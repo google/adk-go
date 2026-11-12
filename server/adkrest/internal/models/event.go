@@ -41,6 +41,25 @@ type EventActions struct {
 	EndOfAgent                 bool                                         `json:"endOfAgent,omitempty"`
 }
 
+// MarshalJSON writes an allocated empty AgentState as {} and omits a nil one.
+// A plain `omitempty` drops both, but an empty state is a checkpoint of its
+// own (the agent started and has nothing to save yet), so clients have to be
+// able to tell it apart from none, as session.EventActions.MarshalJSON does.
+func (a EventActions) MarshalJSON() ([]byte, error) {
+	// alias strips this method so json does not recurse into it; the pointer
+	// field at depth 0 shadows the promoted map, and `omitempty` on a pointer
+	// keys off the pointer being nil rather than the map's length.
+	type alias EventActions
+	var agentState *map[string]any
+	if a.AgentState != nil {
+		agentState = &a.AgentState
+	}
+	return json.Marshal(struct {
+		alias
+		AgentState *map[string]any `json:"agentState,omitempty"`
+	}{alias: alias(a), AgentState: agentState})
+}
+
 // Event represents a single event in a session.
 type Event struct {
 	ID                  string                                      `json:"id"`

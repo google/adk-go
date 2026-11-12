@@ -1644,9 +1644,12 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			ev.Branch = ctx.Branch()
 			ev.Actions = *toolCtx.Actions()
 			// A tool handler holds this EventActions for the whole call, and
-			// everything on it lands on the persisted event. Compaction is the
-			// framework's to write: see session.EventActions.Compaction.
+			// everything on it lands on the persisted event. Compaction and the
+			// agent checkpoint fields are the framework's to write: see
+			// session.EventActions.
 			ev.Actions.Compaction = nil
+			ev.Actions.AgentState = nil
+			ev.Actions.EndOfAgent = false
 
 			traceTool := curTool
 			if traceTool == nil {
