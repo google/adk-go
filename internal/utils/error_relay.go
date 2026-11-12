@@ -28,7 +28,8 @@ type errRelayKey struct{}
 // errRelay lets a ParallelAgent nested below another one report an error to
 // the outer one as soon as it records it, before the agents in between have
 // returned it. It is bound to one agent, compared by identity rather than by
-// name, so another agent cannot report through it even under the same name.
+// name, so another agent cannot report through it even under the same name. It
+// is valid only in the invocation it was made for.
 type errRelay struct {
 	invocationID string
 	// agent is the State of the only agent that may report through or pass
@@ -38,8 +39,8 @@ type errRelay struct {
 	report func(error)
 }
 
-// agentState returns the State that identifies a, or nil for an agent not
-// built with agent.New.
+// agentState returns the State that identifies a, or nil for an agent that
+// does not expose one, such as a type that embeds an agent.Agent.
 func agentState(a agent.Agent) *agentinternal.State {
 	if internalAgent, ok := a.(agentinternal.Agent); ok {
 		return agentinternal.Reveal(internalAgent)
@@ -58,7 +59,8 @@ func boundTo(ctx agent.InvocationContext) (errRelay, bool) {
 }
 
 // WithErrRelay returns ctx with a relay that subAgent may report through in the
-// invocation invocationID. report is called with each error reported.
+// invocation invocationID. report is called with each error reported, possibly
+// from several goroutines at once, so it must be safe for concurrent use.
 func WithErrRelay(ctx context.Context, invocationID string, subAgent agent.Agent, report func(error)) context.Context {
 	return context.WithValue(ctx, errRelayKey{}, errRelay{invocationID: invocationID, agent: agentState(subAgent), report: report})
 }
@@ -66,7 +68,8 @@ func WithErrRelay(ctx context.Context, invocationID string, subAgent agent.Agent
 // PassErrRelay returns ctx with the relay bound to ctx.Agent() rebound to
 // subAgent, or ctx itself when there is no such relay. Call it only for a
 // sub-agent whose errors ctx.Agent() yields to its own caller at once and
-// unchanged, as SequentialAgent and LoopAgent do. An agent that may catch or
+// unchanged, and whose events it keeps reading until the sub-agent ends or
+// fails, as SequentialAgent and LoopAgent do. An agent that may catch or
 // retry an error does not call it, so a ParallelAgent it runs cannot report
 // through the relay.
 func PassErrRelay(ctx agent.InvocationContext, subAgent agent.Agent) agent.InvocationContext {

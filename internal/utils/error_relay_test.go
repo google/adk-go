@@ -71,4 +71,17 @@ func TestErrRelay(t *testing.T) {
 	if len(got) != 1 || got[0] != boom {
 		t.Errorf("ReportErr() by the agent the relay was passed to reported %v, want [%v]", got, boom)
 	}
+
+	// An agent that does not expose its State matches no relay, not even one
+	// bound to another such agent.
+	got = nil
+	bare := embeddedAgent{inner}
+	bareCtx := utils.WithErrRelay(t.Context(), "inv", bare, func(err error) { got = append(got, err) })
+	utils.ReportErr(runCtx(bareCtx, embeddedAgent{newAgent("other")}, "inv"), boom)
+	if len(got) != 0 {
+		t.Errorf("ReportErr() between agents without a State reported %v, want nothing", got)
+	}
 }
+
+// embeddedAgent embeds an agent without its State.
+type embeddedAgent struct{ agent.Agent }

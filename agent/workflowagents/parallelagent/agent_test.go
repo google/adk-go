@@ -1457,6 +1457,64 @@ func TestParallelAgent_LoopLaterPassErrorSurvivesEscalate(t *testing.T) {
 	}
 }
 
+// embeddedAgent embeds an agent without its State, so the relay treats it as
+// any other agent.
+type embeddedAgent struct{ agent.Agent }
+
+func TestParallelAgent_EmbeddedAgentDoesNotPassErrors(t *testing.T) {
+	boom := errors.New("boom")
+	failed := make(chan struct{})
+	failing := must(agent.New(agent.Config{
+		Name: "failing",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// Cleanup that lasts until the run cancels it, so the error
+				// reaches the outer agent early only through the relay.
+				defer func() { <-ctx.Done() }()
+				yield(nil, boom)
+				close(failed)
+			}
+		},
+	}))
+	escalator := must(agent.New(agent.Config{
+		Name: "escalator",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				<-failed
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+					Actions:     session.EventActions{Escalate: true},
+				}, nil)
+			}
+		},
+	}))
+	inner := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "inner", SubAgents: []agent.Agent{failing}}}))
+	seq := must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "seq", SubAgents: []agent.Agent{inner}}}))
+	outer := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "outer", SubAgents: []agent.Agent{embeddedAgent{seq}, escalator}}}))
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: outer, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	sawEscalate := false
+	for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Errorf("run yielded %v, want the escalation: the embedding agent had not yielded the error", err)
+		}
+		if ev != nil && ev.Actions.Escalate {
+			sawEscalate = true
+		}
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("run ended only at the test deadline")
+	}
+	if !sawEscalate {
+		t.Errorf("escalate event was not yielded")
+	}
+}
+
 // appendHookService calls hook before appending each event.
 type appendHookService struct {
 	session.Service
