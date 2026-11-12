@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"reflect"
 	"sync"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -81,6 +82,9 @@ func newDynamicNodeWithResolvedSchemas[IN, OUT any](
 	inputSchema, outputSchema *jsonschema.Resolved,
 	cfg NodeConfig,
 ) *dynamicNode[IN, OUT] {
+	if isContentType(reflect.TypeFor[IN]()) {
+		cfg.ContentInput = true
+	}
 	return &dynamicNode[IN, OUT]{
 		BaseNode:     NewBaseNodeWithSchemas(name, "", cfg, inputSchema, outputSchema),
 		fn:           fn,
@@ -178,6 +182,7 @@ func (n *dynamicNode[IN, OUT]) coerceInput(input any) (IN, error) {
 	if input == nil {
 		return zero, nil
 	}
+	input = contentAsText(reflect.TypeFor[IN](), input)
 	if v, ok := input.(IN); ok {
 		return v, nil
 	}

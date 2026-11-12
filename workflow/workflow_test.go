@@ -16,12 +16,14 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
@@ -705,5 +707,407 @@ func TestWorkflowWithNoEdgesRunsToCompletion(t *testing.T) {
 				t.Errorf("Run() yielded %d events, want none: %+v", len(events), events)
 			}
 		})
+	}
+}
+
+// inputLog records, per node name, every input a node ran with. Nodes
+// of one workflow run on their own goroutines.
+type inputLog struct {
+	mu     sync.Mutex
+	inputs map[string][]any
+}
+
+func (l *inputLog) record(name string, in any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.inputs == nil {
+		l.inputs = map[string][]any{}
+	}
+	l.inputs[name] = append(l.inputs[name], in)
+}
+
+func (l *inputLog) recorded() map[string][]any {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make(map[string][]any, len(l.inputs))
+	for name, in := range l.inputs {
+		out[name] = append([]any(nil), in...)
+	}
+	return out
+}
+
+// newLoggingNode returns a custom BaseNode embedder that records its
+// input in log and emits nothing.
+func newLoggingNode(name string, cfg NodeConfig, log *inputLog) Node {
+	return &hitlNode{
+		BaseNode: NewBaseNode(name, "", cfg),
+		run: func(_ agent.Context, input any, _ func(*session.Event, error) bool) {
+			log.record(name, input)
+		},
+	}
+}
+
+func TestWorkflow_StartSeed_ContentOnlyForContentTypedSuccessors(t *testing.T) {
+	log := &inputLog{}
+	type stateParams struct {
+		NodeInput *genai.Content
+	}
+	fromState, err := NewFunctionNodeFromState("from_state", func(_ agent.InvocationContext, p stateParams) (any, error) {
+		log.record("from_state", p.NodeInput)
+		return nil, nil
+	}, NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewFunctionNodeFromState: %v", err)
+	}
+	successors := []Node{
+		NewFunctionNode("function", func(_ agent.Context, in *genai.Content) (any, error) {
+			log.record("function", in)
+			return nil, nil
+		}, NodeConfig{}),
+		NewFunctionNode("function_value", func(_ agent.Context, in genai.Content) (any, error) {
+			log.record("function_value", in)
+			return nil, nil
+		}, NodeConfig{}),
+		NewEmittingFunctionNode("emitting", func(_ agent.Context, in *genai.Content, _ func(*session.Event) error) (any, error) {
+			log.record("emitting", in)
+			return nil, nil
+		}, NodeConfig{}),
+		NewDynamicNode("dynamic", func(_ agent.Context, in *genai.Content, _ func(*session.Event) error) (any, error) {
+			log.record("dynamic", in)
+			return nil, nil
+		}, NodeConfig{}),
+		fromState,
+		newLoggingNode("custom_content", NodeConfig{ContentInput: true}, log),
+		NewFunctionNode("function_any", func(_ agent.Context, in any) (any, error) {
+			log.record("function_any", in)
+			return nil, nil
+		}, NodeConfig{}),
+		newLoggingNode("custom_text", NodeConfig{}, log),
+	}
+	var edges []Edge
+	for _, n := range successors {
+		edges = append(edges, Edge{From: Start, To: n})
+	}
+	w := mustNew(t, edges)
+	mockCtx := newMockCtx(t)
+	mockCtx.sess = fakeSession{events: sliceEvents{}}
+	mockCtx.userContent = &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "hello"}, nil, {Text: " world"}}}
+
+	drain(t, w.Run(mockCtx))
+
+	content := &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "hello"}, nil, {Text: " world"}}}
+	want := map[string][]any{
+		"function":       {content},
+		"function_value": {*content},
+		"emitting":       {content},
+		"dynamic":        {content},
+		"from_state":     {content},
+		"custom_content": {content},
+		"function_any":   {"hello world"},
+		"custom_text":    {"hello world"},
+	}
+	if diff := cmp.Diff(want, log.recorded()); diff != "" {
+		t.Errorf("inputs from Start (-want +got):\n%s", diff)
+	}
+}
+
+// A JoinNode after Start receives the message text as START's entry, as
+// adk-python's join barrier receives START's node input.
+func TestWorkflow_StartSeed_JoinNodeReceivesText(t *testing.T) {
+	join := NewJoinNode("join")
+	w := mustNew(t, []Edge{{From: Start, To: join}})
+	mockCtx := newMockCtx(t)
+	mockCtx.userContent = &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "hello"}}}
+
+	events := drain(t, w.Run(mockCtx))
+
+	if len(events) != 1 {
+		t.Fatalf("Run yielded %d events, want 1", len(events))
+	}
+	if diff := cmp.Diff(map[string]any{"START": "hello"}, events[0].Output); diff != "" {
+		t.Errorf("join output (-want +got):\n%s", diff)
+	}
+}
+
+func TestWorkflow_NodeRootWrapper_RootSeed(t *testing.T) {
+	t.Run("node_root_receives_content", func(t *testing.T) {
+		log := &inputLog{}
+		root := newLoggingNode("root", NodeConfig{}, log)
+		w, err := New("", []Edge{{From: Start, To: root}}, WithNodeRootWrapper())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		mockCtx := newMockCtx(t)
+		mockCtx.userContent = &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}
+
+		drain(t, w.Run(mockCtx))
+
+		want := map[string][]any{"root": {&genai.Content{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}}}
+		if diff := cmp.Diff(want, log.recorded()); diff != "" {
+			t.Errorf("node root input (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("node_root_without_user_content_receives_nil", func(t *testing.T) {
+		log := &inputLog{}
+		root := newLoggingNode("root", NodeConfig{}, log)
+		w, err := New("", []Edge{{From: Start, To: root}}, WithNodeRootWrapper())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+
+		drain(t, w.Run(newMockCtx(t)))
+
+		if diff := cmp.Diff(map[string][]any{"root": {nil}}, log.recorded()); diff != "" {
+			t.Errorf("node root input (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("workflow_node_root_resolves_seed_per_inner_successor", func(t *testing.T) {
+		log := &inputLog{}
+		anyNode := NewFunctionNode("any_node", func(_ agent.Context, in any) (string, error) {
+			log.record("any_node", in)
+			return "a", nil
+		}, NodeConfig{})
+		contentNode := NewFunctionNode("content_node", func(_ agent.Context, in *genai.Content) (string, error) {
+			log.record("content_node", in)
+			return "c", nil
+		}, NodeConfig{})
+		join := NewJoinNode("join")
+		root, err := NewWorkflowNode("wf", []Edge{
+			{From: Start, To: anyNode},
+			{From: Start, To: contentNode},
+			{From: anyNode, To: join},
+			{From: contentNode, To: join},
+		})
+		if err != nil {
+			t.Fatalf("NewWorkflowNode: %v", err)
+		}
+		w, err := New("", []Edge{{From: Start, To: root}}, WithNodeRootWrapper())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		mockCtx := newMockCtx(t)
+		mockCtx.userContent = &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}
+
+		drain(t, w.Run(mockCtx))
+
+		want := map[string][]any{
+			"any_node":     {"hi"},
+			"content_node": {&genai.Content{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
+		}
+		if diff := cmp.Diff(want, log.recorded()); diff != "" {
+			t.Errorf("inner successor inputs (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestWorkflow_NodeRootWrapper_NoBookkeepingEvents(t *testing.T) {
+	t.Run("no_output", func(t *testing.T) {
+		root := newHitlNode("root", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Content = genai.NewContentFromText("progress", genai.RoleModel)
+			yield(ev, nil)
+		})
+		w, err := New("", []Edge{{From: Start, To: root}}, WithNodeRootWrapper())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+
+		events := drain(t, w.Run(newSeededMockCtx(t)))
+
+		if len(events) != 1 {
+			t.Fatalf("Run yielded %d events, want only the node's own event", len(events))
+		}
+		for key := range events[0].CustomMetadata {
+			if strings.HasPrefix(key, workflowBasePathPrefix) {
+				t.Errorf("event custom metadata has key %q", key)
+			}
+		}
+	})
+
+	// The option, not the empty name, turns the bookkeeping off.
+	t.Run("unmarked_anonymous_workflow_keeps_bookkeeping", func(t *testing.T) {
+		root := newHitlNode("root", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Content = genai.NewContentFromText("progress", genai.RoleModel)
+			yield(ev, nil)
+		})
+		w := mustNew(t, []Edge{{From: Start, To: root}})
+
+		events := drain(t, w.Run(newSeededMockCtx(t)))
+
+		if len(events) != 2 {
+			t.Fatalf("Run yielded %d events, want the node's event and a completion record", len(events))
+		}
+		if _, ok := events[0].CustomMetadata[workflowBasePathPrefix]; !ok {
+			t.Errorf("node event custom metadata = %v, want key %q", events[0].CustomMetadata, workflowBasePathPrefix)
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		boom := errors.New("boom")
+		root := newHitlNode("root", func(_ agent.Context, _ any, yield func(*session.Event, error) bool) {
+			yield(nil, boom)
+		})
+		w, err := New("", []Edge{{From: Start, To: root}}, WithNodeRootWrapper())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+
+		var events []*session.Event
+		var runErr error
+		for ev, err := range w.Run(newSeededMockCtx(t)) {
+			if err != nil {
+				runErr = err
+				continue
+			}
+			events = append(events, ev)
+		}
+
+		if !errors.Is(runErr, boom) {
+			t.Errorf("Run error = %v, want %v", runErr, boom)
+		}
+		if len(events) != 0 {
+			t.Errorf("Run yielded %d events, want none; first has custom metadata %v", len(events), events[0].CustomMetadata)
+		}
+	})
+}
+
+func TestWorkflow_NodeRootWrapper_ResumeReentersRootWithOriginalContent(t *testing.T) {
+	const invocationID = "test-invocation-id" // MockInvocationContext.InvocationID
+	newRoot := func(log *inputLog) Node {
+		return newHitlNode("root", func(ctx agent.Context, input any, yield func(*session.Event, error) bool) {
+			log.record("root", input)
+			if _, ok := ctx.ResumedInput("approval"); ok {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Output = "resumed"
+				yield(ev, nil)
+				return
+			}
+			yield(NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "approval"}), nil)
+		})
+	}
+	newAnswer := func() *genai.Content {
+		c := genai.NewContentFromFunctionResponse(WorkflowInputFunctionCallName, map[string]any{"result": "approved"}, genai.RoleUser)
+		c.Parts[0].FunctionResponse.ID = "approval"
+		return c
+	}
+	// runTurn1 runs the first turn and returns the history the runner
+	// would have stored: the user message, then the node root's events.
+	runTurn1 := func(t *testing.T, w *Workflow) sliceEvents {
+		t.Helper()
+		userEvent := &session.Event{Author: "user", InvocationID: invocationID}
+		userEvent.Content = &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "initial prompt"}}}
+		turn1 := newMockCtx(t)
+		turn1.userContent = userEvent.Content
+		return append(sliceEvents{userEvent}, drain(t, w.Run(turn1))...)
+	}
+	resumeOutputs := func(t *testing.T, w *Workflow, history sliceEvents) []any {
+		t.Helper()
+		state, err := w.ReconstructRunState(fakeSession{events: history}, invocationID)
+		if err != nil {
+			t.Fatalf("ReconstructRunState: %v", err)
+		}
+		turn2 := newMockCtx(t)
+		turn2.userContent = newAnswer()
+		var outputs []any
+		for _, ev := range drain(t, w.Resume(agent.Promote(turn2), state, map[string]any{"approval": map[string]any{"result": "approved"}})) {
+			if ev.Output != nil {
+				outputs = append(outputs, ev.Output)
+			}
+		}
+		return outputs
+	}
+
+	t.Run("answer_in_history", func(t *testing.T) {
+		log := &inputLog{}
+		w, err := New("", []Edge{{From: Start, To: newRoot(log)}}, WithNodeRootWrapper())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		history := runTurn1(t, w)
+		answerEvent := &session.Event{Author: "user", InvocationID: invocationID}
+		answerEvent.Content = newAnswer()
+		history = append(history, answerEvent)
+
+		outputs := resumeOutputs(t, w, history)
+
+		original := &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "initial prompt"}}}
+		if diff := cmp.Diff(map[string][]any{"root": {original, original}}, log.recorded()); diff != "" {
+			t.Errorf("node root inputs over both turns (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]any{"resumed"}, outputs); diff != "" {
+			t.Errorf("resume outputs (-want +got):\n%s", diff)
+		}
+	})
+
+	// As adk-python's Runner._find_user_message_for_invocation, the seed
+	// skips user events without parts and function-response turns.
+	t.Run("seed_skips_partless_user_event", func(t *testing.T) {
+		log := &inputLog{}
+		w, err := New("", []Edge{{From: Start, To: newRoot(log)}}, WithNodeRootWrapper())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		partless := &session.Event{Author: "user", InvocationID: invocationID}
+		partless.Content = &genai.Content{Role: "user"}
+		answerEvent := &session.Event{Author: "user", InvocationID: invocationID}
+		answerEvent.Content = newAnswer()
+		history := append(sliceEvents{partless}, runTurn1(t, w)...)
+		history = append(history, answerEvent)
+
+		resumeOutputs(t, w, history)
+
+		original := &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "initial prompt"}}}
+		if diff := cmp.Diff(map[string][]any{"root": {original, original}}, log.recorded()); diff != "" {
+			t.Errorf("node root inputs over both turns (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("seed_skips_function_response_turn", func(t *testing.T) {
+		log := &inputLog{}
+		w, err := New("", []Edge{{From: Start, To: newRoot(log)}}, WithNodeRootWrapper())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		answerEvent := &session.Event{Author: "user", InvocationID: invocationID}
+		answerEvent.Content = newAnswer()
+		// History holds no prompt for this invocation, only the answer.
+		history := append(runTurn1(t, w)[1:], answerEvent)
+
+		resumeOutputs(t, w, history)
+
+		original := &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "initial prompt"}}}
+		if diff := cmp.Diff(map[string][]any{"root": {original, nil}}, log.recorded()); diff != "" {
+			t.Errorf("node root inputs over both turns (-want +got):\n%s", diff)
+		}
+	})
+
+	// Workflow.Resume also accepts an answer that history does not hold
+	// yet; the node root is re-run rather than handed off.
+	t.Run("answer_only_in_responses", func(t *testing.T) {
+		w, err := New("", []Edge{{From: Start, To: newRoot(&inputLog{})}}, WithNodeRootWrapper())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		history := runTurn1(t, w)
+
+		outputs := resumeOutputs(t, w, history)
+
+		if diff := cmp.Diff([]any{"resumed"}, outputs); diff != "" {
+			t.Errorf("resume outputs (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestWorkflow_NodeRootWrapper_RequiresSingleEdge(t *testing.T) {
+	a := NewFunctionNode("a", func(_ agent.Context, in any) (any, error) { return in, nil }, NodeConfig{})
+	b := NewFunctionNode("b", func(_ agent.Context, in any) (any, error) { return in, nil }, NodeConfig{})
+
+	w, err := New("", Chain(Start, a, b), WithNodeRootWrapper())
+
+	if err == nil || w != nil {
+		t.Errorf("New with two edges = (%v, %v), want (nil, error)", w, err)
 	}
 }

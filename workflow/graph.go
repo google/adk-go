@@ -21,6 +21,10 @@ type graph struct {
 	successors    map[Node][]Edge
 	predecessors  map[Node][]Edge
 	isRootWrapper bool
+	// isNodeRootWrapper is set by WithNodeRootWrapper. New then
+	// guarantees a single edge, so every node other than Start is the
+	// node root.
+	isNodeRootWrapper bool
 }
 
 // newGraph indexes edges by source and target node so successor

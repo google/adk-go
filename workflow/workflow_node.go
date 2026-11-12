@@ -50,6 +50,11 @@ func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 // this node's output; more than one is a graph-design error
 // (ErrMultipleOutputs); zero means the node produces no output.
 // Mirrors adk-python's _set_ctx_output_or_interrupts.
+//
+// As a successor of [Start], the node receives the outer workflow's
+// START seed unchanged and passes it to the inner workflow, whose own
+// [Start] gives each inner successor the form it declares (see
+// [NodeConfig.ContentInput]).
 func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	terminals := n.subWorkflow.graph.terminalNodeNames()
 	nodesByName := buildNodesByName(n.subWorkflow.graph)

@@ -184,10 +184,7 @@ func (w *Workflow) Resume(
 				continue
 			}
 
-			reenter := false
-			if r := node.Config().RerunOnResume; r != nil && *r {
-				reenter = true
-			}
+			reenter := s.graph.rerunsOnResume(node)
 
 			if reenter || ns.Status == NodePending || ns.Status == NodeFailed {
 				// Re-entry: re-activate with the resolved responses
