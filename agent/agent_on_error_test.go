@@ -488,7 +488,14 @@ func TestAgentRunOnAgentErrorCallbackNotifiesEveryPlugin(t *testing.T) {
 
 	ctx := plugininternal.ToContext(t.Context(), pm)
 	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Agent: a})
-	for range a.Run(ic) {
+	var gotErr error
+	for _, err := range a.Run(ic) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if gotErr == nil {
+		t.Error("Run() error = nil, want error")
 	}
 
 	if len(notified) != 2 || notified[0] != "first" || notified[1] != "second" {

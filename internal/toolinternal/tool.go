@@ -91,8 +91,7 @@ func (e *PanicError) Error() string { return e.msg }
 // Call this wherever a tool error becomes a function response. err must not be
 // nil.
 func ModelErrorText(toolName string, err error) (text string, panicked bool) {
-	var panicErr *PanicError
-	if errors.As(err, &panicErr) {
+	if _, ok := errors.AsType[*PanicError](err); ok {
 		return fmt.Sprintf("Invoking `%s()` failed with an internal error.", toolName), true
 	}
 	return err.Error(), false

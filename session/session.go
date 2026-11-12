@@ -480,8 +480,8 @@ func hasTrailingCodeExecutionResult(resp *model.LLMResponse) bool {
 	if resp == nil || resp.Content == nil {
 		return false
 	}
-	for i := len(resp.Content.Parts) - 1; i >= 0; i-- {
-		if part := resp.Content.Parts[i]; part != nil {
+	for _, part := range slices.Backward(resp.Content.Parts) {
+		if part != nil {
 			return part.CodeExecutionResult != nil
 		}
 	}

@@ -811,8 +811,7 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 	unanswered := make(map[string]struct{})
 	// The latest hand-over skipped as a turn start below, if any.
 	handover := -1
-	for i := len(events) - 1; i >= 0; i-- {
-		event := events[i]
+	for i, event := range slices.Backward(events) {
 		for _, call := range utils.FunctionCalls(utils.Content(event)) {
 			delete(unanswered, call.ID)
 		}
