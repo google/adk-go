@@ -720,6 +720,189 @@ func TestContentsRequestProcessor(t *testing.T) {
 			},
 		},
 		{
+			name: "FilterAdkLiveArtifacts",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{Text: "Some text"},
+								{FileData: &genai.FileData{FileURI: "artifact://app/user/session/_adk_live/audio.pcm#1"}},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{Text: "Some text"},
+					},
+				},
+			},
+		},
+		{
+			// The audio cache manager writes an event whose only part is the
+			// internal reference, so the whole content has to go.
+			name: "FilterAdkLiveArtifactOnlyContent",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{Text: "before"},
+							},
+						},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{FileData: &genai.FileData{
+									FileURI:  "artifact://app/user/session/_adk_live/adk_live_audio_storage_input_audio_1700000000000.pcm#0",
+									MIMEType: "audio/pcm",
+								}},
+							},
+						},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{Text: "after"},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "before"}},
+				},
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "after"}},
+				},
+			},
+		},
+		{
+			// With SaveLiveBlob on, the output-audio event is authored by the
+			// agent that spoke, so another agent sees it as a foreign event.
+			// ConvertForeignEvent must not turn it into a bare "For context:"
+			// turn: an event whose only parts are internal live refs has to
+			// behave as if it were not in the session at all.
+			name: "DropForeignAdkLiveArtifactOnlyContent",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("hi", "user"),
+					},
+				},
+				{
+					Author: "otherAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{FileData: &genai.FileData{
+									FileURI:  "artifact://app/user/session/_adk_live/adk_live_audio_storage_output_audio_1700000000000.pcm#0",
+									MIMEType: "audio/pcm",
+								}},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("hi", "user"),
+			},
+		},
+		{
+			// A foreign event that also says something keeps the spoken part
+			// and loses only the internal ref.
+			name: "FilterForeignAdkLiveArtifactKeepsText",
+			events: []*session.Event{
+				{
+					Author: "otherAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{Text: "here is the summary"},
+								{FileData: &genai.FileData{
+									FileURI:  "artifact://app/user/session/_adk_live/adk_live_audio_storage_output_audio_1700000000000.pcm#0",
+									MIMEType: "audio/pcm",
+								}},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{Text: "For context:"},
+						{Text: "[otherAgent] said: here is the summary"},
+					},
+				},
+			},
+		},
+		{
+			// A user-visible artifact outside the _adk_live namespace stays.
+			name: "KeepNonLiveArtifactRefs",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{Text: "look at this"},
+								{FileData: &genai.FileData{
+									FileURI:  "artifact://app/user/session/report.pdf#1",
+									MIMEType: "application/pdf",
+								}},
+								{FileData: &genai.FileData{
+									FileURI:  "gs://bucket/recording.mp3",
+									MIMEType: "audio/mp3",
+								}},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{Text: "look at this"},
+						{FileData: &genai.FileData{
+							FileURI:  "artifact://app/user/session/report.pdf#1",
+							MIMEType: "application/pdf",
+						}},
+						{FileData: &genai.FileData{
+							FileURI:  "gs://bucket/recording.mp3",
+							MIMEType: "audio/mp3",
+						}},
+					},
+				},
+			},
+		},
+		{
 			name: "ExcludeToolConfirmation",
 			events: []*session.Event{
 				{

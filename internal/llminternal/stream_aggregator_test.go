@@ -17,7 +17,10 @@ package llminternal_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -1555,5 +1558,108 @@ func TestProcessResponseNilCandidate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProcessResponse yielded error: %v", err)
 		}
+	}
+}
+
+// TestProcessResponseNilPart is the part-level sibling of the nil-candidate
+// regression above: a nil part in a chunk must be skipped like the empty part
+// the filter already targets, not panic the reflect check — and skipping it
+// must leave the aggregation of the surrounding text parts undisturbed (a
+// guard that also flushed the text buffer would split "a", nil, "b" into two
+// parts instead of one).
+func TestProcessResponseNilPart(t *testing.T) {
+	tests := []struct {
+		name     string
+		parts    []*genai.Part
+		wantText string
+	}{
+		{"nil first", []*genai.Part{nil, genai.NewPartFromText("kept")}, "kept"},
+		{"nil last", []*genai.Part{genai.NewPartFromText("kept"), nil}, "kept"},
+		{"text on both sides aggregates across the nil", []*genai.Part{genai.NewPartFromText("a"), nil, genai.NewPartFromText("b")}, "ab"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aggregator := llminternal.NewStreamingResponseAggregator()
+			chunk := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+				Content: &genai.Content{Parts: tt.parts},
+			}}}
+			for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+				if err != nil {
+					t.Fatalf("ProcessResponse yielded error: %v", err)
+				}
+			}
+			response := aggregator.Close()
+			if response == nil || response.Content == nil || len(response.Content.Parts) != 1 || response.Content.Parts[0].Text != tt.wantText {
+				t.Fatalf("aggregated response = %+v, want the single text part %q", response, tt.wantText)
+			}
+		})
+	}
+}
+
+// streamedTextResponses returns n responses of one 200-byte text part each,
+// the shape a long streamed reply arrives in.
+func streamedTextResponses(n int) []*genai.GenerateContentResponse {
+	responses := make([]*genai.GenerateContentResponse, n)
+	for i := range responses {
+		responses[i] = &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+			Content: genai.NewContentFromText(strings.Repeat("x", 200), genai.RoleModel),
+		}}}
+	}
+	return responses
+}
+
+func aggregateStream(ctx context.Context, responses []*genai.GenerateContentResponse) (*model.LLMResponse, error) {
+	agg := llminternal.NewStreamingResponseAggregator()
+	for _, r := range responses {
+		for _, err := range agg.ProcessResponse(ctx, r) {
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return agg.Close(), nil
+}
+
+func TestStreamingResponseAggregatorDoesNotRecopyText(t *testing.T) {
+	bytesAllocated := func(chunks int) uint64 {
+		responses := streamedTextResponses(chunks)
+		var least uint64
+		for range 3 {
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			resp, err := aggregateStream(t.Context(), responses)
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("aggregateStream() error = %v", err)
+			}
+			if got, want := len(resp.Content.Parts[0].Text), chunks*200; got != want {
+				t.Fatalf("aggregated %d bytes of text, want %d", got, want)
+			}
+			if n := after.TotalAlloc - before.TotalAlloc; least == 0 || n < least {
+				least = n
+			}
+		}
+		return least
+	}
+	// Appending through a builder makes the bytes allocated grow linearly with
+	// the number of chunks, so doubling the chunks about doubles them.
+	// Recopying the text on every chunk makes them grow quadratically.
+	small, large := bytesAllocated(1000), bytesAllocated(2000)
+	if ratio := float64(large) / float64(small); ratio > 3 {
+		t.Errorf("doubling the chunks multiplied the bytes allocated by %.1f (%d to %d), want about 2", ratio, small, large)
+	}
+}
+
+func BenchmarkStreamingResponseAggregator(b *testing.B) {
+	for _, chunks := range []int{15, 90, 500} {
+		responses := streamedTextResponses(chunks)
+		b.Run(fmt.Sprintf("chunks=%d", chunks), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := aggregateStream(b.Context(), responses); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
