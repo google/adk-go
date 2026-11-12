@@ -47,6 +47,10 @@ var ErrNotFound = errors.New("session not found")
 type Service interface {
 	Create(context.Context, *CreateRequest) (*CreateResponse, error)
 	Get(context.Context, *GetRequest) (*GetResponse, error)
+	// List returns the sessions that match the request, ordered by last update
+	// time ascending, so the last session is the most recently active one.
+	// Sessions with equal update times are ordered by user ID, then by session
+	// ID.
 	List(context.Context, *ListRequest) (*ListResponse, error)
 	Delete(context.Context, *DeleteRequest) error
 	// AppendEvent is used to append an event to a session, and remove temporary state keys from the event.
@@ -128,6 +132,8 @@ type ListRequest struct {
 
 // ListResponse represents a response from [Service.List].
 type ListResponse struct {
+	// Sessions is ordered by last update time ascending, ties broken by user
+	// ID and then session ID. The last element is the most recently active.
 	Sessions []Session
 }
 

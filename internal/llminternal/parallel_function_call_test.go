@@ -69,6 +69,7 @@ var expectedNonPartialLLMResponse25Flash = []*model.LLMResponse{
 			Role: "model",
 		},
 		FinishReason: genai.FinishReasonStop,
+		ModelVersion: "gemini-2.5-flash",
 	},
 	{
 		Partial: false,
@@ -96,6 +97,7 @@ var expectedNonPartialLLMResponse25Flash = []*model.LLMResponse{
 			Role: "model",
 		},
 		FinishReason: genai.FinishReasonStop,
+		ModelVersion: "gemini-2.5-flash",
 	},
 	{
 		Partial: false,
@@ -117,6 +119,7 @@ var expectedNonPartialLLMResponse25Flash = []*model.LLMResponse{
 			Role: "model",
 		},
 		FinishReason: genai.FinishReasonStop,
+		ModelVersion: "gemini-2.5-flash",
 	},
 	{
 		Partial: false,
@@ -144,6 +147,7 @@ var expectedNonPartialLLMResponse25Flash = []*model.LLMResponse{
 			Role: "model",
 		},
 		FinishReason: genai.FinishReasonStop,
+		ModelVersion: "gemini-2.5-flash",
 	},
 }
 
@@ -168,6 +172,7 @@ var expectedNonPartialLLMResponse3FlashPreview = []*model.LLMResponse{
 			Role: "model",
 		},
 		FinishReason: genai.FinishReasonStop,
+		ModelVersion: "gemini-3-flash-preview",
 	},
 	{
 		Partial: false,
@@ -195,6 +200,7 @@ var expectedNonPartialLLMResponse3FlashPreview = []*model.LLMResponse{
 			Role: "model",
 		},
 		FinishReason: genai.FinishReasonStop,
+		ModelVersion: "gemini-3-flash-preview",
 	},
 	{
 		Partial: false,
@@ -216,6 +222,7 @@ var expectedNonPartialLLMResponse3FlashPreview = []*model.LLMResponse{
 			Role: "model",
 		},
 		FinishReason: genai.FinishReasonStop,
+		ModelVersion: "gemini-3-flash-preview",
 	},
 	{
 		Partial: false,
@@ -243,6 +250,7 @@ var expectedNonPartialLLMResponse3FlashPreview = []*model.LLMResponse{
 			Role: "model",
 		},
 		FinishReason: genai.FinishReasonStop,
+		ModelVersion: "gemini-3-flash-preview",
 	},
 }
 
@@ -267,6 +275,7 @@ var expectedNonPartialLLMResponse3ProPreview = []*model.LLMResponse{
 			Role: "model",
 		},
 		FinishReason: genai.FinishReasonStop,
+		ModelVersion: "gemini-3.1-pro-preview",
 	},
 	{
 		Partial: false,
@@ -295,6 +304,7 @@ var expectedNonPartialLLMResponse3ProPreview = []*model.LLMResponse{
 			Role: "model",
 		},
 		FinishReason: genai.FinishReasonStop,
+		ModelVersion: "gemini-3.1-pro-preview",
 	},
 	{
 		Partial: false,
@@ -316,6 +326,7 @@ var expectedNonPartialLLMResponse3ProPreview = []*model.LLMResponse{
 			Role: "model",
 		},
 		FinishReason: genai.FinishReasonStop,
+		ModelVersion: "gemini-3.1-pro-preview",
 	},
 	{
 		Partial: false,
@@ -344,6 +355,7 @@ var expectedNonPartialLLMResponse3ProPreview = []*model.LLMResponse{
 			Role: "model",
 		},
 		FinishReason: genai.FinishReasonStop,
+		ModelVersion: "gemini-3.1-pro-preview",
 	},
 }
 

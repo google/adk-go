@@ -453,7 +453,7 @@ func hasFunctionCalls(resp *model.LLMResponse) bool {
 		return false
 	}
 	for _, part := range resp.Content.Parts {
-		if part.FunctionCall != nil {
+		if part != nil && part.FunctionCall != nil {
 			return true
 		}
 	}
@@ -465,20 +465,27 @@ func hasFunctionResponses(resp *model.LLMResponse) bool {
 		return false
 	}
 	for _, part := range resp.Content.Parts {
-		if part.FunctionResponse != nil {
+		if part != nil && part.FunctionResponse != nil {
 			return true
 		}
 	}
 	return false
 }
 
-// Returns whether the event has a trailing code execution result.
+// Returns whether the event has a trailing code execution result. Nil Parts
+// entries are skipped the way hasFunctionCalls and hasFunctionResponses skip
+// them: the trailing part is the last non-nil one, so a stray nil after a
+// code execution result does not change the classification.
 func hasTrailingCodeExecutionResult(resp *model.LLMResponse) bool {
-	if resp == nil || resp.Content == nil || len(resp.Content.Parts) == 0 {
+	if resp == nil || resp.Content == nil {
 		return false
 	}
-	lastPart := resp.Content.Parts[len(resp.Content.Parts)-1]
-	return lastPart.CodeExecutionResult != nil
+	for i := len(resp.Content.Parts) - 1; i >= 0; i-- {
+		if part := resp.Content.Parts[i]; part != nil {
+			return part.CodeExecutionResult != nil
+		}
+	}
+	return false
 }
 
 // Bounds on a decoded numeric event timestamp, in microseconds: years 1 and

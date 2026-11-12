@@ -311,6 +311,59 @@ func TestDatabaseService_StateUpdateTimeIsSet(t *testing.T) {
 	}
 }
 
+// The test database is SQLite without PRAGMA foreign_keys, so the ON DELETE
+// CASCADE on events is not enforced and only an explicit delete removes them.
+func TestDatabaseService_DeleteRemovesSessionEvents(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	deleted := session.DeleteRequest{AppName: "app", UserID: "user", SessionID: "s1"}
+	// Sessions that share part of the deleted session's (app, user, session)
+	// key, so their events must survive the delete.
+	kept := []session.DeleteRequest{
+		{AppName: "app", UserID: "user", SessionID: "s2"},
+		{AppName: "app", UserID: "other-user", SessionID: "s1"},
+		{AppName: "other-app", UserID: "user", SessionID: "s1"},
+	}
+	for _, key := range append([]session.DeleteRequest{deleted}, kept...) {
+		created, err := s.Create(ctx, &session.CreateRequest{AppName: key.AppName, UserID: key.UserID, SessionID: key.SessionID})
+		if err != nil {
+			t.Fatalf("Create(%+v): %v", key, err)
+		}
+		event := &session.Event{
+			ID:          "e-" + key.AppName + "-" + key.UserID + "-" + key.SessionID,
+			Author:      "tool",
+			Timestamp:   time.Now(),
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("tool output", genai.RoleUser)},
+		}
+		if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+			t.Fatalf("AppendEvent(%+v): %v", key, err)
+		}
+	}
+
+	if err := s.Delete(ctx, &deleted); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	countEvents := func(key session.DeleteRequest) int64 {
+		t.Helper()
+		var n int64
+		if err := s.db.Model(&storageEvent{}).
+			Where("app_name = ? AND user_id = ? AND session_id = ?", key.AppName, key.UserID, key.SessionID).
+			Count(&n).Error; err != nil {
+			t.Fatalf("count events of %+v: %v", key, err)
+		}
+		return n
+	}
+	if got := countEvents(deleted); got != 0 {
+		t.Errorf("events left for deleted session %+v = %d, want 0", deleted, got)
+	}
+	for _, key := range kept {
+		if got := countEvents(key); got != 1 {
+			t.Errorf("events left for kept session %+v = %d, want 1", key, got)
+		}
+	}
+}
+
 func TestNewSessionServiceFromDB(t *testing.T) {
 	t.Run("nil db returns error", func(t *testing.T) {
 		_, err := NewSessionServiceFromDB(nil)
@@ -530,11 +583,14 @@ func TestEventsSharingATimestampComeBackInAStableOrder(t *testing.T) {
 	}
 	sess := created.Session
 
-	// Six events on one instant, appended in a known order.
+	// Six events on one instant, appended in a known order. The ids ascend
+	// because the query breaks ties on id: random ids land in exact reverse
+	// insertion order once in 720 runs and fail the check below.
 	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	var want []string
 	for i := range 6 {
 		ev := session.NewEvent(ctx, "inv1")
+		ev.ID = fmt.Sprintf("event-%d", i)
 		ev.Author = "author"
 		ev.Timestamp = ts
 		ev.LLMResponse.Content = genai.NewContentFromText(fmt.Sprintf("event %d", i), genai.RoleUser)
@@ -832,5 +888,100 @@ func TestDatabaseService_NonJSONStateErrorSurfaces(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("expected no persisted session for the failing write, found %d", count)
+	}
+}
+
+func TestDatabaseService_ListOrderedByLastUpdateTime(t *testing.T) {
+	svc := emptyService(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	created := map[string]session.Session{}
+	// Create in reverse ID order so neither PK order nor creation order equals the want.
+	for i, id := range []string{"c", "b", "a"} {
+		cctx := platform.WithTimeProvider(ctx, func() time.Time { return base.Add(time.Duration(i) * time.Second) })
+		resp, err := svc.Create(cctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		created[id] = resp.Session
+	}
+	// "c" (created first) becomes most recently active.
+	ev := session.NewEvent(ctx, "inv")
+	ev.Timestamp = base.Add(time.Minute)
+	if err := svc.AppendEvent(ctx, created["c"], ev); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := svc.List(ctx, &session.ListRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, s := range resp.Sessions {
+		got = append(got, s.ID())
+	}
+	if want := []string{"b", "a", "c"}; !slices.Equal(got, want) {
+		t.Errorf("List() order = %v, want %v", got, want)
+	}
+}
+
+// TestDatabaseService_ListOrdersMixedOffsetsByInstant stores update times in
+// two zones. SQLite keeps each as RFC 3339 text with its own offset, so text
+// order puts "early" (14:00+02:00) after "late" (13:00Z).
+func TestDatabaseService_ListOrdersMixedOffsetsByInstant(t *testing.T) {
+	svc := emptyService(t)
+	instant := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		id string
+		at time.Time
+	}{
+		{"early", instant.In(time.FixedZone("CEST", 2*3600))},
+		{"late", instant.Add(time.Hour)},
+	} {
+		ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return c.at })
+		if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: c.id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, err := svc.List(t.Context(), &session.ListRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, s := range resp.Sessions {
+		got = append(got, s.ID())
+	}
+	if want := []string{"early", "late"}; !slices.Equal(got, want) {
+		t.Errorf("List() order = %v, want %v (by instant, not by stored text)", got, want)
+	}
+}
+
+func TestDatabaseService_ListTieBreaksByUserThenID(t *testing.T) {
+	svc := emptyService(t)
+	// Without this SQLite serves the app_name filter from the composite primary
+	// key index, so ties already arrive in (user_id, id) order and a dropped
+	// tie-break would stay green.
+	if err := svc.db.Exec("CREATE INDEX IF NOT EXISTS idx_test_sessions_app_update ON sessions(app_name, update_time)").Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { svc.db.Exec("DROP INDEX IF EXISTS idx_test_sessions_app_update") })
+	ctx := context.Background()
+	same := platform.WithTimeProvider(ctx, func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) })
+	// Equal update times across two users, created so that neither creation
+	// order nor ID order alone equals the want.
+	for _, k := range [][2]string{{"u2", "a"}, {"u1", "b"}, {"u1", "a"}} {
+		if _, err := svc.Create(same, &session.CreateRequest{AppName: "app", UserID: k[0], SessionID: k[1]}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, err := svc.List(ctx, &session.ListRequest{AppName: "app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, s := range resp.Sessions {
+		got = append(got, s.UserID()+"/"+s.ID())
+	}
+	if want := []string{"u1/a", "u1/b", "u2/a"}; !slices.Equal(got, want) {
+		t.Errorf("List() order = %v, want %v", got, want)
 	}
 }
