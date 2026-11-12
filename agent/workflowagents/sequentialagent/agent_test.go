@@ -849,8 +849,7 @@ func TestSequentialAgent_RunLive_NestedSequentialOrchestration(t *testing.T) {
 	}
 }
 
-// closeSignalingLiveSession is a sub-agent session whose events, like those of
-// a live model connection, keep coming until Close.
+// closeSignalingLiveSession unblocks the paired event stream when Close is called.
 type closeSignalingLiveSession struct {
 	closed    chan struct{}
 	closeOnce sync.Once

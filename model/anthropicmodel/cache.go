@@ -14,7 +14,11 @@
 
 package anthropicmodel
 
-import "github.com/anthropics/anthropic-sdk-go"
+import (
+	"slices"
+
+	"github.com/anthropics/anthropic-sdk-go"
+)
 
 func toCacheControlParam(cfg *PromptCacheConfig) anthropic.CacheControlEphemeralParam {
 	cc := anthropic.NewCacheControlEphemeralParam()
@@ -53,8 +57,8 @@ func applyCacheBreakpoints(
 }
 
 func markLastCacheableMessageBlock(messages []anthropic.MessageParam, cc anthropic.CacheControlEphemeralParam) {
-	for i := len(messages) - 1; i >= 0; i-- {
-		blocks := messages[i].Content
+	for _, message := range slices.Backward(messages) {
+		blocks := message.Content
 		for j := len(blocks) - 1; j >= 0; j-- {
 			block := &blocks[j]
 			// Claude rejects cache_control on thinking and redacted_thinking blocks.

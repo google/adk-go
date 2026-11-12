@@ -551,7 +551,10 @@ func TestCompactionRunsWhenConsumerStopsEarly(t *testing.T) {
 
 	// Consume one event, then stop, as a streaming caller does on the terminal
 	// event.
-	for range r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}) {
+	for _, err := range r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("run failed: %v", err)
+		}
 		break
 	}
 

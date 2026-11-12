@@ -213,13 +213,13 @@ func TestWorkflowNode_DelegatedControlOwnership(t *testing.T) {
 }
 
 func TestResume_RejectedResponseConsumerExit(t *testing.T) {
-	for trial := 0; trial < 20; trial++ {
+	for range 20 {
 		var started, ended atomic.Int32
 		entered := make(chan struct{}, 10)
 		var edges []Edge
 		state := NewRunState()
 		responses := map[string]any{"invalid": "wrong"}
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			name := fmt.Sprintf("valid%d", i)
 			node := NewDynamicNode(name, func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
 				started.Add(1)

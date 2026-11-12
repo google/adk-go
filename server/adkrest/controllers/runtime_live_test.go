@@ -1235,7 +1235,7 @@ func TestRunLiveHandler_PingWriteDeadlineIsKeepaliveTimeout(t *testing.T) {
 
 	stallPing(2 * keepaliveTimeout)
 	select {
-	case <-readErr:
+	case <-readErr: //nolint:errcheck // the read failing is the expected outcome; its error says nothing more
 	case <-time.After(time.Second):
 		t.Fatal("connection did not close after a ping stalled for twice the keepalive timeout")
 	}

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -326,10 +327,8 @@ func hasWaitingInterrupt(state *workflow.RunState, id string) bool {
 		if ns == nil || ns.Status != workflow.NodeWaiting {
 			continue
 		}
-		for _, got := range ns.Interrupts {
-			if got == id {
-				return true
-			}
+		if slices.Contains(ns.Interrupts, id) {
+			return true
 		}
 	}
 	return false
@@ -494,7 +493,7 @@ func TestRunner_WorkflowNode_OutputAndPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if !sessionHasOutput(got.Session, "HI") {
+	if !slices.Contains(sessionOutputs(got.Session), "HI") {
 		t.Errorf("session does not contain the persisted output %q", "HI")
 	}
 }
@@ -1073,16 +1072,6 @@ func sessionHasUserText(sess session.Session, want string) bool {
 			if p.Text == want {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-// sessionHasOutput reports whether any event carries the given output.
-func sessionHasOutput(sess session.Session, want any) bool {
-	for _, out := range sessionOutputs(sess) {
-		if out == want {
-			return true
 		}
 	}
 	return false

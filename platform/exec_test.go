@@ -84,7 +84,7 @@ func TestWithTaskRunnerIsUsed(t *testing.T) {
 	if !used {
 		t.Fatal("installed TaskRunner was not used")
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if order[i] != i {
 			t.Fatalf("sequential runner ran out of order: got %v", order)
 		}

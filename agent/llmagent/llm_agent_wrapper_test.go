@@ -1521,7 +1521,7 @@ func TestTaskAgent_NullableResultClosesDelegation(t *testing.T) {
 	}}
 	task, err := llmagent.New(llmagent.Config{
 		Name: "doer", Description: "d", Model: taskLLM, Mode: llmagent.ModeTask,
-		OutputSchema: &genai.Schema{Type: genai.TypeString, Nullable: genai.Ptr(true)},
+		OutputSchema: &genai.Schema{Type: genai.TypeString, Nullable: new(true)},
 	})
 	if err != nil {
 		t.Fatal(err)
