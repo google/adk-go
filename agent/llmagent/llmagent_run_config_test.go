@@ -184,6 +184,107 @@ func TestOutputSchemaWithTools_UndeclaredModelFallbackByNameAndBackend(t *testin
 	}
 }
 
+// backendlessModel is a model that implements neither
+// model.CapabilitiesProvider nor a GetGoogleLLMVariant method, as most custom
+// models do. It implements only Name; a before-model callback must answer in
+// its place.
+type backendlessModel struct {
+	model.LLM
+	name string
+}
+
+func (m *backendlessModel) Name() string { return m.name }
+
+// TestOutputSchemaWithTools_UndeclaredModelFallbackIgnoresEnvironment pins
+// that the fallback for a model without model.CapabilitiesProvider takes the
+// backend from the model's GetGoogleLLMVariant method, never from the
+// GOOGLE_GENAI_USE_ENTERPRISE and GOOGLE_GENAI_USE_VERTEXAI environment
+// variables. adk-python's fallback reads those variables
+// (models/_capabilities.py:30-51, utils/variant_utils.py:43-46), so there a
+// model named like Gemini that reports no backend gets the native schema under
+// them. A before-model callback records the request the model would receive
+// and answers in its place.
+func TestOutputSchemaWithTools_UndeclaredModelFallbackIgnoresEnvironment(t *testing.T) {
+	t.Setenv("GOOGLE_GENAI_USE_ENTERPRISE", "true")
+	t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+	schema := &genai.Schema{
+		Type:       genai.TypeObject,
+		Properties: map[string]*genai.Schema{"city": {Type: genai.TypeString}},
+		Required:   []string{"city"},
+	}
+	tests := []struct {
+		name             string
+		model            model.LLM
+		wantSchema       *genai.Schema
+		wantMIMEType     string
+		wantSetModelResp bool
+	}{
+		{
+			name:             "gemini_reporting_no_backend_gets_set_model_response",
+			model:            &backendlessModel{name: "gemini-2.5-flash"},
+			wantSetModelResp: true,
+		},
+		{
+			name:         "gemini_reporting_vertex_gets_native_schema",
+			model:        &undeclaredModel{name: "gemini-2.5-flash", backend: genai.BackendVertexAI},
+			wantSchema:   schema,
+			wantMIMEType: "application/json",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dummyTool, err := functiontool.New(functiontool.Config{
+				Name:        "dummy_tool",
+				Description: "does nothing",
+			}, func(agent.Context, struct{}) (struct{}, error) {
+				return struct{}{}, nil
+			})
+			if err != nil {
+				t.Fatalf("functiontool.New: %v", err)
+			}
+			var requests []*model.LLMRequest
+			a, err := llmagent.New(llmagent.Config{
+				Name:         "schema_agent",
+				Model:        tc.model,
+				OutputSchema: schema,
+				Tools:        []tool.Tool{dummyTool},
+				BeforeModelCallbacks: []llmagent.BeforeModelCallback{func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+					requests = append(requests, req)
+					return &model.LLMResponse{
+						Content:      genai.NewContentFromText(`{"city": "Paris"}`, genai.RoleModel),
+						FinishReason: genai.FinishReasonStop,
+					}, nil
+				}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			runner := testutil.NewTestAgentRunner(t, a)
+
+			if _, err := testutil.CollectEvents(runner.Run(t, "session", "hi")); err != nil {
+				t.Fatalf("run failed: %v", err)
+			}
+
+			if len(requests) == 0 {
+				t.Fatal("model received no request")
+			}
+			cfg := requests[0].Config
+			if diff := cmp.Diff(tc.wantSchema, cfg.ResponseSchema); diff != "" {
+				t.Errorf("ResponseSchema mismatch (-want +got):\n%s", diff)
+			}
+			if cfg.ResponseJsonSchema != nil {
+				t.Errorf("ResponseJsonSchema = %v, want nil", cfg.ResponseJsonSchema)
+			}
+			if got := cfg.ResponseMIMEType; got != tc.wantMIMEType {
+				t.Errorf("ResponseMIMEType = %q, want %q", got, tc.wantMIMEType)
+			}
+			if got := declaresFunction(cfg, "set_model_response"); got != tc.wantSetModelResp {
+				t.Errorf("request declares set_model_response = %t, want %t", got, tc.wantSetModelResp)
+			}
+		})
+	}
+}
+
 // TestOutputSchemaWithTools_OpenAIModelGetsSetModelResponse checks, on both
 // OpenAI APIs, that an agent on an openaimodel model with tools and an output
 // schema sends no native response schema and gets the set_model_response tool,
