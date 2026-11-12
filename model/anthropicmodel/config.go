@@ -26,6 +26,8 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/version"
 )
 
 // DefaultMaxTokens is the default max_tokens value sent to Claude when neither
@@ -328,8 +330,12 @@ func validateGenerateContentConfig(cfg *genai.GenerateContentConfig, reqTools ma
 	if cfg.CachedContent != "" {
 		return fmt.Errorf("%w: CachedContent is not supported; use ClientConfig.PromptCache instead", ErrInvalidConfig)
 	}
-	if len(cfg.Labels) > 0 {
-		return fmt.Errorf("%w: Labels is not supported", ErrInvalidConfig)
+	// The label the agent flow adds to every request is dropped; Anthropic has
+	// no request labels to send it in.
+	for key := range cfg.Labels {
+		if key != version.AgentNameLabel {
+			return fmt.Errorf("%w: Labels is not supported", ErrInvalidConfig)
+		}
 	}
 	if cfg.MediaResolution != "" {
 		return fmt.Errorf("%w: MediaResolution is not supported", ErrInvalidConfig)

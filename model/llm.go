@@ -67,6 +67,22 @@ type LLMResponse struct {
 	// The Runner fully processes only the final non-partial event, partial
 	// events are simply forwarded downstream (eg. to UI for display).
 	Partial bool `json:"partial,omitempty"`
+	// PartialSet reports whether Partial was set explicitly on this response.
+	//
+	// Because Partial is a bool whose zero value is false, a response literal
+	// that leaves Partial unset cannot otherwise be told apart from one that
+	// sets Partial: false. Setting PartialSet: true with Partial: false marks
+	// the response as explicitly non-partial: an AfterModelCallback
+	// replacement with Partial: false and PartialSet: true overrides a partial
+	// model response instead of inheriting Partial: true from it, and session
+	// services and REST serializers that distinguish an explicit false from an
+	// omitted field preserve Partial: false.
+	//
+	// When Partial is true, the response is always treated as explicitly
+	// partial regardless of PartialSet. The zero value (Partial: false,
+	// PartialSet: false) means Partial was left unset. PartialSet is never
+	// written to JSON.
+	PartialSet bool `json:"-"`
 	// Indicates whether the response from the model is complete.
 	// Only used for streaming mode.
 	TurnComplete bool `json:"turnComplete,omitempty"`

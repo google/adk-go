@@ -22,6 +22,8 @@ import (
 
 	oaishared "github.com/openai/openai-go/v3/shared"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/version"
 )
 
 // RequestTimeout reports the bound the caller asked for, or zero for none; the
@@ -183,6 +185,22 @@ var SupportedConfigFields = []string{
 	"CandidateCount",
 	// Accepted with no effect: neither API pauses a generation with CONTINUATION.
 	"AutomaticContinuation",
+	// Only the label the agent flow adds; HasUnsupportedLabels refuses the rest
+	// first. Neither API has a field to send it in.
+	"Labels",
+}
+
+// HasUnsupportedLabels reports whether labels holds a label the OpenAI
+// endpoints would have to send. Neither API has request labels, so any label
+// does, except version.AgentNameLabel, which the agent flow adds to every
+// request and which is dropped. A non-nil empty map counts as unsupported: the
+// caller asked for labels. labels is not modified.
+func HasUnsupportedLabels(labels map[string]string) bool {
+	if labels == nil {
+		return false
+	}
+	_, hasAgentName := labels[version.AgentNameLabel]
+	return !hasAgentName || len(labels) > 1
 }
 
 // SupportedThinkingConfigFields names the ThinkingConfig fields both endpoints

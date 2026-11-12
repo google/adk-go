@@ -2671,6 +2671,75 @@ func TestGenerateContentConfigValidation(t *testing.T) {
 	})
 }
 
+// TestOpenAIAndAnthropic_IgnoreADKAgentNameLabelOnly checks that the
+// adk_agent_name label the flow adds to every request is accepted and never
+// sent, while a label the caller set is still refused before any request
+// leaves.
+func TestOpenAIAndAnthropic_IgnoreADKAgentNameLabelOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		labels  map[string]string
+		wantErr bool
+	}{
+		{name: "adk_label_only", labels: map[string]string{"adk_agent_name": "my_agent"}},
+		{name: "adk_and_user_label", labels: map[string]string{"adk_agent_name": "my_agent", "env": "prod"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requestBody []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var err error
+				if requestBody, err = io.ReadAll(r.Body); err != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"msg_labels","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":3,"output_tokens":1}}`)
+			}))
+			defer srv.Close()
+			m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+				APIKey:  "test-key",
+				BaseURL: srv.URL,
+			})
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			req := &model.LLMRequest{
+				Contents: genai.Text("hi"),
+				Config:   &genai.GenerateContentConfig{Labels: tt.labels},
+			}
+			var gotErr error
+			for _, err := range m.GenerateContent(t.Context(), req, false) {
+				if err != nil {
+					gotErr = err
+				}
+			}
+			if tt.wantErr {
+				if !errors.Is(gotErr, anthropicmodel.ErrInvalidConfig) {
+					t.Errorf("GenerateContent() error = %v, want ErrInvalidConfig", gotErr)
+				}
+				if requestBody != nil {
+					t.Error("a request reached the server, want it refused before sending")
+				}
+				return
+			}
+			if gotErr != nil {
+				t.Fatalf("GenerateContent() error = %v", gotErr)
+			}
+			if requestBody == nil {
+				t.Fatal("no request reached the server")
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(requestBody, &payload); err != nil {
+				t.Fatalf("json.Unmarshal(request body) error = %v", err)
+			}
+			if v, ok := payload["labels"]; ok {
+				t.Errorf("request body carries labels %v, want none", v)
+			}
+		})
+	}
+}
+
 func TestConcurrencyAndNonMutation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
