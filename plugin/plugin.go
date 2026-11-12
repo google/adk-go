@@ -224,6 +224,7 @@ type AfterRunCallback func(agent.InvocationContext)
 //
 // Like other plugin callbacks, it may run concurrently for different invocations.
 type OnRunErrorCallback func(agent.InvocationContext, error)
+
 // OnAgentErrorCallback is invoked when an error escapes an agent's run. It is
 // notification-only: callbacks are called in registration order and the error
 // is yielded to the caller unchanged.
