@@ -663,3 +663,233 @@ func TestLLMAgent_RewritingPlannerProcessResponseErrorStopsRun(t *testing.T) {
 		t.Errorf("run yielded the model response, want none")
 	}
 }
+
+func transferResponse(agentName string) *model.LLMResponse {
+	return &model.LLMResponse{
+		Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{Name: "transfer_to_agent", Args: map[string]any{"agent_name": agentName}},
+		}}},
+		FinishReason: genai.FinishReasonStop,
+	}
+}
+
+func TestLLMAgent_TransferredAgentThoughtOnlyTurnEndsRun(t *testing.T) {
+	t.Run("sub_agent_planner_thought_only_turn", func(t *testing.T) {
+		subLLM := &scriptedModel{responses: []*model.LLMResponse{textResponse("/*REASONING*/I will wait for more input.")}}
+		rootLLM := &scriptedModel{responses: []*model.LLMResponse{transferResponse("planner_sub"), textResponse("root speaks again")}}
+		sub := newPlannerAgent(t, llmagent.Config{Name: "planner_sub", Description: "plans", Model: subLLM, Planner: planner.NewPlanReActPlanner()})
+		root := newPlannerAgent(t, llmagent.Config{Name: "root", Model: rootLLM, SubAgents: []agent.Agent{sub}})
+
+		run := runPlannerAgent(t, root)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		if n, m := len(rootLLM.recorded()), len(subLLM.recorded()); n != 1 || m != 1 {
+			t.Errorf("model calls: root = %d, planner_sub = %d; want 1 and 1", n, m)
+		}
+		last := run.events[len(run.events)-1]
+		if last.Author != "planner_sub" {
+			t.Errorf("last event Author = %q, want %q", last.Author, "planner_sub")
+		}
+		if diff := cmp.Diff([]*genai.Part{{Text: "I will wait for more input.", Thought: true}}, modelEventParts(t, run.events)); diff != "" {
+			t.Errorf("last event parts mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("non_llm_sub_agent_thought_only_event", func(t *testing.T) {
+		thinker, err := agent.New(agent.Config{
+			Name:        "thinker",
+			Description: "thinks",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "thinker"
+					ev.LLMResponse = model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "still thinking", Thought: true}}}}
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New: %v", err)
+		}
+		rootLLM := &scriptedModel{responses: []*model.LLMResponse{transferResponse("thinker"), textResponse("root speaks again")}}
+		root := newPlannerAgent(t, llmagent.Config{Name: "root", Model: rootLLM, SubAgents: []agent.Agent{thinker}})
+
+		run := runPlannerAgent(t, root)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		if n := len(rootLLM.recorded()); n != 1 {
+			t.Errorf("root model calls = %d, want 1", n)
+		}
+		if hasText(run.events, "root speaks again") {
+			t.Errorf("run yielded a second root answer, want the run to end on the thinker's event")
+		}
+	})
+
+	t.Run("transfer_back_to_parent_planner_thought_only_turn", func(t *testing.T) {
+		rootLLM := &scriptedModel{responses: []*model.LLMResponse{transferResponse("sub"), textResponse("/*REASONING*/I will wait for more input."), textResponse("root speaks again")}}
+		subLLM := &scriptedModel{responses: []*model.LLMResponse{transferResponse("root"), textResponse("sub speaks again")}}
+		sub := newPlannerAgent(t, llmagent.Config{Name: "sub", Description: "helps", Model: subLLM})
+		root := newPlannerAgent(t, llmagent.Config{Name: "root", Model: rootLLM, Planner: planner.NewPlanReActPlanner(), SubAgents: []agent.Agent{sub}})
+
+		run := runPlannerAgent(t, root)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		if n, m := len(rootLLM.recorded()), len(subLLM.recorded()); n != 2 || m != 1 {
+			t.Errorf("model calls: root = %d, sub = %d; want 2 and 1", n, m)
+		}
+		last := run.events[len(run.events)-1]
+		if last.Author != "root" {
+			t.Errorf("last event Author = %q, want %q", last.Author, "root")
+		}
+		if diff := cmp.Diff([]*genai.Part{{Text: "I will wait for more input.", Thought: true}}, modelEventParts(t, run.events)); diff != "" {
+			t.Errorf("last event parts mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("transfer_to_peer_planner_thought_only_turn", func(t *testing.T) {
+		rootLLM := &scriptedModel{responses: []*model.LLMResponse{transferResponse("first"), textResponse("root speaks again")}}
+		firstLLM := &scriptedModel{responses: []*model.LLMResponse{transferResponse("second"), textResponse("first speaks again")}}
+		secondLLM := &scriptedModel{responses: []*model.LLMResponse{textResponse("/*REASONING*/I will wait for more input.")}}
+		first := newPlannerAgent(t, llmagent.Config{Name: "first", Description: "starts", Model: firstLLM})
+		second := newPlannerAgent(t, llmagent.Config{Name: "second", Description: "plans", Model: secondLLM, Planner: planner.NewPlanReActPlanner()})
+		root := newPlannerAgent(t, llmagent.Config{Name: "root", Model: rootLLM, SubAgents: []agent.Agent{first, second}})
+
+		run := runPlannerAgent(t, root)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		if diff := cmp.Diff([]int{1, 1, 1}, []int{len(rootLLM.recorded()), len(firstLLM.recorded()), len(secondLLM.recorded())}); diff != "" {
+			t.Errorf("model calls of root, first, second mismatch (-want +got):\n%s", diff)
+		}
+		last := run.events[len(run.events)-1]
+		if last.Author != "second" {
+			t.Errorf("last event Author = %q, want %q", last.Author, "second")
+		}
+	})
+}
+
+// userThinkingPlanner is a user planner with its own ApplyThinkingConfig
+// method that does not embed planner.BuiltInPlanner.
+type userThinkingPlanner struct{}
+
+func (userThinkingPlanner) ApplyThinkingConfig(req *model.LLMRequest) {
+	if req.Config == nil {
+		req.Config = &genai.GenerateContentConfig{}
+	}
+	req.Config.ThinkingConfig = &genai.ThinkingConfig{ThinkingBudget: genai.Ptr[int32](7)}
+}
+
+func (userThinkingPlanner) BuildPlanningInstruction(agent.ReadonlyContext, *model.LLMRequest) (string, error) {
+	return "Think, then plan in three steps.", nil
+}
+
+// instructingBuiltInPlanner embeds *planner.BuiltInPlanner and defines its
+// own BuildPlanningInstruction, as a Python subclass of BuiltInPlanner can
+// override build_planning_instruction.
+type instructingBuiltInPlanner struct {
+	*planner.BuiltInPlanner
+}
+
+func (instructingBuiltInPlanner) BuildPlanningInstruction(agent.ReadonlyContext, *model.LLMRequest) (string, error) {
+	return "Extra planning text.", nil
+}
+
+// thinkingOverrideBuiltInPlanner embeds *planner.BuiltInPlanner and defines
+// its own ApplyThinkingConfig, as a Python subclass of BuiltInPlanner can
+// override apply_thinking_config.
+type thinkingOverrideBuiltInPlanner struct {
+	*planner.BuiltInPlanner
+}
+
+func (thinkingOverrideBuiltInPlanner) ApplyThinkingConfig(req *model.LLMRequest) {
+	if req.Config == nil {
+		req.Config = &genai.GenerateContentConfig{}
+	}
+	req.Config.ThinkingConfig = &genai.ThinkingConfig{ThinkingBudget: genai.Ptr[int32](32)}
+}
+
+func TestLLMAgent_BuiltInPlannerDetection(t *testing.T) {
+	t.Run("user_planner_with_apply_thinking_config_is_not_built_in", func(t *testing.T) {
+		llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("done")}}
+		a := newPlannerAgent(t, llmagent.Config{Name: "test_agent", Model: llm, Planner: userThinkingPlanner{}})
+
+		run := runPlannerAgent(t, a, thoughtHistory(t)...)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		reqs := llm.recorded()
+		if len(reqs) != 1 {
+			t.Fatalf("model calls = %d, want 1", len(reqs))
+		}
+		wantInst := "You are an agent. Your internal name is \"test_agent\".\n\nThink, then plan in three steps."
+		if got := systemInstructionText(t, reqs[0]); got != wantInst {
+			t.Errorf("system instruction = %q, want %q", got, wantInst)
+		}
+		wantSent := []*genai.Part{{Text: "stored thought"}, {Text: "stored plain"}}
+		if diff := cmp.Diff(wantSent, reqs[0].Contents[1].Parts); diff != "" {
+			t.Errorf("request history parts mismatch (-want +got):\n%s", diff)
+		}
+		if reqs[0].Config.ThinkingConfig != nil {
+			t.Errorf("request ThinkingConfig = %+v, want nil", reqs[0].Config.ThinkingConfig)
+		}
+	})
+
+	t.Run("embedded_builtin_planner_own_instruction_is_not_called_F4", func(t *testing.T) {
+		llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("done")}}
+		a := newPlannerAgent(t, llmagent.Config{
+			Name:    "test_agent",
+			Model:   llm,
+			Planner: instructingBuiltInPlanner{planner.NewBuiltInPlanner(&genai.ThinkingConfig{ThinkingBudget: genai.Ptr[int32](64)})},
+		})
+
+		run := runPlannerAgent(t, a, thoughtHistory(t)...)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		reqs := llm.recorded()
+		if len(reqs) != 1 {
+			t.Fatalf("model calls = %d, want 1", len(reqs))
+		}
+		wantInst := "You are an agent. Your internal name is \"test_agent\"."
+		if got := systemInstructionText(t, reqs[0]); got != wantInst {
+			t.Errorf("system instruction = %q, want %q", got, wantInst)
+		}
+		wantSent := []*genai.Part{{Text: "stored thought", Thought: true}, {Text: "stored plain"}}
+		if diff := cmp.Diff(wantSent, reqs[0].Contents[1].Parts); diff != "" {
+			t.Errorf("request history parts mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(&genai.ThinkingConfig{ThinkingBudget: genai.Ptr[int32](64)}, reqs[0].Config.ThinkingConfig); diff != "" {
+			t.Errorf("request ThinkingConfig mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("embedded_builtin_planner_own_apply_thinking_config_is_called", func(t *testing.T) {
+		llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("done")}}
+		a := newPlannerAgent(t, llmagent.Config{
+			Name:    "test_agent",
+			Model:   llm,
+			Planner: thinkingOverrideBuiltInPlanner{planner.NewBuiltInPlanner(&genai.ThinkingConfig{ThinkingBudget: genai.Ptr[int32](64)})},
+		})
+
+		run := runPlannerAgent(t, a)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		reqs := llm.recorded()
+		if len(reqs) != 1 {
+			t.Fatalf("model calls = %d, want 1", len(reqs))
+		}
+		if diff := cmp.Diff(&genai.ThinkingConfig{ThinkingBudget: genai.Ptr[int32](32)}, reqs[0].Config.ThinkingConfig); diff != "" {
+			t.Errorf("request ThinkingConfig mismatch (-want +got):\n%s", diff)
+		}
+	})
+}

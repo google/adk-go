@@ -361,8 +361,9 @@ type Config struct {
 	// To use the model's built-in thinking feature, pass a *planner.BuiltInPlanner
 	// (if GenerateContentConfig.ThinkingConfig is also set, the planner's
 	// ThinkingConfig takes precedence). To use natural-language Plan-Re-Act
-	// planning, pass a *planner.PlanReActPlanner. Any planner other than a
-	// BuiltInPlanner has its planning instruction appended to the system
+	// planning, pass a *planner.PlanReActPlanner. Any planner that does not
+	// implement planner.BuiltIn (a *planner.BuiltInPlanner or a struct that
+	// embeds one) has its planning instruction appended to the system
 	// instruction, and the Thought flag is cleared on every part of the
 	// conversation history sent to the model; this changes only the request's
 	// copy, and the stored session events keep their flags.

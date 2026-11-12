@@ -26,9 +26,10 @@ import (
 // Planner guides an LLM agent to plan and reason across model calls.
 //
 // Before each model call, the agent's flow invokes BuildPlanningInstruction
-// (unless the planner is a BuiltInPlanner) and appends any non-empty
-// instruction to the request's system instruction. The flow rewrites model
-// responses through the planner only if it also implements RewritingPlanner.
+// and appends any non-empty instruction to the request's system instruction,
+// unless the planner implements BuiltIn (a *BuiltInPlanner or a struct that
+// embeds one; see BuiltIn). The flow rewrites model responses through the
+// planner only if it also implements RewritingPlanner.
 //
 // In adk-python both planner methods are abstract, so every Python planner
 // implements the response step. A planner ported from Python therefore

@@ -26,25 +26,17 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
-// builtInPlanner is satisfied by *planner.BuiltInPlanner and by every struct
-// that embeds it. Such a planner only sets the request's thinking config; as
-// in adk-python's isinstance(planner, BuiltInPlanner) check, it adds no
-// instruction and leaves request thought flags alone.
-type builtInPlanner interface {
-	ApplyThinkingConfig(*model.LLMRequest)
-}
-
 // nlPlanningRequestProcessor prepares req for the agent's planner: a built-in
-// planner sets the thinking config; any other planner appends its planning
-// instruction and clears the thought flags of the request history (adk-python
-// flows/llm_flows/extensions/_planning.py).
+// planner (planner.BuiltIn) sets the thinking config; any other planner appends
+// its planning instruction and clears the thought flags of the request history
+// (adk-python flows/llm_flows/extensions/_planning.py).
 func nlPlanningRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		p := getPlanner(ctx)
 		if p == nil {
 			return
 		}
-		if bp, ok := p.(builtInPlanner); ok {
+		if bp, ok := p.(planner.BuiltIn); ok {
 			bp.ApplyThinkingConfig(req)
 			return
 		}

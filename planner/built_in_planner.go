@@ -21,15 +21,47 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
+// BuiltIn is implemented by *BuiltInPlanner and by the types that embed it.
+// The agent's flow uses it to tell a built-in planner from any other Planner,
+// as adk-python does with isinstance(planner, BuiltInPlanner).
+//
+// The unexported method of BuiltIn cannot be declared outside this package, so
+// a type implements BuiltIn only through a *BuiltInPlanner it embeds, directly
+// or through an embedded BuiltIn value. Go promotes the methods of
+// *BuiltInPlanner to a struct that embeds *BuiltInPlanner and to a pointer to a
+// struct that embeds BuiltInPlanner, and the methods of BuiltIn to a struct
+// that embeds a BuiltIn value. Those types implement BuiltIn unless they
+// declare a method of the same name with another signature. A type that has an
+// ApplyThinkingConfig method but embeds none of these is an ordinary Planner.
+//
+// Before each model call, the flow calls ApplyThinkingConfig on a planner that
+// implements BuiltIn, and neither calls its BuildPlanningInstruction nor clears
+// the Thought flags on request history parts. The call goes to the planner's
+// own ApplyThinkingConfig if its type declares one, and otherwise to the
+// embedded BuiltInPlanner or BuiltIn value; a nil embedded BuiltIn value makes
+// the call panic. An embedding type's own BuildPlanningInstruction is never
+// called.
+type BuiltIn interface {
+	// ApplyThinkingConfig sets the thinking config of req, the request about
+	// to be sent to the model.
+	ApplyThinkingConfig(req *model.LLMRequest)
+
+	builtIn()
+}
+
 // BuiltInPlanner configures an LLM agent to use the model's built-in thinking
 // feature via a genai.ThinkingConfig.
 //
 // Unlike PlanReActPlanner and custom Planner implementations, BuiltInPlanner
 // does not append a planning instruction and does not clear Thought flags on
-// request history parts. It implements Planner but not RewritingPlanner, so the
-// flow does not rewrite model response parts for it. A struct that embeds
-// *BuiltInPlanner and defines its own ProcessPlanningResponse implements
-// RewritingPlanner, and the flow calls that method.
+// request history parts. It implements BuiltIn and Planner but not
+// RewritingPlanner, so the flow does not rewrite model response parts for it.
+//
+// A struct that embeds *BuiltInPlanner implements BuiltIn, so the flow calls
+// the struct's own ApplyThinkingConfig if it defines one and never calls its
+// BuildPlanningInstruction, even one the struct defines itself. If the struct
+// defines its own ProcessPlanningResponse, it implements RewritingPlanner, and
+// the flow calls that method.
 //
 // If both llmagent.Config.GenerateContentConfig.ThinkingConfig and
 // BuiltInPlanner.ThinkingConfig are non-nil, BuiltInPlanner.ThinkingConfig
@@ -73,3 +105,5 @@ func (p *BuiltInPlanner) ApplyThinkingConfig(req *model.LLMRequest) {
 func (p *BuiltInPlanner) BuildPlanningInstruction(ctx agent.ReadonlyContext, req *model.LLMRequest) (string, error) {
 	return "", nil
 }
+
+func (*BuiltInPlanner) builtIn() {}

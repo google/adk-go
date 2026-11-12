@@ -155,7 +155,12 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				// thoughts, so under such a planner a thought-only turn ends the
 				// step, as every final turn does in adk-python
 				// (Event.is_final_response ignores thought flags).
-				if !isThoughtOnlyTurn(lastEvent) || responseRewritingPlanner(ctx) != nil {
+				// Another agent's final event ends the step too: an agent
+				// reached by transfer_to_agent runs inside this step, and its
+				// own flow has already decided whether to call its model
+				// again, so calling this agent's model would answer in its
+				// place.
+				if !isThoughtOnlyTurn(lastEvent) || lastEvent.Author != ctx.Agent().Name() || responseRewritingPlanner(ctx) != nil {
 					return
 				}
 				thoughtOnlyTurns++
