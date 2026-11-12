@@ -104,8 +104,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// paths through this Transport agree on it. Every other failure degrades
 		// to the rejection the downstream actually sent, which is more
 		// informative than "we could not refresh".
-		var consent *ConsentRequiredError
-		if errors.As(err, &consent) {
+		if _, ok := errors.AsType[*ConsentRequiredError](err); ok {
 			drain(resp)
 			return nil, err
 		}

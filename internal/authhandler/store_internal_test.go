@@ -606,12 +606,10 @@ func TestGetAuthResponseConcurrentCallsShareOneCode(t *testing.T) {
 	got := make([]*toolauth.Credential, 2)
 	errs := make([]error, 2)
 	for i := range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			got[i], errs[i] = GetAuthResponse(t.Context(), state, cfg)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

@@ -632,11 +632,11 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 		}
 	}
 
-	ctxType := reflect.TypeOf((*Context)(nil)).Elem()
-	icType := reflect.TypeOf((*InvocationContext)(nil)).Elem()
+	ctxType := reflect.TypeFor[Context]()
+	icType := reflect.TypeFor[InvocationContext]()
 	produces := func(m reflect.Method) bool {
-		for i := range m.Type.NumOut() {
-			if out := m.Type.Out(i); out == ctxType || out == icType {
+		for out := range m.Type.Outs() {
+			if out == ctxType || out == icType {
 				return true
 			}
 		}
@@ -656,8 +656,7 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 	}
 
 	for _, iface := range []reflect.Type{ctxType, icType} {
-		for i := range iface.NumMethod() {
-			m := iface.Method(i)
+		for m := range iface.Methods() {
 			if produces(m) {
 				if !calledOnTheRow[m.Name] {
 					t.Errorf("%s.%s returns a context and no matrix column CALLS IT on the "+
@@ -674,10 +673,9 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 			} else if n == 1 {
 				continue
 			}
-			for j := range m.Type.NumOut() {
-				out := m.Type.Out(j)
+			for out := range m.Type.Outs() {
 				// time.Time is a struct but holds nothing reachable.
-				if inert(out.Kind()) || out == reflect.TypeOf(time.Time{}) {
+				if inert(out.Kind()) || out == reflect.TypeFor[time.Time]() {
 					continue
 				}
 				t.Errorf("%s.%s returns %s and is classified nowhere. Decide which it is: "+

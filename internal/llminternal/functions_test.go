@@ -391,7 +391,7 @@ func TestGenerateRequestConfirmationEventResponseOrder(t *testing.T) {
 	}
 
 	// Repeated calls must produce an identical ordering.
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		next := generateRequestConfirmationEvent(ctx, functionCallEvent, functionResponseEvent)
 		if diff := cmp.Diff(gotOrder, orderOf(t, next)); diff != "" {
 			t.Errorf("ordering not stable on call %d (-first +next):\n%s", i, diff)
