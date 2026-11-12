@@ -809,6 +809,8 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 	// Here a result counts only once it passes the branch and isolation-scope
 	// checks below, and call IDs come from every event.
 	unanswered := make(map[string]struct{})
+	// The latest hand-over skipped as a turn start below, if any.
+	handover := -1
 	for i, event := range slices.Backward(events) {
 		for _, call := range utils.FunctionCalls(utils.Content(event)) {
 			delete(unanswered, call.ID)
@@ -848,9 +850,27 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		if isOtherAgentReply(agentName, event) && !compactioninternal.HasUsableSummary(event) && ConvertForeignEvent(event) == nil {
 			continue
 		}
-		if event.Author == "user" || isOtherAgentReply(agentName, event) {
-			return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
+		if event.Author != "user" && !isOtherAgentReply(agentName, event) {
+			continue
 		}
+		// A transfer_to_agent hand-over continues the turn of the request it
+		// hands over, so it stays in the prompt as context rather than
+		// starting the turn and slicing that request out. As in adk-python's
+		// _is_direct_transfer.
+		if isDirectTransfer(event) {
+			if handover < 0 {
+				handover = i
+			}
+			continue
+		}
+		return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
+	}
+	// With no earlier turn start, the turn starts at the latest hand-over, the
+	// event it started at before hand-overs were skipped. Falling back to the
+	// whole session instead would show the agent its own earlier turns.
+	// adk-python returns [] here.
+	if handover >= 0 {
+		return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[handover:], events, isSingleTurn, userContent)
 	}
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
 	// but that may be a bug.
@@ -861,6 +881,17 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 // back as a user-authored function response.
 func isSubmittedToolResult(ev *session.Event) bool {
 	return ev.Author == "user" && len(utils.FunctionResponses(utils.Content(ev))) > 0
+}
+
+// isDirectTransfer reports whether ev is a transfer_to_agent call or the
+// response that carries out the transfer.
+func isDirectTransfer(ev *session.Event) bool {
+	if ev.Actions.TransferToAgent != "" {
+		return true
+	}
+	return slices.ContainsFunc(utils.FunctionCalls(utils.Content(ev)), func(call *genai.FunctionCall) bool {
+		return call.Name == transferAgentName
+	})
 }
 
 func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {

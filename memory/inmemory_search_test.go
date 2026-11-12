@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"golang.org/x/text/unicode/norm"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/memory"
@@ -232,5 +233,95 @@ func memoryTextEvent(id string, texts ...string) *session.Event {
 		LLMResponse: model.LLMResponse{
 			Content: genai.NewContentFromParts(parts, genai.RoleUser),
 		},
+	}
+}
+
+func Test_inMemoryService_SearchMemory_PreservesBlobPartsAndSkipsThoughtsInAddedEvents(t *testing.T) {
+	svc := memory.InMemoryService()
+	addEvents(t, svc, "s1", &session.Event{
+		ID: "mixed",
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			genai.NewPartFromBytes([]byte("abc"), "text/plain"),
+			{Text: "secretplan", Thought: true},
+			genai.NewPartFromText("hello world"),
+		}, genai.RoleModel)},
+	})
+
+	if got := search(t, svc, "secretplan"); len(got.Memories) != 0 {
+		t.Errorf("SearchMemory(%q) matched thought text, got %d entries", "secretplan", len(got.Memories))
+	}
+
+	got := search(t, svc, "hello")
+	if len(got.Memories) != 1 {
+		t.Fatalf("SearchMemory(%q) returned %d entries, want 1", "hello", len(got.Memories))
+	}
+	want := []*genai.Part{
+		genai.NewPartFromBytes([]byte("abc"), "text/plain"),
+		genai.NewPartFromText("hello world"),
+	}
+	if diff := cmp.Diff(want, got.Memories[0].Content.Parts); diff != "" {
+		t.Errorf("SearchMemory() parts mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func Test_inMemoryService_SearchMemory_TokenizationNFCAndScriptSplitting(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		text  string
+		query string
+		want  int
+	}{
+		{name: "embedded Latin word", text: "私はPythonでADKを使っています", query: "Python", want: 1},
+		{name: "embedded Latin word lowercase query", text: "私はPythonでADKを使っています", query: "adk", want: 1},
+		{name: "embedded underscore word", text: "私はmy_var_nameとcafé_1を使う", query: "my_var_name", want: 1},
+		{name: "embedded accented word", text: "私はmy_var_nameとcafé_1を使う", query: "café_1", want: 1},
+		{name: "query is not split", text: "Python", query: "私はPython", want: 0},
+		{name: "ordinal indicators are not Latin", text: "私はªPythonºを使う", query: "Python", want: 1},
+		{name: "NFD event NFC query", text: "私はCafe\u0301でADKを使っています", query: "Café", want: 1},
+		{name: "NFD event NFC lowercase query", text: "私はCafe\u0301でADKを使っています", query: "café", want: 1},
+		{name: "NFD event other word", text: "私はCafe\u0301でADKを使っています", query: "Ruby", want: 0},
+		{name: "NFC event NFD query", text: "Meet at the Café", query: "Cafe\u0301", want: 1},
+		{name: "NFD Japanese event", text: norm.NFD.String("プログラミングを学ぶ"), query: "プログラミング", want: 1},
+		{
+			name:  "NFD Korean event",
+			text:  "\u110c\u1166 \u110b\u1175\u1105\u1173\u11b7\u110b\u1173\u11ab \u1106\u1175\u11ab\u1109\u116e\u110b\u1175\u11b8\u1102\u1175\u1103\u1161",
+			query: "민수입니다",
+			want:  1,
+		},
+		{name: "Devanagari prefix", text: "\u0939\u093f\u0928\u094d\u0926\u0940", query: "\u0939", want: 1},
+		{name: "uncomposed combining mark separates words", text: "q\u0301", query: "q", want: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := memory.InMemoryService()
+			addEvents(t, svc, "s1", memoryTextEvent("event", tt.text))
+
+			if got := search(t, svc, tt.query); len(got.Memories) != tt.want {
+				t.Errorf("SearchMemory() returned %d entries, want %d", len(got.Memories), tt.want)
+			}
+		})
+	}
+}
+
+func Test_inMemoryService_SearchMemory_FullUnicodeLowercasing(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		text  string
+		query string
+		want  int
+	}{
+		{name: "final sigma", text: "οδος", query: "ΟΔΟΣ", want: 1},
+		{name: "final sigma in event text matched as substring", text: "私はΟΔΟΣ", query: "οδος", want: 1},
+		{name: "dotted capital I", text: "İstanbul", query: "istanbul", want: 0},
+		{name: "dotted capital I splits a run in CJK text", text: "私はİstanbulに", query: "stanbul", want: 1},
+		{name: "Kelvin sign lowercases to ASCII", text: "kiwi", query: "\u212a", want: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := memory.InMemoryService()
+			addEvents(t, svc, "s1", memoryTextEvent("event", tt.text))
+
+			if got := search(t, svc, tt.query); len(got.Memories) != tt.want {
+				t.Errorf("SearchMemory() returned %d entries, want %d", len(got.Memories), tt.want)
+			}
+		})
 	}
 }
