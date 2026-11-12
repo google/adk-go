@@ -445,7 +445,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			}
 		}
 		childOut, hasChildOutput := childEventOutput(ev)
-		if hasChildOutput && !outputCountsFor(ev, childPath) {
+		if hasChildOutput && !outputCountsFor(ev, child, childPath) {
 			// Forwarded from a node nested under the child, such as a task
 			// agent dispatched by a workflow the child transferred to. The
 			// resume scan already keys outputs by the emitter's path.

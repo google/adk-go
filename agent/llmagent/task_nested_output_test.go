@@ -34,9 +34,9 @@ import (
 // a workflow whose dynamic node dispatches another task agent, "inner", with
 // workflow.RunNode. inner's own runTask stamps Output on its finish_task
 // response before it is forwarded through outer, so the guard in outer's
-// runTask is not enough on its own: the scheduler running outer and the
-// runner's node body must not take that Output as outer's. outer never calls
-// finish_task, so its delegation must stay open.
+// runTask is not enough on its own: the scheduler running outer must not take
+// that Output as outer's. outer never calls finish_task, so its delegation
+// must stay open.
 func TestTaskDelegation_NestedTaskAgentDoesNotResolveIt(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
