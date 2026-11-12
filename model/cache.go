@@ -41,9 +41,10 @@ const maxCacheIntervals = 100
 // The bookkeeping that carries a cache from one request to the next is the
 // [CacheMetadata] on each model response, which the session stores with the
 // event. The in-memory, database and Vertex AI session services keep it. A
-// session service that drops it still serves the cache within one invocation,
-// but the next invocation cannot find the cache to reuse or delete it, so it
-// stays on the provider until its TTL runs out.
+// session service that drops it still serves the cache within one invocation.
+// No stored record names the cache then, so the runner deletes it when the
+// invocation ends and the next invocation creates another, which costs more
+// than not caching.
 //
 // A failure to create or delete a cache is not reported. Caching only saves
 // tokens and time, so the request goes ahead without a cache instead.

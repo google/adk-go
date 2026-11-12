@@ -72,8 +72,9 @@ const cacheCleanupTimeout = 30 * time.Second
 //     is sent, because the flow and its telemetry read the request after the
 //     model call.
 //   - Under a runner nothing is deleted during the call. The caches it created
-//     or stopped using are settled once the invocation's events are stored,
-//     keeping those the stored records name. adk-python deletes a cache it
+//     or stopped using are settled once the invocation has ended, against the
+//     session as its store holds it, keeping those an agent's latest stored
+//     record names. adk-python deletes a cache it
 //     stops using before the call, so a call whose response is never stored
 //     leaves the session naming a cache that no longer exists, and a cache it
 //     creates for a response that is never stored stays until its TTL runs
@@ -203,7 +204,7 @@ func (c *contextCache) isValid(ctx context.Context, req *model.LLMRequest, prefi
 }
 
 // track hands the named cache to the invocation's ledger, which deletes it
-// once the invocation ends unless a stored event names it.
+// once the invocation ends unless an agent's latest stored record names it.
 func (c *contextCache) track(ledger *llminternal.ContextCacheLedger, name string) {
 	if name == "" {
 		return

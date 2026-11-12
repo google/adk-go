@@ -17,6 +17,7 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -60,6 +61,10 @@ type fakeCacheAPI struct {
 	// goneMessage replaces the message, so a 403 can be one about something
 	// other than the cache.
 	goneMessage string
+	// goneAfterChunk makes a streamed generation that names a gone cache send
+	// one chunk of text before its error, as a stream that fails part-way
+	// does, instead of failing before any output.
+	goneAfterChunk bool
 
 	mu            sync.Mutex
 	calls         []string
@@ -124,6 +129,15 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 		f.generates = append(f.generates, decoded)
 		if f.generateStatus != 0 {
 			fail(f.generateStatus)
+			return
+		}
+		if name, _ := decoded["cachedContent"].(string); f.goneAfterChunk && f.gone[name] {
+			w.Header().Set("Content-Type", "text/event-stream")
+			chunk, _ := json.Marshal(map[string]any{"candidates": []any{map[string]any{
+				"content": map[string]any{"role": "model", "parts": []any{map[string]any{"text": "Hel"}}},
+			}}})
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", chunk)
+			_, _ = fmt.Fprint(w, `{"error": {"code": 404, "message": "CachedContent not found (or permission denied)", "status": "NOT_FOUND"}}`+"\n\n")
 			return
 		}
 		if failGone() {
@@ -832,6 +846,11 @@ func (e cacheEvents) All() iter.Seq[*session.Event] { return slices.Values(e) }
 func (e cacheEvents) Len() int                      { return len(e) }
 func (e cacheEvents) At(i int) *session.Event       { return e[i] }
 
+// loadEvents returns a loader that yields events, as a session store would.
+func loadEvents(events session.Events) func(context.Context) (session.Events, error) {
+	return func(context.Context) (session.Events, error) { return events, nil }
+}
+
 // storedRecord returns a stored model event of one agent recording metadata.
 func storedRecord(metadata *model.CacheMetadata) *session.Event {
 	return &session.Event{Author: "assistant", LLMResponse: model.LLMResponse{CacheMetadata: metadata}}
@@ -916,7 +935,7 @@ func TestGenerateContent_ContextCacheLedger(t *testing.T) {
 			if tt.stored != nil {
 				events = tt.stored(resp.CacheMetadata, before)
 			}
-			ledger.Settle(ctx, events)
+			ledger.Settle(ctx, loadEvents(events))
 			var deleted []string
 			for _, call := range api.calls[2:] {
 				deleted = append(deleted, strings.TrimPrefix(call, "delete "))
@@ -991,6 +1010,85 @@ func TestGenerateContent_ContextCacheMissingCache(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGenerateContent_ContextCacheMissingCacheAfterOutput checks that a stream
+// that fails with a missing-cache error after it has already produced output is
+// not sent again: the consumer has seen the first attempt's text, so a second
+// attempt would repeat it. The error goes to the caller.
+func TestGenerateContent_ContextCacheMissingCacheAfterOutput(t *testing.T) {
+	api := &fakeCacheAPI{gone: map[string]bool{"cachedContents/gone": true}, goneAfterChunk: true}
+	m := newCacheTestModel(t, api, "test-model")
+	req := cacheTestRequest(&model.ContextCacheConfig{})
+	req.PreviousPromptTokenCount = 5000
+	req.CacheMetadata = &model.CacheMetadata{CacheName: "cachedContents/gone", ExpireTime: cacheTestNow.Add(time.Hour), InvocationsUsed: 1, Fingerprint: fingerprintOf(m, cacheTestRequest(nil), 2), ContentsCount: 2}
+
+	var chunks int
+	var lastErr error
+	for resp, err := range m.GenerateContent(cacheTestContext(t), req, true) {
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp.Partial {
+			chunks++
+		}
+	}
+
+	var apiErr genai.APIError
+	if !errors.As(lastErr, &apiErr) || apiErr.Code != http.StatusNotFound {
+		t.Errorf("error = %v, want the provider's 404 passed to the caller", lastErr)
+	}
+	if chunks != 1 {
+		t.Errorf("partial chunks yielded = %d, want the 1 sent before the failure", chunks)
+	}
+	if diff := cmp.Diff([]string{"generate"}, api.calls); diff != "" {
+		t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestGenerateContent_ContextCacheMissingCacheCleanup checks that the cache the
+// provider reported missing is deleted, since the provider may only have
+// reported it unreachable: straight away without a ledger, and once the
+// invocation settles under one.
+func TestGenerateContent_ContextCacheMissingCacheCleanup(t *testing.T) {
+	newRequest := func(t *testing.T, api *fakeCacheAPI) (*geminiModel, *model.LLMRequest) {
+		m := newCacheTestModel(t, api, "test-model")
+		req := cacheTestRequest(&model.ContextCacheConfig{})
+		req.PreviousPromptTokenCount = 5000
+		req.CacheMetadata = &model.CacheMetadata{CacheName: "cachedContents/gone", ExpireTime: cacheTestNow.Add(time.Hour), InvocationsUsed: 1, Fingerprint: fingerprintOf(m, cacheTestRequest(nil), 2), ContentsCount: 2}
+		return m, req
+	}
+
+	t.Run("without a ledger", func(t *testing.T) {
+		api := &fakeCacheAPI{gone: map[string]bool{"cachedContents/gone": true}}
+		m, req := newRequest(t, api)
+
+		generateOnce(t, cacheTestContext(t), m, req)
+
+		if diff := cmp.Diff([]string{"generate", "delete cachedContents/gone", "generate"}, api.calls); diff != "" {
+			t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("under a ledger", func(t *testing.T) {
+		api := &fakeCacheAPI{gone: map[string]bool{"cachedContents/gone": true}}
+		m, req := newRequest(t, api)
+		ledger := llminternal.NewContextCacheLedger()
+		ctx := llminternal.WithContextCacheLedger(cacheTestContext(t), ledger)
+
+		resp := generateOnce(t, ctx, m, req)
+
+		if diff := cmp.Diff([]string{"generate", "generate"}, api.calls); diff != "" {
+			t.Fatalf("API calls before settling mismatch (-want +got):\n%s", diff)
+		}
+		// The retry recorded fingerprint-only metadata, so nothing stored names
+		// the missing cache.
+		ledger.Settle(ctx, loadEvents(cacheEvents{storedRecord(resp.CacheMetadata)}))
+		if diff := cmp.Diff([]string{"generate", "generate", "delete cachedContents/gone"}, api.calls); diff != "" {
+			t.Errorf("API calls after settling mismatch (-want +got):\n%s", diff)
+		}
+	})
 }
 
 // TestGenerateContent_ContextCacheDefaultIntervals checks the number of

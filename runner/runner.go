@@ -93,7 +93,9 @@ type Config struct {
 	// default, disables it. It does not apply to [Runner.RunLive].
 	//
 	// When an invocation ends, the runner deletes the caches its model calls
-	// created or stopped using, except those its stored events still name.
+	// created or stopped using, except those the latest stored record of an
+	// agent still names. It reads the stored session to tell, so an invocation
+	// that only reused a cache reads nothing extra.
 	//
 	// See [model.ContextCacheConfig] for when a cache is created and reused,
 	// and which models and session services support it.
@@ -164,9 +166,9 @@ func New(cfg Config) (*Runner, error) {
 	if err := cfg.ContextCache.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid ContextCache: %w", err)
 	}
-	// A copy that shares nothing with the caller's config, its HTTP options
-	// included, so a later change to it neither reaches running invocations
-	// nor races with them.
+	// A copy of the caller's config, its HTTP options included, so that a
+	// later change to the caller's headers, timeout or the maps in its extra
+	// body neither reaches running invocations nor races with them.
 	contextCache := llminternal.CloneContextCacheConfig(cfg.ContextCache)
 
 	return &Runner{
@@ -555,21 +557,43 @@ func (r *Runner) withContextCache(ctx context.Context) context.Context {
 	return llminternal.WithContextCacheLedger(ctx, ledger)
 }
 
+// contextCacheSettleTimeout bounds reading the stored session once an
+// invocation has ended, which a hung store would otherwise hold open. A var so
+// a test can shorten it rather than waiting for the bound to pass.
+var contextCacheSettleTimeout = 30 * time.Second
+
 // settleContextCaches deletes the context caches the invocation's model calls
-// created or stopped using that no event stored in sess names. It runs once
-// the invocation has ended, however it ended, so that the events it judges
-// are the ones the session actually holds. A canceled invocation still
-// settles, or its caches would stay on the provider until their TTL runs out.
+// created or stopped using, except those the latest stored record of an agent
+// names. It runs once the invocation has ended, however it ended. A canceled
+// invocation still settles, or its caches would stay on the provider until
+// their TTL runs out.
+//
+// It judges against the session as the session service holds it, not against
+// the invocation's own handle. A service may add an event to the handle before
+// it writes the event, and leave it there when the write fails, as the
+// database service does, so the handle can name a cache the store never
+// recorded. Compaction re-reads the session for the same reason. The read
+// happens only when a cache was created or stopped being used, so most
+// invocations make none.
 func (r *Runner) settleContextCaches(ctx context.Context, sess session.Session) {
 	ledger := llminternal.ContextCacheLedgerFromContext(ctx)
 	if ledger == nil || sess == nil {
 		return
 	}
-	ledger.Settle(context.WithoutCancel(ctx), sess.Events())
+	ledger.Settle(context.WithoutCancel(ctx), func(ctx context.Context) (session.Events, error) {
+		ctx, cancel := context.WithTimeout(ctx, contextCacheSettleTimeout)
+		defer cancel()
+		stored, err := r.reloadSession(ctx, sess)
+		if err != nil {
+			return nil, err
+		}
+		return stored.Events(), nil
+	})
 }
 
-// reloadSession re-fetches a session so compaction works against current state
-// rather than the snapshot the invocation began with.
+// reloadSession re-fetches a session so that compaction and context cache
+// cleanup work against current state rather than the snapshot the invocation
+// began with.
 func (r *Runner) reloadSession(ctx context.Context, s session.Session) (session.Session, error) {
 	resp, err := r.sessionService.Get(ctx, &session.GetRequest{
 		AppName:   s.AppName(),
@@ -580,7 +604,7 @@ func (r *Runner) reloadSession(ctx context.Context, s session.Session) (session.
 		return nil, fmt.Errorf("failed to re-read the session: %w", err)
 	}
 	if resp == nil || resp.Session == nil {
-		return nil, fmt.Errorf("session %q disappeared while compacting", s.ID())
+		return nil, fmt.Errorf("session %q disappeared before it could be re-read", s.ID())
 	}
 	return resp.Session, nil
 }

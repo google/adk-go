@@ -26,11 +26,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
+	"gorm.io/gorm"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
@@ -40,6 +43,7 @@ import (
 	"google.golang.org/adk/v2/model/gemini"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/database"
 )
 
 // cachingGeminiAPI stands in for the Gemini API. It creates caches on request
@@ -50,6 +54,7 @@ type cachingGeminiAPI struct {
 	mu            sync.Mutex
 	creates       int
 	createHeaders []http.Header
+	createBodies  []map[string]any
 	generates     []map[string]any
 	live          map[string]bool
 	// emptyReplies holds the generations, numbered from 1, answered with no
@@ -95,6 +100,7 @@ func (f *cachingGeminiAPI) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/cachedContents"):
 		f.creates++
 		f.createHeaders = append(f.createHeaders, r.Header.Clone())
+		f.createBodies = append(f.createBodies, decoded)
 		name := fmt.Sprintf("cachedContents/%d", f.creates)
 		f.live[name] = true
 		_, _ = fmt.Fprintf(w, `{"name": %q, "expireTime": %q}`, name, time.Now().Add(time.Hour).Format(time.RFC3339))
@@ -484,6 +490,178 @@ func TestRunner_ContextCacheReplyNotStored(t *testing.T) {
 	}
 }
 
+// observedService counts the Get calls made to its session service, and can
+// fail them, or hang them until their context ends.
+type observedService struct {
+	session.Service
+	gets     atomic.Int32
+	failGets atomic.Bool
+	hangGets atomic.Bool
+}
+
+func (s *observedService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
+	s.gets.Add(1)
+	if s.hangGets.Load() {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if s.failGets.Load() {
+		return nil, errors.New("session store unavailable")
+	}
+	return s.Service.Get(ctx, req)
+}
+
+// TestRunner_ContextCacheDatabaseStaleWrite reproduces a review finding with
+// the database service on SQLite. During turn 3's model call a second handle
+// appends an event to the same session, so the database rejects turn 3's reply
+// as written from a stale session. The service has already added that reply
+// to the invocation's own session object by then, and keeps it there, so that
+// object names the cache the turn created while the database does not. With
+// CacheIntervals 1, turn 3 replaces turn 2's cache. The database still names
+// turn 2's, so that one has to stay, and the new one, recorded nowhere, has to
+// go.
+func TestRunner_ContextCacheDatabaseStaleWrite(t *testing.T) {
+	const staleTurn = 3
+	db, err := gorm.Open(sqlite.Open("file:contextcachestalewrite?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("gorm.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	svc, err := database.NewSessionServiceFromDB(db)
+	if err != nil {
+		t.Fatalf("NewSessionServiceFromDB() error = %v", err)
+	}
+	if err := database.AutoMigrate(svc); err != nil {
+		t.Fatalf("AutoMigrate() error = %v", err)
+	}
+
+	api := &cachingGeminiAPI{}
+	turn := 0
+	secondWriter := func(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+		if turn != staleTurn {
+			return nil, nil
+		}
+		got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+		if err != nil {
+			return nil, err
+		}
+		other := session.NewEvent(ctx, "another-writer")
+		other.Author = "other"
+		return nil, svc.AppendEvent(ctx, got.Session, other)
+	}
+	root := cachingAgent(t, api, llmagent.Config{BeforeModelCallbacks: []llmagent.BeforeModelCallback{secondWriter}})
+	r, _ := newCachingRunnerWith(t, Config{Agent: root, SessionService: svc, ContextCache: &model.ContextCacheConfig{CacheIntervals: 1}})
+
+	for turn = 1; turn <= 4; turn++ {
+		err := runTurn(t, r, turn)
+		if turn == staleTurn {
+			if err == nil || !strings.Contains(err.Error(), "stale") {
+				t.Fatalf("turn %d error = %v, want the database's stale session error, so this test checks nothing", turn, err)
+			}
+		} else if err != nil {
+			t.Fatalf("turn %d failed: %v", turn, err)
+		}
+		checkCachesMatchSession(t, api, svc, turn)
+	}
+}
+
+// TestRunner_ContextCacheSettleReads checks that cache cleanup reads the stored
+// session only on a turn that created or stopped using a cache. Turn 2 creates
+// the cache, and turns 3 and 4 only reuse it.
+func TestRunner_ContextCacheSettleReads(t *testing.T) {
+	getsPerTurn := func(cacheCfg *model.ContextCacheConfig) []int32 {
+		api := &cachingGeminiAPI{}
+		svc := &observedService{Service: session.InMemoryService()}
+		r, _ := newCachingRunnerWith(t, Config{Agent: cachingAgent(t, api, llmagent.Config{}), SessionService: svc, ContextCache: cacheCfg})
+		var gets []int32
+		for turn := 1; turn <= 4; turn++ {
+			before := svc.gets.Load()
+			if err := runTurn(t, r, turn); err != nil {
+				t.Fatalf("turn %d failed: %v", turn, err)
+			}
+			gets = append(gets, svc.gets.Load()-before)
+		}
+		return gets
+	}
+
+	off := getsPerTurn(nil)
+	want := slices.Clone(off)
+	want[1]++
+	if diff := cmp.Diff(want, getsPerTurn(&model.ContextCacheConfig{})); diff != "" {
+		t.Errorf("session reads per turn with caching on, against off plus one for the turn that creates a cache (-want +got):\n%s", diff)
+	}
+}
+
+// TestRunner_ContextCacheSettleCannotReadSession checks what cleanup does when
+// the store cannot be read after an invocation. It cannot tell which caches
+// the stored records name, so it deletes none: the cache turn 3 replaced stays
+// on the provider until its TTL, where deleting it blind could remove one the
+// session still names.
+func TestRunner_ContextCacheSettleCannotReadSession(t *testing.T) {
+	api := &cachingGeminiAPI{}
+	svc := &observedService{Service: session.InMemoryService()}
+	turn := 0
+	unplug := func(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+		// After the turn has read its session, before it ends.
+		svc.failGets.Store(turn == 3)
+		return nil, nil
+	}
+	root := cachingAgent(t, api, llmagent.Config{BeforeModelCallbacks: []llmagent.BeforeModelCallback{unplug}})
+	r, _ := newCachingRunnerWith(t, Config{Agent: root, SessionService: svc, ContextCache: &model.ContextCacheConfig{CacheIntervals: 1}})
+
+	for turn = 1; turn <= 3; turn++ {
+		if err := runTurn(t, r, turn); err != nil {
+			t.Fatalf("turn %d failed: %v", turn, err)
+		}
+	}
+	svc.failGets.Store(false)
+
+	if got, want := api.liveCaches(), []string{"cachedContents/1", "cachedContents/2"}; !cmp.Equal(got, want) {
+		t.Errorf("live caches after a turn whose store could not be read = %v, want both kept: %v", got, want)
+	}
+}
+
+// TestRunner_ContextCacheSettleStoreHangs checks that a store that never
+// answers does not hold the end of an invocation open: cleanup gives up once
+// its bound passes, and deletes nothing, as when the store cannot be read.
+func TestRunner_ContextCacheSettleStoreHangs(t *testing.T) {
+	contextCacheSettleTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { contextCacheSettleTimeout = 30 * time.Second })
+
+	api := &cachingGeminiAPI{}
+	svc := &observedService{Service: session.InMemoryService()}
+	turn := 0
+	hang := func(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+		svc.hangGets.Store(turn == 3)
+		return nil, nil
+	}
+	root := cachingAgent(t, api, llmagent.Config{BeforeModelCallbacks: []llmagent.BeforeModelCallback{hang}})
+	r, _ := newCachingRunnerWith(t, Config{Agent: root, SessionService: svc, ContextCache: &model.ContextCacheConfig{CacheIntervals: 1}})
+
+	for turn = 1; turn <= 2; turn++ {
+		if err := runTurn(t, r, turn); err != nil {
+			t.Fatalf("turn %d failed: %v", turn, err)
+		}
+	}
+	turn = 3
+	start := time.Now()
+	if err := runTurn(t, r, turn); err != nil {
+		t.Fatalf("turn %d failed: %v", turn, err)
+	}
+	svc.hangGets.Store(false)
+
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("the turn took %v with a store that hangs, want cleanup to give up after its bound", elapsed)
+	}
+	if got, want := api.liveCaches(), []string{"cachedContents/1", "cachedContents/2"}; !cmp.Equal(got, want) {
+		t.Errorf("live caches after cleanup gave up = %v, want both kept: %v", got, want)
+	}
+}
+
 // TestRunner_ContextCacheMissingCache checks that a session naming a cache the
 // provider no longer holds recovers on the next turn: the request is sent
 // again without the cache, and the turn after creates a new one.
@@ -506,25 +684,32 @@ func TestRunner_ContextCacheMissingCache(t *testing.T) {
 }
 
 // TestRunner_ContextCacheHTTPOptionsNotShared checks that the runner's copy of
-// CreateHTTPOptions shares nothing with the caller's or with any request's. A
-// header the caller adds after New, and one a callback adds to an earlier
-// request's config, must not reach a cache creation, and the callback's must
-// not reach the caller's map either.
+// CreateHTTPOptions shares no map with the caller's or with any request's. A
+// header or a nested extra body entry the caller adds after New, and one a
+// callback adds to an earlier request's config, must not reach a cache
+// creation, and the callback's must not reach the caller's maps either.
 func TestRunner_ContextCacheHTTPOptionsNotShared(t *testing.T) {
 	api := &cachingGeminiAPI{}
 	turn := 0
 	tamper := func(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 		if turn == 1 && req.CacheConfig != nil {
-			req.CacheConfig.CreateHTTPOptions.Headers.Set("X-Callback", "turn 1")
+			opts := req.CacheConfig.CreateHTTPOptions
+			opts.Headers.Set("X-Callback", "turn 1")
+			opts.ExtraBody["labels"].(map[string]any)["callback"] = "turn 1"
 		}
 		return nil, nil
 	}
 	callerHeaders := http.Header{"X-Caller": []string{"yes"}}
-	cfg := &model.ContextCacheConfig{CreateHTTPOptions: &genai.HTTPOptions{Headers: callerHeaders}}
+	callerLabels := map[string]any{"team": "a"}
+	cfg := &model.ContextCacheConfig{CreateHTTPOptions: &genai.HTTPOptions{
+		Headers:   callerHeaders,
+		ExtraBody: map[string]any{"labels": callerLabels},
+	}}
 	r, _ := newCachingRunner(t, cachingAgent(t, api, llmagent.Config{BeforeModelCallbacks: []llmagent.BeforeModelCallback{tamper}}), cfg)
 	callerHeaders.Set("X-After-New", "yes")
+	callerLabels["after-new"] = "yes"
 
-	// A caller writing its map while the runner creates caches is a data
+	// A caller writing its maps while the runner creates caches is a data
 	// race the race detector reports, unless nothing is shared.
 	done := make(chan struct{})
 	var writer sync.WaitGroup
@@ -535,6 +720,7 @@ func TestRunner_ContextCacheHTTPOptionsNotShared(t *testing.T) {
 				return
 			default:
 				callerHeaders.Set("X-Writer", time.Now().String())
+				callerLabels["writer"] = time.Now().String()
 			}
 		}
 	})
@@ -548,6 +734,7 @@ func TestRunner_ContextCacheHTTPOptionsNotShared(t *testing.T) {
 
 	api.mu.Lock()
 	createHeaders := api.createHeaders
+	createBodies := api.createBodies
 	api.mu.Unlock()
 	if len(createHeaders) != 1 {
 		t.Fatalf("caches created = %d, want 1", len(createHeaders))
@@ -563,6 +750,19 @@ func TestRunner_ContextCacheHTTPOptionsNotShared(t *testing.T) {
 	}
 	if got := callerHeaders.Get("X-Callback"); got != "" {
 		t.Errorf("the caller's map gained X-Callback = %q from a request's config", got)
+	}
+
+	// The nested map is where a copy of only the top level of the extra body
+	// leaves the caller, the runner and every request sharing one.
+	labels, ok := createBodies[0]["labels"].(map[string]any)
+	if !ok {
+		t.Fatalf("cache creation body has no labels from the extra body: %v", createBodies[0])
+	}
+	if diff := cmp.Diff(map[string]any{"team": "a"}, labels); diff != "" {
+		t.Errorf("labels on the cache creation, from the runner's copy as of New (-want +got):\n%s", diff)
+	}
+	if got := callerLabels["callback"]; got != nil {
+		t.Errorf("the caller's labels gained callback = %v from a request's config", got)
 	}
 }
 

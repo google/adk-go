@@ -16,8 +16,10 @@ package llminternal
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"net/http"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -35,6 +37,11 @@ type eventList []*session.Event
 func (e eventList) All() iter.Seq[*session.Event] { return slices.Values(e) }
 func (e eventList) Len() int                      { return len(e) }
 func (e eventList) At(i int) *session.Event       { return e[i] }
+
+// stored returns a loader that yields events, as a session store would.
+func stored(events session.Events) func(context.Context) (session.Events, error) {
+	return func(context.Context) (session.Events, error) { return events, nil }
+}
 
 // record returns an event of author on branch recording the named cache, or
 // fingerprint-only metadata when name is empty.
@@ -97,18 +104,50 @@ func TestContextCacheLedger_Settle(t *testing.T) {
 				ledger.Track(name, func(context.Context) { deleted = append(deleted, name) })
 			}
 
-			ledger.Settle(t.Context(), tt.events)
+			ledger.Settle(t.Context(), stored(tt.events))
 
 			if diff := cmp.Diff(tt.wantDeleted, deleted); diff != "" {
 				t.Errorf("deleted mismatch (-want +got):\n%s", diff)
 			}
 			deleted = nil
-			ledger.Settle(t.Context(), nil)
+			ledger.Settle(t.Context(), stored(nil))
 			if len(deleted) != 0 {
 				t.Errorf("a second Settle deleted %v, want the ledger emptied by the first", deleted)
 			}
 		})
 	}
+}
+
+// TestContextCacheLedger_SettleLoading checks when Settle reads the stored
+// events, and what it does when it cannot.
+func TestContextCacheLedger_SettleLoading(t *testing.T) {
+	t.Run("an empty ledger reads nothing", func(t *testing.T) {
+		ledger := NewContextCacheLedger()
+		ledger.Settle(t.Context(), func(context.Context) (session.Events, error) {
+			t.Error("Settle read the stored events with nothing tracked")
+			return nil, nil
+		})
+	})
+
+	t.Run("a failed read deletes nothing and empties the ledger", func(t *testing.T) {
+		ledger := NewContextCacheLedger()
+		var deleted []string
+		for _, name := range []string{"c/1", "c/2"} {
+			ledger.Track(name, func(context.Context) { deleted = append(deleted, name) })
+		}
+
+		ledger.Settle(t.Context(), func(context.Context) (session.Events, error) {
+			return nil, errors.New("store unavailable")
+		})
+		if len(deleted) != 0 {
+			t.Errorf("deleted %v when the stored events could not be read, want nothing", deleted)
+		}
+
+		ledger.Settle(t.Context(), stored(nil))
+		if len(deleted) != 0 {
+			t.Errorf("a later Settle deleted %v, want the ledger emptied by the failed one", deleted)
+		}
+	})
 }
 
 // TestContextCacheLedger_ConcurrentTrack checks that parallel sub-agents
@@ -130,7 +169,7 @@ func TestContextCacheLedger_ConcurrentTrack(t *testing.T) {
 	}
 	wg.Wait()
 
-	ledger.Settle(t.Context(), nil)
+	ledger.Settle(t.Context(), stored(nil))
 
 	if deleted != 20 {
 		t.Errorf("deleted %d caches, want all 20 tracked", deleted)
@@ -140,7 +179,7 @@ func TestContextCacheLedger_ConcurrentTrack(t *testing.T) {
 func TestContextCacheLedger_NilIsInert(t *testing.T) {
 	var ledger *ContextCacheLedger
 	ledger.Track("c/1", func(context.Context) { t.Error("a nil ledger deleted a cache") })
-	ledger.Settle(t.Context(), eventList{})
+	ledger.Settle(t.Context(), stored(eventList{}))
 }
 
 // TestCloneContextCacheConfig checks that writing to every mutable part of the
@@ -156,9 +195,17 @@ func TestCloneContextCacheConfig(t *testing.T) {
 		return &model.ContextCacheConfig{
 			CacheIntervals: 4,
 			CreateHTTPOptions: &genai.HTTPOptions{
-				Headers:   http.Header{"X-A": []string{"1"}},
-				ExtraBody: map[string]any{"k": "v"},
-				Timeout:   &timeout,
+				Headers: http.Header{"X-A": []string{"1"}},
+				ExtraBody: map[string]any{
+					"k":      "v",
+					"labels": map[string]any{"team": "a"},
+					"typed":  map[string]string{"x": "1"},
+					"list":   []any{map[string]any{"i": 1}, "s"},
+					"names":  []string{"n1"},
+					"empty":  map[string]any{},
+					"nilmap": map[string]any(nil),
+				},
+				Timeout: &timeout,
 				RetryOptions: &genai.HTTPRetryOptions{
 					Attempts:        &attempts,
 					InitialDelay:    &initialDelay,
@@ -179,6 +226,15 @@ func TestCloneContextCacheConfig(t *testing.T) {
 	o.Headers.Set("X-A", "changed")
 	o.Headers.Set("X-B", "added")
 	o.ExtraBody["k"] = "changed"
+	// A callback writing to a map nested in the extra body, the case a copy of
+	// only its top level leaves shared.
+	o.ExtraBody["labels"].(map[string]any)["team"] = "changed"
+	o.ExtraBody["labels"].(map[string]any)["added"] = "x"
+	o.ExtraBody["typed"].(map[string]string)["x"] = "changed"
+	o.ExtraBody["list"].([]any)[0].(map[string]any)["i"] = 99
+	o.ExtraBody["list"].([]any)[1] = "changed"
+	o.ExtraBody["names"].([]string)[0] = "changed"
+	o.ExtraBody["empty"].(map[string]any)["added"] = "x"
 	*o.Timeout = time.Hour
 	*o.RetryOptions.Attempts = 9
 	*o.RetryOptions.InitialDelay = 9
@@ -192,6 +248,66 @@ func TestCloneContextCacheConfig(t *testing.T) {
 	}
 	if CloneContextCacheConfig(nil) != nil {
 		t.Error("CloneContextCacheConfig(nil) != nil")
+	}
+}
+
+// TestCloneContextCacheConfig_KeepsNilness checks that a nil map in the extra
+// body, and a config without options, stay nil rather than becoming empty, so
+// the copy sends the same request the original does.
+func TestCloneContextCacheConfig_KeepsNilness(t *testing.T) {
+	clone := CloneContextCacheConfig(&model.ContextCacheConfig{
+		CreateHTTPOptions: &genai.HTTPOptions{ExtraBody: map[string]any{"nilmap": map[string]any(nil), "nilslice": []any(nil)}},
+	})
+	body := clone.CreateHTTPOptions.ExtraBody
+	if m, ok := body["nilmap"].(map[string]any); !ok || m != nil {
+		t.Errorf("nilmap = %#v, want a nil map", body["nilmap"])
+	}
+	if s, ok := body["nilslice"].([]any); !ok || s != nil {
+		t.Errorf("nilslice = %#v, want a nil slice", body["nilslice"])
+	}
+	if got := CloneContextCacheConfig(&model.ContextCacheConfig{}).CreateHTTPOptions; got != nil {
+		t.Errorf("options of a config without any = %v, want nil", got)
+	}
+	if got := CloneContextCacheConfig(&model.ContextCacheConfig{CreateHTTPOptions: &genai.HTTPOptions{}}).CreateHTTPOptions.ExtraBody; got != nil {
+		t.Errorf("ExtraBody of options without one = %v, want nil", got)
+	}
+}
+
+// TestCloneHTTPOptionsCoversEveryField fails when genai gives HTTPOptions or
+// HTTPRetryOptions a field that refers to shared state, a pointer, map, slice,
+// interface or function, that the copy in cloneHTTPOptions does not handle. A
+// new such field would otherwise be shared between the caller and every
+// request until someone noticed. Add the field to cloneHTTPOptions, then to
+// the list here.
+func TestCloneHTTPOptionsCoversEveryField(t *testing.T) {
+	// handled lists the reference-valued fields cloneHTTPOptions copies, or
+	// shares on purpose, as its doc comment says.
+	handled := map[string]map[string]bool{
+		"HTTPOptions": {
+			"Headers":               true,
+			"ExtraBody":             true,
+			"Timeout":               true,
+			"RetryOptions":          true,
+			"ExtrasRequestProvider": true, // a function, shared as it is
+		},
+		"HTTPRetryOptions": {
+			"Attempts":        true,
+			"InitialDelay":    true,
+			"MaxDelay":        true,
+			"ExpBase":         true,
+			"Jitter":          true,
+			"HTTPStatusCodes": true,
+		},
+	}
+	for _, typ := range []reflect.Type{reflect.TypeFor[genai.HTTPOptions](), reflect.TypeFor[genai.HTTPRetryOptions]()} {
+		for field := range typ.Fields() {
+			switch field.Type.Kind() {
+			case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface, reflect.Func, reflect.Chan:
+				if !handled[typ.Name()][field.Name] {
+					t.Errorf("%s.%s is a %s that cloneHTTPOptions does not copy, so the caller and every request would share it", typ.Name(), field.Name, field.Type.Kind())
+				}
+			}
+		}
 	}
 }
 

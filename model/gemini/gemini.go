@@ -32,7 +32,7 @@
 // it is replaced.
 //
 // Under a runner, a cache is deleted only once the invocation that stopped
-// using it has stored its events, and only if no stored record still names
+// using it has ended, and only if no agent's latest stored record still names
 // it. A cache created for a reply that was never stored is deleted then too.
 // A request naming a cache that the provider no longer holds is sent again
 // once without it, and the next request creates a new cache.
@@ -137,12 +137,12 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 // they carry nothing.
 //
 // Under a runner, the caches this call created or stopped using go into the
-// invocation's ledger, and the runner deletes those that no stored event names
-// once the invocation ends. Only the runner can tell, because callbacks,
-// plugins and the session write all sit between this response and the stored
-// event. Called without a runner, the model deletes on its own: a cache it
-// replaced once a complete response has reached the caller, and a cache it
-// created when none has.
+// invocation's ledger, and the runner deletes those that no agent's latest
+// stored record names once the invocation ends. Only the runner can tell,
+// because callbacks, plugins and the session write all sit between this
+// response and the stored event. Called without a runner, the model deletes on
+// its own: a cache it replaced once a complete response has reached the
+// caller, and a cache it created when none has.
 //
 // A request naming a cache that the provider no longer holds, for example one
 // deleted elsewhere or expired early, is sent again once without the cache, so

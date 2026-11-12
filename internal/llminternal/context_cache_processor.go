@@ -53,8 +53,8 @@ func ContextCacheRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 		if cfg == nil {
 			return
 		}
-		// A copy that shares nothing, because the runner's config is shared by
-		// every request and a callback may write to the request's.
+		// A copy, because the runner's config is shared by every request and a
+		// callback may write to the request's headers or extra body.
 		req.CacheConfig = CloneContextCacheConfig(cfg)
 
 		if ctx.Session() == nil {
