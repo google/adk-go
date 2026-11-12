@@ -1099,7 +1099,7 @@ func TestSearch_OverlappingParallelCallsReportAlreadyAvailable(t *testing.T) {
 		}
 		return ft
 	}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		gated, err := New(&staticToolset{tools: []tool.Tool{newTool("zebra_tool"), newTool("apple_tool")}}, Config{})
 		if err != nil {
 			t.Fatalf("New() error = %v", err)

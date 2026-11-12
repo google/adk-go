@@ -129,11 +129,9 @@ func TestProviderCredentialConcurrent(t *testing.T) {
 	got := make([]auth.Credential, len(users)*8)
 	errs := make([]error, len(users)*8)
 	for i := range got {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			got[i], errs[i] = p.Credential(ctxs[i%len(users)])
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -2198,12 +2196,10 @@ func TestProviderRefreshConcurrentForcesOnce(t *testing.T) {
 	results := make(chan result, n)
 	var wg sync.WaitGroup
 	for range n {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			cred, err := rp.Refresh(ctx, rejected)
 			results <- result{cred, err}
-		}()
+		})
 	}
 	var got []result
 	timeout := time.After(5 * time.Second)

@@ -421,8 +421,7 @@ func isResumable(err error) bool {
 	// A failed read or write on the underlying socket of an already-established
 	// connection. The dial lives on a different path, which handles its own
 	// errors, so reaching here means a live connection dropped.
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if _, ok := errors.AsType[*net.OpError](err); ok {
 		return true
 	}
 	// Match the close code rather than the text: gorilla puts the socket
@@ -517,7 +516,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		// IsGemini3xLive and still gets both.
 		if !googlellm.IsGemini3xLive(f.Model.Name()) {
 			if runCfg.Live.EnableAffectiveDialog {
-				liveConnectConfig.EnableAffectiveDialog = genai.Ptr(true)
+				liveConnectConfig.EnableAffectiveDialog = new(true)
 			}
 			liveConnectConfig.Proactivity = runCfg.Live.Proactivity
 		}
