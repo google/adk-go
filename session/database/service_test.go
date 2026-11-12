@@ -1252,3 +1252,135 @@ func TestDatabaseService_ListTieBreaksByUserThenID(t *testing.T) {
 		t.Errorf("List() order = %v, want %v", got, want)
 	}
 }
+
+// getUserState reads the user state of (appName, userID) through
+// session.GetUserState and fails the test on an error.
+func getUserState(t *testing.T, svc session.Service, appName, userID string) map[string]any {
+	t.Helper()
+	resp, err := session.GetUserState(t.Context(), svc, &session.GetUserStateRequest{AppName: appName, UserID: userID})
+	if err != nil {
+		t.Fatalf("GetUserState(%q, %q) error = %v", appName, userID, err)
+	}
+	return resp.State
+}
+
+// The user-state read returns only the user: keys of exactly the requested
+// (app, user) pair, unprefixed and with a stored nil kept, keeps them after
+// the session is deleted, and never matches another row when an id is empty.
+func TestDatabaseService_GetUserState_ScopesAndEmptyIDs(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	created, err := s.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "u1",
+		SessionID: "s1",
+		State:     map[string]any{"app:a": "av", "user:k1": "v1", "sk": "sv"},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	event := session.NewEvent(ctx, "inv")
+	event.Actions.StateDelta = map[string]any{"user:nil_val": nil}
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	for _, id := range [][2]string{{"app", ""}, {"", "u1"}, {"", ""}} {
+		if diff := cmp.Diff(map[string]any{}, getUserState(t, s, id[0], id[1])); diff != "" {
+			t.Errorf("GetUserState(%q, %q) mismatch (-want +got):\n%s", id[0], id[1], diff)
+		}
+	}
+	wantU1 := map[string]any{"k1": "v1", "nil_val": nil}
+	if diff := cmp.Diff(wantU1, getUserState(t, s, "app", "u1")); diff != "" {
+		t.Errorf("GetUserState(app, u1) mismatch (-want +got):\n%s", diff)
+	}
+
+	if err := s.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "u1", SessionID: "s1"}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if diff := cmp.Diff(wantU1, getUserState(t, s, "app", "u1")); diff != "" {
+		t.Errorf("GetUserState(app, u1) after Delete mismatch (-want +got):\n%s", diff)
+	}
+	s2, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u1", SessionID: "s2"})
+	if err != nil {
+		t.Fatalf("Create(s2) error = %v", err)
+	}
+	wantS2 := map[string]any{"app:a": "av", "user:k1": "v1", "user:nil_val": nil}
+	if diff := cmp.Diff(wantS2, maps.Collect(s2.Session.State().All())); diff != "" {
+		t.Errorf("Create(s2) state mismatch (-want +got):\n%s", diff)
+	}
+
+	// Create rejects empty ids, so these rows can only be inserted directly.
+	for _, row := range []*storageUserState{
+		{AppName: "app", UserID: "", State: stateMap{"k": "empty_user"}},
+		{AppName: "", UserID: "u1", State: stateMap{"k": "empty_app"}},
+	} {
+		if err := s.db.Create(row).Error; err != nil {
+			t.Fatalf("insert user_states row (%q, %q): %v", row.AppName, row.UserID, err)
+		}
+	}
+	if diff := cmp.Diff(map[string]any{"k": "empty_user"}, getUserState(t, s, "app", "")); diff != "" {
+		t.Errorf("GetUserState(app, \"\") mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]any{"k": "empty_app"}, getUserState(t, s, "", "u1")); diff != "" {
+		t.Errorf("GetUserState(\"\", u1) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Mutating the map a user-state read returns, at any depth, changes nothing
+// stored.
+func TestDatabaseService_GetUserState_DeepCopyNoAliasing(t *testing.T) {
+	s := emptyService(t)
+	if _, err := s.Create(t.Context(), &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "u1",
+		SessionID: "s1",
+		State: map[string]any{
+			"user:profile": map[string]any{"name": "Alice", "roles": []any{"admin", map[string]any{"dept": "eng"}}},
+			"user:empty":   nil,
+		},
+	}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	want := map[string]any{
+		"profile": map[string]any{"name": "Alice", "roles": []any{"admin", map[string]any{"dept": "eng"}}},
+		"empty":   nil,
+	}
+
+	got := getUserState(t, s, "app", "u1")
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("first GetUserState(app, u1) mismatch (-want +got):\n%s", diff)
+	}
+	profile := got["profile"].(map[string]any)
+	profile["name"] = "Mallory"
+	roles := profile["roles"].([]any)
+	roles[0] = "guest"
+	roles[1].(map[string]any)["dept"] = "sales"
+	got["empty"] = "full"
+	got["extra"] = true
+
+	if diff := cmp.Diff(want, getUserState(t, s, "app", "u1")); diff != "" {
+		t.Errorf("second GetUserState(app, u1) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A state column holding JSON null, which another writer of the table can
+// leave, reads as an empty map rather than a nil one.
+func TestDatabaseService_GetUserState_NullStateColumn(t *testing.T) {
+	s := emptyService(t)
+	if err := s.db.Exec("INSERT INTO user_states (app_name, user_id, state, update_time) VALUES (?, ?, ?, ?)",
+		"app", "u1", "null", time.Date(2026, time.March, 15, 12, 30, 0, 0, time.UTC)).Error; err != nil {
+		t.Fatalf("insert user_states row: %v", err)
+	}
+	if diff := cmp.Diff(map[string]any{}, getUserState(t, s, "app", "u1")); diff != "" {
+		t.Errorf("GetUserState(app, u1) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDatabaseService_GetUserState_NilRequest(t *testing.T) {
+	s := emptyService(t)
+	resp, err := s.GetUserState(t.Context(), nil)
+	if err == nil || resp != nil {
+		t.Errorf("GetUserState(nil) = %v, %v; want nil and an error", resp, err)
+	}
+}

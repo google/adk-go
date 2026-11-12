@@ -17,6 +17,7 @@ package session
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
@@ -67,29 +68,46 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 		return nil, fmt.Errorf("session %s already exists", req.SessionID)
 	}
 
-	state := req.State
-	if state == nil {
-		state = make(stateMap)
-	}
+	// The stored session keeps only session-scoped keys: app: and user: keys
+	// go to the shared scoped state and temp: keys are not stored at all, as
+	// in adk-python (in_memory_session_service.py, _create_session_impl).
+	appDelta, userDelta, sessionState := sessionutils.ExtractStateDeltas(req.State)
 	val := &session{
 		id:        key,
-		state:     state,
+		state:     sessionState,
 		updatedAt: platform.Now(ctx),
 	}
 
 	s.sessions.Set(encodedKey, val)
-	appDelta, userDelta, _ := sessionutils.ExtractStateDeltas(req.State)
-	appState := s.updateAppState(appDelta, req.AppName)
-	userState := s.updateUserState(userDelta, req.AppName, req.UserID)
-	val.state = sessionutils.MergeStates(appState, userState, state)
+	s.updateAppState(appDelta, req.AppName)
+	s.updateUserState(userDelta, req.AppName, req.UserID)
 
 	copiedSession := copySessionWithoutStateAndEvents(val)
-	copiedSession.state = maps.Clone(val.state)
+	copiedSession.state = s.mergeStates(val.state, req.AppName, req.UserID)
 	copiedSession.events = slices.Clone(val.events)
 
 	return &CreateResponse{
 		Session: copiedSession,
 	}, nil
+}
+
+// GetUserState implements [UserStateReader]. It returns a deep copy of the
+// user state stored for (req.AppName, req.UserID), as adk-python's
+// get_user_state does (in_memory_session_service.py).
+func (s *inMemoryService) GetUserState(ctx context.Context, req *GetUserStateRequest) (*GetUserStateResponse, error) {
+	if req == nil {
+		return nil, errors.New("session: get user state request is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Copy under the lock: Create and AppendEvent write the stored user state
+	// under s.mu.
+	return &GetUserStateResponse{State: sessionutils.CloneStateMap(s.userState[req.AppName][req.UserID])}, nil
 }
 
 func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
@@ -534,4 +552,7 @@ func copySessionWithoutStateAndEvents(sess *session) *session {
 	}
 }
 
-var _ Service = (*inMemoryService)(nil)
+var (
+	_ Service         = (*inMemoryService)(nil)
+	_ UserStateReader = (*inMemoryService)(nil)
+)
