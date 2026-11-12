@@ -15,6 +15,8 @@
 package database
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -36,7 +38,10 @@ func updateMax(max *atomic.Int32, n int32) {
 func TestKeyedMutex_DropsTheEntryWhenItIsUnused(t *testing.T) {
 	var k keyedMutex[string]
 
-	unlock := k.lock("a")
+	unlock, err := k.lock(t.Context(), "a")
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
 	if got := len(k.locks); got != 1 {
 		t.Errorf("locks while one is held = %d; want 1", got)
 	}
@@ -46,7 +51,10 @@ func TestKeyedMutex_DropsTheEntryWhenItIsUnused(t *testing.T) {
 	}
 
 	// The key can be locked again afterwards.
-	unlock = k.lock("a")
+	unlock, err = k.lock(t.Context(), "a")
+	if err != nil {
+		t.Fatalf("lock after the entry was dropped: %v", err)
+	}
 	unlock()
 }
 
@@ -84,19 +92,31 @@ func TestKeyedMutex_SerializesOneKeyAtATime(t *testing.T) {
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		unlock := k.lock("a")
+		unlock, err := k.lock(t.Context(), "a")
+		if err != nil {
+			t.Errorf("lock: %v", err)
+			return
+		}
 		defer unlock()
 		hold(true)
 	}()
 	go func() {
 		defer wg.Done()
-		unlock := k.lock("a")
+		unlock, err := k.lock(t.Context(), "a")
+		if err != nil {
+			t.Errorf("lock: %v", err)
+			return
+		}
 		defer unlock()
 		hold(true)
 	}()
 	go func() {
 		defer wg.Done()
-		unlock := k.lock("b")
+		unlock, err := k.lock(t.Context(), "b")
+		if err != nil {
+			t.Errorf("lock: %v", err)
+			return
+		}
 		defer unlock()
 		hold(false)
 	}()
@@ -116,5 +136,61 @@ func TestKeyedMutex_SerializesOneKeyAtATime(t *testing.T) {
 	}
 	if got := globalMax.Load(); got != 2 {
 		t.Errorf("operations on two keys at the same time = %d; want 2", got)
+	}
+}
+
+// A waiter whose request is canceled leaves the queue instead of blocking
+// until the holder finishes its transaction. Without this, a client that has
+// already given up keeps a connection and a goroutine until an append it no
+// longer cares about commits.
+func TestKeyedMutex_CanceledWaiterDoesNotWaitForTheHolder(t *testing.T) {
+	var k keyedMutex[string]
+
+	unlock, err := k.lock(t.Context(), "a")
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	defer unlock()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	waiterDone := make(chan error, 1)
+	go func() {
+		_, err := k.lock(ctx, "a")
+		waiterDone <- err
+	}()
+
+	cancel()
+
+	select {
+	case err := <-waiterDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("canceled waiter error = %v; want %v", err, context.Canceled)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the canceled waiter is still waiting for the holder")
+	}
+
+	// Only the holder's reference is left, so the entry goes when it releases.
+	if got := len(k.locks); got != 1 {
+		t.Errorf("locks after the waiter canceled = %d; want 1", got)
+	}
+}
+
+// A request that is canceled before it takes a free lock does not take it:
+// the select between the free slot and the canceled context would otherwise
+// pick the slot at random.
+func TestKeyedMutex_CanceledRequestDoesNotTakeAFreeLock(t *testing.T) {
+	var k keyedMutex[string]
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	if _, err := k.lock(ctx, "a"); !errors.Is(err, context.Canceled) {
+		t.Errorf("lock error = %v; want %v", err, context.Canceled)
+	}
+	if got := len(k.locks); got != 0 {
+		t.Errorf("locks after a canceled request = %d; want 0", got)
 	}
 }

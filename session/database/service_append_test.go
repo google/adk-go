@@ -15,7 +15,10 @@
 package database
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -251,5 +254,214 @@ func TestDatabaseService_AppendEvent_SerializesAppendsToOneSession(t *testing.T)
 		if _, err := resp.Session.State().Get(key); err != nil {
 			t.Errorf("state[%q] is missing: %v", key, err)
 		}
+	}
+}
+
+// AppendEvent takes the same row locks in the same order as Create:
+// app state, then user state, then the session row. Create writes app and
+// user before inserting the session, so taking the session row first here
+// inverts the order; on MySQL a concurrent duplicate Create then waits on the
+// session row while holding the state rows and the append, holding the
+// session row while waiting for the state rows, is aborted as the deadlock
+// victim.
+func TestDatabaseService_AppendEvent_LocksStateRowsBeforeTheSessionRow(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got := recordStateRowStatements(t, s, "app_states", "user_states", "sessions")
+
+	event := &session.Event{
+		ID:        "e1",
+		Author:    "user",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{StateDelta: map[string]any{
+			"app:k":  1,
+			"user:k": 2,
+			"k":      3,
+		}},
+	}
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	// The first lock statement for each table is the one taken by the
+	// transaction; inserts of missing rows come before their lock.
+	first := func(substr string) int {
+		for i, stmt := range *got {
+			if strings.HasPrefix(stmt, substr) {
+				return i
+			}
+		}
+		return -1
+	}
+	app := first("select app_states for update")
+	user := first("select user_states for update")
+	session := first("select sessions for update")
+	if app < 0 || user < 0 || session < 0 {
+		t.Fatalf("AppendEvent lock statements:\n got %q\nwant a row lock on app_states, user_states and sessions", *got)
+	}
+	if !(app < user && user < session) {
+		t.Errorf("AppendEvent lock order:\n got %q\nwant app_states, then user_states, then sessions", *got)
+	}
+}
+
+// A Create that names an existing session ID runs concurrently with an append
+// to that session. The two take the same row locks in the same order, so the
+// append still commits; the Create fails on the primary key instead of
+// deadlocking the append.
+func TestDatabaseService_AppendEvent_SurvivesConcurrentDuplicateCreate(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "ses1"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	var appendErr, createErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		event := &session.Event{
+			ID:        "e1",
+			Author:    "user",
+			Timestamp: time.Now(),
+			Actions: session.EventActions{StateDelta: map[string]any{
+				"app:k":  1,
+				"user:k": 2,
+				"k":      3,
+			}},
+		}
+		appendErr = s.AppendEvent(ctx, created.Session, event)
+	}()
+	go func() {
+		defer wg.Done()
+		_, createErr = s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "ses1"})
+	}()
+	wg.Wait()
+
+	if appendErr != nil {
+		t.Errorf("AppendEvent alongside a duplicate Create: %v", appendErr)
+	}
+	if createErr == nil {
+		t.Error("the duplicate Create succeeded; want it to fail on the primary key")
+	}
+
+	resp, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "ses1"})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := resp.Session.Events().Len(); got != 1 {
+		t.Errorf("stored events after the race = %d; want 1", got)
+	}
+	for _, key := range []string{"app:k", "user:k", "k"} {
+		if _, err := resp.Session.State().Get(key); err != nil {
+			t.Errorf("state[%q] is missing after the race: %v", key, err)
+		}
+	}
+}
+
+// An append whose request is canceled while it waits for another append to
+// the same session leaves the queue and returns context.Canceled at once.
+// The base implementation reached the database layer and failed there; a
+// plain mutex would keep the canceled request blocked until the holder's
+// transaction commits, even though the client has already gone.
+func TestDatabaseService_AppendEvent_CanceledAppendLeavesTheQueue(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "ses1"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	key := sessionKey{appName: "app", userID: "user", sessionID: "ses1"}
+
+	firstInside := make(chan struct{})
+	release := make(chan struct{})
+	var holdFirst atomic.Bool
+	record := func(tx *gorm.DB) {
+		if tx.Statement.Table != "sessions" {
+			return
+		}
+		if holdFirst.CompareAndSwap(false, true) {
+			close(firstInside)
+			<-release
+		}
+	}
+	if err := s.db.Callback().Query().Before("gorm:query").Register("test:hold_first_append", record); err != nil {
+		t.Fatalf("register query callback: %v", err)
+	}
+	t.Cleanup(func() { _ = s.db.Callback().Query().Remove("test:hold_first_append") })
+
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- s.AppendEvent(ctx, created.Session, &session.Event{
+			ID:        "e0",
+			Author:    "user",
+			Timestamp: time.Now(),
+			Actions:   session.EventActions{StateDelta: map[string]any{"k0": 0}},
+		})
+	}()
+	select {
+	case <-firstInside:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first append never reached the database")
+	}
+
+	// The second append queues on the session lock while the first holds it.
+	cancelCtx, cancel := context.WithCancel(ctx)
+	secondErr := make(chan error, 1)
+	go func() {
+		secondErr <- s.AppendEvent(cancelCtx, created.Session, &session.Event{
+			ID:        "e1",
+			Author:    "user",
+			Timestamp: time.Now(),
+		})
+	}()
+
+	// Wait for the goroutine above to enqueue, then cancel it.
+	queueDeadline := time.Now().Add(10 * time.Second)
+	for {
+		s.sessionLocks.mu.Lock()
+		refs := 0
+		if entry, ok := s.sessionLocks.locks[key]; ok {
+			refs = entry.refs
+		}
+		s.sessionLocks.mu.Unlock()
+		if refs == 2 {
+			break
+		}
+		if time.Now().After(queueDeadline) {
+			close(release)
+			t.Fatal("the canceled append never queued on the session lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-secondErr:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("canceled append error = %v; want %v", err, context.Canceled)
+		}
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("the canceled append waited for the holder to finish")
+	}
+
+	close(release)
+	if err := <-firstErr; err != nil {
+		t.Errorf("the holding append failed: %v", err)
+	}
+
+	resp, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "ses1"})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := resp.Session.Events().Len(); got != 1 {
+		t.Errorf("stored events = %d; want 1", got)
 	}
 }
