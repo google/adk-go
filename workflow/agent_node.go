@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"slices"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -310,6 +311,20 @@ func childEventOutput(event *session.Event) (any, bool) {
 		}
 	}
 	return nil, false
+}
+
+// outputCountsFor reports whether event's output can count for the node at
+// path. An event whose OutputFor is set was already attributed by the
+// scheduler that ran its emitter and counts only for the paths listed there:
+// a task agent that transfers to a workflow forwards the events of the nodes
+// that workflow runs, and a nested task agent's finish_task result arrives
+// with OutputFor naming the nested node, not the task agent. An event with no
+// OutputFor has not been attributed yet and counts for the node emitting it.
+func outputCountsFor(event *session.Event, path string) bool {
+	if event.NodeInfo == nil || len(event.NodeInfo.OutputFor) == 0 {
+		return true
+	}
+	return slices.Contains(event.NodeInfo.OutputFor, path)
 }
 
 func nodeInputToContent(input any) (*genai.Content, error) {
