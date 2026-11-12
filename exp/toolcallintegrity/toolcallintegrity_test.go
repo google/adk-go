@@ -15,6 +15,7 @@
 package toolcallintegrity_test
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -79,7 +80,7 @@ func newSession(t *testing.T) (session.Service, session.Session) {
 }
 
 func callEvent(calls ...*genai.FunctionCall) *session.Event {
-	ev := session.NewEvent(nil, "inv")
+	ev := session.NewEvent(context.TODO(), "inv")
 	ev.Author = "agent"
 	c := &genai.Content{Role: genai.RoleModel}
 	for _, fc := range calls {
@@ -120,8 +121,7 @@ func beforeTool(t *testing.T, p *plugin.Plugin, sess session.Session, name, call
 
 func wantIntegrityError(t *testing.T, err error, substr string) {
 	t.Helper()
-	var ie *toolcallintegrity.Error
-	if !errors.As(err, &ie) {
+	if _, ok := errors.AsType[*toolcallintegrity.Error](err); !ok {
 		t.Fatalf("error = %v, want a *toolcallintegrity.Error", err)
 	}
 	if !strings.Contains(err.Error(), substr) {
@@ -158,7 +158,7 @@ func TestOnEventStampsCalls(t *testing.T) {
 		t.Errorf("custom metadata lost the caller's key: %v", ev.CustomMetadata)
 	}
 
-	text := session.NewEvent(nil, "inv")
+	text := session.NewEvent(context.TODO(), "inv")
 	text.Content = genai.NewContentFromText("hi", genai.RoleModel)
 	appendStamped(t, p, svc, sess, text)
 	if text.CustomMetadata != nil {
@@ -380,7 +380,8 @@ func transferAgent(t *testing.T, args map[string]any) (agent.Agent, *int) {
 	transfer, err := functiontool.New(functiontool.Config{Name: "transfer", Description: "Transfers money."},
 		func(_ agent.Context, in struct {
 			Amount int `json:"amount"`
-		}) (map[string]any, error) {
+		},
+		) (map[string]any, error) {
 			*runs++
 			return map[string]any{"status": "done"}, nil
 		})

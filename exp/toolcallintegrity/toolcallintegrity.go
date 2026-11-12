@@ -243,7 +243,7 @@ func (p *integrityPlugin) unstamped(name, callID string) error {
 	if !p.allowUnstamped {
 		return errorf("%s call %q has no integrity stamp.", name, callID)
 	}
-	slog.Warn("toolcallintegrity: function call has no integrity stamp", "name", name, "call_id", callID)
+	slog.Warn("toolcallintegrity: function call has no integrity stamp", "name", name, "call_id", callID) //nolint:forbidigo // should be changed when we apply consistent logging approach
 	return nil
 }
 
