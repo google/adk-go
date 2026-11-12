@@ -499,3 +499,32 @@ func TestInMemoryService_ReferenceToRewindTombstone(t *testing.T) {
 		t.Errorf("Load(alias.txt) = (%v, %v), want error %v", loaded, err, fs.ErrNotExist)
 	}
 }
+
+// TestInMemoryService_SlashIDsDoNotCollide checks that IDs holding "/" keep the
+// app, user and session apart: user "victim" with session "x/s" and user
+// "victim/x" with session "s" are different scopes. adk-python's in-memory
+// service joins the IDs into one "app/user/session/file" path, where the two
+// collide.
+func TestInMemoryService_SlashIDsDoNotCollide(t *testing.T) {
+	ctx := t.Context()
+	svc := artifact.InMemoryService()
+	if _, err := svc.Save(ctx, &artifact.SaveRequest{
+		AppName: "app", UserID: "victim", SessionID: "x/s", FileName: "f.txt",
+		Part: genai.NewPartFromText("secret"),
+	}); err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+
+	if _, err := svc.Load(ctx, &artifact.LoadRequest{
+		AppName: "app", UserID: "victim/x", SessionID: "s", FileName: "f.txt", Version: 1,
+	}); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Load() from the other user error = %v, want fs.ErrNotExist", err)
+	}
+	list, err := svc.List(ctx, &artifact.ListRequest{AppName: "app", UserID: "victim/x", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("List() failed: %v", err)
+	}
+	if len(list.FileNames) != 0 {
+		t.Errorf("List() for the other user = %v, want none", list.FileNames)
+	}
+}
