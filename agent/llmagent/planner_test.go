@@ -421,6 +421,168 @@ func TestLLMAgent_BuiltInPlannerThinkingConfigPrecedenceAndNoRewrite(t *testing.
 	})
 }
 
+// runInSession runs a in sessionID of svc to completion and returns the first
+// error. It does not call t.Fatal, so it can run on its own goroutine.
+func runInSession(ctx context.Context, svc session.Service, a agent.Agent, sessionID string) error {
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: a, SessionService: svc})
+	if err != nil {
+		return err
+	}
+	for _, err := range r.Run(ctx, "test_user", sessionID, genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// A before-model callback may edit the thinking config of the request it
+// receives. Each request holds its own copy of the planner's ThinkingConfig,
+// so the edit reaches that model call only.
+func TestLLMAgent_BuiltInPlannerThinkingConfigIsPerRequest(t *testing.T) {
+	t.Run("callback_edit_does_not_reach_planner_or_later_run", func(t *testing.T) {
+		llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("first"), textResponse("second")}}
+		p := planner.NewBuiltInPlanner(&genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: genai.Ptr[int32](1024)})
+		calls := 0
+		a := newPlannerAgent(t, llmagent.Config{
+			Name:    "test_agent",
+			Model:   llm,
+			Planner: p,
+			BeforeModelCallbacks: []llmagent.BeforeModelCallback{func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+				calls++
+				if calls == 1 {
+					req.Config.ThinkingConfig.IncludeThoughts = false
+					*req.Config.ThinkingConfig.ThinkingBudget = 0
+				}
+				return nil, nil
+			}},
+		})
+
+		first := runPlannerAgent(t, a)
+		second := runPlannerAgent(t, a)
+
+		if first.err != nil || second.err != nil {
+			t.Fatalf("run errors: first %v, second %v", first.err, second.err)
+		}
+		reqs := llm.recorded()
+		if len(reqs) != 2 {
+			t.Fatalf("model calls = %d, want 2", len(reqs))
+		}
+		wantSent := []*genai.ThinkingConfig{
+			{IncludeThoughts: false, ThinkingBudget: genai.Ptr[int32](0)},
+			{IncludeThoughts: true, ThinkingBudget: genai.Ptr[int32](1024)},
+		}
+		gotSent := []*genai.ThinkingConfig{reqs[0].Config.ThinkingConfig, reqs[1].Config.ThinkingConfig}
+		if diff := cmp.Diff(wantSent, gotSent); diff != "" {
+			t.Errorf("request ThinkingConfigs mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(&genai.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: genai.Ptr[int32](1024)}, p.ThinkingConfig); diff != "" {
+			t.Errorf("planner ThinkingConfig mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("concurrent_invocations_edit_their_own_copy", func(t *testing.T) {
+		llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("done"), textResponse("done")}}
+		p := planner.NewBuiltInPlanner(&genai.ThinkingConfig{IncludeThoughts: true})
+		a := newPlannerAgent(t, llmagent.Config{
+			Name:    "test_agent",
+			Model:   llm,
+			Planner: p,
+			BeforeModelCallbacks: []llmagent.BeforeModelCallback{func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+				req.Config.ThinkingConfig.ThinkingBudget = genai.Ptr[int32](64)
+				return nil, nil
+			}},
+		})
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "test_app", UserID: "test_user", SessionID: "s1"}); err != nil {
+			t.Fatalf("session Create s1: %v", err)
+		}
+		if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "test_app", UserID: "test_user", SessionID: "s2"}); err != nil {
+			t.Fatalf("session Create s2: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		var err1, err2 error
+		wg.Go(func() { err1 = runInSession(ctx, svc, a, "s1") })
+		wg.Go(func() { err2 = runInSession(ctx, svc, a, "s2") })
+		wg.Wait()
+
+		if err1 != nil || err2 != nil {
+			t.Fatalf("run errors: s1 %v, s2 %v", err1, err2)
+		}
+		reqs := llm.recorded()
+		if len(reqs) != 2 {
+			t.Fatalf("model calls = %d, want 2", len(reqs))
+		}
+		wantSent := []*genai.ThinkingConfig{
+			{IncludeThoughts: true, ThinkingBudget: genai.Ptr[int32](64)},
+			{IncludeThoughts: true, ThinkingBudget: genai.Ptr[int32](64)},
+		}
+		gotSent := []*genai.ThinkingConfig{reqs[0].Config.ThinkingConfig, reqs[1].Config.ThinkingConfig}
+		if diff := cmp.Diff(wantSent, gotSent); diff != "" {
+			t.Errorf("request ThinkingConfigs mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(&genai.ThinkingConfig{IncludeThoughts: true}, p.ThinkingConfig); diff != "" {
+			t.Errorf("planner ThinkingConfig mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestLLMAgent_BuiltInPlannerThinkingConfigCopyOfEmbeddingPlanner(t *testing.T) {
+	t.Run("own_apply_thinking_config_result_is_copied", func(t *testing.T) {
+		llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("done")}}
+		shared := &genai.ThinkingConfig{ThinkingBudget: genai.Ptr[int32](32)}
+		a := newPlannerAgent(t, llmagent.Config{
+			Name:    "test_agent",
+			Model:   llm,
+			Planner: sharedConfigBuiltInPlanner{BuiltInPlanner: planner.NewBuiltInPlanner(nil), shared: shared},
+			BeforeModelCallbacks: []llmagent.BeforeModelCallback{func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+				*req.Config.ThinkingConfig.ThinkingBudget = 0
+				return nil, nil
+			}},
+		})
+
+		run := runPlannerAgent(t, a)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		reqs := llm.recorded()
+		if len(reqs) != 1 {
+			t.Fatalf("model calls = %d, want 1", len(reqs))
+		}
+		if diff := cmp.Diff(&genai.ThinkingConfig{ThinkingBudget: genai.Ptr[int32](0)}, reqs[0].Config.ThinkingConfig); diff != "" {
+			t.Errorf("request ThinkingConfig mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(&genai.ThinkingConfig{ThinkingBudget: genai.Ptr[int32](32)}, shared); diff != "" {
+			t.Errorf("planner's shared ThinkingConfig mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("config_cleared_by_apply_thinking_config_stays_nil", func(t *testing.T) {
+		llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("done")}}
+		a := newPlannerAgent(t, llmagent.Config{
+			Name:    "test_agent",
+			Model:   llm,
+			Planner: configClearingBuiltInPlanner{planner.NewBuiltInPlanner(nil)},
+		})
+
+		run := runPlannerAgent(t, a)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		reqs := llm.recorded()
+		if len(reqs) != 1 {
+			t.Fatalf("model calls = %d, want 1", len(reqs))
+		}
+		if reqs[0].Config != nil {
+			t.Errorf("request Config = %+v, want nil", reqs[0].Config)
+		}
+	})
+}
+
 func TestLLMAgent_RewritingPlannerEmitsSeparateStateEventBeforeModelEvent(t *testing.T) {
 	llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("raw answer")}}
 	a := newPlannerAgent(t, llmagent.Config{
@@ -813,6 +975,28 @@ func (thinkingOverrideBuiltInPlanner) ApplyThinkingConfig(req *model.LLMRequest)
 		req.Config = &genai.GenerateContentConfig{}
 	}
 	req.Config.ThinkingConfig = &genai.ThinkingConfig{ThinkingBudget: genai.Ptr[int32](32)}
+}
+
+// sharedConfigBuiltInPlanner embeds *planner.BuiltInPlanner and defines its
+// own ApplyThinkingConfig, which stores the planner's shared config in the
+// request.
+type sharedConfigBuiltInPlanner struct {
+	*planner.BuiltInPlanner
+	shared *genai.ThinkingConfig
+}
+
+func (p sharedConfigBuiltInPlanner) ApplyThinkingConfig(req *model.LLMRequest) {
+	req.Config.ThinkingConfig = p.shared
+}
+
+// configClearingBuiltInPlanner embeds *planner.BuiltInPlanner and defines its
+// own ApplyThinkingConfig, which removes the request's Config.
+type configClearingBuiltInPlanner struct {
+	*planner.BuiltInPlanner
+}
+
+func (configClearingBuiltInPlanner) ApplyThinkingConfig(req *model.LLMRequest) {
+	req.Config = nil
 }
 
 func TestLLMAgent_BuiltInPlannerDetection(t *testing.T) {

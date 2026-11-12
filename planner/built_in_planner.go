@@ -41,6 +41,12 @@ import (
 // embedded BuiltInPlanner or BuiltIn value; a nil embedded BuiltIn value makes
 // the call panic. An embedding type's own BuildPlanningInstruction is never
 // called.
+//
+// After ApplyThinkingConfig returns, the flow replaces a non-nil request
+// Config's ThinkingConfig with a deep copy, whichever ApplyThinkingConfig ran.
+// So before-model callbacks, plugins and the model can edit the thinking
+// config of the request they receive without changing the planner, a later
+// request, or another agent that shares the planner.
 type BuiltIn interface {
 	// ApplyThinkingConfig sets the thinking config of req, the request about
 	// to be sent to the model.
@@ -68,9 +74,13 @@ type BuiltIn interface {
 // takes precedence and overwrites the request's ThinkingConfig on every model
 // call.
 //
+// The agent's flow gives each model request its own copy of ThinkingConfig
+// (see BuiltIn), so a before-model callback or plugin that edits the request's
+// thinking config changes neither ThinkingConfig nor any other request.
+//
 // The zero value (ThinkingConfig == nil) is valid and acts as a no-op.
-// BuiltInPlanner is safe for concurrent use as long as ThinkingConfig is not
-// mutated concurrently.
+// BuiltInPlanner is safe for concurrent use as long as ThinkingConfig and the
+// value it points to are not mutated concurrently.
 type BuiltInPlanner struct {
 	// ThinkingConfig is applied to each outbound model.LLMRequest.Config.
 	// If nil, ApplyThinkingConfig leaves the request unchanged.
@@ -87,7 +97,11 @@ func NewBuiltInPlanner(thinkingConfig *genai.ThinkingConfig) *BuiltInPlanner {
 // ApplyThinkingConfig sets req.Config.ThinkingConfig to p.ThinkingConfig,
 // allocating req.Config if it is nil and overwriting any thinking config the
 // request already has. Afterwards req.Config is non-nil and
-// req.Config.ThinkingConfig is the same pointer as p.ThinkingConfig.
+// req.Config.ThinkingConfig is p.ThinkingConfig itself, not a copy, so a change
+// made through req changes p.ThinkingConfig. The agent's flow replaces it with
+// a copy before callbacks, plugins or the model see the request (see BuiltIn);
+// a caller that applies the config to a request of its own and then edits the
+// request's thinking config must replace it with a copy first.
 //
 // p and req may be nil. When p, req or p.ThinkingConfig is nil,
 // ApplyThinkingConfig leaves req unmodified.

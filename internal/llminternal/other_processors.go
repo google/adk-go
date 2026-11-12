@@ -27,9 +27,10 @@ import (
 )
 
 // nlPlanningRequestProcessor prepares req for the agent's planner: a built-in
-// planner (planner.BuiltIn) sets the thinking config; any other planner appends
-// its planning instruction and clears the thought flags of the request history
-// (adk-python flows/llm_flows/extensions/_planning.py).
+// planner (planner.BuiltIn) sets the thinking config, of which req then gets
+// its own copy; any other planner appends its planning instruction and clears
+// the thought flags of the request history (adk-python
+// flows/llm_flows/extensions/_planning.py).
 func nlPlanningRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		p := getPlanner(ctx)
@@ -38,6 +39,13 @@ func nlPlanningRequestProcessor(ctx agent.InvocationContext, req *model.LLMReque
 		}
 		if bp, ok := p.(planner.BuiltIn); ok {
 			bp.ApplyThinkingConfig(req)
+			// ApplyThinkingConfig may store a value that the planner shares with
+			// every request and every agent using it. Before-model callbacks,
+			// plugins and the model may edit req, so req gets a copy, as
+			// basicRequestProcessor gives it a copy of GenerateContentConfig.
+			if req.Config != nil {
+				req.Config.ThinkingConfig = clone(req.Config.ThinkingConfig)
+			}
 			return
 		}
 		inst, err := p.BuildPlanningInstruction(icontext.NewReadonlyContext(ctx), req)
