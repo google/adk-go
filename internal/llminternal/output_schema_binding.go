@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
+	"google.golang.org/adk/v2/internal/deepcopy"
 )
 
 type boundOutputSchemaKey struct {
@@ -80,5 +81,5 @@ func outputSchemaFor(ctx agent.InvocationContext, state *State) *genai.Schema {
 	if shouldUseAutoFlow(cur) && len(transferTargets(cur, parentmap.FromContext(ctx)[cur.Name()])) > 0 {
 		return nil
 	}
-	return clone(schema)
+	return deepcopy.Copy(schema)
 }

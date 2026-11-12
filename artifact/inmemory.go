@@ -33,6 +33,7 @@ import (
 	"rsc.io/omap"
 	"rsc.io/ordered"
 
+	"google.golang.org/adk/v2/internal/deepcopy"
 	"google.golang.org/adk/v2/platform"
 )
 
@@ -184,7 +185,7 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	createTime := platform.Now(ctx)
 	// Copy before taking the lock. The copy only reads the caller's part, and
 	// inline data can be large.
-	part := clonePart(req.Part)
+	part := deepcopy.Copy(req.Part)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -246,7 +247,7 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 	}
 	// Copy after unlocking. A stored entry never changes after Save, and inline
 	// data can be large.
-	return &LoadResponse{Part: clonePart(entry.part)}, nil
+	return &LoadResponse{Part: deepcopy.Copy(entry.part)}, nil
 }
 
 // resolve returns the entry Load reports for the named artifact, following

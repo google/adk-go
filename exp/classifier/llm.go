@@ -30,7 +30,7 @@ import (
 
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/deepcopy"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -116,7 +116,7 @@ func NewLLM(cfg LLMConfig) (*LLMClassifier, error) {
 
 	return &LLMClassifier{
 		llm:        cfg.Model,
-		baseConfig: llminternal.CloneGenerateContentConfig(cfg.GenerateContentConfig),
+		baseConfig: deepcopy.Copy(cfg.GenerateContentConfig),
 	}, nil
 }
 
@@ -210,7 +210,7 @@ func (c *LLMClassifier) buildRequest(
 	// Copy per request, as adk-python's _build_request does with
 	// model_copy(deep=True), so a model adapter that mutates the config it
 	// receives cannot affect later calls through the copied fields.
-	cfg := llminternal.CloneGenerateContentConfig(c.baseConfig)
+	cfg := deepcopy.Copy(c.baseConfig)
 	if cfg == nil {
 		cfg = &genai.GenerateContentConfig{}
 	}

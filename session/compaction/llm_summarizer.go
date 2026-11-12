@@ -17,7 +17,6 @@ package compaction
 import (
 	"context"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -25,6 +24,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/deepcopy"
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
@@ -220,10 +220,13 @@ func (s *LLMSummarizer) SummarizeEvents(ctx context.Context, events []*session.E
 		return SummarizeResult{}, err
 	}
 	prompt := strings.Replace(s.promptTemplate, ConversationHistoryPlaceholder, transcript, 1)
+	// Each call gets its own config because the model writes into the one it
+	// is given (model/gemini fills in HTTPOptions.Headers), and two concurrent
+	// summarizations sharing s.genConfig would write one map.
 	req := &model.LLMRequest{
 		Model:    s.model.Name(),
 		Contents: []*genai.Content{genai.NewContentFromText(prompt, genai.RoleUser)},
-		Config:   cloneGenConfig(s.genConfig),
+		Config:   deepcopy.Copy(s.genConfig),
 	}
 
 	// A timeout here bounds the model call only. The caller's own deadline
@@ -436,33 +439,6 @@ func escapeLines(text string) string {
 		"\u2029", "\\n",
 	)
 	return r.Replace(text)
-}
-
-// cloneGenConfig returns a copy safe to hand to one model call.
-//
-// The config is built once when the summarizer is constructed, and the model
-// writes into what it is given: model/gemini fills in Config.HTTPOptions.Headers
-// on every request. Sharing one struct across calls therefore means two
-// concurrent summarizations are two goroutines writing one http.Header map.
-//
-// This is the ordinary path rather than a corner case. The runner forwards the
-// root agent's GenerateContentConfig to the summarizer, so any application that
-// sets a temperature or a safety setting is exposed without doing anything
-// unusual. The agent's own calls are already safe because the basic request
-// processor clones first, and the summarizer path was the one that did not.
-func cloneGenConfig(cfg *genai.GenerateContentConfig) *genai.GenerateContentConfig {
-	if cfg == nil {
-		return nil
-	}
-	out := *cfg
-	out.SafetySettings = slices.Clone(cfg.SafetySettings)
-	out.Labels = maps.Clone(cfg.Labels)
-	if cfg.HTTPOptions != nil {
-		opts := *cfg.HTTPOptions
-		opts.Headers = cfg.HTTPOptions.Headers.Clone()
-		out.HTTPOptions = &opts
-	}
-	return &out
 }
 
 // summarizerGenConfig adapts an application's generation config for the

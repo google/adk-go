@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/compactioninternal"
+	"google.golang.org/adk/v2/internal/deepcopy"
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
@@ -267,7 +268,7 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 
 	var contents []*genai.Content
 	for _, ev := range filtered {
-		content := clone(utils.Content(ev))
+		content := deepcopy.Copy(utils.Content(ev))
 		if content == nil {
 			continue
 		}

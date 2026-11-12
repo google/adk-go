@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+
+	"google.golang.org/adk/v2/internal/deepcopy"
 )
 
 // RequestCredentialFunctionCallName is the name of the function call ADK sends
@@ -177,9 +179,8 @@ func digest(v any) (string, error) {
 // account key in. The copy carries c's key in CredentialKey, since its
 // stripped content would derive a different one.
 //
-// Values in Extra maps are copied deeply when they are JSON objects or arrays
-// as encoding/json decodes them, map[string]any and []any; any other value is
-// shared with c. WithoutSecrets fails only when [Config.Key] does.
+// Values in Extra maps are copied deeply, except for funcs and channels,
+// which are shared with c. WithoutSecrets fails only when [Config.Key] does.
 func (c *Config) WithoutSecrets() (*Config, error) {
 	key, err := c.Key()
 	if err != nil {
@@ -190,7 +191,7 @@ func (c *Config) WithoutSecrets() (*Config, error) {
 	out.RawAuthCredential = c.RawAuthCredential.clone()
 	out.ExchangedAuthCredential = c.ExchangedAuthCredential.clone()
 	out.CredentialKey = key
-	out.Extra = cloneExtra(c.Extra)
+	out.Extra = deepcopy.Copy(c.Extra)
 	for _, cred := range []*Credential{out.RawAuthCredential, out.ExchangedAuthCredential} {
 		if cred == nil {
 			continue
@@ -220,7 +221,7 @@ func (s Scheme) clone() Scheme {
 	s.TokenEndpointAuthMethodsSupported = slices.Clone(s.TokenEndpointAuthMethodsSupported)
 	s.GrantTypesSupported = slices.Clone(s.GrantTypesSupported)
 	s.Scopes = slices.Clone(s.Scopes)
-	s.Extra = cloneExtra(s.Extra)
+	s.Extra = deepcopy.Copy(s.Extra)
 	return s
 }
 
@@ -233,7 +234,7 @@ func (f *OAuthFlows) clone() *OAuthFlows {
 	out.Password = f.Password.clone()
 	out.ClientCredentials = f.ClientCredentials.clone()
 	out.AuthorizationCode = f.AuthorizationCode.clone()
-	out.Extra = cloneExtra(f.Extra)
+	out.Extra = deepcopy.Copy(f.Extra)
 	return &out
 }
 
@@ -243,7 +244,7 @@ func (f *OAuthFlow) clone() *OAuthFlow {
 	}
 	out := *f
 	out.Scopes = maps.Clone(f.Scopes)
-	out.Extra = cloneExtra(f.Extra)
+	out.Extra = deepcopy.Copy(f.Extra)
 	return &out
 }
 
@@ -255,7 +256,7 @@ func (c *Credential) clone() *Credential {
 	out.HTTP = c.HTTP.clone()
 	out.OAuth2 = c.OAuth2.clone()
 	out.ServiceAccount = c.ServiceAccount.clone()
-	out.Extra = cloneExtra(c.Extra)
+	out.Extra = deepcopy.Copy(c.Extra)
 	return &out
 }
 
@@ -265,8 +266,8 @@ func (h *HTTPAuth) clone() *HTTPAuth {
 		return nil
 	}
 	out := *h
-	out.Credentials.Extra = cloneExtra(h.Credentials.Extra)
-	out.Extra = cloneExtra(h.Extra)
+	out.Credentials.Extra = deepcopy.Copy(h.Credentials.Extra)
+	out.Extra = deepcopy.Copy(h.Extra)
 	return &out
 }
 
@@ -275,7 +276,7 @@ func (o *OAuth2Auth) clone() *OAuth2Auth {
 		return nil
 	}
 	out := *o
-	out.Extra = cloneExtra(o.Extra)
+	out.Extra = deepcopy.Copy(o.Extra)
 	return &out
 }
 
@@ -286,7 +287,7 @@ func (s *ServiceAccount) clone() *ServiceAccount {
 	out := *s
 	out.ServiceAccountCredential = s.ServiceAccountCredential.clone()
 	out.Scopes = slices.Clone(s.Scopes)
-	out.Extra = cloneExtra(s.Extra)
+	out.Extra = deepcopy.Copy(s.Extra)
 	return &out
 }
 
@@ -295,35 +296,8 @@ func (s *ServiceAccountCredential) clone() *ServiceAccountCredential {
 		return nil
 	}
 	out := *s
-	out.Extra = cloneExtra(s.Extra)
+	out.Extra = deepcopy.Copy(s.Extra)
 	return &out
-}
-
-// cloneExtra returns a copy of an Extra map, copying the JSON objects and
-// arrays in it deeply.
-func cloneExtra(m map[string]any) map[string]any {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		out[k] = cloneJSONValue(v)
-	}
-	return out
-}
-
-func cloneJSONValue(v any) any {
-	switch v := v.(type) {
-	case map[string]any:
-		return cloneExtra(v)
-	case []any:
-		out := slices.Clone(v)
-		for i := range out {
-			out[i] = cloneJSONValue(out[i])
-		}
-		return out
-	}
-	return v
 }
 
 // ToolArguments are the arguments of an adk_request_credential call: the
