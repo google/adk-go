@@ -16,6 +16,7 @@ package compactioninternal
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"google.golang.org/genai"
@@ -230,12 +231,7 @@ func hasProse(c *genai.Content) bool {
 	if c == nil {
 		return false
 	}
-	for _, p := range c.Parts {
-		if utils.IsProsePart(p) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(c.Parts, utils.IsProsePart)
 }
 
 // SanitizeSummary strips anything from a compaction record that must not reach

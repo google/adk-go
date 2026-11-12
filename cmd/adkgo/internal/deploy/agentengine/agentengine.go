@@ -253,7 +253,7 @@ func builderGoVersion(sourceDir string) string {
 // goVersionFromModFile extracts the value of the top-level `go` directive
 // (e.g. "1.26.5") from go.mod contents, or "" if it is absent or malformed.
 func goVersionFromModFile(data []byte) string {
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "go ")
 		if !ok {
 			continue

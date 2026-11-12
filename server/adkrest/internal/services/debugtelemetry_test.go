@@ -782,7 +782,10 @@ func TestInferenceDetailsPartsMatchWebUI(t *testing.T) {
 	call := func(context.Context) iter.Seq2[*model.LLMResponse, error] {
 		return func(yield func(*model.LLMResponse, error) bool) { yield(resp, nil) }
 	}
-	for range telemetry.InstrumentGenerateContent(ctx, params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+	for _, err := range telemetry.InstrumentGenerateContent(ctx, params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+		if err != nil {
+			t.Fatalf("InstrumentGenerateContent() error = %v", err)
+		}
 	}
 	span.End()
 
