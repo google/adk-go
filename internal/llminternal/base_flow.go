@@ -1571,41 +1571,73 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						}()
 					} else {
 						var sb strings.Builder
+						var streamErr error
 						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
 							if err != nil {
-								// The error may be a recovered panic, whose
-								// text carries the panic value and the stack.
-								// adk-python logs the exception at this point
-								// (flows/llm_flows/tools/_caller.py, in
-								// _process_function_live_helper); ADK Go has
-								// no library logger, so the error goes to the
-								// tool callbacks, the way the non-streaming
-								// path does, and the model keeps seeing a
-								// generic message for a panic.
-								errorResponse, cbErr := f.runOnToolErrorCallbacks(toolCtx, streamTool, fnCall.Args, err)
-								if errorResponse != nil || cbErr != nil {
-									err = cbErr
-								}
-								response := errorResponse
-
-								alteredResponse, alteredErr := f.runAfterToolCallbacks(toolCtx, streamTool, fnCall.Args, response, err)
-								if alteredResponse != nil || alteredErr != nil {
-									response = alteredResponse
-									err = alteredErr
-								}
-
-								if err != nil {
-									errText, _ := toolinternal.ModelErrorText(streamTool.Name(), err)
-									result = map[string]any{"error": errText}
-								} else {
-									result = response
-								}
+								// Stop the producer and let it unwind before any
+								// callback runs. Breaking returns from the
+								// iterator's yield, so its deferred cleanup runs
+								// as the range statement ends; running a callback
+								// inside the loop instead would let it observe a
+								// tool that still holds its resources, or take
+								// one and deadlock. A non-streaming tool runs its
+								// callbacks only after Run has returned, for the
+								// same reason.
+								streamErr = err
 								break
 							}
 							sb.WriteString(chunk)
 						}
-						if result == nil {
-							result = map[string]any{"result": sb.String()}
+
+						if streamErr != nil {
+							// The error may be a recovered panic, whose
+							// text carries the panic value and the stack.
+							// adk-python logs the exception at this point
+							// (flows/llm_flows/tools/_live_caller.py, in
+							// _process_function_live_helper); ADK Go has
+							// no library logger, so the error goes to the
+							// tool callbacks, the way the non-streaming
+							// path does, and the model keeps seeing a
+							// generic message for a panic.
+							errorResponse, cbErr := f.runOnToolErrorCallbacks(toolCtx, streamTool, fnCall.Args, streamErr)
+							if errorResponse != nil || cbErr != nil {
+								streamErr = cbErr
+							}
+							response := errorResponse
+
+							alteredResponse, alteredErr := f.runAfterToolCallbacks(toolCtx, streamTool, fnCall.Args, response, streamErr)
+							if alteredResponse != nil || alteredErr != nil {
+								response = alteredResponse
+								streamErr = alteredErr
+							}
+
+							if streamErr != nil {
+								errText, _ := toolinternal.ModelErrorText(streamTool.Name(), streamErr)
+								result = map[string]any{"error": errText}
+							} else {
+								result = response
+							}
+						} else {
+							// A successful stream runs the after-tool chain too,
+							// with the completed result, the way a successful
+							// non-streaming call does. A plugin that counts
+							// failures in OnToolError and resets the count in
+							// AfterTool - plugin/retryandreflect - would
+							// otherwise carry a streaming failure into the next
+							// call and exhaust a budget the non-streaming path
+							// would have cleared.
+							response := map[string]any{"result": sb.String()}
+							alteredResponse, alteredErr := f.runAfterToolCallbacks(toolCtx, streamTool, fnCall.Args, response, nil)
+							if alteredResponse != nil || alteredErr != nil {
+								response = alteredResponse
+								streamErr = alteredErr
+							}
+							if streamErr != nil {
+								errText, _ := toolinternal.ModelErrorText(streamTool.Name(), streamErr)
+								result = map[string]any{"error": errText}
+							} else {
+								result = response
+							}
 						}
 					}
 				} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {

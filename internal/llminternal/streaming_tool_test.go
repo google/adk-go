@@ -247,14 +247,15 @@ func TestHandleFunctionCalls_StreamingToolErrors(t *testing.T) {
 			wantAfterTool: true,
 		},
 		{
-			name: "a successful streaming tool runs no callback",
+			name: "a successful streaming tool runs the after-tool callback",
 			handler: func(agent.Context, struct{}) iter.Seq2[string, error] {
 				return func(yield func(string, error) bool) {
 					yield("chunk ", nil)
 					yield("two", nil)
 				}
 			},
-			want: map[string]any{"result": "chunk two"},
+			want:          map[string]any{"result": "chunk two"},
+			wantAfterTool: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -313,6 +314,112 @@ func TestHandleFunctionCalls_StreamingToolErrors(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The callback chain runs only after the tool's iterator has unwound. A
+// callback that runs inside the loop would see a tool that has not run its
+// deferred cleanup yet, so a callback taking the resource the tool releases
+// in that cleanup would deadlock; a non-streaming tool's callbacks likewise
+// run after Run has returned.
+func TestHandleFunctionCalls_StreamingToolCallbacksRunAfterTheToolReturns(t *testing.T) {
+	var finished bool
+	var toolFinishedWhenCalled []bool
+
+	streamTool, err := functiontool.NewStreaming(functiontool.Config{Name: "test_stream"}, func(agent.Context, struct{}) iter.Seq2[string, error] {
+		return func(yield func(string, error) bool) {
+			defer func() { finished = true }()
+			yield("", errors.New("order not found"))
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	flow := &Flow{
+		OnToolErrorCallbacks: []OnToolErrorCallback{
+			func(agent.Context, tool.Tool, map[string]any, error) (map[string]any, error) {
+				toolFinishedWhenCalled = append(toolFinishedWhenCalled, finished)
+				return nil, nil
+			},
+		},
+		AfterToolCallbacks: []AfterToolCallback{
+			func(agent.Context, tool.Tool, map[string]any, map[string]any, error) (map[string]any, error) {
+				toolFinishedWhenCalled = append(toolFinishedWhenCalled, finished)
+				return nil, nil
+			},
+		},
+	}
+
+	resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "test_stream", Args: map[string]any{}},
+	}}}}
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		InvocationID: "inv_1",
+		Agent:        &mockAgent{name: "agent_1"},
+	})
+
+	if _, err := flow.handleFunctionCalls(invCtx, map[string]tool.Tool{"test_stream": streamTool}, resp, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(toolFinishedWhenCalled) != 2 {
+		t.Fatalf("callbacks that ran = %d; want 2", len(toolFinishedWhenCalled))
+	}
+	for i, seen := range toolFinishedWhenCalled {
+		if !seen {
+			t.Errorf("callback %d ran before the tool iterator finished", i)
+		}
+	}
+}
+
+// A successful non-live stream runs the after-tool chain with the completed
+// result and a nil error, so a plugin that resets its failure count there
+// treats a streaming success like a non-streaming one.
+func TestHandleFunctionCalls_SuccessfulStreamingToolRunsAfterTool(t *testing.T) {
+	streamTool, err := functiontool.NewStreaming(functiontool.Config{Name: "test_stream"}, func(agent.Context, struct{}) iter.Seq2[string, error] {
+		return func(yield func(string, error) bool) {
+			yield("chunk ", nil)
+			yield("two", nil)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var gotResult map[string]any
+	var gotErr error
+	flow := &Flow{
+		AfterToolCallbacks: []AfterToolCallback{
+			func(_ agent.Context, _ tool.Tool, _, result map[string]any, err error) (map[string]any, error) {
+				gotResult, gotErr = result, err
+				return nil, nil
+			},
+		},
+	}
+
+	resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "test_stream", Args: map[string]any{}},
+	}}}}
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		InvocationID: "inv_1",
+		Agent:        &mockAgent{name: "agent_1"},
+	})
+
+	mergedEvent, err := flow.handleFunctionCalls(invCtx, map[string]tool.Tool{"test_stream": streamTool}, resp, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if gotErr != nil {
+		t.Errorf("after-tool callback error = %v; want nil", gotErr)
+	}
+	if diff := cmp.Diff(map[string]any{"result": "chunk two"}, gotResult); diff != "" {
+		t.Errorf("after-tool callback result mismatch (-want +got):\n%s", diff)
+	}
+	got := mergedEvent.LLMResponse.Content.Parts[0].FunctionResponse.Response
+	if diff := cmp.Diff(map[string]any{"result": "chunk two"}, got); diff != "" {
+		t.Errorf("FunctionResponse mismatch (-want +got):\n%s", diff)
 	}
 }
 
