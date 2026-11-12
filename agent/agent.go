@@ -34,6 +34,13 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
+// ErrInvalidAgentConfig is wrapped by one error only: the error [New] returns
+// for the reserved name "user", which the other agent constructors pass on
+// because they build their agent through [New]. No other constructor error
+// wraps it; in particular, the errors [New] returns for an empty name or a
+// repeated sub-agent do not.
+var ErrInvalidAgentConfig = errors.New("invalid agent configuration")
+
 // Agent is the base interface which all agents must implement.
 //
 // Agents are created with ADK constructors to ensure correct
@@ -48,7 +55,16 @@ type Agent interface {
 	Description() string
 	Run(InvocationContext) iter.Seq2[*session.Event, error]
 	SubAgents() []Agent
+
+	// FindAgent searches the agent tree for an agent with the given name.
+	// It returns the agent itself on an exact name match; otherwise, it
+	// delegates to the inner FindSubAgent. A type that embeds Agent MUST override
+	// FindAgent to return itself on an exact name match and delegate to the inner
+	// FindSubAgent otherwise, preserving identity.
 	FindAgent(name string) Agent
+
+	// FindSubAgent searches the agent's descendants (depth-first, pre-order)
+	// for an agent with the given name. It excludes the agent itself.
 	FindSubAgent(name string) Agent
 
 	internal() *agent
@@ -56,15 +72,20 @@ type Agent interface {
 
 // New creates an Agent with a custom logic defined by Run function. It returns
 // an error if cfg.Name is empty or a sub-agent appears more than once in
-// cfg.SubAgents.
+// cfg.SubAgents. It refuses the name "user", which is reserved for the end
+// user's input, with an error wrapping [ErrInvalidAgentConfig]; the check is
+// case-sensitive, so "User" is accepted.
 func New(cfg Config) (Agent, error) {
 	// Under agenttool or as a transfer target, an empty name puts an empty
 	// function name or enum value in the parent's model request, which Vertex
-	// AI rejects. adk-python also requires a valid identifier other than
-	// "user"; that is not enforced here because it would reject names that
-	// work today, such as "research-agent".
+	// AI rejects. adk-python also requires a valid identifier; that is not
+	// enforced here because it would reject names that work today, such as
+	// "research-agent".
 	if cfg.Name == "" {
 		return nil, fmt.Errorf("error creating agent: name must not be empty")
+	}
+	if cfg.Name == "user" {
+		return nil, fmt.Errorf("%w: agent name cannot be `user`, it is reserved for the end user's input", ErrInvalidAgentConfig)
 	}
 	subAgentSet := make(map[Agent]bool)
 	for _, subAgent := range cfg.SubAgents {
