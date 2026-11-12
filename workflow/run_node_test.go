@@ -19,6 +19,7 @@ import (
 	"errors"
 	"iter"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -454,18 +455,14 @@ func runConcurrentDup(t *testing.T, child *gatedRunCountNode) (outs [2]string, e
 		"orch",
 		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			var wg sync.WaitGroup
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				outs[0], errs[0] = RunNode[string](ctx, child, "x", WithRunID("dup"))
-			}()
+			})
 			synctest.Wait() // leader is inside child.Run, parked on release
 
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				outs[1], errs[1] = RunNode[string](ctx, child, "x", WithRunID("dup"))
-			}()
+			})
 			synctest.Wait() // second caller is parked on the gate, not merely started
 
 			close(child.release)
@@ -520,18 +517,14 @@ func TestRunNode_WithRunID_ConcurrentSharesInterrupt(t *testing.T) {
 			"orch",
 			func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 				var wg sync.WaitGroup
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					_, errs[0] = RunNode[string](ctx, child, "x", WithRunID("dup"))
-				}()
+				})
 				synctest.Wait()
 
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					_, errs[1] = RunNode[string](ctx, child, "x", WithRunID("dup"))
-				}()
+				})
 				synctest.Wait()
 
 				close(child.release)
@@ -634,18 +627,14 @@ func TestRunNode_WithRunID_WaiterUnblocksOnCancel(t *testing.T) {
 			"orch",
 			func(nc agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 				var wg sync.WaitGroup
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					_, _ = RunNode[string](nc, child, "x", WithRunID("dup"))
-				}()
+				})
 				synctest.Wait()
 
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					_, waiterErr = RunNode[string](nc, child, "x", WithRunID("dup"))
-				}()
+				})
 				synctest.Wait()
 
 				cancel()
@@ -660,7 +649,7 @@ func TestRunNode_WithRunID_WaiterUnblocksOnCancel(t *testing.T) {
 			},
 			NodeConfig{},
 		)
-		for range n.Run(agent.NewContext(&MockInvocationContext{Context: ctx}), "") {
+		for range n.Run(agent.NewContext(&MockInvocationContext{Context: ctx}), "") { //nolint:errcheck // the node body holds the assertions and cancels its own context
 		}
 	})
 }
@@ -756,19 +745,15 @@ func TestRunNode_WithRunID_ConcurrentSharesPanicAsFailure(t *testing.T) {
 			"orch",
 			func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 				var wg sync.WaitGroup
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					defer func() { _ = recover() }()
 					_, _ = RunNode[string](ctx, child, "x", WithRunID("dup"))
-				}()
+				})
 				synctest.Wait() // leader is inside child.Run, parked on release
 
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					waiterOut, waiterErr = RunNode[string](ctx, child, "x", WithRunID("dup"))
-				}()
+				})
 				synctest.Wait() // waiter is parked on the gate
 
 				close(child.release)
@@ -942,8 +927,7 @@ func TestRunNode_IsolationScope_DistinctPerNodePath(t *testing.T) {
 // isolationScopeAtPath returns the IsolationScope of the last event
 // stamped with nodePath.
 func isolationScopeAtPath(events []*session.Event, nodePath string) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
+	for _, ev := range slices.Backward(events) {
 		if ev.NodeInfo != nil && ev.NodeInfo.Path == nodePath {
 			return ev.IsolationScope
 		}
@@ -1007,8 +991,7 @@ func outputBearingPaths(events []*session.Event) []string {
 // stamped with parentPath.
 // outputForAtPath returns NodeInfo.OutputFor of the event at nodePath.
 func outputForAtPath(events []*session.Event, nodePath string) []string {
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
+	for _, ev := range slices.Backward(events) {
 		if ev.NodeInfo != nil && ev.NodeInfo.Path == nodePath {
 			return ev.NodeInfo.OutputFor
 		}
@@ -1019,8 +1002,7 @@ func outputForAtPath(events []*session.Event, nodePath string) []string {
 // derivedOutputAtPath returns the output the event at nodePath carries,
 // via childEventOutput (explicit Output or MessageAsOutput-derived).
 func derivedOutputAtPath(events []*session.Event, nodePath string) (any, bool) {
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
+	for _, ev := range slices.Backward(events) {
 		if ev.NodeInfo != nil && ev.NodeInfo.Path == nodePath {
 			return childEventOutput(ev)
 		}
@@ -1030,8 +1012,7 @@ func derivedOutputAtPath(events []*session.Event, nodePath string) (any, bool) {
 
 func parentTerminalOutput(t *testing.T, events []*session.Event, parentPath string) any {
 	t.Helper()
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
+	for _, ev := range slices.Backward(events) {
 		if ev.NodeInfo != nil && ev.NodeInfo.Path == parentPath {
 			return ev.Output
 		}
@@ -1086,15 +1067,13 @@ func TestRunNode_ConcurrentChildren_NoRace(t *testing.T) {
 		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			start := make(chan struct{})
 			var wg sync.WaitGroup
-			wg.Add(n)
-			for i := 0; i < n; i++ {
+			for i := range n {
 				// Distinct run-id per goroutine so every child actually
 				// runs and the only shared mutable state is the parent
 				// yield path; a shared run-id would collapse the goroutines
 				// into one execution.
 				child := newStubNode("child", "out")
-				go func(i int) {
-					defer wg.Done()
+				wg.Go(func() {
 					defer func() {
 						if r := recover(); r != nil {
 							mu.Lock()
@@ -1105,7 +1084,7 @@ func TestRunNode_ConcurrentChildren_NoRace(t *testing.T) {
 					<-start
 					_, errs[i] = RunNode[string](ctx, child, nil,
 						WithUseSubBranch(), WithRunID("c"+strconv.Itoa(i)))
-				}(i)
+				})
 			}
 			close(start)
 			wg.Wait()

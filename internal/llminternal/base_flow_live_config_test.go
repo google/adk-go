@@ -159,7 +159,7 @@ func TestRunLiveSendsLiveRunConfigFields(t *testing.T) {
 				},
 			},
 			EnableAffectiveDialog: true,
-			Proactivity:           &genai.ProactivityConfig{ProactiveAudio: genai.Ptr(true)},
+			Proactivity:           &genai.ProactivityConfig{ProactiveAudio: new(true)},
 		}
 	}
 	wantRealtime := map[string]any{
@@ -247,7 +247,7 @@ func TestRunLiveSendsLiveRunConfigFields(t *testing.T) {
 			name:  "proactivity only",
 			model: "gemini-live-2.5-flash-preview",
 			live: &agent.LiveRunConfig{
-				Proactivity: &genai.ProactivityConfig{ProactiveAudio: genai.Ptr(true)},
+				Proactivity: &genai.ProactivityConfig{ProactiveAudio: new(true)},
 			},
 			want: map[string]any{"proactivity": map[string]any{"proactiveAudio": true}},
 		},

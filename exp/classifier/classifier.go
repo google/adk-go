@@ -818,8 +818,7 @@ func rejectEmbeddedGenaiTypes(t reflect.Type, seen map[reflect.Type]bool) error 
 	if t.Kind() != reflect.Struct || seen[t] {
 		return nil
 	}
-	for i := range t.NumField() {
-		sf := t.Field(i)
+	for sf := range t.Fields() {
 		if !sf.Anonymous || !jsonVisibleField(sf) {
 			continue
 		}

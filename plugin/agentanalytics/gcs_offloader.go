@@ -737,9 +737,7 @@ func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts upload
 	var anyStarted, anySucceeded, anyCutShort, anyStalled atomic.Bool
 	for _, t := range tasks {
 		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			var started bool
 			start := time.Now()
@@ -765,7 +763,7 @@ func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts upload
 			if t.err == nil && strings.HasPrefix(t.uri, "gs://") {
 				anySucceeded.Store(true)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -1001,16 +999,13 @@ func safeUploadErrorSummary(err error) string {
 	case errors.Is(err, errUploadCooldown):
 		return errUploadCooldown.Error()
 	}
-	var panicErr offloaderPanicError
-	if errors.As(err, &panicErr) {
+	if panicErr, ok := errors.AsType[offloaderPanicError](err); ok {
 		return panicErr.Error()
 	}
-	var owned ownedUploadError
-	if errors.As(err, &owned) {
+	if owned, ok := errors.AsType[ownedUploadError](err); ok {
 		return stripURIQueries(redactErrorMessage(owned.Error()))
 	}
-	var apiErr *googleapi.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*googleapi.Error](err); ok {
 		return fmt.Sprintf("HTTP %d", apiErr.Code)
 	}
 	return fmt.Sprintf("error type %T", err)

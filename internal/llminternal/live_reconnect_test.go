@@ -231,9 +231,7 @@ func TestRunLiveReconnectSurvivesATransientDrop(t *testing.T) {
 	sawTurn := make(chan struct{})
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		once := false
 		for ev, err := range seq {
 			if err != nil {
@@ -244,7 +242,7 @@ func TestRunLiveReconnectSurvivesATransientDrop(t *testing.T) {
 				close(sawTurn)
 			}
 		}
-	}()
+	})
 	select {
 	case <-sawTurn:
 	case <-time.After(drainTimeout):
@@ -587,15 +585,13 @@ func TestRunLiveCeilingSparesLongLivedConnections(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range seq {
 			if err != nil {
 				streamErr = err
 			}
 		}
-	}()
+	})
 
 	// Long enough for many more cycles than maxTotal.
 	time.Sleep(10 * connLifetime)
@@ -645,15 +641,13 @@ func TestRunLiveCeilingSparesAnIntermediaryCycledSession(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range seq {
 			if err != nil {
 				streamErr = err
 			}
 		}
-	}()
+	})
 
 	// Long enough for more cycles than the ceiling would allow.
 	time.Sleep(6 * connLifetime)
@@ -694,15 +688,13 @@ func TestRunLiveConsecutiveBudgetSparesASilentSession(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range seq {
 			if err != nil {
 				streamErr = err
 			}
 		}
-	}()
+	})
 
 	// Long enough for many more cycles than maxAttempts.
 	time.Sleep(10 * connLifetime)
@@ -745,9 +737,7 @@ func TestRunLiveCeilingIgnoresConsumerLatency(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range seq {
 			if err != nil {
 				streamErr = err
@@ -755,7 +745,7 @@ func TestRunLiveCeilingIgnoresConsumerLatency(t *testing.T) {
 			// Far slower than healthyUptime, which is the whole point.
 			time.Sleep(10 * p.healthyUptime)
 		}
-	}()
+	})
 
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()

@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"slices"
 
 	"google.golang.org/genai"
 
@@ -53,8 +54,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			}
 		}
 		confirmationResponses := make(map[string]toolconfirmation.ToolConfirmation)
-		for k := len(events) - 1; k >= 0; k-- {
-			event := events[k]
+		for _, event := range slices.Backward(events) {
 			// Find the first event authored by user
 			if event.Author != "user" {
 				continue
