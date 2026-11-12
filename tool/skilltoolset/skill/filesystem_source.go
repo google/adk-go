@@ -32,6 +32,10 @@ import (
 // with valid YAML frontmatter, and the directory name must exactly match
 // the name defined in that frontmatter.
 //
+// The returned Source's LoadInstructions method returns the SKILL.md body with
+// leading and trailing whitespace removed, while ParseBytes returns it
+// unchanged.
+//
 // Expected layout example:
 //
 //	  skill-1/

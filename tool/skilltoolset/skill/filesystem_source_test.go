@@ -167,9 +167,9 @@ func TestFileSystemSource_LoadInstructions(t *testing.T) {
 		{
 			name: "Trims surrounding whitespace",
 			source: NewFileSystemSource(plainFS{fstest.MapFS{
-				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n\n  # Math\n\nAdd numbers.\n\n")},
+				"test-skill/SKILL.md": &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n\n  # Math\n\n  - Add numbers.\n\n")},
 			}}),
-			want: "# Math\n\nAdd numbers.",
+			want: "# Math\n\n  - Add numbers.",
 		},
 		{
 			name: "Name mismatch",
