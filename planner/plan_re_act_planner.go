@@ -96,6 +96,19 @@ var planReActInstruction = strings.Join([]string{
 // response parts to strip planning tags and mark reasoning/planning sections as
 // thoughts. It implements Planner and RewritingPlanner.
 //
+// Use it with a model that has no built-in thinking feature; for a model that
+// has one, BuiltInPlanner lets the model plan on its own. In an agent run, the
+// agent's events carry the plan and the reasoning as parts whose Thought is
+// true and the final answer as a part whose Thought is false. A turn that the
+// planner reduces to thought parts only ends the agent's step, as any final
+// response does.
+//
+// With streaming (agent.StreamingModeSSE), the planner rewrites each partial
+// response on its own. A partial response is marked as a thought only if its
+// own text starts with a planning tag, so a partial event can show reasoning
+// as plain text that the final, aggregated event marks as a thought, and a tag
+// split across two partial responses is not recognized in either.
+//
 // PlanReActPlanner is stateless; its zero value and NewPlanReActPlanner() are
 // identical and safe for concurrent use.
 type PlanReActPlanner struct{}

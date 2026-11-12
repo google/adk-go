@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package planner provides interfaces and built-in implementations for guiding
-// LLM agents to generate and follow plans across model turns.
 package planner
 
 import (
