@@ -31,12 +31,14 @@ import (
 // quoted JSON string, and the set_model_response tool needs object parameters,
 // so primitive, slice, map and nullable (pointer) outputs stay unconstrained.
 // Every object must also set additionalProperties to false, as a Go struct
-// does: set_model_response rejects keys its schema does not list, so an open
-// object would turn an answer the node accepts into an error.
+// does: set_model_response drops keys its schema does not list, so an open
+// object would lose keys the node accepts.
 //
 // A nullable property (a pointer or slice field) keeps Nullable. The
 // set_model_response tool accepts a null argument only when its schema is
 // nullable, so dropping it would turn a null the node accepts into an error.
+// The tool keeps a null for a required key, so a required pointer field that
+// the model sets to null reaches the node as null.
 //
 // The result is a hint, not the contract: BaseNode.ValidateOutput still checks
 // the reply against the full schema. So a schema that genai.Schema cannot

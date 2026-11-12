@@ -266,10 +266,9 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	}
 
 	// Only StateDelta comes from the trim above; every other field below is
-	// read off event. The canonical record is not a mirror of the one
-	// appendEvent stored locally — it clones Compaction, ArtifactDelta,
-	// RequestedToolConfirmations and RequestedAuthConfigs where the local record
-	// aliases them.
+	// read off event. Compaction, ArtifactDelta, RequestedToolConfirmations,
+	// RequestedAuthConfigs and SetModelResponse are cloned so that the
+	// caller's event shares none of them with the canonical record.
 	eventCopy := &Event{
 		ID:             event.ID,
 		InvocationID:   event.InvocationID,
@@ -284,6 +283,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			RequestedAuthConfigs:       maps.Clone(event.Actions.RequestedAuthConfigs),
 			TransferToAgent:            event.Actions.TransferToAgent,
 			Escalate:                   event.Actions.Escalate,
+			SetModelResponse:           sessionutils.CloneValue(event.Actions.SetModelResponse),
 			SkipSummarization:          event.Actions.SkipSummarization,
 			Compaction:                 event.Actions.Compaction.clone(),
 		},

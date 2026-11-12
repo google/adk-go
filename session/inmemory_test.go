@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/platform"
@@ -540,6 +541,36 @@ func TestInMemoryService_AppendEvent_CopiesCompaction(t *testing.T) {
 	}
 	if txt := stored.CompactedContent.Parts[0].Text; txt != "summary" {
 		t.Errorf("stored summary = %q, want %q: the caller rewrote the stored content", txt, "summary")
+	}
+}
+
+// TestInMemoryService_AppendEventClonesSetModelResponse pins that the stored
+// event keeps the answer a set_model_response call stored, and that writes to
+// the caller's map and its nested list after the append do not reach it.
+func TestInMemoryService_AppendEventClonesSetModelResponse(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+	createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	items := []any{"a"}
+	answer := map[string]any{"k": "v", "items": items}
+	event := &session.Event{ID: "e1", Author: "agent", Actions: session.EventActions{SetModelResponse: answer}}
+	if err := service.AppendEvent(ctx, createResp.Session, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	answer["k"] = "mutated"
+	items[0] = "b"
+
+	got, err := service.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: createResp.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := map[string]any{"k": "v", "items": []any{"a"}}
+	if diff := cmp.Diff(want, got.Session.Events().At(0).Actions.SetModelResponse); diff != "" {
+		t.Errorf("stored SetModelResponse mismatch (-want +got):\n%s", diff)
 	}
 }
 
