@@ -270,6 +270,28 @@ func TestNewModel_UsesTheConfiguredClient(t *testing.T) {
 	}
 }
 
+// TestNewModel_DeclaresNoOutputSchemaWithTools checks, on both APIs, that an
+// OpenAI model declares it cannot take an output schema next to tools, as
+// adk-python's OpenAILlm and OpenAIResponsesLlm do through the base fallback
+// for a non-Gemini model (models/base_llm.py:92-124).
+func TestNewModel_DeclaresNoOutputSchemaWithTools(t *testing.T) {
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gpt-4o", &ClientConfig{APIKey: "test", API: api})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			cp, ok := llm.(model.CapabilitiesProvider)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement model.CapabilitiesProvider", llm)
+			}
+			if cp.Capabilities().OutputSchemaAndTools {
+				t.Error("Capabilities().OutputSchemaAndTools = true, want false")
+			}
+		})
+	}
+}
+
 // TestOpenAIAndAnthropic_IgnoreADKAgentNameLabelOnly checks, on both APIs, that
 // the adk_agent_name label the flow adds to every request is accepted and never
 // sent, while a label the caller set, or an empty labels map, is still refused

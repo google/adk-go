@@ -98,6 +98,19 @@ func CanUseOutputSchemaWithTools(llm model.LLM) bool {
 		IsGemini2OrAbove(llm.Name())
 }
 
+// GeminiOutputSchemaAndTools reports whether a Gemini model on the Vertex AI
+// backend can pair an output schema with tools natively. Mirrors adk-python's
+// gemini_output_schema_and_tools (src/google/adk/models/_capabilities.py:30-51),
+// which is shared by Gemini.capabilities and the fallback for models that do
+// not implement model.CapabilitiesProvider.
+func GeminiOutputSchemaAndTools(llm model.LLM) bool {
+	if llm == nil {
+		return false
+	}
+	return IsGeminiModel(llm.Name()) &&
+		GetGoogleLLMVariant(llm) == genai.BackendVertexAI
+}
+
 // IsGeminiAPIVariant returns true if the model is a Gemini API model (not Vertex AI).
 func IsGeminiAPIVariant(llm model.LLM) bool {
 	return GetGoogleLLMVariant(llm) == genai.BackendGeminiAPI
