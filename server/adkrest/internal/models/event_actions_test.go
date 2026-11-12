@@ -239,3 +239,43 @@ func TestEventActions_SetModelResponseConversion(t *testing.T) {
 		t.Errorf("ToSessionEvent() SetModelResponse mismatch (-want +got):\n%s", diff)
 	}
 }
+
+// TestEventActions_RewindBeforeInvocationIDConversion verifies that a rewind's
+// target crosses the REST API in both directions: the response body carries
+// it under rewindBeforeInvocationId, and a request body that carries it gives
+// it back to the session event.
+func TestEventActions_RewindBeforeInvocationIDConversion(t *testing.T) {
+	original := session.Event{
+		ID:     "evt-rewind",
+		Author: "user",
+		Actions: session.EventActions{
+			RewindBeforeInvocationID: "inv-2",
+		},
+	}
+
+	body, err := json.Marshal(FromSessionEvent(original))
+	if err != nil {
+		t.Fatalf("json.Marshal() failed: %v", err)
+	}
+	var wire struct {
+		Actions map[string]json.RawMessage `json:"actions"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatalf("json.Unmarshal() failed: %v", err)
+	}
+	if got, want := string(wire.Actions["rewindBeforeInvocationId"]), `"inv-2"`; got != want {
+		t.Errorf("REST actions.rewindBeforeInvocationId = %q, want %q", got, want)
+	}
+
+	var restEvent Event
+	if err := json.Unmarshal([]byte(`{"id":"evt-rewind","author":"user","actions":{"rewindBeforeInvocationId":"inv-2"}}`), &restEvent); err != nil {
+		t.Fatalf("json.Unmarshal() into Event failed: %v", err)
+	}
+	got, err := ToSessionEvent(restEvent)
+	if err != nil {
+		t.Fatalf("ToSessionEvent() failed: %v", err)
+	}
+	if got.Actions.RewindBeforeInvocationID != "inv-2" {
+		t.Errorf("ToSessionEvent() RewindBeforeInvocationID = %q, want \"inv-2\"", got.Actions.RewindBeforeInvocationID)
+	}
+}

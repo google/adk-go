@@ -408,7 +408,10 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		// raw_event nothing about it reaches the backend. On reload the session
 		// would hold neither the summary nor any record that compaction ran,
 		// and the same range would be summarized again on every trigger.
-		event.Actions.Compaction != nil
+		event.Actions.Compaction != nil ||
+		// A rewind's target has no column either, and prompt assembly needs
+		// it to drop the rewound events after a reload.
+		event.Actions.RewindBeforeInvocationID != ""
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for
