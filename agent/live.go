@@ -67,4 +67,8 @@ type LiveRunConfig struct {
 	// returns an event, the same or a new one, gets the run's metadata merged
 	// into it, its own keys winning.
 	CustomMetadata map[string]any
+	// GetSessionConfig controls which events are fetched when the runner
+	// loads the session from the session service at the start of RunLive.
+	// Nil or a zero GetSessionConfig loads all session events.
+	GetSessionConfig *GetSessionConfig
 }

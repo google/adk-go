@@ -117,6 +117,19 @@ func (c *InvocationContext) SetLiveSessionResumptionHandle(handle string) {
 	c.params.LiveSessionResumptionHandle = handle
 }
 
+// SetInvocationID replaces the invocation ID of c.
+//
+// Only the runner calls it, while it takes in the user message in
+// appendMessageToSession: after the on-user-message callbacks have returned a
+// replacement message that answers a function call of an earlier invocation,
+// before any context is derived from c, before the invocation's agent runs,
+// and before any other goroutine holds the context. Contexts already derived
+// from c (WithICDelta copies c) keep the old ID, and other goroutines read the
+// ID without synchronization.
+func (c *InvocationContext) SetInvocationID(id string) {
+	c.params.InvocationID = id
+}
+
 func (c *InvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
 	newCtx := *c
 	newCtx.Context = ctx
