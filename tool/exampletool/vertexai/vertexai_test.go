@@ -245,6 +245,45 @@ func TestProvider_ConfigValidation(t *testing.T) {
 	})
 }
 
+// The location becomes part of the host the client dials
+// ("<location>-aiplatform.googleapis.com"), so a location no Vertex AI region
+// can have must fail at construction, not at the first query.
+func TestNewProviderWithOptions_RejectsLocationThatCannotFormHost(t *testing.T) {
+	origFactory := newExampleStoreClient
+	t.Cleanup(func() {
+		newExampleStoreClient = origFactory
+	})
+	clientsCreated := 0
+	newExampleStoreClient = func(context.Context, ...option.ClientOption) (exampleStoreClient, error) {
+		clientsCreated++
+		return &fakeExampleStoreClient{}, nil
+	}
+
+	for _, tc := range []struct {
+		name      string
+		storeName string
+	}{
+		{name: "dot", storeName: "projects/p/locations/us.central1/exampleStores/s"},
+		{name: "underscore", storeName: "projects/p/locations/us_central1/exampleStores/s"},
+		{name: "uppercase", storeName: "projects/p/locations/US-CENTRAL1/exampleStores/s"},
+		{name: "empty", storeName: "projects/p/locations//exampleStores/s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientsCreated = 0
+			p, err := NewProviderWithOptions(t.Context(), &ProviderConfig{ExampleStoreName: tc.storeName}, option.WithoutAuthentication())
+			if err == nil {
+				t.Errorf("NewProviderWithOptions(%q) succeeded with location %q, want error", tc.storeName, p.Location())
+			}
+			if p != nil {
+				t.Errorf("NewProviderWithOptions(%q) provider = %#v, want nil", tc.storeName, p)
+			}
+			if clientsCreated != 0 {
+				t.Errorf("NewProviderWithOptions(%q) created %d clients, want 0", tc.storeName, clientsCreated)
+			}
+		})
+	}
+}
+
 func TestProvider_Examples(t *testing.T) {
 	// reference: test_get_examples_searches_the_configured_store
 	t.Run("searches the configured store", func(t *testing.T) {

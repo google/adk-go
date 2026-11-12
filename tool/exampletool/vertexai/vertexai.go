@@ -59,7 +59,9 @@ const (
 	similarityThreshold = 0.5
 )
 
-var exampleStoreNamePattern = regexp.MustCompile(`^projects/([a-zA-Z0-9._:-]+)/locations/([a-zA-Z0-9._-]+)/exampleStores/([a-zA-Z0-9._-]+)$`)
+// The location is concatenated into the endpoint host, so its character set
+// is narrow.
+var exampleStoreNamePattern = regexp.MustCompile(`^projects/([a-zA-Z0-9._:-]+)/locations/([a-z0-9-]+)/exampleStores/([a-zA-Z0-9._-]+)$`)
 
 // ProviderConfig configures a Vertex AI Example Store provider.
 //
@@ -69,8 +71,10 @@ var exampleStoreNamePattern = regexp.MustCompile(`^projects/([a-zA-Z0-9._:-]+)/l
 type ProviderConfig struct {
 	// ExampleStoreName is the full resource name of the Vertex AI Example Store,
 	// in the format "projects/{project}/locations/{location}/exampleStores/{example_store}".
-	// Bare store names are rejected; the provider does not read
-	// GOOGLE_CLOUD_PROJECT or GOOGLE_CLOUD_LOCATION from the environment.
+	// The location picks the host the client dials, so it may contain only
+	// lowercase letters, digits and '-'. Bare store names are rejected; the
+	// provider does not read GOOGLE_CLOUD_PROJECT or GOOGLE_CLOUD_LOCATION from
+	// the environment.
 	ExampleStoreName string
 }
 
@@ -148,8 +152,9 @@ func (p *Provider) Location() string {
 // from a Vertex AI Example Store.
 //
 // config must be non-nil and config.ExampleStoreName must be a full resource
-// name of the form "projects/{project}/locations/{location}/exampleStores/{example_store}".
-// Unlike adk-python, NewProvider does not fall back to GOOGLE_CLOUD_PROJECT or
+// name of the form "projects/{project}/locations/{location}/exampleStores/{example_store}",
+// with a location of lowercase letters, digits and '-'. Unlike adk-python,
+// NewProvider does not fall back to GOOGLE_CLOUD_PROJECT or
 // GOOGLE_CLOUD_LOCATION for bare store names.
 //
 // NewProvider creates the underlying Vertex AI Example Store gRPC client
@@ -176,9 +181,10 @@ func NewProvider(ctx context.Context, config *ProviderConfig) (exampletool.Provi
 // Example Store client.
 //
 // config must be non-nil and config.ExampleStoreName must be a full resource
-// name of the form "projects/{project}/locations/{location}/exampleStores/{example_store}".
-// Unlike adk-python, NewProviderWithOptions does not fall back to
-// GOOGLE_CLOUD_PROJECT or GOOGLE_CLOUD_LOCATION for bare store names.
+// name of the form "projects/{project}/locations/{location}/exampleStores/{example_store}",
+// with a location of lowercase letters, digits and '-'. Unlike adk-python,
+// NewProviderWithOptions does not fall back to GOOGLE_CLOUD_PROJECT or
+// GOOGLE_CLOUD_LOCATION for bare store names.
 //
 // The regional endpoint derived from the store's location
 // ("<location>-aiplatform.googleapis.com:443") is passed before opts, so a
