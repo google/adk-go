@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -1152,5 +1153,69 @@ func TestRequestConfirmationFirstApprovalPlaceholderAfterRequest(t *testing.T) {
 	}
 	if !dispatched {
 		t.Errorf("first approval did not dispatch %q when the placeholder response follows the request", callID)
+	}
+}
+
+func TestRequestConfirmationResumesOnlyRequestConfirmationCalls(t *testing.T) {
+	agnt, tools, err := newMockLlmAgent()
+	if err != nil {
+		t.Fatalf("newMockLlmAgent() failed: %v", err)
+	}
+	confirmationRequest := func(name, id, originalCallID string) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{
+			Name: name,
+			ID:   id,
+			Args: map[string]any{
+				"originalFunctionCall": map[string]any{
+					"name": mockToolName,
+					"args": map[string]any{"param1": "test"},
+					"id":   originalCallID,
+				},
+			},
+		}}
+	}
+	userConfirmationJSON, err := json.Marshal(toolconfirmation.ToolConfirmation{Confirmed: true})
+	if err != nil {
+		t.Fatalf("json.Marshal() failed: %v", err)
+	}
+	userConfirmation := func(id string) *genai.Part {
+		return &genai.Part{FunctionResponse: &genai.FunctionResponse{
+			Name:     toolconfirmation.FunctionCallName,
+			ID:       id,
+			Response: map[string]any{"response": string(userConfirmationJSON)},
+		}}
+	}
+	events := []*session.Event{
+		{
+			Author: "testAgent",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
+				confirmationRequest(toolconfirmation.FunctionCallName, "requested_confirmation_id", "requested_call_id"),
+				// Carries an originalFunctionCall payload, but is not a
+				// confirmation request.
+				confirmationRequest("some_other_tool", "other_call_id", "unrequested_call_id"),
+			}}},
+		},
+		{
+			Author: "user",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{
+				userConfirmation("requested_confirmation_id"),
+				userConfirmation("other_call_id"),
+			}}},
+		},
+	}
+	invocationContext := createInvocationContext(t, agnt, &fakeSession{events: events})
+
+	var gotIDs []string
+	for event, err := range llminternal.RequestConfirmationRequestProcessor(invocationContext, &model.LLMRequest{}, &llminternal.Flow{Tools: tools}) {
+		if err != nil {
+			t.Fatalf("RequestConfirmationRequestProcessor() returned error: %v", err)
+		}
+		for _, resp := range utils.FunctionResponses(event.Content) {
+			gotIDs = append(gotIDs, resp.ID)
+		}
+	}
+
+	if diff := cmp.Diff([]string{"requested_call_id"}, gotIDs); diff != "" {
+		t.Errorf("RequestConfirmationRequestProcessor() resumed function call IDs diff (-want +got):\n%s", diff)
 	}
 }
