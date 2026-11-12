@@ -70,6 +70,8 @@ type Entry struct {
 // does not implement [EventAdder]. It wraps [errors.ErrUnsupported]. A caller
 // that receives it can ingest the full session with
 // [Service.AddSessionToMemory] instead, as its message says.
+//
+// EXPERIMENTAL: ErrAddEventsUnsupported is experimental; its API and behavior may change or be removed in a later version.
 var ErrAddEventsUnsupported error = &unsupportedError{
 	msg: "memory: service does not support adding event deltas; call Service.AddSessionToMemory to ingest the full session",
 }
@@ -95,6 +97,8 @@ func (e *unsupportedError) Unwrap() error { return errors.ErrUnsupported }
 // implement EventAdder, even when the wrapped value does, because embedding
 // promotes only the methods of Service. Such a wrapper declares
 // AddEventsToMemory itself to forward the call.
+//
+// EXPERIMENTAL: EventAdder is experimental; its API and behavior may change or be removed in a later version.
 type EventAdder interface {
 	// AddEventsToMemory appends an incremental batch of events to the memory
 	// service for the scope named by req.
@@ -107,6 +111,8 @@ type EventAdder interface {
 
 // AddEventsRequest is the parameter for [EventAdder.AddEventsToMemory] and
 // [AddEventsToMemory].
+//
+// EXPERIMENTAL: AddEventsRequest is experimental; its API and behavior may change or be removed in a later version.
 type AddEventsRequest struct {
 	// AppName is the application name for memory scope.
 	AppName string
@@ -132,6 +138,8 @@ type AddEventsRequest struct {
 // svc and req must not be nil; AddEventsToMemory returns an error for either
 // without calling svc. Otherwise it returns the error of
 // [EventAdder.AddEventsToMemory].
+//
+// EXPERIMENTAL: AddEventsToMemory is experimental; its API and behavior may change or be removed in a later version.
 func AddEventsToMemory(ctx context.Context, svc Service, req *AddEventsRequest) error {
 	if svc == nil {
 		return errors.New("memory: service must not be nil")
