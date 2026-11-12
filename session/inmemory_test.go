@@ -1841,6 +1841,38 @@ func TestInMemoryService_AppendEvent_StoresSameIDEventThatDiffers(t *testing.T) 
 	}
 }
 
+// TestInMemoryService_AppendEvent_IgnoresRedeliveryOfOlderEvent re-delivers an
+// event that is neither the newest event nor the newest one with its ID, so a
+// duplicate check that looks only at recent events stores it twice.
+func TestInMemoryService_AppendEvent_IgnoresRedeliveryOfOlderEvent(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	held := createAt(t, svc, "app-redeliver-older", "s1")
+	newEvent := func(id, author string) *session.Event {
+		return &session.Event{ID: id, InvocationID: "inv1", Author: author, Timestamp: appendT1}
+	}
+	for _, ev := range []*session.Event{
+		newEvent("dup-1", "user"),
+		newEvent("dup-1", "agent"),
+		newEvent("other", "user"),
+	} {
+		if err := svc.AppendEvent(ctx, held, ev); err != nil {
+			t.Fatalf("AppendEvent(%s by %s) error = %v", ev.ID, ev.Author, err)
+		}
+	}
+
+	if err := svc.AppendEvent(ctx, held, newEvent("dup-1", "user")); err != nil {
+		t.Fatalf("AppendEvent(re-delivery) error = %v", err)
+	}
+
+	if got := held.Events().Len(); got != 3 {
+		t.Errorf("held Events().Len() = %d, want 3", got)
+	}
+	if got := getStored(t, svc, held).Events().Len(); got != 3 {
+		t.Errorf("stored Events().Len() = %d, want 3", got)
+	}
+}
+
 func TestInMemoryService_AppendEvent_IdempotentWithTempStateDelta(t *testing.T) {
 	ctx := t.Context()
 	svc := session.InMemoryService()
