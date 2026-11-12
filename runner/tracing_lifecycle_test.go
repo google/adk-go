@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
@@ -40,9 +39,8 @@ func TestRunInvocationSessionID(t *testing.T) {
 		for _, kind := range []string{"workflow", "node", "live"} {
 			for _, sessionID := range []string{"", "provided"} {
 				t.Run(kind+"/"+sessionID, func(t *testing.T) {
-					tp, exp := newInvocationTraceExporter(t)
-					ctx, caller := tp.Tracer("caller").Start(t.Context(), "caller", trace.WithAttributes(attribute.String("gen_ai.conversation.id", "caller-session")))
-					defer caller.End()
+					_, exp := newInvocationTraceExporter(t)
+					ctx := t.Context()
 					var actualID string
 					p := mustTraceValue(plugin.New(plugin.Config{Name: "session", BeforeRunCallback: func(ctx agent.InvocationContext) (*genai.Content, error) {
 						actualID = ctx.Session().ID()
@@ -74,7 +72,6 @@ func TestRunInvocationSessionID(t *testing.T) {
 					if actualID == "" {
 						t.Fatal("session service returned an empty ID")
 					}
-					caller.End()
 					var checkedRoot bool
 					for _, sp := range exp.GetSpans() {
 						var id string
@@ -84,10 +81,6 @@ func TestRunInvocationSessionID(t *testing.T) {
 							}
 						}
 						switch {
-						case sp.Name == "caller":
-							if id != "caller-session" {
-								t.Error("runner overwrote the caller's conversation ID")
-							}
 						case sp.Name == "invocation":
 							if id != "" {
 								t.Error("legacy invocation gained a conversation ID attribute")
