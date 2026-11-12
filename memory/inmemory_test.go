@@ -15,6 +15,8 @@
 package memory_test
 
 import (
+	"context"
+	"errors"
 	"iter"
 	"slices"
 	"strconv"
@@ -375,4 +377,451 @@ func Test_inMemoryService_SearchMemory_Concurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestAddEventsToMemory_BasicAndEntryFields(t *testing.T) {
+	svc := memory.InMemoryService()
+	ev := &session.Event{
+		ID:        "ev-1",
+		Author:    "user",
+		Timestamp: time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC),
+		LLMResponse: model.LLMResponse{
+			Content:        genai.NewContentFromText("alpha beta", genai.RoleUser),
+			CustomMetadata: map[string]any{"event_key": "event_val"},
+		},
+	}
+	addEvents(t, svc, "s1", nil, ev)
+
+	got := search(t, svc, "alpha")
+
+	want := []memory.Entry{{
+		ID:             "ev-1",
+		Author:         "user",
+		Timestamp:      time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC),
+		Content:        genai.NewContentFromText("alpha beta", genai.RoleUser),
+		CustomMetadata: map[string]any{"event_key": "event_val"},
+	}}
+	if diff := cmp.Diff(want, got.Memories); diff != "" {
+		t.Errorf("SearchMemory() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestAddEventsToMemory_CustomMetadataIgnored(t *testing.T) {
+	svc := memory.InMemoryService()
+	ev := &session.Event{
+		ID: "ev-1",
+		LLMResponse: model.LLMResponse{
+			Content:        genai.NewContentFromText("alpha beta", genai.RoleUser),
+			CustomMetadata: map[string]any{"event_key": "event_val"},
+		},
+	}
+	if err := memory.AddEventsToMemory(t.Context(), svc, &memory.AddEventsRequest{
+		AppName:        "app",
+		UserID:         "user",
+		SessionID:      "s1",
+		Events:         []*session.Event{ev},
+		CustomMetadata: map[string]any{"call_key": "ignored"},
+	}); err != nil {
+		t.Fatalf("AddEventsToMemory() error = %v", err)
+	}
+
+	got := search(t, svc, "alpha")
+
+	if len(got.Memories) != 1 {
+		t.Fatalf("SearchMemory() returned %d entries, want 1", len(got.Memories))
+	}
+	if diff := cmp.Diff(map[string]any{"event_key": "event_val"}, got.Memories[0].CustomMetadata); diff != "" {
+		t.Errorf("Entry.CustomMetadata mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestAddEventsToMemory_DefaultBucketDoesNotCollideWithUnknownSessionID(t *testing.T) {
+	svc := memory.InMemoryService()
+	addEvents(t, svc, "", memoryTextEvent("shared-id", "default copy"))
+	addEvents(t, svc, "__unknown_session_id__", memoryTextEvent("shared-id", "sentinel copy"))
+	addSession(t, svc, "", memoryTextEvent("shared-id", "empty session copy"))
+
+	got := search(t, svc, "copy")
+
+	want := []string{"default copy", "sentinel copy", "empty session copy"}
+	if diff := cmp.Diff(want, memoryTexts(got)); diff != "" {
+		t.Errorf("SearchMemory() texts mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestAddEventsToMemory_DeduplicationScopeAndWordlessReservations(t *testing.T) {
+	blobOnly := func() *session.Event {
+		return &session.Event{ID: "dup", LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts(
+			[]*genai.Part{genai.NewPartFromBytes([]byte("abc"), "text/plain")}, genai.RoleUser)}}
+	}
+	thoughtOnly := func() *session.Event {
+		return &session.Event{ID: "dup", LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts(
+			[]*genai.Part{{Text: "hidden", Thought: true}}, genai.RoleModel)}}
+	}
+	emptyContent := func() *session.Event {
+		return &session.Event{ID: "dup", LLMResponse: model.LLMResponse{Content: &genai.Content{}}}
+	}
+	nilPart := func() *session.Event {
+		return &session.Event{ID: "dup", LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{nil}}}}
+	}
+	viaSession := func(t *testing.T, svc memory.Service, ev *session.Event) { addSession(t, svc, "s1", ev) }
+	viaEvents := func(t *testing.T, svc memory.Service, ev *session.Event) { addEvents(t, svc, "s1", ev) }
+
+	for _, tt := range []struct {
+		name  string
+		setup func(t *testing.T, svc memory.Service)
+		query string
+		want  []string
+	}{
+		{
+			name: "duplicates in one call",
+			setup: func(t *testing.T, svc memory.Service) {
+				addEvents(t, svc, "s1", memoryTextEvent("dup", "in-call first"), memoryTextEvent("dup", "in-call second"))
+			},
+			query: "call",
+			want:  []string{"in-call first"},
+		},
+		{
+			name: "duplicate of an added session event",
+			setup: func(t *testing.T, svc memory.Service) {
+				addSession(t, svc, "s1", memoryTextEvent("dup", "from session"))
+				addEvents(t, svc, "s1", memoryTextEvent("dup", "from events"))
+			},
+			query: "from",
+			want:  []string{"from session"},
+		},
+		{
+			name: "same id in other bucket",
+			setup: func(t *testing.T, svc memory.Service) {
+				addEvents(t, svc, "s1", memoryTextEvent("dup", "s1 text"))
+				addEvents(t, svc, "s2", memoryTextEvent("dup", "s2 text"))
+			},
+			query: "text",
+			want:  []string{"s1 text", "s2 text"},
+		},
+		{
+			name:  "blob-only session event reserves id",
+			setup: reuseAfter(viaSession, blobOnly, "reused text"),
+			query: "reused",
+		},
+		{
+			name:  "blob-only added event reserves id",
+			setup: reuseAfter(viaEvents, blobOnly, "reused text"),
+			query: "reused",
+		},
+		{
+			name:  "thought-only session event reserves id",
+			setup: reuseAfter(viaSession, thoughtOnly, "reused text"),
+			query: "reused",
+		},
+		{
+			name:  "thought-only added event reserves id",
+			setup: reuseAfter(viaEvents, thoughtOnly, "reused text"),
+			query: "reused",
+		},
+		{
+			name:  "session event without parts does not reserve id",
+			setup: reuseAfter(viaSession, emptyContent, "reused after nil part"),
+			query: "reused",
+			want:  []string{"reused after nil part"},
+		},
+		{
+			name:  "added event without parts does not reserve id",
+			setup: reuseAfter(viaEvents, emptyContent, "reused after nil part"),
+			query: "reused",
+			want:  []string{"reused after nil part"},
+		},
+		{
+			name:  "session event with only nil parts does not reserve id",
+			setup: reuseAfter(viaSession, nilPart, "reused after nil part"),
+			query: "reused",
+			want:  []string{"reused after nil part"},
+		},
+		{
+			name:  "added event with only nil parts does not reserve id",
+			setup: reuseAfter(viaEvents, nilPart, "reused after nil part"),
+			query: "reused",
+			want:  []string{"reused after nil part"},
+		},
+		{
+			name: "empty ids are not duplicates",
+			setup: func(t *testing.T, svc memory.Service) {
+				addEvents(t, svc, "s1", memoryTextEvent("", "empty id 1"), memoryTextEvent("", "empty id 2"))
+			},
+			query: "empty",
+			want:  []string{"empty id 1", "empty id 2"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := memory.InMemoryService()
+			tt.setup(t, svc)
+
+			got := search(t, svc, tt.query)
+
+			if diff := cmp.Diff(tt.want, memoryTexts(got)); diff != "" {
+				t.Errorf("SearchMemory(%q) texts mismatch (-want +got):\n%s", tt.query, diff)
+			}
+		})
+	}
+}
+
+// reuseAfter returns a setup that stores first() in bucket "s1" with store,
+// then adds an event to "s1" with the same ID "dup" and the given text.
+func reuseAfter(store func(*testing.T, memory.Service, *session.Event), first func() *session.Event, text string) func(*testing.T, memory.Service) {
+	return func(t *testing.T, svc memory.Service) {
+		store(t, svc, first())
+		addEvents(t, svc, "s1", memoryTextEvent("dup", text))
+	}
+}
+
+func TestAddEventsToMemory_AppendReplaceAndEmptyBucketOrder(t *testing.T) {
+	t.Run("append after session then replace", func(t *testing.T) {
+		svc := memory.InMemoryService()
+		addSession(t, svc, "s1", memoryTextEvent("1", "note one"))
+		addEvents(t, svc, "s1", memoryTextEvent("2", "note two"))
+
+		if diff := cmp.Diff([]string{"1", "2"}, memoryIDs(search(t, svc, "note"))); diff != "" {
+			t.Errorf("SearchMemory() after append IDs mismatch (-want +got):\n%s", diff)
+		}
+
+		addSession(t, svc, "s1", memoryTextEvent("dup", "note a"), memoryTextEvent("dup", "note b"))
+
+		if diff := cmp.Diff([]string{"note a", "note b"}, memoryTexts(search(t, svc, "note"))); diff != "" {
+			t.Errorf("SearchMemory() after replace texts mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("zero-event call fixes named bucket position", func(t *testing.T) {
+		svc := memory.InMemoryService()
+		addEvents(t, svc, "early")
+		addEvents(t, svc, "", memoryTextEvent("def", "tie"))
+		addSession(t, svc, "late", memoryTextEvent("late", "tie"))
+		addEvents(t, svc, "early", memoryTextEvent("early", "tie"))
+
+		if diff := cmp.Diff([]string{"early", "def", "late"}, memoryIDs(search(t, svc, "tie"))); diff != "" {
+			t.Errorf("SearchMemory() IDs mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("zero-event call fixes default bucket position", func(t *testing.T) {
+		svc := memory.InMemoryService()
+		addEvents(t, svc, "")
+		addSession(t, svc, "late", memoryTextEvent("late", "tie"))
+		addEvents(t, svc, "", memoryTextEvent("def", "tie"))
+
+		if diff := cmp.Diff([]string{"def", "late"}, memoryIDs(search(t, svc, "tie"))); diff != "" {
+			t.Errorf("SearchMemory() IDs mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func Test_inMemoryService_SearchMemory_ConcurrentAddEvents(t *testing.T) {
+	svc := memory.InMemoryService()
+	ctx := t.Context()
+
+	// Each worker adds 5 events to its own session and 5 to the shared default
+	// bucket, all carrying "x" and the worker's own word "w<i>". Together the
+	// workers put 20 events in the default bucket.
+	const workers = 4
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			for j := range 5 {
+				for _, sid := range []string{"s" + strconv.Itoa(i), ""} {
+					id := sid + "-" + strconv.Itoa(i) + "-" + strconv.Itoa(j)
+					if err := memory.AddEventsToMemory(ctx, svc, &memory.AddEventsRequest{
+						AppName: "app", UserID: "user", SessionID: sid,
+						Events: []*session.Event{memoryTextEvent(id, "x w"+strconv.Itoa(i))},
+					}); err != nil {
+						t.Errorf("AddEventsToMemory() error = %v", err)
+						return
+					}
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 25 {
+				id := "sess" + strconv.Itoa(i)
+				if err := svc.AddSessionToMemory(ctx, makeSession(t, "app", "user", id, []*session.Event{memoryTextEvent(id, "x")})); err != nil {
+					t.Errorf("AddSessionToMemory() error = %v", err)
+					return
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 25 {
+				if _, err := svc.SearchMemory(ctx, &memory.SearchRequest{AppName: "app", UserID: "user", Query: "x"}); err != nil {
+					t.Errorf("SearchMemory() error = %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	// The sessions alone hold 4 matching events; the rest come from the
+	// concurrent AddEventsToMemory calls.
+	if got := search(t, svc, "x"); len(got.Memories) != 10 {
+		t.Errorf("SearchMemory() returned %d entries, want 10", len(got.Memories))
+	}
+	for _, tt := range []struct {
+		query string
+		want  []string
+	}{
+		{query: "w0", want: []string{"-0-0", "-0-1", "-0-2", "-0-3", "-0-4", "s0-0-0", "s0-0-1", "s0-0-2", "s0-0-3", "s0-0-4"}},
+		{query: "w1", want: []string{"-1-0", "-1-1", "-1-2", "-1-3", "-1-4", "s1-1-0", "s1-1-1", "s1-1-2", "s1-1-3", "s1-1-4"}},
+		{query: "w2", want: []string{"-2-0", "-2-1", "-2-2", "-2-3", "-2-4", "s2-2-0", "s2-2-1", "s2-2-2", "s2-2-3", "s2-2-4"}},
+		{query: "w3", want: []string{"-3-0", "-3-1", "-3-2", "-3-3", "-3-4", "s3-3-0", "s3-3-1", "s3-3-2", "s3-3-3", "s3-3-4"}},
+	} {
+		got := memoryIDs(search(t, svc, tt.query))
+		slices.Sort(got)
+		if diff := cmp.Diff(tt.want, got); diff != "" {
+			t.Errorf("SearchMemory(%q) IDs mismatch (-want +got):\n%s", tt.query, diff)
+		}
+	}
+}
+
+// eventlessService implements memory.Service but not memory.EventAdder.
+type eventlessService struct{}
+
+func (eventlessService) AddSessionToMemory(context.Context, session.Session) error { return nil }
+
+func (eventlessService) SearchMemory(context.Context, *memory.SearchRequest) (*memory.SearchResponse, error) {
+	return &memory.SearchResponse{}, nil
+}
+
+// acceptingEventAdder implements memory.EventAdder and accepts any request,
+// nil included.
+type acceptingEventAdder struct{ eventlessService }
+
+func (acceptingEventAdder) AddEventsToMemory(context.Context, *memory.AddEventsRequest) error {
+	return nil
+}
+
+func TestAddEventsToMemory_UnsupportedService(t *testing.T) {
+	err := memory.AddEventsToMemory(t.Context(), eventlessService{}, &memory.AddEventsRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "s1",
+		Events:    []*session.Event{memoryTextEvent("e1", "hello")},
+	})
+
+	if !errors.Is(err, memory.ErrAddEventsUnsupported) {
+		t.Errorf("AddEventsToMemory() error = %v, want errors.Is(err, memory.ErrAddEventsUnsupported)", err)
+	}
+	if !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("AddEventsToMemory() error = %v, want errors.Is(err, errors.ErrUnsupported)", err)
+	}
+}
+
+func TestAddEventsToMemory_NilRequests(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		call    func(ctx context.Context) error
+		wantErr string
+	}{
+		{
+			name: "AddEventsToMemory nil service",
+			call: func(ctx context.Context) error {
+				return memory.AddEventsToMemory(ctx, nil, &memory.AddEventsRequest{})
+			},
+			wantErr: "memory: service must not be nil",
+		},
+		{
+			name: "AddEventsToMemory nil request",
+			call: func(ctx context.Context) error {
+				return memory.AddEventsToMemory(ctx, memory.InMemoryService(), nil)
+			},
+			wantErr: "memory: AddEventsRequest must not be nil",
+		},
+		{
+			name: "AddEventsToMemory nil request to an EventAdder that accepts it",
+			call: func(ctx context.Context) error {
+				return memory.AddEventsToMemory(ctx, acceptingEventAdder{}, nil)
+			},
+			wantErr: "memory: AddEventsRequest must not be nil",
+		},
+		{
+			name: "EventAdder nil request",
+			call: func(ctx context.Context) error {
+				return memory.InMemoryService().(memory.EventAdder).AddEventsToMemory(ctx, nil)
+			},
+			wantErr: "memory: AddEventsRequest must not be nil",
+		},
+		{
+			name: "AddSessionToMemory nil session",
+			call: func(ctx context.Context) error {
+				return memory.InMemoryService().AddSessionToMemory(ctx, nil)
+			},
+			wantErr: "memory: session must not be nil",
+		},
+		{
+			name: "SearchMemory nil request",
+			call: func(ctx context.Context) error {
+				resp, err := memory.InMemoryService().SearchMemory(ctx, nil)
+				if resp != nil {
+					t.Errorf("SearchMemory(nil) response = %v, want nil", resp)
+				}
+				return err
+			},
+			wantErr: "memory: SearchRequest must not be nil",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call(t.Context())
+			if err == nil || err.Error() != tt.wantErr {
+				t.Errorf("error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// addEvents adds events to the bucket sessionID of ("app", "user").
+func addEvents(t *testing.T, svc memory.Service, sessionID string, events ...*session.Event) {
+	t.Helper()
+	if err := memory.AddEventsToMemory(t.Context(), svc, &memory.AddEventsRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: sessionID,
+		Events:    events,
+	}); err != nil {
+		t.Fatalf("AddEventsToMemory(%q) error = %v", sessionID, err)
+	}
+}
+
+// addSession adds a session of ("app", "user") holding events.
+func addSession(t *testing.T, svc memory.Service, sessionID string, events ...*session.Event) {
+	t.Helper()
+	if err := svc.AddSessionToMemory(t.Context(), makeSession(t, "app", "user", sessionID, events)); err != nil {
+		t.Fatalf("AddSessionToMemory(%q) error = %v", sessionID, err)
+	}
+}
+
+// search searches the memories of ("app", "user").
+func search(t *testing.T, svc memory.Service, query string) *memory.SearchResponse {
+	t.Helper()
+	got, err := svc.SearchMemory(t.Context(), &memory.SearchRequest{AppName: "app", UserID: "user", Query: query})
+	if err != nil {
+		t.Fatalf("SearchMemory(%q) error = %v", query, err)
+	}
+	return got
+}
+
+func memoryIDs(resp *memory.SearchResponse) []string {
+	var ids []string
+	for _, e := range resp.Memories {
+		ids = append(ids, e.ID)
+	}
+	return ids
+}
+
+// memoryTexts returns the text of the last part of each memory.
+func memoryTexts(resp *memory.SearchResponse) []string {
+	var texts []string
+	for _, e := range resp.Memories {
+		texts = append(texts, e.Content.Parts[len(e.Content.Parts)-1].Text)
+	}
+	return texts
 }
