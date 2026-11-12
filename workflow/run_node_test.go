@@ -1124,8 +1124,7 @@ func TestRunNode_ConcurrentChildren_NoRace(t *testing.T) {
 type waitForOutputNode struct{ BaseNode }
 
 func newWaitForOutputNode(name string) *waitForOutputNode {
-	t := true
-	return &waitForOutputNode{BaseNode: NewBaseNode(name, "", NodeConfig{WaitForOutput: &t})}
+	return &waitForOutputNode{BaseNode: NewBaseNode(name, "", NodeConfig{WaitForOutput: new(true)})}
 }
 
 func (n *waitForOutputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
@@ -1142,9 +1141,8 @@ type waitForOutputWithValueNode struct {
 }
 
 func newWaitForOutputWithValueNode(name string, out any) *waitForOutputWithValueNode {
-	t := true
 	return &waitForOutputWithValueNode{
-		BaseNode: NewBaseNode(name, "", NodeConfig{WaitForOutput: &t}),
+		BaseNode: NewBaseNode(name, "", NodeConfig{WaitForOutput: new(true)}),
 		out:      out,
 	}
 }

@@ -49,6 +49,9 @@ linters:
         - pattern: ^print(ln)?$
           pkg: ^$
           msg: library code must not write to stderr; see "Logging and error messages" in AGENTS.md
+        - pattern: ^genai\.Ptr$
+          pkg: ^google\.golang\.org/genai$
+          msg: use new(expr) instead
 
     misspell:
       locale: US
@@ -121,12 +124,15 @@ linters:
       - path: '_test\.go$'
         linters:
           - forbidigo
+        text: 'Logging and error messages'
       - path: '(^|/)(cmd|examples)/'
         linters:
           - forbidigo
+        text: 'Logging and error messages'
       - path: '^plugin/loggingplugin/'
         linters:
           - forbidigo
+        text: 'Logging and error messages'
       - linters:
           - misspell
         text: '`CANCELLED` is a misspelling of `CANCELED`'

@@ -3602,8 +3602,7 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 					}
 					call := callCount.Add(1)
 					if call == 1 {
-						path := req.Path
-						firstCallPath.Store(&path)
+						firstCallPath.Store(&req.Path)
 					}
 					if tt.partialSuccess && call == 1 {
 						time.Sleep(tt.firstUploadTakes)
