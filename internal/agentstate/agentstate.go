@@ -48,8 +48,10 @@ func New() *Store {
 }
 
 // Populate loads the checkpoints that events of invocationID carry, oldest
-// first, as adk-python's populate_invocation_agent_states does.
-func (s *Store) Populate(events session.Events, invocationID string) {
+// first, as adk-python's populate_invocation_agent_states does. root is the
+// agent tree, used to reset an agent's sub-agents when it saves a checkpoint,
+// the same way Checkpoint does while the invocation runs.
+func (s *Store) Populate(events session.Events, invocationID string, root agent.Agent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ev := range events.All() {
@@ -61,11 +63,16 @@ func (s *Store) Populate(events session.Events, invocationID string) {
 			s.ended[ev.Author] = true
 			delete(s.states, ev.Author)
 		case ev.Actions.AgentState != nil:
+			if a := root.FindAgent(ev.Author); a != nil {
+				s.clearSubAgents(a)
+			}
 			s.states[ev.Author] = maps.Clone(ev.Actions.AgentState)
 			s.ended[ev.Author] = false
-		case ev.Author != "user" && ev.LLMResponse.Content != nil && s.states[ev.Author] == nil:
+		case ev.Author != "user" && ev.LLMResponse.Content != nil && s.states[ev.Author] == nil && !s.ended[ev.Author]:
 			// An agent that saves no checkpoint of its own, such as an LLM
 			// agent, still ran: an empty checkpoint marks it as one to resume.
+			// Content after an agent's end, such as an after-agent callback's,
+			// does not reopen it; a parent's next checkpoint does.
 			s.states[ev.Author] = map[string]any{}
 			s.ended[ev.Author] = false
 		}
@@ -232,40 +239,31 @@ func Int(state map[string]any, key string) int {
 
 // AwaitsAnswer reports whether ctx's agent, on ctx's branch, made a
 // long-running call earlier in this invocation that the user has not answered
-// yet. Run again on a later turn, as a parallel sibling of the agent whose call
-// was answered, such an agent has to keep waiting rather than call the model
-// as if its call were settled.
+// yet. Run again on a later turn, such an agent has to keep waiting rather than
+// call the model as if its calls were settled: as a parallel sibling of the
+// agent whose call was answered, or after only some of the calls it made in
+// one turn were answered.
 func AwaitsAnswer(ctx agent.InvocationContext) bool {
-	events := ctx.Session().Events()
-	last := -1
-	for i := events.Len() - 1; i >= 0; i-- {
-		ev := events.At(i)
-		if ev.InvocationID == ctx.InvocationID() && ev.Author == ctx.Agent().Name() && ev.Branch == ctx.Branch() && Pauses(ev) {
-			last = i
-			break
-		}
-	}
-	if last < 0 {
-		return false
-	}
+	self := ctx.Agent().Name()
+	var calls []string
 	answered := map[string]bool{}
-	for i := last + 1; i < events.Len(); i++ {
-		ev := events.At(i)
-		if ev.Author != "user" || ev.LLMResponse.Content == nil {
+	for ev := range ctx.Session().Events().All() {
+		if ev.InvocationID != ctx.InvocationID() || ev.LLMResponse.Content == nil {
 			continue
 		}
 		for _, part := range ev.LLMResponse.Content.Parts {
-			if part != nil && part.FunctionResponse != nil {
+			if part == nil {
+				continue
+			}
+			if ev.Author == "user" && part.FunctionResponse != nil {
 				answered[part.FunctionResponse.ID] = true
+			}
+			if ev.Author == self && ev.Branch == ctx.Branch() && part.FunctionCall != nil && slices.Contains(ev.LongRunningToolIDs, part.FunctionCall.ID) {
+				calls = append(calls, part.FunctionCall.ID)
 			}
 		}
 	}
-	for _, part := range events.At(last).LLMResponse.Content.Parts {
-		if part != nil && part.FunctionCall != nil && slices.Contains(events.At(last).LongRunningToolIDs, part.FunctionCall.ID) && !answered[part.FunctionCall.ID] {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(calls, func(id string) bool { return !answered[id] })
 }
 
 // TransferToResume returns the agent that ctx's agent, an LLM agent run again
@@ -275,25 +273,31 @@ func AwaitsAnswer(ctx agent.InvocationContext) bool {
 // when the agent should run as usual, as when the user answered the agent's
 // own call.
 func TransferToResume(ctx agent.InvocationContext) string {
+	self := ctx.Agent().Name()
 	var events []*session.Event
+	// The latest user message of the invocation, the one being answered. It
+	// is written on the root's branch, so it is looked for on every branch.
+	var answer *session.Event
 	for ev := range ctx.Session().Events().All() {
-		if ev.InvocationID == ctx.InvocationID() && ev.Branch == ctx.Branch() {
+		if ev.InvocationID != ctx.InvocationID() {
+			continue
+		}
+		if ev.Author == "user" {
+			answer = ev
+			continue
+		}
+		if ev.Branch == ctx.Branch() {
 			events = append(events, ev)
 		}
 	}
-	if len(events) == 0 {
-		return ""
-	}
-	self := ctx.Agent().Name()
-	if last := events[len(events)-1]; last.Author == "user" && last.LLMResponse.Content != nil {
-		for _, part := range last.LLMResponse.Content.Parts {
-			if part == nil || part.FunctionResponse == nil {
-				continue
-			}
-			if call := callAuthor(events, part.FunctionResponse.ID); call == self {
+	// Whether the answer is this agent's is settled before any earlier
+	// transfer: an agent that transferred on a loop's earlier pass and then
+	// made its own call keeps the answer.
+	if answer != nil && answer.LLMResponse.Content != nil {
+		for _, part := range answer.LLMResponse.Content.Parts {
+			if part != nil && part.FunctionResponse != nil && callAuthor(events, part.FunctionResponse.ID) == self {
 				return ""
 			}
-			break
 		}
 	}
 	for i := len(events) - 1; i >= 0; i-- {
