@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
@@ -43,6 +44,7 @@ import (
 	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
@@ -180,21 +182,161 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 // isThoughtOnlyTurn reports whether ev is a completed (non-partial) model turn
 // whose parts are all model "thinking" (Thought) parts — no surfaced answer.
 // Thought signatures ride on substantive parts (text, function calls), which
-// are not Thought, so any such part makes the turn non-thought-only.
+// are not Thought, so any such part makes the turn non-thought-only. A turn
+// with an error code is never thought-only: it is a final response, as in
+// adk-python (Event.is_final_response), whatever its parts are.
 func isThoughtOnlyTurn(ev *session.Event) bool {
-	if ev == nil || ev.LLMResponse.Partial {
+	if ev == nil || ev.LLMResponse.Partial || ev.LLMResponse.ErrorCode != "" {
 		return false
 	}
-	content := ev.LLMResponse.Content
-	if content == nil || len(content.Parts) == 0 {
+	return isThoughtOnlyResponse(&ev.LLMResponse)
+}
+
+// isThoughtOnlyResponse reports whether resp holds at least one thought part
+// and no part that is not a thought. Nil parts are ignored, so a response
+// whose parts are all nil is not thought-only.
+func isThoughtOnlyResponse(resp *model.LLMResponse) bool {
+	if resp == nil || resp.Content == nil {
 		return false
 	}
-	for _, p := range content.Parts {
-		if p != nil && !p.Thought {
+	sawThought := false
+	for _, p := range resp.Content.Parts {
+		if p == nil {
+			continue
+		}
+		if !p.Thought {
 			return false
 		}
+		sawThought = true
 	}
-	return true
+	return sawThought
+}
+
+// isPythonWhitespace reports whether r is whitespace for Python's str.strip,
+// which also strips the file, group, record and unit separators U+001C to
+// U+001F that unicode.IsSpace does not report.
+func isPythonWhitespace(r rune) bool {
+	return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
+}
+
+// hasMeaningfulContent reports whether resp holds a part a caller can act on:
+// a function call or response, executable code or its result, inline or file
+// data, or text that is not a thought and not only whitespace. It follows
+// adk-python's has_meaningful_content (flows/llm_flows/core/_finalizer.py).
+func hasMeaningfulContent(resp *model.LLMResponse) bool {
+	if !hasParts(resp) {
+		return false
+	}
+	for _, p := range resp.Content.Parts {
+		if p == nil {
+			continue
+		}
+		if p.FunctionCall != nil || p.FunctionResponse != nil || p.ExecutableCode != nil ||
+			p.CodeExecutionResult != nil || p.InlineData != nil || p.FileData != nil {
+			return true
+		}
+		if !p.Thought && strings.TrimFunc(p.Text, isPythonWhitespace) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasParts reports whether resp has content with at least one part.
+func hasParts(resp *model.LLMResponse) bool {
+	return resp != nil && resp.Content != nil && len(resp.Content.Parts) > 0
+}
+
+// streamingMode returns the streaming mode of the invocation.
+func streamingMode(ctx agent.InvocationContext) agent.StreamingMode {
+	if rc := ctx.RunConfig(); rc != nil {
+		return rc.StreamingMode
+	}
+	return agent.StreamingModeNone
+}
+
+// agentName returns the name of the invocation's agent, or "" without one.
+func agentName(ctx agent.InvocationContext) string {
+	if ctx == nil || ctx.Agent() == nil {
+		return ""
+	}
+	return ctx.Agent().Name()
+}
+
+// Error code and messages applyEmptyResponsePolicy sets, as in adk-python
+// (flows/llm_flows/core/_model_call.py).
+const (
+	noContentErrorCode              = "MODEL_RETURNED_NO_CONTENT"
+	noContentErrorMessage           = "The model returned no content (finish_reason=STOP with empty parts)."
+	noMeaningfulContentErrorMessage = "The model returned no actionable content (finish_reason=STOP with thought-only or whitespace-only parts)."
+)
+
+// applyEmptyResponsePolicy marks a completed response that finished with STOP
+// but holds no meaningful content as an error, so that the turn ends with an
+// error event the caller can act on instead of a silent empty answer. It sets
+// resp.ErrorCode to MODEL_RETURNED_NO_CONTENT and, unless resp already has an
+// error message, a message that says whether the response had no parts or only
+// thought or whitespace parts.
+//
+// It leaves resp unchanged when resp is partial, already has an error code, or
+// finished for another reason. Under SSE streaming it also leaves a response
+// without parts unchanged: the streaming aggregator ends a turn with a
+// finish-only chunk, which adk-python does not mark either. A thought-only
+// response is left unchanged, because Flow.Run calls the model again after it
+// where adk-python ends the run.
+//
+// It must run after the after-model callbacks and before the response
+// processors: emptiness is a property of what the model returned, and a
+// processor may clear the content on purpose, as the code execution processor
+// does.
+func applyEmptyResponsePolicy(ctx agent.InvocationContext, resp *model.LLMResponse) {
+	if resp == nil || resp.Partial || resp.ErrorCode != "" || resp.FinishReason != genai.FinishReasonStop || hasMeaningfulContent(resp) {
+		return
+	}
+	withParts := hasParts(resp)
+	if !withParts && streamingMode(ctx) == agent.StreamingModeSSE {
+		return
+	}
+	if isThoughtOnlyResponse(resp) {
+		return
+	}
+	resp.ErrorCode = noContentErrorCode
+	if resp.ErrorMessage != "" {
+		return
+	}
+	resp.ErrorMessage = noContentErrorMessage
+	if withParts {
+		resp.ErrorMessage = noMeaningfulContentErrorMessage
+	}
+}
+
+// stampAgentNameLabel records the name of the invocation's agent in
+// req.Config.Labels under version.AgentNameLabel, so that billing reports can
+// be split per agent. It keeps a value already set under the key. Neither the
+// config nor the labels map found in the request is ever modified: the label
+// is added to a copy of the map, set on a shallow copy of the config (a new
+// config when req.Config is nil), and that copy replaces req.Config, because a
+// before-model callback may have attached a config or map it shares with
+// other invocations. Without an agent it does nothing.
+func stampAgentNameLabel(ctx agent.InvocationContext, req *model.LLMRequest) {
+	name := agentName(ctx)
+	if name == "" {
+		return
+	}
+	var cfg genai.GenerateContentConfig
+	if req.Config != nil {
+		if _, ok := req.Config.Labels[version.AgentNameLabel]; ok {
+			return
+		}
+		cfg = *req.Config
+	}
+	labels := maps.Clone(cfg.Labels)
+	if labels == nil {
+		labels = make(map[string]string, 1)
+	}
+	labels[version.AgentNameLabel] = name
+	cfg.Labels = labels
+	req.Config = &cfg
 }
 
 type activeTask struct {
@@ -934,6 +1076,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, err)
 				return
 			}
+			applyEmptyResponsePolicy(ctx, resp.LLMResponse)
 			if err := f.postprocess(ctx, req, resp); err != nil {
 				yield(nil, err)
 				return
@@ -1125,8 +1268,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 		}
 
-		// TODO: Set _ADK_AGENT_NAME_LABEL_KEY in req.GenerateConfig.Labels
-		// to help with slicing the billing reports on a per-agent basis.
+		stampAgentNameLabel(ctx, req)
 
 		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 		// Streaming mode comes from the invocation context's RunConfig rather than
@@ -1209,17 +1351,22 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 // drops TurnComplete, clients never see the turn end. If it drops
 // UsageMetadata, the call disappears from token accounting.
 //
-// Partial and TurnComplete are plain bools, so an unset value cannot be told
-// apart from an explicit false; a delta is never final while the stream
-// continues, so a partial original keeps its replacement partial, and a
-// response that ended the turn keeps its replacement ending it. UsageMetadata
-// set on the replacement is respected. The replacement is copied rather than
-// modified, and returned as is when nothing needs filling.
+// A delta is never final while the stream continues, so a replacement that
+// leaves Partial unset takes Partial and PartialSet from the original. Partial
+// counts as set when it is true or PartialSet is true, so a replacement with
+// Partial: false and PartialSet: true keeps its explicit false and can end a
+// stream on purpose. TurnComplete is a plain bool, so an unset value
+// cannot be told apart from an explicit false; a response that ended the turn
+// keeps its replacement ending it. UsageMetadata set on the replacement is
+// respected. The replacement is copied rather than modified, and returned as
+// is when nothing needs filling.
 func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResponse {
 	if original == nil {
 		return replacement
 	}
-	inheritPartial := original.Partial && !replacement.Partial
+	replacementHasPartial := replacement.Partial || replacement.PartialSet
+	originalHasPartial := original.Partial || original.PartialSet
+	inheritPartial := originalHasPartial && !replacementHasPartial
 	inheritTurnComplete := original.TurnComplete && !replacement.TurnComplete
 	inheritUsage := original.UsageMetadata != nil && replacement.UsageMetadata == nil
 	if !inheritPartial && !inheritTurnComplete && !inheritUsage {
@@ -1227,7 +1374,8 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 	}
 	merged := *replacement
 	if inheritPartial {
-		merged.Partial = true
+		merged.Partial = original.Partial
+		merged.PartialSet = original.PartialSet
 	}
 	if inheritTurnComplete {
 		merged.TurnComplete = true

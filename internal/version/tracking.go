@@ -19,6 +19,13 @@ import (
 	"strings"
 )
 
+// AgentNameLabel is the request label under which the agent flow records the
+// name of the agent that makes a model call, so that billing reports can be
+// split per agent. The flow sets it in GenerateContentConfig.Labels unless the
+// request already holds the key. Model connectors that cannot send labels
+// ignore this key.
+const AgentNameLabel = "adk_agent_name"
+
 // TrackingHeader returns the client labels ADK puts at the front of the
 // user-agent and x-goog-api-client headers so that services can attribute
 // traffic to ADK Go, for example "google-adk/2.6.0 gl-go/1.26.5". Other tokens

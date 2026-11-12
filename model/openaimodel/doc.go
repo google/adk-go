@@ -44,17 +44,20 @@
 //	            ResponseLogprobs with Logprobs, Tools, ToolConfig,
 //	            ThinkingConfig, ServiceTier, HTTPOptions.Timeout
 //	Chat only   StopSequences, FrequencyPenalty, PresencePenalty, Seed
-//	Rejected    TopK, CandidateCount above one, Labels, SafetySettings, an
-//	            unsupported ResponseMIMEType, CachedContent, ResponseModalities,
-//	            MediaResolution, SpeechConfig, AudioTimestamp, ImageConfig,
+//	Rejected    TopK, CandidateCount above one, any label in Labels other
+//	            than adk_agent_name, an empty non-nil Labels map,
+//	            SafetySettings, an unsupported ResponseMIMEType,
+//	            CachedContent, ResponseModalities, MediaResolution,
+//	            SpeechConfig, AudioTimestamp, ImageConfig,
 //	            RoutingConfig, ModelSelectionConfig, ModelArmorConfig,
 //	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
 //	            ContinuationToken, HTTPOptions apart from Timeout and Headers,
 //	            and on Responses also a non-empty StopSequences, the
 //	            penalties and Seed
-//	Ignored     HTTPOptions.Headers; AutomaticContinuation, which has no
-//	            effect because these APIs never pause a generation with
-//	            CONTINUATION; and on Chat Completions
+//	Ignored     HTTPOptions.Headers; the adk_agent_name label, which the
+//	            agent flow adds to every request; AutomaticContinuation,
+//	            which has no effect because these APIs never pause a
+//	            generation with CONTINUATION; and on Chat Completions
 //	            ThinkingConfig.IncludeThoughts, which has no equivalent there
 //
 // Function tools are sent with strict parameter validation disabled, and that

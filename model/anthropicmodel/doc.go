@@ -134,7 +134,7 @@
 //	| Seed                         | Rejected |
 //	| SafetySettings               | Rejected |
 //	| CachedContent                | Rejected (use ClientConfig.PromptCache) |
-//	| Labels                       | Rejected |
+//	| Labels                       | Rejected for any label other than adk_agent_name; adk_agent_name, which the agent flow adds to every request, is ignored |
 //	| MediaResolution              | Rejected |
 //	| SpeechConfig                 | Rejected |
 //	| AudioTimestamp               | Rejected |

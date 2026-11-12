@@ -840,6 +840,89 @@ func TestModel_GenerateWithoutCandidates(t *testing.T) {
 	}
 }
 
+// TestGeminiModel_LabelsStrippedOnGeminiAPIAndKeptOnVertex checks that request
+// labels, which the flow fills with the calling agent's name, reach the wire
+// only on Vertex AI. The Gemini Developer API does not support labels, so the
+// body sent there carries none while the caller's config keeps them.
+func TestGeminiModel_LabelsStrippedOnGeminiAPIAndKeptOnVertex(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     *genai.ClientConfig
+		wantLabels map[string]any
+	}{
+		{
+			name:   "gemini_api",
+			config: &genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: "test-key"},
+		},
+		{
+			name:       "vertex_ai",
+			config:     &genai.ClientConfig{Backend: genai.BackendVertexAI, Project: "test-project", Location: "eu"},
+			wantLabels: map[string]any{"adk_agent_name": "my_agent", "team": "core"},
+		},
+	}
+	for _, tt := range tests {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tt.name, stream), func(t *testing.T) {
+				var requestBody []byte
+				transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					var err error
+					requestBody, err = io.ReadAll(req.Body)
+					if err != nil {
+						return nil, err
+					}
+					contentType, responseBody := "application/json", `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`
+					if stream {
+						contentType, responseBody = "text/event-stream", "data: "+responseBody+"\n\n"
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": {contentType}},
+						Body:       io.NopCloser(strings.NewReader(responseBody)),
+					}, nil
+				})
+				clientConfig := *tt.config
+				clientConfig.HTTPClient = &http.Client{Transport: transport}
+				llm, err := NewModel(t.Context(), "gemini-2.5-flash", &clientConfig)
+				if err != nil {
+					t.Fatalf("NewModel() error = %v", err)
+				}
+				req := &model.LLMRequest{
+					Contents: genai.Text("hello"),
+					Config: &genai.GenerateContentConfig{
+						Labels: map[string]string{"adk_agent_name": "my_agent", "team": "core"},
+					},
+				}
+				for _, err := range llm.GenerateContent(t.Context(), req, stream) {
+					if err != nil {
+						t.Fatalf("GenerateContent() error = %v", err)
+					}
+				}
+				if requestBody == nil {
+					t.Fatal("no request reached the transport")
+				}
+				var payload map[string]any
+				if err := json.Unmarshal(requestBody, &payload); err != nil {
+					t.Fatalf("json.Unmarshal(request body) error = %v", err)
+				}
+				// Vertex AI takes labels at the top level of the body.
+				gotLabels, sent := payload["labels"]
+				if tt.wantLabels == nil && sent {
+					t.Errorf("request body carries labels %v, want none", gotLabels)
+				}
+				if tt.wantLabels != nil {
+					if diff := cmp.Diff(tt.wantLabels, gotLabels); diff != "" {
+						t.Errorf("request body labels mismatch (-want +got):\n%s", diff)
+					}
+				}
+				wantCallerLabels := map[string]string{"adk_agent_name": "my_agent", "team": "core"}
+				if diff := cmp.Diff(wantCallerLabels, req.Config.Labels); diff != "" {
+					t.Errorf("req.Config.Labels changed (-want +got):\n%s", diff)
+				}
+			})
+		}
+	}
+}
+
 func TestModel_MaybeAppendUserContent(t *testing.T) {
 	tests := []struct {
 		name     string

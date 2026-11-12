@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"maps"
 	"strings"
 	"testing"
 
@@ -1836,4 +1837,279 @@ func TestGenerateContentDrawsOneIDPerEvent(t *testing.T) {
 			}
 		})
 	}
+}
+
+const (
+	wantNoContentMessage           = "The model returned no content (finish_reason=STOP with empty parts)."
+	wantNoActionableContentMessage = "The model returned no actionable content (finish_reason=STOP with thought-only or whitespace-only parts)."
+)
+
+// runScriptedFlow runs f.Run with a model that answers its i-th call with
+// turns[i], and fails the test if the model is called more often than turns
+// allows. It returns the yielded events and the number of model calls.
+func runScriptedFlow(t *testing.T, f *Flow, runConfig *agent.RunConfig, turns ...*model.LLMResponse) ([]*session.Event, int) {
+	t.Helper()
+	calls := 0
+	f.Model = &mockModelForTest{
+		name: "scripted",
+		generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+			return func(yield func(*model.LLMResponse, error) bool) {
+				calls++
+				if calls > len(turns) {
+					t.Fatalf("model called %d times, want at most %d", calls, len(turns))
+				}
+				yield(turns[calls-1], nil)
+			}
+		},
+	}
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(t.Context(), &runconfig.RunConfig{}),
+		icontext.InvocationContextParams{
+			InvocationID: "inv_1",
+			Agent:        &mockAgent{name: "agent_1"},
+			RunConfig:    runConfig,
+		},
+	)
+	var events []*session.Event
+	for ev, err := range f.Run(ctx) {
+		if err != nil {
+			t.Fatalf("Run() yielded error: %v", err)
+		}
+		events = append(events, ev)
+	}
+	return events, calls
+}
+
+func stopTurn(parts ...*genai.Part) *model.LLMResponse {
+	return &model.LLMResponse{
+		Content:      &genai.Content{Role: genai.RoleModel, Parts: parts},
+		FinishReason: genai.FinishReasonStop,
+	}
+}
+
+type eventError struct{ Code, Message string }
+
+func errorsOf(events []*session.Event) []eventError {
+	var got []eventError
+	for _, ev := range events {
+		got = append(got, eventError{ev.ErrorCode, ev.ErrorMessage})
+	}
+	return got
+}
+
+func TestEmptyResponsePolicy_MeaningfulContentParts(t *testing.T) {
+	t.Run("function_response_is_meaningful", func(t *testing.T) {
+		events, _ := runScriptedFlow(t, &Flow{}, nil,
+			stopTurn(&genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "tool", Response: map[string]any{"ok": true}}}),
+			stopTurn(&genai.Part{Text: "done"}),
+		)
+		want := []eventError{{}, {}}
+		if diff := cmp.Diff(want, errorsOf(events)); diff != "" {
+			t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("nil_part_element_not_meaningful", func(t *testing.T) {
+		events, calls := runScriptedFlow(t, &Flow{}, nil, stopTurn(nil))
+		if calls != 1 {
+			t.Errorf("model called %d times, want 1", calls)
+		}
+		want := []eventError{{"MODEL_RETURNED_NO_CONTENT", wantNoActionableContentMessage}}
+		if diff := cmp.Diff(want, errorsOf(events)); diff != "" {
+			t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestEmptyResponsePolicy_UnicodeFileInfoRecordUnitSeparators pins Python's
+// str.strip whitespace, which also strips U+001C to U+001F; unicode.IsSpace
+// does not.
+func TestEmptyResponsePolicy_UnicodeFileInfoRecordUnitSeparators(t *testing.T) {
+	events, _ := runScriptedFlow(t, &Flow{}, nil, stopTurn(&genai.Part{Text: "\x1c\x1d\x1e\x1f"}))
+	want := []eventError{{"MODEL_RETURNED_NO_CONTENT", wantNoActionableContentMessage}}
+	if diff := cmp.Diff(want, errorsOf(events)); diff != "" {
+		t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestEmptyResponsePolicy_PreservesPreExistingErrorAndSkipsNonStopOrPartial(t *testing.T) {
+	emptyText := func() *genai.Content { return genai.NewContentFromText("", genai.RoleModel) }
+	tests := []struct {
+		name string
+		resp *model.LLMResponse
+		want eventError
+	}{
+		{
+			name: "preexisting_message_kept",
+			resp: &model.LLMResponse{Content: emptyText(), ErrorMessage: "upstream detail", FinishReason: genai.FinishReasonStop},
+			want: eventError{"MODEL_RETURNED_NO_CONTENT", "upstream detail"},
+		},
+		{
+			name: "existing_error_code_untouched",
+			resp: &model.LLMResponse{Content: emptyText(), ErrorCode: "SAFETY", ErrorMessage: "blocked", FinishReason: genai.FinishReasonStop},
+			want: eventError{"SAFETY", "blocked"},
+		},
+		{
+			name: "non_stop_untouched",
+			resp: &model.LLMResponse{Content: emptyText(), FinishReason: genai.FinishReasonMaxTokens},
+			want: eventError{},
+		},
+		{
+			name: "partial_untouched",
+			resp: &model.LLMResponse{Content: emptyText(), Partial: true, FinishReason: genai.FinishReasonStop},
+			want: eventError{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []*session.Event
+			captureLog(t, func() { events, _ = runScriptedFlow(t, &Flow{}, nil, tc.resp) })
+			if diff := cmp.Diff([]eventError{tc.want}, errorsOf(events)); diff != "" {
+				t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestEmptyResponsePolicy_SSEEmptyContentAndNilContentNotStamped(t *testing.T) {
+	sse := &agent.RunConfig{StreamingMode: agent.StreamingModeSSE}
+	t.Run("nil_content", func(t *testing.T) {
+		events, _ := runScriptedFlow(t, &Flow{}, sse, &model.LLMResponse{FinishReason: genai.FinishReasonStop})
+		if len(events) != 0 {
+			t.Errorf("Run() yielded %d events, want 0: %+v", len(events), errorsOf(events))
+		}
+	})
+	t.Run("empty_parts", func(t *testing.T) {
+		events, _ := runScriptedFlow(t, &Flow{}, sse, stopTurn())
+		if diff := cmp.Diff([]eventError{{}}, errorsOf(events)); diff != "" {
+			t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestRunOneStep_AppliesPolicyBeforeProcessors pins that the policy judges what
+// the model returned: a response processor that adds content afterwards does
+// not hide an empty model turn.
+func TestRunOneStep_AppliesPolicyBeforeProcessors(t *testing.T) {
+	addPart := func(_ agent.InvocationContext, _ *model.LLMRequest, resp *model.LLMResponse) error {
+		resp.Content.Parts = append(resp.Content.Parts, &genai.Part{Text: "added by processor"})
+		return nil
+	}
+	f := &Flow{ResponseProcessors: []func(agent.InvocationContext, *model.LLMRequest, *model.LLMResponse) error{addPart}}
+
+	events, _ := runScriptedFlow(t, f, nil, stopTurn())
+
+	if diff := cmp.Diff([]eventError{{"MODEL_RETURNED_NO_CONTENT", wantNoContentMessage}}, errorsOf(events)); diff != "" {
+		t.Fatalf("event errors mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]*genai.Part{{Text: "added by processor"}}, events[0].Content.Parts); diff != "" {
+		t.Errorf("event parts mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestCallLLM_AgentNameLabelStampingAndPreservation(t *testing.T) {
+	type result struct {
+		modelCalls  int
+		modelLabels map[string]string
+	}
+	call := func(t *testing.T, a agent.Agent, req *model.LLMRequest, callbacks ...BeforeModelCallback) result {
+		t.Helper()
+		var res result
+		m := &mockModelForTest{
+			name: "test-model",
+			generateContent: func(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+				res.modelCalls++
+				if req.Config != nil {
+					res.modelLabels = maps.Clone(req.Config.Labels)
+				}
+				return func(yield func(*model.LLMResponse, error) bool) {
+					yield(&model.LLMResponse{Content: genai.NewContentFromText("ok", genai.RoleModel)}, nil)
+				}
+			},
+		}
+		f := &Flow{Model: m, BeforeModelCallbacks: callbacks}
+		params := icontext.InvocationContextParams{}
+		if a != nil {
+			params.Agent = a
+		}
+		ctx := icontext.NewInvocationContext(t.Context(), params)
+		for _, err := range f.callLLM(ctx, req, map[string]any{}, map[string]int64{}) {
+			if err != nil {
+				t.Fatalf("callLLM() error = %v", err)
+			}
+		}
+		return res
+	}
+
+	t.Run("stamps_after_before_model_callback", func(t *testing.T) {
+		callbackSawNilConfig := false
+		recordConfig := func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+			callbackSawNilConfig = req.Config == nil
+			return nil, nil
+		}
+		res := call(t, &mockAgent{name: "test_agent"}, &model.LLMRequest{}, recordConfig)
+		if !callbackSawNilConfig {
+			t.Error("before-model callback saw a non-nil config, want the request without the label")
+		}
+		if diff := cmp.Diff(map[string]string{"adk_agent_name": "test_agent"}, res.modelLabels); diff != "" {
+			t.Errorf("model labels mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("preserves_existing_adk_agent_name_label", func(t *testing.T) {
+		req := &model.LLMRequest{Config: &genai.GenerateContentConfig{Labels: map[string]string{"adk_agent_name": "custom_owner", "env": "prod"}}}
+		res := call(t, &mockAgent{name: "billing_agent"}, req)
+		if diff := cmp.Diff(map[string]string{"adk_agent_name": "custom_owner", "env": "prod"}, res.modelLabels); diff != "" {
+			t.Errorf("model labels mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("callback_map_not_modified", func(t *testing.T) {
+		shared := map[string]string{"team": "core"}
+		attach := func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+			req.Config = &genai.GenerateContentConfig{Labels: shared}
+			return nil, nil
+		}
+		res := call(t, &mockAgent{name: "test_agent"}, &model.LLMRequest{}, attach)
+		if diff := cmp.Diff(map[string]string{"team": "core"}, shared); diff != "" {
+			t.Errorf("callback's labels map changed (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(map[string]string{"adk_agent_name": "test_agent", "team": "core"}, res.modelLabels); diff != "" {
+			t.Errorf("model labels mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("callback_config_not_modified", func(t *testing.T) {
+		shared := &genai.GenerateContentConfig{Temperature: genai.Ptr[float32](0.2)}
+		attach := func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+			req.Config = shared
+			return nil, nil
+		}
+		res := call(t, &mockAgent{name: "test_agent"}, &model.LLMRequest{}, attach)
+		if shared.Labels != nil {
+			t.Errorf("callback's config Labels = %v, want nil", shared.Labels)
+		}
+		if diff := cmp.Diff(map[string]string{"adk_agent_name": "test_agent"}, res.modelLabels); diff != "" {
+			t.Errorf("model labels mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("short_circuit_does_not_stamp", func(t *testing.T) {
+		cached := func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+			return &model.LLMResponse{Content: genai.NewContentFromText("cached", genai.RoleModel)}, nil
+		}
+		req := &model.LLMRequest{}
+		res := call(t, &mockAgent{name: "test_agent"}, req, cached)
+		if req.Config != nil {
+			t.Errorf("request config = %+v after a short-circuit, want nil", req.Config)
+		}
+		if res.modelCalls != 0 {
+			t.Errorf("model called %d times, want 0", res.modelCalls)
+		}
+	})
+	t.Run("nil_agent_does_not_panic_or_stamp", func(t *testing.T) {
+		req := &model.LLMRequest{}
+		res := call(t, nil, req)
+		if req.Config != nil {
+			t.Errorf("request config = %+v without an agent, want nil", req.Config)
+		}
+		if res.modelCalls != 1 {
+			t.Errorf("model called %d times, want 1", res.modelCalls)
+		}
+	})
 }

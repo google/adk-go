@@ -16,6 +16,7 @@ package llmagent_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -564,6 +565,157 @@ func TestAfterModelCallbackReplacementKeepsStreamingFields(t *testing.T) {
 	}
 }
 
+const (
+	noContentMessage           = "The model returned no content (finish_reason=STOP with empty parts)."
+	noActionableContentMessage = "The model returned no actionable content (finish_reason=STOP with thought-only or whitespace-only parts)."
+)
+
+type eventError struct{ Code, Message string }
+
+func errorsOf(events []*session.Event) []eventError {
+	var got []eventError
+	for _, ev := range events {
+		got = append(got, eventError{ev.ErrorCode, ev.ErrorMessage})
+	}
+	return got
+}
+
+// TestEmptyResponsePolicy_AppliesToCallbacksAndAfterAfterModelCallback pins
+// that every response reaching post-processing is judged, whether it came from
+// the model, a before-model callback or an on-model-error callback, and that
+// it is judged after the after-model callbacks have seen it.
+func TestEmptyResponsePolicy_AppliesToCallbacksAndAfterAfterModelCallback(t *testing.T) {
+	t.Run("before_model_short_circuit", func(t *testing.T) {
+		a := newTestAgent(t, llmagent.Config{
+			Name:  "test_agent",
+			Model: &scriptedModel{},
+			BeforeModelCallbacks: []llmagent.BeforeModelCallback{func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+				return &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{}}, FinishReason: genai.FinishReasonStop}, nil
+			}},
+		})
+
+		run := runAgentOnce(t, a)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		if diff := cmp.Diff([]eventError{{"MODEL_RETURNED_NO_CONTENT", noContentMessage}}, errorsOf(run.events)); diff != "" {
+			t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("on_model_error_recovery", func(t *testing.T) {
+		var afterCallbackSaw []string
+		a := newTestAgent(t, llmagent.Config{
+			Name:  "test_agent",
+			Model: &scriptedModel{}, // fails with errScriptExhausted
+			OnModelErrorCallbacks: []llmagent.OnModelErrorCallback{func(agent.Context, *model.LLMRequest, error) (*model.LLMResponse, error) {
+				return &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "  "}}}, FinishReason: genai.FinishReasonStop}, nil
+			}},
+			AfterModelCallbacks: []llmagent.AfterModelCallback{func(_ agent.Context, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+				afterCallbackSaw = append(afterCallbackSaw, resp.ErrorCode)
+				return nil, nil
+			}},
+		})
+
+		run := runAgentOnce(t, a)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		if diff := cmp.Diff([]string{""}, afterCallbackSaw); diff != "" {
+			t.Errorf("error codes seen by the after-model callback mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]eventError{{"MODEL_RETURNED_NO_CONTENT", noActionableContentMessage}}, errorsOf(run.events)); diff != "" {
+			t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("after_model_replacement_emptied", func(t *testing.T) {
+		a := newTestAgent(t, llmagent.Config{
+			Name:  "test_agent",
+			Model: &scriptedModel{responses: []*model.LLMResponse{textResponse("valid")}},
+			AfterModelCallbacks: []llmagent.AfterModelCallback{func(agent.Context, *model.LLMResponse, error) (*model.LLMResponse, error) {
+				return &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: ""}}}, FinishReason: genai.FinishReasonStop}, nil
+			}},
+		})
+
+		run := runAgentOnce(t, a)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		if diff := cmp.Diff([]eventError{{"MODEL_RETURNED_NO_CONTENT", noActionableContentMessage}}, errorsOf(run.events)); diff != "" {
+			t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestAfterModelCallback_PartialSetAndInheritance pins model.LLMResponse.PartialSet:
+// an explicit Partial: false is kept on an after-model replacement rather than
+// inherited from the response it replaces, and is never written to JSON.
+func TestAfterModelCallback_PartialSetAndInheritance(t *testing.T) {
+	// runReplacement runs an agent whose model answers original and whose
+	// after-model callback answers replacement, and returns the event that
+	// carries the replacement's text "final".
+	runReplacement := func(t *testing.T, original, replacement *model.LLMResponse) *session.Event {
+		t.Helper()
+		a := newTestAgent(t, llmagent.Config{
+			Name:  "test_agent",
+			Model: &scriptedModel{responses: []*model.LLMResponse{original}},
+			AfterModelCallbacks: []llmagent.AfterModelCallback{func(agent.Context, *model.LLMResponse, error) (*model.LLMResponse, error) {
+				return replacement, nil
+			}},
+		})
+		run := runAgentOnce(t, a)
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		for _, ev := range run.events {
+			if hasText([]*session.Event{ev}, "final") {
+				return ev
+			}
+		}
+		t.Fatalf("no event carries the replacement text; got %d events", len(run.events))
+		return nil
+	}
+	partialChunk := func() *model.LLMResponse {
+		return &model.LLMResponse{Content: genai.NewContentFromText("chunk", genai.RoleModel), Partial: true}
+	}
+	explicitFinal := func() *model.LLMResponse {
+		return &model.LLMResponse{Content: genai.NewContentFromText("final", genai.RoleModel), Partial: false, PartialSet: true}
+	}
+	type partialFields struct{ Partial, PartialSet bool }
+
+	t.Run("explicit_false_replacement_overrides_partial_original", func(t *testing.T) {
+		ev := runReplacement(t, partialChunk(), explicitFinal())
+		if diff := cmp.Diff(partialFields{false, true}, partialFields{ev.Partial, ev.PartialSet}); diff != "" {
+			t.Errorf("event partial fields mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("explicit_false_original_carries_to_unset_replacement", func(t *testing.T) {
+		original := &model.LLMResponse{Content: genai.NewContentFromText("chunk", genai.RoleModel), Partial: false, PartialSet: true}
+		ev := runReplacement(t, original, &model.LLMResponse{Content: genai.NewContentFromText("final", genai.RoleModel)})
+		if diff := cmp.Diff(partialFields{false, true}, partialFields{ev.Partial, ev.PartialSet}); diff != "" {
+			t.Errorf("event partial fields mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("json_omits_partial_set", func(t *testing.T) {
+		ev := runReplacement(t, partialChunk(), explicitFinal())
+		for name, v := range map[string]any{"LLMResponse": ev.LLMResponse, "Event": ev} {
+			b, err := json.Marshal(v)
+			if err != nil {
+				t.Fatalf("json.Marshal(%s) error = %v", name, err)
+			}
+			if strings.Contains(string(b), "partialSet") || strings.Contains(string(b), "PartialSet") {
+				t.Errorf("json.Marshal(%s) wrote the PartialSet field: %s", name, b)
+			}
+		}
+	})
+}
+
 func TestToolCallback(t *testing.T) {
 	type Args struct {
 		Seed int `json:"seed"`
@@ -829,6 +981,7 @@ func TestInstructionProvider(t *testing.T) {
 							},
 							Role: genai.RoleUser,
 						},
+						Labels: map[string]string{"adk_agent_name": "test_agent"},
 					},
 				},
 			},
@@ -861,6 +1014,7 @@ func TestInstructionProvider(t *testing.T) {
 							},
 							Role: genai.RoleUser,
 						},
+						Labels: map[string]string{"adk_agent_name": "test_agent"},
 					},
 				},
 			},
@@ -893,6 +1047,7 @@ func TestInstructionProvider(t *testing.T) {
 							},
 							Role: genai.RoleUser,
 						},
+						Labels: map[string]string{"adk_agent_name": "test_agent"},
 					},
 				},
 			},
@@ -927,6 +1082,7 @@ func TestInstructionProvider(t *testing.T) {
 							},
 							Role: genai.RoleUser,
 						},
+						Labels: map[string]string{"adk_agent_name": "test_agent"},
 					},
 				},
 			},
