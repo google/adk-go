@@ -490,11 +490,38 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 //
 // The record is restored rather than cleared, because an ordinary event should
 // carry none and a summary carries the real one. Both cases are then the same
-// rule: whatever the framework decided, not whatever came back.
+// rule: whatever the framework decided, not whatever came back. The same goes
+// for AgentState and EndOfAgent: a planted checkpoint would tell a resumed
+// workflow to skip a sub-agent such as an approval step.
 //
 // The post-invocation summary path does not use this. A plugin is invited to
 // rewrite a summary there, and SanitizeSummary re-checks the result.
-func fromPlugin(original, modified *session.Event, record *session.EventCompaction) *session.Event {
+// frameworkActions holds the fields of an event's actions that only the
+// framework writes, captured before a plugin runs so fromPlugin can put them
+// back.
+type frameworkActions struct {
+	compaction *session.EventCompaction
+	agentState map[string]any
+	endOfAgent bool
+}
+
+// frameworkActionsOf captures ev's framework-owned actions. AgentState is
+// copied so a plugin that edits the map in place does not edit the capture.
+func frameworkActionsOf(ev *session.Event) frameworkActions {
+	return frameworkActions{
+		compaction: ev.Actions.Compaction,
+		agentState: maps.Clone(ev.Actions.AgentState),
+		endOfAgent: ev.Actions.EndOfAgent,
+	}
+}
+
+func (f frameworkActions) restore(ev *session.Event) {
+	ev.Actions.Compaction = f.compaction
+	ev.Actions.AgentState = f.agentState
+	ev.Actions.EndOfAgent = f.endOfAgent
+}
+
+func fromPlugin(original, modified *session.Event, record frameworkActions) *session.Event {
 	// The record is restored on whatever comes back, including the original,
 	// before any early return.
 	//
@@ -505,10 +532,10 @@ func fromPlugin(original, modified *session.Event, record *session.EventCompacti
 	// plugin had planted. The framework decides what a compaction record says,
 	// not a plugin.
 	if modified == nil || modified == original {
-		original.Actions.Compaction = record
+		record.restore(original)
 		return original
 	}
-	modified.Actions.Compaction = record
+	record.restore(modified)
 	return modified
 }
 
@@ -840,7 +867,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 				// event in place has already overwritten this field by the time
 				// the callback returns, so reading it afterwards reads the
 				// plugin's value rather than the framework's.
-				record := event.Actions.Compaction
+				record := frameworkActionsOf(event)
 				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
 				if err != nil {
 					if !yield(nil, err) {
@@ -891,7 +918,7 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	event.Author = ctx.Agent().Name()
 	event.Content = content
 
-	record := event.Actions.Compaction
+	record := frameworkActionsOf(event)
 	modifiedEvent, err := r.pluginManager.RunOnEventCallback(ctx, event)
 	if err != nil {
 		return nil, err
@@ -1108,7 +1135,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				// Captured before the plugin runs: one that mutates the event in
 				// place has already overwritten this field by the time the callback
 				// returns.
-				record := event.Actions.Compaction
+				record := frameworkActionsOf(event)
 				modifiedEvent, pluginErr := r.pluginManager.RunOnEventCallback(iCtx, event)
 				if pluginErr != nil {
 					if !yield(nil, pluginErr) {
