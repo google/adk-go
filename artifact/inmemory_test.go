@@ -15,6 +15,8 @@
 package artifact_test
 
 import (
+	"errors"
+	"io/fs"
 	"net/url"
 	"testing"
 	"time"
@@ -345,5 +347,155 @@ func TestInMemoryService_ReviewRepro(t *testing.T) {
 	}
 	if got := resp.Part.MediaResolution.Level; got != genai.PartMediaResolutionLevelMediaResolutionLow {
 		t.Errorf("MediaResolution.Level = %v, want %v", got, genai.PartMediaResolutionLevelMediaResolutionLow)
+	}
+}
+
+func TestInMemoryService_NegativeVersionNotFound(t *testing.T) {
+	srv := artifact.InMemoryService()
+	for _, text := range []string{"v1", "v2"} {
+		if _, err := srv.Save(t.Context(), &artifact.SaveRequest{
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "f.txt", Part: genai.NewPartFromText(text),
+		}); err != nil {
+			t.Fatalf("Save() failed: %v", err)
+		}
+	}
+
+	for _, version := range []int64{-1, -2} {
+		loaded, err := srv.Load(t.Context(), &artifact.LoadRequest{
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "f.txt", Version: version,
+		})
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Load(Version: %d) = (%v, %v), want error %v", version, loaded, err, fs.ErrNotExist)
+		}
+		got, err := srv.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "f.txt", Version: version,
+		})
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("GetArtifactVersion(Version: %d) = (%v, %v), want error %v", version, got, err, fs.ErrNotExist)
+		}
+	}
+}
+
+func TestInMemoryService_VersionsAscendingOrder(t *testing.T) {
+	srv := artifact.InMemoryService()
+	for range 4 {
+		if _, err := srv.Save(t.Context(), &artifact.SaveRequest{
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "f.txt", Part: genai.NewPartFromText("data"),
+		}); err != nil {
+			t.Fatalf("Save() failed: %v", err)
+		}
+	}
+
+	resp, err := srv.Versions(t.Context(), &artifact.VersionsRequest{
+		AppName: "app", UserID: "u", SessionID: "s", FileName: "f.txt",
+	})
+	if err != nil {
+		t.Fatalf("Versions() failed: %v", err)
+	}
+	if diff := cmp.Diff([]int64{1, 2, 3, 4}, resp.Versions); diff != "" {
+		t.Errorf("Versions() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestInMemoryService_SaveLoadEmptyText(t *testing.T) {
+	for _, fileName := range []string{"empty.txt", "user:empty.txt"} {
+		t.Run(fileName, func(t *testing.T) {
+			srv := artifact.InMemoryService()
+			saved, err := srv.Save(t.Context(), &artifact.SaveRequest{
+				AppName: "app", UserID: "u", SessionID: "s", FileName: fileName, Part: genai.NewPartFromText(""),
+			})
+			if err != nil {
+				t.Fatalf("Save() failed: %v", err)
+			}
+			if saved.Version != 1 {
+				t.Errorf("Save() version = %d, want 1", saved.Version)
+			}
+
+			for _, version := range []int64{0, 1} {
+				loaded, err := srv.Load(t.Context(), &artifact.LoadRequest{
+					AppName: "app", UserID: "u", SessionID: "s", FileName: fileName, Version: version,
+				})
+				if err != nil {
+					t.Fatalf("Load(Version: %d) failed: %v", version, err)
+				}
+				if diff := cmp.Diff(&genai.Part{Text: ""}, loaded.Part); diff != "" {
+					t.Errorf("Load(Version: %d) part mismatch (-want +got):\n%s", version, diff)
+				}
+			}
+
+			got, err := srv.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{
+				AppName: "app", UserID: "u", SessionID: "s", FileName: fileName, Version: 1,
+			})
+			if err != nil {
+				t.Fatalf("GetArtifactVersion() failed: %v", err)
+			}
+			if got.ArtifactVersion.MimeType != "text/plain" {
+				t.Errorf("GetArtifactVersion().MimeType = %q, want %q", got.ArtifactVersion.MimeType, "text/plain")
+			}
+		})
+	}
+}
+
+func TestInMemoryService_RewindTombstone(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		marker *genai.Part
+	}{
+		{name: "NewRewindTombstone", marker: artifact.NewRewindTombstone()},
+		{name: "empty non-nil data", marker: genai.NewPartFromBytes([]byte{}, "application/octet-stream")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := artifact.InMemoryService()
+			for _, part := range []*genai.Part{genai.NewPartFromText("v1"), tc.marker} {
+				if _, err := srv.Save(t.Context(), &artifact.SaveRequest{
+					AppName: "app", UserID: "u", SessionID: "s", FileName: "f.txt", Part: part,
+				}); err != nil {
+					t.Fatalf("Save() failed: %v", err)
+				}
+			}
+
+			for _, version := range []int64{0, 2} {
+				loaded, err := srv.Load(t.Context(), &artifact.LoadRequest{
+					AppName: "app", UserID: "u", SessionID: "s", FileName: "f.txt", Version: version,
+				})
+				if !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("Load(Version: %d) = (%v, %v), want error %v", version, loaded, err, fs.ErrNotExist)
+				}
+			}
+
+			loaded, err := srv.Load(t.Context(), &artifact.LoadRequest{
+				AppName: "app", UserID: "u", SessionID: "s", FileName: "f.txt", Version: 1,
+			})
+			if err != nil {
+				t.Fatalf("Load(Version: 1) failed: %v", err)
+			}
+			if diff := cmp.Diff(genai.NewPartFromText("v1"), loaded.Part); diff != "" {
+				t.Errorf("Load(Version: 1) part mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A reference whose target version is the rewind marker loads as not found,
+// as loading the marker directly does.
+func TestInMemoryService_ReferenceToRewindTombstone(t *testing.T) {
+	srv := artifact.InMemoryService()
+	for _, req := range []*artifact.SaveRequest{
+		{AppName: "app", UserID: "u", SessionID: "s", FileName: "f.txt", Part: genai.NewPartFromText("v1")},
+		{AppName: "app", UserID: "u", SessionID: "s", FileName: "f.txt", Part: artifact.NewRewindTombstone()},
+		{AppName: "app", UserID: "u", SessionID: "s", FileName: "alias.txt", Part: &genai.Part{FileData: &genai.FileData{
+			FileURI: "artifact://apps/app/users/u/sessions/s/artifacts/f.txt/versions/2",
+		}}},
+	} {
+		if _, err := srv.Save(t.Context(), req); err != nil {
+			t.Fatalf("Save(%q) failed: %v", req.FileName, err)
+		}
+	}
+
+	loaded, err := srv.Load(t.Context(), &artifact.LoadRequest{
+		AppName: "app", UserID: "u", SessionID: "s", FileName: "alias.txt",
+	})
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Load(alias.txt) = (%v, %v), want error %v", loaded, err, fs.ErrNotExist)
 	}
 }

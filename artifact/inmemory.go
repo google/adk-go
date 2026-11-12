@@ -49,7 +49,9 @@ type inMemoryService struct {
 	artifacts omap.Map[string, *artifactEntry]
 }
 
-// InMemoryService returns a new in-memory artifact service.
+// InMemoryService returns a new in-memory artifact service. Its Versions
+// returns version numbers in ascending order. Load reports a version that
+// holds the rewind marker (see [IsRewindTombstone]) as not found.
 func InMemoryService() Service {
 	return &inMemoryService{}
 }
@@ -273,9 +275,10 @@ func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, v
 			entry *artifactEntry
 			ok    bool
 		)
-		if version > 0 {
+		switch {
+		case version > 0:
 			entry, ok = s.get(appName, userID, lookupSession, fileName, version)
-		} else {
+		case version == 0:
 			// pick the latest version
 			_, entry, ok = s.find(appName, userID, lookupSession, fileName)
 		}
@@ -284,6 +287,11 @@ func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, v
 		}
 
 		if !isArtifactRef(entry.part) {
+			// A version holding the rewind marker loads as absent, as in
+			// adk-python's in-memory service; earlier versions still load.
+			if IsRewindTombstone(entry.part) {
+				return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
+			}
 			return entry, nil
 		}
 
@@ -350,7 +358,8 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 	return &ListResponse{FileNames: filenames}, nil
 }
 
-// Versions implements [artifact.Service] and returns an error if no versions are found.
+// Versions implements [artifact.Service]. It returns the versions in ascending
+// order, and an error if no versions are found.
 func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error) {
 	err := req.Validate()
 	if err != nil {
@@ -374,6 +383,8 @@ func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*
 	if len(versions) == 0 {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
+	// Keys sort newest first, so the scan yields descending versions.
+	slices.Reverse(versions)
 	return &VersionsResponse{Versions: versions}, nil
 }
 
@@ -394,9 +405,10 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 
 	var entry *artifactEntry
 	var ok bool
-	if version > 0 {
+	switch {
+	case version > 0:
 		entry, ok = s.get(appName, userID, sessionID, fileName, version)
-	} else {
+	case version == 0:
 		version, entry, ok = s.find(appName, userID, sessionID, fileName)
 	}
 
@@ -412,13 +424,13 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 		canonicalURI = fmt.Sprintf("memory://apps/%s/users/%s/artifacts/%s/versions/%d", escapedAppName, escapedUserID, escapedFileName, version)
 	}
 	// Report the media type the same way adk-python's in-memory service does:
-	// inline data carries its own, text is text/plain, and a reference has no
-	// media type until it is loaded.
+	// inline data carries its own, text (empty text included) is text/plain,
+	// and a reference has no media type until it is loaded.
 	var mimeType string
 	switch {
 	case entry.part.InlineData != nil:
 		mimeType = entry.part.InlineData.MIMEType
-	case entry.part.Text != "":
+	case !isArtifactRef(entry.part):
 		mimeType = "text/plain"
 	}
 

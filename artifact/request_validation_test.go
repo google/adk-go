@@ -463,3 +463,95 @@ func TestValidateRequiredStrings(t *testing.T) {
 		})
 	}
 }
+
+// TestListRequest_Validate_EmptySessionID checks that an empty SessionID asks
+// for user-scoped names only, while a request that also lacks another field
+// still names SessionID among the missing fields.
+func TestListRequest_Validate_EmptySessionID(t *testing.T) {
+	testCases := []ValidatorTestCase{
+		{
+			name:    "empty SessionID lists user-scoped names",
+			req:     &ListRequest{AppName: "MyApp", UserID: "user-123"},
+			wantErr: false,
+		},
+		{
+			name:       "empty SessionID and missing AppName",
+			req:        &ListRequest{UserID: "user-123"},
+			wantErr:    true,
+			wantErrMsg: "invalid list request: missing required fields: AppName, SessionID",
+		},
+	}
+	executeValidatorTestCases(t, "ListRequest", testCases)
+}
+
+// TestSaveRequest_Validate_EmptyTextAndNonContentParts checks that a part
+// whose every field is zero is accepted as empty text, and that a part with no
+// text and no inline data is still refused when any other field is set.
+func TestSaveRequest_Validate_EmptyTextAndNonContentParts(t *testing.T) {
+	const wantErrMsg = "invalid save request: Part.InlineData or Part.Text has to be set"
+	saveRequest := func(part *genai.Part) *SaveRequest {
+		return &SaveRequest{AppName: "MyApp", UserID: "user-123", SessionID: "sess-abc", FileName: "file.txt", Part: part}
+	}
+	testCases := []ValidatorTestCase{
+		{
+			name:    "empty text",
+			req:     saveRequest(genai.NewPartFromText("")),
+			wantErr: false,
+		},
+		{
+			name:       "function response",
+			req:        saveRequest(&genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "fn"}}),
+			wantErr:    true,
+			wantErrMsg: wantErrMsg,
+		},
+		{
+			name:       "executable code",
+			req:        saveRequest(&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "x"}}),
+			wantErr:    true,
+			wantErrMsg: wantErrMsg,
+		},
+		{
+			name:       "code execution result",
+			req:        saveRequest(&genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Output: "x"}}),
+			wantErr:    true,
+			wantErrMsg: wantErrMsg,
+		},
+		{
+			name:       "thought signature",
+			req:        saveRequest(&genai.Part{ThoughtSignature: []byte("sig")}),
+			wantErr:    true,
+			wantErrMsg: wantErrMsg,
+		},
+		{
+			name:       "tool call",
+			req:        saveRequest(&genai.Part{ToolCall: &genai.ToolCall{ID: "1"}}),
+			wantErr:    true,
+			wantErrMsg: wantErrMsg,
+		},
+		{
+			name:       "tool response",
+			req:        saveRequest(&genai.Part{ToolResponse: &genai.ToolResponse{ID: "1"}}),
+			wantErr:    true,
+			wantErrMsg: wantErrMsg,
+		},
+		{
+			name:       "thought flag",
+			req:        saveRequest(&genai.Part{Thought: true}),
+			wantErr:    true,
+			wantErrMsg: wantErrMsg,
+		},
+		{
+			name:       "audio transcription",
+			req:        saveRequest(&genai.Part{AudioTranscription: &genai.Transcription{Text: "hello"}}),
+			wantErr:    true,
+			wantErrMsg: wantErrMsg,
+		},
+		{
+			name:       "non-reference file data",
+			req:        saveRequest(genai.NewPartFromURI("gs://bucket/file.txt", "text/plain")),
+			wantErr:    true,
+			wantErrMsg: wantErrMsg,
+		},
+	}
+	executeValidatorTestCases(t, "SaveRequest", testCases)
+}

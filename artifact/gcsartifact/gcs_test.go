@@ -850,3 +850,19 @@ var (
 	_ gcsObjectIterator = (*fakeObjectIterator)(nil)
 	_ gcsWriter         = (*fakeWriter)(nil)
 )
+
+// TestGCSService_SaveEmptyText checks that GCS stores a part whose every field
+// is zero, which SaveRequest.Validate accepts as empty text.
+func TestGCSService_SaveEmptyText(t *testing.T) {
+	svc := newGCSServiceForTesting("emptytext")
+	resp, err := svc.Save(t.Context(), &artifact.SaveRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "empty.txt",
+		Part: genai.NewPartFromText(""),
+	})
+	if err != nil {
+		t.Fatalf("Save() failed: %v", err)
+	}
+	if resp.Version != 1 {
+		t.Errorf("Save() version = %d, want 1", resp.Version)
+	}
+}

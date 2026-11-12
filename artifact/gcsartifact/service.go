@@ -381,10 +381,13 @@ func (s *gcsService) List(ctx context.Context, req *artifact.ListRequest) (*arti
 	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
 	filenamesSet := map[string]bool{}
 
-	// Fetch filenames for the session.
-	err = s.fetchFilenamesFromPrefix(ctx, buildSessionPrefix(appName, userID, sessionID), filenamesSet)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch session filenames: %w", err)
+	// An empty session asks for user-scoped names only. Its prefix would be
+	// "app/user//", which also matches the blobs of a user ID ending in "/".
+	if sessionID != "" {
+		err = s.fetchFilenamesFromPrefix(ctx, buildSessionPrefix(appName, userID, sessionID), filenamesSet)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch session filenames: %w", err)
+		}
 	}
 
 	// Fetch filenames for the user.

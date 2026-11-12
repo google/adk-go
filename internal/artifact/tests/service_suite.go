@@ -63,6 +63,13 @@ func TestArtifactService(t *testing.T, name string, factory func(t *testing.T) (
 		}
 		testArtifactService_ListSessionNamedUser(t, srv)
 	})
+	t.Run(fmt.Sprintf("Test%sArtifactService_ListEmptySessionID", name), func(t *testing.T) {
+		srv, err := factory(t)
+		if err != nil {
+			t.Fatalf("Failed to set up service: %v", err)
+		}
+		testArtifactService_ListEmptySessionID(t, srv)
+	})
 	t.Run(fmt.Sprintf("Test%sArtifactService_GetArtifactVersion", name), func(t *testing.T) {
 		ctx := t.Context()
 		// Create the service using the factory for this sub-test.
@@ -125,6 +132,38 @@ func testArtifactService_ListSessionNamedUser(t *testing.T, srv artifact.Service
 				t.Error("List must return only the session's own and user-scoped filenames, sorted and without duplicates")
 			}
 		})
+	}
+}
+
+// testArtifactService_ListEmptySessionID checks that a List request without a
+// session returns only the user's user-scoped names, from every session.
+func testArtifactService_ListEmptySessionID(t *testing.T, srv artifact.Service) {
+	for _, file := range []struct {
+		userID    string
+		sessionID string
+		fileName  string
+	}{
+		{"u", "s1", "session.txt"},
+		{"u", "s1", "user:b.txt"},
+		{"u", "s2", "user:a.txt"},
+		// A path-based store that joins an empty session into "app/u//" would
+		// match this user's session files.
+		{"u/", "s1", "other-user.txt"},
+	} {
+		if _, err := srv.Save(t.Context(), &artifact.SaveRequest{
+			AppName: "app", UserID: file.userID, SessionID: file.sessionID,
+			FileName: file.fileName, Part: genai.NewPartFromText("fixture"),
+		}); err != nil {
+			t.Fatalf("Save failed: %v", err)
+		}
+	}
+
+	resp, err := srv.List(t.Context(), &artifact.ListRequest{AppName: "app", UserID: "u", SessionID: ""})
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if diff := cmp.Diff([]string{"user:a.txt", "user:b.txt"}, resp.FileNames); diff != "" {
+		t.Errorf("List(SessionID: \"\") mismatch (-want +got):\n%s", diff)
 	}
 }
 
