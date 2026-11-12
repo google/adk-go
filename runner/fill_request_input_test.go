@@ -30,6 +30,12 @@ func TestFillRequestInputResponseID(t *testing.T) {
 		ev.LongRunningToolIDs = []string{id}
 		return ev
 	}
+	confirm := func(id string) *session.Event {
+		ev := session.NewEvent(t.Context(), "inv")
+		ev.Content = &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: id, Name: "adk_request_confirmation"}}}}
+		ev.LongRunningToolIDs = []string{id}
+		return ev
+	}
 	answer := func(id string) *session.Event {
 		ev := session.NewEvent(t.Context(), "inv")
 		ev.Content = &genai.Content{Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: id, Name: workflow.WorkflowInputFunctionCallName}}}}
@@ -51,6 +57,9 @@ func TestFillRequestInputResponseID(t *testing.T) {
 		{name: "no open request", events: nil, msg: resp("", workflow.WorkflowInputFunctionCallName)},
 		{name: "several open requests", events: []*session.Event{call("a"), call("b")}, msg: resp("", workflow.WorkflowInputFunctionCallName)},
 		{name: "existing ID kept", events: []*session.Event{call("a")}, msg: resp("x", workflow.WorkflowInputFunctionCallName), wantID: "x"},
+		{name: "only a confirmation is open", events: []*session.Event{confirm("c")}, msg: resp("", workflow.WorkflowInputFunctionCallName)},
+		{name: "confirmation and request open", events: []*session.Event{confirm("c"), call("a")}, msg: resp("", workflow.WorkflowInputFunctionCallName), wantID: "a", wantNew: true},
+		{name: "same message answers the open call", events: []*session.Event{call("a")}, msg: &genai.Content{Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "a", Name: workflow.WorkflowInputFunctionCallName}}, {FunctionResponse: &genai.FunctionResponse{Name: workflow.WorkflowInputFunctionCallName}}}}, wantID: "a"},
 		{name: "other function name", events: []*session.Event{call("a")}, msg: resp("", "other")},
 		{name: "text message", events: []*session.Event{call("a")}, msg: genai.NewContentFromText("hi", genai.RoleUser)},
 	}

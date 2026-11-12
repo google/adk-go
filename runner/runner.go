@@ -1386,39 +1386,61 @@ func (r *Runner) withPluginManager(ctx context.Context) context.Context {
 	return plugininternal.ToContext(ctx, r.pluginManager)
 }
 
-// fillRequestInputResponseID returns msg with the call ID set on an
-// adk_request_input response that has none, provided exactly one request is
-// still open in the session. Otherwise it returns msg unchanged. The message
-// passed in is never modified.
+// fillRequestInputResponseID returns msg with the call ID set on the first
+// adk_request_input response that has none, provided exactly one
+// adk_request_input call is still open in the session and msg does not already
+// answer it. Otherwise it returns msg unchanged. The message passed in is never
+// modified.
 func fillRequestInputResponseID(msg *genai.Content, sess session.Session) *genai.Content {
-	var missing bool
-	for _, fr := range utils.FunctionResponses(msg) {
-		if fr.ID == "" && fr.Name == workflow.WorkflowInputFunctionCallName {
-			missing = true
+	target := -1
+	answered := map[string]struct{}{}
+	if msg != nil {
+		for i, p := range msg.Parts {
+			fr := (*genai.FunctionResponse)(nil)
+			if p != nil {
+				fr = p.FunctionResponse
+			}
+			if fr == nil {
+				continue
+			}
+			if fr.ID != "" {
+				answered[fr.ID] = struct{}{}
+			} else if fr.Name == workflow.WorkflowInputFunctionCallName && target < 0 {
+				target = i
+			}
 		}
 	}
-	if !missing {
+	if target < 0 || sess == nil {
 		return msg
 	}
 	open := openLongRunningCallIDs(sess)
-	if len(open) != 1 {
+	candidates := map[string]struct{}{}
+	events := sess.Events()
+	for i := 0; i < events.Len(); i++ {
+		for _, fc := range utils.FunctionCalls(events.At(i).Content) {
+			if fc == nil || fc.Name != workflow.WorkflowInputFunctionCallName {
+				continue
+			}
+			_, isOpen := open[fc.ID]
+			_, done := answered[fc.ID]
+			if isOpen && !done {
+				candidates[fc.ID] = struct{}{}
+			}
+		}
+	}
+	if len(candidates) != 1 {
 		return msg
 	}
 	var id string
-	for k := range open {
+	for k := range candidates {
 		id = k
 	}
 	out := *msg
-	out.Parts = make([]*genai.Part, len(msg.Parts))
-	for i, p := range msg.Parts {
-		out.Parts[i] = p
-		if p != nil && p.FunctionResponse != nil && p.FunctionResponse.ID == "" && p.FunctionResponse.Name == workflow.WorkflowInputFunctionCallName {
-			fr := *p.FunctionResponse
-			fr.ID = id
-			cp := *p
-			cp.FunctionResponse = &fr
-			out.Parts[i] = &cp
-		}
-	}
+	out.Parts = append([]*genai.Part(nil), msg.Parts...)
+	fr := *msg.Parts[target].FunctionResponse
+	fr.ID = id
+	cp := *msg.Parts[target]
+	cp.FunctionResponse = &fr
+	out.Parts[target] = &cp
 	return &out
 }
