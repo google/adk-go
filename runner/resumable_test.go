@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
@@ -213,17 +214,18 @@ func TestRun_NotResumableKeepsRunning(t *testing.T) {
 
 // TestRun_ResumableParallelInsideLoop checks that a parallel agent on a later
 // pass of a loop waits for the sub-agent that paused on that pass, even though
-// the sub-agent finished on an earlier pass.
+// the sub-agent finished on an earlier pass, and holds the agent after the
+// loop until then.
 func TestRun_ResumableParallelInsideLoop(t *testing.T) {
 	a, aModel := longRunningAsker(t, "a", text("a done"), approveCall("a2"), text("waiting"), text("a approved"))
-	var bRuns atomic.Int32
-	root := mustLoop(t, "root", 2, mustParallel(t, "par", a, customAgent(t, "b", &bRuns, nil)))
+	var bRuns, afterRuns atomic.Int32
+	root := mustSequential(t, "root", mustLoop(t, "loop", 2, mustParallel(t, "par", a, customAgent(t, "b", &bRuns, nil))), customAgent(t, "after", &afterRuns, nil))
 
 	turns := runTurns(t, root, true, resumeContent("a2", "approve", "ok"))
 
 	want := []map[string]int{
 		{"a": 4, "b": 2}, // pass 1: "a done"; pass 2: call, pending response, "waiting"
-		{"a": 1},
+		{"a": 1, "after": 1},
 	}
 	if diff := cmp.Diff(want, turns); diff != "" {
 		t.Errorf("events by author per turn mismatch (-want +got):\n%s", diff)
@@ -272,11 +274,30 @@ func TestRun_ResumableLoopStopsOnEscalation(t *testing.T) {
 	var runs atomic.Int32
 	escalator := customAgent(t, "escalator", &runs, func(_ agent.InvocationContext, ev *session.Event) { ev.Actions.Escalate = true })
 	root := mustLoop(t, "root", 3, escalator)
-
-	runTurns(t, root, true)
+	service := session.InMemoryService()
+	r, err := runner.New(runner.Config{AppName: "repro", Agent: root, SessionService: service, AutoCreateSession: true, Resumable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("start", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	if got := runs.Load(); got != 1 {
 		t.Errorf("escalator ran %d times, want 1", got)
+	}
+	got, err := service.Get(t.Context(), &session.GetRequest{AppName: "repro", UserID: "u", SessionID: "s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := false
+	for ev := range got.Session.Events().All() {
+		ended = ended || ev.Author == "root" && ev.Actions.EndOfAgent
+	}
+	if !ended {
+		t.Error("the escalated loop recorded no end-of-agent event, so a later turn would resume it")
 	}
 }
 
@@ -383,14 +404,172 @@ func TestRun_ResumableAgentAnswersItsOwnCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := mustLoop(t, "root", 2, coord)
+	var afterRuns atomic.Int32
+	root := mustSequential(t, "root", mustLoop(t, "loop", 2, coord), customAgent(t, "after", &afterRuns, nil))
 
-	runTurns(t, root, true, resumeContent("lr1", "approve", "ok"))
+	turns := runTurns(t, root, true, resumeContent("lr1", "approve", "ok"))
+
+	if turns[0]["after"] != 0 || turns[1]["after"] != 1 {
+		t.Errorf("after ran %d times before the answer and %d times after it, want 0 and 1", turns[0]["after"], turns[1]["after"])
+	}
+	if got := helperRuns.Load(); got != 1 {
+		t.Errorf("helper ran %d times, want 1 (only on the first pass)", got)
+	}
+	if n := len(coordModel.Requests); n != 4 || !hasFunctionResponse(coordModel.Requests[3].Contents, "lr1") {
+		t.Errorf("coord did not get the answer to its own call, requests = %d", n)
+	}
+}
+
+// TestRun_ResumableRootLLMTransfersIntoWorkflow checks that a workflow agent
+// reached by a transfer from a root LLM agent stops on a long-running call and
+// continues from the caller once it is answered. The root LLM agent runs
+// through the node runtime, so this covers the store on that path too.
+func TestRun_ResumableRootLLMTransfersIntoWorkflow(t *testing.T) {
+	tests := []struct {
+		name     string
+		newChild func(t *testing.T, asker, after agent.Agent) agent.Agent
+		want     []map[string]int
+	}{
+		{
+			name:     "sequential",
+			newChild: func(t *testing.T, asker, after agent.Agent) agent.Agent { return mustSequential(t, "wf", asker, after) },
+			want:     []map[string]int{{"coord": 2, "asker": 3}, {"asker": 1, "after": 1}},
+		},
+		{
+			name:     "loop",
+			newChild: func(t *testing.T, asker, after agent.Agent) agent.Agent { return mustLoop(t, "wf", 1, asker, after) },
+			want:     []map[string]int{{"coord": 2, "asker": 3}, {"asker": 1, "after": 1}},
+		},
+		{
+			// The sibling finishes on the first turn and does not run again.
+			name:     "parallel",
+			newChild: func(t *testing.T, asker, after agent.Agent) agent.Agent { return mustParallel(t, "wf", asker, after) },
+			want:     []map[string]int{{"coord": 2, "asker": 3, "after": 1}, {"asker": 1}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			asker, askerModel := longRunningAsker(t, "asker", approveCall("lr1"), text("waiting"), text("approved"))
+			var afterRuns atomic.Int32
+			child := tc.newChild(t, asker, customAgent(t, "after", &afterRuns, nil))
+			coordModel := &testutil.MockModel{Responses: []*genai.Content{
+				genai.NewContentFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": "wf"}, genai.RoleModel),
+			}}
+			coord, err := llmagent.New(llmagent.Config{Name: "coord", Model: coordModel, SubAgents: []agent.Agent{child}})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			turns := runTurns(t, coord, true, resumeContent("lr1", "approve", "ok"))
+
+			if diff := cmp.Diff(tc.want, turns); diff != "" {
+				t.Errorf("events by author per turn mismatch (-want +got):\n%s", diff)
+			}
+			if n := len(coordModel.Requests); n != 1 {
+				t.Errorf("coord called its model %d times, want 1", n)
+			}
+			if n := len(askerModel.Requests); n != 3 || !hasFunctionResponse(askerModel.Requests[2].Contents, "lr1") {
+				t.Errorf("asker did not get the answer on the resume turn, requests = %d", n)
+			}
+		})
+	}
+}
+
+// TestRun_ResumableParallelAgentAnswersItsOwnCall is
+// TestRun_ResumableAgentAnswersItsOwnCall on a parallel branch. The answer is
+// written on the root's empty branch, so it has to count as answering the
+// call made on the agent's own branch; otherwise the earlier transfer target
+// runs again and the agent stays paused.
+func TestRun_ResumableParallelAgentAnswersItsOwnCall(t *testing.T) {
+	var helperRuns, besideRuns atomic.Int32
+	helper := customAgent(t, "helper", &helperRuns, nil)
+	approve, err := functiontool.New(functiontool.Config{Name: "approve", Description: "approve", IsLongRunning: true},
+		func(agent.Context, struct{}) (map[string]any, error) { return map[string]any{"status": "pending"}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordModel := &testutil.MockModel{Responses: []*genai.Content{
+		genai.NewContentFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": "helper"}, genai.RoleModel),
+		approveCall("lr1"), text("waiting"), text("approved"),
+	}}
+	coord, err := llmagent.New(llmagent.Config{Name: "coord", Model: coordModel, Tools: []tool.Tool{approve}, SubAgents: []agent.Agent{helper}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var afterRuns atomic.Int32
+	root := mustParallel(t, "root",
+		mustSequential(t, "seq", mustLoop(t, "loop", 2, coord), customAgent(t, "after", &afterRuns, nil)),
+		customAgent(t, "beside", &besideRuns, nil))
+
+	turns := runTurns(t, root, true, resumeContent("lr1", "approve", "ok"))
+
+	if turns[0]["after"] != 0 || turns[1]["after"] != 1 {
+		t.Errorf("after ran %d times before the answer and %d times after it, want 0 and 1", turns[0]["after"], turns[1]["after"])
+	}
+	if got := besideRuns.Load(); got != 1 {
+		t.Errorf("beside ran %d times, want 1", got)
+	}
 
 	if got := helperRuns.Load(); got != 1 {
 		t.Errorf("helper ran %d times, want 1 (only on the first pass)", got)
 	}
 	if n := len(coordModel.Requests); n != 4 || !hasFunctionResponse(coordModel.Requests[3].Contents, "lr1") {
 		t.Errorf("coord did not get the answer to its own call, requests = %d", n)
+	}
+}
+
+// TestRun_ResumableWaitsForEveryOutstandingCall checks that an agent that made
+// two long-running calls in one turn stays paused, and keeps the sequence
+// paused, until both are answered, whichever is answered first.
+func TestRun_ResumableWaitsForEveryOutstandingCall(t *testing.T) {
+	for _, order := range [][]string{{"lr2", "lr1"}, {"lr1", "lr2"}} {
+		t.Run(order[0]+"_first", func(t *testing.T) {
+			asker, askerModel := longRunningAsker(t, "asker", approveCall("lr1"), approveCall("lr2"), text("waiting"), text("approved"))
+			var afterRuns atomic.Int32
+			root := mustSequential(t, "root", asker, customAgent(t, "after", &afterRuns, nil))
+
+			turns := runTurns(t, root, true, resumeContent(order[0], "approve", "ok"), resumeContent(order[1], "approve", "ok"))
+
+			want := []map[string]int{
+				{"asker": 5}, // two calls, two pending responses, "waiting"
+				{},
+				{"asker": 1, "after": 1},
+			}
+			if diff := cmp.Diff(want, turns); diff != "" {
+				t.Errorf("events by author per turn mismatch (-want +got):\n%s", diff)
+			}
+			if n := len(askerModel.Requests); n != 4 {
+				t.Errorf("asker called its model %d times, want 4 (not before both answers)", n)
+			}
+		})
+	}
+}
+
+// TestRun_ResumableFinishedAgentWithCallbackContentIsNotRerun checks that a
+// workflow agent that finished, and whose after-agent callback then added
+// content, is not run again when a parallel sibling's call is answered.
+func TestRun_ResumableFinishedAgentWithCallbackContentIsNotRerun(t *testing.T) {
+	var workRuns atomic.Int32
+	work, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{
+		Name:      "work",
+		SubAgents: []agent.Agent{customAgent(t, "step", &workRuns, nil)},
+		AfterAgentCallbacks: []agent.AfterAgentCallback{func(agent.Context) (*genai.Content, error) {
+			return genai.NewContentFromText("work summary", genai.RoleModel), nil
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	asker, _ := longRunningAsker(t, "asker", approveCall("lr1"), text("waiting"), text("approved"))
+	var afterRuns atomic.Int32
+	root := mustSequential(t, "root", mustParallel(t, "par", asker, work), customAgent(t, "after", &afterRuns, nil))
+
+	turns := runTurns(t, root, true, resumeContent("lr1", "approve", "ok"))
+
+	if turns[0]["after"] != 0 || turns[1]["after"] != 1 {
+		t.Errorf("after ran %d times before the answer and %d times after it, want 0 and 1", turns[0]["after"], turns[1]["after"])
+	}
+	if got := workRuns.Load(); got != 1 {
+		t.Errorf("work's step ran %d times, want 1", got)
 	}
 }
