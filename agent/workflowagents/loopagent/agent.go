@@ -103,7 +103,7 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 			shouldExit := false
 			for _, subAgent := range subAgents {
-				for event, err := range subAgent.Run(passCtx) {
+				for event, err := range subAgent.Run(passErrRelay(passCtx, subAgent)) {
 					// A failed sub-agent ends the loop, as in adk-python. Retrying
 					// it would repeat the same failure, forever when there is no
 					// MaxIterations.
@@ -130,4 +130,13 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}
 		}
 	}
+}
+
+// passErrRelay hands an enclosing ParallelAgent's error relay on to subAgent,
+// since this agent yields a sub-agent's error to its caller at once.
+func passErrRelay(ctx agent.InvocationContext, subAgent agent.Agent) agent.InvocationContext {
+	if relayCtx, ok := agentinternal.PassErrRelay(ctx, ctx.InvocationID(), ctx.Agent().Name(), subAgent.Name()); ok {
+		return ctx.WithContext(relayCtx)
+	}
+	return ctx
 }

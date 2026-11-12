@@ -89,7 +89,7 @@ func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Ev
 			subAgents = subAgents[indexes[0]:]
 		}
 		for _, subAgent := range subAgents {
-			for event, err := range subAgent.Run(ctx) {
+			for event, err := range subAgent.Run(passErrRelay(ctx, subAgent)) {
 				// A failed sub-agent ends the sequence, as in adk-python: later
 				// sub-agents would run without the output they depend on.
 				if !yield(event, err) || err != nil {
@@ -237,4 +237,13 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 	}
 
 	return seqSess, wrappedIter, nil
+}
+
+// passErrRelay hands an enclosing ParallelAgent's error relay on to subAgent,
+// since this agent yields a sub-agent's error to its caller at once.
+func passErrRelay(ctx agent.InvocationContext, subAgent agent.Agent) agent.InvocationContext {
+	if relayCtx, ok := agentinternal.PassErrRelay(ctx, ctx.InvocationID(), ctx.Agent().Name(), subAgent.Name()); ok {
+		return ctx.WithContext(relayCtx)
+	}
+	return ctx
 }
