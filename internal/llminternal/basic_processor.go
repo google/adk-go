@@ -162,8 +162,8 @@ func deepCopy(src, dst reflect.Value) {
 	}
 }
 
-// holdsNoReference reports whether a value of kind k shares no memory when
-// copied by assignment.
+// holdsNoReference reports whether a value of kind k holds no reference that a
+// copy could write through. A string shares its bytes, but they are immutable.
 func holdsNoReference(k reflect.Kind) bool {
 	switch k {
 	case reflect.Bool, reflect.String,
