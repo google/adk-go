@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strings"
 	"sync"
@@ -2531,10 +2532,7 @@ func TestFirestoreService_SessionStateNumbersReadAsFloat64(t *testing.T) {
 			})
 			check := func(name string, s session.Session) {
 				t.Helper()
-				got := map[string]any{}
-				for k, v := range s.State().All() {
-					got[k] = v
-				}
+				got := maps.Collect(s.State().All())
 				if diff := cmp.Diff(want, got); diff != "" {
 					t.Errorf("%s state mismatch (-want +got):\n%s", name, diff)
 				}
@@ -2751,10 +2749,7 @@ func TestFirestoreService_SharedStateNumbersReadAsFloat64(t *testing.T) {
 	}
 	check := func(name string, s session.Session) {
 		t.Helper()
-		got := map[string]any{}
-		for k, v := range s.State().All() {
-			got[k] = v
-		}
+		got := maps.Collect(s.State().All())
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("%s state mismatch (-want +got):\n%s", name, diff)
 		}
