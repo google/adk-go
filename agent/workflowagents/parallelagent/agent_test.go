@@ -1249,9 +1249,9 @@ func TestParallelAgent_ErrorCaughtAtRunTimeKeepsEscalate(t *testing.T) {
 		ev.Actions.Escalate = true
 		return ev
 	}
-	// newInner returns a ParallelAgent whose only branch fails on its first
-	// run and succeeds after.
-	newInner := func() agent.Agent {
+	// newInner returns a ParallelAgent named name whose only branch fails on
+	// its first run and succeeds after.
+	newNamedInner := func(name string) agent.Agent {
 		var runs atomic.Int32
 		flaky := newAgent("flaky", func(_ agent.InvocationContext, yield func(*session.Event, error) bool) {
 			if runs.Add(1) == 1 {
@@ -1260,8 +1260,9 @@ func TestParallelAgent_ErrorCaughtAtRunTimeKeepsEscalate(t *testing.T) {
 			}
 			yield(text("ok"), nil)
 		})
-		return must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "inner", SubAgents: []agent.Agent{flaky}}}))
+		return must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: []agent.Agent{flaky}}}))
 	}
+	newInner := func() agent.Agent { return newNamedInner("inner") }
 	// retryingNode runs a in a workflow node that tries it twice.
 	retryingNode := func(t *testing.T, a agent.Agent) *workflow.AgentNode {
 		node, err := workflow.NewAgentNode(a, workflow.NodeConfig{RetryConfig: &workflow.RetryConfig{MaxAttempts: 2}})
@@ -1270,10 +1271,10 @@ func TestParallelAgent_ErrorCaughtAtRunTimeKeepsEscalate(t *testing.T) {
 		}
 		return node
 	}
-	// newCatcher runs inner without declaring it and turns its error into
-	// fallback, then closes caught.
-	newCatcher := func(inner agent.Agent, fallback *session.Event, caught chan struct{}) agent.Agent {
-		return newAgent("catcher", func(ctx agent.InvocationContext, yield func(*session.Event, error) bool) {
+	// newNamedCatcher runs inner without declaring it and turns its error
+	// into fallback, then closes caught.
+	newNamedCatcher := func(name string, inner agent.Agent, fallback *session.Event, caught chan struct{}) agent.Agent {
+		return newAgent(name, func(ctx agent.InvocationContext, yield func(*session.Event, error) bool) {
 			defer close(caught)
 			for ev, err := range inner.Run(ctx) {
 				if err != nil {
@@ -1285,6 +1286,9 @@ func TestParallelAgent_ErrorCaughtAtRunTimeKeepsEscalate(t *testing.T) {
 				}
 			}
 		})
+	}
+	newCatcher := func(inner agent.Agent, fallback *session.Event, caught chan struct{}) agent.Agent {
+		return newNamedCatcher("catcher", inner, fallback, caught)
 	}
 
 	tests := []struct {
@@ -1329,6 +1333,35 @@ func TestParallelAgent_ErrorCaughtAtRunTimeKeepsEscalate(t *testing.T) {
 			}})), done
 		}},
 	}
+	tests = append(tests, []struct {
+		name  string
+		build func(t *testing.T) (agent.Agent, <-chan struct{})
+	}{
+		// A wrapper may keep the name of the agent it wraps, so the relay
+		// has to tell agents apart by identity, not by name.
+		{"wrapper named like the undeclared inner agent it catches", func(t *testing.T) (agent.Agent, <-chan struct{}) {
+			caught := make(chan struct{})
+			return newNamedCatcher("inner", newInner(), text("fallback"), caught), caught
+		}},
+		{"same-name wrapper in a SequentialAgent", func(t *testing.T) (agent.Agent, <-chan struct{}) {
+			caught := make(chan struct{})
+			return must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{
+				Name: "seq", SubAgents: []agent.Agent{newNamedCatcher("inner", newInner(), text("fallback"), caught)},
+			}})), caught
+		}},
+		// A SequentialAgent or LoopAgent the catcher runs itself gets no
+		// relay to pass on.
+		{"catcher running the inner agent through an undeclared SequentialAgent", func(t *testing.T) (agent.Agent, <-chan struct{}) {
+			caught := make(chan struct{})
+			hidden := must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "hidden", SubAgents: []agent.Agent{newInner()}}}))
+			return newCatcher(hidden, text("fallback"), caught), caught
+		}},
+		{"catcher running the inner agent through an undeclared LoopAgent", func(t *testing.T) (agent.Agent, <-chan struct{}) {
+			caught := make(chan struct{})
+			hidden := must(loopagent.New(loopagent.Config{MaxIterations: 1, AgentConfig: agent.Config{Name: "hidden", SubAgents: []agent.Agent{newInner()}}}))
+			return newCatcher(hidden, text("fallback"), caught), caught
+		}},
+	}...)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			holder, handled := tt.build(t)
@@ -1360,6 +1393,67 @@ func TestParallelAgent_ErrorCaughtAtRunTimeKeepsEscalate(t *testing.T) {
 				t.Errorf("escalation was not yielded")
 			}
 		})
+	}
+}
+
+// A LoopAgent runs its later passes with a different context, and still passes
+// the relay on there. An error from the inner ParallelAgent on the second pass
+// must replace the escalation while the failing branch is cleaning up.
+func TestParallelAgent_LoopLaterPassErrorSurvivesEscalate(t *testing.T) {
+	boom := errors.New("boom")
+	failed := make(chan struct{})
+	var passes atomic.Int32
+	failing := must(agent.New(agent.Config{
+		Name: "failing",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if passes.Add(1) == 1 {
+					yield(&session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("pass one", genai.RoleModel)}}, nil)
+					return
+				}
+				// Cleanup that lasts until the run cancels it.
+				defer func() { <-ctx.Done() }()
+				yield(nil, boom)
+				close(failed)
+			}
+		},
+	}))
+	escalator := must(agent.New(agent.Config{
+		Name: "escalator",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				<-failed
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+					Actions:     session.EventActions{Escalate: true},
+				}, nil)
+			}
+		},
+	}))
+	inner := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "inner", SubAgents: []agent.Agent{failing}}}))
+	loop := must(loopagent.New(loopagent.Config{MaxIterations: 3, AgentConfig: agent.Config{Name: "loop", SubAgents: []agent.Agent{inner}}}))
+	outer := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "outer", SubAgents: []agent.Agent{loop, escalator}}}))
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: outer, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	sawErr := false
+	for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if errors.Is(err, boom) {
+			sawErr = true
+		}
+		if ev != nil && ev.Actions.Escalate {
+			t.Errorf("escalate event yielded after the second pass failed, want the error instead")
+		}
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("run ended only at the test deadline")
+	}
+	if !sawErr {
+		t.Errorf("error from the second pass was not returned")
 	}
 }
 

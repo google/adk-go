@@ -134,16 +134,16 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 				// may be a different one. An enclosing ParallelAgent would get
 				// an error only after that Wait, so report this one there now.
 				if firstErr.CompareAndSwap(nil, &err) {
-					agentinternal.ReportErr(ctx, ctx.InvocationID(), ctx.Agent().Name(), err)
+					utils.ReportErr(ctx, err)
 				}
 			}
 			// A ParallelAgent below subAgent reports its error here as soon as
 			// it records it, if every agent in between passed the relay on.
-			reporterCtx := agentinternal.WithErrRelay(errGroupCtx, ctx.InvocationID(), subAgent.Name(), onErr)
+			relayCtx := utils.WithErrRelay(errGroupCtx, ctx.InvocationID(), subAgent, onErr)
 			// Keep the parent's isolation scope: a workflow node stamps it on
 			// every event the branches emit, and the LLM history filter matches
 			// it exactly, so an unscoped branch would lose its own turns.
-			subCtx := icontext.NewInvocationContext(reporterCtx, icontext.InvocationContextParams{
+			subCtx := icontext.NewInvocationContext(relayCtx, icontext.InvocationContextParams{
 				Artifacts:      ctx.Artifacts(),
 				Memory:         ctx.Memory(),
 				Session:        ctx.Session(),
