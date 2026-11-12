@@ -18,6 +18,7 @@ package model
 import (
 	"context"
 	"iter"
+	"slices"
 
 	"google.golang.org/genai"
 )
@@ -130,4 +131,53 @@ type LLMResponse struct {
 	// this response, set when the request had a CacheConfig. Only complete
 	// responses carry it, not partial streaming chunks.
 	CacheMetadata *CacheMetadata `json:"cacheMetadata,omitempty"`
+}
+
+// FunctionCalls returns the FunctionCall of each part of r.Content that has
+// one, in part order. It returns nil when r is nil, r.Content is nil, or no
+// part holds a function call. Nil entries in r.Content.Parts are skipped.
+// The returned pointers are the ones stored in r.Content; they are not copies.
+func (r *LLMResponse) FunctionCalls() []*genai.FunctionCall {
+	if r == nil || r.Content == nil {
+		return nil
+	}
+	var calls []*genai.FunctionCall
+	for _, p := range r.Content.Parts {
+		if p != nil && p.FunctionCall != nil {
+			calls = append(calls, p.FunctionCall)
+		}
+	}
+	return calls
+}
+
+// FunctionResponses returns the FunctionResponse of each part of r.Content
+// that has one, in part order, under the same rules as FunctionCalls.
+func (r *LLMResponse) FunctionResponses() []*genai.FunctionResponse {
+	if r == nil || r.Content == nil {
+		return nil
+	}
+	var responses []*genai.FunctionResponse
+	for _, p := range r.Content.Parts {
+		if p != nil && p.FunctionResponse != nil {
+			responses = append(responses, p.FunctionResponse)
+		}
+	}
+	return responses
+}
+
+// HasTrailingCodeExecutionResult reports whether the last non-nil part of
+// r.Content holds a CodeExecutionResult. It returns false when r is nil,
+// r.Content is nil, or no non-nil part exists.
+func (r *LLMResponse) HasTrailingCodeExecutionResult() bool {
+	if r == nil || r.Content == nil {
+		return false
+	}
+	// A nil entry after a code execution result does not hide it: the
+	// trailing part is the last non-nil one.
+	for _, p := range slices.Backward(r.Content.Parts) {
+		if p != nil {
+			return p.CodeExecutionResult != nil
+		}
+	}
+	return false
 }
