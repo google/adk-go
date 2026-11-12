@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"sort"
 
 	"google.golang.org/genai"
 
@@ -256,7 +257,11 @@ func restoreCredentialSecrets(stored, submitted any, restoreSecrets bool) (any, 
 			return submitted, false
 		}
 		if isCredential(st) {
-			restoreSecrets = !hasSecretKey(s)
+			// Restore only into an object that outbound redaction still treats
+			// as a credential. A client that clears or changes authType is
+			// replacing the credential; restoring secrets into the ordinary
+			// object would make the serializer leave them visible.
+			restoreSecrets = isCredential(s) && !hasSecretKey(s)
 		}
 		restored := false
 		if restoreSecrets {
@@ -285,7 +290,11 @@ func restoreCredentialSecrets(stored, submitted any, restoreSecrets bool) (any, 
 		}
 		restored := false
 		for i := range s {
-			if merged, changed := restoreCredentialSecrets(st[i], s[i], restoreSecrets); changed {
+			match := matchStoredElement(st, s[i])
+			if match < 0 {
+				continue
+			}
+			if merged, changed := restoreCredentialSecrets(st[match], s[i], restoreSecrets); changed {
 				s[i] = merged
 				restored = true
 			}
@@ -294,6 +303,78 @@ func restoreCredentialSecrets(stored, submitted any, restoreSecrets bool) (any, 
 	default:
 		return submitted, false
 	}
+}
+
+// matchStoredElement returns the index of the stored array element that
+// identifies the same credential as submitted, or -1 when none does or more
+// than one does. Matching by a stable non-secret identity keeps a reordered
+// array from handing one entry another entry's secrets.
+func matchStoredElement(stored []any, submitted any) int {
+	identity := credentialIdentity(submitted)
+	if identity == "" {
+		return -1
+	}
+	match := -1
+	for i, item := range stored {
+		if credentialIdentity(item) != identity {
+			continue
+		}
+		if match >= 0 {
+			return -1
+		}
+		match = i
+	}
+	return match
+}
+
+// credentialIdentity returns a JSON identity for the credentials in v, with
+// every secret key removed. Fields next to a credential are ignored, so editing
+// them does not break the match. It returns "" when v holds no credential.
+func credentialIdentity(v any) string {
+	identities := findCredentialIdentities(v)
+	if len(identities) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(identities)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// findCredentialIdentities collects the redacted JSON of every credential in v,
+// sorted so an identity does not depend on map or slice order.
+func findCredentialIdentities(v any) []string {
+	var identities []string
+	var walk func(any)
+	walk = func(v any) {
+		switch v := v.(type) {
+		case map[string]any:
+			if isCredential(v) {
+				redacted, err := asJSONValue(v)
+				if err != nil {
+					return
+				}
+				dropSecretKeys(redacted)
+				b, err := json.Marshal(redacted)
+				if err != nil {
+					return
+				}
+				identities = append(identities, string(b))
+				return
+			}
+			for _, val := range v {
+				walk(val)
+			}
+		case []any:
+			for _, item := range v {
+				walk(item)
+			}
+		}
+	}
+	walk(v)
+	sort.Strings(identities)
+	return identities
 }
 
 // hasSecretKey reports whether v carries a credential secret key at any depth.
