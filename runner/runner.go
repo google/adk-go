@@ -743,6 +743,22 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 		telemetry.SetInvocationSessionID(ctx, storedSession.ID())
 
+		// In a resumable run, the workflow agents continue from the
+		// checkpoints this invocation saved. The store is attached before the
+		// two dispatch paths split, so a workflow agent reached by a transfer
+		// from a root LLM agent has it too. It is kept in a local, for the
+		// same reason as rootCtx below.
+		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
+		stateCtx := ctx
+		var states *agentstate.Store
+		if r.resumable {
+			states = agentstate.New()
+			if invocationID != "" {
+				states.Populate(storedSession.Events(), invocationID, r.rootAgent)
+			}
+			stateCtx = agentstate.ToContext(ctx, states)
+		}
+
 		// Node path: an LlmAgent runs through the ADK 2.0 node runtime
 		// (the Go equivalent of adk-python's _run_node_async, reached for
 		// an LlmAgent root).
@@ -776,7 +792,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			// accumulate wrappers. The non-LlmAgent path below does assign back,
 			// but this branch returns before reaching it, so on this path the
 			// iterator really is clean for a re-range.
-			rootCtx := llminternal.WithBoundMode(ctx, r.rootAgent.Name(), llmInternalState, rootMode)
+			rootCtx := llminternal.WithBoundMode(stateCtx, r.rootAgent.Name(), llmInternalState, rootMode)
 
 			hasTaskSubAgent := func() bool {
 				for _, subAgent := range r.rootAgent.SubAgents() {
@@ -796,7 +812,10 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			// when the chat coordinator has task-mode sub-agents,
 			// the wrapper handles delegation via ctx.run_node. Don't let
 			// the legacy sub-agent picker bypass the coordinator on resume.
-			if hasTaskSubAgent() {
+			// A root that stopped partway through the invocation being
+			// answered runs again and resumes the agent it transferred to, as
+			// on the path below.
+			if hasTaskSubAgent() || states != nil && states.Resumes(r.rootAgent.Name()) {
 				agentToRun = r.rootAgent
 			} else {
 				agentToRun, err = r.findAgentToRun(storedSession, msg)
@@ -810,7 +829,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
-		ctx = parentmap.ToContext(ctx, r.parents)
+		ctx = parentmap.ToContext(stateCtx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
@@ -819,16 +838,6 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
 		ctx = r.withContextCache(ctx)
 		defer r.settleContextCaches(ctx, storedSession)
-
-		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
-		var states *agentstate.Store
-		if r.resumable {
-			states = agentstate.New()
-			if invocationID != "" {
-				states.Populate(storedSession.Events(), invocationID)
-			}
-			ctx = agentstate.ToContext(ctx, states)
-		}
 
 		// Compaction has to happen however iteration ends. Breaking out of the
 		// range loop on the terminal event is the ordinary streaming idiom, and
