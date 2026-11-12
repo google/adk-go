@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"reflect"
 	"strings"
 	"time"
@@ -59,9 +60,9 @@ func convertSnake(path, indent string, o any) (any, error) {
 	case reflect.Struct:
 		vt := v.Type()
 		// handle time.Time in a special way
-		if vt == reflect.TypeOf(time.Time{}) {
+		if vt == reflect.TypeFor[time.Time]() {
 			t := o.(time.Time)
-			return t.UnixMilli() / 1000.0, nil // returns a number of seconds "Unix-way"
+			return float64(t.UnixMicro()) / 1e6, nil // returns a number of seconds "Unix-way"
 		}
 
 		// this map will hold all the fields
@@ -86,9 +87,7 @@ func convertSnake(path, indent string, o any) (any, error) {
 					return nil, fmt.Errorf("failed to convert embedded struct with name:%v o: %+v %T err: %w", name, fv.Interface(), fv.Interface(), err)
 				}
 				// merge them to m
-				for k, v := range embed.(map[string]any) {
-					m[k] = v
-				}
+				maps.Copy(m, embed.(map[string]any))
 				continue
 			}
 

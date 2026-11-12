@@ -77,13 +77,13 @@ func TestHTTPRecordDirectivesPartitionCassettes(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		for _, line := range strings.Split(string(content), "\n") {
+		for line := range strings.SplitSeq(string(content), "\n") {
 			line = strings.TrimSpace(line)
 			if !strings.HasPrefix(line, "//go:generate") || !strings.Contains(line, "-httprecord") {
 				continue
 			}
 			pattern := ""
-			for _, field := range strings.Fields(line) {
+			for field := range strings.FieldsSeq(line) {
 				if p, ok := strings.CutPrefix(field, "-httprecord="); ok {
 					pattern = p
 					break

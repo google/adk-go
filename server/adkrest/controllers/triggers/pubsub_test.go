@@ -362,11 +362,9 @@ func TestPubSubTriggerHandler_EnforcesMaxConcurrentRuns(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range limit + 1 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ctrl.PubSubTriggerHandler(httptest.NewRecorder(), buildPubSubRequest(t, "hello"))
-		}()
+		})
 	}
 
 	for i := range limit {

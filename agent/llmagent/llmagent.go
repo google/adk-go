@@ -530,6 +530,16 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		// TODO: log "Skipping output save for agent %s: event authored by %s"
 		return
 	}
+	// A task agent delivers its result through finish_task, which runTask writes
+	// to OutputKey. Its text turns (a clarification question, a greeting) are
+	// not the result. runTask runs only when the task agent is entered as a node
+	// (its RunNode method or RunLLMAgentAsNode), whichever agent sits above it.
+	// When it is run through Run (as SequentialAgent, LoopAgent and
+	// ParallelAgent do) or RunLive, nothing writes the finish_task output, so
+	// OutputKey stays unset. Matches adk-python's __maybe_save_output_to_state.
+	if llminternal.Reveal(a).Mode == llminternal.ModeTask {
+		return
+	}
 	if a.OutputKey != "" && event.IsFinalResponse() && event.Content != nil && len(event.Content.Parts) > 0 {
 		var sb strings.Builder
 		hasTextPart := false
