@@ -23,6 +23,7 @@ import (
 	"log"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
@@ -549,8 +550,21 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	return nil
 }
 
-// fromPlugin returns the event a plugin gave back, with the compaction record
-// the framework put on the original rather than any the plugin supplied.
+// fromPlugin returns the event a plugin's OnEventCallback leaves behind, with
+// the compaction record the framework put on the original rather than any the
+// plugin supplied.
+//
+// When modified is nil or original itself, it returns original. Otherwise it
+// returns a new event: a copy of original with every field that modified sets
+// laid over it, mirroring adk-python's Runner._get_output_event
+// (runners.py). ID, InvocationID and Timestamp always stay the original's,
+// and an empty Author falls back to the original's. A field counts as set
+// when it is not its zero value; Partial counts as set when it is true or
+// PartialSet is true, so a plugin can downgrade a partial event. A non-nil
+// CustomMetadata, an empty map included, replaces the original's public keys
+// while the original's ADK-internal keys survive (eventmetadata.WithInternalFrom);
+// a nil one keeps the original's map. fromPlugin mutates neither modified nor
+// any map of original or modified.
 //
 // A compaction record is not content. It says which stored events every later
 // prompt drops and what stands in for them, so planting one erases history and
@@ -590,15 +604,130 @@ func fromPlugin(original, modified *session.Event, record *session.EventCompacti
 		original.Actions.Compaction = record
 		return original
 	}
-	out := *modified
-	out.Actions.Compaction = record
-	out.ID = original.ID
-	out.InvocationID = original.InvocationID
-	out.Timestamp = original.Timestamp
-	if out.Author == "" {
-		out.Author = original.Author
+	out := *original
+	mergeLLMResponse(&out.LLMResponse, &modified.LLMResponse)
+	if modified.Author != "" {
+		out.Author = modified.Author
+	}
+	if modified.Branch != "" {
+		out.Branch = modified.Branch
+	}
+	if modified.IsolationScope != "" {
+		out.IsolationScope = modified.IsolationScope
+	}
+	mergeEventActions(&out.Actions, &modified.Actions, record)
+	if len(modified.LongRunningToolIDs) > 0 {
+		out.LongRunningToolIDs = slices.Clone(modified.LongRunningToolIDs)
+	}
+	if len(modified.Routes) > 0 {
+		out.Routes = slices.Clone(modified.Routes)
+	}
+	if modified.RequestedInput != nil {
+		out.RequestedInput = modified.RequestedInput
+	}
+	if modified.Output != nil {
+		out.Output = modified.Output
+	}
+	if modified.NodeInfo != nil {
+		out.NodeInfo = modified.NodeInfo
 	}
 	return &out
+}
+
+// mergeLLMResponse lays the fields src sets over dst, for fromPlugin.
+func mergeLLMResponse(dst, src *model.LLMResponse) {
+	if src.Content != nil {
+		dst.Content = src.Content
+	}
+	if src.CitationMetadata != nil {
+		dst.CitationMetadata = src.CitationMetadata
+	}
+	if src.GroundingMetadata != nil {
+		dst.GroundingMetadata = src.GroundingMetadata
+	}
+	if src.UsageMetadata != nil {
+		dst.UsageMetadata = src.UsageMetadata
+	}
+	if src.CacheMetadata != nil {
+		dst.CacheMetadata = src.CacheMetadata
+	}
+	if src.CustomMetadata != nil {
+		dst.CustomMetadata = eventmetadata.WithInternalFrom(src.CustomMetadata, dst.CustomMetadata)
+	}
+	if src.LogprobsResult != nil {
+		dst.LogprobsResult = src.LogprobsResult
+	}
+	if src.InputTranscription != nil {
+		dst.InputTranscription = src.InputTranscription
+	}
+	if src.OutputTranscription != nil {
+		dst.OutputTranscription = src.OutputTranscription
+	}
+	if src.ModelVersion != "" {
+		dst.ModelVersion = src.ModelVersion
+	}
+	// A Go bool cannot say whether a struct literal set it to false, so an
+	// explicit downgrade needs PartialSet (model.LLMResponse.PartialSet).
+	if src.Partial || src.PartialSet {
+		dst.Partial = src.Partial
+		dst.PartialSet = src.PartialSet
+	}
+	if src.TurnComplete {
+		dst.TurnComplete = true
+	}
+	if src.Interrupted {
+		dst.Interrupted = true
+	}
+	if src.SessionResumptionHandle != "" {
+		dst.SessionResumptionHandle = src.SessionResumptionHandle
+	}
+	if src.ErrorCode != "" {
+		dst.ErrorCode = src.ErrorCode
+	}
+	if src.ErrorMessage != "" {
+		dst.ErrorMessage = src.ErrorMessage
+	}
+	if src.FinishReason != "" {
+		dst.FinishReason = src.FinishReason
+	}
+	if src.AvgLogprobs != 0 {
+		dst.AvgLogprobs = src.AvgLogprobs
+	}
+}
+
+// mergeEventActions lays the actions src sets over dst, for fromPlugin, and
+// sets dst.Compaction to record. The delta maps dst ends up with are copies,
+// because the session service applies and keeps them.
+func mergeEventActions(dst, src *session.EventActions, record *session.EventCompaction) {
+	if len(src.StateDelta) > 0 {
+		dst.StateDelta = maps.Clone(src.StateDelta)
+	} else if dst.StateDelta != nil {
+		dst.StateDelta = maps.Clone(dst.StateDelta)
+	}
+	if len(src.ArtifactDelta) > 0 {
+		dst.ArtifactDelta = maps.Clone(src.ArtifactDelta)
+	} else if dst.ArtifactDelta != nil {
+		dst.ArtifactDelta = maps.Clone(dst.ArtifactDelta)
+	}
+	if len(src.RequestedToolConfirmations) > 0 {
+		dst.RequestedToolConfirmations = maps.Clone(src.RequestedToolConfirmations)
+	}
+	if len(src.RequestedAuthConfigs) > 0 {
+		dst.RequestedAuthConfigs = maps.Clone(src.RequestedAuthConfigs)
+	}
+	if src.SkipSummarization {
+		dst.SkipSummarization = true
+	}
+	if src.TransferToAgent != "" {
+		dst.TransferToAgent = src.TransferToAgent
+	}
+	if src.Escalate {
+		dst.Escalate = true
+	}
+	if src.SetModelResponse != nil {
+		dst.SetModelResponse = src.SetModelResponse
+	}
+	dst.Compaction = record
 }
 
 // processEventWithPlugins stamps the event's timestamp if it is zero, merges
@@ -609,8 +738,8 @@ func fromPlugin(original, modified *session.Event, record *session.EventCompacti
 // are. This mirrors adk-python's Runner._process_event_with_plugin_callbacks
 // and _get_output_event (runners.py).
 //
-// It does not persist the event: the caller appends the returned event to the
-// session when it is not partial. A runner-synthesized event goes through
+// It does not persist the event: the caller decides on the returned event, with
+// shouldAppendEvent, whether to append it to the session. A runner-synthesized event goes through
 // this function so it gets the run's custom metadata before OnEventCallback,
 // like agent output events. event must be non-nil. On a plugin error it
 // returns (nil, err) unchanged.
@@ -631,7 +760,7 @@ func (r *Runner) processEventWithPlugins(ctx agent.InvocationContext, event *ses
 		return nil, err
 	}
 	event = fromPlugin(event, modifiedEvent, record)
-	stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
+	stampTimestamp(ctx, event) // a plugin may have cleared it in place
 	// adk-python merges again for every returned event, the same object
 	// included, and only a None return skips it (runners.py,
 	// _get_output_event).
@@ -1015,7 +1144,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			// This does NOT emit any event.
 			defer pluginManager.RunAfterRunCallback(ctx)
 
-			if event, err := r.runBeforeRunCallback(ctx); event != nil || err != nil {
+			if event, err := r.runBeforeRunCallback(ctx, false); event != nil || err != nil {
 				yield(event, err)
 				return
 			}
@@ -1042,14 +1171,6 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 			stampTimestamp(ctx, event)
 
-			if !event.LLMResponse.Partial {
-				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
-					clone := *event
-					clone.Output = nil
-					event = &clone
-				}
-			}
-
 			event, err = r.processEventWithPlugins(ctx, event)
 			if err != nil {
 				if !yield(nil, err) {
@@ -1057,9 +1178,9 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 				}
 				continue
 			}
+			event = clearMessageAsOutput(event)
 
-			// only commit non-partial event to a session service
-			if !event.LLMResponse.Partial {
+			if shouldAppendEvent(event, false) {
 				if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return
@@ -1085,8 +1206,10 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 }
 
 // runBeforeRunCallback processes and persists a plugin's replacement reply.
-// A nil event and nil error mean agent execution should continue.
-func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Event, error) {
+// A nil event and nil error mean agent execution should continue. The reply
+// goes through the OnEventCallback plugins and is appended to the session
+// when shouldAppendEvent(reply, isLive) holds; isLive is true for RunLive.
+func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext, isLive bool) (*session.Event, error) {
 	content, err := r.pluginManager.RunBeforeRunCallback(ctx)
 	if err != nil || content == nil {
 		return nil, err
@@ -1114,8 +1237,8 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	maps.Copy(reply.CustomMetadata, event.CustomMetadata)
 	reply.CustomMetadata[plugininternal.BeforeRunReplyKey] = true
 	event = &reply
-	stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
-	if !event.Partial {
+	stampTimestamp(ctx, event) // a replacement may be a struct literal
+	if shouldAppendEvent(event, isLive) {
 		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
 			return nil, fmt.Errorf("failed to add event to session: %w", err)
 		}
@@ -1270,7 +1393,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		// The reply goes through OnEvent and the run through AfterRun, as on
 		// Run. adk-python runs a live agent through the same
 		// Runner._exec_with_plugin as run_async (runners.py).
-		earlyExitEvent, err := r.runBeforeRunCallback(iCtx)
+		earlyExitEvent, err := r.runBeforeRunCallback(iCtx, true)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1319,14 +1442,6 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			}
 			stampTimestamp(iCtx, event)
 
-			if !event.LLMResponse.Partial {
-				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
-					clone := *event
-					clone.Output = nil
-					event = &clone
-				}
-			}
-
 			event, err = r.processEventWithPlugins(iCtx, event)
 			if err != nil {
 				if !yield(nil, err) {
@@ -1334,6 +1449,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				}
 				continue
 			}
+			event = clearMessageAsOutput(event)
 
 			// Chronological event buffering logic for Live streaming.
 			// Holds back tool calls/responses if they arrive before the transcription finishes.
@@ -1360,22 +1476,26 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				if event.LLMResponse.InputTranscription != nil || event.LLMResponse.OutputTranscription != nil {
 					isTranscribing = false
 
-					if err := r.sessionService.AppendEvent(iCtx, storedSession, event); err != nil {
-						if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
-							return
+					if shouldAppendEvent(event, true) {
+						if err := r.sessionService.AppendEvent(iCtx, storedSession, event); err != nil {
+							if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
+								return
+							}
+							continue
 						}
-						continue
 					}
 					if !yield(event, nil) {
 						return
 					}
 
 					for _, bufferedEvent := range bufferedEvents {
-						if err := r.sessionService.AppendEvent(iCtx, storedSession, bufferedEvent); err != nil {
-							if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
-								return
+						if shouldAppendEvent(bufferedEvent, true) {
+							if err := r.sessionService.AppendEvent(iCtx, storedSession, bufferedEvent); err != nil {
+								if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
+									return
+								}
+								continue
 							}
-							continue
 						}
 						if !yield(bufferedEvent, nil) {
 							return
@@ -1386,7 +1506,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				}
 			}
 
-			if !event.LLMResponse.Partial && !hasInlineData(event) {
+			if shouldAppendEvent(event, true) {
 				if err := r.sessionService.AppendEvent(iCtx, storedSession, event); err != nil {
 					if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
 						return
@@ -1404,15 +1524,17 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		// Live agents reach here when their session closes, including on cancellation.
 		// Python persists live events as they arrive; Go buffers them during transcription.
 		// Detach cancellation so session teardown can still persist that buffer.
-		// Match the mid-stream flush's persistence policy for buffered tool events,
-		// including those carrying inline data.
+		// Like the mid-stream flush, store each buffered event that
+		// shouldAppendEvent accepts, and yield every one.
 		flushCtx := context.WithoutCancel(iCtx)
 		for _, bufferedEvent := range bufferedEvents {
-			if err := r.sessionService.AppendEvent(flushCtx, storedSession, bufferedEvent); err != nil {
-				if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
-					return
+			if shouldAppendEvent(bufferedEvent, true) {
+				if err := r.sessionService.AppendEvent(flushCtx, storedSession, bufferedEvent); err != nil {
+					if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
+						return
+					}
+					continue
 				}
-				continue
 			}
 			if !yield(bufferedEvent, nil) {
 				return
@@ -1765,16 +1887,57 @@ func (r *Runner) isTransferableAcrossAgentTree(agentToRun agent.Agent) bool {
 	return true
 }
 
-func hasInlineData(event *session.Event) bool {
-	if event.LLMResponse.Content == nil {
+// shouldAppendEvent reports whether the runner appends event, as the
+// OnEventCallback plugins left it, to the session: never a partial event, and
+// in live mode no event carrying inline model media. This mirrors adk-python's
+// Runner._process_and_append_event and _should_append_event (runners.py).
+func shouldAppendEvent(event *session.Event, isLive bool) bool {
+	if event == nil || event.LLMResponse.Partial {
+		return false
+	}
+	if isLive && isLiveMediaWithInlineData(event) {
+		return false
+	}
+	return true
+}
+
+// isLiveMediaWithInlineData reports whether event's content has a part with
+// inline audio, video or image data, matched on the MIME type without regard
+// to case. Such data stays out of a live session to keep large blobs out of
+// storage; a FileData reference to the same media is kept. This mirrors
+// adk-python's _is_live_model_media_event_with_inline_data
+// (flows/llm_flows/context/_contents.py).
+func isLiveMediaWithInlineData(event *session.Event) bool {
+	if event == nil || event.LLMResponse.Content == nil {
 		return false
 	}
 	for _, part := range event.LLMResponse.Content.Parts {
-		if part != nil && part.InlineData != nil {
+		if part == nil || part.InlineData == nil {
+			continue
+		}
+		mime := strings.ToLower(part.InlineData.MIMEType)
+		if strings.HasPrefix(mime, "audio/") ||
+			strings.HasPrefix(mime, "video/") ||
+			strings.HasPrefix(mime, "image/") {
 			return true
 		}
 	}
 	return false
+}
+
+// clearMessageAsOutput returns event with Output cleared when event is a
+// final model message that also serves as its node's output
+// (NodeInfo.MessageAsOutput), so the message is stored once, as content. It
+// returns a copy rather than editing event, and event itself otherwise. The
+// loops call it after the OnEventCallback plugins, which therefore still see
+// Output, as adk-python's Runner does (runners.py).
+func clearMessageAsOutput(event *session.Event) *session.Event {
+	if !event.LLMResponse.Partial && event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
+		clone := *event
+		clone.Output = nil
+		return &clone
+	}
+	return event
 }
 
 // withPluginManager puts this runner's plugin manager in ctx, which is where

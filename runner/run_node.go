@@ -172,7 +172,7 @@ func (r *Runner) runNode(
 	if pluginManager != nil {
 		defer pluginManager.RunAfterRunCallback(ictx)
 
-		if event, err := r.runBeforeRunCallback(ictx); event != nil || err != nil {
+		if event, err := r.runBeforeRunCallback(ictx, false); event != nil || err != nil {
 			yield(event, err)
 			return
 		}
@@ -245,14 +245,6 @@ func (r *Runner) runNode(
 		}
 		stampTimestamp(ictx, event)
 
-		if event != nil && !event.LLMResponse.Partial {
-			if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
-				clone := *event
-				clone.Output = nil
-				event = &clone
-			}
-		}
-
 		event, err = r.processEventWithPlugins(ictx, event)
 		if err != nil {
 			if !yield(nil, err) {
@@ -260,8 +252,9 @@ func (r *Runner) runNode(
 			}
 			continue
 		}
+		event = clearMessageAsOutput(event)
 
-		if !event.LLMResponse.Partial {
+		if shouldAppendEvent(event, false) {
 			if err := r.sessionService.AppendEvent(ictx, storedSession, event); err != nil {
 				yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 				return
