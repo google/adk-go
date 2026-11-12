@@ -104,8 +104,9 @@ func (s exampleTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) er
 			return fmt.Errorf("exampletool: fetch examples: %w", err)
 		}
 	} else {
-		// Unlike adk-python, the static list path checks only the first part for
-		// non-empty text to preserve existing behavior.
+		// Like adk-python, the static list path requires text in the first part.
+		// The provider path above differs from adk-python: it joins the text of
+		// all non-thought parts (userQuery).
 		if parts[0] == nil || parts[0].Text == "" {
 			return nil
 		}
@@ -155,20 +156,37 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 	// that names no model, take plain fences; the tool_code and tool_outputs
 	// fences are for other models.
 	isGemini := model == "" || strings.Contains(model, "gemini-")
-	for exampleNum, example := range examples {
-		fmt.Fprintf(&sb, exampleStart, exampleNum+1)
+	// Counts only the examples written, so that skipped nil examples leave no
+	// gap in the numbering.
+	renderedNum := 0
+	for _, example := range examples {
+		if example == nil {
+			continue
+		}
+		renderedNum++
+		fmt.Fprintf(&sb, exampleStart, renderedNum)
 		sb.WriteString(userPrefix)
 		if example.Input != nil && len(example.Input.Parts) > 0 {
+			// As in adk-python, the newline is written even when no part holds
+			// text, which leaves a blank line after the user prefix.
+			var inputTexts []string
 			for _, part := range example.Input.Parts {
+				if part == nil {
+					continue
+				}
 				if part.Text != "" {
 					safeText := strings.ReplaceAll(part.Text, "End few-shot", "[PROTECTED]")
-					sb.WriteString(safeText)
-					sb.WriteString("\n")
+					inputTexts = append(inputTexts, safeText)
 				}
 			}
+			sb.WriteString(strings.Join(inputTexts, "\n"))
+			sb.WriteString("\n")
 		}
 		previousRole := ""
 		for _, content := range example.Output {
+			if content == nil {
+				continue
+			}
 			var role string
 			if content.Role == "model" {
 				role = modelPrefix
@@ -180,6 +198,9 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 			}
 			previousRole = role
 			for _, part := range content.Parts {
+				if part == nil {
+					continue
+				}
 				if part.FunctionCall != nil {
 					args := []string{}
 					// Sorted, because map order would make the instruction differ
@@ -202,7 +223,7 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 					if isGemini {
 						prefix = functionPrefix
 					}
-					fmt.Fprintf(&sb, "%s%v%s", prefix, part.FunctionResponse, functionResponseSuffix)
+					fmt.Fprintf(&sb, "%s%s%s", prefix, formatFunctionResponse(part.FunctionResponse), functionResponseSuffix)
 				} else if part.Text != "" {
 					// SANITIZATION: Again, protect the boundary tags
 					safeText := strings.ReplaceAll(part.Text, "End few-shot", "[PROTECTED]")
@@ -215,4 +236,38 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 	}
 	sb.WriteString(examplesEnd)
 	return sb.String()
+}
+
+// formatFunctionResponse writes fr in the layout of fmt's %v for a
+// *genai.FunctionResponse, with WillContinue and each part (and its inline or
+// file data) written as the value it points to. %v would write those pointers
+// as memory addresses, which differ from one request to the next.
+func formatFunctionResponse(fr *genai.FunctionResponse) string {
+	willContinue := "<nil>"
+	if fr.WillContinue != nil {
+		willContinue = fmt.Sprint(*fr.WillContinue)
+	}
+	parts := make([]string, 0, len(fr.Parts))
+	for _, p := range fr.Parts {
+		parts = append(parts, formatFunctionResponsePart(p))
+	}
+	return fmt.Sprintf("&{%s %s [%s] %s %s %v}", willContinue, fr.Scheduling, strings.Join(parts, " "), fr.ID, fr.Name, fr.Response)
+}
+
+// formatFunctionResponsePart writes p in the layout of fmt's %v for a
+// genai.FunctionResponsePart value, with its inline and file data written as
+// the values they point to.
+func formatFunctionResponsePart(p *genai.FunctionResponsePart) string {
+	if p == nil {
+		return "<nil>"
+	}
+	inlineData := "<nil>"
+	if p.InlineData != nil {
+		inlineData = fmt.Sprintf("%v", *p.InlineData)
+	}
+	fileData := "<nil>"
+	if p.FileData != nil {
+		fileData = fmt.Sprintf("%v", *p.FileData)
+	}
+	return fmt.Sprintf("{%s %s %s}", inlineData, fileData, p.MediaProcessing)
 }

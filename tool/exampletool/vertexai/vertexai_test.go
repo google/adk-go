@@ -19,6 +19,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -820,4 +821,340 @@ func TestProvider_Examples(t *testing.T) {
 			t.Fatalf("Examples() error = %v, want %v", err, wantErr)
 		}
 	})
+}
+
+// recordingExampleStoreServer answers every SearchExamples request with resp
+// and records each request under mu, so concurrent handlers are race-free.
+type recordingExampleStoreServer struct {
+	aiplatformpb.UnimplementedExampleStoreServiceServer
+	resp *aiplatformpb.SearchExamplesResponse
+
+	mu      sync.Mutex
+	gotReqs []*aiplatformpb.SearchExamplesRequest
+}
+
+func (s *recordingExampleStoreServer) SearchExamples(_ context.Context, req *aiplatformpb.SearchExamplesRequest) (*aiplatformpb.SearchExamplesResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gotReqs = append(s.gotReqs, req)
+	return s.resp, nil
+}
+
+func (s *recordingExampleStoreServer) requests() []*aiplatformpb.SearchExamplesRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*aiplatformpb.SearchExamplesRequest(nil), s.gotReqs...)
+}
+
+func TestNewProvider_ReturnsNilOnError(t *testing.T) {
+	p, err := NewProvider(t.Context(), nil)
+	if err == nil || err.Error() != "vertexai: config cannot be nil" {
+		t.Fatalf("NewProvider(nil) error = %v, want %q", err, "vertexai: config cannot be nil")
+	}
+	if p != nil {
+		t.Errorf("NewProvider(nil) provider = %#v, want nil interface value", p)
+	}
+}
+
+func TestNewProviderWithOptions(t *testing.T) {
+	listener := bufconn.Listen(1024 * 1024)
+	srv := grpc.NewServer()
+	fakeSrv := &recordingExampleStoreServer{
+		resp: &aiplatformpb.SearchExamplesResponse{
+			Results: []*aiplatformpb.SearchExamplesResponse_SimilarExample{
+				makeResult("hello", 0.9, makeExpectedContent("model", &aiplatformpb.Part{
+					Data: &aiplatformpb.Part_Text{Text: "world"},
+				})),
+			},
+		},
+	}
+	aiplatformpb.RegisterExampleStoreServiceServer(srv, fakeSrv)
+	go func() {
+		_ = srv.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		srv.Stop()
+		_ = listener.Close()
+	})
+
+	var dialMu sync.Mutex
+	var gotDialTargets []string
+	callerOpts := []option.ClientOption{
+		option.WithEndpoint("custom.endpoint.example:443"),
+		option.WithGRPCDialOption(grpc.WithContextDialer(func(_ context.Context, addr string) (net.Conn, error) {
+			dialMu.Lock()
+			gotDialTargets = append(gotDialTargets, addr)
+			dialMu.Unlock()
+			return listener.Dial()
+		})),
+		option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
+		option.WithoutAuthentication(),
+	}
+
+	t.Run("serves concurrent queries through caller options", func(t *testing.T) {
+		const storeName = "projects/p/locations/us-central1/exampleStores/s"
+		p, err := NewProviderWithOptions(t.Context(), &ProviderConfig{ExampleStoreName: storeName}, callerOpts...)
+		if err != nil {
+			t.Fatalf("NewProviderWithOptions() error = %v", err)
+		}
+
+		queries := []string{"q1", "q2"}
+		gotExamples := make([][]*exampletool.Example, len(queries))
+		gotErrs := make([]error, len(queries))
+		var wg sync.WaitGroup
+		for i, q := range queries {
+			wg.Go(func() {
+				gotExamples[i], gotErrs[i] = p.Examples(t.Context(), q)
+			})
+		}
+		wg.Wait()
+
+		want := []*exampletool.Example{{
+			Input:  genai.NewContentFromText("hello", genai.RoleUser),
+			Output: []*genai.Content{genai.NewContentFromText("world", genai.RoleModel)},
+		}}
+		for i, q := range queries {
+			if gotErrs[i] != nil {
+				t.Errorf("Examples(%q) error = %v", q, gotErrs[i])
+			}
+			if diff := cmp.Diff(want, gotExamples[i]); diff != "" {
+				t.Errorf("Examples(%q) mismatch (-want +got):\n%s", q, diff)
+			}
+		}
+		reqs := fakeSrv.requests()
+		if len(reqs) != 2 {
+			t.Fatalf("server received %d requests, want 2", len(reqs))
+		}
+		for _, req := range reqs {
+			if req.GetExampleStore() != storeName || req.GetTopK() != 10 {
+				t.Errorf("request ExampleStore = %q, TopK = %d, want %q, 10", req.GetExampleStore(), req.GetTopK(), storeName)
+			}
+		}
+		dialMu.Lock()
+		targets := append([]string(nil), gotDialTargets...)
+		dialMu.Unlock()
+		if len(targets) == 0 || targets[0] != "custom.endpoint.example:443" {
+			t.Errorf("dialed targets = %q, want first %q", targets, "custom.endpoint.example:443")
+		}
+		if err := p.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
+
+	t.Run("resolves project and location", func(t *testing.T) {
+		p, err := NewProviderWithOptions(t.Context(), &ProviderConfig{
+			ExampleStoreName: "projects/example.com:my-proj/locations/asia-east1/exampleStores/store-1",
+		}, callerOpts...)
+		if err != nil {
+			t.Fatalf("NewProviderWithOptions() error = %v", err)
+		}
+		t.Cleanup(func() { _ = p.Close() })
+		if got := p.Project(); got != "example.com:my-proj" {
+			t.Errorf("Project() = %q, want %q", got, "example.com:my-proj")
+		}
+		if got := p.Location(); got != "asia-east1" {
+			t.Errorf("Location() = %q, want %q", got, "asia-east1")
+		}
+
+		var nilP *Provider
+		zero := &Provider{}
+		for name, q := range map[string]*Provider{"nil": nilP, "zero": zero} {
+			if got := q.Project(); got != "" {
+				t.Errorf("%s Provider Project() = %q, want empty", name, got)
+			}
+			if got := q.Location(); got != "" {
+				t.Errorf("%s Provider Location() = %q, want empty", name, got)
+			}
+		}
+	})
+}
+
+func TestNewProviderWithOptions_WrapsErrors(t *testing.T) {
+	t.Run("client creation error is wrapped", func(t *testing.T) {
+		errFake := errors.New("dial failed")
+		origFactory := newExampleStoreClient
+		t.Cleanup(func() {
+			newExampleStoreClient = origFactory
+		})
+		newExampleStoreClient = func(context.Context, ...option.ClientOption) (exampleStoreClient, error) {
+			return nil, errFake
+		}
+
+		p, err := NewProviderWithOptions(t.Context(), &ProviderConfig{ExampleStoreName: testStoreName})
+		if p != nil {
+			t.Errorf("NewProviderWithOptions() provider = %v, want nil", p)
+		}
+		if !errors.Is(err, errFake) {
+			t.Errorf("NewProviderWithOptions() error = %v, want wrapping %v", err, errFake)
+		}
+		if err == nil || err.Error() != "vertexai: create example store client: dial failed" {
+			t.Errorf("NewProviderWithOptions() error = %v, want %q", err, "vertexai: create example store client: dial failed")
+		}
+	})
+
+	t.Run("nil client option", func(t *testing.T) {
+		p, err := NewProviderWithOptions(t.Context(), &ProviderConfig{ExampleStoreName: testStoreName}, nil)
+		if p != nil {
+			t.Errorf("NewProviderWithOptions() provider = %v, want nil", p)
+		}
+		if err == nil || err.Error() != "vertexai: client option cannot be nil" {
+			t.Errorf("NewProviderWithOptions() error = %v, want %q", err, "vertexai: client option cannot be nil")
+		}
+	})
+}
+
+func TestProvider_Uninitialized(t *testing.T) {
+	for name, p := range map[string]*Provider{"nil": nil, "zero": {}} {
+		t.Run(name, func(t *testing.T) {
+			if err := p.Close(); err != nil {
+				t.Errorf("Close() error = %v, want nil", err)
+			}
+			examples, err := p.Examples(t.Context(), "query")
+			if examples != nil {
+				t.Errorf("Examples() = %v, want nil", examples)
+			}
+			if err == nil || err.Error() != "vertexai: provider is not initialized" {
+				t.Errorf("Examples() error = %v, want %q", err, "vertexai: provider is not initialized")
+			}
+		})
+	}
+}
+
+func TestProvider_Examples_ConvertsPartialArgsAndWillContinue(t *testing.T) {
+	client := &fakeExampleStoreClient{
+		resp: &aiplatformpb.SearchExamplesResponse{
+			Results: []*aiplatformpb.SearchExamplesResponse_SimilarExample{
+				makeResult("search key", 1.0, makeExpectedContent("model", &aiplatformpb.Part{
+					Data: &aiplatformpb.Part_FunctionCall{
+						FunctionCall: &aiplatformpb.FunctionCall{
+							Name:         "get_weather",
+							WillContinue: true,
+							PartialArgs: []*aiplatformpb.PartialArg{
+								{JsonPath: "$.a", Delta: &aiplatformpb.PartialArg_StringValue{StringValue: "str"}, WillContinue: true},
+								{JsonPath: "$.b", Delta: &aiplatformpb.PartialArg_NumberValue{NumberValue: 3.5}},
+								{JsonPath: "$.c", Delta: &aiplatformpb.PartialArg_BoolValue{BoolValue: true}},
+								{JsonPath: "$.d", Delta: &aiplatformpb.PartialArg_NullValue{NullValue: structpb.NullValue_NULL_VALUE}},
+							},
+						},
+					},
+				})),
+			},
+		},
+	}
+	p, err := newProvider(&ProviderConfig{ExampleStoreName: testStoreName}, client)
+	if err != nil {
+		t.Fatalf("newProvider() error = %v", err)
+	}
+
+	examples, err := p.Examples(t.Context(), "query")
+	if err != nil {
+		t.Fatalf("Examples() error = %v", err)
+	}
+
+	fc := examples[0].Output[0].Parts[0].FunctionCall
+	if fc.WillContinue == nil || !*fc.WillContinue {
+		t.Errorf("FunctionCall.WillContinue = %v, want pointer to true", fc.WillContinue)
+	}
+	want := []*genai.PartialArg{
+		{JsonPath: "$.a", StringValue: "str", WillContinue: new(true)},
+		{JsonPath: "$.b", NumberValue: new(3.5)},
+		{JsonPath: "$.c", BoolValue: new(true)},
+		{JsonPath: "$.d", NULLValue: "NULL_VALUE"},
+	}
+	if diff := cmp.Diff(want, fc.PartialArgs); diff != "" {
+		t.Errorf("FunctionCall.PartialArgs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestProvider_Examples_ConvertsFunctionResponseParts(t *testing.T) {
+	client := &fakeExampleStoreClient{
+		resp: &aiplatformpb.SearchExamplesResponse{
+			Results: []*aiplatformpb.SearchExamplesResponse_SimilarExample{
+				makeResult("search key", 1.0, makeExpectedContent("model", &aiplatformpb.Part{
+					Data: &aiplatformpb.Part_FunctionResponse{
+						FunctionResponse: &aiplatformpb.FunctionResponse{
+							Name: "render",
+							Parts: []*aiplatformpb.FunctionResponsePart{
+								{Data: &aiplatformpb.FunctionResponsePart_InlineData{InlineData: &aiplatformpb.FunctionResponseBlob{
+									MimeType: "image/png", Data: []byte("png"), DisplayName: "chart.png",
+								}}},
+								{Data: &aiplatformpb.FunctionResponsePart_FileData{FileData: &aiplatformpb.FunctionResponseFileData{
+									MimeType: "application/pdf", FileUri: "gs://b/doc.pdf", DisplayName: "doc.pdf",
+								}}},
+							},
+						},
+					},
+				})),
+			},
+		},
+	}
+	p, err := newProvider(&ProviderConfig{ExampleStoreName: testStoreName}, client)
+	if err != nil {
+		t.Fatalf("newProvider() error = %v", err)
+	}
+
+	examples, err := p.Examples(t.Context(), "query")
+	if err != nil {
+		t.Fatalf("Examples() error = %v", err)
+	}
+
+	want := []*genai.FunctionResponsePart{
+		{InlineData: &genai.FunctionResponseBlob{MIMEType: "image/png", Data: []byte("png"), DisplayName: "chart.png"}},
+		{FileData: &genai.FunctionResponseFileData{MIMEType: "application/pdf", FileURI: "gs://b/doc.pdf", DisplayName: "doc.pdf"}},
+	}
+	if diff := cmp.Diff(want, examples[0].Output[0].Parts[0].FunctionResponse.Parts); diff != "" {
+		t.Errorf("FunctionResponse.Parts mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestProvider_Examples_SkipsNilPartialArgAndEmptyFunctionResponsePart(t *testing.T) {
+	client := &fakeExampleStoreClient{
+		resp: &aiplatformpb.SearchExamplesResponse{
+			Results: []*aiplatformpb.SearchExamplesResponse_SimilarExample{
+				makeResult("search key", 1.0,
+					makeExpectedContent("model", &aiplatformpb.Part{
+						Data: &aiplatformpb.Part_FunctionCall{
+							FunctionCall: &aiplatformpb.FunctionCall{
+								Name: "get_weather",
+								PartialArgs: []*aiplatformpb.PartialArg{
+									nil,
+									{JsonPath: "$.a", Delta: &aiplatformpb.PartialArg_StringValue{StringValue: "s"}},
+								},
+							},
+						},
+					}),
+					makeExpectedContent("user", &aiplatformpb.Part{
+						Data: &aiplatformpb.Part_FunctionResponse{
+							FunctionResponse: &aiplatformpb.FunctionResponse{
+								Name: "get_weather",
+								Parts: []*aiplatformpb.FunctionResponsePart{
+									nil,
+									{},
+									{Data: &aiplatformpb.FunctionResponsePart_FileData{FileData: &aiplatformpb.FunctionResponseFileData{FileUri: "gs://b/x"}}},
+								},
+							},
+						},
+					}),
+				),
+			},
+		},
+	}
+	p, err := newProvider(&ProviderConfig{ExampleStoreName: testStoreName}, client)
+	if err != nil {
+		t.Fatalf("newProvider() error = %v", err)
+	}
+
+	examples, err := p.Examples(t.Context(), "query")
+	if err != nil {
+		t.Fatalf("Examples() error = %v", err)
+	}
+
+	wantArgs := []*genai.PartialArg{{JsonPath: "$.a", StringValue: "s"}}
+	if diff := cmp.Diff(wantArgs, examples[0].Output[0].Parts[0].FunctionCall.PartialArgs); diff != "" {
+		t.Errorf("FunctionCall.PartialArgs mismatch (-want +got):\n%s", diff)
+	}
+	wantParts := []*genai.FunctionResponsePart{{FileData: &genai.FunctionResponseFileData{FileURI: "gs://b/x"}}}
+	if diff := cmp.Diff(wantParts, examples[0].Output[1].Parts[0].FunctionResponse.Parts); diff != "" {
+		t.Errorf("FunctionResponse.Parts mismatch (-want +got):\n%s", diff)
+	}
 }
