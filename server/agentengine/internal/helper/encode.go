@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"reflect"
 	"strings"
 	"time"
@@ -39,34 +40,33 @@ func ConvertSnake(o any) any {
 	return res
 }
 
-// convertSnake does the job. It includes indent for debugging purposes
-// uses reflect to traverse the object
 func convertSnake(path, indent string, o any) (any, error) {
-	// handle nil
-	if o == nil {
+	return convertSnakeValue(path, indent, reflect.ValueOf(o))
+}
+
+// Work with reflect.Values so unexported embedded structs can expose their
+// exported fields without calling Interface on the struct itself.
+func convertSnakeValue(path, indent string, v reflect.Value) (any, error) {
+	if !v.IsValid() {
 		return nil, nil
 	}
-	v := reflect.ValueOf(o)
 	switch v.Kind() {
 	case reflect.String:
-		// return string as-is
-		s, ok := o.(string)
-		if !ok {
-			// not a string, but a derived type
-			return o, nil
+		if v.CanInterface() {
+			return v.Interface(), nil
 		}
-		return s, nil
+		return v.String(), nil
 	case reflect.Struct:
 		vt := v.Type()
-		// handle time.Time in a special way
 		if vt == reflect.TypeOf(time.Time{}) {
-			t := o.(time.Time)
+			if !v.CanInterface() {
+				return nil, fmt.Errorf("cannot convert unexported time field")
+			}
+			t := v.Interface().(time.Time)
 			return float64(t.UnixMicro()) / 1e6, nil // returns a number of seconds "Unix-way"
 		}
 
-		// this map will hold all the fields
 		m := make(map[string]any)
-		// iterate over the fields handling all the cases
 		for i := 0; i < v.NumField(); i++ {
 			fv := v.Field(i)
 			fvt := vt.Field(i)
@@ -75,25 +75,24 @@ func convertSnake(path, indent string, o any) (any, error) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse tag (%v): %w", tag, err)
 			}
-			// respect json "-"
 			if skip {
 				continue
 			}
-			// handle embedded structs
+			newPath := path + "." + name
 			if fvt.Anonymous {
-				embed, err := convertSnake(path+"."+name, indent+".   ", fv.Interface())
+				embed, err := convertSnakeValue(newPath, indent+".   ", fv)
 				if err != nil {
-					return nil, fmt.Errorf("failed to convert embedded struct with name:%v o: %+v %T err: %w", name, fv.Interface(), fv.Interface(), err)
+					return nil, fmt.Errorf("failed to convert embedded field: %w", err)
 				}
-				// merge them to m
-				for k, v := range embed.(map[string]any) {
-					m[k] = v
+				if fields, ok := embed.(map[string]any); ok {
+					maps.Copy(m, fields)
+				} else if embed != nil {
+					// Scalar embeddings such as time.Time cannot be flattened.
+					m[convertName(newPath, name)] = embed
 				}
 				continue
 			}
 
-			// regular field
-			newPath := path + "." + name
 			newName := convertName(newPath, name)
 			if fv.CanInterface() {
 				val, err := convertSnake(newPath, indent+".   ", fv.Interface())
@@ -122,7 +121,8 @@ func convertSnake(path, indent string, o any) (any, error) {
 		}
 		return m, nil
 	case reflect.Slice:
-		if rm, ok := o.(json.RawMessage); ok {
+		if v.Type() == reflect.TypeFor[json.RawMessage]() {
+			rm := json.RawMessage(v.Bytes())
 			if len(rm) == 0 {
 				return nil, nil
 			}
@@ -133,7 +133,7 @@ func convertSnake(path, indent string, o any) (any, error) {
 		}
 		res := []any{}
 		for i := 0; i < v.Len(); i++ {
-			elem, err := convertSnake(path+".[]", indent+"    ", v.Index(i).Interface())
+			elem, err := convertSnakeValue(path+".[]", indent+"    ", v.Index(i))
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert slice element with path: %v err: %w", path+".[]", err)
 			}
@@ -146,7 +146,7 @@ func convertSnake(path, indent string, o any) (any, error) {
 	case reflect.Map:
 		res := make(map[string]any)
 		for _, k := range v.MapKeys() {
-			elem, err := convertSnake(path+"->", indent+"    ", v.MapIndex(k).Interface())
+			elem, err := convertSnakeValue(path+"->", indent+"    ", v.MapIndex(k))
 			if err != nil {
 				return nil, fmt.Errorf("failed to convert map element with path: %v err: %w", path+"->", err)
 			}
@@ -156,11 +156,11 @@ func convertSnake(path, indent string, o any) (any, error) {
 			return map[string]any{}, nil
 		}
 		return res, nil
-	case reflect.Pointer:
+	case reflect.Pointer, reflect.Interface:
 		if v.IsNil() {
 			return nil, nil
 		}
-		return convertSnake(path+"*", indent+"    ", v.Elem().Interface())
+		return convertSnakeValue(path+"*", indent+"    ", v.Elem())
 	case reflect.Bool:
 		return v.Bool(), nil
 	case reflect.Float32, reflect.Float64:

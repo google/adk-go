@@ -121,9 +121,6 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 		if event == nil {
 			continue
 		}
-		if event.LLMResponse.Content == nil {
-			continue
-		}
 
 		err = helper.EmitJSON(rw, *event)
 		if err != nil {

@@ -349,6 +349,85 @@ func TestEmbedded(t *testing.T) {
 	}
 }
 
+func TestEmbeddedValues(t *testing.T) {
+	type details struct{ DisplayName string }
+	type Details struct{ DisplayName string }
+	type Label string
+	type label string
+	type hiddenTime = time.Time
+	type Unsupported uint
+	for _, tc := range []struct {
+		name    string
+		value   any
+		want    map[string]any
+		wantErr bool
+	}{
+		{
+			name:  "time",
+			value: struct{ time.Time }{time.UnixMicro(1_234_567)},
+			want:  map[string]any{"time": 1.234567},
+		},
+		{
+			name:  "unexported_struct",
+			value: struct{ details }{details{"synthetic"}},
+			want:  map[string]any{"display_name": "synthetic"},
+		},
+		{
+			name:  "unexported_pointer",
+			value: struct{ *details }{&details{"synthetic"}},
+			want:  map[string]any{"display_name": "synthetic"},
+		},
+		{
+			name:  "exported_pointer",
+			value: struct{ *Details }{&Details{"synthetic"}},
+			want:  map[string]any{"display_name": "synthetic"},
+		},
+		{
+			name:  "nil_pointer",
+			value: struct{ *Details }{},
+			want:  map[string]any{},
+		},
+		{
+			name:  "nested_interfaces",
+			value: map[string]any{"values": []any{nil, struct{ details }{details{"synthetic"}}}},
+			want:  map[string]any{"values": []any{nil, map[string]any{"display_name": "synthetic"}}},
+		},
+		{
+			name:  "exported_scalar",
+			value: struct{ Label }{"synthetic"},
+			want:  map[string]any{"label": Label("synthetic")},
+		},
+		{
+			name:  "unexported_scalar",
+			value: struct{ label }{"synthetic"},
+			want:  map[string]any{"label": "synthetic"},
+		},
+		{
+			name:    "unexported_time_alias",
+			value:   struct{ hiddenTime }{time.Unix(1, 0)},
+			wantErr: true,
+		},
+		{
+			name:    "unsupported_embedded_type",
+			value:   struct{ Unsupported }{},
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := convertSnake("", "", tc.value)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("conversion error present = %t, want %t", err != nil, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if !cmp.Equal(got, tc.want) {
+				t.Error("embedded fields were not preserved")
+			}
+		})
+	}
+}
+
 func TestOmitEmpty(t *testing.T) {
 	type A struct {
 		OmittableArr         []int       `json:"optional_array,omitempty"`
