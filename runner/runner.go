@@ -36,6 +36,7 @@ import (
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	"google.golang.org/adk/v2/internal/compactioninternal"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/eventmetadata"
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
 	"google.golang.org/adk/v2/internal/plugininternal"
@@ -509,11 +510,59 @@ func fromPlugin(original, modified *session.Event, record *session.EventCompacti
 	return &out
 }
 
-// stampTimestamp gives an event without a timestamp the time the runner
-// received it, as adk-python's Event does on construction. That is an event an
-// agent yielded without one, or one a plugin rewrote in place and left without
-// one. A replacement a plugin returns has already inherited the original's
-// timestamp through fromPlugin.
+// processEventWithPlugins stamps the event's timestamp if it is zero, merges
+// the run's custom metadata into event, runs the OnEventCallback plugins and
+// applies fromPlugin. When a plugin returns a non-nil event, a replacement or
+// the same event, the run's custom metadata is merged into that event again,
+// its own keys winning; a nil return keeps the plugin's in-place edits as they
+// are. This mirrors adk-python's Runner._process_event_with_plugin_callbacks
+// and _get_output_event (runners.py).
+//
+// It does not persist the event: the caller appends the returned event to the
+// session when it is not partial. A runner-synthesized event goes through
+// this function so it gets the run's custom metadata before OnEventCallback,
+// like agent output events. event must be non-nil. On a plugin error it
+// returns (nil, err) unchanged.
+func (r *Runner) processEventWithPlugins(ctx agent.InvocationContext, event *session.Event) (*session.Event, error) {
+	stampTimestamp(ctx, event)
+	runMetadata := runMetadataFromContext(ctx)
+	eventmetadata.MergeIntoEvent(event, runMetadata)
+	if r.pluginManager == nil {
+		return event, nil
+	}
+	// Captured before the plugin runs. A plugin that mutates the event in
+	// place has already overwritten this field by the time the callback
+	// returns, so reading it afterwards reads the plugin's value rather than
+	// the framework's.
+	record := event.Actions.Compaction
+	modifiedEvent, err := r.pluginManager.RunOnEventCallback(ctx, event)
+	if err != nil {
+		return nil, err
+	}
+	event = fromPlugin(event, modifiedEvent, record)
+	stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
+	// adk-python merges again for every returned event, the same object
+	// included, and only a None return skips it (runners.py,
+	// _get_output_event).
+	if modifiedEvent != nil {
+		eventmetadata.MergeIntoEvent(event, runMetadata)
+	}
+	return event, nil
+}
+
+// runMetadataFromContext returns the invocation's custom metadata, which Run
+// or RunLive filtered with eventmetadata.WithoutInternal and stored on the
+// context's runconfig.RunConfig. It returns nil when ctx carries none.
+func runMetadataFromContext(ctx context.Context) map[string]any {
+	if rc := runconfig.FromContext(ctx); rc != nil {
+		return rc.CustomMetadata
+	}
+	return nil
+}
+
+// stampTimestamp gives an event that an agent yielded, or a plugin returned in
+// its place, without a timestamp the time the runner received it, as
+// adk-python's Event does on construction.
 //
 // An event built as a struct literal never passes through session.NewEvent.
 // Stored with a zero timestamp it moves the session's last update time back to
@@ -579,12 +628,20 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
+	// Copied now: the sequence below runs only when ranged, and later
+	// changes to the caller's map must not reach the invocation's events.
+	var runMetadata map[string]any
+	if cfg.CustomMetadata != nil {
+		runMetadata = eventmetadata.WithoutInternal(*cfg.CustomMetadata)
+	}
 	return telemetry.InstrumentInvocation(ctx, r.rootAgent, sessionID, func(ctx context.Context) iter.Seq2[*session.Event, error] {
-		return r.run(ctx, userID, sessionID, msg, cfg, opts...)
+		return r.run(ctx, userID, sessionID, msg, cfg, runMetadata, opts...)
 	})
 }
 
-func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
+// run is the body of Run. runMetadata is the caller's RunConfig.CustomMetadata
+// without ADK-internal keys, copied when Run was called.
+func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, runMetadata map[string]any, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
@@ -682,16 +739,17 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 				}
 			}
 
-			r.runNode(rootCtx, storedSession, agentToRun, msg, cfg, options, yield)
+			r.runNode(rootCtx, storedSession, agentToRun, msg, cfg, runMetadata, options, yield)
 			return
 		}
 
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
-			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
-			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
-			HTTPOptions:   cfg.HTTPOptions,
-			Labels:        cfg.Labels,
+			StreamingMode:  runconfig.StreamingMode(cfg.StreamingMode),
+			MaxLLMCalls:    runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
+			HTTPOptions:    cfg.HTTPOptions,
+			Labels:         cfg.Labels,
+			CustomMetadata: runMetadata,
 		})
 		ctx = r.withPluginManager(ctx)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
@@ -836,21 +894,12 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 				}
 			}
 
-			if pluginManager != nil {
-				// Captured before the plugin runs. A plugin that mutates the
-				// event in place has already overwritten this field by the time
-				// the callback returns, so reading it afterwards reads the
-				// plugin's value rather than the framework's.
-				record := event.Actions.Compaction
-				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
-				if err != nil {
-					if !yield(nil, err) {
-						return
-					}
-					continue
+			event, err = r.processEventWithPlugins(ctx, event)
+			if err != nil {
+				if !yield(nil, err) {
+					return
 				}
-				event = fromPlugin(event, modifiedEvent, record)
-				stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
+				continue
 			}
 
 			// only commit non-partial event to a session service
@@ -892,14 +941,12 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	event.Author = ctx.Agent().Name()
 	event.Content = content
 
-	record := event.Actions.Compaction
-	modifiedEvent, err := r.pluginManager.RunOnEventCallback(ctx, event)
+	event, err = r.processEventWithPlugins(ctx, event)
 	if err != nil {
 		return nil, err
 	}
 	// Stamp after OnEvent so a replacement keeps its BeforeRun origin, without
 	// changing plugin-owned metadata.
-	event = fromPlugin(event, modifiedEvent, record)
 	reply := *event
 	reply.CustomMetadata = make(map[string]any, len(event.CustomMetadata)+1)
 	maps.Copy(reply.CustomMetadata, event.CustomMetadata)
@@ -1015,8 +1062,9 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
-		StreamingMode: runconfig.StreamingModeBidi, // Live is always bidirectional streaming
-		Live:          &cfg,
+		StreamingMode:  runconfig.StreamingModeBidi, // Live is always bidirectional streaming
+		Live:           &cfg,
+		CustomMetadata: eventmetadata.WithoutInternal(cfg.CustomMetadata),
 	})
 	ctx = r.withPluginManager(ctx)
 	// Deliberately no compactionctx here: context compaction does not apply to
@@ -1113,20 +1161,12 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				}
 			}
 
-			if r.pluginManager != nil {
-				// Captured before the plugin runs: one that mutates the event in
-				// place has already overwritten this field by the time the callback
-				// returns.
-				record := event.Actions.Compaction
-				modifiedEvent, pluginErr := r.pluginManager.RunOnEventCallback(iCtx, event)
-				if pluginErr != nil {
-					if !yield(nil, pluginErr) {
-						return
-					}
-					continue
+			event, err = r.processEventWithPlugins(iCtx, event)
+			if err != nil {
+				if !yield(nil, err) {
+					return
 				}
-				event = fromPlugin(event, modifiedEvent, record)
-				stampTimestamp(iCtx, event) // a plugin may have rewritten the event in place
+				continue
 			}
 
 			// Chronological event buffering logic for Live streaming.
@@ -1280,6 +1320,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 			event.IsolationScope = iso
 		}
 	}
+	eventmetadata.MergeIntoEvent(event, runMetadataFromContext(ctx))
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 		return ctx, nil, fmt.Errorf("failed to append event to sessionService: %w", err)

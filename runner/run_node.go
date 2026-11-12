@@ -67,6 +67,7 @@ func (r *Runner) runNode(
 	agentToRun agent.Agent,
 	msg *genai.Content,
 	cfg agent.RunConfig,
+	runMetadata map[string]any,
 	opts runOptions,
 	yield func(*session.Event, error) bool,
 ) {
@@ -137,7 +138,7 @@ func (r *Runner) runNode(
 	}
 
 	// UserContent is read by Workflow.Run as the workflow's seed input.
-	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg)
+	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg, runMetadata)
 	invocationCtx = ictx
 
 	// Append the user message to history (also runs the on_user_message
@@ -207,20 +208,12 @@ func (r *Runner) runNode(
 			}
 		}
 
-		if pluginManager != nil {
-			// Captured before the plugin runs: one that mutates the event in
-			// place has already overwritten this field by the time the callback
-			// returns.
-			record := event.Actions.Compaction
-			modifiedEvent, perr := pluginManager.RunOnEventCallback(ictx, event)
-			if perr != nil {
-				if !yield(nil, perr) {
-					return
-				}
-				continue
+		event, err = r.processEventWithPlugins(ictx, event)
+		if err != nil {
+			if !yield(nil, err) {
+				return
 			}
-			event = fromPlugin(event, modifiedEvent, record)
-			stampTimestamp(ictx, event) // a plugin may have rewritten the event in place
+			continue
 		}
 
 		if !event.LLMResponse.Partial {
@@ -263,13 +256,15 @@ func (r *Runner) newNodeInvocationContext(
 	agentToRun agent.Agent,
 	msg *genai.Content,
 	cfg agent.RunConfig,
+	runMetadata map[string]any,
 ) agent.Context {
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
-		StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
-		MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
-		HTTPOptions:   cfg.HTTPOptions,
-		Labels:        cfg.Labels,
+		StreamingMode:  runconfig.StreamingMode(cfg.StreamingMode),
+		MaxLLMCalls:    runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
+		HTTPOptions:    cfg.HTTPOptions,
+		Labels:         cfg.Labels,
+		CustomMetadata: runMetadata,
 	})
 	ctx = r.withPluginManager(ctx)
 

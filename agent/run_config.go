@@ -70,6 +70,35 @@ type RunConfig struct {
 	// grows quadratically with no exit.
 	MaxLLMCalls int
 
+	// CustomMetadata holds caller-supplied key-value metadata for this
+	// invocation.
+	//
+	// The runner merges CustomMetadata into every event the invocation
+	// persists and yields, including the initial user message event and a
+	// BeforeRunCallback early-exit reply, before OnEventCallback plugins run
+	// and before the event is appended to the session. When an event already
+	// defines a key present in CustomMetadata, the event's own value wins.
+	//
+	// Keys reserved for ADK's own event bookkeeping — keys starting with
+	// "__adk_internal_" or "adk.workflow.", and "adk:before_run_reply" — are
+	// dropped from CustomMetadata before merging. Keys with those prefixes
+	// that an event itself sets are preserved on that event.
+	//
+	// CustomMetadata is a pointer so that RunConfig stays comparable and
+	// usable as a map key. Nil (the zero value) or a pointer to an empty map
+	// leaves every event's CustomMetadata unchanged. The runner copies the
+	// non-reserved entries when Run is called, before Run returns, and merges
+	// that copy into events: the caller's map is never mutated by ADK, and
+	// changes to it after Run is called do not reach the events. The copy is
+	// shallow. Values stored in the map should be JSON-serializable for
+	// persistent session backends and must not be mutated concurrently while
+	// the invocation runs.
+	//
+	// A plugin that edits the event and returns nil keeps its edits; one that
+	// returns an event, the same or a new one, gets the run's metadata merged
+	// into it, its own keys winning.
+	CustomMetadata *map[string]any
+
 	// HTTPOptions holds per-invocation HTTP options (such as custom headers,
 	// timeout, retry options, or extra body fields) merged into each model
 	// request's GenerateContentConfig.HTTPOptions during the invocation.

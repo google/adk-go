@@ -23,6 +23,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/eventmetadata"
 	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
@@ -31,7 +32,7 @@ import (
 )
 
 // BeforeRunReplyKey identifies persisted replies that bypassed agent execution.
-const BeforeRunReplyKey = "adk:before_run_reply"
+const BeforeRunReplyKey = eventmetadata.BeforeRunReplyKey
 
 type PluginConfig struct {
 	Plugins      []*plugin.Plugin
