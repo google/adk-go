@@ -300,9 +300,9 @@ func TransferToResume(ctx agent.InvocationContext) string {
 			}
 		}
 	}
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Author == self && events[i].Actions.TransferToAgent != "" {
-			return events[i].Actions.TransferToAgent
+	for _, ev := range slices.Backward(events) {
+		if ev.Author == self && ev.Actions.TransferToAgent != "" {
+			return ev.Actions.TransferToAgent
 		}
 	}
 	return ""
@@ -311,11 +311,11 @@ func TransferToResume(ctx agent.InvocationContext) string {
 // callAuthor returns the author of the latest event in events with a call
 // with the given id, or "".
 func callAuthor(events []*session.Event, id string) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		if content := events[i].LLMResponse.Content; content != nil {
+	for _, ev := range slices.Backward(events) {
+		if content := ev.LLMResponse.Content; content != nil {
 			for _, part := range content.Parts {
 				if part != nil && part.FunctionCall != nil && part.FunctionCall.ID == id {
-					return events[i].Author
+					return ev.Author
 				}
 			}
 		}
