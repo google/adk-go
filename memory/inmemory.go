@@ -44,6 +44,26 @@ const maxSearchResults = 10
 // to the bucket of req.SessionID and keeps the first stored event of each
 // non-empty event ID in that bucket; AddSessionToMemory replaces the bucket of
 // the session.
+//
+// Both add methods skip nil events and events whose content is nil or holds
+// no non-nil part; such an event does not reserve its ID. Thought parts are
+// left out of both matching and the returned content. An event with parts but
+// no searchable text, such as a blob-only or thought-only event, is stored
+// and reserves its ID, but no search returns it.
+//
+// A query and the stored text are split into words: runs of letters, numbers
+// and underscores, taken after Unicode NFC normalization and lowercased with
+// full Unicode case mapping. An event matches a query word when it has that
+// word. A query word with non-ASCII characters also matches anywhere inside
+// the event's text, and a stored word that mixes Latin and other scripts,
+// such as the Python in 私はPythonを使う, also yields each single-script run
+// as a word. A query with no words returns no entries.
+//
+// Returned entries carry the stored event's ID, Author, Timestamp and
+// CustomMetadata. They share the event's parts and metadata with the service
+// and with the events that were added, so callers must not modify them.
+// AddSessionToMemory, AddEventsToMemory and SearchMemory return an error for a
+// nil session or request.
 func InMemoryService() Service {
 	return &inMemoryService{
 		store: make(map[key]*userMemories),

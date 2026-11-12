@@ -90,6 +90,11 @@ func (e *unsupportedError) Unwrap() error { return errors.ErrUnsupported }
 // The in-memory service returned by [InMemoryService] implements EventAdder.
 // Callers holding an arbitrary [Service] can either call the package-level
 // [AddEventsToMemory] helper or test for support with a type assertion.
+//
+// A type that wraps a Service by embedding the Service interface does not
+// implement EventAdder, even when the wrapped value does, because embedding
+// promotes only the methods of Service. Such a wrapper declares
+// AddEventsToMemory itself to forward the call.
 type EventAdder interface {
 	// AddEventsToMemory appends an incremental batch of events to the memory
 	// service for the scope named by req.
