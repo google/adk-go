@@ -69,6 +69,9 @@ type frontmatterYAML struct {
 // decodeAllowedTools decodes an allowed-tools value read under key, which
 // names the key in errors.
 func decodeAllowedTools(node *yaml.Node, key string) ([]string, error) {
+	if node.Kind == yaml.AliasNode {
+		node = node.Alias
+	}
 	switch node.Kind {
 	case yaml.SequenceNode:
 		var tools []string

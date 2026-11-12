@@ -379,6 +379,94 @@ Body`,
 	}
 }
 
+func TestParse_AllowedToolsAlias(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    []string
+		wantErr string
+	}{
+		{
+			name:  "string",
+			value: "Read Bash(git:*)",
+			want:  []string{"Read", "Bash(git:*)"},
+		},
+		{
+			name:  "sequence",
+			value: "[Read, Bash(git:*)]",
+			want:  []string{"Read", "Bash(git:*)"},
+		},
+		{
+			name:  "sequence with an aliased element",
+			value: "[&tool Read, *tool]",
+			want:  []string{"Read", "Read"},
+		},
+		{
+			name:  "null",
+			value: "null",
+		},
+		{
+			name:    "integer",
+			value:   "42",
+			wantErr: "%s must be a string or a sequence of strings",
+		},
+		{
+			name:    "mapping",
+			value:   "{tool: Read}",
+			wantErr: "%s must be a string or a sequence of strings",
+		},
+		{
+			name:    "unbalanced expression",
+			value:   "Bash(git:*",
+			wantErr: "%s must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression): unclosed '('",
+		},
+		{
+			name:    "sequence of mappings",
+			value:   "[{tool: Read}]",
+			wantErr: "%s: yaml: unmarshal errors:",
+		},
+		{
+			name:    "recursive sequence",
+			value:   "[*value]",
+			wantErr: "%s: yaml: unmarshal errors:",
+		},
+	}
+	for _, key := range []string{"allowed-tools", "allowed_tools"} {
+		for _, testcase := range tests {
+			t.Run(key+"/"+testcase.name, func(t *testing.T) {
+				t.Parallel()
+				input := fmt.Sprintf("---\nname: skill\ndescription: skill\nvalue: &value %s\n%s: *value\n", testcase.value, key)
+				if key == "allowed-tools" {
+					input += "allowed_tools: Write\n"
+				}
+				input += "---\nMarkdown Body"
+				reader := bufio.NewReader(strings.NewReader(input))
+				got, err := Parse(reader)
+				if testcase.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), fmt.Sprintf(testcase.wantErr, key)) {
+						t.Fatalf("Parse: got error %v, want error containing %q", err, fmt.Sprintf(testcase.wantErr, key))
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Parse: expected no error, got: %v", err)
+				}
+				want := &Frontmatter{Name: "skill", Description: "skill", AllowedTools: testcase.want}
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("Parse: got %v, want %v", got, want)
+				}
+				instruction, err := io.ReadAll(reader)
+				if err != nil {
+					t.Fatalf("io.ReadAll: expected no error, got: %v", err)
+				}
+				if string(instruction) != "Markdown Body" {
+					t.Errorf("expected unread instruction %q, got %q", "Markdown Body", instruction)
+				}
+			})
+		}
+	}
+}
+
 func TestParse_InvalidFormat(t *testing.T) {
 	tests := []struct {
 		name    string
