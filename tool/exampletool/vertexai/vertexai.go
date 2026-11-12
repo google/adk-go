@@ -12,7 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package vertexai provides an [exampletool.Provider] backed by a Vertex AI Example Store.
+// Package vertexai provides an [exampletool.Provider] backed by a Vertex AI
+// Example Store.
+//
+// A [Provider] holds one Example Store client for one store, named by its full
+// resource name in [ProviderConfig]. Create it with [NewProvider], which
+// connects to the store's regional endpoint with Application Default
+// Credentials, or with [NewProviderWithOptions], which also applies the
+// caller's client options (another endpoint, credentials, or an existing gRPC
+// connection). Pass the Provider to the example tool:
+//
+//	p, err := vertexai.NewProvider(ctx, &vertexai.ProviderConfig{
+//		ExampleStoreName: "projects/my-project/locations/us-central1/exampleStores/my-store",
+//	})
+//	if err != nil {
+//		return err
+//	}
+//	defer p.(io.Closer).Close()
+//	examples, err := exampletool.New(exampletool.ExampleToolConfig{Provider: p})
+//
+// On each model call the example tool calls [Provider.Examples] with the
+// user's text, which runs one similarity search in the store and converts the
+// results into [exampletool.Example] values. The number of results (10) and
+// the similarity threshold (0.5) are fixed.
 package vertexai
 
 import (
@@ -92,8 +114,10 @@ var (
 	_ io.Closer            = (*Provider)(nil)
 )
 
-// Close closes the underlying Vertex AI Example Store client.
-// Calling Close on a nil or zero Provider returns nil.
+// Close closes the underlying Vertex AI Example Store client. This also closes
+// a connection passed to [NewProviderWithOptions] with [option.WithGRPCConn].
+// After Close, Examples fails. Calling Close on a nil or zero Provider returns
+// nil.
 func (p *Provider) Close() error {
 	if p == nil || p.client == nil {
 		return nil
@@ -101,8 +125,8 @@ func (p *Provider) Close() error {
 	return p.client.Close()
 }
 
-// Project returns the Google Cloud project ID resolved for the Example Store,
-// or "" if p is nil or uninitialized.
+// Project returns the Google Cloud project ID taken from the store's resource
+// name, or "" if p is nil or uninitialized.
 func (p *Provider) Project() string {
 	if p == nil {
 		return ""
@@ -110,8 +134,9 @@ func (p *Provider) Project() string {
 	return p.project
 }
 
-// Location returns the Google Cloud location resolved for the Example Store,
-// or "" if p is nil or uninitialized.
+// Location returns the Google Cloud location taken from the store's resource
+// name, or "" if p is nil or uninitialized. The client's default endpoint is
+// the regional endpoint of this location.
 func (p *Provider) Location() string {
 	if p == nil {
 		return ""
@@ -168,7 +193,8 @@ func NewProvider(ctx context.Context, config *ProviderConfig) (exampletool.Provi
 // non-nil error.
 //
 // Close the returned [*Provider] when it is no longer in use to release the
-// underlying client connection.
+// underlying client connection. The client takes ownership of a connection
+// passed with [option.WithGRPCConn]: Close closes it.
 func NewProviderWithOptions(ctx context.Context, config *ProviderConfig, opts ...option.ClientOption) (*Provider, error) {
 	project, location, err := resolveStoreResource(config)
 	if err != nil {
@@ -227,7 +253,14 @@ func resolveStoreResource(config *ProviderConfig) (project, location string, err
 //
 // Examples sends one SearchExamples RPC for the configured store with top_k=10
 // and query as the last-entry user content search key. Results with
-// similarity_score < 0.5 or without a stored_contents_example are skipped.
+// similarity_score < 0.5 or without a stored_contents_example are skipped;
+// the others are returned in the order of the response. Each returned
+// Example's Input is a user content with one text part holding the stored
+// example's search key, and its Output holds the stored expected contents in
+// order, converted to [genai.Content]. Unset contents are left out, and so are
+// parts that carry no data and no thought flag, thought signature or video
+// metadata.
+//
 // If the search returns no matching results, Examples returns an empty,
 // non-nil slice and a nil error. If the RPC fails or p is uninitialized,
 // Examples returns nil and a non-nil error wrapping the underlying cause.

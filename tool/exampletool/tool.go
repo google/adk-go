@@ -12,7 +12,51 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package exampletool provides a tool that allows an agent to add (few-shot) examples to the LLM request.
+// Package exampletool provides a tool that adds few-shot examples to the
+// system instruction of an agent's model requests.
+//
+// An [Example] pairs a user turn with the turns that should follow it. Create
+// the tool with [New], either with a fixed list of examples or with a
+// [Provider] that selects examples for each user query, and add it to the
+// agent's tools (llmagent.Config.Tools). The tool is never declared to the
+// model and is never called; it only rewrites each outgoing request. Package
+// google.golang.org/adk/v2/tool/exampletool/vertexai provides a Provider backed
+// by a Vertex AI Example Store.
+//
+// On every model call the tool renders its examples as one text block and
+// appends it to the system instruction, after a blank line:
+//
+//	<EXAMPLES>
+//	Begin few-shot
+//	The following are examples of user queries and model responses using the available tools.
+//
+//	EXAMPLE 1:
+//	Begin example
+//	[user]
+//	Where is order 4417?
+//	[model]
+//	```
+//	check_order_status(order_id='4417')
+//	```
+//	Order 4417 shipped on Tuesday.
+//	End example
+//
+//	End few-shot
+//	<EXAMPLES>
+//
+// An output content with role "model" is written under the model prefix line
+// and a content with any other role under the user prefix line, as in the
+// block above; consecutive contents with the same prefix share one line. Text
+// parts are written as they are, except that "End few-shot" inside example
+// text becomes "[PROTECTED]" so that it cannot close the block. A function
+// call is written as name(key=value, ...) with its arguments sorted by key,
+// string values in single quotes and other values formatted with %v. A
+// function response is written in the layout of %v for a
+// *genai.FunctionResponse, with pointer fields written as the values they
+// point to. Parts of other kinds are left out. For a request that names no
+// model or a model whose name contains "gemini-", calls and responses are
+// fenced with plain ``` fences; for any other model they are fenced with
+// ```tool_code and ```tool_outputs.
 package exampletool
 
 import (
@@ -30,7 +74,15 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
-// Example is a single few-shot example, pairing an input with its expected output.
+// Example is a single few-shot example, pairing a user turn with the turns
+// that should follow it.
+//
+// Input holds the user turn; only its text parts are rendered. Output holds
+// the turns that follow, in order, such as a function call, its response and
+// the model's answer. Set each output content's Role, because it decides
+// whether the content is rendered under the model or the user prefix line (see
+// the package documentation). A nil Input renders
+// as an empty user turn; nil examples, contents and parts are skipped.
 type Example struct {
 	Input  *genai.Content   `json:"input"`
 	Output []*genai.Content `json:"output"`
@@ -38,16 +90,26 @@ type Example struct {
 
 // Provider fetches few-shot examples for a user query.
 //
-// Examples takes a context.Context and returns an error because providers may
-// perform I/O.
+// The example tool calls Examples once per model call, in the request path,
+// with the text of the user message (see [New]) and the invocation's context.
+// Examples may perform I/O; it should honor ctx, because the model call waits
+// for it. An error stops the turn before the model is called: the tool
+// returns it wrapped, and the agent's run yields it. A nil or empty result adds the example block with no
+// examples in it. Nil entries in the result are skipped.
+//
+// An agent may run concurrently in several invocations, so an implementation
+// must be safe for concurrent use.
 type Provider interface {
 	Examples(ctx context.Context, query string) ([]*Example, error)
 }
 
 // ExampleToolConfig configures an example tool with the few-shot examples to add.
-// Set either Examples or Provider, not both.
+// Set either Examples or Provider, not both. With neither set, the tool adds
+// the example block with no examples in it.
 type ExampleToolConfig struct {
+	// Examples is a fixed list of examples, added on every model call.
 	Examples []*Example
+	// Provider selects examples for each user query.
 	Provider Provider
 }
 
@@ -58,7 +120,20 @@ type exampleTool struct {
 }
 
 // New creates an example tool that adds the configured few-shot examples to the
-// LLM request.
+// system instruction of every model request of the agent it is added to. New
+// returns an error if both config.Examples and config.Provider are set.
+//
+// The tool is named "example_tool". It is never declared to the model and
+// never called. Before each model call it reads the user message of the
+// invocation and adds nothing if there is none or it has no parts. With a
+// fixed list, it also adds nothing when the message's first part has no text.
+// With a Provider, it joins the non-empty text of all non-thought parts with
+// spaces into the query, adds nothing when that query is empty, and otherwise
+// calls Provider.Examples with it.
+//
+// The tool does not copy config.Examples; changing the examples after New
+// changes what later requests receive. The tool is safe for concurrent use
+// if its Provider is.
 func New(config ExampleToolConfig) (*exampleTool, error) {
 	if config.Examples != nil && config.Provider != nil {
 		return nil, errors.New("exampletool: cannot specify both Examples and Provider")
@@ -79,7 +154,9 @@ func (s exampleTool) Description() string {
 	return "example tool"
 }
 
-// ProcessRequest adds the exampleTool examples to the LLM request.
+// ProcessRequest appends the rendered examples to the system instruction of
+// req, as described in [New]. It returns a non-nil error only when the
+// Provider fails, wrapping the Provider's error.
 func (s exampleTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	userContent := ctx.UserContent()
 	if userContent == nil {
