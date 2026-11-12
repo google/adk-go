@@ -382,8 +382,12 @@ type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (
 // If it returns non-nil LLMResponse or error, the actual model response/error
 // is replaced with the returned response/error. A replacement keeps the
 // Partial, TurnComplete and UsageMetadata of the response it replaces unless
-// it sets them itself; since Partial and TurnComplete are bools, setting them
-// to false has no effect.
+// it sets them itself. Partial counts as set when it is true or when
+// PartialSet is true, so a replacement for a partial response that sets
+// Partial: false and PartialSet: true produces a non-partial event, while one
+// that sets only Partial: false stays partial. TurnComplete has no such mark:
+// a replacement for a response with TurnComplete true always keeps
+// TurnComplete true. UsageMetadata counts as set when it is non-nil.
 type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 // OnModelErrorCallback that is called when receiving an error response from the llm model.
