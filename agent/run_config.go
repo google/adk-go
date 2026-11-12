@@ -91,6 +91,18 @@ type RunConfig struct {
 	// by request assembly or by BeforeModelCallback. The caller must not
 	// mutate HTTPOptions or its nested maps concurrently while the invocation
 	// runs.
+	//
+	// The model connectors in model/anthropicmodel and model/openaimodel
+	// accept only the Timeout and Headers fields of a request's HTTPOptions:
+	// they apply a positive Timeout as the request timeout and send none of
+	// the Headers. Any other field set on the request, such as RetryOptions or
+	// ExtraBody, makes the connector return an error without sending the
+	// request (wrapping anthropicmodel.ErrInvalidConfig or
+	// openaimodel.ErrUnsupportedConfigField); so does a negative Timeout, and
+	// with model/openaimodel a zero Timeout. An invocation whose HTTPOptions
+	// puts such a field on the request, for example a non-nil RetryOptions or
+	// ExtraBody, therefore fails every model call of an agent whose model uses
+	// one of these connectors.
 	HTTPOptions *genai.HTTPOptions
 
 	// Labels holds per-invocation key-value labels (for example, for billing
@@ -106,5 +118,13 @@ type RunConfig struct {
 	// on the agent. ADK copies Labels into a fresh map per request, so neither
 	// the caller's map nor the agent's map is mutated. The caller must not
 	// mutate Labels concurrently while the invocation runs.
+	//
+	// The model connectors in model/anthropicmodel and model/openaimodel have
+	// no request labels to send. They drop the "adk_agent_name" label, and
+	// return an error without sending the request when the request carries any
+	// other label (wrapping anthropicmodel.ErrInvalidConfig, or
+	// openaimodel.ErrLabelsNotSupported). An invocation that sets any key
+	// other than "adk_agent_name" in Labels therefore fails every model call
+	// of an agent whose model uses one of these connectors.
 	Labels map[string]string
 }
