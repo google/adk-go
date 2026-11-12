@@ -346,12 +346,14 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 // recover from or replace the failure. An error is compared against the
 // failing agent's own context: when that context is done, a cancellation or
 // deadline error is not reported — including a deadline a parent agent or a
-// workflow node imposed on this agent, since that deadline lives on the
-// agent's own context — and neither is any error wrapping the context's
-// cancellation cause, because errors.Is cannot tell an echo of the
-// cancellation from an unrelated failure that wraps it; a caller that cancels
-// with a cause should use an error value it owns. Errors raised while the
-// agent's context is still live are reported.
+// workflow node imposed on it, since that deadline lives on the agent's own
+// context.
+//
+// The context's cancellation cause, or any error wrapping it, is suppressed
+// too, because errors.Is cannot tell an echo of the cancellation from an
+// unrelated failure that wraps it; a caller that cancels with a cause should
+// use an error value it owns. Errors that escape while the agent's context is
+// still live are reported.
 func runOnAgentErrorCallbacks(ctx InvocationContext, err error) {
 	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Cause(ctx))) {
 		return
