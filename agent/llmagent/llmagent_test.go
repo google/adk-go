@@ -1018,7 +1018,7 @@ func TestFunctionTool(t *testing.T) {
 }
 
 // transfer_to_agent returns no result of its own, so after-tool callbacks see
-// nil, as adk-python's see None. The model is still sent {"result": null}.
+// nil. The model is still sent {"result": null}.
 func TestAgentTransferAfterToolCallbackSeesNoResult(t *testing.T) {
 	model := &testutil.MockModel{Responses: []*genai.Content{
 		genai.NewContentFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": "sub_agent_1"}, "model"),
@@ -1075,7 +1075,8 @@ func TestAgentTransfer(t *testing.T) {
 	}
 	transferResponse := func() *genai.Content {
 		return genai.NewContentFromFunctionResponse(
-			"transfer_to_agent", map[string]any{"result": nil}, "user")
+			"transfer_to_agent", map[string]any{"result": nil}, "user",
+		)
 	}
 	text := func(text string) *genai.Content {
 		return genai.NewContentFromText(

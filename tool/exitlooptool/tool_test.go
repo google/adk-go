@@ -150,8 +150,8 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 	}
 }
 
-// exit_loop returns no result of its own, so after-tool callbacks see nil, as
-// adk-python's see None. The model is still sent {"result": null}.
+// exit_loop returns no result of its own, so after-tool callbacks see nil. The
+// model is still sent {"result": null}.
 func TestExitLoopToolAfterToolCallbackSeesNoResult(t *testing.T) {
 	exitLoopTool, err := exitlooptool.New()
 	if err != nil {
@@ -189,5 +189,47 @@ func TestExitLoopToolAfterToolCallbackSeesNoResult(t *testing.T) {
 	}
 	if gotResult != nil {
 		t.Errorf("after-tool callback result = %v, want nil", gotResult)
+	}
+}
+
+// A map an after-tool callback returns in place of exit_loop's nil result is
+// sent to the model as it is, not wrapped as {"result": ...}.
+func TestExitLoopToolAfterToolCallbackReplacesResult(t *testing.T) {
+	exitLoopTool, err := exitlooptool.New()
+	if err != nil {
+		t.Fatalf("failed to create exit tool: %v", err)
+	}
+	a, err := llmagent.New(llmagent.Config{
+		Name: "simple agent",
+		Model: &testutil.MockModel{Responses: []*genai.Content{
+			genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
+		}},
+		Tools: []tool.Tool{exitLoopTool},
+		AfterToolCallbacks: []llmagent.AfterToolCallback{
+			func(agent.Context, tool.Tool, map[string]any, map[string]any, error) (map[string]any, error) {
+				return map[string]any{"exited": true}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create llm agent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, a)
+	var responses []map[string]any
+	for ev, err := range runner.Run(t, "id", "message") {
+		if err != nil {
+			t.Fatalf("runner returned unexpected error: %v", err)
+		}
+		for _, p := range ev.Content.Parts {
+			if p.FunctionResponse != nil {
+				responses = append(responses, p.FunctionResponse.Response)
+			}
+		}
+	}
+
+	want := []map[string]any{{"exited": true}}
+	if diff := cmp.Diff(want, responses); diff != "" {
+		t.Errorf("function responses mismatch (-want +got):\n%s", diff)
 	}
 }
