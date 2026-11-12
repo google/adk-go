@@ -227,6 +227,11 @@ func (e *Event) IsFinalResponse() bool {
 	if e.Actions.SkipSummarization || len(e.LongRunningToolIDs) > 0 {
 		return true
 	}
+	// A complete error event ends the turn even when it carries a function
+	// response or a code execution result; only a function call keeps it open.
+	if e.LLMResponse.ErrorCode != "" && !e.LLMResponse.Partial && !hasFunctionCalls(&e.LLMResponse) {
+		return true
+	}
 
 	return !hasFunctionCalls(&e.LLMResponse) && !hasFunctionResponses(&e.LLMResponse) && !e.LLMResponse.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
 }
@@ -480,8 +485,8 @@ func hasTrailingCodeExecutionResult(resp *model.LLMResponse) bool {
 	if resp == nil || resp.Content == nil {
 		return false
 	}
-	for i := len(resp.Content.Parts) - 1; i >= 0; i-- {
-		if part := resp.Content.Parts[i]; part != nil {
+	for _, part := range slices.Backward(resp.Content.Parts) {
+		if part != nil {
 			return part.CodeExecutionResult != nil
 		}
 	}

@@ -165,6 +165,55 @@ func TestAgentRunOnAgentErrorCallback(t *testing.T) {
 			wantRunErr: true,
 		},
 		{
+			name: "caller cancellation with cause is not reported",
+			invocationCtx: func(ctx context.Context) context.Context {
+				cause := errors.New("caller gave up")
+				ctx, cancel := context.WithCancelCause(ctx)
+				cancel(cause)
+				return ctx
+			},
+			run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(nil, fmt.Errorf("wrapped: %w", context.Cause(ctx)))
+				}
+			},
+			wantCalls:  0,
+			wantRunErr: true,
+		},
+		{
+			name: "caller deadline with cause is not reported",
+			invocationCtx: func(ctx context.Context) context.Context {
+				cause := errors.New("caller gave up")
+				ctx, cancel := context.WithTimeoutCause(ctx, -time.Second, cause)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(nil, fmt.Errorf("wrapped: %w", context.Cause(ctx)))
+				}
+			},
+			wantCalls:  0,
+			wantRunErr: true,
+		},
+		{
+			name: "unrelated error while cancelled with cause is reported",
+			invocationCtx: func(ctx context.Context) context.Context {
+				cause := errors.New("caller gave up")
+				ctx, cancel := context.WithCancelCause(ctx)
+				cancel(cause)
+				return ctx
+			},
+			run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(nil, fmt.Errorf("wrapped: %w", runErr))
+				}
+			},
+			wantCalls:       1,
+			wantRunErr:      true,
+			wantCallbackErr: runErr,
+		},
+		{
 			name: "live invocation deadline is reported",
 			run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
 				return func(yield func(*session.Event, error) bool) {
@@ -439,7 +488,14 @@ func TestAgentRunOnAgentErrorCallbackNotifiesEveryPlugin(t *testing.T) {
 
 	ctx := plugininternal.ToContext(t.Context(), pm)
 	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Agent: a})
-	for range a.Run(ic) {
+	var gotErr error
+	for _, err := range a.Run(ic) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if gotErr == nil {
+		t.Error("Run() error = nil, want error")
 	}
 
 	if len(notified) != 2 || notified[0] != "first" || notified[1] != "second" {

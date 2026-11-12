@@ -238,9 +238,16 @@ type OnRunErrorCallback func(agent.InvocationContext, error)
 //
 // A panicking callback is recovered so the remaining callbacks still run and
 // the original error is still yielded, matching adk-python's
-// on_agent_error_callback. A cancellation or deadline error is not reported
-// when the invocation's own context is done, matching adk-python's handling of
-// task cancellation; timeouts raised inside the run are reported. Callbacks may
+// on_agent_error_callback. An error is compared against the failing agent's
+// own context: when that context is done, a cancellation or deadline error is
+// not reported, matching adk-python's handling of task cancellation — and that
+// covers a deadline a parent agent or a workflow node imposed on it, since
+// that deadline lives on the agent's own context. The context's cancellation
+// cause, or any error wrapping it, is suppressed too, because errors.Is
+// cannot tell an echo of the cancellation from an unrelated failure that
+// wraps it; a caller that cancels with a cause should use an error value it
+// owns. Errors that escape while the agent's context is still live are
+// reported. Callbacks may
 // be invoked concurrently by parallel sub-agents and must be safe for
 // concurrent use. An error from a sub-agent is reported once for each ancestor
 // as it propagates, matching adk-python; callbacks that count failures should
