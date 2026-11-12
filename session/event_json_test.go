@@ -505,3 +505,50 @@ func TestEventJSONEncodesRequestedAuthConfigsAsGiven(t *testing.T) {
 		t.Errorf("actions.requestedAuthConfigs mismatch (-want +got):\n%s", diff)
 	}
 }
+
+// TestEventActions_SetModelResponseJSONRoundTrip pins the wire form of a
+// stored set_model_response answer: the key adk-python writes, no key when no
+// answer was stored, and an empty list that stays a stored answer through a
+// round trip rather than turning into "no answer".
+func TestEventActions_SetModelResponseJSONRoundTrip(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		wantRaw string // raw JSON of actions.setModelResponse, "" means absent
+	}{
+		{name: "unset is omitted", value: nil, wantRaw: ""},
+		{name: "empty list is written", value: []any{}, wantRaw: "[]"},
+		{name: "map is written", value: map[string]any{"a": float64(1)}, wantRaw: `{"a":1}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := json.Marshal(&session.Event{ID: "e", Author: "a", Actions: session.EventActions{SetModelResponse: tt.value}})
+			if err != nil {
+				t.Fatalf("Marshal() failed: %v", err)
+			}
+
+			var wire struct {
+				Actions map[string]json.RawMessage `json:"actions"`
+			}
+			if err := json.Unmarshal(b, &wire); err != nil {
+				t.Fatalf("Unmarshal() failed: %v", err)
+			}
+			raw, ok := wire.Actions["setModelResponse"]
+			if tt.wantRaw == "" && ok {
+				t.Errorf("actions.setModelResponse = %s, want the key to be absent", raw)
+			}
+			if tt.wantRaw != "" && string(raw) != tt.wantRaw {
+				t.Errorf("actions.setModelResponse = %q, want %q", raw, tt.wantRaw)
+			}
+
+			got := &session.Event{}
+			if err := json.Unmarshal(b, got); err != nil {
+				t.Fatalf("Unmarshal() failed: %v", err)
+			}
+			if diff := cmp.Diff(tt.value, got.Actions.SetModelResponse); diff != "" {
+				t.Errorf("SetModelResponse after round trip mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

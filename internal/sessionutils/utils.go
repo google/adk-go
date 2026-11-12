@@ -16,6 +16,7 @@ package sessionutils
 
 import (
 	"maps"
+	"reflect"
 	"strings"
 )
 
@@ -71,4 +72,140 @@ func MergeStates(appState, userState, sessionState map[string]any) map[string]an
 	}
 
 	return mergedState
+}
+
+// CloneValue returns a deep copy of v that shares no mutable memory with v at
+// any depth.
+//
+// Maps, slices, arrays, pointers and the exported fields of structs are copied
+// at every depth, and values keep their dynamic types. Every map, pointer and
+// slice of nonzero capacity is copied once, so a value that refers to itself
+// comes back as a copy that refers to the copy. A nil map, slice, pointer or
+// interface stays nil. The unexported fields of a struct are copied by value,
+// and func and channel values cannot be copied and stay shared.
+func CloneValue[T any](v T) T {
+	c := cloner{memo: make(map[visitKey]reflect.Value)}
+	// Go through pointers so that an interface-typed T holding nil stays a
+	// valid reflect.Value instead of becoming the zero Value.
+	var out T
+	reflect.ValueOf(&out).Elem().Set(c.copy(reflect.ValueOf(&v).Elem()))
+	return out
+}
+
+// visitKey identifies a map, pointer or slice already copied by a cloner. The
+// length and capacity are zero for a map or pointer. A slice needs them because
+// s and s[:1] share a data pointer but are different values.
+type visitKey struct {
+	typ      reflect.Type
+	ptr      uintptr
+	len, cap int
+}
+
+// cloner deep-copies values. memo maps each map, pointer and slice copied so
+// far to its copy, so a value reached again through a cycle or a second
+// reference resolves to the same copy instead of being copied again.
+type cloner struct {
+	memo map[visitKey]reflect.Value
+}
+
+// copy returns a copy of v that shares no mutable memory with it, except
+// through unexported struct fields and func and channel values.
+func (c *cloner) copy(v reflect.Value) reflect.Value {
+	if !v.IsValid() || !mayAlias(v.Type()) {
+		return v
+	}
+	switch v.Kind() {
+	case reflect.Pointer:
+		if v.IsNil() {
+			return v
+		}
+		k := visitKey{typ: v.Type(), ptr: v.Pointer()}
+		if out, ok := c.memo[k]; ok {
+			return out
+		}
+		out := reflect.New(v.Type().Elem())
+		c.memo[k] = out
+		out.Elem().Set(c.copy(v.Elem()))
+		return out
+	case reflect.Interface:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.New(v.Type()).Elem()
+		out.Set(c.copy(v.Elem()))
+		return out
+	case reflect.Map:
+		if v.IsNil() {
+			return v
+		}
+		k := visitKey{typ: v.Type(), ptr: v.Pointer()}
+		if out, ok := c.memo[k]; ok {
+			return out
+		}
+		out := reflect.MakeMapWithSize(v.Type(), v.Len())
+		c.memo[k] = out
+		for it := v.MapRange(); it.Next(); {
+			out.SetMapIndex(c.copy(it.Key()), c.copy(it.Value()))
+		}
+		return out
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		// A slice of capacity zero has no backing array of its own, so its
+		// data pointer can be shared by unrelated values and is no identity.
+		if v.Cap() > 0 {
+			k := visitKey{typ: v.Type(), ptr: v.Pointer(), len: v.Len(), cap: v.Cap()}
+			if out, ok := c.memo[k]; ok {
+				return out
+			}
+			c.memo[k] = out
+		}
+		if !mayAlias(v.Type().Elem()) {
+			reflect.Copy(out, v)
+			return out
+		}
+		for i := range v.Len() {
+			out.Index(i).Set(c.copy(v.Index(i)))
+		}
+		return out
+	case reflect.Array:
+		out := reflect.New(v.Type()).Elem()
+		for i := range v.Len() {
+			out.Index(i).Set(c.copy(v.Index(i)))
+		}
+		return out
+	case reflect.Struct:
+		out := reflect.New(v.Type()).Elem()
+		// Set the whole struct first so unexported fields survive, then
+		// replace each exported field with its copy.
+		out.Set(v)
+		for i := range v.NumField() {
+			if v.Type().Field(i).IsExported() {
+				out.Field(i).Set(c.copy(v.Field(i)))
+			}
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// mayAlias reports whether a value of type t can hold a reference to memory
+// that another holder may write through.
+func mayAlias(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		return true
+	case reflect.Array:
+		return mayAlias(t.Elem())
+	case reflect.Struct:
+		for f := range t.Fields() {
+			if mayAlias(f.Type) {
+				return true
+			}
+		}
+	}
+	return false
 }

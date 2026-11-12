@@ -362,6 +362,15 @@ type EventActions struct {
 	// The agent is escalating to a higher level agent.
 	Escalate bool `json:"escalate,omitempty"`
 
+	// SetModelResponse holds the answer a set_model_response call stored: the
+	// validated map for an object schema, the bare list for a list schema, the
+	// value the model sent for any other schema. The flow ends the agent's turn
+	// with a text event holding this value as JSON. Nil means no answer was
+	// stored, so a stored answer is never nil; an empty list is a stored answer.
+	// Only the set_model_response tool writes it. The Vertex AI session service
+	// does not persist it.
+	SetModelResponse any `json:"setModelResponse,omitempty"`
+
 	// Compaction, when non-nil, marks this event as a context-compaction
 	// summary standing in for a contiguous range of earlier events.
 	//
