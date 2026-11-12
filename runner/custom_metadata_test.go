@@ -492,6 +492,13 @@ func TestRunner_RunConfigCustomMetadata_PluginReplacement(t *testing.T) {
 			onEvent: func(_ *testing.T, ev *session.Event, _ map[string]any) *session.Event {
 				return &session.Event{Author: ev.Author, LLMResponse: model.LLMResponse{Content: ev.Content}}
 			},
+			want: map[string]any{"run_k": "from_run", "secret": "x", "agent_k": "from_agent", "shared_k": "from_agent"},
+		},
+		{
+			name: "S5 replacement with empty map",
+			onEvent: func(_ *testing.T, ev *session.Event, _ map[string]any) *session.Event {
+				return &session.Event{Author: ev.Author, LLMResponse: model.LLMResponse{Content: ev.Content, CustomMetadata: map[string]any{}}}
+			},
 			want: map[string]any{"run_k": "from_run", "shared_k": "from_run", "secret": "x"},
 		},
 	}

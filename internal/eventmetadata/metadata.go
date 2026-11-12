@@ -81,6 +81,40 @@ func WithoutInternal(metadata map[string]any) map[string]any {
 	return kept
 }
 
+// WithInternalFrom returns a new map combining replacement with any reserved
+// ADK-internal entries (satisfying [IsInternalKey]) from original.
+//
+// Preconditions:
+//   - replacement and original may be nil or non-nil maps; neither may be
+//     mutated concurrently during the call.
+//
+// Postconditions:
+//   - If len(replacement) == 0 and original has no keys satisfying
+//     IsInternalKey(k), returns nil without allocating.
+//   - Otherwise, returns a newly allocated map[string]any containing every
+//     entry of replacement overlaid with every entry (k, v) of original where
+//     IsInternalKey(k) is true (original's internal keys win on conflict).
+//   - Neither replacement nor original is mutated, and the returned map never
+//     shares storage with original or replacement.
+//
+// WithInternalFrom is a pure function and safe for concurrent use.
+func WithInternalFrom(replacement, original map[string]any) map[string]any {
+	var out map[string]any
+	if len(replacement) > 0 {
+		out = maps.Clone(replacement)
+	}
+	for k, v := range original {
+		if !IsInternalKey(k) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]any)
+		}
+		out[k] = v
+	}
+	return out
+}
+
 // MergeIntoEvent merges runMetadata (stripping any internal keys via
 // IsInternalKey) into event.CustomMetadata.
 //

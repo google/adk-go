@@ -65,7 +65,11 @@ type LiveRunConfig struct {
 	//
 	// A plugin that edits the event and returns nil keeps its edits; one that
 	// returns an event, the same or a new one, gets the run's metadata merged
-	// into it, its own keys winning.
+	// into it, its own keys winning. When a replacement event leaves
+	// CustomMetadata nil, the original event's CustomMetadata is preserved and
+	// its keys win over the run's metadata; to clear the original event's
+	// public keys on a replacement, set CustomMetadata to an empty map
+	// (map[string]any{}).
 	CustomMetadata map[string]any
 	// GetSessionConfig controls which events are fetched when the runner
 	// loads the session from the session service at the start of RunLive.
