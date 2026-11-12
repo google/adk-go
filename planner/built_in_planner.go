@@ -43,10 +43,14 @@ import (
 // called.
 //
 // After ApplyThinkingConfig returns, the flow replaces a non-nil request
-// Config's ThinkingConfig with a deep copy, whichever ApplyThinkingConfig ran.
+// Config, thinking config included, with a deep copy, whichever
+// ApplyThinkingConfig ran and whether or not it replaced the request's Config.
 // So before-model callbacks, plugins and the model can edit the thinking
 // config of the request they receive without changing the planner, a later
-// request, or another agent that shares the planner.
+// request, or another agent that shares the planner. As with the copy the
+// flow makes of llmagent.Config.GenerateContentConfig, values held in
+// interface-typed fields of the Config, such as ResponseJsonSchema, stay
+// shared.
 type BuiltIn interface {
 	// ApplyThinkingConfig sets the thinking config of req, the request about
 	// to be sent to the model.

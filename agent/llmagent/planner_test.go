@@ -560,6 +560,55 @@ func TestLLMAgent_BuiltInPlannerThinkingConfigCopyOfEmbeddingPlanner(t *testing.
 		}
 	})
 
+	t.Run("config_replaced_by_apply_thinking_config_is_copied", func(t *testing.T) {
+		llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("first"), textResponse("second")}}
+		sharedThinking := &genai.ThinkingConfig{IncludeThoughts: true}
+		shared := &genai.GenerateContentConfig{ThinkingConfig: sharedThinking, Labels: map[string]string{"team": "a"}}
+		calls := 0
+		a := newPlannerAgent(t, llmagent.Config{
+			Name:    "test_agent",
+			Model:   llm,
+			Planner: sharedRequestConfigBuiltInPlanner{BuiltInPlanner: planner.NewBuiltInPlanner(nil), cfg: shared},
+			BeforeModelCallbacks: []llmagent.BeforeModelCallback{func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+				calls++
+				if calls == 1 {
+					req.Config.ThinkingConfig.IncludeThoughts = false
+					req.Config.Labels["team"] = "b"
+				}
+				return nil, nil
+			}},
+		})
+
+		first := runPlannerAgent(t, a)
+		second := runPlannerAgent(t, a)
+
+		if first.err != nil || second.err != nil {
+			t.Fatalf("run errors: first %v, second %v", first.err, second.err)
+		}
+		reqs := llm.recorded()
+		if len(reqs) != 2 {
+			t.Fatalf("model calls = %d, want 2", len(reqs))
+		}
+		wantLabels := []map[string]string{{"team": "b"}, {"team": "a"}}
+		if diff := cmp.Diff(wantLabels, []map[string]string{reqs[0].Config.Labels, reqs[1].Config.Labels}); diff != "" {
+			t.Errorf("request Labels mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(map[string]string{"team": "a"}, shared.Labels); diff != "" {
+			t.Errorf("planner's shared Labels mismatch (-want +got):\n%s", diff)
+		}
+		wantSent := []*genai.ThinkingConfig{{IncludeThoughts: false}, {IncludeThoughts: true}}
+		gotSent := []*genai.ThinkingConfig{reqs[0].Config.ThinkingConfig, reqs[1].Config.ThinkingConfig}
+		if diff := cmp.Diff(wantSent, gotSent); diff != "" {
+			t.Errorf("request ThinkingConfigs mismatch (-want +got):\n%s", diff)
+		}
+		if shared.ThinkingConfig != sharedThinking {
+			t.Errorf("planner's shared Config.ThinkingConfig = %p, want the original %p", shared.ThinkingConfig, sharedThinking)
+		}
+		if diff := cmp.Diff(&genai.ThinkingConfig{IncludeThoughts: true}, sharedThinking); diff != "" {
+			t.Errorf("planner's shared ThinkingConfig mismatch (-want +got):\n%s", diff)
+		}
+	})
+
 	t.Run("config_cleared_by_apply_thinking_config_stays_nil", func(t *testing.T) {
 		llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("done")}}
 		a := newPlannerAgent(t, llmagent.Config{
@@ -987,6 +1036,18 @@ type sharedConfigBuiltInPlanner struct {
 
 func (p sharedConfigBuiltInPlanner) ApplyThinkingConfig(req *model.LLMRequest) {
 	req.Config.ThinkingConfig = p.shared
+}
+
+// sharedRequestConfigBuiltInPlanner embeds *planner.BuiltInPlanner and defines
+// its own ApplyThinkingConfig, which replaces the request's Config with the
+// planner's shared config.
+type sharedRequestConfigBuiltInPlanner struct {
+	*planner.BuiltInPlanner
+	cfg *genai.GenerateContentConfig
+}
+
+func (p sharedRequestConfigBuiltInPlanner) ApplyThinkingConfig(req *model.LLMRequest) {
+	req.Config = p.cfg
 }
 
 // configClearingBuiltInPlanner embeds *planner.BuiltInPlanner and defines its
