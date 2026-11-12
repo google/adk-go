@@ -238,8 +238,11 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 //
 // On the agent's final text turn (no function calls, not partial,
 // role=model) we:
-//   - parse the text against the agent's OutputSchema if set, else
-//     keep the raw text;
+//   - parse the text against the agent's OutputSchema if set; parse it
+//     as JSON, without validation and after removing a markdown code
+//     fence around it, if OutputJsonSchema is set; else keep the raw
+//     text. An all-whitespace text gives no output when either schema
+//     is set;
 //   - record an OutputKey state-delta on the event so the runner
 //     persists it (Go writes to ev.Actions.StateDelta; Python writes
 //     to ctx.actions.state_delta — the runner reconciles the
@@ -251,8 +254,9 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 //     except when the OutputSchema produced a non-null parsed value, which
 //     is the output in its own right.
 //
-// Returns an error iff OutputSchema validation fails on a non-empty
-// model reply; the caller (runSingleTurn) propagates it.
+// Returns an error iff OutputSchema validation fails, or the text is not
+// JSON for OutputJsonSchema, on a non-empty model reply; the caller
+// (runSingleTurn) propagates it.
 func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 	if ev == nil {
 		return nil
@@ -287,7 +291,8 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 	// parsed stays nil for a reply of literal null, which validates as a nil
 	// map when the schema has no required fields.
 	var parsed map[string]any
-	if state.OutputSchema != nil {
+	switch {
+	case state.OutputSchema != nil:
 		if strings.TrimSpace(text) == "" {
 			output = nil
 		} else {
@@ -298,7 +303,19 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 			}
 			output = parsed
 		}
-	} else {
+	case state.OutputJsonSchema != nil:
+		if strings.TrimSpace(text) == "" {
+			output = nil
+		} else {
+			// adk-python parses a schema that is not a model without
+			// validating it (utils/_schema_utils.py, validate_schema).
+			var parsed any
+			if err := json.Unmarshal([]byte(utils.StripJSONCodeFence(text)), &parsed); err != nil {
+				return fmt.Errorf("LlmAgent %q output is not valid JSON: %w", a.Name(), err)
+			}
+			output = parsed
+		}
+	default:
 		output = text
 	}
 

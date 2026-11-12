@@ -49,6 +49,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -61,8 +62,12 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
-// New is a constructor for LLMAgent.
+// New is a constructor for LLMAgent. It returns an error if both
+// Config.OutputSchema and Config.OutputJsonSchema are set.
 func New(cfg Config) (agent.Agent, error) {
+	if cfg.OutputSchema != nil && cfg.OutputJsonSchema != nil {
+		return nil, fmt.Errorf("LlmAgent %q: OutputSchema and OutputJsonSchema are mutually exclusive; set at most one", cfg.Name)
+	}
 	beforeModelCallbacks := make([]llminternal.BeforeModelCallback, 0, len(cfg.BeforeModelCallbacks))
 	for _, c := range cfg.BeforeModelCallbacks {
 		beforeModelCallbacks = append(beforeModelCallbacks, llminternal.BeforeModelCallback(c))
@@ -115,6 +120,7 @@ func New(cfg Config) (agent.Agent, error) {
 			DisallowTransferToPeers:   cfg.DisallowTransferToPeers,
 			InputSchema:               cfg.InputSchema,
 			OutputSchema:              cfg.OutputSchema,
+			OutputJsonSchema:          cfg.OutputJsonSchema,
 			IncludeContents:           llminternal.IncludeContents(cfg.IncludeContents),
 			Instruction:               cfg.Instruction,
 			InstructionProvider:       llminternal.InstructionProvider(cfg.InstructionProvider),
@@ -346,6 +352,10 @@ type Config struct {
 	// (function tools, RAG, agent transfer, etc.) while producing structured
 	// output. See internal/llminternal/outputschema_processor.go for details.
 	OutputSchema *genai.Schema
+	// OutputJsonSchema is the output schema when the agent replies, given as a
+	// raw JSON schema. It carries what a *genai.Schema cannot, such as
+	// additionalProperties. It is mutually exclusive with OutputSchema.
+	OutputJsonSchema *jsonschema.Schema
 
 	// Callbacks are executed in the order they are provided.
 	// If a callback returns result/error, then the execution of the callback
@@ -595,7 +605,7 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		result := sb.String()
 
 		// TODO: add output schema validation and unmarshalling
-		if a.OutputSchema != nil {
+		if a.OutputSchema != nil || a.OutputJsonSchema != nil {
 			// If the result from the final chunk is just whitespace or empty,
 			// it means this is an empty final chunk of a stream.
 			// Do not attempt to parse it as JSON.
