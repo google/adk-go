@@ -132,3 +132,24 @@ func ExampleCapabilitiesProvider() {
 	// tools: [lookup_capital set_model_response]
 	// native response schema: false
 }
+
+// FunctionCalls lists the function calls a model response asks for, skipping
+// its other parts. The same method is available on a session.Event.
+func ExampleLLMResponse_FunctionCalls() {
+	resp := &model.LLMResponse{Content: &genai.Content{
+		Role: genai.RoleModel,
+		Parts: []*genai.Part{
+			{Text: "Let me check both cities."},
+			{FunctionCall: &genai.FunctionCall{Name: "get_weather", Args: map[string]any{"city": "Paris"}}},
+			{FunctionCall: &genai.FunctionCall{Name: "get_weather", Args: map[string]any{"city": "Rome"}}},
+		},
+	}}
+	for _, fc := range resp.FunctionCalls() {
+		fmt.Println(fc.Name, fc.Args["city"])
+	}
+	fmt.Println(len(resp.FunctionResponses()))
+	// Output:
+	// get_weather Paris
+	// get_weather Rome
+	// 0
+}
