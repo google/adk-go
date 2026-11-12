@@ -43,8 +43,13 @@ const maxDepth = 64
 // they point to stays shared. Func and channel values cannot be copied and
 // stay shared too. A copied slice has the same length as the original, and its
 // capacity equals its length.
-func Copy[T any](v T) T {
+//
+// Options narrow the copy; see [ShareInterfaces].
+func Copy[T any](v T, opts ...Option) T {
 	var c copier
+	for _, opt := range opts {
+		opt(&c)
+	}
 	out := c.copy(reflect.ValueOf(v), 0)
 	if !out.IsValid() {
 		return v
@@ -68,7 +73,22 @@ type copied struct {
 }
 
 type copier struct {
-	seen map[ref]copied
+	seen            map[ref]copied
+	shareInterfaces bool
+}
+
+// Option changes what [Copy] copies.
+type Option func(*copier)
+
+// ShareInterfaces makes [Copy] return the value held in an interface-typed
+// field, map value or slice element as it is, without copying it. The
+// container holding the interface is still copied: with this option, a
+// map[string]any is a new map whose values are shared with the original.
+//
+// It is for copies on a hot path whose payloads are large and are not written
+// in place, such as the tool payloads in conversation history.
+func ShareInterfaces() Option {
+	return func(c *copier) { c.shareInterfaces = true }
 }
 
 // lookup returns the copy already made of k, if it was made at depth or
@@ -107,7 +127,7 @@ func (c *copier) copy(v reflect.Value, depth int) reflect.Value {
 		out.Elem().Set(c.copy(v.Elem(), depth+1))
 		return out
 	case reflect.Interface:
-		if v.IsNil() {
+		if v.IsNil() || c.shareInterfaces {
 			return v
 		}
 		out := reflect.New(v.Type()).Elem()

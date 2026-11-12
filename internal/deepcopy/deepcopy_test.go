@@ -269,6 +269,35 @@ func TestCopyTellsAStructFromItsFirstField(t *testing.T) {
 	}
 }
 
+// TestShareInterfaces checks that the option shares what an interface holds
+// and still copies everything else, including the map that holds it.
+func TestShareInterfaces(t *testing.T) {
+	nested := map[string]any{"n": 1}
+	orig := &genai.Content{Parts: []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{Name: "f", Args: map[string]any{"k": nested}}},
+		{InlineData: &genai.Blob{Data: []byte("x"), DisplayName: "d"}},
+	}}
+	got := Copy(orig, ShareInterfaces())
+
+	if !reflect.DeepEqual(orig, got) {
+		t.Fatalf("Copy() = %+v, want %+v", got, orig)
+	}
+	if got.Parts[0] == orig.Parts[0] || got.Parts[0].FunctionCall == orig.Parts[0].FunctionCall {
+		t.Error("Copy() shares a part or its FunctionCall")
+	}
+	if sameMap(got.Parts[0].FunctionCall.Args, orig.Parts[0].FunctionCall.Args) {
+		t.Error("Copy() shares the Args map")
+	}
+	if !sameMap(got.Parts[0].FunctionCall.Args["k"].(map[string]any), nested) {
+		t.Error("Copy() copied the value held in Args, want it shared")
+	}
+	got.Parts[1].InlineData.DisplayName = ""
+	got.Parts[1].InlineData.Data[0] = 'y'
+	if b := orig.Parts[1].InlineData; b.DisplayName != "d" || b.Data[0] != 'x' {
+		t.Error("writing through the copy's blob changed the original")
+	}
+}
+
 // TestCopyPreservesSharing checks that two references to one value in the
 // original are two references to one copy.
 func TestCopyPreservesSharing(t *testing.T) {

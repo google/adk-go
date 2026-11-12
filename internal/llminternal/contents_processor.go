@@ -268,7 +268,12 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 
 	var contents []*genai.Content
 	for _, ev := range filtered {
-		content := deepcopy.Copy(utils.Content(ev))
+		// Request processors and callbacks may replace parts or set their
+		// fields, so the copy owns every part and the structs below it. Tool
+		// payloads can be large and are copied again on every model call, so
+		// the values inside FunctionCall.Args and FunctionResponse.Response stay
+		// shared with history.
+		content := deepcopy.Copy(utils.Content(ev), deepcopy.ShareInterfaces())
 		if content == nil {
 			continue
 		}
