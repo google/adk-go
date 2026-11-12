@@ -14,7 +14,11 @@
 
 package agent
 
-import "errors"
+import (
+	"errors"
+
+	"google.golang.org/genai"
+)
 
 // ErrLLMCallsLimitExceeded is returned when an invocation makes more model
 // calls than RunConfig.MaxLLMCalls allows. Detect it with errors.Is.
@@ -65,4 +69,42 @@ type RunConfig struct {
 	// appends an event per turn and re-sends a growing history, so token cost
 	// grows quadratically with no exit.
 	MaxLLMCalls int
+
+	// HTTPOptions holds per-invocation HTTP options (such as custom headers,
+	// timeout, retry options, or extra body fields) merged into each model
+	// request's GenerateContentConfig.HTTPOptions during the invocation.
+	//
+	// When the agent has no GenerateContentConfig.HTTPOptions, each request
+	// receives a copy of HTTPOptions (including BaseURL and APIVersion). When
+	// the agent already configures GenerateContentConfig.HTTPOptions,
+	// HTTPOptions.Headers are merged into the agent's headers by canonical
+	// HTTP header name (with HTTPOptions winning on conflict), and non-nil
+	// Timeout, RetryOptions, and ExtraBody replace the agent's values;
+	// configuration-time fields (BaseURL, APIVersion, BaseURLResourceScope,
+	// ExtrasRequestProvider) on the agent's HTTPOptions are kept.
+	//
+	// Nil (the zero value) leaves each request's HTTPOptions as configured on
+	// the agent. ADK copies HTTPOptions, its Headers and ExtraBody maps (the
+	// ExtraBody map is copied and the values inside it are shared), its
+	// RetryOptions struct, and its Timeout pointer before attaching them to a
+	// request, so neither the caller's HTTPOptions nor the agent's is mutated
+	// by request assembly or by BeforeModelCallback. The caller must not
+	// mutate HTTPOptions or its nested maps concurrently while the invocation
+	// runs.
+	HTTPOptions *genai.HTTPOptions
+
+	// Labels holds per-invocation key-value labels (for example, for billing
+	// or attribution) merged into each model request's
+	// GenerateContentConfig.Labels during the invocation.
+	//
+	// When an agent also configures GenerateContentConfig.Labels, entries in
+	// Labels are merged on top and win on key conflict. An explicitly set
+	// "adk_agent_name" entry in Labels is preserved and not overwritten by
+	// ADK's default agent-name attribution label.
+	//
+	// Nil or empty (the zero value) leaves each request's Labels as configured
+	// on the agent. ADK copies Labels into a fresh map per request, so neither
+	// the caller's map nor the agent's map is mutated. The caller must not
+	// mutate Labels concurrently while the invocation runs.
+	Labels map[string]string
 }

@@ -110,7 +110,22 @@ func needOutputSchemaProcessor(state *State) bool {
 		return false
 	}
 	hasTools := len(state.Tools) > 0 || len(state.Toolsets) > 0
-	return hasTools && googlellm.NeedsOutputSchemaProcessor(state.Model)
+	return hasTools && !canUseOutputSchemaWithTools(state.Model)
+}
+
+// canUseOutputSchemaWithTools reports whether llm accepts a native output
+// schema and tools in one request. A model that implements
+// model.CapabilitiesProvider decides for itself; any other model gets
+// adk-python's fallback (models/base_llm.py:92-124), which allows it only for
+// a Gemini model name on Vertex AI.
+func canUseOutputSchemaWithTools(llm model.LLM) bool {
+	if llm == nil {
+		return false
+	}
+	if cp, ok := llm.(model.CapabilitiesProvider); ok {
+		return cp.Capabilities().OutputSchemaAndTools
+	}
+	return googlellm.GeminiOutputSchemaAndTools(llm)
 }
 
 // setModelResponseTool implements tool.Tool and toolinternal.FunctionTool.

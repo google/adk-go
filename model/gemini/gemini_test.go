@@ -1039,6 +1039,95 @@ func TestGeminiModel_LabelsStrippedOnGeminiAPIAndKeptOnVertex(t *testing.T) {
 	}
 }
 
+// TestGeminiModel_CapabilitiesUsesClientBackendNotEnv checks that the
+// OutputSchemaAndTools capability follows the backend of the model's own
+// client. adk-python's Gemini.capabilities reads GOOGLE_GENAI_USE_ENTERPRISE
+// and GOOGLE_GENAI_USE_VERTEXAI from the environment instead
+// (models/_capabilities.py:30-51), so a model whose client disagrees with the
+// environment reports the wrong value there. Each case sets the environment to
+// the opposite of the client's backend.
+func TestGeminiModel_CapabilitiesUsesClientBackendNotEnv(t *testing.T) {
+	tests := []struct {
+		name   string
+		envUse string
+		config *genai.ClientConfig
+		want   bool
+	}{
+		{
+			name:   "vertex_ai_client_env_off",
+			envUse: "0",
+			config: &genai.ClientConfig{
+				Backend:    genai.BackendVertexAI,
+				Project:    "test-project",
+				Location:   "us-central1",
+				HTTPClient: &http.Client{},
+			},
+			want: true,
+		},
+		{
+			name:   "gemini_api_client_env_on",
+			envUse: "1",
+			config: &genai.ClientConfig{
+				Backend:    genai.BackendGeminiAPI,
+				APIKey:     "fake-key",
+				HTTPClient: &http.Client{},
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", tt.envUse)
+			t.Setenv("GOOGLE_GENAI_USE_ENTERPRISE", tt.envUse)
+			llm, err := NewModel(t.Context(), "gemini-2.5-flash", tt.config)
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			cp, ok := llm.(model.CapabilitiesProvider)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement model.CapabilitiesProvider", llm)
+			}
+			if got := cp.Capabilities().OutputSchemaAndTools; got != tt.want {
+				t.Errorf("Capabilities().OutputSchemaAndTools = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGeminiModel_CapabilitiesOnVertexAIFollowModelName checks that on Vertex
+// AI the OutputSchemaAndTools capability follows the model name: every Gemini
+// name has it, with no version check (adk-python commit 745de0ac1), and a
+// non-Gemini name such as Gemma does not (models/_capabilities.py:30-51).
+func TestGeminiModel_CapabilitiesOnVertexAIFollowModelName(t *testing.T) {
+	tests := []struct {
+		modelName string
+		want      bool
+	}{
+		{modelName: "gemini-1.5-pro", want: true},
+		{modelName: "gemma-3-27b-it", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.modelName, func(t *testing.T) {
+			llm, err := NewModel(t.Context(), tt.modelName, &genai.ClientConfig{
+				Backend:    genai.BackendVertexAI,
+				Project:    "test-project",
+				Location:   "us-central1",
+				HTTPClient: &http.Client{},
+			})
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			cp, ok := llm.(model.CapabilitiesProvider)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement model.CapabilitiesProvider", llm)
+			}
+			if got := cp.Capabilities().OutputSchemaAndTools; got != tt.want {
+				t.Errorf("Capabilities().OutputSchemaAndTools = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestModel_MaybeAppendUserContent(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -45,6 +45,15 @@ type Model struct {
 // one itself.
 func (m *Model) Name() string { return m.name }
 
+// Capabilities returns the resolved capabilities of the OpenAI Responses model.
+//
+// OutputSchemaAndTools is false, so an agent that has both an output schema
+// and tools gets the set_model_response tool instead of a native response
+// schema. An agent without tools still sends its output schema natively.
+func (m *Model) Capabilities() model.Capabilities { return model.Capabilities{} }
+
+var _ model.CapabilitiesProvider = (*Model)(nil)
+
 // GenerateContent converts a generic LLMRequest into an OpenAI-specific request,
 // then calls the OpenAI API. It handles both streaming and non-streaming responses.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
