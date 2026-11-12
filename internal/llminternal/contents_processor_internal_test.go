@@ -198,3 +198,35 @@ func TestPromptTokenEstimator_SuffixDoesNotLogPairedResponseAsOrphan(t *testing.
 		t.Errorf("paired response in suffix produced a stale-response notice: %q", output)
 	}
 }
+
+// A session service may hand back fresh event structs, so the suffix the
+// compaction estimate builds need not share pointers with the full history.
+// The suffix start is then found by event ID, and the call before it still
+// pairs with the response in it.
+func TestBuildContentsSuffix_FindsStartByEventID(t *testing.T) {
+	const agentName = "worker"
+	call := &session.Event{ID: "e1", Author: agentName, LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{ID: "paired", Name: "ping"}},
+	}}}}
+	response := &session.Event{ID: "e2", Author: agentName, LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+		{FunctionResponse: &genai.FunctionResponse{ID: "paired", Name: "ping"}},
+	}}}}
+	copied := *response
+	allEvents := []*session.Event{call, response}
+
+	var got []*genai.Content
+	output := captureLog(t, func() {
+		var err error
+		got, err = buildContentsDefaultWithCallSource(agentName, "", "", []*session.Event{&copied}, allEvents, false, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	if output != "" {
+		t.Errorf("paired response in a copied suffix produced a stale-response notice: %q", output)
+	}
+	want := []*genai.Content{response.Content}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
+	}
+}

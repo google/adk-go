@@ -163,7 +163,7 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	// suffix to one of them is not taken for an orphan.
 	callsBefore := make(map[string]struct{})
 	if len(events) > 0 {
-		if start := slices.Index(allEvents, events[0]); start > 0 {
+		if start := suffixStart(allEvents, events[0]); start > 0 {
 			for _, ev := range allEvents[:start] {
 				if visible(ev) {
 					recordCallAuthors(callAuthors, ev)
@@ -312,6 +312,18 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 
 func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
 	return utils.EventBelongsToBranch(invocationBranch, event.Branch)
+}
+
+// suffixStart returns the index of first in allEvents, or -1. A session
+// service may return fresh event structs on each read, so an event with an ID
+// is matched by ID; only an event without one is matched by pointer.
+func suffixStart(allEvents []*session.Event, first *session.Event) int {
+	if first.ID == "" {
+		return slices.Index(allEvents, first)
+	}
+	return slices.IndexFunc(allEvents, func(ev *session.Event) bool {
+		return ev.ID == first.ID
+	})
 }
 
 // addCallIDs adds the ids of the function calls in event to ids.
