@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/session"
@@ -182,9 +183,10 @@ type Option func(*workflowOptions)
 // caller's Option list. Zero values mean "no override / use
 // engine defaults".
 type workflowOptions struct {
-	maxConcurrency int
-	stateSchema    *jsonschema.Resolved
-	isRootWrapper  bool
+	maxConcurrency    int
+	stateSchema       *jsonschema.Resolved
+	isRootWrapper     bool
+	isNodeRootWrapper bool
 }
 
 // WithRootWrapper marks this workflow as a synthetic single-node wrapper
@@ -199,6 +201,34 @@ type workflowOptions struct {
 func WithRootWrapper() Option {
 	return func(o *workflowOptions) {
 		o.isRootWrapper = true
+	}
+}
+
+// WithNodeRootWrapper marks this anonymous workflow as a synthetic wrapper
+// created by Runner.runNode to drive a standalone node root. It is meant
+// for the runner; other callers have no reason to set it.
+//
+// [New] returns an error unless the workflow holds exactly one edge, from
+// [Start] to the node root. The node root is treated as follows:
+//
+//   - A node root that is a [*WorkflowNode] receives the START seed
+//     unchanged, so its inner [Start] gives each of its own successors the
+//     form that successor declares (see [NodeConfig.ContentInput]). Any
+//     other node root receives the user message as a *genai.Content
+//     whatever its ContentInput, or nil when there is no user content.
+//   - [Workflow.Resume] re-runs an interrupted node root, as if its
+//     [NodeConfig.RerunOnResume] were &true, and passes it the
+//     invocation's first user message again.
+//
+// Architectural note: Unlike Go, Python ADK does not wrap standalone nodes
+// in a synthetic workflow. Go introduced this wrapper so all node execution
+// rides through a unified graph engine. When marked as a node root wrapper,
+// Workflow.Run does not stamp an extraneous parent namespace prefix onto
+// root contexts, adds no adk.workflow.base_path key to events, and yields no
+// completion or outcome event, maintaining strict parity with Python.
+func WithNodeRootWrapper() Option {
+	return func(o *workflowOptions) {
+		o.isNodeRootWrapper = true
 	}
 }
 
@@ -263,8 +293,12 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	for _, opt := range opts {
 		opt(&o)
 	}
+	if o.isNodeRootWrapper && len(edges) != 1 {
+		return nil, fmt.Errorf("workflow: WithNodeRootWrapper needs exactly one edge, from Start to the node root; got %d edges", len(edges))
+	}
 	graph := newGraph(edges)
 	graph.isRootWrapper = o.isRootWrapper
+	graph.isNodeRootWrapper = o.isNodeRootWrapper
 	if err := validateWorkflow(graph, o.stateSchema); err != nil {
 		return nil, err
 	}
@@ -319,7 +353,7 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 	} else {
 		c = agent.Promote(ctx)
 	}
-	return w.RunNode(c, userInput(c))
+	return w.RunNode(c, newStartSeed(c.UserContent()))
 }
 
 // RunNode drives the workflow with the given input.
@@ -340,13 +374,20 @@ func (w *Workflow) RunNode(ctx agent.Context, input any) iter.Seq2[*session.Even
 	}
 }
 
-// userInput extracts the workflow's seed input from the
-// InvocationContext's UserContent. Concatenates all text parts;
-// returns nil for an empty UserContent.
-func userInput(ctx agent.Context) any {
-	uc := ctx.UserContent()
+// startSeed is the input Workflow.Run gives Start: the user message in
+// both forms a successor of Start can take. [graph.startSeedFor] picks
+// one per successor, so no node other than a [*WorkflowNode] sees a
+// startSeed.
+type startSeed struct {
+	content *genai.Content
+	// text is the concatenated text of content's parts, or nil when
+	// content is nil.
+	text any
+}
+
+func newStartSeed(uc *genai.Content) startSeed {
 	if uc == nil {
-		return nil
+		return startSeed{}
 	}
 	var sb strings.Builder
 	for _, part := range uc.Parts {
@@ -354,5 +395,29 @@ func userInput(ctx agent.Context) any {
 			sb.WriteString(part.Text)
 		}
 	}
-	return sb.String()
+	return startSeed{content: uc, text: sb.String()}
+}
+
+// startSeedFor returns the input target receives from Start when Start
+// carries seed. A [*WorkflowNode] receives the seed unchanged, so its own
+// Start resolves it for each inner successor. A node declaring
+// [NodeConfig.ContentInput], and the node root of a workflow built with
+// [WithNodeRootWrapper], receive the *genai.Content; every other node
+// receives the text. An input that is not a startSeed, such as the
+// input a caller passes to [Workflow.RunNode], is returned unchanged.
+func (g *graph) startSeedFor(seed any, target Node) any {
+	s, ok := seed.(startSeed)
+	if !ok {
+		return seed
+	}
+	if _, isWorkflow := target.(*WorkflowNode); isWorkflow {
+		return s
+	}
+	if !target.Config().ContentInput && !g.isNodeRootWrapper {
+		return s.text
+	}
+	if s.content == nil {
+		return nil
+	}
+	return s.content
 }

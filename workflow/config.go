@@ -89,6 +89,28 @@ type NodeConfig struct {
 	// emits "invoke_agent"). This keeps the span tree consistent with
 	// the direct agent path and adk-python.
 	EmitsOwnSpan bool
+
+	// ContentInput, when true, declares that the node takes the user
+	// message as a *genai.Content when it is a direct successor of
+	// [Start]: [Workflow.Run] passes it the invocation's user content,
+	// and [Workflow.Resume] passes it the invocation's first user
+	// message again when it re-runs the node. When false (the zero
+	// value), such a node receives the concatenated text of the
+	// message's parts as a string, or nil when there is no user content.
+	// The field has no effect on input from any other predecessor.
+	//
+	// [NewFunctionNode], [NewFunctionNodeWithSchema],
+	// [NewEmittingFunctionNode], [NewEmittingFunctionNodeWithSchema],
+	// [NewDynamicNode] and [NewDynamicNodeWithSchema] set ContentInput
+	// when their input type is *genai.Content or genai.Content, and
+	// [NewFunctionNodeFromState] sets it when the node-input field has
+	// one of those types. A custom node that embeds [BaseNode] and reads
+	// a *genai.Content from [Start] sets it in its NodeConfig.
+	//
+	// A [WorkflowNode] ignores ContentInput: as a successor of [Start] it
+	// receives the seed unchanged, and its inner [Start] applies this
+	// rule to its own successors.
+	ContentInput bool
 }
 
 // RetryConfig defines the parameters for retrying a failed node.

@@ -22,6 +22,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -144,7 +145,7 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 	// re-entry node's input: every node's cached output, the set of
 	// nodes that ran, and the workflow's seed input.
 	nodeOutputs, completed := collectNodeOutputs(events, nodesByName, invocationID, w.name)
-	workflowInput := firstUserInput(events, invocationID)
+	workflowInput := firstUserSeed(events, invocationID)
 
 	// Stage 3: turn each interrupted node's scan into a NodeState.
 	state, err := w.buildRunState(scans, nodesByName, nodeOutputs, workflowInput)
@@ -422,10 +423,14 @@ func unresolvedInterrupts(scan *nodeScanState) []string {
 
 // rerunsOnResume reports whether the node opted into re-entry mode
 // (NodeConfig.RerunOnResume), in which Resume re-runs the node with
-// the user responses rather than handing off to its successors.
-func rerunsOnResume(node Node) bool {
+// the user responses rather than handing off to its successors. The
+// node root of a workflow built with WithNodeRootWrapper always does.
+func (g *graph) rerunsOnResume(node Node) bool {
 	if node == nil {
 		return false
+	}
+	if g.isNodeRootWrapper {
+		return true
 	}
 	r := node.Config().RerunOnResume
 	return r != nil && *r
@@ -463,7 +468,7 @@ func validateResolved(scan *nodeScanState) (map[string]any, error) {
 //     with Output = the response (forwarded to successors by Resume)
 func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs map[string]any, workflowInput any) (*NodeState, error) {
 	unresolved := unresolvedInterrupts(scan)
-	reenter := rerunsOnResume(node)
+	reenter := w.graph.rerunsOnResume(node)
 
 	resumed, err := validateResolved(scan)
 	if err != nil {
@@ -544,44 +549,33 @@ func (w *Workflow) predecessorInput(node Node, nodeOutputs map[string]any, workf
 	}
 	for _, e := range incoming {
 		if e.From.Name() == Start.Name() {
-			return workflowInput, Start.Name()
+			return w.graph.startSeedFor(workflowInput, node), Start.Name()
 		}
 	}
 	return nodeOutputs[incoming[0].From.Name()], incoming[0].From.Name()
 }
 
-// firstUserInput returns the seed workflow input: the text of the
-// first user event in history (the original prompt), used as the
-// START successor's input on re-entry. Resume turns (user
-// FunctionResponses) are skipped. When invocationID is non-empty, only
-// that invocation's user events are considered, so the seed is the
-// current run's prompt rather than an earlier run's.
-func firstUserInput(events session.Events, invocationID string) any {
+// firstUserSeed returns the seed workflow input: the START seed built
+// from the first user event in history (the original prompt), used as
+// the START successor's input on re-entry. Resume turns (user
+// FunctionResponses) and user events without parts are skipped. When
+// invocationID is non-empty, only that invocation's user events are
+// considered, so the seed is the current run's prompt rather than an
+// earlier run's. Returns nil when no such event exists. Mirrors
+// adk-python Runner._find_user_message_for_invocation.
+func firstUserSeed(events session.Events, invocationID string) any {
 	for i := 0; i < events.Len(); i++ {
 		ev := events.At(i)
-		if ev == nil || ev.Author != "user" || ev.Content == nil {
+		if ev == nil || ev.Author != "user" || ev.Content == nil || len(ev.Content.Parts) == 0 {
 			continue
 		}
 		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
-		var text strings.Builder
-		hasFR := false
-		for _, p := range ev.Content.Parts {
-			if p == nil {
-				continue
-			}
-			if p.FunctionResponse != nil {
-				hasFR = true
-			}
-			text.WriteString(p.Text)
-		}
-		if hasFR {
+		if len(utils.FunctionResponses(ev.Content)) > 0 {
 			continue
 		}
-		if text.String() != "" {
-			return text.String()
-		}
+		return newStartSeed(ev.Content)
 	}
 	return nil
 }

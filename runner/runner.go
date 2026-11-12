@@ -49,13 +49,33 @@ import (
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/workflow"
 )
 
 // Config is used to create a [Runner].
+//
+// Exactly one of [Config.Agent] or [Config.Node] must be non-nil.
 type Config struct {
+	// AppName identifies the application in session, artifact, and memory
+	// requests. When Node is set and AppName is empty, New defaults AppName
+	// to Node.Name().
 	AppName string
-	// Root agent which starts the execution.
-	Agent          agent.Agent
+	// Agent is the root agent which starts execution. Mutually exclusive
+	// with Node.
+	Agent agent.Agent
+	// Node is the root workflow node (such as a [workflow.BaseNode]
+	// embedder, [workflow.FunctionNode], a node built by
+	// [workflow.NewDynamicNode], or a [workflow.WorkflowNode]) which starts
+	// execution on the node runtime path. Mutually exclusive with Agent.
+	//
+	// A node root that is not a [workflow.WorkflowNode] receives the user
+	// message as a *genai.Content with Role "user"; on a turn that resumes
+	// it, it receives the invocation's original user message. A
+	// [workflow.WorkflowNode] root passes the message on to each successor
+	// of its [workflow.Start] in the form that successor declares (see
+	// [workflow.NodeConfig.ContentInput]). The node's events carry the root
+	// path "<Node.Name()>@1" in [session.NodeInfo].
+	Node           workflow.Node
 	SessionService session.Service
 
 	// optional
@@ -121,18 +141,48 @@ func WithYieldUserMessage() RunOption {
 }
 
 // New creates a new [Runner].
+//
+// Exactly one of cfg.Agent or cfg.Node must be non-nil, and
+// cfg.SessionService must be non-nil. When cfg.Node is set, its name must
+// not be empty, and an empty cfg.AppName defaults to cfg.Node.Name(). When
+// cfg.Compaction is set, it must be valid, and either name a Summarizer or
+// have an LLM agent with a model as the root. New returns an error
+// describing the first precondition that does not hold. It does not modify
+// cfg or cfg.Compaction.
 func New(cfg Config) (*Runner, error) {
-	if cfg.Agent == nil {
+	if cfg.Agent == nil && cfg.Node == nil {
 		return nil, fmt.Errorf("root agent is required")
+	}
+	if cfg.Agent != nil && cfg.Node != nil {
+		return nil, errors.New("only one of Agent or Node may be provided")
 	}
 
 	if cfg.SessionService == nil {
 		return nil, fmt.Errorf("session service is required")
 	}
 
-	parents, err := parentmap.New(cfg.Agent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create agent tree: %w", err)
+	appName := cfg.AppName
+	var parents parentmap.Map
+	var standIn agent.Agent
+	if cfg.Agent != nil {
+		var err error
+		parents, err = parentmap.New(cfg.Agent)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create agent tree: %w", err)
+		}
+	} else {
+		if cfg.Node.Name() == "" {
+			return nil, errors.New("node name must not be empty")
+		}
+		// adk-python names the app after a node root (Runner._resolve_app).
+		if appName == "" {
+			appName = cfg.Node.Name()
+		}
+		var err error
+		standIn, err = newStandInAgent(cfg.Node)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	pluginManager, err := plugininternal.NewPluginManager(plugininternal.PluginConfig{
@@ -149,8 +199,10 @@ func New(cfg Config) (*Runner, error) {
 	}
 
 	return &Runner{
-		appName:           cfg.AppName,
+		appName:           appName,
 		rootAgent:         cfg.Agent,
+		rootNode:          cfg.Node,
+		standInAgent:      standIn,
 		sessionService:    cfg.SessionService,
 		artifactService:   cfg.ArtifactService,
 		memoryService:     cfg.MemoryService,
@@ -167,6 +219,7 @@ func New(cfg Config) (*Runner, error) {
 var defaultSummarizerTimeout = 60 * time.Second
 
 // resolveCompactionConfig validates cfg and fills in the default summarizer.
+// rootAgent is nil when the runner's root is a node.
 //
 // Resolving at construction time means a misconfigured runner fails fast at
 // New, rather than silently skipping compaction turns later, or blowing up
@@ -184,6 +237,9 @@ func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*co
 		return &resolved, nil
 	}
 
+	if rootAgent == nil {
+		return nil, errors.New("the Compaction config needs a Summarizer: root is a node, so no default model is available")
+	}
 	llmAgent, ok := rootAgent.(llminternal.Agent)
 	if !ok {
 		return nil, fmt.Errorf("the Compaction config needs a Summarizer: root agent %q is not an LLM agent, so no default model is available", rootAgent.Name())
@@ -234,8 +290,14 @@ func NewInMemory(appName string, a agent.Agent) (*Runner, error) {
 // processing, event generation, and interaction with various services like
 // artifact storage, session management, and memory.
 type Runner struct {
-	appName         string
-	rootAgent       agent.Agent
+	appName   string
+	rootAgent agent.Agent
+	// rootNode is Config.Node; exactly one of rootAgent and rootNode is set.
+	rootNode workflow.Node
+	// standInAgent is the invocation context's agent when rootNode is set,
+	// so that plugins, callbacks and telemetry that read ctx.Agent() see the
+	// node's name. It is never run.
+	standInAgent    agent.Agent
 	sessionService  session.Service
 	artifactService artifact.Service
 	memoryService   memory.Service
@@ -641,6 +703,16 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // it carries a function call ("user message cannot contain function calls"),
 // or when it has no parts and the root agent is not an LlmAgent ("no parts in
 // the new_message").
+//
+// A root node (Config.Node) runs on the node path; see [Config.Node] for the
+// input it receives and the paths its events carry. On a node root, Run also
+// refuses, with nothing stored, a message that holds both text and a
+// function response with an ID ("message cannot contain both function
+// responses and text: ..."); a BeforeRunCallback reply is authored "model";
+// and the node's events carry no workflow bookkeeping metadata. On any root,
+// a nil msg with a non-empty [WithStateDelta] stores a user event without
+// content that carries the delta, which [WithYieldUserMessage] yields on the
+// node path.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// Copied now: the sequence below runs only when ranged, and later
 	// changes to the caller's map must not reach the invocation's events.
@@ -649,9 +721,18 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		runMetadata = eventmetadata.WithoutInternal(*cfg.CustomMetadata)
 	}
 	sessionCfg := getSessionConfigOf(cfg.GetSessionConfig)
-	return telemetry.InstrumentInvocation(ctx, r.rootAgent, sessionID, func(ctx context.Context) iter.Seq2[*session.Event, error] {
+	return telemetry.InstrumentInvocation(ctx, r.invocationRoot(), sessionID, func(ctx context.Context) iter.Seq2[*session.Event, error] {
 		return r.run(ctx, userID, sessionID, msg, cfg, runMetadata, sessionCfg, opts...)
 	})
+}
+
+// invocationRoot returns the root whose name and description the invocation
+// span records: the root node when the runner has one, else the root agent.
+func (r *Runner) invocationRoot() telemetry.AgentLike {
+	if r.rootNode != nil {
+		return r.rootNode
+	}
+	return r.rootAgent
 }
 
 // getSessionConfigOf returns a copy of *cfg, or the zero GetSessionConfig
@@ -713,6 +794,13 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID, sessionCfg)
 		if err != nil {
 			yield(nil, err)
+			return
+		}
+
+		// A node root always runs on the node path, as adk-python's
+		// Runner.run_async sends a BaseNode root to _run_node_async.
+		if r.rootNode != nil {
+			r.runNode(ctx, storedSession, r.standInAgent, msg, cfg, runMetadata, llminternal.ModeUnset, options, yield)
 			return
 		}
 
@@ -926,8 +1014,14 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	}
 
 	event := session.NewEvent(ctx, ctx.InvocationID())
-	// Match RunLive's attribution so later turns can resolve the agent from history.
-	event.Author = ctx.Agent().Name()
+	if r.rootNode != nil {
+		// adk-python authors a node root's before-run reply "model"
+		// (workflow/_node_runner_utils.py).
+		event.Author = genai.RoleModel
+	} else {
+		// Match RunLive's attribution so later turns can resolve the agent from history.
+		event.Author = ctx.Agent().Name()
+	}
 	event.Content = content
 
 	event, err = r.processEventWithPlugins(ctx, event)
@@ -1026,8 +1120,12 @@ func (s *closedLiveSession) Close() error {
 }
 
 // RunLive starts a live, bidirectional agent session, returning the session
-// and a stream of events from the agents.
+// and a stream of events from the agents. It returns an error, before the
+// session is read, when the runner's root is a node.
 func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	if r.rootNode != nil {
+		return nil, nil, fmt.Errorf("runner root %q is a node, not an agent", r.rootNode.Name())
+	}
 	options := runOptions{}
 	for _, opt := range opts {
 		opt(&options)
@@ -1258,11 +1356,22 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 // Runner._append_new_message_to_session; the node path's _append_user_event
 // stores it). replaced reports whether a callback returned a replacement; the
 // replacement is then ctx's UserContent, and when it answers a function call
-// in history, ctx carries that call's invocation ID. A nil msg appends
-// nothing.
+// in history, ctx carries that call's invocation ID. On a node root, a
+// message that holds both text and a function response with an ID is
+// refused before and after the callbacks. A nil msg runs no callback and
+// appends a content-less user event carrying stateDelta when stateDelta is
+// not empty, and nothing otherwise (adk-python
+// Runner._append_state_delta_event).
 func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts, requireParts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (_ agent.Context, _ *session.Event, replaced bool, _ error) {
 	if msg == nil {
-		return ctx, nil, false, nil
+		if len(stateDelta) == 0 {
+			return ctx, nil, false, nil
+		}
+		event, err := r.appendUserEvent(ctx, storedSession, nil, stateDelta)
+		return ctx, event, false, err
+	}
+	if err := r.validateNodeRootMessage(msg); err != nil {
+		return ctx, nil, false, err
 	}
 	if pluginManager != nil {
 		modifiedMsg, err := pluginManager.RunOnUserMessageCallback(ctx, msg)
@@ -1290,6 +1399,9 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 					UserContent: &msg,
 				},
 			})
+			if err := r.validateNodeRootMessage(msg); err != nil {
+				return ctx, nil, replaced, err
+			}
 		}
 	}
 
@@ -1317,6 +1429,13 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		}
 	}
 
+	event, err := r.appendUserEvent(ctx, storedSession, msg, stateDelta)
+	return ctx, event, replaced, err
+}
+
+// appendUserEvent appends a user event with content msg, which may be nil,
+// and stateDelta to storedSession, and returns it.
+func (r *Runner) appendUserEvent(ctx agent.Context, storedSession session.Session, msg *genai.Content, stateDelta map[string]any) (*session.Event, error) {
 	event := session.NewEvent(ctx, ctx.InvocationID())
 
 	event.Author = "user"
@@ -1334,9 +1453,36 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 	eventmetadata.MergeIntoEvent(event, runMetadataFromContext(ctx))
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
-		return ctx, nil, replaced, fmt.Errorf("failed to append event to sessionService: %w", err)
+		return nil, fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
-	return ctx, event, replaced, nil
+	return event, nil
+}
+
+// validateNodeRootMessage refuses, on a node root, a message that holds
+// both non-empty text and a function response with an ID: the response
+// resumes an existing invocation while the text starts a new one
+// (adk-python Runner._validate_new_message). Agent roots accept such a
+// message, which the A2A input-required flow sends.
+func (r *Runner) validateNodeRootMessage(msg *genai.Content) error {
+	if r.rootNode == nil {
+		return nil
+	}
+	hasResumeResponse, hasText := false, false
+	for _, p := range msg.Parts {
+		if p == nil {
+			continue
+		}
+		if p.FunctionResponse != nil && p.FunctionResponse.ID != "" {
+			hasResumeResponse = true
+		}
+		if p.Text != "" {
+			hasText = true
+		}
+	}
+	if hasResumeResponse && hasText {
+		return errors.New("message cannot contain both function responses and text: function responses resume an existing invocation while text starts a new one")
+	}
+	return nil
 }
 
 // setInvocationID replaces the invocation ID of the invocation context ctx
@@ -1451,11 +1597,13 @@ func (r *Runner) usesLegacySubAgentPicker(rootMode llminternal.Mode) bool {
 // restoreBranchFromHistory returns the branch agentToRun last ran on, taken
 // from its most recent event in sess that has a branch. A non-empty
 // invocationID limits the search to that invocation's events, so an agent
-// does not continue on a branch of an earlier invocation. The root agent, and
-// an agent with no such event, run on the root branch "" (adk-python
-// agents/_agent_router.py restore_branch_from_history).
+// does not continue on a branch of an earlier invocation. The root agent, a
+// node root's stand-in agent, and an agent with no such event, run on the
+// root branch "" (adk-python agents/_agent_router.py
+// restore_branch_from_history; adk-python restores no branch for a node
+// root).
 func (r *Runner) restoreBranchFromHistory(sess session.Session, agentToRun agent.Agent, invocationID string) string {
-	if sess == nil || agentToRun == nil || agentToRun == r.rootAgent {
+	if sess == nil || agentToRun == nil || agentToRun == r.rootAgent || agentToRun == r.standInAgent {
 		return ""
 	}
 	events := sess.Events()

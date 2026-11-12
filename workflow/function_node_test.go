@@ -836,3 +836,86 @@ func TestFunctionNode_NonContentOutputGoesToOutput(t *testing.T) {
 		t.Errorf("event.Output mismatch (-want +got):\n%s", diff)
 	}
 }
+
+// A node whose input type is string receives the text of a Content
+// input, as adk-python's FunctionNode coerces types.Content to str.
+func TestFunctionNode_CoerceContentToString(t *testing.T) {
+	content := &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "hello"}, nil, {Text: " world"}}}
+	type stateParams struct {
+		NodeInput string
+	}
+	for _, tc := range []struct {
+		name  string
+		input any
+		node  func(record func(string)) (Node, error)
+	}{
+		{
+			name:  "function_node",
+			input: content,
+			node: func(record func(string)) (Node, error) {
+				return NewFunctionNode("echo", func(_ agent.Context, in string) (any, error) {
+					record(in)
+					return nil, nil
+				}, NodeConfig{}), nil
+			},
+		},
+		{
+			name:  "function_node_content_value",
+			input: *content,
+			node: func(record func(string)) (Node, error) {
+				return NewFunctionNode("echo", func(_ agent.Context, in string) (any, error) {
+					record(in)
+					return nil, nil
+				}, NodeConfig{}), nil
+			},
+		},
+		{
+			name:  "emitting_function_node",
+			input: content,
+			node: func(record func(string)) (Node, error) {
+				return NewEmittingFunctionNode("echo", func(_ agent.Context, in string, _ func(*session.Event) error) (any, error) {
+					record(in)
+					return nil, nil
+				}, NodeConfig{}), nil
+			},
+		},
+		{
+			name:  "function_node_from_state",
+			input: content,
+			node: func(record func(string)) (Node, error) {
+				return NewFunctionNodeFromState("echo", func(_ agent.InvocationContext, p stateParams) (any, error) {
+					record(p.NodeInput)
+					return nil, nil
+				}, NodeConfig{})
+			},
+		},
+		{
+			name:  "dynamic_node",
+			input: content,
+			node: func(record func(string)) (Node, error) {
+				return NewDynamicNode("echo", func(_ agent.Context, in string, _ func(*session.Event) error) (any, error) {
+					record(in)
+					return nil, nil
+				}, NodeConfig{}), nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []string
+			n, err := tc.node(func(in string) { got = append(got, in) })
+			if err != nil {
+				t.Fatalf("constructing the node: %v", err)
+			}
+			mockCtx := newMockCtx(t)
+			mockCtx.sess = fakeSession{events: sliceEvents{}}
+			for _, err := range n.Run(agent.NewContext(mockCtx), tc.input) {
+				if err != nil {
+					t.Fatalf("Run: %v", err)
+				}
+			}
+			if diff := cmp.Diff([]string{"hello world"}, got); diff != "" {
+				t.Errorf("input the function received (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

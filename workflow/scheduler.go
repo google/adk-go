@@ -672,7 +672,7 @@ func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
 // followed by failure, or record successful completion with no output.
 // Keep those outcomes in history without persisting the node's error text.
 func (s *scheduler) completionEvent(name string, nr *nodeRun, inventory failureInventory) *session.Event {
-	if name == Start.Name() || s.graph.isRootWrapper {
+	if name == Start.Name() || s.graph.isRootWrapper || s.graph.isNodeRootWrapper {
 		return nil
 	}
 	ns := s.state.Nodes[name]
@@ -785,7 +785,7 @@ func (s *scheduler) handleEvent(it eventItem) {
 	if it.ev == nil {
 		return
 	}
-	if !s.graph.isRootWrapper {
+	if !s.graph.isRootWrapper && !s.graph.isNodeRootWrapper {
 		metadata := maps.Clone(it.ev.CustomMetadata)
 		if metadata == nil {
 			metadata = map[string]any{}
@@ -1137,7 +1137,7 @@ func appendSuccessor(out []successor, g *graph, state *RunState, target Node, in
 	if _, isJoin := target.(*JoinNode); !isJoin {
 		return append(out, successor{
 			node:        target,
-			input:       input,
+			input:       g.startSeedFor(input, target),
 			triggeredBy: triggeredBy,
 			branch:      parentBranch,
 		})
@@ -1159,7 +1159,8 @@ func appendSuccessor(out []successor, g *graph, state *RunState, target Node, in
 // recorded Output for every predecessor of target. Returns
 // (nil, false) if any predecessor is not yet NodeCompleted; a
 // predecessor that completed without an output contributes a nil
-// value (same as the absence the predecessor itself emitted).
+// value (same as the absence the predecessor itself emitted). START
+// contributes the workflow's seed as resolved by graph.startSeedFor.
 func aggregatePredecessorOutputs(g *graph, state *RunState, target Node) (map[string]any, bool) {
 	predEdges := g.predecessorsOf(target)
 	aggregated := make(map[string]any, len(predEdges))
@@ -1168,6 +1169,12 @@ func aggregatePredecessorOutputs(g *graph, state *RunState, target Node) (map[st
 		ns := state.Nodes[name]
 		if ns == nil || ns.Status != NodeCompleted {
 			return nil, false
+		}
+		if edge.From == Start {
+			// START carries the workflow's seed in its Input; it has
+			// no output of its own.
+			aggregated[name] = g.startSeedFor(ns.Input, target)
+			continue
 		}
 		aggregated[name] = ns.Output
 	}

@@ -55,12 +55,26 @@ func buildRunnerNode(a agent.Agent) (workflow.Node, error) {
 	return newAgentNode(a), nil
 }
 
+// newStandInAgent returns the agent a node root's invocation context
+// carries, named and described as n. Plugins, callbacks and telemetry read
+// ctx.Agent(); adk-java gives a node root the same kind of stand-in
+// (Runner.NodeViewAgent). The stand-in has no Run function and is never run.
+func newStandInAgent(n workflow.Node) (agent.Agent, error) {
+	a, err := agent.New(agent.Config{Name: n.Name(), Description: n.Description()})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stand-in agent for node %q: %w", n.Name(), err)
+	}
+	return a, nil
+}
+
 // runNode drives an agent through the workflow engine by wrapping it
 // in a single-node workflow (START -> node), reusing the agent path's
 // session/plugin/persist pipeline. The wrapping node bridges the agent's
 // HITL (long-running tools, which emit LongRunningToolIDs) into a
 // workflow pause; see newAgentNode. Go equivalent of adk-python
 // Runner._run_node_async. rootMode is the root LlmAgent's resolved mode.
+// When the runner's root is a node, agentToRun is its stand-in agent and
+// the workflow drives the node itself.
 func (r *Runner) runNode(
 	ctx context.Context,
 	storedSession session.Session,
@@ -162,22 +176,33 @@ func (r *Runner) runNode(
 		}
 	}
 
-	// Built only now, for the agent picked after the message was taken in:
-	// the node runs the agent it wraps, not the context's agent.
-	node, err := buildRunnerNode(agentToRun)
-	if err != nil {
-		yield(nil, err)
-		return
+	var wf *workflow.Workflow
+	if r.rootNode != nil {
+		// Anonymous, so the node's path is "<name>@1" as in Python, and
+		// marked as the node-root wrapper, so the node's events carry no
+		// workflow bookkeeping (Python runs a node root directly).
+		wf, err = workflow.New("", []workflow.Edge{
+			{From: workflow.Start, To: r.rootNode},
+		}, workflow.WithNodeRootWrapper())
+	} else {
+		// Built only now, for the agent picked after the message was taken in:
+		// the node runs the agent it wraps, not the context's agent.
+		var node workflow.Node
+		node, err = buildRunnerNode(agentToRun)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		// Architectural note: Unlike Go, Python ADK executes standalone agents
+		// directly via agent.run_async. Go wraps top-level agents in a synthetic
+		// single-node workflow (START -> node) so all execution rides through
+		// a unified graph engine. We pass workflow.WithRootWrapper() to prevent
+		// this synthetic workflow from stamping an unwanted namespace prefix
+		// ("app/agent@1") onto events, ensuring 100% path parity with Python.
+		wf, err = workflow.New(rootWorkflowName(r.appName, agentToRun), []workflow.Edge{
+			{From: workflow.Start, To: node},
+		}, workflow.WithRootWrapper())
 	}
-	// Architectural note: Unlike Go, Python ADK executes standalone agents
-	// directly via agent.run_async. Go wraps top-level agents in a synthetic
-	// single-node workflow (START -> node) so all execution rides through
-	// a unified graph engine. We pass workflow.WithRootWrapper() to prevent
-	// this synthetic workflow from stamping an unwanted namespace prefix
-	// ("app/agent@1") onto events, ensuring 100% path parity with Python.
-	wf, err := workflow.New(rootWorkflowName(r.appName, agentToRun), []workflow.Edge{
-		{From: workflow.Start, To: node},
-	}, workflow.WithRootWrapper())
 	if err != nil {
 		yield(nil, fmt.Errorf("failed to build node workflow: %w", err))
 		return
@@ -366,6 +391,21 @@ func buildResumeResponses(msg *genai.Content, state *workflow.RunState, sess ses
 		// Opaque payload; Workflow.Resume validates against any schema.
 		out[fr.ID] = decodeResumeResponse(fr)
 	}
+	// The runner has already persisted this turn's answers. Rehydration
+	// unwraps and validates them (adk-python's {"result": v} included), so
+	// its value replaces the ingress decoding, as in workflowagent.
+	if state != nil {
+		for _, ns := range state.Nodes {
+			if ns == nil {
+				continue
+			}
+			for id, response := range ns.ResumedInputs {
+				if _, matched := out[id]; matched {
+					out[id] = response
+				}
+			}
+		}
+	}
 	return out
 }
 
@@ -420,11 +460,21 @@ func decodeResumeResponse(fr *genai.FunctionResponse) any {
 }
 
 // waitingInterruptIDs returns the set of interrupt IDs for every node
-// in state that is currently paused on a long-running interrupt.
+// in state that is currently paused on a long-running interrupt, plus the
+// IDs of interrupts that history answers (NodeState.ResumedInputs). The
+// runner appends the turn's message before it reconstructs the state, so
+// the interrupts this turn answers are in the second set, as they are for
+// agent/workflowagent's detectResume.
 func waitingInterruptIDs(state *workflow.RunState) map[string]struct{} {
 	ids := map[string]struct{}{}
 	for _, ns := range state.Nodes {
-		if ns == nil || ns.Status != workflow.NodeWaiting {
+		if ns == nil {
+			continue
+		}
+		for id := range ns.ResumedInputs {
+			ids[id] = struct{}{}
+		}
+		if ns.Status != workflow.NodeWaiting {
 			continue
 		}
 		for _, id := range ns.Interrupts {

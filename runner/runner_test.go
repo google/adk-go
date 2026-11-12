@@ -32,6 +32,8 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/workflow"
 )
 
 func TestRunner_findAgentToRun(t *testing.T) {
@@ -1234,5 +1236,77 @@ func TestRunner_NilEventYieldedTerminatesRun(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Run() did not terminate after a nil event")
+	}
+}
+
+// newTestNode returns a function node named name that returns no output.
+func newTestNode(name string) workflow.Node {
+	return workflow.NewFunctionNode(name, func(agent.Context, any) (any, error) { return nil, nil }, workflow.NodeConfig{})
+}
+
+func TestRunner_New_MutuallyExclusiveRoots(t *testing.T) {
+	a := must(agent.New(agent.Config{Name: "a"}))
+
+	r, err := New(Config{Agent: a, Node: newTestNode("myNode"), SessionService: session.InMemoryService()})
+
+	if r != nil || err == nil || err.Error() != "only one of Agent or Node may be provided" {
+		t.Errorf("New() = %v, %v; want nil, %q", r, err, "only one of Agent or Node may be provided")
+	}
+}
+
+func TestRunner_New_NodeNameRequired(t *testing.T) {
+	r, err := New(Config{Node: newTestNode(""), SessionService: session.InMemoryService()})
+
+	if r != nil || err == nil || err.Error() != "node name must not be empty" {
+		t.Errorf("New() = %v, %v; want nil, %q", r, err, "node name must not be empty")
+	}
+}
+
+func TestRunner_New_NodeRootCompactionNeedsSummarizer(t *testing.T) {
+	const want = "the Compaction config needs a Summarizer: root is a node, so no default model is available"
+
+	r, err := New(Config{
+		Node:           newTestNode("myNode"),
+		SessionService: session.InMemoryService(),
+		Compaction:     &compaction.Config{CompactionInterval: 2, OverlapSize: 1},
+	})
+
+	if r != nil || err == nil || err.Error() != want {
+		t.Errorf("New() = %v, %v; want nil, %q", r, err, want)
+	}
+}
+
+func TestRunner_New_DefaultsAppNameToNodeName(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	r, err := New(Config{Node: newTestNode("myNode"), SessionService: svc, AutoCreateSession: true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	for _, err := range r.Run(ctx, "u", "s", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	}
+
+	if _, err := svc.Get(ctx, &session.GetRequest{AppName: "myNode", UserID: "u", SessionID: "s"}); err != nil {
+		t.Errorf("session under app name %q: Get() error = %v", "myNode", err)
+	}
+}
+
+func TestRunner_RunLive_RefusedOnNodeRoot(t *testing.T) {
+	const want = `runner root "myNode" is a node, not an agent`
+	r, err := New(Config{AppName: "app", Node: newTestNode("myNode"), SessionService: session.InMemoryService()})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// The session does not exist, so the refusal has to come before the
+	// session is read.
+	sess, events, err := r.RunLive(t.Context(), "u", "s", agent.LiveRunConfig{})
+
+	if sess != nil || events != nil || err == nil || err.Error() != want {
+		t.Errorf("RunLive() = %v, %v, %v; want nil, nil, %q", sess, events, err, want)
 	}
 }
