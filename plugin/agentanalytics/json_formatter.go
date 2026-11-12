@@ -55,6 +55,23 @@ const (
 	maxContainerAlloc = 1024
 )
 
+// maxFunctionNameSummaryLength bounds, in runes, the function name that a
+// response summary shows for a function call or response part when maxLength >= 0
+// (before truncateString appends the 14-rune "...[TRUNCATED]" suffix). A
+// negative maxLength leaves function names unlimited in length while still
+// applying redaction when it is enabled.
+const maxFunctionNameSummaryLength = 256
+
+// responseSummarySlack is the fixed absolute 4096-rune allowance (not
+// proportional to maxLength) added to any non-negative maxLength when rendering
+// a response summary, bounding the joined summary at maxLength + 4096 runes
+// (before truncateString appends the 14-rune "...[TRUNCATED]" suffix). It
+// accommodates part wrappers ("text: '...'", "call: ...", "resp: ...",
+// "Executable code (...): ...", "Code execution result (...): ..."), separators,
+// and per-part truncation suffixes without letting many-part responses grow
+// without bound.
+const responseSummarySlack = 4096
+
 type nodeBudget struct {
 	remaining int
 }
@@ -449,6 +466,10 @@ func newResponseMessageSummary(content *genai.Content, contentOrd, maxLength int
 	if content == nil {
 		return m
 	}
+	nameLimit := maxFunctionNameSummaryLength
+	if maxLength < 0 {
+		nameLimit = -1
+	}
 	for i, part := range content.Parts {
 		var t bool
 		piece := "other"
@@ -461,9 +482,13 @@ func newResponseMessageSummary(content *genai.Content, contentOrd, maxLength int
 			piece = "text: '" + text + "'"
 			isText = true
 		case part.FunctionCall != nil:
-			piece = "call: " + part.FunctionCall.Name
+			var name string
+			name, t = sanitizeAndTruncateText(part.FunctionCall.Name, nameLimit, redact)
+			piece = "call: " + name
 		case part.FunctionResponse != nil:
-			piece = "resp: " + part.FunctionResponse.Name
+			var name string
+			name, t = sanitizeAndTruncateText(part.FunctionResponse.Name, nameLimit, redact)
+			piece = "resp: " + name
 		case part.ExecutableCode != nil:
 			var code string
 			code, t = sanitizeAndTruncateText(part.ExecutableCode.Code, maxLength, redact)
@@ -498,8 +523,16 @@ func (m *messageSummary) render(maxLength int) (string, bool) {
 		truncated = truncated || p.truncated
 	}
 	joined := strings.Join(active, " | ")
-	if m.isResponse {
-		return joined, truncated
+	if m.isResponse && maxLength >= 0 {
+		// Individual pieces are not strictly bounded by maxLength: function
+		// names are bounded at maxFunctionNameSummaryLength (256 runes), and
+		// text or code pieces carry wrappers (including language or outcome
+		// prefixes) and "...[TRUNCATED]" suffixes beyond maxLength. Adding the
+		// fixed responseSummarySlack (4096 runes) preserves single-part or
+		// small-part summaries while strictly bounding many-part summaries at
+		// maxLength + responseSummarySlack runes before truncateString appends
+		// the 14-rune "...[TRUNCATED]" suffix.
+		maxLength += responseSummarySlack
 	}
 	summary, t := truncateString(joined, maxLength)
 	return summary, truncated || t
@@ -558,10 +591,14 @@ func (b *contentSummaryBuilder) retainInlineSummary(contentOrd, partIdx int, fal
 	}
 }
 
+// hasFailedUploadTruncated reports whether any non-omitted text piece was
+// truncated, pinning is_truncated when content is denied and a text upload
+// falls back to truncated inline text without counting summary-only caps on
+// non-text pieces.
 func (b *contentSummaryBuilder) hasFailedUploadTruncated() bool {
 	for _, m := range b.messages {
 		for _, p := range m.pieces {
-			if !p.omitted && p.truncated {
+			if p.isText && !p.omitted && p.truncated {
 				return true
 			}
 		}
@@ -651,9 +688,13 @@ func contentSummary(content *genai.Content, maxLength int, redact bool) (string,
 	return newMessageSummary(content, 0, maxLength, redact).render(maxLength)
 }
 
-// formatResponseContent renders model output the way adk-python writes
-// content.response: one entry per part joined by " | ", or "None" if there
-// are no parts.
+// formatResponseContent renders model output as one entry per part joined by
+// " | ", or "None" if there are no parts. When maxLength >= 0, function call
+// and response names are capped at maxFunctionNameSummaryLength (256 runes)
+// and the joined summary is capped at maxLength + responseSummarySlack
+// (4096 runes) before truncateString appends "...[TRUNCATED]" when truncated;
+// maxLength < 0 disables length truncation while still applying redaction when
+// redact is true.
 func formatResponseContent(content *genai.Content, maxLength int, redact bool) (string, bool) {
 	return newResponseMessageSummary(content, 0, maxLength, redact).render(maxLength)
 }

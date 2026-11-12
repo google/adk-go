@@ -491,14 +491,35 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			}
 		}
 
+		// The reconnect loop writes the resumption handle into this config, so
+		// it needs its own copy: the caller may reuse its LiveRunConfig.
+		sessionResumption := runCfg.Live.SessionResumption
+		if sessionResumption != nil {
+			sessionResumptionCopy := *sessionResumption
+			sessionResumption = &sessionResumptionCopy
+		}
+
 		liveConnectConfig := &genai.LiveConnectConfig{
 			ResponseModalities:       runCfg.Live.ResponseModalities,
 			SpeechConfig:             runCfg.Live.SpeechConfig,
 			SystemInstruction:        nreq.Config.SystemInstruction,
 			Tools:                    nreq.Config.Tools,
-			SessionResumption:        runCfg.Live.SessionResumption,
+			SessionResumption:        sessionResumption,
 			InputAudioTranscription:  runCfg.Live.InputAudioTranscription,
 			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
+			RealtimeInputConfig:      runCfg.Live.RealtimeInputConfig,
+		}
+		// Leave affective dialog and proactivity unset for the models
+		// IsGemini3xLive matches. Affective dialog is not supported on them,
+		// and proactive audio is either always on (Gemini 3.8 Live, where
+		// sending proactive_audio: false is an error) or not supported
+		// (Gemini 3.1 Flash Live). Live Translate is excluded by
+		// IsGemini3xLive and still gets both.
+		if !googlellm.IsGemini3xLive(f.Model.Name()) {
+			if runCfg.Live.EnableAffectiveDialog {
+				liveConnectConfig.EnableAffectiveDialog = genai.Ptr(true)
+			}
+			liveConnectConfig.Proactivity = runCfg.Live.Proactivity
 		}
 
 		iCtx, isIContext := ctx.(*icontext.InvocationContext)
