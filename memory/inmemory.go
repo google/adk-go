@@ -35,8 +35,17 @@ const maxSearchResults = 10
 // Searches return at most ten entries, ranked by the number of distinct query
 // words they match. Ties follow session insertion order, then event order.
 // Session content and custom metadata are copied on ingestion and retrieval.
-// Unexported reference fields, functions, channels, and unsafe pointers in
-// metadata remain shared.
+//
+// Pointers and slices whose elements contain unexported struct fields by value
+// remain shared, except for time.Time. This avoids copying stateful objects such
+// as strings.Builder or sync.Mutex. Non-copyable objects must be passed by pointer.
+// Unexported reference fields, functions, channels, and unsafe pointers also stay
+// shared. Callers must synchronize access to shared values.
+//
+// Content and custom metadata are copied independently. Cycles are supported,
+// but slice capacity and internal sharing relationships are not guaranteed to
+// be preserved, including overlapping slice views and pointers into fields or
+// elements.
 func InMemoryService() Service {
 	return &inMemoryService{
 		store: make(map[key]*userMemories),

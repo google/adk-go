@@ -15,6 +15,7 @@
 package memory_test
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,13 +48,14 @@ func memoryCopyEvent() *session.Event {
 	event.Content.Parts[0].PartMetadata = map[string]any{"values": []string{"original"}}
 	values := []string{"original", "tail"}
 	event.CustomMetadata = map[string]any{
-		"label":  "original",
-		"nested": map[string]any{"items": []any{map[string]any{"value": "original"}}},
-		"typed":  []map[string][]int{{"numbers": {1, 2}}},
-		"record": &memoryMetadataRecord{Values: []string{"original"}, Time: time.Unix(123, 456)},
-		"array":  [1][]string{{"original"}},
-		"views":  map[string][]string{"short": values[:1], "long": values},
-		"named":  []any{memoryMetadataStrings(values), memoryMetadataOtherStrings(values)},
+		"label":         "original",
+		"nested":        map[string]any{"items": []any{map[string]any{"value": "original"}}},
+		"typed":         []map[string][]int{{"numbers": {1, 2}}},
+		"record":        &memoryMetadataRecord{Values: []string{"original"}, Time: time.Unix(123, 456)},
+		"array":         [1][]string{{"original"}},
+		"array pointer": &[1][]string{{"original"}},
+		"views":         map[string][]string{"short": values[:1], "long": values},
+		"named":         []any{memoryMetadataStrings(values), memoryMetadataOtherStrings(values)},
 	}
 	return event
 }
@@ -95,6 +97,9 @@ func TestInMemoryServiceCopiesData(t *testing.T) {
 		}},
 		{"array metadata", func(_ *genai.Content, metadata map[string]any) {
 			metadata["array"].([1][]string)[0][0] = "changed"
+		}},
+		{"array pointer metadata", func(_ *genai.Content, metadata map[string]any) {
+			metadata["array pointer"].(*[1][]string)[0][0] = "changed"
 		}},
 		{"slice views", func(_ *genai.Content, metadata map[string]any) {
 			metadata["views"].(map[string][]string)["long"][0] = "changed"
@@ -206,6 +211,108 @@ func TestInMemoryServiceCopiesDefinedPointerMetadata(t *testing.T) {
 			t.Error("copy changed the typed nil pointer")
 		}
 		*first = 9
+	}
+}
+
+func TestInMemoryServicePreservesOpaqueMetadata(t *testing.T) {
+	type record struct {
+		Name    string
+		Builder strings.Builder
+	}
+	for _, tt := range []struct {
+		name    string
+		value   any
+		builder func(any) *strings.Builder
+	}{
+		{
+			name: "builder pointer", value: new(strings.Builder),
+			builder: func(value any) *strings.Builder { return value.(*strings.Builder) },
+		},
+		{
+			name: "builder in struct", value: new(record),
+			builder: func(value any) *strings.Builder { return &value.(*record).Builder },
+		},
+		{
+			name: "builder in array", value: new([1]strings.Builder),
+			builder: func(value any) *strings.Builder { return &value.(*[1]strings.Builder)[0] },
+		},
+		{
+			name: "slice of builders", value: make([]strings.Builder, 1),
+			builder: func(value any) *strings.Builder { return &value.([]strings.Builder)[0] },
+		},
+		{
+			name: "slice of structs", value: make([]record, 1),
+			builder: func(value any) *strings.Builder { return &value.([]record)[0].Builder },
+		},
+		{
+			name: "slice of arrays", value: make([][1]strings.Builder, 1),
+			builder: func(value any) *strings.Builder { return &value.([][1]strings.Builder)[0][0] },
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			original := tt.builder(tt.value)
+			original.WriteString("seed")
+			event := memoryTextEvent("event", "Python")
+			event.CustomMetadata = map[string]any{
+				"value":  tt.value,
+				"nested": []any{map[string]any{"value": tt.value}},
+			}
+			svc := memory.InMemoryService()
+			if err := svc.AddSessionToMemory(t.Context(), makeSession(t, "app", "user", "session", []*session.Event{event})); err != nil {
+				t.Fatal("add session failed")
+			}
+			original.WriteString(" updated")
+			for range 2 {
+				found := searchCopyMemory(t, svc, "Python")
+				if len(found) != 1 {
+					t.Fatal("seed memory not found")
+				}
+				metadata := found[0].CustomMetadata
+				for _, value := range []any{metadata["value"], metadata["nested"].([]any)[0].(map[string]any)["value"]} {
+					got := tt.builder(value)
+					if got != original {
+						t.Fatal("opaque builder was copied")
+					}
+					got.WriteString("x")
+				}
+			}
+		})
+	}
+}
+
+func TestInMemoryServiceCopiesOpaqueMetadataContainers(t *testing.T) {
+	type record struct {
+		Builder *strings.Builder
+		Values  []string
+	}
+	source := &record{Builder: new(strings.Builder), Values: []string{"original"}}
+	source.Builder.WriteString("seed")
+	event := memoryTextEvent("event", "Python")
+	event.CustomMetadata = map[string]any{
+		"record":   source,
+		"builders": []*strings.Builder{source.Builder},
+	}
+	svc := memory.InMemoryService()
+	if err := svc.AddSessionToMemory(t.Context(), makeSession(t, "app", "user", "session", []*session.Event{event})); err != nil {
+		t.Fatal("add session failed")
+	}
+	source.Values[0] = "source changed"
+	for range 2 {
+		found := searchCopyMemory(t, svc, "Python")
+		if len(found) != 1 {
+			t.Fatal("seed memory not found")
+		}
+		metadata := found[0].CustomMetadata
+		got := metadata["record"].(*record)
+		builders := metadata["builders"].([]*strings.Builder)
+		if got.Builder != source.Builder || builders[0] != source.Builder {
+			t.Error("opaque pointers in copied containers changed")
+		}
+		if got.Values[0] != "original" {
+			t.Error("external mutation changed the copied container")
+		}
+		got.Values[0] = "result changed"
+		builders[0] = nil
 	}
 }
 

@@ -14,7 +14,10 @@
 
 package memory
 
-import "reflect"
+import (
+	"reflect"
+	"time"
+)
 
 type memoryCloneReference struct {
 	typeOf  reflect.Type
@@ -22,9 +25,7 @@ type memoryCloneReference struct {
 	length  int
 }
 
-// cloneMemoryData copies mutable data while preserving Go types and cycles.
-// Unexported struct fields, functions, channels, and unsafe pointers retain
-// their values.
+// cloneMemoryData follows the copy policy documented on InMemoryService.
 func cloneMemoryData[T any](src T) T {
 	var dst T
 	reflect.ValueOf(&dst).Elem().Set(cloneMemoryValue(reflect.ValueOf(&src).Elem(), make(map[memoryCloneReference]reflect.Value)))
@@ -49,6 +50,9 @@ func cloneMemoryValue(src reflect.Value, copies map[memoryCloneReference]reflect
 
 	switch src.Kind() {
 	case reflect.Pointer:
+		if memoryTypeIsOpaque(src.Type().Elem()) {
+			return src
+		}
 		dst := reflect.New(src.Type().Elem()).Convert(src.Type())
 		copies[reference] = dst
 		dst.Elem().Set(cloneMemoryValue(src.Elem(), copies))
@@ -57,9 +61,7 @@ func cloneMemoryValue(src reflect.Value, copies map[memoryCloneReference]reflect
 		if src.IsNil() {
 			return src
 		}
-		dst := reflect.New(src.Type()).Elem()
-		dst.Set(cloneMemoryValue(src.Elem(), copies))
-		return dst
+		return cloneMemoryValue(src.Elem(), copies)
 	case reflect.Map:
 		dst := reflect.MakeMapWithSize(src.Type(), src.Len())
 		copies[reference] = dst
@@ -68,6 +70,9 @@ func cloneMemoryValue(src reflect.Value, copies map[memoryCloneReference]reflect
 		}
 		return dst
 	case reflect.Slice:
+		if memoryTypeIsOpaque(src.Type().Elem()) {
+			return src
+		}
 		dst := reflect.MakeSlice(src.Type(), src.Len(), src.Len())
 		copies[reference] = dst
 		// Attachments can contain large byte slices.
@@ -87,7 +92,7 @@ func cloneMemoryValue(src reflect.Value, copies map[memoryCloneReference]reflect
 		return dst
 	case reflect.Struct:
 		dst := reflect.New(src.Type()).Elem()
-		// Preserve opaque value types such as time.Time.
+		// Preserve unexported fields in value types such as time.Time.
 		dst.Set(src)
 		for i := range src.NumField() {
 			if src.Type().Field(i).IsExported() {
@@ -98,4 +103,24 @@ func cloneMemoryValue(src reflect.Value, copies map[memoryCloneReference]reflect
 	default:
 		return src
 	}
+}
+
+func memoryTypeIsOpaque(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Array:
+		return memoryTypeIsOpaque(t.Elem())
+	case reflect.Struct:
+		if t == reflect.TypeFor[time.Time]() {
+			return false
+		}
+		// Private state may forbid copying, as in strings.Builder or sync.Mutex.
+		// Inspect inline fields; referenced objects are checked when cloned.
+		for i := range t.NumField() {
+			field := t.Field(i)
+			if !field.IsExported() || memoryTypeIsOpaque(field.Type) {
+				return true
+			}
+		}
+	}
+	return false
 }
