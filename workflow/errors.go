@@ -50,7 +50,7 @@ var (
 	ErrInputValidation = errors.New("workflow: input validation failed")
 	// ErrOutputAlreadyDelegated rejects a second WithUseAsOutput
 	// child in the same parent activation.
-	ErrOutputAlreadyDelegated = errors.New("workflow: parent already has a use_as_output child")
+	ErrOutputAlreadyDelegated = errors.New("workflow: parent already has a use_as_output delegate")
 )
 
 // NodeRunError wraps a sentinel with the failing child's identity.
