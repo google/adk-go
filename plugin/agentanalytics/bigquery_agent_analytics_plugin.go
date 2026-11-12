@@ -1231,6 +1231,10 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		// retryandreflect registered before this plugin recovered the failure
 		// before onToolError ran, so the TOOL_ERROR row is written here.
 		details, _ := result["error_details"].(string)
+		if details == "" {
+			details, _ = result["error_type"].(string)
+		}
+		details = cmp.Or(details, "tool call failed and was handled by the reflect and retry plugin")
 		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(details))
 		return nil, nil
 	}
