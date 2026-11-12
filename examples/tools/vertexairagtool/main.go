@@ -36,7 +36,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/cmd/launcher/full"
-	"google.golang.org/adk/v2/exp/vragtool"
+	"google.golang.org/adk/v2/exp/vertexairagtool"
 	"google.golang.org/adk/v2/model/gemini"
 	"google.golang.org/adk/v2/tool"
 )
@@ -65,7 +65,7 @@ func main() {
 		log.Fatalf("Failed to create model: %v", err)
 	}
 
-	ragTool, err := vragtool.New(vragtool.Config{
+	ragTool, err := vertexairagtool.New(vertexairagtool.Config{
 		Description: "Retrieves relevant passages from the documentation corpus.",
 		RAGResources: []*genai.VertexRAGStoreRAGResource{
 			{RAGCorpus: corpus},

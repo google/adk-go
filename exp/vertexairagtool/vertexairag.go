@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package vragtool provides a tool that grounds an agent's responses on a
+// Package vertexairagtool provides a tool that grounds an agent's responses on a
 // Vertex AI RAG (Retrieval-Augmented Generation) corpus.
 //
 // The tool is a model-side built-in: before each model call it adds a Vertex RAG
@@ -23,7 +23,7 @@
 //
 // EXPERIMENTAL: this package is not yet stable API. Anything here may change or
 // be removed in a later version without notice.
-package vragtool
+package vertexairagtool
 
 import (
 	"errors"
