@@ -30,6 +30,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -43,6 +44,64 @@ import (
 // databaseService is an database implementation of sessionService.Service.
 type databaseService struct {
 	db *gorm.DB
+	// appendOrderTiebreak makes Get order events that share a timestamp by
+	// append order instead of by event ID. Only [New] sets it.
+	appendOrderTiebreak bool
+
+	sessionLocksMu sync.Mutex
+	// sessionLocks holds the lock of every session an AppendEvent call holds
+	// or waits for. Guarded by sessionLocksMu; nil until the first append.
+	sessionLocks map[sessionLockKey]*sessionLock
+}
+
+// sessionLockKey identifies a session in databaseService.sessionLocks.
+type sessionLockKey struct {
+	appName, userID, sessionID string
+}
+
+// sessionLock serializes appends to one session. refs counts the calls that
+// hold or wait for gate, and is guarded by databaseService.sessionLocksMu.
+type sessionLock struct {
+	gate chan struct{}
+	refs int
+}
+
+// Config configures a database [session.Service] created with [New].
+//
+// The zero Config is not usable: New returns an error when Dialector is nil.
+type Config struct {
+	// Dialector specifies the database connection. It is required.
+	Dialector gorm.Dialector
+	// AppendOrderTiebreak configures the service to break timestamp ties
+	// by the order events were appended, rather than by event ID.
+	AppendOrderTiebreak bool
+	// GORMOptions configures the underlying GORM database.
+	GORMOptions []gorm.Option
+}
+
+// New creates a [session.Service] that stores sessions in the relational
+// database cfg.Dialector connects to (e.g., PostgreSQL, Spanner, SQLite),
+// opened with gorm.Open(cfg.Dialector, cfg.GORMOptions...).
+//
+// By default, the service orders events with equal timestamps ascending by
+// event ID, matching adk-python's DatabaseSessionService; this is also the
+// order of every service created with [NewSessionService] or
+// [NewSessionServiceFromDB]. When cfg.AppendOrderTiebreak is true, events
+// sharing a timestamp are returned in the order they were appended, matching
+// adk-python's SqliteSessionService.
+//
+// It returns an error if cfg.Dialector is nil or if [gorm.Open] fails. The
+// service does not create its tables. See [AutoMigrate].
+func New(cfg Config) (session.Service, error) {
+	// gorm.Open accepts a nil dialector without an error.
+	if cfg.Dialector == nil {
+		return nil, errors.New("dialector must not be nil")
+	}
+	db, err := gorm.Open(cfg.Dialector, cfg.GORMOptions...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating database session service: %w", err)
+	}
+	return &databaseService{db: db, appendOrderTiebreak: cfg.AppendOrderTiebreak}, nil
 }
 
 var _ session.UserStateReader = (*databaseService)(nil)
@@ -67,6 +126,9 @@ func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.S
 // an existing [*gorm.DB] connection. This is useful when the application
 // already manages a database connection and wants to share it across multiple
 // services.
+//
+// The service always orders events with equal timestamps ascending by event
+// ID; [New] is the only constructor that offers append order.
 //
 // It returns an error if db is nil. The service does not create its tables.
 // See [AutoMigrate].
@@ -236,9 +298,17 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 	// later prompt.
 	//
 	// The id is arbitrary as an ordering, but it is stable, and stable is what
-	// callers need. adk-python orders the same way, by timestamp then id, so
-	// this also removes a divergence rather than creating one.
-	eventQuery = eventQuery.Order("timestamp DESC, id DESC")
+	// callers need. adk-python's DatabaseSessionService orders the same way,
+	// by timestamp then id.
+	//
+	// With appendOrderTiebreak, ties go by seq, the append order, as
+	// adk-python's SqliteSessionService orders by rowid. Rows written before
+	// seq existed all hold 0, so among themselves they still go by id.
+	orderClause := "timestamp DESC, id DESC"
+	if s.appendOrderTiebreak {
+		orderClause = "timestamp DESC, seq DESC, id DESC"
+	}
+	eventQuery = eventQuery.Order(orderClause)
 
 	if req.NumRecentEvents > 0 {
 		eventQuery = eventQuery.Limit(req.NumRecentEvents)
@@ -431,51 +501,108 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	// Truncate timestamp to microsecond precision to match database precision and prevent rounding errors.
 	event.Timestamp = event.Timestamp.Truncate(time.Microsecond)
 
-	sess, ok := curSession.(*localSession)
-	if !ok {
-		return fmt.Errorf("unexpected session type %T", sess)
-	}
-	// Like adk-python, keep temporary state local even if persistence fails.
-	sess.mu.Lock()
-	if sess.appendGate == nil {
-		sess.appendGate = make(chan struct{}, 1)
-	}
-	appendGate := sess.appendGate
-	for key, value := range event.Actions.StateDelta {
-		if strings.HasPrefix(key, session.KeyPrefixTemp) {
-			sess.state[key] = value
-		}
-	}
-	sess.mu.Unlock()
+	// Neither the stored event nor the session's copy keeps temp: keys.
+	trimmedEvent := trimTempDeltaState(event)
 
-	select {
-	case appendGate <- struct{}{}:
-		defer func() { <-appendGate }()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
-	event = trimTempDeltaState(event)
-	// Publish persistent state, history and update time only after Commit succeeds.
-	if err := s.applyEvent(ctx, sess, event); err != nil {
+	unlock, err := s.lockSession(ctx, curSession.AppName(), curSession.UserID(), curSession.ID())
+	if err != nil {
 		return err
 	}
+	defer unlock()
+	if err := s.applyEvent(ctx, curSession, trimmedEvent); err != nil {
+		return err
+	}
+	// Only a committed event reaches curSession, so a rejected append leaves
+	// it as it was. adk-python applies temp: keys to the session before it
+	// checks the session exists or is current (database_session_service.py:908).
+	return commitToSession(curSession, trimmedEvent, event.Actions.StateDelta, event.Timestamp)
+}
 
-	return sess.appendEvent(event)
+// lockSession waits until no other AppendEvent call of s holds the session
+// (appName, userID, sessionID) or ctx ends, and returns the function that
+// releases it.
+//
+// The database locks the session row too, but SQLite ignores FOR UPDATE: two
+// connections that read the session and then both write fail with "database
+// is locked" instead of the later one seeing the earlier commit and returning
+// session.ErrStaleSession. adk-python serializes appends per session in the
+// same way (database_session_service.py:499-530).
+func (s *databaseService) lockSession(ctx context.Context, appName, userID, sessionID string) (func(), error) {
+	key := sessionLockKey{appName: appName, userID: userID, sessionID: sessionID}
+	s.sessionLocksMu.Lock()
+	if s.sessionLocks == nil {
+		s.sessionLocks = make(map[sessionLockKey]*sessionLock)
+	}
+	l := s.sessionLocks[key]
+	if l == nil {
+		l = &sessionLock{gate: make(chan struct{}, 1)}
+		s.sessionLocks[key] = l
+	}
+	l.refs++
+	s.sessionLocksMu.Unlock()
+
+	dropRef := func() {
+		s.sessionLocksMu.Lock()
+		defer s.sessionLocksMu.Unlock()
+		// Drop the entry with its last user, so the map holds only the
+		// sessions being appended to.
+		l.refs--
+		if l.refs == 0 {
+			delete(s.sessionLocks, key)
+		}
+	}
+
+	select {
+	case l.gate <- struct{}{}:
+		return func() {
+			<-l.gate
+			dropRef()
+		}, nil
+	case <-ctx.Done():
+		dropRef()
+		return nil, ctx.Err()
+	}
+}
+
+// commitToSession updates curSession with an event applyEvent committed:
+// rawStateDelta, temp: keys included, goes into its state, and trimmedEvent
+// and updatedAt into its events and update time. A Session the caller
+// implemented has no setters for its events or update time, so only its
+// state, when it has one, is updated.
+func commitToSession(curSession session.Session, trimmedEvent *session.Event, rawStateDelta map[string]any, updatedAt time.Time) error {
+	if ms, ok := curSession.(sessionutils.MutableSession); ok {
+		ms.CommitAppend(trimmedEvent, rawStateDelta, updatedAt)
+		return nil
+	}
+	st := curSession.State()
+	if st == nil {
+		return nil
+	}
+	for k, v := range rawStateDelta {
+		if err := st.Set(k, v); err != nil {
+			return fmt.Errorf("event %q is stored, but setting the session's state failed: %w", trimmedEvent.ID, err)
+		}
+	}
+	return nil
 }
 
 // applyEvent fetches the session, validates it, applies state changes from an
-// event, and saves the event atomically.
-func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, event *session.Event) error {
+// event, and saves the event atomically. It does not modify curSession.
+func (s *databaseService) applyEvent(ctx context.Context, curSession session.Session, event *session.Event) error {
 	// Wrap database operations in a single transaction.
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Fetch the session object from storage.
+		// Fetch and lock the session row, so that a concurrent append to the
+		// same session waits for this one and then sees its update time and
+		// sequence number. adk-python locks the row the same way
+		// (database_session_service.py:935-936). SQLite ignores the clause;
+		// lockSession serializes appends there.
 		var storageSess storageSession
-		err := tx.Where(&storageSession{AppName: sess.AppName(), UserID: sess.UserID(), ID: sess.ID()}).
+		err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).
+			Where(&storageSession{AppName: curSession.AppName(), UserID: curSession.UserID(), ID: curSession.ID()}).
 			First(&storageSess).Error
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return fmt.Errorf("%w: %q, cannot apply event: %w", session.ErrNotFound, sess.ID(), err)
+				return fmt.Errorf("%w: %q, cannot apply event: %w", session.ErrNotFound, curSession.ID(), err)
 			}
 			return fmt.Errorf("failed to get session: %w", err)
 		}
@@ -483,10 +610,11 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 		// Ensure the session object is not stale.
 		// We use UnixMicro() for microsecond-level precision, matching the Python code.
 		storageUpdateTime := storageSess.UpdateTime.UnixMicro()
-		sessionUpdateTime := sess.LastUpdateTime().UnixMicro()
+		sessionUpdateTime := curSession.LastUpdateTime().UnixMicro()
 		if storageUpdateTime > sessionUpdateTime {
 			return fmt.Errorf(
-				"stale session error: last update time from request (%s) is older than in database (%s)",
+				"%w: stale session error: last update time from request (%s) is older than in database (%s)",
+				session.ErrStaleSession,
 				time.UnixMicro(sessionUpdateTime).Format(time.RFC3339Nano),
 				time.UnixMicro(storageUpdateTime).Format(time.RFC3339Nano),
 			)
@@ -506,22 +634,22 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 		// could deadlock.
 		appTx := tx
 		if len(appDelta) > 0 {
-			if appTx, err = lockStateRow(tx, &storageAppState{AppName: sess.AppName(), State: map[string]any{}, UpdateTime: event.Timestamp}); err != nil {
+			if appTx, err = lockStateRow(tx, &storageAppState{AppName: curSession.AppName(), State: map[string]any{}, UpdateTime: event.Timestamp}); err != nil {
 				return fmt.Errorf("failed to lock app state: %w", err)
 			}
 		}
-		storageApp, err := fetchStorageAppState(appTx, sess.AppName())
+		storageApp, err := fetchStorageAppState(appTx, curSession.AppName())
 		if err != nil {
 			return err
 		}
 
 		userTx := tx
 		if len(userDelta) > 0 {
-			if userTx, err = lockStateRow(tx, &storageUserState{AppName: sess.AppName(), UserID: sess.UserID(), State: map[string]any{}, UpdateTime: event.Timestamp}); err != nil {
+			if userTx, err = lockStateRow(tx, &storageUserState{AppName: curSession.AppName(), UserID: curSession.UserID(), State: map[string]any{}, UpdateTime: event.Timestamp}); err != nil {
 				return fmt.Errorf("failed to lock user state: %w", err)
 			}
 		}
-		storageUser, err := fetchStorageUserState(userTx, sess.AppName(), sess.UserID())
+		storageUser, err := fetchStorageUserState(userTx, curSession.AppName(), curSession.UserID())
 		if err != nil {
 			return err
 		}
@@ -550,10 +678,21 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 		}
 
 		// Create the new event record in the database.
-		storageEv, err := createStorageEvent(sess, event)
+		storageEv, err := createStorageEvent(curSession, event)
 		if err != nil {
 			return fmt.Errorf("failed to map event to storage model: %w", err)
 		}
+		// Number the event after the session's last one. The session row lock
+		// (and lockSession on SQLite) keeps two appends from reading the same
+		// maximum. COALESCE covers a session with no events yet.
+		var maxSeq int64
+		if err := tx.Model(&storageEvent{}).
+			Where("app_name = ? AND user_id = ? AND session_id = ?", curSession.AppName(), curSession.UserID(), curSession.ID()).
+			Select("COALESCE(MAX(seq), 0)").
+			Scan(&maxSeq).Error; err != nil {
+			return fmt.Errorf("failed to query event sequence: %w", err)
+		}
+		storageEv.Seq = maxSeq + 1
 		if err := tx.Create(storageEv).Error; err != nil {
 			return fmt.Errorf("failed to save event: %w", err)
 		}

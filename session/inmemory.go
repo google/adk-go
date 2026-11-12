@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -254,33 +255,23 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		event.ID = platform.NewUUID(ctx)
 	}
 
-	sess, ok := curSession.(*session)
-	if !ok {
-		return fmt.Errorf("unexpected session type %T for session ID %s", curSession, curSession.ID())
-	}
+	// The session is found by its identity, whatever the concrete type of
+	// curSession: a copy made with CloneSession or a value the caller built
+	// names a stored session as well as the value Create returned.
+	key := id{appName: curSession.AppName(), userID: curSession.UserID(), sessionID: curSession.ID()}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	stored_session, ok := s.sessions.Get(sess.id.Encode())
+	stored_session, ok := s.sessions.Get(key.Encode())
 	if !ok {
-		return fmt.Errorf("%w: %q, cannot apply event", ErrNotFound, sess.id.sessionID)
+		return fmt.Errorf("%w: %q, cannot apply event", ErrNotFound, key.sessionID)
 	}
 
-	// Trim here, before sess.appendEvent publishes its own trimmed event into
-	// the live session's event list: the map cloned below is then one no other
-	// goroutine can reach.
-	trimmedDelta := maps.Clone(trimTempDeltaState(event).Actions.StateDelta)
-
-	// update the in-memory session
-	// Keep the session locked until AppendEvent finishes all reads of event.
-	// Otherwise, concurrent Session.Events readers can mutate its action maps
-	// during those reads, potentially causing a fatal concurrent map read write runtime throw.
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	if err := sess.appendEvent(event); err != nil {
-		return fmt.Errorf("fail to set state on appendEvent: %w", err)
-	}
+	trimmedEvent := trimTempDeltaState(event)
+	// The canonical record gets a map of its own: trimTempDeltaState returns
+	// the caller's map when it strips nothing.
+	trimmedDelta := maps.Clone(trimmedEvent.Actions.StateDelta)
 
 	// Only StateDelta comes from the trim above; every other field below is
 	// read off event. Compaction, ArtifactDelta, RequestedToolConfirmations,
@@ -318,6 +309,16 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		NodeInfo:           event.NodeInfo,
 	}
 
+	// An equal re-delivery of a stored event is ignored, so a caller that
+	// retries AppendEvent neither stores the event twice nor applies its
+	// state delta twice. Distinct events that share an ID are all kept, as in
+	// adk-python (in_memory_session_service.py, append_event).
+	if slices.ContainsFunc(stored_session.events, func(e *Event) bool {
+		return e.ID == eventCopy.ID && eventsEqual(e, eventCopy)
+	}) {
+		return nil
+	}
+
 	// update the in-memory session service
 	stored_session.events = append(stored_session.events, eventCopy)
 	stored_session.updatedAt = event.Timestamp
@@ -326,6 +327,36 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		s.updateAppState(appDelta, curSession.AppName())
 		s.updateUserState(userDelta, curSession.AppName(), curSession.UserID())
 		maps.Copy(stored_session.state, sessionDelta)
+	}
+
+	// curSession changes only now that the stored session has, and under
+	// s.mu, so concurrent appends through one value reach it in the order
+	// they reached storage.
+	if err := commitToHeldSession(curSession, trimmedEvent, event.Actions.StateDelta, event.Timestamp); err != nil {
+		return fmt.Errorf("event %q is stored in session %q, but the session value was not updated: %w", event.ID, key.sessionID, err)
+	}
+	return nil
+}
+
+// commitToHeldSession updates the session value a caller passed to
+// AppendEvent after the append has been stored. A value the service or
+// CloneSession made takes the trimmed event, the whole state delta with its
+// temp: keys, and the update time. A value the caller built can only take the
+// state delta, through its State, and the first error its State.Set returns is
+// returned.
+func commitToHeldSession(curSession Session, trimmedEvent *Event, stateDelta map[string]any, updatedAt time.Time) error {
+	if ms, ok := curSession.(sessionutils.MutableSession); ok {
+		ms.CommitAppend(trimmedEvent, stateDelta, updatedAt)
+		return nil
+	}
+	st := curSession.State()
+	if st == nil {
+		return nil
+	}
+	for k, v := range stateDelta {
+		if err := st.Set(k, v); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -421,20 +452,25 @@ func (s *session) LastUpdateTime() time.Time {
 	return s.updatedAt
 }
 
-// appendEvent requires the caller to hold s.mu for writing.
-func (s *session) appendEvent(event *Event) error {
-	if event.Partial {
-		return nil
-	}
+// CommitAppend implements [sessionutils.MutableSession]. trimmedEvent must be
+// a *Event, and it is appended as is: s holds the caller's event, or its copy
+// without temp: keys, as adk-python's session holds the event object the
+// runner yields, so a change the caller makes to that event later shows in s.
+// rawStateDelta is applied to s's state with its temp: keys, so that later
+// readers of s within the invocation see them; storage never holds them.
+func (s *session) CommitAppend(trimmedEvent any, rawStateDelta map[string]any, updatedAt time.Time) {
+	ev := trimmedEvent.(*Event)
 
-	if err := updateSessionState(s, event); err != nil {
-		return fmt.Errorf("error on appendEvent: %w", err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(rawStateDelta) > 0 {
+		if s.state == nil {
+			s.state = make(map[string]any)
+		}
+		maps.Copy(s.state, rawStateDelta)
 	}
-	processedEvent := trimTempDeltaState(event)
-
-	s.events = append(s.events, processedEvent)
-	s.updatedAt = event.Timestamp
-	return nil
+	s.events = append(s.events, ev)
+	s.updatedAt = updatedAt
 }
 
 type events []*Event
@@ -500,6 +536,49 @@ func (s *state) Set(key string, value any) error {
 	return nil
 }
 
+// eventsEqual reports whether a and b are the same event field by field, as
+// adk-python's model equality compares two events. Timestamps compare as
+// instants, whatever their location or monotonic reading. An empty map or
+// slice equals a nil one, because adk-python defaults those fields to empty
+// values where a Go struct literal leaves them nil.
+func eventsEqual(a, b *Event) bool {
+	if !a.Timestamp.Equal(b.Timestamp) {
+		return false
+	}
+	ac, bc := *a, *b
+	ac.Timestamp, bc.Timestamp = time.Time{}, time.Time{}
+	nilEmptyCollections(&ac)
+	nilEmptyCollections(&bc)
+	return reflect.DeepEqual(&ac, &bc)
+}
+
+// nilEmptyCollections sets every empty map or slice field of e that a default
+// can leave either nil or empty to nil. e must be a copy the caller owns.
+func nilEmptyCollections(e *Event) {
+	e.Actions.StateDelta = nilIfEmptyMap(e.Actions.StateDelta)
+	e.Actions.ArtifactDelta = nilIfEmptyMap(e.Actions.ArtifactDelta)
+	e.Actions.RequestedToolConfirmations = nilIfEmptyMap(e.Actions.RequestedToolConfirmations)
+	e.Actions.RequestedAuthConfigs = nilIfEmptyMap(e.Actions.RequestedAuthConfigs)
+	e.Actions.RenderUIWidgets = nilIfEmptySlice(e.Actions.RenderUIWidgets)
+	e.CustomMetadata = nilIfEmptyMap(e.CustomMetadata)
+	e.LongRunningToolIDs = nilIfEmptySlice(e.LongRunningToolIDs)
+	e.Routes = nilIfEmptySlice(e.Routes)
+}
+
+func nilIfEmptyMap[M ~map[K]V, K comparable, V any](m M) M {
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+func nilIfEmptySlice[S ~[]E, E any](s S) S {
+	if len(s) == 0 {
+		return nil
+	}
+	return s
+}
+
 // trimTempDeltaState removes temporary state delta keys from the event.
 func trimTempDeltaState(event *Event) *Event {
 	if len(event.Actions.StateDelta) == 0 {
@@ -526,21 +605,6 @@ func trimTempDeltaState(event *Event) *Event {
 	return &eventCopy
 }
 
-// updateSessionState updates the session state based on the event state delta.
-func updateSessionState(session *session, event *Event) error {
-	if event.Actions.StateDelta == nil {
-		return nil // Nothing to do
-	}
-
-	// ensure the session state map is initialized
-	if session.state == nil {
-		session.state = make(map[string]any)
-	}
-
-	maps.Copy(session.state, event.Actions.StateDelta)
-	return nil
-}
-
 func copySessionWithoutStateAndEvents(sess *session) *session {
 	return &session{
 		id: id{
@@ -553,6 +617,7 @@ func copySessionWithoutStateAndEvents(sess *session) *session {
 }
 
 var (
-	_ Service         = (*inMemoryService)(nil)
-	_ UserStateReader = (*inMemoryService)(nil)
+	_ Service                     = (*inMemoryService)(nil)
+	_ UserStateReader             = (*inMemoryService)(nil)
+	_ sessionutils.MutableSession = (*session)(nil)
 )
