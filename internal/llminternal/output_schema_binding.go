@@ -44,7 +44,10 @@ func WithBoundOutputSchema(ctx context.Context, agentName string, state *State, 
 
 // outputSchemaFor returns the output schema for the current agent's next
 // request: its declared OutputSchema, else a copy of the schema bound by
-// [WithBoundOutputSchema], else nil. state is the current agent's.
+// [WithBoundOutputSchema], else nil. state is the current agent's. It returns
+// nil for an agent that declares an OutputJsonSchema, whose own schema wins
+// over a bound one just as an OutputSchema does, so the request never carries
+// both.
 //
 // A bound schema is a placement's request, not the agent's own, so it gives way
 // whenever applying it would change a request that works without it:
@@ -66,6 +69,9 @@ func WithBoundOutputSchema(ctx context.Context, agentName string, state *State, 
 // The copy keeps a request callback that edits the schema from reaching the
 // node's other runs, including concurrent ones.
 func outputSchemaFor(ctx agent.InvocationContext, state *State) *genai.Schema {
+	if state.OutputJsonSchema != nil {
+		return nil
+	}
 	if state.OutputSchema != nil {
 		return state.OutputSchema
 	}

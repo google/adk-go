@@ -70,7 +70,7 @@ func ExampleNew() {
 	fmt.Println("result:", result)
 	fmt.Println("stored:", ctx.Actions().SetModelResponse)
 	// Output:
-	// parameters: {"properties":{"items":{"items":{"properties":{"name":{"type":"STRING"},"population":{"type":"INTEGER"}},"required":["name","population"],"title":"City","type":"OBJECT"},"type":"ARRAY"}},"required":["items"],"type":"OBJECT"}
+	// parameters: {"type":"object","properties":{"items":{"type":"array","items":{"$ref":"#/$defs/City"}}},"$defs":{"City":{"type":"object","properties":{"name":{"type":"string"},"population":{"type":"integer"}},"title":"City","required":["name","population"]}},"required":["items"]}
 	// Validation Error found:
 	// 1 validation error for list[City]
 	// 0.population

@@ -16,7 +16,6 @@ package llminternal
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"iter"
 
@@ -28,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/setmodelresponsetool"
 	"google.golang.org/adk/v2/tool/toolutils"
 )
@@ -53,20 +53,22 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 		if !needOutputSchemaProcessor(state) {
 			return
 		}
-		schema := outputSchemaFor(ctx, state)
-		if schema == nil {
+		var t tool.Tool
+		var err error
+		if state.OutputJsonSchema != nil {
+			t, err = setmodelresponsetool.NewFromJSONSchema(state.OutputJsonSchema)
+		} else if schema := outputSchemaFor(ctx, state); schema != nil {
+			t, err = setmodelresponsetool.New(schema)
+		} else {
 			return
 		}
-
-		// Add the set_model_response tool to handle structured output
-		t, err := setmodelresponsetool.New(schema)
 		if err != nil {
 			yield(nil, fmt.Errorf("build set_model_response tool: %w", err))
 			return
 		}
-		setResponseTool, ok := t.(toolutils.Tool)
-		if !ok {
-			yield(nil, errors.New("build set_model_response tool: the tool has no declaration"))
+		setResponseTool, err := declarationFor(ctx, state.Model, t)
+		if err != nil {
+			yield(nil, fmt.Errorf("build set_model_response tool: %w", err))
 			return
 		}
 		if err := toolutils.PackTool(req, setResponseTool); err != nil {

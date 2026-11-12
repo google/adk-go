@@ -123,17 +123,20 @@ func InputSchema(cur agent.Agent) *genai.Schema {
 	return nil
 }
 
-func getOutputSchema(cur agent.Agent) *genai.Schema {
+// hasOutputSchema reports whether cur, or for an agent that is not an LLM
+// agent its last sub-agent, has an OutputSchema or an OutputJsonSchema.
+func hasOutputSchema(cur agent.Agent) bool {
 	llmAgent, ok := cur.(llminternal.Agent)
 	if ok && llmAgent != nil {
-		return llminternal.Reveal(llmAgent).OutputSchema
+		state := llminternal.Reveal(llmAgent)
+		return state.OutputSchema != nil || state.OutputJsonSchema != nil
 	}
 
 	if len(cur.SubAgents()) > 0 {
-		return getOutputSchema(cur.SubAgents()[len(cur.SubAgents())-1])
+		return hasOutputSchema(cur.SubAgents()[len(cur.SubAgents())-1])
 	}
 
-	return nil
+	return false
 }
 
 // MakeFunctionDeclaration creates a function declaration for a given agent.

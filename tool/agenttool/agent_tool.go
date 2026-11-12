@@ -282,6 +282,9 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		if !ok {
 			return nil, fmt.Errorf("internal error: failed to convert to llm agent")
 		}
+		if llminternal.Reveal(internalLlmAgent).OutputJsonSchema != nil {
+			return t.parseJSONOutput(outputText)
+		}
 		if agentOutputSchema := llminternal.Reveal(internalLlmAgent).OutputSchema; agentOutputSchema != nil {
 			// Assuming schemautils.ValidateOutputSchema parses the JSON string outputText
 			// and validates it against the agentOutputSchema, returning a map[string]any.
@@ -294,6 +297,21 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	return map[string]any{"result": outputText}, nil
+}
+
+// parseJSONOutput parses the reply of a sub-agent that has an
+// OutputJsonSchema. Like adk-python's validate_schema for a schema that is not
+// a model, it strips a code fence and parses the JSON without validating it.
+// A JSON object is the result as it is; any other value is under "result".
+func (t *agentTool) parseJSONOutput(outputText string) (map[string]any, error) {
+	var v any
+	if err := json.Unmarshal([]byte(utils.StripJSONCodeFence(outputText)), &v); err != nil {
+		return nil, fmt.Errorf("output validation failed for sub-agent %s: %w", t.agent.Name(), err)
+	}
+	if m, ok := v.(map[string]any); ok {
+		return m, nil
+	}
+	return map[string]any{"result": v}, nil
 }
 
 // ProcessRequest adds the agent tool's function declaration to the LLM request.

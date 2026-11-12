@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -52,6 +53,18 @@ func NewFinishTaskTool(taskAgent agent.Agent) (tool.Tool, error) {
 
 	newTool := &FinishTaskTool{
 		taskAgentName: taskAgent.Name(),
+	}
+
+	newTool.description = "Signal that this agent has completed its delegated task. Call this when you have finished your delegated task."
+	if llmAgentState.OutputSchema != nil || llmAgentState.OutputJsonSchema != nil {
+		newTool.description += " Pass the required output data in the parameters."
+	}
+
+	if s := llmAgentState.OutputJsonSchema; s != nil {
+		if err := newTool.setJSONSchema(s); err != nil {
+			return nil, fmt.Errorf("NewFinishTaskTool: OutputJsonSchema of %q: %w", taskAgent.Name(), err)
+		}
+		return newTool, nil
 	}
 
 	if llmAgentState.OutputSchema != nil {
@@ -89,12 +102,25 @@ func NewFinishTaskTool(taskAgent agent.Agent) (tool.Tool, error) {
 		}
 	}
 
-	newTool.description = "Signal that this agent has completed its delegated task. Call this when you have finished your delegated task."
-	if llmAgentState.OutputSchema != nil {
-		newTool.description += " Pass the required output data in the parameters."
-	}
-
 	return newTool, nil
+}
+
+// setJSONSchema makes s, wrapped under defaultWrapperKey when its root is not
+// an object, the declared parameters and the schema the call is validated
+// against.
+func (t *FinishTaskTool) setJSONSchema(s *jsonschema.Schema) error {
+	params := s
+	if !strings.EqualFold(s.Type, "object") {
+		t.wrapperKey = defaultWrapperKey
+		params = utils.WrapJSONSchema(defaultWrapperKey, s)
+	}
+	resolved, err := params.Resolve(nil)
+	if err != nil {
+		return fmt.Errorf("resolve schema: %w", err)
+	}
+	t.jsonParams = params
+	t.resolvedJSONParams = resolved
+	return nil
 }
 
 type FinishTaskTool struct {
@@ -108,6 +134,11 @@ type FinishTaskTool struct {
 	// [result]}` and the model-provided value is unwrapped before validation.
 	wrappedSchema *genai.Schema
 	wrapperKey    string
+	// jsonParams is set instead of userSchema and wrappedSchema when the agent
+	// has an OutputJsonSchema: the schema itself, or its wrapper when the
+	// schema is not an object. resolvedJSONParams validates the call.
+	jsonParams         *jsonschema.Schema
+	resolvedJSONParams *jsonschema.Resolved
 }
 
 const defaultWrapperKey = "result"
@@ -136,6 +167,13 @@ func (t *FinishTaskTool) WrapperKey() string {
 }
 
 func (t *FinishTaskTool) Declaration() *genai.FunctionDeclaration {
+	if t.jsonParams != nil {
+		return &genai.FunctionDeclaration{
+			Name:                 t.Name(),
+			Description:          t.Description(),
+			ParametersJsonSchema: t.jsonParams,
+		}
+	}
 	return &genai.FunctionDeclaration{
 		Name:        t.Name(),
 		Description: t.Description(),
@@ -182,6 +220,17 @@ func (t *FinishTaskTool) Run(ctx agent.Context, args any) (map[string]any, error
 }
 
 func (t *FinishTaskTool) validateArgs(args map[string]any) error {
+	if t.resolvedJSONParams != nil {
+		if err := t.resolvedJSONParams.Validate(args); err != nil {
+			return err
+		}
+		// As in the genai branch, an unwrapped null would read as "the task
+		// did not finish", even when the schema allows null.
+		if t.wrapperKey != "" && args[t.wrapperKey] == nil {
+			return fmt.Errorf("%q must not be null", t.wrapperKey)
+		}
+		return nil
+	}
 	if t.wrapperKey == "" {
 		return utils.ValidateMapOnSchema(args, t.userSchema, false)
 	}
