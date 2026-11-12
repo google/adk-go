@@ -40,4 +40,6 @@
 // RewritingPlanner can write session state through its agent.Context, and the
 // flow records that change in an event of its own before the model response
 // event.
+//
+// EXPERIMENTAL: This package is experimental; its API and behavior may change or be removed in a later version.
 package planner

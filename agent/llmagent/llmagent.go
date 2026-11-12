@@ -373,6 +373,8 @@ type Config struct {
 	// only thought parts after rewriting ends the agent's step, as any final
 	// response does. Under any other planner, the agent calls the model again
 	// after a thought-only turn.
+	//
+	// EXPERIMENTAL: Config.Planner is experimental; its API and behavior may change or be removed in a later version.
 	Planner planner.Planner
 }
 
