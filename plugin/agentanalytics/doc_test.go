@@ -496,7 +496,7 @@ func TestDocParity_ADKNodeAttributesAndOmissions(t *testing.T) {
 
 	eventType := reflect.TypeFor[session.Event]()
 	actionsType := reflect.TypeFor[session.EventActions]()
-	for _, field := range []string{"RenderUIWidgets", "RewindBeforeInvocationID"} {
+	for _, field := range []string{"RenderUIWidgets"} {
 		if _, ok := eventType.FieldByName(field); ok {
 			t.Errorf("session.Event unexpectedly defines %s", field)
 		}

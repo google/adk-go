@@ -370,6 +370,14 @@ type EventActions struct {
 	// Only the set_model_response tool writes it.
 	SetModelResponse any `json:"setModelResponse,omitempty"`
 
+	// RewindBeforeInvocationID, when non-empty, marks the event as a session
+	// rewind written by runner.Runner.Rewind: the session's state and
+	// artifacts are restored to before the first event of the named
+	// invocation. Events stay in the session, but prompt assembly treats the
+	// rewind event and every event from the start of that invocation up to it
+	// as removed. Empty means the event is not a rewind.
+	RewindBeforeInvocationID string `json:"rewindBeforeInvocationId,omitempty"`
+
 	// Compaction, when non-nil, marks this event as a context-compaction
 	// summary standing in for a contiguous range of earlier events.
 	//

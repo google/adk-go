@@ -38,6 +38,7 @@ type EventActions struct {
 	RequestedAuthConfigs       authConfigs                                  `json:"requestedAuthConfigs,omitempty"`
 	Compaction                 *session.EventCompaction                     `json:"compaction,omitempty"`
 	SetModelResponse           any                                          `json:"setModelResponse,omitempty"`
+	RewindBeforeInvocationID   string                                       `json:"rewindBeforeInvocationId,omitempty"`
 }
 
 // Event represents a single event in a session.
@@ -141,6 +142,7 @@ func ToSessionEvent(event Event) (*session.Event, error) {
 			TransferToAgent:            event.Actions.TransferToAgent,
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
 			SetModelResponse:           event.Actions.SetModelResponse,
+			RewindBeforeInvocationID:   event.Actions.RewindBeforeInvocationID,
 			// Actions.Compaction is deliberately not mapped inbound. A
 			// compaction record tells prompt assembly to drop a span of history
 			// and substitute content in its place, so honoring one from a
@@ -197,6 +199,7 @@ func FromSessionEvent(event session.Event) Event {
 			RequestedAuthConfigs:       event.Actions.RequestedAuthConfigs,
 			Compaction:                 event.Actions.Compaction,
 			SetModelResponse:           event.Actions.SetModelResponse,
+			RewindBeforeInvocationID:   event.Actions.RewindBeforeInvocationID,
 		},
 	}
 }

@@ -283,6 +283,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			TransferToAgent:            event.Actions.TransferToAgent,
 			Escalate:                   event.Actions.Escalate,
 			SetModelResponse:           sessionutils.CloneValue(event.Actions.SetModelResponse),
+			RewindBeforeInvocationID:   event.Actions.RewindBeforeInvocationID,
 			SkipSummarization:          event.Actions.SkipSummarization,
 			Compaction:                 event.Actions.Compaction.clone(),
 		},
