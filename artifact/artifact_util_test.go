@@ -243,3 +243,53 @@ func TestValidateArtifactReferenceScope(t *testing.T) {
 		})
 	}
 }
+
+func TestIsRewindTombstone(t *testing.T) {
+	testCases := []struct {
+		name string
+		part *genai.Part
+		want bool
+	}{
+		{name: "marker with empty data", part: genai.NewPartFromBytes([]byte{}, "application/octet-stream"), want: true},
+		{name: "marker with nil data", part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/octet-stream"}}, want: true},
+		{name: "non-empty data", part: genai.NewPartFromBytes([]byte("a"), "application/octet-stream"), want: false},
+		{name: "other MIME type", part: genai.NewPartFromBytes([]byte{}, "application/pdf"), want: false},
+		{
+			name: "display name set",
+			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/octet-stream", Data: []byte{}, DisplayName: "empty.bin"}},
+			want: false,
+		},
+		{
+			name: "marker plus thought flag",
+			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/octet-stream"}, Thought: true},
+			want: false,
+		},
+		{name: "empty text", part: genai.NewPartFromText(""), want: false},
+		{name: "nil", part: nil, want: false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsRewindTombstone(tc.part); got != tc.want {
+				t.Errorf("IsRewindTombstone(%+v) = %v, want %v", tc.part, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewRewindTombstone(t *testing.T) {
+	first := NewRewindTombstone()
+	if !IsRewindTombstone(first) {
+		t.Fatalf("IsRewindTombstone(NewRewindTombstone()) = false, want true")
+	}
+	req := &SaveRequest{AppName: "app", UserID: "user", SessionID: "session", FileName: "file.txt", Part: first}
+	if err := req.Validate(); err != nil {
+		t.Errorf("SaveRequest.Validate() with NewRewindTombstone() = %v, want nil", err)
+	}
+
+	// A caller that changes the part it got must not change the next marker.
+	first.InlineData.MIMEType = "text/plain"
+	first.InlineData.Data = []byte("changed")
+	if second := NewRewindTombstone(); !IsRewindTombstone(second) {
+		t.Errorf("NewRewindTombstone() after changing an earlier result = %+v, want a marker", second.InlineData)
+	}
+}

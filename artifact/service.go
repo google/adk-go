@@ -22,6 +22,7 @@ package artifact
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -44,7 +45,9 @@ type Service interface {
 	// and deleting an artifact that does not exist is not an error. If req.Version
 	// is set and that version does not exist, implementations may return an error.
 	Delete(ctx context.Context, req *DeleteRequest) error
-	// List lists all the artifact filenames within a session.
+	// List lists the artifact filenames visible to a session: the session's own
+	// files and the user-scoped ("user:" prefixed) files of the user. When
+	// req.SessionID is empty, List returns only the user-scoped filenames.
 	List(ctx context.Context, req *ListRequest) (*ListResponse, error)
 	// Versions lists all versions of an artifact.
 	Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error)
@@ -122,8 +125,10 @@ func (req *SaveRequest) validate(allowRef bool) error {
 
 	// A reference part carries neither Part.Text nor Part.InlineData; only the
 	// in-memory service accepts one, so the content rule tolerates it there and
-	// stays strict for every other caller.
-	if req.Part.Text == "" && req.Part.InlineData == nil && !(allowRef && isArtifactRef(req.Part)) {
+	// stays strict for every other caller. A part whose every field is zero is
+	// empty text: genai.Part cannot tell Text "" from an unset Text, and
+	// adk-python accepts Part(text="").
+	if req.Part.Text == "" && req.Part.InlineData == nil && !(allowRef && isArtifactRef(req.Part)) && !reflect.ValueOf(*req.Part).IsZero() {
 		return fmt.Errorf("invalid save request: Part.InlineData or Part.Text has to be set")
 	}
 
@@ -220,18 +225,20 @@ func (req *DeleteRequest) Validate() error {
 	return nil
 }
 
-// ListRequest is the parameter for [Service.List].
+// ListRequest is the parameter for [Service.List]. AppName and UserID are
+// required. An empty SessionID asks for the user-scoped filenames only.
 type ListRequest struct {
 	AppName, UserID, SessionID string
 }
 
-// Validate checks if the struct is valid or if it is missing a field.
+// Validate checks if the struct is valid or if it is missing a field. An empty
+// SessionID is valid when AppName and UserID are set; when either of them is
+// missing too, the error lists SessionID among the missing fields.
 func (req *ListRequest) Validate() error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
 		{Name: "AppName", Value: req.AppName},
 		{Name: "UserID", Value: req.UserID},
-		{Name: "SessionID", Value: req.SessionID},
 	}
 
 	// Use the helper function for all required string fields
@@ -239,6 +246,9 @@ func (req *ListRequest) Validate() error {
 
 	// If the slice has any items, it means fields were missing.
 	if len(missingFields) > 0 {
+		if req.SessionID == "" {
+			missingFields = append(missingFields, "SessionID")
+		}
 		return fmt.Errorf("invalid list request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
 	return nil

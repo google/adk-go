@@ -16,6 +16,7 @@ package artifact
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,10 +28,9 @@ import (
 // another.
 const artifactURIScheme = "artifact://"
 
-// parsedArtifactURI is the result of parsing an artifact reference URI. It is
-// unexported: the artifact package is the only consumer today, and a v2 module
-// treats an exported name as a permanent commitment, so it can be exported later
-// if a caller outside the package appears.
+// parsedArtifactURI is the result of parseArtifactURI, the stricter parser that
+// saving and loading an artifact reference use. [ParseArtifactURI] is the
+// exported parser with adk-python's rules.
 type parsedArtifactURI struct {
 	AppName string
 	UserID  string
@@ -46,6 +46,7 @@ type parsedArtifactURI struct {
 // segments here match [^/]+ and are intentionally stricter than adk-python. An
 // app/user/session ID that itself contains "/" (accepted elsewhere, e.g. the
 // canonical-URI encoding) therefore cannot be named in a reference URI.
+// [ParseArtifactURI] implements the lookahead by hand and accepts such IDs.
 var (
 	sessionScopedArtifactURIRE = regexp.MustCompile(
 		`^artifact://apps/([^/]+)/users/([^/]+)/sessions/([^/]+)/artifacts/(.+)/versions/([1-9][0-9]*)$`,
@@ -112,10 +113,143 @@ func parseArtifactURI(uri string) (parsedArtifactURI, bool) {
 // a file name. A name containing a newline does not round-trip, because "."
 // does not match "\n", although validateFileName accepts such a name.
 func buildArtifactURI(appName, userID, sessionID, fileName string, version int64) string {
+	return BuildArtifactURI(appName, userID, sessionID, fileName, version)
+}
+
+// ParsedArtifactURI holds parsed URI components. The zero value has empty strings and Version: 0.
+type ParsedArtifactURI struct {
+	AppName, UserID, SessionID, FileName string
+	Version                              int64
+}
+
+// ParseArtifactURI parses an artifact URI, supporting slashes in app/user/session segments.
+// Version is treated as an opaque non-negative integer. On failure, returns the zero value
+// of ParsedArtifactURI and false. Safe for concurrent use. Returns ParsedArtifactURI{}, false
+// for any URI that contains "\n", in any segment.
+func ParseArtifactURI(uri string) (ParsedArtifactURI, bool) {
+	// adk-python's patterns use "." without re.DOTALL, so no part of a URI may
+	// hold a newline.
+	if strings.Contains(uri, "\n") {
+		return ParsedArtifactURI{}, false
+	}
+	rest, ok := strings.CutPrefix(uri, artifactURIScheme+"apps/")
+	if !ok {
+		return ParsedArtifactURI{}, false
+	}
+	appName, rest, next := cutSegment(rest)
+	if appName == "" || next != "users" {
+		return ParsedArtifactURI{}, false
+	}
+	userID, rest, next := cutSegment(rest)
+	if userID == "" {
+		return ParsedArtifactURI{}, false
+	}
+	var sessionID string
+	if next == "sessions" {
+		sessionID, rest, next = cutSegment(rest)
+		if sessionID == "" {
+			return ParsedArtifactURI{}, false
+		}
+	}
+	if next != "artifacts" {
+		return ParsedArtifactURI{}, false
+	}
+	// The file name may hold any reserved word, so it ends at the last
+	// "/versions/", the only one a digits-only version can follow.
+	i := strings.LastIndex(rest, "/versions/")
+	if i <= 0 {
+		return ParsedArtifactURI{}, false
+	}
+	fileName, digits := rest[:i], rest[i+len("/versions/"):]
+	version, ok := parseASCIIDigits(digits)
+	if !ok {
+		return ParsedArtifactURI{}, false
+	}
+	return ParsedArtifactURI{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: version}, true
+}
+
+// reservedURISegments are the words that delimit the segments of an artifact
+// URI. adk-python's _RESERVED_PATH_SEGMENTS.
+var reservedURISegments = []string{"apps", "users", "sessions", "artifacts", "versions"}
+
+// cutSegment splits s at the first "/{reserved}/" in it, returning the text
+// before it as the segment, the text after it as rest, and the reserved word
+// as next. When s holds no reserved delimiter, next is empty.
+//
+// This is adk-python's lazy segment pattern with its lookahead
+// (?!/(?:apps|artifacts|sessions|users|versions)/), which RE2 lacks: a segment
+// may hold "/" and may start with a reserved word ("apps/sub"), but may not
+// contain "/{reserved}/" anywhere, its closing "/" included ("sub/apps").
+func cutSegment(s string) (segment, rest, next string) {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '/' {
+			continue
+		}
+		for _, word := range reservedURISegments {
+			if after, ok := strings.CutPrefix(s[i+1:], word+"/"); ok {
+				return s[:i], after, word
+			}
+		}
+	}
+	return s, "", ""
+}
+
+// parseASCIIDigits parses s as a non-negative decimal int64 written in ASCII
+// digits only. strconv.ParseInt alone would accept a sign, and adk-python's
+// \d would accept non-ASCII digits.
+func parseASCIIDigits(s string) (int64, bool) {
+	if s == "" {
+		return 0, false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// BuildArtifactURI builds an artifact URI. If sessionID is empty, returns the user-scoped variant.
+// Treats version as an opaque integer string. Precondition: provided segments must round-trip
+// through path validation. Does NOT escape components. Returns built string. Safe for concurrent use.
+func BuildArtifactURI(appName, userID, sessionID, fileName string, version int64) string {
 	if sessionID == "" {
 		return fmt.Sprintf("artifact://apps/%s/users/%s/artifacts/%s/versions/%d", appName, userID, fileName, version)
 	}
 	return fmt.Sprintf("artifact://apps/%s/users/%s/sessions/%s/artifacts/%s/versions/%d", appName, userID, sessionID, fileName, version)
+}
+
+// IsRewindTombstone returns true exactly when part is non-nil, part.InlineData is non-nil with
+// MIMEType == "application/octet-stream", len(Data) == 0 (nil or empty slice), DisplayName == "",
+// and every other field of genai.Part and genai.Blob is zero.
+func IsRewindTombstone(part *genai.Part) bool {
+	if part == nil || part.InlineData == nil {
+		return false
+	}
+	blob := *part.InlineData
+	if blob.MIMEType != rewindTombstoneMIMEType || len(blob.Data) != 0 {
+		return false
+	}
+	// Data may be nil or empty: clonePart keeps an empty slice non-nil.
+	blob.MIMEType, blob.Data = "", nil
+	rest := *part
+	rest.InlineData = nil
+	return reflect.ValueOf(blob).IsZero() && reflect.ValueOf(rest).IsZero()
+}
+
+// rewindTombstoneMIMEType is the media type of the rewind marker, as
+// adk-python's _REWIND_TOMBSTONE.
+const rewindTombstoneMIMEType = "application/octet-stream"
+
+// NewRewindTombstone returns a new marker part that a session rewind saves to remove an artifact.
+// The part is safe for the caller to store or modify. It returns a fresh part on each call that
+// passes SaveRequest.Validate and that IsRewindTombstone accepts.
+func NewRewindTombstone() *genai.Part {
+	return &genai.Part{InlineData: &genai.Blob{MIMEType: rewindTombstoneMIMEType}}
 }
 
 // isArtifactRef reports whether part is an artifact reference, i.e. its
