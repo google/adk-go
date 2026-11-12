@@ -74,9 +74,10 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	// in adk-python (in_memory_session_service.py, _create_session_impl).
 	appDelta, userDelta, sessionState := sessionutils.ExtractStateDeltas(req.State)
 	val := &session{
-		id:        key,
-		state:     sessionState,
-		updatedAt: platform.Now(ctx),
+		id:         key,
+		state:      sessionState,
+		updatedAt:  platform.Now(ctx),
+		eventsByID: make(map[string][]*Event),
 	}
 
 	s.sessions.Set(encodedKey, val)
@@ -313,14 +314,16 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	// retries AppendEvent neither stores the event twice nor applies its
 	// state delta twice. Distinct events that share an ID are all kept, as in
 	// adk-python (in_memory_session_service.py, append_event).
-	if slices.ContainsFunc(stored_session.events, func(e *Event) bool {
-		return e.ID == eventCopy.ID && eventsEqual(e, eventCopy)
+	sameID := stored_session.eventsByID[eventCopy.ID]
+	if slices.ContainsFunc(sameID, func(e *Event) bool {
+		return eventsEqual(e, eventCopy)
 	}) {
 		return nil
 	}
 
 	// update the in-memory session service
 	stored_session.events = append(stored_session.events, eventCopy)
+	stored_session.eventsByID[eventCopy.ID] = append(sameID, eventCopy)
 	stored_session.updatedAt = event.Timestamp
 	if len(event.Actions.StateDelta) > 0 {
 		appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
@@ -418,6 +421,12 @@ type session struct {
 	events    []*Event
 	state     map[string]any
 	updatedAt time.Time
+
+	// eventsByID holds the same events as events, grouped by ID, so that
+	// AppendEvent finds an equal re-delivery without scanning the whole
+	// history. Only sessions stored by inMemoryService keep it, guarded by
+	// inMemoryService.mu like the rest of a stored session's events.
+	eventsByID map[string][]*Event
 }
 
 func (s *session) ID() string {
