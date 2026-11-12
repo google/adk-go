@@ -165,6 +165,9 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			var resumeOrder []string
 			confirmationIDByCallID := map[string]string{}
 			for _, functionCall := range calls {
+				if functionCall.Name != toolconfirmation.FunctionCallName {
+					continue
+				}
 				confirmation, ok := confirmationResponses[functionCall.ID]
 				if !ok {
 					continue
