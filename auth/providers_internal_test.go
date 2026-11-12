@@ -89,11 +89,9 @@ func TestLazyTokenSourceSingleFlight(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, n)
 	for i := range n {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, errs[i] = p.Credential(t.Context())
-		}()
+		})
 	}
 	close(release)
 	wg.Wait()

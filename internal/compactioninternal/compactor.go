@@ -515,8 +515,8 @@ func mayAlias(t reflect.Type) bool {
 	case reflect.Array:
 		return mayAlias(t.Elem())
 	case reflect.Struct:
-		for i := range t.NumField() {
-			if mayAlias(t.Field(i).Type) {
+		for field := range t.Fields() {
+			if mayAlias(field.Type) {
 				return true
 			}
 		}
@@ -563,8 +563,8 @@ func summarizerBackend(s compaction.Summarizer) genai.Backend {
 // latestInvocationID returns the invocation of the newest event in sess.
 func latestInvocationID(sess session.Session) string {
 	events := collect(sess)
-	for i := len(events) - 1; i >= 0; i-- {
-		if id := events[i].InvocationID; id != "" {
+	for _, event := range slices.Backward(events) {
+		if id := event.InvocationID; id != "" {
 			return id
 		}
 	}
