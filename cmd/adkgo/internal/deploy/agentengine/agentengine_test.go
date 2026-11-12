@@ -485,6 +485,29 @@ func TestComputeFlags_RejectsSecretWithAgentEngineID(t *testing.T) {
 	}
 }
 
+func TestComputeFlags_RejectsSecretNameClashingWithEnv(t *testing.T) {
+	tests := []struct {
+		name       string
+		defaultEnv bool
+		env        []string
+		secrets    []string
+	}{
+		{name: "default", defaultEnv: true, secrets: []string{"NUM_WORKERS=s:1"}},
+		{name: "env flag", env: []string{"FOO=bar"}, secrets: []string{"FOO=s:1"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetFlags(t, "cmd/app/main.go")
+			flags.agentEngine.defaultEnv = tc.defaultEnv
+			flags.agentEngine.env = tc.env
+			flags.agentEngine.secrets = tc.secrets
+			if err := flags.computeFlags(); err == nil {
+				t.Fatal("computeFlags() = nil, want an error for a --secret name that clashes with an environment variable")
+			}
+		})
+	}
+}
+
 func TestComputeFlags_AgentEngineIDWithoutSecret(t *testing.T) {
 	resetFlags(t, "cmd/app/main.go")
 	flags.agentEngine.agentEngineID = "123"
