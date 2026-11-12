@@ -111,10 +111,20 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			})
 			// A graph workflow below keeps recording its nodes under the
 			// workflow node this agent runs in, if any, so a request one of
-			// them makes interrupts that node.
-			if ac, ok := ctx.(agent.Context); ok && ac.Path() != "" {
-				path := ac.Path()
-				subCtx = agent.PromoteWithDelta(subCtx, &agent.CommonContextDelta{Path: &path})
+			// them makes interrupts that node. The answers that node was
+			// resumed with go along, for a branch that asks with
+			// workflow.ResumeOrRequestInput.
+			if ac, ok := ctx.(agent.Context); ok {
+				delta := &agent.CommonContextDelta{}
+				if path := ac.Path(); path != "" {
+					delta.Path = &path
+				}
+				if resumed := utils.ResumedInputs(ac); resumed != nil {
+					delta.ResumeInputs = &resumed
+				}
+				if delta.Path != nil || delta.ResumeInputs != nil {
+					subCtx = agent.PromoteWithDelta(subCtx, delta)
+				}
 			}
 
 			if err := runSubAgent(subCtx, subAgent, resultsChan, doneChan); err != nil {

@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	internalcontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -201,9 +202,18 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		exCtx := agent.NewContext(agentCtx)
 		// A graph workflow nested in a composite agent records its nodes
 		// under this node's path, so a request one of them makes interrupts
-		// this node, and the outer workflow resumes it with the answer.
-		if p := ctx.Path(); composite && p != "" {
-			exCtx = exCtx.WithDelta(&agent.CommonContextDelta{Path: &p})
+		// this node, and the outer workflow resumes it with the answer. A
+		// sub-agent that asks with ResumeOrRequestInput finds the answers this
+		// node was resumed with in the context.
+		if composite {
+			delta := &agent.CommonContextDelta{}
+			if p := ctx.Path(); p != "" {
+				delta.Path = &p
+			}
+			if resumed := utils.ResumedInputs(ctx); resumed != nil {
+				delta.ResumeInputs = &resumed
+			}
+			exCtx = exCtx.WithDelta(delta)
 		}
 
 		type NodeRunner interface {

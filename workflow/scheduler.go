@@ -161,6 +161,27 @@ func (nr *nodeRun) setRoutingEvent(ev *session.Event, nodeName string) {
 	nr.routingEvent = ev
 }
 
+// outstandingChildInterrupts returns the interrupts a composite agent node
+// raised on an earlier turn that are still unanswered after it was resumed.
+//
+// Resumed with only some answers, a composite agent runs just the children
+// those answers are for, as a parallel agent holding graph workflows does, so
+// the other children do not raise their requests again. Without this the node
+// would complete and its successors run while a child is still waiting.
+func (s *scheduler) outstandingChildInterrupts(name string, ns *NodeState) []string {
+	an, ok := s.nodesByName[name].(*AgentNode)
+	if !ok || !isComposite(an.agent) {
+		return nil
+	}
+	var outstanding []string
+	for _, id := range ns.Interrupts {
+		if _, answered := ns.ResumedInputs[id]; !answered {
+			outstanding = append(outstanding, id)
+		}
+	}
+	return outstanding
+}
+
 // trackInterrupts accumulates the node's long-running tool call IDs.
 //
 // It does NOT resolve an interrupt from a FunctionResponse seen in the
@@ -983,6 +1004,11 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) er
 		for id := range nr.interruptIDs {
 			ns.Interrupts = append(ns.Interrupts, id)
 		}
+		return nil
+	}
+	if outstanding := s.outstandingChildInterrupts(it.nodeName, ns); len(outstanding) > 0 {
+		ns.Status = NodeWaiting
+		ns.Interrupts = outstanding
 		return nil
 	}
 
