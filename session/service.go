@@ -42,6 +42,21 @@ import (
 // as fmt.Errorf("%w: …: %w", session.ErrNotFound, err).
 var ErrNotFound = errors.New("session not found")
 
+// ErrStaleSession reports that the session passed to [Service.AppendEvent] is
+// stale because a newer update has been committed to storage since the session
+// value was loaded or copied.
+//
+// Persistent [Service] implementations that enforce optimistic concurrency
+// (such as session/database) wrap ErrStaleSession from [Service.AppendEvent]
+// when the stored session's update time is newer than the caller's
+// [Session.LastUpdateTime]:
+//
+//	if errors.Is(err, session.ErrStaleSession) { … }
+//
+// When AppendEvent returns ErrStaleSession, neither storage nor the caller's
+// [Session] value is modified.
+var ErrStaleSession = errors.New("stale session")
+
 // Service is a session storage service.
 //
 // It provides a set of methods for managing sessions and events.
@@ -55,6 +70,19 @@ type Service interface {
 	List(context.Context, *ListRequest) (*ListResponse, error)
 	Delete(context.Context, *DeleteRequest) error
 	// AppendEvent is used to append an event to a session, and remove temporary state keys from the event.
+	//
+	// The session is identified by its AppName, UserID and ID, whatever the
+	// concrete type of the [Session] value: a value returned by Create or Get,
+	// a copy made with [CloneSession], or one the caller built. When storage
+	// holds no such session, AppendEvent returns an error wrapping
+	// [ErrNotFound]. A persistent implementation that detects a newer stored
+	// update than the value's [Session.LastUpdateTime] returns an error
+	// wrapping [ErrStaleSession]. On any error, neither storage nor the value
+	// is modified, with one exception: when the State of a value the caller
+	// built fails to Set a key, the event stays stored and AppendEvent returns
+	// that error wrapped. On success, the value's state receives the event's
+	// state delta and, for values returned by the service or by
+	// [CloneSession], its events and last update time include the event.
 	//
 	// Two further obligations, both checked by the shared conformance suite in
 	// session/sessiontestsuite, so an implementation that misses either goes

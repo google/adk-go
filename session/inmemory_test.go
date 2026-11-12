@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
 	"reflect"
 	"slices"
@@ -30,6 +31,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
@@ -1310,3 +1312,770 @@ func TestInMemoryService_GetUserState_ConcurrentReadAndAppend(t *testing.T) {
 		t.Errorf("GetUserState() after all appends mismatch (-want +got):\n%s", diff)
 	}
 }
+
+func TestCloneSession_NilReturnsNil(t *testing.T) {
+	if got := session.CloneSession(nil); got != nil {
+		t.Errorf("CloneSession(nil) = %#v, want nil", got)
+	}
+}
+
+func TestCloneSession_SharesNothingWithInMemorySession(t *testing.T) {
+	t0 := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	t1 := t0.Add(time.Second)
+	t2 := t0.Add(2 * time.Second)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return t0 })
+	svc := session.InMemoryService()
+	created, err := svc.Create(ctx, &session.CreateRequest{
+		AppName:   "app-clone",
+		UserID:    "u1",
+		SessionID: "s-clone",
+		State: map[string]any{
+			"k":      "v1",
+			"nested": map[string]any{"inner": "orig"},
+			"slice":  []any{"a"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	held := created.Session
+	e1 := &session.Event{
+		ID:           "e1",
+		InvocationID: "inv1",
+		Author:       "user",
+		Timestamp:    t1,
+		Actions: session.EventActions{
+			StateDelta:    map[string]any{"d": "orig"},
+			ArtifactDelta: map[string]int64{"f": 1},
+			Compaction: &session.EventCompaction{
+				StartTimestamp:   t0,
+				EndTimestamp:     t0,
+				CompactedContent: genai.NewContentFromText("summary", genai.RoleModel),
+			},
+		},
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleUser)},
+	}
+	if err := svc.AppendEvent(ctx, held, e1); err != nil {
+		t.Fatalf("AppendEvent(e1) error = %v", err)
+	}
+
+	cloned := session.CloneSession(held)
+
+	if err := held.State().Set("k", "v2"); err != nil {
+		t.Fatalf("held.State().Set() error = %v", err)
+	}
+	nested, err := held.State().Get("nested")
+	if err != nil {
+		t.Fatalf("held.State().Get(nested) error = %v", err)
+	}
+	nested.(map[string]any)["inner"] = "mutated"
+	slice, err := held.State().Get("slice")
+	if err != nil {
+		t.Fatalf("held.State().Get(slice) error = %v", err)
+	}
+	slice.([]any)[0] = "mutated"
+	heldEvent := held.Events().At(0)
+	heldEvent.Actions.StateDelta["d"] = "mutated"
+	heldEvent.Actions.ArtifactDelta["f"] = 99
+	heldEvent.Content.Parts[0].Text = "mutated"
+	heldEvent.Actions.Compaction.CompactedContent.Parts[0].Text = "mutated"
+	if err := svc.AppendEvent(ctx, held, &session.Event{
+		ID:           "e2",
+		InvocationID: "inv2",
+		Author:       "user",
+		Timestamp:    t2,
+		Actions:      session.EventActions{StateDelta: map[string]any{"k2": "v2"}},
+	}); err != nil {
+		t.Fatalf("AppendEvent(e2) error = %v", err)
+	}
+
+	if got, want := cloned.ID(), "s-clone"; got != want {
+		t.Errorf("cloned.ID() = %q, want %q", got, want)
+	}
+	if got, want := cloned.AppName(), "app-clone"; got != want {
+		t.Errorf("cloned.AppName() = %q, want %q", got, want)
+	}
+	if got, want := cloned.UserID(), "u1"; got != want {
+		t.Errorf("cloned.UserID() = %q, want %q", got, want)
+	}
+	wantState := map[string]any{
+		"k":      "v1",
+		"nested": map[string]any{"inner": "orig"},
+		"slice":  []any{"a"},
+		"d":      "orig",
+	}
+	if diff := cmp.Diff(wantState, maps.Collect(cloned.State().All())); diff != "" {
+		t.Errorf("cloned.State() mismatch (-want +got):\n%s", diff)
+	}
+	if got := cloned.LastUpdateTime(); !got.Equal(t1) {
+		t.Errorf("cloned.LastUpdateTime() = %v, want %v", got, t1)
+	}
+	if got := cloned.Events().Len(); got != 1 {
+		t.Fatalf("cloned.Events().Len() = %d, want 1", got)
+	}
+	ev := cloned.Events().At(0)
+	if got := ev.Actions.StateDelta["d"]; got != "orig" {
+		t.Errorf("cloned event StateDelta[d] = %v, want %q", got, "orig")
+	}
+	if got := ev.Actions.ArtifactDelta["f"]; got != 1 {
+		t.Errorf("cloned event ArtifactDelta[f] = %d, want 1", got)
+	}
+	if got := ev.Content.Parts[0].Text; got != "hello" {
+		t.Errorf("cloned event Content text = %q, want %q", got, "hello")
+	}
+	if got := ev.Actions.Compaction.CompactedContent.Parts[0].Text; got != "summary" {
+		t.Errorf("cloned event Compaction text = %q, want %q", got, "summary")
+	}
+}
+
+// Times shared by the AppendEvent tests below.
+var (
+	appendT0 = time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	appendT1 = appendT0.Add(time.Minute)
+	appendT2 = appendT0.Add(2 * time.Minute)
+	appendT3 = appendT0.Add(3 * time.Minute)
+)
+
+// createAt creates the session (app, "u1", sessionID) on svc with its creation
+// time, and so its LastUpdateTime, fixed at appendT0.
+func createAt(t *testing.T, svc session.Service, app, sessionID string) session.Session {
+	t.Helper()
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return appendT0 })
+	resp, err := svc.Create(ctx, &session.CreateRequest{AppName: app, UserID: "u1", SessionID: sessionID})
+	if err != nil {
+		t.Fatalf("Create(%q, %q) error = %v", app, sessionID, err)
+	}
+	return resp.Session
+}
+
+// getStored reads back from svc the session s names.
+func getStored(t *testing.T, svc session.Service, s session.Session) session.Session {
+	t.Helper()
+	resp, err := svc.Get(t.Context(), &session.GetRequest{AppName: s.AppName(), UserID: s.UserID(), SessionID: s.ID()})
+	if err != nil {
+		t.Fatalf("Get(%q) error = %v", s.ID(), err)
+	}
+	return resp.Session
+}
+
+// foreignSession is a session.Session the service did not create, as a caller
+// or an adapter can build one. Only its State can be written to.
+type foreignSession struct {
+	appName, userID, id string
+	updated             time.Time
+	state               foreignState
+}
+
+func (s *foreignSession) ID() string                { return s.id }
+func (s *foreignSession) AppName() string           { return s.appName }
+func (s *foreignSession) UserID() string            { return s.userID }
+func (s *foreignSession) State() session.State      { return s.state }
+func (s *foreignSession) Events() session.Events    { return foreignEvents{} }
+func (s *foreignSession) LastUpdateTime() time.Time { return s.updated }
+
+type foreignState map[string]any
+
+func (s foreignState) Get(key string) (any, error) {
+	v, ok := s[key]
+	if !ok {
+		return nil, session.ErrStateKeyNotExist
+	}
+	return v, nil
+}
+
+func (s foreignState) Set(key string, value any) error {
+	s[key] = value
+	return nil
+}
+
+func (s foreignState) All() iter.Seq2[string, any] { return maps.All(s) }
+
+type foreignEvents struct{}
+
+func (foreignEvents) All() iter.Seq[*session.Event] { return func(func(*session.Event) bool) {} }
+func (foreignEvents) Len() int                      { return 0 }
+func (foreignEvents) At(int) *session.Event         { return nil }
+
+func TestInMemoryService_AppendEvent_ThroughCloneUpdatesOnlyClone(t *testing.T) {
+	svc := session.InMemoryService()
+	s2 := createAt(t, svc, "app-clone-append", "s2")
+	c2 := session.CloneSession(s2)
+
+	err := svc.AppendEvent(t.Context(), c2, &session.Event{
+		ID:           "e3",
+		InvocationID: "inv3",
+		Author:       "user",
+		Timestamp:    appendT3,
+		Actions:      session.EventActions{StateDelta: map[string]any{"k3": "v3"}},
+	})
+	if err != nil {
+		t.Fatalf("AppendEvent(clone) error = %v", err)
+	}
+
+	if got := c2.Events().Len(); got != 1 {
+		t.Fatalf("clone Events().Len() = %d, want 1", got)
+	}
+	if got := c2.Events().At(0).ID; got != "e3" {
+		t.Errorf("clone Events().At(0).ID = %q, want %q", got, "e3")
+	}
+	if got := c2.LastUpdateTime(); !got.Equal(appendT3) {
+		t.Errorf("clone LastUpdateTime() = %v, want %v", got, appendT3)
+	}
+	if got, err := c2.State().Get("k3"); err != nil || got != "v3" {
+		t.Errorf(`clone State().Get("k3") = %v, %v, want "v3", nil`, got, err)
+	}
+	if got := s2.Events().Len(); got != 0 {
+		t.Errorf("original Events().Len() = %d, want 0", got)
+	}
+	if got := s2.LastUpdateTime(); !got.Equal(appendT0) {
+		t.Errorf("original LastUpdateTime() = %v, want %v", got, appendT0)
+	}
+	if _, err := s2.State().Get("k3"); !errors.Is(err, session.ErrStateKeyNotExist) {
+		t.Errorf(`original State().Get("k3") error = %v, want ErrStateKeyNotExist`, err)
+	}
+	if got := getStored(t, svc, s2).Events().Len(); got != 1 {
+		t.Errorf("stored Events().Len() = %d, want 1", got)
+	}
+}
+
+// A temp: key reaches the held session's state, so later steps of the same
+// invocation can read it, but not storage (base_session_service.py:175-178).
+func TestInMemoryService_AppendEvent_TempStateReachesOnlyHeldSession(t *testing.T) {
+	svc := session.InMemoryService()
+	held := createAt(t, svc, "app-temp", "s1")
+
+	err := svc.AppendEvent(t.Context(), held, &session.Event{
+		ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT1,
+		Actions: session.EventActions{StateDelta: map[string]any{"temp:t": "tv", "sk": "sv"}},
+	})
+	if err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	if got, err := held.State().Get("temp:t"); err != nil || got != "tv" {
+		t.Errorf("held State().Get(temp:t) = %v, %v; want tv", got, err)
+	}
+	if _, err := getStored(t, svc, held).State().Get("temp:t"); !errors.Is(err, session.ErrStateKeyNotExist) {
+		t.Errorf("stored State().Get(temp:t) error = %v, want ErrStateKeyNotExist", err)
+	}
+}
+
+// The held session holds the event the caller passed, as adk-python's
+// session holds the event object it is given (base_session_service.py:185).
+func TestInMemoryService_AppendEvent_HeldSessionHoldsCallerEvent(t *testing.T) {
+	svc := session.InMemoryService()
+	held := createAt(t, svc, "app-held-event", "s1")
+	ev := &session.Event{
+		ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT1,
+		Actions: session.EventActions{StateDelta: map[string]any{"k": "v"}},
+	}
+
+	if err := svc.AppendEvent(t.Context(), held, ev); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	if got := held.Events().At(0); got != ev {
+		t.Errorf("held.Events().At(0) = %p, want the appended event %p", got, ev)
+	}
+}
+
+// A nil session or a nil event is an error, not a panic, and stores nothing.
+func TestInMemoryService_AppendEvent_NilArgumentIsError(t *testing.T) {
+	svc := session.InMemoryService()
+	held := createAt(t, svc, "app-nil-arg", "s1")
+	ev := &session.Event{ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT1}
+	tests := []struct {
+		name    string
+		session session.Session
+		event   *session.Event
+	}{
+		{name: "nil session", session: nil, event: ev},
+		{name: "nil event", session: held, event: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := svc.AppendEvent(t.Context(), tc.session, tc.event); err == nil {
+				t.Error("AppendEvent() error = nil, want an error")
+			}
+			if got := getStored(t, svc, held).Events().Len(); got != 0 {
+				t.Errorf("stored Events().Len() = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestInMemoryService_AppendEvent_AbsentForeignSessionIsNotFound(t *testing.T) {
+	svc := session.InMemoryService()
+	foreign := &foreignSession{appName: "app-foreign", userID: "u1", id: "s1", state: foreignState{}}
+
+	err := svc.AppendEvent(t.Context(), foreign, &session.Event{
+		ID:           "e1",
+		InvocationID: "inv1",
+		Author:       "user",
+		Timestamp:    appendT1,
+		Actions:      session.EventActions{StateDelta: map[string]any{"k": "v"}},
+	})
+
+	if !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("AppendEvent(absent foreign session) error = %v, want ErrNotFound", err)
+	}
+	if _, err := foreign.State().Get("k"); !errors.Is(err, session.ErrStateKeyNotExist) {
+		t.Errorf(`foreign State().Get("k") error = %v, want ErrStateKeyNotExist`, err)
+	}
+}
+
+func TestInMemoryService_AppendEvent_ExistingForeignSessionStoresEventAndSetsState(t *testing.T) {
+	svc := session.InMemoryService()
+	createAt(t, svc, "app-foreign", "s1")
+	foreign := &foreignSession{appName: "app-foreign", userID: "u1", id: "s1", updated: appendT0, state: foreignState{}}
+
+	err := svc.AppendEvent(t.Context(), foreign, &session.Event{
+		ID:           "e1",
+		InvocationID: "inv1",
+		Author:       "user",
+		Timestamp:    appendT1,
+		Actions:      session.EventActions{StateDelta: map[string]any{"k": "v"}},
+	})
+	if err != nil {
+		t.Fatalf("AppendEvent(foreign session) error = %v", err)
+	}
+
+	stored := getStored(t, svc, foreign)
+	if got := stored.Events().Len(); got != 1 {
+		t.Fatalf("stored Events().Len() = %d, want 1", got)
+	}
+	if got := stored.Events().At(0).ID; got != "e1" {
+		t.Errorf("stored Events().At(0).ID = %q, want %q", got, "e1")
+	}
+	if got, err := stored.State().Get("k"); err != nil || got != "v" {
+		t.Errorf(`stored State().Get("k") = %v, %v, want "v", nil`, got, err)
+	}
+	if got, err := foreign.State().Get("k"); err != nil || got != "v" {
+		t.Errorf(`foreign State().Get("k") = %v, %v, want "v", nil`, got, err)
+	}
+}
+
+func TestInMemoryService_AppendEvent_UnknownSessionDoesNotMutateHeldSession(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	held := createAt(t, svc, "app-rejected", "s1")
+	if err := svc.AppendEvent(ctx, held, &session.Event{
+		ID:           "e1",
+		InvocationID: "inv1",
+		Author:       "user",
+		Timestamp:    appendT1,
+		Actions:      session.EventActions{StateDelta: map[string]any{"sk1": "v1"}},
+	}); err != nil {
+		t.Fatalf("AppendEvent(e1) error = %v", err)
+	}
+	if err := svc.Delete(ctx, &session.DeleteRequest{AppName: "app-rejected", UserID: "u1", SessionID: "s1"}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+
+	err := svc.AppendEvent(ctx, held, &session.Event{
+		ID:           "e_del",
+		InvocationID: "inv2",
+		Author:       "user",
+		Timestamp:    appendT2,
+		Actions:      session.EventActions{StateDelta: map[string]any{"temp:leak": "bad", "sk3": "bad"}},
+	})
+
+	if !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("AppendEvent(deleted session) error = %v, want ErrNotFound", err)
+	}
+	if got := held.Events().Len(); got != 1 {
+		t.Errorf("held Events().Len() = %d, want 1", got)
+	}
+	if got := held.LastUpdateTime(); !got.Equal(appendT1) {
+		t.Errorf("held LastUpdateTime() = %v, want %v", got, appendT1)
+	}
+	if got := presentKeys(held, "temp:leak", "sk3"); got != nil {
+		t.Errorf("held state holds %q, want none of the rejected event's keys", got)
+	}
+}
+
+func TestInMemoryService_AppendEvent_IgnoresEqualRedelivery(t *testing.T) {
+	newBase := func() *session.Event {
+		return &session.Event{
+			ID:           "dup-1",
+			InvocationID: "inv1",
+			Author:       "user",
+			Timestamp:    appendT1,
+			Actions:      session.EventActions{StateDelta: map[string]any{"k": "v1"}},
+		}
+	}
+	base := newBase()
+	otherLocation := newBase()
+	otherLocation.Timestamp = appendT1.In(time.FixedZone("UTC+2", 2*60*60))
+	for _, tc := range []struct {
+		name          string
+		first, second *session.Event
+	}{
+		{name: "same_pointer", first: base, second: base},
+		{name: "same_instant_other_location", first: newBase(), second: otherLocation},
+		{
+			name:  "nil_and_empty_maps_after_temp_trim",
+			first: &session.Event{ID: "dup-1", InvocationID: "inv1", Author: "user", Timestamp: appendT1},
+			second: &session.Event{
+				ID:           "dup-1",
+				InvocationID: "inv1",
+				Author:       "user",
+				Timestamp:    appendT1,
+				Actions: session.EventActions{
+					StateDelta:    map[string]any{"temp:scratch": "x"},
+					ArtifactDelta: map[string]int64{},
+				},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			svc := session.InMemoryService()
+			held := createAt(t, svc, "app-redeliver", tc.name)
+			if err := svc.AppendEvent(ctx, held, tc.first); err != nil {
+				t.Fatalf("AppendEvent(first) error = %v", err)
+			}
+
+			if err := svc.AppendEvent(ctx, held, tc.second); err != nil {
+				t.Fatalf("AppendEvent(re-delivery) error = %v", err)
+			}
+
+			if got := held.Events().Len(); got != 1 {
+				t.Errorf("held Events().Len() = %d, want 1", got)
+			}
+			if got := getStored(t, svc, held).Events().Len(); got != 1 {
+				t.Errorf("stored Events().Len() = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestInMemoryService_AppendEvent_StoresSameIDEventThatDiffers(t *testing.T) {
+	newBase := func() *session.Event {
+		return &session.Event{
+			ID:           "dup-1",
+			InvocationID: "inv1",
+			Author:       "user",
+			Timestamp:    appendT1,
+			Actions:      session.EventActions{StateDelta: map[string]any{"k": "v1"}},
+			LLMResponse:  model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleUser)},
+		}
+	}
+	for _, tc := range []struct {
+		name                  string
+		change                func(*session.Event)
+		field                 func(*session.Event) any
+		wantBase, wantChanged any
+	}{
+		{
+			name:        "timestamp_500ns",
+			change:      func(e *session.Event) { e.Timestamp = appendT1.Add(500 * time.Nanosecond) },
+			field:       func(e *session.Event) any { return e.Timestamp },
+			wantBase:    time.Date(2026, time.January, 1, 12, 1, 0, 0, time.UTC),
+			wantChanged: time.Date(2026, time.January, 1, 12, 1, 0, 500, time.UTC),
+		},
+		{
+			name:        "author",
+			change:      func(e *session.Event) { e.Author = "agent" },
+			field:       func(e *session.Event) any { return e.Author },
+			wantBase:    "user",
+			wantChanged: "agent",
+		},
+		{
+			name:        "invocation_id",
+			change:      func(e *session.Event) { e.InvocationID = "inv2" },
+			field:       func(e *session.Event) any { return e.InvocationID },
+			wantBase:    "inv1",
+			wantChanged: "inv2",
+		},
+		{
+			name:        "content",
+			change:      func(e *session.Event) { e.Content = genai.NewContentFromText("world", genai.RoleUser) },
+			field:       func(e *session.Event) any { return e.Content.Parts[0].Text },
+			wantBase:    "hello",
+			wantChanged: "world",
+		},
+		{
+			name:        "partial_set",
+			change:      func(e *session.Event) { e.PartialSet = true },
+			field:       func(e *session.Event) any { return e.PartialSet },
+			wantBase:    false,
+			wantChanged: true,
+		},
+		{
+			name:        "actions",
+			change:      func(e *session.Event) { e.Actions.StateDelta = map[string]any{"k": "v2"} },
+			field:       func(e *session.Event) any { return e.Actions.StateDelta["k"] },
+			wantBase:    "v1",
+			wantChanged: "v2",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			svc := session.InMemoryService()
+			held := createAt(t, svc, "app-same-id", tc.name)
+			if err := svc.AppendEvent(ctx, held, newBase()); err != nil {
+				t.Fatalf("AppendEvent(base) error = %v", err)
+			}
+			changed := newBase()
+			tc.change(changed)
+
+			if err := svc.AppendEvent(ctx, held, changed); err != nil {
+				t.Fatalf("AppendEvent(changed) error = %v", err)
+			}
+
+			if got := held.Events().Len(); got != 2 {
+				t.Errorf("held Events().Len() = %d, want 2", got)
+			}
+			stored := getStored(t, svc, held)
+			if got := stored.Events().Len(); got != 2 {
+				t.Fatalf("stored Events().Len() = %d, want 2", got)
+			}
+			if diff := cmp.Diff(tc.wantBase, tc.field(stored.Events().At(0))); diff != "" {
+				t.Errorf("stored event 0 field mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantChanged, tc.field(stored.Events().At(1))); diff != "" {
+				t.Errorf("stored event 1 field mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestInMemoryService_AppendEvent_IdempotentWithTempStateDelta(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	held := createAt(t, svc, "app-retry-temp", "s1")
+	newRetry := func() *session.Event {
+		return &session.Event{
+			ID:           "retry-temp",
+			InvocationID: "inv1",
+			Author:       "agent",
+			Timestamp:    appendT1,
+			Actions:      session.EventActions{StateDelta: map[string]any{"temp:scratch": "v1", "persisted": 1}},
+		}
+	}
+	if err := svc.AppendEvent(ctx, held, newRetry()); err != nil {
+		t.Fatalf("AppendEvent(first) error = %v", err)
+	}
+
+	if err := svc.AppendEvent(ctx, held, newRetry()); err != nil {
+		t.Fatalf("AppendEvent(retry) error = %v", err)
+	}
+
+	if got := held.Events().Len(); got != 1 {
+		t.Errorf("held Events().Len() = %d, want 1", got)
+	}
+	stored := getStored(t, svc, held)
+	if got := stored.Events().Len(); got != 1 {
+		t.Fatalf("stored Events().Len() = %d, want 1", got)
+	}
+	if diff := cmp.Diff(map[string]any{"persisted": 1}, stored.Events().At(0).Actions.StateDelta); diff != "" {
+		t.Errorf("stored StateDelta mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// completeEvent returns the event of the conformance test
+// u1799_append_event_complete_sessionservicetype_database, with Partial set
+// to false explicitly.
+func completeEvent() *session.Event {
+	return &session.Event{
+		ID:           "complete-1",
+		InvocationID: "invocation",
+		Author:       "user",
+		Timestamp:    time.Unix(1700000000, 123000000).UTC(),
+		Actions: session.EventActions{
+			ArtifactDelta:   map[string]int64{"file": 0},
+			TransferToAgent: "agent",
+			Escalate:        true,
+		},
+		LongRunningToolIDs: []string{"tool1"},
+		LLMResponse: model.LLMResponse{
+			Content:           genai.NewContentFromText("test_text", genai.RoleUser),
+			GroundingMetadata: &genai.GroundingMetadata{WebSearchQueries: []string{"query1"}},
+			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+				PromptTokenCount:     1,
+				CandidatesTokenCount: 1,
+				TotalTokenCount:      2,
+			},
+			CitationMetadata:    &genai.CitationMetadata{},
+			CustomMetadata:      map[string]any{"custom_key": "custom_value"},
+			InputTranscription:  &genai.Transcription{Text: "input transcription", Finished: true},
+			OutputTranscription: &genai.Transcription{Text: "output transcription", Finished: true},
+			Partial:             false,
+			PartialSet:          true,
+			TurnComplete:        true,
+			Interrupted:         true,
+			ErrorCode:           "error_code",
+			ErrorMessage:        "error_message",
+		},
+	}
+}
+
+func TestInMemoryService_AppendEvent_RoundTripsCompleteEvent(t *testing.T) {
+	svc := session.InMemoryService()
+	held := createAt(t, svc, "app-complete", "s1")
+
+	if err := svc.AppendEvent(t.Context(), held, completeEvent()); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	if diff := cmp.Diff(completeEvent(), held.Events().At(0)); diff != "" {
+		t.Errorf("held event mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(completeEvent(), getStored(t, svc, held).Events().At(0)); diff != "" {
+		t.Errorf("stored event mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestInMemoryService_AppendEvent_KeepsPartialSet(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	held := createAt(t, svc, "app-partialset", "s1")
+	if err := svc.AppendEvent(ctx, held, &session.Event{
+		ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT1,
+		LLMResponse: model.LLMResponse{Partial: false, PartialSet: true},
+	}); err != nil {
+		t.Fatalf("AppendEvent(e1) error = %v", err)
+	}
+	if err := svc.AppendEvent(ctx, held, &session.Event{
+		ID: "e2", InvocationID: "inv1", Author: "user", Timestamp: appendT2,
+		LLMResponse: model.LLMResponse{Partial: false, PartialSet: false},
+	}); err != nil {
+		t.Fatalf("AppendEvent(e2) error = %v", err)
+	}
+
+	want := []partialFlags{{Partial: false, PartialSet: true}, {Partial: false, PartialSet: false}}
+	if diff := cmp.Diff(want, eventPartialFlags(held)); diff != "" {
+		t.Errorf("held events (Partial, PartialSet) mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(want, eventPartialFlags(getStored(t, svc, held))); diff != "" {
+		t.Errorf("stored events (Partial, PartialSet) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type partialFlags struct{ Partial, PartialSet bool }
+
+// eventPartialFlags returns the Partial and PartialSet fields of s's events,
+// in order.
+func eventPartialFlags(s session.Session) []partialFlags {
+	var flags []partialFlags
+	for ev := range s.Events().All() {
+		flags = append(flags, partialFlags{ev.Partial, ev.PartialSet})
+	}
+	return flags
+}
+
+// presentKeys returns the keys among keys that s's state holds, in the order
+// given.
+func presentKeys(s session.Session, keys ...string) []string {
+	var present []string
+	for _, key := range keys {
+		if _, err := s.State().Get(key); err == nil {
+			present = append(present, key)
+		}
+	}
+	return present
+}
+
+func TestInMemoryService_AppendEvent_PartialEventLeavesStateAndUpdateTime(t *testing.T) {
+	svc := session.InMemoryService()
+	held := createAt(t, svc, "app-partial-state", "s1")
+
+	err := svc.AppendEvent(t.Context(), held, &session.Event{
+		ID:           "p1",
+		InvocationID: "inv1",
+		Author:       "agent",
+		Timestamp:    appendT0.Add(10 * time.Minute),
+		LLMResponse:  model.LLMResponse{Partial: true},
+		Actions: session.EventActions{StateDelta: map[string]any{
+			"temp:t": "tv", "app:a": "av", "user:u": "uv", "sk": "sv",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("AppendEvent(partial) error = %v", err)
+	}
+
+	stored := getStored(t, svc, held)
+	if got := held.Events().Len(); got != 0 {
+		t.Errorf("held Events().Len() = %d, want 0", got)
+	}
+	if got := stored.Events().Len(); got != 0 {
+		t.Errorf("stored Events().Len() = %d, want 0", got)
+	}
+	if got := held.LastUpdateTime(); !got.Equal(appendT0) {
+		t.Errorf("held LastUpdateTime() = %v, want %v", got, appendT0)
+	}
+	if got := stored.LastUpdateTime(); !got.Equal(appendT0) {
+		t.Errorf("stored LastUpdateTime() = %v, want %v", got, appendT0)
+	}
+	if got := presentKeys(held, "temp:t", "app:a", "user:u", "sk"); got != nil {
+		t.Errorf("held state holds %q, want none of the partial event's keys", got)
+	}
+	if got := presentKeys(stored, "temp:t", "app:a", "user:u", "sk"); got != nil {
+		t.Errorf("stored state holds %q, want none of the partial event's keys", got)
+	}
+}
+
+func TestInMemoryService_AppendEvent_OlderEventMovesLastUpdateTimeBack(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	held := createAt(t, svc, "app-backdated", "s1")
+	if err := svc.AppendEvent(ctx, held, &session.Event{
+		ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT0.Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("AppendEvent(e1) error = %v", err)
+	}
+
+	if err := svc.AppendEvent(ctx, held, &session.Event{
+		ID: "e2", InvocationID: "inv1", Author: "user", Timestamp: appendT0.Add(2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("AppendEvent(e2) error = %v", err)
+	}
+
+	want := time.Date(2026, time.January, 1, 12, 2, 0, 0, time.UTC)
+	if got := held.LastUpdateTime(); !got.Equal(want) {
+		t.Errorf("held LastUpdateTime() = %v, want %v", got, want)
+	}
+	if got := getStored(t, svc, held).LastUpdateTime(); !got.Equal(want) {
+		t.Errorf("stored LastUpdateTime() = %v, want %v", got, want)
+	}
+}
+
+// failingState is a session.State whose Set always fails.
+type failingState struct{ foreignState }
+
+var errSetFailed = errors.New("set failed")
+
+func (failingState) Set(string, any) error { return errSetFailed }
+
+func TestInMemoryService_AppendEvent_ForeignStateSetErrorIsReturned(t *testing.T) {
+	svc := session.InMemoryService()
+	createAt(t, svc, "app-foreign-set", "s1")
+	foreign := &foreignSessionWithState{
+		foreignSession: foreignSession{appName: "app-foreign-set", userID: "u1", id: "s1", updated: appendT0},
+		state:          failingState{foreignState{}},
+	}
+
+	err := svc.AppendEvent(t.Context(), foreign, &session.Event{
+		ID:           "e1",
+		InvocationID: "inv1",
+		Author:       "user",
+		Timestamp:    appendT1,
+		Actions:      session.EventActions{StateDelta: map[string]any{"k": "v"}},
+	})
+
+	if !errors.Is(err, errSetFailed) {
+		t.Errorf("AppendEvent() error = %v, want it to wrap %v", err, errSetFailed)
+	}
+	if got := getStored(t, svc, foreign).Events().Len(); got != 1 {
+		t.Errorf("stored Events().Len() = %d, want 1: the event is stored before the value is updated", got)
+	}
+}
+
+// foreignSessionWithState is a foreignSession whose State is any session.State.
+type foreignSessionWithState struct {
+	foreignSession
+	state session.State
+}
+
+func (s *foreignSessionWithState) State() session.State { return s.state }

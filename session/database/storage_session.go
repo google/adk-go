@@ -100,11 +100,17 @@ type storageEvent struct {
 	InputTranscription  dynamicJSON
 	OutputTranscription dynamicJSON
 
+	// Partial is NULL when the event left Partial unset (PartialSet false),
+	// which is how adk-python stores partial=None.
 	Partial      *bool
 	TurnComplete *bool
 	ErrorCode    *string
 	ErrorMessage *string
 	Interrupted  *bool
+
+	// Seq numbers a session's events in append order, from 1. Rows written
+	// before the column existed hold 0.
+	Seq int64 `gorm:"not null;default:0"`
 
 	// Belongs-To relationship: An event belongs to a session.
 	Session storageSession `gorm:"foreignKey:AppName,UserID,SessionID;references:AppName,UserID,ID"`
@@ -194,7 +200,9 @@ func createStorageEvent(session session.Session, event *session.Event) (*storage
 	}
 
 	// For booleans, we can assign pointers directly.
-	storageEv.Partial = &event.Partial
+	if event.Partial || event.PartialSet {
+		storageEv.Partial = &event.Partial
+	}
 	storageEv.TurnComplete = &event.TurnComplete
 	storageEv.Interrupted = &event.Interrupted
 
@@ -385,6 +393,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 			ErrorCode:           errorCode,
 			ErrorMessage:        errorMessage,
 			Partial:             partial,
+			PartialSet:          se.Partial != nil,
 			TurnComplete:        turnComplete,
 			Interrupted:         interrupted,
 		},
