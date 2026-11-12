@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/planner"
 	"google.golang.org/adk/v2/tool"
 )
 
@@ -72,6 +73,8 @@ type State struct {
 	OutputSchema *genai.Schema
 
 	OutputKey string
+
+	Planner planner.Planner
 
 	// LiveModeInjection guards the single live-mode tool injection an agent
 	// receives. Its lifetime follows the agent rather than a global cache.

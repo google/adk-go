@@ -1254,3 +1254,102 @@ func TestRunLiveKeepsResumptionHandleOutOfCallerConfig(t *testing.T) {
 		t.Errorf("caller's SessionResumption.Handle = %q, want it left empty", callerConfig.Handle)
 	}
 }
+
+// liveStatePlanner is a planner.RewritingPlanner whose response step writes
+// live_key to state and replaces the response parts.
+type liveStatePlanner struct{}
+
+func (liveStatePlanner) BuildPlanningInstruction(agent.ReadonlyContext, *model.LLMRequest) (string, error) {
+	return "", nil
+}
+
+func (liveStatePlanner) ProcessPlanningResponse(ctx agent.Context, _ []*genai.Part) ([]*genai.Part, error) {
+	if err := ctx.State().Set("live_key", "live_val"); err != nil {
+		return nil, err
+	}
+	return []*genai.Part{{Text: "clean live"}}, nil
+}
+
+// In live mode the planner's response step runs on each model event, and the
+// state event it causes comes before the rewritten model event, as in
+// adk-python's live flow (live/_live_llm_flow.py).
+func TestLLMAgent_RunLiveRewritingPlannerStateEventBeforeModelEvent(t *testing.T) {
+	const rawLiveTurn = `{"serverContent":{"modelTurn":{"parts":[{"text":"raw live"}],"role":"model"},"turnComplete":true}}`
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(rawLiveTurn)); err != nil {
+			t.Errorf("writing model turn failed: %v", err)
+			return
+		}
+		blockUntilClientCloses(conn)
+	})
+	baseAgent, err := agent.New(agent.Config{Name: "live_agent"})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+	liveAgent := &mockLLMAgent{Agent: baseAgent, s: &State{Planner: liveStatePlanner{}}}
+	created, err := session.InMemoryService().Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("session Create failed: %v", err)
+	}
+	baseCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(baseCtx, &runconfig.RunConfig{
+			StreamingMode: runconfig.StreamingModeBidi,
+			Live:          &agent.LiveRunConfig{},
+		}),
+		icontext.InvocationContextParams{Agent: liveAgent, Session: created.Session},
+	)
+	f := &Flow{
+		Model:              &fakeLiveModel{client: client},
+		RequestProcessors:  []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+		ResponseProcessors: DefaultResponseProcessors,
+	}
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	next, stop := iter.Pull2(seq)
+	defer stop()
+
+	var events []*session.Event
+	for {
+		ev, err, ok := next()
+		if !ok {
+			t.Fatal("iterator ended before the model event")
+		}
+		if err != nil {
+			t.Fatalf("RunLive yielded an error: %v", err)
+		}
+		if ev == nil {
+			continue
+		}
+		events = append(events, ev)
+		if ev.LLMResponse.Content != nil {
+			break
+		}
+	}
+
+	modelEv := events[len(events)-1]
+	if modelEv.Author != "live_agent" {
+		t.Errorf("model event Author = %q, want %q", modelEv.Author, "live_agent")
+	}
+	if diff := cmp.Diff([]*genai.Part{{Text: "clean live"}}, modelEv.LLMResponse.Content.Parts); diff != "" {
+		t.Errorf("model event parts mismatch (-want +got):\n%s", diff)
+	}
+	if len(events) < 2 {
+		t.Fatalf("no event came before the model event, want the state event")
+	}
+	stateEv := events[len(events)-2]
+	if stateEv.Author != "live_agent" {
+		t.Errorf("state event Author = %q, want %q", stateEv.Author, "live_agent")
+	}
+	if stateEv.LLMResponse.Content != nil {
+		t.Errorf("state event Content = %v, want nil", stateEv.LLMResponse.Content)
+	}
+	if diff := cmp.Diff(map[string]any{"live_key": "live_val"}, stateEv.Actions.StateDelta); diff != "" {
+		t.Errorf("state event StateDelta mismatch (-want +got):\n%s", diff)
+	}
+}
