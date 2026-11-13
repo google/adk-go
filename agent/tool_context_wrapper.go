@@ -158,6 +158,11 @@ func (c *toolContextWrapper) RequestConfirmation(hint string, payload any) error
 	return c.context.RequestConfirmation(hint, payload)
 }
 
+// RenderUIWidget implements [UIWidgetRenderer].
+func (c *toolContextWrapper) RenderUIWidget(widget session.UIWidget) error {
+	return RenderUIWidget(c.context, widget)
+}
+
 // SearchMemory implements [Context].
 func (c *toolContextWrapper) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	return c.context.SearchMemory(ctx, query)

@@ -162,7 +162,12 @@ func (c *callbackContextWrapper) FunctionCallID() string {
 func (c *callbackContextWrapper) RequestConfirmation(hint string, payload any) error {
 	//  RequestConfirmation() does not make any sense for a callback context
 	log.Print("RequestConfirmation() is not supported for callback context") //nolint:forbidigo // pre-slog call site
-	return fmt.Errorf("RequestConfirmation() is not supported for callback context")
+	return errNoFunctionCallID
+}
+
+// RenderUIWidget implements [UIWidgetRenderer].
+func (c *callbackContextWrapper) RenderUIWidget(widget session.UIWidget) error {
+	return RenderUIWidget(c.context, widget)
 }
 
 // SearchMemory implements [Context]. Without a memory service it reports the

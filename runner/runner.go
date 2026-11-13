@@ -763,6 +763,9 @@ func mergeEventActions(dst, src *session.EventActions, record *session.EventComp
 	if len(src.RequestedAuthConfigs) > 0 {
 		dst.RequestedAuthConfigs = maps.Clone(src.RequestedAuthConfigs)
 	}
+	if len(src.RenderUIWidgets) > 0 {
+		dst.RenderUIWidgets = slices.Clone(src.RenderUIWidgets)
+	}
 	if src.SkipSummarization {
 		dst.SkipSummarization = true
 	}

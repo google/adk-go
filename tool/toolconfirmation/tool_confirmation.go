@@ -60,7 +60,7 @@ type ToolConfirmation struct {
 
 	// Payload contains any additional data or context related to the confirmation request.
 	// The structure of the Payload is application-specific.
-	Payload any `json:"payload"`
+	Payload any `json:"payload,omitempty"`
 }
 
 // OriginalCallFrom retrieves the underlying, original function call from a tool confirmation wrapper.
