@@ -46,6 +46,15 @@ var (
 // workflowScopeKey marks a context as running inside an invoke_workflow span.
 type workflowScopeKey struct{}
 
+type invocationScopeKey struct{}
+
+// invocationScope identifies the span owned by this runner and, for workflow
+// roots, the agent that runs within it without starting a second span.
+type invocationScope struct {
+	span     trace.Span
+	workflow *agentinternal.State
+}
+
 // Operation is the internal sum-type which describes what can be used to start a span.
 type Operation interface {
 	isOperation()
@@ -94,7 +103,11 @@ type InvocationContext interface {
 func StartNodeSpan(ctx context.Context, ictx InvocationContext, op Operation) (context.Context, trace.Span) {
 	switch o := op.(type) {
 	case OperationAgent:
-		if isWorkflowAgent(o.Agent) {
+		if state := workflowState(o.Agent); state != nil {
+			if scope, ok := ctx.Value(invocationScopeKey{}).(*invocationScope); ok && scope.workflow == state {
+				// The runner ends this span after its callbacks and compaction.
+				return context.WithValue(ctx, invocationScopeKey{}, nil), noop.Span{}
+			}
 			return startInvokeWorkflowSpan(ctx, o.Agent.Name(), sessionID(ictx))
 		}
 		return startInvokeAgentSpan(ctx, ictx, o.Agent)
@@ -105,12 +118,16 @@ func StartNodeSpan(ctx context.Context, ictx InvocationContext, op Operation) (c
 	}
 }
 
-func isWorkflowAgent(a AgentLike) bool {
+func workflowState(a AgentLike) *agentinternal.State {
 	internal, ok := a.(agentinternal.Agent)
 	if !ok {
-		return false
+		return nil
 	}
-	return agentinternal.Reveal(internal).AgentType == agentinternal.TypeWorkflowAgent
+	state := agentinternal.Reveal(internal)
+	if state.AgentType == agentinternal.TypeWorkflowAgent {
+		return state
+	}
+	return nil
 }
 
 // sessionID returns ictx.Session().ID() or "" if the
