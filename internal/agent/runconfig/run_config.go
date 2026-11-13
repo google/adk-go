@@ -21,6 +21,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 )
 
 type StreamingMode string
@@ -83,17 +84,26 @@ type RunConfig struct {
 
 func ToContext(ctx context.Context, cfg *RunConfig) context.Context {
 	// TODO(kdroste): move to invocationContext?
-	return context.WithValue(ctx, runConfigCtxKey, cfg)
+	return context.WithValue(ctx, adkcontext.RunConfigKey, cfg)
 }
 
 func FromContext(ctx context.Context) *RunConfig {
-	m, ok := ctx.Value(runConfigCtxKey).(*RunConfig)
+	m, ok := ctx.Value(adkcontext.RunConfigKey).(*RunConfig)
 	if !ok {
 		return nil
 	}
 	return m
 }
 
-type ctxKey int
-
-const runConfigCtxKey ctxKey = 0
+// CustomMetadataSnapshot returns the invocation's pre-filtered custom metadata,
+// the CustomMetadata field, or nil for a nil receiver. The map is the runner's
+// own copy: callers must not write to it, and copy it before handing it on.
+//
+// It exists so that package agent, which cannot import this package, can read
+// the snapshot from the value stored under [adkcontext.RunConfigKey].
+func (c *RunConfig) CustomMetadataSnapshot() map[string]any {
+	if c == nil {
+		return nil
+	}
+	return c.CustomMetadata
+}

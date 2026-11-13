@@ -93,8 +93,7 @@ func (c *callbackContextWrapper) IsolationScope() string {
 
 // Memory implements [Context].
 func (c *callbackContextWrapper) Memory() Memory {
-	log.Print("Memory() is not supported for callback context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.Memory()
 }
 
 // Path implements [Context].
@@ -111,8 +110,7 @@ func (c *callbackContextWrapper) ResumedInput(interruptID string) (any, bool) {
 
 // RunConfig implements [Context].
 func (c *callbackContextWrapper) RunConfig() *RunConfig {
-	log.Print("RunConfig() is not supported for callback context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.RunConfig()
 }
 
 // RunID implements [Context].
@@ -123,8 +121,7 @@ func (c *callbackContextWrapper) RunID() string {
 
 // Session implements [Context].
 func (c *callbackContextWrapper) Session() session.Session {
-	log.Print("Session() is not supported for callback context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.Session()
 }
 
 // WithBranch implements [Context].
@@ -168,9 +165,12 @@ func (c *callbackContextWrapper) RequestConfirmation(hint string, payload any) e
 	return fmt.Errorf("RequestConfirmation() is not supported for callback context")
 }
 
-// SearchMemory implements [Context].
+// SearchMemory implements [Context]. Without a memory service it reports the
+// missing service, as every context does; with one it refuses.
 func (c *callbackContextWrapper) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
-	//  SearchMemory() does not make any sense for a callback context
+	if _, ok := memoryService(c.context); !ok {
+		return nil, errNoMemoryForSearch
+	}
 	log.Print("SearchMemory() is not supported for callback context") //nolint:forbidigo // pre-slog call site
 	return nil, fmt.Errorf("SearchMemory() is not supported for callback context")
 }

@@ -15,6 +15,8 @@
 package memory_test
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -255,5 +257,77 @@ func TestMemory_Search_Isolation(t *testing.T) {
 		t.Errorf("memory2.SearchMemory returned %d items, want 1", len(got2.Memories))
 	} else if diff := cmp.Diff(content2, got2.Memories[0].Content); diff != "" {
 		t.Errorf("memory2.SearchMemory returned diff (-want +got):\n%s", diff)
+	}
+}
+
+// recordingService implements memory.Service, memory.EventAdder and
+// memory.MemoryAdder, and records the requests the two adders receive.
+type recordingService struct {
+	eventReqs  []*memory.AddEventsRequest
+	memoryReqs []*memory.AddMemoryRequest
+}
+
+func (*recordingService) AddSessionToMemory(context.Context, session.Session) error { return nil }
+
+func (*recordingService) SearchMemory(context.Context, *memory.SearchRequest) (*memory.SearchResponse, error) {
+	return &memory.SearchResponse{}, nil
+}
+
+func (r *recordingService) AddEventsToMemory(_ context.Context, req *memory.AddEventsRequest) error {
+	r.eventReqs = append(r.eventReqs, req)
+	return nil
+}
+
+func (r *recordingService) AddMemory(_ context.Context, req *memory.AddMemoryRequest) error {
+	r.memoryReqs = append(r.memoryReqs, req)
+	return nil
+}
+
+// searchOnlyService implements memory.Service and neither optional adder.
+type searchOnlyService struct{}
+
+func (searchOnlyService) AddSessionToMemory(context.Context, session.Session) error { return nil }
+
+func (searchOnlyService) SearchMemory(context.Context, *memory.SearchRequest) (*memory.SearchResponse, error) {
+	return &memory.SearchResponse{}, nil
+}
+
+// Memory is an agent.Memory, not a memory.Service, so the optional interfaces
+// of the Service it wraps are reachable only through its forwarding methods.
+// They pass the caller's request on unchanged.
+func TestMemory_AddEventsToMemoryForwardsToService(t *testing.T) {
+	svc := &recordingService{}
+	m := &imemory.Memory{Service: svc, AppName: "wrapper-app", UserID: "wrapper-user", SessionID: "wrapper-sess"}
+	req := &memory.AddEventsRequest{AppName: "app-1", UserID: "user-1", SessionID: "sess-1"}
+
+	if err := m.AddEventsToMemory(t.Context(), req); err != nil {
+		t.Fatalf("AddEventsToMemory() error = %v, want nil", err)
+	}
+	if len(svc.eventReqs) != 1 || svc.eventReqs[0] != req {
+		t.Errorf("service received %v, want exactly the caller's request %p", svc.eventReqs, req)
+	}
+}
+
+func TestMemory_AddMemoryForwardsToService(t *testing.T) {
+	svc := &recordingService{}
+	m := &imemory.Memory{Service: svc, AppName: "wrapper-app", UserID: "wrapper-user"}
+	req := &memory.AddMemoryRequest{AppName: "app-1", UserID: "user-1", Memories: []*memory.Entry{{ID: "m1"}}}
+
+	if err := m.AddMemory(t.Context(), req); err != nil {
+		t.Fatalf("AddMemory() error = %v, want nil", err)
+	}
+	if len(svc.memoryReqs) != 1 || svc.memoryReqs[0] != req {
+		t.Errorf("service received %v, want exactly the caller's request %p", svc.memoryReqs, req)
+	}
+}
+
+func TestMemory_AddersUnsupportedService(t *testing.T) {
+	m := &imemory.Memory{Service: searchOnlyService{}, AppName: "app-1", UserID: "user-1"}
+
+	if err := m.AddEventsToMemory(t.Context(), &memory.AddEventsRequest{}); !errors.Is(err, memory.ErrAddEventsUnsupported) {
+		t.Errorf("AddEventsToMemory() error = %v, want errors.Is(err, memory.ErrAddEventsUnsupported)", err)
+	}
+	if err := m.AddMemory(t.Context(), &memory.AddMemoryRequest{}); !errors.Is(err, memory.ErrAddMemoryUnsupported) {
+		t.Errorf("AddMemory() error = %v, want errors.Is(err, memory.ErrAddMemoryUnsupported)", err)
 	}
 }

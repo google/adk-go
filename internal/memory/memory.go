@@ -32,6 +32,24 @@ func (a *Memory) AddSessionToMemory(ctx context.Context, session session.Session
 	return a.Service.AddSessionToMemory(ctx, session)
 }
 
+// AddEventsToMemory passes req to [memory.AddEventsToMemory] with the wrapped
+// Service, so a Service that implements [memory.EventAdder] is reached even
+// though Memory hides it. It returns [memory.ErrAddEventsUnsupported] when the
+// Service does not implement it. req carries its own scope; Memory's AppName,
+// UserID and SessionID fields are not applied to it.
+func (a *Memory) AddEventsToMemory(ctx context.Context, req *memory.AddEventsRequest) error {
+	return memory.AddEventsToMemory(ctx, a.Service, req)
+}
+
+// AddMemory passes req to [memory.AddMemory] with the wrapped Service, so a
+// Service that implements [memory.MemoryAdder] is reached even though Memory
+// hides it. It returns [memory.ErrAddMemoryUnsupported] when the Service does
+// not implement it. req carries its own scope; Memory's AppName and UserID
+// fields are not applied to it.
+func (a *Memory) AddMemory(ctx context.Context, req *memory.AddMemoryRequest) error {
+	return memory.AddMemory(ctx, a.Service, req)
+}
+
 func (a *Memory) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	return a.Service.SearchMemory(ctx, &memory.SearchRequest{
 		AppName: a.AppName,

@@ -1656,8 +1656,8 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		return ctx, nil, replaced, errUserFunctionCall
 	}
 
-	artifactsService := ctx.Artifacts()
-	if artifactsService != nil && saveInputBlobsAsArtifacts {
+	if r.artifactService != nil && saveInputBlobsAsArtifacts {
+		artifactsService := ctx.Artifacts()
 		for i, part := range msg.Parts {
 			if part.InlineData == nil {
 				continue

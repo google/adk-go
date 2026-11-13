@@ -148,9 +148,11 @@ type artifactVersionResult struct {
 }
 
 // It fails if a sub-agent's version lookup does not reach the outer runner's
-// artifact service with the outer session's scope, or if a version of 0 is not
-// reported as not found.
-func TestAgentTool_Run_ArtifactVersion(t *testing.T) {
+// artifact service with the outer session's scope, if a version of 0 is not
+// reported as not found, or if a sub-agent whose outer runner has no artifact
+// service gets anything but "artifact service is not initialized", for version
+// 0 as well (the check of the forwarding chain precedes the version check).
+func TestAgentTool_Run_ArtifactVersionAndNoService(t *testing.T) {
 	for _, nested := range []bool{false, true} {
 		name := "direct"
 		if nested {
@@ -180,6 +182,18 @@ func TestAgentTool_Run_ArtifactVersion(t *testing.T) {
 			}
 			if got, err := results["0"].got, results["0"].err; got != nil || !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("ArtifactVersion(0) = %+v, %v; want nil and an error wrapping fs.ErrNotExist", got, err)
+			}
+		})
+		t.Run("no service/"+name, func(t *testing.T) {
+			const want = "artifact service is not initialized"
+
+			results := runArtifactVersionLookups(t, nil, nested)
+
+			for _, version := range []string{"latest", "1", "0"} {
+				got, err := results[version].got, results[version].err
+				if got != nil || err == nil || err.Error() != want || errors.Is(err, errors.ErrUnsupported) {
+					t.Errorf("ArtifactVersion(%s) = %+v, %v; want nil, %q", version, got, err, want)
+				}
 			}
 		})
 	}

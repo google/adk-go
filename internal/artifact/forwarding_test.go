@@ -200,6 +200,65 @@ func TestForwardingService_Errors(t *testing.T) {
 	}
 }
 
+// A sub-agent whose outer invocation has no artifact service gets the same
+// error from every forwarded call, directly and through a nested AgentTool. It
+// fails if Delete, Versions or GetArtifactVersion stop recognizing a parent
+// without a service and report an unsupported operation instead.
+func TestForwardingService_Errors_NoServiceMessage(t *testing.T) {
+	const want = "artifact service is not initialized"
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	direct := artifactinternal.NewForwardingService(agent.NewToolContext(ic, "call", nil, nil).Artifacts())
+	nested := artifactinternal.NewForwardingService(&artifactinternal.Artifacts{Service: direct})
+	for _, tc := range []struct {
+		name    string
+		service artifact.Service
+	}{
+		{name: "direct", service: direct},
+		{name: "nested", service: nested},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := tc.service
+			for _, operation := range []struct {
+				name string
+				run  func() error
+			}{
+				{name: "save", run: func() error {
+					_, err := service.Save(t.Context(), &artifact.SaveRequest{FileName: "a.txt", Part: genai.NewPartFromText("x")})
+					return err
+				}},
+				{name: "load latest", run: func() error {
+					_, err := service.Load(t.Context(), &artifact.LoadRequest{FileName: "a.txt"})
+					return err
+				}},
+				{name: "load version", run: func() error {
+					_, err := service.Load(t.Context(), &artifact.LoadRequest{FileName: "a.txt", Version: 1})
+					return err
+				}},
+				{name: "list", run: func() error { _, err := service.List(t.Context(), &artifact.ListRequest{}); return err }},
+				{name: "delete", run: func() error { return service.Delete(t.Context(), &artifact.DeleteRequest{FileName: "a.txt"}) }},
+				{name: "versions", run: func() error {
+					_, err := service.Versions(t.Context(), &artifact.VersionsRequest{FileName: "a.txt"})
+					return err
+				}},
+				{name: "metadata", run: func() error {
+					_, err := service.GetArtifactVersion(t.Context(), &artifact.GetArtifactVersionRequest{FileName: "a.txt", Version: 1})
+					return err
+				}},
+			} {
+				t.Run(operation.name, func(t *testing.T) {
+					err := operation.run()
+					if err == nil || err.Error() != want {
+						t.Errorf("error = %v, want %q", err, want)
+					}
+					if errors.Is(err, errors.ErrUnsupported) {
+						t.Errorf("error = %v, want one that does not wrap errors.ErrUnsupported", err)
+					}
+				})
+			}
+		})
+	}
+}
+
 // A forwarding service over parent artifacts written outside adk-go, which
 // expose no backing service, reports that before it checks the version. It
 // fails if the chain check ignores such a parent, so that version 0 reports a

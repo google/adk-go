@@ -18,11 +18,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/adkcontext"
+	"google.golang.org/adk/v2/internal/eventmetadata"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
@@ -237,6 +240,119 @@ type Context interface {
 	WithDelta(d *CommonContextDelta) Context
 }
 
+// AddSessionToMemory adds the session of ctx's invocation to ctx's memory
+// service, so later invocations of the same user can recall it. It works from
+// callback and tool contexts alike: from a tool context, whose Session method
+// reports no session, it still passes the invocation's session, and so it does
+// from a type of the caller's own that embeds a tool context. A Context whose
+// own Session method reports a session passes that session instead.
+//
+// It returns an error, without calling any service, when the invocation has no
+// memory service. Otherwise it returns the error of the service's
+// AddSessionToMemory unchanged.
+func AddSessionToMemory(ctx Context) error {
+	m, ok := memoryService(ctx)
+	if !ok {
+		return errNoMemoryForSession
+	}
+	return m.AddSessionToMemory(ctx, invocationSession(ctx))
+}
+
+// invocationSession returns the session of ctx's invocation. A tool context
+// reports no session through Session, and other contexts wrap one (a live
+// streaming tool runs under an ADK wrapper, a user's decorator under its own),
+// so the session comes from Value, which every ADK context forwards down to the
+// commonContext that holds the invocation. ADK's own context types are asked
+// through Value first, which spares a tool context's Session its "not
+// supported" log line. Any other Context's Session wins when it is not nil, so
+// a type that overrides Session passes its own session; when it is nil, that
+// Context is asked through Value too.
+func invocationSession(ctx Context) session.Session {
+	if _, ours := ctx.(adkcontext.Source); ours {
+		if s, ok := ctx.Value(invocationSessionKey{}).(session.Session); ok {
+			return s
+		}
+	}
+	if s := ctx.Session(); s != nil {
+		return s
+	}
+	s, _ := ctx.Value(invocationSessionKey{}).(session.Session)
+	return s
+}
+
+// invocationSessionKey is the context key under which a commonContext answers
+// with the session of the invocation it wraps. Only this package can name it.
+type invocationSessionKey struct{}
+
+// eventAdder is the method of a Memory that can add events, such as the
+// memory the runner builds over a [memory.EventAdder].
+type eventAdder interface {
+	AddEventsToMemory(ctx context.Context, req *memory.AddEventsRequest) error
+}
+
+// memoryAdder is the method of a Memory that accepts direct writes, such as
+// the memory the runner builds over a [memory.MemoryAdder].
+type memoryAdder interface {
+	AddMemory(ctx context.Context, req *memory.AddMemoryRequest) error
+}
+
+// AddEventsToMemory adds events to ctx's memory service, scoped to the app,
+// user and session of ctx (ctx.AppName, ctx.UserID and ctx.SessionID).
+// customMetadata is passed to the service unchanged; which keys a service
+// reads is up to the service. events and customMetadata are passed on as they
+// are, without copying; nil or empty events are the service's to accept or
+// refuse.
+//
+// It returns an error, without calling any service, when the invocation has no
+// memory service. It returns [memory.ErrAddEventsUnsupported] when the memory
+// service cannot add events (see [memory.EventAdder]).
+// Otherwise it returns the service's error unchanged.
+func AddEventsToMemory(ctx Context, events []*session.Event, customMetadata map[string]any) error {
+	m, ok := memoryService(ctx)
+	if !ok {
+		return errNoMemoryForEvents
+	}
+	adder, ok := m.(eventAdder)
+	if !ok {
+		return memory.ErrAddEventsUnsupported
+	}
+	return adder.AddEventsToMemory(ctx, &memory.AddEventsRequest{
+		AppName:        ctx.AppName(),
+		UserID:         ctx.UserID(),
+		SessionID:      ctx.SessionID(),
+		Events:         events,
+		CustomMetadata: customMetadata,
+	})
+}
+
+// AddMemory writes memories directly to ctx's memory service, scoped to the app
+// and user of ctx (ctx.AppName and ctx.UserID). customMetadata is passed to the
+// service unchanged. memories and customMetadata are passed on as they are,
+// without copying; nil or empty memories are the service's to accept or
+// refuse.
+//
+// It returns an error, without calling any service, when the invocation has no
+// memory service. It returns [memory.ErrAddMemoryUnsupported] when the memory
+// service does not accept direct writes (see [memory.MemoryAdder]); the
+// in-memory service is one of those. Otherwise it
+// returns the service's error unchanged.
+func AddMemory(ctx Context, memories []*memory.Entry, customMetadata map[string]any) error {
+	m, ok := memoryService(ctx)
+	if !ok {
+		return errNoMemoryForEntries
+	}
+	adder, ok := m.(memoryAdder)
+	if !ok {
+		return memory.ErrAddMemoryUnsupported
+	}
+	return adder.AddMemory(ctx, &memory.AddMemoryRequest{
+		AppName:        ctx.AppName(),
+		UserID:         ctx.UserID(),
+		Memories:       memories,
+		CustomMetadata: customMetadata,
+	})
+}
+
 // artifactVersionReader is the method of an Artifacts that can look up the
 // record of an artifact version, such as the Artifacts the runner builds over
 // its [artifact.Service].
@@ -263,7 +379,7 @@ func ArtifactVersion(ctx Context, name string, version *int64) (*artifact.Artifa
 	arts := ctx.Artifacts()
 	for {
 		switch a := arts.(type) {
-		case nil:
+		case nil, noServiceArtifacts:
 			return nil, errNoArtifactService
 		case artifactVersionReader:
 			return a.ArtifactVersion(ctx, name, version)
@@ -273,4 +389,37 @@ func ArtifactVersion(ctx Context, name string, version *int64) (*artifact.Artifa
 			return nil, fmt.Errorf("artifacts of type %T cannot look up versions: %w", arts, errors.ErrUnsupported)
 		}
 	}
+}
+
+// CustomMetadata returns the custom metadata of the run ctx belongs to:
+// [RunConfig.CustomMetadata] without the keys ADK reserves for its own event
+// metadata (the "__adk_internal_" and "adk.workflow." prefixes and the
+// "adk:before_run_reply" key).
+//
+// Inside a run started by the runner it returns the copy the runner took when
+// the run started. Without a runner it filters the run config of ctx, when ctx
+// has a RunConfig method, as callback, tool and instruction-provider contexts
+// do. It returns an empty, non-nil map when there is no metadata.
+//
+// The result is a new map on every call: changing it changes neither the run
+// nor what later calls return. Values are not deep-copied. CustomMetadata is
+// safe for concurrent use.
+func CustomMetadata(ctx ReadonlyContext) map[string]any {
+	var md map[string]any
+	if snap, ok := ctx.Value(adkcontext.RunConfigKey).(customMetadataSnapshotter); ok {
+		md = maps.Clone(snap.CustomMetadataSnapshot())
+	} else if rc, ok := ctx.(interface{ RunConfig() *RunConfig }); ok && rc.RunConfig() != nil && rc.RunConfig().CustomMetadata != nil {
+		md = eventmetadata.WithoutInternal(*rc.RunConfig().CustomMetadata)
+	}
+	if md == nil {
+		return map[string]any{}
+	}
+	return md
+}
+
+// customMetadataSnapshotter is the method through which the runner's run
+// config, stored under [adkcontext.RunConfigKey], hands out the custom
+// metadata it filtered when the run started.
+type customMetadataSnapshotter interface {
+	CustomMetadataSnapshot() map[string]any
 }

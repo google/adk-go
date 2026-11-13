@@ -300,7 +300,7 @@ func NewCallbackContext(ic InvocationContext, actions *session.EventActions) Con
 		Context:           ic,
 		invocationContext: ic,
 		actions:           actions,
-		artifacts:         ic.Artifacts(),
+		artifacts:         withoutNoService(ic.Artifacts()),
 	}
 	// wrap the commonContext in order to log information about someone using tool-context methods on a callback context
 	wrapper := &callbackContextWrapper{
@@ -451,9 +451,13 @@ func (c *commonContext) IsolationScope() string {
 	return c.invocationContext.IsolationScope()
 }
 
-// Memory implements [InvocationContext].
+// Memory implements [InvocationContext]. When the invocation has no memory
+// service it returns a Memory whose methods report that, never nil.
 func (c *commonContext) Memory() Memory {
-	return c.invocationContext.Memory()
+	if m := c.invocationContext.Memory(); m != nil {
+		return m
+	}
+	return noServiceMemory{}
 }
 
 // ResumedInput implements [InvocationContext].
@@ -539,11 +543,17 @@ func (c *commonContext) State() session.State {
 	return &callbackContextState{ctx: c}
 }
 
+// Artifacts implements [InvocationContext]. When the invocation has no
+// artifact service it returns an Artifacts whose methods report that, never
+// nil.
 func (c *commonContext) Artifacts() Artifacts {
 	if c.artifacts != nil {
 		return c.artifacts
 	}
-	return c.invocationContext.Artifacts()
+	if a := c.invocationContext.Artifacts(); a != nil {
+		return a
+	}
+	return noServiceArtifacts{}
 }
 
 func (c *commonContext) InvocationID() string {
@@ -572,17 +582,23 @@ func (c *commonContext) UserID() string {
 
 // Value implements context.Context. For the ADK identity key it returns the
 // [Identity] of the invocation this context speaks for (so [IdentityFromContext]
-// can recover it from a derived context). Every other key delegates to the
-// embedded context, preserving existing behavior.
+// can recover it from a derived context). For this package's session key it
+// returns the session of the invocation it wraps, so [AddSessionToMemory] finds
+// it through any ADK context that wraps this one. Every other key delegates to
+// the embedded context, preserving existing behavior.
 //
-// Only the identity key touches the invocation, so no other key is affected by
-// its state, and a session that panics costs the identity, not the process.
+// Only those two keys touch the invocation, so no other key is affected by its
+// state, and a session that panics costs the identity, not the process. The
+// session key is read only by [AddSessionToMemory], on the caller's goroutine.
 func (c *commonContext) Value(key any) any {
 	if c == nil {
 		return nil
 	}
 	if key == adkcontext.IdentityKey {
 		return c.identity()
+	}
+	if key == (invocationSessionKey{}) {
+		return c.invocationContext.Session()
 	}
 	if c.Context == nil {
 		return nil
@@ -690,10 +706,7 @@ func (c *commonContext) Actions() *session.EventActions {
 
 // SearchMemory performs a semantic search on the agent's memory.
 func (c *commonContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
-	if c.invocationContext.Memory() == nil {
-		return nil, fmt.Errorf("memory service is not set")
-	}
-	return c.invocationContext.Memory().SearchMemory(ctx, query)
+	return c.Memory().SearchMemory(ctx, query)
 }
 
 // ToolConfirmation returns the Human-in-the-Loop confirmation handle for the
@@ -780,10 +793,11 @@ func (c *callbackContextState) All() iter.Seq2[string, any] {
 }
 
 // newTrackedArtifacts wraps inner so that each successful Save is recorded
-// into the supplied EventActions.ArtifactDelta. It returns nil when inner is
-// nil so that "no artifact service configured" stays observable (a nil
-// Artifacts) instead of panicking on the first promoted method call.
+// into the supplied EventActions.ArtifactDelta. It returns nil when there is no
+// artifact service, so that the context resolves the service through its
+// invocation on every call instead of caching its absence.
 func newTrackedArtifacts(inner Artifacts, actions *session.EventActions) Artifacts {
+	inner = withoutNoService(inner)
 	if inner == nil {
 		return nil
 	}
@@ -822,10 +836,72 @@ func (a *trackedArtifacts) Save(ctx context.Context, name string, data *genai.Pa
 	return resp, nil
 }
 
-// errNoArtifactService is the error a context returns for an artifact service
-// its invocation does not have. The text is adk-python's (agents/context.py),
-// in Go's style.
-var errNoArtifactService = errors.New("artifact service is not initialized")
+// The errors a context returns for a service its invocation does not have. The
+// texts are adk-python's (agents/context.py), in Go's style.
+var (
+	errNoArtifactService  = errors.New("artifact service is not initialized")
+	errNoMemoryForSession = errors.New("cannot add session to memory: memory service is not available")
+	errNoMemoryForEvents  = errors.New("cannot add events to memory: memory service is not available")
+	errNoMemoryForEntries = errors.New("cannot add memory: memory service is not available")
+	errNoMemoryForSearch  = errors.New("memory service is not available")
+)
+
+// noServiceArtifacts is the Artifacts of a context whose invocation has no
+// artifact service. Every method fails without side effects.
+type noServiceArtifacts struct{}
+
+func (noServiceArtifacts) Save(context.Context, string, *genai.Part) (*artifact.SaveResponse, error) {
+	return nil, errNoArtifactService
+}
+
+func (noServiceArtifacts) List(context.Context) (*artifact.ListResponse, error) {
+	return nil, errNoArtifactService
+}
+
+func (noServiceArtifacts) Load(context.Context, string) (*artifact.LoadResponse, error) {
+	return nil, errNoArtifactService
+}
+
+func (noServiceArtifacts) LoadVersion(context.Context, string, int) (*artifact.LoadResponse, error) {
+	return nil, errNoArtifactService
+}
+
+// ArtifactServiceErr lets internal/artifact recognize a parent that has no
+// artifact service, which it cannot name, so that the calls it forwards to such
+// a parent fail with the same error as this type's methods.
+func (noServiceArtifacts) ArtifactServiceErr() error { return errNoArtifactService }
+
+// withoutNoService returns a, or nil when a only reports the missing service,
+// so that a context never caches the absence of a service.
+func withoutNoService(a Artifacts) Artifacts {
+	if _, none := a.(noServiceArtifacts); none {
+		return nil
+	}
+	return a
+}
+
+// noServiceMemory is the Memory of a context whose invocation has no memory
+// service. Every method fails without side effects.
+type noServiceMemory struct{}
+
+func (noServiceMemory) AddSessionToMemory(context.Context, session.Session) error {
+	return errNoMemoryForSession
+}
+
+func (noServiceMemory) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
+	return nil, errNoMemoryForSearch
+}
+
+// memoryService returns the memory service of ctx's invocation, and false when
+// it has none.
+func memoryService(ctx Context) (Memory, bool) {
+	switch m := ctx.Memory().(type) {
+	case nil, noServiceMemory:
+		return nil, false
+	default:
+		return m, true
+	}
+}
 
 // NewCleanToolContextTestOnly is intended only for tests. Do not use for other purposes, please!
 func NewCleanToolContextTestOnly(ctx Context, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) (Context, error) {

@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package adkcontext holds the private context key under which an ADK context
-// registers its invocation identity, so it can be recovered from a derived
-// context.Context via agent.IdentityFromContext. It is a tiny leaf package shared
-// by the agent and internal/context packages to avoid an import cycle.
+// Package adkcontext holds the private context keys that more than one ADK
+// package reads: the key under which an ADK context registers its invocation
+// identity, so it can be recovered from a derived context.Context via
+// agent.IdentityFromContext, and the key of the runner's run config. It is a
+// tiny leaf package shared by the agent, internal/context and
+// internal/agent/runconfig packages to avoid an import cycle.
 package adkcontext
 
 type ctxKey int
@@ -42,6 +44,14 @@ type ctxKey int
 // authentication boundary. agent.IdentityFromContext states the full rule, and
 // both limits above are pinned by tests in package agent.
 const IdentityKey ctxKey = 0
+
+// RunConfigKey is the context value key under which the runner stores the
+// invocation's internal run config (a *runconfig.RunConfig). It lives here
+// rather than in internal/agent/runconfig because that package imports agent,
+// and package agent reads the value too. Package agent cannot name
+// *runconfig.RunConfig, so it reads the value through an interface the type
+// satisfies, such as one with CustomMetadataSnapshot() map[string]any.
+const RunConfigKey ctxKey = 1
 
 // Recovered returns what read produced, and whether it returned at all.
 //
