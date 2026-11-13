@@ -80,6 +80,9 @@ func NewPanicError(toolName string, value any, stack []byte) *PanicError {
 
 func (e *PanicError) Error() string { return e.msg }
 
+// Unwrap makes errors.Is(err, tool.ErrPanicked) true for a recovered panic.
+func (e *PanicError) Unwrap() error { return tool.ErrPanicked }
+
 // ModelErrorText is the text a failed call of the tool named toolName may show
 // the model, and whether err turned out to be a recovered panic. A recovered
 // panic becomes a generic message, because its own text carries the panic
