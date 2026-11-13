@@ -15,9 +15,11 @@
 package agenttool_test
 
 import (
+	"errors"
 	"iter"
 	"log"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -1023,5 +1025,74 @@ func TestAgentTool_Run_SkipSummarizationNotSetOnInvalidArgs(t *testing.T) {
 				t.Error("SkipSummarization = true after invalid arguments, want false so the parent model can retry")
 			}
 		})
+	}
+}
+
+var errToolsetClosed = errors.New("toolset is closed")
+
+// closeCountingToolset counts its Close calls. Like a closed mcptoolset, it
+// fails Tools once it is closed.
+type closeCountingToolset struct {
+	closes atomic.Int32
+}
+
+func (c *closeCountingToolset) Name() string { return "close_counting_toolset" }
+
+func (c *closeCountingToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
+	if c.closes.Load() > 0 {
+		return nil, errToolsetClosed
+	}
+	return nil, nil
+}
+
+func (c *closeCountingToolset) Close() error {
+	c.closes.Add(1)
+	return nil
+}
+
+// An agent tool runs the same child agent, and so the same toolsets, on every
+// call. A toolset such as mcptoolset cannot reopen once closed, so Run leaves
+// the child's toolsets open; the runner that owns the agent tool closes them.
+func TestAgentTool_RunTwiceLeavesChildToolsetOpen(t *testing.T) {
+	ts := &closeCountingToolset{}
+	testLLM := &testutil.MockModel{
+		Responses: []*genai.Content{
+			genai.NewContentFromText("first answer", genai.RoleModel),
+			genai.NewContentFromText("second answer", genai.RoleModel),
+		},
+	}
+	child, err := llmagent.New(llmagent.Config{
+		Name:     "child_agent",
+		Model:    testLLM,
+		Toolsets: []tool.Toolset{ts},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	toolImpl, ok := agenttool.New(child, nil).(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("agentTool does not implement FunctionTool")
+	}
+
+	first, err := toolImpl.Run(createToolContext(t, child), map[string]any{"request": "one"})
+	if err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+	if got := ts.closes.Load(); got != 0 {
+		t.Errorf("child toolset closes after first Run() = %d, want 0", got)
+	}
+	second, err := toolImpl.Run(createToolContext(t, child), map[string]any{"request": "two"})
+	if err != nil {
+		t.Fatalf("second Run() error = %v", err)
+	}
+	if got := ts.closes.Load(); got != 0 {
+		t.Errorf("child toolset closes after second Run() = %d, want 0", got)
+	}
+
+	if diff := cmp.Diff(map[string]any{"result": "first answer"}, first); diff != "" {
+		t.Errorf("first Run() result diff (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]any{"result": "second answer"}, second); diff != "" {
+		t.Errorf("second Run() result diff (-want +got):\n%s", diff)
 	}
 }

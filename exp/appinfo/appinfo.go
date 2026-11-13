@@ -65,13 +65,11 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/agent/workflowagent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/internal/agenttree"
 	"google.golang.org/adk/v2/internal/llminternal"
-	"google.golang.org/adk/v2/internal/workflowwalk"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
-	"google.golang.org/adk/v2/workflow"
 )
 
 // AppInfo describes an ADK app and the LLM agents it contains. It is the
@@ -181,7 +179,7 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 				agents[name] = describe(ctx, appName, a, llminternal.Reveal(llmAgent))
 			}
 		}
-		for _, child := range children(a) {
+		for _, child := range agenttree.Children(a) {
 			walk(child)
 		}
 	}
@@ -223,34 +221,6 @@ func llmSubAgents(a agent.Agent) []string {
 		}
 	}
 	return names
-}
-
-// children returns the agents a walk should descend into from a: its
-// sub-agents, followed by the agents its workflow graph runs.
-//
-// A workflow agent keeps the agents of its graph in its edges, not in
-// SubAgents, so following SubAgents alone reports nothing for a graph-rooted
-// app.
-func children(a agent.Agent) []agent.Agent {
-	// TODO: make agent name clashes deterministic. A nested workflow's
-	// agents come in map order (workflow's graph.allEdges ranges over its
-	// successors map), so which of two agents sharing a name is described can
-	// change between requests.
-	return slices.Concat(a.SubAgents(), workflowwalk.WalkAgents(workflowEdges(a)))
-}
-
-// workflowEdges returns the edges of a's workflow graph, or nil when a is not
-// a workflow agent.
-func workflowEdges(a agent.Agent) []workflow.Edge {
-	internalAgent, ok := a.(agentinternal.Agent)
-	if !ok {
-		return nil
-	}
-	cfg, ok := agentinternal.Reveal(internalAgent).Config.(workflowagent.Config)
-	if !ok {
-		return nil
-	}
-	return cfg.Edges
 }
 
 // providerInstruction is what app-info reports for an instruction that comes

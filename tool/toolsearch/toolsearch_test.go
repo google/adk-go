@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"path/filepath"
 	"slices"
@@ -1300,4 +1301,67 @@ func TestNew_SkillHintOnlyWithAnnotations(t *testing.T) {
 			t.Errorf("SkillAnnotations %v: description mentions connected_skill = %t, want %t", tc.annotations, got, tc.want)
 		}
 	}
+}
+
+// closingToolset counts its Close calls and returns err from each of them.
+type closingToolset struct {
+	staticToolset
+	closes int
+	err    error
+}
+
+func (c *closingToolset) Close() error {
+	c.closes++
+	return c.err
+}
+
+func TestToolsetWrappers_PassCloseThroughAndUnwrap(t *testing.T) {
+	errClose := errors.New("close failed")
+	newGated := func(t *testing.T, base tool.Toolset) tool.Toolset {
+		t.Helper()
+		gated, err := New(base, Config{})
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		return gated
+	}
+	closeOf := func(t *testing.T, ts tool.Toolset) error {
+		t.Helper()
+		c, ok := ts.(io.Closer)
+		if !ok {
+			t.Fatalf("%T does not implement io.Closer", ts)
+		}
+		return c.Close()
+	}
+
+	t.Run("closes base", func(t *testing.T) {
+		base := &closingToolset{}
+		if err := closeOf(t, newGated(t, base)); err != nil {
+			t.Errorf("Close() = %v, want nil", err)
+		}
+		if base.closes != 1 {
+			t.Errorf("base closes = %d, want 1", base.closes)
+		}
+	})
+	t.Run("returns base error", func(t *testing.T) {
+		base := &closingToolset{err: errClose}
+		if err := closeOf(t, newGated(t, base)); !errors.Is(err, errClose) {
+			t.Errorf("Close() = %v, want %v", err, errClose)
+		}
+	})
+	t.Run("base is not a closer", func(t *testing.T) {
+		if err := closeOf(t, newGated(t, &staticToolset{})); err != nil {
+			t.Errorf("Close() = %v, want nil", err)
+		}
+	})
+	t.Run("unwraps to base", func(t *testing.T) {
+		base := &closingToolset{}
+		u, ok := newGated(t, base).(interface{ Unwrap() tool.Toolset })
+		if !ok {
+			t.Fatal("gating toolset has no Unwrap() tool.Toolset method")
+		}
+		if got := u.Unwrap(); got != base {
+			t.Errorf("Unwrap() = %v, want the base toolset %v", got, base)
+		}
+	})
 }

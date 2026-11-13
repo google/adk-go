@@ -161,17 +161,22 @@ func (r *Runner) runNode(
 		})
 		invocationCtx = ictx
 	}
+
+	// Plugin lifecycle: after_run is deferred before the user message is
+	// yielded, so a caller that stops ranging on that message still gets it,
+	// as in adk-python, whose finally covers the user-message yield.
+	pluginManager := r.pluginManager
+	if pluginManager != nil {
+		defer pluginManager.RunAfterRunCallback(ictx)
+	}
 	if opts.yieldUserMessage && userEvent != nil {
 		if !yield(userEvent, nil) {
 			return
 		}
 	}
 
-	// Plugin lifecycle: defer after_run, run before_run, honor early exit.
-	pluginManager := r.pluginManager
+	// Run before_run and honor its early exit.
 	if pluginManager != nil {
-		defer pluginManager.RunAfterRunCallback(ictx)
-
 		if event, err := r.runBeforeRunCallback(ictx, false); event != nil || err != nil {
 			yield(event, err)
 			return

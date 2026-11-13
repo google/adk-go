@@ -25,6 +25,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool/toolutils"
 )
@@ -48,6 +49,17 @@ type Tool interface {
 
 // Toolset is an interface for a collection of tools. It allows grouping
 // related tools together and providing them to an agent.
+//
+// A toolset that holds a resource, such as a network connection, implements
+// [io.Closer]. When the application calls Close on the runner that runs the
+// toolset's agent (Runner.Close in package runner), the runner calls Close on
+// every such toolset reachable from the runner's root, once, one toolset
+// after another, and gives each ten seconds. Close must release the resource
+// and return, may be called more than once, and may be called while Tools
+// runs. A toolset that wraps another toolset passes Close through to it, as
+// [FilterToolset] and [WithConfirmation] do, and has an Unwrap() Toolset
+// method that returns the wrapped toolset, so that a toolset shared by
+// several wrappers is closed once.
 type Toolset interface {
 	// Name returns the name of the toolset.
 	Name() string
@@ -79,7 +91,8 @@ func AllowedToolsPredicate(allowedTools []string) Predicate {
 }
 
 // FilterToolset returns a Toolset that filters the tools in the given Toolset
-// using the given predicate.
+// using the given predicate. Close on the returned toolset closes toolset when
+// that implements [io.Closer].
 func FilterToolset(toolset Toolset, predicate Predicate) Toolset {
 	if toolset == nil {
 		panic("toolset must not be nil")
@@ -117,6 +130,10 @@ func (f *filteredToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
 	return filtered, nil
 }
 
+func (f *filteredToolset) Close() error { return utils.CloseIfCloser(f.toolset) }
+
+func (f *filteredToolset) Unwrap() Toolset { return f.toolset }
+
 // ConfirmationProvider defines a function that dynamically determines whether
 // a specific tool execution requires user confirmation.
 //
@@ -135,6 +152,8 @@ type ConfirmationProvider func(toolName string, toolInput any) bool
 // itself, such as the model-side built-ins in tool/geminitool, cannot be
 // confirmed and are included in the returned Toolset without modification.
 //
+// Close on the returned toolset closes ts when that implements [io.Closer].
+//
 // EXPERIMENTAL: WithConfirmation is experimental and not currently in scope for the v1.0 API.
 func WithConfirmation(ts Toolset, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) Toolset {
 	return &confirmationToolset{
@@ -151,6 +170,10 @@ type confirmationToolset struct {
 }
 
 func (c *confirmationToolset) Name() string { return c.toolset.Name() }
+
+func (c *confirmationToolset) Close() error { return utils.CloseIfCloser(c.toolset) }
+
+func (c *confirmationToolset) Unwrap() Toolset { return c.toolset }
 
 func (c *confirmationToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
 	tools, err := c.toolset.Tools(ctx)
