@@ -1122,7 +1122,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			isToolCallOrResp := false
 			if event.LLMResponse.Content != nil {
 				for _, part := range event.LLMResponse.Content.Parts {
-					if part.FunctionCall != nil || part.FunctionResponse != nil {
+					if part != nil && (part.FunctionCall != nil || part.FunctionResponse != nil) {
 						isToolCallOrResp = true
 						break
 					}
@@ -1236,7 +1236,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 	artifactsService := ctx.Artifacts()
 	if artifactsService != nil && saveInputBlobsAsArtifacts {
 		for i, part := range msg.Parts {
-			if part.InlineData == nil {
+			if part == nil || part.InlineData == nil {
 				continue
 			}
 			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
@@ -1386,7 +1386,7 @@ func hasInlineData(event *session.Event) bool {
 		return false
 	}
 	for _, part := range event.LLMResponse.Content.Parts {
-		if part.InlineData != nil {
+		if part != nil && part.InlineData != nil {
 			return true
 		}
 	}
