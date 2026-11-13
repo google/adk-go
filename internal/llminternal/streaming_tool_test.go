@@ -412,6 +412,54 @@ func TestHandleFunctionCalls_NoArgsReachLiveStreamingToolAsEmptyMap(t *testing.T
 	}
 }
 
+// argEditingStreamTool sets input_str in the args RunStream is called with and
+// streams the new value.
+type argEditingStreamTool struct{}
+
+func (argEditingStreamTool) Name() string        { return "edit_stream" }
+func (argEditingStreamTool) Description() string { return "edits its args" }
+func (argEditingStreamTool) IsLongRunning() bool { return false }
+
+func (t argEditingStreamTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.Name(), Description: t.Description()}
+}
+
+func (argEditingStreamTool) RunStream(_ agent.Context, args any) iter.Seq2[string, error] {
+	args.(map[string]any)["input_str"] = "modified_input"
+	return func(yield func(string, error) bool) { yield("modified_input", nil) }
+}
+
+// A live streaming tool's edits to its args do not reach the function call
+// event.
+func TestHandleFunctionCalls_LiveStreamingToolArgEditsDoNotReachTheCallEvent(t *testing.T) {
+	sent := make(chan struct{}, 1)
+	liveSess := &mockLiveSession{sendFunc: func(agent.LiveRequest) error {
+		sent <- struct{}{}
+		return nil
+	}}
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		InvocationID: "inv_1",
+		Agent:        &mockAgent{name: "agent_1"},
+	})
+	st := argEditingStreamTool{}
+	call := &genai.FunctionCall{ID: "call_1", Name: st.Name(), Args: map[string]any{"input_str": "original"}}
+	resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}
+
+	_, err := (&Flow{}).handleFunctionCalls(invCtx, map[string]tool.Tool{st.Name(): st}, resp, nil, liveSess)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-sent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streaming tool sent no result")
+	}
+	if diff := cmp.Diff(map[string]any{"input_str": "original"}, call.Args); diff != "" {
+		t.Errorf("function call args mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // noRunTool is a tool that is neither a function tool nor a streaming one.
 type noRunTool struct{}
 

@@ -580,6 +580,13 @@ func TestHandleFunctionCalls_CallbackArgEditsDoNotReachTheCallEvent(t *testing.T
 			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
 			wantCallArgs: map[string]any{"input_str": "original"},
 		},
+		{
+			name:         "streaming tool edits its arguments",
+			toolName:     "edit_stream",
+			callArgs:     map[string]any{"input_str": "original"},
+			wantResponse: map[string]any{"result": "modified_input"},
+			wantCallArgs: map[string]any{"input_str": "original"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &Flow{}
@@ -591,7 +598,7 @@ func TestHandleFunctionCalls_CallbackArgEditsDoNotReachTheCallEvent(t *testing.T
 			}
 			call := &genai.FunctionCall{ID: "call_1", Name: tc.toolName, Args: tc.callArgs}
 			resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}
-			toolsDict := map[string]tool.Tool{"echo": echoTool, "plain": &fakeTool{name: "plain"}}
+			toolsDict := map[string]tool.Tool{"echo": echoTool, "plain": &fakeTool{name: "plain"}, "edit_stream": argEditingStreamTool{}}
 			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 				InvocationID: "inv_1",
 				Agent:        &mockAgent{name: "agent_1"},
