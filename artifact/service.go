@@ -226,13 +226,17 @@ func (req *SaveRequest) validate(allowRef bool) error {
 	}
 
 	// Validate that FileName doesn't contain path separators
-	if err := validateFileName(req.FileName); err != nil {
+	if err := ValidateFileName(req.FileName); err != nil {
 		return err
 	}
 	return nil
 }
 
-func validateFileName(name string) error {
+// ValidateFileName reports whether name is usable as an artifact file name:
+// it returns an error wrapping [ErrInputValidation] when name contains a
+// path separator ("/" or "\") and nil otherwise. The error text does not
+// contain name.
+func ValidateFileName(name string) error {
 	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
 		return invalidInput("invalid name: filename cannot contain path separators")
 	}
@@ -265,7 +269,7 @@ func (req *LoadRequest) Validate() error {
 	}
 
 	// Validate that FileName doesn't contain path separators
-	if err := validateFileName(req.FileName); err != nil {
+	if err := ValidateFileName(req.FileName); err != nil {
 		return err
 	}
 
@@ -299,7 +303,7 @@ func (req *DeleteRequest) Validate() error {
 	}
 
 	// Validate that FileName doesn't contain path separators
-	if err := validateFileName(req.FileName); err != nil {
+	if err := ValidateFileName(req.FileName); err != nil {
 		return err
 	}
 
@@ -367,7 +371,7 @@ func (req *VersionsRequest) Validate() error {
 	}
 
 	// Validate that FileName doesn't contain path separators
-	if err := validateFileName(req.FileName); err != nil {
+	if err := ValidateFileName(req.FileName); err != nil {
 		return err
 	}
 
@@ -425,7 +429,7 @@ func (req *GetArtifactVersionRequest) Validate() error {
 	}
 
 	// Validate that FileName doesn't contain path separators
-	if err := validateFileName(req.FileName); err != nil {
+	if err := ValidateFileName(req.FileName); err != nil {
 		return err
 	}
 

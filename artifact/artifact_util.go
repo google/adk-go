@@ -113,7 +113,7 @@ func parseArtifactURI(uri string) (parsedArtifactURI, bool) {
 // at the end of the string, so a file name containing "/" round-trips through
 // parseArtifactURI even though SaveRequest.Validate rejects a path separator in
 // a file name. A name containing a newline does not round-trip, because "."
-// does not match "\n", although validateFileName accepts such a name.
+// does not match "\n", although ValidateFileName accepts such a name.
 func buildArtifactURI(appName, userID, sessionID, fileName string, version int64) string {
 	return BuildArtifactURI(appName, userID, sessionID, fileName, version)
 }
