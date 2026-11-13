@@ -16,6 +16,7 @@ package llminternal
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -191,6 +192,67 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 			t.Error("set_model_response tool should NOT be added when native support is available")
 		}
 	})
+}
+
+func TestOutputSchemaRequestProcessor_SchemaIsolation(t *testing.T) {
+	schema := &genai.Schema{
+		Type:       genai.TypeObject,
+		Properties: map[string]*genai.Schema{"answer": {Type: genai.TypeString}},
+	}
+	base := utils.Must(agent.New(agent.Config{Name: "SchemaAgent"}))
+	a := &mockLLMAgent{Agent: base, s: &State{
+		Model: &mockLLM{name: "gemini-2.5-flash"}, OutputSchema: schema,
+		Tools: []tool.Tool{&mockTool{name: "other_tool"}},
+	}}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: a})
+	requests := []*model.LLMRequest{{}, {}}
+	for _, req := range requests {
+		for _, err := range outputSchemaRequestProcessor(ctx, req, &Flow{}) {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	first := requests[0].Config.Tools[0].FunctionDeclarations[0].ParametersJsonSchema.(*genai.Schema)
+	first.Properties["answer"].Type = genai.TypeNumber
+	first.Properties["extra"] = &genai.Schema{Type: genai.TypeBoolean}
+	for name, got := range map[string]*genai.Schema{
+		"agent":         schema,
+		"other request": requests[1].Config.Tools[0].FunctionDeclarations[0].ParametersJsonSchema.(*genai.Schema),
+	} {
+		if got.Properties["answer"].Type != genai.TypeString || len(got.Properties) != 1 {
+			t.Errorf("request mutation changed %s schema", name)
+		}
+	}
+	requestTool := requests[0].Tools["set_model_response"].(*setModelResponseTool)
+	if _, err := requestTool.Run(nil, map[string]any{"answer": 42.0}); err != nil {
+		t.Fatal("request tool did not validate against its request schema")
+	}
+}
+
+func TestOutputSchemaRequestProcessor_SchemaCloneError(t *testing.T) {
+	schema := &genai.Schema{Type: genai.TypeArray}
+	schema.Items = schema
+	base := utils.Must(agent.New(agent.Config{Name: "SchemaAgent"}))
+	a := &mockLLMAgent{Agent: base, s: &State{
+		Model: &mockLLM{name: "gemini-2.5-flash"}, OutputSchema: schema,
+		Tools: []tool.Tool{&mockTool{name: "other_tool"}},
+	}}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: a})
+	req := &model.LLMRequest{}
+	errorsSeen := 0
+	for ev, err := range outputSchemaRequestProcessor(ctx, req, &Flow{}) {
+		if ev != nil || !errors.Is(err, errCloneDepth) {
+			t.Fatal("processor did not return the expected clone error")
+		}
+		errorsSeen++
+	}
+	if errorsSeen != 1 {
+		t.Errorf("processor returned %d errors, want one", errorsSeen)
+	}
+	if req.Config != nil || len(req.Tools) != 0 {
+		t.Error("processor modified the request after clone failure")
+	}
 }
 
 func TestCreateFinalModelResponseEvent(t *testing.T) {
