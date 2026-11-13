@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -992,8 +993,19 @@ func TestInMemoryService_AppendEvent_IgnoresRedeliveredEvent(t *testing.T) {
 			redeliver: func(e *session.Event) *session.Event { return e },
 		},
 		{
-			// The service compares against its own copy of the stored event,
-			// which a change to the caller's event does not reach.
+			// temp: keys are not stored, so they do not tell two events apart.
+			name:  "copy with another temp value",
+			delta: map[string]any{"temp:scratch": "x", "counter": 1},
+			redeliver: func(e *session.Event) *session.Event {
+				c := *e
+				c.Actions.StateDelta = map[string]any{"temp:scratch": "y", "counter": 1}
+				return &c
+			},
+		},
+		{
+			// The service compares against the encoding it made of the event
+			// at append time, which a later change to the caller's
+			// StateDelta does not reach.
 			name:  "equal copy after the caller changed its event",
 			delta: map[string]any{"counter": 1},
 			redeliver: func(e *session.Event) *session.Event {
@@ -1126,5 +1138,195 @@ func TestInMemoryService_AppendEvent_KeepsDistinctEventWithSameID(t *testing.T) 
 	}
 	if v, err := got.Session.State().Get("k"); err != nil || v != "second" {
 		t.Errorf("State().Get(%q) = %v, %v; want %q, nil", "k", v, err, "second")
+	}
+}
+
+func TestInMemoryService_Get_NotFoundReportsTrimmedID(t *testing.T) {
+	s := session.InMemoryService()
+
+	_, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: " missing\n"})
+	if !errors.Is(err, session.ErrNotFound) {
+		t.Fatalf("Get() error = %v, want %v", err, session.ErrNotFound)
+	}
+	if got, want := err.Error(), `session not found: "missing"`; got != want {
+		t.Errorf("Get() error = %q, want %q", got, want)
+	}
+}
+
+// Get hands out the service's stored events, and a caller may write into
+// their maps. A retried append must not read them, or the two race.
+func TestInMemoryService_AppendEvent_RetryDoesNotReadStoredEvent(t *testing.T) {
+	ctx := t.Context()
+	s := session.InMemoryService()
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	ts := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
+	newEvent := func() *session.Event {
+		return &session.Event{ID: "event1", Author: "user", Timestamp: ts, Actions: session.EventActions{StateDelta: map[string]any{"k": 1}}}
+	}
+	if err := s.AppendEvent(ctx, created.Session, newEvent()); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	stored := got.Session.Events().At(0)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 100 {
+			stored.Actions.StateDelta["w"] = i
+		}
+	}()
+	for range 100 {
+		if err := s.AppendEvent(ctx, created.Session, newEvent()); err != nil {
+			t.Errorf("AppendEvent() retry error = %v", err)
+		}
+	}
+	<-done
+
+	got, err = s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if n := got.Session.Events().Len(); n != 1 {
+		t.Errorf("stored session holds %d events, want 1", n)
+	}
+}
+
+func TestInMemoryService_AppendEvent_RedeliveryLeavesStateAndUpdateTime(t *testing.T) {
+	ctx := t.Context()
+	s := session.InMemoryService()
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	ts := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
+	e1 := &session.Event{ID: "event1", Author: "user", Timestamp: ts, Actions: session.EventActions{StateDelta: map[string]any{"counter": 1}}}
+	e2 := &session.Event{ID: "event2", Author: "agent", Timestamp: ts.Add(time.Hour), Actions: session.EventActions{StateDelta: map[string]any{"counter": 2}}}
+	retry := *e1
+	retry.Actions.StateDelta = map[string]any{"counter": 1}
+
+	for _, event := range []*session.Event{e1, e2, &retry} {
+		if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+			t.Fatalf("AppendEvent(%s) error = %v", event.ID, err)
+		}
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if v, err := got.Session.State().Get("counter"); err != nil || v != 2 {
+		t.Errorf("State().Get(%q) = %v, %v; want 2, nil", "counter", v, err)
+	}
+	if got, want := got.Session.LastUpdateTime(), ts.Add(time.Hour); !got.Equal(want) {
+		t.Errorf("LastUpdateTime() = %v, want %v", got, want)
+	}
+}
+
+// The comparison is by instant, so a copy of the timestamp that lost its
+// monotonic reading or moved to another location is the same event.
+func TestInMemoryService_AppendEvent_IgnoresRedeliveryOfSameInstant(t *testing.T) {
+	tests := []struct {
+		name    string
+		convert func(time.Time) time.Time
+	}{
+		{
+			name:    "monotonic reading dropped",
+			convert: func(ts time.Time) time.Time { return ts.Round(0) },
+		},
+		{
+			name:    "another location",
+			convert: func(ts time.Time) time.Time { return ts.In(time.FixedZone("UTC+1", 3600)) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			s := session.InMemoryService()
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			event := &session.Event{ID: "event1", Author: "user", Timestamp: time.Now()}
+			retry := *event
+			retry.Timestamp = tt.convert(event.Timestamp)
+
+			for _, e := range []*session.Event{event, &retry} {
+				if err := s.AppendEvent(ctx, created.Session, e); err != nil {
+					t.Fatalf("AppendEvent() error = %v", err)
+				}
+			}
+
+			got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if n := got.Session.Events().Len(); n != 1 {
+				t.Errorf("stored session holds %d events, want 1", n)
+			}
+		})
+	}
+}
+
+func TestInMemoryService_AppendEvent_KeepsEventChangedInPlace(t *testing.T) {
+	ctx := t.Context()
+	s := session.InMemoryService()
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	event := &session.Event{ID: "event1", Author: "agent", Timestamp: time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)}
+	event.Content = genai.NewContentFromText("first", genai.RoleModel)
+
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+	event.Content.Parts[0].Text = "second"
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent() after the change error = %v", err)
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if n := got.Session.Events().Len(); n != 2 {
+		t.Errorf("stored session holds %d events, want 2", n)
+	}
+}
+
+// An event JSON cannot encode is never recognized as a re-delivery, and it
+// becomes the latest event with its ID, so an equal copy of the event before
+// it is appended too.
+func TestInMemoryService_AppendEvent_KeepsEventThatCannotBeEncoded(t *testing.T) {
+	ctx := t.Context()
+	s := session.InMemoryService()
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	ts := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
+	first := &session.Event{ID: "event1", Author: "user", Timestamp: ts}
+	unencodable := &session.Event{ID: "event1", Author: "user", Timestamp: ts, Actions: session.EventActions{StateDelta: map[string]any{"ratio": math.NaN()}}}
+	copyOfFirst := *first
+
+	for _, event := range []*session.Event{first, unencodable, unencodable, &copyOfFirst} {
+		if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+			t.Fatalf("AppendEvent() error = %v", err)
+		}
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if n := got.Session.Events().Len(); n != 4 {
+		t.Errorf("stored session holds %d events, want 4", n)
 	}
 }
