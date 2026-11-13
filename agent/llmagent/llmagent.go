@@ -65,10 +65,16 @@ import (
 )
 
 // New is a constructor for LLMAgent. It returns an error if both
-// Config.OutputSchema and Config.OutputJsonSchema are set.
+// Config.OutputSchema and Config.OutputJsonSchema are set. It returns an error
+// wrapping [agent.ErrInvalidAgentConfig] if cfg.GenerateContentConfig sets
+// Tools, SystemInstruction or HTTPOptions.BaseURL; when several are set, the
+// error names the first of them in that order.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.OutputSchema != nil && cfg.OutputJsonSchema != nil {
 		return nil, fmt.Errorf("LlmAgent %q: OutputSchema and OutputJsonSchema are mutually exclusive; set at most one", cfg.Name)
+	}
+	if err := validateGenerateContentConfig(cfg.GenerateContentConfig); err != nil {
+		return nil, err
 	}
 	beforeModelCallbacks := make([]llminternal.BeforeModelCallback, 0, len(cfg.BeforeModelCallbacks))
 	for _, c := range cfg.BeforeModelCallbacks {
@@ -172,6 +178,27 @@ func New(cfg Config) (agent.Agent, error) {
 	return a, nil
 }
 
+// validateGenerateContentConfig refuses the fields of cfg that other agent or
+// model settings own, in the order adk-python checks them
+// (agents/llm_agent.py, validate_generate_content_config). adk-python also
+// refuses ResponseSchema; ADK Go accepts it, because workflow agent nodes read
+// it as the agent's own response format.
+func validateGenerateContentConfig(cfg *genai.GenerateContentConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.Tools) > 0 {
+		return fmt.Errorf("%w: all tools must be set via llmagent.Config.Tools, not via llmagent.Config.GenerateContentConfig.Tools", agent.ErrInvalidAgentConfig)
+	}
+	if cfg.SystemInstruction != nil {
+		return fmt.Errorf("%w: system instruction must be set via llmagent.Config.Instruction, not via llmagent.Config.GenerateContentConfig.SystemInstruction", agent.ErrInvalidAgentConfig)
+	}
+	if cfg.HTTPOptions != nil && cfg.HTTPOptions.BaseURL != "" {
+		return fmt.Errorf("%w: base URL is a transport setting and must be set on the model or its client, not via llmagent.Config.GenerateContentConfig.HTTPOptions.BaseURL", agent.ErrInvalidAgentConfig)
+	}
+	return nil
+}
+
 func installTaskTools(a *llmAgent) error {
 	state := llminternal.Reveal(a)
 
@@ -242,8 +269,25 @@ type Config struct {
 	// GenerateContentConfig is for the additional content generation
 	// configuration.
 	//
-	// NOTE: not all fields are usable, e.g. tools must be configured via
-	// `tools`.
+	// NOTE: not all fields are usable. [New] refuses a config that sets any of
+	// these, with an error wrapping [agent.ErrInvalidAgentConfig]:
+	//   - Tools: set tools in [Config.Tools]. For a *genai.Tool, use
+	//     geminitool.New(name, description, t) or a geminitool built-in such
+	//     as geminitool.GoogleSearch{}.
+	//   - SystemInstruction: set the instruction in [Config.Instruction].
+	//     Instruction is a template, so text with {placeholders} that must
+	//     stay literal belongs in [Config.InstructionProvider] instead.
+	//     A system instruction with non-text parts has no Config field; add
+	//     those parts to req.Config.SystemInstruction in a
+	//     [BeforeModelCallback], creating it when it is nil.
+	//   - HTTPOptions.BaseURL: set the base URL on the model or its client,
+	//     for example in the *genai.ClientConfig given to gemini.NewModel.
+	//     It is refused because a supplied config could send the credentialed
+	//     model call to an arbitrary host. The other HTTPOptions fields are
+	//     accepted.
+	//
+	// [New] checks the config once, when it is called. It keeps the pointer,
+	// so later edits to the config are not checked.
 	//
 	// For example: use this config to adjust model temperature, configure
 	// safety settings, etc.

@@ -140,9 +140,13 @@ type RunConfig struct {
 	// the agent already configures GenerateContentConfig.HTTPOptions,
 	// HTTPOptions.Headers are merged into the agent's headers by canonical
 	// HTTP header name (with HTTPOptions winning on conflict), and non-nil
-	// Timeout, RetryOptions, and ExtraBody replace the agent's values;
-	// configuration-time fields (BaseURL, APIVersion, BaseURLResourceScope,
-	// ExtrasRequestProvider) on the agent's HTTPOptions are kept.
+	// Timeout, RetryOptions, and ExtraBody replace the agent's values; the
+	// configuration-time fields (APIVersion, BaseURLResourceScope,
+	// ExtrasRequestProvider) on the agent's HTTPOptions are kept, and
+	// the BaseURL and configuration-time fields of HTTPOptions are dropped.
+	// A BaseURL set here therefore takes effect only for an agent without
+	// GenerateContentConfig.HTTPOptions. An agent sets no BaseURL of its own:
+	// llmagent.New refuses a GenerateContentConfig whose HTTPOptions sets one.
 	//
 	// Nil (the zero value) leaves each request's HTTPOptions as configured on
 	// the agent. ADK copies HTTPOptions, its Headers and ExtraBody maps (the

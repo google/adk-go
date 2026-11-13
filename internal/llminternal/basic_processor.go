@@ -144,8 +144,10 @@ func runLabelsFor(llm model.LLM, labels *map[string]string) map[string]string {
 // When the agent sets no HTTPOptions, the request gets a copy of runHTTP,
 // BaseURL and APIVersion included. Otherwise only the request-time fields
 // (Headers, Timeout, RetryOptions, ExtraBody) are merged, and the agent's
-// BaseURL and APIVersion stay: adk-python drops runHTTP's BaseURL and
-// APIVersion in that case, and ADK keeps that behavior.
+// APIVersion stays: adk-python drops runHTTP's BaseURL and APIVersion in that
+// case, and ADK keeps that behavior. cfg carries no agent BaseURL to keep,
+// because llmagent.New refuses one; only an edit to the agent's config after
+// New, which nothing checks, can put one there.
 func mergeRunConfigHTTPOptions(cfg *genai.GenerateContentConfig, runHTTP *genai.HTTPOptions) {
 	if cfg.HTTPOptions == nil {
 		cfg.HTTPOptions = clone(runHTTP)
