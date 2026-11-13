@@ -2301,7 +2301,7 @@ func TestViews_AsyncStartupAndCloseLifecycle(t *testing.T) {
 			// garbage before every view.
 			client := newJobCountingBQClient(t, &jobs)
 			bqaap.runner = collectingRunner{inner: bqViewRunner{client: weak.Make(client), projectID: "test-project", datasetID: "test_dataset"}}
-			bqaap.startAsyncViewCreation(ctx, defs, logger.Printf, client)
+			bqaap.startAsyncViewCreation(ctx, defs, logger.Printf, client, nil)
 		}()
 		bqaap.viewsMu.Lock()
 		done := bqaap.asyncViewsDone
@@ -2714,7 +2714,7 @@ func TestBigQueryAgentAnalyticsPlugin_SyncViews(t *testing.T) {
 		if err != nil {
 			t.Fatalf("viewDefinitionsWithDenied: %v", err)
 		}
-		bqaapA.startAsyncViewCreation(ctx, defs, nil, nil)
+		bqaapA.startAsyncViewCreation(ctx, defs, nil, nil, nil)
 		<-bgEntered
 
 		syncErrCh := make(chan error, 1)
@@ -2998,7 +2998,7 @@ func TestBigQueryAgentAnalyticsPlugin_SyncViews(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ViewDefinitions: %v", err)
 		}
-		bqaap.startAsyncViewCreation(ctx, defs, nil, nil)
+		bqaap.startAsyncViewCreation(ctx, defs, nil, nil, nil)
 		bqaap.viewsMu.Lock()
 		bgDone := bqaap.asyncViewsDone
 		bqaap.viewsMu.Unlock()
@@ -3057,7 +3057,7 @@ func TestPluginState_ReleasesViewPassAndRunner(t *testing.T) {
 		t.Fatalf("viewDefinitionsWithDenied() error = %v", err)
 	}
 
-	bqaap.startAsyncViewCreation(context.Background(), defs, nil, nil)
+	bqaap.startAsyncViewCreation(context.Background(), defs, nil, nil, nil)
 	bqaap.viewsMu.Lock()
 	done := bqaap.asyncViewsDone
 	bqaap.viewsMu.Unlock()

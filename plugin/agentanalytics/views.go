@@ -709,9 +709,12 @@ func (s *pluginState) isClosed() bool {
 }
 
 // startAsyncViewCreation runs a view creation pass for defs in the background,
-// logging failures through logf if it is not nil. The pass keeps client
-// reachable until it ends, because the runner refers to it only weakly.
-func (s *pluginState) startAsyncViewCreation(parentCtx context.Context, defs []ViewDefinition, logf func(format string, args ...any), client *bq.Client) {
+// logging failures through logf if it is not nil, and calling onReady,
+// Config.OnSchemaReady, if it is not nil, once the pass has created every
+// view. The pass keeps client reachable until it ends, because the runner
+// refers to it only weakly, and holds onReady, which can refer to the
+// caller's objects, only until it ends.
+func (s *pluginState) startAsyncViewCreation(parentCtx context.Context, defs []ViewDefinition, logf func(format string, args ...any), client *bq.Client, onReady func()) {
 	viewsCtx, viewsCancel := context.WithCancel(context.WithoutCancel(parentCtx))
 	done := make(chan struct{})
 	s.viewsMu.Lock()
@@ -740,7 +743,15 @@ func (s *pluginState) startAsyncViewCreation(parentCtx context.Context, defs []V
 		if s.isClosed() || viewsCtx.Err() != nil {
 			return
 		}
-		_ = syncAnalyticsViews(viewsCtx, runner, defs, logf)
+		if err := syncAnalyticsViews(viewsCtx, runner, defs, logf); err != nil {
+			// A view that failed, or a pass that SyncViews or Close ended,
+			// leaves the schema not ready, as in adk-python.
+			return
+		}
+		if s.isClosed() || viewsCtx.Err() != nil {
+			return
+		}
+		notifySchemaReady(onReady, logf)
 	}()
 }
 
