@@ -4809,7 +4809,11 @@ func TestJSONFormatter_InvalidUTF8(t *testing.T) {
 			}
 
 			got, truncated, err = smartTruncate(map[string]string{"bad\xffkey": "a", "bad\xfekey": "b"}, 100, redact)
-			if wantCollision := `{"bad` + "\uFFFD" + `key":"[REDACTED]"}`; err != nil || string(got) != wantCollision || !truncated {
+			wantCollisionVal := redactedValue
+			if !redact {
+				wantCollisionVal = "[COLLIDING_KEY]"
+			}
+			if wantCollision := `{"bad` + "\uFFFD" + `key":"` + wantCollisionVal + `"}`; err != nil || string(got) != wantCollision || !truncated {
 				t.Errorf("smartTruncate(colliding bad map keys, redact=%v) = (%q, %v, %v), want (%q, true, nil)", redact, got, truncated, err, wantCollision)
 			}
 		}
@@ -5094,6 +5098,18 @@ type (
 type countingMarshaler struct{ n uint64 }
 
 func (countingMarshaler) MarshalJSON() ([]byte, error) { return []byte(`"counting"`), nil }
+
+var credsUserinfoMarshalCalled atomic.Bool
+
+// CredsUserinfo is a defined type over url.Userinfo whose MarshalJSON method
+// records that it was called and formats the userinfo including any password.
+type CredsUserinfo url.Userinfo
+
+// MarshalJSON implements json.Marshaler for CredsUserinfo.
+func (c CredsUserinfo) MarshalJSON() ([]byte, error) {
+	credsUserinfoMarshalCalled.Store(true)
+	return json.Marshal((*url.Userinfo)(&c).String())
+}
 
 // TestJSONFormatter_CredentialNamedTypes checks that, under redaction, a value
 // of url.Userinfo (or a pointer to it) or of a type named for a credential is
@@ -5417,9 +5433,9 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 		})
 
 		t.Run("map[Token]*self/over_budget", func(t *testing.T) {
-			// Values are circular pointers back to the holder, which charge no
-			// node budget themselves; only charging each whole-redacted entry
-			// stops the loop at maxSanitizeNodes.
+			// Values are skipped without walking when the credential key
+			// redacts whole; charging both key and skipped value stops the loop
+			// at maxSanitizeNodes.
 			type selfHolder struct {
 				M map[Token]*selfHolder
 			}
@@ -5776,7 +5792,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			}{nil, "example.com"}, `{"Host":"example.com","Userinfo":"[REDACTED]"}`, true, `{"Host":"example.com"}`, false},
 			{"map key", map[url.Userinfo]string{*u: secret}, `{"[REDACTED]":"[REDACTED]"}`, true, `{"[UNSUPPORTED_KEY]":"` + secret + `"}`, true},
 			{"nil pointer map key", map[*url.Userinfo]string{nil: secret}, `{"[REDACTED]":"[REDACTED]"}`, true, `{"[UNSUPPORTED_KEY]":"` + secret + `"}`, true},
-			{"defined type over url.Userinfo", definedUserinfo(*u), `{}`, false, `{}`, false},
+			{"defined type over url.Userinfo", definedUserinfo(*u), `"[REDACTED]"`, true, `{}`, false},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
 				got, truncated, err := SmartTruncate(tt.in, 1000)
@@ -6143,4 +6159,663 @@ func TestJSONFormatter_ConcurrentCredentialStructNoRace(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestJSONFormatter_EmbeddedRedactsWholeNoShadow(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET_4321"
+	u := url.UserPassword("alice", secret)
+	var marshalerCalled atomic.Bool
+	type RefreshToken struct {
+		Raw string
+		credentialTextKey
+	}
+	type MiddleText struct {
+		RefreshToken
+	}
+	type InnerUser struct {
+		url.Userinfo
+	}
+	type SiblingDisplay struct {
+		Display string `json:"Userinfo"`
+	}
+	mt := MiddleText{RefreshToken: RefreshToken{Raw: secret, credentialTextKey: credentialTextKey{&marshalerCalled, secret}}}
+
+	for _, tt := range []struct {
+		name         string
+		in           any
+		want         string
+		wantTrunc    bool
+		wantOff      string
+		wantOffTrunc bool
+	}{
+		{
+			name: "embedded Userinfo before explicit json Userinfo",
+			in: struct {
+				url.Userinfo
+				Display string `json:"Userinfo"`
+			}{*u, "public-label"},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "explicit json Userinfo before embedded Userinfo",
+			in: struct {
+				Display string `json:"Userinfo"`
+				url.Userinfo
+			}{"public-label", *u},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "embedded pointer Userinfo before explicit json Userinfo",
+			in: struct {
+				*url.Userinfo
+				Display string `json:"Userinfo"`
+			}{nil, "public-label"},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "non-colliding embedded Userinfo emits redacted sentinel",
+			in: struct {
+				url.Userinfo
+				Name string
+			}{*u, "alice"},
+			want:      `{"Name":"alice","Userinfo":"[REDACTED]"}`,
+			wantTrunc: true,
+			wantOff:   `{"Name":"alice"}`,
+		},
+		{
+			name: "embedded Userinfo before empty omitempty json Userinfo",
+			in: struct {
+				url.Userinfo
+				Display string `json:"Userinfo,omitempty"`
+			}{*u, ""},
+			want:      `{}`,
+			wantTrunc: true,
+			wantOff:   `{}`,
+		},
+		{
+			name: "empty omitempty json Userinfo before embedded Userinfo",
+			in: struct {
+				Display string `json:"Userinfo,omitempty"`
+				url.Userinfo
+			}{"", *u},
+			want:      `{}`,
+			wantTrunc: true,
+			wantOff:   `{}`,
+		},
+		{
+			name: "deeper embedded Userinfo before shallower explicit json Userinfo",
+			in: struct {
+				InnerUser
+				Display string `json:"Userinfo"`
+			}{InnerUser{*u}, "public-label"},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "shallower explicit json Userinfo before deeper embedded Userinfo",
+			in: struct {
+				Display string `json:"Userinfo"`
+				InnerUser
+			}{"public-label", InnerUser{*u}},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "shallower embedded Userinfo before deeper promoted json Userinfo",
+			in: struct {
+				url.Userinfo
+				SiblingDisplay
+			}{*u, SiblingDisplay{Display: "public-label"}},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "deeper promoted json Userinfo before shallower embedded Userinfo",
+			in: struct {
+				SiblingDisplay
+				url.Userinfo
+			}{SiblingDisplay{Display: "public-label"}, *u},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "embedded shadowed credential marshaler before explicit colliding field",
+			in: struct {
+				MiddleText
+				MarshalText int
+				Display     string `json:"MiddleText"`
+			}{mt, 1, "public-label"},
+			want:      `{"MarshalText":1,"MiddleText":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"MarshalText":1,"MiddleText":"public-label","Raw":"` + secret + `"}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+			}
+			if marshalerCalled.Load() {
+				t.Errorf("SmartTruncate(%T) called embedded credential marshaler", tt.in)
+			}
+			gotOff, truncOff, err := smartTruncate(tt.in, 1000, false)
+			if err != nil || string(gotOff) != tt.wantOff || truncOff != tt.wantOffTrunc {
+				t.Errorf("smartTruncate(%T, redact off) = (%s, %v, %v), want (%s, %v, nil)", tt.in, gotOff, truncOff, err, tt.wantOff, tt.wantOffTrunc)
+			}
+		})
+	}
+
+	// An embedded redactsWhole field still charges one node immediately.
+	s := sanitizer{
+		maxLength: 100,
+		redact:    true,
+		budget:    &nodeBudget{remaining: 1},
+		visiting:  make(map[visitKey]struct{}),
+	}
+	out, truncated := s.walk(reflect.ValueOf(struct {
+		url.Userinfo
+		Display string `json:"Userinfo"`
+	}{*u, "public-label"}), 0)
+	got, err := json.Marshal(out)
+	if want := `{"[SANITIZE_BUDGET_EXCEEDED]":"[SANITIZE_BUDGET_EXCEEDED]"}`; err != nil || string(got) != want || !truncated {
+		t.Errorf("walk(embedded Userinfo with budget=1) = (%s, %v, %v), want (%s, true, nil)", got, truncated, err, want)
+	}
+}
+
+func TestJSONFormatter_CredentialByteSlice(t *testing.T) {
+	type (
+		Token      byte
+		Passphrase []byte
+		MyByte     byte
+	)
+	checkCredentialNamed(t, true, reflect.TypeFor[Token](), reflect.TypeFor[Passphrase]())
+	checkCredentialNamed(t, false, reflect.TypeFor[MyByte]())
+
+	for _, tt := range []struct {
+		name         string
+		in           any
+		want         string
+		wantTrunc    bool
+		wantOff      string
+		wantOffTrunc bool
+	}{
+		{
+			name:      "slice of credential-named byte type redacts elements",
+			in:        []Token("jwt"),
+			want:      `["[REDACTED]","[REDACTED]","[REDACTED]"]`,
+			wantTrunc: true,
+			wantOff:   `"jwt"`,
+		},
+		{
+			name:      "array of credential-named byte type matches slice",
+			in:        [3]Token{'j', 'w', 't'},
+			want:      `["[REDACTED]","[REDACTED]","[REDACTED]"]`,
+			wantTrunc: true,
+			wantOff:   `[106,119,116]`,
+		},
+		{
+			name:    "empty slice of credential-named byte type",
+			in:      []Token{},
+			want:    `[]`,
+			wantOff: `""`,
+		},
+		{
+			name:    "nil slice of credential-named byte type",
+			in:      []Token(nil),
+			want:    `null`,
+			wantOff: `null`,
+		},
+		{
+			name:      "credential-named byte slice type redacts whole",
+			in:        Passphrase("jwt"),
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `"jwt"`,
+		},
+		{
+			name:    "plain byte slice uses bytes shortcut",
+			in:      []byte("kept"),
+			want:    `"kept"`,
+			wantOff: `"kept"`,
+		},
+		{
+			name:    "neutral defined byte slice uses bytes shortcut",
+			in:      []MyByte("kept"),
+			want:    `"kept"`,
+			wantOff: `"kept"`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+			}
+			gotOff, truncOff, err := smartTruncate(tt.in, 1000, false)
+			if err != nil || string(gotOff) != tt.wantOff || truncOff != tt.wantOffTrunc {
+				t.Errorf("smartTruncate(%T, redact off) = (%s, %v, %v), want (%s, %v, nil)", tt.in, gotOff, truncOff, err, tt.wantOff, tt.wantOffTrunc)
+			}
+		})
+	}
+
+	gotBudget, truncBudget, err := SmartTruncate(make([]Token, maxSanitizeNodes+10), 100)
+	if err != nil || !truncBudget {
+		t.Fatalf("SmartTruncate([]Token over budget) = (truncated %v, %v), want truncated", truncBudget, err)
+	}
+	var parsed []any
+	if err := json.Unmarshal(gotBudget, &parsed); err != nil {
+		t.Fatalf("json.Unmarshal([]Token over budget) error: %v", err)
+	}
+	if len(parsed) != maxSanitizeNodes || parsed[len(parsed)-1] != sanitizeBudgetPlaceholder {
+		t.Errorf("SmartTruncate([]Token over budget) wrote %d items ending in %v, want %d ending in %s", len(parsed), parsed[len(parsed)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
+	}
+}
+
+func TestJSONFormatter_PlainCredentialStructMapKeys(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET_7531"
+	type (
+		Secret struct {
+			ID string
+		}
+		LabelStruct struct {
+			ID string
+		}
+	)
+	checkCredentialNamed(t, true, reflect.TypeFor[Secret](), reflect.TypeFor[codeVerifier[int]]())
+	checkCredentialNamed(t, false, reflect.TypeFor[LabelStruct](), reflect.TypeFor[selfPtr](), reflect.TypeFor[mutPtrA]())
+
+	var valCalled atomic.Bool
+	valProbe := labelValueProbe{called: &valCalled, raw: secret}
+	sec := Secret{ID: "key-id"}
+	secPtr := &sec
+
+	for _, tt := range []struct {
+		name string
+		in   any
+	}{
+		{"plain credential struct key", map[Secret]labelValueProbe{sec: valProbe}},
+		{"pointer to plain credential struct key", map[*Secret]labelValueProbe{&sec: valProbe}},
+		{"nil pointer to plain credential struct key", map[*Secret]labelValueProbe{nil: valProbe}},
+		{"double pointer to plain credential struct key", map[**Secret]labelValueProbe{&secPtr: valProbe}},
+		{"nil double pointer to plain credential struct key", map[**Secret]labelValueProbe{nil: valProbe}},
+		{"plain credential struct key in interface", map[any]labelValueProbe{sec: valProbe}},
+		{"nil pointer to plain credential struct key in interface", map[any]labelValueProbe{(*Secret)(nil): valProbe}},
+		{"generic plain credential struct key", map[codeVerifier[int]]labelValueProbe{{ID: "k", raw: 1}: valProbe}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			valCalled.Store(false)
+			got, truncated, err := SmartTruncate(tt.in, 1000)
+			if want := `{"[REDACTED]":"[REDACTED]"}`; err != nil || string(got) != want || !truncated {
+				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, true, nil)", tt.in, got, truncated, err, want)
+			}
+			if valCalled.Load() {
+				t.Errorf("SmartTruncate(%T) called MarshalJSON on map value under plain credential struct key", tt.in)
+			}
+		})
+	}
+
+	// Budget accounting charges 2 nodes (key + skipped value) for a plain credential struct map key.
+	s2 := sanitizer{
+		maxLength: 100,
+		redact:    true,
+		budget:    &nodeBudget{remaining: 2},
+		visiting:  make(map[visitKey]struct{}),
+	}
+	out2, trunc2 := s2.walk(reflect.ValueOf(map[Secret]string{sec: "v"}), 0)
+	got2, err := json.Marshal(out2)
+	if want2 := `{"[SANITIZE_BUDGET_EXCEEDED]":"[SANITIZE_BUDGET_EXCEEDED]"}`; err != nil || string(got2) != want2 || !trunc2 || s2.budget.remaining != 0 {
+		t.Errorf("walk(map[Secret]string, budget=2) = (%s, %v, remaining=%d, %v), want (%s, true, 0, nil)", got2, trunc2, s2.budget.remaining, err, want2)
+	}
+	s3 := sanitizer{
+		maxLength: 100,
+		redact:    true,
+		budget:    &nodeBudget{remaining: 3},
+		visiting:  make(map[visitKey]struct{}),
+	}
+	out3, trunc3 := s3.walk(reflect.ValueOf(map[Secret]string{sec: "v"}), 0)
+	got3, err := json.Marshal(out3)
+	if want3 := `{"[REDACTED]":"[REDACTED]"}`; err != nil || string(got3) != want3 || !trunc3 || s3.budget.remaining != 0 {
+		t.Errorf("walk(map[Secret]string, budget=3) = (%s, %v, remaining=%d, %v), want (%s, true, 0, nil)", got3, trunc3, s3.budget.remaining, err, want3)
+	}
+
+	// Non-credential plain struct keys and recursive pointer keys remain [UNSUPPORTED_KEY] and walk values.
+	var neutralCalled atomic.Bool
+	neutralProbe := labelValueProbe{called: &neutralCalled, raw: "kept"}
+	gotNeutral, truncNeutral, err := SmartTruncate(map[LabelStruct]labelValueProbe{{ID: "k"}: neutralProbe}, 1000)
+	if want := `{"[UNSUPPORTED_KEY]":"kept"}`; err != nil || string(gotNeutral) != want || !truncNeutral || !neutralCalled.Load() {
+		t.Errorf("SmartTruncate(map[LabelStruct]labelValueProbe) = (%s, %v, called=%v, %v), want (%s, true, true, nil)", gotNeutral, truncNeutral, neutralCalled.Load(), err, want)
+	}
+	gotRec, truncRec, err := SmartTruncate(map[selfPtr]string{nil: "kept"}, 1000)
+	if want := `{"[UNSUPPORTED_KEY]":"kept"}`; err != nil || string(gotRec) != want || !truncRec {
+		t.Errorf("SmartTruncate(map[selfPtr]string) = (%s, %v, %v), want (%s, true, nil)", gotRec, truncRec, err, want)
+	}
+	neutralCalled.Store(false)
+	gotOff, truncOff, err := smartTruncate(map[Secret]labelValueProbe{sec: neutralProbe}, 1000, false)
+	if want := `{"[UNSUPPORTED_KEY]":"kept"}`; err != nil || string(gotOff) != want || !truncOff || !neutralCalled.Load() {
+		t.Errorf("smartTruncate(map[Secret]labelValueProbe, redact off) = (%s, %v, called=%v, %v), want (%s, true, true, nil)", gotOff, truncOff, neutralCalled.Load(), err, want)
+	}
+}
+
+func TestJSONFormatter_DefinedUserinfoTypes(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET_6420"
+	type NotUserinfo struct {
+		username    string
+		password    string
+		passwordSet bool
+	}
+	type OuterPromoted struct {
+		CredsUserinfo
+	}
+	checkCredentialNamed(t, false, reflect.TypeFor[CredsUserinfo](), reflect.TypeFor[NotUserinfo](), reflect.TypeFor[OuterPromoted]())
+
+	if redactsWhole(reflect.TypeFor[NotUserinfo]()) {
+		t.Fatalf("redactsWhole(NotUserinfo) = true, want false")
+	}
+	notU := NotUserinfo{username: "alice", password: secret, passwordSet: true}
+	if notU.username != "alice" || notU.password != secret || !notU.passwordSet {
+		t.Fatalf("unexpected NotUserinfo fixture: %+v", notU)
+	}
+	if got, truncated, err := SmartTruncate(notU, 1000); err != nil || string(got) != `{}` || truncated {
+		t.Errorf("SmartTruncate(NotUserinfo) = (%s, %v, %v), want ({}, false, nil)", got, truncated, err)
+	}
+
+	u := url.UserPassword("alice", secret)
+	cu := CredsUserinfo(*u)
+	cuPtr := &cu
+	var valCalled atomic.Bool
+	valProbe := labelValueProbe{called: &valCalled, raw: secret}
+
+	for _, tt := range []struct {
+		name         string
+		in           any
+		want         string
+		wantTrunc    bool
+		wantOff      string
+		wantOffTrunc bool
+	}{
+		{
+			name:      "value with MarshalJSON",
+			in:        cu,
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `"alice:` + secret + `"`,
+		},
+		{
+			name:      "pointer to defined Userinfo",
+			in:        cuPtr,
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `"alice:` + secret + `"`,
+		},
+		{
+			name:      "nil pointer to defined Userinfo",
+			in:        (*CredsUserinfo)(nil),
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `null`,
+		},
+		{
+			name:      "embedded defined Userinfo promoting MarshalJSON",
+			in:        struct{ CredsUserinfo }{cu},
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `"alice:` + secret + `"`,
+		},
+		{
+			name:      "embedded defined Userinfo promoting MarshalJSON through two levels",
+			in:        struct{ OuterPromoted }{OuterPromoted{cu}},
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `"alice:` + secret + `"`,
+		},
+		{
+			name:      "embedded pointer to defined Userinfo promoting MarshalJSON",
+			in:        struct{ *CredsUserinfo }{cuPtr},
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `"alice:` + secret + `"`,
+		},
+		{
+			name:         "nil embedded pointer to defined Userinfo promoting MarshalJSON",
+			in:           struct{ *CredsUserinfo }{nil},
+			want:         `"[REDACTED]"`,
+			wantTrunc:    true,
+			wantOff:      `"[UNSUPPORTED_OBJECT]"`,
+			wantOffTrunc: true,
+		},
+		{
+			name: "embedded defined Userinfo with shadowed MarshalJSON",
+			in: struct {
+				CredsUserinfo
+				MarshalJSON int
+			}{cu, 1},
+			want:      `{"CredsUserinfo":"[REDACTED]","MarshalJSON":1}`,
+			wantTrunc: true,
+			wantOff:   `{"MarshalJSON":1}`,
+		},
+		{
+			name:         "defined Userinfo map key",
+			in:           map[CredsUserinfo]labelValueProbe{cu: valProbe},
+			want:         `{"[REDACTED]":"[REDACTED]"}`,
+			wantTrunc:    true,
+			wantOff:      `{"[UNSUPPORTED_KEY]":"` + secret + `"}`,
+			wantOffTrunc: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			credsUserinfoMarshalCalled.Store(false)
+			valCalled.Store(false)
+			got, truncated, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+			}
+			if credsUserinfoMarshalCalled.Load() {
+				t.Errorf("SmartTruncate(%T) called CredsUserinfo.MarshalJSON", tt.in)
+			}
+			if valCalled.Load() {
+				t.Errorf("SmartTruncate(%T) called value MarshalJSON under CredsUserinfo map key", tt.in)
+			}
+			gotOff, truncOff, err := smartTruncate(tt.in, 1000, false)
+			if err != nil || string(gotOff) != tt.wantOff || truncOff != tt.wantOffTrunc {
+				t.Errorf("smartTruncate(%T, redact off) = (%s, %v, %v), want (%s, %v, nil)", tt.in, gotOff, truncOff, err, tt.wantOff, tt.wantOffTrunc)
+			}
+		})
+	}
+
+	// omitzero on a struct containing CredsUserinfo does not call IsZero, and
+	// concurrent pointer/mutex updates do not race or invoke MarshalJSON.
+	type omitZeroHolder struct {
+		Ptr   *CredsUserinfo
+		Inner struct {
+			mu sync.Mutex
+			C  CredsUserinfo
+		} `json:"inner,omitzero"`
+	}
+	zeroHolder := &omitZeroHolder{}
+	credsUserinfoMarshalCalled.Store(false)
+	gotZero, truncZero, err := SmartTruncate(zeroHolder, 1000)
+	if want := `{"Ptr":"[REDACTED]","inner":{"C":"[REDACTED]"}}`; err != nil || string(gotZero) != want || !truncZero {
+		t.Errorf("SmartTruncate(zero omitZeroHolder) = (%s, %v, %v), want (%s, true, nil)", gotZero, truncZero, err, want)
+	}
+	if credsUserinfoMarshalCalled.Load() {
+		t.Errorf("SmartTruncate(zero omitZeroHolder) called CredsUserinfo.MarshalJSON")
+	}
+	if gotOff, _, err := smartTruncate(zeroHolder, 1000, false); err != nil || string(gotOff) != `{"Ptr":null}` {
+		t.Errorf("smartTruncate(zero omitZeroHolder, redact off) = (%s, %v), want {\"Ptr\":null}", gotOff, err)
+	}
+
+	c1 := CredsUserinfo(*url.UserPassword("alice", "s1"))
+	c2 := CredsUserinfo(*url.UserPassword("bob", "s2"))
+	live := &omitZeroHolder{Ptr: &c1}
+	live.Inner.C = c1
+	var flip bool
+	const wantLive = `{"Ptr":"[REDACTED]","inner":{"C":"[REDACTED]"}}`
+	runWhileUpdating(func() {
+		flip = !flip
+		next := &c1
+		if flip {
+			next = &c2
+		}
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&live.Ptr)), unsafe.Pointer(next))
+		live.Inner.mu.Lock()
+		live.Inner.C = *next
+		live.Inner.mu.Unlock()
+	}, func() {
+		for range 300 {
+			if got, _, err := SmartTruncate(live, 1000); err != nil || string(got) != wantLive {
+				t.Fatalf("SmartTruncate(live omitZeroHolder) = (%s, %v), want %s", got, err, wantLive)
+			}
+		}
+	})
+	if credsUserinfoMarshalCalled.Load() {
+		t.Errorf("SmartTruncate(live omitZeroHolder) called CredsUserinfo.MarshalJSON")
+	}
+}
+
+func TestJSONFormatter_CircularReferenceBudget(t *testing.T) {
+	// A small circular pointer still emits [CIRCULAR_REFERENCE] with truncated=false.
+	node := &cyclicNode{Name: "a"}
+	node.Next = node
+	gotSingle, truncSingle, err := SmartTruncate(node, 1000)
+	if want := `{"Name":"a","Next":"[CIRCULAR_REFERENCE]"}`; err != nil || string(gotSingle) != want || truncSingle {
+		t.Fatalf("SmartTruncate(single pointer cycle) = (%s, %v, %v), want (%s, false, nil)", gotSingle, truncSingle, err, want)
+	}
+
+	type selfPtrList struct {
+		Ptrs []*selfPtrList
+	}
+
+	// Exact budget: 1 node for selfPtrList + 1 node for Ptrs + (maxSanitizeNodes - 2) circular pointers.
+	const exactRefs = maxSanitizeNodes - 2
+	exact := &selfPtrList{Ptrs: make([]*selfPtrList, exactRefs)}
+	for i := range exact.Ptrs {
+		exact.Ptrs[i] = exact
+	}
+	gotExact, truncExact, err := SmartTruncate(exact, 100)
+	if err != nil || truncExact {
+		t.Fatalf("SmartTruncate(exact circular pointers) = (truncated %v, %v), want (false, nil)", truncExact, err)
+	}
+	var parsedExact struct {
+		Ptrs []any
+	}
+	if err := json.Unmarshal(gotExact, &parsedExact); err != nil {
+		t.Fatalf("json.Unmarshal(exact circular pointers) error: %v", err)
+	}
+	if len(parsedExact.Ptrs) != exactRefs || parsedExact.Ptrs[len(parsedExact.Ptrs)-1] != circularRefPlaceholder {
+		t.Errorf("SmartTruncate(exact circular pointers) wrote %d items ending in %v, want %d ending in %s", len(parsedExact.Ptrs), parsedExact.Ptrs[len(parsedExact.Ptrs)-1], exactRefs, circularRefPlaceholder)
+	}
+
+	// Over budget: a slice of maxSanitizeNodes + 10 self-pointers stops at maxSanitizeNodes.
+	over := &selfPtrList{Ptrs: make([]*selfPtrList, maxSanitizeNodes+10)}
+	for i := range over.Ptrs {
+		over.Ptrs[i] = over
+	}
+	gotOver, truncOver, err := SmartTruncate(over, 100)
+	if err != nil || !truncOver {
+		t.Fatalf("SmartTruncate(over-budget circular pointers) = (truncated %v, %v), want (true, nil)", truncOver, err)
+	}
+	var parsedOver struct {
+		Ptrs []any
+	}
+	if err := json.Unmarshal(gotOver, &parsedOver); err != nil {
+		t.Fatalf("json.Unmarshal(over-budget circular pointers) error: %v", err)
+	}
+	const wantOverLen = maxSanitizeNodes - 1
+	if len(parsedOver.Ptrs) != wantOverLen || parsedOver.Ptrs[0] != circularRefPlaceholder || parsedOver.Ptrs[len(parsedOver.Ptrs)-1] != sanitizeBudgetPlaceholder {
+		t.Errorf("SmartTruncate(over-budget circular pointers) wrote %d items (first=%v, last=%v), want %d (first=%s, last=%s)", len(parsedOver.Ptrs), parsedOver.Ptrs[0], parsedOver.Ptrs[len(parsedOver.Ptrs)-1], wantOverLen, circularRefPlaceholder, sanitizeBudgetPlaceholder)
+	}
+
+	// Slice and map cycles are likewise bounded by maxSanitizeNodes.
+	cyclicSlices := make([]any, maxSanitizeNodes+10)
+	for i := range cyclicSlices {
+		cyclicSlices[i] = cyclicSlices
+	}
+	gotSliceCycle, truncSliceCycle, err := SmartTruncate(cyclicSlices, 100)
+	if err != nil || !truncSliceCycle {
+		t.Fatalf("SmartTruncate(over-budget slice cycles) = (truncated %v, %v), want (true, nil)", truncSliceCycle, err)
+	}
+	var parsedSlices []any
+	if err := json.Unmarshal(gotSliceCycle, &parsedSlices); err != nil {
+		t.Fatalf("json.Unmarshal(over-budget slice cycles) error: %v", err)
+	}
+	if len(parsedSlices) != maxSanitizeNodes || parsedSlices[0] != circularRefPlaceholder || parsedSlices[len(parsedSlices)-1] != sanitizeBudgetPlaceholder {
+		t.Errorf("SmartTruncate(over-budget slice cycles) wrote %d items ending in %v, want %d ending in %s", len(parsedSlices), parsedSlices[len(parsedSlices)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
+	}
+
+	cyclicMaps := make([]any, maxSanitizeNodes+10)
+	rootMap := map[string]any{"items": cyclicMaps}
+	for i := range cyclicMaps {
+		cyclicMaps[i] = rootMap
+	}
+	gotMapCycle, truncMapCycle, err := SmartTruncate(rootMap, 100)
+	if err != nil || !truncMapCycle {
+		t.Fatalf("SmartTruncate(over-budget map cycles) = (truncated %v, %v), want (true, nil)", truncMapCycle, err)
+	}
+	var parsedMap map[string][]any
+	if err := json.Unmarshal(gotMapCycle, &parsedMap); err != nil {
+		t.Fatalf("json.Unmarshal(over-budget map cycles) error: %v", err)
+	}
+	items := parsedMap["items"]
+	if len(items) != maxSanitizeNodes-1 || items[0] != circularRefPlaceholder || items[len(items)-1] != sanitizeBudgetPlaceholder {
+		t.Errorf("SmartTruncate(over-budget map cycles) wrote %d items ending in %v, want %d ending in %s", len(items), items[len(items)-1], maxSanitizeNodes-1, sanitizeBudgetPlaceholder)
+	}
+}
+
+func TestJSONFormatter_CollidingMapKeys(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		in        any
+		wantOn    string
+		wantOff   string
+		wantTrunc bool
+	}{
+		{
+			name:      "int and string keys disagreeing",
+			in:        map[any]any{1: "a", "1": "b"},
+			wantOn:    `{"1":"[REDACTED]"}`,
+			wantOff:   `{"1":"[COLLIDING_KEY]"}`,
+			wantTrunc: true,
+		},
+		{
+			name:      "int and string keys agreeing",
+			in:        map[any]any{1: "a", "1": "a"},
+			wantOn:    `{"1":"a"}`,
+			wantOff:   `{"1":"a"}`,
+			wantTrunc: false,
+		},
+		{
+			name:      "invalid UTF-8 keys disagreeing",
+			in:        map[string]string{"bad\xffkey": "a", "bad\xfekey": "b"},
+			wantOn:    "{\"bad\uFFFDkey\":\"[REDACTED]\"}",
+			wantOff:   "{\"bad\uFFFDkey\":\"[COLLIDING_KEY]\"}",
+			wantTrunc: true,
+		},
+		{
+			name:      "colliding key where one value equals placeholder",
+			in:        map[any]any{1: "[COLLIDING_KEY]", "1": "a"},
+			wantOn:    `{"1":"[REDACTED]"}`,
+			wantOff:   `{"1":"[COLLIDING_KEY]"}`,
+			wantTrunc: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gotOn, truncOn, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(gotOn) != tt.wantOn || truncOn != tt.wantTrunc {
+				t.Errorf("SmartTruncate(%s) = (%s, %v, %v), want (%s, %v, nil)", tt.name, gotOn, truncOn, err, tt.wantOn, tt.wantTrunc)
+			}
+			gotOff, truncOff, err := smartTruncate(tt.in, 1000, false)
+			if err != nil || string(gotOff) != tt.wantOff || truncOff != tt.wantTrunc {
+				t.Errorf("smartTruncate(%s, redact off) = (%s, %v, %v), want (%s, %v, nil)", tt.name, gotOff, truncOff, err, tt.wantOff, tt.wantTrunc)
+			}
+		})
+	}
 }
