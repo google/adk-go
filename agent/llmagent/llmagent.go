@@ -139,7 +139,10 @@ func New(cfg Config) (agent.Agent, error) {
 		},
 	}
 
-	baseAgent, err := agent.New(agent.Config{
+	// The base agent is published as its sub-agents' parent only once a is
+	// complete (link, at the end), so a goroutine walking a sub-agent's parent
+	// link never sees a half-built a.
+	internalAgent, link, err := agentinternal.NewUnlinked(agent.Config{
 		Name:                 cfg.Name,
 		Description:          cfg.Description,
 		SubAgents:            cfg.SubAgents,
@@ -149,6 +152,10 @@ func New(cfg Config) (agent.Agent, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent: %w", err)
+	}
+	baseAgent, ok := internalAgent.(agent.Agent)
+	if !ok {
+		return nil, fmt.Errorf("internal error: failed to convert to agent")
 	}
 
 	// TODO: remove this in favor of the state reveal below.
@@ -161,21 +168,22 @@ func New(cfg Config) (agent.Agent, error) {
 	// So in BeforeAgentCallback, we cannot access llmAgent.State fields.
 	// We should remote llminternal.State in favor of agentinternal.State.
 
-	internalAgent, ok := baseAgent.(agentinternal.Agent)
-	if !ok {
-		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
-	}
 	state := agentinternal.Reveal(internalAgent)
 	state.AgentType = agentinternal.TypeLLMAgent
 	state.Config = cfg
 	// A before-agent callback that returns content short-circuits the run, so its
 	// event never reaches llmAgent.run. Give it the same output_key handling.
 	state.OnBeforeAgentCallbackEvent = a.saveOutputToState
+	// The model walk reaches a's parent link through Base, and an ancestor
+	// walk that reaches the base agent finds a, and its model, through the
+	// Owner that link sets.
+	a.Base = internalAgent
 
 	if err := installTaskTools(a); err != nil {
 		return nil, err
 	}
 
+	link(a)
 	return a, nil
 }
 
@@ -303,6 +311,18 @@ type Config struct {
 	// `LLMResponse`, which would skip the actual model call.
 	BeforeModelCallbacks []BeforeModelCallback
 	// Model that is used by the agent.
+	//
+	// When Model is nil, the agent uses the model of its nearest ancestor that
+	// is an LLM agent with a model, skipping other agents in between; the
+	// ancestors are read when the model is needed, so the parent can be built
+	// after this agent. With no such ancestor, the agent uses the process-wide
+	// default model (DefaultModel until SetDefaultModel or
+	// SetDefaultModelByName changes it), and in a live run the default live
+	// model. CanonicalModel and CanonicalLiveModel return the model the agent
+	// resolves to. The built-in default names resolve only in a program that
+	// imports package model/gemini, which registers the Gemini patterns:
+	//
+	//	import _ "google.golang.org/adk/v2/model/gemini"
 	Model model.LLM
 	// AfterModelCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil LLMResponse or error. Then

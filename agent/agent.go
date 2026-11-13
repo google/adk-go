@@ -80,7 +80,37 @@ type Agent interface {
 // cfg.SubAgents. It refuses the name "user", which is reserved for the end
 // user's input, with an error wrapping [ErrInvalidAgentConfig]; the check is
 // case-sensitive, so "User" is accepted.
+//
+// When it succeeds, New records the new agent as the parent of each agent in
+// cfg.SubAgents; see [Config.SubAgents]. A sub-agent that already has a parent
+// is accepted and takes the new agent as its parent. A failed New records
+// nothing. New is safe for concurrent use, including concurrent calls that
+// list the same sub-agent.
 func New(cfg Config) (Agent, error) {
+	a, err := newUnlinked(cfg)
+	if err != nil {
+		return nil, err
+	}
+	a.linkSubAgents(nil)
+	return a, nil
+}
+
+func init() {
+	agentinternal.NewUnlinked = func(cfg any) (agentinternal.Agent, func(owner any), error) {
+		a, err := newUnlinked(cfg.(Config))
+		if err != nil {
+			return nil, nil, err
+		}
+		return a, a.linkSubAgents, nil
+	}
+	agentinternal.InnerState = func(a any) *agentinternal.State {
+		return &a.(Agent).internal().State
+	}
+}
+
+// newUnlinked validates cfg and builds the agent New returns, without
+// linking it to its sub-agents.
+func newUnlinked(cfg Config) (*agent, error) {
 	// Under agenttool or as a transfer target, an empty name puts an empty
 	// function name or enum value in the parent's model request, which Vertex
 	// AI rejects. adk-python also requires a valid identifier; that is not
@@ -99,7 +129,7 @@ func New(cfg Config) (Agent, error) {
 		}
 		subAgentSet[subAgent] = true
 	}
-	return &agent{
+	a := &agent{
 		name:                 cfg.Name,
 		description:          cfg.Description,
 		subAgents:            cfg.SubAgents,
@@ -109,7 +139,23 @@ func New(cfg Config) (Agent, error) {
 		State: agentinternal.State{
 			AgentType: agentinternal.TypeCustomAgent,
 		},
-	}, nil
+	}
+	return a, nil
+}
+
+// linkSubAgents publishes a as the parent of each of its sub-agents, with
+// owner as a's Owner. The caller has passed every validation, so a failed
+// constructor leaves the sub-agents as they were. internal() reaches the
+// inner agent of any value, including a type that embeds an Agent.
+func (a *agent) linkSubAgents(owner any) {
+	children := make([]*agentinternal.State, 0, len(a.subAgents))
+	for _, subAgent := range a.subAgents {
+		if subAgent == nil {
+			continue
+		}
+		children = append(children, &subAgent.internal().State)
+	}
+	agentinternal.Link(a, owner, children)
 }
 
 // Config is the configuration for creating a new Agent.
@@ -123,8 +169,11 @@ type Config struct {
 	// One-line description is enough and preferred.
 	Description string
 	// SubAgents are the child agents that this agent can delegate tasks to.
-	// ADK will automatically set a parent of each sub-agent to this agent to
-	// allow agent transferring across the tree.
+	// ADK records this agent as the parent of each sub-agent, which an LLM
+	// sub-agent without a model reads to inherit its ancestor's model. An agent
+	// listed in the SubAgents of two constructed agents keeps the one
+	// constructed last as its parent; listing it again is not an error. Build
+	// the agent tree before running it.
 	SubAgents []Agent
 
 	// BeforeAgentCallbacks are called sequentially before the agent starts its

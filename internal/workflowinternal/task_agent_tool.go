@@ -15,6 +15,7 @@
 package workflowinternal
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -29,8 +30,7 @@ import (
 )
 
 type TaskAgentTool struct {
-	agent           agent.Agent
-	funcDeclaration *genai.FunctionDeclaration
+	agent agent.Agent
 }
 
 func NewTaskAgentTool(curAgent agent.Agent) (tool.Tool, error) {
@@ -38,14 +38,13 @@ func NewTaskAgentTool(curAgent agent.Agent) (tool.Tool, error) {
 		return nil, fmt.Errorf("NewTaskAgentTool: agent is nil")
 	}
 
-	return &TaskAgentTool{
-		agent:           curAgent,
-		funcDeclaration: createTaskAgentFuncDeclaration(curAgent),
-	}, nil
+	return &TaskAgentTool{agent: curAgent}, nil
 }
 
+// Declaration builds the declaration on each call: the sub-agent's model can
+// come from an ancestor constructed after the tool.
 func (t *TaskAgentTool) Declaration() *genai.FunctionDeclaration {
-	return t.funcDeclaration
+	return createTaskAgentFuncDeclaration(t.agent)
 }
 
 func (t *TaskAgentTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
@@ -104,9 +103,14 @@ func createTaskAgentFuncDeclaration(curAgent agent.Agent) *genai.FunctionDeclara
 	}
 
 	if llmAgent, ok := curAgent.(llminternal.Agent); ok && llmAgent != nil {
-		agentState := llminternal.Reveal(llmAgent)
+		// A model that does not resolve is treated as one that is not on the
+		// Gemini API; the step that calls the model reports the error.
+		resolved, err := llminternal.ResolveModel(context.Background(), curAgent)
+		if err != nil {
+			resolved = nil
+		}
 
-		if !googlellm.IsGeminiAPIVariant(agentState.Model) {
+		if !googlellm.IsGeminiAPIVariant(resolved) {
 			if hasOutputSchema(curAgent) {
 				decl.ResponseJsonSchema = &genai.Schema{Type: "OBJECT"}
 			} else {

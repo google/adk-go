@@ -21,6 +21,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 )
@@ -79,6 +80,10 @@ type State struct {
 	// receives. Its lifetime follows the agent rather than a global cache.
 	// Only callers of Do are synchronized; other State readers take no lock.
 	LiveModeInjection LiveModeToolInjection
+
+	// Base is the inner agent llmagent.New built for this LLM agent. The
+	// static model walk starts at its Parent link.
+	Base agentinternal.Agent
 }
 
 // LiveModeToolInjection allows one successful live-mode tool injection per
