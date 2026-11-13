@@ -390,7 +390,7 @@ func (s *fileService) openDirectory(ctx context.Context, path string, create boo
 	if err != nil {
 		return nil, fileError("open artifact root", err)
 	}
-	for _, component := range strings.Split(path, string(filepath.Separator)) {
+	for component := range strings.SplitSeq(path, string(filepath.Separator)) {
 		if err := ctx.Err(); err != nil {
 			_ = root.Close()
 			return nil, err
