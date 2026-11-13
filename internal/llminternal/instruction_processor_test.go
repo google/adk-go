@@ -29,6 +29,8 @@ import (
 	"google.golang.org/adk/v2/artifact"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -499,4 +501,86 @@ func TestProcessStateVariable_SystemicErrorPropagates(t *testing.T) {
 			t.Fatalf("expected systemic error to propagate even for optional key, got: %v", err)
 		}
 	})
+}
+
+func TestInstructionsRequestProcessor_LiveInjectionAppendsSuffix(t *testing.T) {
+	const suffix = "\ncall the task_completed function to exit"
+	errProvider := errors.New("provider failed")
+	for _, tt := range []struct {
+		name    string
+		state   *State
+		suffix  string
+		want    string
+		wantErr error
+	}{
+		{
+			name:   "instruction",
+			state:  &State{Instruction: "base instruction"},
+			suffix: suffix,
+			want:   "base instruction" + suffix,
+		},
+		{
+			name: "instruction provider",
+			state: &State{InstructionProvider: func(agent.ReadonlyContext) (string, error) {
+				return "dynamic instruction", nil
+			}},
+			suffix: suffix,
+			want:   "dynamic instruction" + suffix,
+		},
+		{
+			name: "instruction provider error",
+			state: &State{InstructionProvider: func(agent.ReadonlyContext) (string, error) {
+				return "partial", errProvider
+			}},
+			suffix:  suffix,
+			wantErr: errProvider,
+		},
+		{
+			name:  "empty suffix",
+			state: &State{Instruction: "base instruction"},
+			want:  "base instruction",
+		},
+		{
+			name:   "suffix without a base instruction",
+			state:  &State{},
+			suffix: suffix,
+			want:   suffix,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mockAgent := &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "test_agent"})),
+				s:     tt.state,
+			}
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Agent: mockAgent,
+			})
+			f := &Flow{LiveInjection: &LiveInjection{InstructionSuffix: tt.suffix}}
+			req := &model.LLMRequest{}
+
+			var gotErr error
+			for _, err := range instructionsRequestProcessor(ctx, req, f) {
+				if err != nil {
+					gotErr = err
+				}
+			}
+			if !errors.Is(gotErr, tt.wantErr) {
+				t.Fatalf("instructionsRequestProcessor() error = %v, want %v", gotErr, tt.wantErr)
+			}
+			if tt.wantErr != nil {
+				return
+			}
+
+			if got := systemInstructionText(req); got != tt.want {
+				t.Errorf("instruction = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func systemInstructionText(req *model.LLMRequest) string {
+	if req.Config == nil {
+		return ""
+	}
+	return strings.Join(utils.TextParts(req.Config.SystemInstruction), "")
 }

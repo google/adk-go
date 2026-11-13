@@ -64,7 +64,11 @@ func instructionsRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 		}
 
 		// Append agent's instruction
-		if err := appendInstructions(ctx, req, llmAgent.internal()); err != nil {
+		var suffix string
+		if f.LiveInjection != nil {
+			suffix = f.LiveInjection.InstructionSuffix
+		}
+		if err := appendInstructions(ctx, req, llmAgent.internal(), suffix); err != nil {
 			yield(nil, fmt.Errorf("failed to append instructions: %w", err))
 			return
 		}
@@ -81,18 +85,24 @@ var placeholderRegex = regexp.MustCompile(`{+[^{}]*}+`)
 // brace of a run, so a match is never preceded by {.
 const literalPlaceholderPrefixes = `$\`
 
-func appendInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agentState *State) error {
+// appendInstructions appends the agent's instruction, followed by suffix, to
+// req. A provider error ends the append without the suffix, as before.
+func appendInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agentState *State, suffix string) error {
 	if agentState.InstructionProvider != nil {
 		instruction, err := agentState.InstructionProvider(icontext.NewReadonlyContext(ctx))
 		if err != nil {
 			return fmt.Errorf("failed to evaluate instruction provider: %w", err)
 		}
 
-		utils.AppendInstructions(req, instruction)
+		utils.AppendInstructions(req, instruction+suffix)
 		return nil
 	}
 
 	if agentState.Instruction == "" {
+		if suffix == "" {
+			return nil
+		}
+		utils.AppendInstructions(req, suffix)
 		return nil
 	}
 
@@ -101,7 +111,7 @@ func appendInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agen
 		return fmt.Errorf("failed to inject session state into instruction: %w", err)
 	}
 
-	utils.AppendInstructions(req, inst)
+	utils.AppendInstructions(req, inst+suffix)
 	return nil
 }
 
