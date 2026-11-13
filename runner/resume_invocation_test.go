@@ -428,12 +428,49 @@ func TestRun_ResumeByID_LlmAgentRoot_UnansweredLongRunningCallKeepsAgentOpen(t *
 		t.Fatalf("run 1 events (-want +got):\n%s", diff)
 	}
 
-	// The call of run 1 stays among the last two events of the invocation,
-	// and still pauses it, so the agent does not end.
+	// The unanswered call of run 1 is still the last event of the
+	// invocation, so the resumed run pauses without calling the model, and the
+	// agent does not end.
 	events := runTurn(t, r, nil, runner.WithInvocationID(first[0].InvocationID))
 
-	if diff := cmp.Diff([]string{"root_agent text later"}, describeEvents(events)); diff != "" {
+	if diff := cmp.Diff([]string(nil), describeEvents(events)); diff != "" {
 		t.Errorf("run 2 events (-want +got):\n%s", diff)
+	}
+	if n := endOfAgentCount(sessionEvents(t, svc)); n != 0 {
+		t.Errorf("session has %d end-of-agent events, want 0", n)
+	}
+}
+
+// A long-running call followed by the response of a tool called beside it
+// still pauses the resumed invocation: the call is the second-to-last event,
+// so the agent writes no end-of-agent event.
+func TestRun_ResumeByID_LlmAgentRoot_LongRunningCallBeforeSiblingResponseKeepsAgentOpen(t *testing.T) {
+	svc := session.InMemoryService()
+	calls := resumeSeed("inv-1", "root_agent", &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{ID: "lr-1", Name: "ask_human", Args: map[string]any{}}},
+		{FunctionCall: &genai.FunctionCall{ID: "fc-2", Name: "lookup", Args: map[string]any{}}},
+	}})
+	calls.LongRunningToolIDs = []string{"lr-1"}
+	seedResumeSession(t, svc, seedUser("inv-1", "hi"), calls,
+		resumeSeed("inv-1", "root_agent", responseContent("fc-2", "lookup", map[string]any{"v": 1})))
+	type args struct{}
+	longRunning, err := functiontool.New(functiontool.Config{Name: "ask_human", Description: "asks", IsLongRunning: true},
+		func(agent.Context, args) (map[string]any, error) { return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary, err := functiontool.New(functiontool.Config{Name: "lookup", Description: "looks up"},
+		func(agent.Context, args) (map[string]any, error) { return map[string]any{"v": 1}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := scriptedLlmAgent(t, "root_agent", scripted(modelText("later")), llmagent.Config{Tools: []tool.Tool{longRunning, ordinary}})
+	r := newResumeRunner(t, root, svc, true)
+
+	events := runTurn(t, r, nil, runner.WithInvocationID("inv-1"))
+
+	if diff := cmp.Diff([]string(nil), describeEvents(events)); diff != "" {
+		t.Errorf("events (-want +got):\n%s", diff)
 	}
 	if n := endOfAgentCount(sessionEvents(t, svc)); n != 0 {
 		t.Errorf("session has %d end-of-agent events, want 0", n)
@@ -1324,4 +1361,54 @@ type resumability struct {
 
 func resumabilityOf(a session.EventActions) resumability {
 	return resumability{a.EndOfAgent, a.AgentState, a.RewindBeforeInvocationID}
+}
+
+// TestRun_NonResumableReplayUnexecutedSiblingPersistsResponseAndCallsModelOnce
+// answers one call of a parallel call event whose other call never ran: the
+// flow runs the missing call once, the session stores its response, and the
+// next step sees that response and calls the model once rather than
+// replaying the call again.
+func TestRun_NonResumableReplayUnexecutedSiblingPersistsResponseAndCallsModelOnce(t *testing.T) {
+	svc := session.InMemoryService()
+	var askRuns, fetchRuns atomic.Int32
+	type args struct{}
+	ask, err := functiontool.New(functiontool.Config{Name: "ask", Description: "asks"},
+		func(agent.Context, args) (map[string]any, error) {
+			askRuns.Add(1)
+			return map[string]any{"r": 1}, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetch, err := functiontool.New(functiontool.Config{Name: "fetch", Description: "fetches"},
+		func(agent.Context, args) (map[string]any, error) {
+			fetchRuns.Add(1)
+			return map[string]any{"r": 2}, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedResumeSession(t, svc, resumeSeed("inv-1", "agent", &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "ask", Args: map[string]any{}}},
+		{FunctionCall: &genai.FunctionCall{ID: "c2", Name: "fetch", Args: map[string]any{}}},
+	}}))
+	m := scripted(modelText("done"))
+	root := scriptedLlmAgent(t, "agent", m, llmagent.Config{Tools: []tool.Tool{ask, fetch}})
+	r := newResumeRunner(t, root, svc, false)
+
+	runTurn(t, r, responseContent("c1", "ask", map[string]any{"r": 1}))
+
+	if got := fetchRuns.Load(); got != 1 {
+		t.Errorf("fetch ran %d times, want 1", got)
+	}
+	if got := askRuns.Load(); got != 0 {
+		t.Errorf("ask ran %d times, want 0", got)
+	}
+	if m.call != 1 {
+		t.Errorf("model called %d times, want 1", m.call)
+	}
+	want := []string{"agent call ask", "user response ask", "agent response fetch", "agent text done"}
+	if diff := cmp.Diff(want, describeEvents(sessionEvents(t, svc))); diff != "" {
+		t.Errorf("session events mismatch (-want +got):\n%s", diff)
+	}
 }

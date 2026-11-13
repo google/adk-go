@@ -1266,8 +1266,10 @@ func TestSequentialAgent_ResumablePauseSkipsLaterSubAgents(t *testing.T) {
 
 // TestSequentialAgent_ResumablePauseLetsPausedSubAgentFinish checks that the
 // sub-agent that pauses still yields the rest of its events, as adk-python's
-// SequentialAgent drains it (agents/sequential_agent.py), and that the next
-// sub-agent does not run.
+// SequentialAgent drains it (agents/sequential_agent.py): the ordinary tool's
+// response reaches the caller, and then the sub-agent's next step pauses
+// before calling the model, because the long-running call is unanswered
+// (flows/llm_flows/base_llm_flow.py). The next sub-agent does not run.
 func TestSequentialAgent_ResumablePauseLetsPausedSubAgentFinish(t *testing.T) {
 	type args struct{}
 	longRunning, err := functiontool.New(functiontool.Config{Name: "ask_human", Description: "asks", IsLongRunning: true},
@@ -1296,15 +1298,15 @@ func TestSequentialAgent_ResumablePauseLetsPausedSubAgentFinish(t *testing.T) {
 
 	events, errs := runResumable(t, root)
 
-	want := []string{"first:FC(ask_human)FC(lookup)", "first:FR(lookup)", "first:done"}
+	want := []string{"first:FC(ask_human)FC(lookup)", "first:FR(lookup)"}
 	if diff := cmp.Diff(want, events); diff != "" {
 		t.Errorf("events (-want +got):\n%s", diff)
 	}
 	if len(errs) != 0 {
 		t.Errorf("errors = %v, want none", errs)
 	}
-	if llm.requests != 2 {
-		t.Errorf("first's model got %d requests, want 2", llm.requests)
+	if llm.requests != 1 {
+		t.Errorf("first's model got %d requests, want 1", llm.requests)
 	}
 	if got := afterRuns.Load(); got != 0 {
 		t.Errorf("after ran %d times after first paused the invocation, want 0", got)
