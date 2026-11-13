@@ -138,6 +138,9 @@ var knownEventTypes = newSet(
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// See [Config] for custom-agent error-recovery event provenance and custom
+// clock or UUID provider requirements.
 func NewBigQueryAgentAnalyticsPlugin(
 	ctx context.Context,
 	projectID string,
@@ -164,6 +167,9 @@ func NewBigQueryAgentAnalyticsPlugin(
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// See [Config] for custom-agent error-recovery event provenance and custom
+// clock or UUID provider requirements.
 func NewBigQueryAgentAnalyticsPluginWithConfig(
 	ctx context.Context,
 	config Config,
@@ -274,10 +280,10 @@ type BigQueryAgentAnalyticsPlugin struct {
 
 // DropStats returns cumulative event-drop and formatter-failure counts.
 // TotalDrops sums locally discarded events and writes whose success could not
-// be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops); it can
-// include rows committed before an acknowledgment was lost, so it is an upper
-// bound. FormatterFailureDrops separately counts payload replacement or
-// omission, which does not itself discard a row.
+// be confirmed (QueueFullDrops + AppendFailureDrops + RowErrorDrops +
+// ShutdownDrops); it can include rows committed before an acknowledgment was
+// lost, so it is an upper bound. FormatterFailureDrops separately counts
+// payload replacement or omission, which does not itself discard a row.
 func (p *BigQueryAgentAnalyticsPlugin) DropStats() DropStats {
 	if p == nil || p.stats == nil {
 		return DropStats{}
@@ -344,6 +350,9 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// See [Config] for custom-agent error-recovery event provenance and custom
+// clock or UUID provider requirements.
 func NewBigQueryAgentAnalyticsPluginWithClients(
 	ctx context.Context,
 	config Config,
@@ -499,7 +508,7 @@ func newBigQueryAgentAnalyticsPlugin(
 		AfterToolCallback:   p.afterTool,
 		OnToolErrorCallback: p.onToolError,
 
-		CloseFunc: func() error {
+		CloseFunc: sync.OnceValue(func() error {
 			state.stopAsyncViewCreation()
 			// The processor uploads while it flushes, so it goes first.
 			processor.Close()
@@ -523,7 +532,7 @@ func newBigQueryAgentAnalyticsPlugin(
 			// which the plugin holds, keeps the client alive for the plugin.
 			runtime.KeepAlive(bqClient)
 			return errors.Join(closeErrs...)
-		},
+		}),
 	})
 	if err != nil {
 		processor.Close()
@@ -531,6 +540,7 @@ func newBigQueryAgentAnalyticsPlugin(
 		return nil, err
 	}
 
+	traces.selfPlugin = weak.Make(adkPlugin)
 	registerPlugin(adkPlugin, state)
 
 	if config.createViews() && state.runner != nil {
@@ -643,9 +653,6 @@ type eventData struct {
 	sourceEvent    *session.Event
 	author         string
 	customMetadata map[string]any
-	// customMetadataScrubbed reports that customMetadata was already run
-	// through scrubA2ACustomMetadata.
-	customMetadataScrubbed bool
 	// customMetadataTruncated reports that scrubbing customMetadata hit a
 	// safety cap or placeholder.
 	customMetadataTruncated bool
@@ -825,6 +832,16 @@ func (p *analyticsPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content
 func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 	defer p.recoverCallback(EventInvocationCompleted)
 	id := identityOf(ctx)
+	var terminalEnded, flushed bool
+	defer func() {
+		if !terminalEnded {
+			p.endInvocationSafe(ctx, id)
+		}
+		if p.config.flushOnRunEnd() && !flushed {
+			flushed = true
+			p.flushRunEndSafe()
+		}
+	}()
 	unclosed, unrecErr := p.traces.popUnclosedAgentSpans(ctx, id)
 	if unrecErr == nil && ctx != nil {
 		// A canceled invocation failed even when no span is left open, for
@@ -836,7 +853,9 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 
 	if unrecErr != nil || len(unclosed) > 0 {
 		p.logEvent(ctx, id, EventInvocationError, func() rowSpan {
-			return p.traces.endInvocation(ctx, id)
+			span := p.traces.endInvocation(ctx, id)
+			terminalEnded = true
+			return span
 		}, func(d *eventData) {
 			d.failed = true
 			if unrecErr != nil {
@@ -846,12 +865,35 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 		})
 	} else {
 		p.logEvent(ctx, id, EventInvocationCompleted, func() rowSpan {
-			return p.traces.endInvocation(ctx, id)
+			span := p.traces.endInvocation(ctx, id)
+			terminalEnded = true
+			return span
 		}, nil)
 	}
 
 	if p.config.flushOnRunEnd() {
+		flushed = true
 		p.processor.flushRunEnd() // flush queue synchronously under ShutdownTimeout
+	}
+}
+
+func (p *analyticsPlugin) endInvocationSafe(ctx context.Context, id identity) {
+	defer func() {
+		if recover() != nil && id.invocationID != "" && p.traces != nil {
+			p.traces.mu.Lock()
+			delete(p.traces.invocations, id.invocationID)
+			p.traces.mu.Unlock()
+		}
+	}()
+	if p.traces != nil {
+		p.traces.endInvocation(ctx, id)
+	}
+}
+
+func (p *analyticsPlugin) flushRunEndSafe() {
+	defer func() { _ = recover() }()
+	if p.processor != nil {
+		p.processor.flushRunEnd()
 	}
 }
 
@@ -906,7 +948,11 @@ func (p *analyticsPlugin) logPurgedAgents(ctx context.Context, id identity, purg
 // A partial event, with or without content, records instead that its author
 // is streaming, so that a caller that stops reading on it is not taken for a
 // failure, and one with content or a typed output also records that its
-// author responded (see recordStreamed).
+// author responded (see recordStreamed). A non-partial event with neither
+// content nor a typed output responds to nothing, but when it is the event
+// that ADK built from a retired activation's after-agent callbacks that only
+// changed state or artifacts, it records that the activation creates no more
+// events (see clearLastPartialForEvent).
 //
 // Because ADK stops an event callback chain at the first plugin that returns an
 // event, this callback does not run for events that an earlier-registered
@@ -919,17 +965,20 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
 			evID.path = ev.NodeInfo.Path
 		}
+		// settledAfterAgent stays on this call's stack until the event's rows
+		// are placed, so another event handled meanwhile cannot change it.
+		settledAfterAgent := false
 		if ev.Partial {
-			p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil)
+			p.traces.recordStreamedAt(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil, ev.Timestamp, hasEventCreationProvenance(ctx, ev), ev.ID != "")
 		} else if ev.Content != nil || ev.Output != nil {
-			p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content))
+			settledAfterAgent = p.traces.completeResponseForEvent(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content), hasFunctionCall(ev.Content), ev)
 		} else {
-			p.traces.clearLastPartial(ctx, evID)
+			settledAfterAgent = p.traces.clearLastPartialForEvent(ctx, evID, ev.Author, ev.Branch, ev)
 		}
 		if workflowName, failed, ok := nodeCompletion(ev); ok {
 			p.traces.recordNodeCompletion(ctx, evID, workflowName, ev.NodeInfo.Path, ev.Branch, failed)
 		}
-		p.emitSessionEventSignals(ctx, ev)
+		p.emitSessionEventSignals(ctx, ev, settledAfterAgent)
 		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor && hasTaskCompletedResponse(ev.Content) {
 			taskID := evID
 			taskID.agentName = ev.Author
@@ -940,6 +989,52 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		}
 	}
 	return nil, nil
+}
+
+// hasEventCreationProvenance reports whether ev carries sufficient creation
+// provenance to trust ev.Timestamp came from session.NewEvent rather than
+// runner fallback stamping on a zero-timestamp event. It requires a non-empty
+// ev.ID together with either a canonical UUIDv4 ID or an active custom
+// platform.WithUUIDProvider on ctx.
+func hasEventCreationProvenance(ctx context.Context, ev *session.Event) bool {
+	if ev == nil || ev.ID == "" {
+		return false
+	}
+	return hasNewEventUUID(ev.ID) || contextHasCustomUUIDProvider(ctx)
+}
+
+// hasNewEventUUID reports whether id has the canonical 36-byte RFC 4122 UUIDv4
+// format produced by session.NewEvent. Runner stamps ev.Timestamp on any
+// zero-timestamp event during delivery, so non-UUID or empty IDs cannot prove
+// that ev.Timestamp came from creation time rather than delayed delivery.
+func hasNewEventUUID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i := range 36 {
+		c := id[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		case 14:
+			if c != '4' {
+				return false
+			}
+		case 19:
+			switch c {
+			case '8', '9', 'a', 'b', 'A', 'B':
+			default:
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // nodeCompletion reports whether ev is the event that ADK's workflow
@@ -1652,6 +1747,42 @@ func agentConfig(a agent.Agent) any {
 		a = next
 	}
 	return nil
+}
+
+// agentHasAfterAgentCallbacks reports whether a configures agent-level
+// AfterAgentCallbacks (on the base agent struct or llmagent.Config), which ADK
+// invokes after plugins' AfterAgentCallback hooks finish.
+func agentHasAfterAgentCallbacks(a agent.Agent) bool {
+	for range 4 {
+		v := reflect.ValueOf(a)
+		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+			if v.IsNil() {
+				return false
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			return false
+		}
+		if f := v.FieldByName("Config"); f.IsValid() && f.CanInterface() && !f.IsZero() {
+			if cfg, ok := reflect.TypeAssert[llmagent.Config](f); ok && len(cfg.AfterAgentCallbacks) > 0 {
+				return true
+			}
+		}
+		if cb := v.FieldByName("afterAgentCallbacks"); cb.IsValid() && cb.Kind() == reflect.Slice && cb.Len() > 0 {
+			return true
+		}
+		inner := v.FieldByName("Agent")
+		if !inner.IsValid() || !inner.CanInterface() {
+			return false
+		}
+		next, ok := reflect.TypeAssert[agent.Agent](inner)
+		if !ok {
+			return false
+		}
+		a = next
+	}
+	return false
 }
 
 // identity holds the invocation fields of a row.
