@@ -19,6 +19,7 @@ package workflow
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -323,7 +324,23 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 	} else {
 		c = agent.Promote(ctx)
 	}
-	return w.RunNode(c, userInput(c))
+	return w.RunNode(withOwnerOutputFor(c), userInput(c))
+}
+
+// withOwnerOutputFor adds the paths left for this workflow's agent by the
+// scheduler running its AgentNode (see ownerOutputFor) to ctx's
+// OutputForAncestors, so the workflow's terminal output counts for them. Run
+// and Resume both go through it.
+func withOwnerOutputFor(ctx agent.Context) agent.Context {
+	outputFor, cleared, ok := ownerOutputFor(ctx)
+	if !ok {
+		return ctx
+	}
+	ancestors := append(slices.Clone(ctx.OutputForAncestors()), outputFor...)
+	return ctx.WithDelta(&agent.CommonContextDelta{
+		InvocationContextDelta: &agent.InvocationContextDelta{Context: &cleared},
+		OutputForAncestors:     &ancestors,
+	})
 }
 
 // RunNode drives the workflow with the given input.
