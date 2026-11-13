@@ -112,3 +112,21 @@ func (s *forwardingService) parentStorage() (*Artifacts, error) {
 		}
 	}
 }
+
+// forwardedServiceErr returns the error that a call forwarded through service
+// would return because a parent along its chain of forwarding services has no
+// usable artifact service, and nil when service does not forward or its chain
+// ends at a backing service. It walks the chains of nested AgentTools.
+func forwardedServiceErr(service artifact.Service) error {
+	for {
+		fwd, ok := service.(*forwardingService)
+		if !ok {
+			return nil
+		}
+		parent, err := fwd.parentStorage()
+		if err != nil {
+			return err
+		}
+		service = parent.Service
+	}
+}
