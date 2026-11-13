@@ -39,9 +39,12 @@ const (
 // GetSessionConfig controls which historical events the runner requests from
 // [session.Service.Get] when loading a session for an invocation.
 //
-// Its fields mirror the event-window filter fields of [session.GetRequest].
-// A zero GetSessionConfig (or a nil *GetSessionConfig on [RunConfig] or
-// [LiveRunConfig]) applies no filter and loads the full session history.
+// Its fields set [session.GetRequest.NumRecentEvents] and
+// [session.GetRequest.After]. It has no counterpart of
+// [session.GetRequest.OmitEvents], so it cannot ask for a session without
+// events: a zero NumRecentEvents loads every event. A zero GetSessionConfig
+// (or a nil *GetSessionConfig on [RunConfig] or [LiveRunConfig]) applies no
+// filter and loads the full session history.
 // GetSessionConfig is a pure value type and is safe for concurrent read use.
 type GetSessionConfig struct {
 	// NumRecentEvents limits the loaded session to at most the NumRecentEvents

@@ -108,6 +108,15 @@ type storageEvent struct {
 	ErrorMessage *string
 	Interrupted  *bool
 
+	// The model's finish reason, model version, log probabilities and
+	// resumption handle. Rows written before these columns existed hold NULL
+	// and read back with the fields empty.
+	FinishReason            *string
+	ModelVersion            *string
+	AvgLogprobs             *float64
+	LogprobsResult          dynamicJSON
+	SessionResumptionHandle *string
+
 	// Seq numbers a session's events in append order, from 1. Rows written
 	// before the column existed hold 0.
 	Seq int64 `gorm:"not null;default:0"`
@@ -198,6 +207,19 @@ func createStorageEvent(session session.Session, event *session.Event) (*storage
 	if event.ErrorMessage != "" {
 		storageEv.ErrorMessage = &event.ErrorMessage
 	}
+	if event.FinishReason != "" {
+		finishReason := string(event.FinishReason)
+		storageEv.FinishReason = &finishReason
+	}
+	if event.ModelVersion != "" {
+		storageEv.ModelVersion = &event.ModelVersion
+	}
+	if event.AvgLogprobs != 0 {
+		storageEv.AvgLogprobs = &event.AvgLogprobs
+	}
+	if event.SessionResumptionHandle != "" {
+		storageEv.SessionResumptionHandle = &event.SessionResumptionHandle
+	}
 
 	// For booleans, we can assign pointers directly.
 	if event.Partial || event.PartialSet {
@@ -235,6 +257,12 @@ func createStorageEvent(session session.Session, event *session.Event) (*storage
 		storageEv.CitationMetadata, err = json.Marshal(event.CitationMetadata)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal citation metadata: %w", err)
+		}
+	}
+	if event.LogprobsResult != nil {
+		storageEv.LogprobsResult, err = json.Marshal(event.LogprobsResult)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal logprobs result: %w", err)
 		}
 	}
 	if event.InputTranscription != nil {
@@ -305,6 +333,13 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 	if len(se.CitationMetadata) > 0 {
 		if err := json.Unmarshal(se.CitationMetadata, &citationMetadata); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal citation metadata: %w", err)
+		}
+	}
+
+	var logprobsResult *genai.LogprobsResult
+	if len(se.LogprobsResult) > 0 {
+		if err := json.Unmarshal(se.LogprobsResult, &logprobsResult); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal logprobs result: %w", err)
 		}
 	}
 
@@ -396,6 +431,12 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 			PartialSet:          se.Partial != nil,
 			TurnComplete:        turnComplete,
 			Interrupted:         interrupted,
+			FinishReason:        genai.FinishReason(derefOrZero(se.FinishReason)),
+			ModelVersion:        derefOrZero(se.ModelVersion),
+			AvgLogprobs:         derefOrZero(se.AvgLogprobs),
+			LogprobsResult:      logprobsResult,
+
+			SessionResumptionHandle: derefOrZero(se.SessionResumptionHandle),
 		},
 	}
 
