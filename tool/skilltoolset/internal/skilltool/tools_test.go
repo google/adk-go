@@ -103,7 +103,7 @@ func TestListSkills(t *testing.T) {
 	}
 
 	want := map[string]any{
-		"skills": "<available_skills>\n<skill>\n<name>\nskill1\n</name>\n<description>\ndescription1\n</description>\n</skill>\n<skill>\n<name>\nskill2\n</name>\n<description>\ndescription2\n</description>\n</skill>\n</available_skills>",
+		"result": "<available_skills>\n<skill>\n<name>\nskill1\n</name>\n<description>\ndescription1\n</description>\n</skill>\n<skill>\n<name>\nskill2\n</name>\n<description>\ndescription2\n</description>\n</skill>\n</available_skills>",
 	}
 
 	if diff := cmp.Diff(want, result); diff != "" {
