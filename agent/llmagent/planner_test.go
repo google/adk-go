@@ -736,7 +736,7 @@ func TestLLMAgent_RewritingPlannerEmitsSeparateStateEventBeforeModelEvent(t *tes
 }
 
 func TestLLMAgent_RewritingPlannerEdgeCasesAndBuiltInOverride(t *testing.T) {
-	t.Run("empty_slice_keeps_original_parts_F3", func(t *testing.T) {
+	t.Run("empty_slice_keeps_original_parts", func(t *testing.T) {
 		llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("kept original")}}
 		p := &rewritingPlanner{parts: []*genai.Part{}}
 		a := newPlannerAgent(t, llmagent.Config{Name: "test_agent", Model: llm, Planner: p})
@@ -793,7 +793,7 @@ func TestLLMAgent_RewritingPlannerEdgeCasesAndBuiltInOverride(t *testing.T) {
 		}
 	})
 
-	t.Run("embedded_builtin_planner_with_override_F4", func(t *testing.T) {
+	t.Run("embedded_builtin_planner_with_override", func(t *testing.T) {
 		llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("raw")}}
 		a := newPlannerAgent(t, llmagent.Config{
 			Name:    "test_agent",
@@ -1130,7 +1130,7 @@ func TestLLMAgent_BuiltInPlannerDetection(t *testing.T) {
 		}
 	})
 
-	t.Run("embedded_builtin_planner_own_instruction_is_not_called_F4", func(t *testing.T) {
+	t.Run("embedded_builtin_planner_own_instruction_is_not_called", func(t *testing.T) {
 		llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("done")}}
 		a := newPlannerAgent(t, llmagent.Config{
 			Name:    "test_agent",
