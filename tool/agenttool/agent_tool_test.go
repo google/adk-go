@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -1094,5 +1095,100 @@ func TestAgentTool_RunTwiceLeavesChildToolsetOpen(t *testing.T) {
 	}
 	if diff := cmp.Diff(map[string]any{"result": "second answer"}, second); diff != "" {
 		t.Errorf("second Run() result diff (-want +got):\n%s", diff)
+	}
+}
+
+// TestAgentTool_ForwardsAbortSignalToNestedRunner checks that the agent tool
+// gives its nested run the caller's abort signal and returns the abort message
+// as its result when the nested run is sealed, as adk-python's AgentTool does
+// (tools/agent_tool.py, run_async). The tool contexts carry an abort state but
+// no watcher, so they are never canceled: only the forwarded signal can stop
+// the nested run.
+func TestAgentTool_ForwardsAbortSignalToNestedRunner(t *testing.T) {
+	tests := []struct {
+		name string
+		// signal returns the caller's abort channel and abort, which the
+		// child calls after its first event.
+		signal func() (sig <-chan struct{}, abort func())
+		// child is what the wrapped agent yields before it waits.
+		child    func(ctx agent.InvocationContext) *session.Event
+		wantRuns int32
+	}{
+		{
+			name: "fired_before_run",
+			signal: func() (<-chan struct{}, func()) {
+				ch := make(chan struct{})
+				close(ch)
+				return ch, func() {}
+			},
+			child: func(ctx agent.InvocationContext) *session.Event {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Content = genai.NewContentFromText("not aborted", genai.RoleModel)
+				return ev
+			},
+			wantRuns: 0,
+		},
+		{
+			name: "fired_during_nested_run",
+			signal: func() (<-chan struct{}, func()) {
+				ch := make(chan struct{})
+				return ch, func() { close(ch) }
+			},
+			child: func(ctx agent.InvocationContext) *session.Event {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "approve"}},
+				}}
+				ev.LongRunningToolIDs = []string{"call_1"}
+				return ev
+			},
+			wantRuns: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sig, abort := tt.signal()
+			var runs atomic.Int32
+			child, err := agent.New(agent.Config{Name: "child", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					runs.Add(1)
+					ev := tt.child(ctx)
+					ev.Author = "child"
+					if !yield(ev, nil) {
+						return
+					}
+					abort()
+					select {
+					case <-ctx.Done():
+					case <-time.After(30 * time.Second):
+					}
+				}
+			}})
+			if err != nil {
+				t.Fatalf("agent.New() error = %v", err)
+			}
+			toolImpl, ok := agenttool.New(child, nil).(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
+			created, err := session.InMemoryService().Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "testUser"})
+			if err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			ctx := icontext.WithAbortState(t.Context(), icontext.NewAbortState(sig))
+			ictx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Session: created.Session})
+			toolCtx := agent.NewToolContext(ictx, "", &session.EventActions{}, nil)
+
+			result, err := toolImpl.Run(toolCtx, map[string]any{"request": "go"})
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+			if diff := cmp.Diff(map[string]any{"result": "Invocation was aborted by client."}, result); diff != "" {
+				t.Errorf("Run() result diff (-want +got):\n%s", diff)
+			}
+			if got := runs.Load(); got != tt.wantRuns {
+				t.Errorf("child ran %d times, want %d", got, tt.wantRuns)
+			}
+		})
 	}
 }

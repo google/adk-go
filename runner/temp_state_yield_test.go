@@ -760,3 +760,82 @@ func TestRun_BeforeRunReplyYieldsEventWithoutTempKeys(t *testing.T) {
 		}
 	})
 }
+
+func TestRun_AbortSealYieldsEventsWithoutTempKeys(t *testing.T) {
+	isSeal := func(ev *session.Event) bool { return ev.ErrorCode == "INVOCATION_ABORTED" }
+	plant := tkPlant(isSeal)
+	plantPartial := func(ev *session.Event) {
+		if isSeal(ev) {
+			plant(ev)
+			ev.Partial = true
+		}
+	}
+	tests := []struct {
+		name       string
+		mutate     func(*session.Event)
+		wantSeal   map[string]any
+		wantStored []map[string]any // user message, the call, then the seal when stored
+		wantState  any
+	}{
+		{
+			name:       "seal_without_temp_keys",
+			mutate:     plant,
+			wantSeal:   map[string]any{"k2": "w"},
+			wantStored: []map[string]any{{}, {}, {"k2": "w"}},
+			wantState:  "v",
+		},
+		{
+			name:       "partial_seal_keeps_delta",
+			mutate:     plantPartial,
+			wantSeal:   map[string]any{"temp:k": "v", "k2": "w"},
+			wantStored: []map[string]any{{}, {}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := agent.New(agent.Config{Name: "root", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "root"
+					ev.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "slow"}}}}
+					if !yield(ev, nil) {
+						return
+					}
+					<-ctx.Done()
+				}
+			}})
+			if err != nil {
+				t.Fatalf("agent.New() error = %v", err)
+			}
+			spy := &tkSpy{}
+			r, svc := tkNew(t, runner.Config{Agent: root}, spy.plugin(t, tc.mutate))
+			abort := make(chan struct{})
+
+			var got []*session.Event
+			first := true
+			for ev, err := range r.Run(t.Context(), tkUser, tkSess, userText("hi"), agent.RunConfig{}, runner.WithAbortSignal(abort)) {
+				if err != nil {
+					t.Fatalf("Run() error = %v", err)
+				}
+				got = append(got, ev)
+				if first {
+					close(abort)
+					first = false
+				}
+			}
+
+			if len(got) != 2 {
+				t.Fatalf("Run() yielded %d events, want the call and the seal", len(got))
+			}
+			if diff := cmp.Diff(tc.wantSeal, got[1].Actions.StateDelta); diff != "" {
+				t.Errorf("yielded seal state delta (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantStored, tkDeltas(tkStored(t, svc)), tkEqual); diff != "" {
+				t.Errorf("stored state deltas (-want +got):\n%s", diff)
+			}
+			if tc.wantState != nil && spy.afterRun != tc.wantState {
+				t.Errorf("after-run callback read temp:k = %v, want %v", spy.afterRun, tc.wantState)
+			}
+		})
+	}
+}

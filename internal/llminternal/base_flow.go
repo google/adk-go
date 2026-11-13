@@ -152,6 +152,13 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 	return func(yield func(*session.Event, error) bool) {
 		thoughtOnlyTurns := 0
 		for {
+			// The abort is checked before each step, after each event, and
+			// after each step, as adk-python's run_async does: a signal set
+			// while the caller handles an event stops the flow before it
+			// produces another.
+			if icontext.Aborted(ctx) {
+				return
+			}
 			var lastEvent *session.Event
 			for ev, err := range f.runOneStep(ctx) {
 				if err != nil {
@@ -163,6 +170,12 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 					return
 				}
 				lastEvent = ev
+				if icontext.Aborted(ctx) {
+					return
+				}
+			}
+			if icontext.Aborted(ctx) {
+				return
 			}
 			if lastEvent == nil {
 				return
@@ -1316,8 +1329,8 @@ func extractTools(req *model.LLMRequest) (map[string]tool.Tool, error) {
 //
 // It reports whether the step may go on to the model's next response: true
 // when no call produced a response or when a transfer target ran to its end,
-// false when the step ends, because the calls ran without a transfer, an
-// error was yielded or the consumer stopped.
+// false when the step ends, because the calls ran without a transfer, the run
+// was aborted, an error was yielded or the consumer stopped.
 func (f *Flow) postprocessFunctionCalls(ctx agent.InvocationContext, tools map[string]tool.Tool, toolOrder []string, functionCallEvent *session.Event, yield func(*session.Event, error) bool) bool {
 	ev, err := f.handleFunctionCallsInOrder(ctx, tools, toolOrder, &functionCallEvent.LLMResponse, nil, nil)
 	if err != nil {
@@ -1326,7 +1339,7 @@ func (f *Flow) postprocessFunctionCalls(ctx agent.InvocationContext, tools map[s
 	}
 	if ev == nil {
 		// nothing to yield/process.
-		return true
+		return !icontext.Aborted(ctx)
 	}
 
 	toolConfirmationEvent := generateRequestConfirmationEvent(ctx, functionCallEvent, ev)
@@ -2222,6 +2235,12 @@ func (f *Flow) handleFunctionCallsInOrder(ctx agent.InvocationContext, toolsDict
 		}
 	}
 	platform.RunTasks(batchCtx, tasks)
+	// The abort cancels the tools' context, so a response finished after it
+	// may carry the cancellation instead of a result. It is not recorded: the
+	// runner seals the open call with the abort message.
+	if icontext.Aborted(ctx) {
+		return nil, nil
+	}
 	// A stop ends the step with no response for any call, so a paused call
 	// and its siblings are replayed together on resume.
 	if stop != nil {
