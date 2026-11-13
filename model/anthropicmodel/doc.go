@@ -187,7 +187,7 @@
 //	|-------------------------------|---------------------------|
 //	| nil                           | Thinking parameter omitted |
 //	| ThinkingBudget == nil         | Rejected with ErrInvalidConfig naming ThinkingBudget |
-//	| *ThinkingBudget == 0          | Thinking off: {"type":"between_tools"} on Claude 5.5 (sonnet/opus); {"type":"disabled"} on earlier generations |
+//	| *ThinkingBudget == 0          | Thinking off: {"type":"between_tools"} on Claude 5.5 (sonnet/opus); {"type":"disabled"} on all other models |
 //	| *ThinkingBudget > 0           | Manual thinking enabled ({"type": "enabled", "budget_tokens": N}); never clamped |
 //	| *ThinkingBudget < 0           | Adaptive thinking ({"type": "adaptive", "display": "summarized"}) |
 //	| ThinkingLevel != ""           | Rejected with ErrInvalidConfig naming ThinkingLevel |
@@ -201,7 +201,10 @@
 // parts by default when `ThinkingConfig` is nil), while rejecting `disabled`
 // and manual `enabled` budgets with HTTP 400. On those models,
 // `*ThinkingBudget == 0` maps to `{"type": "between_tools"}` so callers can
-// still turn thinking off without a 400.
+// still turn thinking off without a 400. Because between_tools still returns
+// the short updates the model writes between tool calls as thinking blocks, a
+// caller who sets `ThinkingBudget: 0` on Sonnet 5.5 or Opus 5.5 can still
+// receive thought parts in a tool loop.
 //
 // Reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`) is configured via
 // [ClientConfig.Effort] (`output_config.effort`). Claude `thinking` blocks are

@@ -2013,6 +2013,27 @@ func TestExtendedThinkingAndEffort(t *testing.T) {
 			t.Errorf("thinking on 5.5 = %+v, want type=between_tools", thMap)
 		}
 
+		// 2c. ThinkingBudget == 0 on Claude Opus 5.5 -> between_tools.
+		mOpus55, err := anthropicmodel.NewModel(t.Context(), "claude-opus-5-5", anthropicmodel.ClientConfig{
+			APIKey:  "test-key",
+			BaseURL: srv.URL,
+		})
+		if err != nil {
+			t.Fatalf("NewModel(claude-opus-5-5) error = %v", err)
+		}
+		for _, err := range mOpus55.GenerateContent(t.Context(), &model.LLMRequest{
+			Contents: genai.Text("q"),
+			Config:   &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: &zero}},
+		}, false) {
+			if err != nil {
+				t.Fatalf("ThinkingBudget=0 on opus-5-5 error = %v", err)
+			}
+		}
+		thMap, _ = lastBody["thinking"].(map[string]any)
+		if thMap["type"] != "between_tools" {
+			t.Errorf("thinking on opus-5-5 = %+v, want type=between_tools", thMap)
+		}
+
 		// 3. ThinkingBudget > 0 -> enabled with unclamped budget_tokens.
 		for _, err := range m.GenerateContent(t.Context(), &model.LLMRequest{
 			Contents: genai.Text("q"),

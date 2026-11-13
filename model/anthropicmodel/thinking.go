@@ -49,7 +49,7 @@ func buildThinkingParam(cfg *genai.GenerateContentConfig, modelID string) anthro
 	switch {
 	case budget == 0:
 		// Claude 5.5 rejects {"type":"disabled"} and asks for between_tools to
-		// turn thinking off. Older generations still accept disabled.
+		// turn thinking off. All other models still accept disabled.
 		if thinkingDisableUsesBetweenTools(modelID) {
 			between := anthropic.NewThinkingConfigBetweenToolsParam()
 			return anthropic.ThinkingConfigParamUnion{OfBetweenTools: &between}
@@ -71,10 +71,8 @@ func buildThinkingParam(cfg *genai.GenerateContentConfig, modelID string) anthro
 // with {"type":"between_tools"} instead of {"type":"disabled"}.
 func thinkingDisableUsesBetweenTools(modelID string) bool {
 	m := strings.ToLower(modelID)
-	// Match bare IDs and Vertex resource names that embed them.
-	return strings.Contains(m, "claude-sonnet-5-5") ||
-		strings.Contains(m, "claude-opus-5-5") ||
-		strings.Contains(m, "sonnet-5-5") ||
+	// Substring match also covers versioned IDs such as claude-sonnet-5-5@20260928.
+	return strings.Contains(m, "sonnet-5-5") ||
 		strings.Contains(m, "opus-5-5")
 }
 
