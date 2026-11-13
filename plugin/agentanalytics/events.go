@@ -110,8 +110,8 @@ func isModelResponseCode(code string) bool {
 }
 
 func stripGenericParams(name string) string {
-	if idx := strings.IndexByte(name, '['); idx >= 0 {
-		return name[:idx]
+	if before, _, ok := strings.Cut(name, "["); ok {
+		return before
 	}
 	return name
 }
@@ -230,7 +230,7 @@ hopLoop:
 				visited[key] = true
 			}
 			if v.CanInterface() && v.Type().Implements(unwrapToolType) {
-				if u, ok := v.Interface().(interface{ Unwrap() tool.Tool }); ok {
+				if u, ok := reflect.TypeAssert[interface{ Unwrap() tool.Tool }](v); ok {
 					if inner := orZero(u.Unwrap); !isNil(inner) {
 						v = reflect.ValueOf(inner)
 						continue hopLoop
@@ -246,7 +246,7 @@ hopLoop:
 			return reflect.Value{}
 		}
 		if !fromPtr && v.CanInterface() && v.Type().Implements(unwrapToolType) {
-			if u, ok := v.Interface().(interface{ Unwrap() tool.Tool }); ok {
+			if u, ok := reflect.TypeAssert[interface{ Unwrap() tool.Tool }](v); ok {
 				if inner := orZero(u.Unwrap); !isNil(inner) {
 					v = reflect.ValueOf(inner)
 					continue hopLoop
@@ -346,7 +346,7 @@ func findAgentA2AByName(v reflect.Value, targetName string, visited map[uintptr]
 			}
 		}
 		if v.CanInterface() {
-			if ag, ok := v.Interface().(agent.Agent); ok && ag != nil {
+			if ag, ok := reflect.TypeAssert[agent.Agent](v); ok && ag != nil {
 				if strings.TrimSpace(orZero(ag.Name)) == targetName {
 					return true, isRemoteA2AAgentValue(v)
 				}
@@ -610,7 +610,7 @@ func formatCompactionValue(v reflect.Value, maxLen int, redact bool) (map[string
 	}
 
 	if v.Kind() == reflect.Map && v.CanInterface() {
-		if m, ok := v.Interface().(map[string]any); ok {
+		if m, ok := reflect.TypeAssert[map[string]any](v); ok {
 			out := maps.Clone(m)
 			normalizeCompactionKeys(out)
 			_, hasStart := out["start_timestamp"]
@@ -662,7 +662,7 @@ func compactionTimestamp(f reflect.Value) any {
 	if !f.IsValid() || !f.CanInterface() || f.IsZero() {
 		return nil
 	}
-	if ts, ok := f.Interface().(time.Time); ok {
+	if ts, ok := reflect.TypeAssert[time.Time](f); ok {
 		return epochSeconds(ts)
 	}
 	if f.Type() == jsonNumberType {

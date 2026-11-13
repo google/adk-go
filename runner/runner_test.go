@@ -17,6 +17,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
@@ -360,6 +361,353 @@ func TestRunner_PluginModifiesUserMessage(t *testing.T) {
 	}
 }
 
+// recordingModel records each request it receives and replies with a fixed
+// text.
+type recordingModel struct{ reqs []*model.LLMRequest }
+
+func (*recordingModel) Name() string { return "recording" }
+
+func (m *recordingModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.reqs = append(m.reqs, req)
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("ok", genai.RoleModel)}, nil)
+	}
+}
+
+// TestRunner_InboundMessageIsUserTurn guards that the inbound message is
+// stored and sent to the model as a user turn, whatever Role the caller set.
+// An empty Role used to be dropped when the request was built, and a "model"
+// Role made the caller's text look like the model's own earlier turn.
+func TestRunner_InboundMessageIsUserTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		role string
+	}{
+		{name: "empty role", role: ""},
+		{name: "model role", role: genai.RoleModel},
+		{name: "user role", role: genai.RoleUser},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			m := &recordingModel{}
+			a := must(llmagent.New(llmagent.Config{Name: "a", Model: m}))
+			sessionService := session.InMemoryService()
+			r, err := New(Config{AppName: "app", Agent: a, SessionService: sessionService})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+				t.Fatalf("sessionService.Create() error = %v", err)
+			}
+
+			msg := &genai.Content{Role: tc.role, Parts: []*genai.Part{genai.NewPartFromText("hello model")}}
+			for _, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("r.Run() returned an error: %v", err)
+				}
+			}
+
+			// The caller's struct is left alone.
+			if msg.Role != tc.role {
+				t.Errorf("caller's msg.Role = %q, want it unchanged (%q)", msg.Role, tc.role)
+			}
+
+			// The model sees the message as a user turn.
+			if len(m.reqs) != 1 {
+				t.Fatalf("model got %d requests, want 1", len(m.reqs))
+			}
+			var sent []string
+			for _, c := range m.reqs[0].Contents {
+				for _, p := range c.Parts {
+					if p.Text == "hello model" {
+						sent = append(sent, c.Role)
+					}
+				}
+			}
+			if len(sent) != 1 || sent[0] != genai.RoleUser {
+				t.Errorf("model saw the inbound text with roles %q, want exactly [%q]", sent, genai.RoleUser)
+			}
+
+			// The stored event is a user turn too.
+			got, err := sessionService.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("sessionService.Get() error = %v", err)
+			}
+			first := got.Session.Events().At(0)
+			if first.Author != "user" || first.Content == nil || first.Content.Role != genai.RoleUser {
+				t.Errorf("stored inbound event = author %q content %+v, want author user and role %q", first.Author, first.Content, genai.RoleUser)
+			}
+		})
+	}
+}
+
+// TestRunner_SaveInputBlobsDoesNotMutateCallerMessage guards that replacing
+// inline blobs with placeholders edits the stored copy, not the caller's Parts.
+func TestRunner_SaveInputBlobsDoesNotMutateCallerMessage(t *testing.T) {
+	ctx := t.Context()
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	}))
+	sessionService := session.InMemoryService()
+	r, err := New(Config{AppName: "app", Agent: testAgent, SessionService: sessionService})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	r.artifactService = artifact.InMemoryService()
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+
+	blob := &genai.Part{InlineData: &genai.Blob{MIMEType: "application/octet-stream", Data: []byte("data")}}
+	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromText("file"), blob}}
+	for _, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{SaveInputBlobsAsArtifacts: true}) {
+		if err != nil {
+			t.Fatalf("r.Run() returned an error: %v", err)
+		}
+	}
+	if msg.Parts[1] != blob || blob.InlineData == nil {
+		t.Errorf("caller's message was modified: Parts[1] = %+v, want the original blob part", msg.Parts[1])
+	}
+}
+
+// TestRunner_InboundRoleNormalizedForContextAndPlugin guards the two other
+// places the inbound message flows: the invocation context's UserContent, and
+// a message returned by an OnUserMessageCallback plugin.
+func TestRunner_InboundRoleNormalizedForContextAndPlugin(t *testing.T) {
+	ctx := t.Context()
+	var gotUserContent *genai.Content
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) { gotUserContent = ic.UserContent() }
+		},
+	}))
+	sessionService := session.InMemoryService()
+	r, err := New(Config{AppName: "app", Agent: testAgent, SessionService: sessionService})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+	msg := &genai.Content{Parts: []*genai.Part{genai.NewPartFromText("hi")}}
+	for _, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run() returned an error: %v", err)
+		}
+	}
+	if gotUserContent == nil || gotUserContent.Role != genai.RoleUser {
+		t.Errorf("ctx.UserContent() = %+v, want Role %q", gotUserContent, genai.RoleUser)
+	}
+
+	// A plugin that returns a message with no Role still yields a user turn.
+	roleless, err := plugin.New(plugin.Config{
+		Name: "roleless",
+		OnUserMessageCallback: func(agent.InvocationContext, *genai.Content) (*genai.Content, error) {
+			return &genai.Content{Parts: []*genai.Part{genai.NewPartFromText("from plugin")}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+	r2, err := New(Config{AppName: "app", Agent: testAgent, SessionService: sessionService, PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{roleless}}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s2"}); err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+	gotUserContent = nil
+	for _, err := range r2.Run(ctx, "u", "s2", msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r2.Run() returned an error: %v", err)
+		}
+	}
+	if gotUserContent == nil || gotUserContent.Role != genai.RoleUser || gotUserContent.Parts[0].Text != "from plugin" {
+		t.Errorf("ctx.UserContent() with plugin = %+v, want the plugin message with Role %q", gotUserContent, genai.RoleUser)
+	}
+	got, err := sessionService.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s2"})
+	if err != nil {
+		t.Fatalf("sessionService.Get() error = %v", err)
+	}
+	first := got.Session.Events().At(0)
+	if first.Content == nil || first.Content.Role != genai.RoleUser || first.Content.Parts[0].Text != "from plugin" {
+		t.Errorf("stored event content = %+v, want the plugin message with Role %q", first.Content, genai.RoleUser)
+	}
+}
+
+// TestRunner_RejectsUserFunctionCall guards that a user message carrying a
+// function call ends the run with an error before the message or its input
+// blobs are stored or any agent runs, on both the legacy agent path and the
+// node path.
+func TestRunner_RejectsUserFunctionCall(t *testing.T) {
+	functionCall := &genai.Part{FunctionCall: &genai.FunctionCall{Name: "some_tool", Args: map[string]any{"key": "value"}}}
+	inlineData := &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{0x89, 0x50}}}
+	for _, tc := range []struct {
+		name  string
+		llm   bool
+		parts []*genai.Part
+	}{
+		{name: "legacy path", parts: []*genai.Part{functionCall}},
+		{name: "node path", llm: true, parts: []*genai.Part{functionCall}},
+		{name: "node path, call after text", llm: true, parts: []*genai.Part{genai.NewPartFromText("hi"), functionCall}},
+		{name: "legacy path, call after inline data", parts: []*genai.Part{inlineData, functionCall}},
+		{name: "node path, call after inline data", llm: true, parts: []*genai.Part{inlineData, functionCall}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			ran := false
+			m := &recordingModel{}
+			var a agent.Agent
+			if tc.llm {
+				a = must(llmagent.New(llmagent.Config{Name: "test_agent", Model: m}))
+			} else {
+				a = must(agent.New(agent.Config{
+					Name: "test_agent",
+					Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(func(*session.Event, error) bool) { ran = true }
+					},
+				}))
+			}
+			sessionService := session.InMemoryService()
+			artifactService := artifact.InMemoryService()
+			r, err := New(Config{AppName: "app", Agent: a, SessionService: sessionService, ArtifactService: artifactService})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+				t.Fatalf("sessionService.Create() error = %v", err)
+			}
+
+			msg := &genai.Content{Role: genai.RoleUser, Parts: tc.parts}
+			var runErr error
+			for _, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{SaveInputBlobsAsArtifacts: true}) {
+				if err != nil {
+					runErr = err
+				}
+			}
+
+			if runErr == nil || runErr.Error() != "user message cannot contain function calls" {
+				t.Errorf("r.Run() error = %v, want %q", runErr, "user message cannot contain function calls")
+			}
+			if ran || len(m.reqs) != 0 {
+				t.Errorf("agent ran = %t, model requests = %d, want no agent run and no model request", ran, len(m.reqs))
+			}
+			got, err := sessionService.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("sessionService.Get() error = %v", err)
+			}
+			if n := got.Session.Events().Len(); n != 0 {
+				t.Errorf("session has %d events, want 0", n)
+			}
+			saved, err := artifactService.List(ctx, &artifact.ListRequest{AppName: "app", UserID: "u", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("artifactService.List() error = %v", err)
+			}
+			if len(saved.FileNames) != 0 {
+				t.Errorf("saved artifacts = %v, want none", saved.FileNames)
+			}
+		})
+	}
+}
+
+// TestRunner_UserFunctionCallCheckedAfterPlugin guards that the function call
+// check applies to the message an OnUserMessageCallback plugin returns, not to
+// the message the caller sent.
+func TestRunner_UserFunctionCallCheckedAfterPlugin(t *testing.T) {
+	functionCall := &genai.Part{FunctionCall: &genai.FunctionCall{Name: "some_tool"}}
+	for _, tc := range []struct {
+		name     string
+		sent     []*genai.Part
+		returned []*genai.Part
+		wantErr  bool
+	}{
+		{
+			name:     "plugin removes the call",
+			sent:     []*genai.Part{functionCall},
+			returned: []*genai.Part{genai.NewPartFromText("from plugin")},
+		},
+		{
+			name:     "plugin adds a call",
+			sent:     []*genai.Part{genai.NewPartFromText("hi")},
+			returned: []*genai.Part{functionCall},
+			wantErr:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			testAgent := must(agent.New(agent.Config{
+				Name: "test_agent",
+				Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(func(*session.Event, error) bool) {}
+				},
+			}))
+			replacer, err := plugin.New(plugin.Config{
+				Name: "replacer",
+				OnUserMessageCallback: func(agent.InvocationContext, *genai.Content) (*genai.Content, error) {
+					return &genai.Content{Role: genai.RoleUser, Parts: tc.returned}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("plugin.New() error = %v", err)
+			}
+			sessionService := session.InMemoryService()
+			r, err := New(Config{AppName: "app", Agent: testAgent, SessionService: sessionService, PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{replacer}}})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+				t.Fatalf("sessionService.Create() error = %v", err)
+			}
+
+			var runErr error
+			for _, err := range r.Run(ctx, "u", "s", &genai.Content{Role: genai.RoleUser, Parts: tc.sent}, agent.RunConfig{}) {
+				if err != nil {
+					runErr = err
+				}
+			}
+
+			if gotErr := runErr != nil; gotErr != tc.wantErr {
+				t.Errorf("r.Run() error = %v, want error %t", runErr, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestRunner_UserMessageWithNilPartRuns guards that the function call check
+// skips a nil part instead of dereferencing it.
+func TestRunner_UserMessageWithNilPartRuns(t *testing.T) {
+	ctx := t.Context()
+	ran := false
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) { ran = true }
+		},
+	}))
+	sessionService := session.InMemoryService()
+	r, err := New(Config{AppName: "app", Agent: testAgent, SessionService: sessionService})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+
+	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{nil, genai.NewPartFromText("hi")}}
+	for _, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run() returned an error: %v", err)
+		}
+	}
+	if !ran {
+		t.Error("agent did not run")
+	}
+}
+
 // creates agentTree for tests and returns references to the agents
 func agentTree(t *testing.T) agentTreeStruct {
 	t.Helper()
@@ -637,6 +985,145 @@ func TestRunner_AutoCreateSession(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// getErrSessionService fails Get with getErr and counts Create calls.
+type getErrSessionService struct {
+	session.Service
+	getErr  error
+	creates int
+}
+
+func (s *getErrSessionService) Get(context.Context, *session.GetRequest) (*session.GetResponse, error) {
+	return nil, s.getErr
+}
+
+func (s *getErrSessionService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
+	s.creates++
+	return s.Service.Create(ctx, req)
+}
+
+func TestRunner_AutoCreateSession_GetError(t *testing.T) {
+	t.Parallel()
+
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	}))
+	errTransient := errors.New("connection refused")
+	// A third-party service that returns its own "not found" without wrapping
+	// session.ErrNotFound.
+	errPlainNotFound := errors.New("not found")
+
+	tests := []struct {
+		name              string
+		autoCreateSession bool
+		getErr            error
+		wantCreates       int
+		wantErr           error
+	}{
+		{
+			name:              "transient_error_is_returned_without_create",
+			autoCreateSession: true,
+			getErr:            errTransient,
+			wantCreates:       0,
+			wantErr:           errTransient,
+		},
+		{
+			name:              "unwrapped_not_found_is_returned_without_create",
+			autoCreateSession: true,
+			getErr:            errPlainNotFound,
+			wantCreates:       0,
+			wantErr:           errPlainNotFound,
+		},
+		{
+			name:              "wrapped_not_found_creates_once",
+			autoCreateSession: true,
+			getErr:            fmt.Errorf("%w: %q", session.ErrNotFound, "testSession"),
+			wantCreates:       1,
+		},
+		{
+			name:              "auto_create_false_returns_not_found",
+			autoCreateSession: false,
+			getErr:            session.ErrNotFound,
+			wantCreates:       0,
+			wantErr:           session.ErrNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &getErrSessionService{Service: session.InMemoryService(), getErr: tt.getErr}
+			r, err := New(Config{
+				AppName:           "testApp",
+				Agent:             testAgent,
+				SessionService:    svc,
+				AutoCreateSession: tt.autoCreateSession,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			var gotErr error
+			msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+			for _, err := range r.Run(t.Context(), "testUser", "testSession", msg, agent.RunConfig{}) {
+				if err != nil {
+					gotErr = err
+				}
+			}
+
+			if !errors.Is(gotErr, tt.wantErr) {
+				t.Errorf("Runner.Run() error = %v, want %v", gotErr, tt.wantErr)
+			}
+			if svc.creates != tt.wantCreates {
+				t.Errorf("Create calls = %d, want %d", svc.creates, tt.wantCreates)
+			}
+		})
+	}
+}
+
+// TestRunner_AutoCreateSession_EmptySessionID checks that an empty session ID
+// still creates a session with a generated ID. Get rejects the empty ID with a
+// validation error rather than session.ErrNotFound.
+func TestRunner_AutoCreateSession_EmptySessionID(t *testing.T) {
+	t.Parallel()
+
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	}))
+	svc := session.InMemoryService()
+	r, err := New(Config{
+		AppName:           "testApp",
+		Agent:             testAgent,
+		SessionService:    svc,
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+	for _, err := range r.Run(t.Context(), "testUser", "", msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Runner.Run() with an empty session ID error = %v", err)
+		}
+	}
+
+	resp, err := svc.List(t.Context(), &session.ListRequest{AppName: "testApp", UserID: "testUser"})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(resp.Sessions) != 1 {
+		t.Fatalf("List() returned %d sessions, want 1", len(resp.Sessions))
+	}
+	if resp.Sessions[0].ID() == "" {
+		t.Error("created session has an empty ID, want a generated one")
 	}
 }
 

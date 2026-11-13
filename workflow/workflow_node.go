@@ -84,7 +84,7 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 			// matches the scheduler: Event.Output, or model text when
 			// MessageAsOutput is set.
 			if out, ok := childEventOutput(ev); ok && ev.NodeInfo != nil {
-				for _, seg := range strings.Split(ev.NodeInfo.Path, "/") {
+				for seg := range strings.SplitSeq(ev.NodeInfo.Path, "/") {
 					name := seg
 					if idx := strings.IndexByte(name, '@'); idx >= 0 {
 						name = name[:idx]

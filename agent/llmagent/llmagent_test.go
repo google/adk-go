@@ -448,6 +448,122 @@ func TestModelCallbacks(t *testing.T) {
 	}
 }
 
+// streamingTextModel streams two partial text deltas followed by the final
+// aggregated response, which ends the turn and carries the call's usage
+// metadata.
+type streamingTextModel struct {
+	usage *genai.GenerateContentResponseUsageMetadata
+}
+
+func (m *streamingTextModel) Name() string { return "streaming-text" }
+
+func (m *streamingTextModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for _, delta := range []string{"Hello ", "world."} {
+			if !yield(&model.LLMResponse{Content: genai.NewContentFromText(delta, genai.RoleModel), Partial: true}, nil) {
+				return
+			}
+		}
+		yield(&model.LLMResponse{
+			Content:       genai.NewContentFromText("Hello world.", genai.RoleModel),
+			UsageMetadata: m.usage,
+			TurnComplete:  true,
+		}, nil)
+	}
+}
+
+func TestAfterModelCallbackReplacementKeepsStreamingFields(t *testing.T) {
+	t.Parallel()
+
+	usage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 120, CandidatesTokenCount: 8, TotalTokenCount: 128}
+	ownUsage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 1, CandidatesTokenCount: 1, TotalTokenCount: 2}
+
+	for _, tc := range []struct {
+		name        string
+		replacement func() *model.LLMResponse
+		wantUsage   []*genai.GenerateContentResponseUsageMetadata
+	}{
+		{
+			name: "replacement without usage inherits it",
+			replacement: func() *model.LLMResponse {
+				return &model.LLMResponse{Content: genai.NewContentFromText("scrubbed", genai.RoleModel)}
+			},
+			wantUsage: []*genai.GenerateContentResponseUsageMetadata{nil, nil, usage},
+		},
+		{
+			name: "replacement with its own usage keeps it",
+			replacement: func() *model.LLMResponse {
+				return &model.LLMResponse{Content: genai.NewContentFromText("scrubbed", genai.RoleModel), UsageMetadata: ownUsage}
+			},
+			wantUsage: []*genai.GenerateContentResponseUsageMetadata{ownUsage, ownUsage, ownUsage},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var returned []*model.LLMResponse
+			a, err := llmagent.New(llmagent.Config{
+				Name:  "scrubbing_agent",
+				Model: &streamingTextModel{usage: usage},
+				AfterModelCallbacks: []llmagent.AfterModelCallback{
+					func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+						r := tc.replacement()
+						returned = append(returned, r)
+						return r, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("failed to create llm agent: %v", err)
+			}
+			runner := testutil.NewTestAgentRunner(t, a)
+			stream := runner.RunContentWithConfig(t, "test_session", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{StreamingMode: agent.StreamingModeSSE})
+			events, err := testutil.CollectEvents(stream)
+			if err != nil {
+				t.Fatalf("CollectEvents() error = %v", err)
+			}
+
+			var gotPartial, gotTurnComplete []bool
+			var gotUsage []*genai.GenerateContentResponseUsageMetadata
+			for _, ev := range events {
+				gotPartial = append(gotPartial, ev.Partial)
+				gotTurnComplete = append(gotTurnComplete, ev.TurnComplete)
+				gotUsage = append(gotUsage, ev.UsageMetadata)
+			}
+			if diff := cmp.Diff([]bool{true, true, false}, gotPartial); diff != "" {
+				t.Errorf("event Partial flags mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff([]bool{false, false, true}, gotTurnComplete); diff != "" {
+				t.Errorf("event TurnComplete flags mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantUsage, gotUsage); diff != "" {
+				t.Errorf("event UsageMetadata mismatch (-want +got):\n%s", diff)
+			}
+
+			// Only the final response is a model turn; the deltas must not be
+			// persisted alongside it.
+			resp, err := runner.SessionService().Get(t.Context(), &session.GetRequest{AppName: "test_app", UserID: "test_user", SessionID: "test_session"})
+			if err != nil {
+				t.Fatalf("session Get() error = %v", err)
+			}
+			var modelTurns int
+			for ev := range resp.Session.Events().All() {
+				if ev.Author == "scrubbing_agent" {
+					modelTurns++
+				}
+			}
+			if modelTurns != 1 {
+				t.Errorf("persisted %d agent events, want 1", modelTurns)
+			}
+
+			// The callback's own response objects are not modified.
+			for _, r := range returned {
+				if r.Partial || r.TurnComplete || (r.UsageMetadata != nil && r.UsageMetadata != ownUsage) {
+					t.Errorf("callback response was mutated: Partial=%v TurnComplete=%v UsageMetadata=%v", r.Partial, r.TurnComplete, r.UsageMetadata)
+				}
+			}
+		})
+	}
+}
+
 func TestToolCallback(t *testing.T) {
 	type Args struct {
 		Seed int `json:"seed"`
@@ -901,6 +1017,53 @@ func TestFunctionTool(t *testing.T) {
 	}
 }
 
+// transfer_to_agent returns no result of its own, so after-tool callbacks see
+// nil. The model is still sent {"result": null}.
+func TestAgentTransferAfterToolCallbackSeesNoResult(t *testing.T) {
+	model := &testutil.MockModel{Responses: []*genai.Content{
+		genai.NewContentFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": "sub_agent_1"}, "model"),
+		genai.NewContentFromText("response1", "model"),
+	}}
+	subAgent1, err := llmagent.New(llmagent.Config{
+		Name:  "sub_agent_1",
+		Model: model,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subAgent1: %v", err)
+	}
+	var calls int
+	var gotResult map[string]any
+	rootAgent, err := llmagent.New(llmagent.Config{
+		Name:      "root_agent",
+		Model:     model,
+		SubAgents: []agent.Agent{subAgent1},
+		AfterToolCallbacks: []llmagent.AfterToolCallback{
+			func(_ agent.Context, _ tool.Tool, _, result map[string]any, _ error) (map[string]any, error) {
+				calls++
+				gotResult = result
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create rootAgent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, rootAgent)
+	for _, err := range runner.Run(t, "session_id", "transfer") {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	}
+
+	if calls != 1 {
+		t.Fatalf("after-tool callback ran %d times, want 1", calls)
+	}
+	if gotResult != nil {
+		t.Errorf("after-tool callback result = %v, want nil", gotResult)
+	}
+}
+
 func TestAgentTransfer(t *testing.T) {
 	// Helpers to create genai.Content conveniently.
 	transferCall := func(agentName string) *genai.Content {
@@ -912,7 +1075,8 @@ func TestAgentTransfer(t *testing.T) {
 	}
 	transferResponse := func() *genai.Content {
 		return genai.NewContentFromFunctionResponse(
-			"transfer_to_agent", map[string]any{}, "user")
+			"transfer_to_agent", map[string]any{"result": nil}, "user",
+		)
 	}
 	text := func(text string) *genai.Content {
 		return genai.NewContentFromText(
@@ -1088,6 +1252,42 @@ func TestAgentTransfer(t *testing.T) {
 				// sub_agent_1_1 is single, so it should not be the current agent.
 				// Otherwise, the conversation will be tied to sub_agent_1_1 forever.
 				{"sub_agent_1", text("response2").Parts},
+			},
+		})
+	})
+
+	t.Run("unknown_agent_is_a_tool_error", func(t *testing.T) {
+		// root_agent -- sub_agent_1. The model names an agent outside the
+		// declared enum; it gets the error back and answers instead.
+		model := testModel(
+			transferCall("nobody"),
+			text("response1"))
+
+		subAgent1, err := llmagent.New(llmagent.Config{
+			Name:  "sub_agent_1",
+			Model: model,
+		})
+		if err != nil {
+			t.Fatalf("failed to create subAgent1: %v", err)
+		}
+
+		rootAgent, err := llmagent.New(llmagent.Config{
+			Name:      "root_agent",
+			Model:     model,
+			SubAgents: []agent.Agent{subAgent1},
+		})
+		if err != nil {
+			t.Fatalf("failed to create rootAgent: %v", err)
+		}
+
+		errorResponse := genai.NewContentFromFunctionResponse("transfer_to_agent", map[string]any{
+			"error": `agent "nobody" is not a valid transfer target; available agents: sub_agent_1`,
+		}, "user")
+		check(t, rootAgent, [][]content{
+			0: {
+				{"root_agent", transferCall("nobody").Parts},
+				{"root_agent", errorResponse.Parts},
+				{"root_agent", text("response1").Parts},
 			},
 		})
 	})

@@ -179,8 +179,16 @@ func (t *TransferToAgentTool) Run(ctx agent.Context, args any) (map[string]any, 
 	if !ok || agent == "" {
 		return nil, fmt.Errorf("empty agent_name: %v", args)
 	}
+	// Reject a name outside the declared enum here, as a tool error the model
+	// sees and can recover from. Setting TransferToAgent to it would make the
+	// flow fail the whole invocation when it cannot find the agent. This
+	// deliberately diverges from adk-python, whose tool accepts any name and
+	// whose flow then raises ValueError.
+	if targets := t.enums(); !slices.Contains(targets, agent) {
+		return nil, fmt.Errorf("agent %q is not a valid transfer target; available agents: %s", agent, strings.Join(targets, ", "))
+	}
 	ctx.Actions().TransferToAgent = agent
-	return map[string]any{}, nil
+	return nil, nil
 }
 
 var _ tool.Tool = (*TransferToAgentTool)(nil)

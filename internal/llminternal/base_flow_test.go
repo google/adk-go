@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -33,6 +34,8 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolauth"
 )
 
 type mockFunctionTool struct {
@@ -108,9 +111,24 @@ type testCase struct {
 	afterToolCallbacks   []AfterToolCallback
 	onToolErrorCallbacks []OnToolErrorCallback
 	want                 map[string]any
+	// check runs after the result has been compared, for a row that asserts on
+	// more than the result.
+	check func(t *testing.T)
 }
 
 func TestCallTool(t *testing.T) {
+	panicTool, err := functiontool.New(functiontool.Config{Name: "panicTool"}, func(agent.Context, struct{}) (struct{}, error) {
+		panic("boom")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Callbacks run before the flow replaces the panic error with the generic
+	// message, so each one records the error it was handed for its own row's
+	// check to assert on. Each panic row gets its own map, so that a row only
+	// ever reads what its own callbacks recorded.
+	panicCallbackErrs := map[string]error{}
+	wrappedPanicCallbackErrs := map[string]error{}
 	testCases := []testCase{
 		{
 			name: "tool runs successfully",
@@ -133,6 +151,41 @@ func TestCallTool(t *testing.T) {
 			},
 			args: map[string]any{"key": "value"},
 			want: map[string]any{"error": "tool error"},
+		},
+		{
+			name: "tool panic is hidden from the model but not from callbacks",
+			tool: panicTool.(toolinternal.FunctionTool),
+			args: map[string]any{},
+			onToolErrorCallbacks: []OnToolErrorCallback{
+				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+					panicCallbackErrs["OnToolError"] = err
+					return nil, nil
+				},
+			},
+			afterToolCallbacks: []AfterToolCallback{
+				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+					panicCallbackErrs["AfterTool"] = err
+					return nil, nil
+				},
+			},
+			want:  map[string]any{"error": "Invoking `panicTool()` failed with an internal error."},
+			check: checkPanicCallbackErrs(panicCallbackErrs, "OnToolError", "AfterTool"),
+		},
+		{
+			// An error on its way out of a tool is wrapped more than once:
+			// agenttool wraps what the sub-agent run returned, and a callback
+			// that handles the error and returns its own is free to wrap it.
+			name: "wrapped tool panic is hidden from the model",
+			tool: panicTool.(toolinternal.FunctionTool),
+			args: map[string]any{},
+			onToolErrorCallbacks: []OnToolErrorCallback{
+				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+					wrappedPanicCallbackErrs["OnToolError"] = err
+					return nil, fmt.Errorf("lookup failed: %w", err)
+				},
+			},
+			want:  map[string]any{"error": "Invoking `panicTool()` failed with an internal error."},
+			check: checkPanicCallbackErrs(wrappedPanicCallbackErrs, "OnToolError"),
 		},
 		{
 			name: "before callback returns result",
@@ -431,7 +484,156 @@ func TestCallTool(t *testing.T) {
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("callTool() mismatch (-want +got):\n%s", diff)
 			}
+			if tc.check != nil {
+				tc.check(t)
+			}
 		})
+	}
+}
+
+func TestHandleFunctionCalls_CallbackArgEditsDoNotReachTheCallEvent(t *testing.T) {
+	echoTool := &mockFunctionTool{
+		name: "echo",
+		runFunc: func(_ agent.Context, args map[string]any) (map[string]any, error) {
+			return map[string]any{"args": args}, nil
+		},
+	}
+	echoArgs := func(_ agent.Context, _ tool.Tool, args map[string]any, _ error) (map[string]any, error) {
+		args["input_str"] = "modified_input"
+		return map[string]any{"args": args}, nil
+	}
+	for _, tc := range []struct {
+		name         string
+		toolName     string
+		callArgs     map[string]any
+		before       BeforeToolCallback
+		onToolError  OnToolErrorCallback
+		wantResponse map[string]any
+		wantCallArgs map[string]any
+	}{
+		{
+			name:     "before-tool callback adds an argument",
+			toolName: "echo",
+			callArgs: map[string]any{},
+			before: func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				args["input_str"] = "modified_input"
+				return nil, nil
+			},
+			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
+			wantCallArgs: map[string]any{},
+		},
+		{
+			name:     "before-tool callback adds an argument to a call without arguments",
+			toolName: "echo",
+			callArgs: nil,
+			before: func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				args["input_str"] = "modified_input"
+				return nil, nil
+			},
+			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
+			wantCallArgs: nil,
+		},
+		{
+			name:     "before-tool callback edits a nested object",
+			toolName: "echo",
+			callArgs: map[string]any{"filter": map[string]any{"limit": 1}},
+			before: func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				args["filter"].(map[string]any)["limit"] = 2
+				return nil, nil
+			},
+			wantResponse: map[string]any{"args": map[string]any{"filter": map[string]any{"limit": 2}}},
+			wantCallArgs: map[string]any{"filter": map[string]any{"limit": 1}},
+		},
+		{
+			name:     "before-tool callback edits a nested list",
+			toolName: "echo",
+			callArgs: map[string]any{"tags": []any{"a", map[string]any{"k": "v"}}},
+			before: func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				tags := args["tags"].([]any)
+				tags[0] = "b"
+				tags[1].(map[string]any)["k"] = "w"
+				return nil, nil
+			},
+			wantResponse: map[string]any{"args": map[string]any{"tags": []any{"b", map[string]any{"k": "w"}}}},
+			wantCallArgs: map[string]any{"tags": []any{"a", map[string]any{"k": "v"}}},
+		},
+		{
+			name:         "nil nested values stay nil",
+			toolName:     "echo",
+			callArgs:     map[string]any{"filter": map[string]any(nil), "tags": []any(nil)},
+			wantResponse: map[string]any{"args": map[string]any{"filter": map[string]any(nil), "tags": []any(nil)}},
+			wantCallArgs: map[string]any{"filter": map[string]any(nil), "tags": []any(nil)},
+		},
+		{
+			name:         "on-tool-error callback edits the arguments of an unknown tool",
+			toolName:     "missing",
+			callArgs:     map[string]any{"input_str": "original"},
+			onToolError:  echoArgs,
+			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
+			wantCallArgs: map[string]any{"input_str": "original"},
+		},
+		{
+			name:         "on-tool-error callback edits the arguments of a tool that cannot run",
+			toolName:     "plain",
+			callArgs:     map[string]any{"input_str": "original"},
+			onToolError:  echoArgs,
+			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
+			wantCallArgs: map[string]any{"input_str": "original"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &Flow{}
+			if tc.before != nil {
+				f.BeforeToolCallbacks = []BeforeToolCallback{tc.before}
+			}
+			if tc.onToolError != nil {
+				f.OnToolErrorCallbacks = []OnToolErrorCallback{tc.onToolError}
+			}
+			call := &genai.FunctionCall{ID: "call_1", Name: tc.toolName, Args: tc.callArgs}
+			resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}
+			toolsDict := map[string]tool.Tool{"echo": echoTool, "plain": &fakeTool{name: "plain"}}
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				InvocationID: "inv_1",
+				Agent:        &mockAgent{name: "agent_1"},
+			})
+
+			ev, err := f.handleFunctionCalls(invCtx, toolsDict, resp, nil, nil)
+			if err != nil {
+				t.Fatalf("handleFunctionCalls() error = %v", err)
+			}
+
+			if diff := cmp.Diff(tc.wantResponse, ev.LLMResponse.Content.Parts[0].FunctionResponse.Response); diff != "" {
+				t.Errorf("function response mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantCallArgs, call.Args); diff != "" {
+				t.Errorf("function call args mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// checkPanicCallbackErrs asserts that a callback of each of the given kinds
+// recorded itself in errs, and was handed the panic value and the stack, which
+// callbacks need to diagnose a panic the model only sees as a generic message.
+func checkPanicCallbackErrs(errs map[string]error, kinds ...string) func(t *testing.T) {
+	return func(t *testing.T) {
+		t.Helper()
+		for _, kind := range kinds {
+			err, ok := errs[kind]
+			if !ok {
+				t.Errorf("%s callback was not called for the panic", kind)
+				continue
+			}
+			if err == nil {
+				t.Errorf("%s callback got a nil error for the panic", kind)
+				continue
+			}
+			for _, want := range []string{"boom", "stack:", "runtime/debug.Stack"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("%s callback error is missing %q", kind, want)
+				}
+			}
+		}
 	}
 }
 
@@ -737,6 +939,34 @@ func TestMergeEventActions(t *testing.T) {
 				Escalate:          true,
 			},
 		},
+		{
+			// Each parallel call records its own request under its own call ID,
+			// and the user has to answer all of them.
+			name: "requested auth configs from both calls kept",
+			base: &session.EventActions{
+				RequestedAuthConfigs: map[string]toolauth.Config{"call-a": {CredentialKey: "key-a"}},
+			},
+			other: &session.EventActions{
+				RequestedAuthConfigs: map[string]toolauth.Config{"call-b": {CredentialKey: "key-b"}},
+			},
+			want: &session.EventActions{
+				RequestedAuthConfigs: map[string]toolauth.Config{
+					"call-a": {CredentialKey: "key-a"},
+					"call-b": {CredentialKey: "key-b"},
+				},
+			},
+		},
+		{
+			name: "requested auth configs kept when only the later call asks",
+			base: &session.EventActions{StateDelta: map[string]any{"key1": "value1"}},
+			other: &session.EventActions{
+				RequestedAuthConfigs: map[string]toolauth.Config{"call-b": {CredentialKey: "key-b"}},
+			},
+			want: &session.EventActions{
+				StateDelta:           map[string]any{"key1": "value1"},
+				RequestedAuthConfigs: map[string]toolauth.Config{"call-b": {CredentialKey: "key-b"}},
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -828,6 +1058,30 @@ func TestPreprocess_Toolset(t *testing.T) {
 				t.Errorf("preprocess() model = %s, wantModel %s", req.Model, tc.wantModel)
 			}
 		})
+	}
+}
+
+// TestPreprocessStopsWhenTheConsumerDoes covers a request processor that
+// yields two events, as the auth preprocessor does when a tool it runs again
+// asks for another credential. A consumer that stops after the first event,
+// such as a runner whose session store fails to append it, must not be called
+// again: Go panics when a range-over-func loop body runs after it returned.
+func TestPreprocessStopsWhenTheConsumerDoes(t *testing.T) {
+	twoEvents := func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			if yield(session.NewEvent(t.Context(), "inv"), nil) {
+				yield(session.NewEvent(t.Context(), "inv"), nil)
+			}
+		}
+	}
+	f := &Flow{RequestProcessors: []func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error]{twoEvents}}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: &mockLLMAgent{s: &State{}}})
+
+	for _, err := range f.preprocess(ctx, &model.LLMRequest{}) {
+		if err != nil {
+			t.Fatalf("preprocess() error = %v", err)
+		}
+		break
 	}
 }
 
@@ -1137,6 +1391,59 @@ func TestRun_ThoughtOnlyTurnCountResets(t *testing.T) {
 	want := 2 + 1 + maxConsecutiveThoughtOnlyTurns
 	if m.calls != want {
 		t.Errorf("model called %d times, want %d; the consecutive-turn count did not reset on the non-final turn", m.calls, want)
+	}
+}
+
+// A response without content is dropped unless it carries something the
+// caller needs, such as grounding metadata from a search tool.
+func TestRunKeepsGroundingOnlyResponse(t *testing.T) {
+	grounding := &genai.GroundingMetadata{WebSearchQueries: []string{"test query"}}
+	tests := []struct {
+		name string
+		resp *model.LLMResponse
+		want []*genai.GroundingMetadata
+	}{
+		{
+			name: "grounding metadata only",
+			resp: &model.LLMResponse{GroundingMetadata: grounding},
+			want: []*genai.GroundingMetadata{grounding},
+		},
+		{
+			name: "empty response",
+			resp: &model.LLMResponse{},
+			want: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						yield(tc.resp, nil)
+					}
+				},
+			}
+			f := &Flow{Model: m}
+			ctx := icontext.NewInvocationContext(
+				runconfig.ToContext(t.Context(), &runconfig.RunConfig{}),
+				icontext.InvocationContextParams{
+					InvocationID: "inv_1",
+					Agent:        &mockAgent{name: "agent_1"},
+				},
+			)
+
+			var got []*genai.GroundingMetadata
+			for ev, err := range f.Run(ctx) {
+				if err != nil {
+					t.Fatalf("Run() yielded error: %v", err)
+				}
+				got = append(got, ev.GroundingMetadata)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("Run() event grounding metadata mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

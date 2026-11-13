@@ -338,15 +338,19 @@ func TestA2AClientFactory_CompatProtocolVersion(t *testing.T) {
 	// Registry cards commonly advertise an older A2A protocol version than the
 	// SDK's current one. The factory must register a compatible transport so the
 	// client can be created (this failed with "no compatible transports found"
-	// before the compat transports were added).
+	// before the compat transports were added). A version with no registered
+	// transport, such as a future major, is refused rather than mapped onto one.
 	tests := []struct {
 		name    string
 		binding a2a.TransportProtocol
 		version a2a.ProtocolVersion
+		wantErr bool
 	}{
 		{name: "http+json old version", binding: a2a.TransportProtocolHTTPJSON, version: "0.3.0"},
 		{name: "jsonrpc old version", binding: a2a.TransportProtocolJSONRPC, version: "0.3.0"},
 		{name: "http+json current version", binding: a2a.TransportProtocolHTTPJSON, version: a2a.Version},
+		{name: "http+json unknown major", binding: a2a.TransportProtocolHTTPJSON, version: "2.0", wantErr: true},
+		{name: "jsonrpc unknown major", binding: a2a.TransportProtocolJSONRPC, version: "2.0", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -358,8 +362,15 @@ func TestA2AClientFactory_CompatProtocolVersion(t *testing.T) {
 					ProtocolVersion: tc.version,
 				}},
 			}
-			factory := a2aClientFactory(card, http.DefaultClient)
+			factory := a2aClientFactory(http.DefaultClient)
 			client, err := factory.CreateFromCard(t.Context(), card)
+			if tc.wantErr {
+				if err == nil {
+					_ = client.Destroy()
+					t.Fatalf("CreateFromCard(%s@%s) = client, want an error", tc.binding, tc.version)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("CreateFromCard(%s@%s) error = %v, want a client", tc.binding, tc.version, err)
 			}

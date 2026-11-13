@@ -51,8 +51,7 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 	if cfg != nil {
 		cfgCopy := *cfg
 		if cfg.HTTPClient != nil {
-			clientCopy := *cfg.HTTPClient
-			cfgCopy.HTTPClient = &clientCopy
+			cfgCopy.HTTPClient = new(*cfg.HTTPClient)
 		}
 		cfg = &cfgCopy
 	}
@@ -128,10 +127,9 @@ func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 	if err != nil {
 		return nil, fmt.Errorf("failed to call model: %w", err)
 	}
-	if len(resp.Candidates) == 0 {
-		// shouldn't happen?
-		return nil, fmt.Errorf("empty response")
-	}
+	// A response without candidates is not an error: a blocked prompt reports
+	// why in PromptFeedback, which Genai2LLMResponse turns into ErrorCode and
+	// ErrorMessage, as the streaming path already does.
 	return converters.Genai2LLMResponse(resp), nil
 }
 

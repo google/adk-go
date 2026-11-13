@@ -380,25 +380,97 @@ func TestBuildParams_UnsupportedPart(t *testing.T) {
 	// unsupported part leaves the request empty, so a build that skipped it
 	// silently would still fail with shared.ErrNoContents and look like a rejection.
 	//
-	// The part carries executable code rather than media: media has a wire
-	// field on this endpoint now, and the walk below covers what is left.
+	// The part carries a server-side tool call rather than media or code:
+	// both of those have a way out of this endpoint now, and the walk below
+	// covers what is left.
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
 			genai.NewContentFromText("q", genai.RoleUser),
 			{
 				Role: string(genai.RoleUser),
 				Parts: []*genai.Part{
-					{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+					{ToolCall: &genai.ToolCall{ID: "t1"}},
 				},
 			},
 		},
 	}
 	_, err := buildParams("fallback", req)
 	if err == nil {
-		t.Fatalf("expected error for an executable code part")
+		t.Fatalf("expected error for a tool call part")
 	}
 	if errors.Is(err, shared.ErrNoContents) || !strings.Contains(err.Error(), "unsupported content part") {
 		t.Errorf("buildParams() err = %v, want an unsupported-content-part error", err)
+	}
+}
+
+// TestBuildParams_CodeExecutionAsText pins the regression for a Gemini
+// code-execution turn replayed into an OpenAI request: the parts used to
+// fail the whole request, and now go out as the fenced text adk-python sends.
+func TestBuildParams_CodeExecutionAsText(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents []*genai.Content
+		want     []string
+	}{
+		{
+			name: "code_and_result_on_a_model_turn",
+			contents: []*genai.Content{
+				modelContent(&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)", Language: genai.LanguagePython}}),
+				modelContent(&genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: genai.OutcomeOK, Output: "1"}}),
+			},
+			want: []string{
+				"out/assistant:Code:```python\nprint(1)\n```",
+				"out/assistant:Execution Result:```code_output\n1\n```",
+			},
+		},
+		{
+			name: "text_keeps_its_place_ahead_of_the_code",
+			contents: []*genai.Content{
+				userContent(
+					&genai.Part{Text: "For context:"},
+					&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+				),
+			},
+			want: []string{"in/user:For context:|Code:```python\nprint(1)\n```"},
+		},
+		{
+			name: "code_keeps_its_place_on_a_media_message",
+			contents: []*genai.Content{
+				userContent(
+					&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+					&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+				),
+			},
+			want: []string{"in/user:Code:```python\nprint(1)\n```|img/auto:image_url=data:image/png;base64,AQ=="},
+		},
+		{
+			name: "both_fields_on_one_part_render_code_then_result",
+			contents: []*genai.Content{
+				userContent(&genai.Part{
+					ExecutableCode:      &genai.ExecutableCode{Code: "print(1)"},
+					CodeExecutionResult: &genai.CodeExecutionResult{Output: "1"},
+				}),
+			},
+			want: []string{"in/user:Code:```python\nprint(1)\n```\nExecution Result:```code_output\n1\n```"},
+		},
+		{
+			name: "empty_code_is_still_sent",
+			contents: []*genai.Content{
+				userContent(&genai.Part{ExecutableCode: &genai.ExecutableCode{}}),
+			},
+			want: []string{"in/user:Code:```python\n\n```"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params, err := buildParams("fallback", &model.LLMRequest{Contents: tt.contents})
+			if err != nil {
+				t.Fatalf("buildParams() err = %v", err)
+			}
+			if got := describeInput(params.Input.OfInputItemList); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("input items = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -669,7 +741,9 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 			want: []string{"in/user:q", "in/user:img/auto:image_url=data:image/png;base64,AQ=="},
 		},
 		{
-			name: "thought_text_riding_on_code_is_still_rejected",
+			// Marking the part as a thought drops the scratchpad and leaves
+			// the code, the same split media already gets.
+			name: "thought_text_riding_on_code_drops_only_the_text",
 			contents: []*genai.Content{
 				genai.NewContentFromText("q", genai.RoleUser),
 				modelTurn(&genai.Part{
@@ -678,7 +752,7 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 					ExecutableCode: &genai.ExecutableCode{Code: "print(1)"},
 				}),
 			},
-			wantErrText: "unsupported content part",
+			want: []string{"in/user:q", "out/assistant:Code:```python\nprint(1)\n```"},
 		},
 		{
 			// Dropping the reasoning must not swallow the role error the same
@@ -889,9 +963,7 @@ func TestBuildParams_Media(t *testing.T) {
 			want: []string{"in/user:file:file_data=data:application/pdf;base64,AQ==#report.pdf"},
 		},
 		{
-			// filename is optional on this endpoint, so an unnamed file goes
-			// out without one rather than under a name nobody chose. Whether
-			// the server minds is a question for the live run.
+			// Match adk-python's fallback for unnamed inline files.
 			name: "inline_file_without_a_display_name_falls_back_to_inline_data",
 			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/pdf", Data: []byte{1}}},
 			want: []string{"in/user:file:file_data=data:application/pdf;base64,AQ==#inline_data"},
@@ -1312,7 +1384,7 @@ func TestReplayedReasoning(t *testing.T) {
 		// thought they hold nothing back.
 		{
 			"thought_with_video_metadata",
-			&genai.Part{Thought: true, Text: "scratch", VideoMetadata: &genai.VideoMetadata{FPS: genai.Ptr(2.0)}},
+			&genai.Part{Thought: true, Text: "scratch", VideoMetadata: &genai.VideoMetadata{FPS: new(2.0)}},
 			true,
 		},
 		{
@@ -1341,31 +1413,33 @@ func TestReplayedReasoning(t *testing.T) {
 // implements for THIS endpoint: the genai.Part fields its request converter
 // knows what to do with, and why.
 //
-// It is per-endpoint rather than global because the two endpoints no longer
-// agree: Responses emits media and so passes shared.PartFieldMedia, while Chat
-// Completions still reports it. The default answer — the one with no field
-// emitted — is pinned in the shared package, so that a converter gaining a
-// wire field has to say so here before media stops being reported.
+// Each endpoint opts into shared.PartFieldMedia when it emits media. Both
+// Responses and Chat Completions now do; the shared package separately tests
+// the default rejection when a converter does not opt in. Both endpoints also
+// pass shared.PartFieldCodeExecution, so executable code and its result are
+// accounted for here.
 //
 // The list is deliberately restated here instead of derived from the
 // production code, so a field genai adds later is absent from it by
 // construction and the walk below demands it be reported instead of silently
 // accepted — the failure a denylist would not produce.
 var accountedForFields = map[string]string{
-	"Text":             "sent, or dropped when it is reasoning",
-	"Thought":          "the marker deciding which",
-	"ThoughtSignature": "no request field on either endpoint carries one",
-	"FunctionCall":     "sent as a call",
-	"FunctionResponse": "sent as the call's result",
-	"VideoMetadata":    "qualifies media carried in another field",
-	"MediaResolution":  "qualifies media carried in another field",
-	"PartMetadata":     "caller bookkeeping, never content",
-	"InlineData":       "sent as an input_image or input_file carrying the bytes",
-	"FileData":         "sent as an input_image or input_file naming an upload or a location",
+	"Text":                "sent, or dropped when it is reasoning",
+	"Thought":             "the marker deciding which",
+	"ThoughtSignature":    "no request field on either endpoint carries one",
+	"FunctionCall":        "sent as a call",
+	"FunctionResponse":    "sent as the call's result",
+	"VideoMetadata":       "qualifies media carried in another field",
+	"MediaResolution":     "qualifies media carried in another field",
+	"PartMetadata":        "caller bookkeeping, never content",
+	"InlineData":          "sent as an input_image or input_file carrying the bytes",
+	"FileData":            "sent as an input_image or input_file naming an upload or a location",
+	"ExecutableCode":      "sent as a fenced python block",
+	"CodeExecutionResult": "sent as a fenced code_output block",
 }
 
 func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
-	partType := reflect.TypeOf(genai.Part{})
+	partType := reflect.TypeFor[genai.Part]()
 	for i := range partType.NumField() {
 		field := partType.Field(i)
 		t.Run(field.Name, func(t *testing.T) {
@@ -1376,7 +1450,7 @@ func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
 			part := &genai.Part{}
 			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
 
-			got := shared.UnsupportedPayload(part, shared.PartFieldMedia)
+			got := shared.UnsupportedPayload(part, shared.PartFieldMedia, shared.PartFieldCodeExecution)
 			if why, accounted := accountedForFields[field.Name]; accounted {
 				if got != "" {
 					t.Errorf("UnsupportedPayload() = %q for a part carrying only %s, want %q: %s",
@@ -1443,7 +1517,7 @@ func ridingShapes(part *genai.Part) []struct {
 // so a field the package cannot send has to keep the part out of the drop and
 // on to the rejection.
 func TestReplayedReasoning_EveryUnaccountedFieldDisqualifies(t *testing.T) {
-	partType := reflect.TypeOf(genai.Part{})
+	partType := reflect.TypeFor[genai.Part]()
 	for i := range partType.NumField() {
 		field := partType.Field(i)
 		if _, accounted := accountedForFields[field.Name]; accounted || !field.IsExported() {
@@ -1635,7 +1709,7 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 		field string
 		cfg   *genai.GenerateContentConfig
 	}{
-		{"Seed", &genai.GenerateContentConfig{Seed: genai.Ptr(int32(7))}},
+		{"Seed", &genai.GenerateContentConfig{Seed: new(int32(7))}},
 		{"RoutingConfig", &genai.GenerateContentConfig{RoutingConfig: &genai.GenerationConfigRoutingConfig{}}},
 		{"ModelSelectionConfig", &genai.GenerateContentConfig{ModelSelectionConfig: &genai.ModelSelectionConfig{}}},
 		{"CachedContent", &genai.GenerateContentConfig{CachedContent: "cached"}},
@@ -1644,7 +1718,7 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 		{"SpeechConfig", &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}},
 		{"AudioTimestamp", &genai.GenerateContentConfig{AudioTimestamp: true}},
 		{"ImageConfig", &genai.GenerateContentConfig{ImageConfig: &genai.ImageConfig{}}},
-		{"EnableEnhancedCivicAnswers", &genai.GenerateContentConfig{EnableEnhancedCivicAnswers: genai.Ptr(true)}},
+		{"EnableEnhancedCivicAnswers", &genai.GenerateContentConfig{EnableEnhancedCivicAnswers: new(true)}},
 		{"ModelArmorConfig", &genai.GenerateContentConfig{ModelArmorConfig: &genai.ModelArmorConfig{}}},
 		{"AudioTranscriptionConfig", &genai.GenerateContentConfig{AudioTranscriptionConfig: &genai.AudioTranscriptionConfig{}}},
 		{"ContinuationToken", &genai.GenerateContentConfig{ContinuationToken: []byte("token")}},
@@ -1678,7 +1752,7 @@ var systemInstructionAcceptedFields = map[string]string{
 // Every genai.Part field riding on a system-instruction text part is either
 // accepted above or refused by name, because instructions carries text only.
 func TestBuildParams_SystemInstructionWalksEveryPartField(t *testing.T) {
-	partType := reflect.TypeOf(genai.Part{})
+	partType := reflect.TypeFor[genai.Part]()
 	for i := range partType.NumField() {
 		field := partType.Field(i)
 		if field.Name == "Text" {
@@ -1731,8 +1805,8 @@ func TestApplyGenerationConfigRefusesFieldsOutsideTheSupportedLists(t *testing.T
 		field string
 		cfg   *genai.GenerateContentConfig
 	}{
-		{"Temperature", &genai.GenerateContentConfig{Temperature: genai.Ptr(float32(0.5))}},
-		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: genai.Ptr(time.Second)}}},
+		{"Temperature", &genai.GenerateContentConfig{Temperature: new(float32(0.5))}},
+		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: new(time.Second)}}},
 		{"ThinkingConfig.ThinkingLevel", &genai.GenerateContentConfig{
 			ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow},
 		}},
@@ -1753,7 +1827,7 @@ func TestApplyGenerationConfigRefusesFieldsOutsideTheSupportedLists(t *testing.T
 func TestApplyGenerationConfigAcceptsAutomaticContinuation(t *testing.T) {
 	for _, on := range []bool{false, true} {
 		t.Run(fmt.Sprint(on), func(t *testing.T) {
-			if err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{AutomaticContinuation: genai.Ptr(on)}); err != nil {
+			if err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{AutomaticContinuation: new(on)}); err != nil {
 				t.Errorf("applyGenerationConfig() error = %v, want nil", err)
 			}
 		})
@@ -1778,20 +1852,20 @@ func TestApplyGenerationConfigThinkingConfig(t *testing.T) {
 		{"unspecified level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelUnspecified}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
 		// Responses has no token budget, so only zero/non-zero survives. Zero is
 		// none rather than minimal: minimal is the least thinking, not none of it.
-		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortNone}},
-		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(2048))}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
+		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: new(int32(0))}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortNone}},
+		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: new(int32(2048))}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
 		// -1 is genai's "you decide", and the way to say that to Responses is to
 		// send no effort at all rather than to pick one on the caller's behalf.
-		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(shared.DynamicThinkingBudget))}, oaishared.ReasoningParam{}},
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: new(int32(shared.DynamicThinkingBudget))}, oaishared.ReasoningParam{}},
 		{"dynamic budget with thoughts", &genai.ThinkingConfig{
-			ThinkingBudget:  genai.Ptr(int32(shared.DynamicThinkingBudget)),
+			ThinkingBudget:  new(int32(shared.DynamicThinkingBudget)),
 			IncludeThoughts: true,
 		}, oaishared.ReasoningParam{Summary: oaishared.ReasoningSummaryAuto}},
 		// A level wins over a budget, so an explicit MINIMAL still means minimal
 		// even alongside the zero budget that would otherwise mean none.
 		{"level wins over budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelMinimal,
-			ThinkingBudget: genai.Ptr(int32(0)),
+			ThinkingBudget: new(int32(0)),
 		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMinimal}},
 		// IncludeThoughts is what asks for summaries, and only it.
 		{"thoughts with level", &genai.ThinkingConfig{
@@ -1799,7 +1873,7 @@ func TestApplyGenerationConfigThinkingConfig(t *testing.T) {
 			IncludeThoughts: true,
 		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortHigh, Summary: oaishared.ReasoningSummaryAuto}},
 		{"thoughts with budget", &genai.ThinkingConfig{
-			ThinkingBudget:  genai.Ptr(int32(2048)),
+			ThinkingBudget:  new(int32(2048)),
 			IncludeThoughts: true,
 		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium, Summary: oaishared.ReasoningSummaryAuto}},
 		// Thoughts alone leave the effort to the model rather than inventing one.
@@ -1828,9 +1902,9 @@ func TestApplyGenerationConfigOmitsReasoningSummaryUnlessAsked(t *testing.T) {
 		thinking *genai.ThinkingConfig
 	}{
 		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}},
-		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}},
-		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(4096))}},
-		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(shared.DynamicThinkingBudget))}},
+		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: new(int32(0))}},
+		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: new(int32(4096))}},
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: new(int32(shared.DynamicThinkingBudget))}},
 		{"level with thoughts off", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow, IncludeThoughts: false}},
 	}
 
@@ -1854,15 +1928,15 @@ func TestApplyGenerationConfigRejectsNegativeThinkingBudget(t *testing.T) {
 		name     string
 		thinking *genai.ThinkingConfig
 	}{
-		{"budget alone", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(-2))}},
+		{"budget alone", &genai.ThinkingConfig{ThinkingBudget: new(int32(-2))}},
 		// A level wins over a budget, and must not carry a nonsense one past
 		// unmentioned on its way through.
 		{"budget behind a winning level", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelLow,
-			ThinkingBudget: genai.Ptr(int32(-2)),
+			ThinkingBudget: new(int32(-2)),
 		}},
 		{"budget behind thoughts", &genai.ThinkingConfig{
-			ThinkingBudget:  genai.Ptr(int32(-100)),
+			ThinkingBudget:  new(int32(-100)),
 			IncludeThoughts: true,
 		}},
 	}
@@ -1896,16 +1970,16 @@ func TestApplyGenerationConfigUnspecifiedLevelYieldsToABudget(t *testing.T) {
 		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
 		{"unspecified yields to zero budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelUnspecified,
-			ThinkingBudget: genai.Ptr(int32(0)),
+			ThinkingBudget: new(int32(0)),
 		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortNone}},
 		{"unspecified yields to dynamic budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelUnspecified,
-			ThinkingBudget: genai.Ptr(int32(shared.DynamicThinkingBudget)),
+			ThinkingBudget: new(int32(shared.DynamicThinkingBudget)),
 		}, oaishared.ReasoningParam{}},
 		// A named level is a choice, so it keeps winning.
 		{"named level still wins over zero budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelHigh,
-			ThinkingBudget: genai.Ptr(int32(0)),
+			ThinkingBudget: new(int32(0)),
 		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortHigh}},
 	}
 
@@ -2022,7 +2096,7 @@ func TestApplyGenerationConfigRejectsUntranslatableValues(t *testing.T) {
 		names string
 	}{
 		// Logprobs only sizes the list ResponseLogprobs asks for.
-		{"orphan Logprobs", &genai.GenerateContentConfig{Logprobs: genai.Ptr(int32(5))}, "Logprobs"},
+		{"orphan Logprobs", &genai.GenerateContentConfig{Logprobs: new(int32(5))}, "Logprobs"},
 		{"negative MaxOutputTokens", &genai.GenerateContentConfig{MaxOutputTokens: -1}, "MaxOutputTokens"},
 		{"negative CandidateCount", &genai.GenerateContentConfig{CandidateCount: -1}, "CandidateCount"},
 	}
@@ -2056,7 +2130,7 @@ func TestApplyGenerationConfigAcceptsBoundaryValues(t *testing.T) {
 		{"empty StopSequences", &genai.GenerateContentConfig{StopSequences: []string{}}},
 		{"Logprobs alongside ResponseLogprobs", &genai.GenerateContentConfig{
 			ResponseLogprobs: true,
-			Logprobs:         genai.Ptr(int32(5)),
+			Logprobs:         new(int32(5)),
 		}},
 	}
 
@@ -2073,7 +2147,7 @@ func TestApplyGenerationConfigAcceptsBoundaryValues(t *testing.T) {
 // be wired up. Sniffing for no-op values would need re-deciding per new field.
 func TestApplyGenerationConfigRejectsExplicitOff(t *testing.T) {
 	err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{
-		EnableEnhancedCivicAnswers: genai.Ptr(false),
+		EnableEnhancedCivicAnswers: new(false),
 	})
 	if !errors.Is(err, shared.ErrUnsupportedConfigField) {
 		t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
@@ -2162,16 +2236,15 @@ func TestRequestTimeoutHonorsAPositiveTimeout(t *testing.T) {
 // openai-go reads a zero timeout as "no deadline", so forwarding a non-positive
 // one would lift the caller's bound instead of applying it.
 func TestApplyGenerationConfigRejectsNonPositiveTimeout(t *testing.T) {
-	for _, d := range []time.Duration{0, -time.Second} {
-		timeout := d
+	for _, timeout := range []time.Duration{0, -time.Second} {
 		err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{
 			HTTPOptions: &genai.HTTPOptions{Timeout: &timeout},
 		})
 		if !errors.Is(err, shared.ErrUnsupportedConfigField) {
-			t.Fatalf("timeout %v: error = %v, want %v", d, err, shared.ErrUnsupportedConfigField)
+			t.Fatalf("timeout %v: error = %v, want %v", timeout, err, shared.ErrUnsupportedConfigField)
 		}
 		if !strings.Contains(err.Error(), "Timeout") {
-			t.Errorf("timeout %v: error = %q, want it to name Timeout", d, err)
+			t.Errorf("timeout %v: error = %q, want it to name Timeout", timeout, err)
 		}
 	}
 }
@@ -2253,7 +2326,6 @@ func TestApplyGenerationConfigRejectsEmptyResponseModalities(t *testing.T) {
 // that worked before shared.ErrUnsupportedConfigField existed still works when the
 // caller happens to set one of the newly-rejected fields as well.
 func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
-	topK := float32(5)
 	// Each case pairs a named error with a field that returns the sentinel; the
 	// named error must win. Logprobs is here because it is rejected from within
 	// the translation order rather than from the trailing sweep, which is
@@ -2264,19 +2336,19 @@ func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 		want error
 	}{
 		{"TopK over Seed", &genai.GenerateContentConfig{
-			TopK: &topK,
-			Seed: genai.Ptr(int32(7)),
+			TopK: new(float32(5)),
+			Seed: new(int32(7)),
 		}, shared.ErrTopKNotSupported},
 		{"Labels over orphan Logprobs", &genai.GenerateContentConfig{
-			Logprobs: genai.Ptr(int32(5)),
+			Logprobs: new(int32(5)),
 			Labels:   map[string]string{"team": "search"},
 		}, shared.ErrLabelsNotSupported},
 		{"SafetySettings over orphan Logprobs", &genai.GenerateContentConfig{
-			Logprobs:       genai.Ptr(int32(5)),
+			Logprobs:       new(int32(5)),
 			SafetySettings: []*genai.SafetySetting{{Category: genai.HarmCategoryHarassment}},
 		}, shared.ErrSafetySettingsNotSupported},
 		{"MIME type over orphan Logprobs", &genai.GenerateContentConfig{
-			Logprobs:         genai.Ptr(int32(5)),
+			Logprobs:         new(int32(5)),
 			ResponseMIMEType: "text/csv",
 		}, shared.ErrUnsupportedMIMEType},
 		// The budget has to be one applyThinkingConfig actually rejects, or
@@ -2284,7 +2356,7 @@ func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 		// case passes whether precedence works or not.
 		{"StopSequences over ThinkingConfig", &genai.GenerateContentConfig{
 			StopSequences:  []string{"STOP"},
-			ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(-2))},
+			ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: new(int32(-2))},
 		}, shared.ErrStopSequencesNotSupported},
 	}
 
@@ -3045,7 +3117,7 @@ var geminiShapedHTTPOptions = []struct {
 	{"ExtrasRequestProvider", &genai.HTTPOptions{
 		ExtrasRequestProvider: func(m map[string]any) map[string]any { return m },
 	}},
-	{"RetryOptions", &genai.HTTPOptions{RetryOptions: &genai.HTTPRetryOptions{Attempts: genai.Ptr(int32(3))}}},
+	{"RetryOptions", &genai.HTTPOptions{RetryOptions: &genai.HTTPRetryOptions{Attempts: new(int32(3))}}},
 }
 
 func TestApplyGenerationConfigRejectsGeminiShapedHTTPOptions(t *testing.T) {
@@ -3072,21 +3144,21 @@ func TestTranslatedFieldsAreNotRejected(t *testing.T) {
 		field string
 		cfg   *genai.GenerateContentConfig
 	}{
-		{"Temperature", &genai.GenerateContentConfig{Temperature: genai.Ptr(float32(0.5))}},
-		{"TopP", &genai.GenerateContentConfig{TopP: genai.Ptr(float32(0.9))}},
+		{"Temperature", &genai.GenerateContentConfig{Temperature: new(float32(0.5))}},
+		{"TopP", &genai.GenerateContentConfig{TopP: new(float32(0.9))}},
 		{"MaxOutputTokens", &genai.GenerateContentConfig{MaxOutputTokens: 128}},
 		{"SystemInstruction", &genai.GenerateContentConfig{
 			SystemInstruction: genai.NewContentFromText("be terse", genai.RoleUser),
 		}},
 		{"ResponseMIMEType", &genai.GenerateContentConfig{ResponseMIMEType: "application/json"}},
 		{"ResponseLogprobs", &genai.GenerateContentConfig{ResponseLogprobs: true}},
-		{"Logprobs", &genai.GenerateContentConfig{ResponseLogprobs: true, Logprobs: genai.Ptr(int32(3))}},
+		{"Logprobs", &genai.GenerateContentConfig{ResponseLogprobs: true, Logprobs: new(int32(3))}},
 		{"ThinkingConfig", &genai.GenerateContentConfig{
 			ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow},
 		}},
 		{"ServiceTier", &genai.GenerateContentConfig{ServiceTier: genai.ServiceTierFlex}},
 		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{
-			HTTPOptions: &genai.HTTPOptions{Timeout: genai.Ptr(30 * time.Second)},
+			HTTPOptions: &genai.HTTPOptions{Timeout: new(30 * time.Second)},
 		}},
 	}
 

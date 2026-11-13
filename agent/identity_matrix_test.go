@@ -215,8 +215,7 @@ func identityColumns(t *testing.T, enclosing InvocationContext) []identityColumn
 		// interface, so these columns are as much a way of deriving a context as
 		// the constructors above, and agent.Run takes this exact path on every run.
 		{name: "PromoteWithDelta", method: "WithICDelta", promoted: true, of: func(ic InvocationContext) context.Context {
-			branch := "br"
-			return PromoteWithDelta(ic, &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: &branch}})
+			return PromoteWithDelta(ic, &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: new("br")}})
 		}},
 		// A delta that says nothing about the invocation does not touch it, so this
 		// column is safe where the two below are not.
@@ -233,16 +232,14 @@ func identityColumns(t *testing.T, enclosing InvocationContext) []identityColumn
 			return PromoteWithDelta(ic, &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{}})
 		}},
 		{name: "WithICDelta on a promoted context", method: "WithICDelta", promoted: true, of: func(ic InvocationContext) context.Context {
-			branch := "br"
-			return Promote(ic).WithICDelta(&InvocationContextDelta{Branch: &branch})
+			return Promote(ic).WithICDelta(&InvocationContextDelta{Branch: new("br")})
 		}},
 		// The same method called directly on the invocation rather than on a
 		// commonContext holding it. That is the shape the rule warns about, and
 		// the column above does not reach it: Promote holds the row, so the call
 		// lands on the commonContext.
 		{name: "WithICDelta called on the invocation", method: "WithICDelta", promoted: true, of: func(ic InvocationContext) context.Context {
-			branch := "br"
-			return Promote(ic.WithICDelta(&InvocationContextDelta{Branch: &branch}))
+			return Promote(ic.WithICDelta(&InvocationContextDelta{Branch: new("br")}))
 		}},
 		// WithContext is inherited exactly as WithICDelta is.
 		{name: "WithContext called on the invocation", method: "WithContext", promoted: true, of: func(ic InvocationContext) context.Context {
@@ -263,9 +260,8 @@ func identityColumns(t *testing.T, enclosing InvocationContext) []identityColumn
 			return Promote(asContext(ic).WithAgentContext(t.Context()))
 		}},
 		{name: "WithDelta called on the context", method: "WithDelta", promoted: true, contextOnly: true, reachesInvocation: true, of: func(ic InvocationContext) context.Context {
-			branch := "br"
 			return Promote(asContext(ic).WithDelta(&CommonContextDelta{
-				InvocationContextDelta: &InvocationContextDelta{Branch: &branch},
+				InvocationContextDelta: &InvocationContextDelta{Branch: new("br")},
 			}))
 		}},
 	}
@@ -632,11 +628,11 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 		}
 	}
 
-	ctxType := reflect.TypeOf((*Context)(nil)).Elem()
-	icType := reflect.TypeOf((*InvocationContext)(nil)).Elem()
+	ctxType := reflect.TypeFor[Context]()
+	icType := reflect.TypeFor[InvocationContext]()
 	produces := func(m reflect.Method) bool {
-		for i := range m.Type.NumOut() {
-			if out := m.Type.Out(i); out == ctxType || out == icType {
+		for out := range m.Type.Outs() {
+			if out == ctxType || out == icType {
 				return true
 			}
 		}
@@ -656,8 +652,7 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 	}
 
 	for _, iface := range []reflect.Type{ctxType, icType} {
-		for i := range iface.NumMethod() {
-			m := iface.Method(i)
+		for m := range iface.Methods() {
 			if produces(m) {
 				if !calledOnTheRow[m.Name] {
 					t.Errorf("%s.%s returns a context and no matrix column CALLS IT on the "+
@@ -674,10 +669,9 @@ func TestEveryContextProducingMethodIsTabulated(t *testing.T) {
 			} else if n == 1 {
 				continue
 			}
-			for j := range m.Type.NumOut() {
-				out := m.Type.Out(j)
+			for out := range m.Type.Outs() {
 				// time.Time is a struct but holds nothing reachable.
-				if inert(out.Kind()) || out == reflect.TypeOf(time.Time{}) {
+				if inert(out.Kind()) || out == reflect.TypeFor[time.Time]() {
 					continue
 				}
 				t.Errorf("%s.%s returns %s and is classified nowhere. Decide which it is: "+
@@ -1171,8 +1165,7 @@ type ownedSubScheduler struct {
 // statement about which method runs is exactly the kind that drifts unchecked.
 func TestDeltaDerivationsReachWithICDeltaOnly(t *testing.T) {
 	enclosing := &invocationContext{Context: t.Context(), session: matrixOwner("enclosing")}
-	branch := "br"
-	delta := &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: &branch}}
+	delta := &CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: new("br")}}
 
 	for _, tc := range []struct {
 		name string

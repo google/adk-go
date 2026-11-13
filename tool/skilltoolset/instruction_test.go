@@ -28,11 +28,11 @@ import (
 // call load_skill with skill_name="<SKILL_NAME>", but LoadSkillArgs marshals its
 // field as "name", so the first call was rejected for an unknown field.
 func TestDefaultInstructionMatchesLoadSkillSchema(t *testing.T) {
-	field, ok := reflect.TypeOf(skilltool.LoadSkillArgs{}).FieldByName("Name")
+	field, ok := reflect.TypeFor[skilltool.LoadSkillArgs]().FieldByName("Name")
 	if !ok {
 		t.Fatal("LoadSkillArgs has no Name field")
 	}
-	paramName := strings.Split(field.Tag.Get("json"), ",")[0]
+	paramName, _, _ := strings.Cut(field.Tag.Get("json"), ",")
 	if paramName == "" {
 		t.Fatal("LoadSkillArgs.Name has no json tag")
 	}
