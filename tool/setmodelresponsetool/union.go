@@ -23,8 +23,9 @@ import (
 )
 
 // A union is checked as pydantic's smart mode checks a Union field: every arm
-// is tried, and the valid arm that sets the most record fields, then matches
-// most exactly, then comes first, gives the answer.
+// is tried, and the valid arm that sets the most record fields, counted over
+// every record checked inside the value, then matches most exactly, then comes
+// first, gives the answer.
 
 // isUnion reports whether s is checked as a union: it has AnyOf arms and no
 // type of its own.
@@ -107,16 +108,18 @@ const (
 	exact               // no conversion
 )
 
-// grade ranks a valid arm. fields is the number of the record's properties
-// that the value sets, or -1 when the arm is not a record.
+// grade ranks a valid arm. fields is the number of record fields the value
+// sets, added up over every record checked inside it: the value itself, its
+// properties, its list items and the picked arm of a nested union. It is -1
+// when no record is checked.
 type grade struct {
 	level  level
 	fields int
 }
 
 // beats reports whether an arm graded g replaces the best arm so far: between
-// two records the one that sets more fields wins, otherwise the higher level.
-// A tie keeps the earlier arm.
+// two arms that check records the one that sets more fields wins, otherwise
+// the higher level. A tie keeps the earlier arm.
 func (g grade) beats(best grade) bool {
 	if g.fields >= 0 && best.fields >= 0 && g.fields != best.fields {
 		return g.fields > best.fields
@@ -124,72 +127,85 @@ func (g grade) beats(best grade) bool {
 	return g.level > best.level
 }
 
-func gradeOf(v any, arm *genai.Schema) grade {
-	g := grade{level: exactness(v, arm), fields: -1}
-	if isRecord(arm) {
-		m, _ := v.(map[string]any)
+// with returns g lowered to the level of inner, a grade of a value nested in
+// g's value, and with inner's fields added.
+func (g grade) with(inner grade) grade {
+	g.level = min(g.level, inner.level)
+	if inner.fields >= 0 {
+		g.fields = max(g.fields, 0) + inner.fields
+	}
+	return g
+}
+
+// gradeOf grades v, which is valid for s, as pydantic grades the input of a
+// union arm. A record or a map read from a JSON object is strict at best, an
+// untyped schema is strict as pydantic's Any is, and an enum read from a
+// string is lax. Any number is exact for INTEGER and NUMBER, because a decoded
+// answer holds every JSON number as a float64. A list of untyped items is
+// exact, because pydantic does not check the items of a list[Any].
+func gradeOf(v any, s *genai.Schema) grade {
+	g := grade{level: strict, fields: -1}
+	switch {
+	case v == nil:
+		g.level = exact
+		return g
+	case s == nil:
+		return g
+	case isUnion(s):
+		arms, _ := unionArms(s)
+		_, g, _ = pickArm(v, arms, nil)
+		return g
+	}
+	switch upperType(s) {
+	case genai.TypeString:
+		g.level = exact
+		if len(s.Enum) > 0 {
+			g.level = lax
+		}
+	case genai.TypeInteger, genai.TypeNumber:
+		g.level = exact
+		switch v.(type) {
+		case string, bool:
+			g.level = lax
+		}
+	case genai.TypeBoolean:
+		g.level = lax
+		if _, ok := v.(bool); ok {
+			g.level = exact
+		}
+	case genai.TypeArray:
+		g.level = exact
+		if isAny(s.Items) {
+			return g
+		}
+		rv := reflect.ValueOf(v)
+		for i := range rv.Len() {
+			g = g.with(gradeOf(rv.Index(i).Interface(), s.Items))
+		}
+	case genai.TypeObject:
+		if !isRecord(s) {
+			return g
+		}
 		g.fields = 0
-		for name := range arm.Properties {
-			if _, ok := m[name]; ok {
+		m, _ := v.(map[string]any)
+		for name, prop := range s.Properties {
+			if val, ok := m[name]; ok {
 				g.fields++
+				g = g.with(gradeOf(val, prop))
 			}
 		}
 	}
 	return g
 }
 
-// exactness grades v, which is valid for s, as pydantic grades the input of a
-// union arm. A record or a map read from a JSON object is strict at best, an
-// untyped schema is strict as pydantic's Any is, and an enum read from a
-// string is lax. Any number is exact for INTEGER and NUMBER, because a decoded
-// answer holds every JSON number as a float64.
-func exactness(v any, s *genai.Schema) level {
-	if v == nil {
-		return exact
-	}
+// isAny reports whether s is pydantic's Any: nil, or a schema with no type,
+// no arms and no nullable mark.
+func isAny(s *genai.Schema) bool {
 	if s == nil {
-		return strict
+		return true
 	}
-	if isUnion(s) {
-		arms, _ := unionArms(s)
-		_, g, _ := pickArm(v, arms, nil)
-		return g.level
-	}
-	switch upperType(s) {
-	case genai.TypeString:
-		if len(s.Enum) > 0 {
-			return lax
-		}
-		return exact
-	case genai.TypeInteger, genai.TypeNumber:
-		switch v.(type) {
-		case string, bool:
-			return lax
-		}
-		return exact
-	case genai.TypeBoolean:
-		if _, ok := v.(bool); !ok {
-			return lax
-		}
-		return exact
-	case genai.TypeArray:
-		l := exact
-		rv := reflect.ValueOf(v)
-		for i := range rv.Len() {
-			l = min(l, exactness(rv.Index(i).Interface(), s.Items))
-		}
-		return l
-	case genai.TypeObject:
-		l := strict
-		m, _ := v.(map[string]any)
-		for name, prop := range s.Properties {
-			if val, ok := m[name]; ok {
-				l = min(l, exactness(val, prop))
-			}
-		}
-		return l
-	}
-	return strict
+	t := upperType(s)
+	return (t == "" || t == genai.TypeUnspecified) && len(s.AnyOf) == 0 && !isNullable(s)
 }
 
 // armLabel names s in an issue's location as pydantic names a union member.
