@@ -330,3 +330,78 @@ func ExampleConfig_resumable_customAgent() {
 	// pipeline: end of agent
 	// -- run 3, resumed again
 }
+
+// On a runner whose root is an LlmAgent, a Config.Node or a graph workflow,
+// a user message sent while a task agent is still working on its task joins
+// that task's invocation: it is stored as a new user turn in the task's
+// isolation scope, and the task agent receives it. The runner does not
+// need to be resumable.
+func ExampleRunner_Run_joinTask() {
+	booker, err := llmagent.New(llmagent.Config{
+		Name:        "flight_booker",
+		Description: "Books flights.",
+		Mode:        llmagent.ModeTask,
+		Model: &cannedModel{responses: []*genai.Content{
+			genai.NewContentFromText("Which city?", genai.RoleModel),
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "finish-1", Name: "finish_task", Args: map[string]any{"result": "Flight to Paris booked."},
+			}}}},
+		}},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	coordinator, err := llmagent.New(llmagent.Config{
+		Name:      "coordinator",
+		SubAgents: []agent.Agent{booker},
+		Model: &cannedModel{responses: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "task-1", Name: "flight_booker", Args: map[string]any{"request": "Book a flight"},
+			}}}},
+			genai.NewContentFromText("Your flight to Paris is booked.", genai.RoleModel),
+		}},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{
+		AppName:           "travel",
+		Agent:             coordinator,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	firstInvocation := ""
+	for _, text := range []string{"Book me a flight", "Paris"} {
+		fmt.Printf("-- user: %s\n", text)
+		msg := genai.NewContentFromText(text, genai.RoleUser)
+		for ev, err := range r.Run(context.Background(), "user", "s1", msg, agent.RunConfig{}, runner.WithYieldUserMessage()) {
+			if err != nil {
+				log.Fatal(err)
+			}
+			if firstInvocation == "" {
+				firstInvocation = ev.InvocationID
+			}
+			if ev.Author == "user" && ev.Content.Parts[0].Text != "" {
+				fmt.Printf("stored in scope %q, first invocation: %t\n", ev.IsolationScope, ev.InvocationID == firstInvocation)
+				continue
+			}
+			describe(ev)
+		}
+	}
+
+	// Output:
+	// -- user: Book me a flight
+	// stored in scope "", first invocation: true
+	// coordinator: calls flight_booker
+	// flight_booker: Which city?
+	// -- user: Paris
+	// stored in scope "task-1", first invocation: true
+	// flight_booker: calls finish_task
+	// flight_booker: finish_task returned map[result:Task completed.]
+	// user: flight_booker returned map[result:Flight to Paris booked.]
+	// coordinator: Your flight to Paris is booked.
+}

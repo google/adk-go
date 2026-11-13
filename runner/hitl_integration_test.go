@@ -516,8 +516,8 @@ func eventFields(ev *session.Event) []string {
 }
 
 // A workflow agent paused in two runs, then one message answering both
-// interrupts: the workflow resumes the first run instead of restarting the
-// graph, which would run finished nodes again and ask a new question.
+// interrupts: Run refuses the message because its responses resolve to
+// multiple invocations, and runs neither node again.
 func TestRunner_WorkflowAgent_AnswersToTwoPausedRunsResumeTheFirst(t *testing.T) {
 	ctx := t.Context()
 	var prepareRuns atomic.Int32
@@ -550,15 +550,20 @@ func TestRunner_WorkflowAgent_AnswersToTwoPausedRunsResumeTheFirst(t *testing.T)
 		{FunctionResponse: &genai.FunctionResponse{ID: id1, Name: name1, Response: map[string]any{"payload": "first"}}},
 		{FunctionResponse: &genai.FunctionResponse{ID: id2, Name: name2, Response: map[string]any{"payload": "second"}}},
 	}}
-	newID, _ := findLongRunningInterrupt(drainRunner(t, r.Run(ctx, nodeTestUser, nodeTestSession, msg, agent.RunConfig{})))
+	var runErr error
+	for _, err := range r.Run(ctx, nodeTestUser, nodeTestSession, msg, agent.RunConfig{}) {
+		if err != nil {
+			runErr = err
+		}
+	}
 
 	if got := prepareRuns.Load(); got != 2 {
 		t.Errorf("prepare ran %d times, want 2", got)
 	}
-	if newID != "" {
-		t.Errorf("the run raised a new interrupt %q, want the paused run resumed", newID)
+	if runErr == nil || !strings.Contains(runErr.Error(), "resolve to multiple invocations") {
+		t.Errorf("Run() error = %v, want one that says the responses resolve to multiple invocations", runErr)
 	}
-	if got := handlerInput.Load(); got != "first" {
-		t.Errorf("handler input = %v, want %q", got, "first")
+	if got := handlerInput.Load(); got != nil {
+		t.Errorf("handler input = %v, want none", got)
 	}
 }

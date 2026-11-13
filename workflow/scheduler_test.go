@@ -1307,6 +1307,106 @@ func TestScheduler_StampsFunctionResponseRoleUser(t *testing.T) {
 	}
 }
 
+// authoredNode yields an event that carries an Author and role-less
+// Content, as an agent forwarding a model response without a role does.
+// The parts default to one text part, "hello world".
+type authoredNode struct {
+	BaseNode
+	parts []*genai.Part
+}
+
+func (n *authoredNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Author = "model_agent"
+		parts := n.parts
+		if parts == nil {
+			parts = []*genai.Part{{Text: "hello world"}}
+		}
+		ev.Content = &genai.Content{Parts: parts}
+		yield(ev, nil)
+	}
+}
+
+// TestScheduler_PreservesEmptyRoleOnAuthoredEvent verifies that the
+// default role applies only to author-less node content: an event its
+// producer authored keeps the empty role it was given.
+func TestScheduler_PreservesEmptyRoleOnAuthoredEvent(t *testing.T) {
+	mockCtx := newSeededMockCtx(t)
+
+	node := &authoredNode{BaseNode: NewBaseNode("authored", "", defaultNodeConfig)}
+	w := mustNew(t, []Edge{{From: Start, To: node}})
+
+	var got []*session.Event
+	for _, ev := range drain(t, w.Run(mockCtx)) {
+		if ev != nil && ev.Content != nil {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events with Content, want 1", len(got))
+	}
+	ev := got[0]
+	if ev.Author != "model_agent" {
+		t.Errorf("Author = %q, want %q", ev.Author, "model_agent")
+	}
+	if ev.Content.Role != "" {
+		t.Errorf("Content.Role = %q, want it left empty", ev.Content.Role)
+	}
+	if len(ev.Content.Parts) != 1 || ev.Content.Parts[0].Text != "hello world" {
+		t.Errorf("Content.Parts = %+v, want one part with text %q", ev.Content.Parts, "hello world")
+	}
+}
+
+// TestScheduler_DefaultsRoleOnAuthoredFunctionParts verifies that an
+// authored event whose role-less Content carries a function call or a
+// function response still gets the default role, so the next model
+// request keeps it.
+func TestScheduler_DefaultsRoleOnAuthoredFunctionParts(t *testing.T) {
+	tests := []struct {
+		name     string
+		parts    []*genai.Part
+		wantRole string
+	}{
+		{
+			name:     "function call",
+			parts:    []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "f"}}},
+			wantRole: genai.RoleModel,
+		},
+		{
+			name:     "text and function call",
+			parts:    []*genai.Part{{Text: "calling f"}, {FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "f"}}},
+			wantRole: genai.RoleModel,
+		},
+		{
+			name:     "function response",
+			parts:    []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "fc-1", Name: "f", Response: map[string]any{"ok": true}}}},
+			wantRole: genai.RoleUser,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockCtx := newSeededMockCtx(t)
+
+			node := &authoredNode{BaseNode: NewBaseNode("authored", "", defaultNodeConfig), parts: tt.parts}
+			w := mustNew(t, []Edge{{From: Start, To: node}})
+
+			var got []*session.Event
+			for _, ev := range drain(t, w.Run(mockCtx)) {
+				if ev != nil && ev.Content != nil {
+					got = append(got, ev)
+				}
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d events with Content, want 1", len(got))
+			}
+			if got[0].Content.Role != tt.wantRole {
+				t.Errorf("Content.Role = %q, want %q", got[0].Content.Role, tt.wantRole)
+			}
+		})
+	}
+}
+
 // progressThenSchemaOutputNode yields `progress` output-less events
 // followed by one carrying `output`, to verify the scheduler skips
 // ValidateOutput on output-less events.
