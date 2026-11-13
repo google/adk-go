@@ -72,8 +72,7 @@ func (t *streamTranslator) process(chunk openai.ChatCompletionChunk) (*genai.Gen
 		return nil, errToolCallChunkRejected
 	}
 	if chunk.JSON.Usage.Valid() {
-		usage := chunk.Usage
-		t.usage = &usage
+		t.usage = new(chunk.Usage)
 	}
 
 	if len(chunk.Choices) == 0 {

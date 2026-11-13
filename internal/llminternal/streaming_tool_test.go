@@ -366,3 +366,90 @@ func TestHandleFunctionCalls_LiveControlPlane(t *testing.T) {
 		t.Errorf("expected registry to be empty after cancellation, got: %v", tasksAfter)
 	}
 }
+
+// argsCapturingStreamTool sends the args RunStream is called with to gotArgs.
+type argsCapturingStreamTool struct {
+	gotArgs chan any
+}
+
+func (t *argsCapturingStreamTool) Name() string        { return "capture_stream" }
+func (t *argsCapturingStreamTool) Description() string { return "captures its args" }
+func (t *argsCapturingStreamTool) IsLongRunning() bool { return false }
+
+func (t *argsCapturingStreamTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.Name(), Description: t.Description()}
+}
+
+func (t *argsCapturingStreamTool) RunStream(_ agent.Context, args any) iter.Seq2[string, error] {
+	t.gotArgs <- args
+	return func(yield func(string, error) bool) {}
+}
+
+// A live-mode call without args reaches the streaming tool as an empty map.
+func TestHandleFunctionCalls_NoArgsReachLiveStreamingToolAsEmptyMap(t *testing.T) {
+	st := &argsCapturingStreamTool{gotArgs: make(chan any, 1)}
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		InvocationID: "inv_1",
+		Agent:        &mockAgent{name: "agent_1"},
+	})
+	resp := &model.LLMResponse{Content: &genai.Content{
+		Role:  "model",
+		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: st.Name()}}},
+	}}
+
+	_, err := (&Flow{}).handleFunctionCalls(invCtx, map[string]tool.Tool{st.Name(): st}, resp, nil, &mockLiveSession{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-st.gotArgs:
+		if diff := cmp.Diff(any(map[string]any{}), got); diff != "" {
+			t.Errorf("live streaming tool args mismatch (-want +got):\n%s", diff)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("streaming tool was not run")
+	}
+}
+
+// noRunTool is a tool that is neither a function tool nor a streaming one.
+type noRunTool struct{}
+
+func (noRunTool) Name() string        { return "no_run" }
+func (noRunTool) Description() string { return "has no Run method" }
+func (noRunTool) IsLongRunning() bool { return false }
+
+// A call without args to a tool that cannot be run reaches the on-tool-error
+// callback as an empty map.
+func TestHandleFunctionCalls_NoArgsReachOnToolErrorForNonFunctionTool(t *testing.T) {
+	var gotArgs map[string]any
+	called := false
+	flow := &Flow{
+		OnToolErrorCallbacks: []OnToolErrorCallback{
+			func(_ agent.Context, _ tool.Tool, args map[string]any, _ error) (map[string]any, error) {
+				called, gotArgs = true, args
+				return map[string]any{"handled": true}, nil
+			},
+		},
+	}
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		InvocationID: "inv_1",
+		Agent:        &mockAgent{name: "agent_1"},
+	})
+	resp := &model.LLMResponse{Content: &genai.Content{
+		Role:  "model",
+		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "no_run"}}},
+	}}
+
+	_, err := flow.handleFunctionCalls(invCtx, map[string]tool.Tool{"no_run": noRunTool{}}, resp, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !called {
+		t.Fatal("on-tool-error callback not called")
+	}
+	if diff := cmp.Diff(map[string]any{}, gotArgs); diff != "" {
+		t.Errorf("on-tool-error args mismatch (-want +got):\n%s", diff)
+	}
+}

@@ -395,8 +395,7 @@ type hitlAskerNode struct {
 func newHitlAsker(name, interruptID string, rerunOnResume bool) *hitlAskerNode {
 	cfg := workflow.NodeConfig{}
 	if rerunOnResume {
-		t := true
-		cfg.RerunOnResume = &t
+		cfg.RerunOnResume = new(true)
 	}
 	return &hitlAskerNode{
 		BaseNode:    workflow.NewBaseNode(name, "", cfg),
