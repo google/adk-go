@@ -26,7 +26,7 @@ import (
 func exitLoop(ctx agent.Context, myArgs struct{}) (map[string]string, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = true
-	return map[string]string{}, nil
+	return nil, nil
 }
 
 // New creates an instance of an exitLoop tool.
