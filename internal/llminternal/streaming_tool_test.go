@@ -308,8 +308,7 @@ func TestHandleFunctionCalls_StreamingToolErrors(t *testing.T) {
 				if !strings.Contains(seen.Error(), tc.wantSeen) {
 					t.Errorf("the error the callback saw = %q, want it to contain %q", seen, tc.wantSeen)
 				}
-				var panicErr *toolinternal.PanicError
-				if !errors.As(seen, &panicErr) {
+				if _, ok := errors.AsType[*toolinternal.PanicError](seen); !ok {
 					t.Errorf("the error the callback saw = %v, want a *toolinternal.PanicError", seen)
 				}
 			}
