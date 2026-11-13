@@ -1545,10 +1545,9 @@ func TestCallLLMSkipsNilResponseAndContinues(t *testing.T) {
 	}
 }
 
-// A model response event's id comes from the UUID provider on the context. An
-// application that installs a deterministic provider expects each id it hands
-// out to end up on an event, so generateContent draws one id per event and no
-// spare ones.
+// A model response event's id comes from the UUID provider on the context.
+// generateContent draws an id when a response arrives, never ahead of one, and
+// draws one id for each distinct event id across the responses it yields.
 func TestGenerateContentDrawsOneIDPerEvent(t *testing.T) {
 	text := func(s string) *genai.Content { return genai.NewContentFromText(s, genai.RoleModel) }
 	type yielded struct {
@@ -1563,6 +1562,20 @@ func TestGenerateContentDrawsOneIDPerEvent(t *testing.T) {
 		wantErrs  []error
 		wantDraws int
 	}{
+		{
+			name:      "no responses draw no ids",
+			responses: nil,
+			wantIDs:   nil,
+			wantErrs:  nil,
+			wantDraws: 0,
+		},
+		{
+			name:      "an empty response draws no ids",
+			responses: []yielded{{}},
+			wantIDs:   nil,
+			wantErrs:  nil,
+			wantDraws: 0,
+		},
 		{
 			name:      "one complete response",
 			responses: []yielded{{resp: &model.LLMResponse{Content: text("done")}}},

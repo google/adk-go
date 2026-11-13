@@ -1257,10 +1257,10 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 		ctx := ctx.WithContext(spanCtx)
 		return func(yield func(*responseWithEventID, error) bool) {
 			// The partial chunks of a streamed response share one event id with
-			// the response that completes them. Each complete response, and each
-			// error, which an on-model-error callback may turn into a saved event,
-			// ends the id. A new one is drawn only when the next response arrives,
-			// so every id drawn from the provider ends up on an event.
+			// the response that completes them. A complete response ends the id,
+			// and so does an error, because an on-model-error callback may turn
+			// it into a saved event. A new id is drawn when the next response
+			// arrives, never ahead of one.
 			var eventID string
 			for resp, err := range m.GenerateContent(ctx, req, useStream) {
 				if resp == nil && err == nil {
