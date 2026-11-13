@@ -494,8 +494,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		// it needs its own copy: the caller may reuse its LiveRunConfig.
 		sessionResumption := runCfg.Live.SessionResumption
 		if sessionResumption != nil {
-			sessionResumptionCopy := *sessionResumption
-			sessionResumption = &sessionResumptionCopy
+			sessionResumption = new(*sessionResumption)
 		}
 
 		liveConnectConfig := &genai.LiveConnectConfig{

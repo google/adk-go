@@ -555,7 +555,6 @@ func TestDocParity_UsageMetadataAndContentUsageShape(t *testing.T) {
 }
 
 func TestDocParity_LLMRequestToolSchemaCamelCaseAndDeterministicOrder(t *testing.T) {
-	maxItems := int64(3)
 	req := &model.LLMRequest{
 		Tools: map[string]any{
 			"zebra": &declaredTool{
@@ -567,7 +566,7 @@ func TestDocParity_LLMRequestToolSchemaCamelCaseAndDeterministicOrder(t *testing
 						Properties: map[string]*genai.Schema{
 							"tags": {
 								Type:     genai.TypeArray,
-								MaxItems: &maxItems,
+								MaxItems: new(int64(3)),
 								Items:    &genai.Schema{Type: genai.TypeString},
 							},
 							"target": {
