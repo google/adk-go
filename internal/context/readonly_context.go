@@ -107,3 +107,11 @@ func (c *ReadonlyContext) InvocationID() string {
 func (c *ReadonlyContext) UserContent() *genai.Content {
 	return c.InvocationContext.UserContent()
 }
+
+// RunConfig returns the run config of the invocation c reads from, unchanged
+// and possibly nil. It does not make c an [agent.InvocationContext]; it lets
+// agent.CustomMetadata reach the run config from an instruction provider or
+// toolset when no runner stored a filtered snapshot.
+func (c *ReadonlyContext) RunConfig() *agent.RunConfig {
+	return c.InvocationContext.RunConfig()
+}

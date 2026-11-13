@@ -28,8 +28,10 @@ var errArtifactServiceNotSet = errors.New("parent artifact service is not set")
 
 // NewForwardingService forwards artifact operations to parent and records saves
 // in its event delta. Operations fail if parent is nil.
-// Delete, Versions and GetArtifactVersion return errors.ErrUnsupported when
-// the parent's backing service is inaccessible.
+// When parent belongs to a context whose invocation has no artifact service,
+// every operation returns that context's "artifact service is not initialized"
+// error. Otherwise Delete, Versions and GetArtifactVersion return
+// errors.ErrUnsupported when the parent's backing service is inaccessible.
 func NewForwardingService(parent agent.Artifacts) artifact.Service {
 	return &forwardingService{parent: parent}
 }
@@ -105,6 +107,8 @@ func (s *forwardingService) parentStorage() (*Artifacts, error) {
 		switch a := parent.(type) {
 		case *Artifacts:
 			return a, nil
+		case interface{ ArtifactServiceErr() error }:
+			return nil, a.ArtifactServiceErr()
 		case interface{ Unwrap() agent.Artifacts }:
 			parent = a.Unwrap()
 		default:

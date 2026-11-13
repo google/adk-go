@@ -92,8 +92,7 @@ func (c *toolContextWrapper) IsolationScope() string {
 
 // Memory implements [Context].
 func (c *toolContextWrapper) Memory() Memory {
-	log.Print("Memory() is not supported for tool context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.Memory()
 }
 
 // Path implements [Context].
@@ -109,8 +108,7 @@ func (c *toolContextWrapper) ResumedInput(interruptID string) (any, bool) {
 
 // RunConfig implements [Context].
 func (c *toolContextWrapper) RunConfig() *RunConfig {
-	log.Print("RunConfig() is not supported for tool context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.RunConfig()
 }
 
 // RunID implements [Context].

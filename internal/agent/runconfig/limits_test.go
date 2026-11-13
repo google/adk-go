@@ -63,6 +63,23 @@ func TestIncrementAndEnforceLLMCallsLimit(t *testing.T) {
 		}
 	})
 
+	t.Run("the limit stays exceeded", func(t *testing.T) {
+		// adk-python raises on every increment past the limit, not only the
+		// first (agents/invocation_context.py,
+		// _InvocationCostManager.increment_and_enforce_llm_calls_limit).
+		c := &RunConfig{MaxLLMCalls: 2}
+		for i := 1; i <= 2; i++ {
+			if err := c.IncrementAndEnforceLLMCallsLimit(); err != nil {
+				t.Fatalf("call %d returned %v, want nil", i, err)
+			}
+		}
+		for i := 3; i <= 5; i++ {
+			if err := c.IncrementAndEnforceLLMCallsLimit(); !errors.Is(err, agent.ErrLLMCallsLimitExceeded) {
+				t.Errorf("call %d returned %v, want it to wrap ErrLLMCallsLimitExceeded", i, err)
+			}
+		}
+	})
+
 	t.Run("non-positive limits do not bound", func(t *testing.T) {
 		for _, limit := range []int{0, -1} {
 			c := &RunConfig{MaxLLMCalls: limit}

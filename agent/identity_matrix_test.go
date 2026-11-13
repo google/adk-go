@@ -854,6 +854,37 @@ func TestRebindIsTotalWithNoCachedHandle(t *testing.T) {
 	}
 }
 
+// TestRebindIsTotalOverAContextWithNoArtifactService covers the constructors
+// given an ADK context rather than a bare invocation, as agent.Run gives them
+// its node context. That context answers Artifacts() with a handle that reports
+// the missing service; caching it would keep reporting that after a rebind to
+// an invocation that has a service.
+func TestRebindIsTotalOverAContextWithNoArtifactService(t *testing.T) {
+	alice := &invocationContext{Context: t.Context(), session: matrixOwner("alice"), artifacts: artifactsOf("alice")}
+	bob := Promote(&invocationContext{Context: t.Context(), session: matrixOwner("bob")}) // no artifact service
+
+	tests := []struct {
+		name string
+		held Context
+	}{
+		{"callback", NewCallbackContext(bob, nil).(*callbackContextWrapper).context},
+		{"callback with artifact tracking", NewCallbackContextWithArtifactTracking(bob, nil).(*callbackContextWrapper).context},
+		{"tool", NewToolContext(bob, "fc", nil, nil).(*toolContextWrapper).context},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rebound := tc.held.WithContext(alice).(Context)
+			owner, ok := rebound.Artifacts().(interface{ owner() string })
+			if !ok {
+				t.Fatalf("Artifacts() = %T, want alice's handle after the rebind", rebound.Artifacts())
+			}
+			if got := owner.owner(); got != "alice" {
+				t.Errorf("Artifacts() addresses %q, want \"alice\"", got)
+			}
+		})
+	}
+}
+
 func TestRebindDoesNotCarryTheArtifactsHandle(t *testing.T) {
 	alice := &invocationContext{Context: t.Context(), session: matrixOwner("alice"), artifacts: artifactsOf("alice")}
 	bob := &invocationContext{Context: t.Context(), session: matrixOwner("bob"), artifacts: artifactsOf("bob")}
