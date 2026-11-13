@@ -243,8 +243,10 @@ func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeA
 
 // RunHandler executes a non-streaming agent run for a given session and message.
 //
-// A request whose userId is missing or empty is answered with 400
-// "userId is required" before the session is looked up or the agent runs.
+// When the server has an authorizer, it checks the userId first and a
+// refusal is answered with 403. A request it lets through whose userId is
+// missing or empty is answered with 400 "userId is required" before the
+// session is looked up or the agent runs.
 func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Request) error {
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
@@ -313,8 +315,10 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 
 // RunSSEHandler executes an agent run and streams the resulting events using Server-Sent Events (SSE).
 //
-// A request whose userId is missing or empty is answered with 400
-// "userId is required" before any event is streamed.
+// When the server has an authorizer, it checks the userId first and a
+// refusal is answered with 403. A request it lets through whose userId is
+// missing or empty is answered with 400 "userId is required" before any
+// event is streamed.
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) {
 	// set custom deadlines for this request - it overrides server-wide timeouts
 	rc := http.NewResponseController(rw)
