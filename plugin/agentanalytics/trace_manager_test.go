@@ -1331,7 +1331,7 @@ func TestAgentStartingData(t *testing.T) {
 			wantAttrs: map[string]any{"model": "scripted-model", "instruction_source": "provider"},
 		},
 		{
-			name:      "LLM agent that inherits its model",
+			name:      "LLM agent with nil Model omits model attribute",
 			agent:     helper,
 			wantAttrs: map[string]any{"agent_description": "Helps"},
 		},
@@ -2128,10 +2128,8 @@ func TestTraceManager_ConcurrentSubAgentsAndModelCalls(t *testing.T) {
 
 	const workers = 32
 	var wg sync.WaitGroup
-	wg.Add(workers)
 	for i := range workers {
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			subID := identity{
 				invocationID: "inv-concurrent",
 				agentName:    fmt.Sprintf("worker-%d", i),
@@ -2161,7 +2159,7 @@ func TestTraceManager_ConcurrentSubAgentsAndModelCalls(t *testing.T) {
 			if agentEnd.spanID != agentSpan.spanID {
 				t.Errorf("worker %d agentEnd = %+v, want span %q", i, agentEnd, agentSpan.spanID)
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 
@@ -2183,10 +2181,8 @@ func TestTraceManager_ConcurrentInvocations(t *testing.T) {
 	tm := newTraceManager()
 	const workers = 32
 	var wg sync.WaitGroup
-	wg.Add(workers)
 	for i := range workers {
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			id := identity{
 				invocationID: fmt.Sprintf("inv-%d", i),
 				agentName:    "planner",
@@ -2201,7 +2197,7 @@ func TestTraceManager_ConcurrentInvocations(t *testing.T) {
 			if ag.parentSpanID != inv.spanID || llm.parentSpanID != ag.spanID || llmEnd.spanID != llm.spanID || agEnd.spanID != ag.spanID || invEnd.spanID != inv.spanID {
 				t.Errorf("invocation %d spans inconsistent: inv=%+v ag=%+v llm=%+v", i, inv, ag, llm)
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 	if got := trackedInvocations(tm); len(got) != 0 {
@@ -2234,10 +2230,8 @@ func TestTraceManager_ConcurrentRunnerTreeAndCapacityEviction(t *testing.T) {
 			tm.maxTracked = capLimit
 			const workers = 24
 			var wg sync.WaitGroup
-			wg.Add(workers)
 			for i := range workers {
-				go func(i int) {
-					defer wg.Done()
+				wg.Go(func() {
 					id := identity{
 						invocationID: fmt.Sprintf("inv-evict-%d", i),
 						agentName:    "root",
@@ -2255,7 +2249,7 @@ func TestTraceManager_ConcurrentRunnerTreeAndCapacityEviction(t *testing.T) {
 					if end.rootAgentName != "root" {
 						t.Errorf("invocation %d rootAgentName = %q, want %q", i, end.rootAgentName, "root")
 					}
-				}(i)
+				})
 			}
 			wg.Wait()
 		})
@@ -2329,13 +2323,11 @@ func TestTraceManager_RunnerConcurrentWorkflowRunNodeSameAgent(t *testing.T) {
 		func(ctx agent.Context, _ any, _ func(*session.Event) error) (string, error) {
 			errs := make(chan error, 2)
 			var wg sync.WaitGroup
-			wg.Add(2)
 			for idx := range 2 {
-				go func(idx int) {
-					defer wg.Done()
+				wg.Go(func() {
 					_, runErr := workflow.RunNode[any](ctx, workerNodes[idx], fmt.Sprintf("task-%d", idx))
 					errs <- runErr
-				}(idx)
+				})
 			}
 			wg.Wait()
 			close(errs)
@@ -11549,7 +11541,7 @@ var adkStopsSequentialOnSubAgentError = sync.OnceValue(func() bool {
 	if err != nil {
 		return true
 	}
-	for range r.Run(context.Background(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+	for range r.Run(context.Background(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) { //nolint:errcheck // the probe's failing sub-agent yields the error by design; the probe reports through afterRan
 	}
 	return !afterRan.Load()
 })
@@ -11630,7 +11622,7 @@ var adkResolvesAgentModeWithoutMutation = sync.OnceValue(func() bool {
 	if err != nil {
 		return true
 	}
-	for range r.Run(context.Background(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+	for range r.Run(context.Background(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) { //nolint:errcheck // the probe only observes PrepareLLMAgentInput; it reports through got
 	}
 	return got == nil
 })
@@ -11680,7 +11672,7 @@ var adkEmitsNodeCompletionEvents = sync.OnceValue(func() bool {
 		return true
 	}
 	var emitted bool
-	for ev := range r.Run(context.Background(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+	for ev := range r.Run(context.Background(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) { //nolint:errcheck // the probe's flaky node yields errors by design; it reports through emitted
 		if ev == nil {
 			continue
 		}
@@ -13237,7 +13229,7 @@ func TestTraceManager_ContentlessEventCancelAndSiblingFailureEndInvocationRace(t
 				t.Fatalf("parallelagent.New(par): %v", err)
 			}
 
-			for range newTestRunner(t, par, hold, p).Run(runCtx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			for range newTestRunner(t, par, hold, p).Run(runCtx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) { //nolint:errcheck // the held sub-agents yield errors by design; the rows below carry the outcome
 			}
 			if heldTooLong.Load() {
 				t.Fatal("ender did not unblock while its contentless event was held")
@@ -13332,9 +13324,7 @@ func TestTraceManager_ConcurrentChildrenSameBranchCachedEndInvocationRace(t *tes
 								cachedErr  error
 								stoppedOut bool
 							)
-							wg.Add(2)
-							go func() {
-								defer wg.Done()
+							wg.Go(func() {
 								if siblingEnds {
 									select {
 									case <-siblingStarted:
@@ -13350,9 +13340,8 @@ func TestTraceManager_ConcurrentChildrenSameBranchCachedEndInvocationRace(t *tes
 										cachedErr = runErr
 									}
 								}
-							}()
-							go func() {
-								defer wg.Done()
+							})
+							wg.Go(func() {
 								if !siblingEnds {
 									select {
 									case <-child1Answered:
@@ -13367,7 +13356,7 @@ func TestTraceManager_ConcurrentChildrenSameBranchCachedEndInvocationRace(t *tes
 										return
 									}
 								}
-							}()
+							})
 							wg.Wait()
 							if !stoppedOut && cachedErr != nil {
 								yield(nil, cachedErr)
@@ -13521,9 +13510,7 @@ func TestConcurrencyRace_CachedChildOnDescendantBranchUnderUndeclaredSibling(t *
 							cachedErr  error
 							stoppedOut bool
 						)
-						wg.Add(2)
-						go func() {
-							defer wg.Done()
+						wg.Go(func() {
 							select {
 							case <-siblingAnswered:
 							case <-time.After(10 * time.Second):
@@ -13539,16 +13526,15 @@ func TestConcurrencyRace_CachedChildOnDescendantBranchUnderUndeclaredSibling(t *
 									cachedErr = runErr
 								}
 							}
-						}()
-						go func() {
-							defer wg.Done()
+						})
+						wg.Go(func() {
 							for ev, runErr := range sibling.Run(ctx) {
 								if !yield(ev, runErr) {
 									stoppedOut = true
 									return
 								}
 							}
-						}()
+						})
 						wg.Wait()
 						if !stoppedOut && cachedErr != nil {
 							yield(nil, cachedErr)
@@ -13661,7 +13647,6 @@ func TestConcurrencyRace_ConcurrentSameAgentOnSameBranchAndPath(t *testing.T) {
 							// its ended state, settled after parent joins it,
 							// marks it responded.
 							run := func(i int, forward bool) {
-								defer wg.Done()
 								if i == 1 {
 									select {
 									case <-firstEntered:
@@ -13683,9 +13668,12 @@ func TestConcurrencyRace_ConcurrentSameAgentOnSameBranchAndPath(t *testing.T) {
 									}
 								}
 							}
-							wg.Add(2)
-							go run(0, !cachedFirst)
-							go run(1, cachedFirst)
+							wg.Go(func() {
+								run(0, !cachedFirst)
+							})
+							wg.Go(func() {
+								run(1, cachedFirst)
+							})
 							wg.Wait()
 							if err := errors.Join(runErrs[0], runErrs[1]); !stoppedOut && err != nil {
 								yield(nil, err)
@@ -14063,9 +14051,7 @@ func TestConcurrencyRace_SameOverrideBranchSiblingAndCachedChild(t *testing.T) {
 						)
 						nestedS := "nested"
 						sibCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &nestedS})
-						wg.Add(2)
-						go func() {
-							defer wg.Done()
+						wg.Go(func() {
 							select {
 							case <-siblingAnswered:
 							case <-time.After(10 * time.Second):
@@ -14079,16 +14065,15 @@ func TestConcurrencyRace_SameOverrideBranchSiblingAndCachedChild(t *testing.T) {
 									cachedErr = runErr
 								}
 							}
-						}()
-						go func() {
-							defer wg.Done()
+						})
+						wg.Go(func() {
 							for ev, runErr := range sibling.Run(sibCtx) {
 								if !yield(ev, runErr) {
 									stoppedOut = true
 									return
 								}
 							}
-						}()
+						})
 						wg.Wait()
 						if !stoppedOut && cachedErr != nil {
 							yield(nil, cachedErr)
@@ -14182,9 +14167,7 @@ func TestConcurrencyRace_NestedDescendantBranchCachedChildUnderOverrideSibling(t
 					cachedErr  error
 					stoppedOut bool
 				)
-				wg.Add(2)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					select {
 					case <-siblingAnswered:
 					case <-time.After(10 * time.Second):
@@ -14198,9 +14181,8 @@ func TestConcurrencyRace_NestedDescendantBranchCachedChildUnderOverrideSibling(t
 							cachedErr = runErr
 						}
 					}
-				}()
-				go func() {
-					defer wg.Done()
+				})
+				wg.Go(func() {
 					b1 := "b1"
 					b1Ctx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &b1})
 					for ev, runErr := range sibling.Run(b1Ctx) {
@@ -14209,7 +14191,7 @@ func TestConcurrencyRace_NestedDescendantBranchCachedChildUnderOverrideSibling(t
 							return
 						}
 					}
-				}()
+				})
 				wg.Wait()
 				if !stoppedOut && cachedErr != nil {
 					yield(nil, cachedErr)
@@ -14305,10 +14287,8 @@ func TestConcurrencyRace_ConcurrentSameCustomAgent_FailureNotMaskedByPeerRespons
 						done := make(chan struct{})
 						defer close(done)
 						var wg sync.WaitGroup
-						for idx := range 2 {
-							wg.Add(1)
-							go func(idx int) {
-								defer wg.Done()
+						for range 2 {
+							wg.Go(func() {
 								var sawEv bool
 								for ev, err := range child.Run(ctx) {
 									if ev != nil {
@@ -14335,7 +14315,7 @@ func TestConcurrencyRace_ConcurrentSameCustomAgent_FailureNotMaskedByPeerRespons
 								if sawEv {
 									close(run1Done)
 								}
-							}(idx)
+							})
 						}
 						go func() {
 							wg.Wait()
@@ -14435,16 +14415,14 @@ func TestConcurrencyRace_ConcurrentSilentCustomAgentRuns_EmitsInvocationComplete
 				errs := make(chan error, 2)
 				var wg sync.WaitGroup
 				for range 2 {
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
+					wg.Go(func() {
 						for _, runErr := range silentChild.Run(ctx) {
 							if runErr != nil {
 								errs <- runErr
 								return
 							}
 						}
-					}()
+					})
 				}
 				wg.Wait()
 				close(errs)
@@ -14635,9 +14613,7 @@ func TestConcurrencyRace_ConcurrentSameLLMAgent_ModelErrorNotClearedByPeerSucces
 								wg   sync.WaitGroup
 								err1 error
 							)
-							wg.Add(2)
-							go func() {
-								defer wg.Done()
+							wg.Go(func() {
 								defer failReadyOnce.Do(func() { close(failReady) })
 								if !failingFirst {
 									select {
@@ -14666,9 +14642,8 @@ func TestConcurrencyRace_ConcurrentSameLLMAgent_ModelErrorNotClearedByPeerSucces
 										}
 									}
 								}
-							}()
-							go func() {
-								defer wg.Done()
+							})
+							wg.Go(func() {
 								if failingFirst {
 									select {
 									case <-firstStarted:
@@ -14693,7 +14668,7 @@ func TestConcurrencyRace_ConcurrentSameLLMAgent_ModelErrorNotClearedByPeerSucces
 									}
 									ch <- item{ev: ev, err: e}
 								}
-							}()
+							})
 							go func() {
 								wg.Wait()
 								close(ch)
@@ -14908,17 +14883,14 @@ func TestFailedParallelAgent_RecoveredByAfterAgentCallbackWithConcurrentUndeclar
 					return true
 				}
 				var wg sync.WaitGroup
-				wg.Add(2)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					for ev, err := range guard.Run(ctx) {
 						if !send(ev, err) {
 							return
 						}
 					}
-				}()
-				go func() {
-					defer wg.Done()
+				})
+				wg.Go(func() {
 					select {
 					case <-guardStarted:
 					case <-time.After(10 * time.Second):
@@ -14930,7 +14902,7 @@ func TestFailedParallelAgent_RecoveredByAfterAgentCallbackWithConcurrentUndeclar
 							return
 						}
 					}
-				}()
+				})
 				go func() {
 					wg.Wait()
 					close(ch)
@@ -15268,9 +15240,7 @@ func TestConcurrencyRace_ParallelLookingBranchOverrideUnderCustomParent(t *testi
 				done := make(chan struct{})
 				defer close(done)
 				var wg sync.WaitGroup
-				wg.Add(2)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					sibBranch := "parent.sibling"
 					sibCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &sibBranch})
 					for ev, runErr := range sibling.Run(sibCtx) {
@@ -15289,9 +15259,8 @@ func TestConcurrencyRace_ParallelLookingBranchOverrideUnderCustomParent(t *testi
 						}
 						ch <- item{ev: ev, err: runErr}
 					}
-				}()
-				go func() {
-					defer wg.Done()
+				})
+				wg.Go(func() {
 					select {
 					case <-siblingReady:
 					case <-time.After(10 * time.Second):
@@ -15307,7 +15276,7 @@ func TestConcurrencyRace_ParallelLookingBranchOverrideUnderCustomParent(t *testi
 							return
 						}
 					}
-				}()
+				})
 				go func() {
 					wg.Wait()
 					close(ch)
@@ -15390,7 +15359,7 @@ func TestConcurrencyRace_CustomParentReturnsBeforeUnjoinedChildEndsInvocation(t 
 							}
 							go func() {
 								defer close(childDone)
-								for range child.Run(ctx) {
+								for range child.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 								}
 							}()
 							select {
@@ -15486,7 +15455,7 @@ func TestConcurrencyRace_CustomParentReturnsBeforeUnjoinedChildEndsInvocation(t 
 							// Start the cached child without joining it.
 							go func() {
 								defer close(cachedDone)
-								for range cachedChild.Run(ctx) {
+								for range cachedChild.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 								}
 							}()
 							select {
@@ -15560,7 +15529,7 @@ func TestConcurrencyRace_CustomParentReturnsBeforeUnjoinedChildEndsInvocation(t 
 							// event, and wait for it to finish (join).
 							go func() {
 								defer close(cachedDone)
-								for range cachedChild.Run(ctx) {
+								for range cachedChild.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 								}
 							}()
 							select {
@@ -15668,9 +15637,7 @@ func TestConcurrencyRace_ConcurrentSameAgentWithPromotedSubNodePath(t *testing.T
 						done := make(chan struct{})
 						defer close(done)
 						var wg sync.WaitGroup
-						wg.Add(2)
-						go func() {
-							defer wg.Done()
+						wg.Go(func() {
 							if !cachedFirst {
 								select {
 								case <-firstEntered:
@@ -15686,9 +15653,8 @@ func TestConcurrencyRace_ConcurrentSameAgentWithPromotedSubNodePath(t *testing.T
 									return
 								}
 							}
-						}()
-						go func() {
-							defer wg.Done()
+						})
+						wg.Go(func() {
 							if cachedFirst {
 								select {
 								case <-firstEntered:
@@ -15713,7 +15679,7 @@ func TestConcurrencyRace_ConcurrentSameAgentWithPromotedSubNodePath(t *testing.T
 								}
 								ch <- item{ev: ev, err: runErr}
 							}
-						}()
+						})
 						go func() {
 							wg.Wait()
 							close(ch)
@@ -15841,20 +15807,17 @@ func TestConcurrencyRace_LiveToolConcurrentSameChildWithPromotedPathUnderInvocat
 				}
 			}
 			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				run(secondEntered)
-			}()
-			go func() {
-				defer wg.Done()
+			})
+			wg.Go(func() {
 				select {
 				case <-entered:
 				case <-time.After(10 * time.Second):
 					return
 				}
 				run(nil)
-			}()
+			})
 			wg.Wait()
 			return map[string]any{"ok": true}, nil
 		})
@@ -16046,10 +16009,8 @@ func TestTraceManager_RetiredPeerTrailerDoesNotClearOpenFailingPeerError(t *test
 							wg   sync.WaitGroup
 							err1 error
 						)
-						wg.Add(2)
 						// Failing activation.
-						go func() {
-							defer wg.Done()
+						wg.Go(func() {
 							defer failReadyOnce.Do(func() { close(failReady) })
 							failCtx := ctx.WithContext(context.WithValue(ctx, concurrentFailRunKey{}, true))
 							for _, e := range worker.Run(failCtx) {
@@ -16058,10 +16019,9 @@ func TestTraceManager_RetiredPeerTrailerDoesNotClearOpenFailingPeerError(t *test
 									break
 								}
 							}
-						}()
+						})
 						// Succeeding activation.
-						go func() {
-							defer wg.Done()
+						wg.Go(func() {
 							for ev, e := range worker.Run(ctx) {
 								if ev != nil {
 									ack := make(chan bool, 1)
@@ -16078,7 +16038,7 @@ func TestTraceManager_RetiredPeerTrailerDoesNotClearOpenFailingPeerError(t *test
 								}
 								ch <- item{ev: ev, err: e}
 							}
-						}()
+						})
 						go func() {
 							wg.Wait()
 							close(ch)
@@ -16206,13 +16166,10 @@ func TestConcurrencyRace_FunctionNodeConcurrentCachedChildIsNotRetry(t *testing.
 		}
 		errs := make([]error, 2)
 		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errs[0] = runChild(secondEntered)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			select {
 			case <-entered:
 			case <-time.After(10 * time.Second):
@@ -16220,7 +16177,7 @@ func TestConcurrencyRace_FunctionNodeConcurrentCachedChildIsNotRetry(t *testing.
 				return
 			}
 			errs[1] = runChild(nil)
-		}()
+		})
 		wg.Wait()
 		return "fanned out", errors.Join(errs...)
 	}, workflow.NodeConfig{})
@@ -16301,13 +16258,10 @@ func TestConcurrencyRace_FunctionNodeConcurrentChildDistinctCancelScopes(t *test
 		}
 		errs := make([]error, 2)
 		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errs[0] = runChild(secondEntered)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			select {
 			case <-entered:
 			case <-time.After(10 * time.Second):
@@ -16315,7 +16269,7 @@ func TestConcurrencyRace_FunctionNodeConcurrentChildDistinctCancelScopes(t *test
 				return
 			}
 			errs[1] = runChild(nil)
-		}()
+		})
 		wg.Wait()
 		return "fanned out", errors.Join(errs...)
 	}, workflow.NodeConfig{})
@@ -16368,7 +16322,7 @@ func TestConcurrencyRace_FunctionNodeReturnsBeforeUnjoinedCachedChild(t *testing
 	fan := workflow.NewFunctionNode("fan", func(ctx agent.Context, _ any) (string, error) {
 		go func() {
 			defer close(childDone)
-			for range child.Run(ctx) {
+			for range child.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 				select {
 				case <-rootDone:
 				case <-time.After(10 * time.Second):
@@ -16455,7 +16409,7 @@ func runUnjoinedLateChild(t *testing.T, build func(sub agent.Agent, after agent.
 					case <-time.After(10 * time.Second):
 						return
 					}
-					for range child.Run(ctx) {
+					for range child.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 						select {
 						case <-parentDone:
 						case <-time.After(10 * time.Second):
@@ -17690,7 +17644,7 @@ func TestConcurrencyRace_LiveToolReturnsBeforeUnjoinedCachedChild(t *testing.T) 
 			runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath}).WithICDelta(nil)
 			go func() {
 				defer close(helperDone)
-				for range helper.Run(runCtx) {
+				for range helper.Run(runCtx) { //nolint:errcheck // a detached helper's error cannot be reported from the tool; the rows below carry the outcome
 					select {
 					case <-toolDone:
 					case <-time.After(10 * time.Second):
@@ -17806,7 +17760,7 @@ func TestConcurrencyRace_FunctionToolReturnsBeforeUnjoinedCachedChild(t *testing
 			childCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &path}).WithICDelta(nil)
 			go func() {
 				defer close(childDone)
-				for range child.Run(childCtx) {
+				for range child.Run(childCtx) { //nolint:errcheck // a detached child's error cannot be reported from the tool; the rows below carry the outcome
 					select {
 					case <-toolDone:
 					case <-time.After(10 * time.Second):
@@ -17905,7 +17859,7 @@ func TestRunner_ToolRunCustomParentWithUnjoinedCachedChild_EmitsNoAgentError(t *
 					return func(yield func(*session.Event, error) bool) {
 						go func() {
 							defer close(childDone)
-							for range cachedChild.Run(ctx) {
+							for range cachedChild.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 							}
 						}()
 						select {
@@ -18219,7 +18173,7 @@ func TestRunner_ToolReturnsBeforeHelperModelCallEnds_KeepsHelperOpen(t *testing.
 			helperCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &path}).WithICDelta(nil)
 			go func() {
 				defer close(helperDone)
-				for range helper.Run(helperCtx) {
+				for range helper.Run(helperCtx) { //nolint:errcheck // a detached helper's error cannot be reported from the tool; the rows below carry the outcome
 				}
 			}()
 			select {
@@ -18443,20 +18397,18 @@ func TestConcurrencyRace_FinishTaskEndsTheRunThatMadeTheCall(t *testing.T) {
 				results := make(chan result)
 				var wg sync.WaitGroup
 				runTask := func() {
-					defer wg.Done()
 					for ev, err := range llmagent.RunLLMAgentAsNode(task, nodeCtx, "do the task") {
 						results <- result{ev: ev, err: err}
 					}
 				}
-				wg.Add(2)
-				go runTask()
-				go func() {
+				wg.Go(runTask)
+				wg.Go(func() {
 					select {
 					case <-modelCalled:
 					case <-time.After(10 * time.Second):
 					}
 					runTask()
-				}()
+				})
 				go func() {
 					wg.Wait()
 					close(results)
@@ -19664,11 +19616,9 @@ func TestTraceManager_CallbacksAcrossEndOfRun(t *testing.T) {
 			return realNow()
 		}
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			tm.recordFirstToken(ctx, id)
-		}()
+		})
 		select {
 		case <-ready:
 		case <-time.After(5 * time.Second):
@@ -20403,7 +20353,7 @@ func TestRepro_FailedModelCallsPinCompletedCache(t *testing.T) {
 	}
 	rg := newTestRunner(t, guarded, p)
 	for i := range limit + 6 {
-		for range rg.Run(t.Context(), "u1", fmt.Sprintf("g%d", i), textContent("user", "hi"), agent.RunConfig{}) {
+		for range rg.Run(t.Context(), "u1", fmt.Sprintf("g%d", i), textContent("user", "hi"), agent.RunConfig{}) { //nolint:errcheck // the guardrail blocks every run by design; the pinned count below carries the outcome
 		}
 	}
 	tm.mu.Lock()
@@ -20854,14 +20804,14 @@ func TestRunner_UnjoinedSubAgentCallOutlivesAfterRun(t *testing.T) {
 			start := func(ctx agent.InvocationContext) {
 				go func() {
 					defer close(done)
-					for range sub.Run(ctx) {
+					for range sub.Run(ctx) { //nolint:errcheck // a detached sub-agent's error cannot fail the test; the rows below carry the outcome
 					}
 				}()
 			}
 			// Return once the model call started, without waiting for it.
 			wait := func() { <-gate.entered }
 			var invID string
-			for ev := range newTestRunner(t, tc.root(t, sub, start, wait), p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+			for ev := range newTestRunner(t, tc.root(t, sub, start, wait), p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) { //nolint:errcheck // the root returns while its sub-agent runs on; the completed trace below carries the outcome
 				if ev != nil && invID == "" {
 					invID = ev.InvocationID
 				}
@@ -21027,7 +20977,7 @@ func TestRepro_UnjoinedCallStartedAfterLauncherReturnedMovesToLate(t *testing.T)
 			return func(yield func(*session.Event, error) bool) {
 				go func() {
 					defer close(sDone)
-					for range s.Run(ctx) {
+					for range s.Run(ctx) { //nolint:errcheck // a detached sub-agent's error cannot fail the test; the rows below carry the outcome
 					}
 				}()
 				<-sStarted
@@ -21233,7 +21183,7 @@ func TestRunner_LiveToolSubAgentCallMovesToLateState(t *testing.T) {
 			runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath}).WithICDelta(nil)
 			go func() {
 				defer close(helperDone)
-				for range helper.Run(runCtx) {
+				for range helper.Run(runCtx) { //nolint:errcheck // a detached helper's error cannot be reported from the tool; the rows below carry the outcome
 				}
 			}()
 			select {
@@ -21356,7 +21306,7 @@ func TestRunner_LiveToolReturnsBeforeHelperModelCallEnds_KeepsHelperOpen(t *test
 					runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath}).WithICDelta(nil)
 					go func() {
 						defer close(helperDone)
-						for range helper.Run(runCtx) {
+						for range helper.Run(runCtx) { //nolint:errcheck // a detached helper's error cannot be reported from the tool; the rows below carry the outcome
 						}
 					}()
 					select {
@@ -21606,7 +21556,7 @@ func TestRunner_AgentStartingAcrossAfterRunStartsInLateState(t *testing.T) {
 				go func() {
 					defer close(childDone)
 					childGoroutine.Store(currentGoroutineID())
-					for range child.Run(ctx) {
+					for range child.Run(ctx) { //nolint:errcheck // a detached child's error cannot fail the test; the rows below carry the outcome
 					}
 				}()
 				select {
@@ -22240,7 +22190,7 @@ func TestParallelAgentBranchFailureAfterContent_EmitsInvocationError(t *testing.
 	}
 	p, requests, _ := setupTestPlugin(t)
 	r := newTestRunner(t, par, p)
-	for range r.Run(ctx, "u1", "s1", textContent("user", "hello"), agent.RunConfig{}) {
+	for range r.Run(ctx, "u1", "s1", textContent("user", "hello"), agent.RunConfig{}) { //nolint:errcheck // the failing branch yields the error by design; the INVOCATION_ERROR row below carries it
 	}
 
 	rows := collectRows(t, requests, untilInvocationEnd)

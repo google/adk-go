@@ -4407,7 +4407,7 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 		var cleanedCount atomic.Int32
 
 		func() {
-			for i := 0; i < count; i++ {
+			for i := range count {
 				p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false})
 				if err != nil {
 					t.Fatalf("failed to create disabled plugin: %v", err)

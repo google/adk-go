@@ -2722,7 +2722,7 @@ func agentTypeOf(a agent.Agent) string {
 		if !inner.IsValid() || !inner.CanInterface() {
 			return ""
 		}
-		next, ok := inner.Interface().(agent.Agent)
+		next, ok := reflect.TypeAssert[agent.Agent](inner)
 		if !ok {
 			return ""
 		}
@@ -6892,7 +6892,7 @@ func activationKey(ctx context.Context) any {
 		if key != nil {
 			if v := reflect.ValueOf(key); v.Kind() == reflect.Pointer && !v.IsNil() && v.Elem().Kind() == reflect.Struct {
 				if f := v.Elem().FieldByName("Context"); f.IsValid() && f.CanInterface() {
-					if inner, ok := f.Interface().(agent.InvocationContext); ok && inner != nil {
+					if inner, ok := reflect.TypeAssert[agent.InvocationContext](f); ok && inner != nil {
 						if iv := reflect.ValueOf(inner); iv.Kind() == reflect.Pointer && !iv.IsNil() {
 							return inner
 						}
@@ -7165,11 +7165,11 @@ func parseGoroutineTrace(trace []byte, complete bool) (uint64, goroutineOrigin) 
 		return id, goroutineOrigin{}
 	}
 	const createdBy = "\ncreated by "
-	at := strings.Index(s, createdBy)
-	if at < 0 {
+	_, after, ok := strings.Cut(s, createdBy)
+	if !ok {
 		return id, goroutineOrigin{}
 	}
-	line, _, _ := strings.Cut(s[at+len(createdBy):], "\n")
+	line, _, _ := strings.Cut(after, "\n")
 	const in = " in goroutine "
 	sep := strings.LastIndex(line, in)
 	if sep <= 0 {
@@ -7811,8 +7811,8 @@ func (rec *spanRecord) openFailureCause() error {
 // Open model and tool call contexts derive from their owner activation's
 // context, so scanning agentStack covers them too.
 func (inv *invocationTrace) openFailureCauseLocked() error {
-	for i := len(inv.agentStack) - 1; i >= 0; i-- {
-		if cause := inv.agentStack[i].openFailureCause(); cause != nil {
+	for _, v := range slices.Backward(inv.agentStack) {
+		if cause := v.openFailureCause(); cause != nil {
 			return cause
 		}
 	}
@@ -7995,7 +7995,7 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 				if keyVal, ok := exportContextKey(key); ok {
 					lookupCtx := ctx
 					if v.CanAddr() && v.Addr().CanInterface() {
-						if c, ok := v.Addr().Interface().(context.Context); ok {
+						if c, ok := reflect.TypeAssert[context.Context](v.Addr()); ok {
 							lookupCtx = c
 						}
 					}
@@ -8004,7 +8004,7 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 							out := make(map[string]agent.Agent, m.Len())
 							iter := m.MapRange()
 							for iter.Next() {
-								if a, ok := iter.Value().Interface().(agent.Agent); ok && a != nil {
+								if a, ok := reflect.TypeAssert[agent.Agent](iter.Value()); ok && a != nil {
 									out[iter.Key().String()] = a
 								}
 							}

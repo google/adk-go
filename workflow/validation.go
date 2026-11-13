@@ -451,12 +451,7 @@ func schemaIsString(s *jsonschema.Resolved) bool {
 	if schema.Type == "string" {
 		return true
 	}
-	for _, t := range schema.Types {
-		if t == "string" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(schema.Types, "string")
 }
 
 // validateStateSchemaConsistency checks that all nodes in the graph that reference state fields

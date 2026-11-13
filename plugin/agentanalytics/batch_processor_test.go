@@ -133,8 +133,7 @@ func (s *scriptedClientStream) RecvMsg(m any) error {
 }
 
 func TestBatchProcessor_AppendAndFlush(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	config := DefaultConfig()
 	config.BatchSize = 2
@@ -2833,15 +2832,13 @@ func TestBatchProcessor_ConcurrentAppendAndClose(t *testing.T) {
 
 		var wg sync.WaitGroup
 		start := make(chan struct{})
-		for g := range 8 {
-			wg.Add(1)
-			go func(id int) {
-				defer wg.Done()
+		for id := range 8 {
+			wg.Go(func() {
 				<-start
 				for i := range 50 {
 					bp.Append(map[string]any{"event_type": fmt.Sprintf("evt_%d_%d", id, i)})
 				}
-			}(g)
+			})
 		}
 		close(start)
 		bp.Close()
@@ -3310,16 +3307,12 @@ func TestBatchProcessor_ConcurrentStartAndClose(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			bp.Start()
-		}()
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			bp.Close()
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -4792,8 +4785,8 @@ func TestBatchProcessor_FlushRunEndDeferredBatchRetriesCutShortUploads(t *testin
 			}
 			isSecond := func(row map[string]any) bool { return row[eventIDField] == "ev-1" }
 			lastSecondIdx := func(rows []map[string]any) int {
-				for i := len(rows) - 1; i >= 0; i-- {
-					if isSecond(rows[i]) {
+				for i, row := range slices.Backward(rows) {
+					if isSecond(row) {
 						return i
 					}
 				}
@@ -5949,7 +5942,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_BoundedRotationOnPersistentRejection
 
 	// Write 10 batches. Because InvalidArgument is not an ambiguous send error,
 	// none of the batches should trigger stream rotation across batches.
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		_ = bp.writeBatch(ctx, []map[string]any{{"event_type": fmt.Sprintf("BATCH_%d", i)}})
 	}
 
