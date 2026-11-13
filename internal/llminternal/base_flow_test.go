@@ -30,6 +30,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -1592,6 +1593,161 @@ func TestCallLLMSkipsNilResponseAndContinues(t *testing.T) {
 			}
 			if gotResponses != tc.wantResponses {
 				t.Fatalf("callLLM() yielded %d responses, want %d", gotResponses, tc.wantResponses)
+			}
+		})
+	}
+}
+
+// fakePluginManager answers before-tool callbacks with beforeTool and leaves
+// every other callback to the agent.
+type fakePluginManager struct {
+	beforeTool BeforeToolCallback
+}
+
+func (*fakePluginManager) RunBeforeModelCallback(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+	return nil, nil
+}
+
+func (*fakePluginManager) RunAfterModelCallback(agent.Context, *model.LLMResponse, error) (*model.LLMResponse, error) {
+	return nil, nil
+}
+
+func (*fakePluginManager) RunOnModelErrorCallback(agent.Context, *model.LLMRequest, error) (*model.LLMResponse, error) {
+	return nil, nil
+}
+
+func (p *fakePluginManager) RunBeforeToolCallback(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+	return p.beforeTool(ctx, t, args)
+}
+
+func (*fakePluginManager) RunAfterToolCallback(agent.Context, tool.Tool, map[string]any, map[string]any, error) (map[string]any, error) {
+	return nil, nil
+}
+
+func (*fakePluginManager) RunOnToolErrorCallback(agent.Context, tool.Tool, map[string]any, error) (map[string]any, error) {
+	return nil, nil
+}
+
+func TestHandleFunctionCallsUnknownTool(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		tools              []string
+		pluginBeforeResult map[string]any
+		beforeResult       map[string]any
+		beforeErr          error
+		afterResult        map[string]any
+		onErrorResult      map[string]any
+		onErrorErr         error
+		want               map[string]any
+		wantCalls          []string
+	}{
+		{
+			name:      "not-found text lists the available tools in sorted order",
+			tools:     []string{"echo", "add", "search", "lookup", "date"},
+			want:      map[string]any{"error": "Invoking `ghost()` failed as no tool with that name is available. The tools you can call are: add, date, echo, lookup, search. You could retry, but it is IMPORTANT that you only call a tool from that list."},
+			wantCalls: []string{"plugin before_tool ghost", "before_tool ghost", "on_tool_error ghost: tool 'ghost' not found."},
+		},
+		{
+			name:      "not-found text says none when the agent has no tools",
+			want:      map[string]any{"error": "Invoking `ghost()` failed as no tool with that name is available. The tools you can call are: none. You could retry, but it is IMPORTANT that you only call a tool from that list."},
+			wantCalls: []string{"plugin before_tool ghost", "before_tool ghost", "on_tool_error ghost: tool 'ghost' not found."},
+		},
+		{
+			name:               "plugin before-tool callback answers the call",
+			tools:              []string{"add"},
+			pluginBeforeResult: map[string]any{"answered_by": "plugin"},
+			want:               map[string]any{"answered_by": "plugin"},
+			wantCalls:          []string{"plugin before_tool ghost", "after_tool ghost"},
+		},
+		{
+			name:         "agent before-tool callback answers the call",
+			tools:        []string{"add"},
+			beforeResult: map[string]any{"answered_by": "agent"},
+			want:         map[string]any{"answered_by": "agent"},
+			wantCalls:    []string{"plugin before_tool ghost", "before_tool ghost", "after_tool ghost"},
+		},
+		{
+			name:         "after-tool callback replaces a before-tool answer",
+			tools:        []string{"add"},
+			beforeResult: map[string]any{"answered_by": "agent"},
+			afterResult:  map[string]any{"replaced_by": "after_tool"},
+			want:         map[string]any{"replaced_by": "after_tool"},
+			wantCalls:    []string{"plugin before_tool ghost", "before_tool ghost", "after_tool ghost"},
+		},
+		{
+			name:      "before-tool callback error goes to the on-tool-error and after-tool callbacks",
+			tools:     []string{"add"},
+			beforeErr: errors.New("blocked"),
+			want:      map[string]any{"error": "blocked"},
+			wantCalls: []string{"plugin before_tool ghost", "before_tool ghost", "on_tool_error ghost: blocked", "after_tool ghost"},
+		},
+		{
+			name:          "on-tool-error callback answers when before-tool callbacks do not",
+			tools:         []string{"add"},
+			onErrorResult: map[string]any{"answered_by": "on_tool_error"},
+			want:          map[string]any{"answered_by": "on_tool_error"},
+			wantCalls:     []string{"plugin before_tool ghost", "before_tool ghost", "on_tool_error ghost: tool 'ghost' not found."},
+		},
+		{
+			name:       "on-tool-error callback error is returned to the model",
+			tools:      []string{"add"},
+			onErrorErr: errors.New("handled"),
+			want:       map[string]any{"error": "handled"},
+			wantCalls:  []string{"plugin before_tool ghost", "before_tool ghost", "on_tool_error ghost: tool 'ghost' not found."},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+			plugins := &fakePluginManager{
+				beforeTool: func(_ agent.Context, t tool.Tool, _ map[string]any) (map[string]any, error) {
+					calls = append(calls, "plugin before_tool "+t.Name())
+					return tc.pluginBeforeResult, nil
+				},
+			}
+			f := &Flow{
+				BeforeToolCallbacks: []BeforeToolCallback{
+					func(_ agent.Context, t tool.Tool, _ map[string]any) (map[string]any, error) {
+						calls = append(calls, "before_tool "+t.Name())
+						return tc.beforeResult, tc.beforeErr
+					},
+				},
+				AfterToolCallbacks: []AfterToolCallback{
+					func(_ agent.Context, t tool.Tool, _, _ map[string]any, _ error) (map[string]any, error) {
+						calls = append(calls, "after_tool "+t.Name())
+						return tc.afterResult, nil
+					},
+				},
+				OnToolErrorCallbacks: []OnToolErrorCallback{
+					func(_ agent.Context, t tool.Tool, _ map[string]any, err error) (map[string]any, error) {
+						firstLine, _, _ := strings.Cut(err.Error(), "\n")
+						calls = append(calls, "on_tool_error "+t.Name()+": "+firstLine)
+						return tc.onErrorResult, tc.onErrorErr
+					},
+				},
+			}
+			toolsDict := make(map[string]tool.Tool)
+			for _, name := range tc.tools {
+				toolsDict[name] = &mockFunctionTool{name: name}
+			}
+			ctx := context.WithValue(t.Context(), plugincontext.PluginManagerCtxKey, plugins)
+			invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+				InvocationID: "inv_1",
+				Agent:        &mockAgent{name: "agent_1"},
+			})
+			resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "ghost", Args: map[string]any{}},
+			}}}}
+
+			ev, err := f.handleFunctionCalls(invCtx, toolsDict, resp, nil, nil)
+			if err != nil {
+				t.Fatalf("handleFunctionCalls() error = %v", err)
+			}
+
+			if diff := cmp.Diff(tc.want, ev.LLMResponse.Content.Parts[0].FunctionResponse.Response); diff != "" {
+				t.Errorf("FunctionResponse.Response mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantCalls, calls); diff != "" {
+				t.Errorf("callbacks run (-want +got):\n%s", diff)
 			}
 		})
 	}
