@@ -123,3 +123,28 @@ func calledFromGraph(a agent.Agent, author string, inGraph bool) bool {
 	}
 	return false
 }
+
+// ResumedInputs returns the answers ctx was resumed with, keyed by interrupt
+// ID: every function response the user sent in ctx's invocation that
+// ctx.ResumedInput knows. It returns nil when there are none.
+//
+// A composite agent hands its sub-agents a new context, which would otherwise
+// lose the answers a workflow node was resumed with, and a sub-agent that asks
+// with workflow.ResumeOrRequestInput would ask again.
+func ResumedInputs(ctx agent.Context) map[string]any {
+	var resumed map[string]any
+	for ev := range ctx.Session().Events().All() {
+		if ev.Author != "user" || ev.InvocationID != ctx.InvocationID() {
+			continue
+		}
+		for _, response := range FunctionResponses(ev.Content) {
+			if v, ok := ctx.ResumedInput(response.ID); ok {
+				if resumed == nil {
+					resumed = map[string]any{}
+				}
+				resumed[response.ID] = v
+			}
+		}
+	}
+	return resumed
+}

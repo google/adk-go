@@ -646,3 +646,149 @@ func contentTexts(contents []*genai.Content) []string {
 	}
 	return texts
 }
+
+// TestRun_FunctionResponseResumesWorkflowInsideCompositeNode checks that a
+// graph workflow nested in a composite agent that is itself a node of an outer
+// workflow resumes its paused node with the user's answer, rather than asking
+// again, and that the sub-agent before it in the composite does not run again.
+func TestRun_FunctionResponseResumesWorkflowInsideCompositeNode(t *testing.T) {
+	tests := []struct {
+		name         string
+		newComposite func(t *testing.T, other, inner agent.Agent) agent.Agent
+	}{
+		{"sequential", func(t *testing.T, other, inner agent.Agent) agent.Agent {
+			return mustSequential(t, "comp", other, inner)
+		}},
+		{"parallel", func(t *testing.T, other, inner agent.Agent) agent.Agent {
+			return mustParallel(t, "comp", other, inner)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var otherRuns atomic.Int32
+			comp := tc.newComposite(t, customAgent(t, "other", &otherRuns, nil), pausedWorkflow(t, "inner", "b", "d"))
+			outer, err := workflowagent.New(workflowagent.Config{
+				Name: "outer", SubAgents: []agent.Agent{comp},
+				Edges: []workflow.Edge{{From: workflow.Start, To: joinResumeAgentNode(t, comp)}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			authors, err := runResumeTurn(t, outer, resumeContent("b", workflow.WorkflowInputFunctionCallName, "ok"), func() { otherRuns.Store(0) })
+			if err != nil {
+				t.Fatalf("resume error: %v, authors = %v", err, authors)
+			}
+			if authors["d"] != 1 {
+				t.Errorf("d ran %d times on the resume turn, want 1 (inner resumed), authors = %v", authors["d"], authors)
+			}
+			if got := otherRuns.Load(); got != 0 {
+				t.Errorf("other ran %d times on the resume turn, want 0", got)
+			}
+		})
+	}
+}
+
+// TestRun_FunctionResponseReachesResumeOrRequestInsideCompositeNode checks
+// that a sub-agent of a composite node that asks with ResumeOrRequestInput
+// gets the answer on the resume turn, rather than asking again, and that the
+// outer workflow then runs the node after the composite.
+func TestRun_FunctionResponseReachesResumeOrRequestInsideCompositeNode(t *testing.T) {
+	tests := []struct {
+		name         string
+		newComposite func(t *testing.T, asker agent.Agent) agent.Agent
+	}{
+		{"sequential", func(t *testing.T, asker agent.Agent) agent.Agent { return mustSequential(t, "comp", asker) }},
+		{"parallel", func(t *testing.T, asker agent.Agent) agent.Agent { return mustParallel(t, "comp", asker) }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			comp := tc.newComposite(t, joinResumeAgent(t, "b", "B", true))
+			after := joinResumeAgent(t, "after", "AFTER", false)
+			cn, an := joinResumeAgentNode(t, comp), joinResumeAgentNode(t, after)
+			outer, err := workflowagent.New(workflowagent.Config{
+				Name: "outer", SubAgents: []agent.Agent{comp, after},
+				Edges: []workflow.Edge{{From: workflow.Start, To: cn}, {From: cn, To: an}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			authors, err := runResumeTurn(t, outer, resumeContent("b", workflow.WorkflowInputFunctionCallName, "ok"), nil)
+			if err != nil {
+				t.Fatalf("resume error: %v, authors = %v", err, authors)
+			}
+			if authors["after"] != 1 {
+				t.Errorf("after ran %d times on the resume turn, want 1, authors = %v", authors["after"], authors)
+			}
+		})
+	}
+}
+
+// TestRun_PartialAnswerKeepsCompositeNodePaused checks that answering one of
+// two requests made in parallel inside a composite node resumes only that
+// branch, and the outer workflow does not run the node after the composite
+// until the other request is answered too.
+func TestRun_PartialAnswerKeepsCompositeNodePaused(t *testing.T) {
+	tests := []struct {
+		name         string
+		newComposite func(t *testing.T) agent.Agent
+		done         [2]string // the agents that run once each request is answered
+	}{
+		{
+			name: "agents asking directly",
+			newComposite: func(t *testing.T) agent.Agent {
+				return mustParallel(t, "comp", joinResumeAgent(t, "a", "A", true), joinResumeAgent(t, "b", "B", true))
+			},
+			done: [2]string{"a", "b"},
+		},
+		{
+			name: "nested workflows",
+			newComposite: func(t *testing.T) agent.Agent {
+				return mustParallel(t, "comp", pausedWorkflow(t, "w1", "a", "ad"), pausedWorkflow(t, "w2", "b", "bd"))
+			},
+			done: [2]string{"ad", "bd"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			comp := tc.newComposite(t)
+			after := joinResumeAgent(t, "after", "AFTER", false)
+			cn, an := joinResumeAgentNode(t, comp), joinResumeAgentNode(t, after)
+			outer, err := workflowagent.New(workflowagent.Config{
+				Name: "outer", SubAgents: []agent.Agent{comp, after},
+				Edges: []workflow.Edge{{From: workflow.Start, To: cn}, {From: cn, To: an}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := runner.New(runner.Config{AppName: "repro", Agent: outer, SessionService: session.InMemoryService(), AutoCreateSession: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			turn := func(msg *genai.Content) map[string]int {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				authors := map[string]int{}
+				for ev, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{}) {
+					if err != nil {
+						t.Fatalf("run error: %v, authors = %v", err, authors)
+					}
+					authors[ev.Author]++
+				}
+				return authors
+			}
+
+			turn(genai.NewContentFromText("start", genai.RoleUser))
+			first := turn(resumeContent("a", workflow.WorkflowInputFunctionCallName, "ok"))
+			if first[tc.done[0]] != 1 || first["after"] != 0 {
+				t.Errorf("after answering a: %s ran %d times and after %d times, want 1 and 0, authors = %v", tc.done[0], first[tc.done[0]], first["after"], first)
+			}
+			second := turn(resumeContent("b", workflow.WorkflowInputFunctionCallName, "ok"))
+			if second[tc.done[1]] != 1 || second["after"] != 1 {
+				t.Errorf("after answering b: %s ran %d times and after %d times, want 1 and 1, authors = %v", tc.done[1], second[tc.done[1]], second["after"], second)
+			}
+		})
+	}
+}
