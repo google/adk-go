@@ -26,9 +26,11 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/artifact"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/plugin/savefilesasartifacts"
 	"google.golang.org/adk/v2/runner"
@@ -44,10 +46,13 @@ const (
 )
 
 // gcsLikeService wraps the in-memory service, reporting gs:// canonical URIs
-// and failing the saves listed in failOn.
+// and failing the saves listed in failOn. versionErr and nilVersion make
+// GetArtifactVersion fail or return no version.
 type gcsLikeService struct {
 	artifact.Service
-	failOn map[string]bool
+	failOn     map[string]bool
+	versionErr bool
+	nilVersion bool
 }
 
 func (s *gcsLikeService) Save(ctx context.Context, req *artifact.SaveRequest) (*artifact.SaveResponse, error) {
@@ -58,11 +63,19 @@ func (s *gcsLikeService) Save(ctx context.Context, req *artifact.SaveRequest) (*
 }
 
 func (s *gcsLikeService) GetArtifactVersion(ctx context.Context, req *artifact.GetArtifactVersionRequest) (*artifact.GetArtifactVersionResponse, error) {
-	return &artifact.GetArtifactVersionResponse{ArtifactVersion: &artifact.ArtifactVersion{
+	if s.nilVersion {
+		return &artifact.GetArtifactVersionResponse{}, nil
+	}
+	resp := &artifact.GetArtifactVersionResponse{ArtifactVersion: &artifact.ArtifactVersion{
 		Version:      req.Version,
 		CanonicalURI: fmt.Sprintf("gs://mock-bucket/%s/versions/%d", req.FileName, req.Version),
 		MimeType:     "application/pdf",
-	}}, nil
+	}}
+	if s.versionErr {
+		// A response alongside the error must still be ignored.
+		return resp, errors.New("lookup error")
+	}
+	return resp, nil
 }
 
 func newSession(t *testing.T) session.Session {
@@ -125,6 +138,8 @@ func TestOnUserMessage(t *testing.T) {
 		// noArtifacts leaves the invocation without an artifact service.
 		noArtifacts bool
 		failOn      map[string]bool
+		versionErr  bool
+		nilVersion  bool
 		parts       []*genai.Part
 		// wantParts nil means the callback returns nil content.
 		wantParts []*genai.Part
@@ -151,6 +166,42 @@ func TestOnUserMessage(t *testing.T) {
 				gsRef("artifact_test_invocation_123_0", "application/pdf", 1),
 			},
 			wantDelta: map[string]int64{"artifact_test_invocation_123_0": 1},
+		},
+		{
+			name: "several files without display name",
+			parts: []*genai.Part{
+				blobPart("", "text/plain", []byte("first")),
+				genai.NewPartFromText("between"),
+				blobPart("", "text/plain", []byte("second")),
+			},
+			wantParts: []*genai.Part{
+				placeholder("artifact_test_invocation_123_0"),
+				gsRef("artifact_test_invocation_123_0", "text/plain", 1),
+				genai.NewPartFromText("between"),
+				placeholder("artifact_test_invocation_123_2"),
+				gsRef("artifact_test_invocation_123_2", "text/plain", 1),
+			},
+			wantDelta: map[string]int64{"artifact_test_invocation_123_0": 1, "artifact_test_invocation_123_2": 1},
+		},
+		{
+			name:      "percent sign in file name keeps file reference",
+			parts:     []*genai.Part{blobPart("50% off.pdf", "application/pdf", []byte("test data"))},
+			wantParts: []*genai.Part{placeholder("50% off.pdf"), gsRef("50% off.pdf", "application/pdf", 1)},
+			wantDelta: map[string]int64{"50% off.pdf": 1},
+		},
+		{
+			name:       "version lookup error skips file reference",
+			versionErr: true,
+			parts:      []*genai.Part{blobPart("test.pdf", "application/pdf", []byte("test data"))},
+			wantParts:  []*genai.Part{placeholder("test.pdf")},
+			wantDelta:  map[string]int64{"test.pdf": 1},
+		},
+		{
+			name:       "missing version skips file reference",
+			nilVersion: true,
+			parts:      []*genai.Part{blobPart("test.pdf", "application/pdf", []byte("test data"))},
+			wantParts:  []*genai.Part{placeholder("test.pdf")},
+			wantDelta:  map[string]int64{"test.pdf": 1},
 		},
 		{
 			name: "multiple files in message",
@@ -255,7 +306,7 @@ func TestOnUserMessage(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			inMemory := artifact.InMemoryService()
-			svc := &gcsLikeService{Service: inMemory, failOn: tc.failOn}
+			svc := &gcsLikeService{Service: inMemory, failOn: tc.failOn, versionErr: tc.versionErr, nilVersion: tc.nilVersion}
 
 			cfg := tc.cfg
 			switch {
@@ -307,8 +358,15 @@ func TestOnUserMessage(t *testing.T) {
 					t.Fatalf("Load(%q) error = %v", name, err)
 				}
 				var want []byte
-				for _, part := range tc.parts {
-					if part.InlineData != nil && (part.InlineData.DisplayName == name || part.InlineData.DisplayName == "") {
+				for i, part := range tc.parts {
+					if part.InlineData == nil {
+						continue
+					}
+					partName := part.InlineData.DisplayName
+					if partName == "" {
+						partName = fmt.Sprintf("artifact_%s_%d", invocationID, i)
+					}
+					if partName == name {
 						want = part.InlineData.Data
 					}
 				}
@@ -382,6 +440,12 @@ func TestArtifactDeltaReporting(t *testing.T) {
 			agentDelta: map[string]int64{"blob.pdf": 5, "other.txt": 1},
 			wantDelta:  map[string]int64{"blob.pdf": 5, "other.txt": 1},
 		},
+		{
+			// The plugin saved version 3, newer than the agent's version 1.
+			file:       "blob.pdf",
+			agentDelta: map[string]int64{"blob.pdf": 1},
+			wantDelta:  map[string]int64{"blob.pdf": 3},
+		},
 	}
 	for i, turn := range turns {
 		msg := &genai.Content{Parts: []*genai.Part{blobPart(turn.file, "application/pdf", []byte("test data"))}}
@@ -416,49 +480,83 @@ func TestArtifactDeltaReporting(t *testing.T) {
 	}
 }
 
-func TestAfterRunDropsPendingDelta(t *testing.T) {
+// TestPendingDeltaDoesNotOutliveRun checks that versions saved by a run that
+// ends before any event, for example because appending the user event fails,
+// are not held by the plugin and do not reach a later run, even one that
+// reuses the invocation ID as a resumed invocation does.
+func TestPendingDeltaDoesNotOutliveRun(t *testing.T) {
 	p, err := savefilesasartifacts.New(savefilesasartifacts.Config{})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	ictx := newInvocationContext(t, newSession(t), artifact.InMemoryService())
+	svc := artifact.InMemoryService()
 
+	failed := newInvocationContext(t, newSession(t), svc)
 	msg := &genai.Content{Parts: []*genai.Part{blobPart("blob.pdf", "application/pdf", []byte("test data"))}}
-	if _, err := p.OnUserMessageCallback()(ictx, msg); err != nil {
+	if _, err := p.OnUserMessageCallback()(failed, msg); err != nil {
 		t.Fatalf("OnUserMessageCallback() error = %v", err)
 	}
-	p.AfterRunCallback()(ictx)
 
+	next := newInvocationContext(t, newSession(t), svc)
 	ev := &session.Event{}
-	if _, err := p.OnEventCallback()(ictx, ev); err != nil {
+	if _, err := p.OnEventCallback()(next, ev); err != nil {
 		t.Fatalf("OnEventCallback() error = %v", err)
 	}
 	if len(ev.Actions.ArtifactDelta) != 0 {
-		t.Errorf("ArtifactDelta = %v after AfterRunCallback, want empty", ev.Actions.ArtifactDelta)
+		t.Errorf("ArtifactDelta = %v from an earlier run, want empty", ev.Actions.ArtifactDelta)
 	}
 }
 
 // TestRunner checks the plugin end to end: the user event carries the
-// placeholder and the agent's event carries the ArtifactDelta.
+// placeholder and the agent's event carries the ArtifactDelta. A custom agent
+// runs on the legacy run loop and an llmagent on the node runtime.
 func TestRunner(t *testing.T) {
+	tests := []struct {
+		name     string
+		newAgent func() (agent.Agent, error)
+	}{
+		{
+			name: "custom agent",
+			newAgent: func() (agent.Agent, error) {
+				return agent.New(agent.Config{
+					Name: "test_agent",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							ev := session.NewEvent(ctx, ctx.InvocationID())
+							ev.Author = "test_agent"
+							ev.Content = genai.NewContentFromText("done", genai.RoleModel)
+							yield(ev, nil)
+						}
+					},
+				})
+			},
+		},
+		{
+			name: "llmagent",
+			newAgent: func() (agent.Agent, error) {
+				return llmagent.New(llmagent.Config{
+					Name:  "test_agent",
+					Model: &testutil.MockModel{Responses: []*genai.Content{genai.NewContentFromText("done", genai.RoleModel)}},
+				})
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			testAgent, err := tc.newAgent()
+			if err != nil {
+				t.Fatalf("new agent error = %v", err)
+			}
+			testRunner(t, testAgent)
+		})
+	}
+}
+
+func testRunner(t *testing.T, testAgent agent.Agent) {
+	t.Helper()
 	ctx := t.Context()
 	sessionService := session.InMemoryService()
 	artifactService := artifact.InMemoryService()
-
-	testAgent, err := agent.New(agent.Config{
-		Name: "test_agent",
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-			return func(yield func(*session.Event, error) bool) {
-				ev := session.NewEvent(ctx, ctx.InvocationID())
-				ev.Author = "test_agent"
-				ev.Content = genai.NewContentFromText("done", genai.RoleModel)
-				yield(ev, nil)
-			}
-		},
-	})
-	if err != nil {
-		t.Fatalf("agent.New() error = %v", err)
-	}
 	p, err := savefilesasartifacts.New(savefilesasartifacts.Config{ArtifactService: artifactService})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

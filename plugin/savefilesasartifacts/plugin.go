@@ -26,18 +26,29 @@
 //
 // The saved versions are added to the ArtifactDelta of the first non-partial
 // event of the invocation, so they appear in the session's artifact history.
-// When the invocation commits no event, they are not reported.
+// Until then they are held in the run's session state under a temp: key, which
+// is never persisted, so nothing outlives the run. When the invocation commits
+// no event, they are not reported.
 //
 // The runner stops calling OnUserMessageCallback, and OnEventCallback, at the
-// first plugin that returns a replacement, so register this plugin after any
-// other plugin that rewrites user messages or events.
+// first plugin that returns a non-nil replacement, and skips committing an
+// event when a plugin returns an error. Plugin order therefore costs:
+//   - Registered after a plugin that rewrites the user message, this plugin
+//     never sees the message, and its files are not saved.
+//   - Registered after a plugin that replaces an event, this plugin never sees
+//     that event, and the versions are reported on the next one it does see.
+//   - Registered before a plugin that returns an error for an event, the
+//     versions are written into an event that is not committed, and are not
+//     reported.
+//
+// Do not combine this plugin with [agent.RunConfig.SaveInputBlobsAsArtifacts].
+// When a save fails here, the original part is kept in the message, and the
+// runner then saves it again and fails the run if that save also fails.
 package savefilesasartifacts
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
-	"sync"
 
 	"google.golang.org/genai"
 
@@ -84,24 +95,23 @@ func New(cfg Config) (*plugin.Plugin, error) {
 		cfg.Name = defaultName
 	}
 	p := &saveFilesPlugin{
-		cfg:     cfg,
-		pending: make(map[string]map[string]int64),
+		cfg:        cfg,
+		pendingKey: session.KeyPrefixTemp + cfg.Name + ":pending_delta",
 	}
 	return plugin.New(plugin.Config{
 		Name:                  cfg.Name,
 		OnUserMessageCallback: p.onUserMessage,
 		OnEventCallback:       p.onEvent,
-		AfterRunCallback:      p.afterRun,
 	})
 }
 
+// saveFilesPlugin holds no per-run state: the versions saved for a run are
+// kept in that run's session state, as adk-python does.
 type saveFilesPlugin struct {
 	cfg Config
-
-	mu sync.Mutex
-	// pending holds, per invocation ID, the artifact versions saved by
+	// pendingKey is the session state key that holds the versions saved by
 	// onUserMessage until onEvent records them in an event's actions.
-	pending map[string]map[string]int64
+	pendingKey string
 }
 
 func (p *saveFilesPlugin) onUserMessage(ctx agent.InvocationContext, msg *genai.Content) (*genai.Content, error) {
@@ -136,8 +146,9 @@ func (p *saveFilesPlugin) onUserMessage(ctx agent.InvocationContext, msg *genai.
 			continue
 		}
 
-		// Save a copy so later changes to the message part do not alter the
-		// stored artifact.
+		// Save a shallow copy so later changes to the message part's fields do
+		// not alter the stored artifact. The blob's Data is still shared with
+		// the caller, as in adk-python.
 		partCopy := *part
 		resp, err := artifacts.Save(ctx, name, &partCopy)
 		if err != nil {
@@ -160,16 +171,11 @@ func (p *saveFilesPlugin) onUserMessage(ctx agent.InvocationContext, msg *genai.
 	}
 
 	if len(saved) > 0 {
-		p.mu.Lock()
-		delta := p.pending[ctx.InvocationID()]
-		if delta == nil {
-			delta = make(map[string]int64)
-			p.pending[ctx.InvocationID()] = delta
+		if sess := ctx.Session(); sess != nil {
+			if err := sess.State().Set(p.pendingKey, saved); err != nil {
+				return nil, fmt.Errorf("record saved artifact versions: %w", err)
+			}
 		}
-		for name, version := range saved {
-			delta[name] = version
-		}
-		p.mu.Unlock()
 	}
 
 	return &genai.Content{Role: msg.Role, Parts: newParts}, nil
@@ -182,13 +188,20 @@ func (p *saveFilesPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 	if ev == nil || ev.Partial {
 		return nil, nil
 	}
-	p.mu.Lock()
-	delta := p.pending[ctx.InvocationID()]
-	delete(p.pending, ctx.InvocationID())
-	p.mu.Unlock()
-
+	sess := ctx.Session()
+	if sess == nil {
+		return nil, nil
+	}
+	v, err := sess.State().Get(p.pendingKey)
+	if err != nil {
+		return nil, nil
+	}
+	delta, _ := v.(map[string]int64)
 	if len(delta) == 0 {
 		return nil, nil
+	}
+	if err := sess.State().Set(p.pendingKey, map[string]int64(nil)); err != nil {
+		return nil, fmt.Errorf("clear saved artifact versions: %w", err)
 	}
 	if ev.Actions.ArtifactDelta == nil {
 		ev.Actions.ArtifactDelta = make(map[string]int64)
@@ -200,14 +213,6 @@ func (p *saveFilesPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		}
 	}
 	return nil, nil
-}
-
-// afterRun drops versions that no event carried, for example because the
-// invocation committed no event.
-func (p *saveFilesPlugin) afterRun(ctx agent.InvocationContext) {
-	p.mu.Lock()
-	delete(p.pending, ctx.InvocationID())
-	p.mu.Unlock()
 }
 
 // fileReference returns a FileData part pointing at the saved version, or nil
@@ -245,10 +250,10 @@ func (p *saveFilesPlugin) fileReference(ctx agent.InvocationContext, name string
 	}}
 }
 
+// isModelAccessibleURI reports whether uri has a scheme the model can read.
+// Only the scheme is checked: the GCS service writes object names into the
+// URI unescaped, so a full url.Parse would reject a name such as "50% off.pdf".
 func isModelAccessibleURI(uri string) bool {
-	u, err := url.Parse(uri)
-	if err != nil {
-		return false
-	}
-	return modelAccessibleURISchemes[strings.ToLower(u.Scheme)]
+	scheme, _, ok := strings.Cut(uri, ":")
+	return ok && modelAccessibleURISchemes[strings.ToLower(scheme)]
 }
