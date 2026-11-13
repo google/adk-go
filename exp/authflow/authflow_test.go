@@ -1318,6 +1318,354 @@ func TestTamperedConfirmationBeforeSignInIsNotForwarded(t *testing.T) {
 	}
 }
 
+func TestReusedCallIDDoesNotInheritEarlierApproval(t *testing.T) {
+	t.Run("different tool reuses call ID across turns", func(t *testing.T) {
+		endpoint := newTokenEndpoint(t)
+		cfg := calendarConfig(endpoint.URL)
+		type cityInput struct {
+			City string `json:"city"`
+		}
+		weather, err := functiontool.New(functiontool.Config{
+			Name:                "weather",
+			Description:         "Reads the weather after approval.",
+			RequireConfirmation: true,
+		}, func(_ agent.Context, in cityInput) (map[string]any, error) {
+			return map[string]any{"city": in.City, "forecast": "sunny"}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New(weather) failed: %v", err)
+		}
+		var calendarDeleted bool
+		calendar, err := functiontool.New(functiontool.Config{
+			Name:        "calendar",
+			Description: "Signs in first, then asks for confirmation before deleting.",
+		}, func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			key, err := cfg.Key()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := ctx.State().Get(key); err != nil {
+				cred, err := authflow.GetAuthResponse(ctx, cfg)
+				if err != nil {
+					return nil, err
+				}
+				if cred == nil {
+					if err := authflow.RequestCredential(ctx, cfg); err != nil {
+						return nil, err
+					}
+					return map[string]any{"status": "waiting for sign-in"}, nil
+				}
+				if err := ctx.State().Set(key, *cred); err != nil {
+					return nil, err
+				}
+			}
+			c := ctx.ToolConfirmation()
+			if c == nil {
+				if err := ctx.RequestConfirmation("Clear calendar?", nil); err != nil {
+					return nil, err
+				}
+				return map[string]any{"status": "waiting for approval"}, nil
+			}
+			if c.Confirmed {
+				calendarDeleted = true
+			}
+			return map[string]any{"cleared": c.Confirmed}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New(calendar) failed: %v", err)
+		}
+		llm := &testutil.MockModel{Responses: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "call_1", Name: "weather", Args: map[string]any{"city": "London"},
+			}}}},
+			genai.NewContentFromText("Sunny in London.", genai.RoleModel),
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "call_1", Name: "calendar", Args: map[string]any{},
+			}}}},
+			genai.NewContentFromText("Cleared.", genai.RoleModel),
+		}}
+		r := newRunner(t, llm, weather, calendar)
+
+		first, err := testutil.CollectEvents(r.Run(t, "s1", "weather in London?"))
+		if err != nil {
+			t.Fatalf("first run failed: %v", err)
+		}
+		weatherConf := confirmationRequests(first)
+		if len(weatherConf) != 1 {
+			t.Fatalf("first run sent %d confirmation requests, want 1", len(weatherConf))
+		}
+		if _, err := testutil.CollectEvents(r.RunContent(t, "s1", approveContent(weatherConf[0].ID))); err != nil {
+			t.Fatalf("weather approval failed: %v", err)
+		}
+
+		third, err := testutil.CollectEvents(r.Run(t, "s1", "clear my calendar"))
+		if err != nil {
+			t.Fatalf("third run failed: %v", err)
+		}
+		credRequests := credentialRequests(third)
+		if len(credRequests) != 1 {
+			t.Fatalf("third run sent %d credential requests, want 1", len(credRequests))
+		}
+
+		fourth, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, credRequests[0], "c0de")))
+		if err != nil {
+			t.Fatalf("fourth run failed: %v", err)
+		}
+		if calendarDeleted {
+			t.Errorf("calendar ran destructive action under weather's earlier approval for call_1")
+		}
+		if n := len(confirmationRequests(fourth)); n != 1 {
+			t.Errorf("fourth run sent %d confirmation requests, want 1", n)
+		}
+	})
+
+	t.Run("different tool or arguments reuses call ID before sign-in", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			diverge  *genai.FunctionCall
+			wantTool string
+		}{
+			{
+				name:     "different tool",
+				diverge:  &genai.FunctionCall{ID: "call_1", Name: "calendar", Args: map[string]any{"day": "Monday"}},
+				wantTool: "calendar",
+			},
+			{
+				name:     "different arguments",
+				diverge:  &genai.FunctionCall{ID: "call_1", Name: "weather", Args: map[string]any{"city": "Tokyo"}},
+				wantTool: "weather",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				endpoint := newTokenEndpoint(t)
+				cfg := calendarConfig(endpoint.URL)
+				type cityInput struct {
+					City string `json:"city"`
+				}
+				type dayInput struct {
+					Day string `json:"day"`
+				}
+				var executed []string
+				weather, err := functiontool.New(functiontool.Config{
+					Name:                "weather",
+					Description:         "Reads weather after approval and sign-in.",
+					RequireConfirmation: true,
+				}, func(ctx agent.Context, in cityInput) (map[string]any, error) {
+					cred, err := authflow.GetAuthResponse(ctx, cfg)
+					if err != nil {
+						return nil, err
+					}
+					if cred == nil {
+						if err := authflow.RequestCredential(ctx, cfg); err != nil {
+							return nil, err
+						}
+						return map[string]any{"status": "waiting for sign-in"}, nil
+					}
+					executed = append(executed, "weather:"+in.City)
+					return map[string]any{"forecast": "sunny"}, nil
+				})
+				if err != nil {
+					t.Fatalf("functiontool.New(weather) failed: %v", err)
+				}
+				calendar, err := functiontool.New(functiontool.Config{
+					Name:                "calendar",
+					Description:         "Reads calendar after approval and sign-in.",
+					RequireConfirmation: true,
+				}, func(_ agent.Context, in dayInput) (map[string]any, error) {
+					executed = append(executed, "calendar:"+in.Day)
+					return map[string]any{"events": "standup"}, nil
+				})
+				if err != nil {
+					t.Fatalf("functiontool.New(calendar) failed: %v", err)
+				}
+				llm := &testutil.MockModel{Responses: []*genai.Content{
+					{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+						ID: "call_1", Name: "weather", Args: map[string]any{"city": "London"},
+					}}}},
+					genai.NewContentFromText("Done.", genai.RoleModel),
+				}}
+				r := newRunner(t, llm, weather, calendar)
+
+				first, err := testutil.CollectEvents(r.Run(t, "s1", "weather in London?"))
+				if err != nil {
+					t.Fatalf("first run failed: %v", err)
+				}
+				confs := confirmationRequests(first)
+				if len(confs) != 1 {
+					t.Fatalf("first run sent %d confirmation requests, want 1", len(confs))
+				}
+
+				second, err := testutil.CollectEvents(r.RunContent(t, "s1", approveContent(confs[0].ID)))
+				if err != nil {
+					t.Fatalf("second run failed: %v", err)
+				}
+				creds := credentialRequests(second)
+				if len(creds) != 1 {
+					t.Fatalf("second run sent %d credential requests, want 1", len(creds))
+				}
+
+				// A later event reuses call_1 for a different tool or different
+				// arguments before the user signs in.
+				appendEvent(t, r, "assistant", &genai.Part{FunctionCall: tc.diverge})
+
+				third, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, creds[0], "c0de")))
+				if err != nil {
+					t.Fatalf("third run failed: %v", err)
+				}
+				if len(executed) != 0 {
+					t.Errorf("diverged call executed %v under earlier approval, want none", executed)
+				}
+				freshConfs := confirmationRequests(third)
+				if len(freshConfs) != 1 {
+					t.Fatalf("third run sent %d confirmation requests, want 1", len(freshConfs))
+				}
+				orig, err := toolconfirmation.OriginalCallFrom(freshConfs[0])
+				if err != nil {
+					t.Fatalf("OriginalCallFrom() failed: %v", err)
+				}
+				if orig.Name != tc.wantTool {
+					t.Errorf("fresh confirmation requested for %q, want %q", orig.Name, tc.wantTool)
+				}
+			})
+		}
+	})
+}
+
+func TestMalformedConfirmationDoesNotBlockSignIn(t *testing.T) {
+	malformedApproveContent := func(id string) *genai.Content {
+		return &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+			ID: id, Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": "yes"},
+		}}}}
+	}
+
+	t.Run("earlier malformed confirmation does not block unrelated sign-in", func(t *testing.T) {
+		endpoint := newTokenEndpoint(t)
+		cfg := calendarConfig(endpoint.URL)
+		weather, err := functiontool.New(functiontool.Config{
+			Name:                "weather",
+			Description:         "Reads the weather after approval.",
+			RequireConfirmation: true,
+		}, func(_ agent.Context, _ struct{}) (map[string]any, error) {
+			return map[string]any{"forecast": "sunny"}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New(weather) failed: %v", err)
+		}
+		calendar, rec := newCalendarTool(t, cfg)
+		llm := &testutil.MockModel{Responses: []*genai.Content{
+			genai.NewContentFromFunctionCall("weather", map[string]any{}, genai.RoleModel),
+			genai.NewContentFromText("It is sunny.", genai.RoleModel),
+			calendarCall(),
+			genai.NewContentFromText("You have standup.", genai.RoleModel),
+		}}
+		r := newRunner(t, llm, weather, calendar)
+
+		first, err := testutil.CollectEvents(r.Run(t, "s1", "weather?"))
+		if err != nil {
+			t.Fatalf("first run failed: %v", err)
+		}
+		weatherConfs := confirmationRequests(first)
+		if len(weatherConfs) != 1 {
+			t.Fatalf("first run sent %d confirmation requests, want 1", len(weatherConfs))
+		}
+
+		// A typo'd confirmation fails its own turn, then the user corrects it.
+		if _, err := testutil.CollectEvents(r.RunContent(t, "s1", malformedApproveContent(weatherConfs[0].ID))); err == nil {
+			t.Fatal("malformed confirmation response succeeded, want unmarshal error")
+		}
+		if _, err := testutil.CollectEvents(r.RunContent(t, "s1", approveContent(weatherConfs[0].ID))); err != nil {
+			t.Fatalf("corrected weather confirmation failed: %v", err)
+		}
+
+		// A later, unrelated sign-in in the same session must succeed.
+		fourth, err := testutil.CollectEvents(r.Run(t, "s1", "what's on my calendar?"))
+		if err != nil {
+			t.Fatalf("calendar turn failed: %v", err)
+		}
+		creds := credentialRequests(fourth)
+		if len(creds) != 1 {
+			t.Fatalf("calendar turn sent %d credential requests, want 1", len(creds))
+		}
+		fifth, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, creds[0], "c0de")))
+		if err != nil {
+			t.Fatalf("calendar sign-in failed on old weather typo: %v", err)
+		}
+		if got := fifth[len(fifth)-1].Content.Parts[0].Text; got != "You have standup." {
+			t.Errorf("calendar sign-in ended with %q, want %q", got, "You have standup.")
+		}
+		if runs, tokens := rec.record(); runs != 2 || !cmp.Equal(tokens, []string{"at-1"}) {
+			t.Errorf("calendar ran %d times with tokens %q, want 2 runs with [at-1]", runs, tokens)
+		}
+	})
+
+	t.Run("corrected confirmation on the same call supersedes earlier typo", func(t *testing.T) {
+		endpoint := newTokenEndpoint(t)
+		cfg := calendarConfig(endpoint.URL)
+		var runs int
+		calendar, err := functiontool.New(functiontool.Config{
+			Name:                "calendar",
+			Description:         "Reads the calendar after approval and sign-in.",
+			RequireConfirmation: true,
+		}, func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			runs++
+			cred, err := authflow.GetAuthResponse(ctx, cfg)
+			if err != nil {
+				return nil, err
+			}
+			if cred == nil {
+				if err := authflow.RequestCredential(ctx, cfg); err != nil {
+					return nil, err
+				}
+				return map[string]any{"status": "waiting for sign-in"}, nil
+			}
+			return map[string]any{"events": "standup"}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New(calendar) failed: %v", err)
+		}
+		llm := &testutil.MockModel{Responses: []*genai.Content{
+			calendarCall(),
+			genai.NewContentFromText("You have standup.", genai.RoleModel),
+		}}
+		r := newRunner(t, llm, calendar)
+
+		first, err := testutil.CollectEvents(r.Run(t, "s1", "what's on my calendar?"))
+		if err != nil {
+			t.Fatalf("first run failed: %v", err)
+		}
+		confs := confirmationRequests(first)
+		if len(confs) != 1 {
+			t.Fatalf("first run sent %d confirmation requests, want 1", len(confs))
+		}
+
+		if _, err := testutil.CollectEvents(r.RunContent(t, "s1", malformedApproveContent(confs[0].ID))); err == nil {
+			t.Fatal("malformed confirmation response succeeded, want unmarshal error")
+		}
+		third, err := testutil.CollectEvents(r.RunContent(t, "s1", approveContent(confs[0].ID)))
+		if err != nil {
+			t.Fatalf("corrected confirmation failed: %v", err)
+		}
+		creds := credentialRequests(third)
+		if len(creds) != 1 {
+			t.Fatalf("third run sent %d credential requests, want 1", len(creds))
+		}
+
+		fourth, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, creds[0], "c0de")))
+		if err != nil {
+			t.Fatalf("sign-in rerun failed on superseded typo: %v", err)
+		}
+		if n := len(confirmationRequests(fourth)); n != 0 {
+			t.Errorf("fourth run sent %d confirmation requests, want 0", n)
+		}
+		if got := fourth[len(fourth)-1].Content.Parts[0].Text; got != "You have standup." {
+			t.Errorf("fourth run ended with %q, want %q", got, "You have standup.")
+		}
+		if runs != 2 {
+			t.Errorf("calendar handler ran %d times, want 2", runs)
+		}
+	})
+}
+
 // appendEvent appends an event by author with parts to the runner's session
 // "s1", as a remote agent's response or a tampered store would.
 func appendEvent(t *testing.T, r *testutil.TestAgentRunner, author string, parts ...*genai.Part) {

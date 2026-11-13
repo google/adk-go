@@ -66,11 +66,11 @@ func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flo
 			yield(nil, err)
 			return
 		}
-		parts := partsToRerun(events, agentName, toolCallsToResume(events, agentName, requests, authorized))
+		callEventIdx, parts := partsToRerun(events, agentName, toolCallsToResume(events, agentName, requests, authorized))
 		if len(parts) == 0 {
 			return
 		}
-		confirmations, err := answeredConfirmations(events, agentName)
+		confirmations, err := answeredConfirmations(events, agentName, callEventIdx, parts)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -234,13 +234,13 @@ func toolCallsToResume(events []*session.Event, agentName string, requests map[s
 	return resume
 }
 
-// partsToRerun returns the function call parts in resume from the latest event
-// with any of them, when agentName made that event. Keeping the parts rather
-// than the bare calls preserves ThoughtSignature when a rerun asks for
-// confirmation.
-func partsToRerun(events []*session.Event, agentName string, resume map[string]bool) []*genai.Part {
+// partsToRerun returns the event index and function call parts in resume from
+// the latest event with any of them, when agentName made that event. Keeping
+// the parts rather than the bare calls preserves ThoughtSignature when a rerun
+// asks for confirmation.
+func partsToRerun(events []*session.Event, agentName string, resume map[string]bool) (int, []*genai.Part) {
 	// The last event is the user's answer.
-	for _, ev := range slices.Backward(events[:len(events)-1]) {
+	for i, ev := range slices.Backward(events[:len(events)-1]) {
 		if ev.Content == nil || !slices.ContainsFunc(ev.Content.Parts, func(p *genai.Part) bool {
 			return p != nil && p.FunctionCall != nil && resume[p.FunctionCall.ID]
 		}) {
@@ -255,21 +255,62 @@ func partsToRerun(events []*session.Event, agentName string, resume map[string]b
 				parts = append(parts, p)
 			}
 		}
-		return parts
+		return i, parts
 	}
-	return nil
+	return -1, nil
+}
+
+type confirmationRef struct {
+	confID   string
+	origID   string
+	eventIdx int
 }
 
 // answeredConfirmations returns the user's answers to agentName's
-// adk_request_confirmation calls, keyed by the original function call ID. A
-// tool that was already approved before it asked for sign-in receives its
-// approval again when authPreprocessor reruns it, rather than asking for
-// confirmation a second time.
-func answeredConfirmations(events []*session.Event, agentName string) (map[string]*toolconfirmation.ToolConfirmation, error) {
-	originalIDByConfirmationID := map[string]string{}
+// adk_request_confirmation calls for the function call parts being rerun, keyed
+// by original function call ID. A tool that was already approved before it
+// asked for sign-in receives its approval again when authPreprocessor reruns
+// it, rather than asking for confirmation a second time.
+//
+// Each approval is matched against the full canonical FunctionCall (ID, name,
+// and arguments) emitted after callEventIdx, so a later call that reuses an
+// earlier call ID cannot inherit an approval meant for a different tool,
+// different arguments, or an earlier turn. Only responses targeting the
+// rerun's active confirmations are decoded, from newest to oldest, so an
+// unrelated or superseded malformed confirmation response does not block a
+// valid sign-in.
+func answeredConfirmations(events []*session.Event, agentName string, callEventIdx int, parts []*genai.Part) (map[string]*toolconfirmation.ToolConfirmation, error) {
+	rerunCanonicalByID := make(map[string]string, len(parts))
+	ambiguousRerunIDs := map[string]bool{}
+	for _, p := range parts {
+		if p == nil || p.FunctionCall == nil {
+			continue
+		}
+		id := p.FunctionCall.ID
+		if ambiguousRerunIDs[id] {
+			continue
+		}
+		canonical, err := json.Marshal(p.FunctionCall)
+		if err != nil {
+			ambiguousRerunIDs[id] = true
+			delete(rerunCanonicalByID, id)
+			continue
+		}
+		if prev, seen := rerunCanonicalByID[id]; seen && prev != string(canonical) {
+			ambiguousRerunIDs[id] = true
+			delete(rerunCanonicalByID, id)
+			continue
+		}
+		rerunCanonicalByID[id] = string(canonical)
+	}
+	if len(rerunCanonicalByID) == 0 {
+		return nil, nil
+	}
+
 	originalCallByConfirmationID := map[string]string{}
 	conflicting := map[string]bool{}
-	for _, ev := range events {
+	latestConfByOrigID := map[string]confirmationRef{}
+	for i, ev := range events {
 		if ev.Author != agentName {
 			continue
 		}
@@ -279,33 +320,69 @@ func answeredConfirmations(events []*session.Event, agentName string) (map[strin
 			}
 			orig, err := toolconfirmation.OriginalCallFrom(call)
 			if err != nil {
+				conflicting[call.ID] = true
 				continue
 			}
 			canonical, err := json.Marshal(orig)
 			if err != nil {
+				conflicting[call.ID] = true
 				continue
 			}
 			if prev, seen := originalCallByConfirmationID[call.ID]; seen {
 				if prev != string(canonical) {
 					conflicting[call.ID] = true
 				}
+			} else {
+				originalCallByConfirmationID[call.ID] = string(canonical)
+			}
+			if i <= callEventIdx {
 				continue
 			}
-			originalCallByConfirmationID[call.ID] = string(canonical)
-			originalIDByConfirmationID[call.ID] = orig.ID
+			wantCanonical, ok := rerunCanonicalByID[orig.ID]
+			if !ok {
+				continue
+			}
+			if string(canonical) != wantCanonical {
+				delete(latestConfByOrigID, orig.ID)
+				continue
+			}
+			latestConfByOrigID[orig.ID] = confirmationRef{
+				confID:   call.ID,
+				origID:   orig.ID,
+				eventIdx: i,
+			}
 		}
 	}
-	var confirmations map[string]*toolconfirmation.ToolConfirmation
-	for _, ev := range events {
-		if ev.Author != "user" {
+
+	targetByConfID := make(map[string]confirmationRef, len(latestConfByOrigID))
+	for _, ref := range latestConfByOrigID {
+		if conflicting[ref.confID] {
 			continue
 		}
-		for _, resp := range utils.FunctionResponses(ev.Content) {
-			if resp.Name != toolconfirmation.FunctionCallName || conflicting[resp.ID] {
+		targetByConfID[ref.confID] = ref
+	}
+	if len(targetByConfID) == 0 {
+		return nil, nil
+	}
+
+	var confirmations map[string]*toolconfirmation.ToolConfirmation
+	for i, ev := range slices.Backward(events) {
+		if ev.Author != "user" || ev.Content == nil {
+			continue
+		}
+		for _, p := range slices.Backward(ev.Content.Parts) {
+			if p == nil || p.FunctionResponse == nil {
 				continue
 			}
-			origID, ok := originalIDByConfirmationID[resp.ID]
-			if !ok {
+			resp := p.FunctionResponse
+			if resp.Name != toolconfirmation.FunctionCallName {
+				continue
+			}
+			target, ok := targetByConfID[resp.ID]
+			if !ok || i <= target.eventIdx {
+				continue
+			}
+			if _, decided := confirmations[target.origID]; decided {
 				continue
 			}
 			tc, err := parseToolConfirmation(ev.ID, resp.Response)
@@ -315,7 +392,7 @@ func answeredConfirmations(events []*session.Event, agentName string) (map[strin
 			if confirmations == nil {
 				confirmations = map[string]*toolconfirmation.ToolConfirmation{}
 			}
-			confirmations[origID] = &tc
+			confirmations[target.origID] = &tc
 		}
 	}
 	return confirmations, nil
