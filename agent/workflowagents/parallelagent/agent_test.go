@@ -777,3 +777,101 @@ func TestParallelAgent_ScopedBranchSeesItsOwnHistory(t *testing.T) {
 		t.Errorf("branch prompt is missing its own scoped history; prompt texts: %q", texts)
 	}
 }
+
+// gatedLLM waits for gate to close, then replies with text. It counts its
+// requests.
+type gatedLLM struct {
+	gate     <-chan struct{}
+	text     string
+	requests atomic.Int32
+}
+
+func (m *gatedLLM) Name() string { return "gated" }
+
+func (m *gatedLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.requests.Add(1)
+		select {
+		case <-ctx.Done():
+			yield(nil, ctx.Err())
+		case <-m.gate:
+			yield(&model.LLMResponse{Content: genai.NewContentFromText(m.text, genai.RoleModel), FinishReason: genai.FinishReasonStop}, nil)
+		}
+	}
+}
+
+// TestParallelAgent_PausedBranchLeavesSiblingLlmAgentEnded checks that in a
+// resumable run a pause in one branch does not keep an LlmAgent in another
+// branch from ending: an agent looks for a pause only among its own branch's
+// last events (agents/llm_agent.py, _run_async_impl). Neither the paused agent
+// nor the ParallelAgent writes an end-of-agent event.
+func TestParallelAgent_PausedBranchLeavesSiblingLlmAgentEnded(t *testing.T) {
+	// The sibling's model answers only after the pauser's call has been
+	// stored, so the call is among the invocation's last two events when the
+	// sibling decides whether it ended.
+	gate := make(chan struct{})
+	var closeGate sync.Once
+	type args struct{}
+	askHuman, err := functiontool.New(functiontool.Config{Name: "ask_human", Description: "asks", IsLongRunning: true},
+		func(agent.Context, args) (map[string]any, error) {
+			closeGate.Do(func() { close(gate) })
+			return nil, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pauser := must(llmagent.New(llmagent.Config{
+		Name: "pauser",
+		Model: &testutil.MockModel{Responses: []*genai.Content{{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "lr-1", Name: "ask_human", Args: map[string]any{}}},
+		}}}},
+		Tools: []tool.Tool{askHuman},
+	}))
+	sibling := must(llmagent.New(llmagent.Config{Name: "sibling", Model: &gatedLLM{gate: gate, text: "sibling done"}}))
+	root := must(parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{pauser, sibling}},
+	}))
+	r, err := runner.New(runner.Config{
+		AppName:           "test_app",
+		Agent:             root,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+		Resumable:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for ev, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		got = append(got, describePauseEvent(ev))
+	}
+
+	want := []string{"pauser:FC(ask_human)", "sibling:sibling done", "sibling:END"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("events (-want +got):\n%s", diff)
+	}
+}
+
+// describePauseEvent renders ev as "author:END" for an end-of-agent event, or
+// as "author:" followed by "FC(name)" for each function call and the text of
+// each text part.
+func describePauseEvent(ev *session.Event) string {
+	if ev.Actions.EndOfAgent != nil && *ev.Actions.EndOfAgent {
+		return ev.Author + ":END"
+	}
+	var b strings.Builder
+	if ev.Content != nil {
+		for _, p := range ev.Content.Parts {
+			if p.FunctionCall != nil {
+				fmt.Fprintf(&b, "FC(%s)", p.FunctionCall.Name)
+				continue
+			}
+			b.WriteString(p.Text)
+		}
+	}
+	return ev.Author + ":" + b.String()
+}
