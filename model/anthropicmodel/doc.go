@@ -208,7 +208,9 @@
 // `genai.Part{Thought: true, ThoughtSignature: ...}`. When replaying assistant
 // history, signed `thinking` and `redacted_thinking` blocks are placed at the
 // start of the assistant message as Claude requires, while unsigned thought
-// parts and content-free foreign signatures are stripped.
+// parts and content-free foreign signatures are stripped. When adjacent
+// assistant turns are merged, signed thinking from earlier turns is dropped as
+// well, keeping only the latest turn's thinking blocks.
 //
 // # Prompt Caching and Token Usage Metadata
 //
