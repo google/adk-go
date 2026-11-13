@@ -15,6 +15,7 @@
 package authhandler_test
 
 import (
+	"maps"
 	"net/url"
 	"testing"
 
@@ -72,9 +73,7 @@ func TestGenerateAuthURI(t *testing.T) {
 			"access_type":   {"offline"},
 			"prompt":        {"consent"},
 		}
-		for k, v := range overrides {
-			q[k] = v
-		}
+		maps.Copy(q, overrides)
 		return q
 	}
 	tests := []struct {

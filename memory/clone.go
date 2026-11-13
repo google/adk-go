@@ -115,8 +115,7 @@ func memoryTypeIsOpaque(t reflect.Type) bool {
 		}
 		// Private state may forbid copying, as in strings.Builder or sync.Mutex.
 		// Inspect inline fields; referenced objects are checked when cloned.
-		for i := range t.NumField() {
-			field := t.Field(i)
+		for field := range t.Fields() {
 			if !field.IsExported() || memoryTypeIsOpaque(field.Type) {
 				return true
 			}

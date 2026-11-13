@@ -108,40 +108,48 @@ func TestInMemoryServiceCopiesData(t *testing.T) {
 			metadata["named"].([]any)[0].(memoryMetadataStrings)[0] = "changed"
 		}},
 	}
-	for _, origin := range []string{"source", "result"} {
-		t.Run(origin, func(t *testing.T) {
-			for _, mutation := range mutations {
-				t.Run(mutation.name, func(t *testing.T) {
-					event := memoryCopyEvent()
-					want := memoryCopyEvent()
-					svc := memory.InMemoryService()
-					if err := svc.AddSessionToMemory(t.Context(), makeSession(t, "app", "user", "session", []*session.Event{event})); err != nil {
-						t.Fatal("add session failed")
-					}
-					first := searchCopyMemory(t, svc, "Python")
-					if len(first) != 1 {
-						t.Fatal("seed memory not found")
-					}
-					if !cmp.Equal(first[0].Content, want.Content) || !cmp.Equal(first[0].CustomMetadata, want.CustomMetadata) {
-						t.Fatal("ingestion changed memory data or types")
-					}
-					if origin == "source" {
-						mutation.mutate(event.Content, event.CustomMetadata)
-					} else {
-						mutation.mutate(first[0].Content, first[0].CustomMetadata)
-					}
-					again := searchCopyMemory(t, svc, "Python")
-					if len(again) != 1 {
-						t.Fatal("original keyword no longer matches")
-					}
-					if !cmp.Equal(again[0].Content, want.Content) {
-						t.Error("external mutation changed stored content")
-					}
-					if !cmp.Equal(again[0].CustomMetadata, want.CustomMetadata) {
-						t.Error("external mutation changed stored metadata")
-					}
-					if len(searchCopyMemory(t, svc, "Java")) != 0 {
-						t.Error("external mutation changed the search index")
+	for _, store := range []struct {
+		name string
+		add  func(*testing.T, memory.Service, string, ...*session.Event)
+	}{
+		{"session", addSession},
+		{"events", addEvents},
+	} {
+		t.Run(store.name, func(t *testing.T) {
+			for _, origin := range []string{"source", "result"} {
+				t.Run(origin, func(t *testing.T) {
+					for _, mutation := range mutations {
+						t.Run(mutation.name, func(t *testing.T) {
+							event := memoryCopyEvent()
+							want := memoryCopyEvent()
+							svc := memory.InMemoryService()
+							store.add(t, svc, "session", event)
+							first := searchCopyMemory(t, svc, "Python")
+							if len(first) != 1 {
+								t.Fatal("seed memory not found")
+							}
+							if !cmp.Equal(first[0].Content, want.Content) || !cmp.Equal(first[0].CustomMetadata, want.CustomMetadata) {
+								t.Fatal("ingestion changed memory data or types")
+							}
+							if origin == "source" {
+								mutation.mutate(event.Content, event.CustomMetadata)
+							} else {
+								mutation.mutate(first[0].Content, first[0].CustomMetadata)
+							}
+							again := searchCopyMemory(t, svc, "Python")
+							if len(again) != 1 {
+								t.Fatal("original keyword no longer matches")
+							}
+							if !cmp.Equal(again[0].Content, want.Content) {
+								t.Error("external mutation changed stored content")
+							}
+							if !cmp.Equal(again[0].CustomMetadata, want.CustomMetadata) {
+								t.Error("external mutation changed stored metadata")
+							}
+							if len(searchCopyMemory(t, svc, "Java")) != 0 {
+								t.Error("external mutation changed the search index")
+							}
+						})
 					}
 				})
 			}

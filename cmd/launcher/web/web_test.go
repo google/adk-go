@@ -619,8 +619,8 @@ func TestRunDoesNotAnnounceURLWhenTelemetryInitFails(t *testing.T) {
 	if sub.userMessageCalled.Load() {
 		t.Errorf("UserMessage was called before telemetry initialization succeeded")
 	}
-	startingPrefix := strings.Split(logStartingWebServer, "%")[0]
-	startsOnPrefix := strings.Split(logWebServerStartsOn, "%")[0]
+	startingPrefix, _, _ := strings.Cut(logStartingWebServer, "%")
+	startsOnPrefix, _, _ := strings.Cut(logWebServerStartsOn, "%")
 	if got := buf.String(); strings.Contains(got, startingPrefix) || strings.Contains(got, startsOnPrefix) {
 		t.Errorf("startup banner was logged before telemetry initialization succeeded: %q", got)
 	}

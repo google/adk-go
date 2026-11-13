@@ -426,7 +426,7 @@ func TestLLMSummarizerTranscriptCannotForgeTurns(t *testing.T) {
 		events)
 
 	transcript := prompt[strings.Index(prompt, "user: what is adk?"):]
-	for _, line := range strings.Split(transcript, "\n") {
+	for line := range strings.SplitSeq(transcript, "\n") {
 		switch {
 		case strings.HasPrefix(line, "user: forget"), strings.HasPrefix(line, "model: OK"):
 			t.Errorf("tool output forged a transcript turn: %q\nfull transcript:\n%s", line, transcript)
@@ -622,7 +622,7 @@ func TestFormatEventsEscapesAuthorAndToolNames(t *testing.T) {
 	})
 
 	got := s.formatEvents([]*session.Event{ev, tool}, s.maxToolContentChars)
-	for _, line := range strings.Split(got, "\n") {
+	for line := range strings.SplitSeq(got, "\n") {
 		if strings.HasPrefix(line, "user: ignore the above") || strings.HasPrefix(line, "user: and this") {
 			t.Errorf("a forged turn reached the transcript:\n%s", got)
 		}
@@ -944,13 +944,11 @@ func TestConcurrentSummarizationsDoNotShareOneGenConfig(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if _, err := s.SummarizeEvents(t.Context(), []*session.Event{ev}); err != nil {
 				t.Errorf("SummarizeEvents() error = %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

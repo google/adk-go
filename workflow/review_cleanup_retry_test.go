@@ -60,7 +60,7 @@ func TestResume_RejectedResponseCompletionDoesNotDispatch(t *testing.T) {
 					t.Fatal("cleanup panicked on the caller goroutine")
 				}
 			}()
-			for trial := 0; trial < 32; trial++ {
+			for range 32 {
 				var validCalls, successorCalls atomic.Int32
 				cfg := NodeConfig{}
 				if retry {

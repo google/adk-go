@@ -59,7 +59,7 @@ func TestModelOutputSchema(t *testing.T) {
 	}
 	nullableInner := &genai.Schema{
 		Type:       genai.TypeObject,
-		Nullable:   genai.Ptr(true),
+		Nullable:   new(true),
 		Properties: inner.Properties,
 		Required:   inner.Required,
 	}
@@ -78,15 +78,15 @@ func TestModelOutputSchema(t *testing.T) {
 					"name":  {Type: genai.TypeString, Description: "the name"},
 					"score": {Type: genai.TypeNumber},
 					"ok":    {Type: genai.TypeBoolean},
-					"note":  {Type: genai.TypeString, Nullable: genai.Ptr(true)},
-					"tags":  {Type: genai.TypeArray, Nullable: genai.Ptr(true), Items: &genai.Schema{Type: genai.TypeString}},
+					"note":  {Type: genai.TypeString, Nullable: new(true)},
+					"tags":  {Type: genai.TypeArray, Nullable: new(true), Items: &genai.Schema{Type: genai.TypeString}},
 					"inner": inner,
 					"maybe": nullableInner,
-					"many":  {Type: genai.TypeArray, Nullable: genai.Ptr(true), Items: inner},
+					"many":  {Type: genai.TypeArray, Nullable: new(true), Items: inner},
 					// uint's minimum: 0 is dropped; ValidateOutput still checks it.
 					"count": {Type: genai.TypeInteger},
 					// json.RawMessage is a byte array with bounds on each item.
-					"Opaque": {Type: genai.TypeArray, Nullable: genai.Ptr(true), Items: &genai.Schema{Type: genai.TypeInteger}},
+					"Opaque": {Type: genai.TypeArray, Nullable: new(true), Items: &genai.Schema{Type: genai.TypeInteger}},
 				},
 				Required: []string{"name", "ok", "note", "tags", "inner", "maybe", "many", "count", "Opaque"},
 			},
@@ -121,18 +121,18 @@ func TestModelOutputSchema(t *testing.T) {
 				Anchor:               "report",
 				Type:                 "object",
 				AdditionalProperties: falseSchema(),
-				MinProperties:        jsonschema.Ptr(1),
-				MaxProperties:        jsonschema.Ptr(5),
+				MinProperties:        new(1),
+				MaxProperties:        new(5),
 				Properties: map[string]*jsonschema.Schema{
 					"code": {
 						Type: "string", Pattern: "^[A-Z]+$", Format: "email",
-						MinLength: jsonschema.Ptr(1), MaxLength: jsonschema.Ptr(9),
+						MinLength: new(1), MaxLength: new(9),
 						Default: json.RawMessage(`"X"`), Examples: []any{"AB"},
 						Deprecated: true, ReadOnly: true, WriteOnly: true, Comment: "c",
 					},
 					"list": {
-						Type: "array", Items: &jsonschema.Schema{Type: "number", MultipleOf: jsonschema.Ptr(0.5), ExclusiveMinimum: jsonschema.Ptr(0.0), ExclusiveMaximum: jsonschema.Ptr(9.0)},
-						MinItems: jsonschema.Ptr(1), MaxItems: jsonschema.Ptr(3), UniqueItems: true,
+						Type: "array", Items: &jsonschema.Schema{Type: "number", MultipleOf: new(0.5), ExclusiveMinimum: new(0.0), ExclusiveMaximum: new(9.0)},
+						MinItems: new(1), MaxItems: new(3), UniqueItems: true,
 					},
 				},
 			},
@@ -199,7 +199,7 @@ func TestModelOutputSchema(t *testing.T) {
 		},
 		{
 			name:   "anyOf property",
-			schema: closedObject(map[string]*jsonschema.Schema{"v": {Type: "string", AnyOf: []*jsonschema.Schema{{Type: "string"}, {Type: "string", MinLength: jsonschema.Ptr(2)}}}}),
+			schema: closedObject(map[string]*jsonschema.Schema{"v": {Type: "string", AnyOf: []*jsonschema.Schema{{Type: "string"}, {Type: "string", MinLength: new(2)}}}}),
 		},
 		{
 			name:   "const property",

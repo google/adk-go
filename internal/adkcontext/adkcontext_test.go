@@ -43,7 +43,7 @@ import (
 // directory as sufficient on its own, which it is not: internal/ governs who may
 // import, never who may satisfy.
 func TestSourceMethodIsUnexported(t *testing.T) {
-	src := reflect.TypeOf((*adkcontext.Source)(nil)).Elem()
+	src := reflect.TypeFor[adkcontext.Source]()
 	if got := src.NumMethod(); got != 1 {
 		t.Fatalf("Source has %d methods, want exactly 1; this test knows how to check one", got)
 	}
