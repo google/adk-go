@@ -466,3 +466,82 @@ func TestLiveConnectionRecvKeepsUsageOnBufferedTurnComplete(t *testing.T) {
 		t.Errorf("Recv sequence mismatch (-want +got):\n%s", diff)
 	}
 }
+
+const liveGroundingJSON = `"groundingMetadata":{` +
+	`"webSearchQueries":["weather paris"],` +
+	`"groundingChunks":[{"web":{"uri":"https://example.com/paris","title":"Paris weather"}}],` +
+	`"groundingSupports":[{"segment":{"endIndex":14,"text":"Paris is sunny"},"groundingChunkIndices":[0]}]}`
+
+var wantLiveGrounding = &genai.GroundingMetadata{
+	WebSearchQueries: []string{"weather paris"},
+	GroundingChunks: []*genai.GroundingChunk{
+		{Web: &genai.GroundingChunkWeb{URI: "https://example.com/paris", Title: "Paris weather"}},
+	},
+	GroundingSupports: []*genai.GroundingSupport{
+		{Segment: &genai.Segment{EndIndex: 14, Text: "Paris is sunny"}, GroundingChunkIndices: []int32{0}},
+	},
+}
+
+func TestLiveConnectionRecvCarriesGroundingMetadata(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		want    *model.LLMResponse
+	}{
+		{
+			name:    "grounding with model turn",
+			message: `{"serverContent":{"modelTurn":{"parts":[{"text":"Paris is sunny"}],"role":"model"},` + liveGroundingJSON + `}}`,
+			want: &model.LLMResponse{
+				Content:           &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "Paris is sunny"}}},
+				GroundingMetadata: wantLiveGrounding,
+			},
+		},
+		{
+			name:    "grounding only",
+			message: `{"serverContent":{` + liveGroundingJSON + `}}`,
+			want:    &model.LLMResponse{GroundingMetadata: wantLiveGrounding},
+		},
+		{
+			name:    "grounding with turn complete",
+			message: `{"serverContent":{"turnComplete":true,` + liveGroundingJSON + `}}`,
+			want:    &model.LLMResponse{TurnComplete: true, GroundingMetadata: wantLiveGrounding},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := connectFakeLiveServing(t, tc.message)
+			got, err := conn.Recv(t.Context())
+			if err != nil {
+				t.Fatalf("Recv failed: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("Recv mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// When a turn ends with buffered transcriptions, the grounding metadata stays
+// on the turn-complete response, which Recv delivers after the transcriptions.
+func TestLiveConnectionRecvKeepsGroundingOnBufferedTurnComplete(t *testing.T) {
+	conn := connectFakeLiveServing(t,
+		`{"serverContent":{"outputTranscription":{"text":"sunny"}}}`,
+		`{"serverContent":{"turnComplete":true,`+liveGroundingJSON+`}}`,
+	)
+	var got []*model.LLMResponse
+	for range 3 {
+		resp, err := conn.Recv(t.Context())
+		if err != nil {
+			t.Fatalf("Recv failed: %v", err)
+		}
+		got = append(got, resp)
+	}
+	want := []*model.LLMResponse{
+		{OutputTranscription: &genai.Transcription{Text: "sunny"}, Partial: true},
+		{OutputTranscription: &genai.Transcription{Text: "sunny", Finished: true}},
+		{TurnComplete: true, GroundingMetadata: wantLiveGrounding},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Recv sequence mismatch (-want +got):\n%s", diff)
+	}
+}

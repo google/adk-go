@@ -219,6 +219,7 @@ func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
 		if content.ModelTurn != nil {
 			resp.Content = content.ModelTurn
 		}
+		resp.GroundingMetadata = content.GroundingMetadata
 		resp.TurnComplete = content.TurnComplete
 		resp.Interrupted = content.Interrupted
 
