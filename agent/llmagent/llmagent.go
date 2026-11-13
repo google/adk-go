@@ -477,6 +477,16 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 }
 
 func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	return a.runLive(ctx, llminternal.LiveInjection{})
+}
+
+// RunLiveWithInjection runs a live session with additions that apply to this
+// invocation only, so the shared agent state is never written.
+func (a *llmAgent) RunLiveWithInjection(ctx agent.InvocationContext, injection llminternal.LiveInjection) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	return a.runLive(ctx, injection)
+}
+
+func (a *llmAgent) runLive(ctx agent.InvocationContext, injection llminternal.LiveInjection) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:      ctx.Artifacts(),
 		Memory:         ctx.Memory(),
@@ -489,17 +499,7 @@ func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 		InvocationID:   ctx.InvocationID(),
 	})
 
-	f := &llminternal.Flow{
-		Model:                 a.model,
-		RequestProcessors:     llminternal.DefaultRequestProcessors,
-		ResponseProcessors:    llminternal.DefaultResponseProcessors,
-		BeforeModelCallbacks:  a.beforeModelCallbacks,
-		AfterModelCallbacks:   a.afterModelCallbacks,
-		OnModelErrorCallbacks: a.onModelErrorCallbacks,
-		BeforeToolCallbacks:   a.beforeToolCallbacks,
-		AfterToolCallbacks:    a.afterToolCallbacks,
-		OnToolErrorCallbacks:  a.onToolErrorCallbacks,
-	}
+	f := a.liveFlow(injection)
 
 	sess, innerIter, err := f.RunLive(ctx)
 	if err != nil {
@@ -518,6 +518,39 @@ func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 	}
 
 	return sess, wrappedIter, nil
+}
+
+// liveFlow builds the flow for a live run, carrying the per-invocation
+// additions when this agent does not already have the injected tool.
+func (a *llmAgent) liveFlow(injection llminternal.LiveInjection) *llminternal.Flow {
+	return &llminternal.Flow{
+		Model:                 a.model,
+		RequestProcessors:     llminternal.DefaultRequestProcessors,
+		ResponseProcessors:    llminternal.DefaultResponseProcessors,
+		BeforeModelCallbacks:  a.beforeModelCallbacks,
+		AfterModelCallbacks:   a.afterModelCallbacks,
+		OnModelErrorCallbacks: a.onModelErrorCallbacks,
+		BeforeToolCallbacks:   a.beforeToolCallbacks,
+		AfterToolCallbacks:    a.afterToolCallbacks,
+		OnToolErrorCallbacks:  a.onToolErrorCallbacks,
+		LiveInjection:         a.liveInjection(injection),
+	}
+}
+
+// liveInjection returns the additions to apply to this run, or nil when there
+// are none or the agent already has the injected tool.
+func (a *llmAgent) liveInjection(injection llminternal.LiveInjection) *llminternal.LiveInjection {
+	if injection.Tool == nil && injection.InstructionSuffix == "" {
+		return nil
+	}
+	if injection.Tool != nil {
+		for _, t := range llminternal.Reveal(a).Tools {
+			if t != nil && t.Name() == injection.Tool.Name() {
+				return nil
+			}
+		}
+	}
+	return &injection
 }
 
 // maybeSaveOutputToState saves the model output to state if needed. skip if the event

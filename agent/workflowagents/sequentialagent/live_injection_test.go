@@ -15,8 +15,6 @@
 package sequentialagent_test
 
 import (
-	"errors"
-	"fmt"
 	"iter"
 	"strings"
 	"sync"
@@ -27,7 +25,6 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/session"
-	"google.golang.org/adk/v2/tool"
 )
 
 const completionInstructionMarker = "call the task_completed function to exit"
@@ -36,149 +33,171 @@ type liveRunnerForTest interface {
 	RunLive(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
 }
 
-func TestSequentialAgent_RunLive_ConcurrentInjectionIsVisibleToEveryCaller(t *testing.T) {
-	for _, tt := range []struct {
-		name    string
-		parents int
-	}{
-		{name: "same_parent", parents: 1},
-		{name: "shared_children_between_parents", parents: 2},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			for range 5 {
-				children := []agent.Agent{newCustomAgent(t, 1), newCustomAgent(t, 2), newCustomAgent(t, 3)}
-				parents := make([]agent.Agent, tt.parents)
-				for i := range parents {
-					parents[i] = newSequentialAgent(t, children, fmt.Sprintf("sequential_%d", i))
-				}
-				start := make(chan struct{})
-				var wg sync.WaitGroup
-				for caller := range 20 {
-					wg.Go(func() {
-						<-start
-						seq := parents[caller%len(parents)]
-						ctx := &mockInvocationContext{agent: seq, invocationID: "concurrent", ctx: t.Context()}
-						_, _, err := seq.(liveRunnerForTest).RunLive(ctx)
-						if err != nil {
-							t.Errorf("RunLive() error = %v", err)
-							return
-						}
-						// Read after this caller returns, while other callers may still be
-						// initializing. A count taken only after wg.Wait misses that edge.
-						for i, child := range children {
-							state := llminternal.Reveal(child.(llminternal.Agent))
-							completed := 0
-							for _, item := range state.Tools {
-								if item.Name() == "task_completed" {
-									completed++
-								}
-							}
-							if completed != 1 {
-								t.Errorf("child %d has %d completion tools, want 1", i, completed)
-							}
-							if count := strings.Count(state.Instruction, completionInstructionMarker); count != 1 {
-								t.Errorf("child %d has %d completion instructions, want 1", i, count)
-							}
-						}
-					})
-				}
-				close(start)
-				wg.Wait()
-			}
-		})
+// recordingInjectedAgent records the injection of each live run. It does not
+// implement a plain RunLive, so the sequential agent has to reach it through
+// LiveRunnerWithInjection to start it at all.
+type recordingInjectedAgent struct {
+	agent.Agent
+	mu         sync.Mutex
+	injections []llminternal.LiveInjection
+}
+
+func newRecordingInjectedAgent(name string) *recordingInjectedAgent {
+	return &recordingInjectedAgent{Agent: mustAgent(agent.New(agent.Config{Name: name}))}
+}
+
+func (r *recordingInjectedAgent) RunLiveWithInjection(_ agent.InvocationContext, injection llminternal.LiveInjection) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	r.mu.Lock()
+	r.injections = append(r.injections, injection)
+	r.mu.Unlock()
+	return &dummyLiveSession{sendChan: make(chan agent.LiveRequest, 1)}, func(func(*session.Event, error) bool) {}, nil
+}
+
+func (r *recordingInjectedAgent) recorded() []llminternal.LiveInjection {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]llminternal.LiveInjection(nil), r.injections...)
+}
+
+func newLiveContext(t *testing.T, a agent.Agent) agent.InvocationContext {
+	t.Helper()
+	return icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: a})
+}
+
+func drainLive(t *testing.T, it iter.Seq2[*session.Event, error]) error {
+	t.Helper()
+	var gotErr error
+	for _, err := range it {
+		if err != nil && gotErr == nil {
+			gotErr = err
+		}
+	}
+	return gotErr
+}
+
+func requireCompletionInjection(t *testing.T, child *recordingInjectedAgent, want int) {
+	t.Helper()
+	got := child.recorded()
+	if len(got) != want {
+		t.Fatalf("sub-agent %s got %d injections, want %d", child.Name(), len(got), want)
+	}
+	for _, injection := range got {
+		if injection.Tool == nil || injection.Tool.Name() != "task_completed" {
+			t.Errorf("sub-agent %s injection tool = %v, want task_completed", child.Name(), injection.Tool)
+		}
+		if !strings.Contains(injection.InstructionSuffix, completionInstructionMarker) {
+			t.Errorf("sub-agent %s injection suffix = %q, want it to contain %q", child.Name(), injection.InstructionSuffix, completionInstructionMarker)
+		}
 	}
 }
 
-type namedCompletionTool struct{}
+func TestSequentialAgent_RunLive_InjectsEverySubAgent(t *testing.T) {
+	first := newRecordingInjectedAgent("child_1")
+	second := newRecordingInjectedAgent("child_2")
+	seq := newSequentialAgent(t, []agent.Agent{first, second}, "sequential")
 
-func (*namedCompletionTool) Name() string        { return "task_completed" }
-func (*namedCompletionTool) Description() string { return "caller-provided completion tool" }
-func (*namedCompletionTool) IsLongRunning() bool { return false }
+	_, it, err := seq.(liveRunnerForTest).RunLive(newLiveContext(t, seq))
+	if err != nil {
+		t.Fatalf("RunLive() error = %v", err)
+	}
+	if err := drainLive(t, it); err != nil {
+		t.Fatalf("RunLive() iteration error = %v", err)
+	}
 
-func TestSequentialAgent_RunLive_PreservesExistingCompletionTool(t *testing.T) {
-	existing := &namedCompletionTool{}
+	requireCompletionInjection(t, first, 1)
+	requireCompletionInjection(t, second, 1)
+}
+
+func TestSequentialAgent_RunLive_NestedSequentialInjectsLeafAgents(t *testing.T) {
+	leaf := newRecordingInjectedAgent("leaf")
+	inner := newSequentialAgent(t, []agent.Agent{leaf}, "inner")
+	branch := newRecordingInjectedAgent("branch")
+	outer := newSequentialAgent(t, []agent.Agent{branch, inner}, "outer")
+
+	_, it, err := outer.(liveRunnerForTest).RunLive(newLiveContext(t, outer))
+	if err != nil {
+		t.Fatalf("RunLive() error = %v", err)
+	}
+	if err := drainLive(t, it); err != nil {
+		t.Fatalf("RunLive() iteration error = %v", err)
+	}
+
+	requireCompletionInjection(t, branch, 1)
+	requireCompletionInjection(t, leaf, 1)
+}
+
+func TestSequentialAgent_RunLive_NonLiveCompositeReportsError(t *testing.T) {
+	leaf := newRecordingInjectedAgent("leaf")
+	nonLive := mustAgent(agent.New(agent.Config{Name: "non_live", SubAgents: []agent.Agent{leaf}}))
+	branch := newRecordingInjectedAgent("branch")
+	outer := newSequentialAgent(t, []agent.Agent{branch, nonLive}, "outer")
+
+	_, it, err := outer.(liveRunnerForTest).RunLive(newLiveContext(t, outer))
+	if err != nil {
+		t.Fatalf("RunLive() error = %v", err)
+	}
+	gotErr := drainLive(t, it)
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "does not support Live Run") {
+		t.Fatalf("RunLive() iteration error = %v, want a Live Run support error", gotErr)
+	}
+
+	requireCompletionInjection(t, branch, 1)
+	requireCompletionInjection(t, leaf, 0)
+}
+
+func TestSequentialAgent_RunLive_DoesNotMutateSubAgentState(t *testing.T) {
 	child, err := llmagent.New(llmagent.Config{
-		Name: "child", Model: &FakeLLM{}, Tools: []tool.Tool{existing}, Instruction: "original instruction",
+		Name:        "child",
+		Model:       &FakeLLM{},
+		Instruction: "original instruction",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	seq := newSequentialAgent(t, []agent.Agent{child}, "sequential")
-	ctx := &mockInvocationContext{agent: seq, invocationID: "existing", ctx: t.Context()}
-	for range 2 {
-		if _, _, err := seq.(liveRunnerForTest).RunLive(ctx); err != nil {
-			t.Fatalf("RunLive() error = %v", err)
-		}
+
+	_, it, err := seq.(liveRunnerForTest).RunLive(newLiveContext(t, seq))
+	if err != nil {
+		t.Fatalf("RunLive() error = %v", err)
 	}
+	// The fake model has no live client, so the run fails; the point is that
+	// starting and iterating it leaves the shared state untouched.
+	_ = drainLive(t, it)
+
 	state := llminternal.Reveal(child.(llminternal.Agent))
-	if len(state.Tools) != 1 || state.Tools[0] != existing {
-		t.Error("RunLive changed the caller's completion tool")
+	if len(state.Tools) != 0 {
+		t.Errorf("sub-agent tools after RunLive = %v, want none", state.Tools)
 	}
 	if state.Instruction != "original instruction" {
-		t.Error("RunLive changed the instruction for a caller-provided completion tool")
+		t.Errorf("sub-agent instruction after RunLive = %q, want %q", state.Instruction, "original instruction")
 	}
 }
 
-func TestSequentialAgent_RunLive_AppendsCompletionInstructionToProvider(t *testing.T) {
-	errProvider := errors.New("provider failed")
-	for _, tt := range []struct {
-		name    string
-		result  string
-		err     error
-		wantErr error
-		want    string
-	}{
-		{
-			name:   "appends_to_provider_result",
-			result: "dynamic instruction",
-			want:   "dynamic instruction",
-		},
-		{
-			name:    "passes_provider_error_through",
-			result:  "partial",
-			err:     errProvider,
-			wantErr: errProvider,
-			want:    "partial",
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			child, err := llmagent.New(llmagent.Config{
-				Name:  "child",
-				Model: &FakeLLM{},
-				InstructionProvider: func(agent.ReadonlyContext) (string, error) {
-					return tt.result, tt.err
-				},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			seq := newSequentialAgent(t, []agent.Agent{child}, "sequential")
-			ctx := &mockInvocationContext{agent: seq, invocationID: "provider", ctx: t.Context()}
-			for range 2 {
-				if _, _, err := seq.(liveRunnerForTest).RunLive(ctx); err != nil {
-					t.Fatalf("RunLive() error = %v", err)
-				}
-			}
+func TestSequentialAgent_RunLive_ConcurrentCallersEachInject(t *testing.T) {
+	const callers = 20
+	first := newRecordingInjectedAgent("child_1")
+	second := newRecordingInjectedAgent("child_2")
+	seq := newSequentialAgent(t, []agent.Agent{first, second}, "sequential")
+	ctx := newLiveContext(t, seq)
 
-			// The provider takes over Instruction, so the model is told about
-			// task_completed only if the provider's result carries it.
-			state := llminternal.Reveal(child.(llminternal.Agent))
-			got, err := state.InstructionProvider(icontext.NewReadonlyContext(ctx))
-			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("InstructionProvider() error = %v, want %v", err, tt.wantErr)
-			}
-			if tt.wantErr != nil {
-				if got != tt.want {
-					t.Errorf("InstructionProvider() = %q, want %q", got, tt.want)
-				}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Go(func() {
+			<-start
+			_, it, err := seq.(liveRunnerForTest).RunLive(ctx)
+			if err != nil {
+				t.Errorf("RunLive() error = %v", err)
 				return
 			}
-			if !strings.HasPrefix(got, tt.want) {
-				t.Errorf("InstructionProvider() = %q, want it to start with %q", got, tt.want)
-			}
-			if count := strings.Count(got, completionInstructionMarker); count != 1 {
-				t.Errorf("InstructionProvider() has %d completion instructions, want 1: %q", count, got)
+			if err := drainLive(t, it); err != nil {
+				t.Errorf("RunLive() iteration error = %v", err)
 			}
 		})
 	}
+	close(start)
+	wg.Wait()
+
+	requireCompletionInjection(t, first, callers)
+	requireCompletionInjection(t, second, callers)
 }
