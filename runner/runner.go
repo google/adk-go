@@ -189,13 +189,26 @@ func WithYieldUserMessage() RunOption {
 //
 // On any other runner (the classic path), if [Config.Resumable] is true, the
 // run resumes the invocation: it restores the original user message when msg
-// is nil, appends msg under id when msg is given, rebuilds the agents' states
-// from the invocation's events, routes to the agent that was active, and
-// yields nothing if that agent already ended. If [Config.Resumable] is false,
-// the run's events carry id.
+// is nil; when msg is given, it appends msg under id unless the invocation
+// already holds a user message, in which case msg is a retry and no user
+// event is appended; it rebuilds the agents' states from the invocation's
+// events, routes to the agent that was active, and yields nothing if that
+// agent already ended. If [Config.Resumable] is false, the run's events
+// carry id.
+//
+// Without this option, a message on a runner whose root is an LlmAgent, a
+// [Config.Node] or a graph workflow can join an open task delegation and
+// run under its invocation ID; see [Runner.Run].
 //
 // With no message and a non-empty [WithStateDelta], both paths append a user
-// event with no content that carries the delta.
+// event with no content that carries the delta. With no message, the classic
+// path of a runner that is not resumable runs the agent over the stored
+// history.
+//
+// A message whose function responses answer calls stored in the session
+// ignores id and continues the invocation of those calls. A message with no
+// function response, when the invocation id already holds a user message,
+// is a retry of that turn; see [Runner.Run].
 //
 // On the resumable classic path, Run yields an error and adds no event when
 // the session has no events ("session <id> has no events to resume") or when
@@ -940,6 +953,49 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // content that carries the delta, which [WithYieldUserMessage] yields on the
 // node path.
 //
+// A message whose function responses answer calls stored in the session
+// continues the invocation of those calls, whatever [WithInvocationID] says.
+// When the responses cannot be attributed to exactly one invocation, Run
+// refuses the message before anything is stored or any callback runs on
+// any root of a resumable runner ([Config.Resumable]) and on a
+// [Config.Node] root, a root graph workflow (workflowagent.New) or an
+// LlmAgent root given a [WithInvocationID] id: "function call not found
+// for N function response ids: ..." when a response matches no call, and
+// "function responses resolve to multiple invocations (N): ..." when the
+// calls belong to several invocations. A [Config.Node] root and a root
+// graph workflow refuse calls of several invocations on any runner. The
+// runs that refuse an unmatched response also refuse a message whose first
+// response has no ID ("function response id is required to resume an
+// invocation"), except that a node root, a root graph workflow and an
+// LlmAgent root accept it when no [WithInvocationID] id is given. In every
+// other case such a message starts a new invocation, under the
+// [WithInvocationID] id when one is given.
+//
+// A replacement message from an on-user-message callback moves the run to
+// the invocation of the calls it answers only when the run has no
+// invocation ID of its own, from [WithInvocationID] or from the message. On
+// a node root, a root graph workflow and an LlmAgent root, a replacement
+// that cannot be attributed is refused as a message without a
+// [WithInvocationID] id would be; on other roots the run keeps its
+// invocation.
+//
+// A message with no function response whose invocation already holds a
+// stored user message is a retry: Run stores no second user event, runs no
+// on-user-message callback, and runs the agent again in that invocation.
+// The retry is recognized by the invocation ID alone, so a different text
+// is dropped without an error. On the node path the root receives the stored
+// message, and a non-empty [WithStateDelta] is stored in a user event
+// without content; on the classic path the delta is dropped. A retry that
+// carries a function call is refused as any message is.
+//
+// On a runner whose root is a Config.Node, an LlmAgent or a graph
+// workflow (workflowagent.New), a message that is given no invocation ID
+// and holds no function response with an ID joins an open task
+// delegation: it runs under the invocation ID of the event that opened
+// the delegation, is stored as a new user event with the delegation's
+// isolation scope, and is that run's user content and node input. Such a
+// message is not a retry.
+//
 // A user message whose first function response answers a call made in the
 // same invocation is stored with that call's branch, and with the call's
 // isolation scope when the message has none of its own. A sub-agent that a
@@ -1104,15 +1160,27 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
+		// The message and the invocation ID are checked before anything is
+		// stored or any callback runs (adk-python Runner.run_async).
+		invocationID, err := r.runInvocationID(storedSession, msg, options.invocationID, classicPath)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		// A root graph workflow is a node in adk-python, so its message joins
+		// an open task delegation as on the node path.
+		if r.rootIsNode() {
+			if taskInvocationID := joinedTaskInvocationID(storedSession, msg, invocationID); taskInvocationID != "" {
+				invocationID = taskInvocationID
+				ctx = context.WithValue(ctx, joinedTaskKey{}, true)
+			}
+		}
+
 		// A resumable runner treats an invocation ID, given by the caller or
 		// resolved from a function response, as a resume. Its refusals come
 		// before anything is stored (adk-python Runner.run_async and
 		// Runner._setup_context_for_resumed_invocation).
 		userContent := msg
-		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
-		if options.invocationID != "" {
-			invocationID = options.invocationID
-		}
 		resuming := r.resumable && invocationID != ""
 		var agentStates map[string]map[string]any
 		var ended map[string]bool
@@ -1190,18 +1258,6 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		agentToRun, branch := r.rootAgent, ""
 		if !resuming {
 			agentToRun, branch = r.classicAgentToRun(storedSession, msg, routingView(storedSession, msg))
-			// Answers to calls from several invocations start a new invocation
-			// when they go back to the calling agent, as adk-python does for a
-			// BaseAgent root of an app that is not resumable. A graph workflow
-			// resumes a paused run from its invocation's events, so it keeps the
-			// first call's invocation; adk-python raises for a Workflow root. So
-			// does an answer whose caller is not in the agent tree, since that
-			// caller can be a workflow node agent missing from the workflow's
-			// sub-agents; adk-python starts a new invocation there. An ID the
-			// caller gives with WithInvocationID is kept.
-			if spansInvocations && options.invocationID == "" && agentToRun != r.rootAgent {
-				invocationID = ""
-			}
 		}
 
 		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
@@ -1216,7 +1272,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		})
 		invocationCtx = ic
 		ctx := agent.NewContext(ic)
-		ctx, _, replaced, err := r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, true, r.pluginManager, options.stateDelta)
+		ctx, _, replaced, err := r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, classicPath, invocationID, r.pluginManager, options.stateDelta)
 		// A stage error from it is a run error, reported with this context.
 		lc.bind(ctx)
 		if err != nil {
@@ -1717,27 +1773,49 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 // appendMessageToSession runs the on-user-message callbacks on msg, refuses
 // the resulting message if it is not a valid user turn, and appends it to
-// storedSession as the user event. requireParts refuses a message with no
-// parts, which only the classic path does (adk-python
-// Runner._append_new_message_to_session; the node path's _append_user_event
-// stores it). replaced reports whether a callback returned a replacement; the
-// replacement is then ctx's UserContent, and when it answers a function call
-// in history, ctx carries that call's invocation ID. On a node root, a
-// message that holds both text and a function response with an ID is
-// refused before and after the callbacks. A nil msg runs no callback and
-// appends a content-less user event carrying stateDelta when stateDelta is
-// not empty, and nothing otherwise (adk-python
+// storedSession as the user event. On the classic path a message with no
+// parts is refused (adk-python Runner._append_new_message_to_session; the
+// node path's _append_user_event stores it). replaced reports whether a
+// callback returned a replacement; the replacement is then ctx's
+// UserContent. On a node root, a message that holds both text and a
+// function response with an ID is refused before and after the callbacks.
+// A nil msg runs no callback and appends a content-less user event carrying
+// stateDelta when stateDelta is not empty, and nothing otherwise (adk-python
 // Runner._append_state_delta_event).
-func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts, requireParts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (_ agent.Context, _ *session.Event, replaced bool, _ error) {
+//
+// A msg with no function response whose invocation, ctx's, already stored
+// a user message is a retry: no callback runs and no user event is stored,
+// except that the node path stores a non-empty stateDelta in a content-less
+// user event, which it returns (adk-python Runner._handle_new_message and
+// workflow/_node_runner_utils.py run_node_async). A retry carrying a
+// function call is refused as any message is.
+//
+// resolvedID is the run's invocation ID as runInvocationID decided it, ""
+// when ctx's was minted. Only then does a replacement that answers function calls
+// move ctx to their invocation (adk-python re-resolves only without one,
+// workflow/_node_runner_utils.py). On the roots adk-python runs as nodes
+// that resolution has the run's mode, so a replacement that mode refuses is
+// refused before anything is stored; on other classic roots it is lenient.
+func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, path runPath, resolvedID string, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (_ agent.Context, _ *session.Event, replaced bool, _ error) {
 	if msg == nil {
 		if len(stateDelta) == 0 {
 			return ctx, nil, false, nil
 		}
-		event, err := r.appendUserEvent(ctx, !requireParts, storedSession, nil, stateDelta)
+		event, err := r.appendUserEvent(ctx, path, storedSession, nil, stateDelta)
 		return ctx, event, false, err
 	}
 	if err := r.validateNodeRootMessage(msg); err != nil {
 		return ctx, nil, false, err
+	}
+	if !isJoinedTurn(ctx) && retriesStoredTurn(storedSession, ctx.InvocationID(), msg) {
+		if err := rejectFunctionCalls(msg); err != nil {
+			return ctx, nil, false, err
+		}
+		if path == classicPath || len(stateDelta) == 0 {
+			return ctx, nil, false, nil
+		}
+		event, err := r.appendUserEvent(ctx, path, storedSession, nil, stateDelta)
+		return ctx, event, false, err
 	}
 	if pluginManager != nil {
 		modifiedMsg, err := pluginManager.RunOnUserMessageCallback(ctx, msg)
@@ -1750,13 +1828,26 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 			// it becomes the invocation context's UserContent: WithDelta copies
 			// the value it points to, so a later reassignment would not reach it.
 			msg = asUserContent(modifiedMsg)
+			if err := r.validateNodeRootMessage(msg); err != nil {
+				return ctx, nil, replaced, err
+			}
 
 			// A replacement that answers an earlier call continues that call's
-			// invocation (adk-python workflow/_node_runner_utils.py). The ID is
-			// set before WithDelta, which copies the invocation context.
-			if id, _ := resolveInvocationID(storedSession, msg); id != "" {
-				if err := setInvocationID(ctx, id); err != nil {
+			// invocation. The ID is set before WithDelta, which copies the
+			// invocation context.
+			if resolvedID == "" {
+				mode := resolveLenient
+				if r.runsAsNode(path) {
+					mode = r.resolutionMode(path, "")
+				}
+				id, err := resolveInvocationID(storedSession, msg, mode)
+				if err != nil {
 					return ctx, nil, replaced, err
+				}
+				if id != "" {
+					if err := setInvocationID(ctx, id); err != nil {
+						return ctx, nil, replaced, err
+					}
 				}
 			}
 
@@ -1765,17 +1856,14 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 					UserContent: &msg,
 				},
 			})
-			if err := r.validateNodeRootMessage(msg); err != nil {
-				return ctx, nil, replaced, err
-			}
 		}
 	}
 
-	if requireParts && len(msg.Parts) == 0 {
+	if path == classicPath && len(msg.Parts) == 0 {
 		return ctx, nil, replaced, errors.New("no parts in the new_message")
 	}
-	if len(utils.FunctionCalls(msg)) > 0 {
-		return ctx, nil, replaced, errUserFunctionCall
+	if err := rejectFunctionCalls(msg); err != nil {
+		return ctx, nil, replaced, err
 	}
 
 	if r.artifactService != nil && saveInputBlobsAsArtifacts {
@@ -1795,18 +1883,18 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		}
 	}
 
-	event, err := r.appendUserEvent(ctx, !requireParts, storedSession, msg, stateDelta)
+	event, err := r.appendUserEvent(ctx, path, storedSession, msg, stateDelta)
 	return ctx, event, replaced, err
 }
 
 // appendUserEvent appends a user event with content msg, which may be nil,
 // and stateDelta to storedSession, and returns the event as the caller sees
-// it, without its "temp:" keys. On the node path (onNodePath) an append
+// it, without its "temp:" keys. On the node path an append
 // failure is a run error (a *runStageError), as adk-python appends the user
 // event inside run_node_async's notified try (workflow/_node_runner_utils.py);
 // on the classic path it is a setup failure, as Runner.run_async appends it
 // before _exec_with_plugin (runners.py).
-func (r *Runner) appendUserEvent(ctx agent.Context, onNodePath bool, storedSession session.Session, msg *genai.Content, stateDelta map[string]any) (*session.Event, error) {
+func (r *Runner) appendUserEvent(ctx agent.Context, path runPath, storedSession session.Session, msg *genai.Content, stateDelta map[string]any) (*session.Event, error) {
 	event := session.NewEvent(ctx, ctx.InvocationID())
 
 	event.Author = "user"
@@ -1826,7 +1914,7 @@ func (r *Runner) appendUserEvent(ctx agent.Context, onNodePath bool, storedSessi
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 		err = fmt.Errorf("failed to append event to sessionService: %w", err)
-		if onNodePath {
+		if path == nodePath {
 			return nil, &runStageError{err: err}
 		}
 		return nil, err
@@ -2003,11 +2091,8 @@ func (r *Runner) classicAgentToRun(storedSession session.Session, msg *genai.Con
 	if sub == nil || r.isInGraphWorkflow(sub) {
 		return r.rootAgent, ""
 	}
-	// Answers to calls of several invocations search the whole session.
-	invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
-	if spansInvocations {
-		invocationID = ""
-	}
+	// Lenient resolution never fails: it returns "" instead.
+	invocationID, _ := resolveInvocationID(storedSession, msg, resolveLenient)
 	return sub, r.restoreBranchFromHistory(storedSession, sub, invocationID)
 }
 

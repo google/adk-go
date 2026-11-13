@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"slices"
 
 	"google.golang.org/genai"
 
@@ -136,17 +137,37 @@ func (r *Runner) runNode(
 		}
 	}()
 
+	// The message is validated before its invocation is resolved, as in
+	// adk-python's run_node_async, so a mixed message is refused as such and
+	// not as an unknown function call.
+	if msg != nil {
+		if err := r.validateNodeRootMessage(msg); err != nil {
+			yield(nil, err)
+			return
+		}
+	}
+	invocationID, err := r.runInvocationID(storedSession, msg, opts.invocationID, nodePath)
+	if err != nil {
+		yield(nil, err)
+		return
+	}
+	joinsTask := false
+	if taskInvocationID := joinedTaskInvocationID(storedSession, msg, invocationID); taskInvocationID != "" {
+		invocationID, joinsTask = taskInvocationID, true
+	}
+
 	if err := r.checkCFCModel(ctx, cfg); err != nil {
 		yield(nil, err)
 		return
 	}
 	// UserContent is read by Workflow.Run as the workflow's seed input.
-	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg, runMetadata, opts.invocationID)
+	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg, runMetadata, invocationID, joinsTask)
 	invocationCtx = ictx
+	priorUserContent := ictx.UserContent()
 
 	// Append the user message to history (also runs the on_user_message
 	// plugin callback), same as the agent path.
-	ictx, userEvent, replaced, err := r.appendMessageToSession(ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, false, r.pluginManager, opts.stateDelta)
+	ictx, userEvent, replaced, err := r.appendMessageToSession(ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, nodePath, invocationID, r.pluginManager, opts.stateDelta)
 	// A stage error from it is a run error, reported with this context.
 	lc.bind(ictx)
 	if err != nil {
@@ -168,6 +189,11 @@ func (r *Runner) runNode(
 		ictx = ictx.WithDelta(&agent.CommonContextDelta{
 			InvocationContextDelta: &agent.InvocationContextDelta{Agent: &agentToRun, Branch: &branch},
 		})
+		invocationCtx = ictx
+	}
+	// A joined turn keeps the replacement as its content.
+	if replaced && !joinsTask {
+		ictx = withRestoredUserContent(ictx, storedSession, priorUserContent)
 		invocationCtx = ictx
 	}
 
@@ -318,12 +344,14 @@ func rootWorkflowName(appName string, a agent.Agent) string {
 // mirroring the agent path's wiring (parent map for transfer/tool
 // resolution, resolved agent for the flow).
 //
-// The invocation ID is invocationID, the caller's (WithInvocationID), when
-// it is not empty, else the one resolveInvocationID finds for msg. When
-// either names an invocation whose original user message is stored, that
-// message is the user content, which a node root reads as its input;
+// The invocation ID is invocationID, the one runInvocationID decided or the
+// one an open task delegation lent, or a minted one when it is empty. When
+// invocationID names an invocation whose original user message is stored,
+// that message is the user content, which a node root reads as its input;
 // otherwise msg is (adk-python workflow/_node_runner_utils.py,
-// run_node_async). turnMessage still returns msg for the context.
+// run_node_async). turnMessage still returns msg for the context. A turn
+// that joinsTask borrowed invocationID from an open task delegation and
+// keeps msg as its user content.
 func (r *Runner) newNodeInvocationContext(
 	ctx context.Context,
 	storedSession session.Session,
@@ -332,6 +360,7 @@ func (r *Runner) newNodeInvocationContext(
 	cfg agent.RunConfig,
 	runMetadata map[string]any,
 	invocationID string,
+	joinsTask bool,
 ) agent.Context {
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
@@ -365,15 +394,11 @@ func (r *Runner) newNodeInvocationContext(
 		}
 	}
 
-	if invocationID == "" {
-		// Answers to calls from several invocations resume the first call's
-		// invocation here. adk-python raises for an LlmAgent or Workflow root
-		// in that case; adk-go accepts resume messages adk-python rejects, as it
-		// does for unmatched responses, so runs that resume today keep working.
-		invocationID, _ = resolveInvocationID(storedSession, msg)
+	if joinsTask {
+		ctx = context.WithValue(ctx, joinedTaskKey{}, true)
 	}
 	userContent := msg
-	if invocationID != "" {
+	if invocationID != "" && !joinsTask {
 		if stored := utils.FindUserMessageForInvocation(storedSession.Events(), invocationID); stored != nil {
 			userContent = stored
 			ctx = context.WithValue(ctx, turnMessageKey{}, restoredTurn{message: msg, restored: stored})
@@ -395,10 +420,69 @@ func (r *Runner) newNodeInvocationContext(
 
 type turnMessageKey struct{}
 
+// joinedTaskKey marks the context of a turn that joined an open task
+// delegation: it borrowed the invocation ID and is never a retry.
+type joinedTaskKey struct{}
+
+// joinedTaskInvocationID returns the invocation ID a run's message borrows
+// from the open task delegation of sess (findActiveTaskIsolationScope), or
+// "" when it joins none. Only a message that runInvocationID resolved to no
+// invocation (invocationID is "") and that answers no function call joins:
+// it stays the user's next turn, under the delegation's invocation so the
+// task agent sees it (adk-python workflow/_node_runner_utils.py,
+// run_node_async). A message with an unmatched function response keeps the
+// new invocation that lenient resolution gives it.
+func joinedTaskInvocationID(sess session.Session, msg *genai.Content, invocationID string) string {
+	if invocationID != "" || msg == nil || answersFunctionCalls(msg) {
+		return ""
+	}
+	_, taskInvocationID := findActiveTaskIsolationScope(sess)
+	return taskInvocationID
+}
+
+// isJoinedTurn reports whether ctx is the context of a turn that joined an
+// open task delegation.
+func isJoinedTurn(ctx context.Context) bool {
+	joined, _ := ctx.Value(joinedTaskKey{}).(bool)
+	return joined
+}
+
 // restoredTurn records, for a node-path turn whose user content is the
 // invocation's stored message, the message the turn itself brought.
 type restoredTurn struct {
 	message, restored *genai.Content
+}
+
+// withRestoredUserContent returns ctx for a turn whose message an
+// on-user-message callback replaced. When the replacement answers function
+// calls it stays the turn's message (turnMessage), and the user content
+// becomes the user message that ctx's invocation stored, or prior, the user
+// content before the callback, when it stored none (adk-python
+// workflow/_node_runner_utils.py, run_node_async). Otherwise it returns ctx.
+func withRestoredUserContent(ctx agent.Context, storedSession session.Session, prior *genai.Content) agent.Context {
+	replacement := ctx.UserContent()
+	if !answersFunctionCalls(replacement) {
+		return ctx
+	}
+	userContent := utils.FindUserMessageForInvocation(storedSession.Events(), ctx.InvocationID())
+	if userContent == nil {
+		userContent = prior
+	}
+	base := context.Context(context.WithValue(ctx, turnMessageKey{}, restoredTurn{message: replacement, restored: userContent}))
+	return ctx.WithDelta(&agent.CommonContextDelta{
+		InvocationContextDelta: &agent.InvocationContextDelta{Context: &base, UserContent: &userContent},
+	})
+}
+
+// answersFunctionCalls reports whether msg holds a function response with an
+// ID, adk-python's resume inputs (Runner._extract_resume_inputs).
+func answersFunctionCalls(msg *genai.Content) bool {
+	for _, fr := range utils.FunctionResponses(msg) {
+		if fr.ID != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // turnMessage returns the message the current node-path turn brought, whose
@@ -549,54 +633,59 @@ func waitingInterruptIDs(state *workflow.RunState) map[string]struct{} {
 	return ids
 }
 
-// resolveInvocationID reuses the paused run's invocation ID when msg is a
-// HITL resume (carries a function response), so the resume turn and the
-// pause it answers share one ID and rehydration can scope to a single
-// run. It returns the invocation of the first answered call found in
-// history, or "" for a fresh turn or when no answered call is in history,
-// letting the caller mint a fresh ID. spansInvocations reports that the
-// answered calls belong to more than one invocation. Go analog of
-// adk-python Runner._resolve_invocation_id_from_fr.
-func resolveInvocationID(sess session.Session, msg *genai.Content) (id string, spansInvocations bool) {
-	if sess == nil || msg == nil {
-		return "", false
-	}
-	matched := false
+// resolveInvocationID returns the invocation whose function calls the
+// function responses of msg answer, so a resume turn and the pause it
+// answers share one ID. Only responses with an ID count; with none it
+// returns "". The calls are looked up in the live events of sess (after
+// rewinds), newest first. When a response matches no call, resolveStrict
+// returns an error; when the calls belong to more than one invocation,
+// resolveStrict and resolveRejectMultiple do, and resolveFirst returns the
+// invocation of the first response's call. Otherwise an unattributable
+// message returns "", which leaves the run to its caller's ID or a minted
+// one. Go analog of adk-python Runner._resolve_invocation_id_from_fr.
+func resolveInvocationID(sess session.Session, msg *genai.Content, mode resolveMode) (string, error) {
+	pending := map[string]bool{}
 	for _, fr := range utils.FunctionResponses(msg) {
-		if fr == nil || fr.ID == "" {
-			continue
-		}
-		ev := findEventByFunctionCallID(sess, fr.ID)
-		if ev == nil {
-			continue
-		}
-		if !matched {
-			id, matched = ev.InvocationID, true
-		} else if ev.InvocationID != id {
-			spansInvocations = true
+		if fr.ID != "" {
+			pending[fr.ID] = true
 		}
 	}
-	return id, spansInvocations
-}
-
-// findEventByFunctionCallID returns the most recent event whose content
-// carries a FunctionCall with the given id, or nil. Go analog of
-// adk-python functions.find_event_by_function_call_id (reverse scan).
-func findEventByFunctionCallID(sess session.Session, id string) *session.Event {
-	if sess == nil || id == "" {
-		return nil
+	if len(pending) == 0 {
+		return "", nil
 	}
-	events := sess.Events()
-	for i := events.Len() - 1; i >= 0; i-- {
-		ev := events.At(i)
-		if ev == nil {
-			continue
-		}
-		for _, fc := range utils.FunctionCalls(utils.Content(ev)) {
-			if fc != nil && fc.ID == id {
-				return ev
+	events := utils.ApplyRewinds(slices.Collect(sess.Events().All()))
+	var invocations []string
+	callInvocation := map[string]string{}
+	for i := len(events) - 1; i >= 0 && len(pending) > 0; i-- {
+		for _, fc := range utils.FunctionCalls(utils.Content(events[i])) {
+			if !pending[fc.ID] {
+				continue
+			}
+			delete(pending, fc.ID)
+			callInvocation[fc.ID] = events[i].InvocationID
+			if !slices.Contains(invocations, events[i].InvocationID) {
+				invocations = append(invocations, events[i].InvocationID)
 			}
 		}
 	}
-	return nil
+	switch {
+	case len(pending) > 0:
+		if mode == resolveStrict {
+			return "", fmt.Errorf("function call not found for %d function response ids: each function response ID must match a function call in the session history", len(pending))
+		}
+		return "", nil
+	case len(invocations) > 1:
+		if mode == resolveFirst {
+			for _, fr := range utils.FunctionResponses(msg) {
+				if id, ok := callInvocation[fr.ID]; ok {
+					return id, nil
+				}
+			}
+		}
+		if mode != resolveLenient {
+			return "", fmt.Errorf("function responses resolve to multiple invocations (%d): all function responses in a single message must belong to the same invocation", len(invocations))
+		}
+		return "", nil
+	}
+	return invocations[0], nil
 }

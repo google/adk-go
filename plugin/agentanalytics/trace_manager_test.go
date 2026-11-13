@@ -6753,11 +6753,20 @@ func TestRunner_ResumedTaskThenTransferBack_ClosesEverySpan(t *testing.T) {
 			rows := collectRows(t, requests, func(rows []map[string]any) bool {
 				return len(rowsOfType(rows, EventInvocationCompleted))+len(rowsOfType(rows, EventInvocationError)) >= 2
 			})
+			// The second run's message arrives while the helper_task delegation
+			// is open, so the runner joins that task and both runs share its
+			// invocation ID (adk-python workflow/_node_runner_utils.py:84-94).
+			// The resumed run's rows start at the last USER_MESSAGE_RECEIVED row
+			// of that ID.
 			var resumedRows []map[string]any
 			for _, row := range rows {
-				if row["invocation_id"] == resumedInvocation {
-					resumedRows = append(resumedRows, row)
+				if row["invocation_id"] != resumedInvocation {
+					continue
 				}
+				if row["event_type"] == EventUserMessageReceived {
+					resumedRows = nil
+				}
+				resumedRows = append(resumedRows, row)
 			}
 			if len(rowsOfType(resumedRows, EventInvocationCompleted)) != 1 || len(rowsOfType(resumedRows, EventInvocationError)) != 0 {
 				t.Fatal("resumed invocation did not complete successfully")
