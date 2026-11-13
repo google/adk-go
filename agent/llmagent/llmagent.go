@@ -343,14 +343,25 @@ type Config struct {
 	InputSchema *genai.Schema
 	// The output schema when agent replies.
 	//
-	// When OutputSchema is set, the framework transparently injects a
-	// set_model_response tool so the model can still invoke other tools
-	// (function tools, RAG, agent transfer, etc.) while producing structured
-	// output. See internal/llminternal/outputschema_processor.go for details.
+	// The schema reaches the model in one of two ways. When the agent has
+	// Tools or Toolsets, its Model does not declare
+	// [model.Capabilities].OutputSchemaAndTools (see
+	// [model.CapabilitiesProvider]), and Mode is not ModeTask, the agent adds
+	// the set_model_response tool of package
+	// [google.golang.org/adk/v2/tool/setmodelresponsetool] to the request.
+	// The model can then call the other tools and gives its final answer
+	// through set_model_response, whose valid answer becomes the agent's
+	// final text as JSON. Otherwise, outside ModeTask, the schema goes into
+	// the request config as GenerateContentConfig.ResponseSchema. In
+	// ModeTask the finish_task tool carries the schema instead.
 	OutputSchema *genai.Schema
 	// OutputJsonSchema is the output schema when the agent replies, given as a
 	// raw JSON schema. It carries what a *genai.Schema cannot, such as
 	// additionalProperties. It is mutually exclusive with OutputSchema.
+	// It reaches the model by the rule of OutputSchema, with
+	// GenerateContentConfig.ResponseJsonSchema in place of ResponseSchema. The
+	// set_model_response tool passes an answer for it through without
+	// validating it, as adk-python does.
 	OutputJsonSchema *jsonschema.Schema
 
 	// Callbacks are executed in the order they are provided.
