@@ -11368,9 +11368,7 @@ func TestPlugin_RecoveredToolError_OpaqueStructAndPointerArgsRaceSafe(t *testing
 	}
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := 0; ; i++ {
 			select {
 			case <-stop:
@@ -11385,7 +11383,7 @@ func TestPlugin_RecoveredToolError_OpaqueStructAndPointerArgsRaceSafe(t *testing
 			}
 			shared.mu.Unlock()
 		}
-	}()
+	})
 	defer func() {
 		close(stop)
 		wg.Wait()

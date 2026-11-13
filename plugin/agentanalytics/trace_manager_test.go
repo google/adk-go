@@ -22862,9 +22862,7 @@ func TestBoundedArgsDigest(t *testing.T) {
 		}
 		stop := make(chan struct{})
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := 0; ; i++ {
 				select {
 				case <-stop:
@@ -22876,7 +22874,7 @@ func TestBoundedArgsDigest(t *testing.T) {
 				st.private[fmt.Sprintf("k%d", i%8)] = i
 				st.mu.Unlock()
 			}
-		}()
+		})
 		defer func() {
 			close(stop)
 			wg.Wait()

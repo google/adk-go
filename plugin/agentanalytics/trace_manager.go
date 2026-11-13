@@ -7415,8 +7415,8 @@ func (inv *invocationTrace) resolveToolCallKeyLocked(
 		// another call of the overlap, which it could not be told apart from,
 		// so it now stands for this failure, which the AfterToolCallback of the
 		// failed call settles.
-		for idx := len(entries) - 1; idx >= 0; idx-- {
-			if isOpen(entries[idx]) {
+		for idx, e := range slices.Backward(entries) {
+			if isOpen(e) {
 				return ambiguousErr(idx)
 			}
 		}
@@ -7455,8 +7455,7 @@ func (inv *invocationTrace) resolveToolCallKeyLocked(
 	// turn and only when no call of the overlap is open: it then consumes the
 	// marker without suppressing its row.
 	hasOpen := slices.ContainsFunc(entries, isOpen)
-	for idx := len(entries) - 1; idx >= 0; idx-- {
-		e := entries[idx]
+	for idx, e := range slices.Backward(entries) {
 		if !e.errored || e.ambiguous || !e.id.sameContext(curID) {
 			continue
 		}
@@ -7506,8 +7505,7 @@ func (inv *invocationTrace) resolveToolCallKeyLocked(
 	case errMatches == 0 && openMatches == 1:
 		settleErr, chosen = false, openMatch
 	default:
-		for idx := len(entries) - 1; idx >= 0; idx-- {
-			e := entries[idx]
+		for idx, e := range slices.Backward(entries) {
 			if !isOpen(e) {
 				continue
 			}
