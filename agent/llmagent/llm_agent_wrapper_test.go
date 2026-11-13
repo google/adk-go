@@ -612,6 +612,92 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 		}
 	})
 
+	t.Run("OutputSchema valid JSON: parsed Output is not marked MessageAsOutput", func(t *testing.T) {
+		t.Parallel()
+		schema := &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"title": {Type: genai.TypeString},
+			},
+		}
+		const key = "story"
+		a := makeLLMAgent(t, "x", withOutputSchema(schema), withOutputKey(key))
+		ev := &session.Event{
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: `{"title":"T"}`}},
+				},
+			},
+		}
+		if err := llmagent.ProcessLLMAgentOutput(a, ev); err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		want := map[string]any{"title": "T"}
+		if diff := cmp.Diff(want, ev.Output); diff != "" {
+			t.Errorf("Output mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(want, ev.Actions.StateDelta[key]); diff != "" {
+			t.Errorf("StateDelta[%q] mismatch (-want +got):\n%s", key, diff)
+		}
+		if ev.NodeInfo != nil && ev.NodeInfo.MessageAsOutput {
+			t.Errorf("MessageAsOutput = true, want unset (the parsed Output is the node output)")
+		}
+	})
+
+	t.Run("OutputSchema empty object reply: Output is the empty map, not marked MessageAsOutput", func(t *testing.T) {
+		t.Parallel()
+		schema := &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"title": {Type: genai.TypeString},
+			},
+		}
+		a := makeLLMAgent(t, "x", withOutputSchema(schema))
+		ev := &session.Event{
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "{}"}},
+				},
+			},
+		}
+		if err := llmagent.ProcessLLMAgentOutput(a, ev); err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if diff := cmp.Diff(map[string]any{}, ev.Output); diff != "" {
+			t.Errorf("Output mismatch (-want +got):\n%s", diff)
+		}
+		if ev.NodeInfo != nil && ev.NodeInfo.MessageAsOutput {
+			t.Errorf("MessageAsOutput = true, want unset (the empty map is the node output)")
+		}
+	})
+
+	t.Run("OutputSchema null reply: marked MessageAsOutput", func(t *testing.T) {
+		t.Parallel()
+		schema := &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"title": {Type: genai.TypeString},
+			},
+		}
+		a := makeLLMAgent(t, "x", withOutputSchema(schema))
+		ev := &session.Event{
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "null"}},
+				},
+			},
+		}
+		if err := llmagent.ProcessLLMAgentOutput(a, ev); err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if ev.NodeInfo == nil || !ev.NodeInfo.MessageAsOutput {
+			t.Errorf("MessageAsOutput is unset, want true (a null reply has no parsed value to keep)")
+		}
+	})
+
 	t.Run("OutputSchema invalid JSON: returns validation error", func(t *testing.T) {
 		t.Parallel()
 		schema := &genai.Schema{
@@ -1521,7 +1607,7 @@ func TestTaskAgent_NullableResultClosesDelegation(t *testing.T) {
 	}}
 	task, err := llmagent.New(llmagent.Config{
 		Name: "doer", Description: "d", Model: taskLLM, Mode: llmagent.ModeTask,
-		OutputSchema: &genai.Schema{Type: genai.TypeString, Nullable: genai.Ptr(true)},
+		OutputSchema: &genai.Schema{Type: genai.TypeString, Nullable: new(true)},
 	})
 	if err != nil {
 		t.Fatal(err)

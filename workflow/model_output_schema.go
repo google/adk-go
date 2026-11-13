@@ -90,7 +90,7 @@ func toGenaiSchema(s *jsonschema.Schema) (*genai.Schema, bool) {
 	}
 	out := &genai.Schema{Type: typ, Title: s.Title, Description: s.Description}
 	if nullable {
-		out.Nullable = genai.Ptr(true)
+		out.Nullable = new(true)
 	}
 	for _, v := range s.Enum {
 		str, ok := v.(string)

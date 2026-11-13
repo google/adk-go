@@ -760,7 +760,7 @@ func TestCallbacks_WriteRows(t *testing.T) {
 		Contents: []*genai.Content{textContent("user", "hello")},
 		Config: &genai.GenerateContentConfig{
 			SystemInstruction: textContent("", "be brief"),
-			Temperature:       genai.Ptr[float32](0.5),
+			Temperature:       new(float32(0.5)),
 			Labels:            map[string]string{"env": "test"},
 		},
 	}
@@ -4399,7 +4399,7 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 		var cleanedCount atomic.Int32
 
 		func() {
-			for i := 0; i < count; i++ {
+			for i := range count {
 				p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false})
 				if err != nil {
 					t.Fatalf("failed to create disabled plugin: %v", err)

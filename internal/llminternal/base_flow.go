@@ -421,8 +421,7 @@ func isResumable(err error) bool {
 	// A failed read or write on the underlying socket of an already-established
 	// connection. The dial lives on a different path, which handles its own
 	// errors, so reaching here means a live connection dropped.
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if _, ok := errors.AsType[*net.OpError](err); ok {
 		return true
 	}
 	// Match the close code rather than the text: gorilla puts the socket
@@ -453,6 +452,15 @@ func hasRealtimeInput(v any) bool {
 		return v != nil
 	}
 	return true
+}
+
+// isEmptyLiveResponse reports whether r carries nothing worth an event, as
+// the response built from the Live API's setupComplete does. adk-python's live
+// flow skips the same responses.
+func isEmptyLiveResponse(r *model.LLMResponse) bool {
+	return r.Content == nil && r.ErrorCode == "" && !r.Interrupted && !r.TurnComplete &&
+		r.InputTranscription == nil && r.OutputTranscription == nil && r.UsageMetadata == nil &&
+		r.SessionResumptionHandle == "" && r.GroundingMetadata == nil
 }
 
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
@@ -495,8 +503,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		// it needs its own copy: the caller may reuse its LiveRunConfig.
 		sessionResumption := runCfg.Live.SessionResumption
 		if sessionResumption != nil {
-			sessionResumptionCopy := *sessionResumption
-			sessionResumption = &sessionResumptionCopy
+			sessionResumption = new(*sessionResumption)
 		}
 
 		liveConnectConfig := &genai.LiveConnectConfig{
@@ -517,7 +524,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		// IsGemini3xLive and still gets both.
 		if !googlellm.IsGemini3xLive(f.Model.Name()) {
 			if runCfg.Live.EnableAffectiveDialog {
-				liveConnectConfig.EnableAffectiveDialog = genai.Ptr(true)
+				liveConnectConfig.EnableAffectiveDialog = new(true)
 			}
 			liveConnectConfig.Proactivity = runCfg.Live.Proactivity
 		}
@@ -669,6 +676,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 									sess.audioMgr.CacheOutput(ctx, part.InlineData.Data, part.InlineData.MIMEType)
 								}
 							}
+						}
+						if isEmptyLiveResponse(resp) {
+							continue
 						}
 						ev := session.NewEvent(ctx, ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()
@@ -1506,6 +1516,13 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				confirmation = toolConfirmations[fnCall.ID]
 			}
 			toolCtx := agent.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
+			// A call without args reaches the tool and its callbacks as an
+			// empty map, so a tool that returns its args, as
+			// set_model_response does, returns an object rather than nil.
+			args := fnCall.Args
+			if args == nil {
+				args = map[string]any{}
+			}
 
 			var result map[string]any
 			var curTool tool.Tool
@@ -1523,7 +1540,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				curTool, found = toolsDict[fnCall.Name]
 				if !found {
 					err := newToolNotFoundError(fnCall.Name, toolNames)
-					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, args, err)
 					if err != nil {
 						result = map[string]any{"error": err.Error()}
 					}
@@ -1545,7 +1562,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 								}
 								cancel()
 							}()
-							for chunk, err := range streamTool.RunStream(cancelToolCtx, fnCall.Args) {
+							for chunk, err := range streamTool.RunStream(cancelToolCtx, args) {
 								select {
 								case <-cancelCtx.Done():
 									return
@@ -1572,7 +1589,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					} else {
 						var sb strings.Builder
 						var streamErr error
-						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
+						for chunk, err := range streamTool.RunStream(toolCtx, args) {
 							if err != nil {
 								// Stop the producer and let it unwind before any
 								// callback runs. Breaking returns from the
@@ -1599,13 +1616,13 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 							// tool callbacks, the way the non-streaming
 							// path does, and the model keeps seeing a
 							// generic message for a panic.
-							errorResponse, cbErr := f.runOnToolErrorCallbacks(toolCtx, streamTool, fnCall.Args, streamErr)
+							errorResponse, cbErr := f.runOnToolErrorCallbacks(toolCtx, streamTool, args, streamErr)
 							if errorResponse != nil || cbErr != nil {
 								streamErr = cbErr
 							}
 							response := errorResponse
 
-							alteredResponse, alteredErr := f.runAfterToolCallbacks(toolCtx, streamTool, fnCall.Args, response, streamErr)
+							alteredResponse, alteredErr := f.runAfterToolCallbacks(toolCtx, streamTool, args, response, streamErr)
 							if alteredResponse != nil || alteredErr != nil {
 								response = alteredResponse
 								streamErr = alteredErr
@@ -1627,7 +1644,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 							// call and exhaust a budget the non-streaming path
 							// would have cleared.
 							response := map[string]any{"result": sb.String()}
-							alteredResponse, alteredErr := f.runAfterToolCallbacks(toolCtx, streamTool, fnCall.Args, response, nil)
+							alteredResponse, alteredErr := f.runAfterToolCallbacks(toolCtx, streamTool, args, response, nil)
 							if alteredResponse != nil || alteredErr != nil {
 								response = alteredResponse
 								streamErr = alteredErr
@@ -1642,12 +1659,12 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					}
 				} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
 					err := newToolNotFoundError(fnCall.Name, toolNames)
-					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, args, err)
 					if err != nil {
 						result = map[string]any{"error": err.Error()}
 					}
 				} else {
-					result = f.callTool(toolCtx, funcTool, fnCall.Args)
+					result = f.callTool(toolCtx, funcTool, args)
 				}
 			}
 
@@ -1658,6 +1675,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				if curTool != nil && curTool.IsLongRunning() {
 					return
 				}
+				result = map[string]any{"result": nil}
 			}
 
 			parts := []*genai.Part{

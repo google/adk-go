@@ -54,7 +54,7 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 				genai.NewContentFromText("response2", "model"),
 				genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
 				// Result from the tool execution
-				genai.NewContentFromFunctionResponse("exit_loop", map[string]any{}, "user"),
+				genai.NewContentFromFunctionResponse("exit_loop", map[string]any{"result": nil}, "user"),
 			},
 		},
 		{
@@ -83,7 +83,7 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 			maxIterations: 3,
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
-				genai.NewContentFromFunctionResponse("exit_loop", map[string]any{}, "user"),
+				genai.NewContentFromFunctionResponse("exit_loop", map[string]any{"result": nil}, "user"),
 			},
 		},
 	}
@@ -147,5 +147,89 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 				t.Errorf("unexpected stream length, want %d got %d", len(tc.want), eventCount)
 			}
 		})
+	}
+}
+
+// exit_loop returns no result of its own, so after-tool callbacks see nil. The
+// model is still sent {"result": null}.
+func TestExitLoopToolAfterToolCallbackSeesNoResult(t *testing.T) {
+	exitLoopTool, err := exitlooptool.New()
+	if err != nil {
+		t.Fatalf("failed to create exit tool: %v", err)
+	}
+	var calls int
+	var gotResult map[string]any
+	a, err := llmagent.New(llmagent.Config{
+		Name: "simple agent",
+		Model: &testutil.MockModel{Responses: []*genai.Content{
+			genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
+		}},
+		Tools: []tool.Tool{exitLoopTool},
+		AfterToolCallbacks: []llmagent.AfterToolCallback{
+			func(_ agent.Context, _ tool.Tool, _, result map[string]any, _ error) (map[string]any, error) {
+				calls++
+				gotResult = result
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create llm agent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, a)
+	for _, err := range runner.Run(t, "id", "message") {
+		if err != nil {
+			t.Fatalf("runner returned unexpected error: %v", err)
+		}
+	}
+
+	if calls != 1 {
+		t.Fatalf("after-tool callback ran %d times, want 1", calls)
+	}
+	if gotResult != nil {
+		t.Errorf("after-tool callback result = %v, want nil", gotResult)
+	}
+}
+
+// A map an after-tool callback returns in place of exit_loop's nil result is
+// sent to the model as it is, not wrapped as {"result": ...}.
+func TestExitLoopToolAfterToolCallbackReplacesResult(t *testing.T) {
+	exitLoopTool, err := exitlooptool.New()
+	if err != nil {
+		t.Fatalf("failed to create exit tool: %v", err)
+	}
+	a, err := llmagent.New(llmagent.Config{
+		Name: "simple agent",
+		Model: &testutil.MockModel{Responses: []*genai.Content{
+			genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
+		}},
+		Tools: []tool.Tool{exitLoopTool},
+		AfterToolCallbacks: []llmagent.AfterToolCallback{
+			func(agent.Context, tool.Tool, map[string]any, map[string]any, error) (map[string]any, error) {
+				return map[string]any{"exited": true}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create llm agent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, a)
+	var responses []map[string]any
+	for ev, err := range runner.Run(t, "id", "message") {
+		if err != nil {
+			t.Fatalf("runner returned unexpected error: %v", err)
+		}
+		for _, p := range ev.Content.Parts {
+			if p.FunctionResponse != nil {
+				responses = append(responses, p.FunctionResponse.Response)
+			}
+		}
+	}
+
+	want := []map[string]any{{"exited": true}}
+	if diff := cmp.Diff(want, responses); diff != "" {
+		t.Errorf("function responses mismatch (-want +got):\n%s", diff)
 	}
 }
