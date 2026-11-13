@@ -19,9 +19,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"maps"
 	"math"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -2056,5 +2058,149 @@ func TestDatabaseService_AppendEvent_ForeignStateSetErrorIsReturned(t *testing.T
 	}
 	if diff := cmp.Diff([]string{"e1"}, eventIDs(getStored(t, svc, "app-foreign-db", "s-set-fails", 0))); diff != "" {
 		t.Errorf("stored event IDs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Each constructor's Close closes exactly the connection the service opened:
+// the pool behind a dialector that opens its own connection, and never a
+// *gorm.DB or *sql.DB the caller passed in.
+func TestClose_OwnershipByConstructor(t *testing.T) {
+	listReq := &session.ListRequest{AppName: "app"}
+	for _, tc := range []struct {
+		name string
+		// build returns the service and, when the caller owns the
+		// connection, the *sql.DB that must stay open.
+		build     func(t *testing.T, file string) (session.Service, *sql.DB)
+		wantOwned bool
+	}{
+		{
+			name: "NewSessionService over sqlite.Open",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				svc, err := NewSessionService(sqlite.Open(file))
+				if err != nil {
+					t.Fatalf("NewSessionService() error = %v", err)
+				}
+				return svc, nil
+			},
+			wantOwned: true,
+		},
+		{
+			name: "New over sqlite.Open",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				svc, err := New(Config{Dialector: sqlite.Open(file)})
+				if err != nil {
+					t.Fatalf("New() error = %v", err)
+				}
+				return svc, nil
+			},
+			wantOwned: true,
+		},
+		{
+			name: "NewSessionServiceFromDB",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				gormDB, err := gorm.Open(sqlite.Open(file))
+				if err != nil {
+					t.Fatalf("gorm.Open() error = %v", err)
+				}
+				sqlDB, err := gormDB.DB()
+				if err != nil {
+					t.Fatalf("gormDB.DB() error = %v", err)
+				}
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				svc, err := NewSessionServiceFromDB(gormDB)
+				if err != nil {
+					t.Fatalf("NewSessionServiceFromDB() error = %v", err)
+				}
+				return svc, sqlDB
+			},
+		},
+		{
+			name: "New over a dialector with an existing connection",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				sqlDB, err := sql.Open(sqlite.DriverName, file)
+				if err != nil {
+					t.Fatalf("sql.Open() error = %v", err)
+				}
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				svc, err := New(Config{Dialector: &sqlite.Dialector{DSN: file, Conn: sqlDB}})
+				if err != nil {
+					t.Fatalf("New() error = %v", err)
+				}
+				return svc, sqlDB
+			},
+		},
+		{
+			name: "NewSessionService over a dialector with an existing connection",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				sqlDB, err := sql.Open(sqlite.DriverName, file)
+				if err != nil {
+					t.Fatalf("sql.Open() error = %v", err)
+				}
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				svc, err := NewSessionService(&sqlite.Dialector{DSN: file, Conn: sqlDB})
+				if err != nil {
+					t.Fatalf("NewSessionService() error = %v", err)
+				}
+				return svc, sqlDB
+			},
+		},
+		{
+			name: "New over a dialector value with an existing connection",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				sqlDB, err := sql.Open(sqlite.DriverName, file)
+				if err != nil {
+					t.Fatalf("sql.Open() error = %v", err)
+				}
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				svc, err := New(Config{Dialector: sqlite.Dialector{DSN: file, Conn: sqlDB}})
+				if err != nil {
+					t.Fatalf("New() error = %v", err)
+				}
+				return svc, sqlDB
+			},
+		},
+		{
+			name: "NewSessionService over a dialector value with an existing connection",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				sqlDB, err := sql.Open(sqlite.DriverName, file)
+				if err != nil {
+					t.Fatalf("sql.Open() error = %v", err)
+				}
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				svc, err := NewSessionService(sqlite.Dialector{DSN: file, Conn: sqlDB})
+				if err != nil {
+					t.Fatalf("NewSessionService() error = %v", err)
+				}
+				return svc, sqlDB
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, callerDB := tc.build(t, filepath.Join(t.TempDir(), "own.db"))
+			if err := AutoMigrate(svc); err != nil {
+				t.Fatalf("AutoMigrate() error = %v", err)
+			}
+			closer, ok := svc.(io.Closer)
+			if !ok {
+				t.Fatalf("%T does not implement io.Closer", svc)
+			}
+
+			if err := closer.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+
+			_, err := svc.List(t.Context(), listReq)
+			if tc.wantOwned && err == nil {
+				t.Error("List() after Close() succeeded, want an error from the closed connection")
+			}
+			if !tc.wantOwned && err != nil {
+				t.Errorf("List() after Close() error = %v, want the caller's connection to stay open", err)
+			}
+			if callerDB != nil {
+				if err := callerDB.Ping(); err != nil {
+					t.Errorf("caller's sqlDB.Ping() after Close() error = %v, want nil", err)
+				}
+			}
+		})
 	}
 }

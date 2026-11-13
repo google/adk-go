@@ -19,8 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -28,7 +28,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/glebarez/sqlite"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 	"gorm.io/gorm"
@@ -803,10 +802,15 @@ func TestLLMAgent_CodeExecutionRetryGate(t *testing.T) {
 
 func newSQLiteSessions(t *testing.T) session.Service {
 	t.Helper()
-	svc, err := database.NewSessionService(sqlite.Open(filepath.Join(t.TempDir(), "sessions.db")), &gorm.Config{Logger: logger.Discard})
+	svc, err := database.NewSessionServiceFromURL("sqlite:///:memory:", &gorm.Config{Logger: logger.Discard})
 	if err != nil {
-		t.Fatalf("database.NewSessionService: %v", err)
+		t.Fatalf("database.NewSessionServiceFromURL: %v", err)
 	}
+	t.Cleanup(func() {
+		if err := svc.(io.Closer).Close(); err != nil {
+			t.Errorf("close session service: %v", err)
+		}
+	})
 	if err := database.AutoMigrate(svc); err != nil {
 		t.Fatalf("database.AutoMigrate: %v", err)
 	}
