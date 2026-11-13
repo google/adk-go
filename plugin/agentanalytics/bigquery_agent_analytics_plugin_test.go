@@ -9492,6 +9492,11 @@ func TestPlugin_RecoveredToolError_UnrecoveredValueContext(t *testing.T) {
 // attempt 1's AfterToolCallback was skipped, equal arguments in a new map, or
 // arguments past the digest bounds, do not tell the attempts apart, as
 // EventToolError documents, and attempt 2 is taken for attempt 1's callback.
+// A nil arguments map and an empty one are equal arguments, in either order:
+// an AfterToolCallback of attempt 1 that sees the other one still belongs to
+// attempt 1, so it adds no second TOOL_ERROR row to attempt 1's failure, and
+// when it recovers, it consumes attempt 1's marker, which then cannot claim
+// attempt 2's failure.
 func TestPlugin_RecoveredToolError_StaleValueContextMarker(t *testing.T) {
 	make300 := func(offset int) map[string]any {
 		m := make(map[string]any, 300)
@@ -9524,6 +9529,30 @@ func TestPlugin_RecoveredToolError_StaleValueContextMarker(t *testing.T) {
 					args1:         func() map[string]any { return map[string]any{"q": "same"} },
 					args2:         func() map[string]any { return map[string]any{"q": "same"} },
 					skippedErrors: 1,
+				},
+				{
+					name:          "nil_then_empty",
+					args1:         func() map[string]any { return nil },
+					args2:         func() map[string]any { return map[string]any{} },
+					skippedErrors: 1,
+				},
+				{
+					name:          "empty_then_nil",
+					args1:         func() map[string]any { return map[string]any{} },
+					args2:         func() map[string]any { return nil },
+					skippedErrors: 1,
+				},
+				{
+					name:          "nil_then_distinct",
+					args1:         func() map[string]any { return nil },
+					args2:         func() map[string]any { return map[string]any{"q": "second"} },
+					skippedErrors: 2,
+				},
+				{
+					name:          "distinct_then_nil",
+					args1:         func() map[string]any { return map[string]any{"q": "first"} },
+					args2:         func() map[string]any { return nil },
+					skippedErrors: 2,
 				},
 				{
 					name:          "distinct_args_past_digest_bounds",
@@ -9566,6 +9595,67 @@ func TestPlugin_RecoveredToolError_StaleValueContextMarker(t *testing.T) {
 					}
 				})
 			}
+		}
+
+		for _, swap := range []struct {
+			name             string
+			errArgs, aftArgs func() map[string]any
+		}{
+			{
+				name:    "nil_to_empty",
+				errArgs: func() map[string]any { return nil },
+				aftArgs: func() map[string]any { return map[string]any{} },
+			},
+			{
+				name:    "empty_to_nil",
+				errArgs: func() map[string]any { return map[string]any{} },
+				aftArgs: func() map[string]any { return nil },
+			},
+		} {
+			t.Run(callLabel+"/same_attempt_unrecovered/"+swap.name, func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				ctx := comparableValueToolCtx{mockInvocationContext: withFunctionCall(mCtx, callID), tag: "val"}
+				lookup := &fakeTool{name: "lookup"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeAgentCallback()(mCtx))
+				errs.add(p.BeforeToolCallback()(ctx, lookup, swap.errArgs()))
+				errs.add(p.OnToolErrorCallback()(ctx, lookup, swap.errArgs(), errors.New("boom")))
+				errs.add(p.AfterToolCallback()(ctx, lookup, swap.aftArgs(), nil, errors.New("boom")))
+				errs.add(p.AfterAgentCallback()(mCtx))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				if got := len(rowsOfType(rows, EventToolError)); got != 1 {
+					t.Errorf("got %d TOOL_ERROR rows for one failure, want 1; events=%v", got, eventTypes(rows))
+				}
+			})
+
+			t.Run(callLabel+"/recovered_consumes_marker_across_swap/"+swap.name, func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				ctx1 := comparableValueToolCtx{mockInvocationContext: withFunctionCall(mCtx, callID), tag: "val"}
+				ctx2 := comparableValueToolCtx{mockInvocationContext: withFunctionCall(mCtx, callID), tag: "val"}
+				lookup := &fakeTool{name: "lookup"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeAgentCallback()(mCtx))
+				errs.add(p.BeforeToolCallback()(ctx1, lookup, swap.errArgs()))
+				errs.add(p.OnToolErrorCallback()(ctx1, lookup, swap.errArgs(), errors.New("attempt 1 failed")))
+				errs.add(p.AfterToolCallback()(ctx1, lookup, swap.aftArgs(), map[string]any{"recovered": true}, nil))
+				errs.add(p.AfterToolCallback()(ctx2, lookup, swap.errArgs(), nil, errors.New("attempt 2 failed")))
+				errs.add(p.AfterAgentCallback()(mCtx))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				if got := len(rowsOfType(rows, EventToolError)); got != 2 {
+					t.Errorf("got %d TOOL_ERROR rows, want 2 (marker was not consumed across nil/empty swap); events=%v", got, eventTypes(rows))
+				}
+				if got := len(rowsOfType(rows, EventToolCompleted)); got != 1 {
+					t.Errorf("got %d TOOL_COMPLETED rows, want 1; events=%v", got, eventTypes(rows))
+				}
+			})
 		}
 	}
 }
@@ -10822,7 +10912,13 @@ func TestPlugin_RecoveredToolError_DelayedRejectionConsumedBeforeHiddenPeerFinis
 // activation's delayed response arrives first, and when an earlier plugin
 // answers only its AfterToolCallback and the older activation's delayed
 // response arrives after the failure, also while a third activation holds a
-// pending finish_task call with the same ID.
+// pending finish_task call with the same ID, when the failure arrives with
+// the context of the newer activation's run. Without that context, the third
+// activation's call may be the one that the failure answers, so the newer
+// activation's call keeps running (see completeResponseEvent), and the older
+// activation's delayed response, which reports completion, settles that call
+// and ends the newer activation, as it does when it arrives before the
+// failure.
 func TestPlugin_RecoveredToolError_DelayedRejectionThenPeerFinishFails(t *testing.T) {
 	const callID = "call-finish-shared"
 	finishCall := genai.NewContentFromParts([]*genai.Part{{
@@ -10838,7 +10934,16 @@ func TestPlugin_RecoveredToolError_DelayedRejectionThenPeerFinishFails(t *testin
 	}
 	completed := map[string]any{"result": "Task completed."}
 	failed := map[string]any{"error": "summary is invalid"}
-	for _, mode := range []string{"hidden_tool_callbacks", "hidden_after_tool_callback", "hidden_after_tool_callback_with_pending_peer"} {
+	for _, tc := range []struct {
+		mode        string
+		wantNewEnds int
+	}{
+		{mode: "hidden_tool_callbacks"},
+		{mode: "hidden_after_tool_callback"},
+		{mode: "hidden_after_tool_callback_with_pending_peer", wantNewEnds: 1},
+		{mode: "own_failure_with_pending_peer"},
+	} {
+		mode := tc.mode
 		t.Run(mode, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)
 			taskAgent, err := llmagent.New(llmagent.Config{
@@ -10859,7 +10964,7 @@ func TestPlugin_RecoveredToolError_DelayedRejectionThenPeerFinishFails(t *testin
 			runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
 			finish := &fakeTool{name: finishTaskToolName}
 			args := map[string]any{"summary": "done"}
-			withPeer := mode == "hidden_after_tool_callback_with_pending_peer"
+			withPeer := strings.HasSuffix(mode, "_with_pending_peer")
 
 			var errs callbackErrors
 			errs.add(p.BeforeAgentCallback()(actOld))
@@ -10893,11 +10998,17 @@ func TestPlugin_RecoveredToolError_DelayedRejectionThenPeerFinishFails(t *testin
 				// The newer activation's call runs, and an earlier plugin
 				// answers its AfterToolCallback; the older activation's
 				// response arrives after the newer one's. The failure answers
-				// the newer activation's open call, which shows whose it is
-				// even while another activation has a pending call with the
-				// same ID.
+				// the newer activation's open call when it is the only call
+				// with the ID, or when the failure arrives with the context of
+				// the newer activation's run, which shows whose it is even
+				// while another activation has a pending call with the same
+				// ID.
+				failureCtx := runnerCtx
+				if mode == "own_failure_with_pending_peer" {
+					failureCtx = actNew
+				}
 				errs.add(p.BeforeToolCallback()(toolNew, finish, args))
-				errs.add(p.OnEventCallback()(runnerCtx, finishResponse(failed)))
+				errs.add(p.OnEventCallback()(failureCtx, finishResponse(failed)))
 				errs.add(p.OnEventCallback()(runnerCtx, finishResponse(completed)))
 			}
 			errs.add(p.AfterAgentCallback()(actOld))
@@ -10910,8 +11021,8 @@ func TestPlugin_RecoveredToolError_DelayedRejectionThenPeerFinishFails(t *testin
 				t.Fatalf("got %d AGENT_STARTING rows, want %d; events=%v", len(starts), wantStarts, eventTypes(rows))
 			}
 			endsOld, endsNew := agentEndIndexes(rows, "test-agent", starts[0]["span_id"]), agentEndIndexes(rows, "test-agent", starts[1]["span_id"])
-			if len(endsNew) != 0 {
-				t.Errorf("newer activation whose finish_task call failed got AGENT_COMPLETED rows at %v, want none; events=%v", endsNew, eventTypes(rows))
+			if len(endsNew) != tc.wantNewEnds {
+				t.Errorf("newer activation got AGENT_COMPLETED rows at %v, want %d; events=%v", endsNew, tc.wantNewEnds, eventTypes(rows))
 			}
 			if len(endsOld) != 1 {
 				t.Errorf("older activation got %d AGENT_COMPLETED rows, want 1 (its own AfterAgentCallback); events=%v", len(endsOld), eventTypes(rows))
@@ -10928,7 +11039,1595 @@ func TestPlugin_RecoveredToolError_DelayedRejectionThenPeerFinishFails(t *testin
 // sight, so its response, which reports the failure, may be its own rather
 // than the hidden peer's: the response leaves the peer's deferred completion
 // alone, and the peer still gets its AGENT_COMPLETED row when the run ends.
+// Once the failed responses account for both activations' calls, because a
+// second one arrives or because the visible activation's own response shows
+// by its StateDelta that the first one was not its own, the hidden peer's call
+// failed too, and its deferred completion is canceled. A failed response
+// never answers a call made after it arrived, and a call of the visible
+// activation's later turn does not stand in for one of an earlier turn. Tool
+// callbacks and retirements that follow an ambiguous failure leave it
+// ambiguous: a tool callback may belong to a retry whose model callbacks
+// this plugin did not see, and a retired activation's calls may still be the
+// ones that it answers. They do not make the call that they end another
+// call, though: when the visible activation's first call runs its tool
+// callbacks after the first failed response, a second one still accounts
+// for both activations' calls. So does a model response event that carries
+// the call that the visible activation's model callbacks noted last: it is
+// that call's event, even when it arrives after the first failed response,
+// and starts no retry, in that turn or in a later one. Only an event that
+// follows that one may be the event of a retry whose model callbacks this
+// plugin did not see: a second failed response then may answer the retry,
+// and the hidden peer keeps its deferred completion. Once the failed
+// responses account for the visible activation's calls, it keeps none that
+// a later delayed response of a rejected call could defer a completion for.
 func TestPlugin_RecoveredToolError_VisibleFailureKeepsHiddenPeerDeferral(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	finishResponse := func(resp, stateDelta map[string]any) *session.Event {
+		ev := &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: resp},
+			}}, genai.RoleUser)},
+		}
+		ev.Actions.StateDelta = stateDelta
+		return ev
+	}
+	for _, tc := range []struct {
+		name string
+		// hiddenFirstCall leaves the visible activation's first call to its
+		// model callbacks, which run after the hidden peer's completion is
+		// deferred, as when an earlier plugin answers the call's tool
+		// callbacks.
+		hiddenFirstCall bool
+		// noFirstFailure leaves out the first failed response, so that then
+		// delivers it.
+		noFirstFailure bool
+		// visibleOpen leaves the visible activation open when the run ends,
+		// as it leaves the hidden peer.
+		visibleOpen bool
+		// hiddenModelEvent delivers the model response event of the hidden
+		// peer's call, which the other cases leave out, as when an earlier
+		// plugin replaces it.
+		hiddenModelEvent bool
+		// then lists what happens after the first failed response, which
+		// carries no StateDelta: "failure" delivers another such response,
+		// "retry" runs the visible activation's model again, "retry_tools"
+		// runs the tool callbacks of the retry, which fails validation,
+		// "own_failure_1" and "own_failure_2" deliver the failed responses of
+		// the visible activation's first and second call with their
+		// StateDelta, "completion" delivers a response that reports
+		// completion, without StateDelta, which ends the visible activation,
+		// "visible_ends" runs the visible activation's AfterAgentCallback,
+		// which otherwise runs last, "old_retry" has the oldest activation's
+		// model call finish_task again, which fails validation in plain
+		// sight, "after_tool_only" runs the AfterToolCallback alone of the
+		// visible activation's first call, which fails validation, as when
+		// an earlier plugin answers its BeforeToolCallback, "first_tools"
+		// runs both tool callbacks of that call, which fails validation,
+		// "model_event" delivers the model response event of the visible
+		// activation's model call whose model callbacks ran last,
+		// "retry_event" delivers the same event once more, as for a retry
+		// whose model callbacks this plugin did not see, as when an earlier
+		// plugin's BeforeModelCallback answers the model call,
+		// "unrelated_failure" delivers a failed response of another call ID,
+		// which no activation made, and "old_rejected_retry" has the oldest
+		// activation's model call finish_task again, which is rejected, and
+		// delivers the call's delayed response, which reports completion.
+		then            []string
+		wantHiddenEnds  int
+		wantVisibleEnds int
+	}{
+		{
+			name:           "one_failed_response_keeps_deferral",
+			wantHiddenEnds: 1,
+		},
+		{
+			name:           "second_failed_response_cancels_deferral",
+			then:           []string{"failure"},
+			wantHiddenEnds: 0,
+		},
+		{
+			name:           "third_failed_response_still_cancels_deferral",
+			then:           []string{"failure", "failure"},
+			wantHiddenEnds: 0,
+		},
+		{
+			name:           "visible_failure_with_state_delta_cancels_deferral",
+			then:           []string{"own_failure_1"},
+			wantHiddenEnds: 0,
+		},
+		{
+			name:           "earlier_failure_does_not_answer_later_retry",
+			then:           []string{"retry", "own_failure_1"},
+			wantHiddenEnds: 0,
+		},
+		{
+			name:            "visible_retry_keeps_hidden_first_call",
+			hiddenFirstCall: true,
+			then:            []string{"retry", "retry_tools"},
+			wantHiddenEnds:  1,
+		},
+		{
+			name:           "retry_failure_answers_only_its_own_turn",
+			then:           []string{"retry", "retry_tools", "own_failure_2"},
+			wantHiddenEnds: 1,
+		},
+		{
+			name:            "retry_failure_keeps_hidden_first_call",
+			hiddenFirstCall: true,
+			then:            []string{"retry", "retry_tools", "own_failure_2"},
+			wantHiddenEnds:  1,
+		},
+		{
+			name:            "failure_after_visible_retry_keeps_hidden_first_call",
+			hiddenFirstCall: true,
+			noFirstFailure:  true,
+			then:            []string{"retry", "retry_tools", "failure", "own_failure_2"},
+			wantHiddenEnds:  1,
+		},
+		{
+			name:            "late_tool_callback_keeps_failure_ambiguous",
+			hiddenFirstCall: true,
+			then:            []string{"after_tool_only", "unrelated_failure"},
+			wantHiddenEnds:  1,
+		},
+		{
+			name:            "late_tool_callbacks_keep_failure_ambiguous",
+			hiddenFirstCall: true,
+			then:            []string{"first_tools", "unrelated_failure"},
+			wantHiddenEnds:  1,
+		},
+		{
+			name:            "late_own_failure_keeps_failure_ambiguous",
+			hiddenFirstCall: true,
+			then:            []string{"first_tools", "own_failure_1"},
+			wantHiddenEnds:  1,
+		},
+		{
+			name:            "failure_after_late_tool_callbacks_cancels_deferral",
+			hiddenFirstCall: true,
+			then:            []string{"first_tools", "failure"},
+			wantHiddenEnds:  0,
+		},
+		{
+			name:            "failure_after_late_tool_callback_cancels_deferral",
+			hiddenFirstCall: true,
+			then:            []string{"after_tool_only", "failure"},
+			wantHiddenEnds:  0,
+		},
+		{
+			name:            "failure_after_late_own_failure_cancels_deferral",
+			hiddenFirstCall: true,
+			then:            []string{"first_tools", "own_failure_1", "failure"},
+			wantHiddenEnds:  0,
+		},
+		{
+			name:             "unseen_retry_keeps_failure_ambiguous",
+			hiddenFirstCall:  true,
+			hiddenModelEvent: true,
+			then:             []string{"model_event", "retry_event", "retry_tools", "unrelated_failure"},
+			wantHiddenEnds:   1,
+		},
+		{
+			name:             "failures_around_unseen_retry_keep_deferral",
+			hiddenFirstCall:  true,
+			hiddenModelEvent: true,
+			then:             []string{"model_event", "retry_event", "retry_tools", "failure"},
+			wantHiddenEnds:   1,
+		},
+		{
+			name:             "unseen_retry_failure_keeps_failure_ambiguous",
+			hiddenFirstCall:  true,
+			hiddenModelEvent: true,
+			then:             []string{"model_event", "retry_event", "retry_tools", "own_failure_2"},
+			wantHiddenEnds:   1,
+		},
+		{
+			name:             "model_event_after_failure_starts_no_retry",
+			hiddenFirstCall:  true,
+			hiddenModelEvent: true,
+			then:             []string{"model_event", "first_tools", "failure"},
+			wantHiddenEnds:   0,
+		},
+		{
+			name:             "next_turn_model_event_starts_no_retry",
+			hiddenFirstCall:  true,
+			hiddenModelEvent: true,
+			then:             []string{"retry", "model_event", "retry_tools", "failure", "failure"},
+			wantHiddenEnds:   0,
+		},
+		{
+			name:             "model_events_of_both_turns_start_no_retry",
+			hiddenFirstCall:  true,
+			hiddenModelEvent: true,
+			then:             []string{"model_event", "retry", "model_event", "retry_tools", "failure", "failure"},
+			wantHiddenEnds:   0,
+		},
+		{
+			name:             "unseen_retry_after_next_turn_keeps_deferral",
+			hiddenFirstCall:  true,
+			hiddenModelEvent: true,
+			then:             []string{"retry", "model_event", "retry_event", "retry_tools", "failure", "failure"},
+			wantHiddenEnds:   1,
+		},
+		{
+			name:             "failed_visible_call_leaves_no_call_to_defer",
+			hiddenFirstCall:  true,
+			hiddenModelEvent: true,
+			visibleOpen:      true,
+			then:             []string{"model_event", "first_tools", "failure", "old_rejected_retry"},
+			wantHiddenEnds:   0,
+		},
+		{
+			name:           "retired_peer_may_still_have_caused_failure",
+			then:           []string{"visible_ends", "old_retry", "unrelated_failure", "unrelated_failure"},
+			wantHiddenEnds: 1,
+		},
+		{
+			name:            "completed_peer_may_still_have_caused_failure",
+			hiddenFirstCall: true,
+			then:            []string{"completion", "old_retry", "unrelated_failure", "unrelated_failure"},
+			wantHiddenEnds:  1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "test-agent",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			icOld := &runningInvocation{running: taskAgent}
+			icVisible := &runningInvocation{running: taskAgent}
+			actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+			actHidden := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+			actVisible := &taskActivationContext{mockInvocationContext: mCtx, ic: icVisible}
+			toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+			// visibleTool returns the tool context of the visible
+			// activation's first or second call, with a StateDelta when a
+			// response of the activation is delivered with one.
+			deltas := []map[string]any{{"visible_call": 1}, {"visible_call": 2}}
+			withDelta := slices.Contains(tc.then, "own_failure_1") || slices.Contains(tc.then, "own_failure_2")
+			visibleTool := func(call int) agent.Context {
+				tool := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icVisible}
+				if !withDelta {
+					return tool
+				}
+				return &taskToolContext{taskActivationContext: tool, actions: &session.EventActions{StateDelta: deltas[call-1]}}
+			}
+			runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+			finish := &fakeTool{name: finishTaskToolName}
+			args := map[string]any{"summary": "done"}
+			invalid := map[string]any{"error": "summary is invalid"}
+
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(actOld))
+			errs.add(p.BeforeAgentCallback()(actHidden))
+			errs.add(p.BeforeAgentCallback()(actVisible))
+			errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+			errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+				"result":        "Task completed.",
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "finish rejected",
+			}, nil))
+			errs.add(p.BeforeModelCallback()(actHidden, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishCall}, nil))
+			if tc.hiddenModelEvent {
+				errs.add(p.OnEventCallback()(runnerCtx, &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{Content: finishCall}}))
+			}
+			if !tc.hiddenFirstCall {
+				tool := visibleTool(1)
+				errs.add(p.BeforeModelCallback()(actVisible, &model.LLMRequest{}))
+				errs.add(p.AfterModelCallback()(actVisible, &model.LLMResponse{Content: finishCall}, nil))
+				errs.add(p.BeforeToolCallback()(tool, finish, args))
+				errs.add(p.AfterToolCallback()(tool, finish, args, invalid, nil))
+			}
+			// The oldest activation's delayed response defers the hidden peer's
+			// completion; a failed response arrives next.
+			errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."}, nil)))
+			if tc.hiddenFirstCall {
+				errs.add(p.BeforeModelCallback()(actVisible, &model.LLMRequest{}))
+				errs.add(p.AfterModelCallback()(actVisible, &model.LLMResponse{Content: finishCall}, nil))
+			}
+			if !tc.noFirstFailure {
+				errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid, nil)))
+			}
+			visibleEnded := false
+			for _, step := range tc.then {
+				switch step {
+				case "failure":
+					errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid, nil)))
+				case "retry":
+					errs.add(p.BeforeModelCallback()(actVisible, &model.LLMRequest{}))
+					errs.add(p.AfterModelCallback()(actVisible, &model.LLMResponse{Content: finishCall}, nil))
+				case "retry_tools":
+					tool := visibleTool(2)
+					errs.add(p.BeforeToolCallback()(tool, finish, args))
+					errs.add(p.AfterToolCallback()(tool, finish, args, invalid, nil))
+				case "own_failure_1":
+					errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid, deltas[0])))
+				case "own_failure_2":
+					errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid, deltas[1])))
+				case "completion":
+					errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."}, nil)))
+					visibleEnded = true
+				case "visible_ends":
+					errs.add(p.AfterAgentCallback()(actVisible))
+					visibleEnded = true
+				case "after_tool_only":
+					errs.add(p.AfterToolCallback()(visibleTool(1), finish, args, invalid, nil))
+				case "first_tools":
+					tool := visibleTool(1)
+					errs.add(p.BeforeToolCallback()(tool, finish, args))
+					errs.add(p.AfterToolCallback()(tool, finish, args, invalid, nil))
+				case "model_event", "retry_event":
+					errs.add(p.OnEventCallback()(runnerCtx, &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{Content: finishCall}}))
+				case "unrelated_failure":
+					errs.add(p.OnEventCallback()(runnerCtx, &session.Event{
+						Author: "test-agent",
+						LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+							FunctionResponse: &genai.FunctionResponse{ID: "call-unrelated", Name: finishTaskToolName, Response: invalid},
+						}}, genai.RoleUser)},
+					}))
+				case "old_retry":
+					errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+					errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+					errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+					errs.add(p.AfterToolCallback()(toolOld, finish, args, invalid, nil))
+				case "old_rejected_retry":
+					errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+					errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+					errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+					errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+						"result":        "Task completed.",
+						"response_type": reflectAndRetryResponseType,
+						"error_details": "finish rejected",
+					}, nil))
+					errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."}, nil)))
+				default:
+					t.Fatalf("unknown step %q", step)
+				}
+			}
+			if !visibleEnded && !tc.visibleOpen {
+				errs.add(p.AfterAgentCallback()(actVisible))
+			}
+			errs.add(p.AfterAgentCallback()(actOld))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+			if len(starts) != 3 {
+				t.Fatalf("got %d AGENT_STARTING rows, want 3; events=%v", len(starts), eventTypes(rows))
+			}
+			wantVisibleEnds := 1
+			if tc.visibleOpen {
+				wantVisibleEnds = tc.wantVisibleEnds
+			}
+			for i, want := range []struct {
+				name string
+				ends int
+			}{{"oldest", 1}, {"hidden peer", tc.wantHiddenEnds}, {"visible", wantVisibleEnds}} {
+				if ends := agentEndIndexes(rows, "test-agent", starts[i]["span_id"]); len(ends) != want.ends {
+					t.Errorf("%s activation got AGENT_COMPLETED rows at %v, want %d; events=%v", want.name, ends, want.ends, eventTypes(rows))
+				}
+			}
+		})
+	}
+}
+
+// TestPlugin_RecoveredToolError_SameTurnFinishCallsCountTwice runs the
+// hidden-peer deferral of
+// TestPlugin_RecoveredToolError_VisibleFailureKeepsHiddenPeerDeferral with
+// finish_task calls without call IDs, where the visible activation's model
+// response makes two of them. A failed response arrives before they run, and
+// both fail validation. They stay two calls: a second failed response may
+// answer them and leaves the hidden peer's deferred completion alone, while a
+// third one cancels it. So they do on tool contexts that are not pointers and
+// have no EventActions, whose callbacks carry no attempt identity, and when an
+// earlier plugin answers the tool callbacks of the second call or of both,
+// with every failed response arriving after the calls ran.
+func TestPlugin_RecoveredToolError_SameTurnFinishCallsCountTwice(t *testing.T) {
+	finishPart := func(summary string) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{Name: finishTaskToolName, Args: map[string]any{"summary": summary}}}
+	}
+	finishCall := genai.NewContentFromParts([]*genai.Part{finishPart("done")}, genai.RoleModel)
+	twoFinishCalls := genai.NewContentFromParts([]*genai.Part{finishPart("first"), finishPart("second")}, genai.RoleModel)
+	finishResponse := func(resp map[string]any) *session.Event {
+		return &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{Name: finishTaskToolName, Response: resp},
+			}}, genai.RoleUser)},
+		}
+	}
+	for _, tc := range []struct {
+		name          string
+		valueContexts bool
+		// hiddenTools is the number of the calls, the last ones, whose tool
+		// callbacks an earlier plugin answers. With any such call, every
+		// failed response arrives after the calls ran.
+		hiddenTools    int
+		failures       int
+		wantHiddenEnds int
+	}{
+		{name: "2_failed_responses", failures: 2, wantHiddenEnds: 1},
+		{name: "3_failed_responses", failures: 3, wantHiddenEnds: 0},
+		{name: "value_contexts_2_failed_responses", valueContexts: true, failures: 2, wantHiddenEnds: 1},
+		{name: "value_contexts_3_failed_responses", valueContexts: true, failures: 3, wantHiddenEnds: 0},
+		{name: "first_plain_second_hidden_2_failures", hiddenTools: 1, failures: 2, wantHiddenEnds: 1},
+		{name: "first_plain_second_hidden_3_failures", hiddenTools: 1, failures: 3, wantHiddenEnds: 0},
+		{name: "both_hidden_2_failures", hiddenTools: 2, failures: 2, wantHiddenEnds: 1},
+		{name: "both_hidden_3_failures", hiddenTools: 2, failures: 3, wantHiddenEnds: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "test-agent",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			icOld := &runningInvocation{running: taskAgent}
+			icVisible := &runningInvocation{running: taskAgent}
+			actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+			actHidden := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+			actVisible := &taskActivationContext{mockInvocationContext: mCtx, ic: icVisible}
+			toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, ""), ic: icOld}
+			var toolFirst, toolSecond agent.Context = newTaskToolContext(mCtx, icVisible, nil), newTaskToolContext(mCtx, icVisible, nil)
+			if tc.valueContexts {
+				toolFirst = valueTaskToolCtx{mockInvocationContext: withFunctionCall(mCtx, ""), ic: icVisible}
+				toolSecond = valueTaskToolCtx{mockInvocationContext: withFunctionCall(mCtx, ""), ic: icVisible}
+			}
+			runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+			finish := &fakeTool{name: finishTaskToolName}
+			invalid := map[string]any{"error": "summary is invalid"}
+
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(actOld))
+			errs.add(p.BeforeAgentCallback()(actHidden))
+			errs.add(p.BeforeAgentCallback()(actVisible))
+			errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.BeforeToolCallback()(toolOld, finish, map[string]any{"summary": "done"}))
+			errs.add(p.AfterToolCallback()(toolOld, finish, map[string]any{"summary": "done"}, map[string]any{
+				"result":        "Task completed.",
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "finish rejected",
+			}, nil))
+			errs.add(p.BeforeModelCallback()(actHidden, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishCall}, nil))
+			// The oldest activation's delayed response defers the hidden peer's
+			// completion.
+			errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."})))
+			errs.add(p.BeforeModelCallback()(actVisible, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actVisible, &model.LLMResponse{Content: twoFinishCalls}, nil))
+			early := 0
+			if tc.hiddenTools == 0 {
+				early = 1
+			}
+			for range early {
+				errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid)))
+			}
+			// Both calls run together and fail validation, out of sight for
+			// those whose tool callbacks an earlier plugin answers.
+			switch tc.hiddenTools {
+			case 0:
+				errs.add(p.BeforeToolCallback()(toolFirst, finish, map[string]any{"summary": "first"}))
+				errs.add(p.BeforeToolCallback()(toolSecond, finish, map[string]any{"summary": "second"}))
+				errs.add(p.AfterToolCallback()(toolSecond, finish, map[string]any{"summary": "second"}, invalid, nil))
+				errs.add(p.AfterToolCallback()(toolFirst, finish, map[string]any{"summary": "first"}, invalid, nil))
+			case 1:
+				errs.add(p.BeforeToolCallback()(toolFirst, finish, map[string]any{"summary": "first"}))
+				errs.add(p.AfterToolCallback()(toolFirst, finish, map[string]any{"summary": "first"}, invalid, nil))
+			}
+			for range tc.failures - early {
+				errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid)))
+			}
+			errs.add(p.AfterAgentCallback()(actVisible))
+			errs.add(p.AfterAgentCallback()(actOld))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+			if len(starts) != 3 {
+				t.Fatalf("got %d AGENT_STARTING rows, want 3; events=%v", len(starts), eventTypes(rows))
+			}
+			for i, want := range []struct {
+				name string
+				ends int
+			}{{"oldest", 1}, {"hidden peer", tc.wantHiddenEnds}, {"visible", 1}} {
+				if ends := agentEndIndexes(rows, "test-agent", starts[i]["span_id"]); len(ends) != want.ends {
+					t.Errorf("%s activation got AGENT_COMPLETED rows at %v, want %d; events=%v", want.name, ends, want.ends, eventTypes(rows))
+				}
+			}
+		})
+	}
+}
+
+// TestPlugin_RecoveredToolError_UnseenRetryEventStartsTurn runs the case
+// failures_around_unseen_retry_keep_deferral of
+// TestPlugin_RecoveredToolError_VisibleFailureKeepsHiddenPeerDeferral with
+// the oldest activation started last, so that the first failed response is
+// taken for that activation's event rather than for the visible one's, which
+// then starts no turn of the visible activation. The oldest activation ends
+// before a model response event arrives that follows the visible call's own
+// one, as that of a retry of the visible activation whose model callbacks an
+// earlier plugin answered. The retry's event starts a turn of its own, so its
+// call is not the visible activation's first call, whose turn has not ended:
+// the second failed response may answer the retry, and the hidden peer keeps
+// its deferred completion.
+func TestPlugin_RecoveredToolError_UnseenRetryEventStartsTurn(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	finishResponse := func(resp map[string]any) *session.Event {
+		return &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: resp},
+			}}, genai.RoleUser)},
+		}
+	}
+	modelEvent := func() *session.Event {
+		return &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{Content: finishCall}}
+	}
+	p, requests, mCtx := setupTestPlugin(t)
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:  "test-agent",
+		Mode:  llmagent.ModeTask,
+		Model: &scriptedLLM{},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	icOld := &runningInvocation{running: taskAgent}
+	icVisible := &runningInvocation{running: taskAgent}
+	actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+	actHidden := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+	actVisible := &taskActivationContext{mockInvocationContext: mCtx, ic: icVisible}
+	toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+	toolRetry := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icVisible}
+	runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+	finish := &fakeTool{name: finishTaskToolName}
+	args := map[string]any{"summary": "done"}
+	invalid := map[string]any{"error": "summary is invalid"}
+
+	var errs callbackErrors
+	errs.add(p.BeforeAgentCallback()(actHidden))
+	errs.add(p.BeforeAgentCallback()(actVisible))
+	errs.add(p.BeforeAgentCallback()(actOld))
+	errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+	errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+	errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+		"result":        "Task completed.",
+		"response_type": reflectAndRetryResponseType,
+		"error_details": "finish rejected",
+	}, nil))
+	errs.add(p.BeforeModelCallback()(actHidden, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishCall}, nil))
+	errs.add(p.OnEventCallback()(runnerCtx, modelEvent()))
+	// The oldest activation's delayed response defers the hidden peer's
+	// completion.
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."})))
+	errs.add(p.BeforeModelCallback()(actVisible, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(actVisible, &model.LLMResponse{Content: finishCall}, nil))
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid)))
+	// The visible call's own model response event, delivered after the
+	// failed response.
+	errs.add(p.OnEventCallback()(runnerCtx, modelEvent()))
+	errs.add(p.AfterAgentCallback()(actOld))
+	// The model response event of a retry whose model callbacks an earlier
+	// plugin answered, and the retry's tool callbacks, which fail validation.
+	errs.add(p.OnEventCallback()(runnerCtx, modelEvent()))
+	errs.add(p.BeforeToolCallback()(toolRetry, finish, args))
+	errs.add(p.AfterToolCallback()(toolRetry, finish, args, invalid, nil))
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid)))
+	errs.add(p.AfterAgentCallback()(actVisible))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+	if len(starts) != 3 {
+		t.Fatalf("got %d AGENT_STARTING rows, want 3; events=%v", len(starts), eventTypes(rows))
+	}
+	for i, want := range []struct {
+		name string
+		ends int
+	}{{"hidden peer", 1}, {"visible", 1}, {"oldest", 1}} {
+		if ends := agentEndIndexes(rows, "test-agent", starts[i]["span_id"]); len(ends) != want.ends {
+			t.Errorf("%s activation got AGENT_COMPLETED rows at %v, want %d; events=%v", want.name, ends, want.ends, eventTypes(rows))
+		}
+	}
+}
+
+// TestPlugin_RecoveredToolError_FailuresLeaveCallOfEarlierCompletion runs
+// activations of a task-mode agent whose finish_task calls share one call ID
+// and whose tool callbacks an earlier plugin answers, except those of the
+// oldest activation, whose call is rejected. Its delayed response defers the
+// completion of the hidden peer. Then the other activations call finish_task,
+// and a response that reports completion, with the context of the newest
+// one's run, ends that one. That response answered the call of the activation
+// that it ended (see completionCalls), so a failed response that arrives
+// later does not answer that call: two of them account for the calls of the
+// hidden peer and of the other open activation, and cancel the hidden peer's
+// deferred completion. When the activation that ended made a call with the ID
+// in an earlier turn too, the completion answered one of its two calls, and
+// the other one may still have caused a failure, so two failed responses
+// leave the deferred completion alone. When the hidden peer is the only open
+// activation with such a call, a failed response is taken for its own and
+// cancels its deferred completion, as for any single open candidate. A
+// response that shows no activation shows no call of the activation that it
+// ends, so the failures may still answer that call, and leave the deferred
+// completion alone.
+func TestPlugin_RecoveredToolError_FailuresLeaveCallOfEarlierCompletion(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	finishResponse := func(resp map[string]any) *session.Event {
+		return &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: resp},
+			}}, genai.RoleUser)},
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// openPeer adds an activation that calls finish_task and stays open.
+		openPeer bool
+		// endedRetry has the activation that ends make its call twice, in
+		// two turns, and unshown delivers the response that ends it with the
+		// runner's context.
+		endedRetry, unshown bool
+		failures            int
+		wantHiddenEnds      int
+	}{
+		{name: "two_failures_with_two_open_activations_cancel_deferral", openPeer: true, failures: 2, wantHiddenEnds: 0},
+		{name: "two_failures_with_earlier_call_of_ended_activation_keep_deferral", openPeer: true, endedRetry: true, failures: 2, wantHiddenEnds: 1},
+		{name: "failure_with_one_open_activation_cancels_deferral", failures: 1, wantHiddenEnds: 0},
+		{name: "two_failures_after_unshown_completion_keep_deferral", openPeer: true, unshown: true, failures: 2, wantHiddenEnds: 1},
+		{name: "failure_after_unshown_completion_keeps_deferral", unshown: true, failures: 1, wantHiddenEnds: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "test-agent",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			icOld := &runningInvocation{running: taskAgent}
+			actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+			actHidden := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+			actOpen := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+			actEnded := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+			toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+			runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+			finish := &fakeTool{name: finishTaskToolName}
+			args := map[string]any{"summary": "done"}
+			completed := map[string]any{"result": "Task completed."}
+			invalid := map[string]any{"error": "summary is invalid"}
+			acts := []*taskActivationContext{actOld, actHidden, actEnded}
+			later := []*taskActivationContext{actEnded}
+			if tc.openPeer {
+				acts = []*taskActivationContext{actOld, actHidden, actOpen, actEnded}
+				later = []*taskActivationContext{actOpen, actEnded}
+			}
+
+			var errs callbackErrors
+			for _, act := range acts {
+				errs.add(p.BeforeAgentCallback()(act))
+			}
+			errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+			errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+				"result":        "Task completed.",
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "finish rejected",
+			}, nil))
+			errs.add(p.BeforeModelCallback()(actHidden, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.OnEventCallback()(runnerCtx, finishResponse(completed)))
+			for _, act := range later {
+				turns := 1
+				if act == actEnded && tc.endedRetry {
+					turns = 2
+				}
+				for range turns {
+					errs.add(p.BeforeModelCallback()(act, &model.LLMRequest{}))
+					errs.add(p.AfterModelCallback()(act, &model.LLMResponse{Content: finishCall}, nil))
+				}
+			}
+			if tc.unshown {
+				errs.add(p.OnEventCallback()(runnerCtx, finishResponse(completed)))
+			} else {
+				errs.add(p.OnEventCallback()(actEnded, finishResponse(completed)))
+			}
+			for range tc.failures {
+				errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid)))
+			}
+			if tc.openPeer {
+				errs.add(p.AfterAgentCallback()(actOpen))
+			}
+			errs.add(p.AfterAgentCallback()(actOld))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+			if len(starts) != len(acts) {
+				t.Fatalf("got %d AGENT_STARTING rows, want %d; events=%v", len(starts), len(acts), eventTypes(rows))
+			}
+			for i, start := range starts {
+				want := 1
+				if i == 1 {
+					want = tc.wantHiddenEnds
+				}
+				if ends := agentEndIndexes(rows, "test-agent", start["span_id"]); len(ends) != want {
+					t.Errorf("activation %d got AGENT_COMPLETED rows at %v, want %d; events=%v", i, ends, want, eventTypes(rows))
+				}
+			}
+		})
+	}
+}
+
+// TestPlugin_RecoveredToolError_CompletionAnswersLatestCallOfRetiredActivation
+// runs a task-mode agent whose activations make finish_task calls with one
+// call ID, behind tool callbacks that an earlier plugin answers. The oldest
+// activation's call is rejected, and its delayed response defers the
+// completion of the hidden peer. The third activation makes a call, and a
+// failed response arrives that the hidden peer's call or that call may
+// answer. The third activation's model then makes the call again, and a
+// response that reports completion, with the context of the third
+// activation's run, retires the activation. ADK ends a task-mode activation
+// right after the response of a call that completed the task, so the
+// response answered the retry, not the call that the model followed with
+// another model call, and a second failed response may answer the hidden
+// peer's call or that earlier call, as the first one may. The two failures
+// account for both calls, so the hidden peer's call failed and its deferred
+// completion is canceled: also when the retry's tool span is open until the
+// response settles it. A response that shows no activation shows no call of
+// the activation that it retires, so the failures may also answer the retry,
+// and the deferred completion stays. When the retry ends without completing
+// the task in plain sight, neither call of the third activation completed
+// the task, so the response, which shows no activation, is the hidden
+// peer's, which it retires, and the third activation gets no
+// AGENT_COMPLETED row.
+func TestPlugin_RecoveredToolError_CompletionAnswersLatestCallOfRetiredActivation(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	finishResponse := func(resp map[string]any) *session.Event {
+		return &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: resp},
+			}}, genai.RoleUser)},
+		}
+	}
+	modelEvent := func() *session.Event {
+		return &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{Content: finishCall}}
+	}
+	for _, tc := range []struct {
+		name string
+		// retry is what this plugin sees of the tool callbacks of the third
+		// activation's retry: nothing, BeforeToolCallback alone, or both
+		// callbacks with a result that does not complete the task. unshown
+		// delivers the response that reports completion with the runner's
+		// context.
+		retry                         string
+		unshown                       bool
+		wantHiddenEnds, wantThirdEnds int
+	}{
+		{name: "hidden_retry_leaves_earlier_call_to_failures", retry: "hidden", wantHiddenEnds: 0, wantThirdEnds: 1},
+		{name: "settled_retry_leaves_earlier_call_to_failures", retry: "started", wantHiddenEnds: 0, wantThirdEnds: 1},
+		{name: "unshown_completion_leaves_retry_to_failures", retry: "hidden", unshown: true, wantHiddenEnds: 1, wantThirdEnds: 1},
+		{name: "unfinished_retry_leaves_completion_to_hidden_peer", retry: "unfinished", unshown: true, wantHiddenEnds: 1, wantThirdEnds: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "test-agent",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			icOld := &runningInvocation{running: taskAgent}
+			icEnded := &runningInvocation{running: taskAgent}
+			actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+			actHidden := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+			actEnded := &taskActivationContext{mockInvocationContext: mCtx, ic: icEnded}
+			toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+			toolRetry := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icEnded}
+			runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+			finish := &fakeTool{name: finishTaskToolName}
+			args := map[string]any{"summary": "done"}
+			completed := map[string]any{"result": "Task completed."}
+			invalid := map[string]any{"error": "summary is invalid"}
+
+			var errs callbackErrors
+			for _, act := range []*taskActivationContext{actOld, actHidden, actEnded} {
+				errs.add(p.BeforeAgentCallback()(act))
+			}
+			errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.OnEventCallback()(runnerCtx, modelEvent()))
+			errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+			errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+				"result":        "Task completed.",
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "finish rejected",
+			}, nil))
+			errs.add(p.BeforeModelCallback()(actHidden, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.OnEventCallback()(runnerCtx, modelEvent()))
+			// The oldest activation's delayed response defers the hidden peer's
+			// completion.
+			errs.add(p.OnEventCallback()(runnerCtx, finishResponse(completed)))
+			errs.add(p.BeforeModelCallback()(actEnded, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actEnded, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.OnEventCallback()(runnerCtx, modelEvent()))
+			// A failed response that the hidden peer's call or the third
+			// activation's call may answer.
+			errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid)))
+			errs.add(p.BeforeModelCallback()(actEnded, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actEnded, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.OnEventCallback()(runnerCtx, modelEvent()))
+			switch tc.retry {
+			case "started":
+				errs.add(p.BeforeToolCallback()(toolRetry, finish, args))
+			case "unfinished":
+				errs.add(p.BeforeToolCallback()(toolRetry, finish, args))
+				errs.add(p.AfterToolCallback()(toolRetry, finish, args, invalid, nil))
+			}
+			// The response that retires the third activation, and a second
+			// failed response.
+			if tc.unshown {
+				errs.add(p.OnEventCallback()(runnerCtx, finishResponse(completed)))
+			} else {
+				errs.add(p.OnEventCallback()(actEnded, finishResponse(completed)))
+			}
+			errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid)))
+			errs.add(p.AfterAgentCallback()(actOld))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+			if len(starts) != 3 {
+				t.Fatalf("got %d AGENT_STARTING rows, want 3; events=%v", len(starts), eventTypes(rows))
+			}
+			for i, name := range []string{"oldest", "hidden peer", "third"} {
+				want := []int{1, tc.wantHiddenEnds, tc.wantThirdEnds}[i]
+				if ends := agentEndIndexes(rows, "test-agent", starts[i]["span_id"]); len(ends) != want {
+					t.Errorf("%s activation got AGENT_COMPLETED rows at %v, want %d; events=%v", name, ends, want, eventTypes(rows))
+				}
+			}
+		})
+	}
+}
+
+// TestPlugin_RecoveredToolError_DeferredPeerLeavesUnseenModelEvent runs a
+// task-mode agent whose activations make finish_task calls with one call ID.
+// The oldest activation's call is rejected, and its delayed response defers
+// the completion of the hidden peer, whose model response event an earlier
+// plugin replaced and the tool callbacks of whose finish_task call an earlier
+// plugin answered. Then an earlier plugin answers the model call of the
+// visible activation and the tool callbacks of its finish_task call, so the
+// model response event is all that shows the visible activation's call, and
+// the call's failed response arrives. The event is not taken for the hidden
+// peer's own, so the failed response may answer either activation's call, and
+// the hidden peer keeps its deferred completion: when the hidden peer's model
+// response also made a lookup call that ran in plain sight, which shows that
+// the peer went on past its model response, whichever activation started
+// last, and when a text response of the visible activation, whose model call
+// an earlier plugin answered too, took the hidden peer's place as the author
+// of a model response event, as the deferred completion shows that the hidden
+// peer ran its call. The deferred completion shows that also when nothing
+// took that place: the hidden peer awaits no model response event, so neither
+// the visible activation's model response event nor a text response of it
+// that arrives after the completion was deferred is taken for the hidden
+// peer's, and when the visible activation's call completes, its response ends
+// the visible activation rather than the hidden peer.
+func TestPlugin_RecoveredToolError_DeferredPeerLeavesUnseenModelEvent(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	finishAndLookup := genai.NewContentFromParts([]*genai.Part{
+		{FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}}},
+		{FunctionCall: &genai.FunctionCall{ID: "call-lookup", Name: "lookup", Args: map[string]any{"q": "x"}}},
+	}, genai.RoleModel)
+	finishResponse := func(resp map[string]any) *session.Event {
+		return &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: resp},
+			}}, genai.RoleUser)},
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// hiddenLast starts the hidden peer after the visible activation.
+		hiddenLast bool
+		// lookup has the hidden peer's model response make a lookup call too,
+		// which runs in plain sight.
+		lookup bool
+		// text has the visible activation write a text response, whose model
+		// call an earlier plugin answered too, before the hidden peer's
+		// completion is deferred ("before") or after it ("after").
+		text string
+		// completes has the visible activation's call complete: a response
+		// that reports completion takes the place of the failed one.
+		completes bool
+	}{
+		{name: "visible_started_last", lookup: true},
+		{name: "hidden_started_last", hiddenLast: true, lookup: true},
+		{name: "peer_text_event_before_deferral", text: "before"},
+		{name: "nothing_replaces_hidden_model_event"},
+		{name: "nothing_replaces_hidden_model_event_visible_completes", completes: true},
+		{name: "peer_text_event_after_deferral", text: "after"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "test-agent",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			icOld := &runningInvocation{running: taskAgent}
+			icHidden := &runningInvocation{running: taskAgent}
+			actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+			actHidden := &taskActivationContext{mockInvocationContext: mCtx, ic: icHidden}
+			actVisible := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+			toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+			toolLookup := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, "call-lookup"), ic: icHidden}
+			runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+			finish, lookup := &fakeTool{name: finishTaskToolName}, &fakeTool{name: "lookup"}
+			args := map[string]any{"summary": "done"}
+			acts := []*taskActivationContext{actOld, actHidden, actVisible}
+			if tc.hiddenLast {
+				acts = []*taskActivationContext{actOld, actVisible, actHidden}
+			}
+
+			var errs callbackErrors
+			for _, act := range acts {
+				errs.add(p.BeforeAgentCallback()(act))
+			}
+			errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+			errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+				"result":        "Task completed.",
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "finish rejected",
+			}, nil))
+			errs.add(p.BeforeModelCallback()(actHidden, &model.LLMRequest{}))
+			if tc.lookup {
+				errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishAndLookup}, nil))
+				errs.add(p.BeforeToolCallback()(toolLookup, lookup, map[string]any{"q": "x"}))
+				errs.add(p.AfterToolCallback()(toolLookup, lookup, map[string]any{"q": "x"}, map[string]any{"result": "found"}, nil))
+			} else {
+				errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishCall}, nil))
+			}
+			textEvent := &session.Event{
+				Author:      "test-agent",
+				LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("checking the summary", genai.RoleModel)},
+			}
+			if tc.text == "before" {
+				errs.add(p.OnEventCallback()(runnerCtx, textEvent))
+			}
+			// The oldest activation's delayed response defers the hidden peer's
+			// completion.
+			errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."})))
+			if tc.text == "after" {
+				errs.add(p.OnEventCallback()(runnerCtx, textEvent))
+			}
+			errs.add(p.OnEventCallback()(runnerCtx, &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{Content: finishCall}}))
+			if tc.completes {
+				errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."})))
+			} else {
+				errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"error": "summary is invalid"})))
+				errs.add(p.AfterAgentCallback()(actVisible))
+			}
+			errs.add(p.AfterAgentCallback()(actOld))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+			if len(starts) != len(acts) {
+				t.Fatalf("got %d AGENT_STARTING rows, want %d; events=%v", len(starts), len(acts), eventTypes(rows))
+			}
+			for _, want := range []struct {
+				name string
+				act  *taskActivationContext
+			}{{"oldest", actOld}, {"hidden peer", actHidden}, {"visible", actVisible}} {
+				if ends := agentEndIndexes(rows, "test-agent", starts[slices.Index(acts, want.act)]["span_id"]); len(ends) != 1 {
+					t.Errorf("%s activation got AGENT_COMPLETED rows at %v, want 1; events=%v", want.name, ends, eventTypes(rows))
+				}
+			}
+		})
+	}
+}
+
+// TestPlugin_RecoveredToolError_DeferredPeerLeavesModelEventOfFailedPeers
+// runs the hidden-peer deferral of
+// TestPlugin_RecoveredToolError_DeferredPeerLeavesUnseenModelEvent with the
+// hidden peer started last. Once the hidden peer defers its completion, the
+// next model call of each other activation, which responded before, fails
+// without a callback that this plugin sees recovering the failure. Then a
+// text response arrives, as when an agent's own error callback recovers one
+// of the failures. No activation that
+// defers no completion is a likelier author of the event than another, and
+// the event is still not taken for the hidden peer's, so the hidden peer gets
+// its AGENT_COMPLETED row when the run ends.
+func TestPlugin_RecoveredToolError_DeferredPeerLeavesModelEventOfFailedPeers(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	p, requests, mCtx := setupTestPlugin(t)
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:  "test-agent",
+		Mode:  llmagent.ModeTask,
+		Model: &scriptedLLM{},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	icOld := &runningInvocation{running: taskAgent}
+	actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+	actFailed := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+	actHidden := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+	toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+	runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+	finish := &fakeTool{name: finishTaskToolName}
+	args := map[string]any{"summary": "done"}
+
+	var errs callbackErrors
+	for _, act := range []*taskActivationContext{actOld, actFailed, actHidden} {
+		errs.add(p.BeforeAgentCallback()(act))
+	}
+	errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+	errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+	errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+		"result":        "Task completed.",
+		"response_type": reflectAndRetryResponseType,
+		"error_details": "finish rejected",
+	}, nil))
+	errs.add(p.BeforeModelCallback()(actFailed, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(actFailed, &model.LLMResponse{Content: genai.NewContentFromText("looking into it", genai.RoleModel)}, nil))
+	errs.add(p.BeforeModelCallback()(actHidden, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishCall}, nil))
+	// The oldest activation's delayed response defers the hidden peer's
+	// completion.
+	errs.add(p.OnEventCallback()(runnerCtx, &session.Event{
+		Author: "test-agent",
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: map[string]any{"result": "Task completed."}},
+		}}, genai.RoleUser)},
+	}))
+	for _, act := range []*taskActivationContext{actOld, actFailed} {
+		errs.add(p.BeforeModelCallback()(act, &model.LLMRequest{}))
+		errs.add(p.OnModelErrorCallback()(act, &model.LLMRequest{}, errors.New("model unavailable")))
+	}
+	errs.add(p.OnEventCallback()(runnerCtx, &session.Event{
+		Author:      "test-agent",
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("checking the summary", genai.RoleModel)},
+	}))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+	if len(starts) != 3 {
+		t.Fatalf("got %d AGENT_STARTING rows, want 3; events=%v", len(starts), eventTypes(rows))
+	}
+	if ends := agentEndIndexes(rows, "test-agent", starts[2]["span_id"]); len(ends) != 1 {
+		t.Errorf("hidden peer activation got AGENT_COMPLETED rows at %v, want 1; events=%v", ends, eventTypes(rows))
+	}
+}
+
+// TestPlugin_RecoveredToolError_DeferredPeerContinuationCountsAsCall runs a
+// task-mode agent whose activations make finish_task calls with one call ID.
+// The oldest activation's call is rejected. The hidden peer's model response
+// makes a call, and an earlier plugin replaces the response's session event
+// and the call's function response event and answers the call's tool
+// callbacks. The oldest activation's delayed response defers the hidden
+// peer's completion, and the oldest activation ends. The hidden peer goes on:
+// an earlier plugin's BeforeModelCallback answers its next model call, whose
+// session event carries a finish_task call with the same ID. The deferral
+// shows that the hidden peer ran its first call, whose model response event
+// can no longer arrive, so the event is that of a model call of its own: it
+// makes a second call. That call fails while an earlier plugin answers its
+// tool callbacks, a newer peer's call fails in plain sight, and the hidden
+// peer's third call, whose model call and tool callbacks an earlier plugin
+// answers too and whose session event it replaces, completes. This plugin saw
+// two calls of the hidden peer and one failed response for them, so the
+// completion ends the hidden peer, not the newer peer, whose only call failed
+// and whose AfterAgentCallback ends it afterwards.
+func TestPlugin_RecoveredToolError_DeferredPeerContinuationCountsAsCall(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	finishResponse := func(resp, stateDelta map[string]any) *session.Event {
+		ev := &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: resp},
+			}}, genai.RoleUser)},
+		}
+		ev.Actions.StateDelta = stateDelta
+		return ev
+	}
+	p, requests, mCtx := setupTestPlugin(t)
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:  "test-agent",
+		Mode:  llmagent.ModeTask,
+		Model: &scriptedLLM{},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	icOld := &runningInvocation{running: taskAgent}
+	icPeer := &runningInvocation{running: taskAgent}
+	actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+	actHidden := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+	actPeer := &taskActivationContext{mockInvocationContext: mCtx, ic: icPeer}
+	toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+	peerDelta := map[string]any{"peer_call": 1}
+	toolPeer := &taskToolContext{
+		taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icPeer},
+		actions:               &session.EventActions{StateDelta: peerDelta},
+	}
+	runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+	finish := &fakeTool{name: finishTaskToolName}
+	args := map[string]any{"summary": "done"}
+	invalid := map[string]any{"error": "summary is invalid"}
+	modelEvent := &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{Content: finishCall}}
+
+	var errs callbackErrors
+	errs.add(p.BeforeAgentCallback()(actOld))
+	errs.add(p.BeforeAgentCallback()(actHidden))
+	errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+	errs.add(p.OnEventCallback()(runnerCtx, modelEvent))
+	errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+	errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+		"result":        "Task completed.",
+		"response_type": reflectAndRetryResponseType,
+		"error_details": "finish rejected",
+	}, nil))
+	errs.add(p.BeforeModelCallback()(actHidden, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishCall}, nil))
+	// The oldest activation's delayed response defers the hidden peer's
+	// completion, and the oldest activation ends.
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."}, nil)))
+	errs.add(p.AfterAgentCallback()(actOld))
+	// The hidden peer's second model call and the failed response of its
+	// call.
+	errs.add(p.OnEventCallback()(runnerCtx, modelEvent))
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid, nil)))
+	// The newer peer's call fails in plain sight.
+	errs.add(p.BeforeAgentCallback()(actPeer))
+	errs.add(p.BeforeModelCallback()(actPeer, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(actPeer, &model.LLMResponse{Content: finishCall}, nil))
+	errs.add(p.OnEventCallback()(runnerCtx, modelEvent))
+	errs.add(p.BeforeToolCallback()(toolPeer, finish, args))
+	errs.add(p.AfterToolCallback()(toolPeer, finish, args, invalid, nil))
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid, peerDelta)))
+	// The hidden peer's third call completes.
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."}, nil)))
+	errs.add(p.AfterAgentCallback()(actPeer))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+	if len(starts) != 3 {
+		t.Fatalf("got %d AGENT_STARTING rows, want 3; events=%v", len(starts), eventTypes(rows))
+	}
+	var ends [][]int
+	for i, name := range []string{"oldest", "hidden peer", "newer peer"} {
+		ends = append(ends, agentEndIndexes(rows, "test-agent", starts[i]["span_id"]))
+		if len(ends[i]) != 1 {
+			t.Fatalf("%s activation got AGENT_COMPLETED rows at %v, want 1; events=%v", name, ends[i], eventTypes(rows))
+		}
+	}
+	if ends[1][0] > ends[2][0] {
+		t.Errorf("hidden peer's AGENT_COMPLETED row at %d follows the newer peer's at %d, want the completion to end the hidden peer; events=%v",
+			ends[1][0], ends[2][0], eventTypes(rows))
+	}
+	if n := len(rowsOfType(rows, EventAgentError)); n != 0 {
+		t.Errorf("got %d AGENT_ERROR rows, want none; events=%v", n, eventTypes(rows))
+	}
+}
+
+// TestPlugin_RecoveredToolError_StaleModelResponseLeavesPeerModelEvent runs
+// TestPlugin_RecoveredToolError_DeferredPeerLeavesUnseenModelEvent with a
+// third activation, whose model response makes a finish_task call and a
+// lookup call after the hidden peer deferred its completion. An earlier
+// plugin replaces that response's session event and answers the tool
+// callbacks of its finish_task call, while the lookup call runs: in plain
+// sight, or while an earlier plugin answers its BeforeToolCallback or its
+// AfterToolCallback, before the call's function response event arrives. Then
+// the visible activation's model response event, which an earlier plugin's
+// BeforeModelCallback answered, arrives. Either tool callback of the lookup
+// call shows that the third activation went on past its model response, so
+// the event is not taken for that response's: each of the three activations
+// has a call that the two failed responses that follow may answer, and the
+// hidden peer keeps its deferred completion.
+func TestPlugin_RecoveredToolError_StaleModelResponseLeavesPeerModelEvent(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	finishAndLookup := genai.NewContentFromParts([]*genai.Part{
+		{FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}}},
+		{FunctionCall: &genai.FunctionCall{ID: "call-lookup", Name: "lookup", Args: map[string]any{"q": "x"}}},
+	}, genai.RoleModel)
+	finishResponse := func(resp map[string]any) *session.Event {
+		return &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: resp},
+			}}, genai.RoleUser)},
+		}
+	}
+	lookupResponse := &session.Event{
+		Author: "test-agent",
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{ID: "call-lookup", Name: "lookup", Response: map[string]any{"result": "found"}},
+		}}, genai.RoleUser)},
+	}
+	for _, seen := range []string{"both_tool_callbacks", "before_tool_callback", "after_tool_callback"} {
+		t.Run(seen, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "test-agent",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			icOld := &runningInvocation{running: taskAgent}
+			icThird := &runningInvocation{running: taskAgent}
+			actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+			actHidden := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+			actThird := &taskActivationContext{mockInvocationContext: mCtx, ic: icThird}
+			actVisible := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+			toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+			toolLookup := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, "call-lookup"), ic: icThird}
+			runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+			finish, lookup := &fakeTool{name: finishTaskToolName}, &fakeTool{name: "lookup"}
+			args := map[string]any{"summary": "done"}
+			invalid := map[string]any{"error": "summary is invalid"}
+			acts := []*taskActivationContext{actOld, actHidden, actThird, actVisible}
+
+			var errs callbackErrors
+			for _, act := range acts {
+				errs.add(p.BeforeAgentCallback()(act))
+			}
+			errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+			errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+				"result":        "Task completed.",
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "finish rejected",
+			}, nil))
+			errs.add(p.BeforeModelCallback()(actHidden, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.OnEventCallback()(runnerCtx, &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{Content: finishCall}}))
+			// The oldest activation's delayed response defers the hidden peer's
+			// completion.
+			errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."})))
+			errs.add(p.BeforeModelCallback()(actThird, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actThird, &model.LLMResponse{Content: finishAndLookup}, nil))
+			if seen != "after_tool_callback" {
+				errs.add(p.BeforeToolCallback()(toolLookup, lookup, map[string]any{"q": "x"}))
+			}
+			if seen != "before_tool_callback" {
+				errs.add(p.AfterToolCallback()(toolLookup, lookup, map[string]any{"q": "x"}, map[string]any{"result": "found"}, nil))
+			}
+			errs.add(p.OnEventCallback()(runnerCtx, lookupResponse))
+			errs.add(p.OnEventCallback()(runnerCtx, &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{Content: finishCall}}))
+			errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid)))
+			errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid)))
+			errs.add(p.AfterAgentCallback()(actVisible))
+			errs.add(p.AfterAgentCallback()(actThird))
+			errs.add(p.AfterAgentCallback()(actOld))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+			if len(starts) != len(acts) {
+				t.Fatalf("got %d AGENT_STARTING rows, want %d; events=%v", len(starts), len(acts), eventTypes(rows))
+			}
+			for i, name := range []string{"oldest", "hidden peer", "third", "visible"} {
+				if ends := agentEndIndexes(rows, "test-agent", starts[i]["span_id"]); len(ends) != 1 {
+					t.Errorf("%s activation got AGENT_COMPLETED rows at %v, want 1; events=%v", name, ends, eventTypes(rows))
+				}
+			}
+		})
+	}
+}
+
+// TestPlugin_RecoveredToolError_RetiredPeerUnansweredCallKeepsDeferral runs a
+// task-mode agent whose activations make finish_task calls with one call ID,
+// except for a retry of the visible activation. The oldest activation's call
+// is rejected, and its delayed response defers the completion of the hidden
+// peer, whose tool callbacks an earlier plugin answers. The visible
+// activation's call fails, in plain sight or while an earlier plugin answers
+// its tool callbacks, and its retry completes, so that the retry's response
+// retires the visible activation before the failed call's response arrives.
+// The hidden peer is then the only open activation with a call that the
+// failed response may answer, but the retired activation's failed call, which
+// the retry's response did not answer, may still be the one that it answers,
+// so the hidden peer keeps its deferred completion: when the retry has a call
+// ID of its own, and when it reuses the failed call's ID, whether the failed
+// call ended without completing the task in plain sight or an earlier plugin
+// answered its tool callbacks. The retry's response then answers the retry,
+// whose completion the visible activation's tool callbacks saw, or, when an
+// earlier plugin answers the retry's tool callbacks too, one of the two calls
+// with that ID, not both. When the retry's model response makes two calls
+// with that ID, which complete in plain sight, the response that answers them
+// both leaves the failed call unanswered.
+func TestPlugin_RecoveredToolError_RetiredPeerUnansweredCallKeepsDeferral(t *testing.T) {
+	const callID = "call-finish-shared"
+	// finishCallsWith returns the content of a model response that makes n
+	// finish_task calls with the ID id, and responseWith that of the function
+	// response event that answers n such calls with resp.
+	finishCallsWith := func(id string, n int) *genai.Content {
+		parts := make([]*genai.Part, n)
+		for i := range parts {
+			parts[i] = &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}}}
+		}
+		return genai.NewContentFromParts(parts, genai.RoleModel)
+	}
+	responseWith := func(id string, n int, resp map[string]any) *session.Event {
+		parts := make([]*genai.Part, n)
+		for i := range parts {
+			parts[i] = &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: id, Name: finishTaskToolName, Response: resp}}
+		}
+		return &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts(parts, genai.RoleUser)}}
+	}
+	finishCallWith := func(id string) *genai.Content { return finishCallsWith(id, 1) }
+	responseFor := func(id string, resp map[string]any) *session.Event { return responseWith(id, 1, resp) }
+	for _, tc := range []struct {
+		name string
+		// hiddenFailure has an earlier plugin answer the tool callbacks of the
+		// visible activation's failed call, and hiddenRetry those of its
+		// retry.
+		hiddenFailure, hiddenRetry bool
+		retryID                    string
+		// retryCalls is the number of calls that the retry's model response
+		// makes, one if it is zero. They run one after the other.
+		retryCalls int
+	}{
+		{name: "failed_in_plain_sight", retryID: "call-finish-retry"},
+		{name: "failed_with_hidden_tool_callbacks", hiddenFailure: true, retryID: "call-finish-retry"},
+		{name: "retry_reuses_call_id", retryID: callID},
+		{name: "retry_reuses_id_of_call_with_hidden_tool_callbacks", hiddenFailure: true, retryID: callID},
+		{name: "hidden_retry_reuses_id_of_call_with_hidden_tool_callbacks", hiddenFailure: true, hiddenRetry: true, retryID: callID},
+		{name: "two_plain_sight_completions_reuse_id_of_call_with_hidden_tool_callbacks", hiddenFailure: true, retryID: callID, retryCalls: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "test-agent",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			icOld := &runningInvocation{running: taskAgent}
+			icVisible := &runningInvocation{running: taskAgent}
+			actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+			actHidden := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+			actVisible := &taskActivationContext{mockInvocationContext: mCtx, ic: icVisible}
+			toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+			toolFailed := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icVisible}
+			runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+			finish := &fakeTool{name: finishTaskToolName}
+			args := map[string]any{"summary": "done"}
+			modelEvent := func(id string) *session.Event {
+				return &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{Content: finishCallWith(id)}}
+			}
+
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(actOld))
+			errs.add(p.BeforeAgentCallback()(actHidden))
+			errs.add(p.BeforeAgentCallback()(actVisible))
+			errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCallWith(callID)}, nil))
+			errs.add(p.OnEventCallback()(runnerCtx, modelEvent(callID)))
+			errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+			errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+				"result":        "Task completed.",
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "finish rejected",
+			}, nil))
+			errs.add(p.BeforeModelCallback()(actHidden, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishCallWith(callID)}, nil))
+			errs.add(p.OnEventCallback()(runnerCtx, modelEvent(callID)))
+			// The oldest activation's delayed response defers the hidden peer's
+			// completion.
+			errs.add(p.OnEventCallback()(runnerCtx, responseFor(callID, map[string]any{"result": "Task completed."})))
+			errs.add(p.BeforeModelCallback()(actVisible, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actVisible, &model.LLMResponse{Content: finishCallWith(callID)}, nil))
+			errs.add(p.OnEventCallback()(runnerCtx, modelEvent(callID)))
+			if !tc.hiddenFailure {
+				errs.add(p.BeforeToolCallback()(toolFailed, finish, args))
+				errs.add(p.AfterToolCallback()(toolFailed, finish, args, map[string]any{"error": "summary is invalid"}, nil))
+			}
+			retryCalls := max(tc.retryCalls, 1)
+			errs.add(p.BeforeModelCallback()(actVisible, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actVisible, &model.LLMResponse{Content: finishCallsWith(tc.retryID, retryCalls)}, nil))
+			errs.add(p.OnEventCallback()(runnerCtx, &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{Content: finishCallsWith(tc.retryID, retryCalls)}}))
+			if !tc.hiddenRetry {
+				for range retryCalls {
+					tool := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, tc.retryID), ic: icVisible}
+					errs.add(p.BeforeToolCallback()(tool, finish, args))
+					errs.add(p.AfterToolCallback()(tool, finish, args, map[string]any{"result": "Task completed."}, nil))
+				}
+			}
+			// The retry's response retires the visible activation, and the
+			// failed call's response arrives late.
+			errs.add(p.OnEventCallback()(runnerCtx, responseWith(tc.retryID, retryCalls, map[string]any{"result": "Task completed."})))
+			errs.add(p.OnEventCallback()(runnerCtx, responseFor(callID, map[string]any{"error": "summary is invalid"})))
+			errs.add(p.AfterAgentCallback()(actOld))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+			if len(starts) != 3 {
+				t.Fatalf("got %d AGENT_STARTING rows, want 3; events=%v", len(starts), eventTypes(rows))
+			}
+			for i, name := range []string{"oldest", "hidden peer", "visible"} {
+				if ends := agentEndIndexes(rows, "test-agent", starts[i]["span_id"]); len(ends) != 1 {
+					t.Errorf("%s activation got AGENT_COMPLETED rows at %v, want 1; events=%v", name, ends, eventTypes(rows))
+				}
+			}
+		})
+	}
+}
+
+// TestPlugin_RecoveredToolError_FailuresAnswerCallsOneEach runs activations of
+// a task-mode agent whose finish_task calls share one call ID, with function
+// response events delivered late. A failed response arrives while A and B
+// each have a call that it may answer. B's call then fails in plain sight,
+// and its response, which carries the call's StateDelta, recorded after the
+// first failure arrived, arrives too. A's model retries the call, the oldest
+// activation's rejected response defers A's completion for the retry, and C
+// calls finish_task. Two more failed responses arrive, which A's two calls
+// and C's call may answer. The three failures may have answered B's, A's
+// first and C's calls, so A keeps its retry and gets its AGENT_COMPLETED row.
+func TestPlugin_RecoveredToolError_FailuresAnswerCallsOneEach(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	finishResponse := func(resp, stateDelta map[string]any) *session.Event {
+		ev := &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: resp},
+			}}, genai.RoleUser)},
+		}
+		ev.Actions.StateDelta = stateDelta
+		return ev
+	}
+	p, requests, mCtx := setupTestPlugin(t)
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:  "test-agent",
+		Mode:  llmagent.ModeTask,
+		Model: &scriptedLLM{},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	icOld := &runningInvocation{running: taskAgent}
+	icB := &runningInvocation{running: taskAgent}
+	actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+	actA := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+	actB := &taskActivationContext{mockInvocationContext: mCtx, ic: icB}
+	actC := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+	toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+	deltaB := map[string]any{"b": true}
+	toolB := &taskToolContext{
+		taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icB},
+		actions:               &session.EventActions{StateDelta: deltaB},
+	}
+	runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+	finish := &fakeTool{name: finishTaskToolName}
+	args := map[string]any{"summary": "done"}
+	invalid := map[string]any{"error": "summary is invalid"}
+	modelCall := func(errs *callbackErrors, act *taskActivationContext) {
+		errs.add(p.BeforeModelCallback()(act, &model.LLMRequest{}))
+		errs.add(p.AfterModelCallback()(act, &model.LLMResponse{Content: finishCall}, nil))
+	}
+
+	var errs callbackErrors
+	for _, act := range []*taskActivationContext{actOld, actA, actB, actC} {
+		errs.add(p.BeforeAgentCallback()(act))
+	}
+	modelCall(&errs, actOld)
+	errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+	errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+		"result":        "Task completed.",
+		"response_type": reflectAndRetryResponseType,
+		"error_details": "finish rejected",
+	}, nil))
+	modelCall(&errs, actA)
+	modelCall(&errs, actB)
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid, nil)))
+	errs.add(p.BeforeToolCallback()(toolB, finish, args))
+	errs.add(p.AfterToolCallback()(toolB, finish, args, invalid, nil))
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid, deltaB)))
+	modelCall(&errs, actA)
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."}, nil)))
+	modelCall(&errs, actC)
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid, nil)))
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid, nil)))
+	for _, act := range []*taskActivationContext{actB, actC, actOld} {
+		errs.add(p.AfterAgentCallback()(act))
+	}
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+	if len(starts) != 4 {
+		t.Fatalf("got %d AGENT_STARTING rows, want 4; events=%v", len(starts), eventTypes(rows))
+	}
+	for i, name := range []string{"oldest", "A", "B", "C"} {
+		if ends := agentEndIndexes(rows, "test-agent", starts[i]["span_id"]); len(ends) != 1 {
+			t.Errorf("activation %s got AGENT_COMPLETED rows at %v, want one; events=%v", name, ends, eventTypes(rows))
+		}
+	}
+}
+
+// TestPlugin_RecoveredToolError_AmbiguousFailureKeepsBothDeferrals runs two
+// pairs of activations of a task-mode agent whose finish_task calls share one
+// call ID. In each pair, the older activation's call is rejected, and its
+// delayed response defers the completion of a newer activation whose tool
+// callbacks an earlier plugin answers. One failed response, which either
+// hidden activation may have caused, then arrives. It cancels neither
+// deferred completion, whichever of the two retires first when the run ends.
+func TestPlugin_RecoveredToolError_AmbiguousFailureKeepsBothDeferrals(t *testing.T) {
 	const callID = "call-finish-shared"
 	finishCall := genai.NewContentFromParts([]*genai.Part{{
 		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
@@ -10950,53 +12649,465 @@ func TestPlugin_RecoveredToolError_VisibleFailureKeepsHiddenPeerDeferral(t *test
 	if err != nil {
 		t.Fatalf("llmagent.New: %v", err)
 	}
-	icOld := &runningInvocation{running: taskAgent}
-	icVisible := &runningInvocation{running: taskAgent}
-	actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
-	actHidden := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
-	actVisible := &taskActivationContext{mockInvocationContext: mCtx, ic: icVisible}
-	toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
-	toolVisible := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icVisible}
-	runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
 	finish := &fakeTool{name: finishTaskToolName}
 	args := map[string]any{"summary": "done"}
-
+	runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+	var olds []*taskActivationContext
 	var errs callbackErrors
-	errs.add(p.BeforeAgentCallback()(actOld))
-	errs.add(p.BeforeAgentCallback()(actHidden))
-	errs.add(p.BeforeAgentCallback()(actVisible))
-	errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
-	errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
-	errs.add(p.BeforeToolCallback()(toolOld, finish, args))
-	errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
-		"result":        "Task completed.",
-		"response_type": reflectAndRetryResponseType,
-		"error_details": "finish rejected",
-	}, nil))
-	errs.add(p.BeforeModelCallback()(actHidden, &model.LLMRequest{}))
-	errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishCall}, nil))
-	errs.add(p.BeforeModelCallback()(actVisible, &model.LLMRequest{}))
-	errs.add(p.AfterModelCallback()(actVisible, &model.LLMResponse{Content: finishCall}, nil))
-	errs.add(p.BeforeToolCallback()(toolVisible, finish, args))
-	errs.add(p.AfterToolCallback()(toolVisible, finish, args, map[string]any{"error": "summary is invalid"}, nil))
-	// The oldest activation's delayed response defers the hidden peer's
-	// completion; the visible activation's failure arrives next.
+	for range 2 {
+		icOld := &runningInvocation{running: taskAgent}
+		actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+		actHidden := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{running: taskAgent}}
+		toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+		olds = append(olds, actOld)
+		errs.add(p.BeforeAgentCallback()(actOld))
+		errs.add(p.BeforeAgentCallback()(actHidden))
+		errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+		errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+		errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+		errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+			"result":        "Task completed.",
+			"response_type": reflectAndRetryResponseType,
+			"error_details": "finish rejected",
+		}, nil))
+		errs.add(p.BeforeModelCallback()(actHidden, &model.LLMRequest{}))
+		errs.add(p.AfterModelCallback()(actHidden, &model.LLMResponse{Content: finishCall}, nil))
+	}
+	// Each older activation's delayed response defers one hidden peer's
+	// completion; then a failed response arrives.
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."})))
 	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."})))
 	errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"error": "summary is invalid"})))
-	errs.add(p.AfterAgentCallback()(actVisible))
-	errs.add(p.AfterAgentCallback()(actOld))
+	for _, act := range olds {
+		errs.add(p.AfterAgentCallback()(act))
+	}
 	errs.check(t)
 	p.AfterRunCallback()(mCtx)
 
 	rows := collectRows(t, requests, untilInvocationEnd)
 	starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
-	if len(starts) != 3 {
-		t.Fatalf("got %d AGENT_STARTING rows, want 3; events=%v", len(starts), eventTypes(rows))
+	if len(starts) != 4 {
+		t.Fatalf("got %d AGENT_STARTING rows, want 4; events=%v", len(starts), eventTypes(rows))
 	}
-	for i, name := range []string{"oldest", "hidden peer", "visible"} {
-		if ends := agentEndIndexes(rows, "test-agent", starts[i]["span_id"]); len(ends) != 1 {
-			t.Errorf("%s activation got AGENT_COMPLETED rows at %v, want one; events=%v", name, ends, eventTypes(rows))
+	for i, start := range starts {
+		if ends := agentEndIndexes(rows, "test-agent", start["span_id"]); len(ends) != 1 {
+			t.Errorf("activation %d got AGENT_COMPLETED rows at %v, want one; events=%v", i, ends, eventTypes(rows))
 		}
+	}
+}
+
+// TestPlugin_RecoveredToolError_OldFailedFinishKeepsNewerRetryDeferral runs
+// two activations of a task-mode agent whose finish_task calls share one call
+// ID, with the function response events delivered late. Activation A's first
+// finish_task call fails validation, in plain sight or not, and before the
+// response that reports it arrives, A's model retries the call, whose tool
+// callbacks an earlier plugin answers. Peer B's call is rejected, and its delayed response defers A's
+// completion for the retry. The late response of A's first call, with or
+// without the StateDelta of that call, before or after the deferral, answers
+// only the first call: A keeps its retry, and gets its AGENT_COMPLETED row
+// when the run ends.
+func TestPlugin_RecoveredToolError_OldFailedFinishKeepsNewerRetryDeferral(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	finishResponse := func(resp, stateDelta map[string]any) *session.Event {
+		ev := &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: resp},
+			}}, genai.RoleUser)},
+		}
+		ev.Actions.StateDelta = stateDelta
+		return ev
+	}
+	for _, first := range []struct {
+		name string
+		// modelCall runs the model callbacks of A's first call, which
+		// otherwise runs in A's first turn, epoch 0.
+		modelCall bool
+		// hiddenTools leaves A's first call to its model callbacks, as when
+		// an earlier plugin answers its tool callbacks.
+		hiddenTools bool
+		// stateDelta gives the tool context of A's first call a StateDelta,
+		// which its late response carries.
+		stateDelta bool
+	}{
+		{name: "state_delta", modelCall: true, stateDelta: true},
+		{name: "state_delta_first_turn", stateDelta: true},
+		{name: "no_state_delta", modelCall: true},
+		{name: "hidden_tool_callbacks", modelCall: true, hiddenTools: true},
+	} {
+		for _, lateFirst := range []bool{true, false} {
+			order := "failure_before_deferral"
+			if !lateFirst {
+				order = "failure_after_deferral"
+			}
+			t.Run(first.name+"/"+order, func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				taskAgent, err := llmagent.New(llmagent.Config{
+					Name:  "test-agent",
+					Mode:  llmagent.ModeTask,
+					Model: &scriptedLLM{},
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New: %v", err)
+				}
+				icB := &runningInvocation{running: taskAgent}
+				icA := &runningInvocation{running: taskAgent}
+				actB := &taskActivationContext{mockInvocationContext: mCtx, ic: icB}
+				actA := &taskActivationContext{mockInvocationContext: mCtx, ic: icA}
+				toolB := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icB}
+				var toolA agent.Context = &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icA}
+				var firstDelta map[string]any
+				if first.stateDelta {
+					firstDelta = map[string]any{"first": true}
+					toolA = &taskToolContext{
+						taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icA},
+						actions:               &session.EventActions{StateDelta: firstDelta},
+					}
+				}
+				runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+				finish := &fakeTool{name: finishTaskToolName}
+				args := map[string]any{"summary": "done"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeAgentCallback()(actB))
+				errs.add(p.BeforeAgentCallback()(actA))
+				errs.add(p.BeforeModelCallback()(actB, &model.LLMRequest{}))
+				errs.add(p.AfterModelCallback()(actB, &model.LLMResponse{Content: finishCall}, nil))
+				errs.add(p.BeforeToolCallback()(toolB, finish, args))
+				errs.add(p.AfterToolCallback()(toolB, finish, args, map[string]any{
+					"result":        "Task completed.",
+					"response_type": reflectAndRetryResponseType,
+					"error_details": "finish rejected",
+				}, nil))
+				if first.modelCall {
+					errs.add(p.BeforeModelCallback()(actA, &model.LLMRequest{}))
+					errs.add(p.AfterModelCallback()(actA, &model.LLMResponse{Content: finishCall}, nil))
+				}
+				if !first.hiddenTools {
+					errs.add(p.BeforeToolCallback()(toolA, finish, args))
+					errs.add(p.AfterToolCallback()(toolA, finish, args, map[string]any{"error": "summary is invalid"}, nil))
+				}
+				// A's model retries the call before the response of the first
+				// call arrives; an earlier plugin answers the retry's tool
+				// callbacks.
+				errs.add(p.BeforeModelCallback()(actA, &model.LLMRequest{}))
+				errs.add(p.AfterModelCallback()(actA, &model.LLMResponse{Content: finishCall}, nil))
+				lateFailure := finishResponse(map[string]any{"error": "summary is invalid"}, firstDelta)
+				// B's delayed response, which reports completion, defers A's
+				// completion for the retry.
+				deferring := finishResponse(map[string]any{"result": "Task completed."}, nil)
+				if lateFirst {
+					errs.add(p.OnEventCallback()(runnerCtx, lateFailure))
+					errs.add(p.OnEventCallback()(runnerCtx, deferring))
+				} else {
+					errs.add(p.OnEventCallback()(runnerCtx, deferring))
+					errs.add(p.OnEventCallback()(runnerCtx, lateFailure))
+				}
+				errs.add(p.AfterAgentCallback()(actB))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+				if len(starts) != 2 {
+					t.Fatalf("got %d AGENT_STARTING rows, want 2; events=%v", len(starts), eventTypes(rows))
+				}
+				for i, name := range []string{"B", "A"} {
+					if ends := agentEndIndexes(rows, "test-agent", starts[i]["span_id"]); len(ends) != 1 {
+						t.Errorf("activation %s got AGENT_COMPLETED rows at %v, want one; events=%v", name, ends, eventTypes(rows))
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestPlugin_RecoveredToolError_UnattributedFailuresKeepLaterRetry runs three
+// activations of a task-mode agent whose finish_task calls share one call ID.
+// The calls of activations R and P fail validation in plain sight, and the
+// responses that report the failures carry no StateDelta, so neither shows
+// whose it is. The first arrives before R's model retries the call, whose
+// tool callbacks an earlier plugin answers, and the oldest activation's
+// rejected response defers R's completion for the retry. A second failed
+// response accounts for the first calls of R and P, so R keeps its retry and
+// gets its AGENT_COMPLETED row. A third accounts for the retry as well, and
+// R's deferred completion is canceled.
+func TestPlugin_RecoveredToolError_UnattributedFailuresKeepLaterRetry(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	finishResponse := func(resp map[string]any) *session.Event {
+		return &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: resp},
+			}}, genai.RoleUser)},
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		failures  int
+		wantREnds int
+	}{
+		{name: "two_failures_keep_retry", failures: 2, wantREnds: 1},
+		{name: "third_failure_cancels_retry", failures: 3, wantREnds: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "test-agent",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			icOld := &runningInvocation{running: taskAgent}
+			icR := &runningInvocation{running: taskAgent}
+			icP := &runningInvocation{running: taskAgent}
+			actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+			actR := &taskActivationContext{mockInvocationContext: mCtx, ic: icR}
+			actP := &taskActivationContext{mockInvocationContext: mCtx, ic: icP}
+			toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+			toolR := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icR}
+			toolP := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icP}
+			runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+			finish := &fakeTool{name: finishTaskToolName}
+			args := map[string]any{"summary": "done"}
+			failed := func() *session.Event { return finishResponse(map[string]any{"error": "summary is invalid"}) }
+
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(actOld))
+			errs.add(p.BeforeAgentCallback()(actR))
+			errs.add(p.BeforeAgentCallback()(actP))
+			errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+			errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+				"result":        "Task completed.",
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "finish rejected",
+			}, nil))
+			for _, act := range []struct {
+				act, tool *taskActivationContext
+			}{{actR, toolR}, {actP, toolP}} {
+				errs.add(p.BeforeModelCallback()(act.act, &model.LLMRequest{}))
+				errs.add(p.AfterModelCallback()(act.act, &model.LLMResponse{Content: finishCall}, nil))
+				errs.add(p.BeforeToolCallback()(act.tool, finish, args))
+				errs.add(p.AfterToolCallback()(act.tool, finish, args, map[string]any{"error": "summary is invalid"}, nil))
+			}
+			errs.add(p.OnEventCallback()(runnerCtx, failed()))
+			// R's model retries the call; an earlier plugin answers the retry's
+			// tool callbacks, and the oldest activation's delayed response
+			// defers R's completion.
+			errs.add(p.BeforeModelCallback()(actR, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actR, &model.LLMResponse{Content: finishCall}, nil))
+			errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."})))
+			for range tc.failures - 1 {
+				errs.add(p.OnEventCallback()(runnerCtx, failed()))
+			}
+			errs.add(p.AfterAgentCallback()(actP))
+			errs.add(p.AfterAgentCallback()(actOld))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+			if len(starts) != 3 {
+				t.Fatalf("got %d AGENT_STARTING rows, want 3; events=%v", len(starts), eventTypes(rows))
+			}
+			for i, want := range []struct {
+				name string
+				ends int
+			}{{"oldest", 1}, {"R", tc.wantREnds}, {"P", 1}} {
+				if ends := agentEndIndexes(rows, "test-agent", starts[i]["span_id"]); len(ends) != want.ends {
+					t.Errorf("activation %s got AGENT_COMPLETED rows at %v, want %d; events=%v", want.name, ends, want.ends, eventTypes(rows))
+				}
+			}
+		})
+	}
+}
+
+// TestPlugin_RecoveredToolError_DeferredCallOfTwoKeepsDeferral runs two
+// activations of a task-mode agent whose finish_task calls share one call ID.
+// The older activation's call is rejected. The peer's model response makes
+// two calls with the ID, and the rejected call's delayed response defers the
+// peer's completion for one of them (see deferredTaskFinish). A failed
+// response that answers the other call leaves the deferral alone, so the end
+// of the run retires the peer with an AGENT_COMPLETED row: when an earlier
+// plugin answers the tool callbacks of both calls, and when the first call
+// fails validation in plain sight and its failed response, with the
+// StateDelta of its tool context, arrives after the completion was deferred.
+// Failed responses for both calls cancel it.
+func TestPlugin_RecoveredToolError_DeferredCallOfTwoKeepsDeferral(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCalls := func(n int) *genai.Content {
+		parts := make([]*genai.Part, n)
+		for i := range parts {
+			parts[i] = &genai.Part{FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": fmt.Sprint(i)}}}
+		}
+		return genai.NewContentFromParts(parts, genai.RoleModel)
+	}
+	finishResponse := func(resp, stateDelta map[string]any) *session.Event {
+		ev := &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: resp},
+			}}, genai.RoleUser)},
+		}
+		ev.Actions.StateDelta = stateDelta
+		return ev
+	}
+	for _, tc := range []struct {
+		name string
+		// visibleFirst runs the tool callbacks of the peer's first call, which
+		// fails validation, before the completion is deferred, and delivers
+		// the call's failed response, with its StateDelta, after that.
+		visibleFirst bool
+		// failures is the number of failed responses without StateDelta that
+		// arrive after the completion was deferred.
+		failures     int
+		wantPeerEnds int
+	}{
+		{name: "failure_of_one_hidden_call_keeps_deferral", failures: 1, wantPeerEnds: 1},
+		{name: "failures_of_both_hidden_calls_cancel_deferral", failures: 2, wantPeerEnds: 0},
+		{name: "own_failure_of_visible_call_keeps_deferral", visibleFirst: true, wantPeerEnds: 1},
+		{name: "own_failure_and_failure_of_hidden_call_cancel_deferral", visibleFirst: true, failures: 1, wantPeerEnds: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "test-agent",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			icOld := &runningInvocation{running: taskAgent}
+			icPeer := &runningInvocation{running: taskAgent}
+			actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+			actPeer := &taskActivationContext{mockInvocationContext: mCtx, ic: icPeer}
+			toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+			stateDelta := map[string]any{"peer_call": 1}
+			toolPeer := &taskToolContext{
+				taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icPeer},
+				actions:               &session.EventActions{StateDelta: stateDelta},
+			}
+			runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+			finish := &fakeTool{name: finishTaskToolName}
+			args := map[string]any{"summary": "0"}
+			invalid := map[string]any{"error": "summary is invalid"}
+
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(actOld))
+			errs.add(p.BeforeAgentCallback()(actPeer))
+			errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCalls(1)}, nil))
+			errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+			errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+				"result":        "Task completed.",
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "finish rejected",
+			}, nil))
+			errs.add(p.BeforeModelCallback()(actPeer, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actPeer, &model.LLMResponse{Content: finishCalls(2)}, nil))
+			if tc.visibleFirst {
+				errs.add(p.BeforeToolCallback()(toolPeer, finish, args))
+				errs.add(p.AfterToolCallback()(toolPeer, finish, args, invalid, nil))
+			}
+			// The older activation's delayed response defers the peer's
+			// completion.
+			errs.add(p.OnEventCallback()(runnerCtx, finishResponse(map[string]any{"result": "Task completed."}, nil)))
+			if tc.visibleFirst {
+				errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid, stateDelta)))
+			}
+			for range tc.failures {
+				errs.add(p.OnEventCallback()(runnerCtx, finishResponse(invalid, nil)))
+			}
+			errs.add(p.AfterAgentCallback()(actOld))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+			if len(starts) != 2 {
+				t.Fatalf("got %d AGENT_STARTING rows, want 2; events=%v", len(starts), eventTypes(rows))
+			}
+			for i, want := range []struct {
+				name string
+				ends int
+			}{{"oldest", 1}, {"peer", tc.wantPeerEnds}} {
+				if ends := agentEndIndexes(rows, "test-agent", starts[i]["span_id"]); len(ends) != want.ends {
+					t.Errorf("%s activation got AGENT_COMPLETED rows at %v, want %d; events=%v", want.name, ends, want.ends, eventTypes(rows))
+				}
+			}
+		})
+	}
+}
+
+// TestPlugin_FinishTaskCallCarriesTurnOfItsToolCall checks that a finish_task
+// call that AfterModelCallback notes carries the turn epoch in which its tool
+// call runs, which the call's tool span records, so that a response that
+// answers an earlier turn leaves it alone, and that the model response event
+// that carries the call notes no second one.
+func TestPlugin_FinishTaskCallCarriesTurnOfItsToolCall(t *testing.T) {
+	const callID = "call-finish"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:  "test-agent",
+		Mode:  llmagent.ModeTask,
+		Model: &scriptedLLM{},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	p := newClockedPlugin(t)
+	mCtx := &mockInvocationContext{ctx: t.Context(), agentName: "test-agent", invocationID: "inv-finish-turn"}
+	ic := &runningInvocation{running: taskAgent}
+	act := &taskActivationContext{mockInvocationContext: mCtx, ic: ic}
+	toolCtx := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: ic}
+	runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+
+	var errs callbackErrors
+	errs.add(p.beforeAgent(act))
+	errs.add(p.beforeModel(act, &model.LLMRequest{}))
+	errs.add(p.afterModel(act, &model.LLMResponse{Content: finishCall}, nil))
+	errs.add(p.onEvent(runnerCtx, &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{Content: finishCall}}))
+	errs.add(p.beforeTool(toolCtx, &fakeTool{name: finishTaskToolName}, map[string]any{"summary": "done"}))
+	errs.check(t)
+
+	inv := p.traces.invocation(act, identityOf(act))
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	i := inv.findAgentForContext(act, "", "test-agent", "")
+	if i <= 0 {
+		t.Fatal("the task-mode activation has no open span")
+	}
+	rec := inv.agentStack[i]
+	var spanEpochs []uint64
+	for key, open := range inv.toolSpans {
+		if open.parentSpanID == rec.spanID && toolKeyCall(key) == callID {
+			spanEpochs = append(spanEpochs, open.turnEpoch)
+		}
+	}
+	if len(spanEpochs) != 1 {
+		t.Fatalf("got %d open tool spans of the finish_task call, want 1", len(spanEpochs))
+	}
+	if len(rec.pendingFinishCalls) != 1 {
+		t.Fatalf("got pending finish_task calls %+v, want one", rec.pendingFinishCalls)
+	}
+	if got := rec.pendingFinishCalls[0].epoch; got != spanEpochs[0] {
+		t.Errorf("pending finish_task call has turn epoch %d, want %d, the epoch of its tool span", got, spanEpochs[0])
+	}
+	if len(rec.unseenModelFinishCalls) != 0 {
+		t.Errorf("model responses awaiting their events %v after the model response event, want none", rec.unseenModelFinishCalls)
 	}
 }
 

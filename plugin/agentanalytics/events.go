@@ -1002,7 +1002,7 @@ func (p *analyticsPlugin) emitSessionEventSignals(ctx agent.InvocationContext, e
 	if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
 		id.path = ev.NodeInfo.Path
 	}
-	span := p.traces.eventSpan(ctx, id, ev.Author, ev.Branch)
+	span := p.traces.eventSpan(ctx, id, ev.Author, ev.Branch, true)
 	cleanCustomMeta, a2aTrunc := scrubA2ACustomMetadata(ev.CustomMetadata, p.customMetadata, p.config.redactSensitiveKeys())
 	applyEventBase := func(d *eventData) {
 		d.sourceEvent = ev

@@ -1270,9 +1270,6 @@ func (p *analyticsPlugin) afterModel(ctx agent.Context, res *model.LLMResponse, 
 		p.traces.recordError(ctx, id, key, err)
 	} else if res != nil {
 		p.traces.clearError(ctx, id, key)
-		if finishCalls := finishTaskFunctionCalls(res.Content); len(finishCalls) > 0 {
-			p.traces.noteTaskFinishCalls(ctx, id, finishCalls, false)
-		}
 	}
 	p.logEvent(ctx, id, EventLLMResponse, func() rowSpan {
 		return p.traces.popLLMSpan(ctx, id, res != nil)
@@ -1293,6 +1290,13 @@ func (p *analyticsPlugin) afterModel(ctx agent.Context, res *model.LLMResponse, 
 			d.errMsg = errText
 		}
 	})
+	// popLLMSpan started the turn in which the calls of the response run, the
+	// turn that their finish_task calls carry (see taskFinishCall).
+	if err == nil && res != nil {
+		if finishCalls := finishTaskFunctionCalls(res.Content); len(finishCalls) > 0 {
+			p.traces.noteTaskFinishCalls(ctx, id, finishCalls, false)
+		}
+	}
 	return nil, nil
 }
 
@@ -1466,7 +1470,7 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	}
 	if _, ok := p.finalResponseTools[name]; ok {
 		p.logEvent(ctx, id, EventAgentResponse, func() rowSpan {
-			return p.traces.eventSpan(ctx, id, id.agentName, id.branch)
+			return p.traces.eventSpan(ctx, id, id.agentName, id.branch, false)
 		}, func(d *eventData) {
 			d.content = map[string]any{"response": args}
 			d.attributes = map[string]any{"source_tool": name}

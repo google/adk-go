@@ -140,7 +140,7 @@ func TestTraceManager_EndAdoptsTraceBeforeRetainingIdentity(t *testing.T) {
 	if ended.traceID != traceID.String() {
 		t.Error("terminal row did not adopt its ambient trace")
 	}
-	late := tm.eventSpan(ctx, id, "user", "")
+	late := tm.eventSpan(ctx, id, "user", "", true)
 	if late.traceID != ended.traceID || late.spanID != ended.spanID {
 		t.Error("late callback lost the trace adopted by the terminal row")
 	}
@@ -158,7 +158,7 @@ func TestTraceManager_LateCallbacksDoNotRestartInvocation(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 32 {
 		wg.Go(func() {
-			row := tm.eventSpan(ctx, id, "user", "")
+			row := tm.eventSpan(ctx, id, "user", "", true)
 			if row.traceID != started.traceID || row.spanID != started.spanID || row.parentSpanID != started.parentSpanID {
 				t.Error("late callback changed invocation span identity")
 			}
@@ -222,7 +222,7 @@ func TestTraceManager_CompletedTombstonesStayBounded(t *testing.T) {
 		t.Error("completed invocations are still active")
 	}
 	for i, id := range ids {
-		got := tm.eventSpan(ctx, id, "user", "")
+		got := tm.eventSpan(ctx, id, "user", "", true)
 		if retained := got.spanID == starts[i].spanID; retained != (i > 0) {
 			t.Errorf("completion %d retained = %t, want %t", i, retained, i > 0)
 		}
@@ -241,11 +241,11 @@ func TestTraceManager_LateCallbackRefreshesRetention(t *testing.T) {
 		tm.invocationSpan(ctx, other, nil)
 		tm.endInvocation(ctx, other)
 	}
-	tm.eventSpan(ctx, id, "user", "")
+	tm.eventSpan(ctx, id, "user", "", true)
 	other := identity{invocationID: "new-completion", agentName: "root"}
 	tm.invocationSpan(ctx, other, nil)
 	tm.endInvocation(ctx, other)
-	if got := tm.eventSpan(ctx, id, "user", ""); got.spanID != started.spanID {
+	if got := tm.eventSpan(ctx, id, "user", "", true); got.spanID != started.spanID {
 		t.Error("recent late callback did not refresh completed identity retention")
 	}
 	if len(trackedInvocations(tm)) != 0 {
@@ -432,7 +432,7 @@ func TestTraceManager_ClosedLateStateCanBePruned(t *testing.T) {
 		tm.invocationSpan(ctx, other, nil)
 		tm.endInvocation(ctx, other)
 	}
-	if late := tm.eventSpan(ctx, id, "user", ""); late.spanID == first.spanID {
+	if late := tm.eventSpan(ctx, id, "user", "", true); late.spanID == first.spanID {
 		t.Error("idle initialized late state was retained beyond completed capacity")
 	}
 }
@@ -453,7 +453,7 @@ func TestTraceManager_FullOpenCompletedCacheStaysBounded(t *testing.T) {
 	id := identity{invocationID: "new-idle-completion", agentName: "root"}
 	started := tm.invocationSpan(ctx, id, nil)
 	tm.endInvocation(ctx, id)
-	if got := tm.eventSpan(ctx, id, "user", ""); got.spanID == started.spanID {
+	if got := tm.eventSpan(ctx, id, "user", "", true); got.spanID == started.spanID {
 		t.Error("full cache retained a new idle completion beyond its capacity")
 	}
 	for i, openID := range ids {
