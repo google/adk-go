@@ -300,9 +300,9 @@ func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*co
 	if !ok {
 		return nil, fmt.Errorf("the Compaction config needs a Summarizer: root agent %q is not an LLM agent, so no default model is available", rootAgent.Name())
 	}
-	m := llminternal.Reveal(llmAgent).Model
-	if m == nil {
-		return nil, fmt.Errorf("the Compaction config needs a Summarizer: root agent %q has no model", rootAgent.Name())
+	m, err := llminternal.ResolveModel(context.Background(), rootAgent)
+	if err != nil {
+		return nil, fmt.Errorf("the Compaction config needs a Summarizer: no default model is available for root agent %q: %w", rootAgent.Name(), err)
 	}
 	summarizer, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{
 		Model: m,

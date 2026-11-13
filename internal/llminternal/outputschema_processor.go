@@ -49,8 +49,9 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 		}
 
 		state := llmAgent.internal()
+		llm := processorModel(ctx, f)
 		// Check if we need the processor in the first place.
-		if !needOutputSchemaProcessor(state) {
+		if !needOutputSchemaProcessor(state, llm) {
 			return
 		}
 		var t tool.Tool
@@ -66,7 +67,7 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 			yield(nil, fmt.Errorf("build set_model_response tool: %w", err))
 			return
 		}
-		setResponseTool, err := declarationFor(ctx, state.Model, t)
+		setResponseTool, err := declarationFor(ctx, llm, t)
 		if err != nil {
 			yield(nil, fmt.Errorf("build set_model_response tool: %w", err))
 			return
@@ -136,8 +137,10 @@ func retrieveStructuredModelResponse(ev *session.Event) (string, error) {
 	return "", nil
 }
 
-func needOutputSchemaProcessor(state *State) bool {
-	if state == nil || state.Model == nil {
+// needOutputSchemaProcessor reports whether the agent with state needs the
+// set_model_response tool when llm, the model of its step, serves it.
+func needOutputSchemaProcessor(state *State, llm model.LLM) bool {
+	if state == nil || llm == nil {
 		return false
 	}
 	// Task-mode agents already have a structured-output mechanism:
@@ -147,7 +150,7 @@ func needOutputSchemaProcessor(state *State) bool {
 		return false
 	}
 	hasTools := len(state.Tools) > 0 || len(state.Toolsets) > 0
-	return hasTools && !canUseOutputSchemaWithTools(state.Model)
+	return hasTools && !canUseOutputSchemaWithTools(llm)
 }
 
 // canUseOutputSchemaWithTools reports whether llm accepts a native output

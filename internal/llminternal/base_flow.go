@@ -72,6 +72,10 @@ type OnToolErrorCallback func(ctx agent.Context, tool tool.Tool, args map[string
 // Flow is a base implementation of the agent flow.
 type Flow struct {
 	Model model.LLM
+	// stepModel is the model of the current step: Model when set, else the
+	// agent's resolved model. runOneStep and RunLive set it before anything
+	// reads it, so every reader within one step sees the same model.
+	stepModel model.LLM
 
 	Tools                 []tool.Tool
 	RequestProcessors     []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]
@@ -163,7 +167,7 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				thoughtOnlyTurns++
 				if thoughtOnlyTurns >= maxConsecutiveThoughtOnlyTurns {
 					log.Printf("adk: model %q produced %d consecutive thought-only turns without an answer (limit %d) for agent %q (invocation %q); giving up and returning the last thinking event", //nolint:forbidigo // pre-slog call site
-						f.Model.Name(), thoughtOnlyTurns, maxConsecutiveThoughtOnlyTurns, ctx.Agent().Name(), ctx.InvocationID())
+						f.stepModel.Name(), thoughtOnlyTurns, maxConsecutiveThoughtOnlyTurns, ctx.Agent().Name(), ctx.InvocationID())
 					return
 				}
 			} else {
@@ -599,13 +603,19 @@ func isEmptyLiveResponse(r *model.LLMResponse) bool {
 }
 
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-	clientProvider, ok := f.Model.(interface {
+	if err := f.setStepModel(ctx, ResolveLiveModel); err != nil {
+		return nil, nil, err
+	}
+	clientProvider, ok := f.stepModel.(interface {
 		Client() *genai.Client
 	})
 	if !ok {
 		return nil, nil, fmt.Errorf("model does not support live connection")
 	}
 	client := clientProvider.Client()
+	if client == nil {
+		return nil, nil, fmt.Errorf("agent %q: model %q has no live client; check the model's credentials and configuration", ctx.Agent().Name(), f.stepModel.Name())
+	}
 
 	runCfg := runconfig.FromContext(ctx)
 	if runCfg == nil || runCfg.Live == nil {
@@ -620,7 +630,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		}()
 
 		nreq := &model.LLMRequest{
-			Model: f.Model.Name(),
+			Model: f.stepModel.Name(),
 		}
 		// The live callable map is built from f.Tools, so it needs the names
 		// of the tools that registered themselves without a declaration.
@@ -660,7 +670,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		// sending proactive_audio: false is an error) or not supported
 		// (Gemini 3.1 Flash Live). Live Translate is excluded by
 		// IsGemini3xLive and still gets both.
-		if !googlellm.IsGemini3xLive(f.Model.Name()) {
+		if !googlellm.IsGemini3xLive(f.stepModel.Name()) {
 			if runCfg.Live.EnableAffectiveDialog {
 				liveConnectConfig.EnableAffectiveDialog = new(true)
 			}
@@ -732,7 +742,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						liveConnectConfig.SessionResumption = &genai.SessionResumptionConfig{}
 					}
 					liveConnectConfig.SessionResumption.Handle = handle
-					if googlellm.GetGoogleLLMVariant(f.Model) == genai.BackendVertexAI {
+					if googlellm.GetGoogleLLMVariant(f.stepModel) == genai.BackendVertexAI {
 						liveConnectConfig.SessionResumption.Transparent = true
 					}
 				}
@@ -743,7 +753,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			if liveConnectConfig.SessionResumption != nil {
 				log.Printf("connecting with live session handle: %s\n", liveConnectConfig.SessionResumption.Handle) //nolint:forbidigo // pre-slog call site
 			}
-			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
+			liveSession, err := client.Live.Connect(connCtx, f.stepModel.Name(), liveConnectConfig)
 			if err != nil {
 				cancelConn()
 				log.Printf("failed to connect live session: %v\n", err) //nolint:forbidigo // pre-slog call site
@@ -762,7 +772,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			}
 
 			connectedAt := time.Now()
-			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name())
+			liveConn := googlellm.NewLiveConnection(liveSession, f.stepModel.Name())
 
 			cleanup := func() {
 				cancelConn()
@@ -1063,13 +1073,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 
 func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		if f.Model == nil {
-			yield(nil, fmt.Errorf("agent %q: %w", ctx.Agent().Name(), ErrModelNotConfigured))
+		if err := f.setStepModel(ctx, ResolveModel); err != nil {
+			yield(nil, err)
 			return
 		}
 
 		req := &model.LLMRequest{
-			Model: f.Model.Name(),
+			Model: f.stepModel.Name(),
 		}
 
 		// Preprocess before calling the LLM.
@@ -1410,7 +1420,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			return
 		}
 
-		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
+		for resp, err := range generateContent(ctx, f.currentModel(), req, useStream) {
 			if err != nil {
 				cbResp, cbErr := f.runOnModelErrorCallbacks(ctx, req, actions, err)
 				if cbErr != nil {
