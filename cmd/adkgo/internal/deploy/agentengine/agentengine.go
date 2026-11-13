@@ -18,6 +18,7 @@ package agentengine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,6 +36,7 @@ import (
 	"google.golang.org/api/option"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"google.golang.org/adk/v2/cmd/adkgo/internal/deploy"
 	"google.golang.org/adk/v2/internal/cli/util"
@@ -69,6 +71,8 @@ type agentEngineServiceFlags struct {
 	defaultEnv    bool
 	envVars       []*aiplatformpb.EnvVar
 	updateEnv     bool
+	secrets       []string
+	secretEnv     []*aiplatformpb.SecretEnvVar
 }
 
 type buildFlags struct {
@@ -124,7 +128,38 @@ func init() {
 		" A non-empty value is prefixed with projects/<project_name>/locations/<region>, so the model must be available in that region. To list models, GET"+
 		" https://${LOCATION_ID}-aiplatform.googleapis.com/v1beta1/publishers/google/models")
 	agentEngineCmd.PersistentFlags().DurationVar(&flags.agentEngine.memoryBank.ttl, "mem_ttl", time.Hour*24*365, "Time-To-Live for memories")
+	agentEngineCmd.PersistentFlags().StringArrayVar(&flags.agentEngine.secrets, "secret", nil, "Secret Manager secret to expose as an environment variable, as ENV_VARIABLE=SECRET:VERSION, where SECRET is a bare secret name (not a resource path) and VERSION is a version number, \"latest\" or a Secret Manager alias. The Reasoning Engine Service Agent needs roles/secretmanager.secretAccessor on the secret, or the deployed agent cannot read it. Not supported with --agent_engine_id. Can be repeated.")
 	registerEnvironmentFlags(agentEngineCmd, &flags.agentEngine)
+}
+
+var secretFlagRegexp = regexp.MustCompile(`^([^=]+)=([A-Za-z0-9_-]+):([A-Za-z0-9_-]+)$`)
+
+// parseSecrets converts ENV_VARIABLE=SECRET:VERSION values into SecretEnvVars.
+// Names already used by env are rejected, since a variable cannot be both.
+func parseSecrets(specs []string, env []*aiplatformpb.EnvVar) ([]*aiplatformpb.SecretEnvVar, error) {
+	var out []*aiplatformpb.SecretEnvVar
+	seen := map[string]bool{}
+	for _, e := range env {
+		seen[e.Name] = true
+	}
+	for i, spec := range specs {
+		m := secretFlagRegexp.FindStringSubmatch(spec)
+		if m == nil {
+			return nil, fmt.Errorf("invalid --secret value at position %d, want ENV_VARIABLE=SECRET:VERSION", i+1)
+		}
+		if !environmentNamePattern.MatchString(m[1]) {
+			return nil, fmt.Errorf("invalid --secret value at position %d: environment variable name must match %s", i+1, environmentNamePattern)
+		}
+		if seen[m[1]] {
+			return nil, fmt.Errorf("invalid --secret value at position %d: environment variable name is already set by --env, a default or another --secret", i+1)
+		}
+		seen[m[1]] = true
+		out = append(out, &aiplatformpb.SecretEnvVar{
+			Name:      m[1],
+			SecretRef: &aiplatformpb.SecretRef{Secret: m[2], Version: m[3]},
+		})
+	}
+	return out, nil
 }
 
 // computeFlags uses command line arguments to create a full config
@@ -136,6 +171,14 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 				return err
 			}
 			f.agentEngine.envVars = env
+			secretEnv, err := parseSecrets(f.agentEngine.secrets, env)
+			if err != nil {
+				return err
+			}
+			if len(secretEnv) > 0 && f.agentEngine.agentEngineID != "" {
+				return errors.New("--secret is not supported with --agent_engine_id: this command cannot set secrets when updating an existing Agent Engine")
+			}
+			f.agentEngine.secretEnv = secretEnv
 			f.source.origEntryPointPath = f.source.entryPointPath
 			absp, err := filepath.Abs(f.source.entryPointPath)
 			if err != nil {
@@ -357,6 +400,38 @@ func (f *deployAgentEngineFlags) memoryBankContextSpec() *aiplatformpb.Reasoning
 	return &aiplatformpb.ReasoningEngineContextSpec{MemoryBankConfig: cfg}
 }
 
+// createRequest builds the CreateReasoningEngine request, without the optional
+// Memory Bank context.
+func (f *deployAgentEngineFlags) createRequest(parent string, archiveContent []byte, methods []*structpb.Struct) *aiplatformpb.CreateReasoningEngineRequest {
+	req := &aiplatformpb.CreateReasoningEngineRequest{
+		Parent: parent,
+		ReasoningEngine: &aiplatformpb.ReasoningEngine{
+			DisplayName: f.agentEngine.displayName,
+			Spec: &aiplatformpb.ReasoningEngineSpec{
+				DeploymentSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
+					SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
+						Source: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource_{
+							InlineSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource{
+								SourceArchive: archiveContent,
+							},
+						},
+						LanguageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec_{
+							ImageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec{},
+						},
+					},
+				},
+				AgentFramework: "google-adk",
+				DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
+					Env:       f.agentEngine.envVars,
+					SecretEnv: f.agentEngine.secretEnv,
+				},
+				ClassMethods: methods,
+			},
+		},
+	}
+	return req
+}
+
 // gcloudDeployToAgentEngine invokes gcloud to deploy source on agentEngine
 func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine(opts ...option.ClientOption) error {
 	return util.LogStartStop("Deploying to Agent Engine",
@@ -390,31 +465,7 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine(opts ...option.Client
 			}
 			p("Methods:", string(methodsJSON))
 
-			req := &aiplatformpb.CreateReasoningEngineRequest{
-				Parent: parent,
-				ReasoningEngine: &aiplatformpb.ReasoningEngine{
-					DisplayName: f.agentEngine.displayName,
-					Spec: &aiplatformpb.ReasoningEngineSpec{
-						DeploymentSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
-							SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
-								Source: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource_{
-									InlineSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource{
-										SourceArchive: archiveContent,
-									},
-								},
-								LanguageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec_{
-									ImageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec{},
-								},
-							},
-						},
-						AgentFramework: "google-adk",
-						DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
-							Env: f.agentEngine.envVars,
-						},
-						ClassMethods: methods,
-					},
-				},
-			}
+			req := f.createRequest(parent, archiveContent, methods)
 
 			if f.agentEngine.memoryBank.deploy {
 				req.ReasoningEngine.ContextSpec = f.memoryBankContextSpec()
