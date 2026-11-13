@@ -512,3 +512,77 @@ func TestEventJSONEncodesRequestedAuthConfigsAsGiven(t *testing.T) {
 		t.Errorf("actions.requestedAuthConfigs mismatch (-want +got):\n%s", diff)
 	}
 }
+
+// TestEventActionsJSONAgentState pins the wire form adk-python reads and writes
+// for agent_state and end_of_agent. An empty agent state is a real checkpoint
+// there (an agent that has started but saved nothing yet), so it must survive
+// as {} rather than collapse into an absent key.
+func TestEventActionsJSONAgentState(t *testing.T) {
+	tests := []struct {
+		name    string
+		actions session.EventActions
+		want    map[string]string // json key -> raw value, "" means absent
+	}{
+		{
+			name:    "unset fields are omitted",
+			actions: session.EventActions{},
+			want:    map[string]string{"agentState": "", "endOfAgent": ""},
+		},
+		{
+			name:    "empty agent state is written",
+			actions: session.EventActions{AgentState: map[string]any{}},
+			want:    map[string]string{"agentState": "{}", "endOfAgent": ""},
+		},
+		{
+			name:    "populated agent state is written",
+			actions: session.EventActions{AgentState: map[string]any{"current_sub_agent": "b"}},
+			want:    map[string]string{"agentState": `{"current_sub_agent":"b"}`, "endOfAgent": ""},
+		},
+		{
+			name:    "end of agent is written",
+			actions: session.EventActions{EndOfAgent: true},
+			want:    map[string]string{"agentState": "", "endOfAgent": "true"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := json.Marshal(&session.Event{ID: "e", Author: "a", Actions: tt.actions})
+			if err != nil {
+				t.Fatalf("Marshal() failed: %v", err)
+			}
+			var wire struct {
+				Actions map[string]json.RawMessage `json:"actions"`
+			}
+			if err := json.Unmarshal(b, &wire); err != nil {
+				t.Fatalf("Unmarshal() failed: %v", err)
+			}
+			for key, want := range tt.want {
+				raw, ok := wire.Actions[key]
+				if want == "" {
+					if ok {
+						t.Errorf("actions.%s = %s, want the key to be absent", key, raw)
+					}
+					continue
+				}
+				if string(raw) != want {
+					t.Errorf("actions.%s = %s, want %s", key, raw, want)
+				}
+			}
+
+			got := &session.Event{}
+			if err := json.Unmarshal(b, got); err != nil {
+				t.Fatalf("Unmarshal() failed: %v", err)
+			}
+			if (got.Actions.AgentState == nil) != (tt.actions.AgentState == nil) {
+				t.Errorf("AgentState nil = %v after round trip, want %v", got.Actions.AgentState == nil, tt.actions.AgentState == nil)
+			}
+			if diff := cmp.Diff(tt.actions.AgentState, got.Actions.AgentState); diff != "" {
+				t.Errorf("AgentState mismatch (-want +got):\n%s", diff)
+			}
+			if got.Actions.EndOfAgent != tt.actions.EndOfAgent {
+				t.Errorf("EndOfAgent = %v, want %v", got.Actions.EndOfAgent, tt.actions.EndOfAgent)
+			}
+		})
+	}
+}
