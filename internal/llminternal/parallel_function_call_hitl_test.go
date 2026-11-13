@@ -550,3 +550,95 @@ func TestConfirmedToolWithSkipSummarizationEndsTheTurn(t *testing.T) {
 		t.Errorf("turn 2 event IsFinalResponse() = false, want true")
 	}
 }
+
+// TestConfirmedToolGetsCallbackEditsOnce pins that a before-tool callback's
+// edit to the args of a tool that asks for confirmation is applied once. The
+// adk_request_confirmation call carries the model's args in
+// originalFunctionCall, as adk-python's generate_request_confirmation_event
+// builds it from the function call event, and the call resumed after the
+// approval starts from them.
+func TestConfirmedToolGetsCallbackEditsOnce(t *testing.T) {
+	type readFileArgs struct {
+		Path string `json:"path"`
+	}
+	var ranWith []string
+	readFile, err := functiontool.New(functiontool.Config{
+		Name:                "read_file",
+		Description:         "reads a file",
+		RequireConfirmation: true,
+	}, func(_ agent.Context, args readFileArgs) (struct{}, error) {
+		ranWith = append(ranWith, args.Path)
+		return struct{}{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "hitl_tester",
+		Model: &singleCallMockModel{toolName: "read_file", fcID: "read_call_1", args: map[string]any{"path": "report.txt"}},
+		Tools: []tool.Tool{readFile},
+		BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+			func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				args["path"] = "/sandbox/" + args["path"].(string)
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionService := session.InMemoryService()
+	if _, err := sessionService.Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{Agent: a, SessionService: sessionService, AppName: "testApp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 1: the call asks for confirmation.
+	var confirmCall *genai.FunctionCall
+	for ev, err := range r.Run(t.Context(), "testUser", "testSession", genai.NewContentFromText("Read report.txt", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p.FunctionCall != nil && p.FunctionCall.Name == toolconfirmation.FunctionCallName {
+				confirmCall = p.FunctionCall
+			}
+		}
+	}
+	if confirmCall == nil {
+		t.Fatal("turn 1 asked for no confirmation")
+	}
+	original, err := toolconfirmation.OriginalCallFrom(confirmCall)
+	if err != nil {
+		t.Fatalf("OriginalCallFrom() error = %v", err)
+	}
+	if diff := cmp.Diff(map[string]any{"path": "report.txt"}, original.Args); diff != "" {
+		t.Errorf("originalFunctionCall args mismatch (-want +got):\n%s", diff)
+	}
+
+	// Turn 2: the user approves.
+	confirmationJSON, err := json.Marshal(toolconfirmation.ToolConfirmation{Confirmed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+		Name:     toolconfirmation.FunctionCallName,
+		ID:       confirmCall.ID,
+		Response: map[string]any{"response": string(confirmationJSON)},
+	}}}}
+	for _, err := range r.Run(t.Context(), "testUser", "testSession", reply, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if diff := cmp.Diff([]string{"/sandbox/report.txt"}, ranWith); diff != "" {
+		t.Errorf("paths the tool ran with mismatch (-want +got):\n%s", diff)
+	}
+}

@@ -101,9 +101,9 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal artifact_names to JSON: %w", err)
 		}
-		// Like adk-python, answer arguments the model can correct with a result
-		// rather than a tool error. A JSON null element decodes to "", which
-		// names no artifact, so it is rejected as well.
+		// Arguments the model can correct get an error result, not a tool
+		// error. A JSON null element would decode to "" without an error, so it
+		// is checked separately.
 		if err := json.Unmarshal(artifactNamesJson, &artifactNames); err != nil || hasNullElement(artifactNamesRaw) {
 			return map[string]any{
 				"error":      "'artifact_names' must be a list of strings.",

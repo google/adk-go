@@ -320,6 +320,7 @@ func TestToGenAIPartsRejectsMalformedVideoMetadata(t *testing.T) {
 	}{
 		{name: "not an object", meta: "peer-supplied-text"},
 		{name: "unparsable offset", meta: map[string]any{"startOffset": "peer-supplied-offset"}},
+		{name: "non-numeric fps", meta: map[string]any{"fps": "peer-supplied-fps"}},
 		{name: "not encodable", meta: make(chan int)},
 	}
 

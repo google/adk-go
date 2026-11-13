@@ -639,10 +639,11 @@ func TestRunner_UserFunctionCallCheckedAfterPlugin(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
+			ran := false
 			testAgent := must(agent.New(agent.Config{
 				Name: "test_agent",
 				Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
-					return func(func(*session.Event, error) bool) {}
+					return func(func(*session.Event, error) bool) { ran = true }
 				},
 			}))
 			replacer, err := plugin.New(plugin.Config{
@@ -670,8 +671,11 @@ func TestRunner_UserFunctionCallCheckedAfterPlugin(t *testing.T) {
 				}
 			}
 
-			if gotErr := runErr != nil; gotErr != tc.wantErr {
-				t.Errorf("r.Run() error = %v, want error %t", runErr, tc.wantErr)
+			if gotErr := errors.Is(runErr, errUserFunctionCall); gotErr != tc.wantErr {
+				t.Errorf("r.Run() error = %v, want errUserFunctionCall %t", runErr, tc.wantErr)
+			}
+			if ran == tc.wantErr {
+				t.Errorf("agent ran = %t, want %t", ran, !tc.wantErr)
 			}
 		})
 	}
