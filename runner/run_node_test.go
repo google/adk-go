@@ -1055,6 +1055,133 @@ func TestRunner_Node_ToleratesUnmatchedFunctionResponse(t *testing.T) {
 	}
 }
 
+// Answers resume the invocation of the calls they answer. On the node path
+// that also holds for calls of two invocations: the first call's invocation
+// is resumed, where adk-python raises for an LlmAgent root.
+func TestRunner_FunctionResponsesResumeTheirInvocation(t *testing.T) {
+	tests := []struct {
+		name string
+		root func(*testing.T) agent.Agent
+		ids  []string
+	}{
+		{name: "agent path, calls of one invocation", root: newCallerRoot, ids: []string{"fc-1a", "fc-1b"}},
+		{name: "node path, calls of one invocation", root: newPermissiveAgent, ids: []string{"fc-1a", "fc-1b"}},
+		{name: "node path, calls of two invocations", root: newPermissiveAgent, ids: []string{"fc-1a", "fc-2"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := runFunctionResponses(t, tt.root(t), tt.ids...)
+			for _, id := range got {
+				if id != "inv-1" {
+					t.Errorf("event InvocationID = %q, want %q", id, "inv-1")
+				}
+			}
+		})
+	}
+}
+
+// On the agent path, answers to calls of two invocations go back to the
+// calling agent in a new invocation, as adk-python does for a BaseAgent root
+// of an app that is not resumable.
+func TestRunner_FunctionResponsesStartNewInvocation(t *testing.T) {
+	tests := []struct {
+		name string
+		root func(*testing.T) agent.Agent
+		ids  []string
+	}{
+		{name: "agent path, calls of two invocations", root: newCallerRoot, ids: []string{"fc-1a", "fc-2"}},
+		{name: "agent path, unknown calls", root: newCallerRoot, ids: []string{"no-such-fc"}},
+		{name: "node path, unknown calls", root: newPermissiveAgent, ids: []string{"no-such-fc"}},
+		// fc-0's event has no invocation ID, and that counts as an invocation
+		// of its own, so the run gets a new ID as when fc-0 is answered alone.
+		{name: "agent path, call without an invocation ID first", root: newCallerRoot, ids: []string{"fc-0", "fc-2"}},
+		{name: "node path, call without an invocation ID first", root: newPermissiveAgent, ids: []string{"fc-0", "fc-2"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := runFunctionResponses(t, tt.root(t), tt.ids...)
+			for _, id := range got {
+				if id == "" || id == "inv-1" || id == "inv-2" {
+					t.Errorf("event InvocationID = %q, want a new invocation ID", id)
+				}
+			}
+		})
+	}
+}
+
+// newCallerRoot returns a custom root agent whose sub-agent "approver" made
+// the seeded calls, so the runner's agent path sends answers to those calls
+// back to it. The root itself yields one text event when it runs.
+func newCallerRoot(t *testing.T) agent.Agent {
+	t.Helper()
+	a, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{newPermissiveAgent(t)},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "root"
+				ev.LLMResponse.Content = genai.NewContentFromText("root", genai.RoleModel)
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	return a
+}
+
+// runFunctionResponses seeds call fc-0 in an event without an invocation ID,
+// calls fc-1a and fc-1b from invocation inv-1 and fc-2 from inv-2, all made
+// by "approver", runs root on a message answering callIDs, and returns the
+// invocation ID of every event the run yields.
+func runFunctionResponses(t *testing.T, root agent.Agent, callIDs ...string) []string {
+	t.Helper()
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+	seedFunctionCall(t, ctx, svc, "", "fc-0")
+	seedFunctionCall(t, ctx, svc, "inv-1", "fc-1a", "fc-1b")
+	seedFunctionCall(t, ctx, svc, "inv-2", "fc-2")
+	r := newNodeTestRunner(t, root, svc)
+
+	msg := &genai.Content{Role: genai.RoleUser}
+	for _, id := range callIDs {
+		msg.Parts = append(msg.Parts, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: id, Name: "tool", Response: map[string]any{}}})
+	}
+	var got []string
+	for ev, err := range r.Run(ctx, nodeTestUser, nodeTestSession, msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		got = append(got, ev.InvocationID)
+	}
+	if len(got) == 0 {
+		t.Fatal("Run() yielded no events")
+	}
+	return got
+}
+
+// seedFunctionCall appends a model event carrying function calls with the
+// given IDs, as if invocationID had issued them.
+func seedFunctionCall(t *testing.T, ctx context.Context, svc session.Service, invocationID string, callIDs ...string) {
+	t.Helper()
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: nodeTestApp, UserID: nodeTestUser, SessionID: nodeTestSession})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	ev := session.NewEvent(ctx, invocationID)
+	ev.Author = "approver"
+	ev.LLMResponse.Content = &genai.Content{Role: "model"}
+	for _, id := range callIDs {
+		ev.LLMResponse.Content.Parts = append(ev.LLMResponse.Content.Parts, &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "tool"}})
+	}
+	if err := svc.AppendEvent(ctx, got.Session, ev); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+}
+
 // errNodeBoom is the failure the boom node returns in
 // TestRunner_WorkflowNode_ErrorPropagates.
 var errNodeBoom = errors.New("node failure")
