@@ -220,7 +220,7 @@ func (r *Runner) runNode(
 				continue
 			}
 			event = fromPlugin(event, modifiedEvent, record)
-			stampTimestamp(ictx, event) // a replacement may be a struct literal too
+			stampTimestamp(ictx, event) // a plugin may have rewritten the event in place
 		}
 
 		if !event.LLMResponse.Partial {
