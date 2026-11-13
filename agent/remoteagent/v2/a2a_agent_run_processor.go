@@ -47,6 +47,12 @@ type a2aAgentRunProcessor struct {
 	partConverter adka2a.A2APartConverter
 	request       *a2a.SendMessageRequest
 
+	// adkExtension is set once the remote agent marks a response with
+	// [adka2a.ADKExtensionURI], as [adka2a.Executor] does. adk-python filters
+	// thought parts only from responses without the key, so
+	// dropThoughtsBesideAnswer runs only while this is false.
+	adkExtension bool
+
 	// partial event contents emitted before the terminal event
 	aggregations map[a2a.ArtifactID]*artifactAggregation
 	// used to emit aggregations in the order of last update
@@ -205,8 +211,14 @@ func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext
 		return nil, fmt.Errorf("failed to convert a2aEvent: %w", err)
 	}
 
+	if _, ok := a2aEvent.Meta()[adka2a.ADKExtensionURI]; ok {
+		p.adkExtension = true
+	}
 	if event != nil {
 		p.updateCustomMetadata(event, a2aEvent)
+		if !p.adkExtension {
+			dropThoughtsBesideAnswer(a2aEvent, event)
+		}
 	}
 
 	return event, nil
@@ -260,5 +272,40 @@ func (p *a2aAgentRunProcessor) updateCustomMetadata(event *session.Event, respon
 		} else {
 			event.CustomMetadata[adka2a.ToADKMetaKey(k+"_codec_error")] = err.Error()
 		}
+	}
+}
+
+// dropThoughtsBesideAnswer removes the thought parts of an event that also
+// carries parts that are not thoughts, so only the answer reaches the user.
+// An event made only of thoughts is kept as it is.
+//
+// Interim status updates are skipped. Their text parts are marked as thoughts
+// to report progress, while their function call and data parts are not, so
+// filtering them would drop that text. adk-python marks every part of an
+// interim update as a thought, so its filter keeps the whole update too.
+//
+// Artifact chunks that aggregatePartial reassembles, appended chunks and chunks
+// before the last one, are skipped as well. adk-go stores the reassembled
+// artifact as one event, which adk-python does not do, and filtering the chunks
+// first would cut the reassembled thoughts short. An artifact sent whole in one
+// update, which is how ADK servers send a final answer, is filtered like any
+// other event.
+func dropThoughtsBesideAnswer(a2aEvent a2a.Event, event *session.Event) {
+	switch e := a2aEvent.(type) {
+	case *a2a.TaskArtifactUpdateEvent:
+		if !adka2a.IsPartialFlagSet(e.Meta()) && (e.Append || !e.LastChunk) {
+			return
+		}
+	case *a2a.TaskStatusUpdateEvent:
+		if !e.Status.State.Terminal() && e.Status.State != a2a.TaskStateInputRequired {
+			return
+		}
+	}
+	if event.Content == nil {
+		return
+	}
+	answer := slices.DeleteFunc(slices.Clone(event.Content.Parts), func(p *genai.Part) bool { return p.Thought })
+	if len(answer) > 0 {
+		event.Content.Parts = answer
 	}
 }
