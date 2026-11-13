@@ -16,13 +16,17 @@ package workflow
 
 import (
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/workflowwalk"
 )
 
 // init registers walkAgents as internal [workflowwalk.WalkAgents] for the experimental
-// app-info endpoint (exp/appinfo). The walk reads unexported node fields, so it
-// has to live in this package, and a function variable in an internal package
-// keeps it reachable only from this module.
+// app-info endpoint (exp/appinfo) and the runner's Close (package runner),
+// through internal/agenttree, and walkToolAgents as
+// [workflowwalk.WalkToolAgents] for the runner's Close. The walks read
+// unexported node fields, so they have to live in this package, and a
+// function variable in an internal package keeps them reachable only from
+// this module.
 //
 // Exporting the walk would make it public API for a feature that is still
 // experimental. It would also give callers the agents a running graph uses.
@@ -36,33 +40,58 @@ func init() {
 	workflowwalk.WalkAgents = func(edges any) []agent.Agent {
 		return walkAgents(edges.([]Edge))
 	}
+	workflowwalk.WalkToolAgents = func(edges any) []agent.Agent {
+		return walkToolAgents(edges.([]Edge))
+	}
 }
 
 // walkAgents is the walk behind [workflowwalk.WalkAgents].
 func walkAgents(edges []Edge) []agent.Agent {
 	var agents []agent.Agent
+	walkNodes(edges, func(n Node) {
+		if n, ok := n.(*AgentNode); ok {
+			agents = append(agents, n.agent)
+		}
+	})
+	return agents
+}
+
+// walkToolAgents is the walk behind [workflowwalk.WalkToolAgents].
+func walkToolAgents(edges []Edge) []agent.Agent {
+	var agents []agent.Agent
+	walkNodes(edges, func(n Node) {
+		if n, ok := n.(*ToolNode); ok {
+			if wrapper, ok := n.tool.(toolinternal.AgentWrapper); ok {
+				agents = append(agents, wrapper.WrappedAgent())
+			}
+		}
+	})
+	return agents
+}
+
+// walkNodes calls visit once for every node of edges, and for the nodes of
+// nested workflows and those ParallelWorkers wrap.
+func walkNodes(edges []Edge, visit func(Node)) {
 	seen := make(map[Node]bool)
-	var visit func(n Node)
-	visitAll := func(edges []Edge) {
+	var walk func(n Node)
+	walkAll := func(edges []Edge) {
 		for _, e := range edges {
-			visit(e.From)
-			visit(e.To)
+			walk(e.From)
+			walk(e.To)
 		}
 	}
-	visit = func(n Node) {
+	walk = func(n Node) {
 		if seen[n] {
 			return
 		}
 		seen[n] = true
+		visit(n)
 		switch n := n.(type) {
-		case *AgentNode:
-			agents = append(agents, n.agent)
 		case *WorkflowNode:
-			visitAll(n.subWorkflow.graph.allEdges())
+			walkAll(n.subWorkflow.graph.allEdges())
 		case *ParallelWorker:
-			visit(n.wrapped)
+			walk(n.wrapped)
 		}
 	}
-	visitAll(edges)
-	return agents
+	walkAll(edges)
 }

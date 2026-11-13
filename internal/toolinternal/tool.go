@@ -63,6 +63,18 @@ type SkipSummarizationResultDisplayer interface {
 	DisplayResultOnSkipSummarization() bool
 }
 
+// ToolsetUnwrapper is implemented by a toolset that wraps another one.
+type ToolsetUnwrapper interface {
+	Unwrap() tool.Toolset
+}
+
+// AgentWrapper is implemented by a tool that runs another agent in a runner
+// of its own, such as agenttool's.
+type AgentWrapper interface {
+	tool.Tool
+	WrappedAgent() agent.Agent
+}
+
 // PanicError is a panic recovered from a tool's handler. Its message includes
 // the panic value and the stack, so callbacks and plugins can record them, but
 // the flow must not show it to the model.

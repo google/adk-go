@@ -35,6 +35,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/ranksearch"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -106,6 +107,8 @@ type Config struct {
 // that also reaches the agent another way, such as llmagent.Config.Tools, is
 // still searchable, and once discovered it fails every later model step of the
 // session with the same duplicate-tool error.
+//
+// Close on the returned toolset closes base when that implements [io.Closer].
 func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
 	if base == nil {
 		return nil, errors.New("toolsearch: base toolset is nil")
@@ -412,6 +415,10 @@ type gatingToolset struct {
 }
 
 func (g *gatingToolset) Name() string { return "SearchGatedToolset" }
+
+func (g *gatingToolset) Close() error { return utils.CloseIfCloser(g.base) }
+
+func (g *gatingToolset) Unwrap() tool.Toolset { return g.base }
 
 // requestProcessor matches the per-tool hook ADK uses to pack a tool's
 // declaration into the outgoing LLM request. functiontool and the other ADK

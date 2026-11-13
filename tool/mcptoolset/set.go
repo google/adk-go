@@ -57,7 +57,9 @@ type MetadataProvider func(ctx agent.Context) (map[string]any, error)
 // operations to finish, and is safe to call concurrently or more than once.
 // Further MCP operations fail with [mcp.ErrConnectionClosed]; closing does not
 // affect other sessions created with Config.Client.
-// When using [tool.FilterToolset], retain the original toolset to close it.
+// A toolset wrapped by [tool.FilterToolset], [tool.WithConfirmation] or a
+// toolsearch toolset is closed through the wrapper, and the runner closes it
+// once even when the wrapper is shared. Closing it directly as well does no harm.
 //
 // Usage: create MCP ToolSet with mcptoolset.New() and provide it to the
 // LLMAgent in the llmagent.Config.
