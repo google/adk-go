@@ -42,6 +42,15 @@ func (s *seqAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 	return s.impl.RunLive(ctx)
 }
 
+// FindAgent returns the agent with the given name in s and its descendants.
+// For s's own name it returns s, not the embedded base agent.
+func (s *seqAgent) FindAgent(name string) agent.Agent {
+	if s.Name() == name {
+		return s
+	}
+	return s.FindSubAgent(name)
+}
+
 // New creates a SequentialAgent.
 //
 // SequentialAgent executes its sub-agents once, in the order they are listed.

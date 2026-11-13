@@ -1000,6 +1000,39 @@ func TestSequentialAgent_RunWithoutSessionOrFunctionResponse(t *testing.T) {
 	}
 }
 
+func TestSequentialAgent_FindAgentReturnsSequentialAgent(t *testing.T) {
+	child := newCustomAgent(t, 0)
+	seq := newSequentialAgent(t, []agent.Agent{child}, "seq")
+	llmParent, err := llmagent.New(llmagent.Config{Name: "llm_parent", SubAgents: []agent.Agent{seq}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseParent, err := agent.New(agent.Config{Name: "base_parent", SubAgents: []agent.Agent{seq}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		root       agent.Agent
+		targetName string
+		want       agent.Agent
+	}{
+		{name: "own name", root: seq, targetName: "seq", want: seq},
+		{name: "through llm agent parent", root: llmParent, targetName: "seq", want: seq},
+		{name: "through base agent parent", root: baseParent, targetName: "seq", want: seq},
+		{name: "sub-agent", root: seq, targetName: "custom_agent_0", want: child},
+		{name: "unknown name", root: seq, targetName: "unknown", want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.root.FindAgent(tc.targetName); got != tc.want {
+				t.Errorf("FindAgent(%q) = %T(%p), want %T(%p)", tc.targetName, got, got, tc.want, tc.want)
+			}
+		})
+	}
+}
+
 type singleCallLLM struct {
 	model.LLM
 	call  *genai.FunctionCall
