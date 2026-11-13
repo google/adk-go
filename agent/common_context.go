@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"sync"
@@ -820,6 +821,11 @@ func (a *trackedArtifacts) Save(ctx context.Context, name string, data *genai.Pa
 	}
 	return resp, nil
 }
+
+// errNoArtifactService is the error a context returns for an artifact service
+// its invocation does not have. The text is adk-python's (agents/context.py),
+// in Go's style.
+var errNoArtifactService = errors.New("artifact service is not initialized")
 
 // NewCleanToolContextTestOnly is intended only for tests. Do not use for other purposes, please!
 func NewCleanToolContextTestOnly(ctx Context, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) (Context, error) {

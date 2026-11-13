@@ -16,10 +16,13 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
@@ -232,4 +235,36 @@ type Context interface {
 
 	// WithDelta returns a copy of source context with applied delta d
 	WithDelta(d *CommonContextDelta) Context
+}
+
+// artifactVersionReader is the method of an Artifacts that can look up the
+// record of an artifact version, such as the Artifacts the runner builds over
+// its [artifact.Service].
+type artifactVersionReader interface {
+	ArtifactVersion(ctx context.Context, name string, version *int64) (*artifact.ArtifactVersion, error)
+}
+
+// ArtifactVersion looks up a version of an artifact by name in the invocation's
+// artifact service. If version is nil, it returns the latest version.
+// It returns an error wrapping [fs.ErrNotExist] if the artifact or the version
+// does not exist. A non-nil version of 0 or less returns an error wrapping
+// [fs.ErrNotExist] without calling the service.
+// If the context's artifacts do not support version lookup, it returns an error
+// wrapping [errors.ErrUnsupported].
+// If the invocation has no artifact service configured, it returns an error
+// stating "artifact service is not initialized".
+func ArtifactVersion(ctx Context, name string, version *int64) (*artifact.ArtifactVersion, error) {
+	arts := ctx.Artifacts()
+	for {
+		switch a := arts.(type) {
+		case nil:
+			return nil, errNoArtifactService
+		case artifactVersionReader:
+			return a.ArtifactVersion(ctx, name, version)
+		case interface{ Unwrap() Artifacts }:
+			arts = a.Unwrap()
+		default:
+			return nil, fmt.Errorf("artifacts of type %T cannot look up versions: %w", arts, errors.ErrUnsupported)
+		}
+	}
 }

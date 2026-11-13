@@ -16,6 +16,8 @@ package artifact
 
 import (
 	"context"
+	"fmt"
+	"io/fs"
 
 	"google.golang.org/genai"
 
@@ -66,6 +68,39 @@ func (a *Artifacts) List(ctx context.Context) (*artifact.ListResponse, error) {
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 	})
+}
+
+// ArtifactVersion returns the record of version of the named artifact in a's
+// session, or of its latest version when version is nil.
+//
+// When a's service forwards to the artifacts of a parent context that has no
+// artifact service, through any number of nested AgentTools, it returns that
+// parent's error first, whatever the version. A non-nil version of 0 or less
+// returns an error wrapping [fs.ErrNotExist] without calling the service.
+// Otherwise it returns the service's error unchanged; a missing artifact or
+// version is an error wrapping [fs.ErrNotExist].
+func (a *Artifacts) ArtifactVersion(ctx context.Context, name string, version *int64) (*artifact.ArtifactVersion, error) {
+	if err := forwardedServiceErr(a.Service); err != nil {
+		return nil, err
+	}
+	req := &artifact.GetArtifactVersionRequest{
+		AppName:   a.AppName,
+		UserID:    a.UserID,
+		SessionID: a.SessionID,
+		FileName:  name,
+	}
+	if version != nil {
+		// The service reads version 0 as the latest; versions start at 1.
+		if *version <= 0 {
+			return nil, fmt.Errorf("artifact not found: version is not positive: %w", fs.ErrNotExist)
+		}
+		req.Version = *version
+	}
+	resp, err := a.Service.GetArtifactVersion(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return resp.ArtifactVersion, nil
 }
 
 var _ agent.Artifacts = (*Artifacts)(nil)

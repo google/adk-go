@@ -199,3 +199,16 @@ func TestForwardingService_Errors(t *testing.T) {
 		})
 	}
 }
+
+// A forwarding service over parent artifacts written outside adk-go, which
+// expose no backing service, reports that before it checks the version. It
+// fails if the chain check ignores such a parent, so that version 0 reports a
+// missing artifact instead of an unsupported operation.
+func TestArtifactVersion_ForeignParentBeforeVersionCheck(t *testing.T) {
+	arts := &artifactinternal.Artifacts{Service: artifactinternal.NewForwardingService(failingParent{})}
+	v0 := int64(0)
+	got, err := arts.ArtifactVersion(t.Context(), "a.txt", &v0)
+	if got != nil || !errors.Is(err, errors.ErrUnsupported) || errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("ArtifactVersion(0) = %v, %v; want nil and an error wrapping errors.ErrUnsupported, not fs.ErrNotExist", got, err)
+	}
+}
