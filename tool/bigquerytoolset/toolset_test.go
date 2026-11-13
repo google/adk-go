@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,7 @@ type fakeBigQuery struct {
 
 	mu       sync.Mutex
 	requests []*http.Request
+	bodies   []string
 }
 
 type fakeResponse struct {
@@ -69,8 +71,13 @@ func newFakeBigQuery(t *testing.T, responses map[string]fakeResponse) *fakeBigQu
 }
 
 func (f *fakeBigQuery) serve(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		f.t.Errorf("reading the request body: %v", err)
+	}
 	f.mu.Lock()
 	f.requests = append(f.requests, r.Clone(context.Background()))
+	f.bodies = append(f.bodies, string(body))
 	f.mu.Unlock()
 
 	key := r.Method + " " + r.URL.Path
@@ -97,6 +104,19 @@ func (f *fakeBigQuery) lastRequest() *http.Request {
 		f.t.Fatal("no request reached the fake BigQuery server")
 	}
 	return f.requests[len(f.requests)-1]
+}
+
+// requestBodies returns the JSON body of each request, decoded, in order.
+func (f *fakeBigQuery) requestBodies() []any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]any, len(f.bodies))
+	for i, b := range f.bodies {
+		if b != "" {
+			out[i] = decodeJSON(f.t, b)
+		}
+	}
+	return out
 }
 
 // clientOptions points the toolset at the fake server without credentials.
@@ -210,7 +230,7 @@ func TestToolset_ToolNames(t *testing.T) {
 	for _, tl := range tools {
 		got = append(got, tl.Name())
 	}
-	want := []string{"get_dataset_info", "get_job_info", "get_table_info", "list_dataset_ids", "list_table_ids"}
+	want := []string{"execute_sql", "get_dataset_info", "get_job_info", "get_table_info", "list_dataset_ids", "list_table_ids"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("tool names mismatch (-want +got):\n%s", diff)
 	}
@@ -718,9 +738,9 @@ func TestGetJobInfo_Location(t *testing.T) {
 	}
 }
 
-// TestTools_LocationOnlyOnJobInfo checks that Config.Location is sent only by
-// get_job_info: the other tools address datasets and tables by path, and
-// adk-python's client only adds a location when it looks a job up.
+// TestTools_LocationOnlyOnJobInfo checks that Config.Location is not sent by
+// the dataset and table tools: they address datasets and tables by path, and
+// adk-python's client adds a location only to job requests.
 func TestTools_LocationOnlyOnJobInfo(t *testing.T) {
 	f := newFakeBigQuery(t, map[string]fakeResponse{
 		"GET /bigquery/v2/projects/p/datasets":            {body: `{}`},
@@ -778,6 +798,7 @@ func TestTools_APIErrorIsReturnedToModel(t *testing.T) {
 		"GET /bigquery/v2/projects/p/datasets/missing/tables/t": notFound,
 		"GET /bigquery/v2/projects/missing/datasets":            notFound,
 		"GET /bigquery/v2/projects/p/jobs/missing":              notFound,
+		"POST /bigquery/v2/projects/missing/jobs":               notFound,
 	})
 	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
 
@@ -790,6 +811,7 @@ func TestTools_APIErrorIsReturnedToModel(t *testing.T) {
 		{tool: "list_table_ids", args: map[string]any{"project_id": "p", "dataset_id": "missing"}},
 		{tool: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "missing", "table_id": "t"}},
 		{tool: "get_job_info", args: map[string]any{"project_id": "p", "job_id": "missing"}},
+		{tool: "execute_sql", args: map[string]any{"project_id": "missing", "query": "SELECT 1"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool, func(t *testing.T) {
@@ -1005,6 +1027,7 @@ func TestTools_UserAgent(t *testing.T) {
 		"GET /bigquery/v2/projects/p/datasets/d/tables":   {body: `{}`},
 		"GET /bigquery/v2/projects/p/datasets/d/tables/t": {body: `{}`},
 		"GET /bigquery/v2/projects/p/jobs/j":              {body: `{}`},
+		"POST /bigquery/v2/projects/p/jobs":               {body: selectDryRun},
 	})
 	tools := []struct {
 		name string
@@ -1015,6 +1038,7 @@ func TestTools_UserAgent(t *testing.T) {
 		{name: "list_table_ids", args: map[string]any{"project_id": "p", "dataset_id": "d"}},
 		{name: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "d", "table_id": "t"}},
 		{name: "get_job_info", args: map[string]any{"project_id": "p", "job_id": "j"}},
+		{name: "execute_sql", args: map[string]any{"project_id": "p", "query": "SELECT 1", "dry_run": true}},
 	}
 	apps := []struct {
 		name    string
@@ -1160,6 +1184,8 @@ func TestTools_InvalidIDsAreRejected(t *testing.T) {
 		{tool: "get_job_info", args: map[string]any{"project_id": "..", "job_id": "j"}},
 		{tool: "get_job_info", args: map[string]any{"project_id": "p", "job_id": ""}},
 		{tool: "get_job_info", args: map[string]any{"project_id": "p", "job_id": ".."}},
+		{tool: "execute_sql", args: map[string]any{"project_id": "..", "query": "SELECT 1"}},
+		{tool: "execute_sql", args: map[string]any{"project_id": "", "query": "SELECT 1"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool, func(t *testing.T) {
@@ -1186,6 +1212,7 @@ func TestTools_IDsAreEscaped(t *testing.T) {
 		"GET /bigquery/v2/projects/p/datasets/a/b":          {body: `{}`},
 		"GET /bigquery/v2/projects/p/datasets/d/tables/a/b": {body: `{}`},
 		"GET /bigquery/v2/projects/p/jobs/a/b":              {body: `{}`},
+		"POST /bigquery/v2/projects/a/b/jobs":               {body: selectDryRun},
 	})
 	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
 
@@ -1197,6 +1224,7 @@ func TestTools_IDsAreEscaped(t *testing.T) {
 		{tool: "get_dataset_info", args: map[string]any{"project_id": "p", "dataset_id": "a/b"}, wantPath: "/bigquery/v2/projects/p/datasets/a%2Fb"},
 		{tool: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "d", "table_id": "a/b"}, wantPath: "/bigquery/v2/projects/p/datasets/d/tables/a%2Fb"},
 		{tool: "get_job_info", args: map[string]any{"project_id": "p", "job_id": "a/b"}, wantPath: "/bigquery/v2/projects/p/jobs/a%2Fb"},
+		{tool: "execute_sql", args: map[string]any{"project_id": "a/b", "query": "SELECT 1", "dry_run": true}, wantPath: "/bigquery/v2/projects/a%2Fb/jobs"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool, func(t *testing.T) {
