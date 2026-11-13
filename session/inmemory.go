@@ -17,6 +17,8 @@ package session
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"maps"
@@ -48,7 +50,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
 	}
 
-	sessionID := req.SessionID
+	sessionID := strings.TrimSpace(req.SessionID)
 	if sessionID == "" {
 		sessionID = platform.NewUUID(ctx)
 	}
@@ -64,7 +66,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	defer s.mu.Unlock()
 
 	if _, ok := s.sessions.Get(encodedKey); ok {
-		return nil, fmt.Errorf("session %s already exists", req.SessionID)
+		return nil, fmt.Errorf("session %s already exists", sessionID)
 	}
 
 	state := req.State
@@ -104,12 +106,12 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 	id := id{
 		appName:   appName,
 		userID:    userID,
-		sessionID: sessionID,
+		sessionID: strings.TrimSpace(sessionID),
 	}
 
 	res, ok := s.sessions.Get(id.Encode())
 	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrNotFound, req.SessionID)
+		return nil, fmt.Errorf("%w: %q", ErrNotFound, id.sessionID)
 	}
 
 	copiedSession := copySessionWithoutStateAndEvents(res)
@@ -205,7 +207,7 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 	id := id{
 		appName:   appName,
 		userID:    userID,
-		sessionID: sessionID,
+		sessionID: strings.TrimSpace(sessionID),
 	}
 
 	s.sessions.Delete(id.Encode())
@@ -241,6 +243,15 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("unexpected session type %T for session ID %s", curSession, curSession.ID())
 	}
 
+	// Trim here, before sess.appendEvent publishes its own trimmed event into
+	// the live session's event list: the map cloned below is then one no other
+	// goroutine can reach. The database backend trims twice for the same
+	// reason, once for the live session and once for what it persists.
+	trimmed := trimTempDeltaState(event)
+	// Encoded before taking s.mu, so the encoding's cost does not stall other
+	// sessions.
+	key, keyErr := redeliveryKey(trimmed)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -249,11 +260,17 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("%w: %q, cannot apply event", ErrNotFound, sess.id.sessionID)
 	}
 
-	// Trim here, before sess.appendEvent publishes its own trimmed event into
-	// the live session's event list: the map cloned below is then one no other
-	// goroutine can reach. The database backend trims twice for the same
-	// reason, once for the live session and once for what it persists.
-	trimmedDelta := maps.Clone(trimTempDeltaState(event).Actions.StateDelta)
+	// A caller that retries AppendEvent re-delivers the event it just stored.
+	// Appending it again would duplicate it and re-apply its state delta, so
+	// an event whose key equals that of the latest stored event with its ID
+	// returns here. Distinct events that only share an ID have different
+	// keys and are kept. Comparing only the latest one keeps each append's
+	// cost constant while it holds s.mu, however many stored events share an
+	// ID.
+	if prev, ok := stored_session.latestKeyByID[event.ID]; ok && keyErr == nil && prev == key {
+		return nil
+	}
+	trimmedDelta := maps.Clone(trimmed.Actions.StateDelta)
 
 	// update the in-memory session
 	// Keep the session locked until AppendEvent finishes all reads of event.
@@ -297,6 +314,16 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	// update the in-memory session service
 	stored_session.events = append(stored_session.events, eventCopy)
+	if keyErr != nil {
+		// The event just appended is the latest with its ID, and it has no
+		// key, so nothing re-delivered matches it.
+		delete(stored_session.latestKeyByID, event.ID)
+	} else {
+		if stored_session.latestKeyByID == nil {
+			stored_session.latestKeyByID = make(map[string]string)
+		}
+		stored_session.latestKeyByID[event.ID] = key
+	}
 	stored_session.updatedAt = event.Timestamp
 	if len(event.Actions.StateDelta) > 0 {
 		appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
@@ -364,6 +391,12 @@ type session struct {
 	events    []*Event
 	state     map[string]any
 	updatedAt time.Time
+
+	// latestKeyByID maps each event ID in events to the [redeliveryKey] of the
+	// latest event appended with that ID. Only the service's stored copy sets
+	// it, and inMemoryService.mu guards it, not mu above. AppendEvent uses it
+	// to recognize a retried append.
+	latestKeyByID map[string]string
 }
 
 func (s *session) ID() string {
@@ -501,6 +534,34 @@ func trimTempDeltaState(event *Event) *Event {
 	eventCopy.Actions.StateDelta = filteredStateDelta
 
 	return &eventCopy
+}
+
+// redeliveryKey returns the value AppendEvent compares to recognize a
+// re-delivered event: the SHA-256 digest of the event's JSON encoding, with
+// its timestamp in UTC. Keeping the digest rather than the encoding keeps the
+// memory held per event ID small, whatever the event carries.
+//
+// The key is a string that no session handle can reach. The stored *Event is
+// handed out by Get, and it shares Content, CustomMetadata, RequestedInput,
+// NodeInfo and Output with the caller, so comparing against it would read
+// memory that another goroutine may be writing, and would see in-place edits
+// made after the append.
+//
+// The key compares by value, as adk-python's event equality does. UTC drops
+// the location and the monotonic clock reading, so two copies of one instant
+// get the same key. The encoding holds every field a persisting backend
+// stores; the fields it skips, such as a response schema's property order,
+// only affect presentation. An error means the event holds a value JSON
+// cannot encode, such as NaN, a channel or a func.
+func redeliveryKey(event *Event) (string, error) {
+	e := *event
+	e.Timestamp = e.Timestamp.UTC()
+	b, err := json.Marshal(&e)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return string(sum[:]), nil
 }
 
 // updateSessionState updates the session state based on the event state delta.
