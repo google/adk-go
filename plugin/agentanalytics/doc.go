@@ -75,6 +75,34 @@
 // [Config.MaxContentLen] to Cloud Storage at batch flush time and records
 // BigQuery ObjectRef entries in content_parts.
 //
+// # Best-effort inspection of ADK internals
+//
+// ADK does not expose everything that tells apart the attempts of a tool call
+// or the activations of a task-mode agent, so the plugin reads some
+// unexported fields of the google.golang.org/adk/v2 contexts by reflection.
+// It reads fields of ADK's own context types and of the standard library's
+// context wrappers only: a context of any other type, whose fields are its
+// own, tells its EventActions through its Actions() method, and a custom
+// context that a standard-library wrapper hides is not inspected. These reads
+// are best effort: if a version of ADK or a custom context wrapper changes or
+// hides those fields, the reads fail quietly, without a build error or a log,
+// and the plugin falls back as follows.
+//
+//   - The EventActions of a tool context (see agent.NewToolContext): tool
+//     callbacks are told apart by their context pointer and JSON-shaped
+//     arguments instead (see [EventToolCompleted]). A custom context that is
+//     not a pointer no longer suppresses the TOOL_COMPLETED row of a recovered
+//     tool error, and a pointer context without EventActions suppresses it
+//     only when AfterToolCallback sees unchanged JSON-shaped arguments within
+//     the comparison bounds. A finish_task function response event of a
+//     task-mode agent no longer shows which activation wrote it: a delayed
+//     response of a finish_task call that failed or was recovered ends no
+//     activation unless an open or settled finish_task call shows a newer
+//     completion (or a hidden-callback peer's deferred completion settles once
+//     the activation ends, unless a finish_task response of that peer reports
+//     no completion), so the [EventAgentCompleted] row of a task-mode agent
+//     can move to the end of its parent or run.
+//
 // # Behavioral Differences from adk-python
 //
 // Rows written by this package share the same table schema ([SchemaVersion] "2")

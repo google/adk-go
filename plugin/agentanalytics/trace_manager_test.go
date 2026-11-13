@@ -28,6 +28,7 @@ import (
 	"iter"
 	"log"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1008,13 +1009,13 @@ func TestTraceManager_FailedToolCallBookkeeping(t *testing.T) {
 	}
 }
 
-// TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse replays a
-// failed tool call that a subsequent OnToolErrorCallback recovers (err == nil
-// in AfterToolCallback). TOOL_STARTING, TOOL_ERROR, and TOOL_COMPLETED share
-// the tool call's span under the agent span (with latency_ms reported once on
-// TOOL_ERROR), while AGENT_RESPONSE (when in FinalResponseToolNames) is placed
-// on the enclosing agent span.
-func TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse(t *testing.T) {
+// TestTraceManager_RecoveredToolErrorEmitsOnlyToolError replays a failed tool
+// call that a subsequent OnToolErrorCallback recovers (err == nil in
+// AfterToolCallback). TOOL_STARTING and TOOL_ERROR share the tool call's span
+// under the agent span (with latency_ms reported on TOOL_ERROR), while
+// TOOL_COMPLETED and AGENT_RESPONSE (even when in FinalResponseToolNames) are
+// suppressed.
+func TestTraceManager_RecoveredToolErrorEmitsOnlyToolError(t *testing.T) {
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"final_answer"} })
 	toolCtx := withFunctionCall(mCtx, "call-recovered")
 	final := &fakeTool{name: "final_answer"}
@@ -1034,8 +1035,6 @@ func TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse(t *testin
 		EventAgentStarting,
 		EventToolStarting,
 		EventToolError,
-		EventToolCompleted,
-		EventAgentResponse,
 		EventAgentCompleted,
 		EventInvocationCompleted,
 	}
@@ -1047,23 +1046,17 @@ func TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse(t *testin
 	if toolStart.parent != agentStart.span {
 		t.Errorf("TOOL_STARTING parent_span_id = %q, want agent span %q", toolStart.parent, agentStart.span)
 	}
-	for _, evType := range []string{EventToolError, EventToolCompleted} {
-		row := onlyRowOfType(t, rows, evType)
-		if got := placeOf(row); got != toolStart {
-			t.Errorf("%s is at %+v, want %+v", evType, got, toolStart)
-		}
+	errRow := onlyRowOfType(t, rows, EventToolError)
+	if got := placeOf(errRow); got != toolStart {
+		t.Errorf("TOOL_ERROR is at %+v, want %+v", got, toolStart)
 	}
-	if got := placeOf(onlyRowOfType(t, rows, EventAgentResponse)); got != agentStart {
-		t.Errorf("AGENT_RESPONSE is at %+v, want agent span %+v", got, agentStart)
+	mustLatency(t, errRow)
+	if errRow["status"] != "ERROR" {
+		t.Errorf("TOOL_ERROR status = %v, want ERROR", errRow["status"])
 	}
-	mustLatency(t, onlyRowOfType(t, rows, EventToolError))
-	for _, evType := range []string{EventToolCompleted, EventAgentResponse} {
-		if latency, ok := rowLatency(t, onlyRowOfType(t, rows, evType)); ok {
-			t.Errorf("%s after OnToolErrorCallback has latency_ms %v, want none", evType, latency)
-		}
+	if errRow["error_message"] != "transient error" {
+		t.Errorf("TOOL_ERROR error_message = %v, want %q", errRow["error_message"], "transient error")
 	}
-	checkJSON(t, "TOOL_COMPLETED content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolCompleted), "content"),
-		`{"tool":"final_answer","result":{"answer":"fallback-42"},"tool_origin":"UNKNOWN"}`)
 	if got := placeOf(onlyRowOfType(t, rows, EventAgentCompleted)); got != agentStart {
 		t.Errorf("AGENT_COMPLETED is at %+v, want %+v", got, agentStart)
 	}
@@ -22492,5 +22485,526 @@ func TestLateFailureCauseKeepsActivation(t *testing.T) {
 	defer late.mu.Unlock()
 	if got := late.agentStack[0].firstRetiredCause(); !errors.Is(got, siblingErr) {
 		t.Errorf("failure cause that reached the invocation span = %v, want %v", got, siblingErr)
+	}
+}
+
+func TestTraceManager_EmptyToolCallContextCleanup(t *testing.T) {
+	type payload struct{ _ [64]byte }
+	type payloadKey struct{}
+	ctx := context.Background()
+	tm := newTraceManager()
+	id := identity{invocationID: "empty-id-cleanup", agentName: "root"}
+	tm.invocationSpan(ctx, id, nil)
+	inv := tm.invocation(ctx, id)
+
+	type nonComparableSliceCtx struct {
+		context.Context
+		tags []*payload
+	}
+
+	completedPtr, completedArgPtr := func() (weak.Pointer[payload], weak.Pointer[payload]) {
+		p := &payload{}
+		argP := &payload{}
+		toolCtx := nonComparableSliceCtx{
+			Context: context.WithValue(ctx, payloadKey{}, p),
+			tags:    []*payload{p},
+		}
+		args := map[string]any{"p": argP}
+		tm.pushToolCallSpan(toolCtx, id, "", "lookup", args)
+		tm.popToolCallSpan(toolCtx, id, "", "lookup", true, args)
+		tm.popToolCallSpan(toolCtx, id, "", "lookup", false, args)
+		return weak.Make(p), weak.Make(argP)
+	}()
+
+	// Completing AfterTool deletes the context and argument entry immediately
+	// while the invocation is still live.
+	for range 3 {
+		runtime.GC()
+	}
+	if completedPtr.Value() != nil {
+		t.Error("completed empty-ID tool context is still reachable after AfterTool + GC")
+	}
+	if completedArgPtr.Value() != nil {
+		t.Error("completed empty-ID tool args are still reachable after AfterTool + GC")
+	}
+
+	// Open / abandoned empty-ID contexts and args must be dropped on endInvocation
+	// without retaining references on either inv or late state.
+	openPtr, openArgPtr, endedPtr, endedArgPtr := func() (weak.Pointer[payload], weak.Pointer[payload], weak.Pointer[payload], weak.Pointer[payload]) {
+		p1, ap1, p2, ap2 := &payload{}, &payload{}, &payload{}, &payload{}
+		openCtx := nonComparableSliceCtx{
+			Context: context.WithValue(ctx, payloadKey{}, p1),
+			tags:    []*payload{p1},
+		}
+		endedCtx := nonComparableSliceCtx{
+			Context: context.WithValue(ctx, payloadKey{}, p2),
+			tags:    []*payload{p2},
+		}
+		openArgs := map[string]any{"p": ap1}
+		endedArgs := map[string]any{"p": ap2}
+		tm.pushToolCallSpan(openCtx, id, "", "lookup", openArgs)
+		tm.pushToolCallSpan(endedCtx, id, "", "lookup", endedArgs)
+		tm.popToolCallSpan(endedCtx, id, "", "lookup", true, endedArgs)
+		return weak.Make(p1), weak.Make(ap1), weak.Make(p2), weak.Make(ap2)
+	}()
+
+	tm.endInvocation(ctx, id)
+	inv.mu.Lock()
+	leftCalls := len(inv.emptyToolCalls)
+	inv.mu.Unlock()
+	if leftCalls != 0 {
+		t.Errorf("invocation retained empty-ID entries after endInvocation: calls=%d", leftCalls)
+	}
+
+	for range 3 {
+		runtime.GC()
+	}
+	if openPtr.Value() != nil {
+		t.Error("open empty-ID tool context is still reachable after endInvocation + GC")
+	}
+	if openArgPtr.Value() != nil {
+		t.Error("open empty-ID tool args are still reachable after endInvocation + GC")
+	}
+	if endedPtr.Value() != nil {
+		t.Error("error-ended empty-ID tool context is still reachable after endInvocation + GC")
+	}
+	if endedArgPtr.Value() != nil {
+		t.Error("error-ended empty-ID tool args are still reachable after endInvocation + GC")
+	}
+}
+
+func TestTraceManager_TurnEpochsLateHandoffAndCleanup(t *testing.T) {
+	tm := newTraceManager()
+	id := identity{invocationID: "inv-turn-handoff", agentName: "agent"}
+	baseCtx := &mockInvocationContext{ctx: context.Background(), invocationID: id.invocationID, agentName: id.agentName}
+	callCtx := withFunctionCall(baseCtx, "call-1")
+	args := map[string]any{"q": "hello"}
+
+	tm.invocationSpan(baseCtx, id, nil)
+	tm.pushAgentSpan(baseCtx, id)
+	tm.pushLLMSpan(baseCtx, id)
+	tm.popLLMSpan(baseCtx, id, true)
+	tm.pushToolCallSpan(callCtx, id, "call-1", "echo", args)
+	tm.popToolCallSpan(callCtx, id, "call-1", "echo", true, args)
+	tm.popAgentSpan(baseCtx, id)
+	tm.endInvocation(baseCtx, id)
+
+	tm.mu.Lock()
+	completed := tm.completed[id.invocationID]
+	tm.mu.Unlock()
+	if completed == nil {
+		t.Fatal("expected completedTrace entry after endInvocation")
+	}
+
+	// Late LLM step bumps turnEpoch in late state, so a subsequent late AfterTool
+	// with the exact same context and args emits TOOL_COMPLETED instead of suppressing.
+	tm.pushLLMSpan(baseCtx, id)
+	tm.popLLMSpan(baseCtx, id, true)
+	_, _, closedByError := tm.popToolAfterCallSpan(callCtx, id, "call-1", "echo", args, false)
+	if closedByError {
+		t.Error("expected late AfterTool after post-run turn epoch bump not to suppress")
+	}
+
+	tm.mu.Lock()
+	late := completed.late
+	tm.mu.Unlock()
+	if late == nil {
+		t.Fatal("expected late state")
+	}
+	late.mu.Lock()
+	ep := late.turnEpochs[llmKey(id)]
+	remTools := len(late.completedTools)
+	late.mu.Unlock()
+	if ep < 3 {
+		t.Errorf("late turnEpoch = %d, want >= 3", ep)
+	}
+	if remTools != 0 {
+		t.Errorf("remaining completedTools = %d, want 0", remTools)
+	}
+}
+
+func TestBoundedArgsDigest(t *testing.T) {
+	digest := func(args map[string]any) (uint64, bool) {
+		t.Helper()
+		d, ok, truncated := boundedArgsDigest(args)
+		if !ok {
+			t.Fatal("boundedArgsDigest() ok = false for non-nil args, want true")
+		}
+		return d, truncated
+	}
+
+	t.Run("nil args", func(t *testing.T) {
+		if d, ok, truncated := boundedArgsDigest(nil); ok || d != 0 || truncated {
+			t.Errorf("boundedArgsDigest(nil) = (%d, %v, %v), want (0, false, false)", d, ok, truncated)
+		}
+	})
+
+	t.Run("cyclic maps are deterministic and distinct", func(t *testing.T) {
+		cyclic1 := map[string]any{"k": 1}
+		cyclic1["self"] = cyclic1
+		cyclic2 := map[string]any{"k": 2}
+		cyclic2["self"] = cyclic2
+		d1a, truncated := digest(cyclic1)
+		d1b, _ := digest(cyclic1)
+		d2, _ := digest(cyclic2)
+		if truncated {
+			t.Error("cyclic map digest is truncated, want full")
+		}
+		if d1a != d1b {
+			t.Errorf("cyclic map digest not deterministic: %d != %d", d1a, d1b)
+		}
+		if d1a == d2 {
+			t.Errorf("distinct cyclic maps produced identical digest %d", d1a)
+		}
+	})
+
+	t.Run("map order does not matter", func(t *testing.T) {
+		mA := map[string]any{"a": "x", "b": 42, "nested": map[string]any{"p": true, "q": 3.5}}
+		mB := map[string]any{"nested": map[string]any{"q": 3.5, "p": true}, "b": 42, "a": "x"}
+		dA, _ := digest(mA)
+		dB, _ := digest(mB)
+		if dA != dB {
+			t.Errorf("equivalent maps produced different digests: %d != %d", dA, dB)
+		}
+	})
+
+	t.Run("shared values in non-string-keyed maps", func(t *testing.T) {
+		// A value shared by two entries hashes as itself in both, whatever
+		// order the map iterates in, rather than as a cycle the second time.
+		shared := []any{"x", map[string]any{"y": 1}}
+		sharedMap := map[string]any{"z": []int{1, 2}}
+		args := func() map[string]any {
+			m := map[int]any{}
+			for i := range 16 {
+				if i%2 == 0 {
+					m[i] = shared
+				} else {
+					m[i] = sharedMap
+				}
+			}
+			return map[string]any{"nested": m, "yaml": map[any]any{"a": shared, 2: shared, true: sharedMap}}
+		}
+		want, truncated := digest(args())
+		if truncated {
+			t.Fatal("digest of shared values is truncated, want full")
+		}
+		for i := range 64 {
+			if got, _ := digest(args()); got != want {
+				t.Fatalf("digest #%d = %d, want %d: shared values hash by iteration order", i, got, want)
+			}
+		}
+		other := args()
+		other["nested"].(map[int]any)[3] = shared
+		if got, _ := digest(other); got == want {
+			t.Error("digest unchanged after an entry of a non-string-keyed map changed")
+		}
+	})
+
+	t.Run("maps over 32 keys hash their contents", func(t *testing.T) {
+		big := make(map[string]any, 200)
+		for i := range 200 {
+			big[fmt.Sprintf("k%03d", i)] = i
+		}
+		twin := maps.Clone(big)
+		before, truncated := digest(big)
+		if truncated {
+			t.Fatal("digest of a 200-key map is truncated, want full")
+		}
+		if d, _ := digest(twin); d != before {
+			t.Errorf("equal maps in two allocations: digests %d and %d, want equal", d, before)
+		}
+		big["k150"] = "changed"
+		if after, _ := digest(big); after == before {
+			t.Error("digest unchanged after a 200-key map was changed in place")
+		}
+	})
+
+	t.Run("long strings hash their middle", func(t *testing.T) {
+		head, tail := strings.Repeat("a", 128), strings.Repeat("z", 128)
+		d1, truncated := digest(map[string]any{"s": head + strings.Repeat("m", 64) + tail})
+		d2, _ := digest(map[string]any{"s": head + strings.Repeat("n", 64) + tail})
+		if truncated {
+			t.Error("digest of a 320-byte string is truncated, want full")
+		}
+		if d1 == d2 {
+			t.Error("strings that differ only in the middle produced identical digests")
+		}
+		b1, _ := digest(map[string]any{"b": []byte("same bytes")})
+		b2, _ := digest(map[string]any{"b": []byte("same bytes")})
+		if b1 != b2 {
+			t.Errorf("equal byte slices in two allocations: digests %d and %d, want equal", b1, b2)
+		}
+	})
+
+	t.Run("past the bounds the digest is truncated", func(t *testing.T) {
+		huge := make(map[string]any, maxDigestEntries+1)
+		for i := range maxDigestEntries + 1 {
+			huge[fmt.Sprintf("k%d", i)] = i
+		}
+		dag := map[string]any{"leaf": 1}
+		for range 40 {
+			dag = map[string]any{"a": dag, "b": dag}
+		}
+		for name, args := range map[string]map[string]any{
+			"long string":    {"s": strings.Repeat("x", maxDigestStringBytes+1)},
+			"large map":      huge,
+			"long slice":     {"s": make([]int, maxDigestEntries+1)},
+			"NaN key":        {"m": map[float64]any{math.NaN(): 1}},
+			"pointer key":    {"m": map[*int]any{new(int): 1}},
+			"shared subtree": dag,
+		} {
+			d1, truncated := digest(args)
+			if !truncated {
+				t.Errorf("%s: digest is not truncated, want truncated", name)
+			}
+			if d2, _ := digest(args); d2 != d1 {
+				t.Errorf("%s: truncated digest not deterministic: %d != %d", name, d1, d2)
+			}
+		}
+	})
+
+	t.Run("truncated digests prove nothing", func(t *testing.T) {
+		args := map[string]any{"s": strings.Repeat("x", maxDigestStringBytes+1)}
+		a, _ := toolCallIdentityOf(context.Background(), args)
+		b, _ := toolCallIdentityOf(context.Background(), args)
+		if a.sameArgs(b) {
+			t.Error("sameArgs() = true for truncated digests, want false")
+		}
+		map300A := make(map[string]any, 300)
+		map300B := make(map[string]any, 300)
+		for i := range 300 {
+			map300A[fmt.Sprintf("k%03d", i)] = i
+			map300B[fmt.Sprintf("k%03d", i)] = i + 1000
+		}
+		idA, _ := toolCallIdentityOf(context.Background(), map300A)
+		idB, _ := toolCallIdentityOf(context.Background(), map300B)
+		if !idA.argsTruncated || !idB.argsTruncated || idA.sameArgs(idB) {
+			t.Errorf("300-key maps: truncated=(%v,%v) sameArgs=%v, want (true,true) and false", idA.argsTruncated, idB.argsTruncated, idA.sameArgs(idB))
+		}
+		full, _ := toolCallIdentityOf(context.Background(), map[string]any{"s": "x"})
+		if !full.sameArgs(full) {
+			t.Error("sameArgs() = false for equal full digests, want true")
+		}
+	})
+
+	t.Run("opaque structs pointers and functions set truncated without reading fields", func(t *testing.T) {
+		type opaqueState struct {
+			Public  string
+			counter atomic.Int64
+			mu      sync.Mutex
+			private map[string]int
+		}
+		st := &opaqueState{
+			Public:  "immutable",
+			private: map[string]int{"seed": 1},
+		}
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				st.counter.Add(1)
+				st.mu.Lock()
+				st.private[fmt.Sprintf("k%d", i%8)] = i
+				st.mu.Unlock()
+			}
+		})
+		defer func() {
+			close(stop)
+			wg.Wait()
+		}()
+
+		type plainStruct struct{ X int }
+		var nilPtr *opaqueState
+		for i := range 64 {
+			for name, args := range map[string]map[string]any{
+				"live_struct_ptr": {"p": st},
+				"nil_struct_ptr":  {"p": nilPtr},
+				"struct_value":    {"s": plainStruct{X: i}},
+				"struct_array":    {"a": [2]plainStruct{{X: 1}, {X: 2}}},
+				"closure":         {"fn": func() int { return i }},
+			} {
+				_, ok, truncated := boundedArgsDigest(args)
+				if !ok || !truncated {
+					t.Fatalf("%s: boundedArgsDigest = (ok=%v, truncated=%v), want (true, true)", name, ok, truncated)
+				}
+				id1, _ := toolCallIdentityOf(context.Background(), args)
+				id2, _ := toolCallIdentityOf(context.Background(), args)
+				if id1.sameArgs(id2) {
+					t.Fatalf("%s: sameArgs() = true on opaque argument, want false", name)
+				}
+			}
+		}
+	})
+}
+
+type unwrapTestInvocationCtx struct {
+	agent.InvocationContext
+	context.Context
+	ag agent.Agent
+}
+
+func (c unwrapTestInvocationCtx) Deadline() (time.Time, bool) { return c.Context.Deadline() }
+func (c unwrapTestInvocationCtx) Done() <-chan struct{}       { return c.Context.Done() }
+func (c unwrapTestInvocationCtx) Err() error                  { return c.Context.Err() }
+func (c unwrapTestInvocationCtx) Value(key any) any           { return c.Context.Value(key) }
+func (c unwrapTestInvocationCtx) Agent() agent.Agent          { return c.ag }
+func (c unwrapTestInvocationCtx) Artifacts() agent.Artifacts  { return nil }
+func (c unwrapTestInvocationCtx) Memory() agent.Memory        { return nil }
+func (c unwrapTestInvocationCtx) Session() session.Session    { return nil }
+func (c unwrapTestInvocationCtx) InvocationID() string        { return "inv-unwrap" }
+func (c unwrapTestInvocationCtx) Branch() string              { return "" }
+func (c unwrapTestInvocationCtx) WithContext(ctx context.Context) agent.InvocationContext {
+	c.Context = ctx
+	return c
+}
+
+func (c unwrapTestInvocationCtx) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return c
+}
+
+func TestTraceManager_UnwrapContext_WithoutCancel(t *testing.T) {
+	ic := unwrapTestInvocationCtx{Context: context.Background()}
+	acts := &session.EventActions{StateDelta: map[string]any{"k": "v"}}
+	toolCtx := agent.NewToolContext(ic, "call-wc", acts, nil)
+	cbCtx := agent.NewCallbackContext(ic, acts)
+
+	var logBuf bytes.Buffer
+	origOut := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origOut)
+
+	// Unwrapping callbackContextWrapper must never call .Actions() (which logs
+	// a warning in adk/v2), even across WithoutCancel and WithTimeout wrappers.
+	for _, c := range []context.Context{cbCtx, context.WithoutCancel(cbCtx)} {
+		ap, gotActs, delta, pinned := unwrapToolContextActions(c)
+		if ap == 0 || delta.empty() {
+			t.Errorf("callback unwrap returned (%d, %+v), want non-zero actionsPtr and non-empty delta", ap, delta)
+		}
+		if gotActs != nil {
+			t.Errorf("callback unwrap returned non-nil *session.EventActions %p, want nil", gotActs)
+		}
+		if pinned == nil {
+			t.Errorf("callback unwrap returned nil pinnedCtx")
+		}
+	}
+	if logBuf.Len() != 0 {
+		t.Errorf("unexpected log output unwrapping callback contexts: %q", logBuf.String())
+	}
+
+	// Wrapping a ToolContext in context.WithoutCancel and context.WithTimeout
+	// exercises both the unexported "c" field (withoutCancelCtx) and the
+	// "Context" field that timerCtx promotes from its embedded cancelCtx in
+	// unwrapToolContextActions.
+	timedCtx, cancel := context.WithTimeout(context.WithoutCancel(toolCtx), time.Minute)
+	defer cancel()
+	for _, c := range []context.Context{context.WithoutCancel(toolCtx), timedCtx} {
+		ap, gotActs, delta, pinned := unwrapToolContextActions(c)
+		if ap == 0 || delta.empty() {
+			t.Errorf("withoutCancel tool unwrap returned (%d, %+v), want non-zero actionsPtr and delta", ap, delta)
+		}
+		if gotActs != nil {
+			t.Errorf("withoutCancel wrapper returned direct Actions pointer %p despite hiding Actions()", gotActs)
+		}
+		if pinned == nil {
+			t.Errorf("withoutCancel tool unwrap returned nil pinnedCtx")
+		}
+	}
+	if logBuf.Len() != 0 {
+		t.Errorf("unexpected log output unwrapping withoutCancel contexts: %q", logBuf.String())
+	}
+}
+
+// unwrapTestKey is a context key of TestTraceManager_UnwrapContext_CustomLayouts.
+type unwrapTestKey struct{}
+
+// TestTraceManager_UnwrapContext_CustomLayouts checks that the EventActions of
+// a custom context come from its Actions() method, never from a private field
+// that happens to be named actions, and that a standard-library wrapper around
+// a custom context reads none of the custom context's fields.
+func TestTraceManager_UnwrapContext_CustomLayouts(t *testing.T) {
+	stable := &session.EventActions{StateDelta: map[string]any{"stable": 1}}
+	custom := &privateActionsToolCtx{
+		mockInvocationContext: &mockInvocationContext{ctx: context.Background()},
+		stable:                stable,
+	}
+	custom.replaceActions(0)
+
+	ap, acts, delta, pinned := unwrapToolContextActions(custom)
+	if want := reflect.ValueOf(stable).Pointer(); acts != stable || ap != want {
+		t.Errorf("custom context unwrap = (%#x, %p), want Actions() = (%#x, %p)", ap, acts, want, stable)
+	}
+	if delta.m == nil || mapPtr(delta.m) != mapPtr(stable.StateDelta) || pinned != nil {
+		t.Errorf("custom context unwrap delta = %+v, pinned = %v, want Actions().StateDelta held directly without a pinned context", delta, pinned)
+	}
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{name: "WithValue", ctx: context.WithValue(custom, unwrapTestKey{}, 1)},
+		{name: "WithoutCancel", ctx: context.WithoutCancel(custom)},
+	} {
+		ap, acts, delta, pinned := unwrapToolContextActions(tc.ctx)
+		if ap != 0 || acts != nil || !delta.empty() || pinned != nil {
+			t.Errorf("%s(custom) unwrap = (%#x, %p, %+v, %v), want zero values: the custom context's fields are not read", tc.name, ap, acts, delta, pinned)
+		}
+	}
+}
+
+func TestTraceManager_TaskDeltaRetentionAndCleanup(t *testing.T) {
+	type deltaMarker struct{ _ [64]byte }
+	for _, mode := range []string{"retire_on_pop", "abandon_on_end"} {
+		t.Run(mode, func(t *testing.T) {
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "task",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			tm := newTraceManager()
+			rootCtx := unwrapTestInvocationCtx{Context: context.Background(), ag: taskAgent}
+			id := identity{invocationID: "inv-task-delta-" + mode, agentName: "task"}
+			tm.invocationSpan(rootCtx, id, taskAgent)
+			tm.pushAgentSpan(rootCtx, id)
+
+			markerWeak := func() weak.Pointer[deltaMarker] {
+				marker := &deltaMarker{}
+				acts := &session.EventActions{StateDelta: map[string]any{"marker": marker}}
+				toolCtx := agent.NewToolContext(rootCtx, "c1", acts, nil)
+				tm.noteTaskRejected(toolCtx, id, "c1")
+				return weak.Make(marker)
+			}()
+
+			for range 3 {
+				runtime.GC()
+			}
+			if markerWeak.Value() == nil {
+				t.Fatal("open rejected task activation failed to retain StateDelta map across GC")
+			}
+
+			switch mode {
+			case "retire_on_pop":
+				tm.noteTaskFinished(rootCtx, id, "c1")
+				if _, ok := tm.popTaskAgentSpan(rootCtx, id, []string{"c1"}); !ok {
+					t.Fatal("popTaskAgentSpan() = false after noteTaskFinished, want true")
+				}
+			case "abandon_on_end":
+				tm.endInvocation(rootCtx, id)
+			}
+
+			for range 3 {
+				runtime.GC()
+			}
+			if markerWeak.Value() != nil {
+				t.Errorf("%s: StateDelta map is still reachable after activation cleared + GC", mode)
+			}
+		})
 	}
 }

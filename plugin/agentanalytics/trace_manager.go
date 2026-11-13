@@ -22,7 +22,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"maps"
+	"math"
 	"reflect"
 	"runtime"
 	"slices"
@@ -31,12 +33,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
 
@@ -290,6 +294,51 @@ type spanRecord struct {
 	// the event's node path saw a call with that ID complete, on the same one
 	// (see finishedTaskLocked and popTaskAgentSpan).
 	finishedTasks []string
+	// rejectedTasks holds the function call IDs (or finishTaskToolName when
+	// the call ID is empty) and StateDelta provenance of failed or recovered
+	// finish_task calls whose result map still reported "Task completed."
+	// (see noteTaskRejected and popTaskAgentSpanWithDelta), so that their
+	// FunctionResponse events do not end this or a sibling task activation
+	// when no newer matching finish_task completed cleanly. Cleared on
+	// activation retirement/purge.
+	rejectedTasks []rejectedTaskCall
+	// toolStateDeltas holds references to the ToolContext
+	// EventActions.StateDelta maps of the tool calls of this open task-mode
+	// activation whose function response events have not been seen yet, so
+	// that such an event, including a merged parallel one that carries the
+	// first call's map, resolves back to this activation (see
+	// popTaskAgentSpanWithDelta). releaseTaskToolDeltas drops the references
+	// of the calls that an event answers, and at most maxTaskToolDeltas are
+	// kept.
+	toolStateDeltas []taskDeltaRef
+	// pendingFinishCalls holds the function call IDs (or finishTaskToolName when
+	// the call ID is empty) of finish_task FunctionCall parts emitted by this
+	// task-mode activation's model responses before completion settles them.
+	pendingFinishCalls []string
+	// unfinishedFinishCalls holds the function call IDs (or finishTaskToolName
+	// when the call ID is empty) of this task-mode activation's finish_task
+	// calls that ended without completing the task (see noteTaskUnfinished)
+	// and whose function response events have not arrived, so that such an
+	// event, which reports no completion, is not taken for another
+	// activation's (see unfinishedTaskResponseOwnerLocked). At most
+	// maxTaskToolDeltas are kept.
+	unfinishedFinishCalls []string
+	// settledTaskCalls holds finish_task call IDs (or finishTaskToolName when
+	// empty) of open task-mode finish_task calls whose AfterToolCallback was
+	// skipped and whose FunctionResponse, which reported completion,
+	// completeResponseEvent just cleared from inv.toolSpans, so
+	// popTaskAgentSpanWithDelta still recognizes the activation's finish_task
+	// call. Each carries the turn epoch in which its call started.
+	settledTaskCalls []settledTaskCall
+	// deferredFinish records an ambiguous finish_task FunctionResponse without
+	// StateDelta provenance that arrived while an older peer held a matching
+	// rejection and this activation held a pending finish_task call with hidden
+	// tool callbacks. Cleared if this activation makes further calls or retires.
+	deferredFinish *deferredTaskFinish
+	// unseenModelFinishFC counts AfterModel calls on this activation that have
+	// already recorded pending finish_task FunctionCalls so matching OnEvent
+	// callbacks do not record duplicate entries.
+	unseenModelFinishFC int
 	// nonLLM reports that the agent is a workflow agent, such as a sequential
 	// or loop agent, rather than an llmagent whose sub-agents can transfer to
 	// peers.
@@ -323,6 +372,35 @@ type spanRecord struct {
 	// or tool call, rather than popToolSpan making up a span for a call that
 	// this plugin did not see start.
 	callStarted bool
+	// toolName is the name of the tool for a spanKindTool record, so open tool
+	// spans and finish_task evidence match both the call ID and the tool name.
+	toolName string
+	// prevCompleted chains earlier unconsumed error-ended markers sharing the
+	// same completedTools key (for example, overlapping failures on value
+	// contexts sharing a call ID in the same turn), bounded to maxTaskToolDeltas.
+	prevCompleted *spanRecord
+	// emptyCallSeq identifies the per-context synthetic token assigned to a
+	// tool call with an empty FunctionCallID so late handoff preserves only
+	// pointer identities whose spans remain active or error-ended.
+	emptyCallSeq uint64
+	// toolCallID records the callback attempt identity (context pointer, weak
+	// EventActions pointer, and bounded args digest) for tool spans and
+	// error-ended markers so a reused call ID cannot consume another attempt's
+	// completion marker when callbacks are skipped, without pinning heap
+	// EventActions objects after collection. turnEpoch is the turn epoch of
+	// the call's activation when the call started or failed (see turnEpochs).
+	toolCallID toolCallIdentity
+	turnEpoch  uint64
+	// errArgs is, on the error-ended marker of a call whose callback context
+	// has no attempt identity (see toolCallIdentity.hasAttemptIdentity), the
+	// arguments map that OnToolErrorCallback saw when its digest is complete.
+	// ADK passes one arguments map to every callback of an attempt, so it
+	// tells a later callback of the same attempt, whose map an earlier
+	// callback may have changed in place, apart from the callback of another
+	// attempt that sees another map (see argsShowOtherAttempt). The marker
+	// keeps the map reachable, so that its address is not reused while the
+	// marker is outstanding.
+	errArgs map[string]any
 	// handedOver reports, for a model or tool call, that the run left it open
 	// at AfterRun, which handed it over to the late state of its completed
 	// entry (see rememberCompletedLocked), rather than a callback starting it
@@ -497,6 +575,20 @@ type invocationTrace struct {
 	// OnToolErrorCallback alone for a call of a tool that does not exist;
 	// such records last as long as the invocation.
 	completedTools map[string]*spanRecord
+	// emptyToolCalls maps a slot key to per-call sequence entries and top-level
+	// callback context pointer identities for calls with an empty FunctionCallID.
+	// Surviving live and error-ended entries are handed off across endInvocation
+	// without retaining heap references.
+	emptyToolCalls   map[string][]emptyToolCallEntry
+	emptyToolCallSeq uint64
+	// turnEpochs counts the turns of each agent activation, keyed by
+	// turnEpochKey: each model call of the activation and each function
+	// response event that it writes starts a new turn. A tool call records
+	// the epoch of its activation, so that an error that an earlier turn
+	// recorded cannot suppress a later turn's completion even if callbacks
+	// are skipped with the same context pointer, while the turns of a
+	// concurrent activation of the same agent leave it alone.
+	turnEpochs map[string]uint64
 	// unrecoveredErrors tracks unhandled errors encountered during the
 	// invocation keyed by activation / call identity (e.g. llmKey), together
 	// with the span ID of the agent activation that reported each of them.
@@ -1268,6 +1360,9 @@ type completedTrace struct {
 	// AfterModelCallback or AfterToolCallback that ADK may still run for them
 	// (see popLLMSpan and popToolSpan). They are nil when there are none.
 	endedModels, endedTools map[string]*spanRecord
+	endedEmptyTools         map[string][]emptyToolCallEntry
+	endedEmptyToolSeq       uint64
+	endedTurnEpochs         map[string]uint64
 	position                *list.Element
 }
 
@@ -1604,12 +1699,55 @@ func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv
 		rec.dropContexts()
 		rec.handedOver = true
 	}
+	invEmptySeq := inv.emptyToolCallSeq
+	var handoffTurnEpochs map[string]uint64
+	if len(inv.turnEpochs) > 0 && len(tools)+len(endedTools) > 0 {
+		handoffTurnEpochs = maps.Clone(inv.turnEpochs)
+	}
+	var handoffEmptyTools map[string][]emptyToolCallEntry
+	if len(inv.emptyToolCalls) > 0 && len(tools)+len(endedTools) > 0 {
+		var liveSeqs map[uint64]bool
+		for _, rec := range tools {
+			if rec.emptyCallSeq != 0 {
+				if liveSeqs == nil {
+					liveSeqs = map[uint64]bool{}
+				}
+				liveSeqs[rec.emptyCallSeq] = true
+			}
+		}
+		for _, rec := range endedTools {
+			if rec.emptyCallSeq != 0 {
+				if liveSeqs == nil {
+					liveSeqs = map[uint64]bool{}
+				}
+				liveSeqs[rec.emptyCallSeq] = true
+			}
+		}
+		if len(liveSeqs) > 0 {
+			for k, entries := range inv.emptyToolCalls {
+				var kept []emptyToolCallEntry
+				for _, e := range entries {
+					if liveSeqs[e.seq] {
+						kept = append(kept, e)
+					}
+				}
+				if len(kept) > 0 {
+					if handoffEmptyTools == nil {
+						handoffEmptyTools = map[string][]emptyToolCallEntry{}
+					}
+					handoffEmptyTools[k] = kept
+				}
+			}
+		}
+	}
 	// The calls leave inv, so that no spanRecord is reachable from both inv,
 	// guarded by inv.mu, and the late state, guarded by its own mu.
 	clear(inv.llmSpans)
 	clear(inv.completedModels)
 	clear(inv.toolSpans)
 	clear(inv.completedTools)
+	clear(inv.emptyToolCalls)
+	clear(inv.turnEpochs)
 	inv.syncOpenCallsLocked()
 	inv.mu.Unlock()
 	if len(models)+len(tools) > 0 {
@@ -1618,15 +1756,51 @@ func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv
 	if late := completed.late; late != nil {
 		late.mu.Lock()
 		late.lastSeq = max(late.lastSeq, lastSeq)
+		late.emptyToolCallSeq = max(late.emptyToolCallSeq, invEmptySeq)
 		maps.Copy(late.llmSpans, models)
 		maps.Copy(late.completedModels, endedModels)
 		maps.Copy(late.toolSpans, tools)
 		maps.Copy(late.completedTools, endedTools)
+		if len(handoffTurnEpochs) > 0 {
+			if late.turnEpochs == nil {
+				late.turnEpochs = map[string]uint64{}
+			}
+			for k, ep := range handoffTurnEpochs {
+				late.turnEpochs[k] = max(late.turnEpochs[k], ep)
+			}
+		}
+		if len(handoffEmptyTools) > 0 {
+			if late.emptyToolCalls == nil {
+				late.emptyToolCalls = map[string][]emptyToolCallEntry{}
+			}
+			for k, entries := range handoffEmptyTools {
+				late.emptyToolCalls[k] = append(late.emptyToolCalls[k], entries...)
+			}
+		}
 		late.syncOpenCallsLocked()
 		late.mu.Unlock()
 	} else {
 		completed.endedModels = withCalls(completed.endedModels, endedModels)
 		completed.endedTools = withCalls(completed.endedTools, endedTools)
+		if len(handoffTurnEpochs) > 0 {
+			if completed.endedTurnEpochs == nil {
+				completed.endedTurnEpochs = handoffTurnEpochs
+			} else {
+				for k, ep := range handoffTurnEpochs {
+					completed.endedTurnEpochs[k] = max(completed.endedTurnEpochs[k], ep)
+				}
+			}
+		}
+		if len(handoffEmptyTools) > 0 {
+			if completed.endedEmptyTools == nil {
+				completed.endedEmptyTools = handoffEmptyTools
+			} else {
+				for k, entries := range handoffEmptyTools {
+					completed.endedEmptyTools[k] = append(completed.endedEmptyTools[k], entries...)
+				}
+			}
+		}
+		completed.endedEmptyToolSeq = max(completed.endedEmptyToolSeq, invEmptySeq)
 	}
 	limit := max(tm.maxTracked, 64)
 	tm.pruneWaitingLocked(limit, limit/2)
@@ -1647,7 +1821,16 @@ func (tm *traceManager) lateLocked(completed *completedTrace, sc trace.SpanConte
 		late.restoreEvicted(completed.identity)
 		maps.Copy(late.completedModels, completed.endedModels)
 		maps.Copy(late.completedTools, completed.endedTools)
-		completed.endedModels, completed.endedTools = nil, nil
+		if len(completed.endedTurnEpochs) > 0 {
+			late.turnEpochs = completed.endedTurnEpochs
+			completed.endedTurnEpochs = nil
+		}
+		late.emptyToolCallSeq = completed.endedEmptyToolSeq
+		if len(completed.endedEmptyTools) > 0 {
+			late.emptyToolCalls = completed.endedEmptyTools
+			completed.endedEmptyTools = nil
+		}
+		completed.endedModels, completed.endedTools, completed.endedEmptyToolSeq = nil, nil, 0
 		completed.late = late
 	}
 	return completed.late
@@ -1706,19 +1889,45 @@ func (tm *traceManager) pruneWaitingLocked(limit, keep int) {
 	}
 }
 
+// filterCompletedChain keeps only nodes in head's prevCompleted chain for
+// which keep returns true, preserving relative order.
+func filterCompletedChain(head *spanRecord, keep func(*spanRecord) bool) *spanRecord {
+	var newHead, tail *spanRecord
+	for cur := head; cur != nil; {
+		next := cur.prevCompleted
+		cur.prevCompleted = nil
+		if keep(cur) {
+			if newHead == nil {
+				newHead = cur
+			} else {
+				tail.prevCompleted = cur
+			}
+			tail = cur
+		}
+		cur = next
+	}
+	return newHead
+}
+
 // startedCalls returns the calls in calls that pushLLMSpan or pushToolSpan
 // started, without the spans that popToolSpan made up for calls whose start
 // this plugin did not see, or nil if there are none.
 func startedCalls(calls map[string]*spanRecord) map[string]*spanRecord {
 	var started map[string]*spanRecord
 	for key, rec := range calls {
-		if !rec.callStarted {
+		var kept *spanRecord
+		if rec.prevCompleted != nil {
+			kept = filterCompletedChain(rec, func(r *spanRecord) bool { return r.callStarted })
+		} else if rec.callStarted {
+			kept = rec
+		}
+		if kept == nil {
 			continue
 		}
 		if started == nil {
 			started = make(map[string]*spanRecord, len(calls))
 		}
-		started[key] = rec
+		started[key] = kept
 	}
 	return started
 }
@@ -2458,6 +2667,111 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 	}
 }
 
+// taskDeltaRef refers to the EventActions.StateDelta map of a tool call that
+// a task-mode activation made, which the function response event of the call
+// carries (see popTaskAgentSpanWithDelta). m holds the map itself when the
+// tool context exposes it, so that its address stays valid; otherwise ptr is
+// the address and pinned holds the context that keeps the map alive. call is
+// the function call ID, or else the tool name, of the call, and epoch the
+// turn of the activation in which the reference was recorded (see
+// releaseTaskToolDeltas).
+type taskDeltaRef struct {
+	m      map[string]any
+	ptr    uintptr
+	call   string
+	epoch  uint64
+	pinned context.Context
+}
+
+func (r taskDeltaRef) empty() bool {
+	return r.m == nil && r.ptr == 0
+}
+
+// addr returns the address of the map that r refers to.
+func (r taskDeltaRef) addr() uintptr {
+	if r.m != nil {
+		return reflect.ValueOf(r.m).Pointer()
+	}
+	return r.ptr
+}
+
+// matches reports whether r refers to the map at address evPtr.
+func (r taskDeltaRef) matches(evPtr uintptr) bool {
+	return evPtr != 0 && r.addr() == evPtr
+}
+
+func mapPtr(m map[string]any) uintptr {
+	if m == nil {
+		return 0
+	}
+	rv := reflect.ValueOf(m)
+	if rv.Kind() != reflect.Map || rv.IsNil() {
+		return 0
+	}
+	return rv.Pointer()
+}
+
+// rejectedTaskCall is a finish_task call whose result reported completion
+// although the call failed or an error callback recovered it (see
+// noteTaskRejected), with the StateDelta map that its function response
+// event carries.
+type rejectedTaskCall struct {
+	call  string
+	delta taskDeltaRef
+}
+
+// settledTaskCall is a finish_task call of a task-mode activation whose open
+// span a function response event that reported completion settled (see
+// completeResponseEvent), with the turn epoch in which the call started.
+type settledTaskCall struct {
+	call  string
+	epoch uint64
+}
+
+// batchEpochOf returns the turn epoch in which the task-mode activation rec
+// recorded the StateDelta map at evPtr for one of its tool calls (see
+// recordTaskToolDeltaLocked), and whether it recorded that map: ADK merges the
+// StateDelta maps of the calls of one model response into the map of the
+// first call, so the function response event that carries the map answers
+// the calls that rec made in that turn, and none that it made later.
+func (rec *spanRecord) batchEpochOf(evPtr uintptr) (uint64, bool) {
+	if evPtr == 0 {
+		return 0, false
+	}
+	for _, d := range rec.toolStateDeltas {
+		if d.matches(evPtr) {
+			return d.epoch, true
+		}
+	}
+	return 0, false
+}
+
+// deferredTaskFinish records an ambiguous finish_task FunctionResponse event
+// without StateDelta provenance that arrived while an older task activation
+// held a matching rejectedTasks entry and this unnoted peer activation held
+// only a pendingFinishCalls entry (both tool callbacks hidden by an earlier
+// plugin). If this peer ends without making another model or tool call,
+// receiving another finish_task response, running AfterAgentCallback, or
+// failing, the response belonged to this peer and retires it (see
+// popDeferredTaskCompletionsAll). If a later event carries rejectedDelta, that
+// later event is the older activation's delayed rejected response, proving the
+// earlier event belonged to this peer and retiring this peer immediately.
+type deferredTaskFinish struct {
+	call          string
+	at            time.Time
+	ambient       string
+	rejectedDelta taskDeltaRef
+}
+
+// deferredAgentCompletion carries the AGENT_COMPLETED row span and identity of
+// a task-mode activation settled from deferredTaskFinish.
+type deferredAgentCompletion struct {
+	span      rowSpan
+	agentName string
+	branch    string
+	path      string
+}
+
 // popTaskAgentSpan ends the span of a task-mode sub-agent that completed via
 // a finish_task function response (which ADK does without running
 // AfterAgentCallback), and marks its delegating agent activation as having
@@ -2483,6 +2797,18 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 // is retired without the activation's InvocationContext being read and
 // without its run being taken to be over (see retireAgentLocked).
 func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls []string) (span rowSpan, ok bool) {
+	return tm.popTaskAgentSpanWithDelta(ctx, id, calls, nil)
+}
+
+// popTaskAgentSpanWithDelta is popTaskAgentSpan for a function response event
+// that carries evStateDelta. A task-mode activation that recorded that map for
+// one of its tool calls (see recordTaskToolDeltaLocked) or for a rejected
+// finish_task call (see noteTaskRejected) wrote the event. Without such a
+// match, a recorded rejection of one of the calls drops the event unless an
+// open or settled finish_task call shows that a newer call completed (see
+// hasOpenOrSettledFinishEvidence).
+func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identity, calls []string, evStateDelta map[string]any) (span rowSpan, ok bool) {
+	evDeltaPtr := mapPtr(evStateDelta)
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
@@ -2490,9 +2816,250 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	i := inv.finishedTaskLocked(id, calls)
-	if i < 0 {
-		i = inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
+
+	matchesTaskFrame := func(rec *spanRecord) bool {
+		return rec.kind == spanKindAgent && rec.taskMode && rec.name == id.agentName && rec.branch == id.branch &&
+			(id.path == "" || rec.path == "" || rec.path == id.path)
+	}
+	hasCall := func(list []string) bool {
+		return slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(list, call) })
+	}
+	// finishEvidenceBy reports whether owner has an open finish_task call with
+	// one of the calls, or one that a function response event settled after
+	// an earlier plugin skipped its AfterToolCallback (see
+	// completeResponseEvent), that started by turn maxEpoch: either shows that
+	// the owner made a finish_task call with that ID which ran.
+	finishEvidenceBy := func(owner *spanRecord, maxEpoch uint64) bool {
+		for key, open := range inv.toolSpans {
+			if open.parentSpanID == owner.spanID && open.toolName == finishTaskToolName && open.turnEpoch <= maxEpoch &&
+				slices.Contains(calls, toolKeyCall(key)) {
+				return true
+			}
+		}
+		return slices.ContainsFunc(owner.settledTaskCalls, func(settled settledTaskCall) bool {
+			return settled.epoch <= maxEpoch && slices.Contains(calls, settled.call)
+		})
+	}
+	// hasOpenOrSettledFinishEvidence is finishEvidenceBy in any turn.
+	hasOpenOrSettledFinishEvidence := func(owner *spanRecord) bool {
+		return finishEvidenceBy(owner, math.MaxUint64)
+	}
+	// hasPositiveFinishEvidence also counts the finish_task function calls that
+	// owner's model responses made and that have not ended yet (see
+	// noteTaskFinishCalls). Such a pending call shows only that the call was
+	// made, not that the event answers it, so it never overrides a recorded
+	// rejection.
+	hasPositiveFinishEvidence := func(owner *spanRecord) bool {
+		if hasOpenOrSettledFinishEvidence(owner) {
+			return true
+		}
+		return slices.ContainsFunc(owner.pendingFinishCalls, func(call string) bool {
+			return slices.Contains(calls, call)
+		})
+	}
+
+	// Exact positive provenance match: if the FunctionResponse event carries a
+	// StateDelta map observed during a task activation's tool batch (including
+	// merged parallel FunctionResponse events that carry the first call's map),
+	// bind directly to that activation without cross-retiring any peer.
+	deltaOwnerIdx := -1
+	if evDeltaPtr != 0 {
+		for j := len(inv.agentStack) - 1; j > 0; j-- {
+			rec := inv.agentStack[j]
+			if !matchesTaskFrame(rec) {
+				continue
+			}
+			if slices.ContainsFunc(rec.rejectedTasks, func(rej rejectedTaskCall) bool {
+				return rej.delta.matches(evDeltaPtr) && slices.Contains(calls, rej.call)
+			}) {
+				deltaOwnerIdx = j
+				break
+			}
+		}
+		if deltaOwnerIdx < 0 {
+			for j := len(inv.agentStack) - 1; j > 0; j-- {
+				rec := inv.agentStack[j]
+				if !matchesTaskFrame(rec) {
+					continue
+				}
+				if slices.ContainsFunc(rec.toolStateDeltas, func(d taskDeltaRef) bool {
+					return d.matches(evDeltaPtr)
+				}) {
+					deltaOwnerIdx = j
+					break
+				}
+			}
+		}
+	}
+
+	var i int
+	if deltaOwnerIdx > 0 {
+		// If an earlier no-delta event provisionally consumed this activation's
+		// rejection while an unnoted peer held a pending finish_task call, and
+		// this event now arrives carrying the rejected call's StateDelta, this
+		// event is the delayed rejection and the earlier event belonged to the
+		// peer: retire the peer now instead of the rejected activation.
+		peerIdx := -1
+		for j := len(inv.agentStack) - 1; j > 0; j-- {
+			cand := inv.agentStack[j]
+			if matchesTaskFrame(cand) && cand.deferredFinish != nil &&
+				cand.deferredFinish.rejectedDelta.matches(evDeltaPtr) &&
+				slices.Contains(calls, cand.deferredFinish.call) {
+				peerIdx = j
+				break
+			}
+		}
+		if peerIdx > 0 {
+			i = peerIdx
+		} else {
+			owner := inv.agentStack[deltaOwnerIdx]
+			if !hasCall(owner.finishedTasks) {
+				if idx := slices.IndexFunc(owner.rejectedTasks, func(rej rejectedTaskCall) bool {
+					return rej.delta.matches(evDeltaPtr) && slices.Contains(calls, rej.call)
+				}); idx >= 0 {
+					owner.rejectedTasks = slices.Delete(owner.rejectedTasks, idx, idx+1)
+					return rowSpan{}, false
+				}
+				// The event answers the tool batch in which owner recorded its
+				// StateDelta, so a finish_task call that owner started in a
+				// later turn, such as a retry with the same call ID, does not
+				// show that the event answers a newer call than the rejected
+				// one.
+				evEpoch, ok := owner.batchEpochOf(evDeltaPtr)
+				if !ok {
+					evEpoch = math.MaxUint64
+				}
+				if idx := slices.IndexFunc(owner.rejectedTasks, func(rej rejectedTaskCall) bool {
+					return slices.Contains(calls, rej.call)
+				}); idx >= 0 && !finishEvidenceBy(owner, evEpoch) {
+					owner.rejectedTasks = slices.Delete(owner.rejectedTasks, idx, idx+1)
+					return rowSpan{}, false
+				}
+			}
+			i = deltaOwnerIdx
+		}
+	} else {
+		finishedCount := 0
+		singleFinishedIdx := -1
+		for j := len(inv.agentStack) - 1; j > 0; j-- {
+			rec := inv.agentStack[j]
+			if matchesTaskFrame(rec) && hasCall(rec.finishedTasks) {
+				finishedCount++
+				singleFinishedIdx = j
+			}
+		}
+
+		switch {
+		case finishedCount == 1:
+			i = inv.finishedTaskLocked(id, calls)
+			if i < 0 {
+				i = singleFinishedIdx
+			}
+		case finishedCount > 1:
+			i = inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
+		default:
+			// No open task-mode activation has a matching finishedTasks entry or
+			// direct StateDelta provenance. Scan newest-first for a matching
+			// rejectedTasks entry; supersede it only on an open or settled
+			// finish_task call (never on a StateDelta mismatch, nor on a
+			// finish_task call that a model response made and that has not run:
+			// the event may be the delayed response of the rejected call).
+			isAncestor := func(ancestor, desc *spanRecord) bool {
+				for p := desc.parent; p != nil; p = p.parent {
+					if p == ancestor {
+						return true
+					}
+				}
+				return false
+			}
+			var unnoted []*spanRecord
+			openFinishIdx := -1
+			settledFinishIdx := -1
+			unrejectedIdx := -1
+			for j := len(inv.agentStack) - 1; j > 0; j-- {
+				rec := inv.agentStack[j]
+				if matchesTaskFrame(rec) && len(rec.finishedTasks) == 0 && len(rec.rejectedTasks) == 0 {
+					unnoted = append(unnoted, rec)
+					if unrejectedIdx < 0 {
+						unrejectedIdx = j
+					}
+					if openFinishIdx < 0 && hasPositiveFinishEvidence(rec) {
+						openFinishIdx = j
+					}
+					if settledFinishIdx < 0 && hasOpenOrSettledFinishEvidence(rec) {
+						settledFinishIdx = j
+					}
+				}
+			}
+			sawMatchingRejection := false
+			posRejectedIdx := -1
+			for j := len(inv.agentStack) - 1; j > 0; j-- {
+				rec := inv.agentStack[j]
+				if !matchesTaskFrame(rec) || len(rec.rejectedTasks) == 0 {
+					continue
+				}
+				if idx := slices.IndexFunc(rec.rejectedTasks, func(rej rejectedTaskCall) bool {
+					if !slices.Contains(calls, rej.call) {
+						return false
+					}
+					superseded := hasOpenOrSettledFinishEvidence(rec) || slices.ContainsFunc(unnoted, func(other *spanRecord) bool {
+						return other != rec && !isAncestor(rec, other) && hasOpenOrSettledFinishEvidence(other)
+					})
+					if !superseded {
+						return true
+					}
+					sawMatchingRejection = true
+					if posRejectedIdx < 0 && hasOpenOrSettledFinishEvidence(rec) {
+						posRejectedIdx = j
+					}
+					return false
+				}); idx >= 0 {
+					rej := rec.rejectedTasks[idx]
+					rec.rejectedTasks = slices.Delete(rec.rejectedTasks, idx, idx+1)
+					for _, other := range unnoted {
+						if other != rec && !isAncestor(rec, other) && other.deferredFinish == nil &&
+							slices.Contains(other.pendingFinishCalls, rej.call) {
+							other.deferredFinish = &deferredTaskFinish{
+								call:          rej.call,
+								at:            now,
+								ambient:       ambient,
+								rejectedDelta: rej.delta,
+							}
+							break
+						}
+					}
+					return rowSpan{}, false
+				}
+			}
+			i = -1
+			if act := activationKey(ctx); act != nil {
+				for j := len(inv.agentStack) - 1; j > 0; j-- {
+					r := inv.agentStack[j]
+					if r.kind == spanKindAgent && r.activation == act && r.name == id.agentName && r.branch == id.branch {
+						i = j
+						break
+					}
+				}
+			}
+			if i < 0 {
+				switch {
+				case sawMatchingRejection:
+					// Only an open or settled call superseded the rejection, so
+					// the activation that has one owns the event.
+					if settledFinishIdx >= 0 {
+						i = settledFinishIdx
+					} else if posRejectedIdx >= 0 {
+						i = posRejectedIdx
+					}
+				case openFinishIdx >= 0:
+					i = openFinishIdx
+				case unrejectedIdx >= 0:
+					i = unrejectedIdx
+				default:
+					i = inv.findAgent(id.path, id.agentName, id.branch)
+				}
+			}
+		}
 	}
 	if i < 0 {
 		return rowSpan{}, false
@@ -2500,6 +3067,21 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	rec := inv.agentStack[i]
 	if !rec.taskMode {
 		return rowSpan{}, false
+	}
+	rec.deferredFinish = nil
+	if idx := slices.IndexFunc(rec.finishedTasks, func(fin string) bool {
+		return slices.Contains(calls, fin)
+	}); idx >= 0 {
+		rec.finishedTasks = slices.Delete(rec.finishedTasks, idx, idx+1)
+	}
+	rec.settledTaskCalls = slices.DeleteFunc(rec.settledTaskCalls, func(settled settledTaskCall) bool {
+		return slices.Contains(calls, settled.call)
+	})
+	rec.pendingFinishCalls = slices.DeleteFunc(rec.pendingFinishCalls, func(pending string) bool {
+		return slices.Contains(calls, pending)
+	})
+	if len(rec.pendingFinishCalls) == 0 {
+		rec.unseenModelFinishFC = 0
 	}
 	if rec.parent != nil && rec.parent.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(rec.parent, now)
@@ -2552,13 +3134,11 @@ func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string) int 
 	return found
 }
 
-// noteTaskFinished records that the finish_task call callID of the agent
-// activation that ctx and id identify completed, so that the function response
-// event that reports it ends that activation (see popTaskAgentSpan). The tool
-// callbacks get the context of the activation that made the call, which the
-// event callback does not.
-func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callID string) {
-	if callID == "" {
+// noteTaskFinishCalls records positive finish_task FunctionCall evidence on the
+// owning task-mode agent activation so a subsequent finish_task response can be
+// recognized even when an earlier plugin skips both BeforeTool and AfterTool.
+func (tm *traceManager) noteTaskFinishCalls(ctx context.Context, id identity, calls []string, fromEvent bool) {
+	if len(calls) == 0 {
 		return
 	}
 	inv := tm.invocation(ctx, id)
@@ -2566,8 +3146,318 @@ func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callI
 		inv = tm.invocation(ctx, id)
 	}
 	defer inv.mu.Unlock()
+	matchesTaskFrame := func(rec *spanRecord) bool {
+		return rec.kind == spanKindAgent && rec.taskMode && rec.name == id.agentName && rec.branch == id.branch &&
+			(id.path == "" || rec.path == "" || rec.path == id.path)
+	}
+	hasAnyCall := func(list []string) bool {
+		return slices.ContainsFunc(calls, func(c string) bool { return slices.Contains(list, c) })
+	}
+	var target *spanRecord
+	if !fromEvent {
+		if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+			target = inv.agentStack[i]
+		}
+	} else {
+		if act := activationKey(ctx); act != nil {
+			for j := len(inv.agentStack) - 1; j > 0; j-- {
+				r := inv.agentStack[j]
+				if r.kind == spanKindAgent && r.activation == act && r.name == id.agentName && r.branch == id.branch {
+					target = r
+					break
+				}
+			}
+		}
+		if target == nil {
+			for j := len(inv.agentStack) - 1; j > 0; j-- {
+				r := inv.agentStack[j]
+				if matchesTaskFrame(r) && r.unseenModelFinishFC > 0 && hasAnyCall(r.pendingFinishCalls) {
+					r.unseenModelFinishFC--
+					return
+				}
+			}
+			for j := len(inv.agentStack) - 1; j > 0; j-- {
+				r := inv.agentStack[j]
+				if matchesTaskFrame(r) && len(r.finishedTasks) == 0 && len(r.rejectedTasks) == 0 {
+					target = r
+					break
+				}
+			}
+			if target == nil {
+				if i := inv.findAgent(id.path, id.agentName, id.branch); i > 0 {
+					target = inv.agentStack[i]
+				}
+			}
+		} else if target.unseenModelFinishFC > 0 && hasAnyCall(target.pendingFinishCalls) {
+			target.unseenModelFinishFC--
+			return
+		}
+	}
+	if target == nil || !target.taskMode {
+		return
+	}
+	if !fromEvent {
+		target.unseenModelFinishFC++
+	}
+	for _, call := range calls {
+		if call == "" {
+			continue
+		}
+		if !slices.Contains(target.pendingFinishCalls, call) {
+			target.pendingFinishCalls = append(target.pendingFinishCalls, call)
+		}
+	}
+}
+
+// clearFinishCall removes call from the pending and settled finish_task calls
+// of rec, which then no longer count as evidence that rec made the call.
+func (rec *spanRecord) clearFinishCall(call string) {
+	rec.deferredFinish = nil
+	rec.settledTaskCalls = slices.DeleteFunc(rec.settledTaskCalls, func(settled settledTaskCall) bool {
+		return settled.call == call
+	})
+	rec.pendingFinishCalls = slices.DeleteFunc(rec.pendingFinishCalls, func(pending string) bool {
+		return pending == call
+	})
+	if len(rec.pendingFinishCalls) == 0 {
+		rec.unseenModelFinishFC = 0
+	}
+}
+
+// retireDeferredTaskActivationLocked retires agentStack[idx] when it holds an
+// unresolved deferredTaskFinish (see deferredTaskFinish) and has not failed,
+// returning its AGENT_COMPLETED row span and identity. inv.mu must be held.
+func (inv *invocationTrace) retireDeferredTaskActivationLocked(idx int) (deferredAgentCompletion, bool) {
+	rec := inv.agentStack[idx]
+	df := rec.deferredFinish
+	if df == nil || rec.kind != spanKindAgent || !rec.taskMode || !slices.Contains(rec.pendingFinishCalls, df.call) {
+		return deferredAgentCompletion{}, false
+	}
+	if inv.lastSessionEventPartial || rec.wasCanceled() || rec.openFailureCause() != nil {
+		return deferredAgentCompletion{}, false
+	}
+	if len(inv.failuresLocked(idx, false, nil, true)) > 0 {
+		return deferredAgentCompletion{}, false
+	}
+	rec.deferredFinish = nil
+	rec.pendingFinishCalls = slices.DeleteFunc(rec.pendingFinishCalls, func(pending string) bool {
+		return pending == df.call
+	})
+	if len(rec.pendingFinishCalls) == 0 {
+		rec.unseenModelFinishFC = 0
+	}
+	if rec.parent != nil && rec.parent.kind == spanKindAgent {
+		inv.touchAgentActivityLocked(rec.parent, df.at)
+	}
+	for j := range inv.agentStack {
+		if inv.agentStack[j].spanID == rec.parentSpanID &&
+			inv.agentStack[j].kind == spanKindAgent &&
+			!inv.agentStack[j].nonLLM &&
+			slices.Contains(inv.agentStack[j].children, rec.name) {
+			inv.agentStack[j].taskDelegated = true
+			break
+		}
+	}
+	inv.retireAgentLocked(idx, false, noFrame)
+	inv.retireLateSettledLocked()
+	span := inv.rowSpan(rec, latencyOf(rec, df.at), df.ambient)
+	span.timestamp = df.at
+	return deferredAgentCompletion{
+		span:      span,
+		agentName: rec.name,
+		branch:    rec.branch,
+		path:      rec.path,
+	}, true
+}
+
+// popDeferredTaskCompletionsAll settles any remaining open task-mode
+// activations with an unresolved deferredTaskFinish when the invocation ends.
+func (tm *traceManager) popDeferredTaskCompletionsAll(ctx context.Context, id identity) []deferredAgentCompletion {
+	inv := tm.invocation(ctx, id)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	var out []deferredAgentCompletion
+	for {
+		picked := -1
+		for j := 1; j < len(inv.agentStack); j++ {
+			if inv.agentStack[j].deferredFinish != nil {
+				picked = j
+				break
+			}
+		}
+		if picked < 0 {
+			break
+		}
+		comp, ok := inv.retireDeferredTaskActivationLocked(picked)
+		if !ok {
+			inv.agentStack[picked].deferredFinish = nil
+			continue
+		}
+		out = append(out, comp)
+	}
+	return out
+}
+
+// popDeferredTaskCompletionsUnder settles open child task-mode activations with
+// an unresolved deferredTaskFinish whose runs completed with the parent
+// activation identified by ctx and id, before popAgentSpan retires the parent.
+func (tm *traceManager) popDeferredTaskCompletionsUnder(ctx context.Context, id identity) []deferredAgentCompletion {
+	inv := tm.invocation(ctx, id)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	var out []deferredAgentCompletion
+	for {
+		pIdx := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
+		if pIdx <= 0 {
+			break
+		}
+		parent := inv.agentStack[pIdx]
+		subtree := inv.subtreeLocked(pIdx)
+		picked := -1
+		for j := pIdx + 1; j < len(inv.agentStack); j++ {
+			rec := inv.agentStack[j]
+			if !subtree[rec.spanID] || rec.deferredFinish == nil {
+				continue
+			}
+			if rec.goroutineID == 0 || parent.goroutineID == 0 || rec.goroutineID == parent.goroutineID || parent.joinsOnceReturned(rec) {
+				picked = j
+				break
+			}
+		}
+		if picked < 0 {
+			break
+		}
+		comp, ok := inv.retireDeferredTaskActivationLocked(picked)
+		if !ok {
+			inv.agentStack[picked].deferredFinish = nil
+			continue
+		}
+		out = append(out, comp)
+	}
+	return out
+}
+
+// popDeferredTaskCompletionsForDelegator settles an open child task-mode
+// activation with an unresolved deferredTaskFinish when its delegating LLM
+// parent re-enters BeforeAgentCallback on the same goroutine.
+func (tm *traceManager) popDeferredTaskCompletionsForDelegator(ctx context.Context, id identity) []deferredAgentCompletion {
+	inv := tm.invocation(ctx, id)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	goid := currentGoroutineID()
+	var out []deferredAgentCompletion
+	for {
+		picked := -1
+		for pIdx := len(inv.agentStack) - 1; pIdx > 0 && picked < 0; pIdx-- {
+			parent := inv.agentStack[pIdx]
+			if parent.kind != spanKindAgent || parent.nonLLM ||
+				parent.name != id.agentName || parent.branch != id.branch || parent.path != id.path {
+				continue
+			}
+			for j := pIdx + 1; j < len(inv.agentStack); j++ {
+				rec := inv.agentStack[j]
+				if rec.parentSpanID == parent.spanID && rec.deferredFinish != nil &&
+					slices.Contains(parent.children, rec.name) &&
+					(rec.goroutineID == 0 || goid == 0 || rec.goroutineID == goid) {
+					picked = j
+					break
+				}
+			}
+		}
+		if picked < 0 {
+			break
+		}
+		comp, ok := inv.retireDeferredTaskActivationLocked(picked)
+		if !ok {
+			inv.agentStack[picked].deferredFinish = nil
+			continue
+		}
+		out = append(out, comp)
+	}
+	return out
+}
+
+// noteTaskFinished records that the finish_task call callID of the agent
+// activation that ctx and id identify completed, so that the function response
+// event that reports it ends that activation (see popTaskAgentSpan). Any
+// unconsumed rejection for the same call on that activation is cleared so a
+// retry after a suppressed FunctionResponse event still closes the activation.
+func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callID string) {
+	call := cmp.Or(callID, finishTaskToolName)
+	deltaRef := toolContextTaskDeltaRef(ctx, call)
+	inv := tm.invocation(ctx, id)
+	for !inv.lockLive() {
+		inv = tm.invocation(ctx, id)
+	}
+	defer inv.mu.Unlock()
 	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
-		inv.agentStack[i].finishedTasks = append(inv.agentStack[i].finishedTasks, callID)
+		rec := inv.agentStack[i]
+		inv.recordTaskToolDeltaLocked(rec, deltaRef)
+		rec.rejectedTasks = slices.DeleteFunc(rec.rejectedTasks, func(rej rejectedTaskCall) bool {
+			return rej.call == call
+		})
+		rec.clearFinishCall(call)
+		rec.finishedTasks = append(rec.finishedTasks, call)
+	}
+}
+
+// noteTaskRejected records that the finish_task call callID of the agent
+// activation that ctx and id identify failed or was recovered by an error
+// callback even though its result map still carries "Task completed.", so that
+// the subsequent FunctionResponse event does not end a task activation when no
+// newer matching finish_task succeeded cleanly (see popTaskAgentSpan).
+func (tm *traceManager) noteTaskRejected(ctx context.Context, id identity, callID string) {
+	call := cmp.Or(callID, finishTaskToolName)
+	deltaRef := toolContextTaskDeltaRef(ctx, call)
+	inv := tm.invocation(ctx, id)
+	for !inv.lockLive() {
+		inv = tm.invocation(ctx, id)
+	}
+	defer inv.mu.Unlock()
+	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+		rec := inv.agentStack[i]
+		inv.recordTaskToolDeltaLocked(rec, deltaRef)
+		rec.clearFinishCall(call)
+		rec.rejectedTasks = append(rec.rejectedTasks, rejectedTaskCall{call: call, delta: deltaRef})
+	}
+}
+
+// noteTaskUnfinished records that the finish_task call callID of the agent
+// activation that ctx and id identify ended without completing the task, as
+// when the tool rejects its arguments or a confirmation is pending, so that
+// the call made by the activation's model response no longer counts as
+// evidence that a function response event answers it (see
+// popTaskAgentSpanWithDelta). Its function response event reports no
+// completion, so no rejection needs to be recorded; the activation keeps the
+// call until that event arrives (see unfinishedFinishCalls).
+func (tm *traceManager) noteTaskUnfinished(ctx context.Context, id identity, callID string) {
+	call := cmp.Or(callID, finishTaskToolName)
+	inv := tm.invocation(ctx, id)
+	for !inv.lockLive() {
+		inv = tm.invocation(ctx, id)
+	}
+	defer inv.mu.Unlock()
+	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+		rec := inv.agentStack[i]
+		rec.clearFinishCall(call)
+		if rec.taskMode {
+			if len(rec.unfinishedFinishCalls) >= maxTaskToolDeltas {
+				rec.unfinishedFinishCalls = slices.Delete(rec.unfinishedFinishCalls, 0, len(rec.unfinishedFinishCalls)-maxTaskToolDeltas+1)
+			}
+			rec.unfinishedFinishCalls = append(rec.unfinishedFinishCalls, call)
+		}
+	}
+}
+
+// endUnfinishedResponse records that a function response event that reports
+// no completion answered the finish_task call call of the task-mode
+// activation rec: the call no longer counts as rec's finish_task call, its
+// deferred completion is canceled (see clearFinishCall), and the response
+// that unfinishedFinishCalls waited for has arrived.
+func (rec *spanRecord) endUnfinishedResponse(call string) {
+	rec.clearFinishCall(call)
+	if k := slices.Index(rec.unfinishedFinishCalls, call); k >= 0 {
+		rec.unfinishedFinishCalls = slices.Delete(rec.unfinishedFinishCalls, k, k+1)
 	}
 }
 
@@ -2661,6 +3551,8 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 			}
 			if inv.isLate {
 				retired = append(retired, d)
+			} else {
+				d.clearTaskDeltas()
 			}
 			inv.agentStack = slices.Delete(inv.agentStack, idx, idx+1)
 			continue
@@ -2693,6 +3585,8 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 		// dropRetiredLateContextsLocked).
 		retired = append(retired, rec)
 		inv.dropRetiredLateContextsLocked(retired...)
+	} else {
+		rec.clearTaskDeltas()
 	}
 	inv.syncOpenAgentsLocked()
 }
@@ -2888,17 +3782,27 @@ func (inv *invocationTrace) purgeActivationLocked(i int, failures map[string]err
 	// dropRetiredLateContextsLocked). Only the removed records qualify: the
 	// span that agentStack[i] runs under may still be open.
 	var latePurged []*spanRecord
-	if inv.isLate {
-		for _, rec := range inv.agentStack[i:] {
-			if purged[rec.spanID] {
+	for _, rec := range inv.agentStack[i:] {
+		if purged[rec.spanID] {
+			if inv.isLate {
 				latePurged = append(latePurged, rec)
+			} else {
+				rec.clearTaskDeltas()
 			}
 		}
 	}
 	inv.agentStack = slices.DeleteFunc(inv.agentStack, func(rec *spanRecord) bool { return purged[rec.spanID] })
 	inv.syncOpenAgentsLocked()
-	for _, calls := range []map[string]*spanRecord{inv.llmSpans, inv.completedModels, inv.toolSpans, inv.completedTools} {
+	for _, calls := range []map[string]*spanRecord{inv.llmSpans, inv.completedModels, inv.toolSpans} {
 		maps.DeleteFunc(calls, func(_ string, rec *spanRecord) bool { return purged[rec.parentSpanID] })
+	}
+	for key, rec := range inv.completedTools {
+		kept := filterCompletedChain(rec, func(r *spanRecord) bool { return !purged[r.parentSpanID] })
+		if kept == nil {
+			delete(inv.completedTools, key)
+		} else {
+			inv.completedTools[key] = kept
+		}
 	}
 	maps.DeleteFunc(inv.unrecoveredErrors, func(_ string, e recordedError) bool { return purged[e.spanID] })
 	if purged[inv.lastPartialSpanID] {
@@ -3070,12 +3974,54 @@ type unclosedAgentSpan struct {
 	timestamp time.Time
 }
 
-// completeResponse records that the author of a final, non-partial session
-// event with content or a typed output responded. The
-// author's activation is looked up from the event's author, branch and node
-// path in id, as in eventSpan, because the event callback gets the agent that
-// the runner runs rather than the author. calls holds the function call ID, or
-// else the tool name, of each function response of the event.
+// functionResponseCall identifies one FunctionResponse part of a session
+// event: call is the function call ID, or else the tool name, and name is the
+// tool name (empty when completeResponse is called directly by tests).
+// unfinished reports a finish_task response without ADK's completion sentinel
+// ("result": "Task completed."): the call that it answers ended without
+// completing the task.
+type functionResponseCall struct {
+	call       string
+	name       string
+	unfinished bool
+}
+
+// matchesOpenToolCall reports whether the open tool span rec under key answers
+// fr, matching both the call ID and, when known on both sides, the tool name.
+func matchesOpenToolCall(key string, rec *spanRecord, fr functionResponseCall) bool {
+	if toolKeyCall(key) != fr.call {
+		return false
+	}
+	return fr.name == "" || rec.toolName == "" || rec.toolName == fr.name
+}
+
+func matchesAnyFunctionResponse(key string, rec *spanRecord, calls []functionResponseCall) bool {
+	return slices.ContainsFunc(calls, func(fr functionResponseCall) bool {
+		return matchesOpenToolCall(key, rec, fr)
+	})
+}
+
+// completeResponse is completeResponseEvent for an event whose function
+// responses are known by their call IDs (or tool names) alone, without tool
+// names, outcomes, or StateDelta.
+func (tm *traceManager) completeResponse(ctx context.Context, id identity, author, branch string, calls []string) {
+	var specs []functionResponseCall
+	if len(calls) > 0 {
+		specs = make([]functionResponseCall, len(calls))
+		for i, c := range calls {
+			specs[i] = functionResponseCall{call: c}
+		}
+	}
+	tm.completeResponseEvent(ctx, id, author, branch, specs, nil)
+}
+
+// completeResponseEvent records that the author of a final, non-partial
+// session event with content or a typed output responded. The author's
+// activation is looked up from the event's author, branch and node path in
+// id, as in eventSpan, because the event callback gets the agent that the
+// runner runs rather than the author. calls describes the function responses
+// of the event (see functionResponseCall), and evStateDelta is the event's
+// StateDelta map.
 //
 // If the author has an open agent span, the event settles the activation and
 // the open activations that run under it inside the event's own branch and node
@@ -3103,7 +4049,20 @@ type unclosedAgentSpan struct {
 //     end without a row in the same way: an earlier plugin's
 //     AfterToolCallback that returns a result stops the chain before this
 //     plugin's, so the response event is all that ends them. The other open
-//     tool calls stay open, because the event does not answer them.
+//     tool calls stay open, because the event does not answer them. When the
+//     event's StateDelta shows the tool batch of a task-mode activation that
+//     it answers (see batchEpochOf), the calls that the activation started in
+//     a later turn, such as a retry that reuses a call ID, are not answered
+//     either.
+//   - A finish_task call of a task-mode activation that the event answers
+//     with completion is kept as settled, so that popTaskAgentSpanWithDelta
+//     still recognizes it. One that the event answers without completion no
+//     longer counts as the activation's finish_task call, pending or settled,
+//     and cancels the activation's deferred completion (see
+//     deferredTaskFinish). So does such a response that no open call
+//     answers, once it shows which activation it belongs to (see
+//     unfinishedTaskResponseOwnerLocked); while that is unresolved, nothing
+//     changes.
 //
 // A sub-agent that fails later, without any callback seeing the failure, is
 // settled as well, so its failure is not reported: popUnclosedAgentSpans
@@ -3119,7 +4078,8 @@ type unclosedAgentSpan struct {
 // without agent callbacks: a tool of it may already run a sub-agent on its
 // branch and node path while the callback of the event that called the tool
 // runs, which would be taken for the activation that the agent runs under.
-func (tm *traceManager) completeResponse(ctx context.Context, id identity, author, branch string, calls []string) {
+func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, author, branch string, calls []functionResponseCall, evStateDelta map[string]any) {
+	evDeltaPtr := mapPtr(evStateDelta)
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	inv.mu.Lock()
@@ -3146,6 +4106,11 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 				p.name == author && p.branch == branch && (id.path == "" || p.path == "" || p.path == id.path)
 		})
 		parent := inv.parentFor(identity{agentName: author, branch: branch, path: id.path})
+		if len(calls) > 0 {
+			// No activation of the author is open, so its turns cannot tell a
+			// concurrent one apart from the one that wrote the event.
+			inv.bumpAgentTurnEpochsLocked(identity{path: id.path, agentName: author, branch: branch})
+		}
 		if author == id.agentName {
 			return
 		}
@@ -3156,11 +4121,22 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 		return
 	}
 	var matchedPending, absorbed bool
-	i, matchedPending, absorbed = inv.selectResponseOwnerLocked(i, calls, wasPartial, partialSpanID, now)
+	i, matchedPending, absorbed = inv.selectResponseOwnerLocked(i, calls, evDeltaPtr, wasPartial, partialSpanID, now)
 	if absorbed {
+		// A retired activation absorbed the event. Its tool calls ended before
+		// it retired, so only contexts without an activation (see turnEpochKey)
+		// start a new turn, and the open activations of the author keep theirs.
+		if len(calls) > 0 {
+			inv.bumpTurnEpochKeyLocked(llmKey(identity{path: id.path, agentName: author, branch: branch}))
+		}
 		return
 	}
 	owner := inv.agentStack[i]
+	if len(calls) > 0 {
+		inv.bumpTurnEpochOfLocked(owner)
+	} else {
+		owner.deferredFinish = nil
+	}
 	inv.touchAgentActivityLocked(owner, now)
 	// An activation is created after the one that it runs under, so one pass
 	// over the later spans finds all that run under the owner.
@@ -3187,9 +4163,38 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 			delete(inv.llmSpans, key)
 		}
 	}
+	// An event whose StateDelta shows the tool batch that it answers answers
+	// no call that the owner started in a later turn (see batchEpochOf).
+	evEpoch, hasEvEpoch := owner.batchEpochOf(evDeltaPtr)
+	var unfinishedEnded []string
 	for key, rec := range inv.toolSpans {
-		if rec.parentSpanID == owner.spanID && slices.Contains(calls, toolKeyCall(key)) {
-			delete(inv.toolSpans, key)
+		if rec.parentSpanID != owner.spanID || (hasEvEpoch && rec.turnEpoch > evEpoch) || !matchesAnyFunctionResponse(key, rec, calls) {
+			continue
+		}
+		delete(inv.toolSpans, key)
+		call := toolKeyCall(key)
+		if !owner.taskMode || call == "" || (rec.toolName != "" && rec.toolName != finishTaskToolName) {
+			continue
+		}
+		fr := slices.IndexFunc(calls, func(fr functionResponseCall) bool {
+			return fr.call == call && (fr.name == finishTaskToolName || (fr.name == "" && rec.toolName == finishTaskToolName))
+		})
+		switch {
+		case fr < 0:
+		case calls[fr].unfinished:
+			// The call ended without completing the task.
+			owner.endUnfinishedResponse(call)
+			unfinishedEnded = append(unfinishedEnded, call)
+		case !slices.ContainsFunc(owner.settledTaskCalls, func(settled settledTaskCall) bool { return settled.call == call }):
+			owner.settledTaskCalls = append(owner.settledTaskCalls, settledTaskCall{call: call, epoch: rec.turnEpoch})
+		}
+	}
+	for _, fr := range calls {
+		if !fr.unfinished || slices.Contains(unfinishedEnded, fr.call) {
+			continue
+		}
+		if j := inv.unfinishedTaskResponseOwnerLocked(identity{path: id.path, agentName: author, branch: branch}, fr.call, evDeltaPtr); j > 0 {
+			inv.agentStack[j].endUnfinishedResponse(fr.call)
 		}
 	}
 	inv.syncOpenCallsLocked()
@@ -3207,6 +4212,64 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 	// markToolRunsDoneLocked).
 	inv.settleFinishedLocked()
 	inv.retireLateSettledLocked()
+}
+
+// unfinishedTaskResponseOwnerLocked returns the index in agentStack of the
+// open task-mode activation of the agent of id that a finish_task function
+// response for call, which reports no completion and answers no open call of
+// the event's owner, belongs to, or -1 while that is unresolved: the
+// activation that recorded the event's StateDelta map, at evDeltaPtr, for one
+// of its tool calls (see recordTaskToolDeltaLocked), or else the only one with
+// a finish_task call with that ID whose function response may still arrive
+// (see hasFinishCallLocked). As in findAgent, a node path that either side
+// lacks matches any. inv.mu must be held.
+func (inv *invocationTrace) unfinishedTaskResponseOwnerLocked(id identity, call string, evDeltaPtr uintptr) int {
+	matchesTaskFrame := func(rec *spanRecord) bool {
+		return rec.kind == spanKindAgent && rec.taskMode && rec.name == id.agentName && rec.branch == id.branch &&
+			(id.path == "" || rec.path == "" || rec.path == id.path)
+	}
+	if evDeltaPtr != 0 {
+		for j := len(inv.agentStack) - 1; j > 0; j-- {
+			if rec := inv.agentStack[j]; matchesTaskFrame(rec) {
+				if _, ok := rec.batchEpochOf(evDeltaPtr); ok {
+					return j
+				}
+			}
+		}
+	}
+	found := -1
+	for j := len(inv.agentStack) - 1; j > 0; j-- {
+		rec := inv.agentStack[j]
+		if !matchesTaskFrame(rec) || !inv.hasFinishCallLocked(rec, call) {
+			continue
+		}
+		if found >= 0 {
+			return -1
+		}
+		found = j
+	}
+	return found
+}
+
+// hasFinishCallLocked reports whether the task-mode activation rec has a
+// finish_task call with call whose function response may still arrive: one
+// that is open, that a function response event settled (see
+// completeResponseEvent), that its model made (see noteTaskFinishCalls), whose
+// completion is deferred (see deferredTaskFinish), or that ended without
+// completing the task before its response arrived (see
+// unfinishedFinishCalls). inv.mu must be held.
+func (inv *invocationTrace) hasFinishCallLocked(rec *spanRecord, call string) bool {
+	if slices.Contains(rec.pendingFinishCalls, call) || slices.Contains(rec.unfinishedFinishCalls, call) ||
+		(rec.deferredFinish != nil && rec.deferredFinish.call == call) ||
+		slices.ContainsFunc(rec.settledTaskCalls, func(settled settledTaskCall) bool { return settled.call == call }) {
+		return true
+	}
+	for key, open := range inv.toolSpans {
+		if open.parentSpanID == rec.spanID && open.toolName == finishTaskToolName && toolKeyCall(key) == call {
+			return true
+		}
+	}
+	return false
 }
 
 // retireDrainedDescendantsLocked removes healthy open agent spans that stayed
@@ -3252,10 +4315,10 @@ func (inv *invocationTrace) retireDrainedDescendantsLocked(matchAnc func(p *span
 }
 
 // selectResponseOwnerLocked picks which open activation of agentStack[i]'s
-// (path, name, branch) owns a session event in completeResponse, reporting
+// (path, name, branch) owns a session event in completeResponseEvent, reporting
 // whether it matched pending model/tool callback evidence, or absorbs the event
 // when its author already retired while a peer remained open.
-func (inv *invocationTrace) selectResponseOwnerLocked(i int, calls []string, wasPartial bool, partialSpanID string, now time.Time) (int, bool, bool) {
+func (inv *invocationTrace) selectResponseOwnerLocked(i int, calls []functionResponseCall, evDeltaPtr uintptr, wasPartial bool, partialSpanID string, now time.Time) (int, bool, bool) {
 	base := inv.agentStack[i]
 	k := llmKey(identity{path: base.path, agentName: base.name, branch: base.branch})
 	absorbOntoParent := func() (int, bool, bool) {
@@ -3284,7 +4347,7 @@ func (inv *invocationTrace) selectResponseOwnerLocked(i int, calls []string, was
 	}
 	// hasUnrecErr reports whether activation idx has a non-collateral
 	// unrecovered error recorded, so a model-event credit should not let a
-	// peer's response claim its events (see P1-3).
+	// peer's response claim its events.
 	hasUnrecErr := func(idx int) bool {
 		for _, e := range inv.unrecoveredErrors {
 			if !e.collateral && inv.activationOfLocked(e) == idx {
@@ -3294,14 +4357,66 @@ func (inv *invocationTrace) selectResponseOwnerLocked(i int, calls []string, was
 		return false
 	}
 	if len(calls) > 0 {
+		if base.taskMode && evDeltaPtr != 0 {
+			for _, j := range peerIdxs {
+				cand := inv.agentStack[j]
+				if slices.ContainsFunc(cand.rejectedTasks, func(rej rejectedTaskCall) bool {
+					return rej.delta.matches(evDeltaPtr) && slices.ContainsFunc(calls, func(fr functionResponseCall) bool {
+						return fr.call == rej.call && (fr.name == "" || fr.name == finishTaskToolName)
+					})
+				}) {
+					cand.awaitingToolEvent = max(0, cand.awaitingToolEvent-len(calls))
+					return j, true, false
+				}
+			}
+			for _, j := range peerIdxs {
+				cand := inv.agentStack[j]
+				if slices.ContainsFunc(cand.toolStateDeltas, func(d taskDeltaRef) bool {
+					return d.matches(evDeltaPtr)
+				}) {
+					cand.awaitingToolEvent = max(0, cand.awaitingToolEvent-len(calls))
+					return j, true, false
+				}
+			}
+		}
+		onlyFinishTask := base.taskMode && !slices.ContainsFunc(calls, func(fr functionResponseCall) bool {
+			return fr.name != finishTaskToolName
+		})
+		peerHasFinishState := func(cand *spanRecord) bool {
+			if slices.ContainsFunc(calls, func(fr functionResponseCall) bool {
+				return slices.Contains(cand.finishedTasks, fr.call) ||
+					slices.Contains(cand.pendingFinishCalls, fr.call) ||
+					slices.ContainsFunc(cand.rejectedTasks, func(rej rejectedTaskCall) bool { return rej.call == fr.call })
+			}) {
+				return true
+			}
+			for key, rec := range inv.toolSpans {
+				if rec.parentSpanID == cand.spanID && matchesAnyFunctionResponse(key, rec, calls) {
+					return true
+				}
+			}
+			return false
+		}
+		anyPeerHasFinishState := false
+		if onlyFinishTask {
+			for _, j := range peerIdxs {
+				if peerHasFinishState(inv.agentStack[j]) {
+					anyPeerHasFinishState = true
+					break
+				}
+			}
+		}
 		for _, j := range peerIdxs {
 			cand := inv.agentStack[j]
+			if onlyFinishTask && anyPeerHasFinishState && !peerHasFinishState(cand) {
+				continue
+			}
 			if cand.awaitingToolEvent > 0 && !hasUnrecErr(j) {
 				cand.awaitingToolEvent = max(0, cand.awaitingToolEvent-len(calls))
 				return j, true, false
 			}
 			for key, rec := range inv.toolSpans {
-				if rec.parentSpanID == cand.spanID && slices.Contains(calls, toolKeyCall(key)) {
+				if rec.parentSpanID == cand.spanID && matchesAnyFunctionResponse(key, rec, calls) {
 					return j, true, false
 				}
 			}
@@ -3397,6 +4512,7 @@ func (tm *traceManager) recordError(ctx context.Context, id identity, key string
 		// selectResponseOwnerLocked).
 		owner.awaitingModelEvent = 0
 		owner.awaitingToolEvent = 0
+		owner.deferredFinish = nil
 	}
 	call := &spanRecord{canceled: canceledFunc(ctx), parent: owner, stopPoint: owner.kind == spanKindInvocation}
 	var cause error
@@ -3407,6 +4523,9 @@ func (tm *traceManager) recordError(ctx context.Context, id identity, key string
 			err = fmt.Errorf("%w: %w", err, cause)
 		}
 	}
+	// A new model error ends/breaks the current tool-retry turn context so
+	// subsequent turns do not inherit suppressed completion state.
+	inv.bumpTurnEpochLocked(ctx, id)
 	inv.unrecoveredErrors[key] = recordedError{
 		err:        err,
 		cause:      cause,
@@ -3749,6 +4868,10 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 	}
 
 	if primaryErr == nil {
+		for _, rec := range inv.agentStack[1:] {
+			rec.clearTaskDeltas()
+		}
+		clear(inv.agentStack[1:])
 		inv.agentStack = inv.agentStack[:1]
 		inv.syncOpenAgentsLocked()
 		return nil, nil
@@ -3776,6 +4899,10 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 			err:       spanErr,
 		})
 	}
+	for _, rec := range inv.agentStack[1:] {
+		rec.clearTaskDeltas()
+	}
+	clear(inv.agentStack[1:])
 	inv.agentStack = inv.agentStack[:1]
 	inv.syncOpenAgentsLocked()
 	return popped, primaryErr
@@ -4585,6 +5712,7 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
+	inv.bumpTurnEpochLocked(ctx, id)
 	key := callKey(ctx, llmKey(id))
 	owner := inv.ownerOf(ctx, id)
 	inv.clearLastPartialUnderLocked(owner)
@@ -4596,6 +5724,7 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 		// this activation's final response event (see selectResponseOwnerLocked).
 		owner.awaitingModelEvent = 0
 		owner.awaitingToolEvent = 0
+		owner.deferredFinish = nil
 	}
 	rec := inv.newChild(owner, spanKindLLM, now)
 	rec.canceled = canceledFunc(ctx)
@@ -4697,6 +5826,7 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 	}
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
+	inv.bumpTurnEpochLocked(ctx, id)
 	key := callKey(ctx, llmKey(id))
 	rec := inv.llmSpans[key]
 	if rec == nil {
@@ -4707,11 +5837,15 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 					owner.hasResponse = true
 					owner.modelResponded = true
 					owner.awaitingModelEvent++
+					owner.deferredFinish = nil
 				}
 				span := inv.rowSpan(prev, nil, ambient)
 				span.timestamp = now
 				return span
 			}
+		}
+		if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
+			owner.deferredFinish = nil
 		}
 		span := inv.rowSpan(inv.newChild(inv.ownerOf(ctx, id), spanKindLLM, now), nil, ambient)
 		span.timestamp = now
@@ -4722,6 +5856,7 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 	rec.dropContexts()
 	if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(owner, now)
+		owner.deferredFinish = nil
 	}
 	if !responded {
 		// A model call that did not respond leaves no pending model-event
@@ -4750,25 +5885,44 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 	return span
 }
 
+// pushToolCallSpan starts the span of a tool call with explicit callID and tool
+// name, disambiguating overlapping empty-ID calls by their callback context and
+// arguments.
+func (tm *traceManager) pushToolCallSpan(ctx context.Context, id identity, callID, toolName string, args map[string]any) rowSpan {
+	return tm.pushToolSpanWithKind(ctx, id, toolKey(id, callID, toolName), toolName, callID == "", args)
+}
+
 // pushToolSpan starts the span of a tool call and returns the place of its
 // TOOL_STARTING row.
 func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key string) rowSpan {
+	return tm.pushToolSpanWithKind(ctx, id, key, "", false, nil)
+}
+
+func (tm *traceManager) pushToolSpanWithKind(ctx context.Context, id identity, key, toolName string, emptyCallID bool, args map[string]any) rowSpan {
 	inv := tm.lookupInvocation(ctx, id, false, true)
 	defer inv.pendingSpans.Add(-1)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	curID, deltaRef := toolCallIdentityOf(ctx, args)
 	if !inv.lockLive() {
-		return tm.pushToolSpan(ctx, id, key)
+		return tm.pushToolSpanWithKind(ctx, id, key, toolName, emptyCallID, args)
 	}
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key = callKey(ctx, key)
+	curEpoch := inv.turnEpochOfLocked(ctx, id)
+	resolved := inv.resolveToolCallKeyLocked(ctx, key, true, false, false, emptyCallID, curID, curEpoch, args)
+	key = resolved.key
 	owner := inv.ownerOf(ctx, id)
 	inv.clearLastPartialUnderLocked(owner)
 	if owner.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(owner, now)
+		owner.deferredFinish = nil
+		if owner.taskMode && !deltaRef.empty() {
+			deltaRef.call = toolKeyCall(key)
+			inv.recordTaskToolDeltaLocked(owner, deltaRef)
+		}
 		// A new tool call clears stale model-event credits from earlier
 		// model-response events that the agent's parent consumed without
 		// forwarding, so a peer cannot use them to claim a later event. It
@@ -4777,18 +5931,118 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 		// response may already have ended, and the merged function-response
 		// event of the response still needs that call's credit.
 		owner.awaitingModelEvent = 0
+		if owner.taskMode && (toolName == "" || toolName == finishTaskToolName) {
+			if call := toolKeyCall(key); call != "" {
+				owner.settledTaskCalls = slices.DeleteFunc(owner.settledTaskCalls, func(settled settledTaskCall) bool {
+					return settled.call == call
+				})
+			}
+		}
 	}
 	rec := inv.newChild(owner, spanKindTool, now)
 	rec.canceled = canceledFunc(ctx)
 	rec.seq = inv.nextSeqLocked()
+	rec.emptyCallSeq = resolved.seq
+	rec.toolCallID = curID
+	rec.turnEpoch = curEpoch
 	rec.callStarted = true
+	rec.toolName = toolName
 	rec.ownActivation = owner.isActivationOf(ctx)
 	inv.toolSpans[key] = rec
 	inv.syncOpenCallsLocked()
-	delete(inv.completedTools, key)
+	inv.pruneCompletedToolsOnPushLocked(key, curID, curEpoch)
 	span := inv.rowSpan(rec, nil, ambient)
 	span.timestamp = now
 	return span
+}
+
+func (inv *invocationTrace) pushCompletedToolLocked(key string, rec *spanRecord) {
+	head := filterCompletedChain(inv.completedTools[key], func(e *spanRecord) bool {
+		return e.turnEpoch == rec.turnEpoch && !(rec.toolCallID.hasAttemptIdentity() && e.toolCallID.sameContext(rec.toolCallID))
+	})
+	rec.prevCompleted = head
+	for cur, count := rec, 1; cur.prevCompleted != nil; count++ {
+		if count >= maxTaskToolDeltas {
+			cur.prevCompleted = nil
+			break
+		}
+		cur = cur.prevCompleted
+	}
+	inv.completedTools[key] = rec
+}
+
+func (inv *invocationTrace) pruneCompletedToolsOnPushLocked(key string, curID toolCallIdentity, curEpoch uint64) {
+	head := filterCompletedChain(inv.completedTools[key], func(e *spanRecord) bool {
+		return e.turnEpoch == curEpoch && curID.hasAttemptIdentity() && e.toolCallID.hasAttemptIdentity() && !e.toolCallID.sameContext(curID)
+	})
+	if head == nil {
+		delete(inv.completedTools, key)
+	} else {
+		inv.completedTools[key] = head
+	}
+}
+
+func (inv *invocationTrace) popMatchingCompletedToolLocked(key string, curID toolCallIdentity, curEpoch uint64, requireAttemptID, unrecoveredErr bool, args map[string]any) *spanRecord {
+	head := inv.completedTools[key]
+	if head == nil {
+		return nil
+	}
+	if !requireAttemptID {
+		next := head.prevCompleted
+		head.prevCompleted = nil
+		if next == nil {
+			delete(inv.completedTools, key)
+		} else {
+			inv.completedTools[key] = next
+		}
+		return head
+	}
+	var matched *spanRecord
+	consumed := false
+	newHead := filterCompletedChain(head, func(e *spanRecord) bool {
+		if consumed {
+			return true
+		}
+		if errorEndedSameAttempt(e, curID, curEpoch, unrecoveredErr, args) {
+			matched = e
+			consumed = true
+			return false
+		}
+		// The callback ends the call that e recorded but keeps its own row:
+		// a callback with attempt identity on e's context, or a recovered
+		// callback in e's turn on a context without attempt identity that
+		// its arguments do not show to belong to another attempt. The marker
+		// is consumed, so that it cannot claim a later failure of the call.
+		if e.toolCallID.sameContext(curID) && (curID.hasAttemptIdentity() ||
+			(!unrecoveredErr && e.turnEpoch == curEpoch && !e.argsShowOtherAttempt(curID, args))) {
+			consumed = true
+			return false
+		}
+		return true
+	})
+	if newHead == nil {
+		delete(inv.completedTools, key)
+	} else {
+		inv.completedTools[key] = newHead
+	}
+	return matched
+}
+
+// popToolCallSpan ends the span of a tool call identified by callID and tool
+// name, preserving per-call identity when callID is empty.
+func (tm *traceManager) popToolCallSpan(ctx context.Context, id identity, callID, toolName string, fromError bool, args map[string]any) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
+	return tm.popToolSpanWithKind(ctx, id, toolKey(id, callID, toolName), fromError, callID == "", true, false, args)
+}
+
+// popToolAfterCallSpan ends the span of a tool call from AfterToolCallback.
+// errorOutcome reports that the call ends with an error: the callback still
+// sees the error, or a plugin/retryandreflect payload that reports it. Such a
+// callback adds no second TOOL_ERROR row to the attempt whose failure
+// OnToolErrorCallback recorded, while a callback with a result suppresses
+// TOOL_COMPLETED only when it can tell the recovered attempt apart from a retry
+// (see errorEndedSameAttempt).
+func (tm *traceManager) popToolAfterCallSpan(ctx context.Context, id identity, callID, toolName string, args map[string]any, errorOutcome bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
+	return tm.popToolSpanWithKind(ctx, id, toolKey(id, callID, toolName), false, callID == "", true, errorOutcome, args)
 }
 
 // popToolSpan ends the span of a tool call and returns the place of its
@@ -4803,26 +6057,59 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 // activations that its tool calls ran and that never ended are ended—purged
 // if they failed, or retired quietly otherwise (see endToolRunsLocked).
 func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string, fromError bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
+	return tm.popToolSpanWithKind(ctx, id, key, fromError, false, false, false, nil)
+}
+
+func (tm *traceManager) popToolSpanWithKind(ctx context.Context, id identity, key string, fromError, emptyCallID, requireAttemptID, unrecoveredErr bool, args map[string]any) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	curID, deltaRef := toolCallIdentityOf(ctx, args)
 	if !inv.lockLive() {
-		return tm.popToolSpan(ctx, id, key, fromError)
+		return tm.popToolSpanWithKind(ctx, id, key, fromError, emptyCallID, requireAttemptID, unrecoveredErr, args)
 	}
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key = callKey(ctx, key)
+	curEpoch := inv.turnEpochOfLocked(ctx, id)
+	resolved := inv.resolveToolCallKeyLocked(ctx, key, false, fromError, unrecoveredErr, emptyCallID, curID, curEpoch, args)
+	key = resolved.key
 	open := inv.toolSpans[key]
+	if !fromError && (open == nil || (curID.hasAttemptIdentity() && !open.toolCallID.sameContext(curID))) {
+		if rec := inv.popMatchingCompletedToolLocked(key, curID, curEpoch, requireAttemptID, unrecoveredErr, args); rec != nil {
+			if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+				owningAgent := inv.agentStack[i]
+				owningAgent.awaitingToolEvent++
+				if owningAgent.taskMode && !deltaRef.empty() {
+					deltaRef.call = toolKeyCall(key)
+					inv.recordTaskToolDeltaLocked(owningAgent, deltaRef)
+				}
+			}
+			purged = inv.endToolRunsLocked(ctx, id, inv.lastSessionEventPartial, now, ambient, noFrame)
+			inv.settleFinishedLocked()
+			inv.retireLateSettledLocked()
+			span = inv.rowSpan(rec, nil, ambient)
+			span.timestamp = now
+			return span, purged, true
+		}
+	}
 	delete(inv.toolSpans, key)
 	inv.syncOpenCallsLocked()
 	if open != nil {
 		inv.markToolRunsDoneLocked(open)
 	}
-	if !fromError {
-		if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
-			inv.agentStack[i].awaitingToolEvent++
+	var owningAgent *spanRecord
+	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+		owningAgent = inv.agentStack[i]
+		if !fromError {
+			owningAgent.awaitingToolEvent++
 		}
+	} else if open != nil && open.parent != nil && open.parent.kind == spanKindAgent {
+		owningAgent = open.parent
+	}
+	if owningAgent != nil && owningAgent.taskMode && !deltaRef.empty() {
+		deltaRef.call = toolKeyCall(key)
+		inv.recordTaskToolDeltaLocked(owningAgent, deltaRef)
 	}
 	if open != nil && open.parent != nil && open.parent.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(open.parent, now)
@@ -4837,29 +6124,104 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 	inv.retireLateSettledLocked()
 	if open != nil {
 		open.dropContexts()
-		if fromError {
-			inv.completedTools[key] = open
+		if resolved.dropMatchedSpan || resolved.settledAmbiguousErr {
+			// Ambiguous empty-ID overlap: the matched open entry was settled and
+			// removed above so AfterRun does not leak an unclosed span, while
+			// returning a fresh uncorrelated span with no borrowed latency. An
+			// entry that settled a pending error ends without a row of its own.
+			rec := inv.newChild(inv.ownerOf(ctx, id), spanKindTool, now)
+			rec.dropContexts()
+			span = inv.rowSpan(rec, nil, ambient)
+			span.timestamp = now
+			return span, purged, resolved.settledAmbiguousErr
+		}
+		if fromError && resolved.recordCompleted {
+			open.toolCallID = curID
+			open.turnEpoch = curEpoch
+			open.errArgs = markerArgs(curID, args)
+			inv.pushCompletedToolLocked(key, open)
 		}
 		span = inv.rowSpan(open, latencyOf(open, now), ambient)
 		span.timestamp = now
 		return span, purged, false
 	}
-	if !fromError {
-		if rec := inv.completedTools[key]; rec != nil {
-			delete(inv.completedTools, key)
-			span = inv.rowSpan(rec, nil, ambient)
-			span.timestamp = now
-			return span, purged, true
-		}
-	}
 	rec := inv.newChild(inv.ownerOf(ctx, id), spanKindTool, now)
-	if fromError {
+	if fromError && resolved.recordCompleted {
 		rec.dropContexts()
-		inv.completedTools[key] = rec
+		rec.emptyCallSeq = resolved.seq
+		rec.toolCallID = curID
+		rec.turnEpoch = curEpoch
+		rec.errArgs = markerArgs(curID, args)
+		inv.pushCompletedToolLocked(key, rec)
 	}
 	span = inv.rowSpan(rec, nil, ambient)
 	span.timestamp = now
 	return span, purged, false
+}
+
+// errorEndedSameAttempt reports whether the AfterToolCallback with curID and
+// args, in the turn epoch curEpoch of its activation, belongs to the attempt
+// whose failure OnToolErrorCallback recorded in rec, so that the callback adds
+// no row: TOOL_ERROR is already written, and a recovered attempt gets no
+// TOOL_COMPLETED.
+//
+// A callback that ends the call with an error (unrecoveredErr: it still sees
+// the error, or a plugin/retryandreflect payload that reports it) follows the
+// OnToolErrorCallback of its attempt in the same callback chain, where an
+// earlier callback may have changed the arguments in place: each
+// OnToolErrorCallback records one marker in completedTools, which
+// popToolSpanWithKind deletes on consumption, so matching context and turn
+// epoch dedupes such a callback without comparing mutable or truncated
+// argument digests. On a context without attempt identity, whose callbacks
+// all share one context, the callback of another attempt whose
+// BeforeToolCallback and OnToolErrorCallback were skipped would match the
+// marker as well, so it does not match when its arguments show that it
+// belongs to another attempt (see argsShowOtherAttempt).
+//
+// A callback with a result suppresses TOOL_COMPLETED when it carries attempt
+// identity in the same turn: unconditionally when EventActions is present (as
+// in every stock ADK tool dispatch via agent.NewToolContext, regardless of
+// earlier plugins or in-place argument mutations), or when JSON-shaped
+// arguments match in full on a custom pointer context without EventActions
+// (see toolCallIdentity.sameArgs).
+func errorEndedSameAttempt(rec *spanRecord, curID toolCallIdentity, curEpoch uint64, unrecoveredErr bool, args map[string]any) bool {
+	if !rec.toolCallID.sameContext(curID) || rec.turnEpoch != curEpoch {
+		return false
+	}
+	if !curID.hasAttemptIdentity() {
+		return unrecoveredErr && !rec.argsShowOtherAttempt(curID, args)
+	}
+	return unrecoveredErr || curID.hasActions() || rec.toolCallID.sameArgs(curID)
+}
+
+// markerArgs returns the arguments map that the error-ended marker of a call
+// with curID and args keeps (see spanRecord.errArgs): args when the callback
+// context has no attempt identity and the digest of args is complete, and
+// otherwise nil.
+func markerArgs(curID toolCallIdentity, args map[string]any) map[string]any {
+	if curID.hasAttemptIdentity() || !curID.hasArgs || curID.argsTruncated {
+		return nil
+	}
+	return args
+}
+
+// argsShowOtherAttempt reports whether a tool callback with curID and args,
+// on a callback context without attempt identity, belongs to another attempt
+// than the failure that the error-ended marker rec recorded. ADK passes one
+// arguments map to every callback of an attempt, so the callback belongs to
+// another attempt when it sees another map than the failed call did, and the
+// complete, untruncated digests of the two differ. A map that an earlier
+// callback changed in place is still the attempt's own, and equal arguments,
+// or arguments past the digest bounds, show nothing.
+func (rec *spanRecord) argsShowOtherAttempt(curID toolCallIdentity, args map[string]any) bool {
+	failed := rec.toolCallID
+	if failed.argsTruncated || curID.argsTruncated || failed.sameArgs(curID) {
+		return false
+	}
+	if failed.hasArgs && curID.hasArgs {
+		return rec.errArgs != nil && mapPtr(rec.errArgs) != mapPtr(args)
+	}
+	return true
 }
 
 // eventSpan returns the place of a row that describes a session event: the
@@ -5096,6 +6458,15 @@ func callKey(ctx context.Context, key string) string {
 	return key
 }
 
+// clearTaskDeltas drops the StateDelta provenance and any deferred finish_task
+// state that rec keeps for its task-mode tool calls and rejected finish_task
+// calls (see taskDeltaRef and deferredTaskFinish).
+func (rec *spanRecord) clearTaskDeltas() {
+	rec.toolStateDeltas = nil
+	rec.rejectedTasks = nil
+	rec.deferredFinish = nil
+}
+
 // dropContexts drops what rec keeps of the callbacks of its run: the context
 // of the callback that started it, the InvocationContext of its activation
 // (see ended and activation), any retired causes, and the span that it started
@@ -5107,6 +6478,7 @@ func callKey(ctx context.Context, key string) string {
 func (rec *spanRecord) dropContexts() {
 	rec.canceled, rec.ended, rec.activation, rec.parent = nil, nil, nil, nil
 	rec.retiredCauses = nil
+	rec.clearTaskDeltas()
 }
 
 // dropRetiredLateContextsLocked clears the callback contexts of agent spans
@@ -5118,6 +6490,7 @@ func (rec *spanRecord) dropContexts() {
 func (inv *invocationTrace) dropRetiredLateContextsLocked(retired ...*spanRecord) {
 	for _, r := range retired {
 		r.canceled, r.ended, r.activation, r.retiredCauses = nil, nil, nil, nil
+		r.clearTaskDeltas()
 	}
 	keepParent := make(map[*spanRecord]bool)
 	markChain := func(s *spanRecord) {
@@ -5156,6 +6529,1007 @@ func toolKey(id identity, functionCallID, toolName string) string {
 		return id.path + "\x00" + id.agentName + "\x00" + id.branch + "\x00" + functionCallID
 	}
 	return id.path + "\x00" + id.agentName + "\x00" + id.branch + "\x00" + toolName
+}
+
+// toolCallIdentity identifies the attempt of a tool call that a callback
+// belongs to: its callback context, by pointer when the context is a
+// pointer, the EventActions of the attempt when the context exposes them (as
+// agent.NewToolContext does, with fresh EventActions per attempt), and a
+// digest of the call's arguments (see boundedArgsDigest).
+type toolCallIdentity struct {
+	ctxTyp      reflect.Type
+	ctxPtr      uintptr
+	actionsPtr  uintptr
+	actionsWeak weak.Pointer[session.EventActions]
+	hasWeakAct  bool
+	argsDigest  uint64
+	hasArgs     bool
+	// argsTruncated reports that argsDigest covers only part of the
+	// arguments, so that equal digests do not prove equal arguments.
+	argsTruncated bool
+}
+
+// hasActions reports whether id carries the EventActions of its tool context,
+// as agent.NewToolContext creates per tool call attempt.
+func (id toolCallIdentity) hasActions() bool {
+	return id.hasWeakAct || id.actionsPtr != 0
+}
+
+// hasAttemptIdentity reports whether id tells one attempt from another
+// beyond its arguments: by a pointer context or by EventActions.
+func (id toolCallIdentity) hasAttemptIdentity() bool {
+	return id.ctxPtr != 0 || id.hasActions()
+}
+
+func (id toolCallIdentity) sameContext(other toolCallIdentity) bool {
+	if id.ctxTyp != other.ctxTyp || id.ctxPtr != other.ctxPtr || id.hasWeakAct != other.hasWeakAct {
+		return false
+	}
+	if id.hasWeakAct {
+		a := id.actionsWeak.Value()
+		b := other.actionsWeak.Value()
+		return a != nil && a == b
+	}
+	return id.actionsPtr == other.actionsPtr
+}
+
+// sameArgs reports whether id and other carry complete, untruncated digests of
+// the same JSON-shaped arguments. A truncated digest (from values past the
+// size bounds or opaque pointers, structs, functions, or channels) proves
+// nothing and never matches.
+func (id toolCallIdentity) sameArgs(other toolCallIdentity) bool {
+	if id.hasArgs != other.hasArgs {
+		return false
+	}
+	if !id.hasArgs {
+		return true
+	}
+	return !id.argsTruncated && !other.argsTruncated && id.argsDigest == other.argsDigest
+}
+
+// toolCallIdentityOf returns the attempt identity of a tool callback with ctx
+// and args, and the StateDelta of the tool call's EventActions (see
+// taskDeltaRef), whose call field the caller sets.
+func toolCallIdentityOf(ctx context.Context, args map[string]any) (toolCallIdentity, taskDeltaRef) {
+	var id toolCallIdentity
+	var delta taskDeltaRef
+	if ctx != nil {
+		rv := reflect.ValueOf(ctx)
+		id.ctxTyp = rv.Type()
+		if rv.Kind() == reflect.Pointer && !rv.IsNil() {
+			id.ctxPtr = rv.Pointer()
+		}
+		actionsPtr, actions, d, pinnedCtx := unwrapToolContextActions(ctx)
+		if actions != nil {
+			id.hasWeakAct = true
+			id.actionsWeak = weak.Make(actions)
+		} else {
+			id.actionsPtr = actionsPtr
+		}
+		if !d.empty() {
+			d.pinned = pinnedCtx
+			delta = d
+		}
+	}
+	id.argsDigest, id.hasArgs, id.argsTruncated = boundedArgsDigest(args)
+	return id, delta
+}
+
+// turnEpochKey returns the key of the turn epoch of the activation act of
+// the agent that id identifies, as callKey prefixes model and tool call keys,
+// or of the agent alone when act is nil.
+func turnEpochKey(act any, id identity) string {
+	if act != nil {
+		return fmt.Sprintf("%p\x00%s", act, llmKey(id))
+	}
+	return llmKey(id)
+}
+
+// maxTurnEpochs bounds turnEpochs: past it, bumpTurnEpochKeyLocked keeps only
+// the epochs of the open activations and of contexts without an activation.
+const maxTurnEpochs = 1024
+
+// bumpTurnEpochLocked starts a new turn of the activation that ctx belongs
+// to (see turnEpochs).
+func (inv *invocationTrace) bumpTurnEpochLocked(ctx context.Context, id identity) {
+	inv.bumpTurnEpochKeyLocked(callKey(ctx, llmKey(id)))
+}
+
+// bumpTurnEpochOfLocked starts a new turn of the activation of the agent span
+// rec.
+func (inv *invocationTrace) bumpTurnEpochOfLocked(rec *spanRecord) {
+	inv.bumpTurnEpochKeyLocked(turnEpochKey(rec.activation, identity{path: rec.path, agentName: rec.name, branch: rec.branch}))
+}
+
+// bumpAgentTurnEpochsLocked starts a new turn of every activation of the
+// agent that id identifies, for a response whose activation is unknown.
+func (inv *invocationTrace) bumpAgentTurnEpochsLocked(id identity) {
+	suffix := "\x00" + llmKey(id)
+	for key := range inv.turnEpochs {
+		if prefix, ok := strings.CutSuffix(key, suffix); ok && !strings.Contains(prefix, "\x00") {
+			inv.turnEpochs[key]++
+		}
+	}
+	inv.bumpTurnEpochKeyLocked(llmKey(id))
+}
+
+// bumpTurnEpochKeyLocked starts a new turn under key, first pruning
+// turnEpochs when key is new and the map is full.
+func (inv *invocationTrace) bumpTurnEpochKeyLocked(key string) {
+	if inv.turnEpochs == nil {
+		inv.turnEpochs = map[string]uint64{}
+	}
+	if _, ok := inv.turnEpochs[key]; !ok && len(inv.turnEpochs) >= maxTurnEpochs {
+		inv.pruneTurnEpochsLocked()
+	}
+	inv.turnEpochs[key]++
+}
+
+// pruneTurnEpochsLocked drops the turn epochs of activations that are no
+// longer open. A tool callback of such an activation then reads epoch 0,
+// which matches no recorded error, so its completion is kept.
+func (inv *invocationTrace) pruneTurnEpochsLocked() {
+	open := make(map[string]bool, len(inv.agentStack))
+	for _, rec := range inv.agentStack[1:] {
+		if rec.kind == spanKindAgent && rec.activation != nil {
+			open[turnEpochKey(rec.activation, identity{path: rec.path, agentName: rec.name, branch: rec.branch})] = true
+		}
+	}
+	for key := range inv.turnEpochs {
+		if !open[key] && strings.Count(key, "\x00") > 2 {
+			delete(inv.turnEpochs, key)
+		}
+	}
+}
+
+// turnEpochOfLocked returns the turn epoch of the activation that ctx belongs
+// to.
+func (inv *invocationTrace) turnEpochOfLocked(ctx context.Context, id identity) uint64 {
+	return inv.turnEpochs[callKey(ctx, llmKey(id))]
+}
+
+// maxTaskToolDeltas bounds the StateDelta references that an open task-mode
+// activation keeps for tool calls whose function response events it has not
+// seen (see spanRecord.toolStateDeltas); the oldest is dropped first.
+const maxTaskToolDeltas = 64
+
+// recordTaskToolDeltaLocked records d, the StateDelta of a tool call of the
+// task-mode activation rec, in rec's current turn, unless rec already holds a
+// reference to its map.
+func (inv *invocationTrace) recordTaskToolDeltaLocked(rec *spanRecord, d taskDeltaRef) {
+	if rec == nil || rec.kind != spanKindAgent || !rec.taskMode || d.empty() {
+		return
+	}
+	addr := d.addr()
+	if slices.ContainsFunc(rec.toolStateDeltas, func(existing taskDeltaRef) bool { return existing.addr() == addr }) {
+		return
+	}
+	if len(rec.toolStateDeltas) >= maxTaskToolDeltas {
+		rec.toolStateDeltas = slices.Delete(rec.toolStateDeltas, 0, len(rec.toolStateDeltas)-maxTaskToolDeltas+1)
+	}
+	d.epoch = inv.turnEpochs[turnEpochKey(rec.activation, identity{path: rec.path, agentName: rec.name, branch: rec.branch})]
+	rec.toolStateDeltas = append(rec.toolStateDeltas, d)
+}
+
+// releaseTaskToolDeltas drops the StateDelta references that the open
+// task-mode activations of the agent of id keep for the tool calls that a
+// function response event, which carries evStateDelta and answers calls, has
+// delivered (see spanRecord.toolStateDeltas). ADK merges the StateDelta maps
+// of the calls of one model response into the map of the first call, which
+// the merged event carries, so the activation that recorded that map also
+// drops, for each other call of the event, the oldest reference to the map of
+// a call with the same ID or tool name that it recorded in the same turn. The
+// references of calls of later turns, or of other calls with the same tool
+// name and an empty ID, stay until their own events arrive.
+func (tm *traceManager) releaseTaskToolDeltas(ctx context.Context, id identity, evStateDelta map[string]any, calls []string) {
+	evPtr := mapPtr(evStateDelta)
+	if evPtr == 0 {
+		return
+	}
+	inv := tm.invocation(ctx, id)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	for _, rec := range inv.agentStack[1:] {
+		if rec.kind != spanKindAgent || !rec.taskMode || rec.name != id.agentName || rec.branch != id.branch ||
+			(id.path != "" && rec.path != "" && rec.path != id.path) {
+			continue
+		}
+		m := slices.IndexFunc(rec.toolStateDeltas, func(d taskDeltaRef) bool { return d.matches(evPtr) })
+		if m < 0 {
+			continue
+		}
+		matched := rec.toolStateDeltas[m]
+		rec.toolStateDeltas = slices.Delete(rec.toolStateDeltas, m, m+1)
+		others := slices.Clone(calls)
+		if k := slices.Index(others, matched.call); k >= 0 {
+			others = slices.Delete(others, k, k+1)
+		}
+		rec.toolStateDeltas = slices.DeleteFunc(rec.toolStateDeltas, func(d taskDeltaRef) bool {
+			if d.epoch != matched.epoch {
+				return false
+			}
+			k := slices.Index(others, d.call)
+			if k < 0 {
+				return false
+			}
+			others = slices.Delete(others, k, k+1)
+			return true
+		})
+	}
+}
+
+var eventActionsPtrType = reflect.TypeFor[*session.EventActions]()
+
+// toolContextTaskDeltaRef returns the StateDelta of the EventActions of the
+// tool context ctx of call (see taskDeltaRef), or an empty reference.
+func toolContextTaskDeltaRef(ctx context.Context, call string) taskDeltaRef {
+	_, _, delta, pinnedCtx := unwrapToolContextActions(ctx)
+	if delta.empty() {
+		return taskDeltaRef{}
+	}
+	delta.pinned = pinnedCtx
+	delta.call = call
+	return delta
+}
+
+// safeCallActions returns ctx.Actions(), or nil if ctx has no Actions method or
+// the method panics.
+func safeCallActions(ctx context.Context) (actions *session.EventActions) {
+	ac, ok := ctx.(interface{ Actions() *session.EventActions })
+	if !ok {
+		return nil
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			actions = nil
+		}
+	}()
+	return ac.Actions()
+}
+
+// knownContextFields reports whether unwrapToolContextActions knows the layout
+// of the context struct type typ, and if so returns the fields that hold the
+// context that typ wraps: ADK's tool and callback context wrappers and the
+// commonContext that they wrap, and the context types of the standard library.
+// Their fields are set when the context is made and never change. The fields
+// of any other type belong to its own code, which may guard them with
+// synchronization of its own, so unwrapToolContextActions reads none of them.
+func knownContextFields(typ reflect.Type) (fields []string, ok bool) {
+	switch typ.PkgPath() {
+	case agentPkgPath:
+		switch typ.Name() {
+		case "toolContextWrapper", "callbackContextWrapper":
+			return []string{"context"}, true
+		case "commonContext":
+			return []string{"Context", "invocationContext"}, true
+		}
+	case "context":
+		return []string{"Context", "c"}, true
+	}
+	return nil, false
+}
+
+// unwrapToolContextActions returns the EventActions of the tool context ctx
+// and their StateDelta map (see taskDeltaRef).
+//
+// A context of any type other than ADK's context types and the standard
+// library's tells its EventActions only through its Actions() method: its
+// fields are its own, even a private one that happens to be named actions,
+// and it may guard them with synchronization of its own, so none of them is
+// read.
+//
+// ADK's contexts are inspected instead, without calling Actions() on
+// callbackContextWrapper (which logs a warning), and through a standard
+// library wrapper that hides Actions() (such as
+// context.WithoutCancel(toolCtx)). When the outermost ctx exposes Actions()
+// without crossing a callbackContextWrapper, the typed *session.EventActions
+// and StateDelta references are retained directly to avoid bare uintptr
+// identity retention; otherwise ctx is kept pinned while the owning task
+// activation is open. The inspection follows only fields of the types that
+// knownContextFields knows, and stops at any other type, coupled to these
+// unexported fields of google.golang.org/adk/v2 v2.0.0 and the Go standard
+// library:
+//   - agent.toolContextWrapper.context / agent.callbackContextWrapper.context
+//   - agent.commonContext.actions (*session.EventActions), .Context, .invocationContext
+//   - session.EventActions.StateDelta (exported)
+//   - the Context or c field of the context package's types, such as
+//     context.valueCtx.Context and context.withoutCancelCtx.c
+//
+// All reflection reads are guarded with recover() and fall back to zero values
+// if future wrapper layouts differ. This inspection is best effort: when it
+// misses, tool callbacks are told apart by their context pointer alone (see
+// toolCallIdentity), and the function response events of task-mode
+// activations lose their StateDelta provenance (see
+// popTaskAgentSpanWithDelta), as the package documentation describes.
+func unwrapToolContextActions(ctx context.Context) (actionsPtr uintptr, actions *session.EventActions, delta taskDeltaRef, pinnedCtx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			actionsPtr, actions, delta, pinnedCtx = 0, nil, taskDeltaRef{}, nil
+		}
+	}()
+	if ctx == nil {
+		return 0, nil, taskDeltaRef{}, nil
+	}
+	outer := reflect.TypeOf(ctx)
+	if outer.Kind() == reflect.Pointer {
+		outer = outer.Elem()
+	}
+	if _, known := knownContextFields(outer); !known {
+		got := safeCallActions(ctx)
+		if got == nil {
+			return 0, nil, taskDeltaRef{}, nil
+		}
+		if got.StateDelta != nil {
+			delta = taskDeltaRef{m: got.StateDelta, ptr: mapPtr(got.StateDelta)}
+		}
+		return reflect.ValueOf(got).Pointer(), got, delta, nil
+	}
+	var stateDeltaPtr uintptr
+	seenCallbackWrapper := false
+	queue := []reflect.Value{reflect.ValueOf(ctx)}
+	var stackSeen [8]visitedContextStruct
+	stackLen := 0
+	var seen map[visitedContextStruct]bool
+	for steps := 0; len(queue) > 0 && steps < 64; steps++ {
+		v := queue[0]
+		queue = queue[1:]
+		var ptr uintptr
+		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+			if v.IsNil() {
+				v = reflect.Value{}
+				break
+			}
+			if v.Kind() == reflect.Pointer {
+				ptr = v.Pointer()
+			}
+			v = v.Elem()
+		}
+		if !v.IsValid() || v.Kind() != reflect.Struct {
+			continue
+		}
+		typ := v.Type()
+		fields, known := knownContextFields(typ)
+		if !known {
+			continue
+		}
+		if ptr != 0 {
+			visitKey := visitedContextStruct{ptr: ptr, typ: typ}
+			if seen != nil {
+				if seen[visitKey] {
+					continue
+				}
+				seen[visitKey] = true
+			} else {
+				already := false
+				for idx := range stackLen {
+					if stackSeen[idx] == visitKey {
+						already = true
+						break
+					}
+				}
+				if already {
+					continue
+				}
+				if stackLen < len(stackSeen) {
+					stackSeen[stackLen] = visitKey
+					stackLen++
+				} else {
+					seen = make(map[visitedContextStruct]bool, 16)
+					for idx := range stackLen {
+						seen[stackSeen[idx]] = true
+					}
+					seen[visitKey] = true
+				}
+			}
+		}
+		isAgentType := typ.PkgPath() == agentPkgPath
+		if isAgentType && typ.Name() == "callbackContextWrapper" {
+			seenCallbackWrapper = true
+		}
+		var f reflect.Value
+		if isAgentType && typ.Name() == "commonContext" {
+			f = v.FieldByName("actions")
+		}
+		if f.IsValid() && f.Type() == eventActionsPtrType && !f.IsNil() {
+			actionsPtr = f.Pointer()
+			if sd := f.Elem().FieldByName("StateDelta"); sd.IsValid() && sd.Kind() == reflect.Map && !sd.IsNil() {
+				stateDeltaPtr = sd.Pointer()
+			}
+			if !seenCallbackWrapper {
+				if got := safeCallActions(ctx); got != nil && reflect.ValueOf(got).Pointer() == actionsPtr {
+					actions = got
+					if got.StateDelta != nil {
+						delta = taskDeltaRef{m: got.StateDelta, ptr: reflect.ValueOf(got.StateDelta).Pointer()}
+					} else if stateDeltaPtr != 0 {
+						delta = taskDeltaRef{ptr: stateDeltaPtr}
+						pinnedCtx = ctx
+					}
+					return actionsPtr, actions, delta, pinnedCtx
+				}
+			}
+			if stateDeltaPtr != 0 {
+				delta = taskDeltaRef{ptr: stateDeltaPtr}
+				pinnedCtx = ctx
+			}
+			return actionsPtr, nil, delta, pinnedCtx
+		}
+		for _, field := range fields {
+			if next := v.FieldByName(field); next.IsValid() {
+				queue = append(queue, next)
+			}
+		}
+	}
+	return 0, nil, taskDeltaRef{}, nil
+}
+
+// Bounds of boundedArgsDigest: each string or byte slice is hashed in full up
+// to maxDigestStringBytes, maps, slices, and arrays of JSON-shaped values are
+// hashed with up to maxDigestEntries entries, and at most maxDigestNodes
+// values and maxDigestBytes string bytes are hashed in all. Pointers, structs,
+// functions, channels, and unsafe pointers are treated as opaque incomplete
+// evidence (truncated == true) without dereferencing pointers or reading
+// struct fields.
+const (
+	maxDigestNodes       = 1024
+	maxDigestEntries     = 256
+	maxDigestStringBytes = 64 << 10
+	maxDigestBytes       = 1 << 20
+)
+
+// argsDigestSeed seeds the string hashes of boundedArgsDigest. Digests are
+// compared only within the process, so a per-process seed suffices.
+var argsDigestSeed = maphash.MakeSeed()
+
+// boundedArgsDigest returns a digest of the JSON-shaped arguments of a tool
+// call, whether args was non-nil, and whether the digest covers only part of
+// args. Equal JSON-shaped arguments get equal digests whatever the iteration
+// order of their maps and however their values share references, and the cost
+// stays within the bounds above. A value past one of the bounds, or an opaque
+// value such as a pointer or struct, makes the digest truncated: a truncated
+// digest never proves that two sets of arguments are equal (see
+// toolCallIdentity.sameArgs).
+func boundedArgsDigest(args map[string]any) (digest uint64, ok, truncated bool) {
+	if args == nil {
+		return 0, false, false
+	}
+	d := argsDigester{nodes: maxDigestNodes, bytes: maxDigestBytes}
+	return d.hash(reflect.ValueOf(args)), true, d.truncated
+}
+
+// argsDigester computes boundedArgsDigest. ancestors holds the addresses of
+// the maps and slices that lead to the value being hashed, so that a reference
+// back to one of them hashes as a cycle while a value that is shared without a
+// cycle hashes as itself wherever it appears.
+type argsDigester struct {
+	nodes, bytes int
+	ancestors    []uintptr
+	truncated    bool
+}
+
+const (
+	digestTagNil    uint64 = 0x9e3779b97f4a7c15
+	digestTagBudget uint64 = 0xbf58476d1ce4e5b9
+	digestTagCycle  uint64 = 0x94d049bb133111eb
+	digestTagBool   uint64 = 0x517cc1b727220a95
+	digestTagInt    uint64 = 0x2545f4914f6cdd1d
+	digestTagUint   uint64 = 0x369dea0f31a53f85
+	digestTagFloat  uint64 = 0x735a2d977d76f2a3
+	digestTagStr    uint64 = 0x85ebca77c2b2ae63
+	digestTagSlice  uint64 = 0xc2b2ae3d27d4eb4f
+	digestTagMap    uint64 = 0x165667b19e3779f9
+	digestTagStruct uint64 = 0x27d4eb2f165667c5
+	digestTagPtr    uint64 = 0xd6e8feb86659fd93
+)
+
+// enter reports whether ptr may be hashed below the current value, and if so
+// records it as an ancestor until leave.
+func (d *argsDigester) enter(ptr uintptr) bool {
+	if slices.Contains(d.ancestors, ptr) {
+		return false
+	}
+	d.ancestors = append(d.ancestors, ptr)
+	return true
+}
+
+func (d *argsDigester) leave() {
+	d.ancestors = d.ancestors[:len(d.ancestors)-1]
+}
+
+// hashString hashes s, or its first bytes when s is longer than the bounds
+// allow, together with its length.
+func (d *argsDigester) hashString(s string) uint64 {
+	n := d.takeBytes(len(s))
+	return splitMix64(maphash.String(argsDigestSeed, s[:n]) ^ splitMix64(uint64(len(s))^digestTagStr))
+}
+
+// hashBytes is hashString for a byte slice; equal contents hash alike.
+func (d *argsDigester) hashBytes(b []byte) uint64 {
+	n := d.takeBytes(len(b))
+	return splitMix64(maphash.Bytes(argsDigestSeed, b[:n]) ^ splitMix64(uint64(len(b))^digestTagStr))
+}
+
+// takeBytes returns how many of n string bytes the bounds let the digest
+// hash, and charges them.
+func (d *argsDigester) takeBytes(n int) int {
+	take := min(n, maxDigestStringBytes, max(d.bytes, 0))
+	if take < n {
+		d.truncated = true
+	}
+	d.bytes -= take
+	return take
+}
+
+func (d *argsDigester) hash(v reflect.Value) uint64 {
+	if d.nodes <= 0 {
+		d.truncated = true
+		return digestTagBudget
+	}
+	d.nodes--
+	for v.IsValid() && v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return digestTagNil
+		}
+		v = v.Elem()
+	}
+	if !v.IsValid() {
+		return digestTagNil
+	}
+	switch v.Kind() {
+	case reflect.Bool:
+		if v.Bool() {
+			return digestTagBool ^ 1
+		}
+		return digestTagBool ^ 2
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return splitMix64(uint64(v.Int()) ^ digestTagInt)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return splitMix64(v.Uint() ^ digestTagUint)
+	case reflect.Float32, reflect.Float64:
+		return splitMix64(floatBits(v.Float()) ^ digestTagFloat)
+	case reflect.Complex64, reflect.Complex128:
+		c := v.Complex()
+		return splitMix64(splitMix64(floatBits(real(c))^digestTagFloat) ^ floatBits(imag(c)))
+	case reflect.String:
+		return d.hashString(v.String())
+	case reflect.Pointer:
+		d.truncated = true
+		acc := splitMix64(maphash.String(argsDigestSeed, v.Type().String()) ^ digestTagPtr)
+		if v.IsNil() {
+			return acc ^ digestTagNil
+		}
+		return acc
+	case reflect.Slice, reflect.Array:
+		n := v.Len()
+		if v.Kind() == reflect.Slice {
+			if v.IsNil() {
+				return digestTagNil ^ digestTagSlice
+			}
+			if n > 0 {
+				if !d.enter(v.Pointer()) {
+					return digestTagCycle ^ digestTagSlice
+				}
+				defer d.leave()
+			}
+		}
+		acc := splitMix64(uint64(n) ^ digestTagSlice)
+		if v.Type().Elem().Kind() == reflect.Uint8 && (v.Kind() == reflect.Slice || v.CanAddr()) {
+			return splitMix64(acc ^ d.hashBytes(v.Bytes()))
+		}
+		if n > maxDigestEntries {
+			d.truncated = true
+			n = maxDigestEntries
+		}
+		for i := range n {
+			acc = splitMix64(acc ^ d.hash(v.Index(i)))
+		}
+		return acc
+	case reflect.Map:
+		if v.IsNil() {
+			return digestTagNil ^ digestTagMap
+		}
+		n := v.Len()
+		acc := splitMix64(uint64(n) ^ digestTagMap)
+		if n > maxDigestEntries {
+			d.truncated = true
+			return acc
+		}
+		if !d.enter(v.Pointer()) {
+			return digestTagCycle ^ digestTagMap
+		}
+		defer d.leave()
+		keys, ok := sortedMapKeys(v)
+		if !ok {
+			d.truncated = true
+			return acc
+		}
+		for _, k := range keys {
+			kh := d.hash(k)
+			acc = splitMix64(acc ^ splitMix64(kh^digestTagMap) ^ d.hash(v.MapIndex(k)))
+		}
+		return acc
+	case reflect.Struct:
+		d.truncated = true
+		return splitMix64(maphash.String(argsDigestSeed, v.Type().String()) ^ digestTagStruct)
+	default:
+		// Functions, channels and unsafe pointers are opaque incomplete evidence.
+		d.truncated = true
+		return splitMix64(maphash.String(argsDigestSeed, v.Type().String()))
+	}
+}
+
+// floatBits returns the bits of f with -0 folded into 0, so that equal
+// floats hash alike.
+func floatBits(f float64) uint64 {
+	if f == 0 {
+		f = 0
+	}
+	return math.Float64bits(f)
+}
+
+// sortedMapKeys returns the keys of the map v in a deterministic order: by
+// kind, type and value for keys of a basic kind (also behind an interface),
+// which every map that JSON or YAML decoding builds has. ok is false for
+// other keys, such as pointers or structs, or for NaN keys, which have no
+// order that depends on the map's contents alone.
+func sortedMapKeys(v reflect.Value) (keys []reflect.Value, ok bool) {
+	keys = v.MapKeys()
+	type sortKey struct {
+		kind reflect.Kind
+		typ  string
+		i    int64
+		u    uint64
+		f    float64
+		s    string
+	}
+	sks := make([]sortKey, len(keys))
+	for idx, k := range keys {
+		for k.Kind() == reflect.Interface {
+			if k.IsNil() {
+				break
+			}
+			k = k.Elem()
+		}
+		sk := sortKey{kind: k.Kind()}
+		if k.IsValid() {
+			sk.typ = k.Type().String()
+		}
+		switch k.Kind() {
+		case reflect.Interface:
+			// A nil interface key.
+		case reflect.Bool:
+			if k.Bool() {
+				sk.i = 1
+			}
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			sk.i = k.Int()
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			sk.u = k.Uint()
+		case reflect.Float32, reflect.Float64:
+			sk.f = k.Float()
+			if math.IsNaN(sk.f) {
+				return nil, false
+			}
+		case reflect.String:
+			sk.s = k.String()
+		default:
+			return nil, false
+		}
+		sks[idx] = sk
+	}
+	order := make([]int, len(keys))
+	for idx := range order {
+		order[idx] = idx
+	}
+	compare := func(a, b sortKey) int {
+		return cmp.Or(
+			cmp.Compare(a.kind, b.kind),
+			cmp.Compare(a.typ, b.typ),
+			cmp.Compare(a.i, b.i),
+			cmp.Compare(a.u, b.u),
+			cmp.Compare(a.f, b.f),
+			cmp.Compare(a.s, b.s),
+		)
+	}
+	slices.SortFunc(order, func(a, b int) int { return compare(sks[a], sks[b]) })
+	sorted := make([]reflect.Value, len(keys))
+	for idx, o := range order {
+		if idx > 0 && compare(sks[order[idx-1]], sks[o]) == 0 {
+			// Distinct keys that compare equal, such as two types of one name.
+			return nil, false
+		}
+		sorted[idx] = keys[o]
+	}
+	return sorted, true
+}
+
+func splitMix64(x uint64) uint64 {
+	x += 0x9e3779b97f4a7c15
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+	return x ^ (x >> 31)
+}
+
+// emptyToolCallEntry is a tool call with an empty FunctionCallID, which gets
+// a key of its own (see emptyToolSeqKey) under the slot of its agent and tool
+// (see resolveToolCallKeyLocked). errored reports that OnToolErrorCallback
+// ended the call. ambiguous reports that the call overlapped another open call
+// of the slot whose callback context it cannot be told apart from, and
+// pendingErr that OnToolErrorCallback reported a failure of one of such
+// overlapping calls without knowing which (see resolveToolCallKeyLocked);
+// errID is the identity of that OnToolErrorCallback, whose arguments tell the
+// failed call apart when the calls of the overlap have distinct arguments.
+type emptyToolCallEntry struct {
+	id         toolCallIdentity
+	errID      toolCallIdentity
+	seq        uint64
+	errored    bool
+	ambiguous  bool
+	pendingErr bool
+}
+
+func emptyToolSeqKey(baseKey string, seq uint64) string {
+	return fmt.Sprintf("tc%d\x00%s", seq, baseKey)
+}
+
+// toolCallKey is how resolveToolCallKeyLocked resolves a tool callback: the
+// key of the call's span or error marker, the call's empty-ID sequence number
+// (0 for a call with an ID), and:
+//   - recordCompleted, for OnToolErrorCallback, that an error marker may be
+//     recorded under key for the AfterToolCallback of the call;
+//   - dropMatchedSpan, for AfterToolCallback, that the open span under key
+//     may belong to another overlapping call, so the row gets a span of its
+//     own and no latency;
+//   - settledAmbiguousErr, for AfterToolCallback, that the callback ended one
+//     of overlapping calls of which OnToolErrorCallback reported a failure,
+//     so it adds no row of its own.
+type toolCallKey struct {
+	key                 string
+	seq                 uint64
+	recordCompleted     bool
+	dropMatchedSpan     bool
+	settledAmbiguousErr bool
+}
+
+// resolveToolCallKeyLocked returns the key under which the tool callback
+// with ctx and curID finds or records the span of a call whose key would be
+// baseKey. A call with an ID keeps baseKey, scoped to its activation (see
+// callKey). Calls with an empty ID get a key each, so that overlapping calls
+// of one tool keep separate spans.
+//
+// Overlapping empty-ID calls whose callback contexts cannot be told apart are
+// ambiguous: OnToolErrorCallback cannot tell which of them failed. It then
+// writes TOOL_ERROR on a span of its own and records a pending error on the
+// overlap instead of ending one of the open spans. An AfterToolCallback of the
+// overlap that ends the call with an error, or that ends the last open calls
+// that pending errors account for, settles one pending error and adds no row,
+// so that each failed call ends with one TOOL_ERROR and no TOOL_COMPLETED;
+// another one ends an open call without a pending error as usual. When the
+// calls of the overlap have distinct arguments, those tell the calls apart
+// instead: the pending error is recorded on the call that started with the
+// failure's arguments, and an AfterToolCallback with the arguments of a
+// failure settles it, while one with the arguments of another call ends that
+// call. A call that completes while another call of the overlap is still
+// open cannot be told apart from it when their arguments are equal, so it
+// keeps its TOOL_COMPLETED row even if the other call fails later.
+func (inv *invocationTrace) resolveToolCallKeyLocked(
+	ctx context.Context,
+	baseKey string,
+	push, fromError, unrecoveredErr, emptyCallID bool,
+	curID toolCallIdentity,
+	curEpoch uint64,
+	args map[string]any,
+) toolCallKey {
+	if !emptyCallID {
+		return toolCallKey{key: callKey(ctx, baseKey), recordCompleted: true}
+	}
+	slotKey := callKey(ctx, baseKey)
+	entries := inv.emptyToolCalls[slotKey]
+	seqKey := func(seq uint64) string { return callKey(ctx, emptyToolSeqKey(baseKey, seq)) }
+	isOpen := func(e emptyToolCallEntry) bool {
+		return !e.errored && e.id.sameContext(curID) && inv.toolSpans[seqKey(e.seq)] != nil
+	}
+	storeEntries := func() {
+		if len(entries) == 0 {
+			delete(inv.emptyToolCalls, slotKey)
+		} else {
+			inv.emptyToolCalls[slotKey] = entries
+		}
+	}
+
+	if push {
+		kept := entries[:0]
+		ambiguous := false
+		for _, e := range entries {
+			resolved := seqKey(e.seq)
+			if e.errored {
+				rec := inv.completedTools[resolved]
+				if rec == nil || rec.turnEpoch != curEpoch || !curID.hasAttemptIdentity() || !e.id.hasAttemptIdentity() || e.id.sameContext(curID) {
+					delete(inv.completedTools, resolved)
+					continue
+				}
+				kept = append(kept, e)
+				continue
+			}
+			if inv.toolSpans[resolved] == nil {
+				continue
+			}
+			if e.id.sameContext(curID) {
+				e.ambiguous = true
+				ambiguous = true
+			}
+			kept = append(kept, e)
+		}
+		inv.emptyToolCallSeq++
+		seq := inv.emptyToolCallSeq
+		if inv.emptyToolCalls == nil {
+			inv.emptyToolCalls = map[string][]emptyToolCallEntry{}
+		}
+		inv.emptyToolCalls[slotKey] = append(kept, emptyToolCallEntry{
+			id:        curID,
+			seq:       seq,
+			ambiguous: ambiguous,
+		})
+		return toolCallKey{key: seqKey(seq), seq: seq}
+	}
+
+	if fromError {
+		// The failed call is the open call without a pending error, or, when
+		// the calls of an overlap have distinct arguments, the only such call
+		// that started with the failure's arguments.
+		chosen, argsMatch, argsMatches := -1, -1, 0
+		for idx, e := range entries {
+			if !isOpen(e) || e.pendingErr {
+				continue
+			}
+			chosen = idx
+			if e.id.sameArgs(curID) {
+				argsMatch, argsMatches = idx, argsMatches+1
+			}
+		}
+		if argsMatches == 1 {
+			chosen = argsMatch
+		}
+		ambiguousErr := func(idx int) toolCallKey {
+			entries[idx].pendingErr = true
+			entries[idx].errID = curID
+			storeEntries()
+			inv.emptyToolCallSeq++
+			errSeq := inv.emptyToolCallSeq
+			return toolCallKey{key: seqKey(errSeq), seq: errSeq}
+		}
+		if chosen >= 0 {
+			if entries[chosen].ambiguous {
+				// The failed call cannot be told apart from the other open calls
+				// of the overlap: leave their spans open for their
+				// AfterToolCallbacks, record the failure on the overlap, and
+				// write TOOL_ERROR on a span of its own.
+				return ambiguousErr(chosen)
+			}
+			seq := entries[chosen].seq
+			entries[chosen].errored = true
+			storeEntries()
+			return toolCallKey{key: seqKey(seq), seq: seq, recordCompleted: true}
+		}
+		// Every open call of the overlap carries a pending error. One of them
+		// stands for a failed call whose AfterToolCallback already ended
+		// another call of the overlap, which it could not be told apart from,
+		// so it now stands for this failure, which the AfterToolCallback of the
+		// failed call settles.
+		for idx, e := range slices.Backward(entries) {
+			if isOpen(e) {
+				return ambiguousErr(idx)
+			}
+		}
+		kept := entries[:0]
+		for _, e := range entries {
+			resolved := seqKey(e.seq)
+			rec := inv.completedTools[resolved]
+			if e.errored && (rec == nil || rec.turnEpoch != curEpoch || (curID.hasAttemptIdentity() && e.id.sameContext(curID))) {
+				delete(inv.completedTools, resolved)
+				continue
+			}
+			kept = append(kept, e)
+		}
+		if len(kept) >= maxTaskToolDeltas {
+			delete(inv.completedTools, seqKey(kept[0].seq))
+			kept = slices.Delete(kept, 0, 1)
+		}
+		inv.emptyToolCallSeq++
+		seq := inv.emptyToolCallSeq
+		if inv.emptyToolCalls == nil {
+			inv.emptyToolCalls = map[string][]emptyToolCallEntry{}
+		}
+		inv.emptyToolCalls[slotKey] = append(kept, emptyToolCallEntry{
+			id:      curID,
+			seq:     seq,
+			errored: true,
+		})
+		return toolCallKey{key: seqKey(seq), seq: seq, recordCompleted: true}
+	}
+
+	// An AfterToolCallback on the context of an error-ended call settles the
+	// call's marker (see popMatchingCompletedToolLocked). On a context without
+	// attempt identity, a callback whose arguments show that it belongs to
+	// another attempt leaves the marker alone, and a recovered callback, which
+	// may belong to any call of the overlap, takes a marker only of its own
+	// turn and only when no call of the overlap is open: it then consumes the
+	// marker without suppressing its row.
+	hasOpen := slices.ContainsFunc(entries, isOpen)
+	for idx, e := range slices.Backward(entries) {
+		if !e.errored || e.ambiguous || !e.id.sameContext(curID) {
+			continue
+		}
+		resolved := seqKey(e.seq)
+		rec := inv.completedTools[resolved]
+		if rec == nil {
+			continue
+		}
+		if !curID.hasAttemptIdentity() && (rec.argsShowOtherAttempt(curID, args) ||
+			(!unrecoveredErr && (rec.turnEpoch != curEpoch || hasOpen))) {
+			continue
+		}
+		entries = slices.Delete(entries, idx, idx+1)
+		storeEntries()
+		return toolCallKey{key: resolved, seq: e.seq}
+	}
+	openCount, pending := 0, 0
+	// With distinct arguments, the callback's arguments tell which call of the
+	// overlap it belongs to: errMatch is the only open call whose pending
+	// error was reported with the same arguments, and openMatch the only open
+	// call without a pending error that started with them.
+	errMatch, errMatches, openMatch, openMatches := -1, 0, -1, 0
+	for idx, e := range entries {
+		if !isOpen(e) {
+			continue
+		}
+		openCount++
+		if e.pendingErr {
+			pending++
+			if e.errID.sameArgs(curID) {
+				errMatch, errMatches = idx, errMatches+1
+			}
+		} else if e.id.sameArgs(curID) {
+			openMatch, openMatches = idx, openMatches+1
+		}
+	}
+	// A pending error belongs to one of the open calls of the overlap. The
+	// callback settles it if it ends the call with an error, or if every open
+	// call left is one that a pending error accounts for. Otherwise it ends an
+	// open call without a pending error, so that the failed call can still
+	// settle the error later.
+	settleErr := pending > 0 && (unrecoveredErr || openCount <= pending)
+	chosen := -1
+	switch {
+	case errMatches == 1 && openMatches == 0:
+		settleErr, chosen = true, errMatch
+	case errMatches == 0 && openMatches == 1:
+		settleErr, chosen = false, openMatch
+	default:
+		for idx, e := range slices.Backward(entries) {
+			if !isOpen(e) {
+				continue
+			}
+			if e.pendingErr == settleErr {
+				chosen = idx
+				break
+			}
+			if chosen < 0 {
+				chosen = idx
+			}
+		}
+	}
+	if chosen >= 0 {
+		e := entries[chosen]
+		entries = slices.Delete(entries, chosen, chosen+1)
+		storeEntries()
+		if settleErr && e.pendingErr {
+			return toolCallKey{key: seqKey(e.seq), seq: e.seq, settledAmbiguousErr: true}
+		}
+		return toolCallKey{key: seqKey(e.seq), seq: e.seq, dropMatchedSpan: e.ambiguous}
+	}
+	inv.emptyToolCallSeq++
+	seq := inv.emptyToolCallSeq
+	return toolCallKey{key: seqKey(seq), seq: seq}
 }
 
 // toolKeyCall returns the function call ID, or else the tool name, that
