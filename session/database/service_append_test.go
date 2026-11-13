@@ -190,9 +190,7 @@ func TestDatabaseService_AppendEvent_SerializesAppendsToOneSession(t *testing.T)
 	var wg sync.WaitGroup
 
 	// The first append is held inside its transaction.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		event := &session.Event{
 			ID:        "e0",
 			Author:    "user",
@@ -200,7 +198,7 @@ func TestDatabaseService_AppendEvent_SerializesAppendsToOneSession(t *testing.T)
 			Actions:   session.EventActions{StateDelta: map[string]any{"k0": 0}},
 		}
 		errs[0] = s.AppendEvent(ctx, created.Session, event)
-	}()
+	})
 	select {
 	case <-firstInside:
 	case <-time.After(10 * time.Second):
@@ -210,9 +208,7 @@ func TestDatabaseService_AppendEvent_SerializesAppendsToOneSession(t *testing.T)
 	// The others start while the first one is held there. A serialized
 	// append waits for the first one and does not get to the database.
 	for i := 1; i < appends; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			event := &session.Event{
 				ID:        fmt.Sprintf("e%d", i),
 				Author:    "user",
@@ -220,7 +216,7 @@ func TestDatabaseService_AppendEvent_SerializesAppendsToOneSession(t *testing.T)
 				Actions:   session.EventActions{StateDelta: map[string]any{fmt.Sprintf("k%d", i): i}},
 			}
 			errs[i] = s.AppendEvent(ctx, created.Session, event)
-		}()
+		})
 	}
 
 	select {
