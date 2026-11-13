@@ -67,14 +67,25 @@ type LLMRequest struct {
 	Contents []*genai.Content
 	Config   *genai.GenerateContentConfig
 
+	// Tools maps a tool name to the tool that answers a function call of that
+	// name. Tools add themselves while the LLM flow prepares the request,
+	// usually through toolutils.PackTool. When preparation ends, the flow
+	// deletes every entry whose Declaration method returns nil, so the model
+	// and the callbacks see only declared tools. An entry added later, for
+	// example by a before-model callback, stays in Tools; if it has no
+	// declaration, a function call to its name gets the tool-not-found result.
 	Tools map[string]any `json:"-"`
 }
 
 // LLMResponse is the raw LLM response.
 // It provides the first candidate response from the model if available.
 type LLMResponse struct {
-	Content             *genai.Content                              `json:"content,omitempty"`
-	CitationMetadata    *genai.CitationMetadata                     `json:"citationMetadata,omitempty"`
+	Content          *genai.Content          `json:"content,omitempty"`
+	CitationMetadata *genai.CitationMetadata `json:"citationMetadata,omitempty"`
+	// GroundingMetadata is the grounding metadata of the model's first
+	// candidate. The Gemini model turns a candidate that has no content parts
+	// and a finish reason other than STOP into an error response (ErrorCode
+	// set), and such a response carries no grounding metadata.
 	GroundingMetadata   *genai.GroundingMetadata                    `json:"groundingMetadata,omitempty"`
 	UsageMetadata       *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata,omitempty"`
 	CustomMetadata      map[string]any                              `json:"customMetadata,omitempty"`
