@@ -224,6 +224,21 @@ func newFinalStatusUpdate(task *a2a.Task, state a2a.TaskState, msgParts ...*a2a.
 	return event
 }
 
+func newThoughtPart(text string) *a2a.Part {
+	part := a2a.NewTextPart(text)
+	part.SetMeta(adka2a.ToA2AMetaKey("thought"), true)
+	return part
+}
+
+func newFunctionCallPart(t *testing.T, name string) *a2a.Part {
+	t.Helper()
+	part, err := adka2a.ToA2APart(genai.NewPartFromFunctionCall(name, nil), nil)
+	if err != nil {
+		t.Fatalf("adka2a.ToA2APart() error = %v", err)
+	}
+	return part
+}
+
 func TestRemoteAgent_ADK2ADK(t *testing.T) {
 	testCases := []struct {
 		name                 string
@@ -257,6 +272,16 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 				{Content: genai.NewContentFromText("hello world", genai.RoleModel), TurnComplete: true},
 			},
 			noStreaming: true,
+		},
+		{
+			name: "thoughts beside an answer are kept",
+			remoteEvents: []*session.Event{
+				{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "plan", Thought: true}, {Text: "the answer"}}, Role: genai.RoleModel}}},
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: &genai.Content{Parts: []*genai.Part{{Text: "plan", Thought: true}, {Text: "the answer"}}, Role: genai.RoleModel}},
+				{TurnComplete: true},
+			},
 		},
 		{
 			name: "code execution",
@@ -583,6 +608,158 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 				{Content: &genai.Content{Parts: []*genai.Part{{Text: "submitted...\n", Thought: true}}, Role: genai.RoleModel}, Partial: true},
 				{Content: &genai.Content{Parts: []*genai.Part{{Text: "working...\n", Thought: true}}, Role: genai.RoleModel}, Partial: true},
 				{Content: genai.NewContentFromText("completed!", genai.RoleModel), TurnComplete: true},
+			},
+		},
+		{
+			name: "thoughts beside an answer in a final status update are dropped",
+			remoteEvents: []a2a.Event{
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, newThoughtPart("thinking..."), a2a.NewTextPart("the answer")),
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: genai.NewContentFromText("the answer", genai.RoleModel), TurnComplete: true},
+			},
+		},
+		{
+			name: "thoughts beside an answer in an input-required status update are dropped",
+			remoteEvents: []a2a.Event{
+				newFinalStatusUpdate(task, a2a.TaskStateInputRequired, newThoughtPart("thinking..."), a2a.NewTextPart("which city?")),
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: genai.NewContentFromText("which city?", genai.RoleModel), TurnComplete: true},
+			},
+		},
+		{
+			name: "status update with the ADK extension key keeps thoughts beside an answer",
+			remoteEvents: []a2a.Event{
+				&a2a.TaskStatusUpdateEvent{
+					TaskID:    task.ID,
+					ContextID: task.ContextID,
+					Status: a2a.TaskStatus{
+						State:   a2a.TaskStateCompleted,
+						Message: a2a.NewMessageForTask(a2a.MessageRoleAgent, task, newThoughtPart("thinking..."), a2a.NewTextPart("the answer")),
+					},
+					Metadata: map[string]any{adka2a.ADKExtensionURI: true},
+				},
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: &genai.Content{Parts: []*genai.Part{{Text: "thinking...", Thought: true}, {Text: "the answer"}}, Role: genai.RoleModel}, TurnComplete: true},
+			},
+		},
+		{
+			name: "thoughts beside an answer in a message are dropped",
+			remoteEvents: []a2a.Event{
+				a2a.NewMessage(a2a.MessageRoleAgent, newThoughtPart("thinking..."), a2a.NewTextPart("the answer")),
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: genai.NewContentFromText("the answer", genai.RoleModel), TurnComplete: true},
+			},
+		},
+		{
+			name: "thoughts beside an answer in a task snapshot are dropped",
+			remoteEvents: []a2a.Event{
+				&a2a.Task{Status: a2a.TaskStatus{
+					State:   a2a.TaskStateCompleted,
+					Message: a2a.NewMessage(a2a.MessageRoleAgent, newThoughtPart("thinking..."), a2a.NewTextPart("the answer")),
+				}},
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: genai.NewContentFromText("the answer", genai.RoleModel), TurnComplete: true},
+			},
+		},
+		{
+			name: "streamed artifact chunks keep thoughts beside an answer",
+			remoteEvents: []a2a.Event{
+				newArtifactEvent(newThoughtPart("thinking..."), a2a.NewTextPart("the answer")),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantResponses: []model.LLMResponse{
+				{
+					Content: &genai.Content{Parts: []*genai.Part{{Text: "thinking...", Thought: true}, {Text: "the answer"}}, Role: genai.RoleModel},
+					Partial: true,
+				},
+				{Content: &genai.Content{Parts: []*genai.Part{{Text: "thinking...", Thought: true}, {Text: "the answer"}}, Role: genai.RoleModel}},
+				{TurnComplete: true},
+			},
+		},
+		{
+			name: "the last appended chunk keeps its thoughts in the reassembled artifact",
+			remoteEvents: []a2a.Event{
+				newArtifactEvent(newThoughtPart("thinking")),
+				&a2a.TaskArtifactUpdateEvent{
+					TaskID:    task.ID,
+					ContextID: task.ContextID,
+					Artifact:  &a2a.Artifact{ID: artifactEvent.Artifact.ID, Parts: a2a.ContentParts{newThoughtPart("..."), a2a.NewTextPart("the answer")}},
+					Append:    true,
+					LastChunk: true,
+				},
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: &genai.Content{Parts: []*genai.Part{{Text: "thinking", Thought: true}}, Role: genai.RoleModel}, Partial: true},
+				{
+					Content: &genai.Content{Parts: []*genai.Part{{Text: "...", Thought: true}, {Text: "the answer"}}, Role: genai.RoleModel},
+					Partial: true,
+				},
+				{Content: &genai.Content{Parts: []*genai.Part{{Text: "thinking...", Thought: true}, {Text: "the answer"}}, Role: genai.RoleModel}},
+				{TurnComplete: true},
+			},
+		},
+		{
+			name: "thoughts beside an answer in a whole artifact update are dropped",
+			remoteEvents: []a2a.Event{
+				&a2a.TaskArtifactUpdateEvent{
+					TaskID:    task.ID,
+					ContextID: task.ContextID,
+					Artifact:  &a2a.Artifact{ID: artifactEvent.Artifact.ID, Parts: a2a.ContentParts{newThoughtPart("thinking..."), a2a.NewTextPart("the answer")}},
+					LastChunk: true,
+				},
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: genai.NewContentFromText("the answer", genai.RoleModel)},
+				{TurnComplete: true},
+			},
+		},
+		{
+			name: "thoughts beside an answer in an artifact update with the ADK partial flag are dropped",
+			remoteEvents: []a2a.Event{
+				&a2a.TaskArtifactUpdateEvent{
+					TaskID:    task.ID,
+					ContextID: task.ContextID,
+					Artifact:  &a2a.Artifact{ID: artifactEvent.Artifact.ID, Parts: a2a.ContentParts{newThoughtPart("thinking..."), a2a.NewTextPart("the answer")}},
+					Metadata:  map[string]any{adka2a.ToA2AMetaKey("partial"): false},
+				},
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: genai.NewContentFromText("the answer", genai.RoleModel)},
+				{TurnComplete: true},
+			},
+		},
+		{
+			name: "final status update with only thoughts keeps them",
+			remoteEvents: []a2a.Event{
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted, newThoughtPart("thinking...")),
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: &genai.Content{Parts: []*genai.Part{{Text: "thinking...", Thought: true}}, Role: genai.RoleModel}, TurnComplete: true},
+			},
+		},
+		{
+			name: "working status update keeps its text beside a function call",
+			remoteEvents: []a2a.Event{
+				a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("looking it up"), newFunctionCallPart(t, "get_weather"))),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantResponses: []model.LLMResponse{
+				{
+					Content: &genai.Content{
+						Parts: []*genai.Part{{Text: "looking it up", Thought: true}, {FunctionCall: &genai.FunctionCall{Name: "get_weather"}}},
+						Role:  genai.RoleModel,
+					},
+					Partial: true,
+				},
+				{TurnComplete: true},
 			},
 		},
 		{
