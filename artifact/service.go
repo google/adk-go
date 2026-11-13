@@ -168,12 +168,36 @@ func (req *SaveRequest) Validate() error {
 	return req.validate(false)
 }
 
+// ValidateAllowingFileData checks the request with the rules of
+// [SaveRequest.Validate], except that the part may also be file data: an
+// external file URI or an artifact:// reference. It is for a [Service] that
+// stores file data itself, such as the Cloud Storage service; Validate stays
+// the check for services that do not.
+//
+// File data whose FileURI is empty is refused, as adk-python's Cloud Storage
+// service does, unless the part also carries inline data or non-empty text,
+// which the service stores instead of the file data. The method checks
+// the form of the part only: the service still checks an artifact:// URI with
+// [ParseAndValidateReferenceURI]. Every error wraps [ErrInputValidation] and
+// leaves the caller's values out of its message. It is safe for concurrent use
+// as long as the request is not modified meanwhile.
+func (req *SaveRequest) ValidateAllowingFileData() error {
+	if err := req.validate(true); err != nil {
+		return err
+	}
+	part := req.Part
+	if part.InlineData == nil && part.Text == "" && part.FileData != nil && part.FileData.FileURI == "" {
+		return invalidInput("invalid save request: Part.FileData.FileURI has to be set (Artifact file_data must have a file_uri.)")
+	}
+	return nil
+}
+
 // validate is the shared request validation, with allowRef tolerating a file
-// data part, an artifact reference or external data. Every Service calls
-// Validate() (allowRef false), which rejects a part that is neither text nor
-// inline data; this is a shared contract that backends such as GCS rely on.
-// Only the in-memory service stores file data, so it is the sole caller that
-// sets allowRef.
+// data part, an artifact reference or external data. Validate() (allowRef
+// false) rejects a part that is neither text nor inline data, the shared
+// contract of services that do not store file data. The services that store
+// it set allowRef: the in-memory service directly, and others through
+// ValidateAllowingFileData.
 func (req *SaveRequest) validate(allowRef bool) error {
 	name := artifactName{appName: req.AppName, userID: req.UserID, sessionID: req.SessionID, fileName: req.FileName}
 	missingFields := name.missingFields()
@@ -193,8 +217,8 @@ func (req *SaveRequest) validate(allowRef bool) error {
 	}
 
 	// File data, an artifact reference or external data, carries neither
-	// Part.Text nor Part.InlineData; only the in-memory service accepts it, so
-	// the content rule tolerates it there and stays strict for every other
+	// Part.Text nor Part.InlineData; the content rule tolerates it only for
+	// the services that store file data and stays strict for every other
 	// caller. A part whose every field is zero is empty text: genai.Part cannot
 	// tell Text "" from an unset Text, and adk-python accepts Part(text="").
 	if req.Part.Text == "" && req.Part.InlineData == nil && !(allowRef && req.Part.FileData != nil) && !reflect.ValueOf(*req.Part).IsZero() {

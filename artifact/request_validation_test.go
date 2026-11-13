@@ -732,3 +732,66 @@ func TestRequestValidate_PathSafetyAndSentinel(t *testing.T) {
 		})
 	}
 }
+
+// TestSaveRequestValidateAllowingFileData checks that the opt-in accepts the
+// parts a file-data backend stores and refuses file data without a URI, as
+// adk-python's GCS service does ("Artifact file_data must have a file_uri.",
+// gcs_artifact_service.py).
+func TestSaveRequestValidateAllowingFileData(t *testing.T) {
+	newReq := func(part *genai.Part) *SaveRequest {
+		return &SaveRequest{AppName: "app", UserID: "user1", SessionID: "sess1", FileName: "f.txt", Part: part}
+	}
+	accepted := []struct {
+		name string
+		req  *SaveRequest
+	}{
+		{name: "external file data", req: newReq(&genai.Part{FileData: &genai.FileData{FileURI: "gs://b/o", MIMEType: "application/pdf"}})},
+		{name: "artifact reference", req: newReq(&genai.Part{FileData: &genai.FileData{FileURI: "artifact://apps/app/users/user1/sessions/sess1/artifacts/t.txt/versions/1"}})},
+		{name: "empty text", req: newReq(genai.NewPartFromText(""))},
+		{name: "inline data", req: newReq(genai.NewPartFromBytes([]byte("abc"), "image/png"))},
+		{name: "inline data beside file data without a URI", req: newReq(&genai.Part{InlineData: &genai.Blob{Data: []byte("abc"), MIMEType: "image/png"}, FileData: &genai.FileData{}})},
+		{name: "text beside file data without a URI", req: newReq(&genai.Part{Text: "x", FileData: &genai.FileData{}})},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.req.ValidateAllowingFileData(); err != nil {
+				t.Errorf("ValidateAllowingFileData() = %v, want nil", err)
+			}
+		})
+	}
+
+	refused := []struct {
+		name    string
+		req     *SaveRequest
+		wantMsg string
+	}{
+		{
+			name:    "file data with an empty URI",
+			req:     newReq(&genai.Part{FileData: &genai.FileData{MIMEType: "text/plain"}}),
+			wantMsg: "invalid save request: Part.FileData.FileURI has to be set (Artifact file_data must have a file_uri.)",
+		},
+		{
+			name:    "function call part",
+			req:     newReq(genai.NewPartFromFunctionCall("f", nil)),
+			wantMsg: "invalid save request: Part.InlineData or Part.Text has to be set",
+		},
+		{
+			name: "missing app name",
+			req: &SaveRequest{UserID: "user1", SessionID: "sess1", FileName: "f.txt", Part: &genai.Part{
+				FileData: &genai.FileData{FileURI: "gs://b/o"},
+			}},
+			wantMsg: "invalid save request: missing required fields: AppName",
+		},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.req.ValidateAllowingFileData()
+			if !errors.Is(err, ErrInputValidation) {
+				t.Fatalf("ValidateAllowingFileData() = %v, want an error wrapping ErrInputValidation", err)
+			}
+			if err.Error() != tc.wantMsg {
+				t.Errorf("ValidateAllowingFileData() error = %q, want %q", err.Error(), tc.wantMsg)
+			}
+		})
+	}
+}

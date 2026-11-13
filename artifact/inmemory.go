@@ -152,23 +152,18 @@ func (s *inMemoryService) delete(appName, userID, sessionID, fileName string, ve
 
 // Save implements [artifact.Service]
 func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error) {
-	// Allow file data parts, which carry neither text nor inline data and are
-	// only stored by this service: external file data is kept as is, and the
-	// scope check below re-validates that a reference stays within the caller's
-	// app/user/session.
+	// Allow file data parts, which carry neither text nor inline data:
+	// external file data is kept as is, and the scope check below re-validates
+	// that a reference stays within the caller's app/user/session.
 	if err := req.validate(true); err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	if isArtifactRef(req.Part) {
-		parsed, ok := parseArtifactURI(req.Part.FileData.FileURI)
-		if !ok {
-			return nil, fmt.Errorf("request validation failed: %w", errInvalidReferenceURI())
-		}
 		// Check the caller's session before the user-scope rewrite, so the scope
 		// is validated against the caller, matching Load's per-hop rule.
-		if err := validateArtifactReferenceScope(appName, userID, sessionID, parsed); err != nil {
-			return nil, fmt.Errorf("request validation failed: invalid artifact reference: %w", err)
+		if _, err := ParseAndValidateReferenceURI(req.Part.FileData.FileURI, appName, userID, sessionID, MaxArtifactReferenceDepth); err != nil {
+			return nil, fmt.Errorf("request validation failed: %w", err)
 		}
 	}
 	// If file is user scoped, store it under user scope path
@@ -229,13 +224,6 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 	return nil
 }
 
-// errInvalidReferenceURI returns the error for a malformed artifact:// URI. It
-// carries adk-python's phrase and leaves the URI out: the URI holds app, user,
-// session and file identifiers, which are caller data.
-func errInvalidReferenceURI() error {
-	return invalidInput("invalid artifact reference URI (Invalid artifact reference URI)")
-}
-
 // Load implements [artifact.Service]
 func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResponse, error) {
 	err := req.Validate()
@@ -262,12 +250,9 @@ func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, v
 	// An artifact part may be a reference (its FileData.FileURI uses the
 	// "artifact://" scheme), pointing at another artifact rather than storing
 	// data. Resolve it here, re-validating scope at each hop so a reference can
-	// never escape the app/user/session it was saved under. maxArtifactRefDepth
-	// bounds resolution against cycles and counts reference hops only, so the
-	// requested artifact does not consume one. This mirrors adk-python's cap of 5
-	// (artifact_util._MAX_ARTIFACT_REFERENCE_DEPTH).
-	const maxArtifactRefDepth = 5
-	remainingDepth := maxArtifactRefDepth
+	// never escape the app/user/session it was saved under.
+	// MaxArtifactReferenceDepth bounds resolution against cycles.
+	remainingDepth := MaxArtifactReferenceDepth
 	for {
 		// User-scoped artifacts are stored under the shared user key, but the
 		// scope check below must use the caller's scope (threaded through as
@@ -301,22 +286,21 @@ func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, v
 			return entry, nil
 		}
 
-		parsed, ok := parseArtifactURI(entry.part.FileData.FileURI)
-		if !ok {
-			return nil, errInvalidReferenceURI()
+		parsed, err := ParseAndValidateReferenceURI(entry.part.FileData.FileURI, appName, userID, sessionID, remainingDepth)
+		if err != nil {
+			return nil, err
 		}
-		if err := validateArtifactReferenceScope(appName, userID, sessionID, parsed); err != nil {
-			return nil, fmt.Errorf("invalid artifact reference: %w", err)
-		}
-
 		remainingDepth--
-		if remainingDepth < 0 {
-			return nil, invalidInput(fmt.Sprintf("artifact reference resolution exceeded maximum depth of %d (Exceeded maximum recursion depth resolving artifact reference)", maxArtifactRefDepth))
-		}
 
 		// Follow the reference: the next hop is validated against the session it
 		// just followed, as adk-python resolves each hop against the URI it reached.
 		appName, userID, sessionID, fileName, version = parsed.AppName, parsed.UserID, parsed.SessionID, parsed.FileName, parsed.Version
+		// The target must be loadable on its own, as in the Cloud Storage
+		// service: a user-scoped reference to a file without the "user:"
+		// prefix has no session to look it up in.
+		if err := (&LoadRequest{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName}).Validate(); err != nil {
+			return nil, fmt.Errorf("invalid artifact reference target: %w", err)
+		}
 	}
 }
 

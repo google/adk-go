@@ -31,6 +31,9 @@ type gcsClient interface {
 type gcsBucket interface {
 	object(name string) gcsObject
 	objects(ctx context.Context, q *storage.Query) gcsObjectIterator
+	// signedURL signs a URL for the named object of this bucket with the
+	// client's credentials, as [storage.BucketHandle.SignedURL] does.
+	signedURL(object string, opts *storage.SignedURLOptions) (string, error)
 }
 
 // gcsObject is an interface that a gcs object handle must satisfy.
@@ -91,6 +94,14 @@ func (w *gcsBucketWrapper) objects(ctx context.Context, q *storage.Query) gcsObj
 	return &gcsObjectIteratorWrapper{iter: realIterator}
 }
 
+// signedURL implements the gcsBucket interface for gcsBucketWrapper.
+// BucketHandle.SignedURL fills in the GoogleAccessID and the signing key or
+// the IAM signBlob call from the client's credentials, which the package-level
+// storage.SignedURL does not.
+func (w *gcsBucketWrapper) signedURL(object string, opts *storage.SignedURLOptions) (string, error) {
+	return w.bucket.SignedURL(object, opts)
+}
+
 // gcsObjectWrapper wraps a storage.ObjectHandle to satisfy the gcsObject interface.
 type gcsObjectWrapper struct {
 	object *storage.ObjectHandle
@@ -143,8 +154,12 @@ func (g *gcsWriterWrapper) Close() error {
 	return g.w.Close()
 }
 
+// SetContentType sets the content type of the object. An empty cType stores
+// the object without one: the client would otherwise sniff a type from the
+// payload, and a zero-byte file-data object would read back as text.
 func (g *gcsWriterWrapper) SetContentType(cType string) {
 	g.w.ContentType = cType
+	g.w.ForceEmptyContentType = cType == ""
 }
 
 func (g *gcsWriterWrapper) SetMetadata(metadata map[string]string) {
