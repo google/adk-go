@@ -368,3 +368,218 @@ func TestRun_TypedSchemaWithAnyOf_IsCheckedByItsType(t *testing.T) {
 		})
 	}
 }
+
+// record returns a record schema with the given title and properties, none of
+// them required.
+func record(title string, props map[string]*genai.Schema) *genai.Schema {
+	return &genai.Schema{Type: genai.TypeObject, Title: title, Properties: props}
+}
+
+// defaultZero is an INTEGER property that defaults to 0.
+func defaultZero() *genai.Schema {
+	return &genai.Schema{Type: genai.TypeInteger, Default: float64(0)}
+}
+
+// TestRun_UnionField_CountsFieldsSetInNestedRecords fails if the fields-set
+// comparison of a union counts only the arm's own fields, and not the fields
+// set in the records nested in its properties, its list items and the picked
+// arm of a nested union, added up over all of them. Each row is the pydantic
+// probe it names.
+func TestRun_UnionField_CountsFieldsSetInNestedRecords(t *testing.T) {
+	inner := record("Inner", map[string]*genai.Schema{"p": defaultZero(), "q": defaultZero()})
+	inner2 := record("Inner2", map[string]*genai.Schema{"p": defaultZero(), "r": defaultZero()})
+	pInt := &genai.Schema{
+		Type:       genai.TypeObject,
+		Title:      "PI",
+		Properties: map[string]*genai.Schema{"p": intArm},
+		Required:   []string{"p"},
+	}
+	// bd is pydantic's BD(x: dict, y: int = 0): x holds a JSON object whose
+	// values are untyped.
+	bd := &genai.Schema{
+		Type:       genai.TypeObject,
+		Title:      "BD",
+		Properties: map[string]*genai.Schema{"x": dictArm, "y": defaultZero()},
+		Required:   []string{"x"},
+	}
+	withX := func(title string, x *genai.Schema) *genai.Schema {
+		return &genai.Schema{
+			Type:       genai.TypeObject,
+			Title:      title,
+			Properties: map[string]*genai.Schema{"x": x},
+			Required:   []string{"x"},
+		}
+	}
+	a := withX("A", inner)
+	deep := withX("AD", &genai.Schema{
+		Type:       genai.TypeObject,
+		Title:      "Deep1",
+		Properties: map[string]*genai.Schema{"d": record("Deep2", map[string]*genai.Schema{"k": defaultZero(), "m": defaultZero()})},
+		Required:   []string{"d"},
+	})
+	w1 := &genai.Schema{
+		Type:       genai.TypeObject,
+		Title:      "W1",
+		Properties: map[string]*genai.Schema{"v": union(intArm, addrArm)},
+		Required:   []string{"v"},
+	}
+	w2 := &genai.Schema{
+		Type:       genai.TypeObject,
+		Title:      "W2",
+		Properties: map[string]*genai.Schema{"v": dictArm, "w": defaultZero()},
+		Required:   []string{"v"},
+	}
+	ld := &genai.Schema{
+		Type:       genai.TypeObject,
+		Title:      "LD",
+		Properties: map[string]*genai.Schema{"v": {Type: genai.TypeArray}, "n": defaultZero()},
+		Required:   []string{"v"},
+	}
+	la := &genai.Schema{
+		Type:       genai.TypeObject,
+		Title:      "LA",
+		Properties: map[string]*genai.Schema{"v": listOf(addrArm)},
+		Required:   []string{"v"},
+	}
+	two := record("Two", map[string]*genai.Schema{"a": defaultZero(), "b": defaultZero()})
+	one := record("One", map[string]*genai.Schema{"a": defaultZero(), "c": defaultZero()})
+	e := record("E", map[string]*genai.Schema{"a": defaultZero()})
+	f := &genai.Schema{
+		Type:       genai.TypeObject,
+		Title:      "F",
+		Properties: map[string]*genai.Schema{"b": intArm},
+		Required:   []string{"b"},
+	}
+
+	tests := []struct {
+		name   string
+		schema *genai.Schema
+		in     any
+		want   any
+	}{
+		{
+			"N1a_list_items_count", union(listOf(addrArm), listOf(bArm)),
+			[]any{map[string]any{"city": "x", "zip": float64(5)}},
+			[]any{map[string]any{"city": "x", "zip": float64(5)}},
+		},
+		{
+			"N1c_record_in_a_property_counts_and_dict_values_do_not", union(bd, a),
+			map[string]any{"x": map[string]any{"p": float64(1), "q": float64(2), "r": float64(3)}},
+			map[string]any{"x": map[string]any{"p": float64(1), "q": float64(2)}},
+		},
+		{
+			"N1f_equal_counts_in_list_items_first_wins", union(listOf(addrArm), listOf(bArm)),
+			[]any{map[string]any{"city": "x"}},
+			[]any{map[string]any{"city": "x"}},
+		},
+		{
+			"N1g_equal_counts_in_nested_records_first_wins", union(withX("P", inner), withX("Q", inner2)),
+			map[string]any{"x": map[string]any{"p": float64(1)}},
+			map[string]any{"x": map[string]any{"p": float64(1), "q": float64(0)}},
+		},
+		{
+			"N1i_record_two_levels_down_counts", union(bd, deep),
+			map[string]any{"x": map[string]any{"d": map[string]any{"k": float64(1), "m": float64(2)}}},
+			map[string]any{"x": map[string]any{"d": map[string]any{"k": float64(1), "m": float64(2)}}},
+		},
+		{
+			"N1l_picked_arm_of_a_nested_union_counts", union(w2, w1),
+			map[string]any{"v": map[string]any{"city": "x"}},
+			map[string]any{"v": map[string]any{"city": "x"}},
+		},
+		{
+			"N1n_count_beats_a_higher_grade", union(bd, withX("Wb", pInt)),
+			map[string]any{"x": map[string]any{"p": "1"}},
+			map[string]any{"x": map[string]any{"p": float64(1)}},
+		},
+		{
+			"N1o_optional_record_arm_counts", union(bd, union(a, nullArm)),
+			map[string]any{"x": map[string]any{"p": float64(1), "q": float64(2)}},
+			map[string]any{"x": map[string]any{"p": float64(1), "q": float64(2)}},
+		},
+		{
+			// Two sets 1+1+2 fields and One 2+2+1: One wins only by the sum.
+			"N3d_counts_add_up_over_items", union(listOf(two), listOf(one)),
+			[]any{
+				map[string]any{"a": float64(1), "c": float64(1)},
+				map[string]any{"a": float64(1), "c": float64(1)},
+				map[string]any{"a": float64(1), "b": float64(1)},
+			},
+			[]any{
+				map[string]any{"a": float64(1), "c": float64(1)},
+				map[string]any{"a": float64(1), "c": float64(1)},
+				map[string]any{"a": float64(1), "c": float64(0)},
+			},
+		},
+		{
+			// E sets no field but still counts 0, so F's 1 beats it despite
+			// F's lax grade.
+			"N3a_record_item_setting_no_field_counts_zero", union(listOf(e), listOf(f)),
+			[]any{map[string]any{"b": "1"}},
+			[]any{map[string]any{"b": float64(1)}},
+		},
+		{
+			"N3c_records_in_nested_lists_count", union(listOf(listOf(addrArm)), listOf(listOf(bArm))),
+			[]any{[]any{map[string]any{"city": "x", "zip": float64(5)}}},
+			[]any{[]any{map[string]any{"city": "x", "zip": float64(5)}}},
+		},
+		{
+			"N2b_records_in_a_list_property_count", union(ld, la),
+			map[string]any{"v": []any{map[string]any{"city": "x"}}},
+			map[string]any{"v": []any{map[string]any{"city": "x"}}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tl := newTool(t, outWith(tc.schema))
+			ctx := newToolContext(t)
+
+			got, err := tl.Run(ctx, map[string]any{"v": tc.in})
+			if err != nil {
+				t.Fatalf("Run({v: %#v}) error: %v", tc.in, err)
+			}
+			if diff := cmp.Diff(map[string]any{"v": tc.want}, got); diff != "" {
+				t.Errorf("Run({v: %#v}) mismatch (-want +got):\n%s", tc.in, diff)
+			}
+		})
+	}
+}
+
+// TestRun_UnionField_ListOfUntypedItemsIsExact fails if a list whose items are
+// untyped (pydantic's list[Any]) is graded below exact: pydantic does not
+// check such items, so the list beats a list of records, while a list of
+// nullable untyped items (list[Optional[Any]]) is checked and only strict.
+func TestRun_UnionField_ListOfUntypedItemsIsExact(t *testing.T) {
+	in := []any{map[string]any{"city": "x", "e": float64(1)}}
+	tests := []struct {
+		name   string
+		schema *genai.Schema
+		in     any
+		want   any
+	}{
+		{"N2d_nil_items", union(listOf(addrArm), listOf(nil)), in, in},
+		{"A2_empty_schema_items", union(listOf(addrArm), listOf(&genai.Schema{})), in, in},
+		{"A2_type_unspecified_items", union(listOf(addrArm), listOf(&genai.Schema{Type: genai.TypeUnspecified})), in, in},
+		{"A6_nested_lists", union(listOf(listOf(addrArm)), listOf(listOf(nil))), []any{in}, []any{in}},
+		{
+			"A1_nullable_untyped_items_tie_record_first",
+			union(listOf(addrArm), listOf(&genai.Schema{Nullable: new(true)})),
+			in,
+			[]any{map[string]any{"city": "x"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tl := newTool(t, outWith(tc.schema))
+			ctx := newToolContext(t)
+
+			got, err := tl.Run(ctx, map[string]any{"v": tc.in})
+			if err != nil {
+				t.Fatalf("Run({v: %#v}) error: %v", tc.in, err)
+			}
+			if diff := cmp.Diff(map[string]any{"v": tc.want}, got); diff != "" {
+				t.Errorf("Run({v: %#v}) mismatch (-want +got):\n%s", tc.in, diff)
+			}
+		})
+	}
+}
