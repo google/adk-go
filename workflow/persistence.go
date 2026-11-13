@@ -598,7 +598,7 @@ func eventNodeName(ev *session.Event, nodesByName map[string]Node) string {
 	if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
 		for seg := range strings.SplitSeq(ev.NodeInfo.Path, "/") {
 			name := seg
-			if idx := strings.IndexByte(name, '@'); idx >= 0 {
+			if idx := strings.LastIndexByte(name, '@'); idx >= 0 {
 				name = name[:idx]
 			}
 			if _, ok := nodesByName[name]; ok {
@@ -615,7 +615,10 @@ func eventNodeName(ev *session.Event, nodesByName map[string]Node) string {
 func ownPathNodeName(path string, nodesByName map[string]Node) string {
 	segments := strings.Split(path, "/")
 	for i, segment := range segments {
-		name, _, _ := strings.Cut(segment, "@")
+		name := segment
+		if idx := strings.LastIndexByte(segment, '@'); idx >= 0 {
+			name = segment[:idx]
+		}
 		if _, known := nodesByName[name]; known {
 			if i == len(segments)-1 {
 				return name

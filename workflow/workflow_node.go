@@ -86,7 +86,7 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 			if out, ok := childEventOutput(ev); ok && ev.NodeInfo != nil {
 				for seg := range strings.SplitSeq(ev.NodeInfo.Path, "/") {
 					name := seg
-					if idx := strings.IndexByte(name, '@'); idx >= 0 {
+					if idx := strings.LastIndexByte(name, '@'); idx >= 0 {
 						name = name[:idx]
 					}
 					if terminals[name] {
