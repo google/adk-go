@@ -938,10 +938,11 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, err)
 				return
 			}
-			// Skip the model response event if there is no content and no error code.
+			// Skip the model response event if it carries no content, error code,
+			// interruption or grounding metadata.
 			// This is needed for the code executor to trigger another loop according to
 			// adk-python src/google/adk/flows/llm_flows/base_llm_flow.py BaseLlmFlow._postprocess_async.
-			if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted {
+			if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted && resp.GroundingMetadata == nil {
 				continue
 			}
 
@@ -1529,13 +1530,11 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				confirmation = toolConfirmations[fnCall.ID]
 			}
 			toolCtx := agent.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
-			// A call without args reaches the tool and its callbacks as an
-			// empty map, so a tool that returns its args, as
+			// The callbacks and the tool may edit the arguments; the function
+			// call event keeps the ones the model sent. A call without args
+			// reaches them as an empty map, so a tool that returns its args, as
 			// set_model_response does, returns an object rather than nil.
-			args := fnCall.Args
-			if args == nil {
-				args = map[string]any{}
-			}
+			args := cloneArgs(fnCall.Args)
 
 			var result map[string]any
 			var curTool tool.Tool
@@ -1766,6 +1765,39 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 		return map[string]any{"error": errText}
 	}
 	return response
+}
+
+// cloneArgs returns a copy of a function call's arguments for the callbacks
+// and the tool to edit. Nested map[string]any and []any values, the shapes
+// decoded JSON arguments hold, are copied too; other values are shared. A nil
+// map becomes an empty one, so a callback can add an argument to a call that
+// had none.
+func cloneArgs(args map[string]any) map[string]any {
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		out[k] = cloneArgValue(v)
+	}
+	return out
+}
+
+func cloneArgValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		if t == nil {
+			return t
+		}
+		return cloneArgs(t)
+	case []any:
+		if t == nil {
+			return t
+		}
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = cloneArgValue(e)
+		}
+		return out
+	}
+	return v
 }
 
 func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {

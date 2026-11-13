@@ -341,6 +341,62 @@ func TestContentsRequestProcessor_IncludeContentsNone_IgnoresSiblingBranchPivot(
 	}
 }
 
+// An event with nothing for the model to read, such as another agent's reply
+// that carried only grounding metadata or an error, cannot start the current
+// turn: the user input before it must stay in the request.
+func TestContentsRequestProcessor_IncludeContentsNone_SkipsEmptyPivot(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		reply model.LLMResponse
+	}{
+		{
+			name:  "grounding-only reply",
+			reply: model.LLMResponse{GroundingMetadata: &genai.GroundingMetadata{WebSearchQueries: []string{"X"}}},
+		},
+		{
+			name:  "error reply",
+			reply: model.LLMResponse{ErrorCode: "UNAVAILABLE", ErrorMessage: "model unavailable"},
+		},
+		{
+			name:  "reply with no parts",
+			reply: model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			events := []*session.Event{
+				{
+					Author:      "user",
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Find X", genai.RoleUser)},
+				},
+				{Author: "researcher", LLMResponse: tc.reply},
+			}
+			summarizer := utils.Must(llmagent.New(llmagent.Config{
+				Name:            "summarizer",
+				Model:           &testModel{},
+				IncludeContents: llmagent.IncludeContentsNone,
+			}))
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Agent:   summarizer,
+				Session: &fakeSession{events: events},
+			})
+
+			req := &model.LLMRequest{}
+			for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if err != nil {
+					t.Fatalf("ContentsRequestProcessor() error = %v", err)
+				}
+			}
+
+			want := []*genai.Content{genai.NewContentFromText("Find X", genai.RoleUser)}
+			if diff := cmp.Diff(want, req.Contents); diff != "" {
+				t.Errorf("ContentsRequestProcessor() contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestContentsRequestProcessor_IncludeContentsNone_SubmittedToolResult pins
 // that a tool result the caller posts back does not start the current turn.
 // A long-running tool is finished by running the agent again with its result

@@ -750,12 +750,17 @@ func TestRunner_StampsEventsYieldedWithoutTimestamp(t *testing.T) {
 		// replace makes a plugin swap the custom agent's event for a struct
 		// literal copy, which has no timestamp whatever the original carried.
 		replace bool
+		// rewrite makes a plugin overwrite the custom agent's event in place
+		// with such a copy and return nil.
+		rewrite bool
 		want    time.Time
 	}{
 		{name: "sequential agent root", root: newSequentialRoot, want: runTime},
 		{name: "llm agent root", root: newLlmRoot, want: runTime},
 		{name: "sequential agent root, plugin replacement", root: newSequentialRoot, replace: true, want: runTime},
 		{name: "llm agent root, plugin replacement", root: newLlmRoot, replace: true, want: runTime},
+		{name: "sequential agent root, plugin rewrites in place", root: newSequentialRoot, rewrite: true, want: runTime},
+		{name: "llm agent root, plugin rewrites in place", root: newLlmRoot, rewrite: true, want: runTime},
 		{name: "sequential agent root, own timestamp", root: newSequentialRoot, own: ownTime, want: ownTime},
 		{name: "llm agent root, own timestamp", root: newLlmRoot, own: ownTime, want: ownTime},
 	}
@@ -773,6 +778,10 @@ func TestRunner_StampsEventsYieldedWithoutTimestamp(t *testing.T) {
 						return nil, nil
 					}
 					sawUnstamped = sawUnstamped || ev.Timestamp.IsZero()
+					if tt.rewrite {
+						*ev = session.Event{Author: ev.Author, LLMResponse: ev.LLMResponse}
+						return nil, nil
+					}
 					if !tt.replace {
 						return nil, nil
 					}
@@ -825,27 +834,206 @@ func TestRunner_StampsEventsYieldedWithoutTimestamp(t *testing.T) {
 	}
 }
 
-// TestRunner_StampsBeforeRunReplacement checks that a BeforeRun reply that an
-// OnEvent plugin replaces with a struct literal is stored with a timestamp.
-func TestRunner_StampsBeforeRunReplacement(t *testing.T) {
+// TestRunner_PluginReplacementKeepsEventIdentity checks that when an OnEvent
+// plugin returns a replacement event, the runner streams and stores it with the
+// original event's ID, invocation ID and timestamp, and with the original's
+// author when the replacement names none, on the agent path (sequential root)
+// and on the node path (an LlmAgent root that transfers to the agent). The
+// agent gives its event a timestamp different from the run's time and the
+// plugin's.
+func TestRunner_PluginReplacementKeepsEventIdentity(t *testing.T) {
+	runTime := time.Date(2026, time.March, 2, 10, 0, 0, 0, time.UTC)
+	pluginTime := time.Date(2026, time.March, 3, 11, 0, 0, 0, time.UTC)
+	agentTime := time.Date(2026, time.March, 1, 9, 0, 0, 0, time.UTC)
+
+	newCustom := func(t *testing.T) agent.Agent {
+		a, err := agent.New(agent.Config{
+			Name: "custom",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(&session.Event{
+						ID:           "agent-event",
+						InvocationID: ic.InvocationID(),
+						Timestamp:    agentTime,
+						Author:       "custom",
+						LLMResponse:  model.LLMResponse{Content: genai.NewContentFromText("reply", genai.RoleModel)},
+					}, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New() error = %v", err)
+		}
+		return a
+	}
+	newSequentialRoot := func(t *testing.T) agent.Agent {
+		a, err := sequentialagent.New(sequentialagent.Config{
+			AgentConfig: agent.Config{Name: "seq_root", SubAgents: []agent.Agent{newCustom(t)}},
+		})
+		if err != nil {
+			t.Fatalf("sequentialagent.New() error = %v", err)
+		}
+		return a
+	}
+	newLlmRoot := func(t *testing.T) agent.Agent {
+		m := &scriptedModel{responses: []*genai.Content{{
+			Role: genai.RoleModel,
+			Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "transfer-1", Name: "transfer_to_agent", Args: map[string]any{"agent_name": "custom"},
+			}}},
+		}}}
+		a, err := llmagent.New(llmagent.Config{Name: "llm_root", Model: m, SubAgents: []agent.Agent{newCustom(t)}})
+		if err != nil {
+			t.Fatalf("llmagent.New() error = %v", err)
+		}
+		return a
+	}
+	isReplacement := func(ev *session.Event) bool {
+		return ev.Content != nil && len(ev.Content.Parts) == 1 && ev.Content.Parts[0].Text == "replaced"
+	}
+	tests := []struct {
+		name string
+		root func(t *testing.T) agent.Agent
+		// author is the author the plugin's replacement names.
+		author     string
+		wantAuthor string
+	}{
+		{name: "sequential agent root, no author", root: newSequentialRoot, wantAuthor: "custom"},
+		{name: "llm agent root, no author", root: newLlmRoot, wantAuthor: "custom"},
+		{name: "sequential agent root, own author", root: newSequentialRoot, author: "rewriter", wantAuthor: "rewriter"},
+		{name: "llm agent root, own author", root: newLlmRoot, author: "rewriter", wantAuthor: "rewriter"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return runTime })
+			svc := session.InMemoryService()
+			newNodeTestSession(t, ctx, svc)
+			var original session.Event
+			p, err := plugin.New(plugin.Config{
+				Name: "replace",
+				OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+					if ev.Author != "custom" {
+						return nil, nil
+					}
+					original = *ev
+					return &session.Event{
+						ID:           "plugin-id",
+						InvocationID: "plugin-invocation",
+						Timestamp:    pluginTime,
+						Author:       tt.author,
+						LLMResponse:  model.LLMResponse{Content: genai.NewContentFromText("replaced", genai.RoleModel)},
+					}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("plugin.New() error = %v", err)
+			}
+			r, err := runner.New(runner.Config{
+				AppName:        nodeTestApp,
+				Agent:          tt.root(t),
+				SessionService: svc,
+				PluginConfig:   runner.PluginConfig{Plugins: []*plugin.Plugin{p}},
+			})
+			if err != nil {
+				t.Fatalf("runner.New() error = %v", err)
+			}
+
+			var streamed *session.Event
+			for ev, err := range r.Run(ctx, nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("Run() error = %v", err)
+				}
+				if isReplacement(ev) {
+					streamed = ev
+				}
+			}
+			if original.Author == "" {
+				t.Fatal("the plugin never saw the custom agent's event")
+			}
+			if streamed == nil {
+				t.Fatal("the replacement was not streamed")
+			}
+			got, err := svc.Get(ctx, &session.GetRequest{AppName: nodeTestApp, UserID: nodeTestUser, SessionID: nodeTestSession})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			var stored *session.Event
+			for ev := range got.Session.Events().All() {
+				if isReplacement(ev) {
+					stored = ev
+				}
+			}
+			if stored == nil {
+				t.Fatal("the replacement was not stored")
+			}
+
+			checkIdentity := func(where string, ev *session.Event) {
+				t.Helper()
+				if ev.ID != original.ID {
+					t.Errorf("%s replacement ID = %q, want the original's %q", where, ev.ID, original.ID)
+				}
+				if ev.InvocationID != original.InvocationID {
+					t.Errorf("%s replacement InvocationID = %q, want the original's %q", where, ev.InvocationID, original.InvocationID)
+				}
+				if !ev.Timestamp.Equal(agentTime) {
+					t.Errorf("%s replacement Timestamp = %v, want the original's %v", where, ev.Timestamp, agentTime)
+				}
+				if ev.Author != tt.wantAuthor {
+					t.Errorf("%s replacement Author = %q, want %q", where, ev.Author, tt.wantAuthor)
+				}
+			}
+			checkIdentity("streamed", streamed)
+			checkIdentity("stored", stored)
+		})
+	}
+}
+
+// TestRunner_PluginSharedReplacementIsNotModified checks that a plugin that
+// returns one replacement object for events by two different agents gets each
+// event back under its own author and ID, and that the runner leaves the
+// replacement as the plugin built it.
+func TestRunner_PluginSharedReplacementIsNotModified(t *testing.T) {
 	runTime := time.Date(2026, time.March, 2, 10, 0, 0, 0, time.UTC)
 	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return runTime })
 	svc := session.InMemoryService()
 	newNodeTestSession(t, ctx, svc)
-	a, err := agent.New(agent.Config{Name: "custom"})
+
+	newSpeaker := func(name string) agent.Agent {
+		a, err := agent.New(agent.Config{
+			Name: name,
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(&session.Event{
+						ID:           name + "-event",
+						InvocationID: ic.InvocationID(),
+						Author:       name,
+						LLMResponse:  model.LLMResponse{Content: genai.NewContentFromText("reply", genai.RoleModel)},
+					}, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(%q) error = %v", name, err)
+		}
+		return a
+	}
+	root, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{Name: "seq_root", SubAgents: []agent.Agent{newSpeaker("custom"), newSpeaker("other")}},
+	})
 	if err != nil {
-		t.Fatalf("agent.New() error = %v", err)
+		t.Fatalf("sequentialagent.New() error = %v", err)
+	}
+
+	shared := &session.Event{
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("redacted", genai.RoleModel)},
 	}
 	p, err := plugin.New(plugin.Config{
-		Name: "cache",
-		BeforeRunCallback: func(agent.InvocationContext) (*genai.Content, error) {
-			return genai.NewContentFromText("cached", genai.RoleModel), nil
-		},
+		Name: "redact",
 		OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
-			if ev.Author != "custom" {
+			if ev.Author != "custom" && ev.Author != "other" {
 				return nil, nil
 			}
-			return &session.Event{Author: ev.Author, LLMResponse: ev.LLMResponse}, nil
+			return shared, nil
 		},
 	})
 	if err != nil {
@@ -853,7 +1041,7 @@ func TestRunner_StampsBeforeRunReplacement(t *testing.T) {
 	}
 	r, err := runner.New(runner.Config{
 		AppName:        nodeTestApp,
-		Agent:          a,
+		Agent:          root,
 		SessionService: svc,
 		PluginConfig:   runner.PluginConfig{Plugins: []*plugin.Plugin{p}},
 	})
@@ -861,31 +1049,149 @@ func TestRunner_StampsBeforeRunReplacement(t *testing.T) {
 		t.Fatalf("runner.New() error = %v", err)
 	}
 
-	for _, err := range r.Run(ctx, nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{}) {
+	type identity struct{ ID, Author string }
+	isRedacted := func(ev *session.Event) bool {
+		return ev.Content != nil && len(ev.Content.Parts) == 1 && ev.Content.Parts[0].Text == "redacted"
+	}
+	var streamed []identity
+	for ev, err := range r.Run(ctx, nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{}) {
 		if err != nil {
 			t.Fatalf("Run() error = %v", err)
 		}
+		if isRedacted(ev) {
+			streamed = append(streamed, identity{ev.ID, ev.Author})
+		}
 	}
-
 	got, err := svc.Get(ctx, &session.GetRequest{AppName: nodeTestApp, UserID: nodeTestUser, SessionID: nodeTestSession})
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	var sawReply bool
+	var stored []identity
 	for ev := range got.Session.Events().All() {
-		if ev.Author != "custom" {
-			continue
-		}
-		sawReply = true
-		if !ev.Timestamp.Equal(runTime) {
-			t.Errorf("stored BeforeRun reply has timestamp %v, want %v", ev.Timestamp, runTime)
+		if isRedacted(ev) {
+			stored = append(stored, identity{ev.ID, ev.Author})
 		}
 	}
-	if !sawReply {
-		t.Fatal("the BeforeRun reply was not stored")
+
+	want := []identity{{"custom-event", "custom"}, {"other-event", "other"}}
+	if !slices.Equal(want, streamed) {
+		t.Errorf("streamed replacements = %v, want %v", streamed, want)
 	}
-	if got.Session.LastUpdateTime().IsZero() {
-		t.Error("session LastUpdateTime() is zero after the run")
+	if !slices.Equal(want, stored) {
+		t.Errorf("stored replacements = %v, want %v", stored, want)
+	}
+	if shared.ID != "" || shared.InvocationID != "" || shared.Author != "" || !shared.Timestamp.IsZero() {
+		t.Errorf("shared replacement was modified: ID = %q, InvocationID = %q, Author = %q, Timestamp = %v; want all empty",
+			shared.ID, shared.InvocationID, shared.Author, shared.Timestamp)
+	}
+}
+
+// TestRunner_StampsBeforeRunReplacement checks that a BeforeRun reply that an
+// OnEvent plugin replaces with a struct literal is stored with a timestamp, and
+// that a replacement with an ID, invocation ID and timestamp of its own and no
+// author is stored with the reply's ID, invocation ID and timestamp and the
+// agent's name as author.
+func TestRunner_StampsBeforeRunReplacement(t *testing.T) {
+	runTime := time.Date(2026, time.March, 2, 10, 0, 0, 0, time.UTC)
+	pluginTime := time.Date(2026, time.March, 3, 11, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name string
+		// rewrite makes the plugin overwrite the reply in place with a struct
+		// literal copy and return nil, instead of returning that copy.
+		rewrite bool
+	}{
+		{name: "replacement"},
+		{name: "rewrite in place", rewrite: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return runTime })
+			svc := session.InMemoryService()
+			newNodeTestSession(t, ctx, svc)
+			a, err := agent.New(agent.Config{Name: "custom"})
+			if err != nil {
+				t.Fatalf("agent.New() error = %v", err)
+			}
+			var original session.Event
+			p, err := plugin.New(plugin.Config{
+				Name: "cache",
+				BeforeRunCallback: func(agent.InvocationContext) (*genai.Content, error) {
+					return genai.NewContentFromText("cached", genai.RoleModel), nil
+				},
+				OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+					if ev.Author != "custom" {
+						return nil, nil
+					}
+					original = *ev
+					if tt.rewrite {
+						*ev = session.Event{Author: ev.Author, LLMResponse: ev.LLMResponse}
+						return nil, nil
+					}
+					return &session.Event{
+						ID:           "plugin-id",
+						InvocationID: "plugin-invocation",
+						Timestamp:    pluginTime,
+						LLMResponse:  ev.LLMResponse,
+					}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("plugin.New() error = %v", err)
+			}
+			r, err := runner.New(runner.Config{
+				AppName:        nodeTestApp,
+				Agent:          a,
+				SessionService: svc,
+				PluginConfig:   runner.PluginConfig{Plugins: []*plugin.Plugin{p}},
+			})
+			if err != nil {
+				t.Fatalf("runner.New() error = %v", err)
+			}
+
+			for _, err := range r.Run(ctx, nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("Run() error = %v", err)
+				}
+			}
+
+			got, err := svc.Get(ctx, &session.GetRequest{AppName: nodeTestApp, UserID: nodeTestUser, SessionID: nodeTestSession})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			isReply := func(ev *session.Event) bool {
+				return ev.Content != nil && len(ev.Content.Parts) == 1 && ev.Content.Parts[0].Text == "cached"
+			}
+			var sawReply bool
+			for ev := range got.Session.Events().All() {
+				if !isReply(ev) {
+					continue
+				}
+				sawReply = true
+				if ev.Author != "custom" {
+					t.Errorf("stored BeforeRun reply Author = %q, want %q", ev.Author, "custom")
+				}
+				if !ev.Timestamp.Equal(runTime) {
+					t.Errorf("stored BeforeRun reply has timestamp %v, want %v", ev.Timestamp, runTime)
+				}
+				if tt.rewrite {
+					continue
+				}
+				if ev.ID != original.ID {
+					t.Errorf("stored BeforeRun reply ID = %q, want the original's %q", ev.ID, original.ID)
+				}
+				if ev.InvocationID != original.InvocationID {
+					t.Errorf("stored BeforeRun reply InvocationID = %q, want the original's %q", ev.InvocationID, original.InvocationID)
+				}
+			}
+			if !sawReply {
+				t.Fatal("the BeforeRun reply was not stored")
+			}
+			if original.ID == "" || original.InvocationID == "" {
+				t.Errorf("the plugin saw a reply with ID %q and InvocationID %q, want both set", original.ID, original.InvocationID)
+			}
+			if got.Session.LastUpdateTime().IsZero() {
+				t.Error("session LastUpdateTime() is zero after the run")
+			}
+		})
 	}
 }
 
