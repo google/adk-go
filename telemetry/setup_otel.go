@@ -80,10 +80,15 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure exporters: %w", err)
 	}
-	cfg.spanProcessors = append(cfg.spanProcessors, exp.spanProcessors...)
-	cfg.logProcessors = append(cfg.logProcessors, exp.logProcessors...)
-	// A periodic reader runs from construction, so readers are built only
-	// once nothing else can fail; one built earlier would outlive the error.
+	// Batch processors and periodic readers run from construction, so they
+	// are built only once nothing else can fail; one built earlier would
+	// outlive the error.
+	for _, e := range exp.spanExporters {
+		cfg.spanProcessors = append(cfg.spanProcessors, sdktrace.NewBatchSpanProcessor(e))
+	}
+	for _, e := range exp.logExporters {
+		cfg.logProcessors = append(cfg.logProcessors, sdklog.NewBatchProcessor(e))
+	}
 	for _, m := range exp.metricExporters {
 		cfg.metricReaders = append(cfg.metricReaders, newPeriodicReader(m.exporter, m.opts...))
 	}
@@ -205,8 +210,8 @@ func serviceInstanceID() string {
 }
 
 type exporters struct {
-	spanProcessors  []sdktrace.SpanProcessor
-	logProcessors   []sdklog.Processor
+	spanExporters   []sdktrace.SpanExporter
+	logExporters    []sdklog.Exporter
 	metricExporters []metricExporter
 }
 
@@ -218,8 +223,8 @@ type metricExporter struct {
 }
 
 func (e *exporters) add(other exporters) {
-	e.spanProcessors = append(e.spanProcessors, other.spanProcessors...)
-	e.logProcessors = append(e.logProcessors, other.logProcessors...)
+	e.spanExporters = append(e.spanExporters, other.spanExporters...)
+	e.logExporters = append(e.logExporters, other.logExporters...)
 	e.metricExporters = append(e.metricExporters, other.metricExporters...)
 }
 
@@ -262,7 +267,7 @@ func otlpExporters(ctx context.Context, own ownProviders) (exporters, error) {
 		if err != nil {
 			return exporters{}, fmt.Errorf("failed to create OTLP HTTP exporter: %w", err)
 		}
-		exp.spanProcessors = append(exp.spanProcessors, sdktrace.NewBatchSpanProcessor(exporter))
+		exp.spanExporters = append(exp.spanExporters, exporter)
 	}
 	if own.meter && endpointSet("METRICS") {
 		exporter, err := otlpmetrichttp.New(ctx)
@@ -276,7 +281,7 @@ func otlpExporters(ctx context.Context, own ownProviders) (exporters, error) {
 		if err != nil {
 			return exporters{}, fmt.Errorf("failed to create OTLP HTTP log exporter: %w", err)
 		}
-		exp.logProcessors = append(exp.logProcessors, sdklog.NewBatchProcessor(exporter))
+		exp.logExporters = append(exp.logExporters, exporter)
 	}
 	return exp, nil
 }
@@ -294,7 +299,7 @@ func gcpExporters(ctx context.Context, cfg *config, own ownProviders) (exporters
 		if err != nil {
 			return exporters{}, fmt.Errorf("failed to create GCP span exporter: %w", err)
 		}
-		exp.spanProcessors = append(exp.spanProcessors, sdktrace.NewBatchSpanProcessor(exporter))
+		exp.spanExporters = append(exp.spanExporters, exporter)
 	}
 	if own.meter {
 		exporter, err := otlpmetrichttp.New(ctx,
