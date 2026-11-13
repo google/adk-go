@@ -41,11 +41,17 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 		t.Fatal("loadArtifactsTool does not implement FunctionTool")
 	}
 
+	// Arguments the model can correct get adk-python's error result, not a Go
+	// error.
+	invalidArtifactNamesResult := map[string]any{
+		"error":      "'artifact_names' must be a list of strings.",
+		"error_code": "INVALID_ARGUMENTS",
+	}
+
 	tests := []struct {
-		name    string
-		args    map[string]any
-		want    map[string]any
-		wantErr bool
+		name string
+		args map[string]any
+		want map[string]any
 	}{
 		{
 			name: "basic string slice",
@@ -104,25 +110,36 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 			args: map[string]any{
 				"artifact_names": "not a slice",
 			},
-			wantErr: true,
+			want: invalidArtifactNamesResult,
+		},
+		{
+			name: "incorrect type (object)",
+			args: map[string]any{
+				"artifact_names": map[string]any{"name": "fileA"},
+			},
+			want: invalidArtifactNamesResult,
 		},
 		{
 			name: "any slice with non-string",
 			args: map[string]any{
 				"artifact_names": []any{"fileA", 123},
 			},
-			wantErr: true,
+			want: invalidArtifactNamesResult,
+		},
+		{
+			name: "any slice with null",
+			args: map[string]any{
+				"artifact_names": []any{"fileA", nil},
+			},
+			want: invalidArtifactNamesResult,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := toolImpl.Run(tc, tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("Run() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
 			}
 
 			if diff := cmp.Diff(tt.want, result); diff != "" {
