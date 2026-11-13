@@ -55,6 +55,54 @@ func TestDropOrphanedFunctionResponses_LogAndClone(t *testing.T) {
 	}
 }
 
+func TestDropOrphanedFunctionResponses_PairsWithEarlierCalls(t *testing.T) {
+	event := func(parts ...*genai.Part) *session.Event {
+		return &session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: parts}}}
+	}
+	call := func(id string) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "tool"}}
+	}
+	response := func(id string) *genai.Part {
+		return &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: id, Name: "tool"}}
+	}
+
+	tests := []struct {
+		name        string
+		events      []*session.Event
+		callsBefore map[string]struct{}
+		want        []*session.Event
+	}{
+		{
+			name:   "call after the response",
+			events: []*session.Event{event(response("a")), event(call("a"))},
+			want:   []*session.Event{event(call("a"))},
+		},
+		{
+			name:        "call before the events",
+			events:      []*session.Event{event(response("a"))},
+			callsBefore: map[string]struct{}{"a": {}},
+			want:        []*session.Event{event(response("a"))},
+		},
+		{
+			// The call is kept on the event even though an orphan beside it
+			// is dropped, so a later response to it still pairs.
+			name:   "call on an event that lost an orphan",
+			events: []*session.Event{event(response("x"), call("a")), event(response("a"))},
+			want:   []*session.Event{event(call("a")), event(response("a"))},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			captureLog(t, func() {
+				got, _ := dropOrphanedFunctionResponses(tc.events, tc.callsBefore)
+				if diff := cmp.Diff(tc.want, got); diff != "" {
+					t.Errorf("pruned events mismatch (-want +got):\n%s", diff)
+				}
+			})
+		})
+	}
+}
+
 func TestDropOrphanedFunctionCalls(t *testing.T) {
 	call := func(id string) *genai.Part {
 		return &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "tool"}, ThoughtSignature: []byte("sig-" + id)}
@@ -148,5 +196,37 @@ func TestPromptTokenEstimator_SuffixDoesNotLogPairedResponseAsOrphan(t *testing.
 	})
 	if output != "" {
 		t.Errorf("paired response in suffix produced a stale-response notice: %q", output)
+	}
+}
+
+// A session service may hand back fresh event structs, so the suffix the
+// compaction estimate builds need not share pointers with the full history.
+// The suffix start is then found by event ID, and the call before it still
+// pairs with the response in it.
+func TestBuildContentsSuffix_FindsStartByEventID(t *testing.T) {
+	const agentName = "worker"
+	call := &session.Event{ID: "e1", Author: agentName, LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{ID: "paired", Name: "ping"}},
+	}}}}
+	response := &session.Event{ID: "e2", Author: agentName, LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+		{FunctionResponse: &genai.FunctionResponse{ID: "paired", Name: "ping"}},
+	}}}}
+	copied := *response
+	allEvents := []*session.Event{call, response}
+
+	var got []*genai.Content
+	output := captureLog(t, func() {
+		var err error
+		got, err = buildContentsDefaultWithCallSource(agentName, "", "", []*session.Event{&copied}, allEvents, false, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	if output != "" {
+		t.Errorf("paired response in a copied suffix produced a stale-response notice: %q", output)
+	}
+	want := []*genai.Content{response.Content}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
 	}
 }
