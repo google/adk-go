@@ -880,6 +880,11 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	return event, nil
 }
 
+// errUserFunctionCall rejects a user message that carries a function call.
+// Only a model makes function calls, so storing one would put a call no model
+// produced into the history.
+var errUserFunctionCall = errors.New("user message cannot contain function calls")
+
 type liveAgent interface {
 	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
 }
@@ -901,6 +906,9 @@ func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
 			return p == nil
 		})
 		req.Content = &content
+	}
+	if len(utils.FunctionCalls(req.Content)) > 0 {
+		return errUserFunctionCall
 	}
 	err := s.sess.Send(req)
 	if err != nil {
@@ -1201,6 +1209,10 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 				},
 			})
 		}
+	}
+
+	if len(utils.FunctionCalls(msg)) > 0 {
+		return ctx, nil, errUserFunctionCall
 	}
 
 	artifactsService := ctx.Artifacts()
