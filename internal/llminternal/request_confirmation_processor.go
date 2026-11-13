@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"slices"
+	"strings"
 
 	"google.golang.org/genai"
 
@@ -117,13 +118,12 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 		}
 
 		responseLatestIndex := make(map[string]int)
-		firstAnswerIndex := make(map[string]int)
 		for idx, ev := range events {
 			for _, resp := range utils.FunctionResponses(ev.Content) {
-				responseLatestIndex[resp.ID] = idx
-				if _, ok := firstAnswerIndex[resp.ID]; !ok && ev.Author == "user" && resp.Name == toolconfirmation.FunctionCallName {
-					firstAnswerIndex[resp.ID] = idx
+				if isConfirmationPlaceholder(resp) {
+					continue
 				}
+				responseLatestIndex[resp.ID] = idx
 			}
 		}
 
@@ -198,7 +198,6 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			// and the resulting StateDelta last-writer-wins merge all
 			// non-deterministic across runs.
 			var resumeOrder []string
-			confirmationIDByCallID := map[string]string{}
 			for _, functionCall := range calls {
 				if functionCall.Name != toolconfirmation.FunctionCallName {
 					continue
@@ -227,7 +226,6 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				if !seen {
 					resumeOrder = append(resumeOrder, originalFunctionCall.ID)
 				}
-				confirmationIDByCallID[originalFunctionCall.ID] = functionCall.ID
 				toolsToResumeByFunctionCallID[originalFunctionCall.ID] = &confirmedCall{
 					confirmation: &confirmation,
 					call:         *originalFunctionCall,
@@ -238,13 +236,13 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				continue
 			}
 
-			// Remove the tools that already have a result stored after the user's first
-			// answer to the confirmation (repeated approvals). The "requires confirmation"
-			// placeholder response is stored before that answer, and may sort after the
-			// request, so it must not count.
+			// Remove the tools that already have a result stored after the request
+			// (repeated approvals). The "requires confirmation" placeholder is not a
+			// result and is ignored. A real result is only written once the user has
+			// answered, and stores may order it before that answer when both share a
+			// timestamp, so the answer's position cannot be used as a bound.
 			for callID := range toolsToResumeByFunctionCallID {
-				start := max(k, firstAnswerIndex[confirmationIDByCallID[callID]])
-				if idx, ok := responseLatestIndex[callID]; ok && idx > start {
+				if idx, ok := responseLatestIndex[callID]; ok && idx > k {
 					delete(toolsToResumeByFunctionCallID, callID)
 				}
 			}
@@ -276,4 +274,11 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			}
 		}
 	}
+}
+
+// isConfirmationPlaceholder reports whether resp is the response stored when a
+// tool asks for confirmation instead of running.
+func isConfirmationPlaceholder(resp *genai.FunctionResponse) bool {
+	msg, _ := resp.Response["error"].(string)
+	return strings.Contains(msg, "requires confirmation")
 }

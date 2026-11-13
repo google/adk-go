@@ -17,6 +17,7 @@ package llminternal_test
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -1217,5 +1218,45 @@ func TestRequestConfirmationResumesOnlyRequestConfirmationCalls(t *testing.T) {
 
 	if diff := cmp.Diff([]string{"requested_call_id"}, gotIDs); diff != "" {
 		t.Errorf("RequestConfirmationRequestProcessor() resumed function call IDs diff (-want +got):\n%s", diff)
+	}
+}
+
+// TestRequestConfirmationRepeatedApprovalResultSharesAnswerTimestamp verifies
+// that a stored result is honored when a store orders it before the first
+// approval because both share a timestamp.
+func TestRequestConfirmationRepeatedApprovalResultSharesAnswerTimestamp(t *testing.T) {
+	const callID = "call-1"
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	agentEvent := func(p *genai.Part) *session.Event {
+		return &session.Event{Author: "testAgent", Timestamp: ts, LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{p}}}}
+	}
+	answer := func() *session.Event {
+		return &session.Event{Author: "user", Timestamp: ts.Add(time.Second), LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+			Name: toolconfirmation.FunctionCallName, ID: "conf-1", Response: map[string]any{"confirmed": true},
+		}}}}}}
+	}
+	result := agentEvent(&genai.Part{FunctionResponse: &genai.FunctionResponse{Name: mockToolName, ID: callID, Response: map[string]any{"ok": true}}})
+	result.Timestamp = ts.Add(time.Second)
+	events := []*session.Event{
+		agentEvent(&genai.Part{FunctionCall: &genai.FunctionCall{Name: toolconfirmation.FunctionCallName, ID: "conf-1", Args: map[string]any{
+			"originalFunctionCall": map[string]any{"name": mockToolName, "args": map[string]any{"param1": "test"}, "id": callID},
+			"toolConfirmation":     toolconfirmation.ToolConfirmation{Hint: "h"},
+		}}}),
+		result,
+		answer(),
+		answer(),
+	}
+	agnt, tools, err := newMockLlmAgent()
+	if err != nil {
+		t.Fatalf("error creating mock llmagent: %v", err)
+	}
+	ictx := createInvocationContext(t, agnt, &fakeSession{events: events})
+	for ev, err := range llminternal.RequestConfirmationRequestProcessor(ictx, &model.LLMRequest{}, &llminternal.Flow{Tools: tools}) {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ev != nil {
+			t.Errorf("repeated approval re-dispatched %q although its result is stored", callID)
+		}
 	}
 }
