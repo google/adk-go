@@ -15,12 +15,15 @@
 package llminternal
 
 import (
+	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/internal/converters"
+	"google.golang.org/adk/v2/internal/toolauthinternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -98,70 +101,98 @@ func generateRequestConfirmationEvent(
 	return ev
 }
 
-// generateAuthEvent returns the event that asks the client for the credentials
-// the tools in functionResponseEvent requested, or nil if they requested none.
-// It makes one adk_request_credential call per credential key, for the first
-// tool that asked for it in the order of the responses, which is the order the
-// calls were made in.
-func generateAuthEvent(ctx agent.InvocationContext, functionResponseEvent *session.Event) (*session.Event, error) {
-	requests := functionResponseEvent.Actions.RequestedAuthConfigs
-	if len(requests) == 0 {
+// generateAuthEvent returns the event that asks the client for the
+// credentials the tools requested in functionResponseEvent, with one
+// adk_request_credential call for each distinct credential key, or nil when
+// no tool requested one.
+//
+// adk-go has no tool-context request_credential, so the flow turns a tool's
+// request into an auth request here. Each requested config in
+// functionResponseEvent is replaced by its auth request, which carries none
+// of the secrets the tool was configured with, so they are neither stored in
+// the session nor sent to the client. On error functionResponseEvent is left
+// unchanged.
+func generateAuthEvent(ctx agent.InvocationContext, functionCallEvent, functionResponseEvent *session.Event) (*session.Event, error) {
+	if functionResponseEvent == nil || len(functionResponseEvent.Actions.RequestedAuthConfigs) == 0 {
 		return nil, nil
 	}
+	requested := functionResponseEvent.Actions.RequestedAuthConfigs
+
+	// Visit the requests in the order of the model's function calls, then any
+	// others in sorted order, since map iteration order is random.
+	var ids []string
+	if functionCallEvent != nil {
+		for _, fc := range utils.FunctionCalls(functionCallEvent.Content) {
+			if _, ok := requested[fc.ID]; ok && !slices.Contains(ids, fc.ID) {
+				ids = append(ids, fc.ID)
+			}
+		}
+	}
+	for _, fc := range utils.FunctionResponses(functionResponseEvent.Content) {
+		if _, ok := requested[fc.ID]; ok && !slices.Contains(ids, fc.ID) {
+			ids = append(ids, fc.ID)
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(requested)) {
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+
+	generated := make(map[string]toolauth.Config, len(requested))
+	seenKeys := make(map[string]bool)
 	var parts []*genai.Part
 	var longRunningToolIDs []string
-	seenKeys := map[string]bool{}
-	for _, fr := range utils.FunctionResponses(functionResponseEvent.Content) {
-		cfg, ok := requests[fr.ID]
-		if !ok || seenKeys[cfg.CredentialKey] {
+	for _, id := range ids {
+		cfg := requested[id]
+		req, err := toolauthinternal.GenerateRequest(&cfg)
+		if err != nil {
+			return nil, fmt.Errorf("auth request for function call %q: %w", id, err)
+		}
+		generated[id] = *req
+		// GenerateRequest sets CredentialKey, so this is the key.
+		if seenKeys[req.CredentialKey] {
 			continue
 		}
-		// A request with no key is never merged with another, as in adk-python.
-		if cfg.CredentialKey != "" {
-			seenKeys[cfg.CredentialKey] = true
-		}
-		args, err := converters.ToMapStructure(toolauth.ToolArguments{FunctionCallID: fr.ID, AuthConfig: cfg})
+		seenKeys[req.CredentialKey] = true
+		args, err := toolArgumentsMap(toolauth.ToolArguments{FunctionCallID: id, AuthConfig: *req})
 		if err != nil {
-			return nil, fmt.Errorf("encode %s args: %w", toolauth.RequestCredentialFunctionCallName, err)
+			return nil, fmt.Errorf("auth request for function call %q: %w", id, err)
 		}
-		call := &genai.FunctionCall{
+		fc := &genai.FunctionCall{
 			ID:   utils.GenerateFunctionCallID(ctx),
 			Name: toolauth.RequestCredentialFunctionCallName,
 			Args: args,
 		}
-		parts = append(parts, &genai.Part{FunctionCall: call})
-		longRunningToolIDs = append(longRunningToolIDs, call.ID)
+		parts = append(parts, &genai.Part{FunctionCall: fc})
+		longRunningToolIDs = append(longRunningToolIDs, fc.ID)
 	}
-	if len(parts) == 0 {
-		return nil, nil
+	functionResponseEvent.Actions.RequestedAuthConfigs = generated
+
+	var role string
+	if functionResponseEvent.Content != nil {
+		role = functionResponseEvent.Content.Role
 	}
 	ev := session.NewEvent(ctx, ctx.InvocationID())
 	ev.Author = ctx.Agent().Name()
 	ev.Branch = ctx.Branch()
-	// adk-python gives the request the role of the tool responses, which is user.
-	ev.LLMResponse = model.LLMResponse{Content: &genai.Content{Parts: parts, Role: genai.RoleUser}}
+	ev.LLMResponse = model.LLMResponse{
+		Content: &genai.Content{Parts: parts, Role: role},
+	}
 	ev.LongRunningToolIDs = longRunningToolIDs
 	return ev, nil
 }
 
-// yieldWithAuthRequest yields ev and then, when tools in ev asked for
-// credentials, the adk_request_credential call for them. It reports whether the
-// caller should go on.
-//
-// As in adk-python, asking the user to sign in ends the invocation, so the flow
-// calls neither its model nor a transfer target again.
-func yieldWithAuthRequest(ctx agent.InvocationContext, ev *session.Event, yield func(*session.Event, error) bool) bool {
-	authEvent, err := generateAuthEvent(ctx, ev)
+// toolArgumentsMap returns args as the JSON object an adk_request_credential
+// call carries.
+func toolArgumentsMap(args toolauth.ToolArguments) (map[string]any, error) {
+	b, err := json.Marshal(args)
 	if err != nil {
-		yield(nil, err)
-		return false
+		return nil, err
 	}
-	if !yield(ev, nil) {
-		return false
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
 	}
-	if authEvent == nil {
-		return true
-	}
-	ctx.EndInvocation()
-	return yield(authEvent, nil)
+	return m, nil
 }
