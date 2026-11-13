@@ -29,6 +29,8 @@ import (
 // are retained as-is. Unsupported types and excessive nesting return an error.
 func clone[M any](src M) (M, error) {
 	var dst M
+	// Agent requests copy more deeply than adk-python to isolate callback edits
+	// to nested configuration and history payloads.
 	if err := deepCopy(reflect.ValueOf(&src).Elem(), reflect.ValueOf(&dst).Elem(), 0); err != nil {
 		var zero M
 		return zero, err

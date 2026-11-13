@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -73,6 +74,15 @@ func (pm *PluginManager) registerPlugin(plugin *plugin.Plugin) error {
 	}
 	pm.plugins = append(pm.plugins, plugin)
 	return nil
+}
+
+// HasPlugins reports whether the PluginManager has any registered plugins.
+// It is safe to call on a nil PluginManager.
+func (pm *PluginManager) HasPlugins() bool {
+	if pm == nil {
+		return false
+	}
+	return len(pm.plugins) > 0
 }
 
 // RunOnUserMessageCallback runs the OnUserMessageCallback for all plugins.
@@ -168,6 +178,29 @@ func (pm *PluginManager) RunAfterAgentCallback(cctx agent.Context) (*genai.Conte
 		}
 	}
 	return nil, nil
+}
+
+// RunOnAgentErrorCallback notifies every plugin that an error escaped an
+// agent's run. Unlike the other callbacks it is best-effort notification: all
+// plugins run in registration order and none can suppress the error. A panic
+// from one callback is recovered so the remaining callbacks still run.
+func (pm *PluginManager) RunOnAgentErrorCallback(cctx agent.Context, a agent.Agent, err error) {
+	for _, plugin := range pm.plugins {
+		callback := plugin.OnAgentErrorCallback()
+		if callback == nil {
+			continue
+		}
+		func() {
+			// A panicking callback must not skip later plugins or replace the
+			// original error; adk-python isolates each plugin the same way.
+			defer func() {
+				if r := recover(); r != nil {
+					trace.SpanFromContext(cctx).RecordError(fmt.Errorf("plugin %q OnAgentErrorCallback panicked: %v", plugin.Name(), r))
+				}
+			}()
+			callback(cctx, a, err)
+		}()
+	}
 }
 
 // RunBeforeToolCallback runs the BeforeToolCallback for all plugins.
@@ -289,4 +322,31 @@ func (pm *PluginManager) Close() error {
 func ToContext(ctx context.Context, cfg *PluginManager) context.Context {
 	// TODO(kdroste): move to invocationContext?
 	return context.WithValue(ctx, plugincontext.PluginManagerCtxKey, cfg)
+}
+
+// FromContext returns the PluginManager stored in ctx, or nil if there is none.
+func FromContext(ctx context.Context) *PluginManager {
+	m, _ := ctx.Value(plugincontext.PluginManagerCtxKey).(*PluginManager)
+	return m
+}
+
+type inheritCtxKey struct{}
+
+// WithInheritedPlugins marks ctx so that the next runner started with it keeps
+// the plugin manager already in ctx when that runner has no plugins of its own.
+// Only agenttool sets this mark, for the sub-runner it starts. Any other runner
+// without plugins replaces the manager in ctx with its own empty one.
+func WithInheritedPlugins(ctx context.Context) context.Context {
+	return context.WithValue(ctx, inheritCtxKey{}, FromContext(ctx))
+}
+
+// TakeInheritedPlugins returns the plugin manager marked by
+// WithInheritedPlugins, or nil, and a ctx with the mark cleared, so that the
+// mark applies to one runner only and not to runners started further down.
+func TakeInheritedPlugins(ctx context.Context) (context.Context, *PluginManager) {
+	pm, ok := ctx.Value(inheritCtxKey{}).(*PluginManager)
+	if !ok {
+		return ctx, nil
+	}
+	return context.WithValue(ctx, inheritCtxKey{}, (*PluginManager)(nil)), pm
 }
