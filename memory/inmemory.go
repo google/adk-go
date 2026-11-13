@@ -60,10 +60,22 @@ const maxSearchResults = 10
 // as a word. A query with no words returns no entries.
 //
 // Returned entries carry the stored event's ID, Author, Timestamp and
-// CustomMetadata. They share the event's parts and metadata with the service
-// and with the events that were added, so callers must not modify them.
+// CustomMetadata.
 // AddSessionToMemory, AddEventsToMemory and SearchMemory return an error for a
 // nil session or request.
+//
+// Event content and custom metadata are copied on ingestion and retrieval.
+//
+// Pointers and slices whose elements contain unexported struct fields by value
+// remain shared, except for time.Time. This avoids copying stateful objects such
+// as strings.Builder or sync.Mutex. Non-copyable objects must be passed by pointer.
+// Unexported reference fields, functions, channels, and unsafe pointers also stay
+// shared. Callers must synchronize access to shared values.
+//
+// Content and custom metadata are copied independently. Cycles are supported,
+// but slice capacity and internal sharing relationships are not guaranteed to
+// be preserved, including overlapping slice views and pointers into fields or
+// elements.
 func InMemoryService() Service {
 	return &inMemoryService{
 		store: make(map[key]*userMemories),
@@ -223,10 +235,10 @@ func buildValue(event *session.Event) (value, bool) {
 
 	return value{
 		id:             event.ID,
-		content:        &content,
+		content:        cloneMemoryData(&content),
 		author:         event.Author,
 		timestamp:      event.Timestamp,
-		customMetadata: event.CustomMetadata,
+		customMetadata: cloneMemoryData(event.CustomMetadata),
 		words:          extractSearchableWords(text),
 		textLower:      cases.Lower(language.Und).String(norm.NFC.String(text)),
 	}, true
@@ -303,7 +315,7 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 		return cmp.Compare(b.score, a.score)
 	})
 	for _, match := range scored[:min(len(scored), maxSearchResults)] {
-		res.Memories = append(res.Memories, match.entry)
+		res.Memories = append(res.Memories, cloneMemoryData(match.entry))
 	}
 
 	return res, nil
