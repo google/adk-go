@@ -389,8 +389,16 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 		Where("user_id = ?", userID).
 		Where("session_id = ?", sessionID)
 
+	// SQLite stores timestamps as text with each value's own UTC offset, so
+	// comparing or ordering them in SQL compares text, not instants: an event
+	// stamped 01:00-05:00 sorts before one stamped 01:30-04:00, half an hour
+	// earlier. On SQLite the events are filtered, ordered and limited by
+	// selectEventsByInstant instead, after all of the session's events are
+	// read; this holds for rows already stored with any offset.
+	byInstant := s.db.Dialector.Name() == "sqlite"
+
 	// Apply conditional filters from the request
-	if !req.After.IsZero() {
+	if !req.After.IsZero() && !byInstant {
 		eventQuery = eventQuery.Where("timestamp >= ?", req.After)
 	}
 
@@ -419,7 +427,7 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 	}
 	eventQuery = eventQuery.Order(orderClause)
 
-	if req.NumRecentEvents > 0 {
+	if req.NumRecentEvents > 0 && !byInstant {
 		eventQuery = eventQuery.Limit(req.NumRecentEvents)
 	}
 
@@ -431,6 +439,9 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 			// This is a system failure, not a "not found"
 			return nil, fmt.Errorf("database error while fetching events: %w", err)
 		}
+	}
+	if byInstant {
+		storageEvents = selectEventsByInstant(storageEvents, req.After, req.NumRecentEvents, s.appendOrderTiebreak)
 	}
 
 	// fetch app and user states
@@ -465,6 +476,32 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 	return &session.GetResponse{
 		Session: responseSession,
 	}, nil
+}
+
+// selectEventsByInstant returns the events at or after after, newest first,
+// at most limit of them when limit is positive, in the order Get's SQL query
+// gives on dialects that compare timestamps as instants: by timestamp, then
+// by seq when appendOrderTiebreak is set, then by id. It reorders events in
+// place.
+func selectEventsByInstant(events []storageEvent, after time.Time, limit int, appendOrderTiebreak bool) []storageEvent {
+	if !after.IsZero() {
+		events = slices.DeleteFunc(events, func(e storageEvent) bool { return e.Timestamp.Before(after) })
+	}
+	slices.SortFunc(events, func(a, b storageEvent) int {
+		if c := b.Timestamp.Compare(a.Timestamp); c != 0 {
+			return c
+		}
+		if appendOrderTiebreak {
+			if c := cmp.Compare(b.Seq, a.Seq); c != 0 {
+				return c
+			}
+		}
+		return strings.Compare(b.ID, a.ID)
+	})
+	if limit > 0 && len(events) > limit {
+		events = events[:limit]
+	}
+	return events
 }
 
 // List retrieves sessions from the database using its appName and optional UserID

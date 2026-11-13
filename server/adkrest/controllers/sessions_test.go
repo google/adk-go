@@ -488,6 +488,25 @@ func TestListSessions(t *testing.T) {
 	}
 }
 
+// A second create of the same session ID gets 409 Conflict, as adk-python
+// answers AlreadyExistsError (api_server.py:1264-1267).
+func TestCreateSessionTakenIDIsConflict(t *testing.T) {
+	id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "s1"}
+	apiController := controllers.NewSessionsAPIController(session.InMemoryService())
+	first := httptest.NewRecorder()
+	apiController.CreateSessionHandler(first, newSessionRequest(t, http.MethodPost, id, nil, id.UserID))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first CreateSessionHandler() status = %d, want %d; body: %s", first.Code, http.StatusOK, first.Body.String())
+	}
+
+	rr := httptest.NewRecorder()
+	apiController.CreateSessionHandler(rr, newSessionRequest(t, http.MethodPost, id, nil, id.UserID))
+
+	if rr.Code != http.StatusConflict {
+		t.Errorf("second CreateSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusConflict, rr.Body.String())
+	}
+}
+
 // TestGetSessionMissingSessionIsNotFound covers the 404 path. A service that
 // wraps session.ErrNotFound is telling the handler the session is absent, not
 // that the server broke, so the client must get a 404.

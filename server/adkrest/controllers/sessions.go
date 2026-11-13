@@ -53,6 +53,10 @@ func (c *SessionsAPIController) WithAuthorizer(authorizer authz.Authorizer) {
 }
 
 // CreateSessionHandler is an HTTP handler for the create session API.
+//
+// When the session service reports that the session ID is taken, with an
+// error wrapping [session.ErrAlreadyExists], it answers 409 Conflict; any
+// other failure to create the session or append its events is a 500.
 func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req *http.Request) {
 	params := mux.Vars(req)
 	sessionID, err := models.SessionIDFromHTTPParameters(params)
@@ -97,6 +101,12 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 		events = append(events, sessionEvent)
 	}
 	respSession, err := c.createSession(req.Context(), sessionID, createSessionRequest.State, events)
+	// A taken session ID is the client's conflict, not the server's fault;
+	// adk-python answers it with 409 too (api_server.py:1264-1267).
+	if errors.Is(err, session.ErrAlreadyExists) {
+		http.Error(rw, err.Error(), http.StatusConflict)
+		return
+	}
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
