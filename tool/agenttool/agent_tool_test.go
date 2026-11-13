@@ -15,6 +15,8 @@
 package agenttool_test
 
 import (
+	"context"
+	"errors"
 	"iter"
 	"log"
 	"strings"
@@ -983,3 +985,177 @@ func TestAgentTool_Run_SkipSummarizationNotSetOnInvalidArgs(t *testing.T) {
 		})
 	}
 }
+
+// With SkipSummarization, a sub-agent error must not end the parent turn: the
+// error goes back to the parent model, so the flag has to be cleared on every
+// error return after it was set.
+func TestAgentTool_Run_SkipSummarizationResetOnSubAgentError(t *testing.T) {
+	outputSchema := &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"ok": {Type: genai.TypeBoolean},
+		},
+		Required: []string{"ok"},
+	}
+	tests := []struct {
+		name     string
+		newAgent func(t *testing.T) agent.Agent
+	}{
+		{
+			name: "output schema failure",
+			newAgent: func(t *testing.T) agent.Agent {
+				return createAgentWithModel(t, nil, outputSchema, &testutil.MockModel{
+					Responses: []*genai.Content{
+						genai.NewContentFromText(`{"ok": "not a bool"}`, genai.RoleModel),
+					},
+				})
+			},
+		},
+		{
+			name: "model error",
+			newAgent: func(t *testing.T) agent.Agent {
+				return createAgentWithModel(t, nil, nil, &errorModel{err: errors.New("model failed")})
+			},
+		},
+		{
+			name: "error event",
+			newAgent: func(t *testing.T) agent.Agent {
+				return createAgentWithModel(t, nil, nil, &errorModel{
+					resp: &model.LLMResponse{ErrorCode: "429", ErrorMessage: "rate limited"},
+				})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			child := tt.newAgent(t)
+			toolCtx := createToolContext(t, child)
+			toolImpl, ok := agenttool.New(child, &agenttool.Config{SkipSummarization: true}).(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
+
+			if _, err := toolImpl.Run(toolCtx, map[string]any{"request": "go"}); err == nil {
+				t.Fatal("Run() succeeded, want the sub-agent error")
+			}
+			if toolCtx.Actions().SkipSummarization {
+				t.Error("SkipSummarization = true after a sub-agent error, want false so the parent model sees the error")
+			}
+		})
+	}
+}
+
+// With SkipSummarization, a sub-agent error must let the parent model run
+// again with the error instead of ending the parent turn on the function
+// response.
+func TestAgentTool_Run_SkipSummarizationSubAgentErrorReachesParent(t *testing.T) {
+	outputSchema := &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"ok": {Type: genai.TypeBoolean},
+		},
+		Required: []string{"ok"},
+	}
+	tests := []struct {
+		name     string
+		newAgent func(t *testing.T) agent.Agent
+		wantErr  string
+	}{
+		{
+			name: "output schema failure",
+			newAgent: func(t *testing.T) agent.Agent {
+				return createAgentWithModel(t, nil, outputSchema, &testutil.MockModel{Responses: []*genai.Content{
+					genai.NewContentFromText(`{"ok": "not a bool"}`, genai.RoleModel),
+				}})
+			},
+			wantErr: "output validation failed",
+		},
+		{
+			name: "model error",
+			newAgent: func(t *testing.T) agent.Agent {
+				return createAgentWithModel(t, nil, nil, &errorModel{err: errors.New("model failed")})
+			},
+			wantErr: "model failed",
+		},
+		{
+			name: "error event",
+			newAgent: func(t *testing.T) agent.Agent {
+				return createAgentWithModel(t, nil, nil, &errorModel{
+					resp: &model.LLMResponse{ErrorCode: "429", ErrorMessage: "rate limited"},
+				})
+			},
+			wantErr: "rate limited",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			child := tt.newAgent(t)
+			parentLLM := &testutil.MockModel{
+				Responses: []*genai.Content{
+					{
+						Role: genai.RoleModel,
+						Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+							ID:   "p-1",
+							Name: child.Name(),
+							Args: map[string]any{"request": "go"},
+						}}},
+					},
+					genai.NewContentFromText("handled the error", genai.RoleModel),
+				},
+			}
+			parent, err := llmagent.New(llmagent.Config{
+				Name:  "root",
+				Model: parentLLM,
+				Tools: []tool.Tool{agenttool.New(child, &agenttool.Config{SkipSummarization: true})},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New() failed: %v", err)
+			}
+			svc := session.InMemoryService()
+			r, err := runner.New(runner.Config{AppName: "app", Agent: parent, SessionService: svc})
+			if err != nil {
+				t.Fatalf("runner.New() failed: %v", err)
+			}
+			s, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+			if err != nil {
+				t.Fatalf("Create() failed: %v", err)
+			}
+
+			for _, err := range r.Run(t.Context(), "u", s.Session.ID(), genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("Run() failed: %v", err)
+				}
+			}
+
+			if got := len(parentLLM.Requests); got != 2 {
+				t.Fatalf("parent model requests = %d, want 2 (the second carrying the sub-agent error)", got)
+			}
+			if !requestHasFunctionResponseError(parentLLM.Requests[1], tt.wantErr) {
+				t.Errorf("second parent model request does not carry the sub-agent error %q", tt.wantErr)
+			}
+		})
+	}
+}
+
+// errorModel yields one response or one error, for the sub-agent error paths
+// in agentTool.Run.
+type errorModel struct {
+	resp *model.LLMResponse
+	err  error
+}
+
+func (m *errorModel) Name() string { return "error-model" }
+
+func (m *errorModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if m.err != nil {
+			yield(nil, m.err)
+			return
+		}
+		yield(m.resp, nil)
+	}
+}
+
+var _ model.LLM = (*errorModel)(nil)
