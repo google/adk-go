@@ -440,6 +440,26 @@ type Config struct {
 	// Typical uses cases are:
 	// - Extracts agent reply for later use, such as in tools, callbacks, etc.
 	// - Connects agents to coordinate with each other.
+	//
+	// The stored value is the agent's final text: the non-thought text parts of
+	// its final response, joined. When the agent streams text and calls tools
+	// in one run, it is the text of every non-partial event of the agent in
+	// that run, joined, so text spoken before a tool call is kept. An agent
+	// with an output schema stores only its final text.
+	//
+	// With OutputJsonSchema set, the stored value is what the final text parses
+	// to as JSON, after a markdown code fence around it is removed. JSON numbers
+	// are float64. Text that is not JSON ends the run with an error naming the
+	// agent. On a live run (RunLive) the text is stored unparsed instead.
+	//
+	// With OutputSchema set, the stored value is the text, a JSON string, where
+	// ADK Python stores the parsed value. Parse it, or read
+	// Actions.SetModelResponse, if you need the value. An agent run as a
+	// single_turn node stores the parsed map instead.
+	//
+	// A task agent (Mode is ModeTask) stores the result of its finish_task call
+	// when it runs as a node. Its text turns are not stored, and nothing is
+	// stored when it runs through Run or RunLive.
 	OutputKey string
 
 	// Mode is the delegation mode for this agent.
