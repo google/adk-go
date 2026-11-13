@@ -42,13 +42,15 @@ type parsedArtifactURI struct {
 	Version   int64
 }
 
-// The artifact layout uses "/" as a delimiter, so a segment must not contain
-// one. adk-python allows slashes inside a segment via a reserved-segment
-// lookahead that its language's regex supports; Go's regexp does not, so the
-// segments here match [^/]+ and are intentionally stricter than adk-python. An
-// app/user/session ID that itself contains "/" (accepted elsewhere, e.g. the
-// canonical-URI encoding) therefore cannot be named in a reference URI.
-// [ParseArtifactURI] implements the lookahead by hand and accepts such IDs.
+// sessionScopedArtifactURIRE and userScopedArtifactURIRE are the patterns of
+// parseArtifactURI, and so of the reference check in
+// [ParseAndValidateReferenceURI]. Each app, user and session segment matches
+// [^/]+. A reference therefore cannot name an app, user or session ID that
+// contains "/", such as the user ID "team/alice": saving or following it fails
+// with "Invalid artifact reference URI", although [ValidatePathSegment] accepts
+// the ID, [BuildArtifactURI] builds a URI for it, and adk-python's resolver
+// follows the same reference. [ParseArtifactURI] accepts such IDs, because it
+// ends a segment only at "/" followed by a reserved word and "/".
 var (
 	sessionScopedArtifactURIRE = regexp.MustCompile(
 		`^artifact://apps/([^/]+)/users/([^/]+)/sessions/([^/]+)/artifacts/(.+)/versions/([1-9][0-9]*)$`,
