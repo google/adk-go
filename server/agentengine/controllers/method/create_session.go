@@ -84,6 +84,9 @@ func (c *createSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 	if err != nil {
 		return fmt.Errorf("json.Unmarshal() failed: %w", err)
 	}
+	if req.Input.UserID == "" {
+		return fmt.Errorf("user_id is required")
+	}
 
 	ssReq := &session.CreateRequest{
 		AppName: c.agentEngineID,

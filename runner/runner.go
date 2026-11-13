@@ -953,18 +953,21 @@ func (r *Runner) reloadSession(ctx context.Context, s session.Session) (session.
 // getOrCreateSession loads the session with the event limits of sessionCfg,
 // creating it when it does not exist and the runner auto-creates sessions.
 func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string, sessionCfg agent.GetSessionConfig) (session.Session, error) {
+	// GetSessionConfig documents a negative NumRecentEvents as no limit,
+	// which Service.Get rejects, so it is passed as 0.
 	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
 		AppName:         r.appName,
 		UserID:          userID,
 		SessionID:       sessionID,
-		NumRecentEvents: sessionCfg.NumRecentEvents,
+		NumRecentEvents: max(sessionCfg.NumRecentEvents, 0),
 		After:           sessionCfg.After,
 	})
 	if err == nil {
 		return getResp.Session, nil
 	}
-	// Services reject an empty ID in Get with a validation error, not
-	// ErrNotFound. Create generates an ID for it.
+	// The in-memory, database and Redis services report an empty ID as
+	// ErrNotFound; others, Vertex AI among them, reject it with a validation
+	// error. Create generates an ID for it either way.
 	if !r.autoCreateSession || (sessionID != "" && !errors.Is(err, session.ErrNotFound)) {
 		return nil, err
 	}

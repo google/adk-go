@@ -230,7 +230,7 @@ func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequ
 	rpcReq := &aiplatformpb.ListSessionsRequest{
 		Parent: vertexaiutil.AgentEngineResource(&aeData),
 	}
-	if req.UserID != "" {
+	if req.UserID != "" || req.FilterEmptyUserID {
 		rpcReq.Filter = "userId=" + quoteFilterLiteral(req.UserID)
 	}
 	it := c.rpcClient.ListSessions(ctx, rpcReq)
@@ -707,6 +707,12 @@ func aiplatformToGenaiContent(rpcResp *aiplatformpb.SessionEvent) *genai.Content
 			part := &genai.Part{}
 			part.Thought = respPart.Thought
 			part.ThoughtSignature = respPart.ThoughtSignature
+			if vm := respPart.GetVideoMetadata(); vm != nil {
+				part.VideoMetadata = &genai.VideoMetadata{
+					StartOffset: vm.GetStartOffset().AsDuration(),
+					EndOffset:   vm.GetEndOffset().AsDuration(),
+				}
+			}
 			switch v := respPart.Data.(type) {
 			case *aiplatformpb.Part_Text:
 				part.Text = v.Text
@@ -718,9 +724,14 @@ func aiplatformToGenaiContent(rpcResp *aiplatformpb.SessionEvent) *genai.Content
 			case *aiplatformpb.Part_FunctionCall:
 				argsMap := v.FunctionCall.Args.AsMap() // Converts *structpb.Struct -> map[string]any
 				part.FunctionCall = &genai.FunctionCall{
-					ID:   v.FunctionCall.Id,
-					Name: v.FunctionCall.Name,
-					Args: argsMap,
+					ID:          v.FunctionCall.Id,
+					Name:        v.FunctionCall.Name,
+					Args:        argsMap,
+					PartialArgs: genaiPartialArgs(v.FunctionCall.PartialArgs),
+				}
+				// genai.FunctionCall.WillContinue is a *bool; false stays nil.
+				if v.FunctionCall.WillContinue {
+					part.FunctionCall.WillContinue = new(true)
 				}
 			case *aiplatformpb.Part_FunctionResponse:
 				responseMap := v.FunctionResponse.Response.AsMap() // Converts *structpb.Struct -> map[string]any
@@ -728,6 +739,7 @@ func aiplatformToGenaiContent(rpcResp *aiplatformpb.SessionEvent) *genai.Content
 					ID:       v.FunctionResponse.Id,
 					Name:     v.FunctionResponse.Name,
 					Response: responseMap,
+					Parts:    genaiFunctionResponseParts(v.FunctionResponse.Parts),
 				}
 			case *aiplatformpb.Part_ExecutableCode:
 				part.ExecutableCode = &genai.ExecutableCode{
@@ -755,12 +767,68 @@ func aiplatformToGenaiContent(rpcResp *aiplatformpb.SessionEvent) *genai.Content
 	return content
 }
 
+// genaiPartialArgs converts the partial arguments of a stored function call,
+// the reverse of what internal/vertexai sends. A nil argument is skipped.
+func genaiPartialArgs(src []*aiplatformpb.PartialArg) []*genai.PartialArg {
+	var args []*genai.PartialArg
+	for _, srcArg := range src {
+		if srcArg == nil {
+			continue
+		}
+		arg := &genai.PartialArg{JsonPath: srcArg.GetJsonPath()}
+		if srcArg.GetWillContinue() {
+			arg.WillContinue = new(true)
+		}
+		switch d := srcArg.GetDelta().(type) {
+		case *aiplatformpb.PartialArg_NullValue:
+			arg.NULLValue = d.NullValue.String()
+		case *aiplatformpb.PartialArg_NumberValue:
+			arg.NumberValue = new(d.NumberValue)
+		case *aiplatformpb.PartialArg_StringValue:
+			arg.StringValue = d.StringValue
+		case *aiplatformpb.PartialArg_BoolValue:
+			arg.BoolValue = new(d.BoolValue)
+		}
+		args = append(args, arg)
+	}
+	return args
+}
+
+// genaiFunctionResponseParts converts the parts of a stored function
+// response, the reverse of what internal/vertexai sends. A part with neither
+// inline nor file data is skipped.
+func genaiFunctionResponseParts(src []*aiplatformpb.FunctionResponsePart) []*genai.FunctionResponsePart {
+	var parts []*genai.FunctionResponsePart
+	for _, srcPart := range src {
+		if blob := srcPart.GetInlineData(); blob != nil {
+			parts = append(parts, &genai.FunctionResponsePart{InlineData: &genai.FunctionResponseBlob{
+				MIMEType:    blob.GetMimeType(),
+				Data:        blob.GetData(),
+				DisplayName: blob.GetDisplayName(),
+			}})
+		} else if fd := srcPart.GetFileData(); fd != nil {
+			parts = append(parts, &genai.FunctionResponsePart{FileData: &genai.FunctionResponseFileData{
+				MIMEType:    fd.GetMimeType(),
+				FileURI:     fd.GetFileUri(),
+				DisplayName: fd.GetDisplayName(),
+			}})
+		}
+	}
+	return parts
+}
+
+// createAiplatformpbContent converts event.Content, leaving out nil parts,
+// which adk-python's Content cannot hold. It does not change event. An event
+// with no content returns nil and a nil error.
 func createAiplatformpbContent(event *session.Event) (*aiplatformpb.Content, error) {
 	// TODO add logic for other types of parts
 	var content *aiplatformpb.Content
 	if event.Content != nil {
 		parts := make([]*aiplatformpb.Part, 0)
 		for _, part := range event.Content.Parts {
+			if part == nil {
+				continue
+			}
 			aiplatformPart := &aiplatformpb.Part{}
 			aiplatformPart.Thought = part.Thought
 			aiplatformPart.ThoughtSignature = part.ThoughtSignature

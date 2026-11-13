@@ -271,6 +271,9 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 
 // RunAgent executes a non-streaming agent run for a given session and message.
 func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest models.RunAgentRequest) ([]*session.Event, error) {
+	if runAgentRequest.UserId == "" {
+		return nil, newStatusError(errors.New("userId is required"), http.StatusBadRequest)
+	}
 	err := c.validateSessionExists(ctx, runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
 		return nil, err
@@ -330,6 +333,11 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 			authz.WriteHTTPStatusForAuthError(rw, err)
 			return
 		}
+	}
+
+	if runAgentRequest.UserId == "" {
+		http.Error(rw, "userId is required", http.StatusBadRequest)
+		return
 	}
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)

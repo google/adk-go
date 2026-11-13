@@ -97,9 +97,10 @@ const builtInPrefix = "__"
 // schema, such as one adk-python wrote, fails with an error wrapping
 // [ErrIncompatibleSchema] and leaves the file as it was. Otherwise the
 // database is migrated to the current schema when it is opened. A request
-// that lacks a required field fails before any database is opened, and a call
-// whose context is done before its database is open returns the context's
-// error.
+// that lacks its app name, or a Get with a negative NumRecentEvents, fails
+// before any database is opened, and a call whose context is done before its
+// database is open returns the context's error. An empty user ID is the user
+// "", as in session/database.
 //
 // The returned service is safe for concurrent use. Each database is opened
 // with a single connection, so calls on one app run one at a time; another
@@ -333,8 +334,8 @@ func (s *service) Create(ctx context.Context, req *session.CreateRequest) (*sess
 	}
 	// Checked here as well as in session/database, so that a request that
 	// cannot succeed creates no database.
-	if req.AppName == "" || req.UserID == "" {
-		return nil, errors.New("app_name and user_id are required")
+	if req.AppName == "" {
+		return nil, errors.New("app_name is required")
 	}
 	svc, err := s.service(ctx, req.AppName, true)
 	if err != nil {
@@ -352,8 +353,11 @@ func (s *service) Get(ctx context.Context, req *session.GetRequest) (*session.Ge
 	}
 	// Checked here as well as in session/database, so that a request that
 	// cannot succeed opens no database.
-	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
-		return nil, fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", req.AppName, req.UserID, req.SessionID)
+	if req.AppName == "" {
+		return nil, fmt.Errorf("app_name is required, got app_name: %q", req.AppName)
+	}
+	if err := sessionutils.CheckNumRecentEvents(req.NumRecentEvents); err != nil {
+		return nil, err
 	}
 	svc, err := s.service(ctx, req.AppName, false)
 	if err != nil {
@@ -396,8 +400,8 @@ func (s *service) Delete(ctx context.Context, req *session.DeleteRequest) error 
 	}
 	// Checked here as well as in session/database, so that a request that
 	// cannot succeed opens no database.
-	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
-		return fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", req.AppName, req.UserID, req.SessionID)
+	if req.AppName == "" {
+		return fmt.Errorf("app_name is required, got app_name: %q", req.AppName)
 	}
 	svc, err := s.service(ctx, req.AppName, false)
 	if err != nil {

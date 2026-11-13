@@ -67,6 +67,10 @@ type Service interface {
 	// time ascending, so the last session is the most recently active one.
 	// Sessions with equal update times are ordered by user ID, then by session
 	// ID.
+	//
+	// A request with an empty [ListRequest.UserID] lists the sessions of every
+	// user of the app, unless [ListRequest.FilterEmptyUserID] is true, in which
+	// case it lists only the sessions of the user "".
 	List(context.Context, *ListRequest) (*ListResponse, error)
 	Delete(context.Context, *DeleteRequest) error
 	// AppendEvent is used to append an event to a session, and remove temporary state keys from the event.
@@ -141,11 +145,22 @@ type GetRequest struct {
 	SessionID string
 
 	// NumRecentEvents returns at most NumRecentEvents most recent events.
-	// Optional: if zero, the filter is not applied.
+	// Optional: if zero, the filter is not applied. A negative value is an
+	// error: Get returns it before reading any event, and it does not wrap
+	// [ErrNotFound]. It is checked even when OmitEvents is true.
 	NumRecentEvents int
 	// After returns events with timestamp >= the given time.
 	// Optional: if zero, the filter is not applied.
 	After time.Time
+
+	// OmitEvents asks for the session without its events: the returned
+	// session's Events() is empty, whatever the stored history holds. It is
+	// how a caller checks that a session exists, or reads its state, without
+	// paying to load its history. NumRecentEvents and After are not applied
+	// when OmitEvents is true; a negative NumRecentEvents is still an error.
+	// Optional: if false, events are returned as NumRecentEvents and After
+	// select.
+	OmitEvents bool
 }
 
 // GetResponse represents a response from [Service.Get].
@@ -156,7 +171,13 @@ type GetResponse struct {
 // ListRequest represents a request to list sessions.
 type ListRequest struct {
 	AppName string
-	UserID  string
+	// UserID selects the user whose sessions are listed. An empty UserID lists
+	// the sessions of every user of AppName, unless FilterEmptyUserID is true.
+	UserID string
+	// FilterEmptyUserID makes an empty UserID name the user "": List returns
+	// only the sessions whose user ID is "". It has no effect when UserID is
+	// not empty. Optional: if false, an empty UserID lists every user.
+	FilterEmptyUserID bool
 }
 
 // ListResponse represents a response from [Service.List].

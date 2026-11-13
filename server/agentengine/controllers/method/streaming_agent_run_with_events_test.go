@@ -330,6 +330,43 @@ func TestStreamJSONL_AgentSpaceUsesNonStreamingMode(t *testing.T) {
 	}
 }
 
+// TestStreamingAgentRunWithEventsHandler_MissingUserID checks that a request
+// without user_id or session_id fails before the runner starts, so that the
+// auto-created session of the user "" is never stored.
+func TestStreamingAgentRunWithEventsHandler_MissingUserID(t *testing.T) {
+	appName := "123"
+	a, err := llmagent.New(llmagent.Config{
+		Name: "Echo",
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(cc agent.Context) (*genai.Content, error) {
+				return cc.UserContent(), nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+	svc := session.InMemoryService()
+	h := NewStreamingAgentRunWithEventsHandler(&launcher.Config{
+		AgentLoader:    agent.NewSingleLoader(a),
+		SessionService: svc,
+	}, appName, "streaming_agent_run_with_events", "async_stream")
+	ctx := t.Context()
+
+	err = h.Handle(ctx, newStringWriter(), []byte(`{"class_method":"streaming_agent_run_with_events","input":{"request_json":"{\"message\":{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}}"}}`))
+	if err == nil {
+		t.Fatal("Handle() error = nil, want an error for a missing user_id")
+	}
+
+	resp, err := svc.List(ctx, &session.ListRequest{AppName: appName})
+	if err != nil {
+		t.Fatalf("List() failed: %v", err)
+	}
+	if got := len(resp.Sessions); got != 0 {
+		t.Errorf("List() returned %d sessions, want 0", got)
+	}
+}
+
 func TestStreamingAgentRunWithEventsHandlerMetadata(t *testing.T) {
 	handler := NewStreamingAgentRunWithEventsHandler(nil, "", "streaming_agent_run_with_events", "async_stream")
 

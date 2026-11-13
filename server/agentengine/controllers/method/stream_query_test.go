@@ -129,6 +129,44 @@ func TestSimpleText(t *testing.T) {
 	}
 }
 
+// TestStreamQueryHandler_MissingUserID checks that a request without user_id
+// fails before the runner starts, so that the auto-created session of the
+// user "" is never stored.
+func TestStreamQueryHandler_MissingUserID(t *testing.T) {
+	appName := "123"
+	a, err := llmagent.New(llmagent.Config{
+		Name: "Echo",
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(cc agent.Context) (*genai.Content, error) {
+				return cc.UserContent(), nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+	svc := session.InMemoryService()
+	config := &launcher.Config{
+		AgentLoader:    agent.NewSingleLoader(a),
+		SessionService: svc,
+	}
+	h := NewStreamQueryHandler(config, appName, "async_stream_query", "")
+	ctx := t.Context()
+
+	err = h.Handle(ctx, newStringWriter(), []byte(`{"class_method":"async_stream_query","input":{"message":"hi"}}`))
+	if err == nil {
+		t.Fatal("Handle() error = nil, want an error for a missing user_id")
+	}
+
+	resp, err := svc.List(ctx, &session.ListRequest{AppName: appName})
+	if err != nil {
+		t.Fatalf("List() failed: %v", err)
+	}
+	if got := len(resp.Sessions); got != 0 {
+		t.Errorf("List() returned %d sessions, want 0", got)
+	}
+}
+
 // mock writer for http
 type stringWriter struct {
 	sb strings.Builder

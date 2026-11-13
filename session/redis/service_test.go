@@ -475,6 +475,30 @@ func TestCreateGetDelete_EmptyUserIDAddressesUserLiterally(t *testing.T) {
 	}
 }
 
+// adk-python's RedisSessionService looks an empty session ID up like any
+// other: get_session finds nothing and delete_session deletes nothing.
+func TestGetDelete_EmptySessionID(t *testing.T) {
+	ctx := t.Context()
+	svc, _, _ := newTestService(t, redis.Config{})
+	mustCreate(t, ctx, svc, "a", "u1", "s1", nil)
+
+	if _, err := svc.Get(ctx, &session.GetRequest{AppName: "a", UserID: "u1", SessionID: ""}); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(SessionID: \"\") error = %v, want one wrapping session.ErrNotFound", err)
+	}
+	if err := svc.Delete(ctx, &session.DeleteRequest{AppName: "a", UserID: "u1", SessionID: ""}); err != nil {
+		t.Errorf("Delete(SessionID: \"\") error = %v, want nil", err)
+	}
+	if got := mustGet(t, ctx, svc, "a", "u1", "s1"); got.ID() != "s1" {
+		t.Errorf("Get(s1) after Delete(SessionID: \"\") ID = %q, want \"s1\"", got.ID())
+	}
+	if _, err := svc.Get(ctx, &session.GetRequest{AppName: "", UserID: "u1", SessionID: "s1"}); err == nil || errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(AppName: \"\") error = %v, want a validation error that does not wrap session.ErrNotFound", err)
+	}
+	if err := svc.Delete(ctx, &session.DeleteRequest{AppName: "", UserID: "u1", SessionID: "s1"}); err == nil {
+		t.Error("Delete(AppName: \"\") error = nil, want a validation error")
+	}
+}
+
 // The parts of a session key are joined with ":" unescaped, so app "a:b"
 // with user "c" and app "a" with user "b:c" share the key of session "s".
 // Get reports the identity the stored record holds, as adk-python's
@@ -674,6 +698,38 @@ func TestGet_NumRecentEventsThenAfter(t *testing.T) {
 
 	if diff := cmp.Diff([]string{"e2", "e3"}, eventIDs(resp.Session.Events())); diff != "" {
 		t.Errorf("Get(NumRecentEvents: 3, After: 150 s) events mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestGet_OmitEvents(t *testing.T) {
+	ctx := t.Context()
+	svc, _, _ := newTestService(t, redis.Config{})
+	s1 := mustCreate(t, ctx, svc, "a", "u", "s1", map[string]any{"app:a": "av", "user:u": "uv", "sk": "sv"})
+	mustAppend(t, ctx, svc, s1, &session.Event{ID: "e0", Timestamp: time.Unix(100, 0)})
+	mustAppend(t, ctx, svc, s1, &session.Event{ID: "e1", Timestamp: time.Unix(101, 0)})
+
+	resp, err := svc.Get(ctx, &session.GetRequest{AppName: "a", UserID: "u", SessionID: "s1", OmitEvents: true, NumRecentEvents: 1, After: time.Unix(100, 0)})
+	if err != nil {
+		t.Fatalf("Get(OmitEvents: true) error = %v", err)
+	}
+	if n := resp.Session.Events().Len(); n != 0 {
+		t.Errorf("Get(OmitEvents: true) returned %d events, want 0", n)
+	}
+	if diff := cmp.Diff(map[string]any{"app:a": "av", "user:u": "uv", "sk": "sv"}, stateOf(resp.Session)); diff != "" {
+		t.Errorf("Get(OmitEvents: true) state mismatch (-want +got):\n%s", diff)
+	}
+
+	if diff := cmp.Diff([]string{"e0", "e1"}, eventIDs(mustGet(t, ctx, svc, "a", "u", "s1").Events())); diff != "" {
+		t.Errorf("Get() after the omitted read: events mismatch (-want +got):\n%s", diff)
+	}
+
+	_, err = svc.Get(ctx, &session.GetRequest{AppName: "a", UserID: "u", SessionID: "s1", OmitEvents: true, NumRecentEvents: -1})
+	if err == nil || err.Error() != "num_recent_events must not be negative, got -1" || errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(OmitEvents: true, NumRecentEvents: -1) error = %v, want \"num_recent_events must not be negative, got -1\" not wrapping session.ErrNotFound", err)
+	}
+
+	if _, err := svc.Get(ctx, &session.GetRequest{AppName: "a", UserID: "u", SessionID: "missing", OmitEvents: true}); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(missing, OmitEvents: true) error = %v, want one wrapping session.ErrNotFound", err)
 	}
 }
 
@@ -1294,6 +1350,54 @@ func TestList_ExcludesKeysOfOtherAppsUnderTheSamePrefix(t *testing.T) {
 	}
 	if diff := cmp.Diff([]listed{}, mustList(t, ctx, svc, "app_state", "")); diff != "" {
 		t.Errorf("List(app_state) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// adk-python lists only the user "" when user_id is "" and not None
+// (_redis_session_service.py:279-282, :303).
+func TestList_FilterEmptyUserID(t *testing.T) {
+	ctx := atTime(t.Context(), time.Unix(10, 0))
+	svc, _, _ := newTestService(t, redis.Config{})
+	mustCreate(t, ctx, svc, "a", "", "s_empty", map[string]any{"app:g": "gv", "user:role": "anon", "sk": "v_empty"})
+	mustCreate(t, ctx, svc, "a", "u1", "s_u1", map[string]any{"user:role": "member", "sk": "v_u1"})
+	// adk:session:a:x::s_collide starts with adk:session:a: and not with
+	// adk:session:a::.
+	mustCreate(t, ctx, svc, "a:x", "", "s_collide", map[string]any{"user:role": "other_app"})
+	// adk:session:a:::u:s_colon starts with adk:session:a::, but the stored
+	// user is ":u".
+	mustCreate(t, ctx, svc, "a", ":u", "s_colon", nil)
+	list := func(t *testing.T, req *session.ListRequest) ([]listed, []session.Session) {
+		t.Helper()
+		resp, err := svc.List(ctx, req)
+		if err != nil {
+			t.Fatalf("List(%+v) error = %v", req, err)
+		}
+		got := []listed{}
+		for _, s := range resp.Sessions {
+			got = append(got, listed{s.UserID(), s.ID()})
+		}
+		return got, resp.Sessions
+	}
+
+	got, sessions := list(t, &session.ListRequest{AppName: "a", UserID: "", FilterEmptyUserID: true})
+	if diff := cmp.Diff([]listed{{"", "s_empty"}}, got); diff != "" {
+		t.Fatalf("List(UserID: \"\", FilterEmptyUserID: true) mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]any{"app:g": "gv", "user:role": "anon", "sk": "v_empty"}, stateOf(sessions[0])); diff != "" {
+		t.Errorf("List(UserID: \"\", FilterEmptyUserID: true) state mismatch (-want +got):\n%s", diff)
+	}
+
+	got, _ = list(t, &session.ListRequest{AppName: "a", UserID: ""})
+	if diff := cmp.Diff([]listed{{"", "s_empty"}, {":u", "s_colon"}, {"u1", "s_u1"}}, got); diff != "" {
+		t.Errorf("List(UserID: \"\") mismatch (-want +got):\n%s", diff)
+	}
+
+	got, sessions = list(t, &session.ListRequest{AppName: "a", UserID: "u1", FilterEmptyUserID: true})
+	if diff := cmp.Diff([]listed{{"u1", "s_u1"}}, got); diff != "" {
+		t.Fatalf("List(UserID: \"u1\", FilterEmptyUserID: true) mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]any{"app:g": "gv", "user:role": "member", "sk": "v_u1"}, stateOf(sessions[0])); diff != "" {
+		t.Errorf("List(UserID: \"u1\", FilterEmptyUserID: true) state mismatch (-want +got):\n%s", diff)
 	}
 }
 

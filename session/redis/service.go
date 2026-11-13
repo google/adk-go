@@ -248,10 +248,13 @@ func (s *Service) Create(ctx context.Context, req *session.CreateRequest) (*sess
 // from Redis. If the session does not exist or has expired, Get returns an
 // error wrapping [session.ErrNotFound].
 //
-// req.AppName and req.SessionID are required, an empty req.UserID is the
-// user "", and req.NumRecentEvents must not be negative. A positive NumRecentEvents keeps
-// the last NumRecentEvents stored events; a non-zero After then keeps the
-// events whose timestamp is not before it. Get never refreshes a key's TTL.
+// req.AppName is required. An empty req.UserID is the user "", and an empty
+// req.SessionID names no session, so Get returns [session.ErrNotFound] for
+// it, as in adk-python. req.NumRecentEvents must not be negative, even when
+// req.OmitEvents is true. When req.OmitEvents is true, the returned session
+// has no events. Otherwise a positive NumRecentEvents keeps the last
+// NumRecentEvents stored events, and a non-zero After then keeps the events
+// whose timestamp is not before it. Get never refreshes a key's TTL.
 //
 // The returned session's app name, user ID and ID are those of the stored
 // record, and its state merges the app and user state of req.AppName and
@@ -262,8 +265,8 @@ func (s *Service) Get(ctx context.Context, req *session.GetRequest) (*session.Ge
 	if req == nil {
 		return nil, errors.New("redis: get request is nil")
 	}
-	if req.AppName == "" || req.SessionID == "" {
-		return nil, fmt.Errorf("app_name, session_id are required, got app_name: %q, session_id: %q", req.AppName, req.SessionID)
+	if req.AppName == "" {
+		return nil, fmt.Errorf("app_name is required, got app_name: %q", req.AppName)
 	}
 	if req.NumRecentEvents < 0 {
 		return nil, fmt.Errorf("num_recent_events must not be negative, got %d", req.NumRecentEvents)
@@ -292,8 +295,12 @@ func (s *Service) Get(ctx context.Context, req *session.GetRequest) (*session.Ge
 		return nil, err
 	}
 
+	// The events are stored in the session's value, so omitting them saves
+	// no read.
 	evs := stored.Events
-	if req.NumRecentEvents > 0 {
+	if req.OmitEvents {
+		evs = nil
+	} else if req.NumRecentEvents > 0 {
 		evs = evs[max(len(evs)-req.NumRecentEvents, 0):]
 	}
 	filtered := make([]*session.Event, 0, len(evs))
@@ -313,9 +320,10 @@ func (s *Service) Get(ctx context.Context, req *session.GetRequest) (*session.Ge
 	}}, nil
 }
 
-// List returns all sessions in Redis matching req.AppName (and req.UserID when
-// non-empty), ordered by LastUpdateTime ascending with ties broken by UserID
-// and then session ID. Listed sessions carry merged state and no events.
+// List returns all sessions in Redis matching req.AppName and, when
+// req.UserID is non-empty or req.FilterEmptyUserID is true, req.UserID,
+// ordered by LastUpdateTime ascending with ties broken by UserID and then
+// session ID. Listed sessions carry merged state and no events.
 //
 // req.AppName is required. Glob characters in req.AppName and req.UserID
 // match literally. A key whose value does not decode as a session, or that
@@ -327,8 +335,9 @@ func (s *Service) List(ctx context.Context, req *session.ListRequest) (*session.
 	if req.AppName == "" {
 		return nil, fmt.Errorf("app_name is required, got app_name: %q", req.AppName)
 	}
+	oneUser := req.UserID != "" || req.FilterEmptyUserID
 	pattern := s.keyPrefix + escapeGlob(req.AppName) + ":"
-	if req.UserID != "" {
+	if oneUser {
 		pattern += escapeGlob(req.UserID) + ":"
 	}
 	keys, err := s.scan(ctx, pattern+"*")
@@ -355,7 +364,7 @@ func (s *Service) List(ctx context.Context, req *session.ListRequest) (*session.
 			// adk-python skips a key whose JSON does not parse.
 			continue
 		}
-		if stored.AppName != req.AppName || (req.UserID != "" && stored.UserID != req.UserID) {
+		if stored.AppName != req.AppName || (oneUser && stored.UserID != req.UserID) {
 			continue
 		}
 		userState, ok := userStates[stored.UserID]
@@ -401,14 +410,14 @@ func (s *Service) scan(ctx context.Context, pattern string) ([]string, error) {
 // Delete removes the session key from Redis. Deleting a session that does not
 // exist is a no-op and returns nil. App and user state are not removed.
 //
-// req.AppName and req.SessionID are required; an empty req.UserID is the
-// user "".
+// req.AppName is required. An empty req.UserID is the user "", and an empty
+// req.SessionID names no session, so Delete deletes nothing for it.
 func (s *Service) Delete(ctx context.Context, req *session.DeleteRequest) error {
 	if req == nil {
 		return errors.New("redis: delete request is nil")
 	}
-	if req.AppName == "" || req.SessionID == "" {
-		return fmt.Errorf("app_name, session_id are required, got app_name: %q, session_id: %q", req.AppName, req.SessionID)
+	if req.AppName == "" {
+		return fmt.Errorf("app_name is required, got app_name: %q", req.AppName)
 	}
 	if err := s.client.Del(ctx, s.sessionKey(req.AppName, req.UserID, req.SessionID)).Err(); err != nil {
 		return fmt.Errorf("redis: delete session %q: %w", req.SessionID, err)

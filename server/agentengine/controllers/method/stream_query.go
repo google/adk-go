@@ -84,6 +84,9 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 			},
 		}
 	}
+	if req.Input.UserID == "" {
+		return fmt.Errorf("user_id is required")
+	}
 
 	events, err := s.run(ctx, &req, &req.Input.Message, s.config)
 	if err != nil {
