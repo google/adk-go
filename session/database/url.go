@@ -89,7 +89,6 @@ func NewSessionServiceFromURL(dbURL string, opts ...gorm.Option) (session.Servic
 	if err != nil {
 		return nil, err
 	}
-	opts = append(slices.Clip(opts), discardLogs{})
 	svc, err := New(Config{Dialector: sqlite.Open(dsn), GORMOptions: opts})
 	if err != nil {
 		return nil, &databaseURLError{msg: engineFailure(redacted), cause: err}
