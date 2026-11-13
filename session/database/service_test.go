@@ -314,6 +314,208 @@ func TestDatabaseService_DeleteRemovesSessionEvents(t *testing.T) {
 	}
 }
 
+// GORM leaves a zero-valued field out of a struct condition, and Save turns a
+// row with a zero primary-key field into an INSERT, so the user "" must be
+// named explicitly in every query. adk-python's DatabaseSessionService treats
+// "" as an ordinary user (database_session_service.py:823, :876-880).
+func TestDatabaseService_EmptyUserID_DoesNotTouchOtherUsers(t *testing.T) {
+	s := emptyService(t)
+	const app = "app-empty-u"
+	at := func(sec int64) context.Context {
+		return platform.WithTimeProvider(t.Context(), func() time.Time { return time.Unix(sec, 0).UTC() })
+	}
+	create := func(sec int64, userID, sessionID string, state map[string]any) session.Session {
+		t.Helper()
+		resp, err := s.Create(at(sec), &session.CreateRequest{AppName: app, UserID: userID, SessionID: sessionID, State: state})
+		if err != nil {
+			t.Fatalf("Create(%q, %q) error = %v", userID, sessionID, err)
+		}
+		return resp.Session
+	}
+	appendDelta := func(sess session.Session, id string, sec int64, delta map[string]any) {
+		t.Helper()
+		ev := &session.Event{ID: id, Author: "user", Timestamp: time.Unix(sec, 0).UTC(), Actions: session.EventActions{StateDelta: delta}}
+		if err := s.AppendEvent(t.Context(), sess, ev); err != nil {
+			t.Fatalf("AppendEvent(%q) error = %v", id, err)
+		}
+	}
+	get := func(userID, sessionID string) (session.Session, error) {
+		resp, err := s.Get(t.Context(), &session.GetRequest{AppName: app, UserID: userID, SessionID: sessionID})
+		if err != nil {
+			return nil, err
+		}
+		return resp.Session, nil
+	}
+	type row struct {
+		UserID, ID string
+		State      map[string]any
+	}
+	list := func(req *session.ListRequest) []row {
+		t.Helper()
+		resp, err := s.List(t.Context(), req)
+		if err != nil {
+			t.Fatalf("List(%+v) error = %v", req, err)
+		}
+		var rows []row
+		for _, sess := range resp.Sessions {
+			rows = append(rows, row{sess.UserID(), sess.ID(), maps.Collect(sess.State().All())})
+		}
+		return rows
+	}
+
+	anonS1 := create(10, "", "s1", map[string]any{"app:a": "av", "user:role": "anon", "sk": "anon_s1"})
+	create(20, "", "s2", map[string]any{"user:extra": "v2", "sk": "anon_s2"})
+	u1S1 := create(30, "u1", "s1", map[string]any{"user:role": "member", "sk": "u1_s1"})
+	appendDelta(anonS1, "e_anon", 40, map[string]any{"user:role": "anon_updated", "sk": "anon_s1_v2"})
+	appendDelta(u1S1, "e_u1", 50, map[string]any{"sk": "u1_s1_v2"})
+
+	anon, err := get("", "s1")
+	if err != nil {
+		t.Fatalf("Get(\"\", s1) error = %v", err)
+	}
+	if anon.UserID() != "" || anon.ID() != "s1" {
+		t.Errorf("Get(\"\", s1) = user %q, id %q; want user \"\", id \"s1\"", anon.UserID(), anon.ID())
+	}
+	if diff := cmp.Diff([]string{"e_anon"}, eventIDs(anon)); diff != "" {
+		t.Errorf("Get(\"\", s1) events mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]any{"app:a": "av", "user:role": "anon_updated", "user:extra": "v2", "sk": "anon_s1_v2"}, maps.Collect(anon.State().All())); diff != "" {
+		t.Errorf("Get(\"\", s1) state mismatch (-want +got):\n%s", diff)
+	}
+
+	u1State := map[string]any{"app:a": "av", "user:role": "member", "sk": "u1_s1_v2"}
+	wantAnon := []row{
+		{"", "s2", map[string]any{"app:a": "av", "user:role": "anon_updated", "user:extra": "v2", "sk": "anon_s2"}},
+		{"", "s1", map[string]any{"app:a": "av", "user:role": "anon_updated", "user:extra": "v2", "sk": "anon_s1_v2"}},
+	}
+	if diff := cmp.Diff(wantAnon, list(&session.ListRequest{AppName: app, UserID: "", FilterEmptyUserID: true})); diff != "" {
+		t.Errorf("List(UserID: \"\", FilterEmptyUserID: true) mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(append(wantAnon, row{"u1", "s1", u1State}), list(&session.ListRequest{AppName: app, UserID: ""})); diff != "" {
+		t.Errorf("List(UserID: \"\") mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]row{{"u1", "s1", u1State}}, list(&session.ListRequest{AppName: app, UserID: "u1", FilterEmptyUserID: true})); diff != "" {
+		t.Errorf("List(UserID: \"u1\", FilterEmptyUserID: true) mismatch (-want +got):\n%s", diff)
+	}
+
+	if err := s.Delete(t.Context(), &session.DeleteRequest{AppName: app, UserID: "", SessionID: "s1"}); err != nil {
+		t.Fatalf("Delete(\"\", s1) error = %v", err)
+	}
+
+	if _, err := get("", "s1"); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(\"\", s1) after Delete error = %v, want one wrapping session.ErrNotFound", err)
+	}
+	late := &session.Event{ID: "e_late", Author: "user", Timestamp: time.Unix(60, 0).UTC(), Actions: session.EventActions{StateDelta: map[string]any{"sk": "late"}}}
+	if err := s.AppendEvent(t.Context(), anonS1, late); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("AppendEvent(\"\", s1) after Delete error = %v, want one wrapping session.ErrNotFound", err)
+	}
+	kept, err := get("u1", "s1")
+	if err != nil {
+		t.Fatalf("Get(u1, s1) after Delete(\"\", s1) error = %v", err)
+	}
+	if diff := cmp.Diff([]string{"e_u1"}, eventIDs(kept)); diff != "" {
+		t.Errorf("Get(u1, s1) after Delete(\"\", s1) events mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(u1State, maps.Collect(kept.State().All())); diff != "" {
+		t.Errorf("Get(u1, s1) after Delete(\"\", s1) state mismatch (-want +got):\n%s", diff)
+	}
+	s2, err := get("", "s2")
+	if err != nil {
+		t.Fatalf("Get(\"\", s2) after Delete(\"\", s1) error = %v", err)
+	}
+	if diff := cmp.Diff(wantAnon[0].State, maps.Collect(s2.State().All())); diff != "" {
+		t.Errorf("Get(\"\", s2) after Delete(\"\", s1) state mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDatabaseService_Get_OmitEventsAndNegativeNumRecentEvents(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	sess := createAt(t, s, "app-omit-db", "s1", appendTS, map[string]any{"app:a": "av", "user:u": "uv", "sk": "sv"})
+	for i, id := range []string{"e1", "e2"} {
+		ev := &session.Event{ID: id, Author: "user", Timestamp: appendTS.Add(time.Duration(i+1) * time.Second)}
+		if err := s.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatalf("AppendEvent(%q) error = %v", id, err)
+		}
+	}
+	eventsQueries := 0
+	if err := s.db.Callback().Query().Before("gorm:query").Register("test:count_events", func(tx *gorm.DB) {
+		if tx.Statement.Table == "events" {
+			eventsQueries++
+		}
+	}); err != nil {
+		t.Fatalf("register query callback: %v", err)
+	}
+	t.Cleanup(func() { _ = s.db.Callback().Query().Remove("test:count_events") })
+
+	resp, err := s.Get(ctx, &session.GetRequest{AppName: "app-omit-db", UserID: "u1", SessionID: "s1", OmitEvents: true, NumRecentEvents: 1, After: appendTS.Add(time.Second)})
+	if err != nil {
+		t.Fatalf("Get(OmitEvents: true) error = %v", err)
+	}
+	if n := resp.Session.Events().Len(); n != 0 {
+		t.Errorf("Get(OmitEvents: true) returned %d events, want 0", n)
+	}
+	if eventsQueries != 0 {
+		t.Errorf("Get(OmitEvents: true) ran %d queries on events, want 0", eventsQueries)
+	}
+	if diff := cmp.Diff(map[string]any{"app:a": "av", "user:u": "uv", "sk": "sv"}, maps.Collect(resp.Session.State().All())); diff != "" {
+		t.Errorf("Get(OmitEvents: true) state mismatch (-want +got):\n%s", diff)
+	}
+	if got := eventIDs(getStored(t, s, "app-omit-db", "s1", 0)); !cmp.Equal(got, []string{"e1", "e2"}) || eventsQueries != 1 {
+		t.Errorf("Get() = events %v after %d queries on events; want [e1 e2] after 1", got, eventsQueries)
+	}
+
+	if _, err := s.Get(ctx, &session.GetRequest{AppName: "app-omit-db", UserID: "u1", SessionID: "missing", OmitEvents: true}); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(missing, OmitEvents: true) error = %v, want one wrapping session.ErrNotFound", err)
+	}
+
+	for _, omit := range []bool{false, true} {
+		_, err := s.Get(ctx, &session.GetRequest{AppName: "app-omit-db", UserID: "u1", SessionID: "s1", NumRecentEvents: -1, OmitEvents: omit})
+		if err == nil || err.Error() != "num_recent_events must not be negative, got -1" || errors.Is(err, session.ErrNotFound) {
+			t.Errorf("Get(NumRecentEvents: -1, OmitEvents: %t) error = %v, want \"num_recent_events must not be negative, got -1\" not wrapping session.ErrNotFound", omit, err)
+		}
+	}
+}
+
+// adk-python's DatabaseSessionService stores the session ID as given
+// (database_session_service.py:654-668); only the in-memory service strips it.
+func TestDatabaseService_SessionIDKeptVerbatim(t *testing.T) {
+	s := emptyService(t)
+	createAt(t, s, "app-ws-db", "s1", appendTS, map[string]any{"k": "plain"})
+	createAt(t, s, "app-ws-db", "  s1  ", appendTS, map[string]any{"k": "padded"})
+
+	for _, tc := range []struct{ id, want string }{{"s1", "plain"}, {"  s1  ", "padded"}} {
+		got := getStored(t, s, "app-ws-db", tc.id, 0)
+		if got.ID() != tc.id {
+			t.Errorf("Get(%q) ID = %q, want %q", tc.id, got.ID(), tc.id)
+		}
+		if diff := cmp.Diff(map[string]any{"k": tc.want}, maps.Collect(got.State().All())); diff != "" {
+			t.Errorf("Get(%q) state mismatch (-want +got):\n%s", tc.id, diff)
+		}
+	}
+}
+
+// adk-python looks an empty session ID up like any other: get_session finds
+// no row and delete_session deletes none.
+func TestDatabaseService_EmptySessionID_GetNotFoundDeleteNoOp(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	createAt(t, s, "app", "s1", appendTS, nil)
+
+	if _, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: ""}); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(SessionID: \"\") error = %v, want one wrapping session.ErrNotFound", err)
+	}
+	if err := s.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "u1", SessionID: ""}); err != nil {
+		t.Errorf("Delete(SessionID: \"\") error = %v, want nil", err)
+	}
+	if got := getStored(t, s, "app", "s1", 0); got.ID() != "s1" {
+		t.Errorf("Get(s1) after Delete(SessionID: \"\") ID = %q, want \"s1\"", got.ID())
+	}
+	if _, err := s.Get(ctx, &session.GetRequest{AppName: "", UserID: "u1", SessionID: "s1"}); err == nil || errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(AppName: \"\") error = %v, want a validation error that does not wrap session.ErrNotFound", err)
+	}
+}
+
 func TestNewSessionServiceFromDB(t *testing.T) {
 	t.Run("nil db returns error", func(t *testing.T) {
 		_, err := NewSessionServiceFromDB(nil)

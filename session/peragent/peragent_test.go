@@ -763,17 +763,11 @@ func TestPerAgentService_InvalidRequestsFailWithoutDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "app"}); err == nil {
-		t.Error("Create() without a user ID succeeded, want an error")
-	}
-	if _, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1"}); err == nil || errors.Is(err, session.ErrNotFound) {
-		t.Errorf("Get() without a session ID error = %v, want an error that is not session.ErrNotFound", err)
+	if _, err := svc.Create(ctx, &session.CreateRequest{UserID: "u1"}); err == nil {
+		t.Error("Create() without an app name succeeded, want an error")
 	}
 	if _, err := svc.List(ctx, &session.ListRequest{}); err == nil {
 		t.Error("List() without an app name succeeded, want an error")
-	}
-	if err := svc.Delete(ctx, &session.DeleteRequest{AppName: "app", SessionID: "s1"}); err == nil {
-		t.Error("Delete() without a user ID succeeded, want an error")
 	}
 	if _, err := svc.Create(ctx, nil); err == nil {
 		t.Error("Create(nil) succeeded, want an error")
@@ -825,5 +819,149 @@ func TestPerAgentService_EqualTimestampsKeepAppendOrder(t *testing.T) {
 	}
 	if want := []string{"b", "a"}; !slices.Equal(got, want) {
 		t.Errorf("event IDs = %v, want %v (append order)", got, want)
+	}
+}
+
+func TestPerAgentService_EmptyUserID(t *testing.T) {
+	ctx := t.Context()
+	svc := newService(t, peragent.Config{AgentsRoot: t.TempDir()})
+
+	created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Create() for user \"\" error = %v", err)
+	}
+	if err := svc.AppendEvent(ctx, created.Session, &session.Event{ID: "e1", Timestamp: time.Now()}); err != nil {
+		t.Fatalf("AppendEvent() for user \"\" error = %v", err)
+	}
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Get() for user \"\" error = %v", err)
+	}
+	if n := got.Session.Events().Len(); n != 1 {
+		t.Errorf("Get() for user \"\" returned %d events, want 1", n)
+	}
+	list, err := svc.List(ctx, &session.ListRequest{AppName: "app", UserID: ""})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(list.Sessions) != 1 || list.Sessions[0].ID() != "s1" {
+		t.Errorf("List() = %v, want the one session s1", list.Sessions)
+	}
+	if err := svc.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "", SessionID: "s1"}); err != nil {
+		t.Fatalf("Delete() for user \"\" error = %v", err)
+	}
+	if _, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "", SessionID: "s1"}); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get() after Delete() error = %v, want session.ErrNotFound", err)
+	}
+}
+
+func TestPerAgentService_EmptySessionID(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		database bool
+	}{
+		{name: "app with a database", database: true},
+		{name: "app without a database", database: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			root := t.TempDir()
+			svc := newService(t, peragent.Config{AgentsRoot: root})
+			if tc.database {
+				if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u1", SessionID: "s1"}); err != nil {
+					t.Fatalf("Create() error = %v", err)
+				}
+			}
+
+			_, getErr := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: ""})
+			delErr := svc.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "u1", SessionID: ""})
+
+			if !errors.Is(getErr, session.ErrNotFound) {
+				t.Errorf("Get() with an empty session ID error = %v, want session.ErrNotFound", getErr)
+			}
+			if delErr != nil {
+				t.Errorf("Delete() with an empty session ID error = %v, want nil", delErr)
+			}
+			if !tc.database {
+				mustNotExist(t, filepath.Join(root, "app"))
+			}
+		})
+	}
+}
+
+func TestPerAgentService_GetOmitEvents(t *testing.T) {
+	ctx := t.Context()
+	svc := newService(t, peragent.Config{AgentsRoot: t.TempDir()})
+	created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u1", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := svc.AppendEvent(ctx, created.Session, &session.Event{ID: "e1", Timestamp: time.Now()}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s1", OmitEvents: true})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if n := got.Session.Events().Len(); n != 0 {
+		t.Errorf("Get() with OmitEvents returned %d events, want 0", n)
+	}
+}
+
+func TestPerAgentService_ListFilterEmptyUserID(t *testing.T) {
+	ctx := t.Context()
+	svc := newService(t, peragent.Config{AgentsRoot: t.TempDir()})
+	for _, req := range []*session.CreateRequest{
+		{AppName: "app", UserID: "", SessionID: "s-empty"},
+		{AppName: "app", UserID: "u1", SessionID: "s-u1"},
+	} {
+		if _, err := svc.Create(ctx, req); err != nil {
+			t.Fatalf("Create(%q) error = %v", req.SessionID, err)
+		}
+	}
+
+	list, err := svc.List(ctx, &session.ListRequest{AppName: "app", UserID: "", FilterEmptyUserID: true})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	if len(list.Sessions) != 1 || list.Sessions[0].ID() != "s-empty" {
+		var ids []string
+		for _, s := range list.Sessions {
+			ids = append(ids, s.ID())
+		}
+		t.Errorf("List() with FilterEmptyUserID returned sessions %v, want [s-empty]", ids)
+	}
+}
+
+func TestPerAgentService_NegativeNumRecentEventsFailsBeforeRouting(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		database bool
+	}{
+		{name: "app with a database", database: true},
+		{name: "app without a database", database: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			root := t.TempDir()
+			svc := newService(t, peragent.Config{AgentsRoot: root})
+			if tc.database {
+				if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u1", SessionID: "s1"}); err != nil {
+					t.Fatalf("Create() error = %v", err)
+				}
+			}
+
+			_, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s1", NumRecentEvents: -1})
+
+			if err == nil || errors.Is(err, session.ErrNotFound) {
+				t.Errorf("Get() with NumRecentEvents -1 error = %v, want an error that is not session.ErrNotFound", err)
+			}
+			if !tc.database {
+				mustNotExist(t, filepath.Join(root, "app"))
+			}
+		})
 	}
 }

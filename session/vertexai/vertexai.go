@@ -23,6 +23,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/option"
 
+	"google.golang.org/adk/v2/internal/sessionutils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -59,6 +60,17 @@ func (s *vertexAiService) Create(ctx context.Context, req *session.CreateRequest
 	if req.AppName == "" || req.UserID == "" {
 		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
 	}
+	// Without an id Agent Engine assigns one, so only a given id is checked,
+	// as in adk-python's create_session.
+	if req.SessionID != "" {
+		id, err := s.client.resolveSessionID(req.AppName, req.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		r := *req
+		r.SessionID = id
+		req = &r
+	}
 	sess, err := s.client.createSession(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
@@ -69,6 +81,24 @@ func (s *vertexAiService) Create(ctx context.Context, req *session.CreateRequest
 func (s *vertexAiService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
 	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
 		return nil, fmt.Errorf("app_name, user_id and session_id are required, got app_name: %q, user_id: %q, session_id: %q", req.AppName, req.UserID, req.SessionID)
+	}
+	if err := sessionutils.CheckNumRecentEvents(req.NumRecentEvents); err != nil {
+		return nil, err
+	}
+	id, err := s.client.resolveSessionID(req.AppName, req.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	r := *req
+	r.SessionID = id
+	req = &r
+
+	if req.OmitEvents {
+		sess, err := s.client.getSession(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get session: %w", err)
+		}
+		return &session.GetResponse{Session: sess}, nil
 	}
 
 	// gCtx will be canceled if either function returns an error
@@ -129,7 +159,13 @@ func (s *vertexAiService) Delete(ctx context.Context, req *session.DeleteRequest
 	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
 		return fmt.Errorf("app_name, user_id and session_id are required, got app_name: %q, user_id: %q, session_id: %q", req.AppName, req.UserID, req.SessionID)
 	}
-	err := s.client.deleteSession(ctx, req)
+	id, err := s.client.resolveSessionID(req.AppName, req.SessionID)
+	if err != nil {
+		return err
+	}
+	r := *req
+	r.SessionID = id
+	err = s.client.deleteSession(ctx, &r)
 	if err != nil {
 		return fmt.Errorf("failed to delete session: %w", err)
 	}

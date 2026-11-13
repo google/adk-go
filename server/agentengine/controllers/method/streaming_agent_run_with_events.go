@@ -73,6 +73,9 @@ func (s *streamingAgentRunWithEventsHandler) streamJSONL(ctx context.Context, rw
 		log.Print(err.Error()) //nolint:forbidigo // pre-slog call site
 		return err
 	}
+	if runReq.UserID == "" {
+		return fmt.Errorf("user_id is required")
+	}
 	if err := s.ensureBackendSession(ctx, runReq, requestedSessionID); err != nil {
 		err = fmt.Errorf("s.ensureBackendSession() failed: %w", err)
 		log.Print(err.Error()) //nolint:forbidigo // pre-slog call site

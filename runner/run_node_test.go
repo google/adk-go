@@ -1677,6 +1677,48 @@ func textReplyLlmAgent(t *testing.T, name, text string) agent.Agent {
 	return a
 }
 
+// A negative GetSessionConfig.NumRecentEvents loads every event, as
+// agent.GetSessionConfig documents, although session.Service.Get rejects a
+// negative count.
+func TestRunner_GetSessionConfig_NegativeNumRecentEventsLoadsAllEvents(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+	for i := range 5 {
+		ev := session.NewEvent(ctx, "inv_seed")
+		ev.Author = "user"
+		ev.Timestamp = time.Date(2026, 1, 1, 0, 0, 1+i, 0, time.UTC)
+		ev.Content = genai.NewContentFromText(fmt.Sprintf("m%d", i), genai.RoleUser)
+		appendSeedEvent(t, ctx, svc, ev)
+	}
+	var got []string
+	reader, err := agent.New(agent.Config{
+		Name: "reader",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {
+				events := ctx.Session().Events()
+				for i := 0; i < events.Len(); i++ {
+					got = append(got, eventText(events.At(i)))
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	r := newNodeTestRunner(t, reader, svc)
+
+	cfg := agent.RunConfig{GetSessionConfig: &agent.GetSessionConfig{NumRecentEvents: -1}}
+	if _, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("hi"), cfg)); len(errs) > 0 {
+		t.Fatalf("Run() errors = %v", errs)
+	}
+
+	want := []string{"m0", "m1", "m2", "m3", "m4", "hi"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("session event texts the agent saw mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestRunner_GetSessionConfig_ForwardsLimits(t *testing.T) {
 	// seed stores five user events "m0" to "m4", one second apart.
 	seed := func(t *testing.T, ctx context.Context, svc session.Service) {

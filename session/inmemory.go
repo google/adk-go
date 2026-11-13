@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"rsc.io/omap"
 	"rsc.io/ordered"
@@ -45,12 +46,16 @@ type inMemoryService struct {
 	appState  map[string]stateMap
 }
 
+// Create stores a new session. The user ID "" is a user like any other. The
+// session ID is stripped of surrounding whitespace, and an ID that is empty
+// after stripping is generated, as in adk-python
+// (in_memory_session_service.py, _create_session_impl).
 func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
-	if req.AppName == "" || req.UserID == "" {
-		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
+	if req.AppName == "" {
+		return nil, fmt.Errorf("app_name is required, got app_name: %q", req.AppName)
 	}
 
-	sessionID := req.SessionID
+	sessionID := stripSessionID(req.SessionID)
 	if sessionID == "" {
 		sessionID = platform.NewUUID(ctx)
 	}
@@ -66,7 +71,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	defer s.mu.Unlock()
 
 	if _, ok := s.sessions.Get(encodedKey); ok {
-		return nil, fmt.Errorf("session %s already exists", req.SessionID)
+		return nil, fmt.Errorf("session %s already exists", sessionID)
 	}
 
 	// The stored session keeps only session-scoped keys: app: and user: keys
@@ -84,12 +89,8 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	s.updateAppState(appDelta, req.AppName)
 	s.updateUserState(userDelta, req.AppName, req.UserID)
 
-	copiedSession := copySessionWithoutStateAndEvents(val)
-	copiedSession.state = s.mergeStates(val.state, req.AppName, req.UserID)
-	copiedSession.events = slices.Clone(val.events)
-
 	return &CreateResponse{
-		Session: copiedSession,
+		Session: s.snapshot(val, val.events),
 	}, nil
 }
 
@@ -112,10 +113,17 @@ func (s *inMemoryService) GetUserState(ctx context.Context, req *GetUserStateReq
 	return &GetUserStateResponse{State: sessionutils.CloneStateMap(s.userState[req.AppName][req.UserID])}, nil
 }
 
+// Get returns a copy of the stored session. The session ID is stripped of
+// surrounding whitespace, and one that is empty after stripping names no
+// session, so Get reports it as not found, as adk-python returns None
+// (in_memory_session_service.py, _get_session_impl).
 func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetResponse, error) {
-	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
-	if appName == "" || userID == "" || sessionID == "" {
-		return nil, fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
+	appName, userID, sessionID := req.AppName, req.UserID, stripSessionID(req.SessionID)
+	if appName == "" {
+		return nil, fmt.Errorf("app_name is required, got app_name: %q", appName)
+	}
+	if err := sessionutils.CheckNumRecentEvents(req.NumRecentEvents); err != nil {
+		return nil, err
 	}
 
 	s.mu.RLock()
@@ -132,8 +140,9 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 		return nil, fmt.Errorf("%w: %q", ErrNotFound, req.SessionID)
 	}
 
-	copiedSession := copySessionWithoutStateAndEvents(res)
-	copiedSession.state = s.mergeStates(res.state, appName, userID)
+	if req.OmitEvents {
+		return &GetResponse{Session: s.snapshot(res, nil)}, nil
+	}
 
 	filteredEvents := res.events
 	if req.NumRecentEvents > 0 {
@@ -142,7 +151,7 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 		filteredEvents = filteredEvents[start:]
 	}
 
-	copiedSession.events = make([]*Event, 0, len(filteredEvents))
+	events := make([]*Event, 0, len(filteredEvents))
 	for _, event := range filteredEvents {
 		// Test every event rather than searching for a cut point: events are
 		// kept in append order, which need not be timestamp order, so a
@@ -157,11 +166,11 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 		if !req.After.IsZero() && event.Timestamp.Before(req.After) {
 			continue
 		}
-		copiedSession.events = append(copiedSession.events, event)
+		events = append(events, event)
 	}
 
 	return &GetResponse{
-		Session: copiedSession,
+		Session: s.snapshot(res, events),
 	}, nil
 }
 
@@ -174,10 +183,14 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// An empty userID lists every user unless FilterEmptyUserID makes it name
+	// the user "", as adk-python tells user_id=None from user_id=""
+	// (in_memory_session_service.py, _list_sessions_impl).
+	allUsers := userID == "" && !req.FilterEmptyUserID
 	lo := id{appName: appName, userID: userID}.Encode()
 
 	var hi string
-	if userID == "" {
+	if allUsers {
 		hi = id{appName: appName + "\x00"}.Encode()
 	} else {
 		hi = id{appName: appName, userID: userID + "\x00"}.Encode()
@@ -193,9 +206,7 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 		if key.appName != appName && key.userID != userID {
 			break
 		}
-		copiedSession := copySessionWithoutStateAndEvents(storedSession)
-		copiedSession.state = s.mergeStates(storedSession.state, appName, storedSession.UserID())
-		sessions = append(sessions, copiedSession)
+		sessions = append(sessions, s.snapshot(storedSession, nil))
 	}
 	slices.SortStableFunc(sessions, compareByLastUpdate)
 	return &ListResponse{
@@ -213,10 +224,14 @@ func compareByLastUpdate(a, b Session) int {
 	)
 }
 
+// Delete removes the stored session. The session ID is stripped of surrounding
+// whitespace; deleting a session that does not exist, including one whose ID is
+// empty after stripping, does nothing and returns nil, as in adk-python
+// (in_memory_session_service.py, _delete_session_impl).
 func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error {
-	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
-	if appName == "" || userID == "" || sessionID == "" {
-		return fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
+	appName, userID, sessionID := req.AppName, req.UserID, stripSessionID(req.SessionID)
+	if appName == "" {
+		return fmt.Errorf("app_name is required, got app_name: %q", appName)
 	}
 
 	s.mu.Lock()
@@ -623,6 +638,30 @@ func copySessionWithoutStateAndEvents(sess *session) *session {
 		},
 		updatedAt: sess.updatedAt,
 	}
+}
+
+// stripSessionID removes the characters adk-python's str.strip removes from
+// both ends of id: Unicode white space and U+001C to U+001F, which Python
+// counts as white space and strings.TrimSpace does not.
+func stripSessionID(id string) string {
+	return strings.TrimFunc(id, func(r rune) bool {
+		return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
+	})
+}
+
+// snapshot returns a session with stored's identity and update time, the
+// merged app, user and session state of stored's user, and events, sharing no
+// mutable memory with stored, the service's scoped state or events, as
+// adk-python's copy.deepcopy of the session (in_memory_session_service.py,
+// _copy_session). The caller holds s.mu.
+func (s *inMemoryService) snapshot(stored *session, events []*Event) *session {
+	snap := copySessionWithoutStateAndEvents(stored)
+	snap.state = sessionutils.CloneStateMap(s.mergeStates(stored.state, stored.id.appName, stored.id.userID))
+	snap.events = make([]*Event, len(events))
+	for i, ev := range events {
+		snap.events[i] = sessionutils.CloneValue(ev)
+	}
+	return snap
 }
 
 var (

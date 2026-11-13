@@ -2111,3 +2111,423 @@ type foreignSessionWithState struct {
 }
 
 func (s *foreignSessionWithState) State() session.State { return s.state }
+
+// eventIDs returns the IDs of s's events in order.
+func eventIDs(s session.Session) []string {
+	var ids []string
+	for ev := range s.Events().All() {
+		ids = append(ids, ev.ID)
+	}
+	return ids
+}
+
+func TestInMemoryService_Get_OmitEvents(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	created, err := svc.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "u1",
+		SessionID: "s1",
+		State:     map[string]any{"app:a": "av", "user:u": "uv", "sk": "sv"},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	for _, ev := range []*session.Event{
+		{ID: "e1", Author: "user", Timestamp: appendT1},
+		{ID: "e2", Author: "agent", Timestamp: appendT2, Actions: session.EventActions{StateDelta: map[string]any{"sk2": "sv2"}}},
+		{ID: "e3", Author: "agent", Timestamp: appendT3},
+	} {
+		if err := svc.AppendEvent(ctx, created.Session, ev); err != nil {
+			t.Fatalf("AppendEvent(%q) error = %v", ev.ID, err)
+		}
+	}
+	wantState := map[string]any{"app:a": "av", "user:u": "uv", "sk": "sv", "sk2": "sv2"}
+
+	omitted := []struct {
+		name string
+		req  *session.GetRequest
+	}{
+		{name: "omit only", req: &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s1", OmitEvents: true}},
+		{name: "omit overrides num recent and after", req: &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s1", OmitEvents: true, NumRecentEvents: 2, After: appendT1}},
+	}
+	for _, tt := range omitted {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := svc.Get(ctx, tt.req)
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if n := got.Session.Events().Len(); n != 0 {
+				t.Errorf("Get() Events().Len() = %d, want 0", n)
+			}
+			if diff := cmp.Diff(wantState, maps.Collect(got.Session.State().All())); diff != "" {
+				t.Errorf("Get() state mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Get() without OmitEvents error = %v", err)
+	}
+	if diff := cmp.Diff([]string{"e1", "e2", "e3"}, eventIDs(got.Session)); diff != "" {
+		t.Errorf("Get() without OmitEvents event IDs mismatch (-want +got):\n%s", diff)
+	}
+
+	_, err = svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "missing", OmitEvents: true})
+	if !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(missing, OmitEvents) error = %v, want an error wrapping %v", err, session.ErrNotFound)
+	}
+}
+
+func TestInMemoryService_Get_NegativeNumRecentEvents(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u1", SessionID: "s1"}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		req     *session.GetRequest
+		wantErr string
+	}{
+		{
+			name:    "minus one",
+			req:     &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s1", NumRecentEvents: -1},
+			wantErr: "num_recent_events must not be negative, got -1",
+		},
+		{
+			name:    "checked with omit events",
+			req:     &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s1", NumRecentEvents: -2, OmitEvents: true},
+			wantErr: "num_recent_events must not be negative, got -2",
+		},
+		{
+			// The count is checked before the lookup, so a missing session
+			// reports the count, not ErrNotFound.
+			name:    "checked before lookup",
+			req:     &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "nonexistent", NumRecentEvents: -1},
+			wantErr: "num_recent_events must not be negative, got -1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := svc.Get(ctx, tt.req)
+			if err == nil {
+				t.Fatalf("Get() = %v, want error %q", got, tt.wantErr)
+			}
+			if err.Error() != tt.wantErr {
+				t.Errorf("Get() error = %q, want %q", err, tt.wantErr)
+			}
+			if errors.Is(err, session.ErrNotFound) {
+				t.Errorf("Get() error = %v wraps %v, want a plain validation error", err, session.ErrNotFound)
+			}
+		})
+	}
+}
+
+func TestInMemoryService_EmptyUserID_CRUDAndAppend(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+
+	if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "", UserID: "", SessionID: "s1"}); err == nil {
+		t.Errorf("Create(AppName: %q) error = nil, want an error", "")
+	}
+
+	anon, err := svc.Create(ctx, &session.CreateRequest{
+		AppName: "app", UserID: "", SessionID: "s1",
+		State: map[string]any{"user:role": "anon", "sk": "empty"},
+	})
+	if err != nil {
+		t.Fatalf("Create(UserID: %q) error = %v", "", err)
+	}
+	member, err := svc.Create(ctx, &session.CreateRequest{
+		AppName: "app", UserID: "u1", SessionID: "s1",
+		State: map[string]any{"user:role": "member", "sk": "u1val"},
+	})
+	if err != nil {
+		t.Fatalf("Create(UserID: %q) error = %v", "u1", err)
+	}
+	if err := svc.AppendEvent(ctx, anon.Session, &session.Event{
+		ID: "e_anon", Author: "user", Timestamp: appendT1,
+		Actions: session.EventActions{StateDelta: map[string]any{"user:step": "1"}},
+	}); err != nil {
+		t.Fatalf("AppendEvent(e_anon) error = %v", err)
+	}
+	if err := svc.AppendEvent(ctx, member.Session, &session.Event{
+		ID: "e_u1", Author: "user", Timestamp: appendT2,
+		Actions: session.EventActions{StateDelta: map[string]any{"user:step": "9"}},
+	}); err != nil {
+		t.Fatalf("AppendEvent(e_u1) error = %v", err)
+	}
+	anonState := map[string]any{"user:role": "anon", "user:step": "1", "sk": "empty"}
+	memberState := map[string]any{"user:role": "member", "user:step": "9", "sk": "u1val"}
+
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Get(UserID: %q) error = %v", "", err)
+	}
+	if got.Session.UserID() != "" {
+		t.Errorf("Get(UserID: %q) UserID() = %q, want %q", "", got.Session.UserID(), "")
+	}
+	if diff := cmp.Diff(anonState, maps.Collect(got.Session.State().All())); diff != "" {
+		t.Errorf("Get(UserID: %q) state mismatch (-want +got):\n%s", "", diff)
+	}
+	if diff := cmp.Diff([]string{"e_anon"}, eventIDs(got.Session)); diff != "" {
+		t.Errorf("Get(UserID: %q) event IDs mismatch (-want +got):\n%s", "", diff)
+	}
+
+	type listed struct {
+		UserID, ID string
+		Events     int
+		State      map[string]any
+	}
+	list := func(req *session.ListRequest) []listed {
+		t.Helper()
+		resp, err := svc.List(ctx, req)
+		if err != nil {
+			t.Fatalf("List(%+v) error = %v", req, err)
+		}
+		var out []listed
+		for _, s := range resp.Sessions {
+			out = append(out, listed{s.UserID(), s.ID(), s.Events().Len(), maps.Collect(s.State().All())})
+		}
+		return out
+	}
+	listTests := []struct {
+		name string
+		req  *session.ListRequest
+		want []listed
+	}{
+		{
+			name: "filter empty user id",
+			req:  &session.ListRequest{AppName: "app", UserID: "", FilterEmptyUserID: true},
+			want: []listed{{"", "s1", 0, anonState}},
+		},
+		{
+			name: "empty user id lists every user",
+			req:  &session.ListRequest{AppName: "app", UserID: ""},
+			want: []listed{{"", "s1", 0, anonState}, {"u1", "s1", 0, memberState}},
+		},
+		{
+			name: "filter ignored for a non-empty user id",
+			req:  &session.ListRequest{AppName: "app", UserID: "u1", FilterEmptyUserID: true},
+			want: []listed{{"u1", "s1", 0, memberState}},
+		},
+	}
+	for _, tt := range listTests {
+		t.Run(tt.name, func(t *testing.T) {
+			if diff := cmp.Diff(tt.want, list(tt.req)); diff != "" {
+				t.Errorf("List() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+
+	if err := svc.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "", SessionID: "s1"}); err != nil {
+		t.Fatalf("Delete(UserID: %q) error = %v", "", err)
+	}
+	if _, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "", SessionID: "s1"}); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(UserID: %q) after Delete error = %v, want an error wrapping %v", "", err, session.ErrNotFound)
+	}
+	kept, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Get(UserID: %q) after Delete(UserID: %q) error = %v", "u1", "", err)
+	}
+	if diff := cmp.Diff([]string{"e_u1"}, eventIDs(kept.Session)); diff != "" {
+		t.Errorf("Get(UserID: %q) after Delete(UserID: %q) event IDs mismatch (-want +got):\n%s", "u1", "", diff)
+	}
+}
+
+func TestInMemoryService_SessionIDWhitespace(t *testing.T) {
+	ctx := platform.WithUUIDProvider(t.Context(), func() string { return "gen-uuid-1" })
+	svc := session.InMemoryService()
+	get := func(sessionID string) (*session.GetResponse, error) {
+		return svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: sessionID})
+	}
+
+	blank, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u1", SessionID: "  \t\n  "})
+	if err != nil {
+		t.Fatalf("Create(blank) error = %v", err)
+	}
+	if got := blank.Session.ID(); got != "gen-uuid-1" {
+		t.Errorf("Create(blank) ID() = %q, want %q", got, "gen-uuid-1")
+	}
+
+	padded, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u1", SessionID: "  padded-id  ", State: map[string]any{"k": "v1"}})
+	if err != nil {
+		t.Fatalf("Create(padded) error = %v", err)
+	}
+	if got := padded.Session.ID(); got != "padded-id" {
+		t.Errorf("Create(padded) ID() = %q, want %q", got, "padded-id")
+	}
+
+	// U+001C to U+001F are whitespace to Python's str.strip, not to
+	// strings.TrimSpace.
+	_, err = svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u1", SessionID: "\x1fpadded-id\x1c", State: map[string]any{"k": "v2"}})
+	if err == nil || err.Error() != "session padded-id already exists" {
+		t.Errorf("Create(duplicate) error = %v, want %q", err, "session padded-id already exists")
+	}
+
+	for _, id := range []string{"   padded-id ", "\x1fpadded-id"} {
+		got, err := get(id)
+		if err != nil {
+			t.Fatalf("Get(%q) error = %v", id, err)
+		}
+		if got.Session.ID() != "padded-id" {
+			t.Errorf("Get(%q) ID() = %q, want %q", id, got.Session.ID(), "padded-id")
+		}
+		if diff := cmp.Diff(map[string]any{"k": "v1"}, maps.Collect(got.Session.State().All())); diff != "" {
+			t.Errorf("Get(%q) state mismatch (-want +got):\n%s", id, diff)
+		}
+	}
+
+	if _, err := get("   "); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(blank) error = %v, want an error wrapping %v", err, session.ErrNotFound)
+	}
+	if err := svc.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "u1", SessionID: "   "}); err != nil {
+		t.Errorf("Delete(blank) error = %v, want nil", err)
+	}
+	if _, err := get("padded-id"); err != nil {
+		t.Errorf("Get(padded-id) after Delete(blank) error = %v, want nil", err)
+	}
+
+	if err := svc.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "u1", SessionID: "\tpadded-id "}); err != nil {
+		t.Fatalf("Delete(padded) error = %v", err)
+	}
+	if _, err := get("padded-id"); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(padded-id) after Delete(padded) error = %v, want an error wrapping %v", err, session.ErrNotFound)
+	}
+
+	_, err = svc.Get(ctx, &session.GetRequest{AppName: "", UserID: "u1", SessionID: "gen-uuid-1"})
+	if err == nil || errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(AppName: %q) error = %v, want a validation error that does not wrap %v", "", err, session.ErrNotFound)
+	}
+}
+
+// detachedCopiesState is the state TestInMemoryService_DetachedCopies stores:
+// an app value, a user value and a session value, each holding a nested map or
+// slice.
+func detachedCopiesState() map[string]any {
+	return map[string]any{
+		"app:cfg":    map[string]any{"env": "prod"},
+		"user:prefs": []any{"dark"},
+		"nested":     map[string]any{"k": "orig"},
+	}
+}
+
+// mutateNestedState changes, in place, the nested values of
+// detachedCopiesState held by st.
+func mutateNestedState(t *testing.T, st session.State) {
+	t.Helper()
+	for key, mutate := range map[string]func(v any){
+		"app:cfg":    func(v any) { v.(map[string]any)["env"] = "mutated" },
+		"user:prefs": func(v any) { v.([]any)[0] = "mutated" },
+		"nested":     func(v any) { v.(map[string]any)["k"] = "mutated" },
+	} {
+		v, err := st.Get(key)
+		if err != nil {
+			t.Fatalf("State().Get(%q) error = %v", key, err)
+		}
+		mutate(v)
+	}
+}
+
+func TestInMemoryService_DetachedCopies(t *testing.T) {
+	setup := func(t *testing.T) (session.Service, session.Session) {
+		t.Helper()
+		svc := session.InMemoryService()
+		created, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u1", SessionID: "s1", State: detachedCopiesState()})
+		if err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		return svc, created.Session
+	}
+	assertStoredState := func(t *testing.T, svc session.Service, want map[string]any) {
+		t.Helper()
+		got, err := svc.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s1"})
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		if diff := cmp.Diff(want, maps.Collect(got.Session.State().All())); diff != "" {
+			t.Errorf("Get() state after mutating a returned session (-want +got):\n%s", diff)
+		}
+	}
+
+	t.Run("Create", func(t *testing.T) {
+		svc, created := setup(t)
+		mutateNestedState(t, created.State())
+		assertStoredState(t, svc, detachedCopiesState())
+	})
+
+	t.Run("Get", func(t *testing.T) {
+		ctx := t.Context()
+		svc, created := setup(t)
+		if err := svc.AppendEvent(ctx, created, &session.Event{
+			ID: "e1", Author: "user", Timestamp: appendT1,
+			LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+				{Text: "hello"},
+				{FunctionCall: &genai.FunctionCall{Name: "f", Args: map[string]any{"m": map[string]any{"x": "orig"}, "list": []any{"a"}}}},
+			}}},
+			Actions: session.EventActions{
+				StateDelta:    map[string]any{"ev_map": map[string]any{"ek": "e_orig"}},
+				ArtifactDelta: map[string]int64{"file.txt": 1},
+			},
+		}); err != nil {
+			t.Fatalf("AppendEvent() error = %v", err)
+		}
+
+		got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s1"})
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		mutateNestedState(t, got.Session.State())
+		evMap, err := got.Session.State().Get("ev_map")
+		if err != nil {
+			t.Fatalf("State().Get(%q) error = %v", "ev_map", err)
+		}
+		evMap.(map[string]any)["ek"] = "mutated"
+		ev := got.Session.Events().At(0)
+		ev.Content.Parts[0].Text = "mutated"
+		ev.Content.Parts[1].FunctionCall.Args["m"].(map[string]any)["x"] = "mutated"
+		ev.Content.Parts[1].FunctionCall.Args["list"].([]any)[0] = "mutated"
+		ev.Actions.StateDelta["ev_map"].(map[string]any)["ek"] = "mutated"
+		ev.Actions.ArtifactDelta["file.txt"] = 99
+
+		want := detachedCopiesState()
+		want["ev_map"] = map[string]any{"ek": "e_orig"}
+		assertStoredState(t, svc, want)
+		again, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s1"})
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		stored := again.Session.Events().At(0)
+		gotEvent := map[string]any{
+			"text":          stored.Content.Parts[0].Text,
+			"args":          stored.Content.Parts[1].FunctionCall.Args,
+			"stateDelta":    stored.Actions.StateDelta,
+			"artifactDelta": stored.Actions.ArtifactDelta,
+		}
+		wantEvent := map[string]any{
+			"text":          "hello",
+			"args":          map[string]any{"m": map[string]any{"x": "orig"}, "list": []any{"a"}},
+			"stateDelta":    map[string]any{"ev_map": map[string]any{"ek": "e_orig"}},
+			"artifactDelta": map[string]int64{"file.txt": 1},
+		}
+		if diff := cmp.Diff(wantEvent, gotEvent); diff != "" {
+			t.Errorf("Get() event after mutating a returned event (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("List", func(t *testing.T) {
+		svc, _ := setup(t)
+		listed, err := svc.List(t.Context(), &session.ListRequest{AppName: "app", UserID: "u1"})
+		if err != nil {
+			t.Fatalf("List() error = %v", err)
+		}
+		if len(listed.Sessions) != 1 {
+			t.Fatalf("List() returned %d sessions, want 1", len(listed.Sessions))
+		}
+		mutateNestedState(t, listed.Sessions[0].State())
+		assertStoredState(t, svc, detachedCopiesState())
+	})
+}

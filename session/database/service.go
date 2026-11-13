@@ -218,9 +218,13 @@ func AutoMigrate(service session.Service) error {
 }
 
 // Create generates a session and inserts it to the db, implements session.Service
+//
+// req.AppName is required. An empty req.UserID is the user "", as in
+// adk-python. An empty req.SessionID gets a generated ID; any other value is
+// stored verbatim.
 func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
-	if req.AppName == "" || req.UserID == "" {
-		return nil, fmt.Errorf("app_name and user_id are required")
+	if req.AppName == "" {
+		return nil, fmt.Errorf("app_name is required")
 	}
 
 	sessionID := req.SessionID
@@ -284,7 +288,7 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 		if len(userDelta) > 0 {
 			maps.Copy(storageUser.State, userDelta)
 			storageUser.UpdateTime = createdSession.UpdateTime
-			if err := tx.Save(&storageUser).Error; err != nil {
+			if err := updateUserState(tx, storageUser); err != nil {
 				return fmt.Errorf("failed to save user state: %w", err)
 			}
 		}
@@ -308,20 +312,26 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 }
 
 // Get retrieves a single session from the database using its composite primary key.
+//
+// req.AppName is required. An empty req.UserID is the user "", and an empty
+// req.SessionID is looked up like any other, so Get returns
+// [session.ErrNotFound] for it, as in adk-python. A negative
+// req.NumRecentEvents is an error. With req.OmitEvents, Get does not read
+// the session's events and returns none.
 func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
-	// Ensure all parts of the composite key are provided.
 	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
-	if appName == "" || userID == "" || sessionID == "" {
-		return nil, fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
+	if appName == "" {
+		return nil, fmt.Errorf("app_name is required, got app_name: %q", appName)
+	}
+	if err := sessionutils.CheckNumRecentEvents(req.NumRecentEvents); err != nil {
+		return nil, err
 	}
 
+	// String conditions, not a struct: GORM drops a zero-valued struct field
+	// from the WHERE clause, and "" is a valid user and session ID here.
 	var foundSession storageSession
 	err := s.db.WithContext(ctx).
-		Where(&storageSession{
-			AppName: appName,
-			UserID:  userID,
-			ID:      sessionID,
-		}).
+		Where("app_name = ? AND user_id = ? AND id = ?", appName, userID, sessionID).
 		First(&foundSession).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -372,9 +382,13 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 	}
 
 	var storageEvents []storageEvent
-	if err := eventQuery.Find(&storageEvents).Error; err != nil {
-		// This is a system failure, not a "not found"
-		return nil, fmt.Errorf("database error while fetching events: %w", err)
+	// adk-python skips the events query for num_recent_events == 0
+	// (database_session_service.py:753).
+	if !req.OmitEvents {
+		if err := eventQuery.Find(&storageEvents).Error; err != nil {
+			// This is a system failure, not a "not found"
+			return nil, fmt.Errorf("database error while fetching events: %w", err)
+		}
 	}
 
 	// fetch app and user states
@@ -418,16 +432,11 @@ func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*
 		return nil, fmt.Errorf("app_name is required, got app_name: %q", req.AppName)
 	}
 
+	oneUser := userID != "" || req.FilterEmptyUserID
 	var foundSessions []storageSession
-	listQuery := s.db.WithContext(ctx).
-		Where(&storageSession{
-			AppName: appName,
-		})
-
-	if userID != "" {
-		listQuery = listQuery.Where(&storageSession{
-			UserID: userID,
-		})
+	listQuery := s.db.WithContext(ctx).Where("app_name = ?", appName)
+	if oneUser {
+		listQuery = listQuery.Where("user_id = ?", userID)
 	}
 
 	err := listQuery.Find(&foundSessions).Error
@@ -449,7 +458,7 @@ func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*
 	}
 
 	var userStates map[string]*storageUserState
-	if userID != "" {
+	if oneUser {
 		userState, err := fetchStorageUserState(s.db.WithContext(ctx), appName, userID)
 		if err != nil {
 			return nil, fmt.Errorf("error on list sessions: %w", err)
@@ -497,10 +506,13 @@ func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*
 }
 
 // Delete, deletes a session given a specific id returning error on failure, implements session.Service
+//
+// req.AppName is required. An empty req.UserID is the user "", and an empty
+// req.SessionID is looked up like any other, so Delete deletes nothing for it
+// and returns nil, as in adk-python.
 func (s *databaseService) Delete(ctx context.Context, req *session.DeleteRequest) error {
-	appName, userID, sessionID := req.AppName, req.UserID, req.SessionID
-	if appName == "" || userID == "" || sessionID == "" {
-		return fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
+	if req.AppName == "" {
+		return fmt.Errorf("app_name is required, got app_name: %q", req.AppName)
 	}
 
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -508,21 +520,16 @@ func (s *databaseService) Delete(ctx context.Context, req *session.DeleteRequest
 		// CASCADE foreign key: SQLite enforces foreign keys only when the
 		// connection enables them, and without it the session row goes and its
 		// events stay behind.
-		if err := tx.Where(&storageEvent{
-			AppName:   req.AppName,
-			UserID:    req.UserID,
-			SessionID: req.SessionID,
-		}).Delete(&storageEvent{}).Error; err != nil {
+		//
+		// String conditions, not structs: GORM drops a zero-valued struct
+		// field from the WHERE clause, and "" is a valid user and session ID.
+		if err := tx.Where("app_name = ? AND user_id = ? AND session_id = ?", req.AppName, req.UserID, req.SessionID).
+			Delete(&storageEvent{}).Error; err != nil {
 			return fmt.Errorf("database error during session events deletion: %w", err)
 		}
 
-		target := &storageSession{}
-
-		result := tx.Where(&storageSession{
-			AppName: req.AppName,
-			UserID:  req.UserID,
-			ID:      req.SessionID,
-		}).Delete(target)
+		result := tx.Where("app_name = ? AND user_id = ? AND id = ?", req.AppName, req.UserID, req.SessionID).
+			Delete(&storageSession{})
 
 		if result.Error != nil {
 			return fmt.Errorf("database error during session deletion: %w", result.Error)
@@ -643,7 +650,7 @@ func (s *databaseService) applyEvent(ctx context.Context, curSession session.Ses
 		// lockSession serializes appends there.
 		var storageSess storageSession
 		err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).
-			Where(&storageSession{AppName: curSession.AppName(), UserID: curSession.UserID(), ID: curSession.ID()}).
+			Where("app_name = ? AND user_id = ? AND id = ?", curSession.AppName(), curSession.UserID(), curSession.ID()).
 			First(&storageSess).Error
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -700,7 +707,8 @@ func (s *databaseService) applyEvent(ctx context.Context, curSession session.Ses
 		}
 
 		// Merge state deltas and update the storage objects.
-		// GORM's .Save() method will correctly perform an INSERT or UPDATE.
+		// Save is safe for the app row, whose key is never empty; the user
+		// and session rows go through updateUserState and updateSession.
 		if len(appDelta) > 0 {
 			maps.Copy(storageApp.State, appDelta)
 			// Maintain UpdateTime explicitly (see Create): an unset time.Time
@@ -713,7 +721,7 @@ func (s *databaseService) applyEvent(ctx context.Context, curSession session.Ses
 		if len(userDelta) > 0 {
 			maps.Copy(storageUser.State, userDelta)
 			storageUser.UpdateTime = event.Timestamp
-			if err := tx.Save(&storageUser).Error; err != nil {
+			if err := updateUserState(tx, storageUser); err != nil {
 				return fmt.Errorf("failed to save user state: %w", err)
 			}
 		}
@@ -743,8 +751,7 @@ func (s *databaseService) applyEvent(ctx context.Context, curSession session.Ses
 		}
 
 		storageSess.UpdateTime = event.Timestamp
-		// Save the session to update its state and UpdateTime.
-		if err := tx.Save(&storageSess).Error; err != nil {
+		if err := updateSession(tx, &storageSess); err != nil {
 			return fmt.Errorf("failed to save session state: %w", err)
 		}
 
@@ -763,6 +770,28 @@ func lockStateRow(tx *gorm.DB, emptyRow any) (*gorm.DB, error) {
 		return nil, err
 	}
 	return tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}), nil
+}
+
+// updateSession writes sess.State and sess.UpdateTime to the existing row
+// with sess's key. Save would not do: it leaves a zero-valued key field, such
+// as the user "", out of its WHERE clause and then inserts a duplicate row.
+// RowsAffected is not checked, because MySQL counts changed rows, not matched
+// ones; the caller has read the row inside the same transaction.
+func updateSession(tx *gorm.DB, sess *storageSession) error {
+	return tx.Model(&storageSession{}).
+		Where("app_name = ? AND user_id = ? AND id = ?", sess.AppName, sess.UserID, sess.ID).
+		Select("State", "UpdateTime").
+		Updates(sess).Error
+}
+
+// updateUserState writes st.State and st.UpdateTime to the existing row with
+// st's key, for the same reasons as updateSession. The caller has made sure
+// the row exists with lockStateRow.
+func updateUserState(tx *gorm.DB, st *storageUserState) error {
+	return tx.Model(&storageUserState{}).
+		Where("app_name = ? AND user_id = ?", st.AppName, st.UserID).
+		Select("State", "UpdateTime").
+		Updates(st).Error
 }
 
 func fetchStorageAppState(tx *gorm.DB, appName string) (*storageAppState, error) {
