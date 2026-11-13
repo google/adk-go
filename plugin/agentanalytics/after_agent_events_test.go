@@ -88,23 +88,7 @@ type runItem struct {
 // forwardRun runs a with run number n on a goroutine and sends its items to
 // items, one at a time. wg.Done is called once the run ended.
 func forwardRun(ctx agent.InvocationContext, a agent.Agent, n int, items chan<- runItem, done <-chan struct{}, wg *sync.WaitGroup) {
-	go func() {
-		defer wg.Done()
-		runCtx := ctx.WithContext(context.WithValue(ctx, afterAgentRunKey{}, n))
-		for ev, err := range a.Run(runCtx) {
-			ack := make(chan struct{})
-			select {
-			case items <- runItem{n: n, ev: ev, err: err, ack: ack}:
-			case <-done:
-				return
-			}
-			select {
-			case <-ack:
-			case <-done:
-				return
-			}
-		}
-	}()
+	forwardRunAtDepth(ctx, a, n, 0, items, done, wg)
 }
 
 // failingChild returns an agent named child that yields a partial answer and
@@ -1917,7 +1901,8 @@ func TestAfterAgentSharerResolvesEventBranch(t *testing.T) {
 
 // TestAfterAgentCallbacksStillRunning pins how the runs of after-agent
 // callbacks that enclose a start or end on a goroutine are counted in its
-// stack trace (see afterAgentCallbackRunsOfTrace), and that the activations
+// stack trace (see afterAgentCallbackRunsOfTrace), that incomplete, elided, or
+// malformed traces fail closed with ok == false, and that the activations
 // retired on that goroutine whose callbacks still run, the ones that retired
 // first among those not recorded yet, are not recorded as returned (see
 // markAfterAgentCallbacksReturnedOnLocked).
@@ -1927,32 +1912,62 @@ func TestAfterAgentCallbacksStillRunning(t *testing.T) {
 	}
 	run := agentPkgPath + ".runAfterAgentCallbacks"
 	for _, tc := range []struct {
-		name  string
-		trace string
-		want  int
+		name     string
+		trace    string
+		complete bool
+		want     int
+		wantOK   bool
 	}{
-		{"none", "goroutine 7 [running]:\n" + frame(agentPkgPath+".runBeforeAgentCallbacks") + frame(agentPkgPath+".(*agent).Run.func1"), 0},
-		{"one", "goroutine 7 [running]:\n" + frame(agentPkgPath+".runBeforeAgentCallbacks") + frame(run) + frame(agentPkgPath+".(*agent).Run.func1"), 1},
-		{"nested", "goroutine 7 [running]:\n" + frame(run) + frame("main.callback") + frame(run), 2},
-		{"another package's function of that name", "goroutine 7 [running]:\n" + frame("example.com/other.runAfterAgentCallbacks"), 0},
-		{"a function inside it", "goroutine 7 [running]:\n" + frame(run+".func1"), 0},
-		{"after the created by line", "goroutine 7 [running]:\n" + frame("main.f") + "created by " + run + " in goroutine 1\n\t/src/file.go:3 +0x1\n", 0},
-		{"no frames", "goroutine 7 [running]:", 0},
+		{"none", "goroutine 7 [running]:\n" + frame(agentPkgPath+".runBeforeAgentCallbacks") + frame(agentPkgPath+".(*agent).Run.func1"), true, 0, true},
+		{"one", "goroutine 7 [running]:\n" + frame(agentPkgPath+".runBeforeAgentCallbacks") + frame(run) + frame(agentPkgPath+".(*agent).Run.func1"), true, 1, true},
+		{"one with created by", "goroutine 7 [running]:\n" + frame(run) + "created by main.f in goroutine 1\n\t/src/file.go:3 +0x1\n", true, 1, true},
+		{"nested", "goroutine 7 [running]:\n" + frame(run) + frame("main.callback") + frame(run), true, 2, true},
+		{"another package's function of that name", "goroutine 7 [running]:\n" + frame("example.com/other.runAfterAgentCallbacks"), true, 0, true},
+		{"a function inside it", "goroutine 7 [running]:\n" + frame(run+".func1"), true, 0, true},
+		{"after the created by line", "goroutine 7 [running]:\n" + frame("main.f") + "created by " + run + " in goroutine 1\n\t/src/file.go:3 +0x1\n", true, 0, true},
+		{"tab-indented file line", "goroutine 7 [running]:\n" + frame("main.f") + "\t/dir/" + run + "(0x1)/file.go:10 +0x20\n", true, 0, true},
+		{"no frames", "goroutine 7 [running]:\n", true, 0, true},
+		{"header without newline", "goroutine 7 [running]:", true, 0, false},
+		{"empty", "", true, 0, false},
+		{"frame without arguments", "goroutine 7 [running]:\n" + run + "\n\t/src/file.go:10 +0x20\n", true, 0, false},
+		{"frame starting with paren", "goroutine 7 [running]:\n(0x1)\n\t/src/file.go:10 +0x20\n", true, 0, false},
+		{"elided between two run frames", "goroutine 7 [running]:\n" + frame(run) + "...42 frames elided...\n" + frame(run), true, 0, false},
+		{"additional frames elided between two run frames", "goroutine 7 [running]:\n" + frame(run) + "...additional frames elided...\n" + frame(run), true, 0, false},
+		{"elided with zero visible run frames", "goroutine 7 [running]:\n" + frame(agentPkgPath+".runBeforeAgentCallbacks") + "...42 frames elided...\n" + frame("main.outer"), true, 0, false},
+		{"elided after the created by line", "goroutine 7 [running]:\n" + frame(run) + "created by main.f in goroutine 1\n\t/src/file.go:3 +0x1\n...5 frames elided...\n", true, 1, true},
+		{"truncated with visible run frame", "goroutine 7 [running]:\n" + frame(run), false, 0, false},
+		{"truncated with zero visible run frames", "goroutine 7 [running]:\n" + frame(agentPkgPath+".runBeforeAgentCallbacks"), false, 0, false},
 	} {
-		if got := afterAgentCallbackRunsOfTrace([]byte(tc.trace)); got != tc.want {
-			t.Errorf("afterAgentCallbackRunsOfTrace(%s) = %d, want %d", tc.name, got, tc.want)
+		got, ok := afterAgentCallbackRunsOfTrace([]byte(tc.trace), tc.complete)
+		if got != tc.want || ok != tc.wantOK {
+			t.Errorf("afterAgentCallbackRunsOfTrace(%s) = (%d, %v), want (%d, %v)", tc.name, got, ok, tc.want, tc.wantOK)
 		}
 	}
-	if got := afterAgentCallbackRunsOfTrace(func() []byte { b, _ := currentGoroutineTrace(); return b }()); got != 0 {
-		t.Errorf("afterAgentCallbackRunsOfTrace(this goroutine) = %d, want 0", got)
+	if trace, complete := currentGoroutineTrace(); !complete {
+		t.Fatalf("currentGoroutineTrace() complete = false on test goroutine")
+	} else if got, ok := afterAgentCallbackRunsOfTrace(trace, complete); got != 0 || !ok {
+		t.Errorf("afterAgentCallbackRunsOfTrace(this goroutine) = (%d, %v), want (0, true)", got, ok)
 	}
+	callWithStackDepth(110, func() {
+		trace, complete := currentGoroutineTrace()
+		if !complete || !strings.Contains(string(trace), "frames elided") {
+			t.Fatalf("deep stack trace complete = %v, elided = %v; trace:\n%s", complete, strings.Contains(string(trace), "frames elided"), trace)
+		}
+		if got, ok := afterAgentCallbackRunsOfTrace(trace, complete); got != 0 || ok {
+			t.Errorf("afterAgentCallbackRunsOfTrace(elided goroutine) = (%d, %v), want (0, false)", got, ok)
+		}
+	})
 	setup := func() *invocationTrace {
 		inv := &invocationTrace{agentStack: []*spanRecord{{kind: spanKindInvocation}, {spanID: "root-1", kind: spanKindAgent, name: "root"}}}
 		for _, seq := range []uint64{30, 10, 20} {
+			m := map[string]any{}
 			inv.retiredActivations = append(inv.retiredActivations, retiredActivation{
-				swallower:      retiredSwallower{spanID: fmt.Sprintf("r%d", seq), name: "inner"},
-				retiredAtSeq:   seq,
-				popGoroutineID: 7,
+				swallower:            retiredSwallower{spanID: fmt.Sprintf("r%d", seq), name: "inner"},
+				guardSpanIDs:         []string{"root-1"},
+				retiredAtSeq:         seq,
+				popGoroutineID:       7,
+				afterAgentActions:    actionMaps{stateDelta: reflect.ValueOf(m).Pointer()},
+				afterAgentActionsRef: m,
 			})
 		}
 		inv.retiredActivations = append(inv.retiredActivations, retiredActivation{swallower: retiredSwallower{spanID: "other", name: "inner"}, retiredAtSeq: 5, popGoroutineID: 8})
@@ -1982,6 +1997,39 @@ func TestAfterAgentCallbacksStillRunning(t *testing.T) {
 		}
 		if got := done(inv); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("running %d: afterAgentDone = %v, want %v", tc.running, got, tc.want)
+		}
+	}
+	// An elided or truncated trace leaves the count unknown, so pushAgentSpan
+	// skips markAfterAgentCallbacksReturnedOnLocked and its unconditional
+	// settleAfterAgentActionsOnLocked keeps the action maps of still-pending
+	// activations intact.
+	for _, tc := range []struct {
+		name     string
+		trace    string
+		complete bool
+	}{
+		{"elided between two run frames", "goroutine 7 [running]:\n" + frame(run) + "...42 frames elided...\n" + frame(run), true},
+		{"elided with zero visible run frames", "goroutine 7 [running]:\n" + frame(agentPkgPath+".runBeforeAgentCallbacks") + "...42 frames elided...\n" + frame("main.outer"), true},
+		{"truncated", "goroutine 7 [running]:\n" + frame(run), false},
+	} {
+		inv := setup()
+		goid, _ := parseGoroutineTrace([]byte(tc.trace), tc.complete)
+		if goid != 7 {
+			t.Fatalf("%s: parseGoroutineTrace() goid = %d, want 7", tc.name, goid)
+		}
+		if runs, ok := afterAgentCallbackRunsOfTrace([]byte(tc.trace), tc.complete); ok {
+			inv.markAfterAgentCallbacksReturnedOnLocked(goid, at, runs)
+			inv.afterAgentCallbacksReturnedOnLocked(goid, at, max(runs-1, 0))
+		}
+		inv.settleAfterAgentActionsOnLocked(goid)
+		wantUnmarked := map[string]bool{"r10": false, "r20": false, "r30": false, "other": false}
+		if got := done(inv); !reflect.DeepEqual(got, wantUnmarked) {
+			t.Errorf("%s: afterAgentDone = %v, want %v", tc.name, got, wantUnmarked)
+		}
+		for _, ra := range inv.retiredActivations[:3] {
+			if !ra.holdsAfterAgentEvent() {
+				t.Errorf("%s: %s dropped its after-agent action maps", tc.name, ra.swallower.spanID)
+			}
 		}
 	}
 	// Recorded ones count no more: a later start with one run of callbacks

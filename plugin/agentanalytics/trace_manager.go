@@ -4022,11 +4022,12 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	var origin goroutineOrigin
 	var attempt attemptSite
 	var afterAgentRuns int
+	var afterAgentRunsKnown bool
 	if ended != nil {
 		trace, complete := currentGoroutineTrace()
 		goid, origin = parseGoroutineTrace(trace, complete)
 		attempt = attemptSiteOfTrace(trace, complete)
-		afterAgentRuns = afterAgentCallbackRunsOfTrace(trace)
+		afterAgentRuns, afterAgentRunsKnown = afterAgentCallbackRunsOfTrace(trace, complete)
 	}
 	// The trace of a node attempt shows no other agent run on this goroutine
 	// (see attemptSiteOfTrace), so every activation that ran on it before is
@@ -4187,9 +4188,12 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	// The runs that retired on this goroutine earlier returned, after-agent
 	// callbacks included, before this agent started, unless this agent starts
 	// inside their after-agent callbacks, as when a callback runs an agent
-	// (see markAfterAgentCallbacksReturnedOnLocked). Their maps are dropped
-	// only once this agent is open (see below).
-	inv.markAfterAgentCallbacksReturnedOnLocked(goid, startPlatformTime, afterAgentRuns)
+	// (see markAfterAgentCallbacksReturnedOnLocked). An incomplete or elided
+	// trace does not show how many still run. Their maps are dropped only
+	// once this agent is open (see below).
+	if afterAgentRunsKnown {
+		inv.markAfterAgentCallbacksReturnedOnLocked(goid, startPlatformTime, afterAgentRuns)
+	}
 	// Mark concurrent peers on any remaining matching spans (workflow
 	// children that did not fail and were not purged by the retry loop).
 	parent = inv.parentForRunLocked(id, goid, origin)
@@ -4235,7 +4239,9 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	// (see spanRecord.startedAfterEvent), so a retired activation of the same
 	// agent keeps the maps that recognize its after-agent event while this
 	// agent is open (see needsAfterAgentActionsLocked), and its entry is
-	// pruned only after that.
+	// pruned only after that. Activations whose afterAgentDone is unset keep
+	// their maps in needsAfterAgentActionsLocked, while an already-done
+	// activation on goid whose last blocker was purged above settles here.
 	inv.settleAfterAgentActionsOnLocked(goid)
 	inv.pruneSettledRetiredActivationsLocked(id.agentName, id.branch, id.path)
 	if rec.isNodeAgentOf(parent) {
@@ -4321,17 +4327,24 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 	peerRetirement, credit := inv.reconcileConcurrentResponseOnPopLocked(i, rec.seq)
 	var goid uint64
 	var afterAgentRuns int
+	var afterAgentRunsKnown bool
 	if rec.goroutineID != 0 {
 		trace, complete := currentGoroutineTrace()
 		goid, _ = parseGoroutineTrace(trace, complete)
 		// This callback runs in the activation's own after-agent callbacks.
-		afterAgentRuns = max(afterAgentCallbackRunsOfTrace(trace)-1, 0)
+		if runs, ok := afterAgentCallbackRunsOfTrace(trace, complete); ok {
+			afterAgentRuns = max(runs-1, 0)
+			afterAgentRunsKnown = true
+		}
 	}
 	retiredAt := platform.Now(ctx)
 	// The runs that retired on this goroutine earlier returned, after-agent
 	// callbacks included, before this activation's AfterAgentCallback, unless
-	// this activation ran inside their after-agent callbacks.
-	inv.afterAgentCallbacksReturnedOnLocked(goid, retiredAt, afterAgentRuns)
+	// this activation ran inside their after-agent callbacks. An incomplete or
+	// elided trace does not show how many still run.
+	if afterAgentRunsKnown {
+		inv.afterAgentCallbacksReturnedOnLocked(goid, retiredAt, afterAgentRuns)
+	}
 	// The after-agent event of every activation with after-agent callbacks is
 	// recognized by its action maps (see actionMaps), whether or not the
 	// activation responded or another activation of its agent is open now:
@@ -7116,28 +7129,42 @@ func currentGoroutineTrace() (trace []byte, complete bool) {
 
 // afterAgentCallbackRunsOfTrace returns how many runs of after-agent
 // callbacks the goroutine whose stack trace runtime.Stack(buf, false) wrote is
-// in: the frames of agent.runAfterAgentCallbacks, which runs an activation's
-// after-agent callbacks, this plugin's AfterAgentCallback among them, on the
-// goroutine that ran the activation and builds their event once they all
-// returned. An agent that a callback runs on that goroutine starts and ends
-// inside that frame. The runtime prints the innermost frames of a long trace
-// and elides some of the others, so the innermost runs are always counted.
-func afterAgentCallbackRunsOfTrace(trace []byte) int {
+// in, complete reporting whether the trace fit in buf: the frames of
+// agent.runAfterAgentCallbacks, which runs an activation's after-agent
+// callbacks, this plugin's AfterAgentCallback among them, on the goroutine
+// that ran the activation and builds their event once they all returned. An
+// agent that a callback runs on that goroutine starts and ends inside that
+// frame. The second result is false when the trace is incomplete, malformed,
+// or had frames elided by the runtime.
+func afterAgentCallbackRunsOfTrace(trace []byte, complete bool) (int, bool) {
+	if !complete {
+		return 0, false
+	}
 	_, frames, ok := strings.Cut(string(trace), "\n")
 	if !ok {
-		return 0
+		return 0, false
 	}
 	fn := agentPkgPath + ".runAfterAgentCallbacks"
 	runs := 0
 	for line := range strings.SplitSeq(frames, "\n") {
+		if line == "" || line[0] == '\t' {
+			continue
+		}
 		if strings.HasPrefix(line, "created by ") {
 			break
 		}
-		if paren := strings.LastIndexByte(line, '('); paren > 0 && line[0] != '\t' && line[:paren] == fn {
+		if strings.HasPrefix(line, "...") {
+			return 0, false
+		}
+		paren := strings.LastIndexByte(line, '(')
+		if paren <= 0 {
+			return 0, false
+		}
+		if line[:paren] == fn {
 			runs++
 		}
 	}
-	return runs
+	return runs, true
 }
 
 // parseGoroutineTrace parses the stack trace of one goroutine as

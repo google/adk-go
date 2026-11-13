@@ -1049,12 +1049,48 @@ func TestEnclosingBranchAfterAgentCreditWhileSubBranchOpen_Runner(t *testing.T) 
 	}
 }
 
+// callWithStackDepth calls fn under depth non-tail recursive frames so a
+// goroutine's stack exceeds runtime.Stack's 100-frame print limit.
+func callWithStackDepth(depth int, fn func()) int {
+	if depth <= 0 {
+		fn()
+		return 0
+	}
+	return callWithStackDepth(depth-1, fn) + 1
+}
+
+// forwardRunAtDepth runs a like forwardRun, enclosing a.Run in depth recursive
+// frames on the spawned goroutine so middle frames can be elided by runtime.Stack.
+func forwardRunAtDepth(ctx agent.InvocationContext, a agent.Agent, n, depth int, items chan<- runItem, done <-chan struct{}, wg *sync.WaitGroup) {
+	go func() {
+		defer wg.Done()
+		runCtx := ctx.WithContext(context.WithValue(ctx, afterAgentRunKey{}, n))
+		callWithStackDepth(depth, func() {
+			for ev, err := range a.Run(runCtx) {
+				ack := make(chan struct{})
+				select {
+				case items <- runItem{n: n, ev: ev, err: err, ack: ack}:
+				case <-done:
+					return
+				}
+				select {
+				case <-ack:
+				case <-done:
+					return
+				}
+			}
+		})
+	}()
+}
+
 // TestAfterAgentCallbackRunningAgentKeepsItsMaps_Runner runs, under a custom
 // root, the custom agent inner on a goroutine of root's, and its
 // AfterAgentCallback runs the custom agent helper on that goroutine, with the
 // context of inner's run, before it returns. helper starts and ends inside
 // inner's after-agent callbacks, which have not returned then, so inner keeps
-// the maps that recognize its after-agent event. Meanwhile root runs a second
+// the maps that recognize its after-agent event, including when deep recursion
+// above and below the callback makes runtime.Stack elide middle frames,
+// agent.runAfterAgentCallbacks among them. Meanwhile root runs a second
 // activation of inner on another goroutine, which drains its child's failure
 // under par and stays open, and only then does the first activation's
 // callback return:
@@ -1069,7 +1105,7 @@ func TestEnclosingBranchAfterAgentCreditWhileSubBranchOpen_Runner(t *testing.T) 
 func TestAfterAgentCallbackRunningAgentKeepsItsMaps_Runner(t *testing.T) {
 	const failure = "child failure"
 	type config struct {
-		ownRecovery, secondRecovers bool
+		ownRecovery, secondRecovers, elideFrames bool
 	}
 	run := func(t *testing.T, c config) []map[string]any {
 		t.Helper()
@@ -1080,11 +1116,47 @@ func TestAfterAgentCallbackRunningAgentKeepsItsMaps_Runner(t *testing.T) {
 		defer helperDone.fire()
 		defer secondDrained.fire()
 		defer firstDelivered.fire()
+		checkInnerStillPending := func(ctx agent.InvocationContext, where string) {
+			inv := tm.invocation(ctx, identity{invocationID: ctx.InvocationID(), agentName: "inner"})
+			inv.mu.Lock()
+			defer inv.mu.Unlock()
+			found := false
+			for _, ra := range inv.retiredActivations {
+				if ra.swallower.name != "inner" {
+					continue
+				}
+				found = true
+				if ra.afterAgentDone {
+					t.Errorf("inner-1 marked afterAgentDone %s", where)
+				}
+				if !ra.holdsAfterAgentEvent() {
+					t.Errorf("inner-1 dropped its after-agent action maps %s", where)
+				}
+			}
+			if !found {
+				t.Errorf("inner-1 missing from retiredActivations %s", where)
+			}
+		}
+		var helperRan atomic.Bool
 		par := newParallelAgent(t, "par", failingChild(t, failure))
 		helper, err := agent.New(agent.Config{
 			Name: "helper",
 			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 				return func(yield func(*session.Event, error) bool) {
+					helperRan.Store(true)
+					if c.elideFrames {
+						trace, complete := currentGoroutineTrace()
+						if !complete {
+							t.Errorf("helper stack trace truncated (%d bytes), want complete trace", len(trace))
+						}
+						if !strings.Contains(string(trace), "frames elided") {
+							t.Errorf("helper stack trace did not elide frames:\n%s", trace)
+						}
+						if strings.Contains(string(trace), agentPkgPath+".runAfterAgentCallbacks(") {
+							t.Errorf("helper stack trace still showed runAfterAgentCallbacks:\n%s", trace)
+						}
+					}
+					checkInnerStillPending(ctx, "while helper ran")
 					yield(textEvent(ctx, "helper", ctx.Branch(), "helper answer"), nil)
 				}
 			},
@@ -1104,6 +1176,10 @@ func TestAfterAgentCallbackRunningAgentKeepsItsMaps_Runner(t *testing.T) {
 				}
 			}
 			return drained, true
+		}
+		stackDepth := 0
+		if c.elideFrames {
+			stackDepth = 60
 		}
 		inner, err := agent.New(agent.Config{
 			Name:      "inner",
@@ -1139,11 +1215,19 @@ func TestAfterAgentCallbackRunningAgentKeepsItsMaps_Runner(t *testing.T) {
 				}
 				// The callback runs helper on this goroutine with the
 				// context of inner's run; its events go nowhere.
-				for _, runErr := range helper.Run(firstCtx) {
-					if runErr != nil {
-						return nil, runErr
+				var helperErr error
+				callWithStackDepth(stackDepth, func() {
+					for _, runErr := range helper.Run(firstCtx) {
+						if runErr != nil {
+							helperErr = runErr
+							return
+						}
 					}
+				})
+				if helperErr != nil {
+					return nil, helperErr
 				}
+				checkInnerStillPending(firstCtx, "after helper ended")
 				helperDone.fire()
 				if c.ownRecovery {
 					return textContent("model", "inner-1 recovery"), nil
@@ -1169,7 +1253,7 @@ func TestAfterAgentCallbackRunningAgentKeepsItsMaps_Runner(t *testing.T) {
 						wg.Wait()
 						close(items)
 					}()
-					forwardRun(ctx, inner, 1, items, done, &wg)
+					forwardRunAtDepth(ctx, inner, 1, stackDepth, items, done, &wg)
 					// The second activation starts once helper ran.
 					go func() {
 						helperDone.wait()
@@ -1196,17 +1280,26 @@ func TestAfterAgentCallbackRunningAgentKeepsItsMaps_Runner(t *testing.T) {
 				t.Fatalf("runner.Run error = %v, want nil", runErr)
 			}
 		}
+		if !helperRan.Load() {
+			t.Fatalf("helper did not run")
+		}
 		return takeRows()
 	}
-	t.Run("clean_summary_keeps_the_other_activation's_failure", func(t *testing.T) {
-		wantInvocationFailure(t, run(t, config{}), failure)
-	})
-	t.Run("second_recovers_completes", func(t *testing.T) {
-		wantInvocationCompleted(t, run(t, config{secondRecovers: true}))
-	})
-	t.Run("own_recovery_completes", func(t *testing.T) {
-		wantInvocationCompleted(t, run(t, config{ownRecovery: true}))
-	})
+	for _, elide := range []bool{false, true} {
+		prefix := ""
+		if elide {
+			prefix = "elided_stack/"
+		}
+		t.Run(prefix+"clean_summary_keeps_the_other_activation's_failure", func(t *testing.T) {
+			wantInvocationFailure(t, run(t, config{elideFrames: elide}), failure)
+		})
+		t.Run(prefix+"second_recovers_completes", func(t *testing.T) {
+			wantInvocationCompleted(t, run(t, config{elideFrames: elide, secondRecovers: true}))
+		})
+		t.Run(prefix+"own_recovery_completes", func(t *testing.T) {
+			wantInvocationCompleted(t, run(t, config{elideFrames: elide, ownRecovery: true}))
+		})
+	}
 }
 
 // TestSameTickStartKeepsHeldAfterAgentEvent_Runner runs, under a custom root
