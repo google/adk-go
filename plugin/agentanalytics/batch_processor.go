@@ -416,14 +416,11 @@ func (b *BatchProcessor) drainQueue() []map[string]any {
 		return nil
 	}
 
-	size := queueLen
-	if size > b.config.BatchSize {
-		size = b.config.BatchSize
-	}
+	size := min(queueLen, b.config.BatchSize)
 
 	batch := make([]map[string]any, 0, size)
 Loop:
-	for i := 0; i < size; i++ {
+	for range size {
 		select {
 		case row := <-b.queue:
 			batch = append(batch, row)
@@ -1478,10 +1475,7 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(delay):
-				delay = time.Duration(float64(delay) * s.config.RetryConfig.Multiplier)
-				if delay > s.config.RetryConfig.MaxDelay {
-					delay = s.config.RetryConfig.MaxDelay
-				}
+				delay = min(time.Duration(float64(delay)*s.config.RetryConfig.Multiplier), s.config.RetryConfig.MaxDelay)
 			}
 		}
 

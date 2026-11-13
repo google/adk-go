@@ -125,7 +125,10 @@ func TestGenerateContentTracing(t *testing.T) {
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 
-	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+	for _, err := range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+		if err != nil {
+			t.Fatalf("generateContent() error = %v", err)
+		}
 	}
 
 	// Verify that there is only single span.
@@ -188,7 +191,10 @@ func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 
-	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+	for _, err := range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+		if err != nil {
+			t.Fatalf("generateContent() error = %v", err)
+		}
 	}
 
 	// Verify that there is only single span.
@@ -248,7 +254,7 @@ func TestGenerateContentTracingError(t *testing.T) {
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 
-	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) { //nolint:errcheck // the model yields an error by design; the span above records it
 	}
 
 	// Verify that there is only single span.
@@ -351,7 +357,10 @@ func TestLoggingSpanIDPropagation(t *testing.T) {
 	}
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	for range generateContent(ctx, modelMock, req, true) {
+	for _, err := range generateContent(ctx, modelMock, req, true) {
+		if err != nil {
+			t.Fatalf("generateContent() error = %v", err)
+		}
 	}
 
 	wantEvents := []string{"gen_ai.client.inference.operation.details"}
@@ -410,7 +419,10 @@ func TestInferenceEventDescribesTheRequestTheSpanDoes(t *testing.T) {
 	}
 	req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("Hello", genai.RoleUser)}}
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	for range generateContent(ctx, modelMock, req, false) {
+	for _, err := range generateContent(ctx, modelMock, req, false) {
+		if err != nil {
+			t.Fatalf("generateContent() error = %v", err)
+		}
 	}
 
 	var spanMessages int

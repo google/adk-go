@@ -1645,7 +1645,7 @@ func agentConfig(a agent.Agent) any {
 		if !inner.IsValid() || !inner.CanInterface() {
 			return nil
 		}
-		next, ok := inner.Interface().(agent.Agent)
+		next, ok := reflect.TypeAssert[agent.Agent](inner)
 		if !ok {
 			return nil
 		}
@@ -2202,11 +2202,7 @@ func stateSnapshot(s session.ReadonlyState) map[string]any {
 	if s == nil {
 		return nil
 	}
-	state := map[string]any{}
-	for k, v := range s.All() {
-		state[k] = v
-	}
-	return state
+	return maps.Collect(s.All())
 }
 
 // adkVersion returns the version of the ADK module linked into the binary,

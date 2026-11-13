@@ -170,8 +170,7 @@ func TestReconstructRunState_LatestOutcome(t *testing.T) {
 }
 
 func TestReconstructRunState_PreviouslyResumedReentry(t *testing.T) {
-	rerun := true
-	c := NewFunctionNode("c", func(agent.Context, any) (string, error) { return "result", nil }, NodeConfig{RerunOnResume: &rerun})
+	c := NewFunctionNode("c", func(agent.Context, any) (string, error) { return "result", nil }, NodeConfig{RerunOnResume: new(true)})
 	wf, err := New("root", []Edge{{From: Start, To: c}})
 	if err != nil {
 		t.Fatal(err)
@@ -423,8 +422,7 @@ func TestWorkflow_CancelledDynamicChildDoesNotReplayOutput(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			path := "root@1"
-			resumeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &path})
+			resumeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("root@1")})
 			var sawJoin bool
 			for ev, err := range wf.Resume(resumeCtx, state, map[string]any{"b": "approved"}) {
 				if err != nil {

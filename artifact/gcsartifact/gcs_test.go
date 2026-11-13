@@ -253,16 +253,14 @@ func TestGCSArtifactServiceConcurrentSave(t *testing.T) {
 	gotVersions := make([]int64, savers)
 	errs := make([]error, savers)
 	for i := range savers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			resp, err := srv.Save(t.Context(), saveReq())
 			if err != nil {
 				errs[i] = err
 				return
 			}
 			gotVersions[i] = resp.Version
-		}()
+		})
 	}
 	wg.Wait()
 

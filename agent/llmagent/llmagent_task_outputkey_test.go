@@ -15,6 +15,7 @@
 package llmagent_test
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -74,11 +75,7 @@ func runCoordinatorWithTask(t *testing.T, taskAgent agent.Agent) map[string]any 
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := map[string]any{}
-	for k, v := range resp.Session.State().All() {
-		state[k] = v
-	}
-	return state
+	return maps.Collect(resp.Session.State().All())
 }
 
 // A task agent delivers its result through finish_task. A text turn before

@@ -68,8 +68,7 @@ func pinAuthResponse(requested *toolauth.Config, answer *toolauth.Credential) *t
 // agent path keeps the answer's state, so there the check proves nothing.
 func mergeOAuth2(target, source *toolauth.OAuth2Auth) *toolauth.OAuth2Auth {
 	if target == nil {
-		o := *source
-		return &o
+		return new(*source)
 	}
 	o := *target
 	o.State = source.State
