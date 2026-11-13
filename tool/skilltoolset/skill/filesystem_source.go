@@ -287,20 +287,27 @@ func (f *fileSystemSource) LoadResource(ctx context.Context, name, resourcePath 
 // approved directories and returns sanitized paths relative to the skill root.
 //
 // Every returned path is checked with resolveWithinSkill first, the same
-// check LoadResource applies, so this method never returns a path that
-// resolves outside the skill's own directory: such a path is left out of
-// the result rather than returned and then refused by LoadResource for
-// that reason. This also covers resourceDirectoryPath (or, when it is
-// empty, assets/, references/, or scripts/ itself) being a symlink:
-// fs.WalkDir and the fs.Stat this method runs before it both follow such a
-// link and walk whatever it points at, but every name found that way is
-// still checked before being included.
+// check LoadResource applies. On a filesystem that implements
+// fs.ReadLinkFS with an Lstat that reports a symlink without following
+// it, this means the method never returns a path that resolves outside
+// the skill's own directory: such a path is left out of the result
+// rather than returned and then refused by LoadResource for that reason.
+// On a filesystem that does not satisfy that condition -- including one
+// that wraps a ReadLinkFS-capable filesystem behind a plain fs.FS and so
+// hides the interface -- resolveWithinSkill has no way to see a symlink,
+// so a path escaping through one is listed the same as any ordinary
+// path, and LoadResource will later follow it unchecked. This also
+// covers resourceDirectoryPath (or, when it is empty, assets/,
+// references/, or scripts/ itself) being a symlink: fs.WalkDir and the
+// fs.Stat this method runs before it both follow such a link and walk
+// whatever it points at, but every name found that way is still checked,
+// subject to the same condition, before being included.
 //
-// This does not guarantee a returned path can be read successfully: it may
-// name a directory rather than a file (a symlink that resolves to one, or
-// a resourceDirectoryPath argument that names one directly), or otherwise
-// be unreadable, independently of this check. LoadResource -- or reading
-// what it returns -- can still fail for a path this method returned.
+// This does not guarantee a returned path can be read successfully: it
+// may name a directory rather than a file (a symlink that resolves to
+// one), or otherwise be unreadable, independently of this check.
+// LoadResource -- or reading what it returns -- can still fail for a
+// path this method returned.
 func (f *fileSystemSource) ListResources(ctx context.Context, name, resourceDirectoryPath string) ([]string, error) {
 	if err := f.validateSkill(name); err != nil {
 		return nil, err
