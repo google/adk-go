@@ -42,6 +42,9 @@ func normalize(v any, s *genai.Schema, loc []string, issues *[]issue) any {
 	if s == nil || (v == nil && isNullable(s)) {
 		return v
 	}
+	if isUnion(s) {
+		return normalizeUnion(v, s, loc, issues)
+	}
 	var out any
 	var kind string
 	switch upperType(s) {
@@ -300,8 +303,17 @@ func boolNumber(b bool) float64 {
 	return 0
 }
 
+// isNullable reports whether s accepts a null: it is marked nullable, or it is
+// a union with a NULL arm or a nullable arm.
 func isNullable(s *genai.Schema) bool {
-	return s.Nullable != nil && *s.Nullable
+	if s.Nullable != nil && *s.Nullable {
+		return true
+	}
+	if !isUnion(s) {
+		return false
+	}
+	_, nullable := unionArms(s)
+	return nullable
 }
 
 // child returns loc extended by name, in a new backing array so that sibling

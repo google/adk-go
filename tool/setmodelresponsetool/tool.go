@@ -42,7 +42,9 @@ func New(schema *genai.Schema) (tool.Tool, error) {
 }
 
 // NewFromJSONSchema returns the set_model_response tool for an output schema
-// given as a raw JSON schema.
+// given as a raw JSON schema. The tool does not validate an answer against
+// schema; it accepts the model's response argument as it is, as adk-python
+// does.
 func NewFromJSONSchema(schema *jsonschema.Schema) (tool.Tool, error) {
 	if schema == nil {
 		return nil, errors.New("set_model_response: schema is nil")
