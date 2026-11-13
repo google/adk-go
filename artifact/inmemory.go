@@ -51,6 +51,18 @@ type inMemoryService struct {
 // InMemoryService returns a new in-memory artifact service. Its Versions
 // returns version numbers in ascending order. Load reports a version that
 // holds the rewind marker (see [IsRewindTombstone]) as not found.
+//
+// The artifacts live only as long as the service, so it suits tests,
+// demonstrations and programs that need no persistence. The service is safe
+// for concurrent use.
+//
+// It stores text, inline data and file data. File data whose URI uses the
+// artifact:// scheme is a reference: Save refuses one that leaves the
+// caller's app, user or session, and Load follows it, checking each hop with
+// [ParseAndValidateReferenceURI]. Other file data is stored and loaded as it
+// is. Load and GetArtifactVersion report a negative version as not found. An
+// artifact or version that does not exist is an error wrapping
+// [fs.ErrNotExist].
 func InMemoryService() Service {
 	return &inMemoryService{}
 }
