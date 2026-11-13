@@ -8094,8 +8094,8 @@ func walkContextStructs(ctx context.Context, visit func(v reflect.Value) bool) {
 				stack = append(stack, f)
 			}
 		}
-		for i := len(priorityContextFields) - 1; i >= 0; i-- {
-			if f := v.FieldByName(priorityContextFields[i]); f.IsValid() {
+		for _, name := range slices.Backward(priorityContextFields) {
+			if f := v.FieldByName(name); f.IsValid() {
 				stack = append(stack, f)
 			}
 		}
@@ -8149,7 +8149,7 @@ func contextHasLaterAfterAgentPlugin(ctx context.Context, self *baseplugin.Plugi
 		selfIdx := -1
 		if self != nil {
 			selfPtr := reflect.ValueOf(self).Pointer()
-			for i := 0; i < n; i++ {
+			for i := range n {
 				elem := plugins.Index(i)
 				if elem.Kind() == reflect.Pointer && !elem.IsNil() && elem.Pointer() == selfPtr {
 					selfIdx = i
@@ -8158,7 +8158,7 @@ func contextHasLaterAfterAgentPlugin(ctx context.Context, self *baseplugin.Plugi
 			}
 		}
 		if selfIdx < 0 {
-			for i := 0; i < n; i++ {
+			for i := range n {
 				elem := plugins.Index(i)
 				if elem.Kind() != reflect.Pointer || elem.IsNil() {
 					continue

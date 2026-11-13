@@ -7917,9 +7917,7 @@ func streamBufferedConcurrentRun(
 	ch := make(chan botOut)
 	done := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer close(ch)
 		for ev, runErr := range second.Run(ctx) {
 			var ack chan bool
@@ -7942,7 +7940,7 @@ func streamBufferedConcurrentRun(
 				}
 			}
 		}
-	}()
+	})
 	defer func() {
 		onFlush()
 		close(done)
@@ -10592,7 +10590,7 @@ func TestAfterAgentActionMapsGCReuse_Runner(t *testing.T) {
 			var keep []*session.Event
 			runtime.GC()
 			runtime.GC()
-			for i := 0; i < 2000; i++ {
+			for range 2000 {
 				cand := session.NewEvent(ctx, ctx.InvocationID())
 				if target.shares(eventActionMaps(cand)) {
 					return cand, true

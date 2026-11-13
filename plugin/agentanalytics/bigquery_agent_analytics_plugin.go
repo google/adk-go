@@ -1012,7 +1012,7 @@ func hasNewEventUUID(id string) bool {
 	if len(id) != 36 {
 		return false
 	}
-	for i := 0; i < 36; i++ {
+	for i := range 36 {
 		c := id[i]
 		switch i {
 		case 8, 13, 18, 23:
@@ -1765,7 +1765,7 @@ func agentHasAfterAgentCallbacks(a agent.Agent) bool {
 			return false
 		}
 		if f := v.FieldByName("Config"); f.IsValid() && f.CanInterface() && !f.IsZero() {
-			if cfg, ok := f.Interface().(llmagent.Config); ok && len(cfg.AfterAgentCallbacks) > 0 {
+			if cfg, ok := reflect.TypeAssert[llmagent.Config](f); ok && len(cfg.AfterAgentCallbacks) > 0 {
 				return true
 			}
 		}
@@ -1776,7 +1776,7 @@ func agentHasAfterAgentCallbacks(a agent.Agent) bool {
 		if !inner.IsValid() || !inner.CanInterface() {
 			return false
 		}
-		next, ok := inner.Interface().(agent.Agent)
+		next, ok := reflect.TypeAssert[agent.Agent](inner)
 		if !ok {
 			return false
 		}
