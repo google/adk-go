@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,6 +33,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
@@ -600,4 +603,243 @@ func withCancelAfterDelay(t *testing.T) context.Context {
 		cancel()
 	})
 	return ctx
+}
+
+// A pause ends a resumable loop: no further pass starts (adk-python
+// loop_agent.py, `while ... not (should_exit or pause_invocation)`).
+func TestLoopAgent_ResumablePauseEndsLoop(t *testing.T) {
+	p, pRuns := newPausingAgent(t, "p", 1)
+	loop := newLoop(t, 5, p)
+
+	got := runLoop(t, loop, true)
+
+	want := []string{"p:p text", "p:FC(ask)"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("events mismatch (-want +got):\n%s", diff)
+	}
+	if n := pRuns.Load(); n != 2 {
+		t.Errorf("p ran %d times, want 2", n)
+	}
+}
+
+// Sub-agents after the paused one do not run in the same pass (adk-python
+// loop_agent.py, `if should_exit or pause_invocation: break`).
+func TestLoopAgent_ResumablePauseSkipsRestOfPass(t *testing.T) {
+	p, pRuns := newPausingAgent(t, "p", 0)
+	q, qRuns := newPausingAgent(t, "q", math.MaxInt32)
+	loop := newLoop(t, 2, p, q)
+
+	got := runLoop(t, loop, true)
+
+	want := []string{"p:FC(ask)"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("events mismatch (-want +got):\n%s", diff)
+	}
+	if n := pRuns.Load(); n != 1 {
+		t.Errorf("p ran %d times, want 1", n)
+	}
+	if n := qRuns.Load(); n != 0 {
+		t.Errorf("q ran %d times, want 0", n)
+	}
+}
+
+// The paused sub-agent's remaining events still reach the caller before the
+// loop ends: adk-python reads the sub-agent's whole stream before it checks
+// the pause (loop_agent.py, `async for event in agen`).
+func TestLoopAgent_ResumablePauseLetsPausedSubAgentFinish(t *testing.T) {
+	p, pRuns := newPausingAgent(t, "p", 0, "tail")
+	loop := newLoop(t, 2, p)
+
+	got := runLoop(t, loop, true)
+
+	want := []string{"p:FC(ask)", "p:tail"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("events mismatch (-want +got):\n%s", diff)
+	}
+	if n := pRuns.Load(); n != 1 {
+		t.Errorf("p ran %d times, want 1", n)
+	}
+}
+
+// A runner that is not resumable keeps looping through a long-running call,
+// as adk-go's sequential agent goes on to its next sub-agent there
+// (runner.TestRun_FunctionResponseResumesWorkflowSubAgent). adk-java guards
+// the pause the same way (InvocationContext.java, shouldPauseInvocation).
+func TestLoopAgent_NonResumablePauseDoesNotStopLoop(t *testing.T) {
+	p, pRuns := newPausingAgent(t, "p", 0)
+	loop := newLoop(t, 2, p)
+
+	got := runLoop(t, loop, false)
+
+	want := []string{"p:FC(ask)", "p:FC(ask)"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("events mismatch (-want +got):\n%s", diff)
+	}
+	if n := pRuns.Load(); n != 2 {
+		t.Errorf("p ran %d times, want 2", n)
+	}
+}
+
+// Run called on an invocation context without a run config, and so without
+// the resumable flag, never pauses.
+func TestLoopAgent_ContextWithoutRunConfigDoesNotPause(t *testing.T) {
+	p, pRuns := newPausingAgent(t, "p", 0)
+	loop := newLoop(t, 2, p)
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: loop})
+
+	var got []string
+	for ev, err := range loop.Run(ctx) {
+		if err != nil {
+			t.Errorf("Run() error = %v", err)
+			break
+		}
+		got = append(got, describeEvent(ev))
+	}
+
+	want := []string{"p:FC(ask)", "p:FC(ask)"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("events mismatch (-want +got):\n%s", diff)
+	}
+	if n := pRuns.Load(); n != 2 {
+		t.Errorf("p ran %d times, want 2", n)
+	}
+}
+
+// An event pauses the loop only when one of its own function calls is long
+// running: b's call "call-b" is not in its LongRunningToolIDs, so adk-python
+// does not pause (agents/invocation_context.py, should_pause_invocation) and
+// both passes run b and c.
+func TestLoopAgent_LongRunningIDOfAnotherCallDoesNotPause(t *testing.T) {
+	var bRuns atomic.Int32
+	b, err := agent.New(agent.Config{
+		Name: "b",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				bRuns.Add(1)
+				call := session.NewEvent(ctx, ctx.InvocationID())
+				call.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: "call-b", Name: "ask"}},
+				}}
+				call.LongRunningToolIDs = []string{"other"}
+				yield(call, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, cRuns := newPausingAgent(t, "c", math.MaxInt32)
+	loop := newLoop(t, 2, b, c)
+
+	got := runLoop(t, loop, true)
+
+	want := []string{"b:FC(ask)", "c:c text", "b:FC(ask)", "c:c text"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("events mismatch (-want +got):\n%s", diff)
+	}
+	if n := bRuns.Load(); n != 2 {
+		t.Errorf("b ran %d times, want 2", n)
+	}
+	if n := cRuns.Load(); n != 2 {
+		t.Errorf("c ran %d times, want 2", n)
+	}
+}
+
+// newPausingAgent returns an agent named name and a count of its runs. Each of
+// its first textRuns runs yields the text "<name> text". Every later run
+// yields a call to the long-running tool "ask", with ID "call-<name>", and
+// then one text event per entry of tail.
+func newPausingAgent(t *testing.T, name string, textRuns int32, tail ...string) (agent.Agent, *atomic.Int32) {
+	t.Helper()
+	runs := &atomic.Int32{}
+	a, err := agent.New(agent.Config{
+		Name: name,
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if runs.Add(1) <= textRuns {
+					yield(newTextEvent(ctx, name+" text"), nil)
+					return
+				}
+				callID := "call-" + name
+				call := session.NewEvent(ctx, ctx.InvocationID())
+				call.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: callID, Name: "ask"}},
+				}}
+				call.LongRunningToolIDs = []string{callID}
+				if !yield(call, nil) {
+					return
+				}
+				for _, text := range tail {
+					if !yield(newTextEvent(ctx, text), nil) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, runs
+}
+
+func newTextEvent(ctx agent.InvocationContext, text string) *session.Event {
+	ev := session.NewEvent(ctx, ctx.InvocationID())
+	ev.Content = genai.NewContentFromText(text, genai.RoleModel)
+	return ev
+}
+
+func newLoop(t *testing.T, maxIterations uint, subAgents ...agent.Agent) agent.Agent {
+	t.Helper()
+	loop, err := loopagent.New(loopagent.Config{
+		AgentConfig:   agent.Config{Name: "loop", SubAgents: subAgents},
+		MaxIterations: maxIterations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return loop
+}
+
+// runLoop runs root through a runner, resumable or not, and returns its
+// events as described by describeEvent.
+func runLoop(t *testing.T, root agent.Agent, resumable bool) []string {
+	t.Helper()
+	r, err := runner.New(runner.Config{
+		AppName:           "test_app",
+		Agent:             root,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+		Resumable:         resumable,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for ev, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Errorf("Run() error = %v", err)
+			break
+		}
+		got = append(got, describeEvent(ev))
+	}
+	return got
+}
+
+// describeEvent returns "<author>:" followed by each part of ev's content:
+// "FC(<name>)" for a function call, the text for a text part.
+func describeEvent(ev *session.Event) string {
+	var b strings.Builder
+	b.WriteString(ev.Author + ":")
+	if ev.Content == nil {
+		return b.String()
+	}
+	for _, part := range ev.Content.Parts {
+		if part.FunctionCall != nil {
+			fmt.Fprintf(&b, "FC(%s)", part.FunctionCall.Name)
+			continue
+		}
+		b.WriteString(part.Text)
+	}
+	return b.String()
 }

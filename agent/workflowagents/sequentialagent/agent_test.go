@@ -16,10 +16,12 @@ package sequentialagent_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,12 +31,16 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
+	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 func TestNewSequentialAgent(t *testing.T) {
@@ -1102,5 +1108,365 @@ func TestSequentialAgent_FindAgentReturnsSequentialAgent(t *testing.T) {
 				t.Errorf("FindAgent(%q) = %T(%p), want %T(%p)", tc.targetName, got, got, tc.want, tc.want)
 			}
 		})
+	}
+}
+
+// pausingAgent returns an agent named name that yields one event with a
+// long-running call to "ask" (ID "call-<name>"), then one text event per entry
+// of tail. runs counts its runs.
+func pausingAgent(t *testing.T, name string, runs *atomic.Int32, tail ...string) agent.Agent {
+	t.Helper()
+	return signalingPausingAgent(t, name, runs, make(chan struct{}), tail...)
+}
+
+// signalingPausingAgent is pausingAgent that also closes yielded once the
+// consumer has taken the call event, which in a runner means the session
+// holds it.
+func signalingPausingAgent(t *testing.T, name string, runs *atomic.Int32, yielded chan struct{}, tail ...string) agent.Agent {
+	t.Helper()
+	return mustAgent(agent.New(agent.Config{Name: name, Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			runs.Add(1)
+			if !yield(longRunningCallEvent(ctx, name), nil) {
+				return
+			}
+			close(yielded)
+			for _, text := range tail {
+				if !yield(textEvent(ctx, name, text), nil) {
+					return
+				}
+			}
+		}
+	}}))
+}
+
+// textAgent returns an agent named name that yields the text "<name> text".
+// runs counts its runs.
+func textAgent(t *testing.T, name string, runs *atomic.Int32) agent.Agent {
+	t.Helper()
+	return mustAgent(agent.New(agent.Config{Name: name, Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			runs.Add(1)
+			yield(textEvent(ctx, name, name+" text"), nil)
+		}
+	}}))
+}
+
+func longRunningCallEvent(ctx agent.InvocationContext, author string) *session.Event {
+	ev := session.NewEvent(ctx, ctx.InvocationID())
+	ev.Author = author
+	ev.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{ID: "call-" + author, Name: "ask", Args: map[string]any{}}},
+	}}
+	ev.LongRunningToolIDs = []string{"call-" + author}
+	return ev
+}
+
+func textEvent(ctx agent.InvocationContext, author, text string) *session.Event {
+	ev := session.NewEvent(ctx, ctx.InvocationID())
+	ev.Author = author
+	ev.Content = genai.NewContentFromText(text, genai.RoleModel)
+	return ev
+}
+
+// describeEvent renders ev as "author:" followed by "FC(name)" for each
+// function call, "FR(name)" for each function response and the text of each
+// text part, or as "author:END" for an end-of-agent event.
+func describeEvent(ev *session.Event) string {
+	if ev.Actions.EndOfAgent != nil && *ev.Actions.EndOfAgent {
+		return ev.Author + ":END"
+	}
+	var b strings.Builder
+	if ev.Content != nil {
+		for _, p := range ev.Content.Parts {
+			switch {
+			case p.FunctionCall != nil:
+				fmt.Fprintf(&b, "FC(%s)", p.FunctionCall.Name)
+			case p.FunctionResponse != nil:
+				fmt.Fprintf(&b, "FR(%s)", p.FunctionResponse.Name)
+			default:
+				b.WriteString(p.Text)
+			}
+		}
+	}
+	return ev.Author + ":" + b.String()
+}
+
+// runResumable runs root for one turn on a resumable runner and returns the
+// described events and the errors, reading on after an error as the runner's
+// callers do.
+func runResumable(t *testing.T, root agent.Agent) ([]string, []string) {
+	t.Helper()
+	r, err := runner.New(runner.Config{
+		AppName:           "test_app",
+		Agent:             root,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+		Resumable:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events, errs []string
+	for ev, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+		events = append(events, describeEvent(ev))
+	}
+	return events, errs
+}
+
+// scriptedLLM replies with its responses in order and counts its requests.
+type scriptedLLM struct {
+	mu        sync.Mutex
+	responses []*genai.Content
+	requests  int
+}
+
+func (m *scriptedLLM) Name() string { return "scripted" }
+
+func (m *scriptedLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.mu.Lock()
+		m.requests++
+		if len(m.responses) == 0 {
+			m.mu.Unlock()
+			yield(nil, errors.New("scripted model has no response left"))
+			return
+		}
+		content := m.responses[0]
+		m.responses = m.responses[1:]
+		m.mu.Unlock()
+		yield(&model.LLMResponse{Content: content, FinishReason: genai.FinishReasonStop}, nil)
+	}
+}
+
+func TestSequentialAgent_ResumablePauseSkipsLaterSubAgents(t *testing.T) {
+	var aRuns, bRuns, cRuns atomic.Int32
+	root := newSequentialAgent(t, []agent.Agent{
+		textAgent(t, "a", &aRuns),
+		pausingAgent(t, "b", &bRuns),
+		textAgent(t, "c", &cRuns),
+	}, "root")
+
+	events, errs := runResumable(t, root)
+
+	if diff := cmp.Diff([]string{"a:a text", "b:FC(ask)"}, events); diff != "" {
+		t.Errorf("events (-want +got):\n%s", diff)
+	}
+	if len(errs) != 0 {
+		t.Errorf("errors = %v, want none", errs)
+	}
+	if got := cRuns.Load(); got != 0 {
+		t.Errorf("c ran %d times after b paused the invocation, want 0", got)
+	}
+}
+
+// TestSequentialAgent_ResumablePauseLetsPausedSubAgentFinish checks that the
+// sub-agent that pauses still yields the rest of its events, as adk-python's
+// SequentialAgent drains it (agents/sequential_agent.py), and that the next
+// sub-agent does not run.
+func TestSequentialAgent_ResumablePauseLetsPausedSubAgentFinish(t *testing.T) {
+	type args struct{}
+	longRunning, err := functiontool.New(functiontool.Config{Name: "ask_human", Description: "asks", IsLongRunning: true},
+		func(agent.Context, args) (map[string]any, error) { return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary, err := functiontool.New(functiontool.Config{Name: "lookup", Description: "looks up"},
+		func(agent.Context, args) (map[string]any, error) { return map[string]any{"v": 1}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &scriptedLLM{responses: []*genai.Content{
+		{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "lr-1", Name: "ask_human", Args: map[string]any{}}},
+			{FunctionCall: &genai.FunctionCall{ID: "fc-2", Name: "lookup", Args: map[string]any{}}},
+		}},
+		genai.NewContentFromText("done", genai.RoleModel),
+	}}
+	first, err := llmagent.New(llmagent.Config{Name: "first", Model: llm, Tools: []tool.Tool{longRunning, ordinary}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var afterRuns atomic.Int32
+	root := newSequentialAgent(t, []agent.Agent{first, textAgent(t, "after", &afterRuns)}, "root")
+
+	events, errs := runResumable(t, root)
+
+	want := []string{"first:FC(ask_human)FC(lookup)", "first:FR(lookup)", "first:done"}
+	if diff := cmp.Diff(want, events); diff != "" {
+		t.Errorf("events (-want +got):\n%s", diff)
+	}
+	if len(errs) != 0 {
+		t.Errorf("errors = %v, want none", errs)
+	}
+	if llm.requests != 2 {
+		t.Errorf("first's model got %d requests, want 2", llm.requests)
+	}
+	if got := afterRuns.Load(); got != 0 {
+		t.Errorf("after ran %d times after first paused the invocation, want 0", got)
+	}
+}
+
+// TestSequentialAgent_PauseInDescendantStopsSequence checks that a pause
+// raised below a nested shell agent also stops the outer sequence.
+func TestSequentialAgent_PauseInDescendantStopsSequence(t *testing.T) {
+	tests := []struct {
+		name string
+		// inner builds the first sub-agent of the outer sequence, which holds
+		// the pausing agent "p"; pRuns counts p's runs and otherRuns those of
+		// the agents beside it that must not run.
+		inner      func(t *testing.T, pRuns, otherRuns *atomic.Int32) agent.Agent
+		wantEvents []string
+	}{
+		{
+			name: "sequential",
+			inner: func(t *testing.T, pRuns, otherRuns *atomic.Int32) agent.Agent {
+				return newSequentialAgent(t, []agent.Agent{pausingAgent(t, "p", pRuns), textAgent(t, "q", otherRuns)}, "inner")
+			},
+			wantEvents: []string{"p:FC(ask)"},
+		},
+		{
+			name: "loop",
+			inner: func(t *testing.T, pRuns, _ *atomic.Int32) agent.Agent {
+				return mustAgent(loopagent.New(loopagent.Config{
+					AgentConfig:   agent.Config{Name: "inner", SubAgents: []agent.Agent{pausingAgent(t, "p", pRuns)}},
+					MaxIterations: 3,
+				}))
+			},
+			wantEvents: []string{"p:FC(ask)"},
+		},
+		{
+			name: "parallel",
+			inner: func(t *testing.T, pRuns, _ *atomic.Int32) agent.Agent {
+				yielded := make(chan struct{})
+				return mustAgent(parallelagent.New(parallelagent.Config{
+					AgentConfig: agent.Config{Name: "inner", SubAgents: []agent.Agent{
+						signalingPausingAgent(t, "p", pRuns, yielded),
+						gatedTextAgent(t, "s", yielded),
+					}},
+				}))
+			},
+			// The sibling branch finishes before the outer sequence stops.
+			wantEvents: []string{"p:FC(ask)", "s:s text"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var pRuns, otherRuns, afterRuns atomic.Int32
+			root := newSequentialAgent(t, []agent.Agent{tc.inner(t, &pRuns, &otherRuns), textAgent(t, "after", &afterRuns)}, "root")
+
+			events, errs := runResumable(t, root)
+
+			if diff := cmp.Diff(tc.wantEvents, events); diff != "" {
+				t.Errorf("events (-want +got):\n%s", diff)
+			}
+			if len(errs) != 0 {
+				t.Errorf("errors = %v, want none", errs)
+			}
+			if got := pRuns.Load(); got != 1 {
+				t.Errorf("p ran %d times, want 1", got)
+			}
+			if got := otherRuns.Load(); got != 0 {
+				t.Errorf("p's later sibling ran %d times, want 0", got)
+			}
+			if got := afterRuns.Load(); got != 0 {
+				t.Errorf("after ran %d times after p paused the invocation, want 0", got)
+			}
+		})
+	}
+}
+
+// gatedTextAgent returns an agent named name that yields "<name> text" once
+// gate is closed.
+func gatedTextAgent(t *testing.T, name string, gate <-chan struct{}) agent.Agent {
+	t.Helper()
+	return mustAgent(agent.New(agent.Config{Name: name, Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			select {
+			case <-ctx.Done():
+				yield(nil, ctx.Err())
+			case <-gate:
+				yield(textEvent(ctx, name, name+" text"), nil)
+			}
+		}
+	}}))
+}
+
+func TestSequentialAgent_ErrorAfterPausingEventIsYielded(t *testing.T) {
+	b := mustAgent(agent.New(agent.Config{Name: "b", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			if !yield(longRunningCallEvent(ctx, "b"), nil) {
+				return
+			}
+			yield(nil, errors.New("boom"))
+		}
+	}}))
+	var cRuns atomic.Int32
+	root := newSequentialAgent(t, []agent.Agent{b, textAgent(t, "c", &cRuns)}, "root")
+
+	events, errs := runResumable(t, root)
+
+	if diff := cmp.Diff([]string{"b:FC(ask)"}, events); diff != "" {
+		t.Errorf("events (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"boom"}, errs); diff != "" {
+		t.Errorf("errors (-want +got):\n%s", diff)
+	}
+	if got := cRuns.Load(); got != 0 {
+		t.Errorf("c ran %d times, want 0", got)
+	}
+}
+
+// TestSequentialAgent_ContextWithoutRunConfigDoesNotPause checks that a
+// sequence run outside a runner, with no run config, is not resumable and so
+// runs every sub-agent.
+func TestSequentialAgent_ContextWithoutRunConfigDoesNotPause(t *testing.T) {
+	var pRuns, cRuns atomic.Int32
+	root := newSequentialAgent(t, []agent.Agent{pausingAgent(t, "p", &pRuns), textAgent(t, "c", &cRuns)}, "root")
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: root})
+
+	var events []string
+	for ev, err := range root.Run(ctx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, describeEvent(ev))
+	}
+
+	if diff := cmp.Diff([]string{"p:FC(ask)", "c:c text"}, events); diff != "" {
+		t.Errorf("events (-want +got):\n%s", diff)
+	}
+}
+
+// TestSequentialAgent_LongRunningIDOfAnotherCallDoesNotPause checks that an
+// event pauses the sequence only when one of its own function calls is long
+// running: b's call "call-b" is not in its LongRunningToolIDs, so adk-python
+// does not pause (agents/invocation_context.py, should_pause_invocation) and
+// c runs.
+func TestSequentialAgent_LongRunningIDOfAnotherCallDoesNotPause(t *testing.T) {
+	var cRuns atomic.Int32
+	b := mustAgent(agent.New(agent.Config{Name: "b", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			ev := longRunningCallEvent(ctx, "b")
+			ev.LongRunningToolIDs = []string{"other"}
+			yield(ev, nil)
+		}
+	}}))
+	root := newSequentialAgent(t, []agent.Agent{b, textAgent(t, "c", &cRuns)}, "root")
+
+	events, errs := runResumable(t, root)
+
+	if diff := cmp.Diff([]string{"b:FC(ask)", "c:c text"}, events); diff != "" {
+		t.Errorf("events (-want +got):\n%s", diff)
+	}
+	if len(errs) != 0 {
+		t.Errorf("errors = %v, want none", errs)
+	}
+	if got := cRuns.Load(); got != 1 {
+		t.Errorf("c ran %d times, want 1", got)
 	}
 }
