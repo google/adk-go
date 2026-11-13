@@ -81,7 +81,9 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	)
 
 	subAgents := ctx.Agent().SubAgents()
+	resuming := false
 	if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+		resuming = true
 		selected := make([]agent.Agent, 0, len(indexes))
 		for _, i := range indexes {
 			selected = append(selected, subAgents[i])
@@ -94,6 +96,9 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
 		}
 		subAgent := sa
+		if resuming {
+			subAgent = utils.ResumeSubAgent(ctx, sa)
+		}
 		errGroup.Go(func() error {
 			// Keep the parent's isolation scope: a workflow node stamps it on
 			// every event the branches emit, and the LLM history filter matches

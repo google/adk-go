@@ -450,9 +450,9 @@ type llmAgent struct {
 
 type agentState = agentinternal.State
 
-func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+func (a *llmAgent) run(parentCtx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	var ag agent.Agent = a
-	ctx = ctx.WithICDelta(&agent.InvocationContextDelta{Agent: &ag})
+	ctx := parentCtx.WithICDelta(&agent.InvocationContextDelta{Agent: &ag})
 
 	f := &llminternal.Flow{
 		Model:                 a.model,
@@ -467,6 +467,11 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 	}
 
 	return func(yield func(*session.Event, error) bool) {
+		defer func() {
+			if ctx.Ended() {
+				parentCtx.EndInvocation()
+			}
+		}()
 		for ev, err := range f.Run(ctx) {
 			a.maybeSaveOutputToState(ev)
 			if !yield(ev, err) {

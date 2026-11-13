@@ -29,11 +29,16 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/exp/authflow"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolauth"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 func TestNewSequentialAgent(t *testing.T) {
@@ -1026,4 +1031,221 @@ func TestSequentialAgent_FindAgentReturnsSequentialAgent(t *testing.T) {
 			}
 		})
 	}
+}
+
+type singleCallLLM struct {
+	model.LLM
+	call  *genai.FunctionCall
+	calls int
+}
+
+func (m *singleCallLLM) Name() string { return "single-call-llm" }
+
+func (m *singleCallLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.calls++
+		if m.calls == 1 {
+			yield(&model.LLMResponse{
+				Content: &genai.Content{
+					Role:  genai.RoleModel,
+					Parts: []*genai.Part{{FunctionCall: m.call}},
+				},
+			}, nil)
+			return
+		}
+		yield(&model.LLMResponse{
+			Content: genai.NewContentFromText("first done", genai.RoleModel),
+		}, nil)
+	}
+}
+
+func TestSequentialAgentStopsOnSubAgentPause(t *testing.T) {
+	t.Run("tool confirmation pauses sequence and continues on approval", func(t *testing.T) {
+		askTool, err := functiontool.New(functiontool.Config{
+			Name:                "ask_approval",
+			Description:         "requires approval",
+			RequireConfirmation: true,
+		}, func(agent.Context, struct{}) (map[string]any, error) {
+			return map[string]any{"ok": true}, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		firstLLM := &singleCallLLM{call: &genai.FunctionCall{ID: "call-1", Name: "ask_approval", Args: map[string]any{}}}
+		first, err := llmagent.New(llmagent.Config{
+			Name:  "first",
+			Model: firstLLM,
+			Tools: []tool.Tool{askTool},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		secondLLM := &FakeLLM{id: 1}
+		second, err := llmagent.New(llmagent.Config{Name: "second", Model: secondLLM})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := runner.New(runner.Config{
+			AppName:           "test_app",
+			Agent:             newSequentialAgent(t, []agent.Agent{first, second}, "pipeline"),
+			SessionService:    session.InMemoryService(),
+			AutoCreateSession: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var confID string
+		for ev, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("Run() unexpected error: %v", err)
+			}
+			if ev != nil && ev.Content != nil {
+				for _, p := range ev.Content.Parts {
+					if p.FunctionCall != nil && p.FunctionCall.Name == toolconfirmation.FunctionCallName {
+						confID = p.FunctionCall.ID
+					}
+				}
+			}
+		}
+		if confID == "" {
+			t.Fatal("first turn did not emit adk_request_confirmation")
+		}
+		if firstLLM.calls != 1 {
+			t.Errorf("first agent's model called %d times, want 1", firstLLM.calls)
+		}
+		if secondLLM.callCounter != 0 {
+			t.Fatalf("second agent's model called %d times before approval, want 0", secondLLM.callCounter)
+		}
+
+		approval := &genai.Content{
+			Role: genai.RoleUser,
+			Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				ID:       confID,
+				Name:     toolconfirmation.FunctionCallName,
+				Response: map[string]any{"confirmed": true},
+			}}},
+		}
+		for _, err := range r.Run(t.Context(), "user_id", "session_id", approval, agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("resume Run() unexpected error: %v", err)
+			}
+		}
+		if firstLLM.calls != 2 {
+			t.Errorf("first agent's model called %d times after approval, want 2", firstLLM.calls)
+		}
+		if secondLLM.callCounter != 1 {
+			t.Errorf("second agent's model called %d times after approval, want 1", secondLLM.callCounter)
+		}
+	})
+
+	t.Run("credential request stops sequence and continues after sign-in", func(t *testing.T) {
+		authCfg := &toolauth.Config{
+			AuthScheme: toolauth.Scheme{Type: toolauth.SchemeTypeHTTP, Scheme: "bearer"},
+		}
+		authTool, err := functiontool.New(functiontool.Config{
+			Name:        "need_auth",
+			Description: "requests a credential",
+		}, func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			cred, err := authflow.GetAuthResponse(ctx, authCfg)
+			if err != nil {
+				return nil, err
+			}
+			if cred == nil {
+				if err := authflow.RequestCredential(ctx, authCfg); err != nil {
+					return nil, err
+				}
+				return map[string]any{"status": "pending"}, nil
+			}
+			return map[string]any{"status": "authenticated"}, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterAgentRan := false
+		firstLLM := &singleCallLLM{call: &genai.FunctionCall{ID: "call-auth", Name: "need_auth", Args: map[string]any{}}}
+		first, err := llmagent.New(llmagent.Config{
+			Name:  "first",
+			Model: firstLLM,
+			Tools: []tool.Tool{authTool},
+			AfterAgentCallbacks: []agent.AfterAgentCallback{
+				func(agent.Context) (*genai.Content, error) {
+					afterAgentRan = true
+					return nil, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		secondLLM := &FakeLLM{id: 1}
+		second, err := llmagent.New(llmagent.Config{Name: "second", Model: secondLLM})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := runner.New(runner.Config{
+			AppName:           "test_app",
+			Agent:             newSequentialAgent(t, []agent.Agent{first, second}, "pipeline"),
+			SessionService:    session.InMemoryService(),
+			AutoCreateSession: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var credCallID string
+		var credResp map[string]any
+		for ev, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("Run() unexpected error: %v", err)
+			}
+			if ev != nil && ev.Content != nil {
+				for _, p := range ev.Content.Parts {
+					if p.FunctionCall != nil && p.FunctionCall.Name == toolauth.RequestCredentialFunctionCallName {
+						credCallID = p.FunctionCall.ID
+						cfgArg, _ := p.FunctionCall.Args["authConfig"].(map[string]any)
+						credResp = map[string]any{
+							"authScheme": cfgArg["authScheme"],
+							"exchangedAuthCredential": map[string]any{
+								"authType": toolauth.CredentialTypeHTTP,
+								"http": map[string]any{
+									"scheme":      "bearer",
+									"credentials": map[string]any{"token": "tok-1"},
+								},
+							},
+						}
+					}
+				}
+			}
+		}
+		if credCallID == "" {
+			t.Fatal("first turn did not emit adk_request_credential")
+		}
+		if afterAgentRan {
+			t.Error("first agent's AfterAgentCallback ran after EndInvocation")
+		}
+		if secondLLM.callCounter != 0 {
+			t.Fatalf("second agent's model called %d times before sign-in, want 0", secondLLM.callCounter)
+		}
+
+		credAnswer := &genai.Content{
+			Role: genai.RoleUser,
+			Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				ID:       credCallID,
+				Name:     toolauth.RequestCredentialFunctionCallName,
+				Response: credResp,
+			}}},
+		}
+		for _, err := range r.Run(t.Context(), "user_id", "session_id", credAnswer, agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("resume Run() unexpected error: %v", err)
+			}
+		}
+		if !afterAgentRan {
+			t.Error("first agent's AfterAgentCallback did not run after sign-in completed first")
+		}
+		if secondLLM.callCounter != 1 {
+			t.Errorf("second agent's model called %d times after sign-in, want 1", secondLLM.callCounter)
+		}
+	})
 }

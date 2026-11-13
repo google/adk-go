@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"slices"
 	"sync"
 
 	"google.golang.org/adk/v2/agent"
@@ -94,16 +95,37 @@ type liveRunner interface {
 func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		subAgents := ctx.Agent().SubAgents()
-		if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
-			subAgents = subAgents[indexes[0]:]
+		indexes := utils.GraphResumeIndexes(ctx)
+		startIdx := 0
+		resuming := len(indexes) > 0
+		if resuming {
+			startIdx = indexes[0]
 		}
-		for _, subAgent := range subAgents {
-			for event, err := range subAgent.Run(ctx) {
+		for i := startIdx; i < len(subAgents); i++ {
+			subAgent := subAgents[i]
+			subCtx := ctx
+			if resuming {
+				if slices.Contains(indexes, i) {
+					subAgent = utils.ResumeSubAgent(ctx, subAgent)
+					subCtx = utils.WithWorkflowResuming(ctx)
+				} else {
+					subCtx = utils.WithGraphResumeDone(ctx)
+				}
+			}
+			pauseInvocation := false
+			for event, err := range subAgent.Run(subCtx) {
 				// A failed sub-agent ends the sequence, as in adk-python: later
 				// sub-agents would run without the output they depend on.
 				if !yield(event, err) || err != nil {
 					return
 				}
+				if utils.ShouldPauseInvocation(event) {
+					pauseInvocation = true
+				}
+			}
+			if pauseInvocation || utils.HasUnresolvedLongRunningCalls(ctx) {
+				ctx.EndInvocation()
+				return
 			}
 		}
 	}
