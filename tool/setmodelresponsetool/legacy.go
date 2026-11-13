@@ -19,15 +19,18 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/sessionutils"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // AsLegacy returns a tool that behaves like t, but whose Declaration sets the
 // typed Parameters (a *genai.Schema) and leaves ParametersJsonSchema nil. The
 // caller's schema is not modified. If t is not a tool of this package, AsLegacy
 // returns t unchanged. The returned tool implements the interface the flow runs
-// (Name, Description, IsLongRunning, Declaration, Run), and is safe for
-// concurrent use.
+// (Name, Description, IsLongRunning, Declaration, Run) and ProcessRequest, which
+// packs the typed declaration, so it can be listed in llmagent.Config.Tools as
+// t can. It is safe for concurrent use.
 //
 // EXPERIMENTAL: AsLegacy is experimental; its API and behavior may change or be removed in a later version.
 func AsLegacy(t tool.Tool) tool.Tool {
@@ -52,6 +55,12 @@ func (l *legacyTool) IsLongRunning() bool { return l.t.IsLongRunning() }
 
 func (l *legacyTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	return l.t.Run(ctx, args)
+}
+
+// ProcessRequest packs the typed declaration into the request, with the error
+// of toolutils.PackTool for a duplicate name.
+func (l *legacyTool) ProcessRequest(_ agent.Context, req *model.LLMRequest) error {
+	return toolutils.PackTool(req, l)
 }
 
 // Declaration declares a record as a copy of its schema, and every other

@@ -14,6 +14,10 @@
 
 // Package setmodelresponsetool provides the tool a model calls to return its
 // structured final answer.
+//
+// List the tool in llmagent.Config.Tools only for an agent without an
+// OutputSchema: an agent with one adds its own set_model_response tool when it
+// needs one, and a second tool of that name fails the run as a duplicate.
 package setmodelresponsetool
 
 import (
@@ -25,8 +29,11 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/exp/feature"
 	"google.golang.org/adk/v2/internal/sessionutils"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // Name is the name of the tool, "set_model_response".
@@ -93,6 +100,18 @@ type smrTool struct {
 func (t *smrTool) Name() string { return Name }
 
 func (t *smrTool) IsLongRunning() bool { return false }
+
+// ProcessRequest packs the tool's declaration into the request: the typed form
+// of AsLegacy when feature.LegacyFunctionDeclarationSchema(ctx) is true, and
+// Declaration otherwise. It returns the error of toolutils.PackTool when req
+// already holds a tool named set_model_response.
+func (t *smrTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	var declared toolutils.Tool = t
+	if feature.LegacyFunctionDeclarationSchema(ctx) {
+		declared = &legacyTool{t: t}
+	}
+	return toolutils.PackTool(req, declared)
+}
 
 // Run checks the model's answer. A valid answer is stored, as a clone, in
 // ctx.Actions().SetModelResponse and returned: a map as it is, anything else
