@@ -645,6 +645,31 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 		}
 	})
 
+	t.Run("OutputSchema null reply: marked MessageAsOutput", func(t *testing.T) {
+		t.Parallel()
+		schema := &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"title": {Type: genai.TypeString},
+			},
+		}
+		a := makeLLMAgent(t, "x", withOutputSchema(schema))
+		ev := &session.Event{
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "null"}},
+				},
+			},
+		}
+		if err := llmagent.ProcessLLMAgentOutput(a, ev); err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if ev.NodeInfo == nil || !ev.NodeInfo.MessageAsOutput {
+			t.Errorf("MessageAsOutput is unset, want true (a null reply has no parsed value to keep)")
+		}
+	})
+
 	t.Run("OutputSchema invalid JSON: returns validation error", func(t *testing.T) {
 		t.Parallel()
 		schema := &genai.Schema{

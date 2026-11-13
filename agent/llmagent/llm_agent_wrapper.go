@@ -248,8 +248,8 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 //   - stash the parsed value on event.Output for the node's terminal
 //     output;
 //   - mark the message as the node's output (NodeInfo.MessageAsOutput),
-//     except when the OutputSchema produced a parsed value, which is the
-//     output in its own right.
+//     except when the OutputSchema produced a non-null parsed value, which
+//     is the output in its own right.
 //
 // Returns an error iff OutputSchema validation fails on a non-empty
 // model reply; the caller (runSingleTurn) propagates it.
@@ -284,11 +284,15 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 	text := b.String()
 
 	var output any
+	// parsed stays nil for a reply of literal null, which validates as a nil
+	// map when the schema has no required fields.
+	var parsed map[string]any
 	if state.OutputSchema != nil {
 		if strings.TrimSpace(text) == "" {
 			output = nil
 		} else {
-			parsed, err := utils.ValidateOutputSchema(text, state.OutputSchema)
+			var err error
+			parsed, err = utils.ValidateOutputSchema(text, state.OutputSchema)
 			if err != nil {
 				return fmt.Errorf("LlmAgent %q output validation failed: %w", a.Name(), err)
 			}
@@ -308,8 +312,9 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 	ev.Output = output
 
 	// The runner drops Output from events flagged MessageAsOutput, which
-	// would discard the parsed value.
-	if state.OutputSchema != nil && output != nil {
+	// would discard a non-null parsed value. A null reply has no value to keep,
+	// and stored events do not round-trip it, so it keeps the flag.
+	if parsed != nil {
 		return nil
 	}
 	if ev.NodeInfo == nil {
