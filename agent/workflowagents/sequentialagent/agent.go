@@ -98,7 +98,7 @@ func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Ev
 			subAgents = subAgents[indexes[0]:]
 		}
 		for _, subAgent := range subAgents {
-			for event, err := range subAgent.Run(ctx) {
+			for event, err := range subAgent.Run(utils.PassErrRelay(ctx, subAgent)) {
 				// A failed sub-agent ends the sequence, as in adk-python: later
 				// sub-agents would run without the output they depend on.
 				if !yield(event, err) || err != nil {

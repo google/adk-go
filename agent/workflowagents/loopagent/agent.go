@@ -103,7 +103,7 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 
 			shouldExit := false
 			for _, subAgent := range subAgents {
-				for event, err := range subAgent.Run(passCtx) {
+				for event, err := range subAgent.Run(utils.PassErrRelay(passCtx, subAgent)) {
 					// A failed sub-agent ends the loop, as in adk-python. Retrying
 					// it would repeat the same failure, forever when there is no
 					// MaxIterations.
