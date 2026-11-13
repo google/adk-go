@@ -277,6 +277,89 @@ func TestLiveConnectionSendHistoryFiltersInternalParts(t *testing.T) {
 			},
 			wantTurnComplete: true,
 		},
+		{
+			// A text model's thought signatures make the Live API close the
+			// connection with 1007, so they are dropped from every part that
+			// carries one, while the rest of the part is kept.
+			name: "DropsThoughtSignatures",
+			history: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "what is the weather?"}},
+				},
+				{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "let me check", Thought: true, ThoughtSignature: []byte("sig-thought")},
+						{FunctionCall: &genai.FunctionCall{Name: "get_weather", Args: map[string]any{"city": "Paris"}}, ThoughtSignature: []byte("sig-call")},
+					},
+				},
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "get_weather", Response: map[string]any{"sky": "clear"}}}},
+				},
+				{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "it is clear", ThoughtSignature: []byte("sig-text")}},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "what is the weather?"}},
+				},
+				{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "let me check", Thought: true},
+						{FunctionCall: &genai.FunctionCall{Name: "get_weather", Args: map[string]any{"city": "Paris"}}},
+					},
+				},
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "get_weather", Response: map[string]any{"sky": "clear"}}}},
+				},
+				{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "it is clear"}},
+				},
+			},
+			wantTurnComplete: false,
+		},
+		{
+			// Gemini can put a signature on an empty part of its own, with or
+			// without the thought marker. Without the signature it holds
+			// nothing, so it is dropped, and so is a turn left empty.
+			name: "DropsSignatureOnlyParts",
+			history: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+				{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "hi there"},
+						{ThoughtSignature: []byte("sig-trailing")},
+					},
+				},
+				{
+					Role:  "model",
+					Parts: []*genai.Part{{Thought: true, ThoughtSignature: []byte("sig-marked")}},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+				{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "hi there"}},
+				},
+			},
+			wantTurnComplete: false,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -298,6 +381,36 @@ func TestLiveConnectionSendHistoryFiltersInternalParts(t *testing.T) {
 				t.Errorf("SendHistory sent turnComplete=%t, want %t", got, tc.wantTurnComplete)
 			}
 		})
+	}
+}
+
+// TestLiveConnectionSendHistoryKeepsSessionSignatures checks that dropping
+// thought signatures from the live history leaves the caller's contents alone:
+// they are the session's events, and later text turns still need the
+// signatures. It also checks the wire frame, not only the decoded turns, so a
+// signature cannot reach the Live API under another encoding.
+func TestLiveConnectionSendHistoryKeepsSessionSignatures(t *testing.T) {
+	conn, frames := connectFakeLive(t, genai.BackendGeminiAPI, "gemini-2.0-flash-live-001")
+	callPart := &genai.Part{
+		FunctionCall:     &genai.FunctionCall{Name: "get_weather"},
+		ThoughtSignature: []byte("sig-call"),
+	}
+	history := []*genai.Content{
+		{Role: "user", Parts: []*genai.Part{{Text: "weather?"}}},
+		{Role: "model", Parts: []*genai.Part{callPart}},
+	}
+	if err := conn.SendHistory(t.Context(), history); err != nil {
+		t.Fatalf("SendHistory failed: %v", err)
+	}
+	raw := testutil.AwaitValue(t, frames, "history frame")
+	if strings.Contains(string(raw), "thoughtSignature") || strings.Contains(string(raw), "thought_signature") {
+		t.Errorf("SendHistory sent a thought signature to the Live API: %s", raw)
+	}
+	if got := string(callPart.ThoughtSignature); got != "sig-call" {
+		t.Errorf("SendHistory changed the caller's part: ThoughtSignature = %q, want %q", got, "sig-call")
+	}
+	if history[1].Parts[0] != callPart {
+		t.Error("SendHistory replaced a part in the caller's history")
 	}
 }
 
