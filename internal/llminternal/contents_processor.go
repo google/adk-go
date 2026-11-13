@@ -1102,8 +1102,10 @@ func buildTaskInputUserContent(events []*session.Event, isolationScope string, i
 	if userContent == nil || len(userContent.Parts) == 0 {
 		return nil
 	}
+	// A deep copy, like every other request content: request processors edit
+	// parts in place, and the caller and concurrent runs may share these.
 	parts := make([]*genai.Part, 0, len(userContent.Parts)+1)
-	parts = append(parts, userContent.Parts...)
+	parts = append(parts, clone(userContent).Parts...)
 	if isSingleTurn {
 		parts = append(parts, &genai.Part{Text: SingleTurnNudge})
 	}

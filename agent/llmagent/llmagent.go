@@ -32,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/planner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 )
@@ -96,6 +97,7 @@ func New(cfg Config) (agent.Agent, error) {
 			GlobalInstruction:         cfg.GlobalInstruction,
 			GlobalInstructionProvider: llminternal.InstructionProvider(cfg.GlobalInstructionProvider),
 			OutputKey:                 cfg.OutputKey,
+			Planner:                   cfg.Planner,
 		},
 	}
 
@@ -350,6 +352,30 @@ type Config struct {
 	//
 	// Default value is ModeChat as a sub-agent, ModeSingleTurn as a node in a workflow.
 	Mode Mode
+
+	// Planner instructs the agent to make a plan and execute it step by step.
+	//
+	// When nil (the default), no planning instruction is added, thought flags in
+	// request history are left as stored, and model responses are not rewritten.
+	//
+	// To use the model's built-in thinking feature, pass a *planner.BuiltInPlanner
+	// (if GenerateContentConfig.ThinkingConfig is also set, the planner's
+	// ThinkingConfig takes precedence). To use natural-language Plan-Re-Act
+	// planning, pass a *planner.PlanReActPlanner. Any planner that does not
+	// implement planner.BuiltIn (a *planner.BuiltInPlanner or a struct that
+	// embeds one) has its planning instruction appended to the system
+	// instruction, and the Thought flag is cleared on every part of the
+	// conversation history sent to the model; this changes only the request's
+	// copy, and the stored session events keep their flags.
+	//
+	// Model responses are rewritten only when the planner also implements
+	// planner.RewritingPlanner. Under such a planner, a model turn that holds
+	// only thought parts after rewriting ends the agent's step, as any final
+	// response does. Under any other planner, the agent calls the model again
+	// after a thought-only turn.
+	//
+	// EXPERIMENTAL: Config.Planner is experimental; its API and behavior may change or be removed in a later version.
+	Planner planner.Planner
 }
 
 // Mode is the delegation mode of an LLMAgent. See [Config.Mode] for details.
