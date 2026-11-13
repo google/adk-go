@@ -31,7 +31,8 @@ func ExampleNodeInfo_ParentRunID() {
 	id, ok := root.ParentRunID()
 	fmt.Printf("%q %v\n", id, ok)
 
-	// A nil NodeInfo, as on an event outside a workflow, is valid.
+	// A nil NodeInfo, as on the user's message event or an event built by
+	// hand, is valid.
 	var none *session.NodeInfo
 	fmt.Printf("%q\n", none.Name())
 	// Output:

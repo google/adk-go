@@ -145,8 +145,14 @@ type Event struct {
 	// Output is the generic data output from a workflow node.
 	Output any `json:"output,omitempty"`
 
-	// NodeInfo carries workflow-node metadata for events emitted
-	// inside a workflow. Nil for non-workflow events.
+	// NodeInfo carries the metadata of the workflow node that emitted the
+	// event. runner.Run runs an LLM agent as a workflow node even when the
+	// caller wrote no workflow, so every event of such a run that the agent
+	// or its sub-agents emit carries a NodeInfo whose Path is the root
+	// agent's name. NodeInfo is nil on an event that no workflow node
+	// emitted: the user's message event, a before-run plugin reply, the
+	// events of a root agent that is not an LLM agent, the events of
+	// runner.RunLive, and an event built by hand.
 	NodeInfo *NodeInfo `json:"nodeInfo,omitempty"`
 }
 
