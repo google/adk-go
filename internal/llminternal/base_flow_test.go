@@ -1394,6 +1394,59 @@ func TestRun_ThoughtOnlyTurnCountResets(t *testing.T) {
 	}
 }
 
+// A response without content is dropped unless it carries something the
+// caller needs, such as grounding metadata from a search tool.
+func TestRunKeepsGroundingOnlyResponse(t *testing.T) {
+	grounding := &genai.GroundingMetadata{WebSearchQueries: []string{"test query"}}
+	tests := []struct {
+		name string
+		resp *model.LLMResponse
+		want []*genai.GroundingMetadata
+	}{
+		{
+			name: "grounding metadata only",
+			resp: &model.LLMResponse{GroundingMetadata: grounding},
+			want: []*genai.GroundingMetadata{grounding},
+		},
+		{
+			name: "empty response",
+			resp: &model.LLMResponse{},
+			want: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						yield(tc.resp, nil)
+					}
+				},
+			}
+			f := &Flow{Model: m}
+			ctx := icontext.NewInvocationContext(
+				runconfig.ToContext(t.Context(), &runconfig.RunConfig{}),
+				icontext.InvocationContextParams{
+					InvocationID: "inv_1",
+					Agent:        &mockAgent{name: "agent_1"},
+				},
+			)
+
+			var got []*genai.GroundingMetadata
+			for ev, err := range f.Run(ctx) {
+				if err != nil {
+					t.Fatalf("Run() yielded error: %v", err)
+				}
+				got = append(got, ev.GroundingMetadata)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("Run() event grounding metadata mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestFlowRunPartialLastEvent verifies that Flow.Run does not return an error
 // when the last event from runOneStep has Partial=true.
 // This is a regression test for https://github.com/google/adk-go/issues/600.
