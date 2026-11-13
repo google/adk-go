@@ -199,8 +199,18 @@ func applyServiceDefaults(config *launcher.Config) {
 }
 
 // Run implements launcher.SubLauncher. It takes ownership of the telemetry
-// providers initialized for execution and shuts them down on exit.
+// providers initialized for execution and shuts them down on exit, and it closes
+// the plugins in config.PluginConfig on every return.
 func (w *webLauncher) Run(ctx context.Context, config *launcher.Config) error {
+	// Deferred first so it runs last, on every return path: after srv.Shutdown
+	// on a normal shutdown, and also when setup fails before serving.
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.config.shutdownTimeout)
+		defer cancel()
+		if err := config.PluginConfig.Close(closeCtx); err != nil {
+			log.Printf("plugin shutdown failed: %v", err)
+		}
+	}()
 	applyServiceDefaults(config)
 
 	router, err := w.buildRouter(config)
