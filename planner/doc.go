@@ -33,7 +33,9 @@
 // plan and the reasoning become thought parts (genai.Part.Thought is true) and
 // the final answer is plain text. In both cases the agent's events carry the
 // model's reasoning as thought parts, so an application that shows only the
-// answer skips the parts whose Thought is true.
+// answer skips the parts whose Thought is true. In live mode
+// (runner.Runner.RunLive), BuiltInPlanner has no effect and PlanReActPlanner
+// marks only part of the reasoning as thoughts; their doc comments say why.
 //
 // To write a planner of your own, implement Planner when the planner only adds
 // an instruction, or RewritingPlanner when it also rewrites model responses. A

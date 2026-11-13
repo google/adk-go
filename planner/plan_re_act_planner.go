@@ -99,15 +99,21 @@ var planReActInstruction = strings.Join([]string{
 // Use it with a model that has no built-in thinking feature; for a model that
 // has one, BuiltInPlanner lets the model plan on its own. In an agent run, the
 // agent's events carry the plan and the reasoning as parts whose Thought is
-// true and the final answer as a part whose Thought is false. A turn that the
-// planner reduces to thought parts only ends the agent's step, as any final
-// response does.
+// true and the final answer as a part whose Thought is false, except as
+// described below for streaming and live mode. A turn that the planner
+// reduces to thought parts only ends the agent's step, as any final response
+// does.
 //
-// With streaming (agent.StreamingModeSSE), the planner rewrites each partial
-// response on its own. A partial response is marked as a thought only if its
-// own text starts with a planning tag, so a partial event can show reasoning
-// as plain text that the final, aggregated event marks as a thought, and a tag
-// split across two partial responses is not recognized in either.
+// The planner rewrites each model response on its own. Within a response, it
+// marks as a thought a part whose text starts with a planning tag, and the
+// text before "/*FINAL_ANSWER*/" in a part that contains that tag; other text
+// stays plain. Text that continues a tagged section in a later response
+// therefore stays plain text, and a tag split across two responses is not
+// recognized in either. With streaming (agent.StreamingModeSSE), this affects
+// only the partial events: the final, aggregated event is rewritten as a
+// whole. In live mode (runner.Runner.RunLive), the model's text arrives as
+// several responses that are not partial, and each one is stored as its own
+// event, so a continuation stays plain text in the session.
 //
 // PlanReActPlanner is stateless; its zero value and NewPlanReActPlanner() are
 // identical and safe for concurrent use.
