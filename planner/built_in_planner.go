@@ -78,6 +78,10 @@ type BuiltIn interface {
 // takes precedence and overwrites the request's ThinkingConfig on every model
 // call.
 //
+// In live mode (runner.Runner.RunLive), the flow does not send the request's
+// thinking config to the model, so a BuiltInPlanner has no effect there. The
+// same holds for llmagent.Config.GenerateContentConfig.ThinkingConfig.
+//
 // The agent's flow gives each model request its own copy of ThinkingConfig
 // (see BuiltIn), so a before-model callback or plugin that edits the request's
 // thinking config changes neither ThinkingConfig nor any other request.
