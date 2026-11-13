@@ -36,10 +36,6 @@ import (
 	"google.golang.org/adk/v2/tool/functiontool"
 )
 
-func ptr[T any](v T) *T {
-	return &v
-}
-
 func TestProgressiveSSEStreamingFunctionCallArguments(t *testing.T) {
 	aggregator := llminternal.NewStreamingResponseAggregator()
 	ctx := t.Context()
@@ -58,7 +54,7 @@ func TestProgressiveSSEStreamingFunctionCallArguments(t *testing.T) {
 								PartialArgs: []*genai.PartialArg{
 									{JsonPath: "$.location", StringValue: "New "},
 								},
-								WillContinue: ptr(true),
+								WillContinue: new(true),
 							},
 						},
 					},
@@ -79,7 +75,7 @@ func TestProgressiveSSEStreamingFunctionCallArguments(t *testing.T) {
 								PartialArgs: []*genai.PartialArg{
 									{JsonPath: "$.location", StringValue: "York"},
 								},
-								WillContinue: ptr(true),
+								WillContinue: new(true),
 							},
 						},
 					},
@@ -100,7 +96,7 @@ func TestProgressiveSSEStreamingFunctionCallArguments(t *testing.T) {
 								PartialArgs: []*genai.PartialArg{
 									{JsonPath: "$.unit", StringValue: "celsius"},
 								},
-								WillContinue: ptr(false),
+								WillContinue: new(false),
 							},
 						},
 					},
@@ -324,10 +320,10 @@ func TestProgressiveSSEPreservesThoughtSignature(t *testing.T) {
 								Name: "add_5_numbers",
 								ID:   "fc_003",
 								PartialArgs: []*genai.PartialArg{
-									{JsonPath: "$.num1", NumberValue: ptr(10.0)},
-									{JsonPath: "$.num2", NumberValue: ptr(20.0)},
+									{JsonPath: "$.num1", NumberValue: new(10.0)},
+									{JsonPath: "$.num2", NumberValue: new(20.0)},
 								},
-								WillContinue: ptr(false),
+								WillContinue: new(false),
 							},
 							ThoughtSignature: testThoughtSignature,
 						},
@@ -489,10 +485,10 @@ func TestProgressiveSSEHandlesEmptyFunctionCall(t *testing.T) {
 								Name: "concat_number_and_string",
 								ID:   "fc_001",
 								PartialArgs: []*genai.PartialArg{
-									{JsonPath: "$.num", NumberValue: ptr(100.0)},
+									{JsonPath: "$.num", NumberValue: new(100.0)},
 									{JsonPath: "$.s", StringValue: "ADK"},
 								},
-								WillContinue: ptr(false),
+								WillContinue: new(false),
 							},
 						},
 					},
@@ -569,7 +565,7 @@ func TestStreamingFCChunkWithWillContinueButNoPartialArgs(t *testing.T) {
 							FunctionCall: &genai.FunctionCall{
 								Name:         "my_tool",
 								ID:           "fc_gemini3",
-								WillContinue: ptr(true),
+								WillContinue: new(true),
 							},
 							ThoughtSignature: []byte("test_sig_123"),
 						},
@@ -590,7 +586,7 @@ func TestStreamingFCChunkWithWillContinueButNoPartialArgs(t *testing.T) {
 								PartialArgs: []*genai.PartialArg{
 									{JsonPath: "$.document", StringValue: "Once upon "},
 								},
-								WillContinue: ptr(true),
+								WillContinue: new(true),
 							},
 						},
 					},
@@ -610,7 +606,7 @@ func TestStreamingFCChunkWithWillContinueButNoPartialArgs(t *testing.T) {
 								PartialArgs: []*genai.PartialArg{
 									{JsonPath: "$.document", StringValue: "a time..."},
 								},
-								WillContinue: ptr(true),
+								WillContinue: new(true),
 							},
 						},
 					},
@@ -627,7 +623,7 @@ func TestStreamingFCChunkWithWillContinueButNoPartialArgs(t *testing.T) {
 					Parts: []*genai.Part{
 						{
 							FunctionCall: &genai.FunctionCall{
-								WillContinue: ptr(false),
+								WillContinue: new(false),
 							},
 						},
 					},
@@ -1391,11 +1387,11 @@ func TestFinishReasonUnexpectedToolCallPreservesErrorCode(t *testing.T) {
 func streamFunctionCall(t *testing.T, name string, chunks ...[]*genai.PartialArg) string {
 	t.Helper()
 
-	calls := []*genai.FunctionCall{{Name: name, ID: "fc_" + name, WillContinue: ptr(true)}}
+	calls := []*genai.FunctionCall{{Name: name, ID: "fc_" + name, WillContinue: new(true)}}
 	for _, partialArgs := range chunks {
-		calls = append(calls, &genai.FunctionCall{PartialArgs: partialArgs, WillContinue: ptr(true)})
+		calls = append(calls, &genai.FunctionCall{PartialArgs: partialArgs, WillContinue: new(true)})
 	}
-	calls = append(calls, &genai.FunctionCall{WillContinue: ptr(false)})
+	calls = append(calls, &genai.FunctionCall{WillContinue: new(false)})
 
 	aggregator := llminternal.NewStreamingResponseAggregator()
 	for i, call := range calls {
@@ -1435,12 +1431,12 @@ func streamFunctionCall(t *testing.T, name string, chunks ...[]*genai.PartialArg
 // no value at all.
 func TestStreamedArrayOfObjectsArgument(t *testing.T) {
 	args := streamFunctionCall(t, "render_chart",
-		[]*genai.PartialArg{{JsonPath: "$.data[0].label", StringValue: "Jan 20", WillContinue: ptr(true)}},
-		[]*genai.PartialArg{{JsonPath: "$.data[0].label", StringValue: "23", WillContinue: ptr(true)}},
+		[]*genai.PartialArg{{JsonPath: "$.data[0].label", StringValue: "Jan 20", WillContinue: new(true)}},
+		[]*genai.PartialArg{{JsonPath: "$.data[0].label", StringValue: "23", WillContinue: new(true)}},
 		[]*genai.PartialArg{{JsonPath: "$.data[0].label"}},
-		[]*genai.PartialArg{{JsonPath: "$.data[0].value", NumberValue: ptr(1250.5)}},
+		[]*genai.PartialArg{{JsonPath: "$.data[0].value", NumberValue: new(1250.5)}},
 		[]*genai.PartialArg{{JsonPath: "$.data[1].label", StringValue: "Feb 2023"}},
-		[]*genai.PartialArg{{JsonPath: "$.data[1].value", NumberValue: ptr(990.0)}},
+		[]*genai.PartialArg{{JsonPath: "$.data[1].value", NumberValue: new(990.0)}},
 		[]*genai.PartialArg{{JsonPath: "$.title", StringValue: "Revenue"}},
 	)
 
@@ -1454,7 +1450,7 @@ func TestStreamedArrayOfObjectsArgument(t *testing.T) {
 // it is the shape that exposes a path split on "." alone.
 func TestStreamedArrayOfStringsArgument(t *testing.T) {
 	args := streamFunctionCall(t, "describe_tables",
-		[]*genai.PartialArg{{JsonPath: "$.tables[0]", StringValue: "ord", WillContinue: ptr(true)}},
+		[]*genai.PartialArg{{JsonPath: "$.tables[0]", StringValue: "ord", WillContinue: new(true)}},
 		[]*genai.PartialArg{{JsonPath: "$.tables[0]", StringValue: "ers"}},
 		[]*genai.PartialArg{{JsonPath: "$.tables[1]", StringValue: "customers"}},
 	)
@@ -1483,11 +1479,11 @@ func TestStreamedArrayArgumentKeepsIndexPositions(t *testing.T) {
 // all survive the same traversal.
 func TestStreamedArrayArgumentScalarTypes(t *testing.T) {
 	args := streamFunctionCall(t, "render_chart",
-		[]*genai.PartialArg{{JsonPath: "$.filters[0].enabled", BoolValue: ptr(true)}},
+		[]*genai.PartialArg{{JsonPath: "$.filters[0].enabled", BoolValue: new(true)}},
 		[]*genai.PartialArg{{JsonPath: "$.filters[0].value", NULLValue: "NULL_VALUE"}},
-		[]*genai.PartialArg{{JsonPath: "$.filters[1].enabled", BoolValue: ptr(false)}},
-		[]*genai.PartialArg{{JsonPath: "$.options.stacked", BoolValue: ptr(true)}},
-		[]*genai.PartialArg{{JsonPath: "$.limit", NumberValue: ptr(10.0)}},
+		[]*genai.PartialArg{{JsonPath: "$.filters[1].enabled", BoolValue: new(false)}},
+		[]*genai.PartialArg{{JsonPath: "$.options.stacked", BoolValue: new(true)}},
+		[]*genai.PartialArg{{JsonPath: "$.limit", NumberValue: new(10.0)}},
 	)
 
 	want := `{"filters":[{"enabled":true,"value":null},{"enabled":false}],"limit":10,"options":{"stacked":true}}`
@@ -1558,6 +1554,41 @@ func TestProcessResponseNilCandidate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProcessResponse yielded error: %v", err)
 		}
+	}
+}
+
+// TestProcessResponseNilPart is the part-level sibling of the nil-candidate
+// regression above: a nil part in a chunk must be skipped like the empty part
+// the filter already targets, not panic the reflect check — and skipping it
+// must leave the aggregation of the surrounding text parts undisturbed (a
+// guard that also flushed the text buffer would split "a", nil, "b" into two
+// parts instead of one).
+func TestProcessResponseNilPart(t *testing.T) {
+	tests := []struct {
+		name     string
+		parts    []*genai.Part
+		wantText string
+	}{
+		{"nil first", []*genai.Part{nil, genai.NewPartFromText("kept")}, "kept"},
+		{"nil last", []*genai.Part{genai.NewPartFromText("kept"), nil}, "kept"},
+		{"text on both sides aggregates across the nil", []*genai.Part{genai.NewPartFromText("a"), nil, genai.NewPartFromText("b")}, "ab"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aggregator := llminternal.NewStreamingResponseAggregator()
+			chunk := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+				Content: &genai.Content{Parts: tt.parts},
+			}}}
+			for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+				if err != nil {
+					t.Fatalf("ProcessResponse yielded error: %v", err)
+				}
+			}
+			response := aggregator.Close()
+			if response == nil || response.Content == nil || len(response.Content.Parts) != 1 || response.Content.Parts[0].Text != tt.wantText {
+				t.Fatalf("aggregated response = %+v, want the single text part %q", response, tt.wantText)
+			}
+		})
 	}
 }
 

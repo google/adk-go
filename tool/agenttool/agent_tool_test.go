@@ -799,13 +799,13 @@ func TestAgentTool_Run_StreamedArgsAnsweredLongRunningCallSucceeds(t *testing.T)
 		Responses: []*genai.Content{
 			{
 				Role:  genai.RoleModel,
-				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "start_job", WillContinue: genai.Ptr(true)}}},
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "start_job", WillContinue: new(true)}}},
 			},
 			{
 				Role: genai.RoleModel,
 				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
-					PartialArgs:  []*genai.PartialArg{{JsonPath: "$.amount", NumberValue: genai.Ptr(1.0)}},
-					WillContinue: genai.Ptr(false),
+					PartialArgs:  []*genai.PartialArg{{JsonPath: "$.amount", NumberValue: new(1.0)}},
+					WillContinue: new(false),
 				}}},
 			},
 			genai.NewContentFromText("job started", genai.RoleModel),
@@ -852,13 +852,13 @@ func TestAgentTool_Run_StreamedArgsUnansweredLongRunningCallReturnsError(t *test
 		Responses: []*genai.Content{
 			{
 				Role:  genai.RoleModel,
-				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "start_job", WillContinue: genai.Ptr(true)}}},
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "start_job", WillContinue: new(true)}}},
 			},
 			{
 				Role: genai.RoleModel,
 				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
-					PartialArgs:  []*genai.PartialArg{{JsonPath: "$.amount", NumberValue: genai.Ptr(1.0)}},
-					WillContinue: genai.Ptr(false),
+					PartialArgs:  []*genai.PartialArg{{JsonPath: "$.amount", NumberValue: new(1.0)}},
+					WillContinue: new(false),
 				}}},
 			},
 		},

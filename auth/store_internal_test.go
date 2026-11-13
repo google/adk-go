@@ -118,9 +118,7 @@ func TestInMemoryCredentialStoreConcurrent(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	for g := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range 200 {
 				key := keyFor(g + i)
 				switch (g + i) % 3 {
@@ -147,7 +145,7 @@ func TestInMemoryCredentialStoreConcurrent(t *testing.T) {
 					}
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

@@ -49,9 +49,7 @@ func TestIdentityIsRaceFreeAcrossConcurrentReaders(t *testing.T) {
 	errs := make(chan error, readers)
 
 	for i := range readers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start // release together, so the reads genuinely overlap
 
 			shape := i % 4
@@ -71,7 +69,7 @@ func TestIdentityIsRaceFreeAcrossConcurrentReaders(t *testing.T) {
 				errs <- fmt.Errorf("reader %d (shape %d): IdentityFromContext() = %+v, %v; want %+v, true",
 					i, shape, got, ok, want)
 			}
-		}()
+		})
 	}
 
 	close(start)
@@ -127,9 +125,7 @@ func TestIdentityReadsTheSessionOnceAndNeverTears(t *testing.T) {
 	errs := make(chan error, readers)
 
 	for i := range readers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 
 			got, ok := IdentityFromContext(ctx)
@@ -144,7 +140,7 @@ func TestIdentityReadsTheSessionOnceAndNeverTears(t *testing.T) {
 				errs <- fmt.Errorf("reader %d: torn identity %+v — generations user=%s app=%s session=%s",
 					i, got, user, app, sid)
 			}
-		}()
+		})
 	}
 
 	close(start)
@@ -239,9 +235,7 @@ func TestIdentityAgainstASessionThatChangesUnderIt(t *testing.T) {
 	var spanned atomic.Int64
 
 	for i := range readers {
-		readersDone.Add(1)
-		go func() {
-			defer readersDone.Done()
+		readersDone.Go(func() {
 			for range 50 {
 				before := sess.now()
 				got, ok := IdentityFromContext(ctx)
@@ -279,7 +273,7 @@ func TestIdentityAgainstASessionThatChangesUnderIt(t *testing.T) {
 					spanned.Add(1)
 				}
 			}
-		}()
+		})
 	}
 
 	readersDone.Wait()
