@@ -92,7 +92,10 @@ func AllowedToolsPredicate(allowedTools []string) Predicate {
 
 // FilterToolset returns a Toolset that filters the tools in the given Toolset
 // using the given predicate. Close on the returned toolset closes toolset when
-// that implements [io.Closer].
+// that implements [io.Closer]. When toolset has a request hook, a
+// ProcessRequest(agent.Context, *model.LLMRequest) error method, the returned
+// toolset has one that calls it, so filtering keeps the toolset's own request
+// processing.
 func FilterToolset(toolset Toolset, predicate Predicate) Toolset {
 	if toolset == nil {
 		panic("toolset must not be nil")
@@ -134,6 +137,37 @@ func (f *filteredToolset) Close() error { return utils.CloseIfCloser(f.toolset) 
 
 func (f *filteredToolset) Unwrap() Toolset { return f.toolset }
 
+func (f *filteredToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	return processToolsetRequest(f.toolset, ctx, req)
+}
+
+// processToolsetRequest runs the request hook of ts when ts has one, and does
+// nothing otherwise. A toolset wrapper forwards its own ProcessRequest here, so
+// the flow, which looks for the hook on the outermost toolset, still reaches
+// the wrapped toolset's hook.
+func processToolsetRequest(ts Toolset, ctx agent.Context, req *model.LLMRequest) error {
+	rp, ok := ts.(requestProcessor)
+	if !ok {
+		return nil
+	}
+	return rp.ProcessRequest(ctx, req)
+}
+
+// defersResponse reports what t's DefersResponse answers, and false when t has
+// no such method. A tool wrapper forwards the method through it, because the
+// flow looks for it on the tool it dispatches to.
+func defersResponse(t Tool) bool {
+	d, ok := t.(interface{ DefersResponse() bool })
+	return ok && d.DefersResponse()
+}
+
+// displaysResultOnSkipSummarization reports what t's
+// DisplayResultOnSkipSummarization answers, and false when t has no such method.
+func displaysResultOnSkipSummarization(t Tool) bool {
+	d, ok := t.(interface{ DisplayResultOnSkipSummarization() bool })
+	return ok && d.DisplayResultOnSkipSummarization()
+}
+
 // ConfirmationProvider defines a function that dynamically determines whether
 // a specific tool execution requires user confirmation.
 //
@@ -153,6 +187,9 @@ type ConfirmationProvider func(toolName string, toolInput any) bool
 // confirmed and are included in the returned Toolset without modification.
 //
 // Close on the returned toolset closes ts when that implements [io.Closer].
+// The returned toolset's request hook calls the request hook of ts, when ts has
+// one. A wrapped tool keeps the DefersResponse and
+// DisplayResultOnSkipSummarization answers of the tool it wraps.
 //
 // EXPERIMENTAL: WithConfirmation is experimental and not currently in scope for the v1.0 API.
 func WithConfirmation(ts Toolset, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) Toolset {
@@ -174,6 +211,10 @@ func (c *confirmationToolset) Name() string { return c.toolset.Name() }
 func (c *confirmationToolset) Close() error { return utils.CloseIfCloser(c.toolset) }
 
 func (c *confirmationToolset) Unwrap() Toolset { return c.toolset }
+
+func (c *confirmationToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	return processToolsetRequest(c.toolset, ctx, req)
+}
 
 func (c *confirmationToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
 	tools, err := c.toolset.Tools(ctx)
@@ -281,6 +322,12 @@ func (t *confirmationTool) ProcessRequest(ctx agent.Context, req *model.LLMReque
 	return toolutils.PackTool(req, t)
 }
 
+func (t *confirmationTool) DefersResponse() bool { return defersResponse(t.runnableTool) }
+
+func (t *confirmationTool) DisplayResultOnSkipSummarization() bool {
+	return displaysResultOnSkipSummarization(t.runnableTool)
+}
+
 func (t *confirmationTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	// Check for Human-in-the-Loop confirmation.
 	if err := confirmCall(ctx, t, args, t.requireConfirmation, t.provider); err != nil {
@@ -320,6 +367,14 @@ func (t *confirmationStreamingTool) ProcessRequest(ctx agent.Context, req *model
 		}
 	}
 	return toolutils.PackTool(req, t)
+}
+
+func (t *confirmationStreamingTool) DefersResponse() bool {
+	return defersResponse(t.streamingRunnableTool)
+}
+
+func (t *confirmationStreamingTool) DisplayResultOnSkipSummarization() bool {
+	return displaysResultOnSkipSummarization(t.streamingRunnableTool)
 }
 
 func (t *confirmationStreamingTool) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {
