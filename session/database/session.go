@@ -32,7 +32,10 @@ type localSession struct {
 	userID    string
 	sessionID string
 
-	// guards all mutable fields
+	// Keeps database commits and persistent local updates in the same order.
+	appendGate chan struct{}
+
+	// guards state, events, updatedAt and appendGate initialization
 	mu        sync.RWMutex
 	events    []*session.Event
 	state     map[string]any
@@ -87,6 +90,7 @@ func (s *localSession) appendEvent(event *session.Event) error {
 
 	processedEvent := trimTempDeltaState(event)
 	s.events = append(s.events, processedEvent)
+	s.updatedAt = event.Timestamp
 	return nil
 }
 
