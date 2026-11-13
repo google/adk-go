@@ -15,6 +15,47 @@
 // Package setmodelresponsetool provides the tool a model calls to return its
 // structured final answer.
 //
+// An LLM agent adds this tool to its requests by itself when four things
+// hold: it has an output schema (llmagent.Config.OutputSchema or
+// OutputJsonSchema), it has tools or toolsets, it is not in task mode, and
+// its model does not declare model.Capabilities.OutputSchemaAndTools. The
+// model can then call the other tools and gives its final answer by calling
+// set_model_response. Most programs never import this package. Use it to
+// list the tool on an agent without an output schema, or to read the
+// declaration the model receives.
+//
+// New builds the tool for a *genai.Schema, and NewFromJSONSchema for a raw
+// JSON schema. The schema decides the parameters and how an answer is
+// checked:
+//
+//   - An object schema with properties declares one parameter per property.
+//     The answer is validated and normalized as adk-python's pydantic
+//     validation does in lax mode: a missing required property is an issue,
+//     an absent property with a Default gets the default, a property the
+//     schema does not list is dropped, a null for an optional nullable
+//     property is dropped, a string that holds a number is converted for an
+//     INTEGER or NUMBER property, and a schema with AnyOf arms is checked as
+//     a union.
+//   - An array whose items are such objects declares one parameter, "items",
+//     and each element is validated as above.
+//   - Any other *genai.Schema, and every raw JSON schema, declares one
+//     parameter, "response". Its value is accepted as the model sent it.
+//
+// The declaration carries the parameters as a JSON schema
+// (FunctionDeclaration.ParametersJsonSchema); a titled object below the
+// root appears once, under "$defs". AsLegacy wraps a tool so that it
+// declares the typed form (FunctionDeclaration.Parameters) instead, and
+// feature.WithLegacyFunctionDeclarationSchema in package
+// google.golang.org/adk/v2/exp/feature makes the tool an agent adds do the
+// same.
+//
+// A valid answer is stored in session.EventActions.SetModelResponse of the
+// function response event, and the agent then ends its turn with a model
+// text event that holds the answer as JSON. An invalid answer stores
+// nothing: its function response is {"error": feedback}, where the feedback
+// names each issue in the form of adk-python's validation errors, and the
+// model is called again.
+//
 // List the tool in llmagent.Config.Tools only for an agent without an
 // OutputSchema: an agent with one adds its own set_model_response tool when it
 // needs one, and a second tool of that name fails the run as a duplicate.
@@ -40,7 +81,9 @@ import (
 const Name = "set_model_response"
 
 // New returns the set_model_response tool for an output schema given as a
-// *genai.Schema.
+// *genai.Schema, or an error if schema is nil. The tool keeps schema and
+// does not modify it; the caller must not modify it while the tool is in use.
+// The tool is safe for concurrent use.
 func New(schema *genai.Schema) (tool.Tool, error) {
 	if schema == nil {
 		return nil, errors.New("set_model_response: schema is nil")
@@ -49,9 +92,12 @@ func New(schema *genai.Schema) (tool.Tool, error) {
 }
 
 // NewFromJSONSchema returns the set_model_response tool for an output schema
-// given as a raw JSON schema. The tool does not validate an answer against
-// schema; it accepts the model's response argument as it is, as adk-python
-// does.
+// given as a raw JSON schema, or an error if schema is nil. The tool declares
+// schema as its single parameter, "response". It does not validate an answer
+// against schema; it accepts the model's response argument as it is, as
+// adk-python does. The tool keeps schema and does not modify it; the caller
+// must not modify it while the tool is in use. The tool is safe for
+// concurrent use.
 func NewFromJSONSchema(schema *jsonschema.Schema) (tool.Tool, error) {
 	if schema == nil {
 		return nil, errors.New("set_model_response: schema is nil")

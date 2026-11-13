@@ -146,3 +146,43 @@ func Example_agentWithTools() {
 	// response: map[result:[map[name:Oslo population:709000]]]
 	// final: [{"name":"Oslo","population":709000}]
 }
+
+// An agent without an output schema can list the tool in Config.Tools. The
+// model is offered set_model_response, and a valid call ends the run with the
+// answer as the agent's final text, as it does for the tool an agent with an
+// output schema adds.
+func Example_listedInTools() {
+	smr, err := setmodelresponsetool.New(cities)
+	if err != nil {
+		log.Fatal(err)
+	}
+	llm := &scriptedModel{answers: []map[string]any{
+		{"items": []any{map[string]any{"name": "Lima", "population": 10000000}}},
+	}}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "city_finder",
+		Model: llm,
+		Tools: []tool.Tool{smr},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	r, err := runner.NewInMemory("app", a)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	msg := genai.NewContentFromText("Which city?", genai.RoleUser)
+	for ev, err := range r.Run(context.Background(), "user", "session", msg, agent.RunConfig{}) {
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, p := range ev.Content.Parts {
+			if p.Text != "" {
+				fmt.Println("final:", p.Text)
+			}
+		}
+	}
+	// Output:
+	// final: [{"name":"Lima","population":10000000}]
+}
