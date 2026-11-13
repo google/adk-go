@@ -34,11 +34,16 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
-// ErrInvalidAgentConfig is wrapped by one error only: the error [New] returns
-// for the reserved name "user", which the other agent constructors pass on
-// because they build their agent through [New]. No other constructor error
-// wraps it; in particular, the errors [New] returns for an empty name or a
-// repeated sub-agent do not.
+// ErrInvalidAgentConfig is wrapped by these constructor errors only:
+//   - the error [New] returns for the reserved name "user", which the other
+//     agent constructors pass on because they build their agent through [New];
+//   - the errors [google.golang.org/adk/v2/agent/llmagent.New] returns when
+//     the config's GenerateContentConfig sets Tools, SystemInstruction or
+//     HTTPOptions.BaseURL, which belong on the agent's Tools, its Instruction,
+//     and the model or its client.
+//
+// No other constructor error wraps it; in particular, the errors [New] returns
+// for an empty name or a repeated sub-agent do not.
 var ErrInvalidAgentConfig = errors.New("invalid agent configuration")
 
 // Agent is the base interface which all agents must implement.
