@@ -27,12 +27,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -44,6 +46,9 @@ import (
 // databaseService is an database implementation of sessionService.Service.
 type databaseService struct {
 	db *gorm.DB
+	// ownsDB records that the service opened db's connection pool itself,
+	// so Close closes it.
+	ownsDB bool
 	// appendOrderTiebreak makes Get order events that share a timestamp by
 	// append order instead of by event ID. Only [New] sets it.
 	appendOrderTiebreak bool
@@ -90,6 +95,13 @@ type Config struct {
 // sharing a timestamp are returned in the order they were appended, matching
 // adk-python's SqliteSessionService.
 //
+// The returned service implements [io.Closer]. Close closes the connection
+// pool when cfg.Dialector opened it, as sqlite.Open(dsn) does, and leaves
+// open a connection the module's SQLite dialector carries
+// (sqlite.Dialector{Conn: db} or &sqlite.Dialector{Conn: db}). A caller who
+// passes an open connection through any other dialector and wants it kept
+// open builds the service with [NewSessionServiceFromDB].
+//
 // It returns an error if cfg.Dialector is nil or if [gorm.Open] fails. The
 // service does not create its tables. See [AutoMigrate].
 func New(cfg Config) (session.Service, error) {
@@ -101,16 +113,59 @@ func New(cfg Config) (session.Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error creating database session service: %w", err)
 	}
-	return &databaseService{db: db, appendOrderTiebreak: cfg.AppendOrderTiebreak}, nil
+	return &databaseService{db: db, ownsDB: opensOwnConnection(cfg.Dialector), appendOrderTiebreak: cfg.AppendOrderTiebreak}, nil
 }
 
-var _ session.UserStateReader = (*databaseService)(nil)
+var (
+	_ session.UserStateReader = (*databaseService)(nil)
+	_ io.Closer               = (*databaseService)(nil)
+)
+
+// opensOwnConnection reports whether gorm.Open(dialector) opens a connection
+// pool of its own rather than using one the caller opened. Only the module's
+// SQLite dialector, as a value or a pointer, is recognized as carrying the
+// caller's connection (its Conn field); a caller who passes an open
+// connection through another dialector uses [NewSessionServiceFromDB] to keep
+// it open.
+func opensOwnConnection(dialector gorm.Dialector) bool {
+	switch d := dialector.(type) {
+	case *sqlite.Dialector:
+		return d.Conn == nil
+	case sqlite.Dialector:
+		return d.Conn == nil
+	default:
+		return true
+	}
+}
+
+// Close closes the underlying [*sql.DB] connection pool when s opened it,
+// and otherwise leaves the caller's connection open and returns nil. A
+// connection passed in a sqlite.Dialector or *sqlite.Dialector stays open.
+// It may be called more than once and concurrently. Calls on the service
+// after Close fail with the closed pool's error.
+func (s *databaseService) Close() error {
+	if !s.ownsDB {
+		return nil
+	}
+	sqlDB, err := s.db.DB()
+	if err != nil {
+		return fmt.Errorf("close database session service: %w", err)
+	}
+	return sqlDB.Close()
+}
 
 // NewSessionService creates a new [session.Service] implementation that uses a
 // relational database (e.g., PostgreSQL, Spanner, SQLite) via the GORM library.
 //
 // It requires a [gorm.Dialector] to specify the database connection and
 // accepts optional [gorm.Option] values for further GORM configuration.
+//
+// The returned service implements [io.Closer]. Close closes the connection
+// pool when dialector opened it, as sqlite.Open(dsn) does, and leaves open a
+// connection the module's SQLite dialector carries
+// (sqlite.Dialector{Conn: db} or &sqlite.Dialector{Conn: db}). A caller who
+// passes an open connection through any other dialector and wants it kept
+// open builds the service with [NewSessionServiceFromDB].
 //
 // It returns the new [session.Service] or an error if the database connection
 // [gorm.Open] fails. The service does not create its tables. See [AutoMigrate].
@@ -119,7 +174,7 @@ func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.S
 	if err != nil {
 		return nil, fmt.Errorf("error creating database session service: %w", err)
 	}
-	return &databaseService{db: db}, nil
+	return &databaseService{db: db, ownsDB: opensOwnConnection(dialector)}, nil
 }
 
 // NewSessionServiceFromDB creates a new [session.Service] implementation using
@@ -129,6 +184,8 @@ func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.S
 //
 // The service always orders events with equal timestamps ascending by event
 // ID; [New] is the only constructor that offers append order.
+//
+// The returned service implements [io.Closer]; its Close leaves db open.
 //
 // It returns an error if db is nil. The service does not create its tables.
 // See [AutoMigrate].

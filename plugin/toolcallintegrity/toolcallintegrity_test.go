@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"log/slog"
 	"math"
@@ -1154,6 +1155,7 @@ func newDatabaseService(t *testing.T) session.Service {
 	if err != nil {
 		t.Fatalf("database.New() error = %v", err)
 	}
+	t.Cleanup(func() { _ = svc.(io.Closer).Close() })
 	if err := database.AutoMigrate(svc); err != nil {
 		t.Fatalf("AutoMigrate() error = %v", err)
 	}
