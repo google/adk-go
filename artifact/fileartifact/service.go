@@ -38,6 +38,13 @@
 // may not be rooted, drive-qualified or contain "..", and may not lead out of
 // their scope through a symbolic link. A save also refuses a name whose last
 // element is "metadata.json" or that has a "versions" element, in any casing.
+//
+// Load reports a version that holds the rewind marker
+// ([artifact.IsRewindTombstone]) as not found, as the in-memory service does,
+// and a missing artifact or version as an error wrapping [fs.ErrNotExist].
+// Versions returns version numbers in ascending order. To give agents
+// file-backed artifacts, pass the service that [NewService] returns as the
+// runner's ArtifactService.
 package fileartifact
 
 import (

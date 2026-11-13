@@ -253,6 +253,12 @@ type artifactVersionReader interface {
 // wrapping [errors.ErrUnsupported].
 // If the invocation has no artifact service configured, it returns an error
 // stating "artifact service is not initialized".
+//
+// The artifact is looked up with the app, user and session of the invocation,
+// and a name with the "user:" prefix names an artifact of the user. When a
+// tool from package tool/agenttool runs an agent, the lookups of that agent's
+// tools go to the artifact service of the parent invocation, with the
+// parent's app, user and session.
 func ArtifactVersion(ctx Context, name string, version *int64) (*artifact.ArtifactVersion, error) {
 	arts := ctx.Artifacts()
 	for {

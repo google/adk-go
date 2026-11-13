@@ -32,6 +32,11 @@
 // version 0, as adk-python writes for a first version, is refused with an
 // error wrapping [artifact.ErrInputValidation].
 //
+// Load returns a version that holds the rewind marker
+// ([artifact.IsRewindTombstone]) as an empty "application/octet-stream" part;
+// it does not report it as not found, as the in-memory service does. Versions
+// returns version numbers in ascending order.
+//
 // The service returned by [NewService] also implements [URLProvider], for
 // authenticated and signed URLs of stored artifacts.
 package gcsartifact

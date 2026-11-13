@@ -120,16 +120,36 @@ func buildArtifactURI(appName, userID, sessionID, fileName string, version int64
 	return BuildArtifactURI(appName, userID, sessionID, fileName, version)
 }
 
-// ParsedArtifactURI holds parsed URI components. The zero value has empty strings and Version: 0.
+// ParsedArtifactURI holds the parts of an artifact:// URI, as
+// [ParseArtifactURI] and [ParseAndValidateReferenceURI] return them.
+// SessionID is empty for the URI of a user-scoped artifact. FileName is the
+// file name as the URI writes it, "user:" prefix included. Both functions
+// return the zero value, with empty strings and Version 0, on failure.
 type ParsedArtifactURI struct {
 	AppName, UserID, SessionID, FileName string
 	Version                              int64
 }
 
-// ParseArtifactURI parses an artifact URI, supporting slashes in app/user/session segments.
-// Version is treated as an opaque non-negative integer. On failure, returns the zero value
-// of ParsedArtifactURI and false. Safe for concurrent use. Returns ParsedArtifactURI{}, false
-// for any URI that contains "\n", in any segment.
+// ParseArtifactURI parses an artifact URI of the session-scoped form
+// "artifact://apps/{app}/users/{user}/sessions/{session}/artifacts/{file}/versions/{version}"
+// or of the user-scoped form without the sessions segment, with the rules of
+// adk-python's parse_artifact_uri. It reports whether uri has one of these
+// forms; on failure it returns the zero ParsedArtifactURI and false.
+//
+// The app, user and session IDs may contain "/": each one ends at the first
+// "/" that is followed by "apps", "users", "sessions", "artifacts" or
+// "versions" and another "/", so an ID such as
+// "projects/123/locations/us-central1/reasoningEngines/456" parses, while an
+// ID that contains such a sequence cannot be written in a URI. The file name
+// may contain any character but "\n" and ends at the last "/versions/". The
+// version is a non-negative decimal number in ASCII digits that fits in an
+// int64; "versions/0" is accepted. A URI that contains "\n" anywhere is
+// refused.
+//
+// ParseArtifactURI does not check the IDs with [ValidatePathSegment]. The
+// services check a stored reference with [ParseAndValidateReferenceURI],
+// which is stricter: it refuses IDs that contain "/" and version 0.
+// ParseArtifactURI is safe for concurrent use.
 func ParseArtifactURI(uri string) (ParsedArtifactURI, bool) {
 	// adk-python's patterns use "." without re.DOTALL, so no part of a URI may
 	// hold a newline.
@@ -217,9 +237,18 @@ func parseASCIIDigits(s string) (int64, bool) {
 	return v, true
 }
 
-// BuildArtifactURI builds an artifact URI. If sessionID is empty, returns the user-scoped variant.
-// Treats version as an opaque integer string. Precondition: provided segments must round-trip
-// through path validation. Does NOT escape components. Returns built string. Safe for concurrent use.
+// BuildArtifactURI returns the artifact:// URI of the given version of the
+// artifact that appName, userID, sessionID and fileName name:
+// "artifact://apps/{app}/users/{user}/sessions/{session}/artifacts/{file}/versions/{version}",
+// or the user-scoped form without the sessions segment when sessionID is
+// empty. Saved as the FileURI of a file-data part, the URI makes that part a
+// reference to the artifact.
+//
+// It neither escapes nor checks its arguments. The caller passes IDs that
+// pass [ValidatePathSegment] and a file name that passes [ValidateFileName].
+// A reference that a service follows must also have IDs without "/" and a
+// version of 1 or more (see [ParseAndValidateReferenceURI]). BuildArtifactURI
+// is safe for concurrent use.
 func BuildArtifactURI(appName, userID, sessionID, fileName string, version int64) string {
 	if sessionID == "" {
 		return fmt.Sprintf("artifact://apps/%s/users/%s/artifacts/%s/versions/%d", appName, userID, fileName, version)
@@ -227,9 +256,17 @@ func BuildArtifactURI(appName, userID, sessionID, fileName string, version int64
 	return fmt.Sprintf("artifact://apps/%s/users/%s/sessions/%s/artifacts/%s/versions/%d", appName, userID, sessionID, fileName, version)
 }
 
-// IsRewindTombstone returns true exactly when part is non-nil, part.InlineData is non-nil with
-// MIMEType == "application/octet-stream", len(Data) == 0 (nil or empty slice), DisplayName == "",
-// and every other field of genai.Part and genai.Blob is zero.
+// IsRewindTombstone reports whether part is the rewind marker: the part that
+// [NewRewindTombstone] returns and that a session rewind saves as the newest
+// version of an artifact to remove it. It returns true exactly when part is
+// non-nil, part.InlineData is non-nil with MIMEType == "application/octet-stream",
+// len(Data) == 0 (nil or empty slice), DisplayName == "", and every other field of
+// genai.Part and genai.Blob is zero. An empty part of that media type that a
+// caller saves is therefore a marker too.
+//
+// [InMemoryService] and the file-system service load a version that holds
+// the marker as not found, and earlier versions still load. The Cloud
+// Storage service loads it as an empty part.
 func IsRewindTombstone(part *genai.Part) bool {
 	if part == nil || part.InlineData == nil {
 		return false

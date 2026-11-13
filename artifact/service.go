@@ -17,6 +17,35 @@
 // An artifact is a file identified by an application name, a user ID, a session ID,
 // and a filename. The service provides basic storage operations for artifacts,
 // such as Save, Load, Delete, and List. It also supports versioning of artifacts.
+//
+// The content of an artifact is a [genai.Part]: text, inline data, or, in the
+// services that store it, file data. A file name with the "user:" prefix
+// names an artifact of the user, shared by all the user's sessions; requests
+// for it need no session ID, and List reports it in every session of the
+// user. Any other file name names an artifact of one session.
+//
+// Every Save creates a new version, and the services in this module number
+// an artifact's versions from 1. Version 0 in a load, lookup or delete request
+// selects the latest version (every version, for Delete).
+//
+// An artifact can hold a reference to another artifact of the same app and
+// user: a file-data part whose URI is the artifact:// URI that
+// [BuildArtifactURI] builds. Services that store references follow them on
+// Load, at most [MaxArtifactReferenceDepth] hops, and check at each hop that
+// the target stays in the caller's scope (see [ParseAndValidateReferenceURI]).
+//
+// The Validate methods of the request types check the IDs with
+// [ValidatePathSegment] and the file name with [ValidateFileName]. Their
+// errors, and the errors for an invalid reference, wrap [ErrInputValidation].
+// The services in this module return an error wrapping [io/fs.ErrNotExist]
+// for an artifact or version that does not exist.
+//
+// [InMemoryService] keeps artifacts in memory. Package
+// [google.golang.org/adk/v2/artifact/gcsartifact] stores them in Google Cloud
+// Storage and package [google.golang.org/adk/v2/artifact/fileartifact] in a
+// directory tree. A runner takes a Service in its ArtifactService
+// configuration field, and agents, callbacks and tools reach it through
+// agent.Context.Artifacts.
 package artifact
 
 import (
@@ -50,7 +79,8 @@ type Service interface {
 	// files and the user-scoped ("user:" prefixed) files of the user. When
 	// req.SessionID is empty, List returns only the user-scoped filenames.
 	List(ctx context.Context, req *ListRequest) (*ListResponse, error)
-	// Versions lists all versions of an artifact.
+	// Versions lists all versions of an artifact. The services in this module
+	// return them in ascending order.
 	Versions(ctx context.Context, req *VersionsRequest) (*VersionsResponse, error)
 	// GetArtifactVersion gets the metadata for a specific version of an artifact.
 	GetArtifactVersion(ctx context.Context, req *GetArtifactVersionRequest) (*GetArtifactVersionResponse, error)
@@ -257,6 +287,8 @@ type LoadRequest struct {
 	AppName, UserID, SessionID, FileName string
 
 	// Below are optional fields.
+
+	// Version is the version to load. 0 selects the latest version.
 	Version int64
 }
 
@@ -291,6 +323,8 @@ type DeleteRequest struct {
 	AppName, UserID, SessionID, FileName string
 
 	// Below are optional fields.
+
+	// Version is the version to delete. 0 deletes every version.
 	Version int64
 }
 
@@ -417,6 +451,8 @@ type GetArtifactVersionRequest struct {
 	AppName, UserID, SessionID, FileName string
 
 	// Below are optional fields.
+
+	// Version is the version to describe. 0 selects the latest version.
 	Version int64
 }
 
