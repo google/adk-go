@@ -80,6 +80,8 @@ type Logger interface {
 // storage_mode is GCS_REFERENCE or text is not [UPLOAD FAILED]). Unfinished
 // batches during background or Close flushes are dropped directly.
 type RetryConfig struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_            struct{}
 	MaxRetries   int
 	InitialDelay time.Duration
 	MaxDelay     time.Duration
@@ -104,6 +106,8 @@ type ContentFormatter func(payload any, eventType string) (any, error)
 // bound. FormatterFailureDrops separately counts payload replacement or
 // omission, which does not itself discard a row.
 type DropStats struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{}
 	// QueueFullDrops counts events dropped because QueueMaxSize was reached.
 	QueueFullDrops int64 `json:"queue_full_drops"`
 	// AppendFailureDrops counts events dropped because a plugin callback or row
@@ -132,6 +136,8 @@ type DropStats struct {
 
 // GCSUploadRequest describes one payload to upload to Cloud Storage.
 type GCSUploadRequest struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{}
 	// Path is the object name within the bucket. When Config.GCSPathPrefix is
 	// non-empty after trimming leading and trailing '/', Path begins with the
 	// effective prefix followed by "/" — either the '/'-trimmed
@@ -220,7 +226,7 @@ type GCSContentOffloader interface {
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
-// [DefaultConfig] when a plugin or batch processor is constructed.
+// [DefaultConfig] when a plugin is constructed.
 //
 // Use [DefaultConfig] or set LogMultiModalContent: true to enable
 // content_parts (DisableMultiModalContent overrides it). Session metadata
@@ -232,6 +238,9 @@ type GCSContentOffloader interface {
 // attributes.adk.schema_version on each row is "1". Recursive payload
 // sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
 type Config struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{}
+
 	Enabled        bool
 	ProjectID      string
 	DatasetID      string
@@ -407,7 +416,7 @@ type Config struct {
 	//
 	// Any other prefix is rewritten to "<base>~<sha256>", and a warning with
 	// the rewrite reason and byte lengths (without logging prefix text) is
-	// logged to Logger when the plugin or BatchProcessor is constructed: each
+	// logged to Logger when the plugin is constructed: each
 	// '~', each byte that is not valid UTF-8, and each of those control or
 	// line/paragraph-separator characters is replaced with '_', a leading
 	// ".well-known" segment before "acme-challenge" becomes "_well-known", the

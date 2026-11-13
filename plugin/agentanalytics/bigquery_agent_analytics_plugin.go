@@ -240,7 +240,7 @@ func newDisabledPlugin() (*baseplugin.Plugin, error) {
 // value of the plugin's pluginRegistry entry, which a global map holds until
 // the plugin is collected, so nothing it refers to may lead back to the
 // plugin. It therefore keeps no Config, whose Logger or ContentFormatter can
-// refer to an object that holds the plugin, and no BatchProcessor, which
+// refer to an object that holds the plugin, and no batchProcessor, which
 // keeps the Config. Its view runner refers to the BigQuery client, which can
 // refer to the caller's objects, only weakly, while the plugin itself keeps
 // the client alive. The startup view pass forgets its context when it ends.
@@ -317,8 +317,11 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 // existing table. Any failure to read, create, or upgrade the table fails
 // construction and closes writeClient. Passing bqClient == nil skips table
 // inspection, creation, and schema upgrades for pre-provisioned append-only
-// deployments. ctx bounds this table setup; background writes use only its
-// values (see [NewBatchProcessor]). If config.ProjectID is empty or
+// deployments. ctx bounds this table setup and, when ExactlyOnceDelivery is
+// enabled, the creation of the write stream. Background writes, stream
+// rotations, and Close use only the values carried by ctx, so canceling ctx
+// after construction neither stops nor drains the plugin; only closing the
+// plugin does (see [Config.ShutdownTimeout]). If config.ProjectID is empty or
 // bigquery.DetectProjectID, the project of bqClient is used for the table, the
 // views and the write stream; when config.ProjectID names another project,
 // bqClient checks, creates and upgrades the events table (and views) in
@@ -437,13 +440,13 @@ func newBigQueryAgentAnalyticsPlugin(
 	}
 
 	// Determine destination stream: default stream unless ExactlyOnceDelivery
-	// is enabled, in which case NewBatchProcessor creates a COMMITTED stream.
+	// is enabled, in which case newBatchProcessor creates a COMMITTED stream.
 	streamName := ""
 	if !config.ExactlyOnceDelivery {
 		streamName = fmt.Sprintf("projects/%s/datasets/%s/tables/%s/streams/_default", config.ProjectID, config.DatasetID, config.TableName)
 	}
 
-	processor, err := NewBatchProcessor(ctx, writeClient, streamName, config)
+	processor, err := newBatchProcessor(ctx, writeClient, streamName, config)
 	if err != nil {
 		closeOwnedResources()
 		return nil, fmt.Errorf("failed to initialize batch processor: %w", err)
@@ -569,7 +572,10 @@ func validateConfig(c Config) (map[string]struct{}, error) {
 	case c.MaxContentLen == 0, c.MaxContentLen < -1:
 		return nil, errors.New("invalid config: MaxContentLen must be -1 or >= 1")
 	case c.RetryConfig.MaxRetries < 0, c.RetryConfig.InitialDelay < 0, c.RetryConfig.Multiplier < 1, c.RetryConfig.MaxDelay < c.RetryConfig.InitialDelay:
-		return nil, fmt.Errorf("invalid config: invalid RetryConfig: needs MaxRetries >= 0, InitialDelay >= 0, Multiplier >= 1 and MaxDelay >= InitialDelay, got %+v", c.RetryConfig)
+		// The fields are listed one by one because %+v would also print the
+		// blank field that prevents unkeyed RetryConfig literals.
+		rc := c.RetryConfig
+		return nil, fmt.Errorf("invalid config: invalid RetryConfig: needs MaxRetries >= 0, InitialDelay >= 0, Multiplier >= 1 and MaxDelay >= InitialDelay, got {MaxRetries:%v InitialDelay:%v MaxDelay:%v Multiplier:%v}", rc.MaxRetries, rc.InitialDelay, rc.MaxDelay, rc.Multiplier)
 	}
 	denied, err := parsePayloadColumnDenylist(c.PayloadColumnDenylist)
 	if err != nil {
@@ -607,7 +613,7 @@ func newSet(items ...string) map[string]struct{} {
 // analyticsPlugin holds the state shared by the plugin callbacks.
 type analyticsPlugin struct {
 	config             Config
-	processor          *BatchProcessor
+	processor          *batchProcessor
 	allowlist          map[string]struct{}
 	denylist           map[string]struct{}
 	deniedColumns      map[string]struct{}

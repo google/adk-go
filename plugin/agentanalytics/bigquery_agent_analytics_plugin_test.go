@@ -664,11 +664,11 @@ func TestEventsSchema_ColumnOrder(t *testing.T) {
 		t.Errorf("EventsSchema() columns mismatch (-want +got):\n%s", diff)
 	}
 	var arrowColumns []string
-	for _, f := range ArrowSchema().Fields() {
+	for _, f := range arrowSchema().Fields() {
 		arrowColumns = append(arrowColumns, f.Name)
 	}
 	if diff := cmp.Diff(want, arrowColumns); diff != "" {
-		t.Errorf("ArrowSchema() columns mismatch (-want +got):\n%s", diff)
+		t.Errorf("arrowSchema() columns mismatch (-want +got):\n%s", diff)
 	}
 	if got := EventsSchema()[1].Type; got != bq.StringFieldType {
 		t.Errorf("event_id type = %v, want %v", got, bq.StringFieldType)
@@ -1518,9 +1518,10 @@ func TestNewPlugin_RejectsInvalidConfig(t *testing.T) {
 			wantErr: "BatchSize and QueueMaxSize must be >= 1",
 		},
 		{
-			name:    "negative RetryConfig.MaxRetries",
-			mutate:  func(c *Config) { c.RetryConfig.MaxRetries = -1 },
-			wantErr: "invalid RetryConfig",
+			name:   "negative RetryConfig.MaxRetries",
+			mutate: func(c *Config) { c.RetryConfig.MaxRetries = -1 },
+			// The full message pins how the rejected settings are reported.
+			wantErr: "invalid RetryConfig: needs MaxRetries >= 0, InitialDelay >= 0, Multiplier >= 1 and MaxDelay >= InitialDelay, got {MaxRetries:-1 InitialDelay:100ms MaxDelay:10s Multiplier:2}",
 		},
 		{
 			name:    "Multiplier less than 1",
@@ -2075,9 +2076,9 @@ func TestLLMRequestAttributes_Tools(t *testing.T) {
 	if !ok {
 		t.Fatal("llmRequestAttributes() has no tools")
 	}
-	b, _, err := SmartTruncate(tools, -1)
+	b, _, err := smartTruncate(tools, -1, true)
 	if err != nil {
-		t.Fatalf("SmartTruncate() error: %v", err)
+		t.Fatalf("smartTruncate() error: %v", err)
 	}
 	var got any
 	if err := json.Unmarshal(b, &got); err != nil {
@@ -3996,7 +3997,7 @@ func TestBigQueryAgentAnalyticsPlugin_DropStats(t *testing.T) {
 	// Verify a recovered panic inside logEvent increments AppendFailureDrops and TotalDrops once.
 	ap := &analyticsPlugin{
 		config:    DefaultConfig(),
-		processor: &BatchProcessor{counters: counters},
+		processor: &batchProcessor{counters: counters},
 	}
 	ap.logEvent(context.Background(), identity{}, EventUserMessageReceived, nil, func(*eventData) {
 		panic("boom in callback")
@@ -4028,7 +4029,7 @@ func TestBigQueryAgentAnalyticsPlugin_DropStats(t *testing.T) {
 	disabledCfg.Enabled = false
 	disabledAP := &analyticsPlugin{
 		config:    disabledCfg,
-		processor: &BatchProcessor{counters: counters},
+		processor: &batchProcessor{counters: counters},
 	}
 	disabledAP.logEvent(context.Background(), identity{}, EventUserMessageReceived, nil, func(*eventData) {
 		panic("boom in disabled plugin")
@@ -4529,7 +4530,7 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 	// for as long as the plugin lives, so a value that reached such an object
 	// would keep the plugin alive for the life of the process. That holds for
 	// a plugin that is dropped without Close too, even though its
-	// BatchProcessor goroutine then keeps running, as it does on main.
+	// batchProcessor goroutine then keeps running, as it does on main.
 	for _, tc := range []struct {
 		name string
 		// newPlugin returns a plugin that refers to h, and a function that
@@ -4714,9 +4715,9 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 			return nil, errors.New("boom")
 		}
 
-		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		bp, err := newBatchProcessor(ctx, nil, "test_stream", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		denied, err := validateConfig(cfg)
 		if err != nil {
@@ -4759,9 +4760,9 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 			return nil, errors.New("boom")
 		}
 
-		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		bp, err := newBatchProcessor(ctx, nil, "test_stream", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		denied, err := validateConfig(cfg)
 		if err != nil {
@@ -4790,9 +4791,9 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 			return nil, errors.New("formatter boom")
 		}
 
-		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		bp, err := newBatchProcessor(ctx, nil, "test_stream", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		denied, err := validateConfig(cfg)
 		if err != nil {

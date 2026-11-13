@@ -140,9 +140,9 @@ func TestBatchProcessor_AppendAndFlush(t *testing.T) {
 	config.BatchFlushIntv = 100 * time.Millisecond
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	mStream := &mockStream{
@@ -201,9 +201,9 @@ func TestBatchProcessor_WriteBatchErrors(t *testing.T) {
 			config := DefaultConfig()
 			config.RetryConfig.MaxRetries = 0 // Prevent generic reconnect on nil client
 
-			bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+			bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor error: %v", err)
+				t.Fatalf("newBatchProcessor error: %v", err)
 			}
 
 			mStream := &mockStream{
@@ -229,9 +229,9 @@ func TestBatchProcessor_DataTypes(t *testing.T) {
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	mStream := &mockStream{
@@ -273,9 +273,9 @@ func TestBatchProcessor_WriteBatchEncodesRows(t *testing.T) {
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 	mStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
 	bp.streamWriter.stream = mStream
@@ -323,9 +323,9 @@ func TestBatchProcessor_QueueFull(t *testing.T) {
 	config.BatchSize = 10
 	config.QueueMaxSize = 1
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	// This should succeed and sit in queue
@@ -392,9 +392,9 @@ func TestBatchProcessor_ContentPartsEdgeCases(t *testing.T) {
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	mStream := &mockStream{
@@ -521,9 +521,9 @@ func TestStreamWriter_SendError(t *testing.T) {
 			config := DefaultConfig()
 			config.RetryConfig.MaxRetries = 0 // Prevent generic reconnect on nil client
 
-			bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+			bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor error: %v", err)
+				t.Fatalf("newBatchProcessor error: %v", err)
 			}
 
 			mStream := &mockStream{sendErr: tt.sendErr, recvErr: tt.recvErr, recvSeq: tt.recvSeq}
@@ -589,9 +589,9 @@ func TestStreamWriter_RetryOpensAFreshStream(t *testing.T) {
 	config := DefaultConfig()
 	config.RetryConfig.MaxRetries = 1
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 
 	dead := &mockStream{sendErr: io.EOF, recvErr: io.EOF}
@@ -612,9 +612,9 @@ func TestBatchProcessor_CloseDrainsAndRejectsNewAppends(t *testing.T) {
 	config.BatchFlushIntv = time.Hour
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 	mStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
 	bp.streamWriter.stream = mStream
@@ -643,9 +643,9 @@ func TestBatchProcessor_CloseDrainsAndRejectsNewAppends(t *testing.T) {
 func TestBatchProcessor_DropStats(t *testing.T) {
 	ctx := context.Background()
 
-	var nilBP *BatchProcessor
+	var nilBP *batchProcessor
 	if got := nilBP.DropStats(); got != (DropStats{}) {
-		t.Errorf("nil BatchProcessor.DropStats() = %+v, want zero DropStats", got)
+		t.Errorf("nil batchProcessor.DropStats() = %+v, want zero DropStats", got)
 	}
 
 	config := DefaultConfig()
@@ -653,9 +653,9 @@ func TestBatchProcessor_DropStats(t *testing.T) {
 	config.QueueMaxSize = 1
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	// 1. Trigger 2 queue-full drops (queue capacity is 1).
@@ -828,9 +828,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_CommittedStreamAndOffsets(t *testing
 		Multiplier:   1.0,
 	}
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 
 	// Verify CreateWriteStream was called with COMMITTED type.
@@ -929,15 +929,15 @@ func TestBatchProcessor_ExactlyOnceDelivery_CreateWriteStreamFailure(t *testing.
 	config.DatasetID = "test-ds"
 	config.ExactlyOnceDelivery = true
 
-	if _, err := NewBatchProcessor(ctx, writeClient, "", config); err == nil {
-		t.Fatal("NewBatchProcessor() error = nil, want CreateWriteStream error")
+	if _, err := newBatchProcessor(ctx, writeClient, "", config); err == nil {
+		t.Fatal("newBatchProcessor() error = nil, want CreateWriteStream error")
 	}
 
 	t.Run("honors caller ctx cancellation during initial CreateWriteStream", func(t *testing.T) {
 		canceledCtx, cancel := context.WithCancel(ctx)
 		cancel()
-		if _, err := NewBatchProcessor(canceledCtx, writeClient, "", config); err == nil {
-			t.Fatal("NewBatchProcessor() with canceled ctx error = nil, want context canceled error")
+		if _, err := newBatchProcessor(canceledCtx, writeClient, "", config); err == nil {
+			t.Fatal("newBatchProcessor() with canceled ctx error = nil, want context canceled error")
 		}
 	})
 }
@@ -1138,9 +1138,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_AmbiguousSendThenAlreadyExistsAdvanc
 				Multiplier:   1.0,
 			}
 
-			bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+			bp, err := newBatchProcessor(ctx, writeClient, "", config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor() error = %v", err)
+				t.Fatalf("newBatchProcessor() error = %v", err)
 			}
 			defer bp.Close()
 
@@ -1234,9 +1234,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_UnrecoverableOffsetConflictRotatesSt
 		Multiplier:   1.0,
 	}
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 
 	// Batch 1 (2 rows) -> committed-1 @ offset 0.
@@ -1347,9 +1347,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_TerminalAmbiguousSendRotatesStreamOn
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		bp, err := newBatchProcessor(ctx, writeClient, "", config)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 
 		// Batch A (2 rows) exhausts retries after ambiguous sends.
@@ -1459,9 +1459,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_TerminalAmbiguousSendRotatesStreamOn
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		bp, err := newBatchProcessor(ctx, writeClient, "", config)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -1532,9 +1532,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_TerminalAmbiguousSendRotatesStreamOn
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		bp, err := newBatchProcessor(ctx, writeClient, "", config)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -1599,9 +1599,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_FinalizePreservesCallerContextMetada
 	config.TableName = "agent_events"
 	config.ExactlyOnceDelivery = true
 
-	bp, err := NewBatchProcessor(callerCtx, writeClient, "", config)
+	bp, err := newBatchProcessor(callerCtx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 
 	// Cancel the caller context before Close to verify context.WithoutCancel(b.ctx)
@@ -1634,9 +1634,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_FinalizePreservesCallerContextMetada
 		shortCfg.ExactlyOnceDelivery = true
 		shortCfg.ShutdownTimeout = 5 * time.Millisecond
 
-		bpShort, err := NewBatchProcessor(context.Background(), writeClient, "", shortCfg)
+		bpShort, err := newBatchProcessor(context.Background(), writeClient, "", shortCfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 
 		start := time.Now()
@@ -1663,9 +1663,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_FinalizePreservesCallerContextMetada
 		remCfg.BatchFlushIntv = time.Hour
 		remCfg.ShutdownTimeout = 60 * time.Millisecond
 
-		bpRem, err := NewBatchProcessor(context.Background(), writeClient, "", remCfg)
+		bpRem, err := newBatchProcessor(context.Background(), writeClient, "", remCfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		bpRem.Start()
 		bpRem.Append(map[string]any{"event_type": "DRAIN_BEFORE_FINALIZE"})
@@ -1697,9 +1697,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_FinalizePreservesCallerContextMetada
 		exhaustCfg.RetryConfig.MaxRetries = 0
 		exhaustCfg.Logger = exhaustLog
 
-		bpExhaust, err := NewBatchProcessor(context.Background(), writeClient, "", exhaustCfg)
+		bpExhaust, err := newBatchProcessor(context.Background(), writeClient, "", exhaustCfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		bpExhaust.Start()
 		bpExhaust.Append(map[string]any{"event_type": "EXHAUST_DRAIN_BUDGET"})
@@ -1796,9 +1796,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_CloseBoundedWhenRetiredStreamFinaliz
 			config.ShutdownTimeout = tc.shutdownTimeout
 			config.RetryConfig.MaxRetries = 0
 			config.Logger = logger
-			bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+			bp, err := newBatchProcessor(ctx, writeClient, "", config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor() error = %v", err)
+				t.Fatalf("newBatchProcessor() error = %v", err)
 			}
 			t.Cleanup(func() {
 				bp.streamWriter.cancelFinalizations()
@@ -1833,7 +1833,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_CloseBoundedWhenRetiredStreamFinaliz
 
 // TestBatchProcessor_ExactlyOnceDelivery_RetiredStreamFinalizeKeepsMetadataAndLogsErrors
 // checks that the background finalization of a retired stream keeps the
-// values of the context given to NewBatchProcessor, such as outgoing
+// values of the context given to newBatchProcessor, such as outgoing
 // metadata, after that context is canceled, and that Close waits for it and
 // it logs its failure.
 func TestBatchProcessor_ExactlyOnceDelivery_RetiredStreamFinalizeKeepsMetadataAndLogsErrors(t *testing.T) {
@@ -1869,9 +1869,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RetiredStreamFinalizeKeepsMetadataAn
 	logger := &recordingLogger{}
 	config := exactlyOnceTestConfig()
 	config.Logger = logger
-	bp, err := NewBatchProcessor(callerCtx, writeClient, "", config)
+	bp, err := newBatchProcessor(callerCtx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	t.Cleanup(func() {
 		bp.streamWriter.cancelFinalizations()
@@ -1934,9 +1934,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RetiredStreamFinalizeBoundedByRotate
 	logger := &recordingLogger{}
 	config := exactlyOnceTestConfig()
 	config.Logger = logger
-	bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", config)
+	bp, err := newBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	t.Cleanup(func() {
 		bp.streamWriter.cancelFinalizations()
@@ -2055,9 +2055,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_B1AmbiguousExhaustedThenB2AmbiguousD
 		Multiplier:   1.0,
 	}
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	defer bp.Close()
 
@@ -2102,8 +2102,8 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationCooldownAndGuards(t *testing
 	t.Run("rejects non-empty or _default streamName when ExactlyOnceDelivery is enabled", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.ExactlyOnceDelivery = true
-		if _, err := NewBatchProcessor(ctx, nil, "projects/p/datasets/d/tables/t/streams/_default", cfg); err == nil {
-			t.Fatal("NewBatchProcessor() with _default streamName and ExactlyOnceDelivery=true succeeded, want error")
+		if _, err := newBatchProcessor(ctx, nil, "projects/p/datasets/d/tables/t/streams/_default", cfg); err == nil {
+			t.Fatal("newBatchProcessor() with _default streamName and ExactlyOnceDelivery=true succeeded, want error")
 		}
 	})
 
@@ -2146,9 +2146,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationCooldownAndGuards(t *testing
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", cfg)
+		bp, err := newBatchProcessor(ctx, writeClient, "", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -2239,9 +2239,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationCooldownAndGuards(t *testing
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", cfg)
+		bp, err := newBatchProcessor(ctx, writeClient, "", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -2354,9 +2354,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationCooldownAndGuards(t *testing
 			Multiplier:   1.0,
 		}
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", cfg)
+		bp, err := newBatchProcessor(ctx, writeClient, "", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -2473,9 +2473,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationCooldownAndGuards(t *testing
 		cfg.ExactlyOnceDelivery = true
 		cfg.RetryConfig.MaxRetries = 0
 
-		bp, err := NewBatchProcessor(ctx, writeClient, "", cfg)
+		bp, err := newBatchProcessor(ctx, writeClient, "", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -2530,9 +2530,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_HangingCreateWriteStreamArmsCooldown
 	// than the rotation timeout, so a hanging CreateWriteStream ends at the
 	// write deadline.
 	config.ShutdownTimeout = 300 * time.Millisecond
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	defer bp.Close()
 
@@ -2611,9 +2611,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationOnDepletedBudget(t *testing.
 			config.BatchSize = 4
 			config.BatchFlushIntv = time.Hour
 			config.ShutdownTimeout = 450 * time.Millisecond
-			bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+			bp, err := newBatchProcessor(ctx, writeClient, "", config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor() error = %v", err)
+				t.Fatalf("newBatchProcessor() error = %v", err)
 			}
 			defer bp.Close()
 
@@ -2708,9 +2708,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_FreshStreamUnknownOutcomeArmsCooldow
 					}
 				},
 			}
-			bp, err := NewBatchProcessor(ctx, newScriptedWriteClient(t, srv), "", exactlyOnceTestConfig())
+			bp, err := newBatchProcessor(ctx, newScriptedWriteClient(t, srv), "", exactlyOnceTestConfig())
 			if err != nil {
-				t.Fatalf("NewBatchProcessor() error = %v", err)
+				t.Fatalf("newBatchProcessor() error = %v", err)
 			}
 			defer bp.Close()
 			now := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
@@ -2769,9 +2769,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_CloseDrainDropsBatchesDuringCooldown
 	config.BatchFlushIntv = time.Hour
 	config.GCSOffloader = off
 	config.Logger = logger
-	bp, err := NewBatchProcessor(ctx, newScriptedWriteClient(t, srv), "", config)
+	bp, err := newBatchProcessor(ctx, newScriptedWriteClient(t, srv), "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 
 	// The first stream's offset error replaces it, and the freshly rotated
@@ -2821,9 +2821,9 @@ func TestBatchProcessor_ConcurrentAppendAndClose(t *testing.T) {
 		config.BatchFlushIntv = time.Hour
 		config.RetryConfig.MaxRetries = 0
 
-		bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+		bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 		if err != nil {
-			t.Fatalf("iter %d: NewBatchProcessor error: %v", iter, err)
+			t.Fatalf("iter %d: newBatchProcessor error: %v", iter, err)
 		}
 		mStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
 		bp.streamWriter.stream = mStream
@@ -2857,9 +2857,9 @@ func TestBatchProcessor_CloseDrainsInFlightAndQueuedBatches(t *testing.T) {
 	config.BatchFlushIntv = time.Hour
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	firstSendStarted := make(chan struct{})
@@ -2926,9 +2926,9 @@ func TestBatchProcessor_ReusesCachedStreamAcrossFlushes(t *testing.T) {
 	config.BatchFlushIntv = time.Hour
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -2960,9 +2960,9 @@ func TestBatchProcessor_ConcurrentCloseWaitsForDrain(t *testing.T) {
 	config.BatchFlushIntv = time.Hour
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	bp, err := newBatchProcessor(ctx, nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor error: %v", err)
+		t.Fatalf("newBatchProcessor error: %v", err)
 	}
 
 	firstSendEntered := make(chan struct{})
@@ -3048,9 +3048,9 @@ func TestBatchProcessor_DrainDeliversQueuedRowsAfterConstructorContextCanceled_F
 	config.ShutdownTimeout = time.Second
 	config.RetryConfig.MaxRetries = 1
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 
 	bp.Start()
@@ -3109,9 +3109,9 @@ func TestBatchProcessor_DrainDeliversQueuedRowsAfterConstructorContextCanceled_C
 	config.ShutdownTimeout = time.Second
 	config.RetryConfig.MaxRetries = 1
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 
 	bp.Start()
@@ -3185,9 +3185,9 @@ func TestBatchProcessor_RootContextCancelBeforeFirstStreamOpenDrainsQueuedRowOnC
 	config.ShutdownTimeout = time.Second
 	config.RetryConfig.MaxRetries = 1
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 
 	bp.Start()
@@ -3243,9 +3243,9 @@ func TestBatchProcessor_InitContextCanceledDoesNotStopProcessing(t *testing.T) {
 	config.BatchFlushIntv = 10 * time.Millisecond
 	config.ShutdownTimeout = time.Second
 
-	bp, err := NewBatchProcessor(initCtx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(initCtx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 
 	// Cancel the init context immediately after construction.
@@ -3299,9 +3299,9 @@ func TestBatchProcessor_ConcurrentStartAndClose(t *testing.T) {
 	config.BatchSize = 10
 	config.BatchFlushIntv = 10 * time.Millisecond
 
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 
 	var wg sync.WaitGroup
@@ -3365,9 +3365,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3425,9 +3425,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3465,9 +3465,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = &fakeOffloader{}
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3519,9 +3519,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.RetryConfig.MaxRetries = 0
 		cfg.Logger = logger
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3562,9 +3562,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = &fakeOffloader{}
 		cfg.Logger = logger
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3617,9 +3617,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 		defer bp.Close()
@@ -3662,9 +3662,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = logger
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3725,9 +3725,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = logger
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3792,9 +3792,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -3848,9 +3848,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.GCSOffloader = off
 		cfg.Logger = logger
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 		defer bp.Close()
@@ -3893,9 +3893,9 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 		cfg.RetryConfig.MaxRetries = 0
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 		defer bp.Close()
@@ -3962,9 +3962,9 @@ func TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats(t *testing.T) {
 		}
 		cfg.Logger = &recordingLogger{}
 
-		bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -4008,9 +4008,9 @@ func TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats(t *testing.T) {
 	t.Run("writeBatchWithContexts counts batch in AppendFailureDrops when writeCtx is already canceled", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.RetryConfig.MaxRetries = 0
-		bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
+		bp, err := newBatchProcessor(context.Background(), nil, "test_stream", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 
 		canceledCtx, cancel := context.WithCancel(context.Background())
@@ -4178,9 +4178,9 @@ func TestBatchProcessor_StalledAppendRowsEndsAtShutdownTimeout(t *testing.T) {
 	config.ShutdownTimeout = 200 * time.Millisecond
 	config.RetryConfig.MaxRetries = 0
 
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -4259,9 +4259,9 @@ func TestBatchProcessor_FlushRunEndDoesNotDropBatchWhenBudgetExpires(t *testing.
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -4324,9 +4324,9 @@ func TestBatchProcessor_FlushRunEndBoundedReDeferral(t *testing.T) {
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 	bp.Start()
@@ -4483,9 +4483,9 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 	logger := &recordingLogger{}
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 	bp.Start()
@@ -4707,9 +4707,9 @@ func TestBatchProcessor_FlushRunEndDeferredBatchRetriesCutShortUploads(t *testin
 			cfg.GCSOffloader = off
 			cfg.GCSMaxConcurrentUploads = 1
 			cfg.Logger = &recordingLogger{}
-			bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+			bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor: %v", err)
+				t.Fatalf("newBatchProcessor: %v", err)
 			}
 			t.Cleanup(bp.Close)
 
@@ -4855,9 +4855,9 @@ func TestBatchProcessor_FlushRunEndSucceededWriteReleasesCutShortUploadBytes(t *
 	cfg.GCSMaxConcurrentUploads = 1
 	logger := &recordingLogger{}
 	cfg.Logger = logger
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -4992,9 +4992,9 @@ func TestBatchProcessor_FlushRunEndStalledUploadPausesLaterBatches(t *testing.T)
 			cfg.RetryConfig.MaxRetries = 0
 			cfg.GCSOffloader = off
 			cfg.Logger = logger
-			bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+			bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor: %v", err)
+				t.Fatalf("newBatchProcessor: %v", err)
 			}
 			t.Cleanup(bp.Close)
 
@@ -5070,7 +5070,7 @@ func TestBatchProcessor_FlushRunEndDeferredRetryPrioritizesBigQueryWrite(t *test
 	var inRetry atomic.Bool
 	var pendingDuringRetryWrite atomic.Int64
 	pendingDuringRetryWrite.Store(-1)
-	var bp *BatchProcessor
+	var bp *batchProcessor
 	writeClient := newScriptedWriteClient(t, &dynamicDelayBigQueryWriteServer{
 		delay: &serverDelay,
 		onAppend: func() {
@@ -5097,9 +5097,9 @@ func TestBatchProcessor_FlushRunEndDeferredRetryPrioritizesBigQueryWrite(t *test
 	cfg.GCSMaxConcurrentUploads = 1
 	cfg.Logger = logger
 	var err error
-	bp, err = NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err = newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -5193,7 +5193,7 @@ func TestBatchProcessor_FlushRunEndDeferredRetryDoesNotPauseHealthyUploads(t *te
 	var inRetry, postRetry atomic.Bool
 	var pendingDuringRetryWrite atomic.Int64
 	pendingDuringRetryWrite.Store(-1)
-	var bp *BatchProcessor
+	var bp *batchProcessor
 	writeClient := newScriptedWriteClient(t, &dynamicDelayBigQueryWriteServer{
 		delay: &serverDelay,
 		onAppend: func() {
@@ -5229,9 +5229,9 @@ func TestBatchProcessor_FlushRunEndDeferredRetryDoesNotPauseHealthyUploads(t *te
 	cfg.GCSMaxConcurrentUploads = 1
 	cfg.Logger = logger
 	var err error
-	bp, err = NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err = newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -5391,7 +5391,7 @@ func TestBatchProcessor_NonDeferrableFlushesDoNotDeferCutShortUploads(t *testing
 		var pendingDuringWrite atomic.Int64
 		pendingDuringWrite.Store(-1)
 
-		var bp *BatchProcessor
+		var bp *batchProcessor
 		writeClient := newScriptedWriteClient(t, &hookBigQueryWriteServer{
 			onAppend: func() {
 				if measure.Load() {
@@ -5416,9 +5416,9 @@ func TestBatchProcessor_NonDeferrableFlushesDoNotDeferCutShortUploads(t *testing
 		cfg.Logger = logger
 
 		var err error
-		bp, err = NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err = newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		t.Cleanup(bp.Close)
 
@@ -5466,7 +5466,7 @@ func TestBatchProcessor_NonDeferrableFlushesDoNotDeferCutShortUploads(t *testing
 		var pendingDuringWrite atomic.Int64
 		pendingDuringWrite.Store(-1)
 
-		var bp *BatchProcessor
+		var bp *batchProcessor
 		writeClient := newScriptedWriteClient(t, &hookBigQueryWriteServer{
 			onAppend: func() {
 				if measure.Load() {
@@ -5494,9 +5494,9 @@ func TestBatchProcessor_NonDeferrableFlushesDoNotDeferCutShortUploads(t *testing
 		cfg.Logger = logger
 
 		var err error
-		bp, err = NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err = newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		t.Cleanup(bp.Close)
 
@@ -5580,9 +5580,9 @@ func TestBatchProcessor_FlushRunEndFailingUploadsPauseLaterBatches(t *testing.T)
 	cfg.GCSOffloader = off
 	cfg.GCSMaxConcurrentUploads = 1
 	cfg.Logger = logger
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -5687,9 +5687,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_NotFoundAfterLostResponseIsNotResent
 	config.TableName = "agent_events"
 	config.ExactlyOnceDelivery = true
 	config.RetryConfig = RetryConfig{MaxRetries: 2, InitialDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond, Multiplier: 1.0}
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	defer bp.Close()
 
@@ -5760,9 +5760,9 @@ func TestBatchProcessor_DefaultStream_SendsRoutingHeaderWithoutOffset(t *testing
 	config.TableName = "agent_events"
 	config.ExactlyOnceDelivery = false
 	defaultStream := "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default"
-	bp, err := NewBatchProcessor(ctx, writeClient, defaultStream, config)
+	bp, err := newBatchProcessor(ctx, writeClient, defaultStream, config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	defer bp.Close()
 
@@ -5860,9 +5860,9 @@ func TestBatchProcessor_RoutingHeader_UnicodeTableName(t *testing.T) {
 			config.DatasetID = "test-ds"
 			config.TableName = "événements"
 			config.ExactlyOnceDelivery = tc.exactlyOnceDelivery
-			bp, err := NewBatchProcessor(ctx, writeClient, tc.streamName, config)
+			bp, err := newBatchProcessor(ctx, writeClient, tc.streamName, config)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor() error = %v", err)
+				t.Fatalf("newBatchProcessor() error = %v", err)
 			}
 			defer bp.Close()
 
@@ -5933,9 +5933,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_BoundedRotationOnPersistentRejection
 	config.TableName = "agent_events"
 	config.ExactlyOnceDelivery = true
 	config.RetryConfig = RetryConfig{MaxRetries: 1, InitialDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond, Multiplier: 1.0}
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	defer bp.Close()
 
@@ -5999,9 +5999,9 @@ func TestBatchProcessor_ExactlyOnceDelivery_RetryAttemptRefundOnRotation(t *test
 	// with the default MaxRetries: 3. Only the rotation attempt refund allows
 	// sending on the newly created stream.
 	config.RetryConfig = RetryConfig{MaxRetries: 0, InitialDelay: time.Millisecond}
-	bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+	bp, err := newBatchProcessor(ctx, writeClient, "", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	defer bp.Close()
 	if got := bp.config.RetryConfig.MaxRetries; got != 0 {
@@ -6094,9 +6094,9 @@ func TestBatchProcessor_AppendRowsRequestTraceID(t *testing.T) {
 			MaxDelay:     5 * time.Millisecond,
 			Multiplier:   1.0,
 		}
-		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		bp, err := newBatchProcessor(ctx, writeClient, "", config)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		defer bp.Close()
 
@@ -6173,14 +6173,14 @@ func TestBatchProcessor_AppendRowsRequestTraceID(t *testing.T) {
 // newErrorClassificationProcessor returns a processor for srv, a scripted
 // write server, that retries four times in all (three retries) with
 // millisecond backoff. With exactlyOnce it writes to a committed stream.
-func newErrorClassificationProcessor(t *testing.T, srv storagepb.BigQueryWriteServer, exactlyOnce bool) *BatchProcessor {
+func newErrorClassificationProcessor(t *testing.T, srv storagepb.BigQueryWriteServer, exactlyOnce bool) *batchProcessor {
 	t.Helper()
 	return newErrorClassificationProcessorForClient(t, newScriptedWriteClient(t, srv), exactlyOnce)
 }
 
 // newErrorClassificationProcessorForClient is newErrorClassificationProcessor
 // over writeClient, a client of a scripted write server.
-func newErrorClassificationProcessorForClient(t *testing.T, writeClient *bqstorage.BigQueryWriteClient, exactlyOnce bool) *BatchProcessor {
+func newErrorClassificationProcessorForClient(t *testing.T, writeClient *bqstorage.BigQueryWriteClient, exactlyOnce bool) *batchProcessor {
 	t.Helper()
 	config := exactlyOnceTestConfig()
 	config.ExactlyOnceDelivery = exactlyOnce
@@ -6189,9 +6189,9 @@ func newErrorClassificationProcessorForClient(t *testing.T, writeClient *bqstora
 	if !exactlyOnce {
 		streamName = "projects/test-proj/datasets/test-ds/tables/agent_events/_default"
 	}
-	bp, err := NewBatchProcessor(context.Background(), writeClient, streamName, config)
+	bp, err := newBatchProcessor(context.Background(), writeClient, streamName, config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	t.Cleanup(bp.Close)
 	return bp
@@ -7036,9 +7036,9 @@ func TestFreshStreamClosedBeforeRecvRetryIsBounded(t *testing.T) {
 		})
 		config := DefaultConfig()
 		config.RetryConfig = RetryConfig{MaxRetries: 0, InitialDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond, Multiplier: 1.0}
-		bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/test-proj/datasets/test-ds/tables/agent_events/_default", config)
+		bp, err := newBatchProcessor(context.Background(), writeClient, "projects/test-proj/datasets/test-ds/tables/agent_events/_default", config)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(bp.Close)
 
@@ -7300,9 +7300,9 @@ func TestBatchProcessor_SplitsOversizedBatchAcrossRequests(t *testing.T) {
 	writeClient := newScriptedWriteClient(t, srv, grpc.MaxRecvMsgSize(64*1024*1024))
 	cfg := DefaultConfig()
 	cfg.RetryConfig.MaxRetries = 0
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -7595,9 +7595,9 @@ func TestReviewIgnoredCyclicMetadataDoesNotCrash(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.BatchSize = 10
 		cfg.BatchFlushIntv = time.Hour
-		bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		bp.Start()
 
@@ -7756,9 +7756,9 @@ func TestBatchProcessor_SplitsSparseContentPartsAndEnforcesSerializedCap(t *test
 		writeClient := newScriptedWriteClient(t, srv, grpc.MaxRecvMsgSize(64*1024*1024))
 		cfg := DefaultConfig()
 		cfg.RetryConfig.MaxRetries = 0
-		bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		t.Cleanup(bp.Close)
 
@@ -7809,9 +7809,9 @@ func TestBatchProcessor_SplitsSparseContentPartsAndEnforcesSerializedCap(t *test
 		writeClient := newScriptedWriteClient(t, srv, grpc.MaxRecvMsgSize(64*1024*1024))
 		cfg := DefaultConfig()
 		cfg.RetryConfig.MaxRetries = 0
-		bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor: %v", err)
+			t.Fatalf("newBatchProcessor: %v", err)
 		}
 		t.Cleanup(bp.Close)
 
@@ -7861,8 +7861,8 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 	}
 	for _, path := range []struct {
 		name  string
-		setup func(bp *BatchProcessor)
-		write func(bp *BatchProcessor, batch []map[string]any) error
+		setup func(bp *batchProcessor)
+		write func(bp *batchProcessor, batch []map[string]any) error
 		// countsDrops reports whether the entry point records
 		// DropStats.AppendFailureDrops.
 		countsDrops bool
@@ -7870,8 +7870,8 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 		{
 			// Each row is a request of its own under this estimated limit.
 			name:  "estimated_split_via_writeBatch",
-			setup: func(bp *BatchProcessor) { bp.maxAppendBytes = estimateRowBytes(row("a")) },
-			write: func(bp *BatchProcessor, batch []map[string]any) error {
+			setup: func(bp *batchProcessor) { bp.maxAppendBytes = estimateRowBytes(row("a")) },
+			write: func(bp *batchProcessor, batch []map[string]any) error {
 				return bp.writeBatch(context.Background(), batch)
 			},
 			countsDrops: true,
@@ -7881,8 +7881,8 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 			// 3-row chunk is halved into [a] and [b c], and [b c] into [b]
 			// and [c].
 			name:  "recursive_halving_via_appendChunk",
-			setup: func(bp *BatchProcessor) { bp.maxSerializedAppendBytes = 1 },
-			write: func(bp *BatchProcessor, batch []map[string]any) error {
+			setup: func(bp *batchProcessor) { bp.maxSerializedAppendBytes = 1 },
+			write: func(bp *batchProcessor, batch []map[string]any) error {
 				return bp.appendChunk(context.Background(), batch)
 			},
 		},
@@ -8057,20 +8057,20 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		rows  int
-		setup func(bp *BatchProcessor)
+		setup func(bp *batchProcessor)
 	}{
 		{
 			// Each row is a request of its own under this estimated limit.
 			name:  "estimated_split",
 			rows:  2,
-			setup: func(bp *BatchProcessor) { bp.maxAppendBytes = 1 },
+			setup: func(bp *batchProcessor) { bp.maxAppendBytes = 1 },
 		},
 		{
 			// The batch is a single estimated chunk, which serializes to
 			// more than this limit, so it is halved into [ev-0] and [ev-1].
 			name:  "recursive_serialized_halving",
 			rows:  2,
-			setup: func(bp *BatchProcessor) { bp.maxSerializedAppendBytes = 1 },
+			setup: func(bp *batchProcessor) { bp.maxSerializedAppendBytes = 1 },
 		},
 		{
 			// The batch is halved into [ev-0 ev-1] and [ev-2 ev-3 ev-4],
@@ -8078,7 +8078,7 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 			// the one that fails.
 			name:  "recursive_serialized_halving_progress_in_first_half",
 			rows:  5,
-			setup: func(bp *BatchProcessor) { bp.maxSerializedAppendBytes = 1 },
+			setup: func(bp *batchProcessor) { bp.maxSerializedAppendBytes = 1 },
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -8145,9 +8145,9 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 			cfg.GCSOffloader = off
 			cfg.GCSMaxConcurrentUploads = 1
 			cfg.Logger = &recordingLogger{}
-			bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", cfg)
+			bp, err := newBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", cfg)
 			if err != nil {
-				t.Fatalf("NewBatchProcessor: %v", err)
+				t.Fatalf("newBatchProcessor: %v", err)
 			}
 			t.Cleanup(bp.Close)
 			// Cleanups run last-in first-out: the blocked server request is

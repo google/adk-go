@@ -38,6 +38,8 @@ const maxBigQueryIdentifierLen = 1024
 // ViewDefinition describes a BigQuery view over the agent events table for a
 // single event type.
 type ViewDefinition struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{}
 	// Name is the unqualified BigQuery view name (for example "v_llm_request").
 	Name string
 	// EventType is the event_type value filtered by the view (for example [EventLLMRequest]).
