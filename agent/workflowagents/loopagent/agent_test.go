@@ -612,17 +612,23 @@ func (m *pauseCallLLM) Name() string { return "pause-call-llm" }
 func (m *pauseCallLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.calls++
+		if m.calls == 1 {
+			yield(&model.LLMResponse{
+				Content: &genai.Content{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call-1",
+							Name: "wait_for_user",
+							Args: map[string]any{},
+						},
+					}},
+				},
+			}, nil)
+			return
+		}
 		yield(&model.LLMResponse{
-			Content: &genai.Content{
-				Role: genai.RoleModel,
-				Parts: []*genai.Part{{
-					FunctionCall: &genai.FunctionCall{
-						ID:   "call-1",
-						Name: "wait_for_user",
-						Args: map[string]any{},
-					},
-				}},
-			},
+			Content: genai.NewContentFromText("first done", genai.RoleModel),
 		}, nil)
 	}
 }
@@ -679,6 +685,28 @@ func TestLoopAgentStopsOnSubAgentPause(t *testing.T) {
 		t.Errorf("first agent's model called %d times, want 1", firstLLM.calls)
 	}
 	if secondLLM.callCounter != 0 {
-		t.Errorf("second agent's model called %d times after first paused, want 0", secondLLM.callCounter)
+		t.Fatalf("second agent's model called %d times before answer, want 0", secondLLM.callCounter)
+	}
+
+	answer := &genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+			ID:       "call-1",
+			Name:     "wait_for_user",
+			Response: map[string]any{"ok": true},
+		}}},
+	}
+	for _, err := range r.Run(t.Context(), "user_id", "session_id", answer, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("resume Run() unexpected error: %v", err)
+		}
+	}
+
+	// Pass 1 used 2 calls (initial pause + resume), and passes 2 and 3 used 1 call each.
+	if firstLLM.calls != 4 {
+		t.Errorf("first agent's model called %d times across 3 passes, want 4", firstLLM.calls)
+	}
+	if secondLLM.callCounter != 3 {
+		t.Errorf("second agent's model called %d times across 3 passes after resume, want 3", secondLLM.callCounter)
 	}
 }

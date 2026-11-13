@@ -39,42 +39,69 @@ import (
 	"google.golang.org/adk/v2/workflow"
 )
 
-// TestRun_FunctionResponseResumesWorkflowSubAgent checks that when a sequential
-// or parallel agent is the root, a user function response is routed to the
-// sub-agent that made the long-running call, on that sub-agent's branch, instead
-// of re-running the root.
+// TestRun_FunctionResponseResumesWorkflowSubAgent checks that when a
+// sequential, loop, or parallel agent is the root, a user function response
+// resumes the sub-agent that made the long-running call without repeating
+// earlier siblings, and continues to downstream siblings in sequential and loop
+// workflows once the caller finishes.
 func TestRun_FunctionResponseResumesWorkflowSubAgent(t *testing.T) {
 	tests := []struct {
-		name       string
-		newRoot    func(caller, other agent.Agent) (agent.Agent, error)
-		wantBranch string
-		// wantOtherCalls is how many times the other agent calls its model
-		// in total. It runs at most once, on the first turn.
-		wantOtherCalls int
+		name            string
+		newRoot         func(caller, other agent.Agent) (agent.Agent, error)
+		wantBranch      string
+		wantOtherBefore int
+		wantOtherAfter  int
+		wantAuthors     []string
 	}{
 		{
 			name: "parallel",
 			newRoot: func(caller, other agent.Agent) (agent.Agent, error) {
 				return parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{caller, other}}})
 			},
-			wantBranch:     "root.caller",
-			wantOtherCalls: 1,
+			wantBranch:      "root.caller",
+			wantOtherBefore: 1,
+			wantOtherAfter:  1,
+			wantAuthors:     []string{"caller"},
 		},
 		{
 			name: "sequential, caller runs second",
 			newRoot: func(caller, other agent.Agent) (agent.Agent, error) {
 				return sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{other, caller}}})
 			},
-			wantBranch:     "",
-			wantOtherCalls: 1,
+			wantBranch:      "",
+			wantOtherBefore: 1,
+			wantOtherAfter:  1,
+			wantAuthors:     []string{"caller"},
 		},
 		{
 			name: "sequential, caller runs first",
 			newRoot: func(caller, other agent.Agent) (agent.Agent, error) {
 				return sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{caller, other}}})
 			},
-			wantBranch:     "",
-			wantOtherCalls: 0,
+			wantBranch:      "",
+			wantOtherBefore: 0,
+			wantOtherAfter:  1,
+			wantAuthors:     []string{"caller", "other"},
+		},
+		{
+			name: "loop, caller runs second",
+			newRoot: func(caller, other agent.Agent) (agent.Agent, error) {
+				return loopagent.New(loopagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{other, caller}}, MaxIterations: 1})
+			},
+			wantBranch:      "",
+			wantOtherBefore: 1,
+			wantOtherAfter:  1,
+			wantAuthors:     []string{"caller"},
+		},
+		{
+			name: "loop, caller runs first",
+			newRoot: func(caller, other agent.Agent) (agent.Agent, error) {
+				return loopagent.New(loopagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{caller, other}}, MaxIterations: 1})
+			},
+			wantBranch:      "",
+			wantOtherBefore: 0,
+			wantOtherAfter:  1,
+			wantAuthors:     []string{"caller", "other"},
 		},
 	}
 	for _, tc := range tests {
@@ -120,6 +147,9 @@ func TestRun_FunctionResponseResumesWorkflowSubAgent(t *testing.T) {
 					t.Fatalf("first Run() error = %v", err)
 				}
 			}
+			if n := len(otherModel.Requests); n != tc.wantOtherBefore {
+				t.Fatalf("before answer: other agent called the model %d times, want %d", n, tc.wantOtherBefore)
+			}
 
 			response := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "approve", Response: map[string]any{"ok": true}}}}}
 			var got []*session.Event
@@ -130,8 +160,12 @@ func TestRun_FunctionResponseResumesWorkflowSubAgent(t *testing.T) {
 				got = append(got, ev)
 			}
 
-			if len(got) != 1 {
-				t.Fatalf("resume yielded %d events, want 1 from the caller", len(got))
+			var gotAuthors []string
+			for _, ev := range got {
+				gotAuthors = append(gotAuthors, ev.Author)
+			}
+			if !slices.Equal(gotAuthors, tc.wantAuthors) {
+				t.Fatalf("resume event authors = %v, want %v", gotAuthors, tc.wantAuthors)
 			}
 			if got[0].Author != "caller" || got[0].Branch != tc.wantBranch {
 				t.Errorf("resume event author=%q branch=%q, want author=%q branch=%q", got[0].Author, got[0].Branch, "caller", tc.wantBranch)
@@ -145,11 +179,274 @@ func TestRun_FunctionResponseResumesWorkflowSubAgent(t *testing.T) {
 			if !hasFunctionResponse(callerModel.Requests[1].Contents, "call-1") {
 				t.Errorf("caller's second model request has no function response for call-1")
 			}
-			if n := len(otherModel.Requests); n != tc.wantOtherCalls {
-				t.Errorf("other agent called the model %d times, want %d (it must not re-run on resume)", n, tc.wantOtherCalls)
+			if n := len(otherModel.Requests); n != tc.wantOtherAfter {
+				t.Fatalf("after answer: other agent called the model %d times, want %d", n, tc.wantOtherAfter)
+			}
+			if tc.wantOtherBefore == 0 && tc.wantOtherAfter == 1 {
+				texts := contentTexts(otherModel.Requests[0].Contents)
+				if !slices.ContainsFunc(texts, func(s string) bool { return strings.Contains(s, "approved") }) {
+					t.Errorf("other agent's request does not carry caller's finished output, texts = %q", texts)
+				}
 			}
 		})
 	}
+}
+
+func TestRun_FunctionResponsePreservesWorkflowProgress(t *testing.T) {
+	newApproveTool := func(t *testing.T) tool.Tool {
+		t.Helper()
+		approve, err := functiontool.New(functiontool.Config{Name: "approve", Description: "approve", IsLongRunning: true},
+			func(agent.Context, struct{}) (map[string]any, error) { return nil, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		return approve
+	}
+
+	t.Run("loop continues remaining passes after first-pass pause", func(t *testing.T) {
+		approve := newApproveTool(t)
+		callerModel := &testutil.MockModel{Responses: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "approve", Args: map[string]any{}}}}},
+			genai.NewContentFromText("pass 1 approved", genai.RoleModel),
+			genai.NewContentFromText("pass 2 done", genai.RoleModel),
+		}}
+		afterModel := &testutil.MockModel{Responses: []*genai.Content{
+			genai.NewContentFromText("after pass 1", genai.RoleModel),
+			genai.NewContentFromText("after pass 2", genai.RoleModel),
+		}}
+		caller, err := llmagent.New(llmagent.Config{Name: "caller", Model: callerModel, Tools: []tool.Tool{approve}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := llmagent.New(llmagent.Config{Name: "after", Model: afterModel})
+		if err != nil {
+			t.Fatal(err)
+		}
+		root := mustLoop(t, "root", 2, caller, after)
+		r, err := runner.New(runner.Config{AppName: "app", Agent: root, SessionService: session.InMemoryService(), AutoCreateSession: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("first turn error = %v", err)
+			}
+		}
+		if got := len(afterModel.Requests); got != 0 {
+			t.Fatalf("before answer: after called model %d times, want 0", got)
+		}
+
+		ans := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "approve", Response: map[string]any{"ok": true}}}}}
+		for _, err := range r.Run(t.Context(), "u", "s", ans, agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("resume turn error = %v", err)
+			}
+		}
+		if got := len(callerModel.Requests); got != 3 {
+			t.Errorf("caller called model %d times across 2 loop passes, want 3", got)
+		}
+		if got := len(afterModel.Requests); got != 2 {
+			t.Errorf("after called model %d times across 2 loop passes, want 2", got)
+		}
+	})
+
+	t.Run("loop pausing on second pass does not repeat earlier sibling or completed pass", func(t *testing.T) {
+		for _, freshRunnerOnResume := range []bool{false, true} {
+			name := "same runner"
+			if freshRunnerOnResume {
+				name = "fresh runner from session history"
+			}
+			t.Run(name, func(t *testing.T) {
+				approve := newApproveTool(t)
+				firstModel := &testutil.MockModel{Responses: []*genai.Content{
+					genai.NewContentFromText("first pass 1", genai.RoleModel),
+					genai.NewContentFromText("first pass 2", genai.RoleModel),
+				}}
+				callerModel := &testutil.MockModel{Responses: []*genai.Content{
+					genai.NewContentFromText("caller pass 1", genai.RoleModel),
+					{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call-2", Name: "approve", Args: map[string]any{}}}}},
+					genai.NewContentFromText("caller pass 2 approved", genai.RoleModel),
+				}}
+				afterModel := &testutil.MockModel{Responses: []*genai.Content{
+					genai.NewContentFromText("after pass 1", genai.RoleModel),
+					genai.NewContentFromText("after pass 2", genai.RoleModel),
+				}}
+				buildRoot := func() agent.Agent {
+					first, err := llmagent.New(llmagent.Config{Name: "first", Model: firstModel})
+					if err != nil {
+						t.Fatal(err)
+					}
+					caller, err := llmagent.New(llmagent.Config{Name: "caller", Model: callerModel, Tools: []tool.Tool{approve}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					after, err := llmagent.New(llmagent.Config{Name: "after", Model: afterModel})
+					if err != nil {
+						t.Fatal(err)
+					}
+					return mustLoop(t, "root", 2, first, caller, after)
+				}
+
+				svc := session.InMemoryService()
+				r1, err := runner.New(runner.Config{AppName: "app", Agent: buildRoot(), SessionService: svc, AutoCreateSession: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, err := range r1.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+					if err != nil {
+						t.Fatalf("first turn error = %v", err)
+					}
+				}
+				if got := len(firstModel.Requests); got != 2 {
+					t.Fatalf("before answer: first called model %d times, want 2", got)
+				}
+				if got := len(afterModel.Requests); got != 1 {
+					t.Fatalf("before answer: after called model %d times, want 1 (pass 1 only)", got)
+				}
+
+				r2 := r1
+				if freshRunnerOnResume {
+					r2, err = runner.New(runner.Config{AppName: "app", Agent: buildRoot(), SessionService: svc, AutoCreateSession: true})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				ans := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "call-2", Name: "approve", Response: map[string]any{"ok": true}}}}}
+				for _, err := range r2.Run(t.Context(), "u", "s", ans, agent.RunConfig{}) {
+					if err != nil {
+						t.Fatalf("resume turn error = %v", err)
+					}
+				}
+				if got := len(firstModel.Requests); got != 2 {
+					t.Errorf("after answer: first called model %d times, want 2 (must not repeat)", got)
+				}
+				if got := len(callerModel.Requests); got != 3 {
+					t.Errorf("after answer: caller called model %d times, want 3", got)
+				}
+				if got := len(afterModel.Requests); got != 2 {
+					t.Errorf("after answer: after called model %d times, want 2", got)
+				}
+			})
+		}
+	})
+
+	t.Run("sequence waits for every parallel branch before running downstream", func(t *testing.T) {
+		approve := newApproveTool(t)
+		modelA := &testutil.MockModel{Responses: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call-a", Name: "approve", Args: map[string]any{}}}}},
+			genai.NewContentFromText("a done", genai.RoleModel),
+		}}
+		modelB := &testutil.MockModel{Responses: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call-b", Name: "approve", Args: map[string]any{}}}}},
+			genai.NewContentFromText("b done", genai.RoleModel),
+		}}
+		afterModel := &testutil.MockModel{Responses: []*genai.Content{
+			genai.NewContentFromText("after both", genai.RoleModel),
+		}}
+		a, err := llmagent.New(llmagent.Config{Name: "a", Model: modelA, Tools: []tool.Tool{approve}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := llmagent.New(llmagent.Config{Name: "b", Model: modelB, Tools: []tool.Tool{approve}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := llmagent.New(llmagent.Config{Name: "after", Model: afterModel})
+		if err != nil {
+			t.Fatal(err)
+		}
+		root := mustSequential(t, "seq", mustParallel(t, "par", a, b), after)
+		r, err := runner.New(runner.Config{AppName: "app", Agent: root, SessionService: session.InMemoryService(), AutoCreateSession: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("first turn error = %v", err)
+			}
+		}
+		if got := len(afterModel.Requests); got != 0 {
+			t.Fatalf("after first turn: after called model %d times, want 0", got)
+		}
+
+		ansA := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "call-a", Name: "approve", Response: map[string]any{"ok": true}}}}}
+		for _, err := range r.Run(t.Context(), "u", "s", ansA, agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("answering call-a failed: %v", err)
+			}
+		}
+		if got := len(afterModel.Requests); got != 0 {
+			t.Fatalf("after answering only call-a: after called model %d times, want 0 while call-b is still pending", got)
+		}
+
+		ansB := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "call-b", Name: "approve", Response: map[string]any{"ok": true}}}}}
+		for _, err := range r.Run(t.Context(), "u", "s", ansB, agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("answering call-b failed: %v", err)
+			}
+		}
+		if got := len(afterModel.Requests); got != 1 {
+			t.Errorf("after answering call-b: after called model %d times, want 1", got)
+		}
+	})
+
+	t.Run("sequence resumes transferred descendant and then runs downstream", func(t *testing.T) {
+		approve := newApproveTool(t)
+		specialistModel := &testutil.MockModel{Responses: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "approve", Args: map[string]any{}}}}},
+			genai.NewContentFromText("specialist done", genai.RoleModel),
+		}}
+		coordModel := &testutil.MockModel{Responses: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "tx-1", Name: "transfer_to_agent", Args: map[string]any{"agent_name": "specialist"}}}}},
+		}}
+		afterModel := &testutil.MockModel{Responses: []*genai.Content{
+			genai.NewContentFromText("after done", genai.RoleModel),
+		}}
+		specialist, err := llmagent.New(llmagent.Config{Name: "specialist", Model: specialistModel, Tools: []tool.Tool{approve}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		coord, err := llmagent.New(llmagent.Config{Name: "coord", Model: coordModel, SubAgents: []agent.Agent{specialist}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := llmagent.New(llmagent.Config{Name: "after", Model: afterModel})
+		if err != nil {
+			t.Fatal(err)
+		}
+		root := mustSequential(t, "seq", coord, after)
+		r, err := runner.New(runner.Config{AppName: "app", Agent: root, SessionService: session.InMemoryService(), AutoCreateSession: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("first turn error = %v", err)
+			}
+		}
+		if got := len(afterModel.Requests); got != 0 {
+			t.Fatalf("before answer: after called model %d times, want 0", got)
+		}
+
+		ans := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "approve", Response: map[string]any{"ok": true}}}}}
+		for _, err := range r.Run(t.Context(), "u", "s", ans, agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("resume turn error = %v", err)
+			}
+		}
+		if got := len(coordModel.Requests); got != 1 {
+			t.Errorf("coord called model %d times, want 1 (must not re-run on resume)", got)
+		}
+		if got := len(specialistModel.Requests); got != 2 {
+			t.Errorf("specialist called model %d times, want 2", got)
+		}
+		if got := len(afterModel.Requests); got != 1 {
+			t.Errorf("after called model %d times after specialist finished, want 1", got)
+		}
+	})
 }
 
 func hasFunctionResponse(contents []*genai.Content, callID string) bool {
