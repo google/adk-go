@@ -532,3 +532,27 @@ func TestInMemoryArtifactService_ReferenceErrorsWrapSentinelAndPhrase(t *testing
 			[]string{"artifact://", "loop.txt"})
 	})
 }
+
+// A user-scoped reference carries no session, so a target without the "user:"
+// prefix cannot be looked up; Load refuses it as adk-python does ("Session ID
+// must be provided for session-scoped artifacts.") instead of reporting it
+// missing.
+func TestInMemoryArtifactService_UserScopedReferenceToSessionFile(t *testing.T) {
+	ctx := t.Context()
+	svc := artifact.InMemoryService()
+	for _, req := range []*artifact.SaveRequest{
+		{AppName: "app", UserID: "u", SessionID: "s", FileName: "plain.txt", Part: genai.NewPartFromText("private")},
+		{AppName: "app", UserID: "u", SessionID: "s", FileName: "user:a", Part: &genai.Part{FileData: &genai.FileData{
+			FileURI: "artifact://apps/app/users/u/artifacts/plain.txt/versions/1",
+		}}},
+	} {
+		if _, err := svc.Save(ctx, req); err != nil {
+			t.Fatalf("Save(%q) failed: %v", req.FileName, err)
+		}
+	}
+
+	loaded, err := svc.Load(ctx, &artifact.LoadRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "user:a"})
+	if !errors.Is(err, artifact.ErrInputValidation) {
+		t.Errorf("Load(user:a) = (%v, %v), want an error wrapping ErrInputValidation", loaded, err)
+	}
+}

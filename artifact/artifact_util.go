@@ -330,6 +330,59 @@ func hasReservedSegment(segments []string) bool {
 	return false
 }
 
+// MaxArtifactReferenceDepth is the maximum number of artifact references a
+// service follows to load one artifact, as adk-python's
+// _MAX_ARTIFACT_REFERENCE_DEPTH. It counts reference hops only: loading the
+// requested artifact does not use one, so a chain of five references
+// resolves and a sixth reference fails with [ErrInputValidation]. It bounds
+// self-referencing and cyclic chains.
+const MaxArtifactReferenceDepth = 5
+
+// ParseAndValidateReferenceURI checks an artifact:// reference before a
+// service saves or follows it, and returns its target. uri is the stored or
+// submitted FileData.FileURI; appName, userID and sessionID are the scope of
+// the caller (sessionID is empty for a caller without a session); and
+// remainingDepth is how many more references the caller may follow. A service
+// that follows a chain starts at [MaxArtifactReferenceDepth], passes one less
+// at each hop and calls it with the scope of the artifact it just reached.
+// A save checks a submitted reference with [MaxArtifactReferenceDepth].
+//
+// The checks run in adk-python's order (resolve_artifact_reference) and the
+// first failure is returned:
+//
+//  1. remainingDepth is greater than zero;
+//  2. uri has the session-scoped form
+//     "artifact://apps/{app}/users/{user}/sessions/{session}/artifacts/{file}/versions/{version}"
+//     or the user-scoped form without the sessions segment, where the app,
+//     user and session segments hold no "/" and version is a positive decimal
+//     number. "versions/0" is refused because version 0 asks for the latest
+//     version elsewhere in this package, which a reference must not do;
+//  3. the target has the caller's app and user, and a session-scoped target
+//     has the caller's session.
+//
+// It does not check that the target exists or that its names pass
+// [ValidatePathSegment]; the service does that when it looks the target up.
+// On success it returns the parsed target, with an empty SessionID for a
+// user-scoped one. On failure it returns the zero ParsedArtifactURI and an
+// error that wraps [ErrInputValidation] and contains adk-python's phrase
+// ("Exceeded maximum recursion depth", "Invalid artifact reference URI") or
+// the scope rule that failed. The message never contains uri or its parts.
+// It is safe for concurrent use.
+func ParseAndValidateReferenceURI(uri, appName, userID, sessionID string, remainingDepth int) (ParsedArtifactURI, error) {
+	if remainingDepth <= 0 {
+		return ParsedArtifactURI{}, invalidInput(fmt.Sprintf("artifact reference resolution exceeded maximum depth of %d (Exceeded maximum recursion depth resolving artifact reference)", MaxArtifactReferenceDepth))
+	}
+	parsed, ok := parseArtifactURI(uri)
+	if !ok {
+		// adk-python's message holds the URI; it is caller data, so it is left out.
+		return ParsedArtifactURI{}, invalidInput("invalid artifact reference URI (Invalid artifact reference URI)")
+	}
+	if err := validateArtifactReferenceScope(appName, userID, sessionID, parsed); err != nil {
+		return ParsedArtifactURI{}, fmt.Errorf("invalid artifact reference: %w", err)
+	}
+	return ParsedArtifactURI(parsed), nil
+}
+
 // validateArtifactReferenceScope ensures an artifact reference cannot escape the
 // caller's app/user/session scope: parsed must belong to the same app and user
 // as appName/userID, and if parsed is session-scoped, its session must match

@@ -372,3 +372,130 @@ func TestValidatePathSegment(t *testing.T) {
 		})
 	}
 }
+
+// TestParseAndValidateReferenceURI checks the one rule set that every service
+// applies before following an artifact reference: the hop budget, the strict
+// URI form and the caller's scope, in adk-python's order
+// (artifact_util.resolve_artifact_reference).
+func TestParseAndValidateReferenceURI(t *testing.T) {
+	const (
+		depthMsg   = "artifact reference resolution exceeded maximum depth of 5 (Exceeded maximum recursion depth resolving artifact reference)"
+		invalidMsg = "invalid artifact reference URI (Invalid artifact reference URI)"
+		appUserMsg = "invalid artifact reference: artifact reference must stay within the same app and user scope"
+		sessionMsg = "invalid artifact reference: session-scoped artifact reference must stay within the same session scope"
+	)
+	testCases := []struct {
+		name           string
+		uri            string
+		remainingDepth int
+		want           ParsedArtifactURI
+		wantMsg        string
+	}{
+		{
+			name:           "session-scoped reference in scope",
+			uri:            "artifact://apps/app/users/user1/sessions/sess1/artifacts/t.txt/versions/3",
+			remainingDepth: 5,
+			want:           ParsedArtifactURI{AppName: "app", UserID: "user1", SessionID: "sess1", FileName: "t.txt", Version: 3},
+		},
+		{
+			name:           "user-scoped reference from any session",
+			uri:            "artifact://apps/app/users/user1/artifacts/user:n.txt/versions/1",
+			remainingDepth: 5,
+			want:           ParsedArtifactURI{AppName: "app", UserID: "user1", FileName: "user:n.txt", Version: 1},
+		},
+		{
+			name:           "last hop of the budget",
+			uri:            "artifact://apps/app/users/user1/sessions/sess1/artifacts/t.txt/versions/1",
+			remainingDepth: 1,
+			want:           ParsedArtifactURI{AppName: "app", UserID: "user1", SessionID: "sess1", FileName: "t.txt", Version: 1},
+		},
+		{
+			name:           "budget exhausted",
+			uri:            "artifact://apps/app/users/user1/sessions/sess1/artifacts/zz-secret-zz/versions/1",
+			remainingDepth: 0,
+			wantMsg:        depthMsg,
+		},
+		{
+			name:           "budget exhausted is reported before a malformed URI",
+			uri:            "artifact://apps/app/invalid",
+			remainingDepth: 0,
+			wantMsg:        depthMsg,
+		},
+		{
+			name:           "malformed URI",
+			uri:            "artifact://apps/zz-secret-zz/invalid",
+			remainingDepth: 5,
+			wantMsg:        invalidMsg,
+		},
+		{
+			name:           "not an artifact URI",
+			uri:            "gs://zz-secret-zz/o",
+			remainingDepth: 5,
+			wantMsg:        invalidMsg,
+		},
+		{
+			name:           "version 0",
+			uri:            "artifact://apps/app/users/user1/sessions/sess1/artifacts/t.txt/versions/0",
+			remainingDepth: 5,
+			wantMsg:        invalidMsg,
+		},
+		{
+			name:           "other app",
+			uri:            "artifact://apps/zz-secret-zz/users/user1/sessions/sess1/artifacts/t.txt/versions/1",
+			remainingDepth: 5,
+			wantMsg:        appUserMsg,
+		},
+		{
+			name:           "other user",
+			uri:            "artifact://apps/app/users/zz-secret-zz/artifacts/user:n.txt/versions/1",
+			remainingDepth: 5,
+			wantMsg:        appUserMsg,
+		},
+		{
+			name:           "other session",
+			uri:            "artifact://apps/app/users/user1/sessions/zz-secret-zz/artifacts/t.txt/versions/1",
+			remainingDepth: 5,
+			wantMsg:        sessionMsg,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseAndValidateReferenceURI(tc.uri, "app", "user1", "sess1", tc.remainingDepth)
+			if tc.wantMsg == "" {
+				if err != nil {
+					t.Fatalf("ParseAndValidateReferenceURI() error = %v, want nil", err)
+				}
+				if got != tc.want {
+					t.Errorf("ParseAndValidateReferenceURI() = %+v, want %+v", got, tc.want)
+				}
+				return
+			}
+			if !errors.Is(err, ErrInputValidation) {
+				t.Fatalf("ParseAndValidateReferenceURI() error = %v, want an error wrapping ErrInputValidation", err)
+			}
+			if err.Error() != tc.wantMsg {
+				t.Errorf("ParseAndValidateReferenceURI() error = %q, want %q", err.Error(), tc.wantMsg)
+			}
+			if got != (ParsedArtifactURI{}) {
+				t.Errorf("ParseAndValidateReferenceURI() = %+v on error, want the zero value", got)
+			}
+		})
+	}
+}
+
+// TestParseAndValidateReferenceURISessionlessCaller checks that a caller with
+// no session, as a "user:" artifact saved without one, may reference only
+// user-scoped artifacts.
+func TestParseAndValidateReferenceURISessionlessCaller(t *testing.T) {
+	_, err := ParseAndValidateReferenceURI("artifact://apps/app/users/user1/sessions/s1/artifacts/t.txt/versions/1", "app", "user1", "", MaxArtifactReferenceDepth)
+	if !errors.Is(err, ErrInputValidation) {
+		t.Fatalf("ParseAndValidateReferenceURI() error = %v, want an error wrapping ErrInputValidation", err)
+	}
+	got, err := ParseAndValidateReferenceURI("artifact://apps/app/users/user1/artifacts/user:n.txt/versions/2", "app", "user1", "", MaxArtifactReferenceDepth)
+	if err != nil {
+		t.Fatalf("ParseAndValidateReferenceURI() error = %v, want nil", err)
+	}
+	if want := (ParsedArtifactURI{AppName: "app", UserID: "user1", FileName: "user:n.txt", Version: 2}); got != want {
+		t.Errorf("ParseAndValidateReferenceURI() = %+v, want %+v", got, want)
+	}
+}
