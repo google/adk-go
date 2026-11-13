@@ -397,6 +397,11 @@ type EventActions struct {
 	// content in their place, which is not a decision the code running inside a
 	// turn gets to make about the conversation it is running in.
 	Compaction *EventCompaction `json:"compaction,omitempty"`
+
+	// RenderUIWidgets holds the widgets that tools and callbacks asked the UI
+	// host to render for this event, in the order they were rendered. Nil and
+	// empty both mean no widgets; the JSON key is omitted for either.
+	RenderUIWidgets []UIWidget `json:"renderUiWidgets,omitempty"`
 }
 
 // MarshalJSON omits StateDelta and ArtifactDelta when they are nil and writes

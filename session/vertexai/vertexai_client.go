@@ -416,7 +416,9 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		// resumed invocation is rebuilt from. An empty state counts: it marks
 		// an agent that started.
 		event.Actions.EndOfAgent != nil ||
-		event.Actions.AgentState != nil
+		event.Actions.AgentState != nil ||
+		// The EventActions message has no field for UI widgets either.
+		len(event.Actions.RenderUIWidgets) > 0
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for

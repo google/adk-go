@@ -62,9 +62,15 @@ func generateRequestConfirmationEvent(
 			continue
 		}
 
-		// Prepare arguments for the adk_request_confirmation call
+		// The JSON form of the args is what clients see. genai.FunctionCall
+		// leaves an empty args map out of it, while adk-python keeps it as {},
+		// so that one case is written as a map.
+		var originalCall any = originalPart.FunctionCall
+		if originalPart.FunctionCall.Args != nil && len(originalPart.FunctionCall.Args) == 0 {
+			originalCall = emptyArgsFunctionCall(originalPart.FunctionCall)
+		}
 		args := map[string]any{
-			"originalFunctionCall": originalPart.FunctionCall,
+			"originalFunctionCall": originalCall,
 			"toolConfirmation":     confirmation,
 		}
 
@@ -96,6 +102,17 @@ func generateRequestConfirmationEvent(
 	}
 	ev.LongRunningToolIDs = longRunningToolIDs
 	return ev
+}
+
+// emptyArgsFunctionCall returns the JSON object form of fc, a call whose args
+// map is empty, with "args" written as {}. toolconfirmation.OriginalCallFrom
+// reads this form back into a *genai.FunctionCall.
+func emptyArgsFunctionCall(fc *genai.FunctionCall) map[string]any {
+	call := map[string]any{"name": fc.Name, "args": map[string]any{}}
+	if fc.ID != "" {
+		call["id"] = fc.ID
+	}
+	return call
 }
 
 // generateAuthEvent returns the event that asks the client for the credentials

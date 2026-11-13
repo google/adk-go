@@ -722,7 +722,7 @@ func (c *commonContext) ToolConfirmation() *toolconfirmation.ToolConfirmation {
 // until the user responds.
 func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 	if c.functionCallID == "" {
-		return fmt.Errorf("error function call id not set when requesting confirmation for tool")
+		return errNoFunctionCallID
 	}
 	if c.actions.RequestedToolConfirmations == nil {
 		c.actions.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
@@ -737,6 +737,13 @@ func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 	// false (hasFunctionResponses == true), causing the loop to continue.
 	c.actions.SkipSummarization = true
 	return nil
+}
+
+// RenderUIWidget implements [UIWidgetRenderer]. A context without event
+// actions, such as one built by NewContext or Promote, returns
+// ErrUnsupportedContext.
+func (c *commonContext) RenderUIWidget(widget session.UIWidget) error {
+	return appendUIWidget(c.actions, widget)
 }
 
 func (c *commonContext) InvocationContext() InvocationContext {
@@ -835,6 +842,11 @@ func (a *trackedArtifacts) Save(ctx context.Context, name string, data *genai.Pa
 	}
 	return resp, nil
 }
+
+// errNoFunctionCallID is returned by RequestConfirmation from a context that
+// was not built for a tool call. The text is adk-python's (agents/context.py),
+// in Go's style and naming the Go method.
+var errNoFunctionCallID = errors.New("RequestConfirmation requires a function call ID; it can only be used in a tool context")
 
 // The errors a context returns for a service its invocation does not have. The
 // texts are adk-python's (agents/context.py), in Go's style.

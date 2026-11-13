@@ -17,9 +17,12 @@ package tool_test
 import (
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 func TestNewToolContext_Interfaces(t *testing.T) {
@@ -84,5 +87,25 @@ func TestNewToolContext_RequestConfirmation_AutoGeneratesIDWhenEmpty(t *testing.
 		if tc.Confirmed {
 			t.Error("expected Confirmed to be false")
 		}
+	}
+}
+
+func TestRequestConfirmation_OverwritesSameFunctionCallID(t *testing.T) {
+	inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	actions := &session.EventActions{}
+	toolCtx := agent.NewToolContext(inv, "call-1", actions, nil)
+
+	if err := toolCtx.RequestConfirmation("first hint", map[string]any{"step": 1}); err != nil {
+		t.Fatalf("first RequestConfirmation() error = %v", err)
+	}
+	if err := toolCtx.RequestConfirmation("second hint", map[string]any{"step": 2}); err != nil {
+		t.Fatalf("second RequestConfirmation() error = %v", err)
+	}
+
+	want := map[string]toolconfirmation.ToolConfirmation{
+		"call-1": {Hint: "second hint", Payload: map[string]any{"step": 2}},
+	}
+	if diff := cmp.Diff(want, actions.RequestedToolConfirmations); diff != "" {
+		t.Errorf("RequestedToolConfirmations mismatch (-want +got):\n%s", diff)
 	}
 }

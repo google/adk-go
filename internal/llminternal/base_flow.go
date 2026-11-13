@@ -1353,14 +1353,26 @@ func toolsetPreprocess(ctx agent.InvocationContext, req *model.LLMRequest) error
 }
 
 func newResponseWithEventID(ctx context.Context, resp *model.LLMResponse) *responseWithEventID {
-	return &responseWithEventID{resp, platform.NewUUID(ctx)}
+	return &responseWithEventID{LLMResponse: resp, eventID: platform.NewUUID(ctx)}
 }
 
 func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, stateDelta map[string]any, artifactDelta map[string]int64) iter.Seq2[*responseWithEventID, error] {
-	return func(yield func(*responseWithEventID, error) bool) {
+	return func(yieldResponse func(*responseWithEventID, error) bool) {
+		// Every model callback of this call records into one actions value, as
+		// adk-python's share the model response event's actions. State and
+		// artifact writes land in the caller's maps; the widgets rendered so far
+		// travel with each response to its event.
+		actions := &session.EventActions{StateDelta: stateDelta, ArtifactDelta: artifactDelta}
+		yield := func(resp *responseWithEventID, err error) bool {
+			if resp != nil {
+				resp.uiWidgets = slices.Clone(actions.RenderUIWidgets)
+			}
+			return yieldResponse(resp, err)
+		}
+
 		pluginManager := pluginManagerFromContext(ctx)
 		if pluginManager != nil {
-			cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
+			cctx := agent.NewCallbackContextWithArtifactTracking(ctx, actions)
 			callbackResponse, callbackErr := pluginManager.RunBeforeModelCallback(cctx, req)
 			if callbackResponse != nil || callbackErr != nil {
 				yield(newResponseWithEventID(ctx, callbackResponse), callbackErr)
@@ -1369,7 +1381,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		}
 
 		for _, callback := range f.BeforeModelCallbacks {
-			cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
+			cctx := agent.NewCallbackContextWithArtifactTracking(ctx, actions)
 			callbackResponse, callbackErr := callback(cctx, req)
 
 			if callbackResponse != nil || callbackErr != nil {
@@ -1400,7 +1412,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
-				cbResp, cbErr := f.runOnModelErrorCallbacks(ctx, req, stateDelta, artifactDelta, err)
+				cbResp, cbErr := f.runOnModelErrorCallbacks(ctx, req, actions, err)
 				if cbErr != nil {
 					yield(nil, cbErr)
 					return
@@ -1419,7 +1431,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			// Set it in case after model callbacks use it.
 			utils.PopulateClientFunctionCallID(ctx, resp.Content)
 
-			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, resp.LLMResponse, stateDelta, artifactDelta, err)
+			callbackResp, callbackErr := f.runAfterModelCallbacks(ctx, resp.LLMResponse, actions, err)
 			// TODO: check if we should stop iterator on the first error from stream or continue yielding next results.
 			if callbackErr != nil {
 				yield(nil, callbackErr)
@@ -1499,6 +1511,9 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 type responseWithEventID struct {
 	*model.LLMResponse
 	eventID string
+	// uiWidgets are the widgets the model callbacks of the call rendered
+	// before this response was yielded, for its model response event.
+	uiWidgets []session.UIWidget
 }
 
 // generateContent wraps the LLM call with tracing and logging.
@@ -1529,7 +1544,7 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 				if eventID == "" {
 					eventID = platform.NewUUID(ctx)
 				}
-				if !yield(&responseWithEventID{resp, eventID}, err) {
+				if !yield(&responseWithEventID{LLMResponse: resp, eventID: eventID}, err) {
 					return
 				}
 				// resp is non-nil whenever err is nil; the empty case is skipped above.
@@ -1541,10 +1556,10 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 	})
 }
 
-func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, artifactDelta map[string]int64, llmErr error) (*model.LLMResponse, error) {
+func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, actions *session.EventActions, llmErr error) (*model.LLMResponse, error) {
 	pluginManager := pluginManagerFromContext(ctx)
 	if pluginManager != nil {
-		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
+		cctx := agent.NewCallbackContextWithArtifactTracking(ctx, actions)
 		callbackResponse, callbackErr := pluginManager.RunAfterModelCallback(cctx, llmResp, llmErr)
 		if callbackResponse != nil || callbackErr != nil {
 			return callbackResponse, callbackErr
@@ -1552,7 +1567,7 @@ func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *mode
 	}
 
 	for _, callback := range f.AfterModelCallbacks {
-		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
+		cctx := agent.NewCallbackContextWithArtifactTracking(ctx, actions)
 		callbackResponse, callbackErr := callback(cctx, llmResp, llmErr)
 
 		if callbackResponse != nil || callbackErr != nil {
@@ -1563,10 +1578,10 @@ func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *mode
 	return nil, nil
 }
 
-func (f *Flow) runOnModelErrorCallbacks(ctx agent.InvocationContext, llmReq *model.LLMRequest, stateDelta map[string]any, artifactDelta map[string]int64, llmErr error) (*model.LLMResponse, error) {
+func (f *Flow) runOnModelErrorCallbacks(ctx agent.InvocationContext, llmReq *model.LLMRequest, actions *session.EventActions, llmErr error) (*model.LLMResponse, error) {
 	pluginManager := pluginManagerFromContext(ctx)
 	if pluginManager != nil {
-		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
+		cctx := agent.NewCallbackContextWithArtifactTracking(ctx, actions)
 		callbackResponse, callbackErr := pluginManager.RunOnModelErrorCallback(cctx, llmReq, llmErr)
 		if callbackResponse != nil || callbackErr != nil {
 			return callbackResponse, callbackErr
@@ -1574,7 +1589,7 @@ func (f *Flow) runOnModelErrorCallbacks(ctx agent.InvocationContext, llmReq *mod
 	}
 
 	for _, callback := range f.OnModelErrorCallbacks {
-		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
+		cctx := agent.NewCallbackContextWithArtifactTracking(ctx, actions)
 		callbackResponse, callbackErr := callback(cctx, llmReq, llmErr)
 
 		if callbackResponse != nil || callbackErr != nil {
@@ -1622,6 +1637,7 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *res
 	ev.LLMResponse = *resp.LLMResponse
 	ev.Actions.StateDelta = stateDelta
 	ev.Actions.ArtifactDelta = artifactDelta
+	ev.Actions.RenderUIWidgets = resp.uiWidgets
 
 	// Populate ev.LongRunningToolIDs
 	ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)
@@ -1693,6 +1709,12 @@ func (c *cancelledToolContext) Err() error {
 
 func (c *cancelledToolContext) Deadline() (deadline time.Time, ok bool) {
 	return c.cancelCtx.Deadline()
+}
+
+// RenderUIWidget implements [agent.UIWidgetRenderer] for the tool context it
+// embeds, which the embedding would otherwise hide.
+func (c *cancelledToolContext) RenderUIWidget(widget session.UIWidget) error {
+	return agent.RenderUIWidget(c.Context, widget)
 }
 
 func (c *cancelledToolContext) Value(key any) any {
@@ -2177,6 +2199,9 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.SetModelResponse != nil {
 		base.SetModelResponse = mergeSetModelResponse(base.SetModelResponse, other.SetModelResponse)
 	}
+	// Concatenated without a duplicate check, as in adk-python
+	// (flows/llm_flows/tools/_batch_executor.py).
+	base.RenderUIWidgets = append(base.RenderUIWidgets, other.RenderUIWidgets...)
 	return base
 }
 

@@ -104,6 +104,46 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 	}
 }
 
+// A REST client reads an event's UI widgets under actions.renderUiWidgets, and
+// an event it sends back with them keeps them.
+func TestEventRoundTripPreservesRenderUIWidgets(t *testing.T) {
+	ev := session.Event{
+		ID:     "e1",
+		Author: "agent",
+		Actions: session.EventActions{
+			RenderUIWidgets: []session.UIWidget{{ID: "w1", Provider: "mcp", Payload: map[string]any{"uri": "ui://app"}}},
+		},
+	}
+
+	rawJSON, err := json.Marshal(models.FromSessionEvent(ev))
+	if err != nil {
+		t.Fatalf("json.Marshal(FromSessionEvent()) failed: %v", err)
+	}
+	var wire struct {
+		Actions map[string]any `json:"actions"`
+	}
+	if err := json.Unmarshal(rawJSON, &wire); err != nil {
+		t.Fatalf("json.Unmarshal(rawJSON) to map failed: %v", err)
+	}
+	wantWire := []any{map[string]any{"id": "w1", "provider": "mcp", "payload": map[string]any{"uri": "ui://app"}}}
+	if diff := cmp.Diff(wantWire, wire.Actions["renderUiWidgets"]); diff != "" {
+		t.Errorf("actions.renderUiWidgets mismatch (-want +got):\n%s", diff)
+	}
+
+	var decoded models.Event
+	if err := json.Unmarshal(rawJSON, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal(rawJSON, &decoded) failed: %v", err)
+	}
+	back, err := models.ToSessionEvent(decoded)
+	if err != nil {
+		t.Fatalf("ToSessionEvent() failed: %v", err)
+	}
+	want := []session.UIWidget{{ID: "w1", Provider: "mcp", Payload: map[string]any{"uri": "ui://app"}}}
+	if diff := cmp.Diff(want, back.Actions.RenderUIWidgets); diff != "" {
+		t.Errorf("RenderUIWidgets after round trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // TestCompactionIsReadOnlyOverREST pins the direction the compaction record may
 // travel across the REST boundary.
 //

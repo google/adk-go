@@ -494,15 +494,11 @@ func TestDocParity_ADKNodeAttributesAndOmissions(t *testing.T) {
 		}
 	}
 
-	eventType := reflect.TypeFor[session.Event]()
-	actionsType := reflect.TypeFor[session.EventActions]()
-	for _, field := range []string{"RenderUIWidgets"} {
-		if _, ok := eventType.FieldByName(field); ok {
-			t.Errorf("session.Event unexpectedly defines %s", field)
-		}
-		if _, ok := actionsType.FieldByName(field); ok {
-			t.Errorf("session.EventActions unexpectedly defines %s", field)
-		}
+	if _, ok := reflect.TypeFor[session.Event]().FieldByName("RenderUIWidgets"); ok {
+		t.Errorf("session.Event unexpectedly defines RenderUIWidgets")
+	}
+	if _, ok := reflect.TypeFor[session.EventActions]().FieldByName("RenderUIWidgets"); !ok {
+		t.Errorf("session.EventActions does not define RenderUIWidgets, which the plugin documents as omitted")
 	}
 }
 

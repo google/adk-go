@@ -202,9 +202,8 @@
 //     JSON_VALUE(attributes, '$.adk.node.path') evaluates to NULL on
 //     non-workflow rows rather than "" as in adk-python. (Pinned by
 //     TestDocParity_ADKNodeAttributesAndOmissions in doc_test.go).
-//   - render_ui_widgets and rewind_before_invocation_id omitted: ADK Go's
-//     session.Event and session.EventActions do not define render_ui_widgets,
-//     and the plugin does not write
+//   - render_ui_widgets and rewind_before_invocation_id omitted: the plugin
+//     writes neither session.EventActions.RenderUIWidgets nor
 //     session.EventActions.RewindBeforeInvocationID, so attributes.adk never
 //     includes either attribute. (Pinned by
 //     TestDocParity_ADKNodeAttributesAndOmissions in doc_test.go).
