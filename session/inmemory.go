@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -48,7 +49,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 		return nil, fmt.Errorf("app_name and user_id are required, got app_name: %q, user_id: %q", req.AppName, req.UserID)
 	}
 
-	sessionID := req.SessionID
+	sessionID := strings.TrimSpace(req.SessionID)
 	if sessionID == "" {
 		sessionID = platform.NewUUID(ctx)
 	}
@@ -64,7 +65,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	defer s.mu.Unlock()
 
 	if _, ok := s.sessions.Get(encodedKey); ok {
-		return nil, fmt.Errorf("session %s already exists", req.SessionID)
+		return nil, fmt.Errorf("session %s already exists", sessionID)
 	}
 
 	state := req.State
@@ -104,7 +105,7 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 	id := id{
 		appName:   appName,
 		userID:    userID,
-		sessionID: sessionID,
+		sessionID: strings.TrimSpace(sessionID),
 	}
 
 	res, ok := s.sessions.Get(id.Encode())
@@ -205,7 +206,7 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 	id := id{
 		appName:   appName,
 		userID:    userID,
-		sessionID: sessionID,
+		sessionID: strings.TrimSpace(sessionID),
 	}
 
 	s.sessions.Delete(id.Encode())
@@ -253,7 +254,19 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	// the live session's event list: the map cloned below is then one no other
 	// goroutine can reach. The database backend trims twice for the same
 	// reason, once for the live session and once for what it persists.
-	trimmedDelta := maps.Clone(trimTempDeltaState(event).Actions.StateDelta)
+	trimmed := trimTempDeltaState(event)
+
+	// A caller that retries AppendEvent re-delivers the event it just stored.
+	// Appending it again would duplicate it and re-apply its state delta, so
+	// an event equal to the latest stored event with its ID is dropped. Stored
+	// events hold the trimmed delta, so compare against that. Distinct events
+	// that only share an ID are not equal and are kept. Comparing only the
+	// latest one keeps each append's cost constant while it holds s.mu,
+	// however many stored events share an ID.
+	if prev, ok := stored_session.lastEventByID[event.ID]; ok && reflect.DeepEqual(prev, trimmed) {
+		return nil
+	}
+	trimmedDelta := maps.Clone(trimmed.Actions.StateDelta)
 
 	// update the in-memory session
 	// Keep the session locked until AppendEvent finishes all reads of event.
@@ -297,6 +310,10 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	// update the in-memory session service
 	stored_session.events = append(stored_session.events, eventCopy)
+	if stored_session.lastEventByID == nil {
+		stored_session.lastEventByID = make(map[string]*Event)
+	}
+	stored_session.lastEventByID[event.ID] = eventCopy
 	stored_session.updatedAt = event.Timestamp
 	if len(event.Actions.StateDelta) > 0 {
 		appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
@@ -364,6 +381,11 @@ type session struct {
 	events    []*Event
 	state     map[string]any
 	updatedAt time.Time
+
+	// lastEventByID maps each event ID in events to the latest event with
+	// that ID. Only the service's stored copy sets it; AppendEvent uses it to
+	// recognize a retried append.
+	lastEventByID map[string]*Event
 }
 
 func (s *session) ID() string {
