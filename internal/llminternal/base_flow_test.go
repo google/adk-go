@@ -491,6 +491,127 @@ func TestCallTool(t *testing.T) {
 	}
 }
 
+func TestHandleFunctionCalls_CallbackArgEditsDoNotReachTheCallEvent(t *testing.T) {
+	echoTool := &mockFunctionTool{
+		name: "echo",
+		runFunc: func(_ agent.Context, args map[string]any) (map[string]any, error) {
+			return map[string]any{"args": args}, nil
+		},
+	}
+	echoArgs := func(_ agent.Context, _ tool.Tool, args map[string]any, _ error) (map[string]any, error) {
+		args["input_str"] = "modified_input"
+		return map[string]any{"args": args}, nil
+	}
+	for _, tc := range []struct {
+		name         string
+		toolName     string
+		callArgs     map[string]any
+		before       BeforeToolCallback
+		onToolError  OnToolErrorCallback
+		wantResponse map[string]any
+		wantCallArgs map[string]any
+	}{
+		{
+			name:     "before-tool callback adds an argument",
+			toolName: "echo",
+			callArgs: map[string]any{},
+			before: func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				args["input_str"] = "modified_input"
+				return nil, nil
+			},
+			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
+			wantCallArgs: map[string]any{},
+		},
+		{
+			name:     "before-tool callback adds an argument to a call without arguments",
+			toolName: "echo",
+			callArgs: nil,
+			before: func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				args["input_str"] = "modified_input"
+				return nil, nil
+			},
+			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
+			wantCallArgs: nil,
+		},
+		{
+			name:     "before-tool callback edits a nested object",
+			toolName: "echo",
+			callArgs: map[string]any{"filter": map[string]any{"limit": 1}},
+			before: func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				args["filter"].(map[string]any)["limit"] = 2
+				return nil, nil
+			},
+			wantResponse: map[string]any{"args": map[string]any{"filter": map[string]any{"limit": 2}}},
+			wantCallArgs: map[string]any{"filter": map[string]any{"limit": 1}},
+		},
+		{
+			name:     "before-tool callback edits a nested list",
+			toolName: "echo",
+			callArgs: map[string]any{"tags": []any{"a", map[string]any{"k": "v"}}},
+			before: func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				tags := args["tags"].([]any)
+				tags[0] = "b"
+				tags[1].(map[string]any)["k"] = "w"
+				return nil, nil
+			},
+			wantResponse: map[string]any{"args": map[string]any{"tags": []any{"b", map[string]any{"k": "w"}}}},
+			wantCallArgs: map[string]any{"tags": []any{"a", map[string]any{"k": "v"}}},
+		},
+		{
+			name:         "nil nested values stay nil",
+			toolName:     "echo",
+			callArgs:     map[string]any{"filter": map[string]any(nil), "tags": []any(nil)},
+			wantResponse: map[string]any{"args": map[string]any{"filter": map[string]any(nil), "tags": []any(nil)}},
+			wantCallArgs: map[string]any{"filter": map[string]any(nil), "tags": []any(nil)},
+		},
+		{
+			name:         "on-tool-error callback edits the arguments of an unknown tool",
+			toolName:     "missing",
+			callArgs:     map[string]any{"input_str": "original"},
+			onToolError:  echoArgs,
+			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
+			wantCallArgs: map[string]any{"input_str": "original"},
+		},
+		{
+			name:         "on-tool-error callback edits the arguments of a tool that cannot run",
+			toolName:     "plain",
+			callArgs:     map[string]any{"input_str": "original"},
+			onToolError:  echoArgs,
+			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
+			wantCallArgs: map[string]any{"input_str": "original"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &Flow{}
+			if tc.before != nil {
+				f.BeforeToolCallbacks = []BeforeToolCallback{tc.before}
+			}
+			if tc.onToolError != nil {
+				f.OnToolErrorCallbacks = []OnToolErrorCallback{tc.onToolError}
+			}
+			call := &genai.FunctionCall{ID: "call_1", Name: tc.toolName, Args: tc.callArgs}
+			resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}
+			toolsDict := map[string]tool.Tool{"echo": echoTool, "plain": &fakeTool{name: "plain"}}
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				InvocationID: "inv_1",
+				Agent:        &mockAgent{name: "agent_1"},
+			})
+
+			ev, err := f.handleFunctionCalls(invCtx, toolsDict, resp, nil, nil)
+			if err != nil {
+				t.Fatalf("handleFunctionCalls() error = %v", err)
+			}
+
+			if diff := cmp.Diff(tc.wantResponse, ev.LLMResponse.Content.Parts[0].FunctionResponse.Response); diff != "" {
+				t.Errorf("function response mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantCallArgs, call.Args); diff != "" {
+				t.Errorf("function call args mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // checkPanicCallbackErrs asserts that a callback of each of the given kinds
 // recorded itself in errs, and was handed the panic value and the stack, which
 // callbacks need to diagnose a panic the model only sees as a generic message.
