@@ -68,7 +68,7 @@ func TestNew(t *testing.T) {
 				Description:             "Retrieves documentation.",
 				RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
 				SimilarityTopK:          new(int32(5)),
-				VectorDistanceThreshold: new(float64(0.4)),
+				VectorDistanceThreshold: new(0.4),
 			},
 		},
 	}
