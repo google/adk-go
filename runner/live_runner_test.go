@@ -277,10 +277,12 @@ func TestRunner_RunLive_StampsEventsYieldedWithoutTimestamp(t *testing.T) {
 // TestRunner_RunLive_PluginReplacementKeepsEventIdentity checks that RunLive
 // streams and stores an OnEvent plugin's replacement with the original event's
 // ID, invocation ID, timestamp and author, and with the replacement's content
-// and custom metadata.
+// and custom metadata. The agent gives its event a timestamp different from the
+// run's time and the plugin's.
 func TestRunner_RunLive_PluginReplacementKeepsEventIdentity(t *testing.T) {
 	const appName, userID, sessionID = "testApp", "testUser", "testSession"
 	runTime := time.Date(2026, time.March, 2, 10, 0, 0, 0, time.UTC)
+	agentTime := time.Date(2026, time.March, 1, 9, 0, 0, 0, time.UTC)
 	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return runTime })
 	sessionService := session.InMemoryService()
 	if _, err := sessionService.Create(ctx, &session.CreateRequest{
@@ -318,6 +320,7 @@ func TestRunner_RunLive_PluginReplacementKeepsEventIdentity(t *testing.T) {
 					yield(&session.Event{
 						ID:           "agent-event",
 						InvocationID: ic.InvocationID(),
+						Timestamp:    agentTime,
 						Author:       "test_agent",
 						LLMResponse:  model.LLMResponse{Content: genai.NewContentFromText("reply", genai.RoleModel)},
 					}, nil)
@@ -350,7 +353,7 @@ func TestRunner_RunLive_PluginReplacementKeepsEventIdentity(t *testing.T) {
 	want := []*session.Event{{
 		ID:           "agent-event",
 		InvocationID: originalInvocationID,
-		Timestamp:    runTime,
+		Timestamp:    agentTime,
 		Author:       "test_agent",
 		LLMResponse: model.LLMResponse{
 			Content:        genai.NewContentFromText("replaced", genai.RoleModel),

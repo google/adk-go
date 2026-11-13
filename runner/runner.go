@@ -479,6 +479,9 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 // field the replacement did not set too; a Go struct cannot tell an unset field
 // from a zero one, so here the replacement's other fields win as given.
 //
+// The replacement itself is not written to: the result is a copy, so a plugin
+// that returns one shared event for several originals leaves it as it built it.
+//
 // The post-invocation summary path does not use this. A plugin is invited to
 // rewrite a summary there, and SanitizeSummary re-checks the result.
 func fromPlugin(original, modified *session.Event, record *session.EventCompaction) *session.Event {
@@ -495,19 +498,22 @@ func fromPlugin(original, modified *session.Event, record *session.EventCompacti
 		original.Actions.Compaction = record
 		return original
 	}
-	modified.Actions.Compaction = record
-	modified.ID = original.ID
-	modified.InvocationID = original.InvocationID
-	modified.Timestamp = original.Timestamp
-	if modified.Author == "" {
-		modified.Author = original.Author
+	out := *modified
+	out.Actions.Compaction = record
+	out.ID = original.ID
+	out.InvocationID = original.InvocationID
+	out.Timestamp = original.Timestamp
+	if out.Author == "" {
+		out.Author = original.Author
 	}
-	return modified
+	return &out
 }
 
-// stampTimestamp gives an event that an agent yielded, or a plugin returned in
-// its place, without a timestamp the time the runner received it, as
-// adk-python's Event does on construction.
+// stampTimestamp gives an event without a timestamp the time the runner
+// received it, as adk-python's Event does on construction. That is an event an
+// agent yielded without one, or one a plugin rewrote in place and left without
+// one. A replacement a plugin returns has already inherited the original's
+// timestamp through fromPlugin.
 //
 // An event built as a struct literal never passes through session.NewEvent.
 // Stored with a zero timestamp it moves the session's last update time back to
