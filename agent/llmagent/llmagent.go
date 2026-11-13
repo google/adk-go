@@ -44,6 +44,7 @@
 package llmagent
 
 import (
+	"encoding/json"
 	"fmt"
 	"iter"
 	"slices"
@@ -169,7 +170,7 @@ func New(cfg Config) (agent.Agent, error) {
 	state.Config = cfg
 	// A before-agent callback that returns content short-circuits the run, so its
 	// event never reaches llmAgent.run. Give it the same output_key handling.
-	state.OnBeforeAgentCallbackEvent = a.maybeSaveOutputToState
+	state.OnBeforeAgentCallbackEvent = a.saveOutputToState
 
 	if err := installTaskTools(a); err != nil {
 		return nil, err
@@ -593,8 +594,13 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		}
 
 		paused, endedByTransfer, failed := false, false, false
+		output := ""
 		for ev, err := range f.Run(ctx) {
-			a.maybeSaveOutputToState(ev)
+			if saveErr := a.saveOutputToState(ev); saveErr != nil {
+				yield(nil, saveErr)
+				return
+			}
+			output = a.maybeAccumulateOutput(ev, output)
 			if !yield(ev, err) {
 				return
 			}
@@ -702,6 +708,15 @@ func (a *llmAgent) transferTargetOf(ctx agent.InvocationContext, ev *session.Eve
 	return nil
 }
 
+// RunLive runs the agent over a live model connection. It saves output to
+// state with maybeSaveOutputToState, not saveOutputToState, so with
+// OutputJsonSchema the text form is kept and never parsed. The live connection
+// yields each text chunk of a model turn as its own non-partial event
+// (internal/llminternal/googlellm/live_connection.go), so the first chunk of a
+// JSON answer sent in more than one message is not valid JSON on its own.
+// adk-python parses the whole answer, because its live connection marks text
+// chunks partial and yields the joined text at turn_complete
+// (models/gemini_llm_connection.py:404, :551-556).
 func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:      ctx.Artifacts(),
@@ -733,9 +748,11 @@ func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 	}
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
+		output := ""
 		for ev, err := range innerIter {
 			if err == nil {
 				a.maybeSaveOutputToState(ev)
+				output = a.maybeAccumulateOutput(ev, output)
 			}
 			if !yield(ev, err) {
 				return
@@ -746,15 +763,37 @@ func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter
 	return sess, wrappedIter, nil
 }
 
+// saveOutputToState runs maybeSaveOutputToState on event. With
+// OutputJsonSchema it then replaces the saved text by the value the text
+// parses to, after removing a markdown code fence around it, as adk-python's
+// validate_schema does for a schema that is not a model
+// (utils/_schema_utils.py). Text that is not JSON is an error, and event must
+// then not be yielded: adk-python raises before it yields the event
+// (agents/llm_agent.py, _run_async_impl). An OutputSchema result keeps its
+// text form.
+func (a *llmAgent) saveOutputToState(event *session.Event) error {
+	text, saved := a.maybeSaveOutputToState(event)
+	if !saved || a.OutputJsonSchema == nil {
+		return nil
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(utils.StripJSONCodeFence(text)), &parsed); err != nil {
+		return fmt.Errorf("LlmAgent %q output is not valid JSON: %w", a.Name(), err)
+	}
+	event.Actions.StateDelta[a.OutputKey] = parsed
+	return nil
+}
+
 // maybeSaveOutputToState saves the model output to state if needed. skip if the event
-// was authored by some other agent (e.g. current agent transferred to another agent)
-func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
+// was authored by some other agent (e.g. current agent transferred to another agent).
+// It returns the text it saved and whether it saved any.
+func (a *llmAgent) maybeSaveOutputToState(event *session.Event) (string, bool) {
 	if event == nil {
-		return
+		return "", false
 	}
 	if event.Author != a.Name() {
 		// TODO: log "Skipping output save for agent %s: event authored by %s"
-		return
+		return "", false
 	}
 	// A task agent delivers its result through finish_task, which runTask writes
 	// to OutputKey. Its text turns (a clarification question, a greeting) are
@@ -764,7 +803,7 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 	// ParallelAgent do) or RunLive, nothing writes the finish_task output, so
 	// OutputKey stays unset. Matches adk-python's __maybe_save_output_to_state.
 	if llminternal.Reveal(a).Mode == llminternal.ModeTask {
-		return
+		return "", false
 	}
 	if a.OutputKey != "" && event.IsFinalResponse() && event.Content != nil && len(event.Content.Parts) > 0 {
 		var sb strings.Builder
@@ -776,17 +815,16 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 			}
 		}
 		if !hasTextPart {
-			return
+			return "", false
 		}
 		result := sb.String()
 
-		// TODO: add output schema validation and unmarshalling
 		if a.OutputSchema != nil || a.OutputJsonSchema != nil {
 			// If the result from the final chunk is just whitespace or empty,
 			// it means this is an empty final chunk of a stream.
 			// Do not attempt to parse it as JSON.
 			if strings.TrimSpace(result) == "" {
-				return
+				return "", false
 			}
 		}
 
@@ -795,7 +833,38 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 		}
 
 		event.Actions.StateDelta[a.OutputKey] = result
+		return result, true
 	}
+	return "", false
+}
+
+// maybeAccumulateOutput appends the text of event to output, the text this
+// agent has given in the current run so far, writes the total to state under
+// OutputKey, and returns it. The total replaces what maybeSaveOutputToState
+// wrote for the same event. A model turn that streams text and then calls a
+// tool ends in an event with both, which is not a final response, so without
+// this its text would never reach state. Partial events, thought parts, the
+// events of other agents, a task agent and an agent with an output schema are
+// left out. It ports adk-python's __maybe_accumulate_streaming_output
+// (agents/llm_agent.py).
+func (a *llmAgent) maybeAccumulateOutput(event *session.Event, output string) string {
+	if event == nil || a.OutputKey == "" || llminternal.Reveal(a).Mode == llminternal.ModeTask ||
+		a.OutputSchema != nil || a.OutputJsonSchema != nil ||
+		event.Author != a.Name() || event.Partial || event.Content == nil {
+		return output
+	}
+	var sb strings.Builder
+	for _, part := range event.Content.Parts {
+		if !part.Thought {
+			sb.WriteString(part.Text)
+		}
+	}
+	if sb.Len() == 0 {
+		return output
+	}
+	output += sb.String()
+	event.Actions.StateDelta[a.OutputKey] = output
+	return output
 }
 
 // FindAgent finds a sub-agent by name.

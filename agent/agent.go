@@ -217,7 +217,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)
 		if event != nil && a.OnBeforeAgentCallbackEvent != nil {
-			a.OnBeforeAgentCallbackEvent(event)
+			if hookErr := a.OnBeforeAgentCallbackEvent(event); hookErr != nil {
+				event, err = nil, hookErr
+			}
 		}
 		if event != nil || err != nil {
 			if err != nil {
