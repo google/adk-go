@@ -32,6 +32,7 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -1713,6 +1714,118 @@ func TestCallLLMSkipsNilResponseAndContinues(t *testing.T) {
 			}
 			if gotResponses != tc.wantResponses {
 				t.Fatalf("callLLM() yielded %d responses, want %d", gotResponses, tc.wantResponses)
+			}
+		})
+	}
+}
+
+// A model response event's id comes from the UUID provider on the context.
+// generateContent draws an id when a response arrives, never ahead of one, and
+// draws one id for each distinct event id across the responses it yields.
+func TestGenerateContentDrawsOneIDPerEvent(t *testing.T) {
+	text := func(s string) *genai.Content { return genai.NewContentFromText(s, genai.RoleModel) }
+	type yielded struct {
+		resp *model.LLMResponse
+		err  error
+	}
+	boom := errors.New("boom")
+	for _, tc := range []struct {
+		name      string
+		responses []yielded
+		wantIDs   []string
+		wantErrs  []error
+		wantDraws int
+	}{
+		{
+			name:      "no responses draw no ids",
+			responses: nil,
+			wantIDs:   nil,
+			wantErrs:  nil,
+			wantDraws: 0,
+		},
+		{
+			name:      "an empty response draws no ids",
+			responses: []yielded{{}},
+			wantIDs:   nil,
+			wantErrs:  nil,
+			wantDraws: 0,
+		},
+		{
+			name:      "one complete response",
+			responses: []yielded{{resp: &model.LLMResponse{Content: text("done")}}},
+			wantIDs:   []string{"id-1"},
+			wantErrs:  []error{nil},
+			wantDraws: 1,
+		},
+		{
+			name: "partials share the id of the response that completes them",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("a"), Partial: true}},
+				{resp: &model.LLMResponse{Content: text("b"), Partial: true}},
+				{resp: &model.LLMResponse{Content: text("ab")}},
+			},
+			wantIDs:   []string{"id-1", "id-1", "id-1"},
+			wantErrs:  []error{nil, nil, nil},
+			wantDraws: 1,
+		},
+		{
+			name: "each complete response gets its own id",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("first")}},
+				{resp: &model.LLMResponse{Content: text("second")}},
+			},
+			wantIDs:   []string{"id-1", "id-2"},
+			wantErrs:  []error{nil, nil},
+			wantDraws: 2,
+		},
+		{
+			name: "an error ends the id",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("a"), Partial: true}},
+				{resp: &model.LLMResponse{Content: text("b"), Partial: true}, err: boom},
+				{resp: &model.LLMResponse{Content: text("after")}},
+			},
+			wantIDs:   []string{"id-1", "id-1", "id-2"},
+			wantErrs:  []error{nil, boom, nil},
+			wantDraws: 2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			draws := 0
+			ctx := platform.WithUUIDProvider(t.Context(), func() string {
+				draws++
+				return fmt.Sprintf("id-%d", draws)
+			})
+			invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{InvocationID: "inv-1"})
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						for _, r := range tc.responses {
+							if !yield(r.resp, r.err) {
+								return
+							}
+						}
+					}
+				},
+			}
+
+			var gotIDs []string
+			var gotErrs []error
+			for resp, err := range generateContent(invCtx, m, &model.LLMRequest{}, true) {
+				gotIDs = append(gotIDs, resp.eventID)
+				gotErrs = append(gotErrs, err)
+			}
+
+			if diff := cmp.Diff(tc.wantIDs, gotIDs); diff != "" {
+				t.Errorf("event ids mismatch (-want +got):\n%s", diff)
+			}
+			sameErr := cmp.Comparer(func(a, b error) bool { return a == b })
+			if diff := cmp.Diff(tc.wantErrs, gotErrs, sameErr); diff != "" {
+				t.Errorf("errors mismatch (-want +got):\n%s", diff)
+			}
+			if draws != tc.wantDraws {
+				t.Errorf("drew %d ids from the provider, want %d", draws, tc.wantDraws)
 			}
 		})
 	}

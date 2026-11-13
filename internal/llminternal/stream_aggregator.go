@@ -153,6 +153,10 @@ func (s *streamingResponseAggregator) processFunctionCallPart(part *genai.Part) 
 			}
 			s.currentThoughtSignature = nil
 			s.sequence = append(s.sequence, part)
+		} else if part.FunctionCall.ID == "" {
+			// A nameless chunk continues the call being streamed, for example by
+			// only setting WillContinue to false, so it carries that call's id.
+			part.FunctionCall.ID = s.currentFunctionID
 		}
 	}
 }
@@ -164,6 +168,8 @@ func (s *streamingResponseAggregator) processStreamingFunctionCallPart(part *gen
 	}
 	if part.FunctionCall.ID != "" {
 		s.currentFunctionID = part.FunctionCall.ID
+	} else {
+		part.FunctionCall.ID = s.currentFunctionID
 	}
 	for _, arg := range part.FunctionCall.PartialArgs {
 		segments, ok := parseJSONPath(arg.JsonPath)
