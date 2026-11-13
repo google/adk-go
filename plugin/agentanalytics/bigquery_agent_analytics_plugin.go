@@ -251,16 +251,20 @@ type pluginState struct {
 	enabled bool
 	// defs and defsErr are the views of the plugin's Config, or why it has
 	// none, from [Config.ViewDefinitions].
-	defs           []ViewDefinition
-	defsErr        error
-	runner         viewRunner
-	viewGate       chan struct{}
-	viewsMu        sync.Mutex
-	lifeCtx        context.Context
-	lifeCancel     context.CancelFunc
-	viewsCancel    context.CancelFunc
-	asyncViewsDone chan struct{}
-	closed         bool
+	defs            []ViewDefinition
+	defsErr         error
+	evalDefs        []ViewDefinition
+	evalDefsErr     error
+	evalConfigErr   error
+	createEvalViews bool
+	runner          viewRunner
+	viewGate        chan struct{}
+	viewsMu         sync.Mutex
+	lifeCtx         context.Context
+	lifeCancel      context.CancelFunc
+	viewsCancel     context.CancelFunc
+	asyncViewsDone  chan struct{}
+	closed          bool
 }
 
 // BigQueryAgentAnalyticsPlugin wraps an ADK [baseplugin.Plugin] and exposes
@@ -465,14 +469,20 @@ func newBigQueryAgentAnalyticsPlugin(
 
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	defs, defsErr := config.ViewDefinitions()
+	evalDefs, evalDefsErr := config.EvalViewDefinitions()
+	evalConfigErr := validateEvalViewConfig(config, deniedColumns, false)
 	state := &pluginState{
-		counters:   processor.counters,
-		enabled:    true,
-		defs:       defs,
-		defsErr:    defsErr,
-		viewGate:   make(chan struct{}, 1),
-		lifeCtx:    lifeCtx,
-		lifeCancel: lifeCancel,
+		counters:        processor.counters,
+		enabled:         true,
+		defs:            defs,
+		defsErr:         defsErr,
+		evalDefs:        evalDefs,
+		evalDefsErr:     evalDefsErr,
+		evalConfigErr:   evalConfigErr,
+		createEvalViews: config.CreateEvalViews,
+		viewGate:        make(chan struct{}, 1),
+		lifeCtx:         lifeCtx,
+		lifeCancel:      lifeCancel,
 	}
 	state.viewGate <- struct{}{}
 	if bqClient != nil {
@@ -533,15 +543,36 @@ func newBigQueryAgentAnalyticsPlugin(
 
 	registerPlugin(adkPlugin, state)
 
-	if config.createViews() && state.runner != nil {
+	if (config.createViews() || config.CreateEvalViews) && state.runner != nil {
 		logf := config.viewLogf()
-		if defsErr != nil {
-			if logf != nil {
-				logf("agentanalytics: skipping view creation: %v", defsErr)
+		var startupDefs []ViewDefinition
+		hasPerEventViews := false
+		if config.createViews() {
+			if defsErr != nil {
+				if logf != nil {
+					logf("agentanalytics: skipping view creation: %v", defsErr)
+				}
+			} else {
+				startupDefs = append(startupDefs, defs...)
+				hasPerEventViews = true
 			}
-		} else {
+		}
+		if config.CreateEvalViews {
+			if evalErr := cmp.Or(evalConfigErr, evalDefsErr); evalErr != nil {
+				if logf != nil {
+					logf("agentanalytics: skipping view creation: %v", evalErr)
+				}
+			} else {
+				startupDefs = append(startupDefs, evalDefs...)
+			}
+		}
+		if len(startupDefs) > 0 {
+			retryMethod := "SyncViews"
+			if !hasPerEventViews {
+				retryMethod = "SyncEvalViews"
+			}
 			// Pass only the non-default Logger hook so the goroutine does not retain Config.
-			state.startAsyncViewCreation(ctx, defs, logf, bqClient)
+			state.startAsyncViewCreationWithRetryHint(ctx, startupDefs, logf, retryMethod, bqClient)
 		}
 	}
 	return adkPlugin, nil
@@ -580,6 +611,11 @@ func validateConfig(c Config) (map[string]struct{}, error) {
 	}
 	if c.ViewPrefix != "" && !isValidIdentifier(c.ViewPrefix) {
 		return nil, fmt.Errorf("invalid config: invalid ViewPrefix %q", c.ViewPrefix)
+	}
+	if c.CreateEvalViews {
+		if err := validateEvalViewConfig(c, denied, true); err != nil {
+			return nil, err
+		}
 	}
 	return denied, nil
 }
@@ -733,9 +769,8 @@ func (p *analyticsPlugin) logSessionEvent(ctx context.Context, id identity, even
 
 // logSessionSpanEvent runs spanFn before consulting shouldLogSessionEvent, so
 // session-event rows emitted outside OnEventCallback (such as user-message HITL
-// completions, resumed TOOL_COMPLETED rows, and finalResponseTools
-// AGENT_RESPONSE rows) honor the legacy "EVENT" filter alias while keeping
-// trace manager span side effects intact.
+// completions and resumed TOOL_COMPLETED rows) honor the legacy "EVENT" filter
+// alias while keeping trace manager span side effects intact.
 func (p *analyticsPlugin) logSessionSpanEvent(ctx context.Context, id identity, eventType string, spanFn func() rowSpan, build func(*eventData)) {
 	defer p.recoverCallback(eventType)
 	var span rowSpan
