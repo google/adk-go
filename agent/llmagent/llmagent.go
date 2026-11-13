@@ -351,9 +351,13 @@ type Config struct {
 	// [google.golang.org/adk/v2/tool/setmodelresponsetool] to the request.
 	// The model can then call the other tools and gives its final answer
 	// through set_model_response, whose valid answer becomes the agent's
-	// final text as JSON. Otherwise, outside ModeTask, the schema goes into
-	// the request config as GenerateContentConfig.ResponseSchema. In
-	// ModeTask the finish_task tool carries the schema instead.
+	// final text as JSON. An answer that does not match the schema goes
+	// back to the model as feedback in the function response, and the model
+	// is called again. When the agent has no tools or toolsets, or its
+	// model declares OutputSchemaAndTools, and Mode is not ModeTask, the
+	// schema goes into the request config as
+	// GenerateContentConfig.ResponseSchema. In ModeTask the finish_task tool
+	// carries the schema instead.
 	OutputSchema *genai.Schema
 	// OutputJsonSchema is the output schema when the agent replies, given as a
 	// raw JSON schema. It carries what a *genai.Schema cannot, such as
