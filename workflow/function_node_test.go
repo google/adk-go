@@ -703,11 +703,10 @@ func TestFunctionNode_ValidatesInputOnAssertionHitPath(t *testing.T) {
 		Name string `json:"name"`
 	}
 
-	maxLen := 3
 	inputSchema := &jsonschema.Schema{
 		Type: "object",
 		Properties: map[string]*jsonschema.Schema{
-			"name": {Type: "string", MaxLength: &maxLen},
+			"name": {Type: "string", MaxLength: new(3)},
 		},
 	}
 
