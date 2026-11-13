@@ -22,6 +22,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/internal/agentstate"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
@@ -76,7 +77,16 @@ type loopAgent struct {
 	maxIterations uint
 }
 
+// The agent state keys of a loop, as in adk-python's LoopAgentState.
+const (
+	currentSubAgent = "current_sub_agent"
+	timesLooped     = "times_looped"
+)
+
 func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	if states := agentstate.FromContext(ctx); states != nil {
+		return a.runResumable(ctx, states)
+	}
 	count := a.maxIterations
 
 	return func(yield func(*session.Event, error) bool) {
@@ -129,5 +139,65 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				}
 			}
 		}
+	}
+}
+
+// runResumable runs the loop in a resumable invocation, as adk-python's
+// LoopAgent does: it saves the sub-agent it is on and how many passes it has
+// finished, stops when the invocation pauses on a long-running call, and on the
+// next turn continues from there, so MaxIterations counts passes across turns.
+func (a *loopAgent) runResumable(ctx agent.InvocationContext, states *agentstate.Store) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		subAgents := ctx.Agent().SubAgents()
+		if len(subAgents) == 0 {
+			return
+		}
+		looped, start := 0, 0
+		state, resuming := states.Load(ctx.Agent().Name())
+		if resuming {
+			looped = agentstate.Int(state, timesLooped)
+			start = agentstate.Index(subAgents, state, currentSubAgent)
+		} else if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+			start = indexes[0]
+		}
+		passCtx := ctx
+		for a.maxIterations == 0 || uint(looped) < a.maxIterations {
+			if err := ctx.Err(); err != nil {
+				yield(nil, err)
+				return
+			}
+			for _, subAgent := range subAgents[start:] {
+				// The sub-agent being resumed was saved on the turn it started.
+				if !resuming && !yield(states.Checkpoint(ctx, map[string]any{currentSubAgent: subAgent.Name(), timesLooped: looped}), nil) {
+					return
+				}
+				resuming = false
+				subCtx, scope := agentstate.NewScope(passCtx)
+				escalated := false
+				for event, err := range subAgent.Run(subCtx) {
+					// A failed sub-agent ends the loop, as in Run.
+					if !yield(event, err) || err != nil {
+						return
+					}
+					if agentstate.Pauses(event) {
+						agentstate.MarkPaused(subCtx)
+					}
+					escalated = escalated || event != nil && event.Actions.Escalate
+				}
+				// The loop continues from this sub-agent once its call is
+				// answered on a later turn.
+				if scope.Paused() {
+					return
+				}
+				if escalated {
+					yield(states.End(ctx, ctx.Agent().Name()), nil)
+					return
+				}
+			}
+			start = 0
+			looped++
+			passCtx = utils.WithGraphResumeDone(ctx)
+		}
+		yield(states.End(ctx, ctx.Agent().Name()), nil)
 	}
 }

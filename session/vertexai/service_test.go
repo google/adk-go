@@ -94,6 +94,9 @@ var casesWithoutReplay = map[string]string{
 	// TestAppendEvent_requestedAuthConfigThatDoesNotDecode_leavesSessionUntouched,
 	// both in vertexai_test.go.
 	"Test_vertexaiService_AppendEvent_requested_auth_config_that_does_not_decode_is_refused": "vertexai_test.go",
+	// Pinned offline by TestAgentStateRoundTripsThroughRawEvent in
+	// agent_state_persistence_test.go.
+	"Test_vertexaiService_AppendEvent_agent_state_round_trips": "agent_state_persistence_test.go",
 }
 
 func Test_vertexaiService_AppendEvent_StructuralValidation(t *testing.T) {
