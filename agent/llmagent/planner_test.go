@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/planner"
 	"google.golang.org/adk/v2/runner"
@@ -321,6 +322,48 @@ func TestLLMAgent_PlannerRemovesRequestThoughtsPreservingSessionHistory(t *testi
 	stored := run.sess.Events().At(1).LLMResponse.Content.Parts[0]
 	if !stored.Thought {
 		t.Errorf("stored history part Thought = false, want true")
+	}
+}
+
+// A scoped agent run as a node gets its node input as the first request
+// content; clearing thought flags for the planner must not reach the caller's
+// parts, which concurrent runs of the same input may share.
+func TestLLMAgent_PlannerLeavesNodeInputPartsUnchanged(t *testing.T) {
+	llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("done")}}
+	a := newPlannerAgent(t, llmagent.Config{
+		Name:    "worker",
+		Model:   llm,
+		Mode:    llmagent.ModeSingleTurn,
+		Planner: &instructionPlanner{},
+	})
+	svc := session.InMemoryService()
+	created, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:          a,
+		Session:        created.Session,
+		IsolationScope: "node-1",
+		InvocationID:   "inv-node-input",
+	})
+	input := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "node input thought", Thought: true}}}
+
+	for _, err := range llmagent.RunLLMAgentAsNode(a, agent.NewContext(ic), input) {
+		if err != nil {
+			t.Fatalf("RunLLMAgentAsNode: %v", err)
+		}
+	}
+
+	if !input.Parts[0].Thought {
+		t.Errorf("caller's node input part Thought = false, want true")
+	}
+	reqs := llm.recorded()
+	if len(reqs) != 1 {
+		t.Fatalf("model calls = %d, want 1", len(reqs))
+	}
+	if diff := cmp.Diff(&genai.Part{Text: "node input thought"}, reqs[0].Contents[0].Parts[0]); diff != "" {
+		t.Errorf("node input part sent to the model mismatch (-want +got):\n%s", diff)
 	}
 }
 
