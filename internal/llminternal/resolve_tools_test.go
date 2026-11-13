@@ -77,6 +77,18 @@ func TestToolProcessor_SkippedToolsetKeepsAnEmptyGroup(t *testing.T) {
 	if got := toolNames(f.Tools); len(got) != 2 || got[0] != "o" || got[1] != "w" {
 		t.Errorf("f.Tools = %v, want [o w]", got)
 	}
+	if f.ownToolCount != 1 {
+		t.Errorf("f.ownToolCount = %d, want 1", f.ownToolCount)
+	}
+	if len(f.toolsetTools) != 2 {
+		t.Fatalf("len(f.toolsetTools) = %d, want 2 (one group per toolset)", len(f.toolsetTools))
+	}
+	if len(f.toolsetTools[0]) != 0 {
+		t.Errorf("group of the failing toolset = %v, want empty", toolNames(f.toolsetTools[0]))
+	}
+	if got := toolNames(f.toolsetTools[1]); len(got) != 1 || got[0] != "w" {
+		t.Errorf("group of the working toolset = %v, want [w]", got)
+	}
 }
 
 func TestToolProcessor_ListingErrorChangesNothing(t *testing.T) {
@@ -87,7 +99,7 @@ func TestToolProcessor_ListingErrorChangesNothing(t *testing.T) {
 		&resolveToolsToolset{name: "failing", err: errors.New("mcp down")},
 	})
 	before := &toolsProcessorMockTool{name: "before"}
-	f := &Flow{Tools: []tool.Tool{before}}
+	f := &Flow{Tools: []tool.Tool{before}, ownToolCount: 7, toolsetTools: [][]tool.Tool{{before}}}
 
 	var gotErr error
 	for _, err := range toolProcessor(ctx, &model.LLMRequest{}, f) {
@@ -101,5 +113,11 @@ func TestToolProcessor_ListingErrorChangesNothing(t *testing.T) {
 	}
 	if got := toolNames(f.Tools); len(got) != 1 || got[0] != "before" {
 		t.Errorf("f.Tools = %v, want [before] (unchanged)", got)
+	}
+	if f.ownToolCount != 7 {
+		t.Errorf("f.ownToolCount = %d, want 7 (unchanged)", f.ownToolCount)
+	}
+	if len(f.toolsetTools) != 1 || len(f.toolsetTools[0]) != 1 || f.toolsetTools[0][0] != before {
+		t.Errorf("f.toolsetTools changed to %v groups, want the single group [before]", len(f.toolsetTools))
 	}
 }

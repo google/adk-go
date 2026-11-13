@@ -32,8 +32,10 @@ import (
 // was modified by an earlier step in the same Run(), so the tool list must
 // be rebuilt before each model call rather than being cached across steps.
 // The toolsets are listed concurrently, and a toolset whose listing fails is
-// skipped for the step (see ResolveTools). On a listing error it does not
-// change f.Tools.
+// skipped for the step (see ResolveTools). With f.Tools it records the step's
+// groups (f.ownToolCount, f.toolsetTools) for processToolRequests; a skipped
+// toolset keeps an empty group at its index, so its own request hook still
+// runs. On a listing error it changes none of them.
 func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		llmAgent, ok := ctx.Agent().(Agent)
@@ -47,6 +49,8 @@ func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) 
 			return
 		}
 		f.Tools = flattenTools(own, groups)
+		f.ownToolCount = len(own)
+		f.toolsetTools = groups
 	}
 }
 

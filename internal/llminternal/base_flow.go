@@ -86,6 +86,14 @@ type Flow struct {
 	AfterToolCallbacks    []AfterToolCallback
 	OnToolErrorCallbacks  []OnToolErrorCallback
 
+	// ownToolCount is how many leading entries of Tools are the agent's own
+	// tools. toolsetTools holds the tools each of the agent's Toolsets listed
+	// in the current step, index-aligned with them, so that a toolset's
+	// request hook runs just before its tools'. toolProcessor sets Tools and
+	// both fields together; toolsetTools is nil until it has run.
+	ownToolCount int
+	toolsetTools [][]tool.Tool
+
 	// reconnect bounds RunLive's reconnect attempts. Nil means the defaults;
 	// only tests set it, to shrink the delays.
 	reconnect *liveReconnectPolicy
@@ -1389,11 +1397,7 @@ func (f *Flow) preprocessRecording(ctx agent.InvocationContext, req *model.LLMRe
 			}
 		}
 
-		if err := toolPreprocess(ctx, req, f.Tools); err != nil {
-			yield(nil, err)
-			return
-		}
-		if err := toolsetPreprocess(ctx, req); err != nil {
+		if err := processToolRequests(ctx, req, f); err != nil {
 			yield(nil, err)
 			return
 		}
@@ -1444,19 +1448,38 @@ func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []
 	return nil
 }
 
-func toolsetPreprocess(ctx agent.InvocationContext, req *model.LLMRequest) error {
+// processToolRequests runs the request hooks of the agent's own tools, then,
+// for each of the agent's toolsets in order, the toolset's hook followed by
+// the hooks of the tools it listed in this step, as adk-python's flow does
+// (flows/llm_flows/tools/_agent_tools.py). The groups are positional slices of
+// f.Tools, so a tool that is both an own tool and listed by a toolset is
+// processed in both groups. Before toolProcessor has run, all of f.Tools
+// counts as own.
+func processToolRequests(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) error {
+	own := f.Tools
+	if f.toolsetTools != nil {
+		own = f.Tools[:f.ownToolCount]
+	}
+	if err := toolPreprocess(ctx, req, own); err != nil {
+		return err
+	}
 	llmAgent, ok := ctx.Agent().(Agent)
 	if !ok {
 		return nil
 	}
-	for _, toolset := range Reveal(llmAgent).Toolsets {
-		processor, ok := toolset.(toolinternal.RequestProcessor)
-		if !ok {
-			continue // Not all toolsets implement RequestProcessor.
+	for i, toolset := range Reveal(llmAgent).Toolsets {
+		if processor, ok := toolset.(toolinternal.RequestProcessor); ok {
+			toolCtx := agent.NewToolContext(ctx, "", nil, nil)
+			if err := processor.ProcessRequest(toolCtx, req); err != nil {
+				return fmt.Errorf("process request by toolset %q: %w", toolset.Name(), err)
+			}
 		}
-		toolCtx := agent.NewToolContext(ctx, "", nil, nil)
-		if err := processor.ProcessRequest(toolCtx, req); err != nil {
-			return fmt.Errorf("process request by toolset %q: %w", toolset.Name(), err)
+		var group []tool.Tool
+		if i < len(f.toolsetTools) {
+			group = f.toolsetTools[i]
+		}
+		if err := toolPreprocess(ctx, req, group); err != nil {
+			return err
 		}
 	}
 	return nil

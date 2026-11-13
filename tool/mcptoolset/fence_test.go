@@ -250,6 +250,13 @@ func TestProcessRequest_B20_PrefixedTool(t *testing.T) {
 				return ts
 			},
 		},
+		{
+			name: "tool.WithToolNamePrefix",
+			toolset: func(t *testing.T) tool.Toolset {
+				ts, _ := newPrefixTestToolset(t, mcptoolset.Config{}, "search")
+				return tool.WithToolNamePrefix(ts, "docs")
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tools := prefixTestTools(t, tc.toolset(t))
