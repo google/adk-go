@@ -46,11 +46,11 @@ type LLMConfig struct {
 	// [google.golang.org/adk/v2/agent/llmagent.Config].
 	Model model.LLM
 	// GenerateContentConfig supplies optional generation parameters such as
-	// Temperature, MaxOutputTokens, or ThinkingConfig. [NewLLM] copies it the
-	// same way the agent pipeline copies an agent's config: later changes to
-	// the caller's value do not affect the classifier, except through values in
-	// interface-typed fields such as HTTPOptions.ExtraBody entries, which are
-	// shared. Because LLMClassifier builds the system instruction and output
+	// Temperature, MaxOutputTokens, or ThinkingConfig. [NewLLM] copies its data
+	// containers recursively, including payloads in HTTPOptions.ExtraBody.
+	// Values with unexported fields in empty interfaces may become JSON
+	// snapshots. Configurations that cannot be copied return [ErrInvalidLLMConfig].
+	// Because LLMClassifier builds the system instruction and output
 	// schema from the questions on each call and never calls tools,
 	// GenerateContentConfig must not set SystemInstruction, ResponseSchema,
 	// ResponseJsonSchema, Tools, or ToolConfig, and ResponseMIMEType, when set,
@@ -114,9 +114,13 @@ func NewLLM(cfg LLMConfig) (*LLMClassifier, error) {
 		}
 	}
 
+	baseConfig, err := llminternal.CloneGenerateContentConfig(cfg.GenerateContentConfig)
+	if err != nil {
+		return nil, fmt.Errorf("%w: clone generation config: %w", ErrInvalidLLMConfig, err)
+	}
 	return &LLMClassifier{
 		llm:        cfg.Model,
-		baseConfig: llminternal.CloneGenerateContentConfig(cfg.GenerateContentConfig),
+		baseConfig: baseConfig,
 	}, nil
 }
 
@@ -133,7 +137,8 @@ func (c *LLMClassifier) Name() string {
 //
 // Errors from [model.LLM.GenerateContent] are returned unchanged, as is ctx's
 // error when the model yields no non-partial response after ctx ends.
-// Uninitialized receivers return [ErrInvalidLLMConfig]; empty or invalid
+// Uninitialized receivers or configurations that cannot be copied return
+// [ErrInvalidLLMConfig]; empty or invalid
 // questions return [ErrInvalidQuestion]; invalid inputs return
 // [ErrInvalidInput]; a model turn that is missing, carries an error code, or
 // stops at [genai.FinishReasonMaxTokens] returns [ErrModelFailure]; and model
@@ -168,7 +173,10 @@ func (c *LLMClassifier) Classify(
 	}
 
 	modelName := c.llm.Name()
-	req := c.buildRequest(modelName, userContent, names, normalized)
+	req, err := c.buildRequest(modelName, userContent, names, normalized)
+	if err != nil {
+		return nil, err
+	}
 
 	var finalResp *model.LLMResponse
 	for resp, genErr := range c.llm.GenerateContent(ctx, req, false) {
@@ -201,7 +209,7 @@ func (c *LLMClassifier) buildRequest(
 	userContent *genai.Content,
 	names []string,
 	questions map[string]Question,
-) *model.LLMRequest {
+) (*model.LLMRequest, error) {
 	descriptions := make([]string, len(names))
 	for i, name := range names {
 		descriptions[i] = describeQuestion(name, questions[name])
@@ -210,7 +218,10 @@ func (c *LLMClassifier) buildRequest(
 	// Copy per request, as adk-python's _build_request does with
 	// model_copy(deep=True), so a model adapter that mutates the config it
 	// receives cannot affect later calls through the copied fields.
-	cfg := llminternal.CloneGenerateContentConfig(c.baseConfig)
+	cfg, err := llminternal.CloneGenerateContentConfig(c.baseConfig)
+	if err != nil {
+		return nil, fmt.Errorf("%w: clone generation config: %w", ErrInvalidLLMConfig, err)
+	}
 	if cfg == nil {
 		cfg = &genai.GenerateContentConfig{}
 	}
@@ -226,7 +237,7 @@ func (c *LLMClassifier) buildRequest(
 		Model:    modelName,
 		Contents: []*genai.Content{userContent},
 		Config:   cfg,
-	}
+	}, nil
 }
 
 // inputToContent validates a classifier input and converts it into the user

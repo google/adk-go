@@ -50,7 +50,11 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 		if !needOutputSchemaProcessor(state) {
 			return
 		}
-		schema := outputSchemaFor(ctx, state)
+		schema, err := outputSchemaFor(ctx, state)
+		if err != nil {
+			yield(nil, fmt.Errorf("clone output schema: %w", err))
+			return
+		}
 		if schema == nil {
 			return
 		}
