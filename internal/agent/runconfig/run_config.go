@@ -59,6 +59,22 @@ type RunConfig struct {
 	// without copying.
 	CustomMetadata map[string]any
 
+	// Resumable reports whether the runner that installed this RunConfig is
+	// resumable. A context without a RunConfig is not resumable.
+	Resumable bool
+
+	// AgentStates is the snapshot of agent states the runner rebuilt from the
+	// session when it resumed the invocation on the classic path, keyed by
+	// agent name. Nil otherwise. Read it, never write it.
+	AgentStates map[string]map[string]any
+
+	// NodePath reports whether the run entered through the runner's node
+	// path (an LlmAgent or node root). Only that entry sets it. On a
+	// resumable node-path run, an LlmAgent that transfers writes its
+	// end-of-agent event before the transfer target runs and writes none
+	// after; on the classic path it writes it after the target returns.
+	NodePath bool
+
 	// llmCalls counts model calls made during this invocation, across every
 	// agent it runs, so one budget covers the whole invocation rather than one
 	// budget per agent.

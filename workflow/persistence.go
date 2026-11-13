@@ -655,26 +655,16 @@ func (w *Workflow) predecessorInput(node Node, nodeOutputs map[string]any, workf
 }
 
 // firstUserSeed returns the seed workflow input: the START seed built
-// from the first user event in history (the original prompt), used as
-// the START successor's input on re-entry. Resume turns (user
-// FunctionResponses) and user events without parts are skipped. When
-// invocationID is non-empty, only that invocation's user events are
-// considered, so the seed is the current run's prompt rather than an
-// earlier run's. Returns nil when no such event exists. Mirrors
-// adk-python Runner._find_user_message_for_invocation.
+// from the original prompt of the invocation (see
+// utils.FindUserMessageForInvocation, which skips rewound events, resume
+// turns and user events without parts), used as the START successor's
+// input on re-entry. When invocationID is non-empty, only that
+// invocation's user events are considered, so the seed is the current
+// run's prompt rather than an earlier run's. Returns nil when no such
+// event exists.
 func firstUserSeed(events session.Events, invocationID string) any {
-	for i := range events.Len() {
-		ev := events.At(i)
-		if ev == nil || ev.Author != "user" || ev.Content == nil || len(ev.Content.Parts) == 0 {
-			continue
-		}
-		if invocationID != "" && ev.InvocationID != invocationID {
-			continue
-		}
-		if len(utils.FunctionResponses(ev.Content)) > 0 {
-			continue
-		}
-		return newStartSeed(ev.Content)
+	if content := utils.FindUserMessageForInvocation(events, invocationID); content != nil {
+		return newStartSeed(content)
 	}
 	return nil
 }

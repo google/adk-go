@@ -54,8 +54,10 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -532,13 +534,132 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 	}
 
 	return func(yield func(*session.Event, error) bool) {
+		rc := runconfig.FromContext(ctx)
+		resumable := rc != nil && rc.Resumable
+		if resumable {
+			// adk-python resumes a sub-agent only for an agent with a state
+			// (agents/llm_agent.py, _run_async_impl).
+			if _, hasState := rc.AgentStates[a.Name()]; hasState {
+				sub, err := a.getSubAgentToResume(ctx)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if sub != nil {
+					a.runResumedSubAgent(ctx, sub, yield)
+					return
+				}
+			}
+		}
+
+		paused, endedByTransfer, failed := false, false, false
 		for ev, err := range f.Run(ctx) {
 			a.maybeSaveOutputToState(ev)
 			if !yield(ev, err) {
 				return
 			}
+			if err != nil {
+				failed = true
+				continue
+			}
+			if ev == nil {
+				continue
+			}
+			paused = paused || llminternal.ShouldPauseInvocation(ctx, ev)
+			// On the node path the flow writes this agent's end-of-agent event
+			// before the transfer target runs, so none follows here.
+			if rc != nil && rc.NodePath && ev.Author == a.Name() && ev.Actions.TransferToAgent != "" {
+				endedByTransfer = true
+			}
+		}
+		if !resumable || paused || endedByTransfer || failed || pausedAtTail(ctx) {
+			return
+		}
+		yield(llminternal.NewEndOfAgentEvent(ctx, a.Name()), nil)
+	}
+}
+
+// pausedAtTail reports whether one of the last two events of ctx's
+// invocation and branch pauses the invocation, as adk-python checks before it
+// ends an agent (agents/llm_agent.py, _run_async_impl): the long-running call
+// is followed by the response of a tool called beside it.
+func pausedAtTail(ctx agent.InvocationContext) bool {
+	events := llminternal.InvocationEvents(ctx, true, true)
+	tail := events[max(0, len(events)-2):]
+	return slices.ContainsFunc(tail, func(ev *session.Event) bool {
+		return llminternal.ShouldPauseInvocation(ctx, ev)
+	})
+}
+
+// runResumedSubAgent runs sub, the sub-agent a resumed agent hands the
+// invocation back to, and then ends the agent, unless sub paused the
+// invocation or failed.
+func (a *llmAgent) runResumedSubAgent(ctx agent.InvocationContext, sub agent.Agent, yield func(*session.Event, error) bool) {
+	paused := false
+	for ev, err := range llminternal.RunTransferTarget(ctx, sub) {
+		if !yield(ev, err) || err != nil {
+			return
+		}
+		if ev != nil && llminternal.ShouldPauseInvocation(ctx, ev) {
+			paused = true
 		}
 	}
+	if paused {
+		return
+	}
+	yield(llminternal.NewEndOfAgentEvent(ctx, a.Name()), nil)
+}
+
+// getSubAgentToResume returns the agent a resumed agent hands the
+// invocation back to, from the events of ctx's invocation and branch, or nil
+// when the agent continues itself. When the last event is the agent's own,
+// it is the target of the transfer that event holds, if any. When the last
+// event is a user function response to a call the agent made, there is none.
+// Otherwise it is the target of the agent's last transfer. A user event that
+// answers no call of the invocation is an error. It ports adk-python's
+// LlmAgent._get_subagent_to_resume (agents/llm_agent.py).
+func (a *llmAgent) getSubAgentToResume(ctx agent.InvocationContext) (agent.Agent, error) {
+	events := llminternal.InvocationEvents(ctx, true, true)
+	if len(events) == 0 {
+		return nil, nil
+	}
+	last := events[len(events)-1]
+	if last.Author == a.Name() {
+		return a.transferTargetOf(ctx, last), nil
+	}
+	if last.Author == "user" {
+		var call *session.Event
+		if responses := utils.FunctionResponses(last.Content); len(responses) > 0 {
+			call = llminternal.FindCallEvent(llminternal.InvocationEvents(ctx, true, false), responses[0].ID)
+		}
+		if call == nil {
+			return nil, fmt.Errorf("no agent to transfer to for resuming agent from function response %s", a.Name())
+		}
+		if call.Author == a.Name() {
+			return nil, nil
+		}
+	}
+	for _, event := range slices.Backward(events) {
+		if target := a.transferTargetOf(ctx, event); target != nil {
+			return target, nil
+		}
+	}
+	return nil, nil
+}
+
+// transferTargetOf returns the agent that ev, a transfer_to_agent response
+// of this agent, hands the invocation to, or nil when ev is not one.
+func (a *llmAgent) transferTargetOf(ctx agent.InvocationContext, ev *session.Event) agent.Agent {
+	target := ev.Actions.TransferToAgent
+	if ev.Author != a.Name() || target == "" || target == a.Name() {
+		return nil
+	}
+	for _, fr := range utils.FunctionResponses(ev.Content) {
+		if fr.Name == llminternal.TransferToAgentToolName {
+			return llminternal.TransferTarget(ctx, target)
+		}
+	}
+	return nil
 }
 
 func (a *llmAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {

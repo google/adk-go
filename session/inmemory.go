@@ -266,8 +266,9 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	// Only StateDelta comes from the trim above; every other field below is
 	// read off event. Compaction, ArtifactDelta, RequestedToolConfirmations,
-	// RequestedAuthConfigs and SetModelResponse are cloned so that the
-	// caller's event shares none of them with the canonical record.
+	// RequestedAuthConfigs, SetModelResponse, EndOfAgent and AgentState are
+	// cloned so that the caller's event shares none of them with the
+	// canonical record.
 	eventCopy := &Event{
 		ID:             event.ID,
 		InvocationID:   event.InvocationID,
@@ -284,6 +285,8 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			Escalate:                   event.Actions.Escalate,
 			SetModelResponse:           sessionutils.CloneValue(event.Actions.SetModelResponse),
 			RewindBeforeInvocationID:   event.Actions.RewindBeforeInvocationID,
+			EndOfAgent:                 sessionutils.CloneValue(event.Actions.EndOfAgent),
+			AgentState:                 sessionutils.CloneValue(event.Actions.AgentState),
 			SkipSummarization:          event.Actions.SkipSummarization,
 			Compaction:                 event.Actions.Compaction.clone(),
 		},
