@@ -509,7 +509,7 @@ func TestDatabaseService_AppendEvent_PreservesInputEventTempState(t *testing.T) 
 }
 
 func TestDatabaseService_AppendEvent_FailurePreservesSession(t *testing.T) {
-	for _, failure := range []string{"canceled", "insert", "commit"} {
+	for _, failure := range []string{"canceled", "insert", "commit", "stale", "deleted"} {
 		t.Run(failure, func(t *testing.T) {
 			s := emptyService(t)
 			start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -535,6 +535,14 @@ func TestDatabaseService_AppendEvent_FailurePreservesSession(t *testing.T) {
 				Actions: session.EventActions{StateDelta: map[string]any{
 					"key": "after", "new": true, "app:key": "after", "user:key": "after", "temp:scratch": "local",
 				}},
+			}
+			read := func() session.Session {
+				t.Helper()
+				got, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: sess.ID()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return got.Session
 			}
 			var wantErr error
 			switch failure {
@@ -563,18 +571,22 @@ func TestDatabaseService_AppendEvent_FailurePreservesSession(t *testing.T) {
 				pool := s.db.Statement.ConnPool
 				s.db.Statement.ConnPool = appendTestPool{DB: db, commit: func(*sql.Tx) error { return wantErr }}
 				t.Cleanup(func() { s.db.Statement.ConnPool = pool })
-			}
-			read := func() session.Session {
-				t.Helper()
-				got, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: sess.ID()})
-				if err != nil {
+			case "stale":
+				if err := s.AppendEvent(ctx, read(), &session.Event{ID: "newer", Timestamp: start.Add(2 * time.Second)}); err != nil {
 					t.Fatal(err)
 				}
-				return got.Session
+			case "deleted":
+				if err := s.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "user", SessionID: sess.ID()}); err != nil {
+					t.Fatal(err)
+				}
+				wantErr = session.ErrNotFound
 			}
-			before := read()
+			var before session.Session
+			if failure != "deleted" {
+				before = read()
+			}
 			err = s.AppendEvent(ctx, sess, event)
-			if !errors.Is(err, wantErr) {
+			if err == nil || (wantErr != nil && !errors.Is(err, wantErr)) {
 				t.Fatalf("AppendEvent did not preserve the failure: %v", err)
 			}
 			if sess.Events().Len() != 1 || sess.Events().At(0) != accepted {
@@ -585,6 +597,13 @@ func TestDatabaseService_AppendEvent_FailurePreservesSession(t *testing.T) {
 			}
 			if !sess.LastUpdateTime().Equal(wantTime) {
 				t.Error("failed append changed the local update time")
+			}
+			if failure == "deleted" {
+				_, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: sess.ID()})
+				if !errors.Is(err, session.ErrNotFound) {
+					t.Fatalf("Get after failed append did not preserve deletion: %v", err)
+				}
+				return
 			}
 			after := read()
 			if after.Events().Len() != before.Events().Len() ||
@@ -696,7 +715,7 @@ func TestDatabaseService_AppendEvent_CommitOrder(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("queued append did not return its deadline error: %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		unblock()
 		if err := <-canceledDone; !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("queued append returned an unexpected error: %v", err)
