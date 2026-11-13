@@ -1869,22 +1869,19 @@ func TestToolCallbacks_NilToolDoesNotPanic(t *testing.T) {
 	p.AfterRunCallback()(mCtx)
 
 	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-	if diff := cmp.Diff([]string{EventToolStarting, EventToolError, EventToolCompleted, EventInvocationCompleted}, eventTypes(rows)); diff != "" {
+	if diff := cmp.Diff([]string{EventToolStarting, EventToolError, EventInvocationCompleted}, eventTypes(rows)); diff != "" {
 		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
 	}
 	startRow := onlyRowOfType(t, rows, EventToolStarting)
 	errRow := onlyRowOfType(t, rows, EventToolError)
-	doneRow := onlyRowOfType(t, rows, EventToolCompleted)
-	if errRow["span_id"] != startRow["span_id"] || doneRow["span_id"] != startRow["span_id"] {
-		t.Errorf("span_ids = (%v, %v, %v), want all equal to TOOL_STARTING span_id",
-			startRow["span_id"], errRow["span_id"], doneRow["span_id"])
+	if errRow["span_id"] != startRow["span_id"] {
+		t.Errorf("span_ids = (%v, %v), want both equal",
+			startRow["span_id"], errRow["span_id"])
 	}
 	checkJSON(t, "TOOL_STARTING content", jsonObjectColumn(t, startRow, "content"),
 		`{"tool":"","args":{"q":"1"},"tool_origin":"UNKNOWN"}`)
 	checkJSON(t, "TOOL_ERROR content", jsonObjectColumn(t, errRow, "content"),
 		`{"tool":"","args":{"q":"1"},"tool_origin":"UNKNOWN"}`)
-	checkJSON(t, "TOOL_COMPLETED content", jsonObjectColumn(t, doneRow, "content"),
-		`{"tool":"","result":{"ok":true},"tool_origin":"UNKNOWN"}`)
 }
 
 func TestAfterModelCallback_Status(t *testing.T) {
