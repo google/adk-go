@@ -179,3 +179,30 @@ func TestAppendEvent_callerBuiltSession(t *testing.T) {
 		})
 	}
 }
+
+// An append whose request fails leaves the session value unchanged, temp:
+// keys included. adk-python applies temp: keys to the session before the
+// request (vertex_ai_session_service.py:414-421), so they stay after a
+// failed one.
+func TestAppendEvent_failedRequestLeavesSessionUnchanged(t *testing.T) {
+	s, fake := newFakeService(t)
+	sess := &localSession{appName: "123", userID: "user1", sessionID: "denied", state: map[string]any{}}
+	ev := &session.Event{ID: "e1", Author: "user", Timestamp: time.Date(2026, 11, 13, 1, 2, 3, 0, time.UTC), Actions: session.EventActions{StateDelta: map[string]any{"k": "v", "temp:t": "x"}}}
+
+	if err := s.AppendEvent(t.Context(), sess, ev); err == nil {
+		t.Fatal("AppendEvent(unwritable session) error = nil, want the backend's error")
+	}
+
+	if n := fake.appends.Load(); n != 1 {
+		t.Errorf("AppendEvent RPCs = %d, want 1", n)
+	}
+	if n := sess.Events().Len(); n != 0 {
+		t.Errorf("session events = %d, want 0", n)
+	}
+	if len(sess.state) != 0 {
+		t.Errorf("session state = %v, want empty", sess.state)
+	}
+	if got := sess.LastUpdateTime(); !got.IsZero() {
+		t.Errorf("session LastUpdateTime() = %v, want the zero time", got)
+	}
+}

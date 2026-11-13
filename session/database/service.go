@@ -96,6 +96,12 @@ type Config struct {
 // database cfg.Dialector connects to (e.g., PostgreSQL, Spanner, SQLite),
 // opened with gorm.Open(cfg.Dialector, cfg.GORMOptions...).
 //
+// GORM's log output is discarded, as adk-python creates its engine with
+// echo=False, unless cfg.GORMOptions set a logger: a [*gorm.Config] whose
+// Logger is non-nil, or an option that sets it. GORM's default logger would
+// write statements, with the state and event content they carry, to standard
+// output.
+//
 // By default, the service orders events with equal timestamps ascending by
 // event ID, matching adk-python's DatabaseSessionService; this is also the
 // order of every service created with [NewSessionService] or
@@ -117,7 +123,7 @@ func New(cfg Config) (session.Service, error) {
 	if cfg.Dialector == nil {
 		return nil, errors.New("dialector must not be nil")
 	}
-	db, err := gorm.Open(cfg.Dialector, cfg.GORMOptions...)
+	db, err := gorm.Open(cfg.Dialector, append(slices.Clip(cfg.GORMOptions), discardLogs{})...)
 	if err != nil {
 		return nil, fmt.Errorf("error creating database session service: %w", err)
 	}
@@ -168,6 +174,12 @@ func (s *databaseService) Close() error {
 // It requires a [gorm.Dialector] to specify the database connection and
 // accepts optional [gorm.Option] values for further GORM configuration.
 //
+// GORM's log output is discarded, as adk-python creates its engine with
+// echo=False, unless opts set a logger: a [*gorm.Config] whose Logger is
+// non-nil, or an option that sets it. GORM's default logger would write
+// statements, with the state and event content they carry, to standard
+// output.
+//
 // The returned service implements [io.Closer]. Close closes the connection
 // pool when dialector opened it, as sqlite.Open(dsn) does, and leaves open a
 // connection the module's SQLite dialector carries
@@ -178,7 +190,7 @@ func (s *databaseService) Close() error {
 // It returns the new [session.Service] or an error if the database connection
 // [gorm.Open] fails. The service does not create its tables. See [AutoMigrate].
 func NewSessionService(dialector gorm.Dialector, opts ...gorm.Option) (session.Service, error) {
-	db, err := gorm.Open(dialector, opts...)
+	db, err := gorm.Open(dialector, append(slices.Clip(opts), discardLogs{})...)
 	if err != nil {
 		return nil, fmt.Errorf("error creating database session service: %w", err)
 	}
