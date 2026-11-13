@@ -47,7 +47,6 @@ import (
 func main() {
 	ctx := context.Background()
 
-	rerun := true
 	greet := workflow.NewEmittingFunctionNode[any, any]("greet",
 		func(nc agent.Context, _ any, emit func(*session.Event) error) (any, error) {
 			// ResumeOrRequestInput pauses (asks and returns
@@ -70,7 +69,7 @@ func main() {
 			}
 			return fmt.Sprintf("Hello, %s!", name), nil
 		},
-		workflow.NodeConfig{RerunOnResume: &rerun},
+		workflow.NodeConfig{RerunOnResume: new(true)},
 	)
 
 	rootAgent, err := workflowagent.New(workflowagent.Config{

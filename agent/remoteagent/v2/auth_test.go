@@ -893,8 +893,7 @@ func TestRedactTokenError(t *testing.T) {
 					t.Errorf("mintGroup.token() error = %v, want %q dropped", err, gone)
 				}
 			}
-			var re *oauth2.RetrieveError
-			if !errors.As(err, &re) {
+			if _, ok := errors.AsType[*oauth2.RetrieveError](err); !ok {
 				t.Errorf("mintGroup.token() error = %v, want errors.As to still find *oauth2.RetrieveError", err)
 			}
 		})
@@ -997,8 +996,7 @@ func TestRedactTokenErrorSeesThroughAWrapper(t *testing.T) {
 	if !strings.Contains(got, "400 Bad Request") || !strings.Contains(got, "invalid_grant") {
 		t.Errorf("redactTokenError() = %q, want it to keep the status and the error code", got)
 	}
-	var re *oauth2.RetrieveError
-	if !errors.As(redactTokenError(err), &re) {
+	if _, ok := errors.AsType[*oauth2.RetrieveError](redactTokenError(err)); !ok {
 		t.Error("redactTokenError() lost the error chain")
 	}
 }
@@ -1148,11 +1146,9 @@ func TestRemoteAgent_AuthConcurrentInvocations(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, users)
 	for i := range users {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, errs[i] = runAndCollect(contexts[i], remoteAgent)
-		}()
+		})
 	}
 	wg.Wait()
 	for i, err := range errs {
@@ -2646,7 +2642,7 @@ func TestAuthTransportSharesAMintWithinAScope(t *testing.T) {
 	<-entered
 	defer func() {
 		close(release)
-		<-first
+		<-first //nolint:errcheck // only reaps the first apply; its result is not under test here
 	}()
 
 	sid, _ := a2aclient.SessionIDFrom(scope)

@@ -103,6 +103,10 @@ func TestStartNodePresent(t *testing.T) {
 			}(),
 			expectErrorMsg: "no start node found",
 		},
+		{
+			name:  "empty edges",
+			edges: []Edge{},
+		},
 	}
 
 	for _, tc := range tests {
@@ -114,6 +118,8 @@ func TestStartNodePresent(t *testing.T) {
 				} else if !strings.Contains(err.Error(), tc.expectErrorMsg) {
 					t.Errorf("expected error containing %q, got %v", tc.expectErrorMsg, err)
 				}
+			} else if err != nil {
+				t.Errorf("expected no error, got %v", err)
 			}
 		})
 	}

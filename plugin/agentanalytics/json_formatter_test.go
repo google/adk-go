@@ -4416,11 +4416,10 @@ func TestPartsCollector_TextAndStructuredRedaction(t *testing.T) {
 }
 
 func TestNormalizeFunctionResponse_PythonSnakeCaseParity(t *testing.T) {
-	willCont := true
 	fr := &genai.FunctionResponse{
 		ID:           "call-1",
 		Name:         "lookup_doc",
-		WillContinue: &willCont,
+		WillContinue: new(true),
 		Scheduling:   genai.FunctionResponseSchedulingWhenIdle,
 		Response: map[string]any{
 			"CallerCamelKey": "untouched",
