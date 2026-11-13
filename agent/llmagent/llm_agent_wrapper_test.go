@@ -645,6 +645,34 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 		}
 	})
 
+	t.Run("OutputSchema empty object reply: Output is the empty map, not marked MessageAsOutput", func(t *testing.T) {
+		t.Parallel()
+		schema := &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"title": {Type: genai.TypeString},
+			},
+		}
+		a := makeLLMAgent(t, "x", withOutputSchema(schema))
+		ev := &session.Event{
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "{}"}},
+				},
+			},
+		}
+		if err := llmagent.ProcessLLMAgentOutput(a, ev); err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if diff := cmp.Diff(map[string]any{}, ev.Output); diff != "" {
+			t.Errorf("Output mismatch (-want +got):\n%s", diff)
+		}
+		if ev.NodeInfo != nil && ev.NodeInfo.MessageAsOutput {
+			t.Errorf("MessageAsOutput = true, want unset (the empty map is the node output)")
+		}
+	})
+
 	t.Run("OutputSchema null reply: marked MessageAsOutput", func(t *testing.T) {
 		t.Parallel()
 		schema := &genai.Schema{

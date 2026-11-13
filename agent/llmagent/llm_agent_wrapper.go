@@ -312,8 +312,10 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 	ev.Output = output
 
 	// The runner drops Output from events flagged MessageAsOutput, which
-	// would discard a non-null parsed value. A null reply has no value to keep,
-	// and stored events do not round-trip it, so it keeps the flag.
+	// would discard a non-null parsed value, so that case skips the flag. For a
+	// null reply Output holds a nil map, and stored events do not round-trip
+	// it. The flag keeps the reply text as the node output once the event is
+	// stored.
 	if parsed != nil {
 		return nil
 	}
