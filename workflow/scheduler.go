@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -452,8 +453,15 @@ func runNode(
 	completion := completionItem{nodeName: name}
 	defer func() {
 		if r := recover(); r != nil {
-			completion.err = fmt.Errorf("node %q panicked: %v", name, r)
+			// The panic value can carry anything the node held, and the run
+			// error can reach REST clients and models: keep the value and the
+			// stack on a span (the node's own, or the enclosing one when the
+			// node's span is a no-op), send a generic error out.
+			span.recordPanic(fmt.Errorf("node %q panicked: %v\nstack: %s", name, r, debug.Stack()))
+			completion.err = fmt.Errorf("node %q panicked", name)
 			completion.inventory = failureInventory{}
+			out <- completion
+			return
 		}
 		span.recordError(completion.err, nil)
 		out <- completion

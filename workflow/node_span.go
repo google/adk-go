@@ -29,6 +29,11 @@ import (
 // the parallel worker.
 type nodeSpan struct {
 	span trace.Span
+	// enclosing is the span already on the context for nodes whose own
+	// span is a no-op (Start and EmitsOwnSpan nodes). Recording a
+	// recovered panic on the no-op span would discard it, so recordPanic
+	// falls back to this one.
+	enclosing trace.Span
 }
 
 // startNodeSpan begins an invoke_node span for n and returns a context
@@ -37,10 +42,23 @@ type nodeSpan struct {
 // can unconditionally defer end / call recordError.
 func startNodeSpan(ctx agent.Context, n Node) (nodeSpan, agent.Context) {
 	if n == Start || n.Config().EmitsOwnSpan {
-		return nodeSpan{span: noop.Span{}}, ctx
+		return nodeSpan{span: noop.Span{}, enclosing: trace.SpanFromContext(ctx)}, ctx
 	}
 	spanCtx, span := telemetry.StartNodeSpan(ctx, ctx, telemetry.OperationNode{Node: n})
 	return nodeSpan{span: span}, ctx.WithAgentContext(spanCtx)
+}
+
+// recordPanic records err — a recovered panic's value and stack — on the
+// node's span, or on the enclosing span when the node's own span is a
+// no-op. The run error for a panic is generic, so this record is the
+// only place an operator can read the panic detail; it must land on a
+// span that is actually exported.
+func (s nodeSpan) recordPanic(err error) {
+	if s.enclosing != nil {
+		telemetry.RecordError(s.enclosing, err)
+		return
+	}
+	telemetry.RecordError(s.span, err)
 }
 
 // recordError marks the span failed with recordErr, unless the outcome is
