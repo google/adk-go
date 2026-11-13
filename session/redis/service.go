@@ -44,6 +44,10 @@ const maxTxRetries = 100
 // Service is a Redis-backed implementation of [session.Service] and
 // [session.UserStateReader].
 //
+// Service keeps session IDs as given, with no normalization, and an empty
+// user ID is the user "". See [Service.Create], [Service.Get] and
+// [Service.Delete] for each method's rules.
+//
 // Service is safe for concurrent use by multiple goroutines. A zero Service
 // is invalid; construct one with [NewService].
 type Service struct {
@@ -169,8 +173,9 @@ func (s *Service) appStateKey(appName string) string {
 // adk-python. An empty req.SessionID gets a generated ID; any other value is
 // used verbatim. The session key, and the
 // app and user state keys that req.State writes to, are written in one
-// transaction, so when the session already exists Create returns an
-// "already exists" error and writes nothing. The returned session holds the
+// transaction, so when the session already exists Create returns an error
+// wrapping [session.ErrAlreadyExists], "session <id> already exists", and
+// writes nothing. The returned session holds the
 // merged app, user and session state and, unlike the stored session, any
 // "temp:" keys of req.State, as adk-python's RedisSessionService returns them.
 func (s *Service) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
@@ -203,7 +208,7 @@ func (s *Service) Create(ctx context.Context, req *session.CreateRequest) (*sess
 	err = s.watch(ctx, func(tx *goredis.Tx) error {
 		err := tx.Get(ctx, sessionKey).Err()
 		if err == nil {
-			return fmt.Errorf("session %s already exists", sid)
+			return fmt.Errorf("session %s %w", sid, session.ErrAlreadyExists)
 		}
 		if !errors.Is(err, goredis.Nil) {
 			return fmt.Errorf("redis: read session %q: %w", sid, err)

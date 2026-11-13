@@ -25,6 +25,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"google.golang.org/adk/v2/internal/sessionutils/sqlitedsn"
 	"google.golang.org/adk/v2/internal/sessionutils/sqliteschema"
@@ -38,6 +39,12 @@ var ErrInvalidDatabaseURL = errors.New("invalid database URL")
 
 // NewSessionServiceFromURL creates a [session.Service] backed by the database
 // named by dbURL, passing opts to [gorm.Open].
+//
+// GORM's log output is discarded, as adk-python creates its engine with
+// echo=False, unless opts set a logger: a [*gorm.Config] whose Logger is
+// non-nil, or an option that sets it. GORM's default logger would write
+// statements, with the state and event content they carry, to standard
+// output.
 //
 // The supported URLs use the SQLite driver this module already includes
 // (github.com/glebarez/sqlite). The scheme is "sqlite", "sqlite+aiosqlite"
@@ -82,6 +89,7 @@ func NewSessionServiceFromURL(dbURL string, opts ...gorm.Option) (session.Servic
 	if err != nil {
 		return nil, err
 	}
+	opts = append(slices.Clip(opts), discardLogs{})
 	svc, err := New(Config{Dialector: sqlite.Open(dsn), GORMOptions: opts})
 	if err != nil {
 		return nil, &databaseURLError{msg: engineFailure(redacted), cause: err}
@@ -93,6 +101,21 @@ func NewSessionServiceFromURL(dbURL string, opts ...gorm.Option) (session.Servic
 	}
 	return ds, nil
 }
+
+// discardLogs is a [gorm.Option] that sets [logger.Discard] as the logger
+// when no other option has set one. gorm.Open applies every *gorm.Config
+// before any other option, so discardLogs sees a logger a caller's
+// *gorm.Config sets.
+type discardLogs struct{}
+
+func (discardLogs) Apply(c *gorm.Config) error {
+	if c.Logger == nil {
+		c.Logger = logger.Discard
+	}
+	return nil
+}
+
+func (discardLogs) AfterInitialize(*gorm.DB) error { return nil }
 
 // prepareURLService limits s to one connection, checks that the database
 // does not hold another session schema, and creates the tables.

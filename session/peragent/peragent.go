@@ -100,7 +100,9 @@ const builtInPrefix = "__"
 // that lacks its app name, or a Get with a negative NumRecentEvents, fails
 // before any database is opened, and a call whose context is done before its
 // database is open returns the context's error. An empty user ID is the user
-// "", as in session/database.
+// "", session IDs are kept as given, and a Create of a taken session ID
+// returns an error wrapping [session.ErrAlreadyExists], as in
+// session/database.
 //
 // The returned service is safe for concurrent use. Each database is opened
 // with a single connection, so calls on one app run one at a time; another

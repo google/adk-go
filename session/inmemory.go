@@ -49,7 +49,8 @@ type inMemoryService struct {
 // Create stores a new session. The user ID "" is a user like any other. The
 // session ID is stripped of surrounding whitespace, and an ID that is empty
 // after stripping is generated, as in adk-python
-// (in_memory_session_service.py, _create_session_impl).
+// (in_memory_session_service.py, _create_session_impl). A stripped ID that is
+// taken returns an error wrapping ErrAlreadyExists.
 func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*CreateResponse, error) {
 	if req.AppName == "" {
 		return nil, fmt.Errorf("app_name is required, got app_name: %q", req.AppName)
@@ -71,7 +72,7 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	defer s.mu.Unlock()
 
 	if _, ok := s.sessions.Get(encodedKey); ok {
-		return nil, fmt.Errorf("session %s already exists", sessionID)
+		return nil, fmt.Errorf("session %s %w", sessionID, ErrAlreadyExists)
 	}
 
 	// The stored session keeps only session-scoped keys: app: and user: keys

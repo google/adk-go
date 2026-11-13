@@ -42,6 +42,23 @@ import (
 // as fmt.Errorf("%w: …: %w", session.ErrNotFound, err).
 var ErrNotFound = errors.New("session not found")
 
+// ErrAlreadyExists reports that [Service.Create] was asked to create a
+// session whose ID is already taken by a stored session of the same app and
+// user:
+//
+//	if errors.Is(err, session.ErrAlreadyExists) { … }
+//
+// When Create returns it, storage is unchanged: the stored session, and the
+// app and user state the request's State would have written, stay as they
+// were. [InMemoryService], session/redis, session/database and session/peragent
+// wrap it. The error of [InMemoryService] and session/redis reads
+// "session <id> already exists", and that of session/database and
+// session/peragent reads the same, followed by the database driver's error.
+// session/vertexai does not wrap it: Agent Engine answers a taken ID with
+// INVALID_ARGUMENT, and Create returns that error as it is, as adk-python's
+// Vertex AI service does.
+var ErrAlreadyExists = errors.New("already exists")
+
 // ErrStaleSession reports that the session passed to [Service.AppendEvent] is
 // stale because a newer update has been committed to storage since the session
 // value was loaded or copied.
@@ -60,8 +77,42 @@ var ErrStaleSession = errors.New("stale session")
 // Service is a session storage service.
 //
 // It provides a set of methods for managing sessions and events.
+//
+// A session is identified by its app name, user ID and session ID together:
+// sessions with one session ID under two users, or two apps, are two
+// sessions. An empty app name is an error. An empty user ID names the user
+// "", a user like any other, in every implementation in this module except
+// session/vertexai, whose Create, Get and Delete return an error for it
+// because Agent Engine requires a user ID.
+//
+// How a session ID is normalized depends on the implementation, and the
+// documentation of each says what it does. [InMemoryService] strips
+// surrounding white space. session/database, session/peragent, which stores
+// through it, and session/redis keep the ID as given. session/vertexai
+// accepts only a short ID matching ^[A-Za-z0-9_-]+$, or a session resource
+// name it reduces to one, and returns an error for any other ID before it
+// sends a request.
 type Service interface {
+	// Create stores a new session for the request's app and user, with the
+	// initial state CreateRequest.State, and returns it.
+	//
+	// When CreateRequest.SessionID is empty, Create generates an ID
+	// (session/vertexai has Agent Engine assign one), which the returned
+	// session's ID reports. When a session with the ID already exists for
+	// the app and user, Create returns an error and storage is unchanged.
+	// The error wraps [ErrAlreadyExists] in every implementation in this
+	// module except session/vertexai, which returns Agent Engine's error
+	// without the sentinel.
 	Create(context.Context, *CreateRequest) (*CreateResponse, error)
+	// Get returns the session the request names, with the events that
+	// GetRequest.NumRecentEvents, GetRequest.After and GetRequest.OmitEvents
+	// select.
+	//
+	// When storage holds no such session, including for an empty
+	// GetRequest.SessionID and for a session of another user, Get returns an
+	// error wrapping [ErrNotFound]. session/vertexai rejects an empty or
+	// malformed session ID as invalid instead, with an error that does not
+	// wrap ErrNotFound.
 	Get(context.Context, *GetRequest) (*GetResponse, error)
 	// List returns the sessions that match the request, ordered by last update
 	// time ascending, so the last session is the most recently active one.
@@ -72,6 +123,11 @@ type Service interface {
 	// user of the app, unless [ListRequest.FilterEmptyUserID] is true, in which
 	// case it lists only the sessions of the user "".
 	List(context.Context, *ListRequest) (*ListResponse, error)
+	// Delete removes the session the request names, with its events. App and
+	// user state stay. Deleting a session that does not exist, including for
+	// an empty DeleteRequest.SessionID and a session of another user, does
+	// nothing and returns nil. session/vertexai rejects an empty or malformed
+	// session ID as invalid instead, as in Get.
 	Delete(context.Context, *DeleteRequest) error
 	// AppendEvent is used to append an event to a session, and remove temporary state keys from the event.
 	//
@@ -87,6 +143,11 @@ type Service interface {
 	// that error wrapped. On success, the value's state receives the event's
 	// state delta and, for values returned by the service or by
 	// [CloneSession], its events and last update time include the event.
+	//
+	// session/vertexai departs from this in two ways, both documented on its
+	// NewSessionService: its append request names the session by app name
+	// and session ID only, so a value with another user's ID appends to that
+	// session, and an append that fails in transport may have been stored.
 	//
 	// Two further obligations, both checked by the shared conformance suite in
 	// session/sessiontestsuite, so an implementation that misses either goes
@@ -115,6 +176,20 @@ type Service interface {
 }
 
 // InMemoryService returns an in-memory implementation of the session service.
+//
+// The service holds its sessions in process memory, so they last as long as
+// the service value, and it is safe for concurrent use. Sessions returned by
+// Create, Get and List share no mutable memory with the stored ones. It also
+// implements [UserStateReader].
+//
+// An empty app name is an error, and an empty user ID is the user "". Create,
+// Get and Delete strip surrounding white space from the session ID, removing
+// what Python's str.strip removes (Unicode white space and U+001C to U+001F),
+// and use the stripped ID: Create generates an ID when the stripped one is
+// empty, and a Create whose stripped ID is taken returns an error wrapping
+// [ErrAlreadyExists] that reads "session <id> already exists". Get and Delete
+// look an ID that is empty after stripping up like any other, so Get returns
+// an error wrapping [ErrNotFound] and Delete returns nil.
 func InMemoryService() Service {
 	return &inMemoryService{
 		appState:  make(map[string]stateMap),
