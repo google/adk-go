@@ -123,6 +123,12 @@ func deepCopy(src, dst reflect.Value) {
 			return
 		}
 		dst.Set(reflect.MakeSlice(src.Type(), src.Len(), src.Cap()))
+		// Elements that hold no reference, such as the bytes of inline data,
+		// are copied in one block rather than one reflect.Value at a time.
+		if holdsNoReference(src.Type().Elem().Kind()) {
+			reflect.Copy(dst, src)
+			return
+		}
 		for i := 0; i < src.Len(); i++ {
 			// Create a copy of each element and set it in the new slice
 			elemCopy := reflect.New(src.Index(i).Type()).Elem()
@@ -154,4 +160,17 @@ func deepCopy(src, dst reflect.Value) {
 		// For basic types, direct assignment is sufficient
 		dst.Set(src)
 	}
+}
+
+// holdsNoReference reports whether a value of kind k holds no reference that a
+// copy could write through. A string shares its bytes, but they are immutable.
+func holdsNoReference(k reflect.Kind) bool {
+	switch k {
+	case reflect.Bool, reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
+		return true
+	}
+	return false
 }

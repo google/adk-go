@@ -15,8 +15,11 @@
 package llminternal
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
+
+	"google.golang.org/genai"
 )
 
 func TestClone(t *testing.T) {
@@ -111,4 +114,34 @@ func TestCloneUnexported(t *testing.T) {
 		}
 	}()
 	clone(original)
+}
+
+// TestCloneInlineDataInOneBlock pins the cost of copying inline data. Every
+// model call copies the history, so copying a 1 MiB image one element at a
+// time cost a million allocations per call.
+func TestCloneInlineDataInOneBlock(t *testing.T) {
+	data := bytes.Repeat([]byte{1, 2, 3, 4}, 1<<18)
+	original := &genai.Content{Parts: []*genai.Part{{InlineData: &genai.Blob{MIMEType: "image/png", Data: data}}}}
+
+	cloned := clone(original)
+	if !reflect.DeepEqual(original, cloned) {
+		t.Fatal("clone() changed the inline data")
+	}
+	cloned.Parts[0].InlineData.Data[0] = 9
+	if data[0] != 1 {
+		t.Error("clone() shares the inline data bytes with the original")
+	}
+
+	if allocs := testing.AllocsPerRun(5, func() { clone(original) }); allocs > 100 {
+		t.Errorf("clone() of 1 MiB of inline data made %v allocations, want at most 100", allocs)
+	}
+}
+
+func BenchmarkCloneInlineData(b *testing.B) {
+	c := &genai.Content{Parts: []*genai.Part{{InlineData: &genai.Blob{Data: make([]byte, 1<<20)}}}}
+	b.SetBytes(1 << 20)
+	b.ReportAllocs()
+	for b.Loop() {
+		clone(c)
+	}
 }
