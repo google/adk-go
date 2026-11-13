@@ -66,9 +66,11 @@ type Session interface {
 // the call. Subsequent [Service.AppendEvent] or [State.Set] calls on either s
 // or the clone do not affect the other.
 //
-// The returned [Session] can be passed to [Service.AppendEvent] on any
-// in-memory or database [Service] that holds the session. CloneSession is safe
-// for concurrent use if s's methods are safe for concurrent use.
+// The returned [Session] can be passed to [Service.AppendEvent] of any
+// [Service] that holds the session. The implementations in this module then
+// add the event to the clone and update its state and last update time, as
+// they do for a session they returned. CloneSession is safe for concurrent
+// use if s's methods are safe for concurrent use.
 func CloneSession(s Session) Session {
 	if s == nil {
 		return nil

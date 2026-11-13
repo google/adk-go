@@ -70,6 +70,11 @@ var ErrAlreadyExists = errors.New("already exists")
 //
 //	if errors.Is(err, session.ErrStaleSession) { … }
 //
+// In this module, session/database and session/peragent, which stores through
+// it, make that check. [InMemoryService], session/redis and session/vertexai
+// do not, and append through a stale value. A caller that gets the error
+// loads the session again with [Service.Get] and retries.
+//
 // When AppendEvent returns ErrStaleSession, neither storage nor the caller's
 // [Session] value is modified.
 var ErrStaleSession = errors.New("stale session")

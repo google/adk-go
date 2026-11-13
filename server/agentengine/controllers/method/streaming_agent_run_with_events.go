@@ -43,6 +43,10 @@ type streamingAgentRunWithEventsHandler struct {
 }
 
 // NewStreamingAgentRunWithEventsHandler creates a new handler for streaming_agent_run_with_events.
+//
+// Its Handle returns an error that says "user_id is required" for a request_json whose
+// user_id is missing or empty, before the session service or the agent is
+// called.
 func NewStreamingAgentRunWithEventsHandler(config *launcher.Config, agentEngineID, methodName, apiMode string) *streamingAgentRunWithEventsHandler {
 	return &streamingAgentRunWithEventsHandler{config: config, agentEngineID: agentEngineID, methodName: methodName, apiMode: apiMode}
 }
