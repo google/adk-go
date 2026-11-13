@@ -428,12 +428,15 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 			// block forever on the abandoned channel.
 			name: "parent ctx cancel exits cleanly",
 			serveConn: func(connNum int, conn *websocket.Conn) {
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+					return
+				}
 				blockUntilClientCloses(conn)
 			},
 			drive: func(t *testing.T, sess agent.LiveSession, seq iter.Seq2[*session.Event, error], cancel context.CancelFunc) {
-				// Cancel only after the first event (the setup-complete
-				// acknowledgement) so the reader is parked in Recv when
-				// cleanup tears the connection down.
+				// Cancel only after the first event (the server's only turn)
+				// so the reader is parked in Recv when cleanup tears the
+				// connection down.
 				first := true
 				for range seq { //nolint:errcheck // the canceled reader's error is expected; the test asserts the connection count
 					if first {
@@ -569,7 +572,12 @@ func TestRunLiveCloseStopsIdleSession(t *testing.T) {
 	// the test consumed the signal or gave up and failed.
 	connGone := make(chan struct{}, 1)
 	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
-		blockUntilClientCloses(conn) // an idle server: no unsolicited traffic
+		// One turn to show the connection is up, then an idle server: no
+		// further unsolicited traffic.
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+			t.Errorf("writing the model turn failed: %v", err)
+		}
+		blockUntilClientCloses(conn)
 		connGone <- struct{}{}
 	})
 
@@ -590,10 +598,10 @@ func TestRunLiveCloseStopsIdleSession(t *testing.T) {
 	next, stop := iter.Pull2(seq)
 	defer stop()
 
-	// The setup-complete acknowledgement. Once it lands the connection is up
-	// and the flow is settling into the idle consumer select.
+	// The server's only turn. Once it lands the connection is up and the flow
+	// is settling into the idle consumer select.
 	if _, _, ok := next(); !ok {
-		t.Fatal("iterator ended before the setup-complete event; the connection never came up")
+		t.Fatal("iterator ended before the model turn; the connection never came up")
 	}
 	if got := connCount.Load(); got != 1 {
 		t.Fatalf("connection count = %d, want 1", got)
@@ -729,6 +737,120 @@ func TestHasRealtimeInput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := hasRealtimeInput(tc.in); got != tc.want {
 				t.Errorf("hasRealtimeInput(%T) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunLiveSkipsEmptyResponses checks which server messages become events.
+// The fake server always sends setupComplete first, which carries nothing and
+// so must never surface as an event.
+func TestRunLiveSkipsEmptyResponses(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  string
+		// want is the event msg produces, or nil when it must be skipped.
+		want *model.LLMResponse
+	}{
+		{
+			name: "empty server content",
+			msg:  `{"serverContent":{}}`,
+		},
+		{
+			name: "turn complete",
+			msg:  `{"serverContent":{"turnComplete":true}}`,
+			want: &model.LLMResponse{TurnComplete: true},
+		},
+		{
+			name: "interrupted",
+			msg:  `{"serverContent":{"interrupted":true}}`,
+			want: &model.LLMResponse{Interrupted: true},
+		},
+		{
+			name: "input transcription",
+			msg:  `{"serverContent":{"inputTranscription":{"text":"hi"}}}`,
+			want: &model.LLMResponse{InputTranscription: &genai.Transcription{Text: "hi"}, Partial: true},
+		},
+		{
+			name: "output transcription",
+			msg:  `{"serverContent":{"outputTranscription":{"text":"hello"}}}`,
+			want: &model.LLMResponse{OutputTranscription: &genai.Transcription{Text: "hello"}, Partial: true},
+		},
+		{
+			name: "usage metadata",
+			msg:  `{"usageMetadata":{"promptTokenCount":3}}`,
+			want: &model.LLMResponse{UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 3}},
+		},
+		{
+			name: "session resumption update",
+			msg:  `{"sessionResumptionUpdate":{"newHandle":"handle-1","resumable":true}}`,
+			want: &model.LLMResponse{SessionResumptionHandle: "handle-1"},
+		},
+	}
+	// The end marker carries no turnComplete, which would flush the
+	// transcription cases' accumulated text as an extra event.
+	const endMarker = `{"serverContent":{"modelTurn":{"parts":[{"text":"end"}],"role":"model"}}}`
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(tc.msg)); err != nil {
+					return
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(endMarker)); err != nil {
+					return
+				}
+				blockUntilClientCloses(conn)
+			})
+			f := &Flow{
+				Model:             &fakeLiveModel{client: client},
+				RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+			}
+			ctx, cancel := newLiveInvocationContext(t)
+			defer cancel()
+
+			sess, seq, err := f.RunLive(ctx)
+			if err != nil {
+				t.Fatalf("RunLive failed: %v", err)
+			}
+			defer func() { _ = sess.Close() }()
+
+			var got []*model.LLMResponse
+			for ev, err := range seq {
+				if err != nil {
+					t.Fatalf("iterator error: %v", err)
+				}
+				if ev.LLMResponse.Content != nil {
+					break
+				}
+				got = append(got, &ev.LLMResponse)
+			}
+			var want []*model.LLMResponse
+			if tc.want != nil {
+				want = []*model.LLMResponse{tc.want}
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("events before the model turn mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestIsEmptyLiveResponse(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *model.LLMResponse
+		want bool
+	}{
+		{"zero value", &model.LLMResponse{}, true},
+		{"partial only", &model.LLMResponse{Partial: true}, true},
+		{"content", &model.LLMResponse{Content: &genai.Content{Role: "model"}}, false},
+		{"error code", &model.LLMResponse{ErrorCode: "RESOURCE_EXHAUSTED"}, false},
+		{"grounding metadata", &model.LLMResponse{GroundingMetadata: &genai.GroundingMetadata{}}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isEmptyLiveResponse(tc.in); got != tc.want {
+				t.Errorf("isEmptyLiveResponse(%+v) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
 	}

@@ -454,6 +454,15 @@ func hasRealtimeInput(v any) bool {
 	return true
 }
 
+// isEmptyLiveResponse reports whether r carries nothing worth an event, as
+// the response built from the Live API's setupComplete does. adk-python's live
+// flow skips the same responses.
+func isEmptyLiveResponse(r *model.LLMResponse) bool {
+	return r.Content == nil && r.ErrorCode == "" && !r.Interrupted && !r.TurnComplete &&
+		r.InputTranscription == nil && r.OutputTranscription == nil && r.UsageMetadata == nil &&
+		r.SessionResumptionHandle == "" && r.GroundingMetadata == nil
+}
+
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	clientProvider, ok := f.Model.(interface {
 		Client() *genai.Client
@@ -667,6 +676,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 									sess.audioMgr.CacheOutput(ctx, part.InlineData.Data, part.InlineData.MIMEType)
 								}
 							}
+						}
+						if isEmptyLiveResponse(resp) {
+							continue
 						}
 						ev := session.NewEvent(ctx, ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()
@@ -926,10 +938,11 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, err)
 				return
 			}
-			// Skip the model response event if there is no content and no error code.
+			// Skip the model response event if it carries no content, error code,
+			// interruption or grounding metadata.
 			// This is needed for the code executor to trigger another loop according to
 			// adk-python src/google/adk/flows/llm_flows/base_llm_flow.py BaseLlmFlow._postprocess_async.
-			if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted {
+			if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted && resp.GroundingMetadata == nil {
 				continue
 			}
 
@@ -1504,6 +1517,13 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				confirmation = toolConfirmations[fnCall.ID]
 			}
 			toolCtx := agent.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
+			// A call without args reaches the tool and its callbacks as an
+			// empty map, so a tool that returns its args, as
+			// set_model_response does, returns an object rather than nil.
+			args := fnCall.Args
+			if args == nil {
+				args = map[string]any{}
+			}
 
 			var result map[string]any
 			var curTool tool.Tool
@@ -1521,7 +1541,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				curTool, found = toolsDict[fnCall.Name]
 				if !found {
 					err := newToolNotFoundError(fnCall.Name, toolNames)
-					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, args, err)
 					if err != nil {
 						result = map[string]any{"error": err.Error()}
 					}
@@ -1543,7 +1563,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 								}
 								cancel()
 							}()
-							for chunk, err := range streamTool.RunStream(cancelToolCtx, fnCall.Args) {
+							for chunk, err := range streamTool.RunStream(cancelToolCtx, args) {
 								select {
 								case <-cancelCtx.Done():
 									return
@@ -1569,7 +1589,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						}()
 					} else {
 						var sb strings.Builder
-						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
+						for chunk, err := range streamTool.RunStream(toolCtx, args) {
 							if err != nil {
 								errText, _ := toolinternal.ModelErrorText(streamTool.Name(), err)
 								result = map[string]any{"error": errText}
@@ -1583,12 +1603,12 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					}
 				} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
 					err := newToolNotFoundError(fnCall.Name, toolNames)
-					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, args, err)
 					if err != nil {
 						result = map[string]any{"error": err.Error()}
 					}
 				} else {
-					result = f.callTool(toolCtx, funcTool, fnCall.Args)
+					result = f.callTool(toolCtx, funcTool, args)
 				}
 			}
 
@@ -1599,6 +1619,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				if curTool != nil && curTool.IsLongRunning() {
 					return
 				}
+				result = map[string]any{"result": nil}
 			}
 
 			parts := []*genai.Part{
