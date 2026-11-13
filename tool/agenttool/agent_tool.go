@@ -106,7 +106,16 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 // Run executes the wrapped agent with the provided arguments.
 // It creates a new session for the sub-agent, runs the agent, and returns
 // the final result. Artifacts are accessed through the parent tool context.
-func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
+func (t *agentTool) Run(toolCtx agent.Context, args any) (result map[string]any, retErr error) {
+	actions := toolCtx.Actions()
+	// An error must reach the parent model, so a flag that ends the turn after
+	// this tool call must not survive a failed call, whatever set it.
+	defer func() {
+		if retErr != nil && actions != nil {
+			actions.SkipSummarization = false
+		}
+	}()
+
 	margs, ok := args.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
@@ -144,10 +153,8 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 
 	// Set only once the input is valid, so an argument error goes back to the
 	// parent model instead of ending its turn.
-	if t.skipSummarization {
-		if actions := toolCtx.Actions(); actions != nil {
-			actions.SkipSummarization = true
-		}
+	if t.skipSummarization && actions != nil {
+		actions.SkipSummarization = true
 	}
 
 	sessionService := session.InMemoryService()
@@ -229,11 +236,7 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	if len(pendingIDs) > 0 {
-		// The parent model must see this error, so don't end its turn here,
-		// whatever set SkipSummarization on this call.
-		if actions := toolCtx.Actions(); actions != nil {
-			actions.SkipSummarization = false
-		}
+		// The deferred reset keeps this error from ending the parent turn.
 		return nil, fmt.Errorf("sub-agent %q stopped waiting on unresolved long-running tool calls %v, which AgentTool cannot resume", t.agent.Name(), slices.Sorted(maps.Keys(pendingIDs)))
 	}
 
