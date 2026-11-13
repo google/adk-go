@@ -20,6 +20,14 @@
 // columns, and writes to that table fail until they exist. Applications that
 // manage the schema themselves instead of calling AutoMigrate must add those
 // columns before deploying the release that introduces them.
+//
+// The service keeps session IDs as given, with no normalization, and
+// generates an ID for an empty one in Create. An empty user ID is the user
+// "". A Create of a taken session ID returns an error wrapping
+// [session.ErrAlreadyExists] that reads "session <id> already exists: …",
+// followed by the driver's error, and writes nothing. Get of a missing
+// session, including one with an empty ID, returns an error wrapping
+// [session.ErrNotFound], and Delete of one returns nil.
 package database
 
 import (
@@ -221,7 +229,9 @@ func AutoMigrate(service session.Service) error {
 //
 // req.AppName is required. An empty req.UserID is the user "", as in
 // adk-python. An empty req.SessionID gets a generated ID; any other value is
-// stored verbatim.
+// stored verbatim. When the session already exists, Create returns an error
+// wrapping [session.ErrAlreadyExists], "session <id> already exists: …", and
+// writes nothing.
 func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
 	if req.AppName == "" {
 		return nil, fmt.Errorf("app_name is required")
@@ -248,6 +258,9 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 		return nil, err
 	}
 
+	// insertFailed reports that the session row was not inserted; the cause
+	// is then checked below, outside the rolled-back transaction.
+	var insertFailed bool
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		appDelta, userDelta, sessionState := extractStateDeltas(req.State)
 
@@ -295,6 +308,7 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 		createdSession.State = sessionState
 
 		if err := tx.Create(createdSession).Error; err != nil {
+			insertFailed = true
 			return fmt.Errorf("error creating session on database: %w", err)
 		}
 
@@ -302,6 +316,13 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 		val.updatedAt = createdSession.UpdateTime
 		return nil
 	})
+	// Each driver reports a taken primary key with its own error, so a failed
+	// insert is a duplicate when the session is there once the transaction
+	// has rolled back. This also covers a concurrent Create of the same ID,
+	// as adk-python maps the IntegrityError (database_session_service.py:713-723).
+	if insertFailed && s.sessionExists(ctx, req.AppName, req.UserID, sessionID) {
+		return nil, fmt.Errorf("session %s %w: %w", sessionID, session.ErrAlreadyExists, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +330,15 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 	return &session.CreateResponse{
 		Session: val,
 	}, nil
+}
+
+// sessionExists reports whether the session (appName, userID, sessionID) is
+// stored. A failed lookup reports false.
+func (s *databaseService) sessionExists(ctx context.Context, appName, userID, sessionID string) bool {
+	err := s.db.WithContext(ctx).
+		Where("app_name = ? AND user_id = ? AND id = ?", appName, userID, sessionID).
+		Take(&storageSession{}).Error
+	return err == nil
 }
 
 // Get retrieves a single session from the database using its composite primary key.

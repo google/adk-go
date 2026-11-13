@@ -15,6 +15,7 @@
 package redis
 
 import (
+	"encoding/json"
 	"iter"
 	"maps"
 	"slices"
@@ -30,12 +31,58 @@ import (
 // so a session read back reports the same time as the one Create or
 // AppendEvent updated.
 type storedSession struct {
-	ID             string           `json:"id"`
-	AppName        string           `json:"app_name"`
-	UserID         string           `json:"user_id"`
-	State          map[string]any   `json:"state"`
-	Events         []*session.Event `json:"events"`
-	LastUpdateTime time.Time        `json:"last_update_time"`
+	ID             string         `json:"id"`
+	AppName        string         `json:"app_name"`
+	UserID         string         `json:"user_id"`
+	State          map[string]any `json:"state"`
+	Events         storedEvents   `json:"events"`
+	LastUpdateTime time.Time      `json:"last_update_time"`
+}
+
+// storedEvents is the event list of a storedSession. An event is encoded as
+// session.Event encodes itself, plus "partial": false when the event set
+// Partial to false explicitly (PartialSet), which session.Event's own
+// encoding omits, as adk-python's Redis service stores partial=False. An
+// event decodes with PartialSet true when its document has a "partial" key,
+// so a document written without the key reads back with PartialSet false.
+type storedEvents []*session.Event
+
+// storedEvent is the encoding of one event of storedEvents. Partial shadows
+// the event's own omitempty Partial field.
+type storedEvent struct {
+	*session.Event
+	Partial *bool `json:"partial,omitempty"`
+}
+
+func (evs storedEvents) MarshalJSON() ([]byte, error) {
+	out := make([]storedEvent, len(evs))
+	for i, ev := range evs {
+		out[i].Event = ev
+		if ev != nil && (ev.Partial || ev.PartialSet) {
+			out[i].Partial = &ev.Partial
+		}
+	}
+	return json.Marshal(out)
+}
+
+func (evs *storedEvents) UnmarshalJSON(b []byte) error {
+	var events []*session.Event
+	if err := json.Unmarshal(b, &events); err != nil {
+		return err
+	}
+	var partials []struct {
+		Partial *bool `json:"partial"`
+	}
+	if err := json.Unmarshal(b, &partials); err != nil {
+		return err
+	}
+	for i, p := range partials {
+		if p.Partial != nil {
+			events[i].PartialSet = true
+		}
+	}
+	*evs = events
+	return nil
 }
 
 // localSession is the session.Session the service returns. Its state holds
