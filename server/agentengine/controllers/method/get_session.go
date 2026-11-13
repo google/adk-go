@@ -34,6 +34,9 @@ type getSessionHandler struct {
 }
 
 // NewGetSessionHandler creates a new getSessionHandler. It can be used to serve "async_get_session" method
+//
+// Its Handle returns an error that says "user_id is required" for a payload whose
+// user_id is missing or empty, before the session service is called.
 func NewGetSessionHandler(sessionservice session.Service, agentEngineID, methodName, apiMode string) *getSessionHandler {
 	return &getSessionHandler{sessionservice: sessionservice, agentEngineID: agentEngineID, methodName: methodName, apiMode: apiMode}
 }

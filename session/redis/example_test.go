@@ -16,11 +16,13 @@ package redis_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 
 	"github.com/alicebob/miniredis/v2"
+	goredis "github.com/redis/go-redis/v9"
 
 	"google.golang.org/adk/session/redis"
 
@@ -69,4 +71,42 @@ func ExampleNewService() {
 	// draft = hello
 	// user:theme = dark
 	// events: 1
+}
+
+// A service can share a client the caller already has. Close then leaves that
+// client open, and a taken session ID is reported with
+// session.ErrAlreadyExists.
+func ExampleConfig_client() {
+	mr, err := miniredis.Run()
+	if err != nil {
+		panic(err)
+	}
+	defer mr.Close()
+
+	client := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
+	defer func() { _ = client.Close() }()
+
+	svc, err := redis.NewService(redis.Config{Client: client, KeyPrefix: "support:"})
+	if err != nil {
+		panic(err)
+	}
+
+	ctx := context.Background()
+	req := &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s1"}
+	if _, err := svc.Create(ctx, req); err != nil {
+		panic(err)
+	}
+	_, err = svc.Create(ctx, req)
+	fmt.Println(err, errors.Is(err, session.ErrAlreadyExists))
+	fmt.Println("key:", mr.Keys())
+
+	if err := svc.Close(); err != nil {
+		panic(err)
+	}
+	fmt.Println("client after Close:", client.Ping(ctx).Val())
+
+	// Output:
+	// session s1 already exists true
+	// key: [support:app:user:s1]
+	// client after Close: PONG
 }

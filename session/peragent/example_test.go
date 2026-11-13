@@ -16,6 +16,7 @@ package peragent_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -63,4 +64,48 @@ func ExampleNew() {
 	// Output:
 	// session: s1 topic: weather
 	// stored in multi_agent/greeter/.adk/session.db
+}
+
+// Only Create makes an app's database. The other methods report what an
+// empty database would for an app that has none, and an app name that
+// resolves outside the agents root is an error.
+func ExampleNew_appWithoutDatabase() {
+	root, err := os.MkdirTemp("", "agents")
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = os.RemoveAll(root) }()
+
+	svc, err := peragent.New(peragent.Config{AgentsRoot: root})
+	if err != nil {
+		panic(err)
+	}
+	defer func() { _ = svc.(io.Closer).Close() }()
+
+	ctx := context.Background()
+	_, err = svc.Get(ctx, &session.GetRequest{AppName: "weather", UserID: "user", SessionID: "s1"})
+	fmt.Println("get:", errors.Is(err, session.ErrNotFound))
+	list, err := svc.List(ctx, &session.ListRequest{AppName: "weather", UserID: "user"})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("list:", len(list.Sessions))
+	userState, err := session.GetUserState(ctx, svc, &session.GetUserStateRequest{AppName: "weather", UserID: "user"})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("user state:", userState.State)
+	if _, err := os.Stat(filepath.Join(root, "weather")); errors.Is(err, os.ErrNotExist) {
+		fmt.Println("no weather folder")
+	}
+
+	_, err = svc.Create(ctx, &session.CreateRequest{AppName: "../outside", UserID: "user"})
+	fmt.Println("outside the root:", errors.Is(err, peragent.ErrInvalidAppName))
+
+	// Output:
+	// get: true
+	// list: 0
+	// user state: map[]
+	// no weather folder
+	// outside the root: true
 }
