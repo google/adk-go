@@ -39,6 +39,10 @@ type EventActions struct {
 	Compaction                 *session.EventCompaction                     `json:"compaction,omitempty"`
 	SetModelResponse           any                                          `json:"setModelResponse,omitempty"`
 	RewindBeforeInvocationID   string                                       `json:"rewindBeforeInvocationId,omitempty"`
+	EndOfAgent                 *bool                                        `json:"endOfAgent,omitempty"`
+	// AgentState is a pointer so that an empty state is written as {} and an
+	// absent one is left out, as session.EventActions encodes it.
+	AgentState *map[string]any `json:"agentState,omitempty"`
 }
 
 // Event represents a single event in a session.
@@ -143,6 +147,8 @@ func ToSessionEvent(event Event) (*session.Event, error) {
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
 			SetModelResponse:           event.Actions.SetModelResponse,
 			RewindBeforeInvocationID:   event.Actions.RewindBeforeInvocationID,
+			EndOfAgent:                 event.Actions.EndOfAgent,
+			AgentState:                 agentStateValue(event.Actions.AgentState),
 			// Actions.Compaction is deliberately not mapped inbound. A
 			// compaction record tells prompt assembly to drop a span of history
 			// and substitute content in its place, so honoring one from a
@@ -200,8 +206,26 @@ func FromSessionEvent(event session.Event) Event {
 			Compaction:                 event.Actions.Compaction,
 			SetModelResponse:           event.Actions.SetModelResponse,
 			RewindBeforeInvocationID:   event.Actions.RewindBeforeInvocationID,
+			EndOfAgent:                 event.Actions.EndOfAgent,
+			AgentState:                 agentStateRef(event.Actions.AgentState),
 		},
 	}
+}
+
+// agentStateRef returns nil for a nil state and a pointer to state otherwise.
+func agentStateRef(state map[string]any) *map[string]any {
+	if state == nil {
+		return nil
+	}
+	return &state
+}
+
+// agentStateValue returns the state p points to, or nil for a nil p.
+func agentStateValue(p *map[string]any) map[string]any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 func (e Event) MarshalJSON() ([]byte, error) {

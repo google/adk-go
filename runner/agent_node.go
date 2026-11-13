@@ -70,7 +70,7 @@ func runAgentNodeBody(a agent.Agent) workflow.DynamicFn[any, any] {
 		// from the current turn's FunctionResponse, not session history,
 		// so that a fresh text turn following a completed resume is not
 		// misclassified and still reaches the agent.
-		resolved := answeredInterrupts(ctx.Session(), ctx.UserContent())
+		resolved := answeredInterrupts(ctx.Session(), turnMessage(ctx))
 		isResume := len(resolved) > 0
 
 		if isLlmAgent(a) {
@@ -138,7 +138,7 @@ func runGenericAgentBody(
 ) (any, error) {
 	var userContent *genai.Content
 	if len(resolved) > 0 {
-		userContent = resumeUserContent(ctx.UserContent(), resolved)
+		userContent = resumeUserContent(turnMessage(ctx), resolved)
 	} else {
 		userContent = inputToUserContent(input) // fresh turn
 	}

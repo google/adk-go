@@ -1197,16 +1197,17 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
 				return
 			}
-			type nodeRunner interface {
-				RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
+			// On a resumable run on the node path, the transferring agent ends
+			// before its target runs, as adk-python's node wrapper ends it
+			// (workflow/_llm_agent_wrapper.py). On the classic path its own run
+			// writes its end after the target returns, as adk-python's legacy
+			// path does.
+			if rc := runconfig.FromContext(ctx); rc != nil && rc.Resumable && rc.NodePath {
+				if !yield(NewEndOfAgentEvent(ctx, ctx.Agent().Name()), nil) {
+					return
+				}
 			}
-			var nextStream iter.Seq2[*session.Event, error]
-			if nr, ok := nextAgent.(nodeRunner); ok {
-				nextStream = nr.RunNode(agent.Promote(ctx), nil)
-			} else {
-				nextStream = nextAgent.Run(ctx)
-			}
-			for ev, err := range nextStream {
+			for ev, err := range RunTransferTarget(ctx, nextAgent) {
 				if !yield(ev, err) || err != nil { // forward
 					return
 				}

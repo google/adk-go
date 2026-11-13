@@ -378,6 +378,15 @@ type EventActions struct {
 	// as removed. Empty means the event is not a rewind.
 	RewindBeforeInvocationID string `json:"rewindBeforeInvocationId,omitempty"`
 
+	// EndOfAgent, when true, marks the end of the event author's run in the
+	// invocation. A resumable runner does not run that agent again when it
+	// resumes the invocation. Nil means absent; an explicit false is kept.
+	EndOfAgent *bool `json:"endOfAgent,omitempty"`
+
+	// AgentState holds the event author's state for resuming the invocation.
+	// Nil means absent; an empty map is kept and encodes as {}.
+	AgentState map[string]any `json:"agentState,omitempty"`
+
 	// Compaction, when non-nil, marks this event as a context-compaction
 	// summary standing in for a contiguous range of earlier events.
 	//
@@ -408,8 +417,12 @@ type EventActions struct {
 // decodes it back to nil, so nil stays nil and empty stays empty in either
 // runtime. The shadowing pointer fields below express that -- `omitempty` on a
 // pointer keys off the pointer being nil, not the length of what it points to.
+//
+// AgentState is shadowed the same way, so an empty agent state is written as
+// an empty object, as adk-python writes it, and not dropped: a resumable
+// runner reads an empty state as an agent that has started.
 func (a EventActions) MarshalJSON() ([]byte, error) {
-	// alias strips this method, so json does not recurse into it. The two
+	// alias strips this method, so json does not recurse into it. The
 	// pointer fields sit at depth 0 and shadow the promoted ones at depth 1,
 	// which is how encoding/json resolves a name collision; embedding rather
 	// than restating the struct keeps fields added upstream from being
@@ -419,10 +432,12 @@ func (a EventActions) MarshalJSON() ([]byte, error) {
 		alias
 		StateDelta    *map[string]any   `json:"stateDelta,omitempty"`
 		ArtifactDelta *map[string]int64 `json:"artifactDelta,omitempty"`
+		AgentState    *map[string]any   `json:"agentState,omitempty"`
 	}{
 		alias:         alias(a),
 		StateDelta:    nilOrRef(a.StateDelta),
 		ArtifactDelta: nilOrRef(a.ArtifactDelta),
+		AgentState:    nilOrRef(a.AgentState),
 	})
 }
 

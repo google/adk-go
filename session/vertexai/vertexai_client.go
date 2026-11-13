@@ -411,7 +411,12 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		event.Actions.Compaction != nil ||
 		// A rewind's target has no column either, and prompt assembly needs
 		// it to drop the rewound events after a reload.
-		event.Actions.RewindBeforeInvocationID != ""
+		event.Actions.RewindBeforeInvocationID != "" ||
+		// Nor do a resumable agent's end-of-agent marker and state, which a
+		// resumed invocation is rebuilt from. An empty state counts: it marks
+		// an agent that started.
+		event.Actions.EndOfAgent != nil ||
+		event.Actions.AgentState != nil
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for
