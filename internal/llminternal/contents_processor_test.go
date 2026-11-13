@@ -475,6 +475,228 @@ func TestContentsRequestProcessor_IncludeContentsNone_SubmittedToolResult(t *tes
 	}
 }
 
+// TestContentsRequestProcessor_IncludeContentsNone_TransferredFromParent pins
+// that the parent's transfer_to_agent call and response do not start the
+// current turn of the agent it hands over to. Anchoring there would leave the
+// user's request out of that agent's prompt. Mirrors adk-python's
+// _is_direct_transfer in _get_current_turn_contents. With nothing earlier to
+// start the turn, the latest hand-over still starts it.
+func TestContentsRequestProcessor_IncludeContentsNone_TransferredFromParent(t *testing.T) {
+	t.Parallel()
+	const (
+		parentName = "coordinator"
+		agentName  = "geography"
+	)
+
+	question := genai.NewContentFromText("What is the capital of France?", genai.RoleUser)
+	transferCallPart := &genai.Part{
+		FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "transfer_to_agent", Args: map[string]any{"agent_name": agentName}},
+	}
+	transferCall := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{transferCallPart}}
+	textThenTransferCall := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "Handing over."}, transferCallPart}}
+	transferResponse := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "transfer_to_agent", Response: map[string]any{}},
+	}}}
+	ownCall := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "call-2", Name: "lookup", Args: map[string]any{"country": "France"}},
+	}}}
+	ownResponse := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "call-2", Name: "lookup", Response: map[string]any{"capital": "Paris"}},
+	}}}
+
+	userEvent := &session.Event{Author: "user", LLMResponse: model.LLMResponse{Content: question}}
+	transferCallEvent := &session.Event{Author: parentName, LLMResponse: model.LLMResponse{Content: transferCall}}
+	transferResponseEvent := &session.Event{
+		Author:      parentName,
+		LLMResponse: model.LLMResponse{Content: transferResponse},
+		Actions:     session.EventActions{TransferToAgent: agentName},
+	}
+	// An earlier turn ahead of the request. It stays out of the prompt, so a
+	// test passes only if the turn starts at the request, not at the first
+	// event of the session.
+	earlierAnswerEvent := &session.Event{
+		Author:      agentName,
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Madrid.", genai.RoleModel)},
+	}
+	earlierTurn := []*session.Event{
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("What is the capital of Spain?", genai.RoleUser)}},
+		earlierAnswerEvent,
+	}
+	ownTransferCall := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "call-4", Name: "transfer_to_agent", Args: map[string]any{"agent_name": "history"}},
+	}}}
+	ownTransferError := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "call-4", Name: "transfer_to_agent", Response: map[string]any{"error": "agent history not found"}},
+	}}}
+	// A custom tool that hands over by setting Actions.TransferToAgent, with
+	// a call and response named something other than transfer_to_agent.
+	handoffCall := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "call-3", Name: "handoff", Args: map[string]any{"to": agentName}},
+	}}}
+	handoffResponse := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "call-3", Name: "handoff", Response: map[string]any{}},
+	}}}
+	// The transfer itself stays in the prompt, as context from another agent.
+	transferCallContext := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "For context:"},
+		{Text: `[coordinator] called tool ` + "`transfer_to_agent`" + ` with parameters: {"agent_name":"geography"}`},
+	}}
+	transferResponseContext := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "For context:"},
+		{Text: "[coordinator] `transfer_to_agent` tool returned result: {}"},
+	}}
+
+	withEarlierTurn := func(events ...*session.Event) []*session.Event {
+		return append(slices.Clone(earlierTurn), events...)
+	}
+
+	tests := []struct {
+		name   string
+		events []*session.Event
+		// placedSingleTurn runs the agent with IncludeContents unset at a
+		// placement bound to single_turn, as a graph node binds an LlmAgent
+		// that declares no mode. It builds the turn the same way as none.
+		placedSingleTurn bool
+		want             []*genai.Content
+	}{
+		{
+			name:   "transfer is the latest event",
+			events: withEarlierTurn(userEvent, transferCallEvent, transferResponseEvent),
+			want:   []*genai.Content{question, transferCallContext, transferResponseContext},
+		},
+		{
+			// The call is not the event's first part.
+			name: "parent writes text before the transfer call",
+			events: withEarlierTurn(
+				userEvent,
+				&session.Event{Author: parentName, LLMResponse: model.LLMResponse{Content: textThenTransferCall}},
+				transferResponseEvent,
+			),
+			want: []*genai.Content{
+				question,
+				{Role: genai.RoleUser, Parts: []*genai.Part{
+					{Text: "For context:"},
+					{Text: "[coordinator] said: Handing over."},
+					{Text: `[coordinator] called tool ` + "`transfer_to_agent`" + ` with parameters: {"agent_name":"geography"}`},
+				}},
+				transferResponseContext,
+			},
+		},
+		{
+			// The transfer is no longer the latest event on the agent's next
+			// model call, after its own tool call.
+			name: "agent's own tool call after the transfer",
+			events: withEarlierTurn(
+				userEvent,
+				transferCallEvent,
+				transferResponseEvent,
+				&session.Event{Author: agentName, LLMResponse: model.LLMResponse{Content: ownCall}},
+				&session.Event{Author: agentName, LLMResponse: model.LLMResponse{Content: ownResponse}},
+			),
+			want: []*genai.Content{question, transferCallContext, transferResponseContext, ownCall, ownResponse},
+		},
+		{
+			// The session has no user event, so nothing ahead of the
+			// hand-over starts a turn. The turn starts at the latest
+			// hand-over, as before hand-overs were skipped, so the agent's
+			// own earlier answer stays out.
+			name:   "no user event in the session",
+			events: []*session.Event{earlierAnswerEvent, transferCallEvent, transferResponseEvent},
+			want:   []*genai.Content{transferResponseContext},
+		},
+		{
+			// A later hand-over the agent cannot see, here one whose only
+			// part is a thought that foreign conversion drops, is not the
+			// hand-over the turn falls back to. The checks that hide an
+			// event from the agent run before the skip.
+			name: "hand-over the agent cannot see after the hand-over",
+			events: []*session.Event{
+				earlierAnswerEvent, transferCallEvent, transferResponseEvent,
+				{
+					Author:      "router",
+					LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "Routing elsewhere.", Thought: true}}}},
+					Actions:     session.EventActions{TransferToAgent: "history"},
+				},
+			},
+			want: []*genai.Content{transferResponseContext},
+		},
+		{
+			// The agent's own transfer_to_agent call never starts its turn,
+			// so the turn does not fall back to it either. Here the agent
+			// named an unknown agent and is called again with the error.
+			name: "agent's own failed transfer after the hand-over",
+			events: []*session.Event{
+				earlierAnswerEvent, transferCallEvent, transferResponseEvent,
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: ownTransferCall}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: ownTransferError}},
+			},
+			want: []*genai.Content{transferResponseContext, ownTransferCall, ownTransferError},
+		},
+		{
+			// The response is skipped through Actions.TransferToAgent alone.
+			// The call is not named transfer_to_agent, so it starts the turn,
+			// as in adk-python.
+			name: "custom tool hands over through Actions.TransferToAgent",
+			events: withEarlierTurn(
+				userEvent,
+				&session.Event{Author: parentName, LLMResponse: model.LLMResponse{Content: handoffCall}},
+				&session.Event{
+					Author:      parentName,
+					LLMResponse: model.LLMResponse{Content: handoffResponse},
+					Actions:     session.EventActions{TransferToAgent: agentName},
+				},
+			),
+			want: []*genai.Content{
+				{Role: genai.RoleUser, Parts: []*genai.Part{
+					{Text: "For context:"},
+					{Text: `[coordinator] called tool ` + "`handoff`" + ` with parameters: {"to":"geography"}`},
+				}},
+				{Role: genai.RoleUser, Parts: []*genai.Part{
+					{Text: "For context:"},
+					{Text: "[coordinator] `handoff` tool returned result: {}"},
+				}},
+			},
+		},
+		{
+			name:             "single_turn placement with IncludeContents unset",
+			events:           withEarlierTurn(userEvent, transferCallEvent, transferResponseEvent),
+			placedSingleTurn: true,
+			want:             []*genai.Content{question, transferCallContext, transferResponseContext},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			includeContents := llmagent.IncludeContentsNone
+			if tc.placedSingleTurn {
+				includeContents = ""
+			}
+			a := utils.Must(llmagent.New(llmagent.Config{
+				Name:            agentName,
+				Model:           &testModel{},
+				IncludeContents: includeContents,
+			}))
+			stdCtx := t.Context()
+			if tc.placedSingleTurn {
+				stdCtx = llminternal.WithBoundMode(stdCtx, agentName, stateOf(t, a), llminternal.ModeSingleTurn)
+			}
+			ctx := icontext.NewInvocationContext(stdCtx, icontext.InvocationContextParams{
+				Agent:   a,
+				Session: &fakeSession{events: tc.events},
+			})
+			req := &model.LLMRequest{}
+			for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if err != nil {
+					t.Fatalf("ContentsRequestProcessor() error = %v", err)
+				}
+			}
+			if diff := cmp.Diff(tc.want, req.Contents); diff != "" {
+				t.Errorf("contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestContentsRequestProcessor_StrictIsolationFilterExcludesForeignScope
 // verifies that the contents from the different scope are not included
 // in the content for LLM.
@@ -715,6 +937,189 @@ func TestContentsRequestProcessor(t *testing.T) {
 					Parts: []*genai.Part{
 						{Text: "For context:"},
 						{Text: "[anotherAgent] said: Foreign message"},
+					},
+				},
+			},
+		},
+		{
+			name: "FilterAdkLiveArtifacts",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{Text: "Some text"},
+								{FileData: &genai.FileData{FileURI: "artifact://app/user/session/_adk_live/audio.pcm#1"}},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{Text: "Some text"},
+					},
+				},
+			},
+		},
+		{
+			// The audio cache manager writes an event whose only part is the
+			// internal reference, so the whole content has to go.
+			name: "FilterAdkLiveArtifactOnlyContent",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{Text: "before"},
+							},
+						},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{FileData: &genai.FileData{
+									FileURI:  "artifact://app/user/session/_adk_live/adk_live_audio_storage_input_audio_1700000000000.pcm#0",
+									MIMEType: "audio/pcm",
+								}},
+							},
+						},
+					},
+				},
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{Text: "after"},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "before"}},
+				},
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "after"}},
+				},
+			},
+		},
+		{
+			// With SaveLiveBlob on, the output-audio event is authored by the
+			// agent that spoke, so another agent sees it as a foreign event.
+			// ConvertForeignEvent must not turn it into a bare "For context:"
+			// turn: an event whose only parts are internal live refs has to
+			// behave as if it were not in the session at all.
+			name: "DropForeignAdkLiveArtifactOnlyContent",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("hi", "user"),
+					},
+				},
+				{
+					Author: "otherAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{FileData: &genai.FileData{
+									FileURI:  "artifact://app/user/session/_adk_live/adk_live_audio_storage_output_audio_1700000000000.pcm#0",
+									MIMEType: "audio/pcm",
+								}},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("hi", "user"),
+			},
+		},
+		{
+			// A foreign event that also says something keeps the spoken part
+			// and loses only the internal ref.
+			name: "FilterForeignAdkLiveArtifactKeepsText",
+			events: []*session.Event{
+				{
+					Author: "otherAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{Text: "here is the summary"},
+								{FileData: &genai.FileData{
+									FileURI:  "artifact://app/user/session/_adk_live/adk_live_audio_storage_output_audio_1700000000000.pcm#0",
+									MIMEType: "audio/pcm",
+								}},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{Text: "For context:"},
+						{Text: "[otherAgent] said: here is the summary"},
+					},
+				},
+			},
+		},
+		{
+			// A user-visible artifact outside the _adk_live namespace stays.
+			name: "KeepNonLiveArtifactRefs",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{Text: "look at this"},
+								{FileData: &genai.FileData{
+									FileURI:  "artifact://app/user/session/report.pdf#1",
+									MIMEType: "application/pdf",
+								}},
+								{FileData: &genai.FileData{
+									FileURI:  "gs://bucket/recording.mp3",
+									MIMEType: "audio/mp3",
+								}},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{Text: "look at this"},
+						{FileData: &genai.FileData{
+							FileURI:  "artifact://app/user/session/report.pdf#1",
+							MIMEType: "application/pdf",
+						}},
+						{FileData: &genai.FileData{
+							FileURI:  "gs://bucket/recording.mp3",
+							MIMEType: "audio/mp3",
+						}},
 					},
 				},
 			},

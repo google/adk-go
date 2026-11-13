@@ -364,7 +364,7 @@ func TestPrepareDockerfile_A2AURLReachesCMDArray(t *testing.T) {
 		t.Fatalf("cannot read the generated Dockerfile: %v", err)
 	}
 	var cmdLine string
-	for _, line := range strings.Split(string(content), "\n") {
+	for line := range strings.SplitSeq(string(content), "\n") {
 		if rest, ok := strings.CutPrefix(line, "CMD "); ok {
 			cmdLine = rest
 		}
@@ -402,7 +402,7 @@ func TestPrepareDockerfile_BindsAllInterfaces(t *testing.T) {
 		t.Fatalf("cannot read the generated Dockerfile: %v", err)
 	}
 	var cmdLine string
-	for _, line := range strings.Split(string(content), "\n") {
+	for line := range strings.SplitSeq(string(content), "\n") {
 		if rest, ok := strings.CutPrefix(line, "CMD "); ok {
 			cmdLine = rest
 		}

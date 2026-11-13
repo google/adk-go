@@ -362,11 +362,9 @@ func TestPubSubTriggerHandler_EnforcesMaxConcurrentRuns(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range limit + 1 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ctrl.PubSubTriggerHandler(httptest.NewRecorder(), buildPubSubRequest(t, "hello"))
-		}()
+		})
 	}
 
 	for i := range limit {
@@ -410,5 +408,59 @@ func TestPubSubTriggerHandler_ZeroMaxConcurrentRunsIsUnlimited(t *testing.T) {
 	}
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+}
+
+func TestPubSubTriggerHandler_CancelDuringBackoff(t *testing.T) {
+	throttled := make(chan struct{}, 1)
+	runCount := 0
+	throttledAgent, err := agent.New(agent.Config{
+		Name: "test-agent",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				runCount++
+				throttled <- struct{}{}
+				yield(nil, fmt.Errorf("429 ResourceExhausted"))
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	ctrl := triggers.NewPubSubController(sessionService, agent.NewSingleLoader(throttledAgent), nil, nil, runner.PluginConfig{}, triggers.TriggerConfig{
+		MaxConcurrentRuns: 1,
+		MaxRetries:        3,
+		BaseDelay:         time.Minute,
+		MaxDelay:          time.Minute,
+	})
+
+	req := buildPubSubRequest(t, "hello")
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctrl.PubSubTriggerHandler(rr, req)
+	}()
+
+	// Cancel once the handler is waiting out the backoff, as when the
+	// client goes away during it.
+	<-throttled
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler still waiting out the backoff after its request was cancelled")
+	}
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d so the message is not acknowledged", rr.Code, http.StatusInternalServerError)
+	}
+	if runCount != 1 {
+		t.Errorf("run attempts = %d, want 1", runCount)
 	}
 }

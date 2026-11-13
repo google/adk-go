@@ -855,7 +855,7 @@ func TestNewModel_AnthropicCredentialsAndConfig(t *testing.T) {
 			if hcVal.IsNil() {
 				t.Fatal("RequestConfig.HTTPClient is nil after applying client options")
 			}
-			hc, ok := hcVal.Interface().(*http.Client)
+			hc, ok := reflect.TypeAssert[*http.Client](hcVal)
 			if !ok || hc == nil {
 				t.Fatalf("RequestConfig.HTTPClient = %T, want non-nil *http.Client", hcVal.Interface())
 			}
@@ -2628,6 +2628,16 @@ func TestGenerateContentConfigValidation(t *testing.T) {
 			cfg:       &genai.GenerateContentConfig{ContinuationToken: []byte("tok")},
 			wantField: "ContinuationToken",
 		},
+		{
+			name:      "generation_output_config",
+			cfg:       &genai.GenerateContentConfig{GenerationOutputConfig: &genai.GenerationOutputConfig{}},
+			wantField: "GenerationOutputConfig",
+		},
+		{
+			name:      "store",
+			cfg:       &genai.GenerateContentConfig{Store: &boolTrue},
+			wantField: "Store",
+		},
 	}
 
 	for _, tc := range rejectedCases {
@@ -2729,15 +2739,13 @@ func TestConcurrencyAndNonMutation(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
 	for i := range workers {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
+		wg.Go(func() {
 			for _, err := range m.GenerateContent(t.Context(), sharedReq, false) {
 				if err != nil {
-					errs <- fmt.Errorf("worker %d: %w", idx, err)
+					errs <- fmt.Errorf("worker %d: %w", i, err)
 				}
 			}
-		}(i)
+		})
 	}
 	wg.Wait()
 	close(errs)
@@ -3849,8 +3857,7 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 	assertFieldsMatch := func(t *testing.T, typ reflect.Type, known map[string]bool) {
 		t.Helper()
 		exported := make(map[string]bool, typ.NumField())
-		for i := range typ.NumField() {
-			f := typ.Field(i)
+		for f := range typ.Fields() {
 			if !f.IsExported() {
 				continue
 			}
@@ -3902,6 +3909,8 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 		"AudioTranscriptionConfig":   true,
 		"AutomaticContinuation":      true,
 		"ContinuationToken":          true,
+		"GenerationOutputConfig":     true,
+		"Store":                      true,
 	})
 
 	assertFieldsMatch(t, reflect.TypeFor[genai.HTTPOptions](), map[string]bool{

@@ -569,9 +569,7 @@ func TestLLMClassifierConcurrencyAndErrors(t *testing.T) {
 		}
 		var wg sync.WaitGroup
 		for range 8 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				resp, cErr := clf.Classify(t.Context(), "x", map[string]classifier.Question{
 					"risky": classifier.Binary{},
 				})
@@ -582,7 +580,7 @@ func TestLLMClassifierConcurrencyAndErrors(t *testing.T) {
 				if got := resp.Answers["risky"].(classifier.BinaryAnswer).Probability; got != 0.4 {
 					t.Errorf("Probability = %v, want 0.4", got)
 				}
-			}()
+			})
 		}
 		wg.Wait()
 		if got := len(llm.requests); got != 8 {
