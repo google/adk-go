@@ -257,8 +257,7 @@ func SanitizeSummary(ev *session.Event) bool {
 	kept := make([]*genai.Part, 0, len(c.Parts))
 	for _, p := range c.Parts {
 		if utils.IsProsePart(p) {
-			part := *p
-			kept = append(kept, &part)
+			kept = append(kept, new(*p))
 		}
 	}
 	if len(kept) == 0 {

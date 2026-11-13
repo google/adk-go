@@ -1806,7 +1806,7 @@ func TestApplyGenerationConfigRefusesFieldsOutsideTheSupportedLists(t *testing.T
 		cfg   *genai.GenerateContentConfig
 	}{
 		{"Temperature", &genai.GenerateContentConfig{Temperature: new(float32(0.5))}},
-		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: genai.Ptr(time.Second)}}},
+		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: new(time.Second)}}},
 		{"ThinkingConfig.ThinkingLevel", &genai.GenerateContentConfig{
 			ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow},
 		}},
@@ -1856,9 +1856,9 @@ func TestApplyGenerationConfigThinkingConfig(t *testing.T) {
 		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: new(int32(2048))}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortMedium}},
 		// -1 is genai's "you decide", and the way to say that to Responses is to
 		// send no effort at all rather than to pick one on the caller's behalf.
-		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(shared.DynamicThinkingBudget))}, oaishared.ReasoningParam{}},
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: new(int32(shared.DynamicThinkingBudget))}, oaishared.ReasoningParam{}},
 		{"dynamic budget with thoughts", &genai.ThinkingConfig{
-			ThinkingBudget:  genai.Ptr(int32(shared.DynamicThinkingBudget)),
+			ThinkingBudget:  new(int32(shared.DynamicThinkingBudget)),
 			IncludeThoughts: true,
 		}, oaishared.ReasoningParam{Summary: oaishared.ReasoningSummaryAuto}},
 		// A level wins over a budget, so an explicit MINIMAL still means minimal
@@ -1904,7 +1904,7 @@ func TestApplyGenerationConfigOmitsReasoningSummaryUnlessAsked(t *testing.T) {
 		{"high level", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelHigh}},
 		{"zero budget", &genai.ThinkingConfig{ThinkingBudget: new(int32(0))}},
 		{"positive budget", &genai.ThinkingConfig{ThinkingBudget: new(int32(4096))}},
-		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(shared.DynamicThinkingBudget))}},
+		{"dynamic budget", &genai.ThinkingConfig{ThinkingBudget: new(int32(shared.DynamicThinkingBudget))}},
 		{"level with thoughts off", &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow, IncludeThoughts: false}},
 	}
 
@@ -1974,7 +1974,7 @@ func TestApplyGenerationConfigUnspecifiedLevelYieldsToABudget(t *testing.T) {
 		}, oaishared.ReasoningParam{Effort: oaishared.ReasoningEffortNone}},
 		{"unspecified yields to dynamic budget", &genai.ThinkingConfig{
 			ThinkingLevel:  genai.ThinkingLevelUnspecified,
-			ThinkingBudget: genai.Ptr(int32(shared.DynamicThinkingBudget)),
+			ThinkingBudget: new(int32(shared.DynamicThinkingBudget)),
 		}, oaishared.ReasoningParam{}},
 		// A named level is a choice, so it keeps winning.
 		{"named level still wins over zero budget", &genai.ThinkingConfig{
@@ -2236,16 +2236,15 @@ func TestRequestTimeoutHonorsAPositiveTimeout(t *testing.T) {
 // openai-go reads a zero timeout as "no deadline", so forwarding a non-positive
 // one would lift the caller's bound instead of applying it.
 func TestApplyGenerationConfigRejectsNonPositiveTimeout(t *testing.T) {
-	for _, d := range []time.Duration{0, -time.Second} {
-		timeout := d
+	for _, timeout := range []time.Duration{0, -time.Second} {
 		err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{
 			HTTPOptions: &genai.HTTPOptions{Timeout: &timeout},
 		})
 		if !errors.Is(err, shared.ErrUnsupportedConfigField) {
-			t.Fatalf("timeout %v: error = %v, want %v", d, err, shared.ErrUnsupportedConfigField)
+			t.Fatalf("timeout %v: error = %v, want %v", timeout, err, shared.ErrUnsupportedConfigField)
 		}
 		if !strings.Contains(err.Error(), "Timeout") {
-			t.Errorf("timeout %v: error = %q, want it to name Timeout", d, err)
+			t.Errorf("timeout %v: error = %q, want it to name Timeout", timeout, err)
 		}
 	}
 }
@@ -2327,7 +2326,6 @@ func TestApplyGenerationConfigRejectsEmptyResponseModalities(t *testing.T) {
 // that worked before shared.ErrUnsupportedConfigField existed still works when the
 // caller happens to set one of the newly-rejected fields as well.
 func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
-	topK := float32(5)
 	// Each case pairs a named error with a field that returns the sentinel; the
 	// named error must win. Logprobs is here because it is rejected from within
 	// the translation order rather than from the trailing sweep, which is
@@ -2338,7 +2336,7 @@ func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 		want error
 	}{
 		{"TopK over Seed", &genai.GenerateContentConfig{
-			TopK: &topK,
+			TopK: new(float32(5)),
 			Seed: new(int32(7)),
 		}, shared.ErrTopKNotSupported},
 		{"Labels over orphan Logprobs", &genai.GenerateContentConfig{
@@ -3160,7 +3158,7 @@ func TestTranslatedFieldsAreNotRejected(t *testing.T) {
 		}},
 		{"ServiceTier", &genai.GenerateContentConfig{ServiceTier: genai.ServiceTierFlex}},
 		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{
-			HTTPOptions: &genai.HTTPOptions{Timeout: genai.Ptr(30 * time.Second)},
+			HTTPOptions: &genai.HTTPOptions{Timeout: new(30 * time.Second)},
 		}},
 	}
 

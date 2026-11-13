@@ -358,7 +358,7 @@ func TestAgentTool_Run_CodeParts(t *testing.T) {
 				{Thought: true, CodeExecutionResult: &genai.CodeExecutionResult{Output: "hidden"}},
 				{Thought: true, ExecutableCode: &genai.ExecutableCode{Code: "hidden"}},
 			},
-			want: map[string]any{},
+			want: map[string]any{"result": ""},
 		},
 		{
 			name: "text and code precedence",
@@ -457,7 +457,45 @@ func TestAgentTool_Run_AllThoughtPartsReturnsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() failed unexpectedly: %v", err)
 	}
-	want := map[string]any{}
+	want := map[string]any{"result": ""}
+	if diff := cmp.Diff(want, result); diff != "" {
+		t.Errorf("Run() result diff (-want +got):\n%s", diff)
+	}
+}
+
+// A reply without text is an empty result even when the agent has an output
+// schema, where adk-python validates the empty text and raises.
+func TestAgentTool_Run_AllThoughtPartsReturnsEmpty_WithOutputSchema(t *testing.T) {
+	outputSchema := &genai.Schema{
+		Type:       "OBJECT",
+		Properties: map[string]*genai.Schema{"is_valid": {Type: "BOOLEAN"}},
+		Required:   []string{"is_valid"},
+	}
+	testLLM := &testutil.MockModel{
+		Responses: []*genai.Content{
+			{
+				Parts: []*genai.Part{
+					{Text: "Just thinking...", Thought: true},
+				},
+				Role: genai.RoleModel,
+			},
+		},
+		StreamResponsesCount: 1,
+	}
+
+	agent := createAgentWithModel(t, nil, outputSchema, testLLM)
+	agentTool := agenttool.New(agent, nil)
+	toolCtx := createToolContext(t, agent)
+	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("agentTool does not implement FunctionTool")
+	}
+
+	result, err := toolImpl.Run(toolCtx, map[string]any{"request": "think only"})
+	if err != nil {
+		t.Fatalf("Run() failed unexpectedly: %v", err)
+	}
+	want := map[string]any{"result": ""}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("Run() result diff (-want +got):\n%s", diff)
 	}
@@ -522,7 +560,33 @@ func TestAgentTool_Run_EmptyModelResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() failed unexpectedly: %v", err)
 	}
-	want := map[string]any{}
+	want := map[string]any{"result": ""}
+	if diff := cmp.Diff(want, result); diff != "" {
+		t.Errorf("Run() result diff (-want +got):\n%s", diff)
+	}
+}
+
+func TestAgentTool_Run_NoContentReturnsEmptyResult(t *testing.T) {
+	child, err := agent.New(agent.Config{
+		Name: "silent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				event := session.NewEvent(ctx, ctx.InvocationID())
+				event.Author = "silent"
+				yield(event, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+	wrapped := agenttool.New(child, nil).(toolinternal.FunctionTool)
+
+	result, err := wrapped.Run(createToolContext(t, child), map[string]any{"request": "anything"})
+	if err != nil {
+		t.Fatalf("Run() failed unexpectedly: %v", err)
+	}
+	want := map[string]any{"result": ""}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("Run() result diff (-want +got):\n%s", diff)
 	}

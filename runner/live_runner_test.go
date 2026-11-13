@@ -981,3 +981,49 @@ func TestRunner_RunLive_SendDropsNilParts(t *testing.T) {
 		})
 	}
 }
+
+func TestRunner_RunLive_SendRejectsUserFunctionCall(t *testing.T) {
+	const sessionID = "testSessionUserFunctionCall"
+	sessionService := session.InMemoryService()
+	if _, err := sessionService.Create(t.Context(), &session.CreateRequest{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: sessionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agentSess := &recordingLiveSession{}
+	r, err := New(Config{
+		AppName: "testApp",
+		Agent: &mockLiveAgent{
+			Agent: must(agent.New(agent.Config{Name: "test_agent"})),
+			runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+				return agentSess, func(func(*session.Event, error) bool) {}, nil
+			},
+		},
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, _, err := r.RunLive(t.Context(), "testUser", sessionID, agent.LiveRunConfig{})
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	content := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		genai.NewPartFromText("hi"),
+		{FunctionCall: &genai.FunctionCall{Name: "some_tool"}},
+	}}
+	err = sess.Send(agent.LiveRequest{Content: content})
+
+	if err == nil || err.Error() != "user message cannot contain function calls" {
+		t.Errorf("Send() error = %v, want %q", err, "user message cannot contain function calls")
+	}
+	if len(agentSess.requests) != 0 {
+		t.Errorf("forwarded requests = %d, want 0", len(agentSess.requests))
+	}
+	if n := getRunLiveTestEvents(t, sessionService, sessionID).Len(); n != 0 {
+		t.Errorf("saved events = %d, want 0", n)
+	}
+}
