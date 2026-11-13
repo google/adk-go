@@ -124,7 +124,9 @@ func (r *Runner) runNode(
 
 	compacted := false
 	compactOnce := func() error {
-		if compacted || invocationFailed {
+		// An aborted invocation is not a finished turn either (adk-python
+		// workflow/_node_runner_utils.py, run_node_async).
+		if compacted || invocationFailed || icontext.Aborted(ctx) {
 			return nil
 		}
 		compacted = true
@@ -203,6 +205,12 @@ func (r *Runner) runNode(
 	pluginManager := r.pluginManager
 	lc.start(ictx)
 	defer lc.finish(nil)
+	// Deferred after the after-run callbacks, so it runs before them, as
+	// adk-python seals before after_run in one finally.
+	abortState := icontext.AbortStateFrom(ictx)
+	if abortState != nil {
+		defer r.sealOnStop(ictx, storedSession)
+	}
 	if opts.yieldUserMessage && userEvent != nil {
 		if !yield(userEvent, nil) {
 			return
@@ -265,18 +273,30 @@ func (r *Runner) runNode(
 		return
 	}
 
+	// The workflow runs under the engine context, which the abort cancels;
+	// events are persisted and sealed under ictx, which it does not.
+	engine, stopWatch := watchAbort(ictx)
+	defer stopWatch()
 	var events iter.Seq2[*session.Event, error]
 	responses := buildResumeResponses(turnMessage(ictx), state, storedSession)
-	if len(responses) > 0 {
-		events = wf.Resume(ictx, state, responses)
-	} else {
-		events = wf.Run(ictx)
+	switch {
+	case abortState.Aborted():
+		events = func(func(*session.Event, error) bool) {}
+	case len(responses) > 0:
+		events = wf.Resume(engine, state, responses)
+	default:
+		events = wf.Run(engine)
 	}
 
 	// Consume the workflow's event stream, same loop as the agent path:
 	// on_event plugin callback, persist non-partial events, yield.
 	for event, evErr := range events {
 		if evErr != nil {
+			// The abort's own cancellation, coming back from the workflow,
+			// ends the run as a stop, not as a failure.
+			if icontext.IsAbortEcho(ictx, evErr) {
+				break
+			}
 			if !yield(nil, evErr) {
 				return
 			}
@@ -312,6 +332,16 @@ func (r *Runner) runNode(
 		if !yield(event, nil) {
 			return
 		}
+		// A signal closed while the caller handled the event stops the run
+		// before the next event is requested.
+		if abortState.Aborted() {
+			break
+		}
+	}
+
+	if !r.yieldSealed(ictx, storedSession, yield) {
+		lc.stop()
+		return
 	}
 
 	// After-run runs before post-invocation compaction, as in adk-python's

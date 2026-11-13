@@ -258,10 +258,10 @@ type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 
 // AfterRunCallback is invoked once at the end of a run that started (see
 // [OnRunErrorCallback]) and did not end because of a run error: a completed
-// run, a run whose caller stopped ranging at an event, a run whose context
-// was canceled, and a run whose caller kept ranging past errors the runner
-// goes on from, such as a failed model call, and that then ended without
-// another. [OnRunErrorCallback] says which errors end a
+// run, a run whose caller stopped ranging at an event, an aborted run, a run
+// whose context was canceled, and a run whose caller kept ranging past
+// errors the runner goes on from, such as a failed model call, and that
+// then ended without another. [OnRunErrorCallback] says which errors end a
 // run whatever the caller does and which leave it to the caller.
 //
 // AfterRunCallback is not called when a run error ends the run, so cleanup
@@ -368,13 +368,14 @@ type FailableAfterRunCallback func(ctx agent.InvocationContext) error
 // callback when the caller ranges past it.
 //
 // It is not called for the cancellation of the invocation's context, for a
-// panic that reaches the caller, or when the caller stops ranging at an
-// event, though a failing after-run callback or post-invocation compaction
-// after that stop is reported. A panic that the node path recovers into a node
-// error is a run error like any other node error. In Runner.RunLive, an error
-// from a BeforeRunCallback, from handling its reply or from starting the live
-// agent is not yielded: this callback receives it before RunLive returns it,
-// and the after-run callbacks are not called.
+// run abort, for a panic that reaches the caller, or when the caller stops
+// ranging at an event, though a failing after-run callback or
+// post-invocation compaction after that stop is reported. A panic that the
+// node path recovers into a node error is a run error like any other node
+// error. In Runner.RunLive, an error from a BeforeRunCallback, from handling
+// its reply or from starting the live agent is not yielded: this callback
+// receives it before RunLive returns it, and the after-run callbacks are not
+// called.
 //
 // A panicking callback is recovered, so the remaining plugins are still
 // notified and the caller still holds the original error. The panic is

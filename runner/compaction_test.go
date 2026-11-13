@@ -1895,3 +1895,64 @@ func TestBeforeRunPluginCannotPlantACompactionRecord(t *testing.T) {
 		}
 	}
 }
+
+// TestRunner_Abort_SkipsPostInvocationCompaction checks that an aborted
+// invocation is not compacted, on both run loops, whether the caller drains
+// the run or stops ranging. adk-python compacts only when the invocation was
+// not aborted (runners.py, Runner._run_with_trace;
+// workflow/_node_runner_utils.py, run_node_async).
+func TestRunner_Abort_SkipsPostInvocationCompaction(t *testing.T) {
+	t.Parallel()
+	roots := []struct {
+		name string
+		root func(t *testing.T) agent.Agent
+	}{
+		{
+			name: "custom",
+			root: func(t *testing.T) agent.Agent {
+				_, a := newBlockingCallAgent(t, "tool_agent", false)
+				return a
+			},
+		},
+		{
+			name: "llm",
+			root: func(t *testing.T) agent.Agent {
+				return must(llmagent.New(llmagent.Config{Name: "assistant", Model: &scriptedModel{replyFmt: "answer %d"}}))
+			},
+		},
+	}
+	for _, root := range roots {
+		for _, stop := range []bool{false, true} {
+			name := root.name + "_drain"
+			if stop {
+				name = root.name + "_break"
+			}
+			t.Run(name, func(t *testing.T) {
+				summarizer := &recordingSummarizer{summary: "SUMMARY"}
+				r, svc := newAbortRunner(t, Config{
+					Agent:      root.root(t),
+					Compaction: &compaction.Config{CompactionInterval: 1, OverlapSize: 0, Summarizer: summarizer},
+				})
+				first := func(*session.Event) bool { return true }
+
+				res := abortRun{sig: make(chan struct{}), closeOn: first, stop: stop}.drive(t, r)
+
+				if len(res.errs) != 0 {
+					t.Fatalf("Run() errors = %v, want none", res.errs)
+				}
+				if got := summarizer.calls(); got != 0 {
+					t.Errorf("summarizer ran %d times, want 0", got)
+				}
+				var compactions int
+				for _, ev := range storedAbortSession(t, svc, "s") {
+					if ev.Actions.Compaction != nil {
+						compactions++
+					}
+				}
+				if compactions != 0 {
+					t.Errorf("session holds %d compaction events, want 0", compactions)
+				}
+			})
+		}
+	}
+}

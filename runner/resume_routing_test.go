@@ -429,6 +429,19 @@ func routingPause(author, branch, invocationID, id, name string) *session.Event 
 	return ev
 }
 
+// routingSeal returns an event of author in invocationID that seals an
+// aborted invocation, answering the calls ids, or with no content when ids
+// is empty (adk-python events/_abort_events.py).
+func routingSeal(author, branch, invocationID string, ids ...string) *session.Event {
+	ev := &session.Event{Author: author, Branch: branch, InvocationID: invocationID}
+	ev.ErrorCode = "INVOCATION_ABORTED"
+	ev.ErrorMessage = "Invocation was aborted by client."
+	if len(ids) > 0 {
+		ev.Content = routingAnswers(ids...)
+	}
+	return ev
+}
+
 // TestRunner_Run_FunctionCallByUserAuthorFallsBackToScan pins that a call
 // whose author is not an agent of the tree does not take the answer: the
 // scan picks the agent (adk-python agents/_agent_router.py:186, :193-205). A
@@ -479,6 +492,55 @@ func TestRunner_Run_FunctionCallByUserAuthorFallsBackToScan(t *testing.T) {
 	}
 }
 
+// TestRunner_Run_AbortGuardsSkipRootSealAndUnsealedCallAfterSeal pins the
+// abort guards on the node path: the scan passes over a seal, even a
+// content-less one by the root (adk-python test_agent_router.py:558), and an
+// answer is not routed to its call's author when the last event that is not
+// the user's is a seal, even when that seal did not answer the call (a
+// ported adk-python flaw, agents/_agent_router.py:177-181, runners.py:178-179).
+func TestRunner_Run_AbortGuardsSkipRootSealAndUnsealedCallAfterSeal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		events []*session.Event
+		msg    *genai.Content
+		want   []string
+	}{
+		{
+			name: "root_authored_seal_skipped_in_scan",
+			events: []*session.Event{
+				routingText("sub_agent1", "", "inv_1", "earlier"),
+				routingSeal("root_agent", "", "inv_1"),
+			},
+			msg:  genai.NewContentFromText("next", genai.RoleUser),
+			want: []string{"sub_agent1: sub1 reply"},
+		},
+		{
+			name: "last_non_user_seal_hides_earlier_open_call",
+			events: []*session.Event{
+				routingCall("non_transferable", "", "inv_1", "c1"),
+				routingText("root_agent", "", "inv_2", "root earlier"),
+				routingSeal("root_agent", "", "inv_2"),
+			},
+			msg:  routingAnswers("c1"),
+			want: []string{"root_agent: root reply"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			svc := session.InMemoryService()
+			r := llmRoutingRunner(t, svc, true)
+
+			got := routedReplies(t, r, svc, tc.events, tc.msg)
+
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("replies mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // replacingPlugin returns a plugin whose OnUserMessageCallback replaces every
 // user message with replacement.
 func replacingPlugin(t *testing.T, replacement *genai.Content) *plugin.Plugin {
@@ -505,6 +567,56 @@ func classicRoutingRunner(t *testing.T, svc session.Service, rootRuns, subRuns *
 		t.Fatalf("New: %v", err)
 	}
 	return r
+}
+
+// TestRunner_ClassicPath_AbortSealSkipsAnsweredCall pins the abort guards on
+// the classic path: an answer to a call that a seal closed runs the root,
+// whether it is the run's message, left out of the routing view because the
+// last stored event is the seal (adk-python runners.py:178-179), or a
+// plugin's replacement, stored after the seal (agents/_agent_router.py:178-181).
+func TestRunner_ClassicPath_AbortSealSkipsAnsweredCall(t *testing.T) {
+	t.Parallel()
+	events := func() []*session.Event {
+		return []*session.Event{
+			routingCall("sub", "root.sub@1", "inv_1", "fc_1"),
+			routingSeal("sub", "root.sub@1", "inv_1", "fc_1"),
+		}
+	}
+	tests := []struct {
+		name    string
+		msg     *genai.Content
+		plugins func(t *testing.T) []*plugin.Plugin
+	}{
+		{
+			name:    "direct_function_response_after_seal",
+			msg:     routingAnswers("fc_1"),
+			plugins: func(*testing.T) []*plugin.Plugin { return nil },
+		},
+		{
+			name: "plugin_replaced_function_response_after_seal",
+			msg:  genai.NewContentFromText("approve", genai.RoleUser),
+			plugins: func(t *testing.T) []*plugin.Plugin {
+				return []*plugin.Plugin{replacingPlugin(t, routingAnswers("fc_1"))}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var rootRuns, subRuns []routedRun
+			svc := session.InMemoryService()
+			r := classicRoutingRunner(t, svc, &rootRuns, &subRuns, tc.plugins(t)...)
+
+			runRouting(t, r, svc, events(), tc.msg)
+
+			if diff := cmp.Diff([]routedRun{{invocationID: "inv_1", branch: ""}}, rootRuns, cmp.AllowUnexported(routedRun{})); diff != "" {
+				t.Errorf("root runs mismatch (-want +got):\n%s", diff)
+			}
+			if len(subRuns) != 0 {
+				t.Errorf("sub ran as %+v, want no run", subRuns)
+			}
+		})
+	}
 }
 
 // TestRunner_Run_ToolSubBranchPause_NestedAndAlreadyAnsweredInterrupts pins

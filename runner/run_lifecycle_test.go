@@ -390,9 +390,9 @@ func TestRunner_OnRunError_CalledAfterCallerStopsAtError(t *testing.T) {
 	}
 }
 
-// Setup failures, an early close and the caller's cancellation are not run
-// errors: on-run-error is never called for them. The table also fixes when
-// after-run runs on those paths.
+// Setup failures, an early close, the caller's cancellation and an abort are
+// not run errors: on-run-error is never called for them. The table also fixes
+// when after-run runs on those paths.
 func TestRunner_NotRunErrors_NeverNotifyOnRunError(t *testing.T) {
 	mixed := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
 		{Text: "hi"},
@@ -502,6 +502,17 @@ func TestRunner_NotRunErrors_NeverNotifyOnRunError(t *testing.T) {
 				a := scriptedAgent(t, "custom", step{err: fmt.Errorf("model call: %w", context.DeadlineExceeded)})
 				r, _ := newLifecycleRunner(t, Config{Agent: a}, plugins...)
 				(&lifecycleLog{}).consume(r.Run(ctx, "u", "s", userText("hi"), agent.RunConfig{}), stopAtError)
+			},
+			wantAfterRun: 1,
+		},
+		{
+			name: "abort",
+			run: func(t *testing.T, plugins ...*plugin.Plugin) {
+				a, ready := slowCallRoots()[0].build(t)
+				r, _ := newLifecycleRunner(t, Config{Agent: a}, plugins...)
+				sig := make(chan struct{})
+				closeWhen(t, ready, sig)
+				(&lifecycleLog{}).consume(r.Run(t.Context(), "u", "s", userText("hi"), agent.RunConfig{}, WithAbortSignal(sig)), stopAtError)
 			},
 			wantAfterRun: 1,
 		},
@@ -1076,6 +1087,41 @@ func recoverRun(r *Runner) (recovered any) {
 	return nil
 }
 
+// A sealing error yielded to a ranging caller after an abort ends the run;
+// the abort itself is not a run error.
+func TestRunner_AbortSealingError_IsARunError(t *testing.T) {
+	for _, root := range slowCallRoots() {
+		t.Run(root.name, func(t *testing.T) {
+			a, ready := root.build(t)
+			l := &lifecycleLog{}
+			reject := mustPlugin(t, plugin.Config{
+				Name: "reject",
+				OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+					if ev.ErrorCode == abortedCode {
+						return nil, errors.New("plugin rejected abort event")
+					}
+					return nil, nil
+				},
+			})
+			r, _ := newAbortRunner(t, Config{Agent: a, PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{reject, l.recorder(t)}}})
+			sig := make(chan struct{})
+			closeWhen(t, ready, sig)
+
+			res := abortRun{sig: sig}.drive(t, r)
+
+			if diff := cmp.Diff([]string{"Error in plugin 'reject' during 'on_event_callback' callback: plugin rejected abort event"}, errorStrings(res.errs)); diff != "" {
+				t.Errorf("Run() errors mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff([]string{"on_run_error:Error in plugin 'reject' during 'on_event_callback' callback: plugin rejected abort event"}, l.matching("on_run_error:")); diff != "" {
+				t.Errorf("on-run-error calls mismatch (-want +got):\n%s", diff)
+			}
+			if got := l.count("after_run"); got != 0 {
+				t.Errorf("after-run calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
 // newLiveLifecycleRunner returns a runner whose root is a live agent named
 // "live" that runLive starts.
 func newLiveLifecycleRunner(t *testing.T, svc session.Service, runLive func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error), plugins ...*plugin.Plugin) *Runner {
@@ -1430,6 +1476,58 @@ func TestRunner_AfterRunRunsBeforePostInvocationCompaction(t *testing.T) {
 				t.Errorf("last item error = %v, want one that wraps errAfter", lastErr)
 			}
 		})
+	}
+}
+
+// A caller that ranges past a run error and later stops at the first event
+// the runner yields to seal an aborted run closes the run early: that is not
+// a run error, so on-run-error is not called for the earlier error and
+// after-run runs once.
+func TestRunner_AbortedRunClosedAtSealingEventAfterRangedPastError_RunsAfterRun(t *testing.T) {
+	errFirst := errors.New("first failure")
+	l := &lifecycleLog{}
+	a := mustAgent(t, agent.Config{Name: "tool_agent", Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			call := session.NewEvent(ic, ic.InvocationID())
+			call.Author = "tool_agent"
+			call.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "_slow_tool"}},
+			}}
+			if !yield(call, nil) || !yield(nil, errFirst) {
+				return
+			}
+			<-ic.Done()
+		}
+	}})
+	r, _ := newAbortRunner(t, Config{Agent: a, PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{l.recorder(t)}}})
+	sig := make(chan struct{})
+
+	var errs []error
+	sealingEvents, aborted := 0, false
+	for ev, err := range r.Run(t.Context(), "u", "s", userText("hi"), agent.RunConfig{}, WithAbortSignal(sig)) {
+		if err != nil {
+			errs = append(errs, err)
+			close(sig)
+			aborted = true
+			continue
+		}
+		if aborted && ev != nil {
+			sealingEvents++
+			break
+		}
+	}
+
+	if len(errs) != 1 || errs[0] != errFirst {
+		t.Errorf("caller received errors %v, want [errFirst]", errs)
+	}
+	if sealingEvents != 1 {
+		t.Fatalf("caller saw %d events after the abort, want the sealing event", sealingEvents)
+	}
+	if got := l.count("on_run_error:"); got != 0 {
+		t.Errorf("on-run-error calls = %d (%v), want 0", got, l.runErrors())
+	}
+	if got := l.count("after_run"); got != 1 {
+		t.Errorf("after-run calls = %d, want 1", got)
 	}
 }
 

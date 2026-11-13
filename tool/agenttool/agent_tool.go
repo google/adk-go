@@ -27,8 +27,10 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/abortevents"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/internal/toolinternal"
@@ -61,6 +63,12 @@ type Config struct {
 
 // New creates a new agent tool.
 // If cfg is nil, skipSummarization defaults to false.
+//
+// The tool runs agent in a nested run. When the calling run was given an
+// abort signal ([runner.WithAbortSignal]), the nested run gets the same
+// signal, so aborting the calling run aborts agent too. When the aborted
+// nested run leaves no text, the tool's result is
+// {"result": "Invocation was aborted by client."}.
 func New(agent agent.Agent, cfg *Config) tool.Tool {
 	if cfg == nil {
 		return &agentTool{
@@ -207,6 +215,14 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		labels = rc.Labels
 	}
 
+	// Aborting the calling run aborts the nested one, as in adk-python. Go
+	// has no second event loop to exclude, so the nested run always gets the
+	// signal.
+	var runOpts []runner.RunOption
+	if state := icontext.AbortStateFrom(toolCtx); state != nil {
+		runOpts = append(runOpts, runner.WithAbortSignal(state.Signal()))
+	}
+
 	// TODO(dpasiukevich): verify agent loop termination.
 	// Only this sub-runner keeps the calling run's plugins, so they also see
 	// the sub-agent's agents, models and tools.
@@ -215,9 +231,12 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		MaxLLMCalls:   maxLLMCalls,
 		HTTPOptions:   httpOptions,
 		Labels:        labels,
-	})
+	}, runOpts...)
 
 	var lastEvent *session.Event
+	// The message of the events that seal an aborted nested run. They are not
+	// sub-agent errors: the result is the message when the run left no text.
+	var abortMessage string
 	// Long-running calls that are never answered before the run ends (e.g. a
 	// tool confirmation) leave the sub-agent paused. Its session is discarded,
 	// so the pause can never be resumed.
@@ -226,7 +245,9 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		if err != nil {
 			return nil, fmt.Errorf("error during execution of sub-agent %s: %w", t.agent.Name(), err)
 		}
-		if event.ErrorCode != "" || event.ErrorMessage != "" {
+		if abortevents.IsAbortEvent(event) {
+			abortMessage = event.ErrorMessage
+		} else if event.ErrorCode != "" || event.ErrorMessage != "" {
 			return nil, fmt.Errorf("error from sub-agent %q (code: %q, message: %q)", t.agent.Name(), event.ErrorCode, event.ErrorMessage)
 		}
 		// Partial chunks carry IDs the flow never acts on; a streamed call
@@ -254,7 +275,7 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	if lastEvent == nil {
-		return map[string]any{"result": ""}, nil
+		return noTextResult(abortMessage), nil
 	}
 
 	lastContent := lastEvent.LLMResponse.Content
@@ -283,7 +304,7 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	// validates the empty text against the schema when the reply has parts,
 	// and raises.
 	if outputText == "" {
-		return map[string]any{"result": ""}, nil
+		return noTextResult(abortMessage), nil
 	}
 	if isLllmAgent {
 		internalLlmAgent, ok := t.agent.(llminternal.Agent)
@@ -305,6 +326,14 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	return map[string]any{"result": outputText}, nil
+}
+
+// noTextResult is the result of a nested run that left no text: the abort
+// message when the run was aborted, else "", under "result", as adk-python
+// returns its last error message or an empty string (tools/agent_tool.py,
+// run_async) and the flow wraps it.
+func noTextResult(abortMessage string) map[string]any {
+	return map[string]any{"result": abortMessage}
 }
 
 // parseJSONOutput parses the reply of a sub-agent that has an

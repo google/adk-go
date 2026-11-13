@@ -30,6 +30,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/abortevents"
 	"google.golang.org/adk/v2/internal/adkcontext"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
@@ -159,6 +160,7 @@ type runOptions struct {
 	stateDelta       map[string]any
 	yieldUserMessage bool
 	invocationID     string
+	abort            <-chan struct{}
 }
 
 // WithStateDelta sets a state delta for the run invocation.
@@ -219,6 +221,55 @@ func WithYieldUserMessage() RunOption {
 func WithInvocationID(id string) RunOption {
 	return func(o *runOptions) {
 		o.invocationID = id
+	}
+}
+
+// WithAbortSignal lets the caller stop one run from outside and have the run
+// leave its session consistent. The run is aborted when abort is closed.
+//
+// The signal is separate from the ctx given to [Runner.Run]: an abort never
+// cancels that context, so the run can still persist events and call plugins
+// while it stops. Canceling ctx is an ordinary cancellation, not an abort.
+//
+// The run checks the signal before the agent or workflow starts, after every
+// event it yields, and, in an LLM agent, before each model step, after each
+// event of a step and after each step. A signal closed while the caller
+// handles an event is seen before the next event is requested, so no further
+// agent event is yielded. Agents, tools, model and agent callbacks and
+// workflow nodes run under a context that is canceled when the signal fires,
+// so a tool that selects on ctx.Done() returns at once. A tool that ignores
+// its context, or an agent that does not yield, delays the stop until it
+// returns or yields.
+//
+// After the stop, the run seals the invocation once: for every function call
+// of the invocation that has no response, grouped by author, branch and
+// isolation scope, it appends an event with error code "INVOCATION_ABORTED",
+// error message "Invocation was aborted by client." and a function response
+// {"error": "Invocation was aborted by client."} for each call. When no call
+// is left open, it appends one event with that error code and message, no
+// content, and the root agent or node as author. Sealing events pass through
+// the OnEventCallback plugins like any other event, after-run callbacks run
+// after the seal, and the run skips compaction. A caller that keeps ranging
+// receives the sealing events; a caller that stops ranging after closing the
+// signal still finds them in the session once the range ends. A sealing
+// failure is yielded as an error to a caller that keeps ranging; a caller
+// that has stopped ranging does not receive it.
+//
+// The iterator ends without an error caused by the abort. An error that is
+// not the abort's cancellation, and the cancellation of the caller's own ctx,
+// are still yielded. A signal closed before the run starts stores the user
+// message, runs the before-run and after-run callbacks, runs no agent or
+// workflow, and seals the invocation. A signal closed after the run ended
+// does nothing.
+//
+// A nil channel means no abort monitoring; the run behaves as without the
+// option. [Runner.RunLive] ignores the option. One channel may be given to
+// several runs, and closing it aborts all of them. Close the channel to
+// abort; a value sent on it is consumed by the first check that receives it.
+// The option is safe to use from concurrent Run calls.
+func WithAbortSignal(abort <-chan struct{}) RunOption {
+	return func(o *runOptions) {
+		o.abort = abort
 	}
 }
 
@@ -1003,19 +1054,25 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // of its newest event in the invocation it continues that a rewind did not
 // remove and that is not on a tool's message branch.
 //
+// To stop a run from outside and leave its session consistent, give it
+// [WithAbortSignal] and close the channel: the run stops, answers the calls
+// it left open with INVOCATION_ABORTED events and ends without an error.
+// Canceling ctx instead stops the run with ctx's error and seals nothing.
+//
 // A caller that breaks from the range loop at a non-partial event leaves
 // that event stored in the session. The yield of the node that produced the
 // event returns false, so a node that returns when its yield returns false,
 // as every node and agent in adk-go does, does not go on: an LlmAgent, or an
 // LlmAgent in a graph workflow, does not start the tools that the event's
 // function call names. A custom node that ignores the result of its yield
-// goes on. Run returns after every node it started has ended. A partial
-// event is not stored and is not waited for, so the node that produced it
-// keeps going until its next event or until it sees that its context is
-// done. A resumable runner whose root is an LlmAgent runs a call that was
-// left without a response when it is resumed with [WithInvocationID]. A
-// branch of a parallel agent (package parallelagent) may still start the
-// tool that the function call of the event it produced names.
+// goes on. Run returns after every node it started has ended. Nothing is
+// sealed, unlike an abort. A partial event is not stored and is not waited
+// for, so the node that produced it keeps going until its next event or
+// until it sees that its context is done. A resumable runner whose root is
+// an LlmAgent runs a call that was left without a response when it is
+// resumed with [WithInvocationID]. A branch of a parallel agent (package
+// parallelagent) may still start the tool that the function call of the
+// event it produced names.
 //
 // Run yields each event after the session service has stored it, except a
 // partial event, which is not stored. The state delta of a stored event has
@@ -1023,8 +1080,8 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // invocation reads them, and the OnEvent plugin callbacks, which see the
 // event before it is stored, but the event Run yields is a copy without them,
 // as [session.Service.Get] returns it later. The same holds for the user
-// event [WithYieldUserMessage] yields. A partial event keeps its state delta,
-// "temp:" keys included.
+// event [WithYieldUserMessage] yields and for the events that seal an aborted
+// run. A partial event keeps its state delta, "temp:" keys included.
 //
 // When Run drops a "temp:" key, the event it yields is a copy with its own
 // top-level fields and its own state delta map. The copy shares everything
@@ -1095,6 +1152,9 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		for _, opt := range opts {
 			opt(&options)
 		}
+		// Stored before any other context is built from ctx, so that every
+		// context of the run, on both paths, reaches the run's abort state.
+		ctx = icontext.WithAbortState(ctx, icontext.NewAbortState(options.abort))
 		ctx = adkcontext.WithoutCallPlace(ctx)
 
 		// The inbound message is always a user turn, whatever Role the caller
@@ -1221,7 +1281,9 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 		compacted := false
 		compactOnce := func() error {
-			if compacted || invocationFailed {
+			// An aborted invocation is not a finished turn either
+			// (adk-python runners.py, Runner._run_with_trace).
+			if compacted || invocationFailed || icontext.Aborted(ctx) {
 				return nil
 			}
 			compacted = true
@@ -1314,6 +1376,12 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		pluginManager := r.pluginManager
 		lc.start(ctx)
 		defer lc.finish(nil)
+		// Deferred after the after-run callbacks, so it runs before them, as
+		// adk-python seals before after_run in one finally.
+		abortState := icontext.AbortStateFrom(ctx)
+		if abortState != nil {
+			defer r.sealOnStop(ctx, storedSession)
+		}
 		if pluginManager != nil {
 			if event, err := r.runBeforeRunCallback(ctx, false); event != nil || err != nil {
 				lc.shortCircuit()
@@ -1325,8 +1393,21 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		for event, err := range agentToRun.Run(ctx) {
+		// The agent runs under the engine context, which the abort cancels;
+		// events are persisted and sealed under ctx, which it does not.
+		engine, stopWatch := watchAbort(ctx)
+		defer stopWatch()
+		events := agentToRun.Run(engine)
+		if abortState.Aborted() {
+			events = func(func(*session.Event, error) bool) {}
+		}
+		for event, err := range events {
 			if err != nil {
+				// The abort's own cancellation, coming back from the agent, ends
+				// the run as a stop, not as a failure.
+				if icontext.IsAbortEcho(ctx, err) {
+					break
+				}
 				// The model-call budget is spent for the whole invocation, so
 				// nothing that runs after this can reach a model. Ending here
 				// stops a root agent that carries on after a sub-agent error
@@ -1370,6 +1451,16 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			if !yield(event, nil) {
 				return
 			}
+			// A signal closed while the caller handled the event stops the run
+			// before the next event is requested.
+			if abortState.Aborted() {
+				break
+			}
+		}
+
+		if !r.yieldSealed(ctx, storedSession, yield) {
+			lc.stop()
+			return
 		}
 
 		// After-run runs before post-invocation compaction, as in adk-python,
@@ -2077,8 +2168,9 @@ func findActiveTaskIsolationScope(sess session.Session) (scope, invocationID str
 // The call and the agent that owns it are found as findAgentToRun finds them,
 // in events, the routing view (see routingView): routingView(storedSession,
 // msg) before msg is stored, and routingView(storedSession, nil) once it is,
-// as after a plugin replaced the message. An answer to a pause raised inside
-// a tool goes to the agent that owns the tool (see resolveResumedAgent).
+// as after a plugin replaced the message. The abort guards apply, and an
+// answer to a pause raised inside a tool goes to the agent that owns the tool
+// (see resolveResumedAgent).
 func (r *Runner) classicAgentToRun(storedSession session.Session, msg *genai.Content, events []*session.Event) (agent.Agent, string) {
 	if len(utils.FunctionResponses(msg)) == 0 {
 		return r.rootAgent, ""
@@ -2152,10 +2244,14 @@ func (r *Runner) restoreBranchFromHistory(sess session.Session, agentToRun agent
 // carries function responses. msg is the run's message before it is stored;
 // once it is stored, as a plugin's replacement is before the route is taken
 // again, msg is nil and the view is the stored session alone, as in
-// adk-python (Runner._session_for_routing, runners.py).
+// adk-python. msg is left out when the last live event seals an aborted
+// invocation (adk-python Runner._session_for_routing, runners.py).
 func routingView(sess session.Session, msg *genai.Content) []*session.Event {
 	events := utils.ApplyRewinds(slices.Collect(sess.Events().All()))
 	if len(utils.FunctionResponses(msg)) == 0 {
+		return events
+	}
+	if n := len(events); n > 0 && abortevents.IsAbortEvent(events[n-1]) {
 		return events
 	}
 	return append(events, &session.Event{Author: "user", LLMResponse: model.LLMResponse{Content: msg}})
@@ -2167,8 +2263,9 @@ func routingView(sess session.Session, msg *genai.Content) []*session.Event {
 // It decides on the routing view of sess and msg (see routingView). When the
 // view ends with an answer to a function call that routedCall routes to its
 // author, the agent resolveResumedAgent finds runs. Otherwise the most recent
-// agent that may transfer across the agent tree runs, skipping user events
-// and the events that record an agent's state or end, and the root agent when there is none. It ports adk-python's
+// agent that may transfer across the agent tree runs, skipping user events,
+// seals of aborted invocations and the events that record an agent's state
+// or end, and the root agent when there is none. It ports adk-python's
 // find_agent_to_run (agents/_agent_router.py) with Runner._session_for_routing
 // (runners.py).
 func (r *Runner) findAgentToRun(sess session.Session, msg *genai.Content) (agent.Agent, error) {
@@ -2178,7 +2275,7 @@ func (r *Runner) findAgentToRun(sess session.Session, msg *genai.Content) (agent
 	}
 
 	for _, event := range slices.Backward(events) {
-		if event.Author == "user" || event.Actions.AgentState != nil ||
+		if event.Author == "user" || abortevents.IsAbortEvent(event) || event.Actions.AgentState != nil ||
 			(event.Actions.EndOfAgent != nil && *event.Actions.EndOfAgent) {
 			continue
 		}
@@ -2216,16 +2313,20 @@ func (r *Runner) answeredCallAgent(events []*session.Event) agent.Agent {
 
 // routedCall returns the event holding the function call that the first
 // function response of the last of events answers, when that answer goes to
-// the call's author; nil otherwise. It is nil when the call event has no
-// author, and when llminternal.DecideResumeAction neither routes the answer
-// to the author nor replays the calls; the answer of a user always goes to
-// the author, and an agent's own answer does on a resumable runner
-// (adk-python agents/_agent_router.py, find_agent_to_run).
+// the call's author; nil otherwise. It is nil when the last event, or the
+// last event not authored "user", seals an aborted invocation, when the
+// call event has no author, and when llminternal.DecideResumeAction neither
+// routes the answer to the author nor replays the calls; the answer of a
+// user always goes to the author, and an agent's own answer does on a
+// resumable runner (adk-python agents/_agent_router.py, find_agent_to_run).
 func (r *Runner) routedCall(events []*session.Event) *session.Event {
 	if len(events) == 0 {
 		return nil
 	}
 	answer := events[len(events)-1]
+	if abortevents.IsAbortEvent(answer) || abortevents.IsAbortEvent(lastNonUserEvent(events)) {
+		return nil
+	}
 	responses := utils.FunctionResponses(answer.Content)
 	if len(responses) == 0 {
 		return nil
@@ -2237,6 +2338,17 @@ func (r *Runner) routedCall(events []*session.Event) *session.Event {
 	switch llminternal.DecideResumeAction(call, answer, r.resumable) {
 	case llminternal.ResumeRouteToAuthor, llminternal.ResumeReplayCalls:
 		return call
+	}
+	return nil
+}
+
+// lastNonUserEvent returns the last of events not authored "user", or nil
+// when there is none.
+func lastNonUserEvent(events []*session.Event) *session.Event {
+	for _, ev := range slices.Backward(events) {
+		if ev.Author != "user" {
+			return ev
+		}
 	}
 	return nil
 }

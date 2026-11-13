@@ -20,19 +20,30 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
+	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/workflow"
 )
 
@@ -1309,4 +1320,1221 @@ func TestRunner_RunLive_RefusedOnNodeRoot(t *testing.T) {
 	if sess != nil || events != nil || err == nil || err.Error() != want {
 		t.Errorf("RunLive() = %v, %v, %v; want nil, nil, %q", sess, events, err, want)
 	}
+}
+
+// The abort tests below run roots that are still working when the caller
+// closes the abort signal. A root waits abortBlockFor when the abort does not
+// cancel its context, and a run must end within abortPrompt, so a missing
+// cancellation fails a test instead of passing slowly.
+const (
+	abortBlockFor = 30 * time.Second
+	abortPrompt   = 10 * time.Second
+	abortedCode   = "INVOCATION_ABORTED"
+)
+
+// blockingCallAgent is a custom agent whose first run yields a function call
+// to _slow_tool with ID call_1 and then waits for its context to end. Later
+// runs yield the text "follow-up".
+type blockingCallAgent struct {
+	name     string
+	yieldErr bool          // yield ctx.Err() when the wait ends by cancellation
+	runs     atomic.Int32  // number of runs started
+	blocked  chan struct{} // receives once, when the first run starts waiting
+}
+
+func newBlockingCallAgent(t *testing.T, name string, yieldErr bool) (*blockingCallAgent, agent.Agent) {
+	t.Helper()
+	b := &blockingCallAgent{name: name, yieldErr: yieldErr, blocked: make(chan struct{}, 1)}
+	a, err := agent.New(agent.Config{Name: name, Run: b.run})
+	if err != nil {
+		t.Fatalf("agent.New(%q) error = %v", name, err)
+	}
+	return b, a
+}
+
+func (b *blockingCallAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Author = b.name
+		if b.runs.Add(1) > 1 {
+			ev.Content = genai.NewContentFromText("follow-up", genai.RoleModel)
+			yield(ev, nil)
+			return
+		}
+		ev.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "_slow_tool"}},
+		}}
+		if !yield(ev, nil) {
+			return
+		}
+		b.blocked <- struct{}{}
+		select {
+		case <-ctx.Done():
+			if b.yieldErr {
+				yield(nil, ctx.Err())
+			}
+		case <-time.After(abortBlockFor):
+		}
+	}
+}
+
+// slowToolProbe is a tool named _slow_tool that waits for its context to end.
+type slowToolProbe struct {
+	started chan struct{} // receives when a call starts waiting
+	ctxErr  chan error    // receives ctx.Err() when the wait ends by cancellation
+}
+
+func newSlowTool(t *testing.T) (*slowToolProbe, tool.Tool) {
+	t.Helper()
+	p := &slowToolProbe{started: make(chan struct{}, 1), ctxErr: make(chan error, 1)}
+	tl, err := functiontool.New(functiontool.Config{Name: "_slow_tool", Description: "waits"}, func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+		p.started <- struct{}{}
+		select {
+		case <-ctx.Done():
+			p.ctxErr <- ctx.Err()
+			return nil, ctx.Err()
+		case <-time.After(abortBlockFor):
+			return map[string]any{"result": "done"}, nil
+		}
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() error = %v", err)
+	}
+	return p, tl
+}
+
+// callThenTextModel answers its first request with a call to toolName with ID
+// call_1, and every later request with the text "Recovered". It records the
+// requests it receives.
+type callThenTextModel struct {
+	toolName string
+	mu       sync.Mutex
+	reqs     []*model.LLMRequest
+}
+
+func (*callThenTextModel) Name() string { return "call-then-text" }
+
+func (m *callThenTextModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.mu.Lock()
+	m.reqs = append(m.reqs, req)
+	n := len(m.reqs)
+	m.mu.Unlock()
+	resp := &model.LLMResponse{Content: genai.NewContentFromText("Recovered", genai.RoleModel)}
+	if n == 1 {
+		resp = &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: m.toolName, Args: map[string]any{}}},
+		}}}
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(resp, nil)
+	}
+}
+
+func (m *callThenTextModel) requests() []*model.LLMRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.reqs)
+}
+
+// newSlowToolAgent returns an LLM agent named name whose model calls
+// _slow_tool once and then answers "Recovered".
+func newSlowToolAgent(t *testing.T, name string) (*slowToolProbe, *callThenTextModel, agent.Agent) {
+	t.Helper()
+	probe, tl := newSlowTool(t)
+	m := &callThenTextModel{toolName: "_slow_tool"}
+	a, err := llmagent.New(llmagent.Config{Name: name, Model: m, Tools: []tool.Tool{tl}})
+	if err != nil {
+		t.Fatalf("llmagent.New(%q) error = %v", name, err)
+	}
+	return probe, m, a
+}
+
+// newAbortRunner returns a runner for cfg under app "app" that creates its
+// sessions, with an in-memory session service unless cfg names one.
+func newAbortRunner(t *testing.T, cfg Config) (*Runner, session.Service) {
+	t.Helper()
+	cfg.AppName = "app"
+	cfg.AutoCreateSession = true
+	if cfg.SessionService == nil {
+		cfg.SessionService = session.InMemoryService()
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return r, cfg.SessionService
+}
+
+// abortRun ranges one Run of user "u" with WithAbortSignal(sig).
+type abortRun struct {
+	ctx     context.Context           // t.Context() when nil
+	session string                    // "s" when empty
+	cfg     agent.RunConfig           //
+	msg     *genai.Content            // "Run" when nil
+	sig     chan struct{}             //
+	closeOn func(*session.Event) bool // closes sig in the loop body at the first event it matches
+	stop    bool                      // stops ranging right after closeOn closed sig
+	opts    []RunOption               // added after WithAbortSignal
+}
+
+type abortResult struct {
+	events []*session.Event
+	errs   []error
+	took   time.Duration
+}
+
+func (a abortRun) drive(t *testing.T, r *Runner) abortResult {
+	t.Helper()
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = t.Context()
+	}
+	msg := a.msg
+	if msg == nil {
+		msg = genai.NewContentFromText("Run", genai.RoleUser)
+	}
+	sessionID := a.session
+	if sessionID == "" {
+		sessionID = "s"
+	}
+	var res abortResult
+	closed := false
+	start := time.Now()
+	for ev, err := range r.Run(ctx, "u", sessionID, msg, a.cfg, append([]RunOption{WithAbortSignal(a.sig)}, a.opts...)...) {
+		if err != nil {
+			res.errs = append(res.errs, err)
+			continue
+		}
+		res.events = append(res.events, ev)
+		if !closed && a.closeOn != nil && a.closeOn(ev) {
+			close(a.sig)
+			closed = true
+			if a.stop {
+				break
+			}
+		}
+	}
+	res.took = time.Since(start)
+	return res
+}
+
+// closeWhen closes sig from another goroutine once ready receives, as a caller
+// that aborts from outside its range loop does.
+func closeWhen(t *testing.T, ready <-chan struct{}, sig chan struct{}) {
+	go func() {
+		select {
+		case <-ready:
+			close(sig)
+		case <-t.Context().Done():
+		}
+	}()
+}
+
+// hasCall reports whether ev holds a function call.
+func hasCall(ev *session.Event) bool {
+	return len(utils.FunctionCalls(ev.Content)) > 0
+}
+
+// describeAbortEvent names ev by author, error code and message, function
+// calls, function responses and text, so a test can compare whole events with
+// literals.
+func describeAbortEvent(ev *session.Event) string {
+	s := ev.Author
+	if ev.ErrorCode != "" || ev.ErrorMessage != "" {
+		s += fmt.Sprintf(" %s %q", ev.ErrorCode, ev.ErrorMessage)
+	}
+	if ev.Content == nil {
+		return s + " no-content"
+	}
+	for _, fc := range utils.FunctionCalls(ev.Content) {
+		s += fmt.Sprintf(" call %s %s", fc.ID, fc.Name)
+	}
+	for _, fr := range utils.FunctionResponses(ev.Content) {
+		s += fmt.Sprintf(" response %s %s %v", fr.ID, fr.Name, fr.Response)
+	}
+	var text string
+	for _, p := range ev.Content.Parts {
+		text += p.Text
+	}
+	if text != "" {
+		s += fmt.Sprintf(" text %q", text)
+	}
+	return s
+}
+
+func describeAbortEvents(evs []*session.Event) []string {
+	out := []string{}
+	for _, ev := range evs {
+		out = append(out, describeAbortEvent(ev))
+	}
+	return out
+}
+
+// abortedEvents returns the events of evs that seal an aborted invocation.
+func abortedEvents(evs []*session.Event) []*session.Event {
+	var out []*session.Event
+	for _, ev := range evs {
+		if ev.ErrorCode == abortedCode {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// storedAbortSession returns the events of session id of user "u" in app "app".
+func storedAbortSession(t *testing.T, svc session.Service, id string) []*session.Event {
+	t.Helper()
+	resp, err := svc.Get(context.Background(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: id})
+	if err != nil {
+		t.Fatalf("Get(%q) error = %v", id, err)
+	}
+	return slices.Collect(resp.Session.Events().All())
+}
+
+// textModel answers every request with the text "hello" and counts the calls.
+type textModel struct{ calls *atomic.Int32 }
+
+func (textModel) Name() string { return "text" }
+
+func (m textModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	m.calls.Add(1)
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleModel)}, nil)
+	}
+}
+
+func TestRunner_Abort_PreSignaledAndNilSignal(t *testing.T) {
+	t.Parallel()
+	roots := []struct {
+		name  string
+		build func(t *testing.T, runs *atomic.Int32) Config
+	}{
+		{
+			name: "custom",
+			build: func(t *testing.T, runs *atomic.Int32) Config {
+				a, err := agent.New(agent.Config{Name: "root", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						runs.Add(1)
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "root"
+						ev.Content = genai.NewContentFromText("hello", genai.RoleModel)
+						yield(ev, nil)
+					}
+				}})
+				if err != nil {
+					t.Fatalf("agent.New() error = %v", err)
+				}
+				return Config{Agent: a}
+			},
+		},
+		{
+			name: "llm",
+			build: func(t *testing.T, runs *atomic.Int32) Config {
+				return Config{Agent: must(llmagent.New(llmagent.Config{Name: "root", Model: textModel{calls: runs}}))}
+			},
+		},
+		{
+			name: "node_root",
+			build: func(t *testing.T, runs *atomic.Int32) Config {
+				return Config{Node: workflow.NewFunctionNode("root", func(agent.Context, any) (string, error) {
+					runs.Add(1)
+					return "hello", nil
+				}, workflow.NodeConfig{})}
+			},
+		},
+	}
+	signals := []struct {
+		name       string
+		sig        func() chan struct{}
+		wantRuns   int32
+		wantSealed []string // the abort events, yielded and stored
+	}{
+		{
+			name:       "pre_closed",
+			sig:        func() chan struct{} { ch := make(chan struct{}); close(ch); return ch },
+			wantRuns:   0,
+			wantSealed: []string{`root INVOCATION_ABORTED "Invocation was aborted by client." no-content`},
+		},
+		{
+			name:       "send_struct",
+			sig:        func() chan struct{} { ch := make(chan struct{}, 1); ch <- struct{}{}; return ch },
+			wantRuns:   0,
+			wantSealed: []string{`root INVOCATION_ABORTED "Invocation was aborted by client." no-content`},
+		},
+		{
+			name:       "nil_channel",
+			sig:        func() chan struct{} { return nil },
+			wantRuns:   1,
+			wantSealed: []string{},
+		},
+	}
+	for _, root := range roots {
+		for _, s := range signals {
+			t.Run(root.name+"/"+s.name, func(t *testing.T) {
+				var runs atomic.Int32
+				r, svc := newAbortRunner(t, root.build(t, &runs))
+
+				res := abortRun{sig: s.sig()}.drive(t, r)
+
+				if len(res.errs) != 0 {
+					t.Fatalf("Run() errors = %v, want none", res.errs)
+				}
+				if got := runs.Load(); got != s.wantRuns {
+					t.Errorf("root ran %d times, want %d", got, s.wantRuns)
+				}
+				if diff := cmp.Diff(s.wantSealed, describeAbortEvents(abortedEvents(res.events))); diff != "" {
+					t.Errorf("yielded abort events mismatch (-want +got):\n%s", diff)
+				}
+				if diff := cmp.Diff(s.wantSealed, describeAbortEvents(abortedEvents(storedAbortSession(t, svc, "s")))); diff != "" {
+					t.Errorf("stored abort events mismatch (-want +got):\n%s", diff)
+				}
+			})
+		}
+	}
+}
+
+// TestRunner_Abort_StopsAfterTheEventTheCallerAbortedOn checks that a signal
+// closed while the caller handles an event stops the run before the next
+// event is requested, even from a root that never looks at its context, as
+// adk-python breaks after each event (runners.py, Runner.run_async's execute).
+func TestRunner_Abort_StopsAfterTheEventTheCallerAbortedOn(t *testing.T) {
+	t.Parallel()
+	twoEvents := func(ctx agent.InvocationContext, yield func(*session.Event, error) bool) {
+		for _, text := range []string{"first", "second"} {
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Author = "root"
+			ev.Content = genai.NewContentFromText(text, genai.RoleModel)
+			if !yield(ev, nil) {
+				return
+			}
+		}
+	}
+	tests := []struct {
+		name   string
+		config Config
+	}{
+		{
+			name: "custom",
+			config: Config{Agent: must(agent.New(agent.Config{Name: "root", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) { twoEvents(ctx, yield) }
+			}}))},
+		},
+		{
+			name: "node_root",
+			config: Config{Node: &abortGraphNode{BaseNode: workflow.NewBaseNode("root", "", workflow.NodeConfig{}), fn: func(ctx agent.Context, yield func(*session.Event, error) bool) {
+				twoEvents(ctx, yield)
+			}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := newAbortRunner(t, tt.config)
+			first := func(*session.Event) bool { return true }
+
+			res := abortRun{sig: make(chan struct{}), closeOn: first}.drive(t, r)
+
+			if len(res.errs) != 0 {
+				t.Errorf("Run() errors = %v, want none", res.errs)
+			}
+			want := []string{
+				`root text "first"`,
+				`root INVOCATION_ABORTED "Invocation was aborted by client." no-content`,
+			}
+			if diff := cmp.Diff(want, describeAbortEvents(res.events)); diff != "" {
+				t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestRunner_Abort_SealsOnTheRunsBranch checks that the event that seals an
+// aborted run with no open call is on the run's branch: the branch of the
+// sub-agent whose call the new message answers, as adk-python passes
+// ic.branch after restoring it from history (runners.py,
+// Runner._synthesize_abort_events_if_needed and
+// _setup_context_for_new_invocation).
+func TestRunner_Abort_SealsOnTheRunsBranch(t *testing.T) {
+	t.Parallel()
+	_, worker := newBlockingCallAgent(t, "worker", false)
+	root := must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{worker}}}))
+	svc := session.InMemoryService()
+	created, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	call := session.NewEvent(t.Context(), "inv_0")
+	call.Author = "worker"
+	call.Branch = "root.worker"
+	call.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "approve"}}}}
+	call.LongRunningToolIDs = []string{"call_1"}
+	if err := svc.AppendEvent(t.Context(), created.Session, call); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+	r, _ := newAbortRunner(t, Config{Agent: root, SessionService: svc})
+	answer := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "call_1", Name: "approve", Response: map[string]any{"ok": true}}}}}
+	sig := make(chan struct{})
+	close(sig)
+
+	res := abortRun{msg: answer, sig: sig}.drive(t, r)
+
+	if len(res.errs) != 0 {
+		t.Fatalf("Run() errors = %v, want none", res.errs)
+	}
+	var got []string
+	for _, ev := range res.events {
+		got = append(got, describeAbortEvent(ev)+" branch="+ev.Branch)
+	}
+	want := []string{`root INVOCATION_ABORTED "Invocation was aborted by client." no-content branch=root.worker`}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestRunner_Abort_CompositeAgentsDoNotYieldContextCanceledError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		root func(t *testing.T, blocker, second agent.Agent) agent.Agent
+		want []string
+	}{
+		{
+			name: "sequential",
+			root: func(t *testing.T, blocker, second agent.Agent) agent.Agent {
+				return must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{blocker, second}}}))
+			},
+			want: []string{
+				`blocker call call_1 _slow_tool`,
+				`blocker INVOCATION_ABORTED "Invocation was aborted by client." response call_1 _slow_tool map[error:Invocation was aborted by client.]`,
+			},
+		},
+		{
+			name: "loop",
+			root: func(t *testing.T, blocker, second agent.Agent) agent.Agent {
+				return must(loopagent.New(loopagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{blocker, second}}, MaxIterations: 5}))
+			},
+			want: []string{
+				`blocker call call_1 _slow_tool`,
+				`blocker INVOCATION_ABORTED "Invocation was aborted by client." response call_1 _slow_tool map[error:Invocation was aborted by client.]`,
+			},
+		},
+		{
+			name: "parallel",
+			root: func(t *testing.T, blocker, _ agent.Agent) agent.Agent {
+				return must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{blocker}}}))
+			},
+			want: []string{
+				`blocker call call_1 _slow_tool`,
+				`blocker INVOCATION_ABORTED "Invocation was aborted by client." response call_1 _slow_tool map[error:Invocation was aborted by client.]`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, blocker := newBlockingCallAgent(t, "blocker", true)
+			second, secondAgent := newBlockingCallAgent(t, "second", true)
+			r, _ := newAbortRunner(t, Config{Agent: tt.root(t, blocker, secondAgent)})
+			sig := make(chan struct{})
+			closeWhen(t, b.blocked, sig)
+
+			res := abortRun{sig: sig}.drive(t, r)
+
+			if len(res.errs) != 0 {
+				t.Errorf("Run() errors = %v, want none", res.errs)
+			}
+			if diff := cmp.Diff(tt.want, describeAbortEvents(res.events)); diff != "" {
+				t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
+			}
+			if got := second.runs.Load(); got != 0 {
+				t.Errorf("second sub-agent ran %d times, want 0", got)
+			}
+			if res.took > abortPrompt {
+				t.Errorf("Run() took %v, want under %v", res.took, abortPrompt)
+			}
+		})
+	}
+}
+
+// sealedCall1 describes the event that seals tool_agent's call call_1 to
+// _slow_tool.
+const sealedCall1 = `tool_agent INVOCATION_ABORTED "Invocation was aborted by client." response call_1 _slow_tool map[error:Invocation was aborted by client.]`
+
+// abortCheckingService fails an AppendEvent whose context is done, as a
+// context-aware session service does, and counts the abort events it is asked
+// to store. When failAbort is set it returns failAbort for every abort event
+// instead of storing it.
+type abortCheckingService struct {
+	session.Service
+	failAbort    error
+	abortAppends atomic.Int32
+}
+
+func (s *abortCheckingService) AppendEvent(ctx context.Context, sess session.Session, ev *session.Event) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if ev.ErrorCode == abortedCode {
+		s.abortAppends.Add(1)
+		if s.failAbort != nil {
+			return s.failAbort
+		}
+	}
+	return s.Service.AppendEvent(ctx, sess, ev)
+}
+
+// slowCallRoots are the roots named tool_agent that call _slow_tool with ID
+// call_1 and then wait for their context to end: a custom agent on the classic
+// loop and an LLM agent on the node loop. build returns the root and a channel
+// that receives once the root waits.
+func slowCallRoots() []struct {
+	name  string
+	build func(t *testing.T) (agent.Agent, <-chan struct{})
+} {
+	return []struct {
+		name  string
+		build func(t *testing.T) (agent.Agent, <-chan struct{})
+	}{
+		{
+			name: "custom",
+			build: func(t *testing.T) (agent.Agent, <-chan struct{}) {
+				b, a := newBlockingCallAgent(t, "tool_agent", false)
+				return a, b.blocked
+			},
+		},
+		{
+			name: "llm",
+			build: func(t *testing.T) (agent.Agent, <-chan struct{}) {
+				probe, _, a := newSlowToolAgent(t, "tool_agent")
+				return a, probe.started
+			},
+		},
+	}
+}
+
+// errorStrings returns the messages of errs.
+func errorStrings(errs []error) []string {
+	out := []string{}
+	for _, err := range errs {
+		out = append(out, err.Error())
+	}
+	return out
+}
+
+func TestRunner_Abort_NormalPathSealingUsesUncancelledContextAndPropagatesErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		failAbort        error // returned by AppendEvent for an abort event
+		onEventErr       error // returned by OnEventCallback for an abort event
+		wantErrs         []string
+		wantSealed       []string // yielded abort events
+		wantAbortAppends int32
+	}{
+		{
+			name:             "ctx_alive_in_append",
+			wantErrs:         []string{},
+			wantSealed:       []string{sealedCall1},
+			wantAbortAppends: 1,
+		},
+		{
+			name:             "append_error_propagates",
+			failAbort:        errors.New("simulated db failure"),
+			wantErrs:         []string{"failed to add event to session: simulated db failure"},
+			wantSealed:       []string{},
+			wantAbortAppends: 1,
+		},
+		{
+			name:             "plugin_error_propagates",
+			onEventErr:       errors.New("plugin rejected abort event"),
+			wantErrs:         []string{"Error in plugin 'reject' during 'on_event_callback' callback: plugin rejected abort event"},
+			wantSealed:       []string{},
+			wantAbortAppends: 0,
+		},
+	}
+	for _, root := range slowCallRoots() {
+		for _, tt := range tests {
+			t.Run(root.name+"/"+tt.name, func(t *testing.T) {
+				a, ready := root.build(t)
+				svc := &abortCheckingService{Service: session.InMemoryService(), failAbort: tt.failAbort}
+				p, err := plugin.New(plugin.Config{
+					Name: "reject",
+					OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+						if ev.ErrorCode == abortedCode {
+							return nil, tt.onEventErr
+						}
+						return nil, nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("plugin.New() error = %v", err)
+				}
+				r, _ := newAbortRunner(t, Config{Agent: a, SessionService: svc, PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{p}}})
+				sig := make(chan struct{})
+				// Closed from outside the range loop once the root waits, so the
+				// abort cancels the context the root runs under before sealing.
+				closeWhen(t, ready, sig)
+
+				res := abortRun{sig: sig}.drive(t, r)
+
+				if diff := cmp.Diff(tt.wantErrs, errorStrings(res.errs)); diff != "" {
+					t.Errorf("Run() errors mismatch (-want +got):\n%s", diff)
+				}
+				if diff := cmp.Diff(tt.wantSealed, describeAbortEvents(abortedEvents(res.events))); diff != "" {
+					t.Errorf("yielded abort events mismatch (-want +got):\n%s", diff)
+				}
+				if got := svc.abortAppends.Load(); got != tt.wantAbortAppends {
+					t.Errorf("AppendEvent got %d abort events, want %d", got, tt.wantAbortAppends)
+				}
+			})
+		}
+	}
+}
+
+// afterRunRecorder returns a plugin that counts its after-run calls and
+// records the error code of the session's last event at each.
+func afterRunRecorder(t *testing.T) (*plugin.Plugin, *atomic.Int32, *atomic.Value) {
+	t.Helper()
+	var calls atomic.Int32
+	var lastCode atomic.Value
+	p, err := plugin.New(plugin.Config{
+		Name: "after_run_recorder",
+		AfterRunCallback: func(ic agent.InvocationContext) {
+			calls.Add(1)
+			evs := ic.Session().Events()
+			lastCode.Store(evs.At(evs.Len() - 1).ErrorCode)
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+	return p, &calls, &lastCode
+}
+
+func TestRunner_Abort_EarlyBreakSealsSilentlyDropsAppendErrorAndRunsAfterRun(t *testing.T) {
+	t.Parallel()
+	roots := []struct {
+		name       string
+		config     func(t *testing.T) Config
+		opts       []RunOption
+		wantSealed []string // stored abort events when the append succeeds
+	}{
+		{
+			name: "custom",
+			config: func(t *testing.T) Config {
+				_, a := newBlockingCallAgent(t, "tool_agent", false)
+				return Config{Agent: a}
+			},
+			wantSealed: []string{sealedCall1},
+		},
+		{
+			name: "llm",
+			config: func(t *testing.T) Config {
+				_, _, a := newSlowToolAgent(t, "tool_agent")
+				return Config{Agent: a}
+			},
+			wantSealed: []string{sealedCall1},
+		},
+		{
+			name:       "node_root_yield_user_message",
+			config:     func(t *testing.T) Config { return Config{Node: newTestNode("root")} },
+			opts:       []RunOption{WithYieldUserMessage()},
+			wantSealed: []string{`root INVOCATION_ABORTED "Invocation was aborted by client." no-content`},
+		},
+	}
+	for _, root := range roots {
+		t.Run(root.name+"/seals_on_break", func(t *testing.T) {
+			p, afterRuns, lastCode := afterRunRecorder(t)
+			cfg := root.config(t)
+			cfg.PluginConfig = PluginConfig{Plugins: []*plugin.Plugin{p}}
+			r, svc := newAbortRunner(t, cfg)
+
+			res := abortRun{sig: make(chan struct{}), closeOn: func(*session.Event) bool { return true }, stop: true, opts: root.opts}.drive(t, r)
+
+			if len(res.errs) != 0 {
+				t.Errorf("Run() errors = %v, want none", res.errs)
+			}
+			if diff := cmp.Diff([]string{}, describeAbortEvents(abortedEvents(res.events))); diff != "" {
+				t.Errorf("yielded abort events mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(root.wantSealed, describeAbortEvents(abortedEvents(storedAbortSession(t, svc, "s")))); diff != "" {
+				t.Errorf("stored abort events mismatch (-want +got):\n%s", diff)
+			}
+			if got := afterRuns.Load(); got != 1 {
+				t.Errorf("after-run callbacks ran %d times, want 1", got)
+			}
+			if got := lastCode.Load(); got != abortedCode {
+				t.Errorf("after-run saw last event error code %q, want %q", got, abortedCode)
+			}
+		})
+		t.Run(root.name+"/append_failure_dropped_on_break", func(t *testing.T) {
+			p, afterRuns, _ := afterRunRecorder(t)
+			svc := &abortCheckingService{Service: session.InMemoryService(), failAbort: errors.New("simulated db failure")}
+			cfg := root.config(t)
+			cfg.SessionService = svc
+			cfg.PluginConfig = PluginConfig{Plugins: []*plugin.Plugin{p}}
+			r, _ := newAbortRunner(t, cfg)
+
+			res := abortRun{sig: make(chan struct{}), closeOn: func(*session.Event) bool { return true }, stop: true, opts: root.opts}.drive(t, r)
+
+			if len(res.errs) != 0 {
+				t.Errorf("Run() errors = %v, want none", res.errs)
+			}
+			if got := svc.abortAppends.Load(); got != 1 {
+				t.Errorf("AppendEvent got %d abort events, want 1", got)
+			}
+			if diff := cmp.Diff([]string{}, describeAbortEvents(abortedEvents(storedAbortSession(t, svc, "s")))); diff != "" {
+				t.Errorf("stored abort events mismatch (-want +got):\n%s", diff)
+			}
+			if got := afterRuns.Load(); got != 1 {
+				t.Errorf("after-run callbacks ran %d times, want 1", got)
+			}
+		})
+	}
+}
+
+// twoChunkModel answers every request with two responses, "chunk 1" and
+// "chunk 2", in one model call.
+type twoChunkModel struct{}
+
+func (twoChunkModel) Name() string { return "two-chunk" }
+
+func (twoChunkModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for _, text := range []string{"chunk 1", "chunk 2"} {
+			if !yield(&model.LLMResponse{Content: genai.NewContentFromText(text, genai.RoleModel)}, nil) {
+				return
+			}
+		}
+	}
+}
+
+// callThenAfterModel answers every request with two responses in one call:
+// a call to _slow_tool with ID call_1, then the text "after".
+type callThenAfterModel struct{}
+
+func (callThenAfterModel) Name() string { return "call-then-after" }
+
+func (callThenAfterModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		call := &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "_slow_tool", Args: map[string]any{}}},
+		}}}
+		if !yield(call, nil) {
+			return
+		}
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("after", genai.RoleModel)}, nil)
+	}
+}
+
+// requestResponses describes the function responses in the contents of req.
+func requestResponses(req *model.LLMRequest) []string {
+	out := []string{}
+	for _, c := range req.Contents {
+		for _, fr := range utils.FunctionResponses(c) {
+			out = append(out, fmt.Sprintf("%s %s %v", fr.ID, fr.Name, fr.Response))
+		}
+	}
+	return out
+}
+
+func TestRunner_Abort_FlowStopsBetweenChunksAndCancelsRunningTool(t *testing.T) {
+	t.Parallel()
+	t.Run("tool_cancelled_and_next_turn_recovers", func(t *testing.T) {
+		probe, m, a := newSlowToolAgent(t, "tool_agent")
+		r, svc := newAbortRunner(t, Config{Agent: a})
+		sig := make(chan struct{})
+		closeWhen(t, probe.started, sig)
+
+		res := abortRun{sig: sig}.drive(t, r)
+
+		if len(res.errs) != 0 {
+			t.Errorf("Run() errors = %v, want none", res.errs)
+		}
+		if res.took > abortPrompt {
+			t.Errorf("Run() took %v, want under %v", res.took, abortPrompt)
+		}
+		select {
+		case err := <-probe.ctxErr:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("tool saw ctx.Err() = %v, want %v", err, context.Canceled)
+			}
+		default:
+			t.Error("the tool's context was not cancelled")
+		}
+		wantTurn1 := []string{`tool_agent call call_1 _slow_tool`, sealedCall1}
+		if diff := cmp.Diff(wantTurn1, describeAbortEvents(res.events)); diff != "" {
+			t.Errorf("turn 1 events mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]string{`user text "Run"`, `tool_agent call call_1 _slow_tool`, sealedCall1}, describeAbortEvents(storedAbortSession(t, svc, "s"))); diff != "" {
+			t.Errorf("stored events after turn 1 mismatch (-want +got):\n%s", diff)
+		}
+
+		var turn2 []*session.Event
+		for ev, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("Next question", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("turn 2: Run() error = %v", err)
+			}
+			turn2 = append(turn2, ev)
+		}
+
+		if diff := cmp.Diff([]string{`tool_agent text "Recovered"`}, describeAbortEvents(turn2)); diff != "" {
+			t.Errorf("turn 2 events mismatch (-want +got):\n%s", diff)
+		}
+		reqs := m.requests()
+		if len(reqs) != 2 {
+			t.Fatalf("model got %d requests, want 2", len(reqs))
+		}
+		if diff := cmp.Diff([]string{"call_1 _slow_tool map[error:Invocation was aborted by client.]"}, requestResponses(reqs[1])); diff != "" {
+			t.Errorf("turn 2 request function responses mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("response_after_cancelled_call_is_dropped", func(t *testing.T) {
+		probe, tl := newSlowTool(t)
+		inner := must(llmagent.New(llmagent.Config{Name: "tool_agent", Model: callThenAfterModel{}, Tools: []tool.Tool{tl}}))
+		root := must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{inner}}}))
+		r, svc := newAbortRunner(t, Config{Agent: root})
+		sig := make(chan struct{})
+		closeWhen(t, probe.started, sig)
+
+		res := abortRun{sig: sig}.drive(t, r)
+
+		if len(res.errs) != 0 {
+			t.Errorf("Run() errors = %v, want none", res.errs)
+		}
+		if diff := cmp.Diff([]string{`tool_agent call call_1 _slow_tool`, sealedCall1}, describeAbortEvents(res.events)); diff != "" {
+			t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]string{`user text "Run"`, `tool_agent call call_1 _slow_tool`, sealedCall1}, describeAbortEvents(storedAbortSession(t, svc, "s"))); diff != "" {
+			t.Errorf("stored events mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("stops_before_second_step", func(t *testing.T) {
+		quick, err := functiontool.New(functiontool.Config{Name: "_quick_tool", Description: "returns"}, func(agent.Context, struct{}) (map[string]any, error) {
+			return map[string]any{"result": "ok"}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New() error = %v", err)
+		}
+		m := &callThenTextModel{toolName: "_quick_tool"}
+		r, _ := newAbortRunner(t, Config{Agent: must(llmagent.New(llmagent.Config{Name: "tool_agent", Model: m, Tools: []tool.Tool{quick}}))})
+		closeOnResponse := func(ev *session.Event) bool { return len(utils.FunctionResponses(ev.Content)) > 0 }
+
+		res := abortRun{sig: make(chan struct{}), closeOn: closeOnResponse}.drive(t, r)
+
+		if len(res.errs) != 0 {
+			t.Errorf("Run() errors = %v, want none", res.errs)
+		}
+		want := []string{
+			`tool_agent call call_1 _quick_tool`,
+			`tool_agent response call_1 _quick_tool map[result:ok]`,
+			`tool_agent INVOCATION_ABORTED "Invocation was aborted by client." no-content`,
+		}
+		if diff := cmp.Diff(want, describeAbortEvents(res.events)); diff != "" {
+			t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
+		}
+		if got := len(m.requests()); got != 1 {
+			t.Errorf("model got %d requests, want 1", got)
+		}
+	})
+	t.Run("stops_between_chunks", func(t *testing.T) {
+		r, _ := newAbortRunner(t, Config{Agent: must(llmagent.New(llmagent.Config{Name: "test_agent", Model: twoChunkModel{}}))})
+		byTestAgent := func(ev *session.Event) bool { return ev.Author == "test_agent" }
+
+		res := abortRun{sig: make(chan struct{}), closeOn: byTestAgent}.drive(t, r)
+
+		if len(res.errs) != 0 {
+			t.Errorf("Run() errors = %v, want none", res.errs)
+		}
+		want := []string{
+			`test_agent text "chunk 1"`,
+			`test_agent INVOCATION_ABORTED "Invocation was aborted by client." no-content`,
+		}
+		if diff := cmp.Diff(want, describeAbortEvents(res.events)); diff != "" {
+			t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// waitForCancel signals ready, waits for ctx to end and reports ctx.Err() on
+// observed. It returns ctx.Err(), or nil when ctx outlives abortBlockFor.
+func waitForCancel(ctx context.Context, ready chan<- struct{}, observed chan<- error) error {
+	ready <- struct{}{}
+	select {
+	case <-ctx.Done():
+		observed <- ctx.Err()
+		return ctx.Err()
+	case <-time.After(abortBlockFor):
+		return nil
+	}
+}
+
+func TestRunner_Abort_CallbacksAndCustomNodesObserveContextDone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		build func(t *testing.T, ready chan<- struct{}, observed chan<- error) Config
+	}{
+		{
+			name: "before_model_callback",
+			build: func(t *testing.T, ready chan<- struct{}, observed chan<- error) Config {
+				var calls atomic.Int32
+				return Config{Agent: must(llmagent.New(llmagent.Config{
+					Name:  "root",
+					Model: textModel{calls: &calls},
+					BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+						func(ctx agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+							return nil, waitForCancel(ctx, ready, observed)
+						},
+					},
+				}))}
+			},
+		},
+		{
+			name: "function_node",
+			build: func(t *testing.T, ready chan<- struct{}, observed chan<- error) Config {
+				return Config{Node: workflow.NewFunctionNode("root", func(ctx agent.Context, _ any) (any, error) {
+					return nil, waitForCancel(ctx, ready, observed)
+				}, workflow.NodeConfig{})}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ready := make(chan struct{}, 1)
+			observed := make(chan error, 1)
+			r, _ := newAbortRunner(t, tt.build(t, ready, observed))
+			sig := make(chan struct{})
+			closeWhen(t, ready, sig)
+
+			res := abortRun{sig: sig}.drive(t, r)
+
+			if len(res.errs) != 0 {
+				t.Errorf("Run() errors = %v, want none", res.errs)
+			}
+			select {
+			case err := <-observed:
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("ctx.Err() = %v, want %v", err, context.Canceled)
+				}
+			default:
+				t.Error("the context was not cancelled")
+			}
+			want := []string{`root INVOCATION_ABORTED "Invocation was aborted by client." no-content`}
+			if diff := cmp.Diff(want, describeAbortEvents(res.events)); diff != "" {
+				t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// abortGraphNode is a workflow node that runs fn.
+type abortGraphNode struct {
+	workflow.BaseNode
+	fn func(ctx agent.Context, yield func(*session.Event, error) bool)
+}
+
+func (n *abortGraphNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) { n.fn(ctx, yield) }
+}
+
+func TestRunner_Abort_WorkflowStopsSchedulingAndCancelsParallelNodes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		config func(t *testing.T, edges []workflow.Edge) Config
+	}{
+		{
+			name: "workflowagent",
+			config: func(t *testing.T, edges []workflow.Edge) Config {
+				a, err := workflowagent.New(workflowagent.Config{Name: "root", Edges: edges})
+				if err != nil {
+					t.Fatalf("workflowagent.New() error = %v", err)
+				}
+				return Config{Agent: a}
+			},
+		},
+		{
+			name: "node_root",
+			config: func(t *testing.T, edges []workflow.Edge) Config {
+				n, err := workflow.NewWorkflowNode("root", edges)
+				if err != nil {
+					t.Fatalf("workflow.NewWorkflowNode() error = %v", err)
+				}
+				return Config{Node: n}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bWaiting := make(chan struct{})
+			bEnded := make(chan error, 1)
+			var cRuns atomic.Int32
+			fanoutA := &abortGraphNode{BaseNode: workflow.NewBaseNode("fanout_a", "", workflow.NodeConfig{}), fn: func(ctx agent.Context, yield func(*session.Event, error) bool) {
+				<-bWaiting
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "fanout_a"
+				ev.Content = genai.NewContentFromText("a", genai.RoleModel)
+				if !yield(ev, nil) {
+					return
+				}
+				select {
+				case <-ctx.Done():
+				case <-time.After(abortBlockFor):
+				}
+			}}
+			fanoutB := &abortGraphNode{BaseNode: workflow.NewBaseNode("fanout_b", "", workflow.NodeConfig{}), fn: func(ctx agent.Context, _ func(*session.Event, error) bool) {
+				close(bWaiting)
+				select {
+				case <-ctx.Done():
+					bEnded <- ctx.Err()
+				case <-time.After(abortBlockFor):
+					bEnded <- nil
+				}
+			}}
+			successorC := workflow.NewFunctionNode("successor_c", func(agent.Context, any) (any, error) {
+				cRuns.Add(1)
+				return nil, nil
+			}, workflow.NodeConfig{})
+			edges := []workflow.Edge{
+				{From: workflow.Start, To: fanoutA},
+				{From: workflow.Start, To: fanoutB},
+				{From: fanoutA, To: successorC},
+			}
+			r, _ := newAbortRunner(t, tt.config(t, edges))
+			byFanoutA := func(ev *session.Event) bool { return ev.Author == "fanout_a" }
+
+			res := abortRun{sig: make(chan struct{}), closeOn: byFanoutA}.drive(t, r)
+
+			if len(res.errs) != 0 {
+				t.Errorf("Run() errors = %v, want none", res.errs)
+			}
+			want := []string{
+				`fanout_a text "a"`,
+				`root INVOCATION_ABORTED "Invocation was aborted by client." no-content`,
+			}
+			if diff := cmp.Diff(want, describeAbortEvents(res.events)); diff != "" {
+				t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
+			}
+			select {
+			case err := <-bEnded:
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("fanout_b ended with ctx.Err() = %v, want %v", err, context.Canceled)
+				}
+			case <-time.After(abortPrompt):
+				t.Error("fanout_b did not end")
+			}
+			if got := cRuns.Load(); got != 0 {
+				t.Errorf("successor_c ran %d times, want 0", got)
+			}
+		})
+	}
+}
+
+func TestRunner_Abort_CallerContextCancelVsAbortSignalAndPostRunSignal(t *testing.T) {
+	t.Parallel()
+	t.Run("signal_after_run_ends", func(t *testing.T) {
+		root, err := agent.New(agent.Config{Name: "root", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "root"
+				ev.Content = genai.NewContentFromText("ok", genai.RoleModel)
+				yield(ev, nil)
+			}
+		}})
+		if err != nil {
+			t.Fatalf("agent.New() error = %v", err)
+		}
+		r, svc := newAbortRunner(t, Config{Agent: root})
+		sig := make(chan struct{})
+		res := abortRun{sig: sig}.drive(t, r)
+		if len(res.errs) != 0 {
+			t.Fatalf("Run() errors = %v, want none", res.errs)
+		}
+
+		close(sig)
+
+		want := []string{`user text "Run"`, `root text "ok"`}
+		if diff := cmp.Diff(want, describeAbortEvents(storedAbortSession(t, svc, "s"))); diff != "" {
+			t.Errorf("stored events mismatch (-want +got):\n%s", diff)
+		}
+	})
+	for _, root := range slowCallRoots() {
+		t.Run("caller_ctx_and_abort_both_fire/"+root.name, func(t *testing.T) {
+			a, _ := root.build(t)
+			p, afterRuns, _ := afterRunRecorder(t)
+			svc := &abortCheckingService{Service: session.InMemoryService()}
+			r, _ := newAbortRunner(t, Config{Agent: a, SessionService: svc, PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{p}}})
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			sig := make(chan struct{})
+
+			start := time.Now()
+			for ev, err := range r.Run(ctx, "u", "s", genai.NewContentFromText("Run", genai.RoleUser), agent.RunConfig{}, WithAbortSignal(sig)) {
+				if err == nil && hasCall(ev) {
+					close(sig)
+					cancel()
+					break
+				}
+			}
+
+			if took := time.Since(start); took > abortPrompt {
+				t.Errorf("Run() took %v, want under %v", took, abortPrompt)
+			}
+			if diff := cmp.Diff([]string{sealedCall1}, describeAbortEvents(abortedEvents(storedAbortSession(t, svc, "s")))); diff != "" {
+				t.Errorf("stored abort events mismatch (-want +got):\n%s", diff)
+			}
+			if got := afterRuns.Load(); got != 1 {
+				t.Errorf("after-run callbacks ran %d times, want 1", got)
+			}
+		})
+	}
+	t.Run("concurrent_runs_isolated", func(t *testing.T) {
+		release := make(chan struct{})
+		root, err := agent.New(agent.Config{Name: "root", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "root"
+				if ctx.Session().ID() == "s1" {
+					ev.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "_slow_tool"}}}}
+					if yield(ev, nil) {
+						select {
+						case <-ctx.Done():
+						case <-time.After(abortBlockFor):
+						}
+					}
+					return
+				}
+				select {
+				case <-release:
+				case <-ctx.Done():
+					yield(nil, ctx.Err())
+					return
+				}
+				ev.Content = genai.NewContentFromText("ok", genai.RoleModel)
+				yield(ev, nil)
+			}
+		}})
+		if err != nil {
+			t.Fatalf("agent.New() error = %v", err)
+		}
+		r, svc := newAbortRunner(t, Config{Agent: root})
+		s2Done := make(chan abortResult, 1)
+		go func() {
+			s2Done <- abortRun{session: "s2", sig: make(chan struct{})}.drive(t, r)
+		}()
+
+		res1 := abortRun{session: "s1", sig: make(chan struct{}), closeOn: hasCall}.drive(t, r)
+		close(release)
+		res2 := <-s2Done
+
+		if len(res1.errs) != 0 || len(res2.errs) != 0 {
+			t.Errorf("Run() errors = %v and %v, want none", res1.errs, res2.errs)
+		}
+		wantS1 := []string{`root INVOCATION_ABORTED "Invocation was aborted by client." response call_1 _slow_tool map[error:Invocation was aborted by client.]`}
+		if diff := cmp.Diff(wantS1, describeAbortEvents(abortedEvents(storedAbortSession(t, svc, "s1")))); diff != "" {
+			t.Errorf("s1 stored abort events mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]string{`user text "Run"`, `root text "ok"`}, describeAbortEvents(storedAbortSession(t, svc, "s2"))); diff != "" {
+			t.Errorf("s2 stored events mismatch (-want +got):\n%s", diff)
+		}
+	})
 }
