@@ -162,8 +162,11 @@ func validateAppAndUser(appName, userID string) error {
 // UserID, and SessionID when it is required, are checked with
 // [ValidatePathSegment] in that order. A "user:" file name makes the session
 // irrelevant: an empty SessionID is accepted and a non-empty one is not
-// checked. The part must carry text or inline data. Every error wraps
-// [ErrInputValidation].
+// checked. The part must carry text or inline data, or have no field set:
+// genai.Part cannot tell empty text from unset text, so the services in this
+// module store a part with no field set as empty text. A part with any other
+// field set and neither text nor inline data, such as file data alone, is
+// refused. Every error wraps [ErrInputValidation].
 func (req *SaveRequest) Validate() error {
 	return req.validate(false)
 }
@@ -194,10 +197,11 @@ func (req *SaveRequest) ValidateAllowingFileData() error {
 
 // validate is the shared request validation, with allowRef tolerating a file
 // data part, an artifact reference or external data. Validate() (allowRef
-// false) rejects a part that is neither text nor inline data, the shared
-// contract of services that do not store file data. The services that store
-// it set allowRef: the in-memory service directly, and others through
-// ValidateAllowingFileData.
+// false) accepts a part with text, a part with inline data, or a part with no
+// field set, which the services store as empty text, and rejects every other
+// part: the shared contract of services that do not store file data. The
+// services that store it set allowRef: the in-memory service directly, and
+// others through ValidateAllowingFileData.
 func (req *SaveRequest) validate(allowRef bool) error {
 	name := artifactName{appName: req.AppName, userID: req.UserID, sessionID: req.SessionID, fileName: req.FileName}
 	missingFields := name.missingFields()
