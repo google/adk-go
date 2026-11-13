@@ -16,7 +16,11 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"iter"
+	"time"
+
+	"go.opentelemetry.io/otel/trace"
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -48,19 +52,25 @@ func InstrumentInvocation(ctx context.Context, root AgentLike, sessionID string,
 	}
 }
 
-// InstrumentGenerateContent wraps a model call in its span and log records.
+// InstrumentGenerateContent wraps a model call in its span, log records and
+// client inference metrics.
 // The span ends before the response that ends the call is yielded: an error,
 // a response reporting a finish reason, or the one response of a call that is
 // not streamed. The legacy schema ends it at the first response not marked
 // partial instead.
 func InstrumentGenerateContent[T any](ctx context.Context, params GenerateContentParams, response func(T) (*model.LLMResponse, string), call func(context.Context) iter.Seq2[T, error]) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {
-		ctx, span := startGenerateContentSpan(ctx, params)
+		start := time.Now()
+		ctx, span := startGenerateContentSpan(ctx, params, trace.WithTimestamp(start))
 		logRequest(ctx, params.Request, params.Backend)
 		details := operationDetails{span: span}
 		details.noteLLMRequest(params.Request)
+		// Both span formats record the same metrics. adk-python's older schema
+		// records no inference token metrics; Go has no older metrics to keep.
+		metrics := newClientInference(params, start)
 
 		var result generateContentResult
+		var spanEnd time.Time
 		ended := false
 		end := func() {
 			if ended {
@@ -70,15 +80,29 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 			traceGenerateContentResult(span, result)
 			details.noteLLMRequest(params.Request)
 			details.emit(ctx, params, result)
-			span.End()
+			spanEnd = time.Now()
+			span.End(trace.WithTimestamp(spanEnd))
 		}
-		defer end()
+		// Set on every path that returns normally, so the deferred function
+		// can tell a panic apart.
+		returned := false
+		// The metrics count responses that arrive after the span ended, such
+		// as an aggregate carrying usage, so they wait for the whole call.
+		defer func() {
+			if !returned && !ended {
+				result.Error = errInferencePanicked
+				metrics.observe(ctx, nil, errInferencePanicked, true)
+			}
+			end()
+			metrics.record(ctx, spanEnd)
+		}()
 		legacy := useLegacySchema()
 		for v, err := range call(ctx) {
 			resp, eventID := response(v)
+			metrics.observe(ctx, resp, err, !ended)
 			switch {
 			case legacy:
-				result = generateContentResult{Response: resp, EventID: eventID, Error: err}
+				result = generateContentResult{Response: resp, EventID: eventID, Error: inferenceError(err)}
 				if err != nil {
 					end()
 				} else if !resp.Partial {
@@ -89,7 +113,7 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 				// After the end, what an aggregator assembles from the chunks
 				// already recorded.
 			default:
-				result.Error = err
+				result.Error = inferenceError(err)
 				if resp != nil {
 					result.Response, result.EventID = resp, eventID
 					result.Responses = append(result.Responses, resp)
@@ -102,8 +126,25 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 				}
 			}
 			if !yield(v, err) {
+				returned = true
 				return
 			}
 		}
+		returned = true
 	}
+}
+
+// errInferencePanicked stands for a panic that unwound a model call while its
+// span was open. Its error type is the conventions' fallback value, _OTHER,
+// since a panic value has no stable, low-cardinality name.
+var errInferencePanicked = errors.New("model call panicked")
+
+// inferenceError is the error the inference span, its event and its metrics
+// record for a model error. A canceled call did not fail, so it records none:
+// the span keeps an unset status and nothing gets an error type.
+func inferenceError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }

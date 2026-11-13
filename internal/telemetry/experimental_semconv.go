@@ -76,9 +76,7 @@ func (d *operationDetails) emit(ctx context.Context, params GenerateContentParam
 		semconv.GenAIRequestModel(params.ModelName),
 		gcpVertexAgentInvocationID.String(params.InvocationID),
 	}
-	if provider, ok := providerName(params.ModelName, params.Backend); ok {
-		attrs = append(attrs, provider)
-	}
+	attrs = append(attrs, providerName(params.ModelName, params.Backend))
 	if result.Error != nil {
 		attrs = append(attrs, errorType(result.Error))
 	}

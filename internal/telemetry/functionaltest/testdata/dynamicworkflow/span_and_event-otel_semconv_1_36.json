@@ -259,5 +259,100 @@
       }
     ],
     "logs": []
+  },
+  "metric_points": {
+    "gen_ai.client.inference.duration": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock"
+        },
+        "value": "PRESENT"
+      }
+    ],
+    "gen_ai.client.inference.operation.input_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock"
+        },
+        "value": 0
+      }
+    ],
+    "gen_ai.client.inference.operation.output_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock"
+        },
+        "value": 0
+      }
+    ],
+    "gen_ai.client.inference.usage.cache_read.input_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "unknown"
+        },
+        "value": 0
+      }
+    ],
+    "gen_ai.client.inference.usage.cache_write.input_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "unknown"
+        },
+        "value": 0
+      }
+    ],
+    "gen_ai.client.inference.usage.input_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "unknown"
+        },
+        "value": 0
+      }
+    ],
+    "gen_ai.client.inference.usage.output_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "unknown"
+        },
+        "value": 0
+      }
+    ],
+    "gen_ai.client.inference.usage.reasoning.output_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "unknown"
+        },
+        "value": 0
+      }
+    ]
   }
 }

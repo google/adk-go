@@ -16,8 +16,9 @@
 // telemetry tests:
 //
 //   - [Digest] / [BuildDigest]: the emitted span tree, with log
-//     records nested under the span they were emitted in, normalized so it can
-//     be stored as a golden and compared exactly.
+//     records nested under the span they were emitted in, and the metric data
+//     points grouped by metric name, normalized so it can be stored as a
+//     golden and compared exactly.
 //   - [InMemoryLogExporter]: the log sink to install via
 //     telemetry.OverrideLoggerForTesting.
 //
