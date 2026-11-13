@@ -956,7 +956,10 @@ func TestPreprocessStopsWhenTheConsumerDoes(t *testing.T) {
 	f := &Flow{RequestProcessors: []func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error]{twoEvents}}
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: &mockLLMAgent{s: &State{}}})
 
-	for range f.preprocess(ctx, &model.LLMRequest{}) {
+	for _, err := range f.preprocess(ctx, &model.LLMRequest{}) {
+		if err != nil {
+			t.Fatalf("preprocess() error = %v", err)
+		}
 		break
 	}
 }

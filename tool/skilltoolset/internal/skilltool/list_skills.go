@@ -29,7 +29,7 @@ type ListSkillsArgs struct{}
 
 // ListSkillsResult represents the output for ListSkills tool.
 type ListSkillsResult struct {
-	SkillsXML string `json:"skills"`
+	SkillsXML string `json:"result"`
 }
 
 // ListSkills creates a tool.Tool to list available skills.

@@ -68,7 +68,7 @@ func TestNew(t *testing.T) {
 				Description:             "Retrieves documentation.",
 				RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
 				SimilarityTopK:          genai.Ptr[int32](5),
-				VectorDistanceThreshold: genai.Ptr(0.4),
+				VectorDistanceThreshold: new(0.4),
 			},
 		},
 	}
@@ -114,12 +114,12 @@ func TestProcessRequest(t *testing.T) {
 		Description:             "Retrieves documentation.",
 		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
 		SimilarityTopK:          genai.Ptr[int32](3),
-		VectorDistanceThreshold: genai.Ptr(0.5),
+		VectorDistanceThreshold: new(0.5),
 	}
 	retrieval := &genai.Tool{Retrieval: &genai.Retrieval{VertexRAGStore: &genai.VertexRAGStore{
 		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
 		SimilarityTopK:          genai.Ptr[int32](3),
-		VectorDistanceThreshold: genai.Ptr(0.5),
+		VectorDistanceThreshold: new(0.5),
 	}}}
 
 	testCases := []struct {
@@ -220,7 +220,7 @@ func wantStore() *genai.VertexRAGStore {
 	return &genai.VertexRAGStore{
 		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
 		SimilarityTopK:          genai.Ptr[int32](3),
-		VectorDistanceThreshold: genai.Ptr(0.5),
+		VectorDistanceThreshold: new(0.5),
 	}
 }
 
@@ -259,7 +259,7 @@ func TestProcessRequest_CopiesStorePerRequest(t *testing.T) {
 		Description:             "d",
 		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
 		SimilarityTopK:          genai.Ptr[int32](3),
-		VectorDistanceThreshold: genai.Ptr(0.5),
+		VectorDistanceThreshold: new(0.5),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

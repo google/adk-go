@@ -393,7 +393,7 @@ func TestPrepareDockerfile_EntryPointReachesRUNLine(t *testing.T) {
 		t.Fatalf("cannot read the generated Dockerfile: %v", err)
 	}
 	var runLine string
-	for _, line := range strings.Split(string(content), "\n") {
+	for line := range strings.SplitSeq(string(content), "\n") {
 		if rest, ok := strings.CutPrefix(line, "RUN "); ok {
 			runLine = rest
 		}

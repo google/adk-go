@@ -195,18 +195,18 @@ func TestFinishTaskTool_DeclarationResultMatchesValidation(t *testing.T) {
 	}{
 		{
 			name:         "nullable string",
-			outputSchema: &genai.Schema{Type: genai.TypeString, Nullable: genai.Ptr(true)},
+			outputSchema: &genai.Schema{Type: genai.TypeString, Nullable: new(true)},
 		},
 		{
 			name:         "nullable integer",
-			outputSchema: &genai.Schema{Type: genai.TypeInteger, Nullable: genai.Ptr(true)},
+			outputSchema: &genai.Schema{Type: genai.TypeInteger, Nullable: new(true)},
 		},
 		{
 			name: "nullable array",
 			outputSchema: &genai.Schema{
 				Type:     genai.TypeArray,
 				Items:    &genai.Schema{Type: genai.TypeString},
-				Nullable: genai.Ptr(true),
+				Nullable: new(true),
 			},
 		},
 		{
@@ -219,7 +219,7 @@ func TestFinishTaskTool_DeclarationResultMatchesValidation(t *testing.T) {
 				Type:        genai.TypeString,
 				Description: "The verdict.",
 				Enum:        []string{"yes", "no"},
-				Nullable:    genai.Ptr(true),
+				Nullable:    new(true),
 			},
 		},
 	}
@@ -413,13 +413,13 @@ func TestFinishTaskTool_Run(t *testing.T) {
 		},
 		{
 			name:         "nullable string wrapper, non-null args",
-			outputSchema: &genai.Schema{Type: genai.TypeString, Nullable: genai.Ptr(true)},
+			outputSchema: &genai.Schema{Type: genai.TypeString, Nullable: new(true)},
 			args:         map[string]any{"result": "hello"},
 			want:         wantSuccess,
 		},
 		{
 			name:          "validation error: nullable string wrapper, null result",
-			outputSchema:  &genai.Schema{Type: genai.TypeString, Nullable: genai.Ptr(true)},
+			outputSchema:  &genai.Schema{Type: genai.TypeString, Nullable: new(true)},
 			args:          map[string]any{"result": nil},
 			wantErrSubstr: []string{"finish_task", "validation errors", "result"},
 		},

@@ -308,11 +308,9 @@ func TestEventarcTriggerHandler_NonPositiveMaxConcurrentRunsIsUnlimited(t *testi
 			var wg sync.WaitGroup
 			for i := range requests {
 				recorders[i] = httptest.NewRecorder()
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					ctrl.EventarcTriggerHandler(recorders[i], buildEventarcRequest(t, "hello"))
-				}()
+				})
 			}
 			for i := range requests {
 				select {
@@ -347,11 +345,9 @@ func TestEventarcTriggerHandler_EnforcesMaxConcurrentRuns(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range limit + 1 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ctrl.EventarcTriggerHandler(httptest.NewRecorder(), buildEventarcRequest(t, "hello"))
-		}()
+		})
 	}
 
 	for i := range limit {
