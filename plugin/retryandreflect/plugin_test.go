@@ -17,6 +17,7 @@ package retryandreflect
 import (
 	"errors"
 	"fmt"
+	"iter"
 	"strings"
 	"testing"
 
@@ -338,6 +339,79 @@ func TestRetryAndReflect_ReturnedErrorReachesTheModel(t *testing.T) {
 	}
 	if guidance, _ := res["reflection_guidance"].(string); !strings.Contains(guidance, "order not found") {
 		t.Errorf("reflection_guidance does not carry the tool's error: %q", guidance)
+	}
+}
+
+// A streaming success has to reset the plugin's failure budget the way a
+// non-streaming success does. Otherwise a failure, then a success, then
+// another failure exhausts a MaxRetries(1) budget and the plugin tells the
+// model to stop using a tool that is working, which the non-streaming path
+// does not do.
+func TestStreamingTool_SuccessResetsTheRetryBudget(t *testing.T) {
+	calls := 0
+	streamTool, err := functiontool.NewStreaming(functiontool.Config{Name: "flaky_stream"}, func(_ agent.Context, _ struct{}) iter.Seq2[string, error] {
+		return func(yield func(string, error) bool) {
+			calls++
+			// Fail, succeed, fail.
+			if calls == 2 {
+				yield("ok", nil)
+				return
+			}
+			yield("", errors.New("tool unavailable"))
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := &testutil.MockModel{Responses: []*genai.Content{
+		{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "flaky_stream", Args: map[string]any{}}}}},
+		{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c2", Name: "flaky_stream", Args: map[string]any{}}}}},
+		{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c3", Name: "flaky_stream", Args: map[string]any{}}}}},
+		genai.NewContentFromText("done", "model"),
+	}}
+	a, err := llmagent.New(llmagent.Config{Name: "a", Model: m, Tools: []tool.Tool{streamTool}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(WithMaxRetries(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := testutil.NewTestAgentRunnerWithPluginManager(t, a, runner.PluginConfig{Plugins: []*plugin.Plugin{p}})
+
+	var responses []map[string]any
+	for ev, err := range r.Run(t, "s1", "hi") {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.LLMResponse.Content == nil {
+			continue
+		}
+		for _, part := range ev.LLMResponse.Content.Parts {
+			if part.FunctionResponse != nil {
+				responses = append(responses, part.FunctionResponse.Response)
+			}
+		}
+	}
+
+	if len(responses) != 3 {
+		t.Fatalf("function responses = %d; want 3", len(responses))
+	}
+	for i, want := range []string{reflectAndRetryResponseType, "", reflectAndRetryResponseType} {
+		got, _ := responses[i]["response_type"].(string)
+		if got != want {
+			t.Errorf("function response %d response_type = %q; want %q", i, got, want)
+		}
+	}
+	// The third call must get the first reflection again, not the exceeded
+	// message: the successful second call cleared the budget.
+	guidance, _ := responses[2]["reflection_guidance"].(string)
+	if !strings.Contains(guidance, "retry attempt **1 of 1**") {
+		t.Errorf("third failure guidance does not restart the budget: %.300q", guidance)
+	}
+	if strings.Contains(guidance, "retry limit has been exceeded") {
+		t.Errorf("third failure exceeded a budget the successful call should have reset: %.300q", guidance)
 	}
 }
 
