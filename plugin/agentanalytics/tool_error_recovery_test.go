@@ -113,13 +113,13 @@ func TestReflectAndRetryAnswerErrorMessage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)
 			toolCtx := withFunctionCall(mCtx, "call-reflect")
-			final := &fakeTool{name: "lookup"}
+			lookup := &fakeTool{name: "lookup"}
 			args := map[string]any{}
 			tc.answer["response_type"] = reflectAndRetryResponseType
 			var errs callbackErrors
 			errs.add(p.BeforeAgentCallback()(mCtx))
-			errs.add(p.BeforeToolCallback()(toolCtx, final, args))
-			errs.add(p.AfterToolCallback()(toolCtx, final, args, tc.answer, nil))
+			errs.add(p.BeforeToolCallback()(toolCtx, lookup, args))
+			errs.add(p.AfterToolCallback()(toolCtx, lookup, args, tc.answer, nil))
 			errs.add(p.AfterAgentCallback()(mCtx))
 			errs.check(t)
 			p.AfterRunCallback()(mCtx)
@@ -137,5 +137,104 @@ func TestReflectAndRetryAnswerErrorMessage(t *testing.T) {
 			}
 			mustLatency(t, row)
 		})
+	}
+}
+
+func fnCallResponse(id, name string) *model.LLMResponse {
+	return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: id, Name: name, Args: map[string]any{}}}}}}
+}
+
+func newLookupTool(t *testing.T, fail bool) tool.Tool {
+	t.Helper()
+	lookup, err := functiontool.New(functiontool.Config{Name: "lookup", Description: "looks up"},
+		func(agent.Context, struct{}) (struct{}, error) {
+			if fail {
+				return struct{}{}, errors.New("lookup failed")
+			}
+			return struct{}{}, nil
+		})
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+	return lookup
+}
+
+// TestRunner_ReusedCallIDAfterUnknownTool checks that a successful call still
+// gets TOOL_COMPLETED when an earlier plugin answers its BeforeToolCallback
+// and a call of a missing tool used the same function call ID before.
+func TestRunner_ReusedCallIDAfterUnknownTool(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	early, err := baseplugin.New(baseplugin.Config{
+		Name: "early",
+		BeforeToolCallback: func(agent.Context, tool.Tool, map[string]any) (map[string]any, error) {
+			return map[string]any{"ok": true}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New: %v", err)
+	}
+	bot, err := llmagent.New(llmagent.Config{
+		Name: "bot",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			fnCallResponse("call_0", "ghost"),
+			fnCallResponse("call_0", "lookup"),
+			{Content: textContent("model", "done")},
+		}},
+		Tools: []tool.Tool{newLookupTool(t, false)},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	r := newTestRunner(t, bot, early, p)
+	for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run: %v", err)
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventToolCompleted)); n != 1 {
+		t.Errorf("got %d TOOL_COMPLETED rows, want 1", n)
+	}
+	if n := len(rowsOfType(rows, EventToolError)); n != 1 {
+		t.Errorf("got %d TOOL_ERROR rows, want 1 (the missing tool)", n)
+	}
+}
+
+// TestRunner_AgentOnToolErrorCallback checks that a failure recovered by the
+// agent's own OnToolErrorCallbacks has exactly one terminal row, TOOL_ERROR.
+func TestRunner_AgentOnToolErrorCallback(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	bot, err := llmagent.New(llmagent.Config{
+		Name: "bot",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			fnCallResponse("call_0", "lookup"),
+			{Content: textContent("model", "done")},
+		}},
+		Tools: []tool.Tool{newLookupTool(t, true)},
+		OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+			func(agent.Context, tool.Tool, map[string]any, error) (map[string]any, error) {
+				return map[string]any{"recovered": true}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	r := newTestRunner(t, bot, p)
+	for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run: %v", err)
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+		t.Errorf("got %d TOOL_COMPLETED rows, want 0", n)
+	}
+	row := onlyRowOfType(t, rows, EventToolError)
+	if got, want := placeOf(row), placeOf(onlyRowOfType(t, rows, EventToolStarting)); got != want {
+		t.Errorf("TOOL_ERROR is at %+v, want %+v", got, want)
+	}
+	if row["error_message"] != "lookup failed" {
+		t.Errorf("error_message = %v, want %q", row["error_message"], "lookup failed")
 	}
 }

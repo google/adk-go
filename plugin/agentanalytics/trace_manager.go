@@ -4588,6 +4588,14 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 	key := callKey(ctx, llmKey(id))
 	owner := inv.ownerOf(ctx, id)
 	inv.clearLastPartialUnderLocked(owner)
+	// ADK runs no AfterToolCallback for a call of a missing tool, so its
+	// record, which no TOOL_STARTING span backs, would otherwise mark a later
+	// call that reuses the ID as closed by an error.
+	for k, rec := range inv.completedTools {
+		if !rec.callStarted {
+			delete(inv.completedTools, k)
+		}
+	}
 	if owner.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(owner, now)
 		// A new model call clears stale pending-event credits from earlier
