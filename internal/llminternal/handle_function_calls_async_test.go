@@ -413,7 +413,8 @@ func TestHandleFunctionCalls_FRSkipGates(t *testing.T) {
 	}
 }
 
-// noArgsCallModel calls toolName once with no Args, then answers "done".
+// noArgsCallModel calls toolName once with args (nil by default), then
+// answers "done".
 type noArgsCallModel struct {
 	toolName string
 	args     map[string]any
@@ -496,6 +497,75 @@ func TestHandleFunctionCalls_NoArgsReachToolAsEmptyMap(t *testing.T) {
 	}
 	if diff := cmp.Diff(map[string]any{}, afterArgs); diff != "" {
 		t.Errorf("after-tool callback args mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type argsRecordingStreamTool struct{ gotArgs any }
+
+func (t *argsRecordingStreamTool) Name() string        { return "stream_record" }
+func (t *argsRecordingStreamTool) Description() string { return "records its args" }
+func (t *argsRecordingStreamTool) IsLongRunning() bool { return false }
+
+func (t *argsRecordingStreamTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.Name(), Description: t.Description()}
+}
+
+func (t *argsRecordingStreamTool) RunStream(_ agent.Context, args any) iter.Seq2[string, error] {
+	t.gotArgs = args
+	return func(yield func(string, error) bool) { yield("ok", nil) }
+}
+
+func (t *argsRecordingStreamTool) ProcessRequest(_ agent.Context, req *model.LLMRequest) error {
+	return toolutils.PackTool(req, t)
+}
+
+func TestHandleFunctionCalls_NoArgsReachStreamingToolAsEmptyMap(t *testing.T) {
+	st := &argsRecordingStreamTool{}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "tester",
+		Model: &noArgsCallModel{toolName: st.Name()},
+		Tools: []tool.Tool{st},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range testutil.NewTestAgentRunner(t, a).Run(t, "s", "go") {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if diff := cmp.Diff(any(map[string]any{}), st.gotArgs); diff != "" {
+		t.Errorf("streaming tool args mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestHandleFunctionCalls_NoArgsReachOnToolErrorForUnknownTool(t *testing.T) {
+	var gotArgs map[string]any
+	called := false
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "tester",
+		Model: &noArgsCallModel{toolName: "missing"},
+		Tools: []tool.Tool{&argsRecordingTool{}},
+		OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+			func(_ agent.Context, _ tool.Tool, args map[string]any, _ error) (map[string]any, error) {
+				called, gotArgs = true, args
+				return map[string]any{"handled": true}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range testutil.NewTestAgentRunner(t, a).Run(t, "s", "go") {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !called {
+		t.Fatal("on-tool-error callback not called")
+	}
+	if diff := cmp.Diff(map[string]any{}, gotArgs); diff != "" {
+		t.Errorf("on-tool-error args mismatch (-want +got):\n%s", diff)
 	}
 }
 
