@@ -92,6 +92,7 @@ func (w *Workflow) Resume(
 			return
 		}
 
+		ctx := withOwnerOutputFor(ctx)
 		s := newScheduler(ctx, w.graph, w.maxConcurrency)
 		s.workflowName = w.name
 		s.state = state

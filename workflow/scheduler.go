@@ -388,6 +388,9 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 		SubScheduler:       &dss,
 		OutputForAncestors: &ofa,
 	})
+	// Hand a wrapped agent the ancestors only, not this node's path. A static
+	// node's own output is what its own events carry, live and on resume.
+	perNodeCtx = withAgentNodeOwner(perNodeCtx, n, ofa)
 
 	if cfg.Timeout > 0 {
 		perNodeCtx, cancel = perNodeCtx.WithAgentTimeout(cfg.Timeout)
@@ -756,11 +759,20 @@ func defaultContentRole(c *genai.Content) string {
 
 // terminalAncestors returns the ancestor paths for a terminal node's output,
 // or nil if nodeName is not terminal or the workflow is running at root level.
+// A workflow resumed behind an AgentNode has no path of its own but can still
+// carry ancestors, so those are kept.
 func (s *scheduler) terminalAncestors(nodeName string) []string {
-	if !s.terminals[nodeName] || s.parentCtx.Path() == "" {
+	if !s.terminals[nodeName] {
 		return nil
 	}
-	return append([]string{s.parentCtx.Path()}, s.parentCtx.OutputForAncestors()...)
+	ancestors := s.parentCtx.OutputForAncestors()
+	if s.parentCtx.Path() == "" {
+		if len(ancestors) == 0 {
+			return nil
+		}
+		return slices.Clone(ancestors)
+	}
+	return append([]string{s.parentCtx.Path()}, ancestors...)
 }
 
 // handleEvent updates the per-node accumulator. The event has

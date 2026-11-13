@@ -700,7 +700,14 @@ func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Even
 			yield(nil, err)
 			return
 		}
-		if fc := extractFinishTaskFC(ev); fc != nil {
+		// transfer_to_agent runs the target inside this agent's flow and
+		// forwards its events, so a finish_task call or response may belong
+		// to another (nested) task agent. Only this agent's own finish_task
+		// completes this task. Ownership is decided by Author, which is the
+		// agent's name, so a same-named task agent nested under a transfer
+		// target is not told apart from this one.
+		ownEvent := ev != nil && ev.Author == a.Name()
+		if fc := extractFinishTaskFC(ev); fc != nil && ownEvent {
 			// Remember the latest FC's args; wait for FinishTaskTool's
 			// FR before terminating. On validation failure the FR will
 			// NOT be the success message — the LLM sees the error and
@@ -711,7 +718,7 @@ func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Even
 			}
 			continue
 		}
-		if pendingFCArgs != nil && isFinishTaskSuccessFR(ev) {
+		if pendingFCArgs != nil && ownEvent && isFinishTaskSuccessFR(ev) {
 			wrapperKey := ""
 			if finishTool != nil {
 				wrapperKey = finishTool.WrapperKey()

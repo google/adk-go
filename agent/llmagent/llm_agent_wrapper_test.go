@@ -1649,3 +1649,193 @@ func TestTaskAgent_NullableResultClosesDelegation(t *testing.T) {
 		t.Errorf("task model called %d times, want 2: the null result should be rejected and retried", taskLLM.callIdx)
 	}
 }
+
+// TestRunTask_IgnoresAnotherAgentsFinishTask pins #2059: transfer_to_agent
+// runs the target inside the task agent's own flow and forwards its events, so
+// runTask also sees a finish_task call and success response written by the
+// target. Those belong to the target, and must not end the outer task or become
+// its output.
+func TestRunTask_IgnoresAnotherAgentsFinishTask(t *testing.T) {
+	t.Parallel()
+
+	inner := newFinishingTransferTarget(t)
+	outerLLM := &scriptedLLM{turns: []*model.LLMResponse{{
+		Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{
+				ID:   "transfer-1",
+				Name: "transfer_to_agent",
+				Args: map[string]any{"agent_name": "inner"},
+			},
+		}}},
+	}}}
+	outer := makeLLMAgent(t, "outer", withMode(llmagent.ModeTask), func(c *llmagent.Config) {
+		c.Model = outerLLM
+		c.SubAgents = []agent.Agent{inner}
+	})
+
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:        outer,
+		Session:      resp.Session,
+		UserContent:  genai.NewContentFromText("go", "user"),
+		InvocationID: "inv-nested-finish",
+		RunConfig:    &agent.RunConfig{},
+	})
+
+	var sawInnerFinish bool
+	for ev, err := range llmagent.RunLLMAgentAsNode(outer, agent.NewContext(ic), "go") {
+		if err != nil {
+			t.Fatalf("RunLLMAgentAsNode: %v", err)
+		}
+		if ev == nil {
+			continue
+		}
+		if ev.Author == "inner" && ev.Content != nil {
+			for _, p := range ev.Content.Parts {
+				if p != nil && p.FunctionResponse != nil && p.FunctionResponse.Name == workflowinternal.FinishTaskToolName {
+					sawInnerFinish = true
+				}
+			}
+		}
+		if ev.Output != nil {
+			t.Errorf("outer task completed with output %v from an event authored by %q; only its own finish_task may complete it", ev.Output, ev.Author)
+		}
+	}
+	if !sawInnerFinish {
+		t.Fatal("the transfer target's finish_task response never reached runTask, so the case under test did not run")
+	}
+}
+
+// TestRunTask_TransferTargetCannotCompleteARejectedFinishTask pins the
+// response-side ownership check. The outer agent calls finish_task with
+// arguments its schema rejects; FinishTaskTool answers with an error map
+// rather than a Go error, so the rejected arguments stay pending. The outer
+// agent then transfers, and the target's success response must not complete
+// the outer task with those rejected arguments. Only the outer agent's own,
+// corrected finish_task completes it.
+func TestRunTask_TransferTargetCannotCompleteARejectedFinishTask(t *testing.T) {
+	t.Parallel()
+
+	schema := &genai.Schema{
+		Type:       genai.TypeObject,
+		Properties: map[string]*genai.Schema{"answer": {Type: genai.TypeString}},
+		Required:   []string{"answer"},
+	}
+	outerLLM := &scriptedLLM{
+		turns: []*model.LLMResponse{
+			{Content: fcContent("ft-bad", workflowinternal.FinishTaskToolName, map[string]any{"wrong_field": "oops"})},
+			{Content: fcContent("transfer-1", "transfer_to_agent", map[string]any{"agent_name": "inner"})},
+			{Content: fcContent("ft-good", workflowinternal.FinishTaskToolName, map[string]any{"answer": "42"})},
+		},
+		doneText: "should not be reached",
+	}
+	outer := makeLLMAgent(t, "outer",
+		withMode(llmagent.ModeTask),
+		withOutputSchema(schema),
+		func(c *llmagent.Config) {
+			c.Model = outerLLM
+			c.SubAgents = []agent.Agent{newFinishingTransferTarget(t)}
+		},
+	)
+
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:        outer,
+		Session:      resp.Session,
+		UserContent:  genai.NewContentFromText("go", "user"),
+		InvocationID: "inv-rejected-then-transfer",
+		RunConfig:    &agent.RunConfig{},
+	})
+
+	type completion struct {
+		author string
+		output any
+	}
+	var completions []completion
+	var sawRejection, sawInnerFinish bool
+	for ev, err := range llmagent.RunLLMAgentAsNode(outer, agent.NewContext(ic), "go") {
+		if err != nil {
+			t.Fatalf("RunLLMAgentAsNode: %v", err)
+		}
+		if ev == nil {
+			continue
+		}
+		if ev.Content != nil {
+			for _, p := range ev.Content.Parts {
+				if p == nil || p.FunctionResponse == nil || p.FunctionResponse.Name != workflowinternal.FinishTaskToolName {
+					continue
+				}
+				if _, rejected := p.FunctionResponse.Response["error"]; rejected && ev.Author == "outer" {
+					sawRejection = true
+				}
+				if ev.Author == "inner" {
+					sawInnerFinish = true
+				}
+			}
+		}
+		if ev.Output != nil {
+			completions = append(completions, completion{author: ev.Author, output: ev.Output})
+		}
+	}
+
+	if !sawRejection {
+		t.Fatal("the outer agent's first finish_task was not rejected, so no rejected arguments were pending")
+	}
+	if !sawInnerFinish {
+		t.Fatal("the transfer target's finish_task response never reached runTask, so the case under test did not run")
+	}
+	want := []completion{{author: "outer", output: map[string]any{"answer": "42"}}}
+	if diff := cmp.Diff(want, completions, cmp.AllowUnexported(completion{})); diff != "" {
+		t.Errorf("task completions mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// newFinishingTransferTarget returns an agent named "inner" that, when run,
+// emits its own finish_task call and FinishTaskTool's success response, as a
+// nested task agent under a transfer target would. Its last event is not a
+// final response, so the transferring agent's model is called again after it.
+func newFinishingTransferTarget(t *testing.T) agent.Agent {
+	t.Helper()
+	inner, err := agent.New(agent.Config{
+		Name:        "inner",
+		Description: "transfer target that finishes its own task",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				fc := session.NewEvent(ctx, ctx.InvocationID())
+				fc.Author = "inner"
+				fc.Content = &genai.Content{Role: "model", Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{
+						ID:   "inner-finish",
+						Name: workflowinternal.FinishTaskToolName,
+						Args: map[string]any{"result": "from inner"},
+					},
+				}}}
+				if !yield(fc, nil) {
+					return
+				}
+				fr := session.NewEvent(ctx, ctx.InvocationID())
+				fr.Author = "inner"
+				fr.Content = &genai.Content{Role: "user", Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       "inner-finish",
+						Name:     workflowinternal.FinishTaskToolName,
+						Response: map[string]any{"result": workflowinternal.FinishTaskSuccessResult},
+					},
+				}}}
+				yield(fr, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(inner): %v", err)
+	}
+	return inner
+}
