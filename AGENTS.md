@@ -40,7 +40,7 @@ workspace, while `./...` matches only the module you are standing in:
 - Build:       `go build -mod=readonly work`
 - Test:        `go test -race -mod=readonly -count=1 -shuffle=on work`
 - Single pkg:  `go test -race ./agent/...`
-- Lint:        `golangci-lint run`   (per module; v2, CI pins v2.3.1; config in `.golangci.yml`)
+- Lint:        `golangci-lint run`   (per module; v2, CI pins v2.15.0; config in `.golangci.yml`)
 - Tidy check:  `go mod tidy -diff`   (per module; must print nothing)
 - Format:      `golangci-lint fmt`   (per module; applies gofumpt + goimports)
 
@@ -51,7 +51,7 @@ Install the same `golangci-lint` CI uses. A newer release reports findings CI
 does not, which reads as a failure you did not cause:
 
 ```bash
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.3.1
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 ```
 
 `golangci-lint` and `go mod tidy` are per-module, so a run from the repo root

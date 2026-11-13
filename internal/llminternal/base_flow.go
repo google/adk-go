@@ -421,8 +421,7 @@ func isResumable(err error) bool {
 	// A failed read or write on the underlying socket of an already-established
 	// connection. The dial lives on a different path, which handles its own
 	// errors, so reaching here means a live connection dropped.
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if _, ok := errors.AsType[*net.OpError](err); ok {
 		return true
 	}
 	// Match the close code rather than the text: gorilla puts the socket
@@ -453,6 +452,15 @@ func hasRealtimeInput(v any) bool {
 		return v != nil
 	}
 	return true
+}
+
+// isEmptyLiveResponse reports whether r carries nothing worth an event, as
+// the response built from the Live API's setupComplete does. adk-python's live
+// flow skips the same responses.
+func isEmptyLiveResponse(r *model.LLMResponse) bool {
+	return r.Content == nil && r.ErrorCode == "" && !r.Interrupted && !r.TurnComplete &&
+		r.InputTranscription == nil && r.OutputTranscription == nil && r.UsageMetadata == nil &&
+		r.SessionResumptionHandle == "" && r.GroundingMetadata == nil
 }
 
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
@@ -495,8 +503,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		// it needs its own copy: the caller may reuse its LiveRunConfig.
 		sessionResumption := runCfg.Live.SessionResumption
 		if sessionResumption != nil {
-			sessionResumptionCopy := *sessionResumption
-			sessionResumption = &sessionResumptionCopy
+			sessionResumption = new(*sessionResumption)
 		}
 
 		liveConnectConfig := &genai.LiveConnectConfig{
@@ -517,7 +524,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		// IsGemini3xLive and still gets both.
 		if !googlellm.IsGemini3xLive(f.Model.Name()) {
 			if runCfg.Live.EnableAffectiveDialog {
-				liveConnectConfig.EnableAffectiveDialog = genai.Ptr(true)
+				liveConnectConfig.EnableAffectiveDialog = new(true)
 			}
 			liveConnectConfig.Proactivity = runCfg.Live.Proactivity
 		}
@@ -669,6 +676,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 									sess.audioMgr.CacheOutput(ctx, part.InlineData.Data, part.InlineData.MIMEType)
 								}
 							}
+						}
+						if isEmptyLiveResponse(resp) {
+							continue
 						}
 						ev := session.NewEvent(ctx, ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()

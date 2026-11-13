@@ -91,8 +91,7 @@ func newDynamicNodeWithResolvedSchemas[IN, OUT any](
 
 func applyDynamicDefaults(cfg NodeConfig) NodeConfig {
 	if cfg.RerunOnResume == nil {
-		t := true
-		cfg.RerunOnResume = &t
+		cfg.RerunOnResume = new(true)
 	}
 	return cfg
 }

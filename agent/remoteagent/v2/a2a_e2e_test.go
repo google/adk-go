@@ -628,9 +628,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 	// remoteStreamingChan closes when the subagent's own output first reaches the client.
 	statusUpdateEventChan := make(chan a2a.Event, 10)
 	remoteStreamingChan := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer close(statusUpdateEventChan)
 		remoteStreaming := false
 		msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("work"))
@@ -648,7 +646,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 			}
 			statusUpdateEventChan <- event
 		}
-	}()
+	})
 
 	// Cancel only after the subagent's output reaches the client: before that the
 	// parent doesn't know the subagent task ID, so cancellation can't propagate.
@@ -656,9 +654,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 	taskID := firstUpdate.TaskInfo().TaskID
 	testutil.AwaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
 	cancelResultChan := make(chan *a2a.Task, 1)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer close(cancelResultChan)
 		task, err := client.CancelTask(t.Context(), &a2a.CancelTaskRequest{ID: taskID})
 		if err != nil {
@@ -666,7 +662,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 			return
 		}
 		cancelResultChan <- task
-	}()
+	})
 
 	// Check the streaming message sender got a canceled state task in their response
 	var lastStreamingUpdate a2a.Event

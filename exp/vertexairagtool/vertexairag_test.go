@@ -67,8 +67,8 @@ func TestNew(t *testing.T) {
 			cfg: vertexairagtool.Config{
 				Description:             "Retrieves documentation.",
 				RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
-				SimilarityTopK:          genai.Ptr[int32](5),
-				VectorDistanceThreshold: genai.Ptr(0.4),
+				SimilarityTopK:          new(int32(5)),
+				VectorDistanceThreshold: new(0.4),
 			},
 		},
 	}
@@ -113,13 +113,13 @@ func TestProcessRequest(t *testing.T) {
 	cfg := vertexairagtool.Config{
 		Description:             "Retrieves documentation.",
 		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
-		SimilarityTopK:          genai.Ptr[int32](3),
-		VectorDistanceThreshold: genai.Ptr(0.5),
+		SimilarityTopK:          new(int32(3)),
+		VectorDistanceThreshold: new(0.5),
 	}
 	retrieval := &genai.Tool{Retrieval: &genai.Retrieval{VertexRAGStore: &genai.VertexRAGStore{
 		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
-		SimilarityTopK:          genai.Ptr[int32](3),
-		VectorDistanceThreshold: genai.Ptr(0.5),
+		SimilarityTopK:          new(int32(3)),
+		VectorDistanceThreshold: new(0.5),
 	}}}
 
 	testCases := []struct {
@@ -219,8 +219,8 @@ func processStore(t *testing.T, tl tool.Tool) *genai.VertexRAGStore {
 func wantStore() *genai.VertexRAGStore {
 	return &genai.VertexRAGStore{
 		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
-		SimilarityTopK:          genai.Ptr[int32](3),
-		VectorDistanceThreshold: genai.Ptr(0.5),
+		SimilarityTopK:          new(int32(3)),
+		VectorDistanceThreshold: new(0.5),
 	}
 }
 
@@ -258,8 +258,8 @@ func TestProcessRequest_CopiesStorePerRequest(t *testing.T) {
 	tl, err := vertexairagtool.New(vertexairagtool.Config{
 		Description:             "d",
 		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
-		SimilarityTopK:          genai.Ptr[int32](3),
-		VectorDistanceThreshold: genai.Ptr(0.5),
+		SimilarityTopK:          new(int32(3)),
+		VectorDistanceThreshold: new(0.5),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)

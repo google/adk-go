@@ -956,7 +956,7 @@ func TestViews_JSONPathsMatchEmittedPayloads(t *testing.T) {
 			Contents: []*genai.Content{textContent("user", "what is 6*7?")},
 			Config: &genai.GenerateContentConfig{
 				SystemInstruction: textContent("", "answer concisely"),
-				Temperature:       genai.Ptr[float32](0.2),
+				Temperature:       new(float32(0.2)),
 			},
 			Tools: map[string]any{"lookup": lookupTool},
 		}
