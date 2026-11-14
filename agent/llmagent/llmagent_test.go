@@ -31,10 +31,13 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -1813,5 +1816,447 @@ func TestThoughtOnlyStopTurnEndsInvocation(t *testing.T) {
 	}
 	if diff := cmp.Diff([]eventError{{"MODEL_RETURNED_NO_CONTENT", noActionableContentMessage}}, errorsOf(events)); diff != "" {
 		t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// runUntilError returns the events stream yields before its first error, and
+// that error.
+func runUntilError(stream iter.Seq2[*session.Event, error]) ([]*session.Event, error) {
+	var events []*session.Event
+	for ev, err := range stream {
+		if err != nil {
+			return events, err
+		}
+		events = append(events, ev)
+	}
+	return events, nil
+}
+
+// transferCallOf returns the transfer_to_agent call ev holds, or nil.
+func transferCallOf(ev *session.Event) *genai.FunctionCall {
+	if ev == nil || ev.Content == nil {
+		return nil
+	}
+	for _, p := range ev.Content.Parts {
+		if p.FunctionCall != nil && p.FunctionCall.Name == "transfer_to_agent" {
+			return p.FunctionCall
+		}
+	}
+	return nil
+}
+
+// transferResponseOf returns the transfer_to_agent response ev holds, or nil.
+func transferResponseOf(ev *session.Event) *genai.FunctionResponse {
+	if ev == nil || ev.Content == nil {
+		return nil
+	}
+	for _, p := range ev.Content.Parts {
+		if p.FunctionResponse != nil && p.FunctionResponse.Name == "transfer_to_agent" {
+			return p.FunctionResponse
+		}
+	}
+	return nil
+}
+
+// checkEndsWithTransfer checks that events end with caller's
+// transfer_to_agent call naming target and its {"result": null} response,
+// which sets Actions.TransferToAgent to target.
+func checkEndsWithTransfer(t *testing.T, events []*session.Event, caller, target string) {
+	t.Helper()
+	if len(events) < 2 {
+		t.Fatalf("got %d events before the error, want the transfer call and its response last", len(events))
+	}
+	call, resp := events[len(events)-2], events[len(events)-1]
+	fc := transferCallOf(call)
+	if call.Author != caller || fc == nil {
+		t.Fatalf("second-to-last event = (author %q, call %v), want a transfer_to_agent call by %q", call.Author, fc, caller)
+	}
+	if diff := cmp.Diff(map[string]any{"agent_name": target}, fc.Args); diff != "" {
+		t.Errorf("transfer call args diff (-want +got):\n%s", diff)
+	}
+	fr := transferResponseOf(resp)
+	if resp.Author != caller || fr == nil {
+		t.Fatalf("last event = (author %q, response %v), want a transfer_to_agent response by %q", resp.Author, fr, caller)
+	}
+	if diff := cmp.Diff(map[string]any{"result": nil}, fr.Response); diff != "" {
+		t.Errorf("transfer response diff (-want +got):\n%s", diff)
+	}
+	if got := resp.Actions.TransferToAgent; got != target {
+		t.Errorf("response Actions.TransferToAgent = %q, want %q", got, target)
+	}
+}
+
+func TestAgentTransfer_SelfTransferReRunsCaller(t *testing.T) {
+	// seq_root (sequential) -- caller -- sub1. caller may transfer to sub1
+	// only, but naming itself runs it again, nested in the same invocation.
+	callerModel := &testutil.MockModel{Responses: []*genai.Content{
+		transferTo("caller"),
+		genai.NewContentFromText("nested done", genai.RoleModel),
+	}}
+	sub1Model := &testutil.MockModel{}
+	sub1 := newLLMAgent(t, llmagent.Config{Name: "sub1", Model: sub1Model})
+	caller := newLLMAgent(t, llmagent.Config{
+		Name:                     "caller",
+		Model:                    callerModel,
+		OutputKey:                "caller_out",
+		DisallowTransferToParent: true,
+		DisallowTransferToPeers:  true,
+		SubAgents:                []agent.Agent{sub1},
+	})
+	root, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "seq_root", SubAgents: []agent.Agent{caller}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := runUntilError(testutil.NewTestAgentRunner(t, root).Run(t, "s", "go"))
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want 3 (call, response, nested answer): %v", len(events), events)
+	}
+	checkEndsWithTransfer(t, events[:2], "caller", "caller")
+	answer := events[2]
+	if answer.Author != "caller" || answer.Content == nil || len(answer.Content.Parts) != 1 || answer.Content.Parts[0].Text != "nested done" {
+		t.Errorf("event 2 = (author %q, content %v), want caller's text %q", answer.Author, answer.Content, "nested done")
+	}
+	if got := answer.Actions.StateDelta["caller_out"]; got != "nested done" {
+		t.Errorf("event 2 StateDelta[caller_out] = %v, want %q", got, "nested done")
+	}
+	if answer.InvocationID != events[0].InvocationID {
+		t.Errorf("event 2 InvocationID = %q, want the call's %q", answer.InvocationID, events[0].InvocationID)
+	}
+	if got := len(callerModel.Requests); got != 2 {
+		t.Errorf("caller model calls = %d, want 2", got)
+	}
+	if got := len(sub1Model.Requests); got != 0 {
+		t.Errorf("sub1 model calls = %d, want 0", got)
+	}
+}
+
+func TestAgentTransfer_SelfTransferReRunsCallerOnResumableRun(t *testing.T) {
+	// seq_root (sequential) -- caller -- sub1 on a resumable runner. A
+	// sequential root runs the classic path even when resumable, so naming
+	// itself runs caller again rather than failing as on the node path.
+	callerModel := &testutil.MockModel{Responses: []*genai.Content{
+		transferTo("caller"),
+		genai.NewContentFromText("nested done", genai.RoleModel),
+	}}
+	sub1 := newLLMAgent(t, llmagent.Config{Name: "sub1", Model: &testutil.MockModel{}})
+	caller := newLLMAgent(t, llmagent.Config{
+		Name:                     "caller",
+		Model:                    callerModel,
+		DisallowTransferToParent: true,
+		DisallowTransferToPeers:  true,
+		SubAgents:                []agent.Agent{sub1},
+	})
+	root, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "seq_root", SubAgents: []agent.Agent{caller}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{
+		AppName:           "app",
+		Agent:             root,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+		Resumable:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := runUntilError(r.Run(t.Context(), "user", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}))
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+
+	var answers []string
+	for _, ev := range events {
+		if ev.Author == "caller" && ev.Content != nil && len(ev.Content.Parts) == 1 && ev.Content.Parts[0].Text != "" {
+			answers = append(answers, ev.Content.Parts[0].Text)
+		}
+	}
+	if diff := cmp.Diff([]string{"nested done"}, answers); diff != "" {
+		t.Errorf("caller's text events diff (-want +got):\n%s", diff)
+	}
+	if got := len(callerModel.Requests); got != 2 {
+		t.Errorf("caller model calls = %d, want 2", got)
+	}
+}
+
+func TestAgentTransfer_NonLLMRootFailsRun(t *testing.T) {
+	// seq_root (sequential) -- caller -- sub1. seq_root is in caller's tree
+	// but, not being an LLM agent, is not one of its transfer targets.
+	callerModel := &testutil.MockModel{Responses: []*genai.Content{
+		transferTo("seq_root"),
+		genai.NewContentFromText("unreachable", genai.RoleModel),
+	}}
+	sub1Model := &testutil.MockModel{}
+	sub1 := newLLMAgent(t, llmagent.Config{Name: "sub1", Model: sub1Model})
+	caller := newLLMAgent(t, llmagent.Config{Name: "caller", Model: callerModel, SubAgents: []agent.Agent{sub1}})
+	root, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "seq_root", SubAgents: []agent.Agent{caller}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := runUntilError(testutil.NewTestAgentRunner(t, root).Run(t, "s", "go"))
+
+	if !errors.Is(err, agent.ErrInvalidTransferTarget) {
+		t.Fatalf("run error = %v, want one matching agent.ErrInvalidTransferTarget", err)
+	}
+	if got, want := err.Error(), "Agent caller is not allowed to transfer to agent seq_root."; got != want {
+		t.Errorf("run error text = %q, want %q", got, want)
+	}
+	checkEndsWithTransfer(t, events, "caller", "seq_root")
+	if got := len(callerModel.Requests); got != 1 {
+		t.Errorf("caller model calls = %d, want 1", got)
+	}
+	if got := len(sub1Model.Requests); got != 0 {
+		t.Errorf("sub1 model calls = %d, want 0", got)
+	}
+}
+
+func TestAgentTransfer_DeclaredTargetWinsOverDuplicateInSubtree(t *testing.T) {
+	// caller -- [sub1 -- shared_name (undeclared), shared_name (declared)],
+	// run directly on an invocation context, so caller is the root of the
+	// tree. A depth-first search of the tree meets the undeclared agent first.
+	undeclaredModel := &testutil.MockModel{Responses: []*genai.Content{genai.NewContentFromText("from undeclared", genai.RoleModel)}}
+	declaredModel := &testutil.MockModel{Responses: []*genai.Content{genai.NewContentFromText("from declared", genai.RoleModel)}}
+	undeclared := newLLMAgent(t, llmagent.Config{Name: "shared_name", Model: undeclaredModel})
+	sub1 := newLLMAgent(t, llmagent.Config{
+		Name:                     "sub1",
+		Model:                    &testutil.MockModel{},
+		DisallowTransferToParent: true,
+		DisallowTransferToPeers:  true,
+		SubAgents:                []agent.Agent{undeclared},
+	})
+	declared := newLLMAgent(t, llmagent.Config{Name: "shared_name", Model: declaredModel})
+	caller := newLLMAgent(t, llmagent.Config{
+		Name:      "caller",
+		Model:     &testutil.MockModel{Responses: []*genai.Content{transferTo("shared_name")}},
+		SubAgents: []agent.Agent{sub1, declared},
+	})
+	sess, err := session.InMemoryService().Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:       caller,
+		Session:     sess.Session,
+		UserContent: genai.NewContentFromText("go", genai.RoleUser),
+		RunConfig:   &agent.RunConfig{},
+	})
+
+	events, err := runUntilError(caller.Run(invCtx))
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want 3 (call, response, target's answer): %v", len(events), events)
+	}
+	checkEndsWithTransfer(t, events[:2], "caller", "shared_name")
+	answer := events[2]
+	if answer.Author != "shared_name" || answer.Content == nil || len(answer.Content.Parts) != 1 || answer.Content.Parts[0].Text != "from declared" {
+		t.Errorf("event 2 = (author %q, content %v), want shared_name's text %q", answer.Author, answer.Content, "from declared")
+	}
+	if got := len(declaredModel.Requests); got != 1 {
+		t.Errorf("declared shared_name model calls = %d, want 1", got)
+	}
+	if got := len(undeclaredModel.Requests); got != 0 {
+		t.Errorf("undeclared shared_name model calls = %d, want 0", got)
+	}
+}
+
+// disallowedTransferTree returns seq_root (sequential) -- root -- [child1,
+// child2 -- grandchild2], where root transfers to child1 and child1 then
+// transfers to target. child1Cfg supplies child1's transfer restrictions. It
+// returns the root and the models of root, child2 and grandchild2.
+func disallowedTransferTree(t *testing.T, child1Cfg llmagent.Config, target string) (agent.Agent, map[string]*testutil.MockModel) {
+	t.Helper()
+	models := map[string]*testutil.MockModel{
+		"root":        {Responses: []*genai.Content{transferTo("child1"), genai.NewContentFromText("from root", genai.RoleModel)}},
+		"child2":      {Responses: []*genai.Content{genai.NewContentFromText("from child2", genai.RoleModel)}},
+		"grandchild2": {Responses: []*genai.Content{genai.NewContentFromText("from grandchild2", genai.RoleModel)}},
+	}
+	child1Cfg.Name = "child1"
+	child1Cfg.Model = &testutil.MockModel{Responses: []*genai.Content{
+		transferTo(target),
+		genai.NewContentFromText("from child1", genai.RoleModel),
+	}}
+	child1 := newLLMAgent(t, child1Cfg)
+	grandchild2 := newLLMAgent(t, llmagent.Config{Name: "grandchild2", Model: models["grandchild2"]})
+	child2 := newLLMAgent(t, llmagent.Config{Name: "child2", Model: models["child2"], SubAgents: []agent.Agent{grandchild2}})
+	root := newLLMAgent(t, llmagent.Config{Name: "root", Model: models["root"], SubAgents: []agent.Agent{child1, child2}})
+	seqRoot, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "seq_root", SubAgents: []agent.Agent{root}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return seqRoot, models
+}
+
+func TestAgentTransfer_DisallowedPeerFailsRun(t *testing.T) {
+	root, models := disallowedTransferTree(t, llmagent.Config{DisallowTransferToPeers: true}, "child2")
+
+	events, err := runUntilError(testutil.NewTestAgentRunner(t, root).Run(t, "s", "go"))
+
+	if !errors.Is(err, agent.ErrInvalidTransferTarget) {
+		t.Fatalf("run error = %v, want one matching agent.ErrInvalidTransferTarget", err)
+	}
+	if got, want := err.Error(), "Agent child1 is not allowed to transfer to agent child2."; got != want {
+		t.Errorf("run error text = %q, want %q", got, want)
+	}
+	checkEndsWithTransfer(t, events, "child1", "child2")
+	if got := len(models["child2"].Requests); got != 0 {
+		t.Errorf("child2 model calls = %d, want 0", got)
+	}
+}
+
+func TestAgentTransfer_DisallowedParentFailsRun(t *testing.T) {
+	root, models := disallowedTransferTree(t, llmagent.Config{DisallowTransferToParent: true}, "root")
+
+	events, err := runUntilError(testutil.NewTestAgentRunner(t, root).Run(t, "s", "go"))
+
+	if !errors.Is(err, agent.ErrInvalidTransferTarget) {
+		t.Fatalf("run error = %v, want one matching agent.ErrInvalidTransferTarget", err)
+	}
+	if got, want := err.Error(), "Agent child1 is not allowed to transfer to agent root."; got != want {
+		t.Errorf("run error text = %q, want %q", got, want)
+	}
+	checkEndsWithTransfer(t, events, "child1", "root")
+	if got := len(models["root"].Requests); got != 1 {
+		t.Errorf("root model calls = %d, want 1 (its transfer to child1 only)", got)
+	}
+}
+
+func TestAgentTransfer_DisallowedUnrelatedAgentFailsRun(t *testing.T) {
+	// child1 may transfer to its parent and its peers; its peer's sub-agent
+	// is in the tree but is not a target.
+	root, models := disallowedTransferTree(t, llmagent.Config{}, "grandchild2")
+
+	events, err := runUntilError(testutil.NewTestAgentRunner(t, root).Run(t, "s", "go"))
+
+	if !errors.Is(err, agent.ErrInvalidTransferTarget) {
+		t.Fatalf("run error = %v, want one matching agent.ErrInvalidTransferTarget", err)
+	}
+	if got, want := err.Error(), "Agent child1 is not allowed to transfer to agent grandchild2."; got != want {
+		t.Errorf("run error text = %q, want %q", got, want)
+	}
+	checkEndsWithTransfer(t, events, "child1", "grandchild2")
+	if got := len(models["grandchild2"].Requests); got != 0 {
+		t.Errorf("grandchild2 model calls = %d, want 0", got)
+	}
+}
+
+// adk-python finds the agent in agent.root_agent, the root by the parent
+// links, and then raises the not-allowed error
+// (flows/llm_flows/core/_function_call_postprocessor.py), whichever agent the
+// runner started at. Fails when the transfer tool or the flow takes the root
+// of the tree from the run's parent map alone: with the run started at
+// child1, that root is child1, so the tool rejects grandchild2 as an unknown
+// name, or the flow fails with "failed to find agent".
+func TestAgentTransfer_RunStartedBelowRootRejectsUnrelatedAgent(t *testing.T) {
+	// root -- [child1, child2 -- grandchild2]; the runner starts at child1.
+	child1Model := &testutil.MockModel{Responses: []*genai.Content{
+		transferTo("grandchild2"),
+		genai.NewContentFromText("from child1", genai.RoleModel),
+	}}
+	grandchild2Model := &testutil.MockModel{Responses: []*genai.Content{genai.NewContentFromText("from grandchild2", genai.RoleModel)}}
+	child1 := newLLMAgent(t, llmagent.Config{Name: "child1", Model: child1Model})
+	grandchild2 := newLLMAgent(t, llmagent.Config{Name: "grandchild2", Model: grandchild2Model})
+	child2 := newLLMAgent(t, llmagent.Config{Name: "child2", Model: &testutil.MockModel{}, SubAgents: []agent.Agent{grandchild2}})
+	newLLMAgent(t, llmagent.Config{Name: "root", Model: &testutil.MockModel{}, SubAgents: []agent.Agent{child1, child2}})
+
+	events, err := runUntilError(testutil.NewTestAgentRunner(t, child1).Run(t, "s", "go"))
+
+	if !errors.Is(err, agent.ErrInvalidTransferTarget) {
+		t.Fatalf("run error = %v, want one matching agent.ErrInvalidTransferTarget", err)
+	}
+	if got, want := err.Error(), "Agent child1 is not allowed to transfer to agent grandchild2."; got != want {
+		t.Errorf("run error text = %q, want %q", got, want)
+	}
+	checkEndsWithTransfer(t, events, "child1", "grandchild2")
+	if got := len(child1Model.Requests); got != 1 {
+		t.Errorf("child1 model calls = %d, want 1", got)
+	}
+	if got := len(grandchild2Model.Requests); got != 0 {
+		t.Errorf("grandchild2 model calls = %d, want 0", got)
+	}
+}
+
+func TestAgentTransfer_NodePathSelfTransferRejected(t *testing.T) {
+	// root_agent -- sub_agent_1, with an LLM agent as the runner's root, so
+	// the agents run on the node path, where a self-transfer fails the run.
+	subModel := &testutil.MockModel{Responses: []*genai.Content{
+		transferTo("sub_agent_1"),
+		genai.NewContentFromText("should not run as self-transfer", genai.RoleModel),
+	}}
+	sub := newLLMAgent(t, llmagent.Config{Name: "sub_agent_1", Model: subModel})
+	root := newLLMAgent(t, llmagent.Config{
+		Name:      "root_agent",
+		Model:     &testutil.MockModel{Responses: []*genai.Content{transferTo("sub_agent_1")}},
+		SubAgents: []agent.Agent{sub},
+	})
+
+	events, err := runUntilError(testutil.NewTestAgentRunner(t, root).Run(t, "s", "go"))
+
+	if err == nil || err.Error() != "Agent 'sub_agent_1' cannot transfer to itself." {
+		t.Fatalf("run error = %v, want %q", err, "Agent 'sub_agent_1' cannot transfer to itself.")
+	}
+	if errors.Is(err, agent.ErrInvalidTransferTarget) {
+		t.Errorf("run error %v matches agent.ErrInvalidTransferTarget, want it not to", err)
+	}
+	checkEndsWithTransfer(t, events, "sub_agent_1", "sub_agent_1")
+	if got := len(subModel.Requests); got != 1 {
+		t.Errorf("sub_agent_1 model calls = %d, want 1", got)
+	}
+}
+
+func TestAgentTransfer_ToolSetUnknownTargetFailsRun(t *testing.T) {
+	// A tool, not transfer_to_agent, names an agent absent from the tree.
+	type result struct {
+		Status string `json:"status"`
+	}
+	forceTransfer, err := functiontool.New(functiontool.Config{
+		Name:        "force_transfer",
+		Description: "transfers to an agent that does not exist",
+	}, func(ctx agent.Context, _ struct{}) (result, error) {
+		ctx.Actions().TransferToAgent = "nobody"
+		return result{Status: "ok"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := newLLMAgent(t, llmagent.Config{
+		Name: "root_agent",
+		Model: &testutil.MockModel{Responses: []*genai.Content{
+			genai.NewContentFromFunctionCall("force_transfer", map[string]any{}, genai.RoleModel),
+			genai.NewContentFromText("unreachable", genai.RoleModel),
+		}},
+		Tools: []tool.Tool{forceTransfer},
+	})
+
+	events, err := runUntilError(testutil.NewTestAgentRunner(t, root).Run(t, "s", "go"))
+
+	if err == nil || err.Error() != "failed to find agent: nobody" {
+		t.Fatalf("run error = %v, want %q", err, "failed to find agent: nobody")
+	}
+	if errors.Is(err, agent.ErrInvalidTransferTarget) {
+		t.Errorf("run error %v matches agent.ErrInvalidTransferTarget, want it not to", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("got no events before the error, want the tool's call and response")
+	}
+	last := events[len(events)-1]
+	var resp *genai.FunctionResponse
+	if last.Content != nil && len(last.Content.Parts) == 1 {
+		resp = last.Content.Parts[0].FunctionResponse
+	}
+	if resp == nil || resp.Name != "force_transfer" {
+		t.Fatalf("last event before the error = %v, want force_transfer's response", last.Content)
+	}
+	if diff := cmp.Diff(map[string]any{"status": "ok"}, resp.Response); diff != "" {
+		t.Errorf("force_transfer response diff (-want +got):\n%s", diff)
 	}
 }

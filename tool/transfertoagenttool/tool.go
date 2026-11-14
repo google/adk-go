@@ -20,19 +20,25 @@
 // session.EventActions.TransferToAgent, and the flow handles that transfer as
 // it handles one made through the transfer_to_agent tool it builds itself:
 //
+//   - For the calling agent's own name, it runs the caller again. On the node
+//     path (an LLM agent root, or a root set in runner.Config.Node) it fails
+//     the run instead.
 //   - For one of the caller's transfer targets, it runs that agent. The
 //     targets are the caller's sub-agents and, when its parent is an LLM
 //     agent, the parent and the parent's other sub-agents, less those that
 //     llmagent.Config.DisallowTransferToParent and DisallowTransferToPeers
 //     exclude. A sub-agent or peer whose llmagent.Config.Mode is
 //     llmagent.ModeTask or llmagent.ModeSingleTurn is not a target.
-//   - For any other name, the calling agent's own included, it fails the run.
+//   - For any other name, it fails the run. When the name is that of an agent
+//     of the tree, the error matches agent.ErrInvalidTransferTarget.
 //
 // The flow adds its own transfer_to_agent tool to the model requests of an
 // agent with transfer targets, unless it leaves the tool out because the agent
 // has a built-in search tool its model cannot combine with function calling.
 // Listing this tool in an agent whose requests carry the flow's tool fails the
-// run with a duplicate tool error when the request is built.
+// run with a duplicate tool error when the request is built. An agent without
+// transfer targets can list it, and the only transfer the flow runs from such
+// an agent is to the agent itself, off the node path.
 //
 // It is the Go counterpart of adk-python's TransferToAgentTool
 // (google.adk.tools.TransferToAgentTool).
@@ -77,10 +83,11 @@ type Config struct {
 // session.EventActions.TransferReason to the transfer_reason the model sent,
 // when that is a string; without it, a transfer_reason the model sends is
 // ignored. The call fails, and sets nothing, when agent_name is missing or
-// not a non-empty string, and when it is not in cfg.AgentNames. A name the
-// tool accepts goes to the flow, which runs only one of the calling agent's
-// transfer targets and fails the run for any other name, a listed name no
-// agent of the tree has included (see the package documentation).
+// not a non-empty string, and when it is neither in cfg.AgentNames nor the
+// name of an agent of the calling agent's tree. A name the tool accepts goes
+// to the flow, which runs only the calling agent itself or one of its transfer
+// targets and fails the run for any other name, a listed name no agent of the
+// tree has included (see the package documentation).
 //
 // Listing this tool in an agent whose model requests carry the flow's own
 // transfer_to_agent tool fails the run with a duplicate tool error when the
