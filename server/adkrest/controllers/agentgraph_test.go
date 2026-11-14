@@ -15,7 +15,9 @@
 package controllers_test
 
 import (
+	"context"
 	"encoding/json"
+	"iter"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -24,12 +26,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/awalterschulze/gographviz"
 	"github.com/google/go-cmp/cmp"
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 	"google.golang.org/adk/v2/server/adkrest/internal/services"
+	"google.golang.org/adk/v2/tool"
 )
 
 const graphAppName = "test-app"
@@ -416,5 +422,67 @@ func TestAgentGraphHandlersSurviveANilAgent(t *testing.T) {
 				t.Errorf("status = %d, want %d", rr.Code, http.StatusNotFound)
 			}
 		})
+	}
+}
+
+// graphModel is never called: drawing a graph does not run the agent.
+type graphModel struct{}
+
+func (graphModel) Name() string { return "graph-model" }
+
+func (graphModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(func(*model.LLMResponse, error) bool) {}
+}
+
+type graphTool struct{ name string }
+
+func (t graphTool) Name() string        { return t.name }
+func (t graphTool) Description() string { return "" }
+func (t graphTool) IsLongRunning() bool { return false }
+
+// mcpLikeToolset returns a tool named the way Context7's MCP server names it.
+type mcpLikeToolset struct{}
+
+func (mcpLikeToolset) Name() string { return "mcp" }
+
+func (mcpLikeToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
+	return []tool.Tool{graphTool{name: "resolve-library-id"}}, nil
+}
+
+// TestBuildGraphImageHandlerQuotesToolsetToolNames checks that the DOT the UI
+// receives parses when a toolset tool name is not a DOT identifier. Unquoted,
+// Graphviz rejects the whole source and the UI has nothing to draw.
+func TestBuildGraphImageHandlerQuotesToolsetToolNames(t *testing.T) {
+	root, err := llmagent.New(llmagent.Config{
+		Name:     graphAppName,
+		Model:    graphModel{},
+		Tools:    []tool.Tool{graphTool{name: "direct_tool"}},
+		Toolsets: []tool.Toolset{mcpLikeToolset{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := callGraph(t, graphController(t, root).BuildGraphImageHandler, graphAppName, nil)
+	if got, want := rr.Code, http.StatusOK; got != want {
+		t.Fatalf("build_graph_image status = %d, want %d; body: %s", got, want, rr.Body.String())
+	}
+	var got map[string]controllers.DotGraph
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json.Unmarshal(%q) failed: %v", rr.Body.String(), err)
+	}
+	dot := got[graphAppName].DotSrc
+	ast, err := gographviz.ParseString(dot)
+	if err != nil {
+		t.Fatalf("parse DOT: %v\n%s", err, dot)
+	}
+	g := gographviz.NewGraph()
+	if err := gographviz.Analyse(ast, g); err != nil {
+		t.Fatalf("analyse DOT: %v\n%s", err, dot)
+	}
+	for _, id := range []string{"direct_tool", `"resolve-library-id"`} {
+		if len(g.Edges.SrcToDsts[`"`+graphAppName+`"`][id]) != 1 {
+			t.Errorf("want one edge %s -> %s\n%s", graphAppName, id, dot)
+		}
 	}
 }
