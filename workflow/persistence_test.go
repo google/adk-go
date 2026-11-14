@@ -202,6 +202,221 @@ func TestReconstructRunState_PreviouslyResumedReentry(t *testing.T) {
 	}
 }
 
+// A re-entry node with several incoming edges must rerun with the output
+// of the predecessor that triggered it. The order the edges are declared
+// in does not say which one that was.
+func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
+	a, b, c := newDummyNode("a"), newDummyNode("b"), newDummyNode("c")
+	ask := NewFunctionNode("ask", func(agent.Context, any) (any, error) { return nil, nil }, NodeConfig{RerunOnResume: new(true)})
+	finished := func(node, output string, routes ...string) *session.Event {
+		return &session.Event{Author: node, Output: output, Routes: routes}
+	}
+	completed := func(node string) *session.Event {
+		ev := &session.Event{Author: node}
+		ev.CustomMetadata = map[string]any{workflowNodeCompletedKey: true}
+		return ev
+	}
+	failed := func(node string) *session.Event {
+		ev := &session.Event{Author: node}
+		ev.CustomMetadata = map[string]any{workflowNodeOutcomeKey: workflowNodeFailureOutcome}
+		return ev
+	}
+	partial := func(ev *session.Event) *session.Event {
+		ev.Partial = true
+		return ev
+	}
+	earlier := func(ev *session.Event) *session.Event {
+		ev.InvocationID = "earlier"
+		return ev
+	}
+	for _, tc := range []struct {
+		name        string
+		edges       []Edge
+		history     []*session.Event
+		wantTrigger string
+		wantInput   any
+	}{
+		{
+			name: "predecessor_routed_elsewhere",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: a, To: ask, Route: StringRoute("go")},
+				{From: a, To: b, Route: StringRoute("skip")},
+				{From: b, To: ask},
+			},
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			wantTrigger: "b",
+			wantInput:   "B",
+		},
+		{
+			// Both edges into ask have fired, a's on the first visit and
+			// b's on the way back around the loop.
+			name: "last_predecessor_to_finish",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: a, To: ask, Route: StringRoute("go")},
+				{From: ask, To: b, Route: StringRoute("again")},
+				{From: b, To: ask},
+			},
+			history:     []*session.Event{finished("a", "A", "go"), finished("b", "B")},
+			wantTrigger: "b",
+			wantInput:   "B",
+		},
+		{
+			name: "predecessor_routed_to_node",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: Start, To: ask},
+				{From: a, To: ask, Route: StringRoute("go")},
+			},
+			history:     []*session.Event{finished("a", "A", "go")},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		{
+			name: "default_route_not_taken",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: Start, To: ask},
+				{From: a, To: ask, Route: Default},
+				{From: a, To: b, Route: StringRoute("skip")},
+			},
+			history:     []*session.Event{finished("a", "A", "skip")},
+			wantTrigger: Start.Name(),
+			wantInput:   "seed",
+		},
+		{
+			name: "default_route_taken",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: Start, To: b},
+				{From: b, To: ask, Route: StringRoute("go")},
+				{From: a, To: ask, Route: Default},
+				{From: a, To: b, Route: StringRoute("skip")},
+				{From: a, To: c},
+			},
+			history:     []*session.Event{finished("b", "B", "stop"), finished("a", "A", "other")},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		{
+			name: "default_route_without_routing_event",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: Start, To: b},
+				{From: b, To: ask, Route: StringRoute("go")},
+				{From: a, To: ask, Route: Default},
+				{From: a, To: b, Route: StringRoute("skip")},
+			},
+			history:     []*session.Event{finished("b", "B", "stop"), finished("a", "A")},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		{
+			// Finishing without output still fires the edge.
+			name: "last_predecessor_finished_without_output",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: a, To: ask, Route: StringRoute("go")},
+				{From: ask, To: b, Route: StringRoute("again")},
+				{From: b, To: ask},
+			},
+			history:     []*session.Event{finished("a", "A", "go"), completed("b")},
+			wantTrigger: "b",
+			wantInput:   nil,
+		},
+		{
+			// The comparison is by finish order, not by edge order.
+			name: "first_declared_finished_last",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: b, To: ask},
+				{From: a, To: ask, Route: StringRoute("go")},
+				{From: ask, To: b, Route: StringRoute("again")},
+			},
+			history:     []*session.Event{finished("a", "A", "go"), finished("b", "B")},
+			wantTrigger: "b",
+			wantInput:   "B",
+		},
+		{
+			// A route emitted in an earlier run of the same session says
+			// nothing about the edges taken in this one.
+			name: "routing_from_earlier_invocation",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: b, To: ask},
+				{From: a, To: ask, Route: Default},
+				{From: a, To: b, Route: StringRoute("skip")},
+			},
+			history:     []*session.Event{earlier(finished("a", "old", "skip")), finished("a", "A")},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		{
+			// A predecessor whose latest attempt failed did not trigger
+			// anything, whatever it emitted before failing.
+			name: "failed_predecessor",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: a, To: ask, Route: StringRoute("go")},
+				{From: Start, To: ask},
+			},
+			history:     []*session.Event{finished("a", "A", "go"), failed("a")},
+			wantTrigger: Start.Name(),
+			wantInput:   "seed",
+		},
+		{
+			name: "partial_event",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: a, To: ask, Route: StringRoute("go")},
+				{From: Start, To: ask},
+			},
+			history:     []*session.Event{finished("a", "A", "skip"), partial(finished("a", "A", "go"))},
+			wantTrigger: Start.Name(),
+			wantInput:   "seed",
+		},
+		{
+			name: "only_start_edge_fired",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: a, To: ask, Route: StringRoute("go")},
+				{From: Start, To: ask},
+			},
+			history:     []*session.Event{finished("a", "A", "skip")},
+			wantTrigger: Start.Name(),
+			wantInput:   "seed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wf := mustNew(t, tc.edges)
+			seed := &session.Event{Author: "user"}
+			seed.Content = genai.NewContentFromText("seed", genai.RoleUser)
+			raised := &session.Event{Author: "ask", LongRunningToolIDs: []string{"approval"}}
+			answered := &session.Event{Author: "user"}
+			answered.Content = genai.NewContentFromFunctionResponse(WorkflowInputFunctionCallName, map[string]any{"response": "approved"}, genai.RoleUser)
+			answered.Content.Parts[0].FunctionResponse.ID = "approval"
+			events := append(sliceEvents{seed}, tc.history...)
+			events = append(events, raised, answered)
+			for _, ev := range events {
+				if ev.InvocationID == "" {
+					ev.InvocationID = "current"
+				}
+			}
+
+			state, err := wf.ReconstructRunState(fakeSession{events: events}, "current")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ns := nodeState(t, state, "ask")
+			if ns.Status != NodePending || ns.TriggeredBy != tc.wantTrigger || ns.Input != tc.wantInput {
+				t.Errorf("ask = status %v, triggered by %q with input %v, want NodePending triggered by %q with input %v",
+					ns.Status, ns.TriggeredBy, ns.Input, tc.wantTrigger, tc.wantInput)
+			}
+		})
+	}
+}
+
 func TestResume_FailedSiblingRequiresMatchedInterrupt(t *testing.T) {
 	var attempts atomic.Int32
 	ask := newDummyNode("ask")
