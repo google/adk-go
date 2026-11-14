@@ -50,6 +50,11 @@ type Config struct {
 	// Format for RAGCorpus: "projects/{project}/locations/{location}/ragCorpora/{corpus}".
 	RAGResources []*genai.VertexRAGStoreRAGResource
 
+	// RAGRetrievalConfig configures filtering, hybrid search, ranking and context
+	// count. Nil leaves the backend defaults in place. These options extend the
+	// configuration supported by the Python retrieval tool.
+	RAGRetrievalConfig *genai.RAGRetrievalConfig
+
 	// SimilarityTopK caps how many results retrieval returns. Nil leaves the
 	// backend default in place.
 	SimilarityTopK *int32
@@ -79,6 +84,7 @@ func New(cfg Config) (tool.Tool, error) {
 	// Copy so that later changes to cfg do not reach the tool.
 	store := cloneStore(&genai.VertexRAGStore{
 		RAGResources:            cfg.RAGResources,
+		RAGRetrievalConfig:      cfg.RAGRetrievalConfig,
 		SimilarityTopK:          cfg.SimilarityTopK,
 		VectorDistanceThreshold: cfg.VectorDistanceThreshold,
 	})
@@ -132,8 +138,8 @@ func (r *ragRetrieval) ProcessRequest(ctx agent.Context, req *model.LLMRequest) 
 }
 
 // cloneStore returns a deep copy of the fields of s that New sets:
-// RAGResources, SimilarityTopK and VectorDistanceThreshold. Other fields are
-// not copied. Every element of s.RAGResources must be non-nil.
+// RAGResources, RAGRetrievalConfig, SimilarityTopK and VectorDistanceThreshold.
+// Other fields are not copied. Every element of s.RAGResources must be non-nil.
 func cloneStore(s *genai.VertexRAGStore) *genai.VertexRAGStore {
 	res := make([]*genai.VertexRAGStoreRAGResource, len(s.RAGResources))
 	for i, r := range s.RAGResources {
@@ -142,8 +148,27 @@ func cloneStore(s *genai.VertexRAGStore) *genai.VertexRAGStore {
 			RAGFileIDs: slices.Clone(r.RAGFileIDs),
 		}
 	}
+	cfg := clonePtr(s.RAGRetrievalConfig)
+	if cfg != nil {
+		cfg.TopK = clonePtr(cfg.TopK)
+		cfg.Filter = clonePtr(cfg.Filter)
+		if cfg.Filter != nil {
+			cfg.Filter.VectorDistanceThreshold = clonePtr(cfg.Filter.VectorDistanceThreshold)
+			cfg.Filter.VectorSimilarityThreshold = clonePtr(cfg.Filter.VectorSimilarityThreshold)
+		}
+		cfg.HybridSearch = clonePtr(cfg.HybridSearch)
+		if cfg.HybridSearch != nil {
+			cfg.HybridSearch.Alpha = clonePtr(cfg.HybridSearch.Alpha)
+		}
+		cfg.Ranking = clonePtr(cfg.Ranking)
+		if cfg.Ranking != nil {
+			cfg.Ranking.LlmRanker = clonePtr(cfg.Ranking.LlmRanker)
+			cfg.Ranking.RankService = clonePtr(cfg.Ranking.RankService)
+		}
+	}
 	return &genai.VertexRAGStore{
 		RAGResources:            res,
+		RAGRetrievalConfig:      cfg,
 		SimilarityTopK:          clonePtr(s.SimilarityTopK),
 		VectorDistanceThreshold: clonePtr(s.VectorDistanceThreshold),
 	}
