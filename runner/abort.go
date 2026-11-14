@@ -40,6 +40,19 @@ func watchAbort(ictx agent.Context) (engine agent.Context, stop func()) {
 	return ictx.WithAgentContext(abortCtx), stop
 }
 
+// abortedInvocationIDs returns the invocation IDs of the events in events
+// that seal an aborted invocation (abortevents.IsAbortEvent), wherever they
+// sit: a resumed invocation can append events after its seal.
+func abortedInvocationIDs(events []*session.Event) map[string]struct{} {
+	ids := map[string]struct{}{}
+	for _, ev := range events {
+		if abortevents.IsAbortEvent(ev) {
+			ids[ev.InvocationID] = struct{}{}
+		}
+	}
+	return ids
+}
+
 // sealAborted appends to sess the events that seal the aborted invocation of
 // ctx, at most once per run, and returns them as the OnEventCallback plugins
 // left them. ctx must be the run's own invocation context, not the engine

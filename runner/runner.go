@@ -256,7 +256,10 @@ func WithInvocationID(id string) RunOption {
 // receives the sealing events; a caller that stops ranging after closing the
 // signal still finds them in the session once the range ends. A sealing
 // failure is yielded as an error to a caller that keeps ranging; a caller
-// that has stopped ranging does not receive it.
+// that has stopped ranging does not receive it. A task agent that was running
+// when the run was aborted is closed, and the next message goes to the agent
+// that delegated to it; a task agent that had already replied and was waiting
+// for the user stays open.
 //
 // The iterator ends without an error caused by the abort. An error that is
 // not the abort's cancellation, and the cancellation of the caller's own ctx,
@@ -2122,14 +2125,22 @@ func asUserContent(msg *genai.Content) *genai.Content {
 
 // findActiveTaskIsolationScope returns the open task delegation of sess: the
 // isolation scope of its newest live event (see utils.ApplyRewinds) whose
-// scope no finish_task response has closed, and that event's invocation ID.
-// It returns two empty strings when sess is nil or no scope is open.
+// scope no finish_task response has closed and whose invocation was not
+// aborted, and that event's invocation ID. It returns two empty strings when
+// sess is nil or no scope is open.
 //
 // A scope is closed when the first finish_task function response of a live
 // event in that scope has the result FinishTaskSuccessResult or
 // FinishTaskErrorResult, wherever the response sits; events after it in the
 // same scope do not reopen it. A response with an error instead of a result
-// leaves the scope open, because the task agent retries. Port of adk-python's
+// leaves the scope open, because the task agent retries.
+//
+// A scoped event whose invocation has an abort event (abortevents.IsAbortEvent)
+// anywhere in the live events does not count: its task agent was canceled
+// without calling finish_task, so its scope is closed. The rule goes by
+// invocation ID, so an older event of the same scope under another invocation
+// that was not aborted keeps the scope open. A finish_task response inside an
+// aborted invocation still closes its scope. Port of adk-python's
 // _find_active_task_scope (runners.py).
 func findActiveTaskIsolationScope(sess session.Session) (scope, invocationID string) {
 	if sess == nil {
@@ -2154,8 +2165,12 @@ func findActiveTaskIsolationScope(sess session.Session) (scope, invocationID str
 			finished[ev.IsolationScope] = struct{}{}
 		}
 	}
+	aborted := abortedInvocationIDs(events)
 	for _, ev := range slices.Backward(events) {
 		if ev.IsolationScope == "" {
+			continue
+		}
+		if _, gone := aborted[ev.InvocationID]; gone {
 			continue
 		}
 		if _, done := finished[ev.IsolationScope]; !done {
