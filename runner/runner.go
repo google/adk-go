@@ -13,6 +13,36 @@
 // limitations under the License.
 
 // Package runner provides a runtime for ADK agents.
+//
+// A [Runner] runs one root, an agent ([Config.Agent]) or a workflow node
+// ([Config.Node]), against the sessions of a [session.Service]. Each call of
+// [Runner.Run] is one invocation: the runner loads the session, stores the
+// user message as an event, runs the root, and passes every event the root
+// produces through the plugins' OnEventCallback before it appends the
+// non-partial ones to the session and yields them to the caller. The
+// iterator ends when the root is done, when the caller stops ranging, or
+// after an error that ends the run.
+//
+// Each run takes an [agent.RunConfig], which sets per-run behavior such as
+// the metadata merged into every event (CustomMetadata) and the window of
+// session events the run loads (GetSessionConfig), and [RunOption] values:
+//
+//   - [WithInvocationID] continues or retries an invocation by its ID.
+//   - [WithStateDelta] stores a state change with the user event.
+//   - [WithYieldUserMessage] yields the stored user event first.
+//   - [WithAbortSignal] lets the caller stop the run and have it seal the
+//     invocation.
+//
+// The runner runs an LlmAgent root and a node root as workflow nodes (the
+// node path), and other agent roots by calling their Run method (the classic
+// path). The doc comments of [Runner.Run] and the options say where the two
+// paths differ.
+//
+// [Runner.RunLive] runs a live, bidirectional session, [Runner.Rewind]
+// restores a session's state and artifacts to what they were before a given
+// invocation, and
+// [Runner.Close] releases the toolsets and plugins of the runner's agent
+// tree when the application is done with the runner.
 package runner
 
 import (
@@ -78,7 +108,9 @@ type Config struct {
 	// of its [workflow.Start] in the form that successor declares (see
 	// [workflow.NodeConfig.ContentInput]). The node's events carry the root
 	// path "<Node.Name()>@1" in [session.NodeInfo].
-	Node           workflow.Node
+	Node workflow.Node
+	// SessionService stores the sessions the runner loads and appends events
+	// to. Required.
 	SessionService session.Service
 
 	// optional
@@ -163,19 +195,24 @@ type runOptions struct {
 	abort            <-chan struct{}
 }
 
-// WithStateDelta sets a state delta for the run invocation.
+// WithStateDelta stores delta as the state delta of the user event the run
+// appends, so the session's state holds it before the root runs. With a nil
+// message, a non-empty delta is stored in a user event without content. On a
+// retry (see [Runner.Run]), an LlmAgent root, a [Config.Node] root and a root
+// graph workflow (workflowagent.New) store it the same way, and other roots
+// discard it.
 func WithStateDelta(delta map[string]any) RunOption {
 	return func(o *runOptions) {
 		o.stateDelta = delta
 	}
 }
 
-// WithYieldUserMessage makes Run yield the user message event (after it is
-// appended to the session) before any agent/node events. Mirrors
-// adk-python's yield_user_message. It applies to the roots adk-python runs
-// as nodes: an LlmAgent, a [Config.Node] and a root graph workflow
-// (workflowagent.New). On any other root Run yields no user event, as in
-// adk-python.
+// WithYieldUserMessage makes Run yield the user event it stores, after the
+// event is appended to the session and before any event of the root. It
+// applies to an LlmAgent root, a [Config.Node] root and a root graph
+// workflow (workflowagent.New); on any other root Run yields no user event.
+// When the run stores no user event, as on a retry without a state delta,
+// there is nothing to yield.
 func WithYieldUserMessage() RunOption {
 	return func(o *runOptions) {
 		o.yieldUserMessage = true
