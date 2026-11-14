@@ -701,7 +701,7 @@ func resolveInvocationID(sess session.Session, msg *genai.Content, mode resolveM
 	switch {
 	case len(pending) > 0:
 		if mode == resolveStrict {
-			return "", fmt.Errorf("function call not found for %d function response ids: each function response ID must match a function call in the session history", len(pending))
+			return "", refuseMessagef("function call not found for %d function response ids: each function response ID must match a function call in the session history", len(pending))
 		}
 		return "", nil
 	case len(invocations) > 1:
@@ -713,7 +713,7 @@ func resolveInvocationID(sess session.Session, msg *genai.Content, mode resolveM
 			}
 		}
 		if mode != resolveLenient {
-			return "", fmt.Errorf("function responses resolve to multiple invocations (%d): all function responses in a single message must belong to the same invocation", len(invocations))
+			return "", refuseMessagef("function responses resolve to multiple invocations (%d): all function responses in a single message must belong to the same invocation", len(invocations))
 		}
 		return "", nil
 	}

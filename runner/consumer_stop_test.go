@@ -66,6 +66,24 @@ func newBookingAssistant(t *testing.T, bookings *atomic.Int32) agent.Agent {
 	return a
 }
 
+func newBookingGraphRoot(t *testing.T, bookings *atomic.Int32) agent.Agent {
+	t.Helper()
+	assistant := newBookingAssistant(t, bookings)
+	node, err := workflow.NewAgentNode(assistant, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode() error = %v", err)
+	}
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name:      "wf",
+		Edges:     workflow.Chain(workflow.Start, node),
+		SubAgents: []agent.Agent{assistant},
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New() error = %v", err)
+	}
+	return wf
+}
+
 func hasFunctionCall(ev *session.Event) bool {
 	if ev.Partial || ev.Content == nil {
 		return false
@@ -80,7 +98,9 @@ func hasFunctionCall(ev *session.Event) bool {
 
 // A caller that breaks from the range loop at the event that carries a
 // function call leaves the call stored and unanswered, and the tool does not
-// run. Resuming the invocation by its ID runs the call for an LlmAgent root.
+// run. Resuming the invocation by its ID runs the call for an LlmAgent root,
+// and runs nothing for a graph workflow root, as adk-python's Workflow root
+// does.
 //
 // The test guards the wiring through the public API and the resume (B2), not
 // the scheduler fix itself: without the fix it fails in about two of three
@@ -101,6 +121,12 @@ func TestRun_BreakAtFunctionCall_ToolDoesNotRun(t *testing.T) {
 			newRoot:         newBookingAssistant,
 			wantStored:      []string{"user text Book a table", "assistant call book"},
 			wantAfterResume: 1,
+		},
+		{
+			name:            "graph workflow root",
+			newRoot:         newBookingGraphRoot,
+			wantStored:      []string{"user text Book a table", "assistant call book"},
+			wantAfterResume: 0,
 		},
 	}
 	for _, tc := range tests {
