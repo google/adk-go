@@ -70,8 +70,10 @@ func TestConfigValidateRejectsUnusableCompaction(t *testing.T) {
 // web.NewLauncher return a launcher.SubLauncher, whose interface has Run and
 // no Execute, so the Execute methods on those two concrete types cannot be
 // called through the exported API at all: the universal launcher dispatches to
-// Run. That makes this the one place the check has to hold, and the arguments
-// are rejected before any of them are parsed.
+// Run. That makes this the place the check has to hold for the flag path, and
+// the arguments are rejected before any of them are parsed. The value path is
+// console.NewRunnable, which validates before its Run touches the telemetry
+// providers or the session service.
 func TestFullLauncherRefusesUnusableCompaction(t *testing.T) {
 	t.Parallel()
 
