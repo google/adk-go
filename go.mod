@@ -42,6 +42,7 @@ require (
 require github.com/hashicorp/golang-lru/v2 v2.0.7
 
 require (
+	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
@@ -50,6 +51,7 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/mod v0.42.0 // indirect
@@ -58,6 +60,7 @@ require (
 require (
 	github.com/a2aproject/a2a-go/v2 v2.6.0
 	github.com/anthropics/anthropic-sdk-go v1.81.0
+	github.com/google/cel-go v0.31.0
 )
 
 require (
