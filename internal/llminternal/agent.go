@@ -21,6 +21,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/codeexecutor"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
@@ -75,6 +76,8 @@ type State struct {
 	OutputJsonSchema *jsonschema.Schema
 
 	OutputKey string
+
+	CodeExecutor codeexecutor.CodeExecutor
 
 	// LiveModeInjection guards the single live-mode tool injection an agent
 	// receives. Its lifetime follows the agent rather than a global cache.
