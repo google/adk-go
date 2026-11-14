@@ -67,6 +67,7 @@ func New(allowedBaseDir string) (*plugin.Plugin, error) {
 		Name:                "replay_plugin",
 		BeforeRunCallback:   p.beforeRun,
 		AfterRunCallback:    p.afterRun,
+		OnRunErrorCallback:  p.onRunError,
 		BeforeModelCallback: p.beforeModel,
 		BeforeToolCallback:  p.beforeTool,
 	})
@@ -168,6 +169,14 @@ func (p *replayPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[strin
 	}
 
 	return recording.ToolResponse.Response, nil
+}
+
+// onRunError drops the replay state of an invocation that a run error ended,
+// as afterRun does for a run that completed. The runner calls no after-run
+// callback for such a run, so without it the state would be kept for the
+// life of the plugin.
+func (p *replayPlugin) onRunError(ctx agent.InvocationContext, _ error) {
+	p.afterRun(ctx)
 }
 
 // afterRun cleans up the invocation state.

@@ -432,7 +432,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 // use an error value it owns. Errors that escape while the agent's context is
 // still live are reported.
 func runOnAgentErrorCallbacks(ctx InvocationContext, err error) {
-	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Cause(ctx))) {
+	if agentinternal.IsCallerCancellation(ctx, err) {
 		return
 	}
 	pluginManager := pluginManagerFromContext(ctx)
