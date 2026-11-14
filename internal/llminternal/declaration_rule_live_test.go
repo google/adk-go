@@ -82,7 +82,7 @@ func TestRunLive_UndeclaredToolIsNotCallable(t *testing.T) {
 
 	// The live callable map holds decl_tool only, so the error lists it alone.
 	errText, _ := responses["no_decl"]["error"].(string)
-	if want := "tool 'no_decl' not found.\nAvailable tools: decl_tool\n"; !strings.HasPrefix(errText, want) {
+	if want := "Invoking `no_decl()` failed as no tool with that name is available. The tools you can call are: decl_tool."; !strings.HasPrefix(errText, want) {
 		t.Errorf("no_decl response error = %q, want prefix %q", errText, want)
 	}
 	if diff := cmp.Diff(map[string]any{"ran": "decl_tool"}, responses["decl_tool"]); diff != "" {

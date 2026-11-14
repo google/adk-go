@@ -32,7 +32,9 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/exp/feature"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/typeutil"
@@ -1356,5 +1358,580 @@ func TestFunctionTool_PanicRecovery(t *testing.T) {
 		if !strings.Contains(err.Error(), part) {
 			t.Errorf("expected error to contain %q, but it did not. Error: %v", part, err)
 		}
+	}
+}
+
+type weatherArgs struct {
+	City string `json:"city"`
+	Days int    `json:"days,omitempty"`
+}
+
+type weatherResult struct {
+	Temp float64 `json:"temp"`
+}
+
+type filterArgs struct {
+	Query string         `json:"query"`
+	Extra map[string]any `json:"extra"`
+}
+
+type optArgs struct {
+	Opt  *string `json:"opt"`
+	Name string  `json:"name"`
+}
+
+// declarationContext returns a tool context whose context carries the
+// typed-declaration switch and, unless it is unspecified, the backend.
+func declarationContext(t *testing.T, on bool, backend genai.Backend) agent.Context {
+	t.Helper()
+	c := feature.WithLegacyFunctionDeclarationSchema(t.Context(), on)
+	if backend != genai.BackendUnspecified {
+		c = googlellm.ContextWithBackend(c, backend)
+	}
+	invCtx := icontext.NewInvocationContext(c, icontext.InvocationContextParams{})
+	return agent.NewToolContext(invCtx, "", &session.EventActions{}, nil)
+}
+
+func mustSchema(t *testing.T, s string) *jsonschema.Schema {
+	t.Helper()
+	out := &jsonschema.Schema{}
+	if err := json.Unmarshal([]byte(s), out); err != nil {
+		t.Fatalf("unmarshal schema %s: %v", s, err)
+	}
+	return out
+}
+
+// decodedJSON returns v as decoded JSON, nil for a nil interface, and a marker
+// for a typed nil, which a declaration would send as an explicit null.
+func decodedJSON(t *testing.T, v any) any {
+	t.Helper()
+	if v == nil {
+		return nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal %T: %v", v, err)
+	}
+	var out any
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("unmarshal %s: %v", b, err)
+	}
+	if out == nil {
+		return "<typed nil>"
+	}
+	return out
+}
+
+func TestFunctionTool_ProcessRequest_DeclarationFormsBySwitchAndBackend(t *testing.T) {
+	weather := func(agent.Context, weatherArgs) (weatherResult, error) { return weatherResult{}, nil }
+	w, err := functiontool.New(functiontool.Config{Name: "get_weather", Description: "Weather."}, weather)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := functiontool.NewStreaming(functiontool.Config{Name: "stream_weather", Description: "Weather."},
+		func(agent.Context, weatherArgs) iter.Seq2[string, error] { return func(func(string, error) bool) {} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := functiontool.New(functiontool.Config{Name: "ping", Description: "Ping."},
+		func(agent.Context, struct{}) (weatherResult, error) { return weatherResult{}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := functiontool.New(functiontool.Config{Name: "filter", Description: "Filter."},
+		func(agent.Context, filterArgs) (weatherResult, error) { return weatherResult{}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := functiontool.New(functiontool.Config{Name: "opt", Description: "Opt."},
+		func(agent.Context, optArgs) (weatherResult, error) { return weatherResult{}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapHandler := func(agent.Context, map[string]any) (map[string]any, error) { return nil, nil }
+	titled, err := functiontool.New(functiontool.Config{
+		Name: "titled", Description: "Titled.",
+		InputSchema:  mustSchema(t, `{"type":"object","title":"Args","properties":{"q":{"type":"string","title":"Query"}},"required":["q"],"additionalProperties":false}`),
+		OutputSchema: mustSchema(t, `{"type":"object","title":"Result","properties":{"r":{"type":"string","title":"Reply"}},"required":["r"],"additionalProperties":false}`),
+	}, mapHandler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := functiontool.New(functiontool.Config{Name: "any_args", Description: "Any."}, mapHandler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaulted, err := functiontool.New(functiontool.Config{
+		Name: "defaulted", Description: "Defaulted.",
+		InputSchema: mustSchema(t, `{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string","default":"x"}},"required":["a","b"],"additionalProperties":false}`),
+	}, mapHandler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := functiontool.New(functiontool.Config{
+		Name: "tag", Description: "Tag.",
+		InputSchema:  mustSchema(t, `{"type":"object","properties":{"note":{"anyOf":[{"type":"string"},{"type":"null"}]}}}`),
+		OutputSchema: mustSchema(t, `{"type":"object","properties":{"label":{"anyOf":[{"type":"string"},{"type":"null"}]}}}`),
+	}, mapHandler)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		pw = `{"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"}},"required":["city"],"additionalProperties":false}`
+		rw = `{"type":"object","properties":{"temp":{"type":"number"}},"required":["temp"],"additionalProperties":false}`
+		pe = `{"type":"object","additionalProperties":false}`
+		pf = `{"type":"object","properties":{"query":{"type":"string"},"extra":{"type":"object","additionalProperties":true}},"required":["query","extra"],"additionalProperties":false}`
+		pv = `{"type":"object","properties":{"note":{"type":"string","nullable":true}}}`
+		pm = `{"type":"object","additionalProperties":true}`
+		rv = `{"type":"object","properties":{"label":{"type":"string","nullable":true}}}`
+	)
+	gw := &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{"city": {Type: genai.TypeString}, "days": {Type: genai.TypeInteger}}, Required: []string{"city"}}
+	grw := &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{"temp": {Type: genai.TypeNumber}}, Required: []string{"temp"}}
+	gem, vertex, unspecified := genai.BackendGeminiAPI, genai.BackendVertexAI, genai.BackendUnspecified
+
+	tests := []struct {
+		name                     string
+		on                       bool
+		backend                  genai.Backend
+		tool                     tool.Tool
+		wantParameters           *genai.Schema
+		wantParametersJSONSchema string
+		wantResponse             *genai.Schema
+		wantResponseJSONSchema   string
+		wantToolItself           bool
+	}{
+		{name: "1 off gemini W", backend: gem, tool: w, wantParametersJSONSchema: pw, wantResponseJSONSchema: rw, wantToolItself: true},
+		{name: "2 off gemini E", backend: gem, tool: e, wantParametersJSONSchema: pe, wantResponseJSONSchema: rw, wantToolItself: true},
+		{name: "3 off gemini WS", backend: gem, tool: ws, wantParametersJSONSchema: pw, wantToolItself: true},
+		{name: "4 off unspecified W", backend: unspecified, tool: w, wantParametersJSONSchema: pw, wantResponseJSONSchema: rw, wantToolItself: true},
+		{name: "5 off vertex V", backend: vertex, tool: v, wantParametersJSONSchema: pv, wantResponseJSONSchema: rv},
+		{name: "6 off vertex E", backend: vertex, tool: e, wantResponseJSONSchema: rw},
+		{name: "7 on gemini W", on: true, backend: gem, tool: w, wantParameters: gw},
+		{name: "8 on vertex W", on: true, backend: vertex, tool: w, wantParameters: gw, wantResponse: grw},
+		{name: "9 on unspecified W", on: true, backend: unspecified, tool: w, wantParameters: gw},
+		{name: "10 on vertex WS", on: true, backend: vertex, tool: ws, wantParameters: gw},
+		{name: "11 on gemini E", on: true, backend: gem, tool: e},
+		{name: "12 on gemini F", on: true, backend: gem, tool: f, wantParametersJSONSchema: pf},
+		{
+			name: "13 on gemini O", on: true, backend: gem, tool: o,
+			wantParameters: &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{"opt": {Type: genai.TypeString, Nullable: new(true)}, "name": {Type: genai.TypeString}}, Required: []string{"name"}},
+		},
+		{
+			name: "14 on gemini T", on: true, backend: gem, tool: titled,
+			wantParameters: &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{"q": {Type: genai.TypeString}}, Required: []string{"q"}},
+		},
+		{name: "15 on gemini M", on: true, backend: gem, tool: m, wantParametersJSONSchema: pm},
+		{
+			name: "16 on vertex T", on: true, backend: vertex, tool: titled,
+			wantParameters: &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{"q": {Type: genai.TypeString}}, Required: []string{"q"}},
+			wantResponse:   &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{"r": {Type: genai.TypeString}}, Required: []string{"r"}},
+		},
+		{name: "17 on vertex V", on: true, backend: vertex, tool: v, wantParametersJSONSchema: pv},
+		{
+			name: "18 on gemini D", on: true, backend: gem, tool: defaulted,
+			wantParameters: &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{"a": {Type: genai.TypeString}, "b": {Type: genai.TypeString}}, Required: []string{"a"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &model.LLMRequest{}
+			if err := tc.tool.(toolinternal.RequestProcessor).ProcessRequest(declarationContext(t, tc.on, tc.backend), req); err != nil {
+				t.Fatalf("ProcessRequest() error = %v", err)
+			}
+			d := req.Config.Tools[0].FunctionDeclarations[0]
+			if diff := cmp.Diff(tc.wantParameters, d.Parameters); diff != "" {
+				t.Errorf("Parameters mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantResponse, d.Response); diff != "" {
+				t.Errorf("Response mismatch (-want +got):\n%s", diff)
+			}
+			for _, field := range []struct {
+				name string
+				want string
+				got  any
+			}{
+				{"ParametersJsonSchema", tc.wantParametersJSONSchema, d.ParametersJsonSchema},
+				{"ResponseJsonSchema", tc.wantResponseJSONSchema, d.ResponseJsonSchema},
+			} {
+				var want any
+				if field.want != "" {
+					if err := json.Unmarshal([]byte(field.want), &want); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if diff := cmp.Diff(want, decodedJSON(t, field.got)); diff != "" {
+					t.Errorf("%s mismatch (-want +got):\n%s", field.name, diff)
+				}
+			}
+			if got := req.Tools[tc.tool.Name()] == any(tc.tool); got != tc.wantToolItself {
+				t.Errorf("req.Tools[%q] is the tool itself = %v, want %v", tc.tool.Name(), got, tc.wantToolItself)
+			}
+		})
+	}
+}
+
+type abArgs struct {
+	A string `json:"a"`
+	B int    `json:"b"`
+}
+
+func TestFunctionTool_DropsUndeclaredArgsForStructAndPreservesForMap(t *testing.T) {
+	byValue, err := functiontool.New(functiontool.Config{Name: "by_value"},
+		func(_ agent.Context, a abArgs) (abArgs, error) { return a, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPointer, err := functiontool.New(functiontool.Config{Name: "by_pointer"},
+		func(_ agent.Context, a *abArgs) (abArgs, error) { return *a, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	streaming, err := functiontool.NewStreaming(functiontool.Config{Name: "streaming"},
+		func(_ agent.Context, a abArgs) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) { yield(fmt.Sprintf("%s:%d", a.A, a.B), nil) }
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapTool, err := functiontool.New(functiontool.Config{Name: "map_tool"},
+		func(_ agent.Context, m map[string]int) (map[string]int, error) {
+			return map[string]int{"sum": m["x"] + m["extra"]}, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"a": "hi", "b": float64(7)}
+
+	for _, tl := range []tool.Tool{byValue, byPointer} {
+		t.Run(tl.Name(), func(t *testing.T) {
+			in := map[string]any{"a": "hi", "b": 7, "unexpected_param": "dropped"}
+			got, err := tl.(toolinternal.FunctionTool).Run(createToolContext(t), in)
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+			}
+			raw, ok := tl.(toolinternal.RawResultTool)
+			if !ok {
+				t.Fatalf("%T does not implement toolinternal.RawResultTool", tl)
+			}
+			gotRaw, err := raw.RunRaw(createToolContext(t), in)
+			if err != nil {
+				t.Fatalf("RunRaw() error = %v", err)
+			}
+			if diff := cmp.Diff(any(want), gotRaw); diff != "" {
+				t.Errorf("RunRaw() mismatch (-want +got):\n%s", diff)
+			}
+			if in["unexpected_param"] != "dropped" {
+				t.Errorf("the caller's args lost unexpected_param: %v", in)
+			}
+		})
+	}
+	t.Run("streaming", func(t *testing.T) {
+		in := map[string]any{"a": "hi", "b": 7, "unexpected_param": "dropped"}
+		var got []string
+		for chunk, err := range streaming.(toolinternal.StreamingFunctionTool).RunStream(createToolContext(t), in) {
+			if err != nil {
+				t.Fatalf("RunStream() error = %v", err)
+			}
+			got = append(got, chunk)
+		}
+		if diff := cmp.Diff([]string{"hi:7"}, got); diff != "" {
+			t.Errorf("RunStream() mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("map", func(t *testing.T) {
+		got, err := mapTool.(toolinternal.FunctionTool).Run(createToolContext(t), map[string]any{"x": 7, "extra": 9})
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if diff := cmp.Diff(map[string]any{"sum": float64(16)}, got); diff != "" {
+			t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+type mandatoryArgs struct {
+	ZFirst    string `json:"z_first"`
+	ASecond   int    `json:"a_second"`
+	Optional  string `json:"optional,omitempty"`
+	Coalesced int    `json:"coalesced,omitzero"`
+}
+
+func TestFunctionTool_MissingMandatoryArgsAreAResult(t *testing.T) {
+	const wantText = "Invoking `my_tool()` failed as the following mandatory input parameters are not present:\nz_first\na_second\nYou could retry calling this tool, but it is IMPORTANT for you to provide all the mandatory parameters."
+	ran := false
+	ft, err := functiontool.New(functiontool.Config{Name: "my_tool", RequireConfirmation: true},
+		func(agent.Context, mandatoryArgs) (string, error) { ran = true; return "ok", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := functiontool.NewStreaming(functiontool.Config{Name: "my_tool", RequireConfirmation: true},
+		func(agent.Context, mandatoryArgs) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) { ran = true; yield("ok", nil) }
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{"unexpected": 1}
+	want := map[string]any{"error": wantText}
+
+	got, err := ft.(toolinternal.FunctionTool).Run(createToolContext(t), args)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want the result map", err)
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+	raw, ok := ft.(toolinternal.RawResultTool)
+	if !ok {
+		t.Fatalf("%T does not implement toolinternal.RawResultTool", ft)
+	}
+	gotRaw, err := raw.RunRaw(createToolContext(t), args)
+	if err != nil {
+		t.Fatalf("RunRaw() error = %v, want the result map", err)
+	}
+	if diff := cmp.Diff(any(want), gotRaw); diff != "" {
+		t.Errorf("RunRaw() mismatch (-want +got):\n%s", diff)
+	}
+	var errs []string
+	for chunk, err := range st.(toolinternal.StreamingFunctionTool).RunStream(createToolContext(t), args) {
+		if err == nil {
+			t.Errorf("RunStream() yielded %q, want only the error", chunk)
+			continue
+		}
+		errs = append(errs, err.Error())
+	}
+	if diff := cmp.Diff([]string{wantText}, errs); diff != "" {
+		t.Errorf("RunStream() errors mismatch (-want +got):\n%s", diff)
+	}
+	if ran {
+		t.Error("a handler ran although mandatory arguments were missing")
+	}
+}
+
+type countArgs struct {
+	Count int `json:"count"`
+}
+
+type coercedArgs struct {
+	N   int       `json:"n"`
+	IDs []int     `json:"ids"`
+	Sub countArgs `json:"sub"`
+}
+
+// TestFunctionTool_IntegralFloatCoercionAndStructConversion checks that the
+// float64 numbers a model sends reach int, []int and nested struct fields as
+// ints, and that a non-integral float for an int is refused. It fails if the
+// arguments stop reaching the handler through the JSON round trip of
+// typeutil.ConvertToWithJSONSchema: a conversion that assigns the decoded
+// values by type refuses float64(3) for an int field, and a numeric coercion
+// that truncates passes 1.5 to the handler as 1.
+func TestFunctionTool_IntegralFloatCoercionAndStructConversion(t *testing.T) {
+	var got []coercedArgs
+	ft, err := functiontool.New(functiontool.Config{Name: "coerce"},
+		func(_ agent.Context, a coercedArgs) (string, error) { got = append(got, a); return "ok", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := ft.(toolinternal.FunctionTool).Run
+
+	if _, err := run(createToolContext(t), map[string]any{"n": float64(3), "ids": []any{float64(1), float64(2)}, "sub": map[string]any{"count": float64(4)}}); err != nil {
+		t.Fatalf("Run() with integral floats error = %v", err)
+	}
+	if _, err := run(createToolContext(t), map[string]any{"n": 1.5, "ids": []any{float64(1)}, "sub": map[string]any{"count": float64(1)}}); err == nil {
+		t.Error("Run() with n = 1.5 succeeded, want a validation error")
+	}
+	if diff := cmp.Diff([]coercedArgs{{N: 3, IDs: []int{1, 2}, Sub: countArgs{Count: 4}}}, got); diff != "" {
+		t.Errorf("handler arguments mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type nilStruct struct {
+	X int `json:"x"`
+}
+
+func TestFunctionTool_RunRawKeepsPartsAndNilResults(t *testing.T) {
+	png := genai.NewPartFromBytes([]byte("png"), "image/png")
+	newAny := func(out any) tool.Tool {
+		tl, err := functiontool.New(functiontool.Config{Name: "any_tool"},
+			func(agent.Context, struct{}) (any, error) { return out, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tl
+	}
+	nilMapTool, err := functiontool.New(functiontool.Config{Name: "nil_map"},
+		func(agent.Context, struct{}) (map[string]any, error) { return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	nilPointerTool, err := functiontool.New(functiontool.Config{Name: "nil_pointer"},
+		func(agent.Context, struct{}) (*nilStruct, error) { return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	typedPartMapTool, err := functiontool.New(functiontool.Config{Name: "typed_map"},
+		func(agent.Context, struct{}) (map[string]*genai.Part, error) {
+			return map[string]*genai.Part{"chart": png}, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deep := map[string]any{"report": map[string]any{"charts": map[string]any{"first": png}}}
+
+	tests := []struct {
+		name    string
+		tool    tool.Tool
+		wantRaw any
+		wantRun map[string]any
+	}{
+		{name: "part", tool: newAny(png), wantRaw: png, wantRun: map[string]any{"result": png}},
+		{name: "map holding a part", tool: newAny(map[string]any{"chart": png, "summary": "up"}), wantRaw: map[string]any{"chart": png, "summary": "up"}, wantRun: map[string]any{"chart": png, "summary": "up"}},
+		{name: "typed map holding a part", tool: typedPartMapTool, wantRaw: map[string]any{"chart": png}, wantRun: map[string]any{"chart": png}},
+		{name: "slice holding a part", tool: newAny([]any{png, "x"}), wantRaw: []any{png, "x"}, wantRun: map[string]any{"result": []any{png, "x"}}},
+		{name: "part three containers deep", tool: newAny(deep), wantRaw: deep, wantRun: deep},
+		{name: "untyped nil", tool: newAny(nil), wantRaw: nil, wantRun: nil},
+		{name: "nil map", tool: nilMapTool, wantRaw: nil, wantRun: nil},
+		{name: "nil pointer", tool: nilPointerTool, wantRaw: nil, wantRun: map[string]any{"result": (*nilStruct)(nil)}},
+		{name: "string", tool: newAny("text"), wantRaw: "text", wantRun: map[string]any{"result": "text"}},
+		{name: "struct", tool: newAny(nilStruct{X: 2}), wantRaw: map[string]any{"x": float64(2)}, wantRun: map[string]any{"x": float64(2)}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, ok := tc.tool.(toolinternal.RawResultTool)
+			if !ok {
+				t.Fatalf("%T does not implement toolinternal.RawResultTool", tc.tool)
+			}
+			gotRaw, err := raw.RunRaw(createToolContext(t), map[string]any{})
+			if err != nil {
+				t.Fatalf("RunRaw() error = %v", err)
+			}
+			// A typed nil in an interface is not what the flow can wrap as
+			// {"result": null}, so nil must be the untyped nil.
+			if tc.wantRaw == nil && gotRaw != nil {
+				t.Errorf("RunRaw() = %#v, want untyped nil", gotRaw)
+			}
+			if diff := cmp.Diff(tc.wantRaw, gotRaw); diff != "" {
+				t.Errorf("RunRaw() mismatch (-want +got):\n%s", diff)
+			}
+			gotRun, err := tc.tool.(toolinternal.FunctionTool).Run(createToolContext(t), map[string]any{})
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			if diff := cmp.Diff(tc.wantRun, gotRun, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestFunctionTool_CyclicResultIsAnError(t *testing.T) {
+	cyclic := map[string]any{"a": 1}
+	cyclic["self"] = cyclic
+	tl, err := functiontool.New(functiontool.Config{Name: "cyclic"},
+		func(agent.Context, struct{}) (any, error) { return cyclic, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tl.(toolinternal.FunctionTool).Run(createToolContext(t), map[string]any{}); err == nil {
+		t.Error("Run() of a cyclic result succeeded, want an error")
+	}
+	raw, ok := tl.(toolinternal.RawResultTool)
+	if !ok {
+		t.Fatalf("%T does not implement toolinternal.RawResultTool", tl)
+	}
+	if _, err := raw.RunRaw(createToolContext(t), map[string]any{}); err == nil {
+		t.Error("RunRaw() of a cyclic result succeeded, want an error")
+	}
+}
+
+type staticToolset []tool.Tool
+
+func (s staticToolset) Name() string                                     { return "static" }
+func (s staticToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) { return s, nil }
+
+func TestFunctionTool_ResponseSchedulingAndRawResultsSurviveWrappers(t *testing.T) {
+	png := genai.NewPartFromBytes([]byte("png"), "image/png")
+	whenIdle, err := functiontool.New(functiontool.Config{Name: "when_idle", ResponseScheduling: genai.FunctionResponseSchedulingWhenIdle},
+		func(agent.Context, struct{}) (any, error) { return png, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupt, err := functiontool.NewStreaming(functiontool.Config{Name: "interrupt", ResponseScheduling: genai.FunctionResponseSchedulingInterrupt},
+		func(agent.Context, struct{}) iter.Seq2[string, error] { return func(func(string, error) bool) {} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	unset, err := functiontool.New(functiontool.Config{Name: "unset"},
+		func(agent.Context, struct{}) (any, error) { return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err := tool.WithConfirmation(staticToolset{whenIdle, interrupt}, false, nil).Tools(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &model.LLMRequest{}
+	if err := whenIdle.(toolinternal.RequestProcessor).ProcessRequest(declarationContext(t, true, genai.BackendGeminiAPI), req); err != nil {
+		t.Fatal(err)
+	}
+	declared := req.Tools["when_idle"].(tool.Tool)
+	if declared == whenIdle {
+		t.Fatal("with the switch on, ProcessRequest registered the tool itself, want its request-declaration wrapper")
+	}
+
+	for _, tc := range []struct {
+		name string
+		tool tool.Tool
+		want genai.FunctionResponseScheduling
+	}{
+		{"New", whenIdle, genai.FunctionResponseSchedulingWhenIdle},
+		{"NewStreaming", interrupt, genai.FunctionResponseSchedulingInterrupt},
+		{"unset", unset, ""},
+		{"WithConfirmation of New", confirmed[0], genai.FunctionResponseSchedulingWhenIdle},
+		{"WithConfirmation of NewStreaming", confirmed[1], genai.FunctionResponseSchedulingInterrupt},
+		{"request declaration", declared, genai.FunctionResponseSchedulingWhenIdle},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, ok := tc.tool.(tool.ResponseScheduler)
+			if !ok {
+				t.Fatalf("%T does not implement tool.ResponseScheduler", tc.tool)
+			}
+			if got := s.ResponseScheduling(); got != tc.want {
+				t.Errorf("ResponseScheduling() = %q, want %q", got, tc.want)
+			}
+			if d := tc.tool.(interface {
+				Declaration() *genai.FunctionDeclaration
+			}).Declaration(); d.Behavior != "" {
+				t.Errorf("Declaration().Behavior = %q, want unset", d.Behavior)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		tool tool.Tool
+	}{
+		{"WithConfirmation of New", confirmed[0]},
+		{"request declaration", declared},
+	} {
+		t.Run(tc.name+" RunRaw", func(t *testing.T) {
+			raw, ok := tc.tool.(toolinternal.RawResultTool)
+			if !ok {
+				t.Fatalf("%T does not implement toolinternal.RawResultTool", tc.tool)
+			}
+			got, err := raw.RunRaw(createToolContext(t), map[string]any{})
+			if err != nil {
+				t.Fatalf("RunRaw() error = %v", err)
+			}
+			if got != any(png) {
+				t.Errorf("RunRaw() = %#v, want the handler's part", got)
+			}
+		})
+	}
+	if _, ok := confirmed[1].(toolinternal.RawResultTool); ok {
+		t.Errorf("the confirmation wrapper of a streaming tool implements RunRaw, want only RunStream")
 	}
 }

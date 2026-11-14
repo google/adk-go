@@ -160,7 +160,7 @@ func TestRun_UndeclaredToolIsNotCallable(t *testing.T) {
 		t.Errorf("no_decl Run called %d times, want 0", got)
 	}
 	errText, _ := resp["error"].(string)
-	if want := "tool 'no_decl' not found.\nAvailable tools: \n"; !strings.HasPrefix(errText, want) {
+	if want := "Invoking `no_decl()` failed as no tool with that name is available. The tools you can call are: none."; !strings.HasPrefix(errText, want) {
 		t.Errorf("function response error = %q, want prefix %q", errText, want)
 	}
 }
@@ -207,7 +207,7 @@ func TestRun_ToolPackedByCallbackWithoutDeclarationIsNotCallable(t *testing.T) {
 		t.Errorf("cb_tool Run called %d times, want 0", got)
 	}
 	errText, _ := resp["error"].(string)
-	if want := "tool 'cb_tool' not found.\nAvailable tools: \n"; !strings.HasPrefix(errText, want) {
+	if want := "Invoking `cb_tool()` failed as no tool with that name is available. The tools you can call are: none."; !strings.HasPrefix(errText, want) {
 		t.Errorf("function response error = %q, want prefix %q", errText, want)
 	}
 }

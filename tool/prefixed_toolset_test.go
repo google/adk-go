@@ -615,6 +615,110 @@ func TestWithToolNamePrefix_ForwardsOptionalMethods(t *testing.T) {
 	}
 }
 
+// scheduling answers the flow's ResponseScheduling question.
+type scheduling genai.FunctionResponseScheduling
+
+func (s scheduling) ResponseScheduling() genai.FunctionResponseScheduling {
+	return genai.FunctionResponseScheduling(s)
+}
+
+// rawFunctionTool is a function tool with a scheduling and a RunRaw method
+// that returns raw.
+type rawFunctionTool struct {
+	*packingFunctionTool
+	scheduling
+	raw any
+}
+
+func (r *rawFunctionTool) RunRaw(agent.Context, any) (any, error) { return r.raw, nil }
+
+type scheduledStreamTool struct {
+	letterStreamTool
+	scheduling
+}
+
+type scheduledAgentFunctionTool struct {
+	*rawFunctionTool
+	agent agent.Agent
+}
+
+func (a *scheduledAgentFunctionTool) WrappedAgent() agent.Agent { return a.agent }
+
+func TestWithToolNamePrefix_ForwardsSchedulingAndRawResults(t *testing.T) {
+	child, err := agent.New(agent.Config{Name: "child"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := genai.NewPartFromBytes([]byte("png"), "image/png")
+	plain := newFunctionTool("plain")
+	plain.run = func(agent.Context, any) (map[string]any, error) { return map[string]any{"ran": "Run"}, nil }
+	tests := []struct {
+		name           string
+		original       tool.Tool
+		wantScheduling genai.FunctionResponseScheduling
+		wantRaw        any
+	}{
+		{
+			name:           "function tool with RunRaw",
+			original:       &rawFunctionTool{newFunctionTool("raw"), scheduling(genai.FunctionResponseSchedulingSilent), part},
+			wantScheduling: genai.FunctionResponseSchedulingSilent,
+			wantRaw:        part,
+		},
+		{
+			name:           "agent function tool with RunRaw",
+			original:       &scheduledAgentFunctionTool{&rawFunctionTool{newFunctionTool("agent_raw"), scheduling(genai.FunctionResponseSchedulingWhenIdle), part}, child},
+			wantScheduling: genai.FunctionResponseSchedulingWhenIdle,
+			wantRaw:        part,
+		},
+		{
+			name:     "function tool without RunRaw runs Run",
+			original: plain,
+			wantRaw:  map[string]any{"ran": "Run"},
+		},
+		{
+			name:           "streaming tool",
+			original:       &scheduledStreamTool{scheduling: scheduling(genai.FunctionResponseSchedulingInterrupt)},
+			wantScheduling: genai.FunctionResponseSchedulingInterrupt,
+		},
+		{
+			name:     "tool without a declaration or a scheduling",
+			original: nameOnlyTool{name: "bare"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tl := onlyTool(t, tool.WithToolNamePrefix(&testToolset{tools: []tool.Tool{tt.original}}, "p"))
+
+			s, ok := tl.(tool.ResponseScheduler)
+			if !ok {
+				t.Fatalf("stand-in %T does not implement tool.ResponseScheduler", tl)
+			}
+			if got := s.ResponseScheduling(); got != tt.wantScheduling {
+				t.Errorf("ResponseScheduling() = %q, want %q", got, tt.wantScheduling)
+			}
+			r, ok := tl.(interface {
+				RunRaw(agent.Context, any) (any, error)
+			})
+			if tt.wantRaw == nil {
+				if ok {
+					t.Errorf("stand-in %T has RunRaw, but its original runs neither Run nor RunRaw", tl)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("stand-in %T has no RunRaw", tl)
+			}
+			got, err := r.RunRaw(nil, map[string]any{})
+			if err != nil {
+				t.Fatalf("RunRaw() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.wantRaw, got); diff != "" {
+				t.Errorf("RunRaw() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // agentStreamTool is a streaming tool that wraps an agent.
 type agentStreamTool struct {
 	letterStreamTool

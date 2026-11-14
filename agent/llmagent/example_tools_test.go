@@ -110,7 +110,7 @@ func ExampleConfig_tools() {
 	fmt.Println("audit_log runs:", audit.runs)
 	// Output:
 	// request 1: tools [], 0 genai.Tool, instruction "Every answer is audited."
-	// response to audit_log: tool 'audit_log' not found.
+	// response to audit_log: Invoking `audit_log()` failed as no tool with that name is available. The tools you can call are: none. You could retry, but it is IMPORTANT that you only call a tool from that list.
 	// request 2: tools [], 0 genai.Tool, instruction "Every answer is audited."
 	// audit_log runs: 0
 }

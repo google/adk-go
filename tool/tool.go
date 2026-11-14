@@ -47,6 +47,25 @@ type Tool interface {
 	IsLongRunning() bool
 }
 
+// ResponseScheduler is implemented by a tool that asks the model to treat its
+// function responses in a particular way. The LLM flow copies the value onto
+// the Scheduling field of every genai.FunctionResponse it builds for the tool,
+// whatever produced the result: the tool, a before-tool, after-tool or
+// on-tool-error callback, or the confirmation gate. An empty value means unset:
+// the field stays empty and is omitted from the response's JSON.
+//
+// Only models that support asynchronous function calling read the value (the
+// Gemini Live API); others ignore it. In a Live run a set value also makes the
+// tool non-blocking, which the Live flow decides, not this interface.
+//
+// tool.WithConfirmation and tool.WithToolNamePrefix keep the value of the tools
+// they wrap.
+type ResponseScheduler interface {
+	// ResponseScheduling returns the tool's scheduling, or "" for none. It must
+	// return the same value on every call and be safe for concurrent use.
+	ResponseScheduling() genai.FunctionResponseScheduling
+}
+
 // Toolset is an interface for a collection of tools. It allows grouping
 // related tools together and providing them to an agent.
 //
@@ -168,6 +187,33 @@ func displaysResultOnSkipSummarization(t Tool) bool {
 	return ok && d.DisplayResultOnSkipSummarization()
 }
 
+// responseScheduling reports what t's ResponseScheduling answers, and "" when
+// t is not a ResponseScheduler.
+func responseScheduling(t Tool) genai.FunctionResponseScheduling {
+	if s, ok := t.(ResponseScheduler); ok {
+		return s.ResponseScheduling()
+	}
+	return ""
+}
+
+// rawResultRunner mirrors adk/internal/toolinternal.RawResultTool. It is
+// declared here rather than imported because toolinternal imports this
+// package.
+type rawResultRunner interface {
+	RunRaw(ctx agent.Context, args any) (any, error)
+}
+
+// runRaw runs t through its RunRaw method when it has one, and through Run
+// otherwise. A tool wrapper forwards RunRaw through it, because the flow calls
+// RunRaw on the tool it dispatches to so that a function tool's *genai.Part
+// and nil results are not converted.
+func runRaw(t runnableTool, ctx agent.Context, args any) (any, error) {
+	if r, ok := t.(rawResultRunner); ok {
+		return r.RunRaw(ctx, args)
+	}
+	return t.Run(ctx, args)
+}
+
 // ConfirmationProvider defines a function that dynamically determines whether
 // a specific tool execution requires user confirmation.
 //
@@ -188,8 +234,9 @@ type ConfirmationProvider func(toolName string, toolInput any) bool
 //
 // Close on the returned toolset closes ts when that implements [io.Closer].
 // The returned toolset's request hook calls the request hook of ts, when ts has
-// one. A wrapped tool keeps the DefersResponse and
-// DisplayResultOnSkipSummarization answers of the tool it wraps.
+// one. A wrapped tool keeps the DefersResponse,
+// DisplayResultOnSkipSummarization and ResponseScheduling answers of the tool
+// it wraps.
 //
 // EXPERIMENTAL: WithConfirmation is experimental and not currently in scope for the v1.0 API.
 func WithConfirmation(ts Toolset, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) Toolset {
@@ -336,6 +383,19 @@ func (t *confirmationTool) Run(ctx agent.Context, args any) (map[string]any, err
 	return t.runnableTool.Run(ctx, args)
 }
 
+// RunRaw applies the confirmation gate, then runs the wrapped tool's RunRaw,
+// or its Run when it has none.
+func (t *confirmationTool) RunRaw(ctx agent.Context, args any) (any, error) {
+	if err := confirmCall(ctx, t, args, t.requireConfirmation, t.provider); err != nil {
+		return nil, err
+	}
+	return runRaw(t.runnableTool, ctx, args)
+}
+
+func (t *confirmationTool) ResponseScheduling() genai.FunctionResponseScheduling {
+	return responseScheduling(t.runnableTool)
+}
+
 // confirmationStreamingTool is the streaming counterpart of confirmationTool.
 // It embeds the streamingRunnableTool interface rather than the concrete tool so
 // that only the streaming surface is promoted: a tool that also has a Run method
@@ -375,6 +435,10 @@ func (t *confirmationStreamingTool) DefersResponse() bool {
 
 func (t *confirmationStreamingTool) DisplayResultOnSkipSummarization() bool {
 	return displaysResultOnSkipSummarization(t.streamingRunnableTool)
+}
+
+func (t *confirmationStreamingTool) ResponseScheduling() genai.FunctionResponseScheduling {
+	return responseScheduling(t.streamingRunnableTool)
 }
 
 func (t *confirmationStreamingTool) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {
