@@ -1257,13 +1257,26 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 	return telemetry.InstrumentGenerateContent(ctx, params, response, func(spanCtx context.Context) iter.Seq2[*responseWithEventID, error] {
 		ctx := ctx.WithContext(spanCtx)
 		return func(yield func(*responseWithEventID, error) bool) {
+			// The partial chunks of a streamed response share one event id with
+			// the response that completes them. A complete response ends the id,
+			// and so does an error, because an on-model-error callback may turn
+			// it into a saved event. A new id is drawn when the next response
+			// arrives, never ahead of one.
+			var eventID string
 			for resp, err := range m.GenerateContent(ctx, req, useStream) {
 				if resp == nil && err == nil {
 					// Third-party model implementations may yield an empty response.
 					continue
 				}
-				if !yield(newResponseWithEventID(ctx, resp), err) {
+				if eventID == "" {
+					eventID = platform.NewUUID(ctx)
+				}
+				if !yield(&responseWithEventID{resp, eventID}, err) {
 					return
+				}
+				// resp is non-nil whenever err is nil; the empty case is skipped above.
+				if err != nil || !resp.Partial {
+					eventID = ""
 				}
 			}
 		}
