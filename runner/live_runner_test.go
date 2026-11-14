@@ -1130,3 +1130,42 @@ func TestRunner_RunLive_SendRejectsUserFunctionCall(t *testing.T) {
 		t.Errorf("saved events = %d, want 0", n)
 	}
 }
+
+// TestRunner_RunLive_EventWithNilPart guards that the live runner's event loop
+// and hasInlineData check skip a nil part on model response events instead of
+// panicking.
+func TestRunner_RunLive_EventWithNilPart(t *testing.T) {
+	const sessionID = "testSessionEventNilParts"
+	ev := &session.Event{
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{nil, genai.NewPartFromText("hello")},
+			},
+		},
+	}
+	r, sessionService := newRunLiveTestRunner(t, sessionID, func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			yield(ev, nil)
+		}
+	})
+	_, eventSeq, err := r.RunLive(t.Context(), "testUser", sessionID, agent.LiveRunConfig{})
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	var count int
+	for gotEv, err := range eventSeq {
+		if err != nil {
+			t.Fatalf("eventSeq error = %v", err)
+		}
+		if gotEv != nil {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("got %d events, want 1", count)
+	}
+	if n := getRunLiveTestEvents(t, sessionService, sessionID).Len(); n != 1 {
+		t.Errorf("saved events = %d, want 1", n)
+	}
+}
