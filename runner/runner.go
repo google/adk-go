@@ -114,6 +114,15 @@ type Config struct {
 	// session events, and a later Run with [WithInvocationID], or on the
 	// classic path with a function response that answers one of the
 	// invocation's calls, resumes the invocation from its last event.
+	//
+	// A sequential or loop agent stops after the sub-agent whose event
+	// pauses the invocation, once that sub-agent's events end; resuming the
+	// invocation runs that sub-agent again, but not the sub-agents or loop
+	// passes after it. On a resume, an LlmAgent first runs the function
+	// calls it made in the invocation that never got a response, other than
+	// long-running ones, and pauses again without calling the model while a
+	// long-running call is unanswered.
+	//
 	// Resumption is best effort: in-memory state is lost, and a tool call
 	// that ran before the pause may run again after a resume, so tools must
 	// tolerate at-least-once calls.
@@ -899,6 +908,13 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // a nil msg with a non-empty [WithStateDelta] stores a user event without
 // content that carries the delta, which [WithYieldUserMessage] yields on the
 // node path.
+//
+// A user message whose first function response answers a call made in the
+// same invocation is stored with that call's branch, and with the call's
+// isolation scope when the message has none of its own. A sub-agent that a
+// function response or a resume sends back to work continues on the branch
+// of its newest event in the invocation it continues that a rewind did not
+// remove and that is not on a tool's message branch.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// Copied now: the sequence below runs only when ranged, and later
 	// changes to the caller's map must not reach the invocation's events.
