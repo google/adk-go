@@ -204,9 +204,9 @@ func WithRootWrapper() Option {
 	}
 }
 
-// WithNodeRootWrapper marks this anonymous workflow as a synthetic wrapper
-// created by Runner.runNode to drive a standalone node root. It is meant
-// for the runner; other callers have no reason to set it.
+// WithNodeRootWrapper marks this anonymous workflow as the wrapper the runner
+// builds around a runner.Config.Node root. It is meant for the runner; other
+// callers have no reason to set it.
 //
 // [New] returns an error unless the workflow holds exactly one edge, from
 // [Start] to the node root. The node root is treated as follows:
@@ -220,12 +220,10 @@ func WithRootWrapper() Option {
 //     [NodeConfig.RerunOnResume] were &true, and passes it the
 //     invocation's first user message again.
 //
-// Architectural note: Unlike Go, Python ADK does not wrap standalone nodes
-// in a synthetic workflow. Go introduced this wrapper so all node execution
-// rides through a unified graph engine. When marked as a node root wrapper,
-// Workflow.Run does not stamp an extraneous parent namespace prefix onto
-// root contexts, adds no adk.workflow.base_path key to events, and yields no
-// completion or outcome event, maintaining strict parity with Python.
+// The wrapper is invisible in the events: Workflow.Run adds no path segment
+// of its own to the node root's contexts, adds no adk.workflow.base_path key
+// to events, and yields no completion or outcome event, so the events look
+// as if the node root ran alone.
 func WithNodeRootWrapper() Option {
 	return func(o *workflowOptions) {
 		o.isNodeRootWrapper = true
