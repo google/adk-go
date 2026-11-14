@@ -105,6 +105,52 @@ func TestRenderUIWidget_UnsupportedContexts(t *testing.T) {
 	}
 }
 
+// ctxWithoutRenderer is a caller's own Context that does not implement
+// UIWidgetRenderer.
+type ctxWithoutRenderer struct{ Context }
+
+// An error RenderUIWidget returns because ctx cannot render wraps
+// errors.ErrUnsupported, as memory.ErrAddEventsUnsupported does, and keeps its
+// text; a duplicate ID is not an unsupported operation.
+func TestRenderUIWidget_UnsupportedWrapsErrUnsupported(t *testing.T) {
+	const wantText = "context does not implement UIWidgetRenderer"
+	tests := []struct {
+		name string
+		ctx  func(t *testing.T) Context
+	}{
+		{
+			name: "context without UIWidgetRenderer",
+			ctx:  func(t *testing.T) Context { return ctxWithoutRenderer{} },
+		},
+		{
+			name: "context without event actions",
+			ctx:  func(t *testing.T) Context { return NewContext(&invocationContext{Context: t.Context()}) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := RenderUIWidget(tt.ctx(t), session.UIWidget{ID: "w1"})
+			if !errors.Is(err, errors.ErrUnsupported) {
+				t.Errorf("errors.Is(RenderUIWidget() error %v, errors.ErrUnsupported) = false, want true", err)
+			}
+			if err == nil || err.Error() != wantText {
+				t.Errorf("RenderUIWidget() error = %v, want %q", err, wantText)
+			}
+		})
+	}
+
+	t.Run("duplicate ID", func(t *testing.T) {
+		ctx := NewToolContext(&invocationContext{Context: t.Context()}, "call-1", &session.EventActions{}, nil)
+		if err := RenderUIWidget(ctx, session.UIWidget{ID: "w1"}); err != nil {
+			t.Fatalf("RenderUIWidget(w1) error = %v, want nil", err)
+		}
+		err := RenderUIWidget(ctx, session.UIWidget{ID: "w1"})
+		if err == nil || errors.Is(err, errors.ErrUnsupported) {
+			t.Errorf("RenderUIWidget(duplicate w1) error = %v, want a non-nil error that does not wrap errors.ErrUnsupported", err)
+		}
+	})
+}
+
 // A before- or after-agent callback that renders a widget but returns no
 // content and changes no state or artifact yields no event of its own, as in
 // adk-python (agents/base_agent.py), so the widget is not delivered.
