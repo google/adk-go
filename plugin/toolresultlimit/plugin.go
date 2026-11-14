@@ -16,6 +16,7 @@
 package toolresultlimit
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"unicode/utf8"
@@ -69,7 +70,7 @@ func limitResult(result map[string]any, maxBytes int) (map[string]any, error) {
 		"preview":             "",
 	}
 	response := map[string]any{"output": output}
-	if result["error"] != nil {
+	if hasErrorMarker(encoded) {
 		response["error"] = "Tool reported an error; details are truncated in output.preview."
 	}
 
@@ -93,6 +94,31 @@ func limitResult(result map[string]any, maxBytes int) (map[string]any, error) {
 	}
 	output["preview"] = best
 	return response, nil
+}
+
+// hasErrorMarker requires compact JSON produced by json.Marshal. Scanning avoids
+// calling custom marshalers again or imposing json.Unmarshal's nesting limit.
+func hasErrorMarker(encoded []byte) bool {
+	const key = `"error":`
+	depth := 0
+	for i := 0; i < len(encoded); i++ {
+		switch encoded[i] {
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+		case '"':
+			if depth == 1 && bytes.HasPrefix(encoded[i:], []byte(key)) {
+				return !bytes.HasPrefix(encoded[i+len(key):], []byte("null"))
+			}
+			for i++; encoded[i] != '"'; i++ {
+				if encoded[i] == '\\' {
+					i++
+				}
+			}
+		}
+	}
+	return false
 }
 
 // Preserve the cause without exposing result data in the error message.

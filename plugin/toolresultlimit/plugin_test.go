@@ -87,8 +87,9 @@ func TestAfterToolTruncates(t *testing.T) {
 		manyKeys[fmt.Sprint(i)] = i
 	}
 	tests := []struct {
-		name   string
-		result map[string]any
+		name      string
+		result    map[string]any
+		wantError bool
 	}{
 		{name: "string", result: map[string]any{"value": large}},
 		{name: "nested typed slice", result: map[string]any{"data": map[string]any{"items": []string{large}}}},
@@ -96,9 +97,20 @@ func TestAfterToolTruncates(t *testing.T) {
 		{name: "many small fields", result: manyKeys},
 		{name: "unicode", result: map[string]any{"value": strings.Repeat("中文🙂", 500)}},
 		{name: "escapes", result: map[string]any{"value": strings.Repeat("\"\\\n\t<>&\u2028", 300)}},
-		{name: "error payload", result: map[string]any{"error": large}},
-		{name: "structured error", result: map[string]any{"error": map[string]any{"message": large}}},
+		{name: "error payload", result: map[string]any{"error": large}, wantError: true},
+		{name: "structured error", result: map[string]any{"error": map[string]any{"message": large}}, wantError: true},
 		{name: "null error", result: map[string]any{"error": nil, "data": large}},
+		{name: "nil pointer error", result: map[string]any{"error": (*string)(nil), "data": large}},
+		{name: "nil map error", result: map[string]any{"error": map[string]any(nil), "data": large}},
+		{name: "nil slice error", result: map[string]any{"error": []string(nil), "data": large}},
+		{name: "raw null error", result: map[string]any{"error": json.RawMessage(" \nnull\t"), "data": large}},
+		{name: "null marshaler error", result: map[string]any{"error": nullMarshaler{}, "data": large}},
+		{name: "string null error", result: map[string]any{"error": "null", "data": large}, wantError: true},
+		{name: "nested error", result: map[string]any{"data": map[string]any{"error": large}}},
+		{name: "error in array", result: map[string]any{"data": []any{map[string]any{"error": large}}}},
+		{name: "error text", result: map[string]any{"data": `"error":null ` + large}},
+		{name: "escaped string before error", result: map[string]any{"data": "\"\\{[", "error": large}, wantError: true},
+		{name: "error after nested null", result: map[string]any{"data": map[string]any{"error": nil, "value": large}, "error": "failed"}, wantError: true},
 		{name: "existing truncation fields", result: map[string]any{"truncated": false, "output": large}},
 	}
 	for _, tt := range tests {
@@ -113,11 +125,40 @@ func TestAfterToolTruncates(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				checkTruncated(t, got, original, limit, tt.result["error"] != nil)
+				checkTruncated(t, got, original, limit, tt.wantError)
 			}
 			if !bytes.Equal(original, encode(t, tt.result)) {
 				t.Fatal("original result was mutated")
 			}
+		})
+	}
+}
+
+func TestAfterToolDeepResult(t *testing.T) {
+	// json.Marshal accepts plain containers beyond json.Unmarshal's depth limit.
+	var nested any = "value"
+	for range 10001 {
+		nested = []any{nested}
+	}
+	for _, tt := range []struct {
+		name      string
+		result    map[string]any
+		wantError bool
+	}{
+		{name: "deep data", result: map[string]any{"data": nested, "error": "failed"}, wantError: true},
+		{name: "deep error", result: map[string]any{"error": nested}, wantError: true},
+		{name: "deep data with null error", result: map[string]any{"data": nested, "error": (*string)(nil)}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := New(Config{MaxResultBytes: 256})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := p.AfterToolCallback()(nil, nil, nil, tt.result, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkTruncated(t, got, encode(t, tt.result), 256, tt.wantError)
 		})
 	}
 }
@@ -166,6 +207,10 @@ func TestEncodingError(t *testing.T) {
 	}
 }
 
+type nullMarshaler struct{}
+
+func (nullMarshaler) MarshalJSON() ([]byte, error) { return []byte("null"), nil }
+
 type failingMarshaler struct {
 	err error
 }
@@ -210,7 +255,7 @@ func FuzzResultLimit(f *testing.F) {
 	f.Add("\xff\xfe", uint16(256), false)
 	f.Fuzz(func(t *testing.T, value string, extra uint16, failure bool) {
 		limit := minResultBytes + int(extra)
-		result := map[string]any{"value": value}
+		result := map[string]any{"data": value}
 		if failure {
 			result["error"] = "tool failed"
 		}

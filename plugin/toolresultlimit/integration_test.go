@@ -66,6 +66,7 @@ func TestRunnerIntegration(t *testing.T) {
 		earlierResult     map[string]any
 		calls             int
 		wantTruncated     bool
+		wantError         bool
 		wantLaterCallback bool
 	}{
 		{name: "large nested result", result: large, calls: 1, wantTruncated: true},
@@ -74,7 +75,8 @@ func TestRunnerIntegration(t *testing.T) {
 		{name: "partial result and error", result: large, toolErr: errors.New("fetch failed"), calls: 1, wantLaterCallback: true},
 		{name: "unencodable result and error", result: map[string]any{"value": make(chan int)}, toolErr: errors.New("fetch failed"), calls: 1, wantLaterCallback: true},
 		{name: "long error preserved", toolErr: errors.New(strings.Repeat("failed ", 100)), calls: 1, wantLaterCallback: true},
-		{name: "failure in result", result: map[string]any{"error": strings.Repeat("failed ", 1000)}, calls: 1, wantTruncated: true},
+		{name: "failure in result", result: map[string]any{"error": strings.Repeat("failed ", 1000)}, calls: 1, wantTruncated: true, wantError: true},
+		{name: "typed nil error in result", result: map[string]any{"error": (*string)(nil), "data": large}, calls: 1, wantTruncated: true},
 		{name: "earlier replacement bypasses limiter", result: exact, earlierResult: large, calls: 1},
 	}
 	for _, tt := range tests {
@@ -163,7 +165,7 @@ func TestRunnerIntegration(t *testing.T) {
 					}
 					seen[fr.ID] = true
 					if tt.wantTruncated {
-						checkTruncated(t, fr.Response, encode(t, tt.result), limit, tt.result["error"] != nil)
+						checkTruncated(t, fr.Response, encode(t, tt.result), limit, tt.wantError)
 						continue
 					}
 					want := tt.result
