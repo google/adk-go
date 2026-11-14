@@ -373,6 +373,9 @@ func dropEchoedKeys(delta map[string]any, stored session.ReadonlyState) map[stri
 		// A value that a read returned with credential secrets stripped is not
 		// an echo: the client edited something in it and sent it back without
 		// the secrets it never saw. Restore those before writing it.
+		// Neither error below can happen with the built-in session services:
+		// strippedOnRead has just read the same key, and RedactedState already
+		// encoded the whole state, so the value encodes the same way here.
 		if ok && !isScopedStateKey(key) && strippedOnRead(stored, key, readValue) {
 			if storedValue, err := stored.Get(key); err == nil {
 				if merged, restored, err := models.MergeRedactedValue(storedValue, value); err == nil && restored {
