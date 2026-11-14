@@ -755,10 +755,24 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// adk_request_input response; any other response restarts the graph.
 		// The first response in the message decides the route.
 		agentToRun, branch := r.rootAgent, ""
+		routedToCaller := false
 		if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
 			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
 				agentToRun, branch = sub, ev.Branch
+				routedToCaller = true
 			}
+		}
+		// Answers to calls from several invocations start a new invocation
+		// when they go back to the calling agent, as adk-python does for a
+		// BaseAgent root of an app that is not resumable. A graph workflow
+		// resumes a paused run from its invocation's events, so it keeps the
+		// first call's invocation; adk-python raises for a Workflow root. So
+		// does an answer whose caller is not in the agent tree, since that
+		// caller can be a workflow node agent missing from the workflow's
+		// sub-agents; adk-python starts a new invocation there.
+		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
+		if spansInvocations && routedToCaller {
+			invocationID = ""
 		}
 
 		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
@@ -769,7 +783,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			Agent:        agentToRun,
 			UserContent:  msg,
 			RunConfig:    &cfg,
-			InvocationID: resolveInvocationID(storedSession, msg),
+			InvocationID: invocationID,
 		})
 		invocationCtx = ic
 		ctx := agent.NewContext(ic)
