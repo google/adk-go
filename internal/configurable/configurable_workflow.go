@@ -29,13 +29,13 @@ import (
 )
 
 // nodeFunctionRegistry stores pre-registered custom node functions.
-// nodeRegistry caches the nodes loaded from YAML, keyed by the real path of
-// the file. Only a YAML reference that has passed the containment check may
-// look a node up there: the key is a path, so a name looked up without the
-// check could reach a node loaded for a workflow in another directory.
+// nodeRegistry caches the nodes loaded from YAML by real path and MCP policy.
+// Only a YAML reference that has passed the containment check may look a node
+// up there: a name looked up without the check could reach a node loaded for
+// a workflow in another directory.
 var (
 	nodeFunctionRegistry = make(map[string]func(agent.Context, any) (any, error))
-	nodeRegistry         = make(map[string]workflow.Node)
+	nodeRegistry         = make(map[configCacheKey]workflow.Node)
 )
 
 // RegisterNodeFunction registers a custom node function so it can be referenced inside Workflow YAML configurations.
@@ -208,7 +208,7 @@ func resolveNodeLike(ctx context.Context, configDir, ref string) (workflow.Node,
 	}
 
 	if !strings.HasSuffix(ref, ".yaml") && !strings.HasSuffix(ref, ".yml") {
-		// A name never consults nodeRegistry: its keys are file paths, and a
+		// A name never consults nodeRegistry: its keys include file paths, and a
 		// lookup by name would hand out a node loaded for another directory
 		// without the containment check below.
 		registryMu.RLock()
@@ -229,8 +229,9 @@ func resolveNodeLike(ctx context.Context, configDir, ref string) (workflow.Node,
 		return nil, err
 	}
 
+	cacheKey := configCacheKey{path: absPath, policy: mcpPolicyFromContext(ctx)}
 	registryMu.RLock()
-	n, exists := nodeRegistry[absPath]
+	n, exists := nodeRegistry[cacheKey]
 	registryMu.RUnlock()
 	if exists {
 		return n, nil
@@ -242,7 +243,7 @@ func resolveNodeLike(ctx context.Context, configDir, ref string) (workflow.Node,
 	}
 
 	registryMu.Lock()
-	nodeRegistry[absPath] = n
+	nodeRegistry[cacheKey] = n
 	registryMu.Unlock()
 	return n, nil
 }

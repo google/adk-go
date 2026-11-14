@@ -155,7 +155,7 @@ func TestWorkflowNodeRegistryDoesNotLeakAcrossDirectories(t *testing.T) {
 		t.Fatalf("FromConfig(%q) = %v, want success: the link stays inside the workflow directory", legit, err)
 	}
 	registryMu.RLock()
-	_, cached := nodeRegistry[real]
+	_, cached := nodeRegistry[configCacheKey{path: real}]
 	registryMu.RUnlock()
 	if !cached {
 		t.Fatalf("nodeRegistry has no entry for the real path %q, the test would not exercise the leak", real)
@@ -180,7 +180,7 @@ func TestWorkflowNodeReferenceCacheDoesNotBypassCheck(t *testing.T) {
 		t.Fatalf("FromConfig(%q) = %v, want success: the node is inside its own workflow directory", legit, err)
 	}
 	registryMu.RLock()
-	_, cached := nodeRegistry[outsideNode]
+	_, cached := nodeRegistry[configCacheKey{path: outsideNode}]
 	registryMu.RUnlock()
 	if !cached {
 		t.Fatalf("nodeRegistry has no entry for %q after loading it, the test would not exercise the cache", outsideNode)

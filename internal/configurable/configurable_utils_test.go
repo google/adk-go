@@ -135,11 +135,13 @@ func TestResolveAgentReferenceAllowsPathsInsideAgentDir(t *testing.T) {
 // an unchecked type assertion that panicked and killed the process. The factory
 // must now return a descriptive error instead of crashing.
 func TestResolveToolReferenceMcpToolsetNonStringArgs(t *testing.T) {
+	command := policyExecutable(t)
+	ctx := policyContext(t, command, []string{"a", "b"})
 	newArgs := func(serverArgs, toolFilter []any) map[string]any {
 		return map[string]any{
 			"stdio_connection_params": map[string]any{
 				"server_params": map[string]any{
-					"command": "echo",
+					"command": command,
 					"args":    serverArgs,
 				},
 			},
@@ -173,7 +175,7 @@ func TestResolveToolReferenceMcpToolsetNonStringArgs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// A non-string element previously triggered a panic; the call must
 			// return normally (with or without an error), never crash.
-			_, toolset, err := ResolveToolReference(context.Background(), "McpToolset", tc.args)
+			_, toolset, err := ResolveToolReference(ctx, "McpToolset", tc.args)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("ResolveToolReference(McpToolset) = %v, want no error", err)
@@ -396,10 +398,10 @@ func TestResolveConfigReferenceAliasedDirectoryShareKey(t *testing.T) {
 	}
 	registryMu.RLock()
 	defer registryMu.RUnlock()
-	if _, ok := agentRegistry[realKey]; !ok {
+	if _, ok := agentRegistry[configCacheKey{path: realKey}]; !ok {
 		t.Errorf("agentRegistry has no entry keyed by the real path %q", realKey)
 	}
-	if _, ok := agentRegistry[filepath.Join(aliasDir, "sub_agent.yaml")]; ok {
+	if _, ok := agentRegistry[configCacheKey{path: filepath.Join(aliasDir, "sub_agent.yaml")}]; ok {
 		t.Errorf("agentRegistry holds an entry keyed by the symlinked spelling %q", filepath.Join(aliasDir, "sub_agent.yaml"))
 	}
 }
