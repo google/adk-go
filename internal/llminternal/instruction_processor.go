@@ -252,24 +252,37 @@ func hasTextFileExtension(name string) bool {
 	return false
 }
 
-// isIdentifier checks if a string is a valid Go identifier.
-// This is the equivalent of Python's `str.isidentifier()`.
+// isIdentifier reports whether s is an identifier as Python's
+// str.isidentifier defines one, which adk-python's _is_valid_state_name
+// calls: an underscore or an ID_Start character, followed by ID_Continue
+// characters (Unicode UAX #31). ID_Continue adds combining marks, so names
+// written in scripts such as Devanagari or Thai qualify. Python uses the XID
+// variants, which differ from these only on a few compatibility characters
+// that are not stable under NFKC.
 func isIdentifier(s string) bool {
 	if s == "" {
 		return false
 	}
 	for i, r := range s {
 		if i == 0 {
-			if !unicode.IsLetter(r) && r != '_' {
+			if r != '_' && !isIDStart(r) {
 				return false
 			}
-		} else {
-			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
-				return false
-			}
+		} else if !isIDContinue(r) {
+			return false
 		}
 	}
 	return true
+}
+
+func isIDStart(r rune) bool {
+	return unicode.In(r, unicode.L, unicode.Nl, unicode.Other_ID_Start) &&
+		!unicode.Is(unicode.Pattern_Syntax, r)
+}
+
+func isIDContinue(r rune) bool {
+	return isIDStart(r) ||
+		unicode.In(r, unicode.Mn, unicode.Mc, unicode.Nd, unicode.Pc, unicode.Other_ID_Continue)
 }
 
 // isValidStateName checks if the variable name is a valid state name.

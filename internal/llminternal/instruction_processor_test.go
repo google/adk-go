@@ -214,6 +214,43 @@ func TestInjectSessionState(t *testing.T) {
 			state:    map[string]any{"app:user_name": "Foo"},
 			want:     "Hello Foo!",
 		},
+		// Python's str.isidentifier accepts combining marks after the first
+		// character, as in Thai and Devanagari words.
+		{
+			name:     "state name with combining marks is replaced",
+			template: "Hello {ชื่อ} and {नाम}!",
+			state:    map[string]any{"ชื่อ": "Somchai", "नाम": "Asha"},
+			want:     "Hello Somchai and Asha!",
+		},
+		{
+			name:     "prefixed state name with combining marks is replaced",
+			template: "Hello {user:नाम}!",
+			state:    map[string]any{"user:नाम": "Asha"},
+			want:     "Hello Asha!",
+		},
+		{
+			// U+216B ROMAN NUMERAL TWELVE is a letter number, which may start
+			// an identifier; decimal digits may follow the first character.
+			name:     "state names with a letter number and a digit are replaced",
+			template: "Hello {\u216b} and {item1}!",
+			state:    map[string]any{"\u216b": "Foo", "item1": "Bar"},
+			want:     "Hello Foo and Bar!",
+		},
+		{
+			name:       "missing state name with combining marks is an error",
+			template:   "Hello {नाम}!",
+			state:      map[string]any{},
+			wantErr:    true,
+			wantErrMsg: "state key does not exist",
+		},
+		{
+			// U+2E2F VERTICAL TILDE is a modifier letter but also
+			// Pattern_Syntax, so no identifier may contain it.
+			name:     "state name with a pattern syntax character is not replaced",
+			template: "Hello {a\u2e2f}!",
+			state:    map[string]any{"a\u2e2f": "Foo"},
+			want:     "Hello {a\u2e2f}!",
+		},
 		// Corresponds to: test_inject_session_state_with_none_state_value_returns_empty
 		{
 			name:     "state value is nil",
