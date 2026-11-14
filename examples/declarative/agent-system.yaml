@@ -13,7 +13,8 @@
 # limitations under the License.
 
 # A root agent with two workflow sub-agents. Routing, loop control and data
-# shaping are CEL expressions; the Go host registers only the `default` model.
+# shaping are CEL expressions; of what the Go host registers, this document
+# uses only the `default` model.
 apiVersion: adk/v1alpha1
 kind: AgentSystem
 

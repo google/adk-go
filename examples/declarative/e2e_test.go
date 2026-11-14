@@ -49,7 +49,7 @@ import (
 //go:generate go test -httprecord=^testdata[/\\]TestStudioEndToEnd\.httprr$ -run=^TestStudioEndToEnd$
 func TestStudioEndToEnd(t *testing.T) {
 	llm := openRecordedModel(t, filepath.Join("testdata", "TestStudioEndToEnd.httprr"))
-	agents, err := loadSystem(agentSystem, map[string]model.LLM{"default": llm})
+	agents, err := loadSystem(agentSystem, testRegistry(t, llm))
 	if err != nil {
 		t.Fatalf("loadSystem() error = %v", err)
 	}

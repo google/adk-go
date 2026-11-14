@@ -72,9 +72,9 @@ type expression struct {
 	varRefs []string
 }
 
-// compileCEL type-checks source. When wantBool is set the result must be a
-// bool, or dyn and checked again when evaluated.
-func compileCEL(source string, wantBool bool) (*expression, error) {
+// compileCEL type-checks source. A non-nil want is the type its result must
+// have; a dyn result passes, and is checked again when evaluated.
+func compileCEL(source string, want *cel.Type) (*expression, error) {
 	env, err := newCELEnv()
 	if err != nil {
 		return nil, fmt.Errorf("create CEL environment: %w", err)
@@ -83,8 +83,8 @@ func compileCEL(source string, wantBool bool) (*expression, error) {
 	if issues != nil && issues.Err() != nil {
 		return nil, issues.Err()
 	}
-	if out := ast.OutputType(); wantBool && !out.IsExactType(cel.BoolType) && !out.IsExactType(cel.DynType) {
-		return nil, fmt.Errorf("expression has type %s, want bool", out)
+	if out := ast.OutputType(); want != nil && !out.IsExactType(want) && !out.IsExactType(cel.DynType) {
+		return nil, fmt.Errorf("expression has type %s, want %s", out, want)
 	}
 	refs, err := varRefs(ast.NativeRep().Expr())
 	if err != nil {
@@ -155,6 +155,18 @@ func (e *expression) evalBool(activation map[string]any) (bool, error) {
 		return false, fmt.Errorf("expression returned %T, want bool", out)
 	}
 	return b, nil
+}
+
+func (e *expression) evalString(activation map[string]any) (string, error) {
+	out, err := e.eval(activation)
+	if err != nil {
+		return "", err
+	}
+	s, ok := out.(string)
+	if !ok {
+		return "", fmt.Errorf("expression returned %T, want string", out)
+	}
+	return s, nil
 }
 
 // contextVars binds the ADK context to the CEL variables shared by every

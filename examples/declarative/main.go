@@ -15,15 +15,17 @@
 // Command declarative builds a multi-agent system from a YAML document,
 // agent-system.yaml: a root LlmAgent, studio, that transfers to two workflow
 // sub-agents, writer_critics and llm_router. Routing, loop control and data
-// shaping are CEL expressions in the document. The Go code registers only the
-// model the document refers to as default.
+// shaping are CEL expressions in the document. The Go code registers what a
+// document can name but not declare: the model default and the tool
+// word_count, which briefing.yaml uses.
 //
 // The loader in system.go and cel.go is part of the example, not an ADK API.
 //
 // With GOOGLE_API_KEY set, default is Gemini. Otherwise set OPENAI_API_KEY or
 // OPENAI_BASE_URL, and OPENAI_MODEL, to use any OpenAI-compatible endpoint,
 // such as a local Ollama server. Set AGENT_SYSTEM to the path of another
-// document to run that one instead of the embedded copy.
+// document, such as briefing.yaml, to run that one instead of the embedded
+// copy.
 //
 //	export GOOGLE_API_KEY=...
 //	go run ./examples/declarative/ console
@@ -41,6 +43,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"strings"
 
 	"google.golang.org/genai"
 
@@ -50,6 +53,8 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
 	"google.golang.org/adk/v2/model/openaimodel"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 //go:embed agent-system.yaml
@@ -71,7 +76,15 @@ func main() {
 		}
 	}
 
-	agents, err := loadSystem(doc, map[string]model.LLM{"default": llm})
+	wordCount, err := newWordCountTool()
+	if err != nil {
+		log.Fatalf("Failed to create tool: %v", err)
+	}
+
+	agents, err := loadSystem(doc, registry{
+		models: map[string]model.LLM{"default": llm},
+		tools:  map[string]tool.Tool{"word_count": wordCount},
+	})
 	if err != nil {
 		log.Fatalf("Failed to load agent system: %v", err)
 	}
@@ -108,5 +121,24 @@ func newModel(ctx context.Context) (model.LLM, error) {
 		APIKey:  apiKey,
 		BaseURL: baseURL,
 		API:     openaimodel.APIChatCompletions,
+	})
+}
+
+type wordCountArgs struct {
+	Text string `json:"text" jsonschema:"Text to count the words of"`
+}
+
+type wordCountResult struct {
+	Words int `json:"words"`
+}
+
+// newWordCountTool returns the tool documents call word_count. A tool is Go
+// code, so a document can name one but not declare it.
+func newWordCountTool() (tool.Tool, error) {
+	return functiontool.New(functiontool.Config{
+		Name:        "word_count",
+		Description: "Counts the words in a text.",
+	}, func(_ agent.Context, args wordCountArgs) (wordCountResult, error) {
+		return wordCountResult{Words: len(strings.Fields(args.Text))}, nil
 	})
 }

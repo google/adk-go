@@ -22,7 +22,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/workflow"
 )
 
@@ -269,12 +268,40 @@ func TestLoadSystemReportsIssues(t *testing.T) {
 			wantPath: "agents[2]",
 			wantMsg:  "nodes and edges apply only to a Workflow",
 		},
+		{
+			name:     "tools on a Workflow",
+			old:      "    agent_class: Workflow\n",
+			new:      "    agent_class: Workflow\n    tools: [word_count]\n",
+			wantPath: "agents[1]",
+			wantMsg:  "apply only to an LlmAgent",
+		},
+		{
+			name:     "LlmAgent lists an unregistered tool",
+			old:      "    output_key: draft",
+			new:      "    output_key: draft\n    tools: [sentiment]",
+			wantPath: "agents[2].tools[0]",
+			wantMsg:  `tool "sentiment" is not registered`,
+		},
+		{
+			name:     "join as a parallel worker",
+			old:      "{ id: gather, type: join }",
+			new:      "{ id: gather, type: join, parallel_worker: true }",
+			wantPath: "agents[1].nodes[4].parallel_worker",
+			wantMsg:  "parallel_worker does not apply to join nodes",
+		},
+		{
+			name:     "empty route",
+			old:      "to_node: publish, route: DONE }",
+			new:      `to_node: publish, route: "" }`,
+			wantPath: "agents[1].edges[8].route",
+			wantMsg:  `never emits route ""`,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			doc := editedSystem(t, tc.old, tc.new)
 
-			_, err := loadSystem(doc, map[string]model.LLM{"default": &fakeModel{}})
+			_, err := loadSystem(doc, testRegistry(t, &fakeModel{}))
 
 			var verr *validationError
 			if !errors.As(err, &verr) {
@@ -293,7 +320,7 @@ func TestLoadSystemReportsIssues(t *testing.T) {
 // TestLoadSystemReportsAllIssues checks that every problem is reported at
 // once: with no models registered, each model reference is an issue.
 func TestLoadSystemReportsAllIssues(t *testing.T) {
-	_, err := loadSystem(agentSystem, nil)
+	_, err := loadSystem(agentSystem, registry{})
 
 	var verr *validationError
 	if !errors.As(err, &verr) {
@@ -308,7 +335,7 @@ func TestLoadSystemReportsAllIssues(t *testing.T) {
 func TestLoadSystemRejectsUnknownField(t *testing.T) {
 	doc := editedSystem(t, "kind: AgentSystem", "kind: AgentSystem\nmax_concurrency: 3")
 
-	_, err := loadSystem(doc, map[string]model.LLM{"default": &fakeModel{}})
+	_, err := loadSystem(doc, testRegistry(t, &fakeModel{}))
 
 	if err == nil || !strings.Contains(err.Error(), "field max_concurrency not found") {
 		t.Errorf("loadSystem() error = %v, want an unknown field error", err)
@@ -320,7 +347,7 @@ func TestLoadSystemRejectsUnknownField(t *testing.T) {
 func TestLoadSystemRejectsAgentCycle(t *testing.T) {
 	doc := editedSystem(t, "agent: writer }", "agent: studio }")
 
-	_, err := loadSystem(doc, map[string]model.LLM{"default": &fakeModel{}})
+	_, err := loadSystem(doc, testRegistry(t, &fakeModel{}))
 
 	if err == nil || !strings.Contains(err.Error(), `agent "studio" refers to itself`) {
 		t.Errorf("loadSystem() error = %v, want a reference cycle error", err)
@@ -332,7 +359,7 @@ func TestLoadSystemRejectsAgentCycle(t *testing.T) {
 func TestLoadSystemRejectsUnconditionalCycle(t *testing.T) {
 	doc := editedSystem(t, "{ from_node: decide,          to_node: write,   route: REVISE }", "{ from_node: decide,          to_node: write }")
 
-	_, err := loadSystem(doc, map[string]model.LLM{"default": &fakeModel{}})
+	_, err := loadSystem(doc, testRegistry(t, &fakeModel{}))
 
 	if !errors.Is(err, workflow.ErrUnconditionalCycle) {
 		t.Errorf("loadSystem() error = %v, want %v", err, workflow.ErrUnconditionalCycle)
@@ -340,7 +367,7 @@ func TestLoadSystemRejectsUnconditionalCycle(t *testing.T) {
 }
 
 func TestLoadSystemRequiresAnAgent(t *testing.T) {
-	_, err := loadSystem([]byte("apiVersion: adk/v1alpha1\nkind: AgentSystem\nagents: []\n"), nil)
+	_, err := loadSystem([]byte("apiVersion: adk/v1alpha1\nkind: AgentSystem\nagents: []\n"), registry{})
 
 	var verr *validationError
 	if !errors.As(err, &verr) {

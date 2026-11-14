@@ -1,0 +1,138 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A second document, for the node types agent-system.yaml does not need: a
+# parallel worker, a tool, a nested workflow and a pause for a human. Its root
+# is the workflow itself. Run it with
+#
+#   AGENT_SYSTEM=examples/declarative/briefing.yaml go run ./examples/declarative/ console
+#
+# and give it topics, such as `bicycles, trains`.
+apiVersion: adk/v1alpha1
+kind: AgentSystem
+
+agents:
+  # START -> topics -> research -> count_args -> count -> size
+  #          (cel)     (llm, one    (cel)         (tool)   (cel)
+  #                    run per topic)
+  #
+  #   size -+- EMPTY ------------------------> nothing
+  #         +- LONG -> condense (workflow) -+
+  #         +- DEFAULT ---------------------+-> review -> verdict -+- PUBLISH -> publish
+  #                                             (input)            +- DEFAULT -> discard
+  - name: briefing
+    agent_class: Workflow
+    description: Researches comma-separated topics in parallel and publishes a briefing once a human approves it.
+    nodes:
+      - id: topics
+        type: cel
+        vars:
+          - name: list
+            expr: "user.content.split(',').map(t, t.trim()).filter(t, t != '')"
+        output: vars.list
+        state_delta:
+          topics: vars.list
+
+      # A parallel worker takes a list and runs once per item, here one model
+      # call per topic. Its output is the list of results, and nothing else:
+      # no state, no routes, no tool calls.
+      - id: research
+        type: llm
+        model: default
+        instruction: |
+          You are the Researcher. Reply with one factual sentence about the
+          topic you are given, and nothing else.
+        parallel_worker: true
+        max_parallel_workers: 2             # at most two topics at a time
+        timeout: 120                        # seconds, for all the topics together
+        retry_config:                       # for each topic on its own
+          max_attempts: 3
+          initial_delay: 1                  # seconds
+
+      # A tool node passes its input to the tool as arguments.
+      - id: count_args
+        type: cel
+        output: "{'text': input.join(' ')}"
+        state_delta:
+          briefing: "input.map(f, '- ' + f).join('\\n')"
+
+      - { id: count, type: tool, tool: word_count }   # -> {words: N}
+
+      - id: size
+        type: cel
+        routes:
+          - { route: EMPTY, when: "input.words == 0" }
+          - { route: LONG,  when: "input.words > 40" }
+        output: state.briefing
+
+      - id: nothing
+        type: cel
+        output: "'Give me one or more topics, separated by commas.'"
+
+      # A workflow node is a graph of its own: its START receives the node's
+      # input, and the output of its last node is the node's output.
+      - id: condense
+        type: workflow
+        nodes:
+          - id: shorten
+            type: llm
+            model: default
+            instruction: |
+              You are the Editor. Rewrite the briefing you are given in at
+              most 40 words. Reply with only the rewritten briefing.
+          - id: keep
+            type: cel
+            state_delta:
+              briefing: input
+        edges:
+          - { from_node: START,   to_node: shorten }
+          - { from_node: shorten, to_node: keep }
+
+      # An input node asks the user and pauses the workflow. The reply resumes
+      # it, as the input of `verdict`.
+      - id: review
+        type: input
+        message: "'Publish this briefing? (yes/no)\\n\\n' + input"
+
+      # The reply is whatever the user typed, which a client may send as a
+      # number or a bool, so `verdict` checks its type first.
+      - id: verdict
+        type: cel
+        routes:
+          - route: PUBLISH
+            when: "type(input) == string && input.trim().lowerAscii().startsWith('y')"
+        output: state.briefing
+
+      - id: publish
+        type: cel
+        output: |
+          'Briefing on ' + string(state.topics.size()) + ' topic(s):\n\n' + input
+
+      - id: discard
+        type: cel
+        output: "'Discarded.'"
+
+    edges:
+      - { from_node: START,      to_node: topics }
+      - { from_node: topics,     to_node: research }
+      - { from_node: research,   to_node: count_args }
+      - { from_node: count_args, to_node: count }
+      - { from_node: count,      to_node: size }
+      - { from_node: size,       to_node: nothing,  route: EMPTY }
+      - { from_node: size,       to_node: condense, route: LONG }
+      - { from_node: size,       to_node: review,   route: DEFAULT }
+      - { from_node: condense,   to_node: review }
+      - { from_node: review,     to_node: verdict }
+      - { from_node: verdict,    to_node: publish,  route: PUBLISH }
+      - { from_node: verdict,    to_node: discard,  route: DEFAULT }

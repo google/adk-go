@@ -42,7 +42,7 @@ func TestCELResultValues(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			e, err := compileCEL(tc.expr, false)
+			e, err := compileCEL(tc.expr, nil)
 			if err != nil {
 				t.Fatalf("compileCEL(%q) error = %v", tc.expr, err)
 			}
@@ -71,7 +71,7 @@ func TestCELResultErrors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			e, err := compileCEL(tc.expr, false)
+			e, err := compileCEL(tc.expr, nil)
 			if err != nil {
 				t.Fatalf("compileCEL(%q) error = %v", tc.expr, err)
 			}

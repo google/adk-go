@@ -18,10 +18,13 @@ import (
 	"bytes"
 	"fmt"
 	"maps"
+	"math"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
+	"github.com/google/cel-go/cel"
 	"google.golang.org/genai"
 	"gopkg.in/yaml.v3"
 
@@ -30,6 +33,7 @@ import (
 	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/workflow"
 )
 
@@ -40,16 +44,26 @@ const (
 	classLLM      = "LlmAgent"
 	classWorkflow = "Workflow"
 
-	nodeAgent = "agent"
-	nodeLLM   = "llm"
-	nodeCEL   = "cel"
-	nodeJoin  = "join"
+	nodeAgent    = "agent"
+	nodeLLM      = "llm"
+	nodeCEL      = "cel"
+	nodeJoin     = "join"
+	nodeTool     = "tool"
+	nodeWorkflow = "workflow"
+	nodeInput    = "input"
 
 	// startNode and defaultRoute name workflow.Start and workflow.Default in
 	// edges.
 	startNode    = "START"
 	defaultRoute = "DEFAULT"
 )
+
+// registry holds what a document refers to by name but cannot declare: the
+// models and tools of the Go host.
+type registry struct {
+	models map[string]model.LLM
+	tools  map[string]tool.Tool
+}
 
 // systemSpec is an AgentSystem document. The first agent is the root.
 type systemSpec struct {
@@ -70,6 +84,7 @@ type agentSpec struct {
 	Instruction string   `yaml:"instruction"`
 	Mode        string   `yaml:"mode"`
 	OutputKey   string   `yaml:"output_key"`
+	Tools       []string `yaml:"tools"`
 	SubAgents   []string `yaml:"sub_agents"`
 
 	// Workflow.
@@ -78,21 +93,61 @@ type agentSpec struct {
 }
 
 // nodeSpec declares one workflow node. Which fields apply depends on Type:
-// agent reads Agent; llm reads Model and Instruction; cel reads Vars,
-// Routes, Output and StateDelta; join reads none.
+//
+//   - agent reads Agent
+//   - llm reads Model, Instruction and Tools
+//   - cel reads Vars, Routes, Output and StateDelta
+//   - tool reads Tool
+//   - workflow reads Nodes and Edges, a nested graph with its own START
+//   - input reads Message
+//   - join reads none
+//
+// RetryConfig and Timeout apply to agent, llm and tool nodes; ParallelWorker
+// and MaxParallelWorkers to every type but join and input.
 type nodeSpec struct {
 	ID   string `yaml:"id"`
 	Type string `yaml:"type"`
 
 	Agent string `yaml:"agent"`
 
-	Model       string `yaml:"model"`
-	Instruction string `yaml:"instruction"`
+	Model       string   `yaml:"model"`
+	Instruction string   `yaml:"instruction"`
+	Tools       []string `yaml:"tools"`
 
 	Vars       []varSpec         `yaml:"vars"`
 	Routes     []routeSpec       `yaml:"routes"`
 	Output     string            `yaml:"output"`
 	StateDelta map[string]string `yaml:"state_delta"`
+
+	Tool string `yaml:"tool"`
+
+	Nodes []nodeSpec `yaml:"nodes"`
+	Edges []edgeSpec `yaml:"edges"`
+
+	// Message is a CEL expression: what an input node asks the user.
+	Message string `yaml:"message"`
+
+	// ParallelWorker runs the node once per item of a list input and
+	// outputs the list of results. MaxParallelWorkers caps the runs in
+	// flight; zero is no cap.
+	ParallelWorker     bool `yaml:"parallel_worker"`
+	MaxParallelWorkers int  `yaml:"max_parallel_workers"`
+
+	// Timeout is in seconds. With ParallelWorker, RetryConfig applies to
+	// each item and Timeout to all of them together.
+	RetryConfig *retrySpec `yaml:"retry_config"`
+	Timeout     float64    `yaml:"timeout"`
+}
+
+// retrySpec mirrors workflow.RetryConfig, with delays in seconds. An unset
+// field keeps the value of workflow.DefaultRetryConfig. MaxAttempts counts
+// the first attempt, so 0 and 1 both mean no retry.
+type retrySpec struct {
+	MaxAttempts   *int     `yaml:"max_attempts"`
+	InitialDelay  *float64 `yaml:"initial_delay"`
+	MaxDelay      *float64 `yaml:"max_delay"`
+	BackoffFactor *float64 `yaml:"backoff_factor"`
+	Jitter        *float64 `yaml:"jitter"`
 }
 
 type varSpec struct {
@@ -106,9 +161,26 @@ type routeSpec struct {
 }
 
 type edgeSpec struct {
-	From  string `yaml:"from_node"`
-	To    string `yaml:"to_node"`
-	Route string `yaml:"route"`
+	From  string    `yaml:"from_node"`
+	To    string    `yaml:"to_node"`
+	Route routeList `yaml:"route"`
+}
+
+// routeList is the route of an edge: none, one name, or a list of names any
+// of which takes the edge.
+type routeList []string
+
+// UnmarshalYAML accepts a single route name as well as a list of them.
+func (r *routeList) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.SequenceNode {
+		return n.Decode((*[]string)(r))
+	}
+	var name string
+	if err := n.Decode(&name); err != nil {
+		return err
+	}
+	*r = routeList{name}
+	return nil
 }
 
 // issue is one problem found in a document, at a field path such as
@@ -134,26 +206,30 @@ func (e *validationError) Error() string {
 }
 
 // loadSystem parses doc and builds its agents, root first and the rest in
-// document order. models maps the names the document uses in model fields to
-// the models they stand for.
+// document order. reg maps the names the document uses in model, tool and
+// tools fields to the models and tools they stand for.
 //
 // Every problem with the document, including CEL that does not compile, is
 // reported at once in a *validationError before any agent is built. Problems
 // that only ADK detects, such as an unconditional cycle in a workflow graph,
 // are returned as they come from ADK.
-func loadSystem(doc []byte, models map[string]model.LLM) ([]agent.Agent, error) {
+func loadSystem(doc []byte, reg registry) ([]agent.Agent, error) {
 	var spec systemSpec
 	dec := yaml.NewDecoder(bytes.NewReader(doc))
 	dec.KnownFields(true)
 	if err := dec.Decode(&spec); err != nil {
 		return nil, fmt.Errorf("decode agent system: %w", err)
 	}
-	v := validator{spec: &spec, models: models, cel: map[*nodeSpec]*celNode{}}
+	v := validator{spec: &spec, reg: reg, compiled: compiled{
+		cel:      map[*nodeSpec]*celNode{},
+		messages: map[*nodeSpec]*expression{},
+		configs:  map[*nodeSpec]workflow.NodeConfig{},
+	}}
 	v.validate()
 	if len(v.issues) > 0 {
 		return nil, &validationError{Issues: v.issues}
 	}
-	b := builder{spec: &spec, models: models, cel: v.cel, built: map[string]agent.Agent{}}
+	b := builder{spec: &spec, reg: reg, compiled: v.compiled, built: map[string]agent.Agent{}}
 	agents := make([]agent.Agent, len(spec.Agents))
 	for i := range spec.Agents {
 		a, err := b.agent(spec.Agents[i].Name)
@@ -167,12 +243,18 @@ func loadSystem(doc []byte, models map[string]model.LLM) ([]agent.Agent, error) 
 
 var namePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// compiled is what validation works out for the builder, by node.
+type compiled struct {
+	cel      map[*nodeSpec]*celNode            // cel nodes
+	messages map[*nodeSpec]*expression         // input nodes
+	configs  map[*nodeSpec]workflow.NodeConfig // retry and timeout
+}
+
 type validator struct {
 	spec   *systemSpec
-	models map[string]model.LLM
+	reg    registry
 	issues []issue
-	// cel holds the compiled programs of each cel node, for the builder.
-	cel map[*nodeSpec]*celNode
+	compiled
 }
 
 func (v *validator) add(path, format string, args ...any) {
@@ -205,7 +287,7 @@ func (v *validator) validate() {
 		case classLLM:
 			v.llmAgent(path, a, agents)
 		case classWorkflow:
-			v.workflow(path, a, agents)
+			v.workflow(path, a)
 		default:
 			v.add(path+".agent_class", "got %q, want %s or %s", a.AgentClass, classLLM, classWorkflow)
 		}
@@ -219,13 +301,22 @@ func (v *validator) checkName(path, name string) {
 }
 
 func (v *validator) checkModel(path, name string) {
-	if _, ok := v.models[name]; !ok {
+	if _, ok := v.reg.models[name]; !ok {
 		v.add(path, "model %q is not registered", name)
+	}
+}
+
+func (v *validator) checkTools(path string, names []string) {
+	for i, name := range names {
+		if _, ok := v.reg.tools[name]; !ok {
+			v.add(fmt.Sprintf("%s[%d]", path, i), "tool %q is not registered", name)
+		}
 	}
 }
 
 func (v *validator) llmAgent(path string, a *agentSpec, agents map[string]bool) {
 	v.checkModel(path+".model", a.Model)
+	v.checkTools(path+".tools", a.Tools)
 	switch llmagent.Mode(a.Mode) {
 	case "", llmagent.ModeChat, llmagent.ModeTask, llmagent.ModeSingleTurn:
 	default:
@@ -241,16 +332,22 @@ func (v *validator) llmAgent(path string, a *agentSpec, agents map[string]bool) 
 	}
 }
 
-func (v *validator) workflow(path string, a *agentSpec, agents map[string]bool) {
-	if a.Model != "" || a.Instruction != "" || a.Mode != "" || a.OutputKey != "" || len(a.SubAgents) > 0 {
-		v.add(path, "model, instruction, mode, output_key and sub_agents apply only to an %s", classLLM)
+func (v *validator) workflow(path string, a *agentSpec) {
+	if a.Model != "" || a.Instruction != "" || a.Mode != "" || a.OutputKey != "" || len(a.Tools) > 0 || len(a.SubAgents) > 0 {
+		v.add(path, "model, instruction, mode, output_key, tools and sub_agents apply only to an %s", classLLM)
 	}
-	if len(a.Nodes) == 0 {
+	v.graph(path, a.Nodes, a.Edges, scope{})
+}
+
+// graph checks the nodes and edges of a Workflow agent, or of a workflow node
+// nested in one. Edges name the nodes of their own graph only.
+func (v *validator) graph(path string, specs []nodeSpec, edges []edgeSpec, in scope) {
+	if len(specs) == 0 {
 		v.add(path+".nodes", "a workflow needs at least one node")
 	}
 	nodes := map[string]*nodeSpec{}
-	for i := range a.Nodes {
-		n := &a.Nodes[i]
+	for i := range specs {
+		n := &specs[i]
 		npath := fmt.Sprintf("%s.nodes[%d]", path, i)
 		v.checkName(npath+".id", n.ID)
 		if n.ID == startNode {
@@ -260,43 +357,213 @@ func (v *validator) workflow(path string, a *agentSpec, agents map[string]bool) 
 			v.add(npath+".id", "node %q is declared twice", n.ID)
 		}
 		nodes[n.ID] = n
-		v.node(npath, n, agents)
+		v.node(npath, n, in)
 	}
 	// The workflow engine names an agent node after the agent it runs, not
 	// after its id, so the agent's name must not also be a node id.
-	for _, n := range a.Nodes {
+	for _, n := range specs {
 		if n.Type == nodeAgent && nodes[n.Agent] != nil {
 			v.add(path+".nodes", "agent %q collides with a node id", n.Agent)
 		}
 	}
 	targets := map[string]bool{}
-	for i, e := range a.Edges {
+	for i, e := range edges {
 		v.edge(fmt.Sprintf("%s.edges[%d]", path, i), e, nodes)
 		targets[e.To] = true
 	}
 	// The workflow is built from its edges alone, so a node no edge leads to
 	// would be dropped without a word.
-	for i, n := range a.Nodes {
+	for i, n := range specs {
 		if !targets[n.ID] {
 			v.add(fmt.Sprintf("%s.nodes[%d].id", path, i), "node %q is not the target of any edge, so it never runs", n.ID)
 		}
 	}
 }
 
-func (v *validator) node(path string, n *nodeSpec, agents map[string]bool) {
+// scope is where a graph sits: nested in a workflow node or not, and under a
+// parallel worker or not.
+type scope struct{ nested, parallel bool }
+
+// nodeTypes are the values of a node's type field.
+var nodeTypes = []string{nodeAgent, nodeLLM, nodeCEL, nodeJoin, nodeTool, nodeWorkflow, nodeInput}
+
+// nodeFields says, for each field of a node but id and type, how to tell that
+// a document set it and which node types read it.
+var nodeFields = []struct {
+	name  string
+	set   func(*nodeSpec) bool
+	types []string
+}{
+	{"agent", func(n *nodeSpec) bool { return n.Agent != "" }, []string{nodeAgent}},
+	{"model", func(n *nodeSpec) bool { return n.Model != "" }, []string{nodeLLM}},
+	{"instruction", func(n *nodeSpec) bool { return n.Instruction != "" }, []string{nodeLLM}},
+	{"tools", func(n *nodeSpec) bool { return len(n.Tools) > 0 }, []string{nodeLLM}},
+	{"vars", func(n *nodeSpec) bool { return len(n.Vars) > 0 }, []string{nodeCEL}},
+	{"routes", func(n *nodeSpec) bool { return len(n.Routes) > 0 }, []string{nodeCEL}},
+	{"output", func(n *nodeSpec) bool { return n.Output != "" }, []string{nodeCEL}},
+	{"state_delta", func(n *nodeSpec) bool { return len(n.StateDelta) > 0 }, []string{nodeCEL}},
+	{"tool", func(n *nodeSpec) bool { return n.Tool != "" }, []string{nodeTool}},
+	{"nodes", func(n *nodeSpec) bool { return len(n.Nodes) > 0 }, []string{nodeWorkflow}},
+	{"edges", func(n *nodeSpec) bool { return len(n.Edges) > 0 }, []string{nodeWorkflow}},
+	{"message", func(n *nodeSpec) bool { return n.Message != "" }, []string{nodeInput}},
+	// A join or a pause has no list of items to work through.
+	{"parallel_worker", func(n *nodeSpec) bool { return n.ParallelWorker }, []string{nodeAgent, nodeLLM, nodeCEL, nodeTool, nodeWorkflow}},
+	// Retrying or timing out an expression, a join, a pause or a whole graph
+	// would change nothing, or too much.
+	{"retry_config", func(n *nodeSpec) bool { return n.RetryConfig != nil }, []string{nodeAgent, nodeLLM, nodeTool}},
+	{"timeout", func(n *nodeSpec) bool { return n.Timeout != 0 }, []string{nodeAgent, nodeLLM, nodeTool}},
+}
+
+// misapplied returns the fields set on n that a node of its type ignores.
+func misapplied(n *nodeSpec) []string {
+	var names []string
+	for _, f := range nodeFields {
+		if f.set(n) && !slices.Contains(f.types, n.Type) {
+			names = append(names, f.name)
+		}
+	}
+	return names
+}
+
+func (v *validator) node(path string, n *nodeSpec, in scope) {
+	if !slices.Contains(nodeTypes, n.Type) {
+		v.add(path+".type", "got %q, want one of %s", n.Type, strings.Join(nodeTypes, ", "))
+		return
+	}
+	for _, field := range misapplied(n) {
+		v.add(path+"."+field, "%s does not apply to %s nodes", field, n.Type)
+	}
+	// A parallel worker yields only the list of its results. Whatever else
+	// its node, or a graph nested in it, emits is dropped.
+	dropped := in.parallel || n.ParallelWorker
+	const lost = "a parallel worker drops %s"
+
 	switch n.Type {
 	case nodeAgent:
-		if !agents[n.Agent] {
+		a := v.agentSpec(n.Agent)
+		switch {
+		case a == nil:
 			v.add(path+".agent", "agent %q is not declared", n.Agent)
+		case slices.ContainsFunc(a.Nodes, func(n nodeSpec) bool { return n.Type == nodeInput }):
+			// The reply would become the output of this node, skipping the
+			// rest of the agent's graph.
+			v.add(path+".agent", "workflow %q pauses for input, which it cannot do as a node", n.Agent)
+		case dropped && a.AgentClass == classWorkflow:
+			// Its graph is checked as its own agent, not as one under a
+			// parallel worker.
+			v.add(path+".agent", "a parallel worker cannot run workflow agent %q: nest its graph in a workflow node", n.Agent)
+		case dropped && (len(a.Tools) > 0 || a.OutputKey != ""):
+			v.add(path+".agent", lost, fmt.Sprintf("the tool calls and output_key of agent %q", n.Agent))
 		}
 	case nodeLLM:
 		v.checkModel(path+".model", n.Model)
+		v.checkTools(path+".tools", n.Tools)
+		if dropped && len(n.Tools) > 0 {
+			v.add(path+".tools", lost, "tool calls, so the model never sees a result")
+		}
 	case nodeCEL:
 		v.celNode(path, n)
-	case nodeJoin:
-	default:
-		v.add(path+".type", "got %q, want %s, %s, %s or %s", n.Type, nodeAgent, nodeLLM, nodeCEL, nodeJoin)
+		if n.ParallelWorker && len(n.Routes) > 0 {
+			v.add(path+".routes", lost, "routes")
+		}
+		if dropped && len(n.StateDelta) > 0 {
+			v.add(path+".state_delta", lost, "state changes")
+		}
+	case nodeTool:
+		if _, ok := v.reg.tools[n.Tool]; !ok {
+			v.add(path+".tool", "tool %q is not registered", n.Tool)
+		}
+	case nodeWorkflow:
+		v.graph(path, n.Nodes, n.Edges, scope{nested: true, parallel: dropped})
+	case nodeInput:
+		if in.nested {
+			// The reply would become the output of the workflow node,
+			// skipping the rest of its graph.
+			v.add(path+".type", "an input node cannot be in a nested workflow")
+		}
+		// An input node declares no vars, so its message can read none.
+		v.messages[n] = v.compile(path+".message", n.Message, cel.StringType, nil)
 	}
+
+	if n.MaxParallelWorkers != 0 && !n.ParallelWorker {
+		v.add(path+".max_parallel_workers", "max_parallel_workers applies only with parallel_worker")
+	}
+	if n.MaxParallelWorkers < 0 {
+		v.add(path+".max_parallel_workers", "must not be negative")
+	}
+	cfg, issues := nodeConfig(n)
+	for _, is := range issues {
+		v.add(path+is.Path, "%s", is.Message)
+	}
+	v.configs[n] = cfg
+}
+
+func (v *validator) agentSpec(name string) *agentSpec {
+	i := slices.IndexFunc(v.spec.Agents, func(a agentSpec) bool { return a.Name == name })
+	if i < 0 {
+		return nil
+	}
+	return &v.spec.Agents[i]
+}
+
+// nodeConfig translates the timeout and retry_config of n, which count in
+// seconds. The paths of the issues it returns are relative to the node.
+func nodeConfig(n *nodeSpec) (workflow.NodeConfig, []issue) {
+	var issues []issue
+	check := func(ok bool, path, message string) {
+		if !ok {
+			issues = append(issues, issue{Path: path, Message: message})
+		}
+	}
+	// A duration holds about 292 years, which +Inf and 1e300 are not.
+	const maxSeconds = float64(math.MaxInt64 / int64(time.Second))
+	seconds := func(path string, s float64) time.Duration {
+		check(s >= 0 && s <= maxSeconds, path, "must be a number of seconds that is not negative")
+		return time.Duration(s * float64(time.Second))
+	}
+	cfg := workflow.NodeConfig{Timeout: seconds(".timeout", n.Timeout)}
+	r := n.RetryConfig
+	if r == nil {
+		return cfg, issues
+	}
+	rc := workflow.DefaultRetryConfig()
+	if r.MaxAttempts != nil {
+		check(*r.MaxAttempts >= 0, ".retry_config.max_attempts", "must not be negative")
+		rc.MaxAttempts = *r.MaxAttempts
+	}
+	if r.InitialDelay != nil {
+		rc.InitialDelay = seconds(".retry_config.initial_delay", *r.InitialDelay)
+	}
+	if r.MaxDelay != nil {
+		rc.MaxDelay = seconds(".retry_config.max_delay", *r.MaxDelay)
+	}
+	if r.BackoffFactor != nil {
+		check(*r.BackoffFactor >= 0, ".retry_config.backoff_factor", "must not be negative")
+		rc.BackoffFactor = *r.BackoffFactor
+	}
+	if r.Jitter != nil {
+		check(*r.Jitter >= 0 && *r.Jitter <= 1, ".retry_config.jitter", "must be between 0 and 1")
+		rc.Jitter = *r.Jitter
+	}
+	cfg.RetryConfig = rc
+	return cfg, issues
+}
+
+// compile type-checks a CEL expression that may read the vars in declared,
+// and reports what is wrong with it at path. A non-nil want is the type the
+// expression must have.
+func (v *validator) compile(path, source string, want *cel.Type, declared map[string]bool) *expression {
+	e, err := compileCEL(source, want)
+	if err != nil {
+		v.add(path, "%v", err)
+		return nil
+	}
+	for _, ref := range e.varRefs {
+		if !declared[ref] {
+			v.add(path, "vars.%s is not declared before this expression", ref)
+		}
+	}
+	return e
 }
 
 // celNode compiles every expression of n. Each expression may read only the
@@ -304,18 +571,8 @@ func (v *validator) node(path string, n *nodeSpec, agents map[string]bool) {
 func (v *validator) celNode(path string, n *nodeSpec) {
 	c := &celNode{id: n.ID}
 	declared := map[string]bool{}
-	compile := func(path, source string, wantBool bool) *expression {
-		e, err := compileCEL(source, wantBool)
-		if err != nil {
-			v.add(path, "%v", err)
-			return nil
-		}
-		for _, ref := range e.varRefs {
-			if !declared[ref] {
-				v.add(path, "vars.%s is not declared before this expression", ref)
-			}
-		}
-		return e
+	compile := func(path, source string, want *cel.Type) *expression {
+		return v.compile(path, source, want, declared)
 	}
 	for i, vs := range n.Vars {
 		vpath := fmt.Sprintf("%s.vars[%d]", path, i)
@@ -323,7 +580,7 @@ func (v *validator) celNode(path string, n *nodeSpec) {
 		if declared[vs.Name] {
 			v.add(vpath+".name", "var %q is declared twice", vs.Name)
 		}
-		c.vars = append(c.vars, celVar{name: vs.Name, expr: compile(vpath+".expr", vs.Expr, false)})
+		c.vars = append(c.vars, celVar{name: vs.Name, expr: compile(vpath+".expr", vs.Expr, nil)})
 		declared[vs.Name] = true
 	}
 	for i, r := range n.Routes {
@@ -331,13 +588,13 @@ func (v *validator) celNode(path string, n *nodeSpec) {
 		if r.Route == "" || r.Route == defaultRoute {
 			v.add(rpath+".route", "a route name is required and must not be %s", defaultRoute)
 		}
-		c.routes = append(c.routes, celRoute{route: r.Route, when: compile(rpath+".when", r.When, true)})
+		c.routes = append(c.routes, celRoute{route: r.Route, when: compile(rpath+".when", r.When, cel.BoolType)})
 	}
 	if n.Output != "" {
-		c.output = compile(path+".output", n.Output, false)
+		c.output = compile(path+".output", n.Output, nil)
 	}
 	for _, key := range slices.Sorted(maps.Keys(n.StateDelta)) {
-		c.stateDelta = append(c.stateDelta, celVar{name: key, expr: compile(path+".state_delta."+key, n.StateDelta[key], false)})
+		c.stateDelta = append(c.stateDelta, celVar{name: key, expr: compile(path+".state_delta."+key, n.StateDelta[key], nil)})
 	}
 	v.cel[n] = c
 }
@@ -350,26 +607,34 @@ func (v *validator) edge(path string, e edgeSpec, nodes map[string]*nodeSpec) {
 	if nodes[e.To] == nil {
 		v.add(path+".to_node", "node %q is not declared", e.To)
 	}
-	if e.From == startNode && e.Route != "" {
+	if e.From == startNode && len(e.Route) > 0 {
 		v.add(path+".route", "%s emits no routes", startNode)
 	}
-	if e.Route == "" || e.Route == defaultRoute || from == nil {
+	if len(e.Route) > 1 && slices.Contains(e.Route, defaultRoute) {
+		v.add(path+".route", "%s cannot be combined with other routes", defaultRoute)
+	}
+	if from == nil {
 		return
 	}
-	if from.Type != nodeCEL {
-		v.add(path+".route", "only a cel node emits routes, and %q is a %s node", e.From, from.Type)
-		return
-	}
-	if !slices.ContainsFunc(from.Routes, func(r routeSpec) bool { return r.Route == e.Route }) {
-		v.add(path+".route", "node %q never emits route %q", e.From, e.Route)
+	for _, route := range e.Route {
+		if route == defaultRoute {
+			continue
+		}
+		if from.Type != nodeCEL {
+			v.add(path+".route", "only a cel node emits routes, and %q is a %s node", e.From, from.Type)
+			return
+		}
+		if !slices.ContainsFunc(from.Routes, func(r routeSpec) bool { return r.Route == route }) {
+			v.add(path+".route", "node %q never emits route %q", e.From, route)
+		}
 	}
 }
 
 type builder struct {
-	spec   *systemSpec
-	models map[string]model.LLM
-	cel    map[*nodeSpec]*celNode
-	built  map[string]agent.Agent
+	spec *systemSpec
+	reg  registry
+	compiled
+	built map[string]agent.Agent
 	// building holds the agents being built, to report a cycle of
 	// references instead of recursing forever.
 	building []string
@@ -417,38 +682,27 @@ func (b *builder) llmAgent(spec *agentSpec) (agent.Agent, error) {
 	return llmagent.New(llmagent.Config{
 		Name:        spec.Name,
 		Description: spec.Description,
-		Model:       b.models[spec.Model],
+		Model:       b.reg.models[spec.Model],
 		Instruction: spec.Instruction,
 		Mode:        llmagent.Mode(spec.Mode),
 		OutputKey:   spec.OutputKey,
+		Tools:       b.tools(spec.Tools),
 		SubAgents:   subAgents,
 	})
 }
 
+func (b *builder) tools(names []string) []tool.Tool {
+	tools := make([]tool.Tool, len(names))
+	for i, name := range names {
+		tools[i] = b.reg.tools[name]
+	}
+	return tools
+}
+
 func (b *builder) workflowAgent(spec *agentSpec) (agent.Agent, error) {
-	hasSuccessor := map[string]bool{}
-	for _, e := range spec.Edges {
-		hasSuccessor[e.From] = true
-	}
-	nodes := map[string]workflow.Node{startNode: workflow.Start}
-	for i := range spec.Nodes {
-		n := &spec.Nodes[i]
-		node, err := b.node(n, !hasSuccessor[n.ID])
-		if err != nil {
-			return nil, fmt.Errorf("node %q: %w", n.ID, err)
-		}
-		nodes[n.ID] = node
-	}
-	edges := make([]workflow.Edge, len(spec.Edges))
-	for i, e := range spec.Edges {
-		edges[i] = workflow.Edge{From: nodes[e.From], To: nodes[e.To]}
-		switch e.Route {
-		case "":
-		case defaultRoute:
-			edges[i].Route = workflow.Default
-		default:
-			edges[i].Route = workflow.StringRoute(e.Route)
-		}
+	edges, err := b.graph(spec.Nodes, spec.Edges, true)
+	if err != nil {
+		return nil, err
 	}
 	return workflowagent.New(workflowagent.Config{
 		Name:        spec.Name,
@@ -457,35 +711,113 @@ func (b *builder) workflowAgent(spec *agentSpec) (agent.Agent, error) {
 	})
 }
 
-// node builds n. A terminal node has no outgoing edges; its output is the
-// workflow's reply, so a cel node also sets it as the event's content.
+// graph builds the nodes of one graph and connects them. shown says whether
+// the output of the graph is the workflow's reply; see node.
+func (b *builder) graph(specs []nodeSpec, edgeSpecs []edgeSpec, shown bool) ([]workflow.Edge, error) {
+	hasSuccessor := map[string]bool{}
+	for _, e := range edgeSpecs {
+		hasSuccessor[e.From] = true
+	}
+	nodes := map[string]workflow.Node{startNode: workflow.Start}
+	for i := range specs {
+		n := &specs[i]
+		node, err := b.node(n, shown && !hasSuccessor[n.ID])
+		if err != nil {
+			return nil, fmt.Errorf("node %q: %w", n.ID, err)
+		}
+		nodes[n.ID] = node
+	}
+	edges := make([]workflow.Edge, len(edgeSpecs))
+	for i, e := range edgeSpecs {
+		edges[i] = workflow.Edge{From: nodes[e.From], To: nodes[e.To]}
+		switch {
+		case len(e.Route) == 0:
+		case e.Route[0] == defaultRoute:
+			edges[i].Route = workflow.Default
+		case len(e.Route) == 1:
+			edges[i].Route = workflow.StringRoute(e.Route[0])
+		default:
+			edges[i].Route = workflow.MultiRoute[string](e.Route)
+		}
+	}
+	return edges, nil
+}
+
+// node builds n. A terminal node has no outgoing edges and ends a graph whose
+// output is the workflow's reply, so a cel node there also sets its output as
+// the event's content.
 func (b *builder) node(n *nodeSpec, terminal bool) (workflow.Node, error) {
+	cfg := b.configs[n]
+	if !n.ParallelWorker {
+		return b.bareNode(n, terminal, cfg)
+	}
+	// The worker applies the retry to each item, and rejects a node that has
+	// one of its own. It outputs the list of results and shows none of them.
+	worker, err := b.bareNode(n, terminal, workflow.NodeConfig{})
+	if err != nil {
+		return nil, err
+	}
+	return workflow.NewParallelWorker(n.ID, worker, n.MaxParallelWorkers, cfg)
+}
+
+func (b *builder) bareNode(n *nodeSpec, terminal bool, cfg workflow.NodeConfig) (workflow.Node, error) {
 	switch n.Type {
 	case nodeAgent:
 		a, err := b.agent(n.Agent)
 		if err != nil {
 			return nil, err
 		}
-		return workflow.NewAgentNode(a, workflow.NodeConfig{})
+		return workflow.NewAgentNode(a, cfg)
 	case nodeLLM:
 		a, err := llmagent.New(llmagent.Config{
 			Name:        n.ID,
-			Model:       b.models[n.Model],
+			Model:       b.reg.models[n.Model],
 			Instruction: n.Instruction,
 			Mode:        llmagent.ModeSingleTurn,
+			Tools:       b.tools(n.Tools),
 		})
 		if err != nil {
 			return nil, err
 		}
-		return workflow.NewAgentNode(a, workflow.NodeConfig{})
+		return workflow.NewAgentNode(a, cfg)
 	case nodeCEL:
 		c := b.cel[n]
 		c.terminal = terminal
 		return workflow.NewFunctionNode(n.ID, c.run, workflow.NodeConfig{}), nil
 	case nodeJoin:
 		return workflow.NewJoinNode(n.ID), nil
+	case nodeTool:
+		return workflow.NewNamedToolNode(n.ID, b.reg.tools[n.Tool], cfg)
+	case nodeWorkflow:
+		edges, err := b.graph(n.Nodes, n.Edges, terminal)
+		if err != nil {
+			return nil, err
+		}
+		return workflow.NewWorkflowNode(n.ID, edges)
+	case nodeInput:
+		in := &inputNode{id: n.ID, message: b.messages[n]}
+		return workflow.NewFunctionNode(n.ID, in.run, workflow.NodeConfig{}), nil
 	}
 	return nil, fmt.Errorf("unknown node type %q", n.Type)
+}
+
+// inputNode is the compiled form of an input node.
+type inputNode struct {
+	id      string
+	message *expression
+}
+
+// run returns the event that asks the user for input, which pauses the
+// workflow. The user's reply resumes it on the next turn, as the input of the
+// nodes that follow this one.
+func (n *inputNode) run(ctx agent.Context, input any) (*session.Event, error) {
+	activation := contextVars(ctx)
+	activation["input"] = plainValue(input)
+	msg, err := n.message.evalString(activation)
+	if err != nil {
+		return nil, fmt.Errorf("input node %s: message: %w", n.id, err)
+	}
+	return workflow.NewRequestInputEvent(ctx, session.RequestInput{Message: msg}), nil
 }
 
 // celNode is the compiled form of a cel node.

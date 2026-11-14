@@ -31,11 +31,14 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 // Each fakeModel request is attributed to the declared agent or llm node whose
 // instruction contains the marker.
 var instructionMarkers = map[string]string{
+	"You are the Researcher.":              "research",
+	"You are the Editor.":                  "shorten",
 	"front desk of a small writing studio": "studio",
 	"You are the Writer.":                  "writer",
 	"You are the Clarity critic.":          "critic_clarity",
@@ -110,11 +113,31 @@ func lastUserText(req *model.LLMRequest) string {
 
 func loadTestSystem(t *testing.T, llm model.LLM) []agent.Agent {
 	t.Helper()
-	agents, err := loadSystem(agentSystem, map[string]model.LLM{"default": llm})
+	return loadDoc(t, agentSystem, llm)
+}
+
+// loadDoc builds the agents of doc with testRegistry.
+func loadDoc(t *testing.T, doc []byte, llm model.LLM) []agent.Agent {
+	t.Helper()
+	agents, err := loadSystem(doc, testRegistry(t, llm))
 	if err != nil {
 		t.Fatalf("loadSystem() error = %v", err)
 	}
 	return agents
+}
+
+// testRegistry registers what main does: llm as the model default, and the
+// tool word_count.
+func testRegistry(t *testing.T, llm model.LLM) registry {
+	t.Helper()
+	wordCount, err := newWordCountTool()
+	if err != nil {
+		t.Fatalf("newWordCountTool() error = %v", err)
+	}
+	return registry{
+		models: map[string]model.LLM{"default": llm},
+		tools:  map[string]tool.Tool{"word_count": wordCount},
+	}
 }
 
 // runAgent runs the declared agent name on prompt and returns the text of the
@@ -132,6 +155,18 @@ func runAgent(t *testing.T, agents []agent.Agent, name, prompt string) string {
 // session, and returns the text of every event of each run that carries any.
 func runTurns(t *testing.T, agents []agent.Agent, name string, prompts ...string) [][]string {
 	t.Helper()
+	r := newRunner(t, agents, name)
+	var runs [][]string
+	for _, prompt := range prompts {
+		runs = append(runs, eventTexts(runEvents(t, r, genai.NewContentFromText(prompt, genai.RoleUser))))
+	}
+	return runs
+}
+
+// newRunner returns a runner for the declared agent name, with its own
+// session service.
+func newRunner(t *testing.T, agents []agent.Agent, name string) *runner.Runner {
+	t.Helper()
 	i := slices.IndexFunc(agents, func(a agent.Agent) bool { return a.Name() == name })
 	if i < 0 {
 		t.Fatalf("agent %q not found", name)
@@ -140,25 +175,43 @@ func runTurns(t *testing.T, agents []agent.Agent, name string, prompts ...string
 	if err != nil {
 		t.Fatalf("runner.New() error = %v", err)
 	}
-	var runs [][]string
-	for _, prompt := range prompts {
-		var texts []string
-		var runErr error
-		for event, err := range r.Run(t.Context(), "user", "session", genai.NewContentFromText(prompt, genai.RoleUser), agent.RunConfig{}) {
-			if err != nil {
-				runErr = err
-				break
-			}
-			if text := contentText(event.Content); text != "" {
-				texts = append(texts, text)
-			}
-		}
-		if runErr != nil {
-			t.Fatalf("Run(%q) error = %v", prompt, runErr)
-		}
-		runs = append(runs, texts)
+	return r
+}
+
+// runEvents sends content to r, always in the same session, and returns the
+// events of the run.
+func runEvents(t *testing.T, r *runner.Runner, content *genai.Content) []*session.Event {
+	t.Helper()
+	events, err := tryRun(t, r, content)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
 	}
-	return runs
+	return events
+}
+
+// tryRun is runEvents for a run that may fail: it returns the events up to
+// the error.
+func tryRun(t *testing.T, r *runner.Runner, content *genai.Content) ([]*session.Event, error) {
+	t.Helper()
+	var events []*session.Event
+	for event, err := range r.Run(t.Context(), "user", "session", content, agent.RunConfig{}) {
+		if err != nil {
+			return events, err
+		}
+		events = append(events, event)
+	}
+	return events, nil
+}
+
+// eventTexts returns the text of every event that carries any.
+func eventTexts(events []*session.Event) []string {
+	var texts []string
+	for _, event := range events {
+		if text := contentText(event.Content); text != "" {
+			texts = append(texts, text)
+		}
+	}
+	return texts
 }
 
 func TestLoadSystem(t *testing.T) {
@@ -338,7 +391,7 @@ func TestCELNodeForwardsInput(t *testing.T) {
 		}
 		return genai.NewPartFromText(caller + " saw: " + input)
 	}}
-	agents, err := loadSystem(doc, map[string]model.LLM{"default": m})
+	agents, err := loadSystem(doc, testRegistry(t, m))
 	if err != nil {
 		t.Fatalf("loadSystem() error = %v", err)
 	}
@@ -391,7 +444,7 @@ func TestCELNodeShowsOnlyTerminalOutput(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			agents, err := loadSystem(tc.doc, map[string]model.LLM{"default": &fakeModel{reply: tc.reply}})
+			agents, err := loadSystem(tc.doc, testRegistry(t, &fakeModel{reply: tc.reply}))
 			if err != nil {
 				t.Fatalf("loadSystem() error = %v", err)
 			}
@@ -501,7 +554,7 @@ func TestCELNodeRuntimeErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			doc := editedSystem(t, tc.old, tc.new)
 			m := &fakeModel{reply: func(string, string) *genai.Part { return genai.NewPartFromText("secret-label") }}
-			agents, err := loadSystem(doc, map[string]model.LLM{"default": m})
+			agents, err := loadSystem(doc, testRegistry(t, m))
 			if err != nil {
 				t.Fatalf("loadSystem() error = %v", err)
 			}

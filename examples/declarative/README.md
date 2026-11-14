@@ -3,8 +3,10 @@
 This sample builds a root agent and two workflow sub-agents from one YAML
 document, [`agent-system.yaml`](agent-system.yaml). The routing, the revision
 loop and the data passed between nodes are
-[CEL](https://cel.dev) expressions in that document. The Go code registers one
-model and serves what the document declares.
+[CEL](https://cel.dev) expressions in that document. The Go code registers a
+model and a tool, and serves what the document declares. A second document,
+[`briefing.yaml`](briefing.yaml), uses the remaining node types: a parallel
+worker, a tool, a nested workflow and a pause for a human.
 
 - **Concept:** a declarative `AgentSystem` document, built into `llmagent` and
   `workflowagent` agents by a small loader that lives in this sample
@@ -20,24 +22,47 @@ Go node. Today the same graphs need code like `examples/workflow/routing/llm`,
 which defines a custom node just to set `Routes`.
 
 The loader in [`system.go`](system.go) and [`cel.go`](cel.go) is part of the
-example, not an ADK API. It covers two agent classes and four node types, which
-is enough for the two workflows here:
+example, not an ADK API. It covers two agent classes and seven node types:
 
 | `agent_class` | Built with |
 |---|---|
-| `LlmAgent` | `llmagent.New`; `sub_agents` are transfer targets |
+| `LlmAgent` | `llmagent.New`; `sub_agents` are transfer targets, `tools` are registered tools |
 | `Workflow` | `workflowagent.New` over `nodes` and `edges` |
 
 | Node `type` | Built with | Output |
 |---|---|---|
 | `agent` | `workflow.NewAgentNode` around a declared agent | the agent's reply |
-| `llm` | a single-turn `llmagent` named after the node | the model's reply |
+| `llm` | a single-turn `llmagent` named after the node, with optional `tools` | the model's reply |
 | `cel` | `workflow.NewFunctionNode` | `output`, or the node's input when omitted |
 | `join` | `workflow.NewJoinNode` | a map from predecessor id to its output |
+| `tool` | `workflow.NewNamedToolNode` around a registered tool; the input is its arguments | the tool's result |
+| `workflow` | `workflow.NewWorkflowNode` over its own `nodes` and `edges` | the output of its last node |
+| `input` | `workflow.NewRequestInputEvent` with `message`, a CEL string | the user's reply, on the next turn |
 
-Edges name nodes by id in `from_node` and `to_node`, with an optional `route`.
+Four more fields tune how a node runs. Their names and units are adk-python's:
+
+| Field | Applies to | Meaning |
+|---|---|---|
+| `parallel_worker: true` | any node but a `join` or an `input` | `workflow.NewParallelWorker`: the input is a list, the node runs once per item, and the output is the list of results |
+| `max_parallel_workers` | a parallel worker | how many items run at once; unset is no limit |
+| `retry_config` | `agent`, `llm` and `tool` nodes | `max_attempts`, `initial_delay`, `max_delay`, `backoff_factor` and `jitter`, each defaulting to `workflow.DefaultRetryConfig`, so `retry_config: {}` is five attempts; on a parallel worker, for each item |
+| `timeout` | `agent`, `llm` and `tool` nodes | seconds, as `initial_delay` and `max_delay` are; on a parallel worker, for all the items together |
+
+A field set on a node type that does not read it is a validation issue, not
+ignored.
+
+Edges name nodes by id in `from_node` and `to_node`, with an optional `route`:
+a route name, or a list of names any of which takes the edge.
 `START` is the workflow entry. A `DEFAULT` edge fires
 when none of the source node's routed edges matched.
+
+A document names models and tools; it cannot declare them. The host passes
+`loadSystem` a `registry` of both, and a name that is not in it is a
+validation issue.
+
+What a document cannot say: a `workflow.NewDynamicNode`, whose body is a Go
+function; callbacks, for the same reason; node input and output schemas; and a
+workflow-wide concurrency limit, which `workflowagent.Config` does not take.
 
 ## How it works
 
@@ -71,9 +96,10 @@ graph LR
 
 1. `loadSystem` decodes the document strictly: an unknown field is an error.
 2. It validates the whole document and reports every problem at once, each
-   with its field path: names, model references, agent and node references,
-   edge routes that no `cel` node emits, and CEL that does not compile or
-   reads a `vars.x` declared after it.
+   with its field path: names, model and tool references, agent and node
+   references, edge routes that no `cel` node emits, fields a node type does
+   not read, numbers out of range, and CEL that does not compile or reads a
+   `vars.x` declared after it.
 3. It builds each agent once, root first, and `main` serves them all through
    `agent.NewMultiLoader`, so ADK Web lists `writer_critics` and `llm_router`
    as well as `studio`.
@@ -122,7 +148,7 @@ go run ./examples/declarative/ console
 | `GOOGLE_API_KEY` | one of these | Gemini API key; runs `gemini-flash-latest` |
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | one of these | OpenAI-compatible endpoint, used when `GOOGLE_API_KEY` is unset |
 | `OPENAI_MODEL` | with `OPENAI_*` | model name at that endpoint |
-| `AGENT_SYSTEM` | no | path of a document to run instead of the embedded `agent-system.yaml` |
+| `AGENT_SYSTEM` | no | path of a document to run instead of the embedded `agent-system.yaml`, such as `briefing.yaml` |
 
 Ask `studio` to write something, such as *Write a paragraph about the history
 of the bicycle*, to run `writer_critics`. Anything else, such as *Is it
@@ -170,11 +196,59 @@ exit status 1
 Both mistakes are reported in one run, each at the field to fix, before any
 agent exists.
 
+## The other node types: `briefing.yaml`
+
+[`briefing.yaml`](briefing.yaml) is a document whose root is a workflow. It
+researches a list of topics, one model call per topic, and publishes the
+result once a human approves it.
+
+```mermaid
+graph LR
+    T[topics: cel] --> R[research: llm<br/>parallel worker]
+    R --> A[count_args: cel] --> C[count: tool word_count]
+    C --> S{size: cel}
+    S -- EMPTY --> N[nothing: cel]
+    S -- LONG --> W
+    S -- DEFAULT --> V[review: input]
+    subgraph W [condense: workflow]
+        SH[shorten: llm] --> K[keep: cel]
+    end
+    W --> V
+    V --> D{verdict: cel}
+    D -- PUBLISH --> P[publish: cel]
+    D -- DEFAULT --> X[discard: cel]
+```
+
+```bash
+AGENT_SYSTEM=examples/declarative/briefing.yaml go run ./examples/declarative/ console
+```
+
+A run against `glm-5.3-flash:cloud` through Ollama, with
+`-streaming_mode none`. The three facts came to more than 40 words, so
+`condense` ran, and its model reply is the first line. `review` then paused
+the workflow, and `yes` resumed it.
+
+```text
+User -> bicycles, steam trains, zeppelins
+Agent -> The bicycle evolved from the 1817 German draisine to the 1885 chain-driven safety bike, now used by over a billion people. Trevithick built the first working railway steam locomotive in 1804. Zeppelins carried transatlantic passengers until the 1937 Hindenburg disaster.
+Agent -> Publish this briefing? (yes/no)
+
+The bicycle evolved from the 1817 German draisine to … the 1937 Hindenburg disaster.
+User -> yes
+Agent -> Briefing on 3 topic(s):
+
+The bicycle evolved from the 1817 German draisine to … the 1937 Hindenburg disaster.
+```
+
 ## What it shows
 
 - Routing on model output is a CEL `when`, not a custom node.
 - A bounded loop is a routed back edge plus a counter in `state_delta`.
 - A `join` hands the next node a map, which CEL reshapes into a prompt.
+- A fan-out over data is a `cel` node that outputs a list and a
+  `parallel_worker` after it.
+- A human approval is an `input` node and a `cel` node that routes on the
+  reply.
 
 ## Notes
 
@@ -183,7 +257,8 @@ agent exists.
   count; `decide` names `REVISE` so the YAML reads both outcomes.
 - **An agent node is named after its agent, not its id.** The loader rejects
   a graph where the agent's name is also a node id, which is why node `write`
-  runs agent `writer`.
+  runs agent `writer`. A parallel worker is the exception: it is named after
+  its id.
 - **An `llm` node sees only its input.** `route` forwards `user.content`, not
   the classifier's label, so the chosen branch answers the user's message.
 - **The field names borrow from adk-python's Agent Config** (`name`,
@@ -192,12 +267,31 @@ agent exists.
   config file. One file declares every agent, so it has an
   `apiVersion`/`kind: AgentSystem` envelope and an `agents` list, and
   `sub_agents` and agent nodes name agents in it rather than other files.
-  A workflow lists its `nodes` with an `id` and a `type` (`agent`, `llm`,
-  `cel`, `join`), because `cel` and `join` nodes have no Python config
-  counterpart; Python infers nodes from its edges. `model` names a model the
-  Go host registers rather than a model id, `mode: single_turn` sets the
+  A workflow lists its `nodes` with an `id` and a `type`, because `cel`,
+  `join` and `input` nodes have no Python config counterpart; Python infers
+  nodes from its edges. `model` and `tools` name what the Go host registers
+  rather than a model id or an import path, `mode: single_turn` sets the
   `llmagent` mode, and edges are only the explicit map form, not chains or
-  routing maps.
+  routing maps. A node's `parallel_worker`, `max_parallel_workers`,
+  `retry_config` and `timeout` are Python's node fields unchanged.
 - **A failed evaluation names the node and field, not the cause.** cel-go's
   error text can quote the values involved, which may be the user's message
   or model output, so the loader drops it.
+- **A parallel worker yields its list of results and nothing else.** No text
+  is shown, and the routes, state changes and tool calls of each run are
+  dropped, so the loader rejects `routes` and `state_delta` on a parallel
+  `cel` node, and `tools` or an `output_key` on a parallel model call. It also
+  rejects a parallel `agent` node that runs a Workflow agent, whose graph it
+  does not check for those; nest the graph in a `workflow` node instead. End
+  the graph with a `cel` node that formats the list, as `publish` does.
+- **An `input` node's successor gets the reply, not the node's input.** The
+  reply arrives on the next turn, so what the workflow asked about has to be
+  in session state by then: `condense` and `count_args` write
+  `state.briefing`, and `verdict` reads it back. The reply is whatever the
+  client sent, not always text, so `verdict` checks its type.
+- **An `input` node belongs to the top-level graph of a Workflow agent.**
+  Inside a `workflow` node, or in a Workflow agent that another graph runs as
+  an `agent` node, the reply would become the output of that node and skip
+  the rest of its graph, so the loader rejects both. A graph also cannot loop
+  back into an `input` node it has already paused at: the workflow engine
+  does not resume the second pause.
