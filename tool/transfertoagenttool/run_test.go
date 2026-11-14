@@ -44,6 +44,25 @@ func newTree(t *testing.T) agent.Agent {
 	return root
 }
 
+// newThreeLevelTree returns the agents of the tree top -> mid -> leaf.
+func newThreeLevelTree(t *testing.T) (top, mid, leaf agent.Agent) {
+	t.Helper()
+	llm := &struct{ model.LLM }{}
+	leaf, err := llmagent.New(llmagent.Config{Name: "leaf", Model: llm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid, err = llmagent.New(llmagent.Config{Name: "mid", Model: llm, SubAgents: []agent.Agent{leaf}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	top, err = llmagent.New(llmagent.Config{Name: "top", Model: llm, SubAgents: []agent.Agent{mid}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return top, mid, leaf
+}
+
 // treeContext returns the tool context of a call by self, an agent of root's
 // tree, over the invocation context the runner builds: one that carries the
 // tree's parent map.
@@ -138,6 +157,12 @@ func TestNew_RunIgnoresNonStringReason(t *testing.T) {
 
 func TestNew_RunNameValidation(t *testing.T) {
 	root := newTree(t)
+	child := root.FindAgent("child")
+	top, mid, leaf := newThreeLevelTree(t)
+	solo, err := llmagent.New(llmagent.Config{Name: "solo", Model: &struct{ model.LLM }{}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name    string
 		names   []string
@@ -147,6 +172,12 @@ func TestNew_RunNameValidation(t *testing.T) {
 		wantErr string // empty: the call succeeds and transfers to args' agent_name
 	}{
 		{name: "listed, not in the tree", names: []string{"listed"}, tree: root, self: root, args: map[string]any{"agent_name": "listed"}},
+		{name: "in the tree, not listed", names: []string{"listed"}, tree: root, self: root, args: map[string]any{"agent_name": "child"}},
+		{name: "root of a sub-agent's tree, not listed", names: []string{"helper"}, tree: root, self: child, args: map[string]any{"agent_name": "root"}},
+		{name: "root itself, not listed", names: []string{"listed"}, tree: root, self: root, args: map[string]any{"agent_name": "root"}},
+		{name: "lone agent itself, not listed", names: []string{"x"}, tree: solo, self: solo, args: map[string]any{"agent_name": "solo"}},
+		{name: "root two levels up, not listed", names: []string{"x"}, tree: top, self: leaf, args: map[string]any{"agent_name": "top"}},
+		{name: "above the run's root, not listed", names: []string{"x"}, tree: mid, self: leaf, args: map[string]any{"agent_name": "top"}},
 		{name: "unknown", names: []string{"listed"}, tree: root, self: root, args: map[string]any{"agent_name": "ghost"}, wantErr: `agent "ghost" is not a valid transfer target; available agents: listed`},
 		{name: "unknown with reason", names: []string{"listed"}, tree: root, self: root, args: map[string]any{"agent_name": "ghost", "transfer_reason": "r"}, wantErr: `agent "ghost" is not a valid transfer target; available agents: listed`},
 		{name: "missing argument", names: []string{"listed"}, tree: root, self: root, args: nil, wantErr: "missing argument"},

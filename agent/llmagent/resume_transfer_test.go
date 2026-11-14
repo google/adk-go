@@ -97,16 +97,3 @@ func TestResume_TransferToAgentOutsideTreeFailsRun(t *testing.T) {
 		})
 	}
 }
-
-// runUntilError returns the events stream yields before its first error, and
-// that error.
-func runUntilError(stream iter.Seq2[*session.Event, error]) ([]*session.Event, error) {
-	var events []*session.Event
-	for ev, err := range stream {
-		if err != nil {
-			return events, err
-		}
-		events = append(events, ev)
-	}
-	return events, nil
-}

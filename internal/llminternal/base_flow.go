@@ -1350,9 +1350,9 @@ func (f *Flow) postprocessFunctionCalls(ctx agent.InvocationContext, tools map[s
 // in which case the error is yielded, when the target yielded an error, or
 // when the consumer stopped.
 func (f *Flow) runTransfer(ctx agent.InvocationContext, agentName string, yield func(*session.Event, error) bool) bool {
-	nextAgent := f.agentToRun(ctx, agentName)
-	if nextAgent == nil {
-		yield(nil, fmt.Errorf("failed to find agent: %s", agentName))
+	nextAgent, err := f.agentToRun(ctx, agentName)
+	if err != nil {
+		yield(nil, err)
 		return false
 	}
 	// On a resumable run on the node path, the transferring agent ends
@@ -1776,17 +1776,49 @@ func (f *Flow) postprocess(ctx agent.InvocationContext, req *model.LLMRequest, r
 	}
 }
 
-func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.Agent {
-	// NOTE: in python, BaseLlmFlow._get_agent_to_run searches the entire agent
-	// tree from the root_agent when processing _postprocess_handle_function_calls_async.
-	// I think that is strange. In our version, we check the agents included in transferTarget.
-	agents := transferTargets(ctx.Agent(), parentOf(ctx, ctx.Agent()))
-	for _, agent := range agents {
-		if agent.Name() == agentName {
-			return agent
+// agentToRun returns the agent that a transfer from ctx's agent to the agent
+// named agentName runs, as adk-python's get_agent_to_run does
+// (flows/llm_flows/core/_function_call_postprocessor.py). It looks first at
+// the caller itself, then at the caller's transfer targets, so that a target
+// wins over a same-named agent elsewhere in the tree.
+//
+// The caller's own name runs the caller again, except on the node path, where
+// it is an error, as in adk-python's workflow scheduler
+// (workflow/utils/_transfer_utils.py). Another agent of the tree that is not a
+// target is an error matching [agent.ErrInvalidTransferTarget]. A name no
+// agent of the tree has is an error too.
+func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) (agent.Agent, error) {
+	cur := ctx.Agent()
+	if agentName == cur.Name() {
+		if rc := runconfig.FromContext(ctx); rc != nil && rc.NodePath {
+			return nil, fmt.Errorf("Agent '%s' cannot transfer to itself.", agentName) //nolint:staticcheck // ST1005: the message text is adk-python's
+		}
+		return cur, nil
+	}
+	for _, target := range transferTargets(cur, parentOf(ctx, cur)) {
+		if target.Name() == agentName {
+			return target, nil
 		}
 	}
-	return nil
+	if rootOf(ctx, cur).FindAgent(agentName) == nil {
+		return nil, fmt.Errorf("failed to find agent: %s", agentName)
+	}
+	return nil, invalidTransferError{caller: cur.Name(), target: agentName}
+}
+
+// invalidTransferError is the error of a transfer to an agent of the tree
+// that is not among the caller's transfer targets. Its text is adk-python's.
+type invalidTransferError struct {
+	caller, target string
+}
+
+func (e invalidTransferError) Error() string {
+	return fmt.Sprintf("Agent %s is not allowed to transfer to agent %s.", e.caller, e.target)
+}
+
+// Is makes the error match agent.ErrInvalidTransferTarget.
+func (e invalidTransferError) Is(target error) bool {
+	return target == agent.ErrInvalidTransferTarget
 }
 
 func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *responseWithEventID, tools map[string]tool.Tool, stateDelta map[string]any, artifactDelta map[string]int64) *session.Event {

@@ -152,6 +152,9 @@ const transferReasonDescriptionLine = "\n  transfer_reason: the reason for trans
 type TransferToAgentTool struct {
 	instructions    string
 	supportedAgents []agent.Agent
+	// root is the root of the agent tree the tool's agent belongs to (rootOf),
+	// or the agent itself when it has no parent.
+	root agent.Agent
 	// typed makes Declaration return the typed Parameters form.
 	typed bool
 	// vertex makes Declaration add the null response schema Vertex AI gets.
@@ -165,7 +168,7 @@ type TransferToAgentTool struct {
 
 // NewNamedTransferToAgentTool is the constructor of the public tool (package
 // transfertoagenttool): a tool over a fixed list of names, with no targets to
-// resolve and no instructions.
+// resolve, no instructions and no root.
 func NewNamedTransferToAgentTool(names []string, includeReason bool) *TransferToAgentTool {
 	return &TransferToAgentTool{
 		agentNames:    slices.Clone(names),
@@ -175,8 +178,9 @@ func NewNamedTransferToAgentTool(names []string, includeReason bool) *TransferTo
 
 // NewTransferToAgentTool creates a new TransferToAgentTool. ctx supplies the
 // mode curAgent runs under, which decides whether the transfer INSTRUCTIONS are
-// generated. The tool declaration itself ships either way, so a single_turn
-// agent is still able to call it.
+// generated, and the parent map from which, with the parent links, the tool
+// finds the root of curAgent's tree. The tool declaration itself ships either
+// way, so a single_turn agent is still able to call it.
 func NewTransferToAgentTool(ctx agent.InvocationContext, curAgent, parent agent.Agent, targets []agent.Agent) (*TransferToAgentTool, error) {
 	si, err := instructionsForTransferToAgent(ctx, curAgent, parent, targets)
 	if err != nil {
@@ -185,6 +189,7 @@ func NewTransferToAgentTool(ctx agent.InvocationContext, curAgent, parent agent.
 	return &TransferToAgentTool{
 		instructions:    si,
 		supportedAgents: targets,
+		root:            rootOf(ctx, curAgent),
 	}, nil
 }
 
@@ -347,12 +352,14 @@ func (t *TransferToAgentTool) Run(ctx agent.Context, args any) (map[string]any, 
 	if !ok || agent == "" {
 		return nil, fmt.Errorf("empty agent_name: %v", args)
 	}
-	// Reject a name outside the declared enum here, as a tool error the model
-	// sees and can recover from. Setting TransferToAgent to it would make the
-	// flow fail the whole invocation when it cannot find the agent. This
-	// deliberately diverges from adk-python, whose tool accepts any name and
-	// whose flow then raises ValueError.
-	if targets := t.enums(); !slices.Contains(targets, agent) {
+	// Reject a name that no agent of the tree has here, as a tool error the
+	// model sees and can recover from. Setting TransferToAgent to it would
+	// make the flow fail the whole invocation when it cannot find the agent.
+	// This deliberately diverges from adk-python, whose tool accepts any name
+	// and whose flow then raises ValueError. A name of the tree outside the
+	// enum, the caller's own included, is accepted: the flow decides whether
+	// the transfer may run (Flow.agentToRun).
+	if targets := t.enums(); !slices.Contains(targets, agent) && !t.inTree(ctx, agent) {
 		return nil, fmt.Errorf("agent %q is not a valid transfer target; available agents: %s", agent, strings.Join(targets, ", "))
 	}
 	ctx.Actions().TransferToAgent = agent
@@ -363,7 +370,33 @@ func (t *TransferToAgentTool) Run(ctx agent.Context, args any) (map[string]any, 
 		reason, _ := m["transfer_reason"].(string)
 		ctx.Actions().TransferReason = reason
 	}
+	// adk-python's tool returns None, which after-tool callbacks see and the
+	// flow answers as {"result": null} (tools/transfer_to_agent_tool.py).
 	return nil, nil
+}
+
+// inTree reports whether an agent of the calling agent's tree is named name.
+// A tool the flow builds knows its tree's root. A tool built over names finds
+// the tree from ctx, by the calling agent's name in the run's parent map,
+// because an agent.Agent has no parent accessor; with no parent map it has no
+// tree.
+func (t *TransferToAgentTool) inTree(ctx agent.Context, name string) bool {
+	if t.root != nil {
+		return t.root.FindAgent(name) != nil
+	}
+	parents := parentmap.FromContext(ctx)
+	if parents == nil {
+		return false
+	}
+	self := ctx.AgentName()
+	parent := parents[self]
+	if parent == nil {
+		// The calling agent is the run's root; the map's keys are the rest of
+		// the tree.
+		_, ok := parents[name]
+		return ok || name == self
+	}
+	return rootOf(ctx, parent).FindAgent(name) != nil
 }
 
 var _ tool.Tool = (*TransferToAgentTool)(nil)
