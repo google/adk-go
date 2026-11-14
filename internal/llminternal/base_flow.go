@@ -79,7 +79,7 @@ type Flow struct {
 
 	Tools                 []tool.Tool
 	RequestProcessors     []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]
-	ResponseProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error
+	ResponseProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error]
 	BeforeModelCallbacks  []BeforeModelCallback
 	AfterModelCallbacks   []AfterModelCallback
 	OnModelErrorCallbacks []OnModelErrorCallback
@@ -118,7 +118,7 @@ var (
 		AgentTransferRequestProcessor,
 		removeDisplayNameIfExists,
 	}
-	DefaultResponseProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error{
+	DefaultResponseProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error]{
 		nlPlanningResponseProcessor,
 		codeExecutionResponseProcessor,
 	}
@@ -905,6 +905,21 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				}
 				select {
 				case ev := <-eventCase:
+					// The response processors may rewrite ev's parts, and the
+					// events they emit belong before ev, as in adk-python's
+					// live flow. Their errors end the session the way a request
+					// processor error does.
+					for pev, err := range f.postprocess(ctx, nreq, &ev.LLMResponse) {
+						if err != nil {
+							sess.pushError(err)
+							cleanup()
+							return
+						}
+						if pev != nil && !sess.pushEvent(pev) {
+							cleanup()
+							return
+						}
+					}
 					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
 					var tools map[string]tool.Tool
 					if len(fnCalls) > 0 {
@@ -1137,9 +1152,14 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				return
 			}
 			applyEmptyResponsePolicy(ctx, resp.LLMResponse)
-			if err := f.postprocess(ctx, req, resp); err != nil {
-				yield(nil, err)
-				return
+			for ev, err := range f.postprocess(ctx, req, resp.LLMResponse) {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if ev != nil && !yield(ev, nil) {
+					return
+				}
 			}
 			// Skip the model response event if it carries no content, error code,
 			// interruption or grounding metadata.
@@ -1626,14 +1646,25 @@ func (f *Flow) runOnModelErrorCallbacks(ctx agent.InvocationContext, llmReq *mod
 	return nil, nil
 }
 
-func (f *Flow) postprocess(ctx agent.InvocationContext, req *model.LLMRequest, resp *responseWithEventID) error {
-	// apply response processor functions to the response in the configured order.
-	for _, processor := range f.ResponseProcessors {
-		if err := processor(ctx, req, resp.LLMResponse); err != nil {
-			return err
+// postprocess applies the response processors to resp in the configured
+// order and yields the events they emit, which belong before the model
+// response event. It stops at the first error.
+func (f *Flow) postprocess(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if resp == nil {
+			return
+		}
+		for _, processor := range f.ResponseProcessors {
+			for ev, err := range processor(ctx, req, resp) {
+				if !yield(ev, err) {
+					return
+				}
+				if err != nil {
+					return
+				}
+			}
 		}
 	}
-	return nil
 }
 
 func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.Agent {

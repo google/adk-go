@@ -2265,11 +2265,12 @@ func TestEmptyResponsePolicy_SSEEmptyContentAndNilContentNotStamped(t *testing.T
 // the model returned: a response processor that adds content afterwards does
 // not hide an empty model turn.
 func TestRunOneStep_AppliesPolicyBeforeProcessors(t *testing.T) {
-	addPart := func(_ agent.InvocationContext, _ *model.LLMRequest, resp *model.LLMResponse) error {
-		resp.Content.Parts = append(resp.Content.Parts, &genai.Part{Text: "added by processor"})
-		return nil
+	addPart := func(_ agent.InvocationContext, _ *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error] {
+		return func(func(*session.Event, error) bool) {
+			resp.Content.Parts = append(resp.Content.Parts, &genai.Part{Text: "added by processor"})
+		}
 	}
-	f := &Flow{ResponseProcessors: []func(agent.InvocationContext, *model.LLMRequest, *model.LLMResponse) error{addPart}}
+	f := &Flow{ResponseProcessors: []func(agent.InvocationContext, *model.LLMRequest, *model.LLMResponse) iter.Seq2[*session.Event, error]{addPart}}
 
 	events, _ := runScriptedFlow(t, f, nil, stopTurn())
 
