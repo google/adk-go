@@ -448,13 +448,25 @@ type Config struct {
 	// not offered, and a function call to its name gets the tool-not-found
 	// result. In live mode (RunLive) the second rule holds only for a tool
 	// that registers itself in the request, as toolutils.PackTool does.
+	// These tools come before the tools of Toolsets, in this order; see
+	// Toolsets for keeping a plain tool's place among toolsets.
 	Tools []tool.Tool
 	// Callbacks are executed in the order they are provided.
 	// If a callback returns result/error, then the execution of the callback
 	// list stops and this result/error is returned instead.
 	AfterToolCallbacks []AfterToolCallback
 	// Toolsets will be used by llmagent to extract tools and pass to the
-	// underlying LLM.
+	// underlying LLM. The model is offered Tools first, then the tools of each
+	// toolset in this order; to put a plain tool between toolsets, leave it
+	// out of Tools and wrap it with tool.AsToolset here. Before every model
+	// call of a run the toolsets are listed again, concurrently, so a toolset
+	// may answer differently per step. A toolset's Tools method must be safe
+	// for concurrent use, including with itself: a toolset placed here twice
+	// has Tools called twice at the same time. A toolset whose listing fails is
+	// skipped for that step: it contributes no tools, and the run goes on
+	// without an error or a log line, unless the run's context is
+	// done, which ends the step with the listing error. CanonicalTools returns
+	// the same list outside a run.
 	Toolsets []tool.Toolset
 
 	OnToolErrorCallbacks []OnToolErrorCallback

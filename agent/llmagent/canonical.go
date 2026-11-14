@@ -22,6 +22,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
 )
 
 // The built-in default names resolve through the model registry to ADK's
@@ -105,6 +106,43 @@ func CanonicalInstruction(ctx agent.ReadonlyContext, a agent.Agent) (string, boo
 		return "", false, fmt.Errorf("canonical instruction of agent %q: %w", a.Name(), err)
 	}
 	return text, true, nil
+}
+
+// CanonicalTools returns the tools of the LLM agent a for ctx: Config.Tools,
+// then the tools each of Config.Toolsets lists, in that order; tool.AsToolset
+// is the way to put a plain tool between toolsets. Toolsets are listed
+// concurrently, each with ctx, and land in their declared position. A toolset
+// whose listing fails contributes no tools and the call goes on, and no log
+// line is written; but when ctx is not nil and is canceled (or past its
+// deadline) after a listing has failed, the call returns an error that wraps
+// both the toolset's failure and ctx.Err().
+//
+// The tools llmagent.New adds come after Config.Tools and before the
+// toolsets' tools: for a task agent (Mode is ModeTask) the finish_task tool,
+// then one agent tool for each sub-agent whose Mode is ModeSingleTurn or
+// ModeTask, in sub-agent order. A ModeTask agent with Config.Tools [own] and
+// one toolset listing [ts_a] returns [own finish_task ts_a]. adk-python
+// offers these added tools after the toolsets' tools.
+//
+// Caller provides: an LLM agent (built by llmagent.New) and a read-only
+// context; ctx may be nil, and toolsets then receive nil.
+// Guarantees: a new slice that the caller may modify; the list a step of a
+// run of a offers its model, as far as the toolsets answer the same way.
+// On failure: the error above; an error when a is nil or not an LLM agent. A
+// panic in a toolset's Tools reaches the caller.
+// Zero value: N/A.
+// Concurrency: safe for concurrent use; toolsets are called concurrently
+// with the same ctx, so a ctx handed to CanonicalTools must be safe for that.
+func CanonicalTools(ctx agent.ReadonlyContext, a agent.Agent) ([]tool.Tool, error) {
+	llmAgent, ok := a.(llminternal.Agent)
+	if !ok {
+		return nil, fmt.Errorf("canonical tools: %w", errNotLLMAgent)
+	}
+	tools, err := llminternal.ResolveTools(ctx, llmAgent)
+	if err != nil {
+		return nil, fmt.Errorf("canonical tools of agent %q: %w", a.Name(), err)
+	}
+	return tools, nil
 }
 
 // SetDefaultModel sets the process-wide default model to m. It applies at
