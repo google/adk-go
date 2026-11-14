@@ -64,14 +64,10 @@ func newRegisteredModel(ctx context.Context, name string) (model.LLM, error) {
 }
 
 // IsGeminiConnector reports whether m is ADK's Gemini connector, whether it
-// was built by NewModel or resolved through the model registry.
-//
-// Caller provides: any model.LLM, nil included.
-// Guarantees: true only for a model built by this package; false for nil and
-// for every other model.
-// On failure: N/A.
-// Zero value: N/A.
-// Concurrency: safe for concurrent use.
+// was built by NewModel or resolved through the model registry from one of
+// the names this package registers. It reports false for nil and for every
+// model this package did not build, including one that wraps a Gemini
+// connector. It is safe for concurrent use.
 func IsGeminiConnector(m model.LLM) bool {
 	g, ok := m.(*geminiModel)
 	return ok && g != nil

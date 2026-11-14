@@ -255,7 +255,9 @@ func installTaskTools(a *llmAgent) error {
 // Config of the LLMAgent.
 type Config struct {
 	// Name must be a non-empty string, unique within the agent tree.
-	// Agent name cannot be "user", since it's reserved for end-user's input.
+	// Agent name cannot be "user", since it's reserved for end-user's input:
+	// New refuses it with an error wrapping agent.ErrInvalidAgentConfig. The
+	// check is case-sensitive, so "User" is accepted.
 	Name string
 	// Description of the agent's capability.
 	//

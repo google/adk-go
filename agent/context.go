@@ -72,10 +72,13 @@ type InvocationContext interface {
 	// Agent of this invocation context.
 	Agent() Agent
 
-	// Artifacts of the current session.
+	// Artifacts of the current session. It is nil when the invocation has no
+	// artifact service, except on a Context, whose Artifacts is never nil.
 	Artifacts() Artifacts
 
-	// Memory is scoped to sessions of the current user_id.
+	// Memory is scoped to sessions of the current user_id. It is nil when the
+	// invocation has no memory service, except on a Context, whose Memory is
+	// never nil.
 	Memory() Memory
 
 	// Session of the current invocation context.
@@ -145,6 +148,18 @@ type ReadonlyContext interface {
 // execution and to tools when they are called. It provides access to the
 // originating function call, mutable event actions, long-term memory search,
 // and the Human-in-the-Loop (HITL) confirmation flow.
+//
+// On the contexts ADK builds, Memory and Artifacts are never nil. When the
+// invocation has no memory or artifact service, their methods fail with an
+// error that says so, such as "artifact service is not initialized", and
+// SearchMemory fails with "memory service is not available". The memory
+// calls that are not methods of Memory are package functions over a Context:
+// AddSessionToMemory, AddEventsToMemory and AddMemory. A callback's Context
+// refuses SearchMemory while a memory service is configured; a tool's Context
+// searches. A tool's Context reports no session (Session returns nil), while
+// AddSessionToMemory still reaches the invocation's session. A callback's
+// Context returns the invocation's session, and both return the run config of
+// the invocation.
 type Context interface {
 	ReadonlyContext
 	InvocationContext

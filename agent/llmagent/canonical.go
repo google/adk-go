@@ -53,15 +53,18 @@ var errNotLLMAgent = errors.New("not an LLM agent")
 // when read outside a run: its own Config.Model, else the model of its
 // nearest LLM-agent ancestor (non-LLM ancestors are skipped, an ancestor
 // without a model inherits in turn), else the process-wide default model.
+// The ancestors are the parents that agent.New recorded; when an agent was
+// listed as a sub-agent of two agents, the one constructed last is its
+// parent. A run reads the parents from the tree of its root agent instead.
 //
-// Caller provides: an agent built by llmagent.New.
-// Guarantees: the returned model is the object a run of a would call; the
-// default is resolved through the model registry on first use and reused
-// until a SetDefaultModel* call changes it.
-// On failure: an error wrapping model.NewLLM's when the default name does not
-// resolve; an error when a is nil or not an LLM agent.
-// Zero value: N/A.
-// Concurrency: safe for concurrent use.
+// The returned model is the object a run of a would call when the two agree
+// on the parents. A default given by
+// name is resolved through the model registry on first use and reused until
+// SetDefaultModel or SetDefaultModelByName changes it.
+//
+// It returns an error wrapping model.NewLLM's when the default name does not
+// resolve, and an error when a is nil or was not built by New.
+// CanonicalModel is safe for concurrent use.
 //
 // The built-in default name resolves only in a program that imports package
 // model/gemini, which registers the Gemini patterns (see [DefaultModel]):
@@ -82,16 +85,15 @@ func CanonicalLiveModel(a agent.Agent) (model.LLM, error) {
 }
 
 // CanonicalInstruction returns the instruction of the LLM agent a for ctx and
-// whether the placeholders are left as they are: Config.InstructionProvider's
+// whether its placeholders are left as they are: Config.InstructionProvider's
 // result with true when a provider is set (it wins over Config.Instruction),
-// else Config.Instruction with false.
+// else Config.Instruction with false. The text is returned exactly as
+// configured or provided; placeholders such as {key} are not filled in. ctx is
+// passed to the provider only.
 //
-// Caller provides: an LLM agent and a read-only context for the provider.
-// Guarantees: the text exactly as configured or provided.
-// On failure: the provider's error (wrapped) with "" and false; an error when
-// a is nil or not an LLM agent.
-// Zero value: N/A.
-// Concurrency: safe for concurrent use.
+// It returns "", false and an error that wraps the provider's error when the
+// provider fails, and an error when a is nil or was not built by New.
+// CanonicalInstruction is safe for concurrent use when the provider is.
 func CanonicalInstruction(ctx agent.ReadonlyContext, a agent.Agent) (string, bool, error) {
 	llmAgent, ok := a.(llminternal.Agent)
 	if !ok {
@@ -124,15 +126,13 @@ func CanonicalInstruction(ctx agent.ReadonlyContext, a agent.Agent) (string, boo
 // one toolset listing [ts_a] returns [own finish_task ts_a]. adk-python
 // offers these added tools after the toolsets' tools.
 //
-// Caller provides: an LLM agent (built by llmagent.New) and a read-only
-// context; ctx may be nil, and toolsets then receive nil.
-// Guarantees: a new slice that the caller may modify; the list a step of a
-// run of a offers its model, as far as the toolsets answer the same way.
-// On failure: the error above; an error when a is nil or not an LLM agent. A
-// panic in a toolset's Tools reaches the caller.
-// Zero value: N/A.
-// Concurrency: safe for concurrent use; toolsets are called concurrently
-// with the same ctx, so a ctx handed to CanonicalTools must be safe for that.
+// ctx may be nil; the toolsets then receive nil. The result is a new slice
+// that the caller may modify, and it is the list a step of a run of a offers
+// its model, as far as the toolsets answer the same way. Besides the error
+// for a canceled ctx above, CanonicalTools returns an error when a is nil or
+// was not built by New. A panic in a toolset's Tools method reaches the
+// caller. CanonicalTools is safe for concurrent use. It calls the toolsets
+// concurrently with the same ctx, so ctx must be safe for that.
 func CanonicalTools(ctx agent.ReadonlyContext, a agent.Agent) ([]tool.Tool, error) {
 	llmAgent, ok := a.(llminternal.Agent)
 	if !ok {
@@ -146,31 +146,31 @@ func CanonicalTools(ctx agent.ReadonlyContext, a agent.Agent) ([]tool.Tool, erro
 }
 
 // SetDefaultModel sets the process-wide default model to m. It applies at
-// once to every model-less agent that falls through to the default, built
-// or not.
-//
-// Caller provides: a non-nil model.
-// Guarantees: later resolutions return m itself.
-// On failure: an error and no change when m is nil.
-// Zero value: N/A.
-// Concurrency: safe for concurrent use.
+// once to every model-less agent that falls through to the default, built or
+// not, in every runner of the process: later resolutions return m itself.
+// SetDefaultModel returns an error and changes nothing when m is nil. It is
+// safe for concurrent use.
 func SetDefaultModel(m model.LLM) error { return llminternal.SetDefaultModel(m) }
 
 // SetDefaultModelByName sets the process-wide default model by name. The name
 // is resolved through model.NewLLM on first use, and the resulting model is
-// reused until a setter changes the default.
+// reused until a setter changes the default. A resolution that fails is not
+// kept: the next use tries again.
 //
-// Caller provides: a non-empty name.
-// On failure: an error and no change when name is empty; an unknown name is
-// reported by CanonicalModel, not here.
-// Zero value: N/A.
-// Concurrency: safe for concurrent use.
+// SetDefaultModelByName returns an error and changes nothing when name is
+// empty. It does not resolve the name, so an unknown name is reported by
+// CanonicalModel, or by the step of a run that needs the model, not here. It
+// is safe for concurrent use. To go back to the built-in default, pass
+// DefaultModel.
 func SetDefaultModelByName(name string) error { return llminternal.SetDefaultModelByName(name) }
 
-// SetDefaultLiveModel is SetDefaultModel for live runs.
+// SetDefaultLiveModel is SetDefaultModel for live runs
+// (runner.Runner.RunLive): it sets the model that CanonicalLiveModel and a
+// live run of a model-less agent fall back to.
 func SetDefaultLiveModel(m model.LLM) error { return llminternal.SetDefaultLiveModel(m) }
 
-// SetDefaultLiveModelByName is SetDefaultModelByName for live runs.
+// SetDefaultLiveModelByName is SetDefaultModelByName for live runs. To go
+// back to the built-in default, pass DefaultLiveModel.
 func SetDefaultLiveModelByName(name string) error {
 	return llminternal.SetDefaultLiveModelByName(name)
 }

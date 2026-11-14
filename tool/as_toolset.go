@@ -20,18 +20,17 @@ import (
 
 // AsToolset wraps a single Tool so it can be passed where a Toolset is
 // expected, for example to keep a declared order across plain tools and
-// toolsets in llmagent.Config.Toolsets.
+// toolsets in llmagent.Config.Toolsets, where the agent offers the tools of
+// each toolset in order after the tools of llmagent.Config.Tools.
 //
-// Caller provides: a non-nil Tool.
-// Guarantees: the returned Toolset's Name is t.Name(); its Tools returns
-// exactly []Tool{t}, in a new slice on every call, and a nil error for any
-// context, nil included. The Toolset has no request hook (no
-// ProcessRequest method): the flow runs t's own hook once, through the tools
-// the Toolset lists, as it does for a tool in Config.Tools.
-// On failure: AsToolset panics when t is nil, with a message naming
-// AsToolset.
-// Zero value: N/A.
-// Concurrency: safe for concurrent use when t is.
+// The returned Toolset's Name is t.Name(). Its Tools method returns exactly
+// []Tool{t}, in a new slice on every call, and a nil error for any context,
+// nil included. It has no request hook of its own (no ProcessRequest
+// method): the flow runs t's own hook once, through the tools the Toolset
+// lists, as it does for a tool in llmagent.Config.Tools. It is safe for
+// concurrent use when t is.
+//
+// AsToolset panics when t is nil.
 func AsToolset(t Tool) Toolset {
 	if t == nil {
 		panic("tool.AsToolset: tool must not be nil")
