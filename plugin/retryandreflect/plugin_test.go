@@ -748,3 +748,93 @@ func TestRetryAndReflect_RunnerContinuesCountsOfAnsweredRun(t *testing.T) {
 		t.Errorf("after the answering run: count %d kept, want the counts dropped", count)
 	}
 }
+
+func TestNew_RegistersOnRunErrorCallback(t *testing.T) {
+	p, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	if p.OnRunErrorCallback() == nil {
+		t.Error("New() registered no OnRunErrorCallback, want one")
+	}
+	if p.AfterRunCallback() == nil {
+		t.Error("New() registered no AfterRunCallback, want one")
+	}
+}
+
+// TestRetryAndReflect_FailedRunDropsInvocationCounts runs the plugin through
+// runner.Run on a run that a model failure ends after a tool failure. The
+// runner skips the after-run callbacks of such a run, so the counts are
+// dropped by the on-run-error callback.
+func TestRetryAndReflect_FailedRunDropsInvocationCounts(t *testing.T) {
+	flaky, err := functiontool.New(functiontool.Config{Name: "flaky", Description: "fails"},
+		func(agent.Context, noArgs) (map[string]any, error) {
+			return nil, errors.New("backend unavailable")
+		})
+	if err != nil {
+		t.Fatalf("Failed to create the flaky tool: %v", err)
+	}
+	// The second model call has no response left and fails.
+	mockModel := &testutil.MockModel{Responses: []*genai.Content{
+		genai.NewContentFromFunctionCall("flaky", map[string]any{}, genai.RoleModel),
+	}}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "agent",
+		Model: mockModel,
+		Tools: []tool.Tool{flaky},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create the agent: %v", err)
+	}
+	r := &retryAndReflect{
+		maxRetries:            3,
+		scope:                 Invocation,
+		scopedFailureCounters: make(map[string]map[string]int),
+	}
+	p, err := plugin.New(plugin.Config{
+		Name:                "RetryAndReflectPlugin",
+		AfterToolCallback:   r.afterTool,
+		OnToolErrorCallback: r.onToolError,
+		AfterRunCallback:    r.afterRun,
+		OnRunErrorCallback:  r.onRunError,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create the plugin: %v", err)
+	}
+	testRunner := testutil.NewTestAgentRunnerWithPluginManager(t, a, runner.PluginConfig{Plugins: []*plugin.Plugin{p}})
+	failureCount := func(invocationID string) (int, bool) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		counts, ok := r.scopedFailureCounters[invocationID]
+		return counts["flaky"], ok
+	}
+
+	var invocationID string
+	var runErr error
+	for ev, err := range testRunner.Run(t, "ses1", "start") {
+		if err != nil {
+			runErr = err
+			break
+		}
+		if ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if fr := part.FunctionResponse; fr != nil && fr.Name == "flaky" {
+				invocationID = ev.InvocationID
+				if count, ok := failureCount(invocationID); !ok || count != 1 {
+					t.Errorf("after the tool failure: count %d (kept %t), want 1 kept", count, ok)
+				}
+			}
+		}
+	}
+	if runErr == nil {
+		t.Fatal("run ended without an error, want the model failure")
+	}
+	if invocationID == "" {
+		t.Fatal("run yielded no response of the flaky tool")
+	}
+	if count, ok := failureCount(invocationID); ok {
+		t.Errorf("after the failed run: count %d kept, want the counts dropped", count)
+	}
+}

@@ -119,6 +119,7 @@ func New(opts ...PluginOption) (*plugin.Plugin, error) {
 		AfterToolCallback:   r.afterTool,
 		OnToolErrorCallback: r.onToolError,
 		AfterRunCallback:    r.afterRun,
+		OnRunErrorCallback:  r.onRunError,
 	})
 }
 
@@ -169,6 +170,14 @@ func (r *retryAndReflect) afterRun(ictx agent.InvocationContext) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.scopedFailureCounters, invocationID)
+}
+
+// onRunError drops the failure counts of an invocation that a run error
+// ended. The runner calls no after-run callback for such a run, so without it
+// the counts would stay in scopedFailureCounters. The counts of a run paused
+// on an unanswered long-running call are kept, as in afterRun.
+func (r *retryAndReflect) onRunError(ictx agent.InvocationContext, _ error) {
+	r.afterRun(ictx)
 }
 
 // hasOpenLongRunningCall reports whether the invocation has a long-running call

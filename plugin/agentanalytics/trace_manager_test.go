@@ -42,6 +42,7 @@ import (
 	"time"
 	"weak"
 
+	storagepb "cloud.google.com/go/bigquery/storage/apiv1/storagepb"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
@@ -29727,5 +29728,176 @@ func TestRetireLateSettledLocked_FastSkipWith2048LiveActivations(t *testing.T) {
 	tm.popLLMSpan(ctx, identity{invocationID: invID, agentName: "unmatched", path: "other"}, true)
 	if got := len(lateReviewStack(t, tm, invID)); got != 2047 {
 		t.Fatalf("late activations after settling one leaf = %d, want 2047", got)
+	}
+}
+
+// terminalRowsAfterClose closes p, which uploads every queued row, and returns
+// the INVOCATION_COMPLETED and INVOCATION_ERROR rows that reached requests.
+func terminalRowsAfterClose(t *testing.T, p *baseplugin.Plugin, requests <-chan *storagepb.AppendRowsRequest) []map[string]any {
+	t.Helper()
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	var rows []map[string]any
+	for {
+		select {
+		case req := <-requests:
+			rows = append(rows, decodeArrowRows(t, req)...)
+		default:
+			return slices.DeleteFunc(rows, func(row map[string]any) bool {
+				return row["event_type"] != EventInvocationCompleted && row["event_type"] != EventInvocationError
+			})
+		}
+	}
+}
+
+// TestAnalytics_OnRunErrorWritesTheRowAfterRunInfers compares the terminal
+// row that OnRunErrorCallback writes with the one AfterRunCallback writes for
+// the same callbacks: both infer it from the plugin's state, and the run error
+// does not enter it.
+func TestAnalytics_OnRunErrorWritesTheRowAfterRunInfers(t *testing.T) {
+	p, requests, mCtx := setupTestPlugin(t)
+	onRunError := p.OnRunErrorCallback()
+	if onRunError == nil {
+		t.Fatal("OnRunErrorCallback is nil, want the plugin to register one")
+	}
+	failed, completed := *mCtx, *mCtx
+	failed.invocationID, completed.invocationID = "inv-a", "inv-b"
+
+	var errs callbackErrors
+	errs.add(p.BeforeRunCallback()(&failed))
+	errs.add(p.BeforeAgentCallback()(&failed))
+	errs.check(t)
+	onRunError(&failed, errors.New("boom"))
+	errs.add(p.BeforeRunCallback()(&completed))
+	errs.add(p.BeforeAgentCallback()(&completed))
+	errs.check(t)
+	p.AfterRunCallback()(&completed)
+
+	rows := collectRows(t, requests, func(rows []map[string]any) bool {
+		return len(rowsOfType(rows, EventInvocationError))+len(rowsOfType(rows, EventInvocationCompleted)) >= 2
+	})
+	const wantMsg = `agent "test-agent" execution failed before completion`
+	for _, invocationID := range []string{"inv-a", "inv-b"} {
+		var terminal []map[string]any
+		for _, row := range rows {
+			if row["invocation_id"] == invocationID && (row["event_type"] == EventInvocationError || row["event_type"] == EventInvocationCompleted) {
+				terminal = append(terminal, row)
+			}
+		}
+		if len(terminal) != 1 {
+			t.Errorf("%s: got %d terminal rows, want 1; event types: %v", invocationID, len(terminal), eventTypes(rows))
+			continue
+		}
+		row := terminal[0]
+		if row["event_type"] != EventInvocationError || row["status"] != "ERROR" || row["error_message"] != wantMsg {
+			t.Errorf("%s: terminal row (event_type, status, error_message) = (%v, %v, %v), want (%s, ERROR, %q)",
+				invocationID, row["event_type"], row["status"], row["error_message"], EventInvocationError, wantMsg)
+		}
+	}
+}
+
+// TestRunner_RunErrorPaths_WriteExactlyOneTerminalRow runs paths on which the
+// runner calls both OnRunErrorCallback and AfterRunCallback of the plugin, or
+// only the first, and expects one terminal row on each. The caller ranges to
+// the end of each run.
+func TestRunner_RunErrorPaths_WriteExactlyOneTerminalRow(t *testing.T) {
+	failingAfterRun := func(t *testing.T) *baseplugin.Plugin {
+		t.Helper()
+		p, err := baseplugin.New(baseplugin.Config{
+			Name:                     "cleanup",
+			FailableAfterRunCallback: func(agent.InvocationContext) error { return errors.New("cleanup failed") },
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+		return p
+	}
+	failingBeforeRun := func(t *testing.T) *baseplugin.Plugin {
+		t.Helper()
+		p, err := baseplugin.New(baseplugin.Config{
+			Name: "gate",
+			BeforeRunCallback: func(agent.InvocationContext) (*genai.Content, error) {
+				return nil, errors.New("run rejected")
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+		return p
+	}
+	tests := []struct {
+		name    string
+		plugins func(t *testing.T, analytics *baseplugin.Plugin) []*baseplugin.Plugin
+	}{
+		{
+			name: "after-run fails in a plugin registered before the analytics plugin",
+			plugins: func(t *testing.T, analytics *baseplugin.Plugin) []*baseplugin.Plugin {
+				return []*baseplugin.Plugin{failingAfterRun(t), analytics}
+			},
+		},
+		{
+			name: "after-run fails in a plugin registered after the analytics plugin",
+			plugins: func(t *testing.T, analytics *baseplugin.Plugin) []*baseplugin.Plugin {
+				return []*baseplugin.Plugin{analytics, failingAfterRun(t)}
+			},
+		},
+		{
+			name: "before-run fails in a plugin registered after the analytics plugin",
+			plugins: func(t *testing.T, analytics *baseplugin.Plugin) []*baseplugin.Plugin {
+				return []*baseplugin.Plugin{analytics, failingBeforeRun(t)}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, _ := newTestPluginWithConfig(t, nil)
+			bot, err := llmagent.New(llmagent.Config{
+				Name:  "bot",
+				Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "hello")}}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			r := newTestRunner(t, bot, tt.plugins(t, p)...)
+
+			var sawErr bool
+			for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+				sawErr = sawErr || err != nil
+			}
+			if !sawErr {
+				t.Fatal("run yielded no error, want the failing plugin's error")
+			}
+
+			if terminal := terminalRowsAfterClose(t, p, requests); len(terminal) != 1 {
+				t.Errorf("got %d terminal rows, want 1; event types: %v", len(terminal), eventTypes(terminal))
+			}
+		})
+	}
+}
+
+// TestRunner_ResumedInvocationAfterFailedRun_WritesItsOwnTerminalRow runs
+// the same invocation ID again after a run that OnRunErrorCallback ended, as
+// a resumed invocation does, and expects the later run to end with its own
+// terminal row.
+func TestRunner_ResumedInvocationAfterFailedRun_WritesItsOwnTerminalRow(t *testing.T) {
+	p, requests, mCtx := setupTestPlugin(t)
+	onRunError := p.OnRunErrorCallback()
+	if onRunError == nil {
+		t.Fatal("OnRunErrorCallback is nil, want the plugin to register one")
+	}
+
+	var errs callbackErrors
+	errs.add(p.BeforeRunCallback()(mCtx))
+	errs.check(t)
+	onRunError(mCtx, errors.New("boom"))
+	errs.add(p.BeforeRunCallback()(mCtx))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, func(rows []map[string]any) bool { return len(rows) >= 4 })
+	want := []string{EventInvocationStarting, EventInvocationCompleted, EventInvocationStarting, EventInvocationCompleted}
+	if diff := cmp.Diff(want, eventTypes(rows)); diff != "" {
+		t.Errorf("event types mismatch (-want +got):\n%s", diff)
 	}
 }

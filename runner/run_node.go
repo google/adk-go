@@ -102,11 +102,14 @@ func (r *Runner) runNode(
 
 	invocationFailed := false
 	emit := yield
+	lc := newRunLifecycle(r.pluginManager)
 	yield = func(ev *session.Event, err error) bool {
 		if err != nil {
 			invocationFailed = true
 		}
-		return emit(ev, err)
+		ok := emit(ev, err)
+		lc.yielded(err, ok)
+		return ok
 	}
 
 	// Compaction has to happen however iteration ends. Breaking out of the
@@ -131,6 +134,7 @@ func (r *Runner) runNode(
 	}
 	defer func() {
 		if err := compactOnce(); err != nil {
+			lc.end(err)
 			log.Printf("adk: %v", err) //nolint:forbidigo // pre-slog call site
 		}
 	}()
@@ -146,8 +150,11 @@ func (r *Runner) runNode(
 	// Append the user message to history (also runs the on_user_message
 	// plugin callback), same as the agent path.
 	ictx, userEvent, replaced, err := r.appendMessageToSession(ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, false, r.pluginManager, opts.stateDelta)
+	// A stage error from it is a run error, reported with this context.
+	lc.bind(ictx)
 	if err != nil {
 		yield(nil, err)
+		lc.stop()
 		return
 	}
 	if replaced {
@@ -190,9 +197,8 @@ func (r *Runner) runNode(
 	// yielded, so a caller that stops ranging on that message still gets it,
 	// as in adk-python, whose finally covers the user-message yield.
 	pluginManager := r.pluginManager
-	if pluginManager != nil {
-		defer pluginManager.RunAfterRunCallback(ictx)
-	}
+	lc.start(ictx)
+	defer lc.finish(nil)
 	if opts.yieldUserMessage && userEvent != nil {
 		if !yield(userEvent, nil) {
 			return
@@ -202,7 +208,11 @@ func (r *Runner) runNode(
 	// Run before_run and honor its early exit.
 	if pluginManager != nil {
 		if event, err := r.runBeforeRunCallback(ictx, false); event != nil || err != nil {
-			yield(event, err)
+			lc.shortCircuit()
+			if yield(event, err) {
+				lc.stop()
+				lc.finish(yield)
+			}
 			return
 		}
 	}
@@ -222,6 +232,7 @@ func (r *Runner) runNode(
 		node, err = buildRunnerNode(agentToRun)
 		if err != nil {
 			yield(nil, err)
+			lc.stop()
 			return
 		}
 		// Architectural note: Unlike Go, Python ADK executes standalone agents
@@ -236,6 +247,7 @@ func (r *Runner) runNode(
 	}
 	if err != nil {
 		yield(nil, fmt.Errorf("failed to build node workflow: %w", err))
+		lc.stop()
 		return
 	}
 
@@ -245,6 +257,7 @@ func (r *Runner) runNode(
 	state, err := wf.ReconstructRunState(storedSession, ictx.InvocationID())
 	if err != nil {
 		yield(nil, fmt.Errorf("failed to reconstruct workflow run state: %w", err))
+		lc.stop()
 		return
 	}
 
@@ -274,18 +287,19 @@ func (r *Runner) runNode(
 		}
 		stampTimestamp(ictx, event)
 
+		// An on-event plugin error ends the run, as on the classic path.
 		event, err = r.processEventWithPlugins(ictx, event)
 		if err != nil {
-			if !yield(nil, err) {
-				return
-			}
-			continue
+			yield(nil, err)
+			lc.stop()
+			return
 		}
 		event = clearMessageAsOutput(event)
 
 		if shouldAppendEvent(event, false) {
 			if err := r.sessionService.AppendEvent(ictx, storedSession, event); err != nil {
 				yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+				lc.stop()
 				return
 			}
 		}
@@ -293,6 +307,12 @@ func (r *Runner) runNode(
 		if !yield(event, nil) {
 			return
 		}
+	}
+
+	// After-run runs before post-invocation compaction, as in adk-python's
+	// run_node_async (workflow/_node_runner_utils.py).
+	if !lc.finish(yield) {
+		return
 	}
 
 	// Compact once the invocation is done and every event it produced has been
@@ -303,6 +323,7 @@ func (r *Runner) runNode(
 	// still be reported.
 	if err := compactOnce(); err != nil {
 		yield(nil, err)
+		lc.stop()
 		return
 	}
 }

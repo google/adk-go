@@ -1054,11 +1054,14 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// path can forget to.
 		invocationFailed := false
 		emit := yield
+		lc := newRunLifecycle(r.pluginManager)
 		yield = func(ev *session.Event, err error) bool {
 			if err != nil {
 				invocationFailed = true
 			}
-			return emit(ev, err)
+			ok := emit(ev, err)
+			lc.yielded(err, ok)
+			return ok
 		}
 
 		options := runOptions{}
@@ -1094,8 +1097,10 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 		// A node root always runs on the node path, as adk-python's
 		// Runner.run_async sends a BaseNode root to _run_node_async.
+		// runNode runs the invocation's plugin lifecycle itself, so it gets
+		// the caller's yield: one lifecycle per run.
 		if r.rootNode != nil {
-			r.runNode(ctx, storedSession, r.standInAgent, msg, cfg, runMetadata, llminternal.ModeUnset, options, yield)
+			r.runNode(ctx, storedSession, r.standInAgent, msg, cfg, runMetadata, llminternal.ModeUnset, options, emit)
 			return
 		}
 
@@ -1123,7 +1128,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 				}
 			}
 
-			r.runNode(rootCtx, storedSession, agentToRun, msg, cfg, runMetadata, rootMode, options, yield)
+			r.runNode(rootCtx, storedSession, agentToRun, msg, cfg, runMetadata, rootMode, options, emit)
 			return
 		}
 
@@ -1186,6 +1191,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 		defer func() {
 			if err := compactOnce(); err != nil {
+				lc.end(err)
 				log.Printf("adk: %v", err) //nolint:forbidigo // pre-slog call site
 			}
 		}()
@@ -1241,8 +1247,11 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		invocationCtx = ic
 		ctx := agent.NewContext(ic)
 		ctx, _, replaced, err := r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, true, r.pluginManager, options.stateDelta)
+		// A stage error from it is a run error, reported with this context.
+		lc.bind(ctx)
 		if err != nil {
 			yield(nil, err)
+			lc.stop()
 			return
 		}
 		switch {
@@ -1272,14 +1281,20 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			invocationCtx = ctx
 		}
 
+		// The after-run callbacks run once the run ends, however it ends,
+		// unless it ends because of a run error. Deferred for the caller that
+		// stops ranging; the normal end runs them itself, where a failure can
+		// still be yielded.
 		pluginManager := r.pluginManager
+		lc.start(ctx)
+		defer lc.finish(nil)
 		if pluginManager != nil {
-			// Defer the after run callbacks to perform global cleanup tasks or finalizing logs and metrics data.
-			// This does NOT emit any event.
-			defer pluginManager.RunAfterRunCallback(ctx)
-
 			if event, err := r.runBeforeRunCallback(ctx, false); event != nil || err != nil {
-				yield(event, err)
+				lc.shortCircuit()
+				if yield(event, err) {
+					lc.stop()
+					lc.finish(yield)
+				}
 				return
 			}
 		}
@@ -1292,6 +1307,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 				// from turning the rest of the run into a stream of limit
 				// errors, as adk-python does.
 				if !yield(event, err) || errors.Is(err, agent.ErrLLMCallsLimitExceeded) {
+					lc.stop()
 					return
 				}
 				continue
@@ -1301,22 +1317,25 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
 				log.Printf("%v", err) //nolint:forbidigo // pre-slog call site
 				yield(nil, err)
+				lc.stop()
 				return
 			}
 			stampTimestamp(ctx, event)
 
+			// An on-event plugin error ends the run, as adk-python's plugin
+			// manager raises it (plugins/plugin_manager.py, _run_callbacks).
 			event, err = r.processEventWithPlugins(ctx, event)
 			if err != nil {
-				if !yield(nil, err) {
-					return
-				}
-				continue
+				yield(nil, err)
+				lc.stop()
+				return
 			}
 			event = clearMessageAsOutput(event)
 
 			if shouldAppendEvent(event, false) {
 				if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
+					lc.stop()
 					return
 				}
 			}
@@ -1324,6 +1343,14 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			if !yield(event, nil) {
 				return
 			}
+		}
+
+		// After-run runs before post-invocation compaction, as in adk-python,
+		// whose _exec_with_plugin ends before _run_post_invocation_compaction
+		// starts (runners.py). A failing after-run marks the invocation
+		// failed, so compaction is skipped.
+		if !lc.finish(yield) {
+			return
 		}
 
 		// Compact once the invocation is done and every event it produced has
@@ -1334,6 +1361,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// failure can still be reported.
 		if err := compactOnce(); err != nil {
 			yield(nil, err)
+			lc.stop()
 			return
 		}
 	}
@@ -1533,18 +1561,27 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		UserContent: nil,
 	})
 
+	// The live run follows the same run-level plugin lifecycle as Run
+	// (adk-python live/_runner_utils.py). An error RunLive returns ends the
+	// run, so it is notified before RunLive returns.
+	lc := newRunLifecycle(r.pluginManager)
+	lc.start(iCtx)
 	if r.pluginManager != nil {
 		// The reply goes through OnEvent and the run through AfterRun, as on
 		// Run. adk-python runs a live agent through the same
 		// Runner._exec_with_plugin as run_async (runners.py).
 		earlyExitEvent, err := r.runBeforeRunCallback(iCtx, true)
 		if err != nil {
+			lc.end(err)
 			return nil, nil, err
 		}
 		if earlyExitEvent != nil {
 			earlyExitIter := func(yield func(*session.Event, error) bool) {
-				defer r.pluginManager.RunAfterRunCallback(iCtx)
-				yield(earlyExitEvent, nil)
+				yield = lc.wrap(yield)
+				defer lc.finish(nil)
+				if yield(earlyExitEvent, nil) {
+					lc.finish(yield)
+				}
 			}
 			return &closedLiveSession{}, earlyExitIter, nil
 		}
@@ -1552,13 +1589,13 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 	agentSess, innerIter, err := lAgent.RunLive(iCtx)
 	if err != nil {
+		lc.end(err)
 		return nil, nil, err
 	}
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
-		if r.pluginManager != nil {
-			defer r.pluginManager.RunAfterRunCallback(iCtx)
-		}
+		yield = lc.wrap(yield)
+		defer lc.finish(nil)
 
 		var bufferedEvents []*session.Event
 		isTranscribing := false
@@ -1582,16 +1619,17 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				}
 				log.Printf("%v", err) //nolint:forbidigo // pre-slog call site
 				yield(nil, err)
+				lc.stop()
 				return
 			}
 			stampTimestamp(iCtx, event)
 
+			// An on-event plugin error ends the run, as on Run.
 			event, err = r.processEventWithPlugins(iCtx, event)
 			if err != nil {
-				if !yield(nil, err) {
-					return
-				}
-				continue
+				yield(nil, err)
+				lc.stop()
+				return
 			}
 			event = clearMessageAsOutput(event)
 
@@ -1684,6 +1722,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				return
 			}
 		}
+		lc.finish(yield)
 	}
 
 	return &runnerLiveSession{
@@ -1712,7 +1751,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		if len(stateDelta) == 0 {
 			return ctx, nil, false, nil
 		}
-		event, err := r.appendUserEvent(ctx, storedSession, nil, stateDelta)
+		event, err := r.appendUserEvent(ctx, !requireParts, storedSession, nil, stateDelta)
 		return ctx, event, false, err
 	}
 	if err := r.validateNodeRootMessage(msg); err != nil {
@@ -1721,7 +1760,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 	if pluginManager != nil {
 		modifiedMsg, err := pluginManager.RunOnUserMessageCallback(ctx, msg)
 		if err != nil {
-			return ctx, nil, false, fmt.Errorf("error running on run user message callback : %w", err)
+			return ctx, nil, false, &runStageError{err: fmt.Errorf("error running on run user message callback : %w", err)}
 		}
 		if modifiedMsg != nil {
 			replaced = true
@@ -1776,13 +1815,18 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		}
 	}
 
-	event, err := r.appendUserEvent(ctx, storedSession, msg, stateDelta)
+	event, err := r.appendUserEvent(ctx, !requireParts, storedSession, msg, stateDelta)
 	return ctx, event, replaced, err
 }
 
 // appendUserEvent appends a user event with content msg, which may be nil,
-// and stateDelta to storedSession, and returns it.
-func (r *Runner) appendUserEvent(ctx agent.Context, storedSession session.Session, msg *genai.Content, stateDelta map[string]any) (*session.Event, error) {
+// and stateDelta to storedSession, and returns it. On the node path
+// (onNodePath) an append
+// failure is a run error (a *runStageError), as adk-python appends the user
+// event inside run_node_async's notified try (workflow/_node_runner_utils.py);
+// on the classic path it is a setup failure, as Runner.run_async appends it
+// before _exec_with_plugin (runners.py).
+func (r *Runner) appendUserEvent(ctx agent.Context, onNodePath bool, storedSession session.Session, msg *genai.Content, stateDelta map[string]any) (*session.Event, error) {
 	event := session.NewEvent(ctx, ctx.InvocationID())
 
 	event.Author = "user"
@@ -1801,7 +1845,11 @@ func (r *Runner) appendUserEvent(ctx agent.Context, storedSession session.Sessio
 	stampCallBranch(ctx, event)
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
-		return nil, fmt.Errorf("failed to append event to sessionService: %w", err)
+		err = fmt.Errorf("failed to append event to sessionService: %w", err)
+		if onNodePath {
+			return nil, &runStageError{err: err}
+		}
+		return nil, err
 	}
 	return event, nil
 }

@@ -101,10 +101,13 @@
 //     bigquery_agent_analytics_plugin_test.go and
 //     TestTraceManager_StreamingTTFTAndSingleMarshaledLatency in
 //     trace_manager_test.go).
-//   - Inferred [EventAgentError] and [EventInvocationError] rows: Because ADK
-//     Go does not yet expose plugin-level agent or run error callbacks, the
-//     plugin infers AGENT_ERROR and INVOCATION_ERROR from open agent spans and
-//     unrecovered callback or context errors. End-of-run AGENT_ERROR rows carry
+//   - Inferred [EventAgentError] and [EventInvocationError] rows: The plugin
+//     infers AGENT_ERROR and INVOCATION_ERROR from open agent spans and
+//     unrecovered callback or context errors. A run that a run error ended
+//     reaches the plugin through OnRunErrorCallback instead of
+//     AfterRunCallback, and gets the same inferred rows: the run error's
+//     message does not enter them, where adk-python's on_run_error_callback
+//     writes INVOCATION_ERROR with that message. End-of-run AGENT_ERROR rows carry
 //     the run-end timestamp rather than the instant of failure (activations
 //     purged mid-run carry their last callback timestamp), content.error_traceback
 //     holds the error's Error() text rather than a generated stack traceback,
@@ -112,8 +115,9 @@
 //     `agent "<name>" execution failed before completion` message. (Pinned by
 //     TestRunner_FailedModelCall_EmitsAgentErrorAndInvocationError,
 //     TestRunner_BeforeModelCallbackError_EmitsAgentErrorAndInvocationError,
-//     TestRunner_AgentCompletedAndEndOfRunErrorTimestampsAreNotBackdated, and
-//     TestTraceManager_PurgedActivationLatencyFromLastActivity in
+//     TestRunner_AgentCompletedAndEndOfRunErrorTimestampsAreNotBackdated,
+//     TestTraceManager_PurgedActivationLatencyFromLastActivity, and
+//     TestAnalytics_OnRunErrorWritesTheRowAfterRunInfers in
 //     trace_manager_test.go, and
 //     TestDocParity_ErrorTracebackAndUnclosedSpanSyntheticError in doc_test.go).
 //   - attributes.adk.function_call_id across tool lifecycle rows: In addition

@@ -18,6 +18,8 @@
 package plugin
 
 import (
+	"errors"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -36,6 +38,9 @@ type Config struct {
 
 	BeforeRunCallback BeforeRunCallback
 	AfterRunCallback  AfterRunCallback
+	// At most one of AfterRunCallback and FailableAfterRunCallback is set.
+	FailableAfterRunCallback FailableAfterRunCallback
+	OnRunErrorCallback       OnRunErrorCallback
 
 	BeforeAgentCallback  agent.BeforeAgentCallback
 	AfterAgentCallback   agent.AfterAgentCallback
@@ -52,14 +57,20 @@ type Config struct {
 	CloseFunc func() error
 }
 
-// New creates a [Plugin] from cfg.
+// New creates a [Plugin] from cfg. It returns an error when cfg sets both
+// AfterRunCallback and FailableAfterRunCallback.
 func New(cfg Config) (*Plugin, error) {
+	if cfg.AfterRunCallback != nil && cfg.FailableAfterRunCallback != nil {
+		return nil, errors.New("plugin: AfterRunCallback and FailableAfterRunCallback are both set")
+	}
 	p := &Plugin{
 		name:                  cfg.Name,
 		onUserMessageCallback: cfg.OnUserMessageCallback,
 		onEventCallback:       cfg.OnEventCallback,
 		beforeRunCallback:     cfg.BeforeRunCallback,
 		afterRunCallback:      cfg.AfterRunCallback,
+		failableAfterRun:      cfg.FailableAfterRunCallback,
+		onRunErrorCallback:    cfg.OnRunErrorCallback,
 		beforeAgentCallback:   cfg.BeforeAgentCallback,
 		afterAgentCallback:    cfg.AfterAgentCallback,
 		onAgentErrorCallback:  cfg.OnAgentErrorCallback,
@@ -90,8 +101,10 @@ type Plugin struct {
 	onUserMessageCallback OnUserMessageCallback
 	onEventCallback       OnEventCallback
 
-	beforeRunCallback BeforeRunCallback
-	afterRunCallback  AfterRunCallback
+	beforeRunCallback  BeforeRunCallback
+	afterRunCallback   AfterRunCallback
+	failableAfterRun   FailableAfterRunCallback
+	onRunErrorCallback OnRunErrorCallback
 
 	beforeAgentCallback agent.BeforeAgentCallback
 	afterAgentCallback  agent.AfterAgentCallback
@@ -139,6 +152,18 @@ func (p *Plugin) BeforeRunCallback() BeforeRunCallback {
 // AfterRunCallback returns the plugin's AfterRunCallback.
 func (p *Plugin) AfterRunCallback() AfterRunCallback {
 	return p.afterRunCallback
+}
+
+// FailableAfterRunCallback returns the plugin's FailableAfterRunCallback, or
+// nil when the plugin does not set one.
+func (p *Plugin) FailableAfterRunCallback() FailableAfterRunCallback {
+	return p.failableAfterRun
+}
+
+// OnRunErrorCallback returns the plugin's OnRunErrorCallback, or nil when the
+// plugin does not set one.
+func (p *Plugin) OnRunErrorCallback() OnRunErrorCallback {
+	return p.onRunErrorCallback
 }
 
 // BeforeAgentCallback returns the plugin's BeforeAgentCallback.
@@ -194,8 +219,86 @@ type OnUserMessageCallback func(agent.InvocationContext, *genai.Content) (*genai
 // short-circuits the run.
 type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 
-// AfterRunCallback is invoked after a run completes.
+// AfterRunCallback is invoked once at the end of a run that did not end
+// because of a run error: a completed run, a run whose caller kept ranging
+// past an error and that then ended without another, a run whose caller
+// stopped ranging at an event, and a run whose context was canceled. It is
+// not called when a run error ends the run (see [OnRunErrorCallback]), so
+// cleanup that must also happen on a failed run
+// belongs in OnRunErrorCallback too. The exception is a run that failed in
+// a BeforeRunCallback or while handling its reply: there OnRunErrorCallback
+// is called and the after-run callbacks still run.
+//
+// At the normal end of a run it is called after the last event and before
+// post-invocation compaction, so the compaction summary event is not yet in
+// the session. Plugins are called in registration order. A panic is not
+// recovered. A plugin whose cleanup can fail uses [FailableAfterRunCallback]
+// instead.
 type AfterRunCallback func(agent.InvocationContext)
+
+// FailableAfterRunCallback is an after-run callback that can report failure.
+// It is called on the same runs as [AfterRunCallback] and at the same point,
+// including before post-invocation compaction. A plugin sets at most one of
+// the two: [New] rejects a [Config] that sets both. A nil return means
+// success and changes nothing.
+//
+// A non-nil error is a run error and ends the run. The runner yields it
+// unchanged, not wrapped, to a caller that is still ranging, and calls every
+// plugin's [OnRunErrorCallback] with it once. When the caller has already
+// stopped ranging the error cannot be yielded: it goes only to
+// OnRunErrorCallback, and is recorded as an exception event on the
+// invocation span when that span is recording. With no plugin implementing
+// OnRunErrorCallback and no recording span it is not reported anywhere, so a
+// plugin that must not lose its own failure handles it before returning.
+//
+// Plugins are called in registration order, and after the first plugin
+// whose after-run callback fails, the after-run callbacks of later plugins
+// are not called, as in adk-python. A panic is not recovered. The runner
+// calls it at most once per run, on the goroutine that ranges the run; a
+// plugin is shared by concurrent runs, so the function must be safe for
+// concurrent use.
+type FailableAfterRunCallback func(ctx agent.InvocationContext) error
+
+// OnRunErrorCallback is invoked when a run ends because of a run error, with
+// that error. It is notification-only, like [OnAgentErrorCallback]: it cannot
+// change the outcome, and the caller of the run receives err unchanged.
+//
+// A run error is an error raised once the run has started: by the agent or
+// workflow node, by a run-level plugin callback (BeforeRunCallback,
+// OnEventCallback, OnUserMessageCallback, a failing
+// [FailableAfterRunCallback]), by appending an event to the session, or by
+// post-invocation compaction. A run ends because of a run error when the
+// caller stops ranging at a yielded run error, or when the runner itself
+// stops on one. The callback is then called at most once per run, for every
+// plugin in registration order, after the OnAgentErrorCallback calls for the
+// same error, and err is the value the caller received: the runner does not
+// wrap the agent's or node's error. For a caller that stops at the error, the
+// call happens after the caller's loop body has returned and before its range
+// statement completes. A caller that keeps ranging past an error at a place
+// where the run goes on does not end the run with it: the callback is not
+// called for that error, and if the run later ends because of another run
+// error, it is called once for that one.
+//
+// It is not called for a failure before the run starts (session lookup,
+// message checks), for the cancellation of the invocation's context, when
+// the caller stops ranging at an event, or for a panic.
+// [AfterRunCallback] is not called on a run that ended because of a run
+// error, except for an error from a BeforeRunCallback or from handling its
+// reply. On the live path, an error that Runner.RunLive returns is notified
+// before RunLive returns.
+//
+// A panicking callback is recovered, so the remaining plugins are still
+// notified and the caller still holds the original error. The panic is
+// recorded as an exception event on the invocation span when that span is
+// recording, and is not reported anywhere else; a plugin that must see its
+// own failures recovers them itself.
+//
+// Within a run the runner calls it at most once, on the goroutine that
+// ranges the run. A plugin is shared by concurrent runs, so the function must
+// be safe for concurrent use. The runner does not serialize it against
+// OnAgentErrorCallback, which parallel sub-agents may call concurrently, so a
+// plugin whose two hooks share state guards that state with its own lock.
+type OnRunErrorCallback func(ctx agent.InvocationContext, err error)
 
 // OnAgentErrorCallback is invoked when an error escapes an agent's run. It is
 // notification-only: callbacks are called in registration order and the error
@@ -224,6 +327,11 @@ type AfterRunCallback func(agent.InvocationContext)
 // as it propagates, matching adk-python; callbacks that count failures should
 // dedupe with errors.Is because ancestors wrap the child's error. RunLive
 // bypasses the non-live run loop, so it does not invoke this callback.
+//
+// When the error then ends the run, every plugin's [OnRunErrorCallback] is
+// called after the OnAgentErrorCallback calls for it. The runner does not
+// serialize the two hooks against each other, so a plugin whose hooks share
+// state guards that state with its own lock.
 type OnAgentErrorCallback func(ctx agent.Context, a agent.Agent, err error)
 
 // OnEventCallback is invoked for each event before the runner decides whether

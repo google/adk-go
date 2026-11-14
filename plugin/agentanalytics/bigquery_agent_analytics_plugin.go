@@ -499,6 +499,7 @@ func newBigQueryAgentAnalyticsPlugin(
 		OnUserMessageCallback: p.onUserMessage,
 		BeforeRunCallback:     p.beforeRun,
 		AfterRunCallback:      p.afterRun,
+		OnRunErrorCallback:    p.onRunError,
 		OnEventCallback:       p.onEvent,
 
 		BeforeAgentCallback: p.beforeAgent,
@@ -855,7 +856,7 @@ func (p *analyticsPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content
 	return nil, nil
 }
 
-// afterRun ends the invocation. It writes an AGENT_ERROR row for each agent
+// endRun ends the invocation. It writes an AGENT_ERROR row for each agent
 // span that the invocation's terminal error is attributed to, then
 // INVOCATION_ERROR if the invocation has a terminal error, or else
 // INVOCATION_COMPLETED.
@@ -873,8 +874,10 @@ func (p *analyticsPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content
 // AfterAgentCallback that returns an error when no parallel sibling is still
 // open, ends with INVOCATION_COMPLETED, and so does a run in which a sub-agent
 // fails without any callback after an agent that it runs under produced
-// content: no plugin callback tells either apart from a successful run whose
-// caller stopped reading once it had the response. Conversely, a custom agent
+// content: the rows are inferred from the plugin's own state, the same way
+// for a successful run whose caller stopped reading once it had the response,
+// and the error that OnRunErrorCallback receives does not enter them (see
+// onRunError). Conversely, a custom agent
 // that handles a sub-agent's silent error without writing a final event of its
 // own on the same branch and node path while the ancestor spans between it and
 // the unresponded sub-agent are still open (reading an intermediate sub-agent
@@ -898,7 +901,7 @@ func (p *analyticsPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content
 // error, so the plugin has to be registered before plugins that return
 // replacement events, model responses, tool results or agent content; see
 // [NewBigQueryAgentAnalyticsPluginWithClients].
-func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
+func (p *analyticsPlugin) endRun(ctx agent.InvocationContext) {
 	defer p.recoverCallback(EventInvocationCompleted)
 	id := identityOf(ctx)
 	target := p.traces.captureRunEndTarget(id.invocationID)
@@ -984,6 +987,33 @@ func (p *analyticsPlugin) flushRunEndSafe() {
 	if p.processor != nil {
 		p.processor.flushRunEnd()
 	}
+}
+
+// afterRun ends a run that no run error ended (see endRun). It writes
+// nothing when onRunError already ended the run, which happens on the one
+// path where ADK runs the after-run callbacks after a run error: a
+// BeforeRunCallback that fails.
+func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
+	if _, byRunError := p.traces.terminalRow(identityOf(ctx).invocationID); byRunError {
+		return
+	}
+	p.endRun(ctx)
+}
+
+// onRunError ends a run that a run error ended, for which ADK runs no
+// after-run callbacks, with the rows endRun infers. The run error does not
+// enter them: a run that fails after producing a response ends with
+// INVOCATION_COMPLETED, as it does when its caller ranges past the error and
+// afterRun ends it. It writes nothing when afterRun already ended the run,
+// which happens when the after-run callback of a plugin registered after
+// this one fails.
+func (p *analyticsPlugin) onRunError(ctx agent.InvocationContext, _ error) {
+	invocationID := identityOf(ctx).invocationID
+	if written, _ := p.traces.terminalRow(invocationID); written {
+		return
+	}
+	p.endRun(ctx)
+	p.traces.noteRunErrorRow(invocationID)
 }
 
 // logAgentErrors writes an AGENT_ERROR row for each activation in unclosed of

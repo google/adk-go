@@ -130,14 +130,72 @@ func (pm *PluginManager) RunBeforeRunCallback(cctx agent.InvocationContext) (*ge
 	return nil, nil
 }
 
-// RunAfterRunCallback runs the AfterRunCallback for all plugins.
-func (pm *PluginManager) RunAfterRunCallback(cctx agent.InvocationContext) {
+// RunAfterRunCallback runs the after-run callback of every plugin in
+// registration order: the AfterRunCallback or the FailableAfterRunCallback,
+// whichever the plugin sets. It stops at the first FailableAfterRunCallback
+// that returns an error and returns that error unwrapped, so the after-run
+// callbacks of later plugins do not run, as adk-python's _run_callbacks stops
+// at the first failure. A panic is not recovered.
+func (pm *PluginManager) RunAfterRunCallback(cctx agent.InvocationContext) error {
 	for _, plugin := range pm.plugins {
-		callback := plugin.AfterRunCallback()
-		if callback != nil {
+		if callback := plugin.AfterRunCallback(); callback != nil {
 			callback(cctx)
+			continue
+		}
+		if callback := plugin.FailableAfterRunCallback(); callback != nil {
+			if err := callback(cctx); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
+}
+
+// RunOnRunErrorCallback notifies every plugin that err ended the run. Like
+// RunOnAgentErrorCallback it is best-effort notification: all plugins run in
+// registration order and none can suppress the error. A panic from one
+// callback is recovered and recorded with RecordDiagnostic, so the remaining
+// callbacks still run.
+func (pm *PluginManager) RunOnRunErrorCallback(cctx agent.InvocationContext, err error) {
+	pm.notify(cctx, "OnRunErrorCallback", func(p *plugin.Plugin) func() {
+		callback := p.OnRunErrorCallback()
+		if callback == nil {
+			return nil
+		}
+		return func() { callback(cctx, err) }
+	})
+}
+
+// notify calls, for every plugin in registration order, the function that
+// callbackOf returns for it, and skips a plugin for which it returns nil.
+// hook names the callback in the diagnostic recorded for a panic.
+func (pm *PluginManager) notify(ctx context.Context, hook string, callbackOf func(*plugin.Plugin) func()) {
+	for _, p := range pm.plugins {
+		callback := callbackOf(p)
+		if callback == nil {
+			continue
+		}
+		func() {
+			// A panicking callback must not skip later plugins or replace the
+			// original error; adk-python isolates each plugin the same way.
+			defer func() {
+				if r := recover(); r != nil {
+					RecordDiagnostic(ctx, fmt.Errorf("plugin %q %s panicked: %v", p.Name(), hook, r))
+				}
+			}()
+			callback()
+		}()
+	}
+}
+
+// RecordDiagnostic records err, which has no caller left to return it to, as
+// an exception event on the span in ctx. It does nothing when that span is not
+// recording, which is the case with no tracer provider installed, under the
+// legacy telemetry schema, and for an invocation that opens no span of its
+// own; the error is then not reported anywhere. It never writes to a
+// process-wide log, which library code must not do.
+func RecordDiagnostic(ctx context.Context, err error) {
+	trace.SpanFromContext(ctx).RecordError(err)
 }
 
 // RunOnEventCallback runs the OnEventCallback for all plugins.
@@ -196,22 +254,13 @@ func (pm *PluginManager) RunAfterAgentCallback(cctx agent.Context) (*genai.Conte
 // plugins run in registration order and none can suppress the error. A panic
 // from one callback is recovered so the remaining callbacks still run.
 func (pm *PluginManager) RunOnAgentErrorCallback(cctx agent.Context, a agent.Agent, err error) {
-	for _, plugin := range pm.plugins {
-		callback := plugin.OnAgentErrorCallback()
+	pm.notify(cctx, "OnAgentErrorCallback", func(p *plugin.Plugin) func() {
+		callback := p.OnAgentErrorCallback()
 		if callback == nil {
-			continue
+			return nil
 		}
-		func() {
-			// A panicking callback must not skip later plugins or replace the
-			// original error; adk-python isolates each plugin the same way.
-			defer func() {
-				if r := recover(); r != nil {
-					trace.SpanFromContext(cctx).RecordError(fmt.Errorf("plugin %q OnAgentErrorCallback panicked: %v", plugin.Name(), r))
-				}
-			}()
-			callback(cctx, a, err)
-		}()
-	}
+		return func() { callback(cctx, a, err) }
+	})
 }
 
 // RunBeforeToolCallback runs the BeforeToolCallback for all plugins.
