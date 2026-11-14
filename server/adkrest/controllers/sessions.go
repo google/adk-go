@@ -359,7 +359,9 @@ func isScopedStateKey(key string) bool {
 //
 // Dropping such a key leaves the session as it stands. A scoped key carrying a
 // different value is still a write outside this session, and is still
-// refused. Every other key is written as submitted, changed or not.
+// refused. Every other key is written as submitted, except that a value the
+// client sent back without the credential secrets a read stripped gets those
+// omitted secrets restored.
 func dropEchoedKeys(delta map[string]any, stored session.ReadonlyState) map[string]any {
 	read := models.RedactedState(stored)
 	kept := make(map[string]any, len(delta))
@@ -367,6 +369,19 @@ func dropEchoedKeys(delta map[string]any, stored session.ReadonlyState) map[stri
 		readValue, ok := read[key]
 		if ok && sameJSON(readValue, value) && (isScopedStateKey(key) || strippedOnRead(stored, key, readValue)) {
 			continue
+		}
+		// A value that a read returned with credential secrets stripped is not
+		// an echo: the client edited something in it and sent it back without
+		// the secrets it never saw. Restore those before writing it.
+		// Neither error below can happen with the built-in session services:
+		// strippedOnRead has just read the same key, and RedactedState already
+		// encoded the whole state, so the value encodes the same way here.
+		if ok && !isScopedStateKey(key) && strippedOnRead(stored, key, readValue) {
+			if storedValue, err := stored.Get(key); err == nil {
+				if merged, restored, err := models.MergeRedactedValue(storedValue, value); err == nil && restored {
+					value = merged
+				}
+			}
 		}
 		kept[key] = value
 	}
