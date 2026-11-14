@@ -16,6 +16,8 @@ package agent
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 )
 
 // Loader allows to load a particular agent by name and get the root agent.
@@ -92,13 +94,10 @@ func NewMultiLoader(root Agent, agents ...Agent) (Loader, error) {
 	}, nil
 }
 
-// multiAgentLoader implements AgentLoader. Returns the list of all agents' names (including root agent)
+// ListAgents returns the names of all agents, including the root agent,
+// sorted alphabetically.
 func (m *multiLoader) ListAgents() []string {
-	agents := make([]string, 0, len(m.agentMap))
-	for name := range m.agentMap {
-		agents = append(agents, name)
-	}
-	return agents
+	return slices.Sorted(maps.Keys(m.agentMap))
 }
 
 // multiAgentLoader implements LoadAgent. Returns an agent with given name or error if no such an agent is found

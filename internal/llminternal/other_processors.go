@@ -32,11 +32,6 @@ func codeExecutionRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 	return func(yield func(*session.Event, error) bool) {}
 }
 
-func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
-	// TODO: implement (adk-python src/google/adk/auth/auth_preprocessor.py)
-	return func(yield func(*session.Event, error) bool) {}
-}
-
 func nlPlanningResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
 	// TODO: implement (adk-python src/google/adk/_nl_planning.py)
 	return nil

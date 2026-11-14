@@ -92,7 +92,7 @@ jobs:
       with:
         working-directory: ${{ matrix.module }}
         install-mode: goinstall
-        version: 5256574b81bcedfbcae9099f745f6aee9335da10 # v2.3.1
+        version: 25c5369a93aacb8cccea0d46e1569ca4a194564d # v2.15.0
         # golangci-lint's analysis cache stores the facts analyzers derive about
         # dependencies, and its key does not track the toolchain. Restoring one
         # written by an older Go leaves staticcheck without the runtime.Goexit

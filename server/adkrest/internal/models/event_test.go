@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolauth"
@@ -359,6 +360,268 @@ func TestRequestedAuthConfigsAreNotTakenFromRequests(t *testing.T) {
 	}
 }
 
+// encodedParts returns the content parts of ev as a client receives them.
+func encodedParts(t *testing.T, ev models.Event) []any {
+	t.Helper()
+	b, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("json.Marshal(event) failed: %v", err)
+	}
+	var got struct {
+		Content struct {
+			Parts []any `json:"parts"`
+		} `json:"content"`
+	}
+	if err := decodeKeepingNumbers(b, &got); err != nil {
+		t.Fatalf("decodeKeepingNumbers(event) failed: %v", err)
+	}
+	return got.Content.Parts
+}
+
+// TestRequestCredentialPartsGoOutWithoutSecrets pins that an
+// adk_request_credential call, and the client's answer to it, reach the client
+// without credential secrets such as the PKCE verifier and the code.
+func TestRequestCredentialPartsGoOutWithoutSecrets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		part *genai.Part
+		want string // the parts as the client should see them
+	}{
+		{
+			name: "request whose args hold a config struct",
+			part: &genai.Part{FunctionCall: &genai.FunctionCall{
+				ID:   "req-1",
+				Name: toolauth.RequestCredentialFunctionCallName,
+				Args: map[string]any{
+					"functionCallId": "call-1",
+					"authConfig": toolauth.Config{
+						AuthScheme: toolauth.Scheme{Type: toolauth.SchemeTypeOAuth2, Flows: &toolauth.OAuthFlows{
+							AuthorizationCode: &toolauth.OAuthFlow{
+								AuthorizationURL: "https://idp.example/auth",
+								TokenURL:         "https://idp.example/token",
+								Scopes:           map[string]string{"files": "Read files"},
+							},
+						}},
+						RawAuthCredential: &toolauth.Credential{AuthType: toolauth.CredentialTypeOAuth2, OAuth2: &toolauth.OAuth2Auth{
+							ClientID: "app", ClientSecret: "s3cret", TokenEndpointAuthMethod: "client_secret_post",
+						}},
+						ExchangedAuthCredential: &toolauth.Credential{AuthType: toolauth.CredentialTypeOAuth2, OAuth2: &toolauth.OAuth2Auth{
+							ClientID: "app", AuthURI: "https://idp.example/auth?state=st", State: "st",
+							CodeVerifier: "cv", TokenEndpointAuthMethod: "client_secret_post",
+						}},
+						CredentialKey: "drive",
+					},
+				},
+			}},
+			want: `[{"functionCall": {"id": "req-1", "name": "adk_request_credential", "args": {
+				"functionCallId": "call-1",
+				"authConfig": {
+					"authScheme": {"type": "oauth2", "flows": {"authorizationCode": {
+						"authorizationUrl": "https://idp.example/auth", "tokenUrl": "https://idp.example/token",
+						"scopes": {"files": "Read files"}}}},
+					"rawAuthCredential": {"authType": "oauth2", "oauth2": {
+						"clientId": "app", "tokenEndpointAuthMethod": "client_secret_post"}},
+					"exchangedAuthCredential": {"authType": "oauth2", "oauth2": {
+						"clientId": "app", "authUri": "https://idp.example/auth?state=st", "state": "st",
+						"tokenEndpointAuthMethod": "client_secret_post"}},
+					"credentialKey": "drive"}}}}]`,
+		},
+		{
+			name: "request whose args are plain JSON",
+			part: &genai.Part{FunctionCall: &genai.FunctionCall{
+				ID:   "req-1",
+				Name: toolauth.RequestCredentialFunctionCallName,
+				Args: map[string]any{
+					"functionCallId": "call-1",
+					"authConfig": map[string]any{
+						"authScheme":        map[string]any{"type": "apiKey", "in": "header", "name": "X-Key"},
+						"rawAuthCredential": map[string]any{"authType": "apiKey", "apiKey": "ak"},
+						"credentialKey":     "key",
+					},
+				},
+			}},
+			want: `[{"functionCall": {"id": "req-1", "name": "adk_request_credential", "args": {
+				"functionCallId": "call-1",
+				"authConfig": {
+					"authScheme": {"type": "apiKey", "in": "header", "name": "X-Key"},
+					"rawAuthCredential": {"authType": "apiKey"},
+					"credentialKey": "key"}}}}]`,
+		},
+		{
+			name: "answer with the redirect URL and the verifier",
+			part: &genai.Part{FunctionResponse: &genai.FunctionResponse{
+				ID:   "req-1",
+				Name: toolauth.RequestCredentialFunctionCallName,
+				Response: map[string]any{
+					"exchangedAuthCredential": map[string]any{"authType": "oauth2", "oauth2": map[string]any{
+						"clientId":        "app",
+						"state":           "st",
+						"redirectUri":     "https://app.example/cb",
+						"authResponseUri": "https://app.example/cb?state=st&code=c0de",
+						"codeVerifier":    "cv",
+					}},
+					"credentialKey": "drive",
+				},
+			}},
+			want: `[{"functionResponse": {"id": "req-1", "name": "adk_request_credential", "response": {
+				"exchangedAuthCredential": {"authType": "oauth2", "oauth2": {
+					"clientId": "app", "state": "st", "redirectUri": "https://app.example/cb"}},
+				"credentialKey": "drive"}}}]`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ev := models.Event{Content: &genai.Content{Parts: []*genai.Part{tc.part}}}
+
+			got := encodedParts(t, ev)
+
+			var want []any
+			if err := decodeKeepingNumbers([]byte(tc.want), &want); err != nil {
+				t.Fatalf("decodeKeepingNumbers(want) failed: %v", err)
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("parts mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestOtherFunctionPartsKeepSecretLookingFields pins that only
+// adk_request_credential parts are cleaned: a tool's own args and results
+// reach the client as they are, even under a key such as password.
+func TestOtherFunctionPartsKeepSecretLookingFields(t *testing.T) {
+	t.Parallel()
+
+	ev := models.Event{Content: &genai.Content{Parts: []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "login", Args: map[string]any{"user": "ann", "password": "pw"}}},
+		{FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "login", Response: map[string]any{"token": "tk"}}},
+	}}}
+
+	got := encodedParts(t, ev)
+
+	var want []any
+	if err := decodeKeepingNumbers([]byte(`[
+		{"functionCall": {"id": "call-1", "name": "login", "args": {"user": "ann", "password": "pw"}}},
+		{"functionResponse": {"id": "call-1", "name": "login", "response": {"token": "tk"}}}]`), &want); err != nil {
+		t.Fatalf("decodeKeepingNumbers(want) failed: %v", err)
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("parts mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestRequestCredentialRedactionLeavesTheStoredEventAlone pins that encoding an
+// event for a client does not strip the event the session holds. ADK reads the
+// PKCE verifier and the code from it when the user's answer comes in.
+func TestRequestCredentialRedactionLeavesTheStoredEventAlone(t *testing.T) {
+	t.Parallel()
+
+	args := func() map[string]any {
+		return map[string]any{"functionCallId": "call-1", "authConfig": map[string]any{
+			"exchangedAuthCredential": map[string]any{"authType": "oauth2", "oauth2": map[string]any{
+				"clientId": "app", "codeVerifier": "cv",
+			}},
+		}}
+	}
+	response := func() map[string]any {
+		return map[string]any{"exchangedAuthCredential": map[string]any{"authType": "oauth2", "oauth2": map[string]any{
+			"clientId": "app", "authResponseUri": "https://app.example/cb?code=c0de",
+		}}}
+	}
+	content := &genai.Content{Parts: []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{ID: "req-1", Name: toolauth.RequestCredentialFunctionCallName, Args: args()}},
+		{FunctionResponse: &genai.FunctionResponse{ID: "req-1", Name: toolauth.RequestCredentialFunctionCallName, Response: response()}},
+	}}
+
+	if _, err := json.Marshal(models.Event{Content: content}); err != nil {
+		t.Fatalf("json.Marshal(event) failed: %v", err)
+	}
+
+	if diff := cmp.Diff(args(), content.Parts[0].FunctionCall.Args); diff != "" {
+		t.Errorf("stored call args changed (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(response(), content.Parts[1].FunctionResponse.Response); diff != "" {
+		t.Errorf("stored answer changed (-want +got):\n%s", diff)
+	}
+}
+
+// TestStateDeltaCredentialsGoOutWithoutSecrets pins that a credential kept in
+// state, such as the tokens a tool's sign-in produced, reaches the client
+// without its secrets, while ordinary state keeps every key.
+func TestStateDeltaCredentialsGoOutWithoutSecrets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value any
+		want  string // the value as the client should see it
+	}{
+		{
+			name: "credential struct, as a token exchange stores it",
+			value: toolauth.Credential{AuthType: toolauth.CredentialTypeOAuth2, OAuth2: &toolauth.OAuth2Auth{
+				ClientID: "app", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1700000000,
+				TokenEndpointAuthMethod: "client_secret_post",
+			}},
+			want: `{"authType": "oauth2", "oauth2": {
+				"clientId": "app", "expiresAt": 1700000000, "tokenEndpointAuthMethod": "client_secret_post"}}`,
+		},
+		{
+			name: "credential as JSON, nested in another value",
+			value: map[string]any{"profile": map[string]any{"name": "ann", "cred": map[string]any{
+				"auth_type": "OAUTH2", "oauth2": map[string]any{"access_token": "at", "scope": "files"},
+			}}},
+			want: `{"profile": {"name": "ann", "cred": {"auth_type": "OAUTH2", "oauth2": {"scope": "files"}}}}`,
+		},
+		{
+			name: "auth config",
+			value: map[string]any{
+				"authScheme":              map[string]any{"type": "apiKey", "in": "header", "name": "X-Key"},
+				"rawAuthCredential":       map[string]any{"apiKey": "ak"},
+				"exchangedAuthCredential": map[string]any{"oauth2": map[string]any{"clientId": "app", "authCode": "c0de"}},
+			},
+			want: `{
+				"authScheme": {"type": "apiKey", "in": "header", "name": "X-Key"},
+				"rawAuthCredential": {},
+				"exchangedAuthCredential": {"oauth2": {"clientId": "app"}}}`,
+		},
+		{
+			name:  "ordinary value with keys that look secret",
+			value: map[string]any{"password": "pw", "token": "tk", "authType": "not a credential type"},
+			want:  `{"password": "pw", "token": "tk", "authType": "not a credential type"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ev := session.Event{Actions: session.EventActions{StateDelta: map[string]any{"temp:cred": tc.value}}}
+
+			b, err := json.Marshal(models.FromSessionEvent(ev))
+			if err != nil {
+				t.Fatalf("json.Marshal(event) failed: %v", err)
+			}
+
+			var got struct {
+				Actions struct {
+					StateDelta map[string]any `json:"stateDelta"`
+				} `json:"actions"`
+			}
+			if err := decodeKeepingNumbers(b, &got); err != nil {
+				t.Fatalf("decodeKeepingNumbers(event) failed: %v", err)
+			}
+			var want any
+			if err := decodeKeepingNumbers([]byte(tc.want), &want); err != nil {
+				t.Fatalf("decodeKeepingNumbers(want) failed: %v", err)
+			}
+			if diff := cmp.Diff(want, got.Actions.StateDelta["temp:cred"]); diff != "" {
+				t.Errorf("stateDelta[temp:cred] mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestToSessionEventTimestampBoundsMatchSessionDecoder pins the timestamps
 // ToSessionEvent accepts to the ones the session.Event JSON decoder accepts, so
 // the two bounds cannot drift apart. Zero is left out: the REST model reads it
@@ -398,5 +661,50 @@ func TestToSessionEventTimestampBoundsMatchSessionDecoder(t *testing.T) {
 		if !got.Timestamp.Equal(decoded.Timestamp) {
 			t.Errorf("timestamp %v: ToSessionEvent = %v, session.Event decoder = %v", secs, got.Timestamp, decoded.Timestamp)
 		}
+	}
+}
+
+// TestMarshalEventDropsNilParts: a nil entry in Content.Parts (a null part in
+// a stored create-session body reaches storage verbatim) must serialize, not
+// panic every endpoint that returns the session — and the serialized output
+// must not contain a null part: REST clients, including the bundled web UI,
+// read fields off every part they render. This pins the exact output shape:
+// the nil slot is dropped, the real parts keep their order and content.
+func TestMarshalEventDropsNilParts(t *testing.T) {
+	ev := session.Event{
+		ID: "e1",
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{Parts: []*genai.Part{
+				genai.NewPartFromText("kept"),
+				nil,
+				{FunctionCall: &genai.FunctionCall{Name: "f"}},
+			}},
+		},
+	}
+	rawJSON, err := json.Marshal(models.FromSessionEvent(ev))
+	if err != nil {
+		t.Fatalf("json.Marshal(event with nil part) failed: %v", err)
+	}
+	var got struct {
+		Content struct {
+			Parts []json.RawMessage `json:"parts"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(rawJSON, &got); err != nil {
+		t.Fatalf("unmarshal marshaled event: %v", err)
+	}
+	if len(got.Content.Parts) != 2 {
+		t.Fatalf("parts count = %d, want 2 (nil slot dropped): %s", len(got.Content.Parts), rawJSON)
+	}
+	for i, p := range got.Content.Parts {
+		if string(p) == "null" {
+			t.Errorf("parts[%d] is null; output must never carry a null part: %s", i, rawJSON)
+		}
+	}
+	if !bytes.Contains(got.Content.Parts[0], []byte(`"kept"`)) {
+		t.Errorf("parts[0] = %s, want the kept text part first", got.Content.Parts[0])
+	}
+	if !bytes.Contains(got.Content.Parts[1], []byte(`"name":"f"`)) || !bytes.Contains(got.Content.Parts[1], []byte(`"args":{}`)) {
+		t.Errorf("parts[1] = %s, want the function call with empty args object", got.Content.Parts[1])
 	}
 }

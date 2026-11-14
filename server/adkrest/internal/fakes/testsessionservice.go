@@ -152,7 +152,7 @@ func (s *FakeSessionService) Get(ctx context.Context, req *session.GetRequest) (
 			Session: &sess,
 		}, nil
 	}
-	return nil, fmt.Errorf("not found")
+	return nil, fmt.Errorf("%w: %q", session.ErrNotFound, req.SessionID)
 }
 
 func (s *FakeSessionService) List(ctx context.Context, req *session.ListRequest) (*session.ListResponse, error) {

@@ -285,6 +285,28 @@ func TestExecutor_Cancel(t *testing.T) {
 	}
 }
 
+func TestExecutor_Cancel_WithoutTaskID(t *testing.T) {
+	executor := NewExecutor(ExecutorConfig{})
+	reqCtx := &a2asrv.ExecutorContext{ContextID: a2a.NewContextID()}
+
+	var gotEvents []a2a.Event
+	var gotErr error
+	for event, err := range executor.Cancel(t.Context(), reqCtx) {
+		if err != nil {
+			gotErr = err
+			continue
+		}
+		gotEvents = append(gotEvents, event)
+	}
+
+	if gotErr == nil {
+		t.Fatal("executor.Cancel() error = nil, want an error for a missing task ID")
+	}
+	if len(gotEvents) != 0 {
+		t.Fatalf("executor.Cancel() produced %d events, want 0", len(gotEvents))
+	}
+}
+
 func TestExecutor_SessionReuse(t *testing.T) {
 	ctx := t.Context()
 	agent, err := newEventReplayAgent([]*session.Event{}, nil)

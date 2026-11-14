@@ -15,7 +15,9 @@
 package adka2a
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/go-cmp/cmp"
@@ -64,6 +66,19 @@ func TestPartsTwoWayConversion(t *testing.T) {
 			}(),
 			genaiPart: &genai.Part{
 				InlineData: &genai.Blob{Data: []byte{0xfF}, MIMEType: "image/jpeg", DisplayName: "cat.jpeg"},
+			},
+		},
+		{
+			name: "file bytes with video metadata",
+			a2aPart: func() *a2a.Part {
+				p := a2a.NewRawPart([]byte{0xfF})
+				p.MediaType = "video/mp4"
+				p.SetMeta("adk_video_metadata", map[string]any{"startOffset": "10s", "endOffset": "25s", "fps": 2.0})
+				return p
+			}(),
+			genaiPart: &genai.Part{
+				InlineData:    &genai.Blob{Data: []byte{0xfF}, MIMEType: "video/mp4"},
+				VideoMetadata: &genai.VideoMetadata{StartOffset: 10 * time.Second, EndOffset: 25 * time.Second, FPS: new(2.0)},
 			},
 		},
 		{
@@ -234,6 +249,94 @@ func TestToGenAIPartsEmptyText(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("ToGenAIParts() wrong result (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestToGenAIPartsReadsVideoMetadata(t *testing.T) {
+	videoPart := func(meta any) *a2a.Part {
+		p := a2a.NewRawPart([]byte{0xfF})
+		p.MediaType = "video/mp4"
+		p.SetMeta("adk_video_metadata", meta)
+		return p
+	}
+
+	testCases := []struct {
+		name string
+		part *a2a.Part
+		want *genai.Part
+	}{
+		{
+			name: "fps only",
+			part: videoPart(map[string]any{"fps": 30.0}),
+			want: &genai.Part{
+				InlineData:    &genai.Blob{Data: []byte{0xfF}, MIMEType: "video/mp4"},
+				VideoMetadata: &genai.VideoMetadata{FPS: new(30.0)},
+			},
+		},
+		{
+			name: "fractional offsets",
+			part: videoPart(map[string]any{"startOffset": "1.5s", "endOffset": "3.25s"}),
+			want: &genai.Part{
+				InlineData:    &genai.Blob{Data: []byte{0xfF}, MIMEType: "video/mp4"},
+				VideoMetadata: &genai.VideoMetadata{StartOffset: 1500 * time.Millisecond, EndOffset: 3250 * time.Millisecond},
+			},
+		},
+		{
+			name: "null is absent",
+			part: videoPart(nil),
+			want: &genai.Part{InlineData: &genai.Blob{Data: []byte{0xfF}, MIMEType: "video/mp4"}},
+		},
+		{
+			name: "unprefixed key is ignored",
+			part: func() *a2a.Part {
+				p := a2a.NewRawPart([]byte{0xfF})
+				p.MediaType = "video/mp4"
+				p.SetMeta("video_metadata", map[string]any{"fps": 30.0})
+				return p
+			}(),
+			want: &genai.Part{InlineData: &genai.Blob{Data: []byte{0xfF}, MIMEType: "video/mp4"}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ToGenAIPart(tc.part)
+			if err != nil {
+				t.Fatalf("ToGenAIPart() error = %v, want nil", err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("ToGenAIPart() wrong result (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestToGenAIPartsRejectsMalformedVideoMetadata(t *testing.T) {
+	testCases := []struct {
+		name string
+		meta any
+	}{
+		{name: "not an object", meta: "peer-supplied-text"},
+		{name: "unparsable offset", meta: map[string]any{"startOffset": "peer-supplied-offset"}},
+		{name: "not encodable", meta: make(chan int)},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := a2a.NewRawPart([]byte{0xfF})
+			p.MediaType = "video/mp4"
+			p.SetMeta("adk_video_metadata", tc.meta)
+
+			got, err := ToGenAIPart(p)
+			if err == nil {
+				t.Fatalf("ToGenAIPart() = %v, want error", got)
+			}
+			// The error goes back to the A2A client and into logs, so it must
+			// not quote what the peer sent.
+			if strings.Contains(err.Error(), "peer-supplied") {
+				t.Errorf("ToGenAIPart() error = %q, want no peer-supplied value in it", err)
 			}
 		})
 	}

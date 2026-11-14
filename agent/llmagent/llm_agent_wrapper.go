@@ -246,7 +246,10 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 //     per-event delta into session state on AppendEvent, so the two
 //     paths converge);
 //   - stash the parsed value on event.Output for the node's terminal
-//     output.
+//     output;
+//   - mark the message as the node's output (NodeInfo.MessageAsOutput),
+//     except when the OutputSchema produced a non-null parsed value, which
+//     is the output in its own right.
 //
 // Returns an error iff OutputSchema validation fails on a non-empty
 // model reply; the caller (runSingleTurn) propagates it.
@@ -281,11 +284,15 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 	text := b.String()
 
 	var output any
+	// parsed stays nil for a reply of literal null, which validates as a nil
+	// map when the schema has no required fields.
+	var parsed map[string]any
 	if state.OutputSchema != nil {
 		if strings.TrimSpace(text) == "" {
 			output = nil
 		} else {
-			parsed, err := utils.ValidateOutputSchema(text, state.OutputSchema)
+			var err error
+			parsed, err = utils.ValidateOutputSchema(text, state.OutputSchema)
 			if err != nil {
 				return fmt.Errorf("LlmAgent %q output validation failed: %w", a.Name(), err)
 			}
@@ -304,6 +311,14 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 
 	ev.Output = output
 
+	// The runner drops Output from events flagged MessageAsOutput, which
+	// would discard a non-null parsed value, so that case skips the flag. For a
+	// null reply Output holds a nil map, and stored events do not round-trip
+	// it. The flag keeps the reply text as the node output once the event is
+	// stored.
+	if parsed != nil {
+		return nil
+	}
 	if ev.NodeInfo == nil {
 		ev.NodeInfo = &session.NodeInfo{}
 	}
@@ -710,6 +725,12 @@ func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Even
 			} else {
 				ev.Output = pendingFCArgs
 			}
+			if key := outputKeyOf(a); key != "" && ev.Output != nil {
+				if ev.Actions.StateDelta == nil {
+					ev.Actions.StateDelta = map[string]any{}
+				}
+				ev.Actions.StateDelta[key] = ev.Output
+			}
 			yield(ev, nil)
 			return
 		}
@@ -717,6 +738,15 @@ func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Even
 			return
 		}
 	}
+}
+
+// outputKeyOf returns the OutputKey of an LlmAgent, or "" for any other agent.
+func outputKeyOf(a agent.Agent) string {
+	llmA, ok := a.(llminternal.Agent)
+	if !ok || llmA == nil {
+		return ""
+	}
+	return llminternal.Reveal(llmA).OutputKey
 }
 
 // TODO: The current approach of using wrappedSession to inject the user input
