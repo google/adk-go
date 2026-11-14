@@ -359,7 +359,9 @@ func isScopedStateKey(key string) bool {
 //
 // Dropping such a key leaves the session as it stands. A scoped key carrying a
 // different value is still a write outside this session, and is still
-// refused. Every other key is written as submitted, changed or not.
+// refused. Every other key is written as submitted, except that a value the
+// client sent back without the credential secrets a read stripped gets those
+// omitted secrets restored.
 func dropEchoedKeys(delta map[string]any, stored session.ReadonlyState) map[string]any {
 	read := models.RedactedState(stored)
 	kept := make(map[string]any, len(delta))
