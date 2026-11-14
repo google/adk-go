@@ -188,7 +188,7 @@ func (t *TransferToAgentTool) Run(ctx agent.Context, args any) (map[string]any, 
 		return nil, fmt.Errorf("agent %q is not a valid transfer target; available agents: %s", agent, strings.Join(targets, ", "))
 	}
 	ctx.Actions().TransferToAgent = agent
-	return map[string]any{}, nil
+	return nil, nil
 }
 
 var _ tool.Tool = (*TransferToAgentTool)(nil)

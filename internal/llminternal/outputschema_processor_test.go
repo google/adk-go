@@ -164,7 +164,7 @@ func TestOutputSchemaRequestProcessor(t *testing.T) {
 		// Native support = Vertex AI + Gemini 2.5+
 		llm := &mockLLM{
 			name:    "gemini-2.5-flash",
-			variant: func() *genai.Backend { x := genai.BackendVertexAI; return &x }(),
+			variant: func() *genai.Backend { return new(genai.BackendVertexAI) }(),
 		}
 
 		baseAgent := utils.Must(agent.New(agent.Config{Name: "VertexGemini2Agent"}))

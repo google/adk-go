@@ -182,10 +182,14 @@ func TestRunner_RunLive_StampsEventsYieldedWithoutTimestamp(t *testing.T) {
 		// replace makes a plugin swap the agent's event for a struct literal
 		// copy, which has no timestamp whatever the original carried.
 		replace bool
+		// rewrite makes a plugin overwrite the event in place with such a
+		// copy and return nil.
+		rewrite bool
 		want    time.Time
 	}{
 		{name: "agent event", want: runTime},
 		{name: "plugin replacement", replace: true, want: runTime},
+		{name: "plugin rewrites in place", rewrite: true, want: runTime},
 		{name: "own timestamp", own: ownTime, want: ownTime},
 	}
 	for _, tt := range tests {
@@ -206,6 +210,10 @@ func TestRunner_RunLive_StampsEventsYieldedWithoutTimestamp(t *testing.T) {
 				Name: "observe_and_replace",
 				OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
 					sawUnstamped = sawUnstamped || ev.Timestamp.IsZero()
+					if tt.rewrite {
+						*ev = session.Event{Author: ev.Author, LLMResponse: ev.LLMResponse}
+						return nil, nil
+					}
 					if !tt.replace {
 						return nil, nil
 					}
@@ -263,6 +271,101 @@ func TestRunner_RunLive_StampsEventsYieldedWithoutTimestamp(t *testing.T) {
 				t.Error("OnEventCallback saw the live agent's event with a zero timestamp")
 			}
 		})
+	}
+}
+
+// TestRunner_RunLive_PluginReplacementKeepsEventIdentity checks that RunLive
+// streams and stores an OnEvent plugin's replacement with the original event's
+// ID, invocation ID, timestamp and author, and with the replacement's content
+// and custom metadata. The agent gives its event a timestamp different from the
+// run's time and the plugin's.
+func TestRunner_RunLive_PluginReplacementKeepsEventIdentity(t *testing.T) {
+	const appName, userID, sessionID = "testApp", "testUser", "testSession"
+	runTime := time.Date(2026, time.March, 2, 10, 0, 0, 0, time.UTC)
+	agentTime := time.Date(2026, time.March, 1, 9, 0, 0, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return runTime })
+	sessionService := session.InMemoryService()
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var originalInvocationID string
+	p, err := plugin.New(plugin.Config{
+		Name: "replace",
+		OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+			originalInvocationID = ev.InvocationID
+			return &session.Event{
+				ID:           "plugin-id",
+				InvocationID: "plugin-invocation",
+				Timestamp:    time.Date(2026, time.March, 3, 11, 0, 0, 0, time.UTC),
+				LLMResponse: model.LLMResponse{
+					Content:        genai.NewContentFromText("replaced", genai.RoleModel),
+					CustomMetadata: map[string]any{"modified": true},
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(Config{
+		AppName: appName,
+		Agent: &mockLiveAgent{
+			Agent: must(agent.New(agent.Config{Name: "test_agent"})),
+			runLiveFn: func(ic agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+				return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
+					yield(&session.Event{
+						ID:           "agent-event",
+						InvocationID: ic.InvocationID(),
+						Timestamp:    agentTime,
+						Author:       "test_agent",
+						LLMResponse:  model.LLMResponse{Content: genai.NewContentFromText("reply", genai.RoleModel)},
+					}, nil)
+				}, nil
+			},
+		},
+		SessionService: sessionService,
+		PluginConfig:   PluginConfig{Plugins: []*plugin.Plugin{p}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, stream, err := r.RunLive(ctx, userID, sessionID, agent.LiveRunConfig{})
+	if err != nil {
+		t.Fatalf("RunLive() error = %v", err)
+	}
+	var streamed []*session.Event
+	for ev, err := range stream {
+		if err != nil {
+			t.Fatal(err)
+		}
+		streamed = append(streamed, ev)
+	}
+	stored := slices.Collect(getRunLiveTestEvents(t, sessionService, sessionID).All())
+	if originalInvocationID == "" {
+		t.Fatal("the plugin never saw the live agent's event")
+	}
+
+	want := []*session.Event{{
+		ID:           "agent-event",
+		InvocationID: originalInvocationID,
+		Timestamp:    agentTime,
+		Author:       "test_agent",
+		LLMResponse: model.LLMResponse{
+			Content:        genai.NewContentFromText("replaced", genai.RoleModel),
+			CustomMetadata: map[string]any{"modified": true},
+		},
+	}}
+	opts := cmpopts.IgnoreFields(session.Event{}, "Actions")
+	if diff := cmp.Diff(want, streamed, opts); diff != "" {
+		t.Errorf("streamed events mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(want, stored, opts); diff != "" {
+		t.Errorf("stored events mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -979,5 +1082,51 @@ func TestRunner_RunLive_SendDropsNilParts(t *testing.T) {
 				t.Errorf("saved content mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestRunner_RunLive_SendRejectsUserFunctionCall(t *testing.T) {
+	const sessionID = "testSessionUserFunctionCall"
+	sessionService := session.InMemoryService()
+	if _, err := sessionService.Create(t.Context(), &session.CreateRequest{
+		AppName:   "testApp",
+		UserID:    "testUser",
+		SessionID: sessionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agentSess := &recordingLiveSession{}
+	r, err := New(Config{
+		AppName: "testApp",
+		Agent: &mockLiveAgent{
+			Agent: must(agent.New(agent.Config{Name: "test_agent"})),
+			runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+				return agentSess, func(func(*session.Event, error) bool) {}, nil
+			},
+		},
+		SessionService: sessionService,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, _, err := r.RunLive(t.Context(), "testUser", sessionID, agent.LiveRunConfig{})
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	content := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		genai.NewPartFromText("hi"),
+		{FunctionCall: &genai.FunctionCall{Name: "some_tool"}},
+	}}
+	err = sess.Send(agent.LiveRequest{Content: content})
+
+	if err == nil || err.Error() != "user message cannot contain function calls" {
+		t.Errorf("Send() error = %v, want %q", err, "user message cannot contain function calls")
+	}
+	if len(agentSess.requests) != 0 {
+		t.Errorf("forwarded requests = %d, want 0", len(agentSess.requests))
+	}
+	if n := getRunLiveTestEvents(t, sessionService, sessionID).Len(); n != 0 {
+		t.Errorf("saved events = %d, want 0", n)
 	}
 }

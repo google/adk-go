@@ -473,6 +473,15 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 // carry none and a summary carries the real one. Both cases are then the same
 // rule: whatever the framework decided, not whatever came back.
 //
+// A replacement also keeps the identity of the event it replaces: its ID,
+// invocation ID and timestamp, and its author when the replacement names none,
+// as adk-python's Runner._get_output_event does. adk-python keeps every other
+// field the replacement did not set too; a Go struct cannot tell an unset field
+// from a zero one, so here the replacement's other fields win as given.
+//
+// The replacement itself is not written to: the result is a copy, so a plugin
+// that returns one shared event for several originals leaves it as it built it.
+//
 // The post-invocation summary path does not use this. A plugin is invited to
 // rewrite a summary there, and SanitizeSummary re-checks the result.
 func fromPlugin(original, modified *session.Event, record *session.EventCompaction) *session.Event {
@@ -489,13 +498,22 @@ func fromPlugin(original, modified *session.Event, record *session.EventCompacti
 		original.Actions.Compaction = record
 		return original
 	}
-	modified.Actions.Compaction = record
-	return modified
+	out := *modified
+	out.Actions.Compaction = record
+	out.ID = original.ID
+	out.InvocationID = original.InvocationID
+	out.Timestamp = original.Timestamp
+	if out.Author == "" {
+		out.Author = original.Author
+	}
+	return &out
 }
 
-// stampTimestamp gives an event that an agent yielded, or a plugin returned in
-// its place, without a timestamp the time the runner received it, as
-// adk-python's Event does on construction.
+// stampTimestamp gives an event without a timestamp the time the runner
+// received it, as adk-python's Event does on construction. That is an event an
+// agent yielded without one, or one a plugin rewrote in place and left without
+// one. A replacement a plugin returns has already inherited the original's
+// timestamp through fromPlugin.
 //
 // An event built as a struct literal never passes through session.NewEvent.
 // Stored with a zero timestamp it moves the session's last update time back to
@@ -737,10 +755,24 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// adk_request_input response; any other response restarts the graph.
 		// The first response in the message decides the route.
 		agentToRun, branch := r.rootAgent, ""
+		routedToCaller := false
 		if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
 			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
 				agentToRun, branch = sub, ev.Branch
+				routedToCaller = true
 			}
+		}
+		// Answers to calls from several invocations start a new invocation
+		// when they go back to the calling agent, as adk-python does for a
+		// BaseAgent root of an app that is not resumable. A graph workflow
+		// resumes a paused run from its invocation's events, so it keeps the
+		// first call's invocation; adk-python raises for a Workflow root. So
+		// does an answer whose caller is not in the agent tree, since that
+		// caller can be a workflow node agent missing from the workflow's
+		// sub-agents; adk-python starts a new invocation there.
+		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
+		if spansInvocations && routedToCaller {
+			invocationID = ""
 		}
 
 		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
@@ -751,7 +783,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			Agent:        agentToRun,
 			UserContent:  msg,
 			RunConfig:    &cfg,
-			InvocationID: resolveInvocationID(storedSession, msg),
+			InvocationID: invocationID,
 		})
 		invocationCtx = ic
 		ctx := agent.NewContext(ic)
@@ -816,7 +848,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 					continue
 				}
 				event = fromPlugin(event, modifiedEvent, record)
-				stampTimestamp(ctx, event) // a replacement may be a struct literal too
+				stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
 			}
 
 			// only commit non-partial event to a session service
@@ -871,7 +903,7 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	maps.Copy(reply.CustomMetadata, event.CustomMetadata)
 	reply.CustomMetadata[plugininternal.BeforeRunReplyKey] = true
 	event = &reply
-	stampTimestamp(ctx, event) // a replacement may be a struct literal
+	stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
 	if !event.Partial {
 		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
 			return nil, fmt.Errorf("failed to add event to session: %w", err)
@@ -879,6 +911,11 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	}
 	return event, nil
 }
+
+// errUserFunctionCall rejects a user message that carries a function call.
+// Only a model makes function calls, so storing one would put a call no model
+// produced into the history.
+var errUserFunctionCall = errors.New("user message cannot contain function calls")
 
 type liveAgent interface {
 	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
@@ -901,6 +938,9 @@ func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
 			return p == nil
 		})
 		req.Content = &content
+	}
+	if len(utils.FunctionCalls(req.Content)) > 0 {
+		return errUserFunctionCall
 	}
 	err := s.sess.Send(req)
 	if err != nil {
@@ -1084,7 +1124,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					continue
 				}
 				event = fromPlugin(event, modifiedEvent, record)
-				stampTimestamp(iCtx, event) // a replacement may be a struct literal too
+				stampTimestamp(iCtx, event) // a plugin may have rewritten the event in place
 			}
 
 			// Chronological event buffering logic for Live streaming.
@@ -1201,6 +1241,10 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 				},
 			})
 		}
+	}
+
+	if len(utils.FunctionCalls(msg)) > 0 {
+		return ctx, nil, errUserFunctionCall
 	}
 
 	artifactsService := ctx.Artifacts()

@@ -59,6 +59,8 @@ type requestRecorder struct {
 	reqs     []*model.LLMRequest
 	reply    string // text answer; defaults to a weatherOut value
 	setReply map[string]any
+	// setNoArgs makes the set_model_response call carry no args at all.
+	setNoArgs bool
 }
 
 func (r *requestRecorder) Name() string                       { return r.name }
@@ -71,7 +73,7 @@ func (r *requestRecorder) GenerateContent(_ context.Context, req *model.LLMReque
 		text = `{"city":"Paris","temp":20}`
 	}
 	part := &genai.Part{Text: text}
-	if r.setReply != nil && len(r.reqs) == 1 && offersTool(req, "set_model_response") {
+	if (r.setReply != nil || r.setNoArgs) && len(r.reqs) == 1 && offersTool(req, "set_model_response") {
 		part = &genai.Part{FunctionCall: &genai.FunctionCall{Name: "set_model_response", Args: r.setReply}}
 	}
 	return func(yield func(*model.LLMResponse, error) bool) {
@@ -721,6 +723,42 @@ func TestAgentNode_NullFieldThroughSetModelResponse(t *testing.T) {
 		t.Fatalf("ValidateOutput(%v): %v", out, err)
 	}
 	if diff := cmp.Diff(answer, got); diff != "" {
+		t.Errorf("node output mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A set_model_response call without args is the empty object, as a call with
+// empty args is, so it passes a schema whose fields are all optional.
+func TestAgentNode_SetModelResponseWithoutArgs(t *testing.T) {
+	llm := &requestRecorder{
+		name:      "gemini-2.5-flash",
+		backend:   genai.BackendGeminiAPI,
+		reply:     `{"note":"text"}`, // differs, so a pass needs the tool call
+		setNoArgs: true,
+	}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "a",
+		Model: llm,
+		Tools: []tool.Tool{lookupTool(t)},
+		OutputSchema: &genai.Schema{
+			Type:       genai.TypeObject,
+			Properties: map[string]*genai.Schema{"note": {Type: genai.TypeString}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+
+	out := runNode(t, node, a)
+
+	if !offersTool(firstRequest(t, llm), "set_model_response") {
+		t.Fatal("set_model_response was not offered to the model")
+	}
+	if diff := cmp.Diff(map[string]any{}, out); diff != "" {
 		t.Errorf("node output mismatch (-want +got):\n%s", diff)
 	}
 }

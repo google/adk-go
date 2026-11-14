@@ -471,16 +471,13 @@ func TestBuildParams_CallOutsideModelTurnRejected(t *testing.T) {
 // TestApplyGenerationConfig_EndpointOnlyFields covers the three settings
 // Chat Completions honors that the Responses path rejects outright.
 func TestApplyGenerationConfig_EndpointOnlyFields(t *testing.T) {
-	seed := int32(42)
-	freq := float32(0.5)
-	pres := float32(-0.25)
 	wire := requestWire(t, &model.LLMRequest{
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 		Config: &genai.GenerateContentConfig{
 			StopSequences:    []string{"STOP", "END"},
-			Seed:             &seed,
-			FrequencyPenalty: &freq,
-			PresencePenalty:  &pres,
+			Seed:             new(int32(42)),
+			FrequencyPenalty: new(float32(0.5)),
+			PresencePenalty:  new(float32(-0.25)),
 		},
 	})
 	stop, ok := wire["stop"].([]any)
@@ -499,17 +496,14 @@ func TestApplyGenerationConfig_EndpointOnlyFields(t *testing.T) {
 }
 
 func TestApplyGenerationConfig_TranslatedFields(t *testing.T) {
-	temp := float32(0.3)
-	topP := float32(0.9)
-	logprobs := int32(3)
 	wire := requestWire(t, &model.LLMRequest{
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
 		Config: &genai.GenerateContentConfig{
-			Temperature:      &temp,
-			TopP:             &topP,
+			Temperature:      new(float32(0.3)),
+			TopP:             new(float32(0.9)),
 			MaxOutputTokens:  256,
 			ResponseLogprobs: true,
-			Logprobs:         &logprobs,
+			Logprobs:         new(int32(3)),
 			ServiceTier:      genai.ServiceTierFlex,
 		},
 	})
@@ -553,13 +547,12 @@ func TestApplyGenerationConfig_AcceptsAutomaticContinuation(t *testing.T) {
 }
 
 func TestApplyGenerationConfig_RejectedFields(t *testing.T) {
-	topK := float32(5)
 	tests := []struct {
 		name string
 		cfg  *genai.GenerateContentConfig
 		want error
 	}{
-		{name: "topK", cfg: &genai.GenerateContentConfig{TopK: &topK}, want: shared.ErrTopKNotSupported},
+		{name: "topK", cfg: &genai.GenerateContentConfig{TopK: new(float32(5))}, want: shared.ErrTopKNotSupported},
 		{name: "candidate count", cfg: &genai.GenerateContentConfig{CandidateCount: 2}, want: shared.ErrMultipleCandidatesNotSupported},
 		{name: "labels", cfg: &genai.GenerateContentConfig{Labels: map[string]string{"a": "b"}}, want: shared.ErrLabelsNotSupported},
 		{name: "safety settings", cfg: &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}}, want: shared.ErrSafetySettingsNotSupported},
@@ -603,14 +596,12 @@ func TestApplyGenerationConfig_RefusesFieldsOutsideTheSupportedLists(t *testing.
 	shared.SupportedHTTPOptionFields = nil
 	shared.SupportedThinkingConfigFields = []string{"IncludeThoughts", "ThinkingBudget"}
 
-	temp := float32(0.5)
-	timeout := time.Second
 	tests := []struct {
 		field string
 		cfg   *genai.GenerateContentConfig
 	}{
-		{"Temperature", &genai.GenerateContentConfig{Temperature: &temp}},
-		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}}},
+		{"Temperature", &genai.GenerateContentConfig{Temperature: new(float32(0.5))}},
+		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: new(time.Second)}}},
 		{"ThinkingConfig.ThinkingLevel", &genai.GenerateContentConfig{
 			ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow},
 		}},
@@ -631,10 +622,9 @@ func TestApplyGenerationConfig_RefusesFieldsOutsideTheSupportedLists(t *testing.
 // TestApplyGenerationConfig_SeedAccepted is the counterpart of the rejected
 // list: Seed is refused on Responses and must not be refused here.
 func TestApplyGenerationConfig_SeedAccepted(t *testing.T) {
-	seed := int32(7)
 	_, err := buildParams("m", &model.LLMRequest{
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
-		Config:   &genai.GenerateContentConfig{Seed: &seed},
+		Config:   &genai.GenerateContentConfig{Seed: new(int32(7))},
 	})
 	if err != nil {
 		t.Fatalf("buildParams() err = %v, want nil", err)
@@ -772,10 +762,9 @@ func TestApplyThinkingConfig(t *testing.T) {
 }
 
 func TestApplyThinkingConfig_RejectsNonsenseBudget(t *testing.T) {
-	budget := int32(-5)
 	_, err := buildParams("m", &model.LLMRequest{
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
-		Config:   &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: &budget}},
+		Config:   &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: new(int32(-5))}},
 	})
 	if !errors.Is(err, shared.ErrUnsupportedConfigField) {
 		t.Fatalf("err = %v, want %v", err, shared.ErrUnsupportedConfigField)
