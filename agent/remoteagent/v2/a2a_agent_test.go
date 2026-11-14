@@ -41,6 +41,7 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 	"google.golang.org/adk/v2/session"
@@ -999,6 +1000,7 @@ func TestRemoteAgent_RequestPayload(t *testing.T) {
 			sessionEvents: []*session.Event{newUserHello()},
 			wantRequest: &a2a.SendMessageRequest{
 				Message: &a2a.Message{
+					ID:    "uuid-1",
 					Role:  a2a.MessageRoleUser,
 					Parts: a2a.ContentParts{a2a.NewTextPart("hello")},
 				},
@@ -1023,6 +1025,9 @@ func TestRemoteAgent_RequestPayload(t *testing.T) {
 			},
 			wantRequest: &a2a.SendMessageRequest{
 				Message: &a2a.Message{
+					// uuid-1 goes to the event that turns the other agent's
+					// reply into context.
+					ID:   "uuid-2",
 					Role: a2a.MessageRoleUser,
 					Parts: a2a.ContentParts{
 						a2a.NewTextPart("hello"),
@@ -1052,6 +1057,8 @@ func TestRemoteAgent_RequestPayload(t *testing.T) {
 			},
 			wantRequest: &a2a.SendMessageRequest{
 				Message: &a2a.Message{
+					// uuid-1 goes to the event that turns resp3 into context.
+					ID:        "uuid-2",
 					Role:      a2a.MessageRoleUser,
 					ContextID: "ctx-123",
 					Parts: a2a.ContentParts{
@@ -1097,6 +1104,7 @@ func TestRemoteAgent_RequestPayload(t *testing.T) {
 			},
 			wantRequest: &a2a.SendMessageRequest{
 				Message: &a2a.Message{
+					ID:        "uuid-1",
 					Role:      a2a.MessageRoleUser,
 					TaskID:    "task-1",
 					ContextID: "ctx-1",
@@ -1140,15 +1148,19 @@ func TestRemoteAgent_RequestPayload(t *testing.T) {
 				t.Fatalf("remoteagent.NewA2A() error = %v", err)
 			}
 
+			// Each draw gets its own value, so the test sees which draw the
+			// message ID took.
+			draws := 0
 			ictx := newInvocationContext(t, tc.sessionEvents)
+			ictx = ictx.WithContext(platform.WithUUIDProvider(ictx, func() string {
+				draws++
+				return fmt.Sprintf("uuid-%d", draws)
+			}))
 			if _, err := runAndCollect(ictx, remoteAgent); !errors.Is(err, errRejected) {
 				t.Fatalf("agent.Run() error = %v, want %v", err, errRejected)
 			}
 
-			ignoreFields := []cmp.Option{
-				cmpopts.IgnoreFields(a2a.Message{}, "ID"),
-			}
-			if diff := cmp.Diff(tc.wantRequest, gotRequest, ignoreFields...); diff != "" {
+			if diff := cmp.Diff(tc.wantRequest, gotRequest); diff != "" {
 				t.Fatalf("agent.Run() sent unexpected request (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotRequest, tc.wantRequest, diff)
 			}
 		})
