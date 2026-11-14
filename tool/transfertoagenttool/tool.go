@@ -68,7 +68,8 @@ type Config struct {
 // transfer_reason, default "", and its description has a line for it. The
 // declaration is built for each request: as a JSON Schema in
 // ParametersJsonSchema by default, or as a genai.Schema in Parameters when the
-// request's context carries feature.LegacyFunctionDeclarationSchema.
+// request's context carries feature.LegacyFunctionDeclarationSchema; for a
+// Vertex AI model it adds a null response schema in the same form.
 //
 // When the model calls the tool, it sets the call's
 // session.EventActions.TransferToAgent to agent_name and returns nil, which

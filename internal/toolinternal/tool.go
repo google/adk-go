@@ -39,6 +39,16 @@ type StreamingFunctionTool interface {
 	RunStream(ctx agent.Context, args any) iter.Seq2[string, error]
 }
 
+// RawResultTool is implemented by a FunctionTool that can return its handler's
+// output before wrapping a non-map value into map[string]any{"result": v}, so
+// that *genai.Part values, slices of parts, and nil results reach the flow's
+// response builder intact. RunRaw handles arguments, confirmation and errors
+// as Run does; only the form of a successful result differs. The flow calls
+// RunRaw instead of Run when a tool implements it.
+type RawResultTool interface {
+	RunRaw(ctx agent.Context, args any) (any, error)
+}
+
 type RequestProcessor interface {
 	ProcessRequest(ctx agent.Context, req *model.LLMRequest) error
 }

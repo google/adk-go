@@ -35,9 +35,9 @@ import (
 // Each call to Tools lists ts again and returns, in the same order, one
 // prefixed tool per tool of ts. A prefixed tool keeps everything else of the
 // tool it stands for: its description, IsLongRunning, Run or RunStream, its
-// request hook, its DefersResponse and DisplayResultOnSkipSummarization
-// answers and, for a tool that runs an agent, such as agenttool's, the agent it
-// wraps. Its declaration is a copy of the original's with the prefixed name,
+// request hook, its DefersResponse, DisplayResultOnSkipSummarization and
+// ResponseScheduling answers and, for a tool that runs an agent, such as
+// agenttool's, the agent it wraps. Its declaration is a copy of the original's with the prefixed name,
 // or nil when the original's is nil. The original tool and its declaration are
 // never modified, so listing any number of times never prefixes a name twice.
 // Running a prefixed tool's request hook runs the original's and registers the
@@ -163,6 +163,10 @@ func (p *prefixedTool) DisplayResultOnSkipSummarization() bool {
 	return displaysResultOnSkipSummarization(p.Tool)
 }
 
+func (p *prefixedTool) ResponseScheduling() genai.FunctionResponseScheduling {
+	return responseScheduling(p.Tool)
+}
+
 func (p *prefixedTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return p.process(p, ctx, req)
 }
@@ -233,6 +237,10 @@ type prefixedFunctionTool struct {
 
 func (p *prefixedFunctionTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	return p.fn.Run(ctx, args)
+}
+
+func (p *prefixedFunctionTool) RunRaw(ctx agent.Context, args any) (any, error) {
+	return runRaw(p.fn, ctx, args)
 }
 
 func (p *prefixedFunctionTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {

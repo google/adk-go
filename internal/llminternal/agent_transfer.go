@@ -240,7 +240,8 @@ func (t *TransferToAgentTool) forRequest(ctx context.Context, llm model.LLM) *Tr
 // forContext returns a copy of t that declares itself in the form ctx asks
 // for: the typed form when ctx carries feature.LegacyFunctionDeclarationSchema,
 // and the null response schema when ctx carries the Vertex AI backend
-// (googlellm.ContextWithBackend). For a nil ctx the copy keeps t's form. t is not
+// (googlellm.ContextWithBackend), as the flow sets it on the context of a
+// tool's ProcessRequest. For a nil ctx the copy keeps t's form. t is not
 // modified, and the copy shares t's read-only target lists, so one tool can
 // serve requests of different forms at the same time.
 func (t *TransferToAgentTool) forContext(ctx context.Context) *TransferToAgentTool {

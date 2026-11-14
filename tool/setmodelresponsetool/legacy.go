@@ -19,6 +19,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/sessionutils"
+	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/toolutils"
@@ -87,23 +88,6 @@ func (l *legacyTool) Declaration() *genai.FunctionDeclaration {
 // The copy is made first, so s keeps its titles.
 func untitledCopy(s *genai.Schema) *genai.Schema {
 	c := sessionutils.CloneValue(s)
-	clearTitles(c, map[*genai.Schema]bool{})
+	typeutil.ClearTitles(c)
 	return c
-}
-
-// clearTitles clears the Title of s and of every schema it reaches. seen holds
-// the schemas already cleared, so a schema that reaches itself is visited once.
-func clearTitles(s *genai.Schema, seen map[*genai.Schema]bool) {
-	if s == nil || seen[s] {
-		return
-	}
-	seen[s] = true
-	s.Title = ""
-	clearTitles(s.Items, seen)
-	for _, p := range s.Properties {
-		clearTitles(p, seen)
-	}
-	for _, arm := range s.AnyOf {
-		clearTitles(arm, seen)
-	}
 }

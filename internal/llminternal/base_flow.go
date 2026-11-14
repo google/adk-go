@@ -1038,7 +1038,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						}
 					}
 					if len(fnCalls) > 0 {
-						respEv, err := f.handleFunctionCalls(ctx, tools, &ev.LLMResponse, nil, sess)
+						respEv, err := f.handleFunctionCallsInOrder(ctx, tools, registryOrder(nreq, f.Tools, tools), &ev.LLMResponse, nil, sess)
 						if err != nil {
 							sess.pushError(err)
 							cleanup()
@@ -1190,7 +1190,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		case resumeActionPause:
 			return
 		case resumeActionReplayCalls:
-			f.postprocessFunctionCalls(ctx, tools, d.event, yield)
+			f.postprocessFunctionCalls(ctx, tools, registryOrder(req, f.Tools, tools), d.event, yield)
 			return
 		}
 		// Create event to pass to callback state delta
@@ -1250,7 +1250,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			if resp.Partial {
 				continue
 			}
-			if !f.postprocessFunctionCalls(ctx, tools, modelResponseEvent, yield) {
+			if !f.postprocessFunctionCalls(ctx, tools, registryOrder(req, f.Tools, tools), modelResponseEvent, yield) {
 				return
 			}
 		}
@@ -1284,17 +1284,18 @@ func extractTools(req *model.LLMRequest) (map[string]tool.Tool, error) {
 }
 
 // postprocessFunctionCalls runs the function calls of functionCallEvent with
-// tools, then yields their response event, any credential request, any tool
-// confirmation request and any structured final answer, and runs the agent
-// that a transfer_to_agent call names. A model turn and a replay of calls
-// that never ran both go through it.
+// tools, whose names toolOrder lists in registry order, then yields their
+// response event, any credential request, any tool confirmation request and
+// any structured final answer, and runs the agent that a transfer_to_agent
+// call names. A model turn and a replay of calls that never ran both go
+// through it.
 //
 // It reports whether the step may go on to the model's next response: true
 // when no call produced a response or when a transfer target ran to its end,
 // false when the step ends, because the calls ran without a transfer, an
 // error was yielded or the consumer stopped.
-func (f *Flow) postprocessFunctionCalls(ctx agent.InvocationContext, tools map[string]tool.Tool, functionCallEvent *session.Event, yield func(*session.Event, error) bool) bool {
-	ev, err := f.handleFunctionCalls(ctx, tools, &functionCallEvent.LLMResponse, nil, nil)
+func (f *Flow) postprocessFunctionCalls(ctx agent.InvocationContext, tools map[string]tool.Tool, toolOrder []string, functionCallEvent *session.Event, yield func(*session.Event, error) bool) bool {
+	ev, err := f.handleFunctionCallsInOrder(ctx, tools, toolOrder, &functionCallEvent.LLMResponse, nil, nil)
 	if err != nil {
 		yield(nil, err)
 		return false
@@ -1397,7 +1398,9 @@ func (f *Flow) preprocessRecording(ctx agent.InvocationContext, req *model.LLMRe
 			}
 		}
 
-		if err := processToolRequests(ctx, req, f); err != nil {
+		// Tools declare themselves for the request's backend.
+		toolCtx := ctx.WithContext(googlellm.ContextWithBackend(ctx, googlellm.GetGoogleLLMVariant(f.currentModel())))
+		if err := processToolRequests(toolCtx, req, f); err != nil {
 			yield(nil, err)
 			return
 		}
@@ -1832,36 +1835,6 @@ func (*fakeTool) IsLongRunning() bool { return false }
 
 var _ tool.Tool = (*fakeTool)(nil)
 
-// newToolNotFoundError creates an error matching the specific Python format
-func newToolNotFoundError(toolName string, availableTools []string) error {
-	joinedTools := strings.Join(availableTools, ", ")
-
-	return fmt.Errorf(`tool '%s' not found.
-Available tools: %s
-
-Possible causes:
-  1. LLM hallucinated the function name - review agent instruction clarity
-  2. Tool not registered - verify agent.tools list
-  3. Name mismatch - check for typos
-
-Suggested fixes:
-  - Review agent instruction to ensure tool usage is clear
-  - Verify tool is included in agent.tools list
-  - Check for typos in function name`, toolName, joinedTools)
-}
-
-// toolNotFoundResponse is the function response the model gets for a call to
-// toolName when no tool of that name is available and no callback answers
-// it. The text is adk-python's, and it tells the model which tools it can
-// call instead.
-func toolNotFoundResponse(toolName string, availableTools []string) map[string]any {
-	available := strings.Join(availableTools, ", ")
-	if available == "" {
-		available = "none"
-	}
-	return map[string]any{"error": fmt.Sprintf("Invoking `%s()` failed as no tool with that name is available. The tools you can call are: %s. You could retry, but it is IMPORTANT that you only call a tool from that list.", toolName, available)}
-}
-
 type cancelledToolContext struct {
 	agent.Context
 	// Marker: this is one of ADK's own context types, so the identity procedure
@@ -1948,15 +1921,20 @@ func marshalJSONNoHTMLEscape(v any) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
-// handleFunctionCalls calls the functions and returns the function response event.
+// handleFunctionCalls is handleFunctionCallsInOrder for a toolsDict built
+// from f.Tools, whose names are listed in f.Tools order.
+func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation, liveSess agent.LiveSession) (*session.Event, error) {
+	return f.handleFunctionCallsInOrder(ctx, toolsDict, registryOrder(nil, f.Tools, toolsDict), resp, toolConfirmations, liveSess)
+}
+
+// handleFunctionCallsInOrder calls the functions and returns the function
+// response event. toolOrder is the names of toolsDict in registry order (see
+// registryOrder); a response to an unknown name lists them in that order.
 //
 // TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
-func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation, liveSess agent.LiveSession) (mergedEvent *session.Event, err error) {
+func (f *Flow) handleFunctionCallsInOrder(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, toolOrder []string, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation, liveSess agent.LiveSession) (mergedEvent *session.Event, err error) {
 	fnCalls := utils.FunctionCalls(resp.Content)
-	// adk-python lists tools in declaration order; toolsDict is a map, so the
-	// names are sorted to keep the not-found error text deterministic.
-	toolNames := slices.Sorted(maps.Keys(toolsDict))
 
 	// Merged span for parallel tool calls - create only if there is more than one tool call.
 	if len(fnCalls) > 1 {
@@ -1975,8 +1953,12 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 	tasks := make([]func(context.Context), len(fnCalls))
 	for i, fnCall := range fnCalls {
 		tasks[i] = func(taskCtx context.Context) {
+			name := fnCall.Name
+			if name == "" {
+				name = unnamedTool
+			}
 			sctx, span := telemetry.StartExecuteToolSpan(taskCtx, telemetry.StartExecuteToolSpanParams{
-				ToolName: fnCall.Name,
+				ToolName: name,
 				Args:     fnCall.Args,
 			})
 			defer span.End()
@@ -1986,13 +1968,9 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				confirmation = toolConfirmations[fnCall.ID]
 			}
 			toolCtx := agent.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
-			// The callbacks and the tool may edit the arguments; the function
-			// call event keeps the ones the model sent. A call without args
-			// reaches them as an empty map, so a tool that returns its args, as
-			// set_model_response does, returns an object rather than nil.
 			args := cloneArgs(fnCall.Args)
 
-			var result map[string]any
+			var res toolResult
 			var curTool tool.Tool
 			if fnCall.Name == "stop_streaming" {
 				funcToStop, _ := fnCall.Args["function_name"].(string)
@@ -2002,34 +1980,12 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				} else {
 					status = fmt.Sprintf("No active streaming function named %s found", funcToStop)
 				}
-				result = map[string]any{"status": status}
+				res = toolResult{m: map[string]any{"status": status}}
 			} else {
-				var found bool
-				curTool, found = toolsDict[fnCall.Name]
-				if !found {
-					// Before-tool callbacks may answer a call to a tool that does not
-					// exist. Their answer then goes through the on-tool-error and
-					// after-tool callbacks, as for a tool that exists.
-					missing := &fakeTool{name: fnCall.Name}
-					var err error
-					result, err = f.runBeforeToolCallbacks(toolCtx, missing, args)
-					if result != nil || err != nil {
-						result = f.finishToolCall(toolCtx, missing, args, result, err)
-					} else {
-						// Nothing answered and no tool runs, so the after-tool
-						// callbacks are skipped.
-						lookupErr := newToolNotFoundError(fnCall.Name, toolNames)
-						result, err = f.runOnToolErrorCallbacks(toolCtx, missing, args, lookupErr)
-						switch {
-						case err == lookupErr: // No on-tool-error callback answered.
-							result = toolNotFoundResponse(fnCall.Name, toolNames)
-						case err != nil:
-							result = map[string]any{"error": err.Error()}
-						}
-					}
-				} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
+				curTool = toolsDict[fnCall.Name]
+				if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
 					if liveSess != nil {
-						result = map[string]any{"status": "The function is running asynchronously and the results are pending."}
+						res = toolResult{m: map[string]any{"status": "The function is running asynchronously and the results are pending."}}
 						cancelCtx, cancel := toolCtx.WithAgentCancel()
 						cancelToolCtx := &cancelledToolContext{
 							Context:   toolCtx,
@@ -2074,45 +2030,42 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						for chunk, err := range streamTool.RunStream(toolCtx, args) {
 							if err != nil {
 								errText, _ := toolinternal.ModelErrorText(streamTool.Name(), err)
-								result = map[string]any{"error": errText}
+								res = toolResult{m: map[string]any{"error": errText}}
 								break
 							}
 							sb.WriteString(chunk)
 						}
-						if result == nil {
-							result = map[string]any{"result": sb.String()}
+						if res.m == nil {
+							res = toolResult{m: map[string]any{"result": sb.String()}}
 						}
 					}
-				} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
-					err := newToolNotFoundError(fnCall.Name, toolNames)
-					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, args, err)
-					if err != nil {
-						result = map[string]any{"error": err.Error()}
-					}
+				} else if _, ok := curTool.(toolinternal.FunctionTool); ok {
+					res = f.callTool(toolCtx, curTool, args, nil)
 				} else {
-					result = f.callTool(toolCtx, funcTool, args)
+					// A name no runnable tool has is answered like a tool
+					// call, with a placeholder tool, so that callbacks can
+					// answer it (_caller.py:449-455).
+					curTool = &fakeTool{name: name}
+					res = f.callTool(toolCtx, curTool, args, newToolLookupFailure(name, toolOrder))
 				}
 			}
 
-			if result == nil {
+			if isFalsyResult(res) {
 				if d, ok := curTool.(toolinternal.ResponseDeferrer); ok && d.DefersResponse() {
 					return
 				}
 				if curTool != nil && curTool.IsLongRunning() {
 					return
 				}
-				result = map[string]any{"result": nil}
+			}
+			// A tool that returns nothing is answered {"result": nil}, wrapped
+			// after the callbacks saw nil, as adk-python wraps None.
+			if res.m == nil {
+				res = toolResult{m: map[string]any{"result": nil}}
 			}
 
-			parts := []*genai.Part{
-				{
-					FunctionResponse: &genai.FunctionResponse{
-						ID:       fnCall.ID,
-						Name:     fnCall.Name,
-						Response: result,
-					},
-				},
-			}
+			part := buildFunctionResponse(curTool, fnCall.ID, name, res, "")
+			parts := []*genai.Part{part}
 			// SkipSummarization causes the parent agent loop to terminate on this
 			// event (see session.Event.IsFinalResponse) without the LLM ever
 			// seeing the function response. Since most UIs don't render function
@@ -2128,7 +2081,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 			// a visible text part.
 			if actions := toolCtx.Actions(); actions.SkipSummarization {
 				if displayer, ok := curTool.(toolinternal.SkipSummarizationResultDisplayer); ok && displayer.DisplayResultOnSkipSummarization() {
-					if text, ok := displayableToolResultText(result); ok {
+					if text, ok := displayableToolResultText(res.m); ok {
 						parts = append(parts, &genai.Part{Text: text})
 					}
 				}
@@ -2151,10 +2104,10 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 
 			traceTool := curTool
 			if traceTool == nil {
-				traceTool = &fakeTool{name: fnCall.Name}
+				traceTool = &fakeTool{name: name}
 			}
 			var toolErr error
-			resultErr := result["error"]
+			resultErr := part.FunctionResponse.Response["error"]
 			if resultErr != nil {
 				if err, ok := resultErr.(error); ok {
 					toolErr = err
@@ -2190,92 +2143,58 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fA
 	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 }
 
-func (f *Flow) runBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
-	if pluginManager := pluginManagerFromContext(toolCtx); pluginManager != nil {
-		if result, err := pluginManager.RunBeforeToolCallback(toolCtx, tool, fArgs); result != nil || err != nil {
-			return result, err
+// callTool runs one call of t: the before-tool callbacks, then the tool, the
+// on-tool-error callbacks on an error, and the after-tool callbacks. lookup is
+// non-nil when no runnable tool has the called name; t is then the
+// placeholder, which only callbacks see. A before-tool callback can still
+// answer such a call, and the after-tool callbacks then run as for a tool;
+// otherwise the on-tool-error callbacks receive lookup.err and the after-tool
+// callbacks are skipped (_caller.py:529-554).
+func (f *Flow) callTool(toolCtx agent.Context, t tool.Tool, args map[string]any, lookup *toolLookupFailure) toolResult {
+	var response map[string]any
+	var err error
+	pluginManager := pluginManagerFromContext(toolCtx)
+	if pluginManager != nil {
+		response, err = pluginManager.RunBeforeToolCallback(toolCtx, t, args)
+	}
+	if response == nil && err == nil {
+		response, err = f.invokeBeforeToolCallbacks(toolCtx, t, args)
+	}
+	if lookup != nil && response == nil && err == nil {
+		return f.answerLookupFailure(toolCtx, t, args, lookup)
+	}
+
+	res := toolResult{m: response}
+	if response == nil && err == nil {
+		res, err = runTool(toolCtx, t, args)
+	}
+
+	if err != nil {
+		errorResponse, cbErr := f.runOnToolErrorCallbacks(toolCtx, t, args, err)
+		if errorResponse != nil || cbErr != nil {
+			res = toolResult{m: errorResponse}
+			err = cbErr
 		}
 	}
-	return f.invokeBeforeToolCallbacks(toolCtx, tool, fArgs)
-}
 
-func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
-	response, err := f.runBeforeToolCallbacks(toolCtx, tool, fArgs)
-	if response == nil && err == nil {
-		response, err = tool.Run(toolCtx, fArgs)
-	}
-	return f.finishToolCall(toolCtx, tool, fArgs, response, err)
-}
-
-// finishToolCall passes the error of a tool call to the on-tool-error
-// callbacks and its outcome to the after-tool callbacks, and returns the
-// function response for the model.
-func (f *Flow) finishToolCall(toolCtx agent.Context, tool tool.Tool, fArgs, response map[string]any, err error) map[string]any {
-	pluginManager := pluginManagerFromContext(toolCtx)
-	var errorResponse map[string]any
-	var cbErr error
-	if err != nil && pluginManager != nil {
-		errorResponse, cbErr = pluginManager.RunOnToolErrorCallback(toolCtx, tool, fArgs, err)
-	}
-	if err != nil && errorResponse == nil && cbErr == nil {
-		errorResponse, cbErr = f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
-	}
-	if errorResponse != nil || cbErr != nil {
-		response = errorResponse
-		err = cbErr
-	}
-
-	var alteredResponse map[string]any
+	var altered map[string]any
 	var alteredErr error
 	if pluginManager != nil {
-		alteredResponse, alteredErr = pluginManager.RunAfterToolCallback(toolCtx, tool, fArgs, response, err)
+		altered, alteredErr = pluginManager.RunAfterToolCallback(toolCtx, t, args, res.m, err)
 	}
-	if alteredResponse == nil && alteredErr == nil {
-		alteredResponse, alteredErr = f.invokeAfterToolCallbacks(toolCtx, tool, fArgs, response, err)
+	if altered == nil && alteredErr == nil {
+		altered, alteredErr = f.invokeAfterToolCallbacks(toolCtx, t, args, res.m, err)
 	}
-	if alteredResponse != nil || alteredErr != nil {
-		response = alteredResponse
+	if altered != nil || alteredErr != nil {
+		res.m = altered
 		err = alteredErr
 	}
 
 	if err != nil {
-		errText, _ := toolinternal.ModelErrorText(tool.Name(), err)
-		return map[string]any{"error": errText}
+		errText, _ := toolinternal.ModelErrorText(t.Name(), err)
+		return toolResult{m: map[string]any{"error": errText}}
 	}
-	return response
-}
-
-// cloneArgs returns a copy of a function call's arguments for the callbacks
-// and the tool to edit. Nested map[string]any and []any values, the shapes
-// decoded JSON arguments hold, are copied too; other values are shared. A nil
-// map becomes an empty one, so a callback can add an argument to a call that
-// had none.
-func cloneArgs(args map[string]any) map[string]any {
-	out := make(map[string]any, len(args))
-	for k, v := range args {
-		out[k] = cloneArgValue(v)
-	}
-	return out
-}
-
-func cloneArgValue(v any) any {
-	switch t := v.(type) {
-	case map[string]any:
-		if t == nil {
-			return t
-		}
-		return cloneArgs(t)
-	case []any:
-		if t == nil {
-			return t
-		}
-		out := make([]any, len(t))
-		for i, e := range t {
-			out[i] = cloneArgValue(e)
-		}
-		return out
-	}
-	return v
+	return res
 }
 
 func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {

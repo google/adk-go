@@ -27,10 +27,10 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
-	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // Each tool's description is adk-python's docstring for the tool, without the
@@ -126,6 +126,10 @@ func newTool[TArgs any](b *bigQuery, name, description string, run func(agent.Co
 		return nil, fmt.Errorf("bigquerytoolset: inferring the input schema of %s: %w", name, err)
 	}
 	defaulted := b.applyDefaults(schema)
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		return nil, fmt.Errorf("bigquerytoolset: resolving the input schema of %s: %w", name, err)
+	}
 
 	inner, err := functiontool.New(functiontool.Config{
 		Name:        name,
@@ -144,28 +148,75 @@ func newTool[TArgs any](b *bigQuery, name, description string, run func(agent.Co
 	if err != nil {
 		return nil, err
 	}
-	return &nullDefaultsTool{FunctionTool: inner.(toolinternal.FunctionTool), defaulted: defaulted}, nil
+	return &nullDefaultsTool{FunctionTool: inner.(toolinternal.FunctionTool), defaulted: defaulted, schema: resolved}, nil
 }
 
 // nullDefaultsTool treats a null argument that has a configured default like
 // an omitted one, as adk-python's BigQueryTool does. The declaration still
 // says string, so validation rejects the null unless it is dropped first.
+//
+// It also refuses a call that leaves out a required argument or passes one the
+// tool does not declare, with the input schema's validation error. A function
+// tool drops an undeclared argument and answers a missing one with an error
+// result, as adk-python's FunctionTool does (tools/function_tool.py:284,
+// :365-378), and adk-python's BigQueryTool is one; this tool's tests require
+// the refusal.
 type nullDefaultsTool struct {
 	toolinternal.FunctionTool
 	defaulted []string
+	schema    *jsonschema.Resolved
 }
 
-// ProcessRequest registers t rather than the wrapped tool, because the LLM
-// flow calls what is registered on the request.
-func (t *nullDefaultsTool) ProcessRequest(_ agent.Context, req *model.LLMRequest) error {
-	return toolutils.PackTool(req, t)
+// ProcessRequest packs the wrapped tool's declaration for this request, in the
+// form the request's typed-declaration switch and backend ask for, then
+// registers t in its place, because the LLM flow calls what is registered on
+// the request.
+func (t *nullDefaultsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	if err := t.FunctionTool.(toolinternal.RequestProcessor).ProcessRequest(ctx, req); err != nil {
+		return err
+	}
+	req.Tools[t.Name()] = t
+	return nil
 }
 
 // Run drops null defaulted arguments and runs the wrapped tool.
 func (t *nullDefaultsTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+	cleaned := t.clean(args)
+	if err := t.validate(cleaned); err != nil {
+		return nil, err
+	}
+	return t.FunctionTool.Run(ctx, cleaned)
+}
+
+// RunRaw implements toolinternal.RawResultTool for the wrapped function tool:
+// it drops null defaulted arguments and returns the wrapped tool's raw result.
+func (t *nullDefaultsTool) RunRaw(ctx agent.Context, args any) (any, error) {
+	cleaned := t.clean(args)
+	if err := t.validate(cleaned); err != nil {
+		return nil, err
+	}
+	if r, ok := t.FunctionTool.(toolinternal.RawResultTool); ok {
+		return r.RunRaw(ctx, cleaned)
+	}
+	return t.FunctionTool.Run(ctx, cleaned)
+}
+
+// validate checks a map of arguments against the input schema. Any other value
+// is left to the wrapped tool, which refuses it.
+func (t *nullDefaultsTool) validate(args any) error {
 	m, ok := args.(map[string]any)
 	if !ok {
-		return t.FunctionTool.Run(ctx, args)
+		return nil
+	}
+	return typeutil.ValidateWithJSONSchema(m, t.schema)
+}
+
+// clean returns args without the null defaulted arguments; a value that is
+// not a map is returned unchanged. The caller's map is not modified.
+func (t *nullDefaultsTool) clean(args any) any {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return args
 	}
 	cleaned := maps.Clone(m)
 	for _, arg := range t.defaulted {
@@ -173,7 +224,7 @@ func (t *nullDefaultsTool) Run(ctx agent.Context, args any) (map[string]any, err
 			delete(cleaned, arg)
 		}
 	}
-	return t.FunctionTool.Run(ctx, cleaned)
+	return cleaned
 }
 
 // applyDefaults makes each argument with a configured default optional and

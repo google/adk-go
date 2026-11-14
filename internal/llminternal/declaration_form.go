@@ -15,12 +15,8 @@
 package llminternal
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"maps"
-	"reflect"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -28,6 +24,7 @@ import (
 	"google.golang.org/adk/v2/exp/feature"
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/setmodelresponsetool"
@@ -56,7 +53,7 @@ func declarationFor(ctx context.Context, llm model.LLM, t tool.Tool) (toolintern
 		// A typed *genai.Schema already says nullable: true.
 		return ft, nil
 	}
-	flat, err := flattenNullableForVertex(params)
+	flat, err := typeutil.FlattenNullableForVertex(params)
 	if err != nil {
 		return nil, fmt.Errorf("set_model_response declaration for Vertex AI: %w", err)
 	}
@@ -82,95 +79,3 @@ type declaredTool struct {
 }
 
 func (t *declaredTool) Declaration() *genai.FunctionDeclaration { return t.decl }
-
-// flattenNullableForVertex returns a copy of s in which every sub-schema of
-// the form anyOf [X, {"type": "null"}] becomes X plus "nullable": true. The
-// sub-schema's other keywords (description, default) are kept unless X sets
-// the same keyword. A union with more than one non-null arm keeps its anyOf
-// without the null arm and gets "nullable": true; a union without exactly one
-// null arm is left alone. s is not modified.
-//
-// The rewrite works on the JSON value, as adk-python's does, so every keyword
-// of X survives without listing the fields of jsonschema.Schema here.
-func flattenNullableForVertex(s *jsonschema.Schema) (*jsonschema.Schema, error) {
-	b, err := json.Marshal(s)
-	if err != nil {
-		return nil, fmt.Errorf("marshal parameters: %w", err)
-	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return nil, fmt.Errorf("decode parameters: %w", err)
-	}
-	b, err = json.Marshal(sanitizeForVertex(v))
-	if err != nil {
-		return nil, fmt.Errorf("marshal flattened parameters: %w", err)
-	}
-	out := &jsonschema.Schema{}
-	if err := json.Unmarshal(b, out); err != nil {
-		return nil, fmt.Errorf("unmarshal flattened parameters: %w", err)
-	}
-	return out, nil
-}
-
-// sanitizeForVertex ports _sanitize_json_schema_for_vertex: children first,
-// then the value itself.
-func sanitizeForVertex(v any) any {
-	switch v := v.(type) {
-	case []any:
-		out := make([]any, len(v))
-		for i, item := range v {
-			out[i] = sanitizeForVertex(item)
-		}
-		return out
-	case map[string]any:
-		out := make(map[string]any, len(v))
-		for k, item := range v {
-			out[k] = sanitizeForVertex(item)
-		}
-		return flattenOptionalAnyOf(out)
-	default:
-		return v
-	}
-}
-
-// flattenOptionalAnyOf ports _flatten_optional_any_of for one schema whose
-// children are already rewritten.
-func flattenOptionalAnyOf(s map[string]any) map[string]any {
-	anyOf, ok := s["anyOf"].([]any)
-	if !ok || len(anyOf) < 2 {
-		return s
-	}
-	var nulls []any
-	for _, arm := range anyOf {
-		if m, ok := arm.(map[string]any); ok && m["type"] == "null" {
-			nulls = append(nulls, arm)
-		}
-	}
-	if len(nulls) != 1 {
-		return s
-	}
-	var rest []any
-	for _, arm := range anyOf {
-		if !reflect.DeepEqual(arm, nulls[0]) {
-			rest = append(rest, arm)
-		}
-	}
-	if len(rest) == 1 {
-		if x, ok := rest[0].(map[string]any); ok {
-			flat := maps.Clone(x)
-			for k, val := range s {
-				if _, set := flat[k]; !set && k != "anyOf" {
-					flat[k] = val
-				}
-			}
-			flat["nullable"] = true
-			return flat
-		}
-	}
-	flat := maps.Clone(s)
-	flat["anyOf"] = rest
-	flat["nullable"] = true
-	return flat
-}

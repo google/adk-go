@@ -183,8 +183,8 @@ func TestRun_PrefixedToolDispatch(t *testing.T) {
 			t.Fatalf("got %d function response events, want 1: %v", len(frs), events)
 		}
 		msg, _ := frs[0].Content.Parts[0].FunctionResponse.Response["error"].(string)
-		if !strings.HasPrefix(msg, "tool 'deferring' not found.") {
-			t.Errorf("FunctionResponse error = %q, want one starting with %q", msg, "tool 'deferring' not found.")
+		if want := "Invoking `deferring()` failed as no tool with that name is available."; !strings.HasPrefix(msg, want) {
+			t.Errorf("FunctionResponse error = %q, want one starting with %q", msg, want)
 		}
 	})
 
