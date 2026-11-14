@@ -150,7 +150,7 @@ func TestFindActiveTaskIsolationScope(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			sess := buildSessionWithEvents(t, tc.events)
-			if got := findActiveTaskIsolationScope(sess); got != tc.want {
+			if got, _ := findActiveTaskIsolationScope(sess); got != tc.want {
 				t.Errorf("findActiveTaskIsolationScope = %q, want %q", got, tc.want)
 			}
 		})
@@ -159,8 +159,124 @@ func TestFindActiveTaskIsolationScope(t *testing.T) {
 
 func TestFindActiveTaskIsolationScope_NilSession(t *testing.T) {
 	t.Parallel()
-	if got := findActiveTaskIsolationScope(nil); got != "" {
-		t.Errorf("findActiveTaskIsolationScope(nil) = %q, want \"\"", got)
+	if got, gotInv := findActiveTaskIsolationScope(nil); got != "" || gotInv != "" {
+		t.Errorf("findActiveTaskIsolationScope(nil) = (%q, %q), want (\"\", \"\")", got, gotInv)
+	}
+}
+
+// TestFindActiveTaskIsolationScope_TwoPassErrorResultInvocationIDAndRewinds
+// pins the rules of adk-python's _find_active_task_scope (runners.py) beyond
+// the scope itself: a finished scope stays closed whatever follows it, a
+// failed task closes its scope, the invocation of the scoped event is
+// returned, and rewound events do not count.
+func TestFindActiveTaskIsolationScope_TwoPassErrorResultInvocationIDAndRewinds(t *testing.T) {
+	t.Parallel()
+
+	scoped := func(author, scope, invocationID string, part *genai.Part) *session.Event {
+		return &session.Event{
+			Author:         author,
+			InvocationID:   invocationID,
+			IsolationScope: scope,
+			LLMResponse:    model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}},
+		}
+	}
+	text := func(author, scope, invocationID, s string) *session.Event {
+		return scoped(author, scope, invocationID, &genai.Part{Text: s})
+	}
+	finish := func(scope, invocationID, result string) *session.Event {
+		return scoped("user", scope, invocationID, &genai.Part{FunctionResponse: &genai.FunctionResponse{
+			Name:     workflowinternal.FinishTaskToolName,
+			ID:       "ft-1",
+			Response: map[string]any{"result": result},
+		}})
+	}
+	rewind := func(invocationID, before string) *session.Event {
+		ev := &session.Event{Author: "user", InvocationID: invocationID}
+		ev.Actions.RewindBeforeInvocationID = before
+		return ev
+	}
+
+	tests := []struct {
+		name      string
+		events    []*session.Event
+		wantScope string
+		wantInv   string
+	}{
+		{
+			name: "event_after_finish_does_not_reopen_scope",
+			events: []*session.Event{
+				text("task_agent", "sA", "inv-1", "question"),
+				finish("sA", "inv-1", "Task completed."),
+				text("task_agent", "sA", "inv-1", "post-finish status"),
+			},
+		},
+		{
+			name: "failed_task_closes_scope",
+			events: []*session.Event{
+				text("task_agent", "sA", "inv-1", "question"),
+				finish("sA", "inv-1", "Task failed."),
+			},
+		},
+		{
+			name: "invocation_of_newest_scoped_event",
+			events: []*session.Event{
+				text("task_agent", "sA", "inv-1", "q1"),
+				text("user", "sA", "inv-2", "a1"),
+			},
+			wantScope: "sA",
+			wantInv:   "inv-2",
+		},
+		{
+			name: "rewound_finish_reopens_scope",
+			events: []*session.Event{
+				text("task_agent", "sA", "inv-1", "q1"),
+				finish("sA", "inv-2", "Task completed."),
+				rewind("inv-3", "inv-2"),
+			},
+			wantScope: "sA",
+			wantInv:   "inv-1",
+		},
+		{
+			// A model that calls finish_task twice in one turn gets one
+			// event with both responses. As in adk-python, the first
+			// decides, and an error leaves the scope open.
+			name: "first_finish_task_response_decides",
+			events: []*session.Event{
+				text("task_agent", "sA", "inv-1", "q1"),
+				{
+					Author:         "user",
+					InvocationID:   "inv-1",
+					IsolationScope: "sA",
+					LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+						{FunctionResponse: &genai.FunctionResponse{
+							Name: workflowinternal.FinishTaskToolName, ID: "ft-1", Response: map[string]any{"error": "missing result"},
+						}},
+						{FunctionResponse: &genai.FunctionResponse{
+							Name: workflowinternal.FinishTaskToolName, ID: "ft-2", Response: map[string]any{"result": "Task completed."},
+						}},
+					}}},
+				},
+			},
+			wantScope: "sA",
+			wantInv:   "inv-1",
+		},
+		{
+			name: "rewound_scope_is_not_open",
+			events: []*session.Event{
+				text("task_agent", "sA", "inv-1", "q1"),
+				rewind("inv-2", "inv-1"),
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sess := buildSessionWithEvents(t, tc.events)
+			gotScope, gotInv := findActiveTaskIsolationScope(sess)
+			if gotScope != tc.wantScope || gotInv != tc.wantInv {
+				t.Errorf("findActiveTaskIsolationScope = (%q, %q), want (%q, %q)", gotScope, gotInv, tc.wantScope, tc.wantInv)
+			}
+		})
 	}
 }
 

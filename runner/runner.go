@@ -1748,16 +1748,44 @@ func (r *Runner) appendUserEvent(ctx agent.Context, storedSession session.Sessio
 		event.Actions.StateDelta = stateDelta
 	}
 	if event.IsolationScope == "" {
-		if iso := findActiveTaskIsolationScope(storedSession); iso != "" {
+		if iso, _ := findActiveTaskIsolationScope(storedSession); iso != "" {
 			event.IsolationScope = iso
 		}
 	}
 	eventmetadata.MergeIntoEvent(event, runMetadataFromContext(ctx))
+	stampCallBranch(ctx, event)
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 		return nil, fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
 	return event, nil
+}
+
+// stampCallBranch gives ev, a user event not yet appended, the branch of the
+// function call its first function response answers and, when ev has no
+// isolation scope, that call's scope. The call is searched among the events
+// of ctx's invocation only, newest first. ev is left as it is when it has no
+// function response, its first response has no ID, or no event of the
+// invocation holds the call (adk-python runners.py
+// _stamp_event_branch_context).
+func stampCallBranch(ctx agent.InvocationContext, ev *session.Event) {
+	responses := utils.FunctionResponses(ev.Content)
+	if len(responses) == 0 || responses[0].ID == "" {
+		return
+	}
+	events := llminternal.InvocationEvents(ctx, true, false)
+	for _, event := range slices.Backward(events) {
+		for _, call := range utils.FunctionCalls(utils.Content(event)) {
+			if call.ID != responses[0].ID {
+				continue
+			}
+			ev.Branch = event.Branch
+			if ev.IsolationScope == "" {
+				ev.IsolationScope = event.IsolationScope
+			}
+			return
+		}
+	}
 }
 
 // validateNodeRootMessage refuses, on a node root, a message that holds
@@ -1820,45 +1848,60 @@ func asUserContent(msg *genai.Content) *genai.Content {
 	return &out
 }
 
-// findActiveTaskIsolationScope returns the most recent isolation_scope that has
-// not yet been closed by a successful finish_task FunctionResponse.
-func findActiveTaskIsolationScope(sess session.Session) string {
+// findActiveTaskIsolationScope returns the open task delegation of sess: the
+// isolation scope of its newest live event (see utils.ApplyRewinds) whose
+// scope no finish_task response has closed, and that event's invocation ID.
+// It returns two empty strings when sess is nil or no scope is open.
+//
+// A scope is closed when the first finish_task function response of a live
+// event in that scope has the result FinishTaskSuccessResult or
+// FinishTaskErrorResult, wherever the response sits; events after it in the
+// same scope do not reopen it. A response with an error instead of a result
+// leaves the scope open, because the task agent retries. Port of adk-python's
+// _find_active_task_scope (runners.py).
+func findActiveTaskIsolationScope(sess session.Session) (scope, invocationID string) {
 	if sess == nil {
-		return ""
+		return "", ""
 	}
-	events := sess.Events()
-	finished := map[string]struct{}{}
-	for i := events.Len() - 1; i >= 0; i-- {
-		ev := events.At(i)
-		if ev == nil || ev.IsolationScope == "" {
-			continue
-		}
-		scope := ev.IsolationScope
+	// closesTask reports whether the first finish_task function response of
+	// ev ends its task.
+	closesTask := func(ev *session.Event) bool {
 		for _, fr := range utils.FunctionResponses(ev.Content) {
 			if fr == nil || fr.Name != workflowinternal.FinishTaskToolName {
 				continue
 			}
-			if result, ok := fr.Response["result"]; ok {
-				if s, ok := result.(string); ok && s == workflowinternal.FinishTaskSuccessResult {
-					finished[scope] = struct{}{}
-				}
-			}
-			break
+			result, _ := fr.Response["result"].(string)
+			return result == workflowinternal.FinishTaskSuccessResult || result == workflowinternal.FinishTaskErrorResult
 		}
-		if _, done := finished[scope]; done {
+		return false
+	}
+	events := utils.ApplyRewinds(slices.Collect(sess.Events().All()))
+	finished := map[string]struct{}{}
+	for _, ev := range events {
+		if ev.IsolationScope != "" && closesTask(ev) {
+			finished[ev.IsolationScope] = struct{}{}
+		}
+	}
+	for _, ev := range slices.Backward(events) {
+		if ev.IsolationScope == "" {
 			continue
 		}
-		return scope
+		if _, done := finished[ev.IsolationScope]; !done {
+			return ev.IsolationScope, ev.InvocationID
+		}
 	}
-	return ""
+	return "", ""
 }
 
 // classicAgentToRun returns the agent the classic path runs for msg and the
 // branch it runs on.
 //
 // A function response goes back to the agent that made the call, on the
-// branch it ran on (adk-python find_agent_to_run and
-// restore_branch_from_history). Re-running the root would run agents that
+// branch restoreBranchFromHistory gives it within the invocation the
+// responses resolve to leniently, or within the whole session when they
+// resolve to none (adk-python find_agent_to_run, and
+// _setup_context_for_new_invocation with restore_branch_from_history).
+// Re-running the root would run agents that
 // never saw the call, and they fail on the unmatched response. A call made
 // inside a graph workflow is the exception: the root runs, and sequential,
 // parallel and loop agents on the way narrow to the sub-agents holding the
@@ -1870,10 +1913,27 @@ func findActiveTaskIsolationScope(sess session.Session) string {
 // an adk_request_input response; any other response restarts the graph. The
 // first response in the message decides the route.
 func (r *Runner) classicAgentToRun(storedSession session.Session, msg *genai.Content) (agent.Agent, string) {
-	if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
-		if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
-			return sub, ev.Branch
+	responses := utils.FunctionResponses(msg)
+	if len(responses) == 0 {
+		return r.rootAgent, ""
+	}
+	// The call is looked up in the live events only (adk-python
+	// find_agent_to_run reads _apply_rewinds).
+	answers := func(fc *genai.FunctionCall) bool { return fc.ID == responses[0].ID }
+	for _, ev := range slices.Backward(utils.ApplyRewinds(slices.Collect(storedSession.Events().All()))) {
+		if !slices.ContainsFunc(utils.FunctionCalls(ev.Content), answers) {
+			continue
 		}
+		sub := r.rootAgent.FindAgent(ev.Author)
+		if sub == nil || r.isInGraphWorkflow(sub) {
+			return r.rootAgent, ""
+		}
+		// Answers to calls of several invocations search the whole session.
+		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
+		if spansInvocations {
+			invocationID = ""
+		}
+		return sub, r.restoreBranchFromHistory(storedSession, sub, invocationID)
 	}
 	return r.rootAgent, ""
 }
@@ -1897,24 +1957,29 @@ func (r *Runner) usesLegacySubAgentPicker(rootMode llminternal.Mode) bool {
 }
 
 // restoreBranchFromHistory returns the branch agentToRun last ran on, taken
-// from its most recent event in sess that has a branch. A non-empty
-// invocationID limits the search to that invocation's events, so an agent
-// does not continue on a branch of an earlier invocation. The root agent, a
-// node root's stand-in agent, and an agent with no such event, run on the
-// root branch "" (adk-python agents/_agent_router.py
-// restore_branch_from_history; adk-python restores no branch for a node
-// root).
+// from its most recent live event in sess (see utils.ApplyRewinds) that has a
+// branch. A non-empty invocationID limits the search to that invocation's
+// events, so an agent does not continue on a branch of an earlier invocation.
+// An event on a tool's message branch (llminternal.IsToolBranch, over the
+// function calls of the live events) is skipped: the tool published it under
+// the agent's name, but the agent does not run there. The root agent, a node
+// root's stand-in agent, and an agent with no such event, run on the root
+// branch "" (adk-python agents/_agent_router.py restore_branch_from_history;
+// adk-python restores no branch for a node root).
 func (r *Runner) restoreBranchFromHistory(sess session.Session, agentToRun agent.Agent, invocationID string) string {
 	if sess == nil || agentToRun == nil || agentToRun == r.rootAgent || agentToRun == r.standInAgent {
 		return ""
 	}
-	events := sess.Events()
-	for i := events.Len() - 1; i >= 0; i-- {
-		ev := events.At(i)
-		if ev == nil || ev.Branch == "" {
+	events := utils.ApplyRewinds(slices.Collect(sess.Events().All()))
+	callIDs := llminternal.FunctionCallIDs(events)
+	for _, ev := range slices.Backward(events) {
+		if ev.Branch == "" {
 			continue
 		}
 		if invocationID != "" && ev.InvocationID != invocationID {
+			continue
+		}
+		if llminternal.IsToolBranch(ev.Branch, agentToRun.Name(), callIDs) {
 			continue
 		}
 		if ev.Author == agentToRun.Name() {

@@ -22,8 +22,10 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
-// functionCallIDs returns the ids of the function calls in events.
-func functionCallIDs(events []*session.Event) map[string]struct{} {
+// FunctionCallIDs returns the non-empty IDs of the function calls in events.
+// Nil events and events without content are skipped. The result is never
+// nil; it is empty when events holds no call with an ID.
+func FunctionCallIDs(events []*session.Event) map[string]struct{} {
 	ids := make(map[string]struct{})
 	for _, ev := range events {
 		for _, call := range utils.FunctionCalls(utils.Content(ev)) {
@@ -76,4 +78,29 @@ func isToolSubBranchEvent(agentBranch string, ev *session.Event, agentName strin
 		}
 	}
 	return false
+}
+
+// IsToolBranch reports whether branch is the sub-branch a tool publishes its
+// user-facing message on, rather than a branch the node nodeName runs on.
+// callIDs holds the IDs of the function calls recorded in the session (see
+// FunctionCallIDs).
+//
+// branch is "" or a dot-separated path of segments. It is a tool branch when
+// its last segment is "<name>@<id>", split at the last "@", where <id> is in
+// callIDs and <name> is not nodeName. An agent run as a tool is scoped on
+// "<parent>.<agent>@<function call id>", which names the agent itself, so it
+// is that agent's own branch. An empty branch, a last segment without "@",
+// and an ID not in callIDs all give false. Port of adk-python's
+// _BranchPath.is_tool_branch (events/_branch_path.py).
+func IsToolBranch(branch, nodeName string, callIDs map[string]struct{}) bool {
+	segments := strings.Split(branch, ".")
+	leaf := segments[len(segments)-1]
+	i := strings.LastIndex(leaf, "@")
+	if i < 0 {
+		return false
+	}
+	if _, ok := callIDs[leaf[i+1:]]; !ok {
+		return false
+	}
+	return leaf[:i] != nodeName
 }
