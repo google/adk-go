@@ -2778,7 +2778,6 @@ func TestSanitizeRawText(t *testing.T) {
 			{`[ERROR] POST /v1/login: 400: {"msg":"retry\npassword=SECRET123"}`, unparseableJSONPlaceholder},
 			{`[ERROR] POST /v1/login: 400: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`, unparseableJSONPlaceholder},
 			{`POST /v1/login: {"msg":"retry\npassword=SECRET123"} (status 400)`, redactedSensitiveTextPlaceholder},
-			{`{"msg":"password=SECRET123"}`, `{"msg":"password=[REDACTED]}`},
 			{`{"msg":"retry\npassword=dev-SECRET123-password: dial"}`, redactedSensitiveTextPlaceholder},
 			{`{"msg":"retry\npassword=hunter2val token=abc-SECRET123-token: dial"}`, redactedSensitiveTextPlaceholder},
 			{`["retry\npassword=dev-SECRET123-password: dial"]`, redactedSensitiveTextPlaceholder},
@@ -2871,6 +2870,21 @@ func TestSanitizeRawText(t *testing.T) {
 		if got, want := scrubErrorText(`{"msg":"password=SECRET123"}`), `{"msg":"password=[REDACTED]}`; got != want {
 			t.Errorf("scrubErrorText unescaped JSON pair = %q, want %q", got, want)
 		}
+		// Scrubbing the text of the valid JSON value takes its closing quote
+		// with the redacted value. sanitizeRawText keeps that malformed text,
+		// which reads as redacted prose; SmartTruncate fails such text closed
+		// on its next pass, so it fails it closed on the first, and a second
+		// SmartTruncate changes nothing.
+		if got, lost := sanitizeRawText(`{"msg":"password=SECRET123"}`); got != `{"msg":"password=[REDACTED]}` || !lost {
+			t.Errorf("sanitizeRawText(unescaped JSON pair) = (%q, %v), want (%q, true)", got, lost, `{"msg":"password=[REDACTED]}`)
+		}
+		wantBlob := `"` + unparseableJSONPlaceholder + `"`
+		if raw, truncated, err := SmartTruncate(`{"msg":"password=SECRET123"}`, 4096); err != nil || !truncated || string(raw) != wantBlob {
+			t.Errorf("SmartTruncate(unescaped JSON pair) = (%s, %v, %v), want (%s, true, nil)", raw, truncated, err, wantBlob)
+		}
+		if raw, truncated, err := SmartTruncate(unparseableJSONPlaceholder, 4096); err != nil || truncated || string(raw) != wantBlob {
+			t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want unchanged", unparseableJSONPlaceholder, raw, truncated, err)
+		}
 		for _, harmless := range []string{
 			`C:\new\file.txt`,
 			`{"msg":"talk to Ken\ntomorrow"}`,
@@ -2903,8 +2917,10 @@ func TestSanitizeRawText(t *testing.T) {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", pair.raw, got, lost, pair.want)
 			}
 		}
-		if got, want := nestedPairEnd("token=abc rest", len("token=abc "), 0), len("token=abc "); got != want {
-			t.Errorf("nestedPairEnd fallback = %d, want %d", got, want)
+		fallback := "token=abc rest"
+		st := newQuoteScanState(len(fallback))
+		if got, want := nestedPairEndWithState(fallback, len("token=abc "), 0, openQuoteState{}, &st), len("token=abc "); got != want {
+			t.Errorf("nestedPairEndWithState fallback = %d, want %d", got, want)
 		}
 	})
 

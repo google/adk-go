@@ -1146,12 +1146,7 @@ func floatValue(v reflect.Value) any {
 func (s *sanitizer) stringValue(str string, depth int) (string, bool) {
 	var contentLost bool
 	if s.redact {
-		str, _, contentLost = redactJSONTextWithBudget(str, depth, s.budget)
-		scrubbed := scrubErrorText(str)
-		if scrubbed != str {
-			str = scrubbed
-			contentLost = true
-		}
+		str, contentLost = redactStringValue(str, depth, s.budget)
 	}
 	truncatedStr, lengthTruncated := truncateString(str, s.maxLength)
 	return truncatedStr, contentLost || lengthTruncated
