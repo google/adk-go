@@ -19,6 +19,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/abortevents"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -266,6 +267,173 @@ func TestFindActiveTaskIsolationScope_TwoPassErrorResultInvocationIDAndRewinds(t
 				text("task_agent", "sA", "inv-1", "q1"),
 				rewind("inv-2", "inv-1"),
 			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sess := buildSessionWithEvents(t, tc.events)
+			gotScope, gotInv := findActiveTaskIsolationScope(sess)
+			if gotScope != tc.wantScope || gotInv != tc.wantInv {
+				t.Errorf("findActiveTaskIsolationScope = (%q, %q), want (%q, %q)", gotScope, gotInv, tc.wantScope, tc.wantInv)
+			}
+		})
+	}
+}
+
+// TestFindActiveTaskIsolationScope_AbortedInvocations pins the abort rule of
+// adk-python's _find_active_task_scope (runners.py): a scoped event whose
+// invocation has an INVOCATION_ABORTED event anywhere in the live events does
+// not keep its scope open, while scopes of other invocations, and finish_task
+// responses inside an aborted invocation, count as before.
+func TestFindActiveTaskIsolationScope_AbortedInvocations(t *testing.T) {
+	t.Parallel()
+
+	event := func(author, scope, invocationID string, part *genai.Part) *session.Event {
+		ev := &session.Event{Author: author, InvocationID: invocationID, IsolationScope: scope}
+		if part != nil {
+			ev.Content = &genai.Content{Role: "model", Parts: []*genai.Part{part}}
+		}
+		return ev
+	}
+	text := func(author, scope, invocationID, s string) *session.Event {
+		return event(author, scope, invocationID, &genai.Part{Text: s})
+	}
+	call := func(author, scope, invocationID, name, id string) *session.Event {
+		return event(author, scope, invocationID, &genai.Part{FunctionCall: &genai.FunctionCall{Name: name, ID: id}})
+	}
+	finishSuccess := func(scope, invocationID string) *session.Event {
+		return event("user", scope, invocationID, &genai.Part{FunctionResponse: &genai.FunctionResponse{
+			Name:     workflowinternal.FinishTaskToolName,
+			ID:       "ft-A",
+			Response: map[string]any{"result": workflowinternal.FinishTaskSuccessResult},
+		}})
+	}
+	// seal is an abort event answering the call name/id, or with no content
+	// when name is empty.
+	seal := func(author, scope, invocationID, name, id string) *session.Event {
+		var part *genai.Part
+		if name != "" {
+			part = &genai.Part{FunctionResponse: &genai.FunctionResponse{
+				Name:     name,
+				ID:       id,
+				Response: map[string]any{"error": abortevents.Message},
+			}}
+		}
+		ev := event(author, scope, invocationID, part)
+		ev.ErrorCode = abortevents.ErrorCode
+		ev.ErrorMessage = abortevents.Message
+		return ev
+	}
+
+	tests := []struct {
+		name      string
+		events    []*session.Event
+		wantScope string
+		wantInv   string
+	}{
+		{
+			name: "aborted_single_turn_task_returns_empty",
+			events: []*session.Event{
+				call("coordinator", "", "inv-1", "task_worker", "adk-task-A"),
+				call("task_worker", "adk-task-A", "inv-1", "_slow_tool", "fc-slow"),
+				seal("coordinator", "", "inv-1", "task_worker", "adk-task-A"),
+				seal("task_worker", "adk-task-A", "inv-1", "_slow_tool", "fc-slow"),
+			},
+		},
+		{
+			// A turn that joined the paused task under its invocation ID
+			// and was aborted closes the earlier paused reply too.
+			name: "aborted_joined_turn_borrowing_invocation_id_closes_earlier_paused_reply",
+			events: []*session.Event{
+				call("coordinator", "", "inv-1", "task_worker", "adk-task-A"),
+				text("task_worker", "adk-task-A", "inv-1", "Which city?"),
+				text("user", "adk-task-A", "inv-1", "Paris"),
+				call("task_worker", "adk-task-A", "inv-1", "_slow_tool", "fc-slow"),
+				seal("coordinator", "", "inv-1", "task_worker", "adk-task-A"),
+				seal("task_worker", "adk-task-A", "inv-1", "_slow_tool", "fc-slow"),
+			},
+		},
+		{
+			// The rule is per invocation: an aborted turn under a new
+			// invocation ID leaves the earlier paused reply open.
+			name: "aborted_second_turn_with_distinct_invocation_id_keeps_turn1_scope_open",
+			events: []*session.Event{
+				call("coordinator", "", "inv-1", "task_worker", "adk-task-A"),
+				text("task_worker", "adk-task-A", "inv-1", "Which city?"),
+				text("user", "adk-task-A", "inv-2", "Paris"),
+				call("task_worker", "adk-task-A", "inv-2", "_slow_tool", "fc-slow"),
+				seal("task_worker", "adk-task-A", "inv-2", "_slow_tool", "fc-slow"),
+			},
+			wantScope: "adk-task-A",
+			wantInv:   "inv-1",
+		},
+		{
+			name: "newer_aborted_scope_falls_back_to_older_open_scope",
+			events: []*session.Event{
+				text("task_worker", "adk-task-A", "inv-1", "Paused A"),
+				call("task_worker", "adk-task-B", "inv-2", "_slow_tool", "fc-B"),
+				seal("task_worker", "adk-task-B", "inv-2", "_slow_tool", "fc-B"),
+			},
+			wantScope: "adk-task-A",
+			wantInv:   "inv-1",
+		},
+		{
+			// The abort event itself has no scope.
+			name: "newer_aborted_and_older_finished_returns_empty",
+			events: []*session.Event{
+				call("task_worker", "adk-task-A", "inv-1", workflowinternal.FinishTaskToolName, "ft-A"),
+				finishSuccess("adk-task-A", "inv-1"),
+				call("task_worker", "adk-task-B", "inv-2", "_slow_tool", "fc-B"),
+				seal("coordinator", "", "inv-2", "", ""),
+			},
+		},
+		{
+			// A resumed invocation appends events after its seal.
+			name: "abort_event_preceding_later_scoped_event_of_same_invocation_still_closes_scope",
+			events: []*session.Event{
+				seal("coordinator", "", "inv-1", "", ""),
+				call("task_worker", "adk-task-A", "inv-1", "tool_after_resume", "fc-2"),
+			},
+		},
+		{
+			name: "finish_task_in_aborted_invocation_still_marks_scope_finished_against_earlier_clean_invocation",
+			events: []*session.Event{
+				text("task_worker", "adk-task-A", "inv-1", "Paused A"),
+				finishSuccess("adk-task-A", "inv-2"),
+				seal("coordinator", "", "inv-2", "", ""),
+			},
+		},
+		{
+			name: "other_error_code_does_not_close_scope",
+			events: []*session.Event{
+				text("task_worker", "adk-task-A", "inv-1", "Which city?"),
+				{InvocationID: "inv-1", Author: "coordinator", LLMResponse: model.LLMResponse{ErrorCode: "OTHER_ERROR", ErrorMessage: "boom"}},
+			},
+			wantScope: "adk-task-A",
+			wantInv:   "inv-1",
+		},
+		{
+			name: "two_aborted_invocations_close_both_scopes",
+			events: []*session.Event{
+				text("task_worker", "adk-task-A", "inv-1", "Paused A"),
+				seal("coordinator", "", "inv-1", "", ""),
+				text("task_worker", "adk-task-B", "inv-2", "Paused B"),
+				seal("coordinator", "", "inv-2", "", ""),
+			},
+		},
+		{
+			// inv-1 was resumed after inv-2 and aborted; rewinding before
+			// inv-2 drops that seal but keeps inv-1's paused reply.
+			name: "rewound_abort_event_does_not_close_scope",
+			events: []*session.Event{
+				text("task_worker", "adk-task-A", "inv-1", "Paused A"),
+				text("user", "", "inv-2", "Hello"),
+				seal("coordinator", "", "inv-1", "", ""),
+				{InvocationID: "inv-3", Author: "user", Actions: session.EventActions{RewindBeforeInvocationID: "inv-2"}},
+			},
+			wantScope: "adk-task-A",
+			wantInv:   "inv-1",
 		},
 	}
 	for _, tc := range tests {
