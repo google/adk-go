@@ -16,8 +16,10 @@ package runner_test
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -426,6 +428,91 @@ func runResumeTurn(t *testing.T, root agent.Agent, msg *genai.Content, onResume 
 		authors[ev.Author]++
 	}
 	return authors, nil
+}
+
+// TestRun_FunctionResponseAfterSecondPauseInLoop checks a re-entry node that
+// pauses once per pass of a loop. The answer to its first pause is used up by
+// the pass that got it. Sent again while the node waits on its second pause, it
+// must not rerun the node, and the answer to the second pause must be the one
+// the node gets, whether the two pauses share an interrupt ID or not.
+func TestRun_FunctionResponseAfterSecondPauseInLoop(t *testing.T) {
+	tests := []struct {
+		name        string
+		interruptID func(pass int) string
+		// repeatFirst sends the first answer again during the second pause.
+		// With one ID for both pauses it would be the second answer.
+		repeatFirst bool
+	}{
+		{name: "new id per pause", interruptID: func(pass int) string { return "ask-" + strconv.Itoa(pass) }, repeatFirst: true},
+		{name: "same id", interruptID: func(int) string { return "ask" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			passes, runs := 0, 0
+			var answers []any
+			count := workflow.NewFunctionNode("count", func(agent.Context, any) (int, error) {
+				passes++
+				return passes, nil
+			}, workflow.NodeConfig{})
+			ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, pass int, emit func(*session.Event) error) (any, error) {
+				runs++
+				reply, err := workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: tc.interruptID(pass)})
+				if err != nil {
+					return nil, err
+				}
+				answers = append(answers, reply)
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Routes = []string{reply.(string)}
+				ev.Output = reply
+				return nil, emit(ev)
+			}, workflow.NodeConfig{RerunOnResume: new(true)})
+			wf, err := workflowagent.New(workflowagent.Config{
+				Name: "wf",
+				Edges: []workflow.Edge{
+					{From: workflow.Start, To: count},
+					{From: count, To: ask},
+					{From: ask, To: count, Route: workflow.StringRoute("again")},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := runner.New(runner.Config{AppName: "repro", Agent: wf, SessionService: session.InMemoryService(), AutoCreateSession: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := func(msg *genai.Content) error {
+				for _, err := range r.Run(t.Context(), "u", "s", msg, agent.RunConfig{}) {
+					if err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+			answer := func(pass int, reply string) *genai.Content {
+				return resumeContent(tc.interruptID(pass), workflow.WorkflowInputFunctionCallName, reply)
+			}
+
+			if err := run(genai.NewContentFromText("start", genai.RoleUser)); err != nil {
+				t.Fatalf("first turn: %v", err)
+			}
+			if err := run(answer(1, "again")); err != nil {
+				t.Fatalf("answer to the first pause: %v", err)
+			}
+			if tc.repeatFirst {
+				before := runs
+				if err := run(answer(1, "again")); !errors.Is(err, workflow.ErrNothingToResume) || runs != before {
+					t.Errorf("repeated answer to the first pause: error %v, ask ran %d more times, want ErrNothingToResume and no rerun", err, runs-before)
+				}
+			}
+			if err := run(answer(2, "stop")); err != nil {
+				t.Fatalf("answer to the second pause: %v", err)
+			}
+			if want := []any{"again", "stop"}; !slices.Equal(answers, want) {
+				t.Errorf("ask got the answers %v, want %v", answers, want)
+			}
+		})
+	}
 }
 
 // TestRun_FunctionResponseNarrowsOnlyFirstLoopPass checks that a composite

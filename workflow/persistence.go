@@ -91,10 +91,36 @@ type nodeScanState struct {
 	resolvedCount map[string]int
 	// schemas maps an interrupt ID to its declared response schema,
 	// re-extracted from the pause FunctionCall args.
-	schemas  map[string]*jsonschema.Schema
+	schemas map[string]*jsonschema.Schema
+	// consumed holds the answered interrupts of visits that have since
+	// finished. Their responses went to those visits and must not be
+	// handed to a later visit of the node (reached via loop-back
+	// routing), and a repeated answer to one of them resumes nothing.
+	consumed map[string]struct{}
 	branch   string
 	finished bool
 	failed   bool
+}
+
+// consumeResolved marks every answered interrupt as consumed. Called
+// when the node finishes a visit.
+func (s *nodeScanState) consumeResolved() {
+	for id := range s.resolved {
+		if s.consumed == nil {
+			s.consumed = map[string]struct{}{}
+		}
+		s.consumed[id] = struct{}{}
+	}
+}
+
+// reopen forgets a consumed interrupt that a later visit raises again
+// under the same ID, so the new pause waits for its own answer.
+func (s *nodeScanState) reopen(id string) {
+	if _, ok := s.consumed[id]; !ok {
+		return
+	}
+	delete(s.consumed, id)
+	delete(s.resolved, id)
 }
 
 func (s *nodeScanState) addInterrupt(id string) {
@@ -255,6 +281,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			if hasOutput || ev.CustomMetadata[workflowNodeCompletedKey] == true {
 				sf.branch = ev.Branch
 				sf.finished, sf.failed = true, false
+				sf.consumeResolved()
 			} else if outcome := workflowNodeOutcome(ev); outcome != "" {
 				sf.branch = ev.Branch
 				sf.finished = false
@@ -268,6 +295,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			if id == "" {
 				continue
 			}
+			s.reopen(id)
 			s.addInterrupt(id)
 			s.finished = false
 			if s.branch == "" {
@@ -433,10 +461,14 @@ func rerunsOnResume(node Node) bool {
 
 // validateResolved validates each surviving (last-wins) response
 // against its declared schema and returns the responses keyed by
-// interrupt ID. A superseded invalid payload never reaches here.
+// interrupt ID. A superseded invalid payload never reaches here, and
+// neither does a response an earlier visit of the node consumed.
 func validateResolved(scan *nodeScanState) (map[string]any, error) {
 	resumed := map[string]any{}
 	for id, resp := range scan.resolved {
+		if _, done := scan.consumed[id]; done {
+			continue
+		}
 		if sc := scan.schemas[id]; sc != nil {
 			validated, err := validateResumeResponse(resp, sc)
 			if err != nil {

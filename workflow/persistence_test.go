@@ -256,6 +256,87 @@ func TestReconstructRunState_CancellationAfterInterrupt(t *testing.T) {
 	}
 }
 
+// A re-entry node on a loop can pause once per visit. An answer belongs to
+// the visit that got it. Once that visit has finished, the answer must not
+// count for the next pause of the node.
+func TestReconstructRunState_AnswerConsumedByFinishedVisit(t *testing.T) {
+	count := newDummyNode("count")
+	ask := NewFunctionNode("ask", func(agent.Context, any) (any, error) { return nil, nil }, NodeConfig{RerunOnResume: new(true)})
+	wf := mustNew(t, []Edge{
+		{From: Start, To: count},
+		{From: count, To: ask},
+		{From: ask, To: count, Route: StringRoute("again")},
+	})
+	raised := func(id string) *session.Event {
+		return &session.Event{Author: "ask", LongRunningToolIDs: []string{id}}
+	}
+	answered := func(id, payload string) *session.Event {
+		ev := &session.Event{Author: "user"}
+		ev.Content = genai.NewContentFromFunctionResponse(WorkflowInputFunctionCallName, map[string]any{"response": payload}, genai.RoleUser)
+		ev.Content.Parts[0].FunctionResponse.ID = id
+		return ev
+	}
+	finished := &session.Event{Author: "ask", Output: "again", Routes: []string{"again"}}
+	for _, tc := range []struct {
+		name           string
+		history        sliceEvents
+		wantStatus     NodeStatus
+		wantInterrupts []string
+		wantResumed    map[string]any
+	}{
+		{
+			name:           "second_pause_under_a_new_id",
+			history:        sliceEvents{raised("ask-1"), answered("ask-1", "again"), finished, raised("ask-2")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask-2"},
+		},
+		{
+			name:           "repeated_answer_to_the_first_pause",
+			history:        sliceEvents{raised("ask-1"), answered("ask-1", "again"), finished, raised("ask-2"), answered("ask-1", "again")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask-2"},
+		},
+		{
+			name:        "second_pause_answered",
+			history:     sliceEvents{raised("ask-1"), answered("ask-1", "again"), finished, raised("ask-2"), answered("ask-2", "stop")},
+			wantStatus:  NodePending,
+			wantResumed: map[string]any{"ask-2": "stop"},
+		},
+		{
+			name:           "second_pause_under_the_same_id",
+			history:        sliceEvents{raised("ask"), answered("ask", "again"), finished, raised("ask")},
+			wantStatus:     NodeWaiting,
+			wantInterrupts: []string{"ask"},
+		},
+		{
+			name:        "second_pause_under_the_same_id_answered",
+			history:     sliceEvents{raised("ask"), answered("ask", "again"), finished, raised("ask"), answered("ask", "stop")},
+			wantStatus:  NodePending,
+			wantResumed: map[string]any{"ask": "stop"},
+		},
+		{
+			// The visit that got the answer has not finished, so the
+			// answer still belongs to it.
+			name:        "asked_again_before_finishing",
+			history:     sliceEvents{raised("ask"), answered("ask", "again"), raised("ask")},
+			wantStatus:  NodePending,
+			wantResumed: map[string]any{"ask": "again"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, err := wf.ReconstructRunState(fakeSession{events: tc.history}, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ns := nodeState(t, state, "ask")
+			if ns.Status != tc.wantStatus || !reflect.DeepEqual(ns.Interrupts, tc.wantInterrupts) || !reflect.DeepEqual(ns.ResumedInputs, tc.wantResumed) {
+				t.Errorf("ask = status %v, interrupts %v, resumed inputs %v, want status %v, interrupts %v, resumed inputs %v",
+					ns.Status, ns.Interrupts, ns.ResumedInputs, tc.wantStatus, tc.wantInterrupts, tc.wantResumed)
+			}
+		})
+	}
+}
+
 func TestResume_FailedRequesterReceivesResponse(t *testing.T) {
 	var called atomic.Bool
 	ask := NewFunctionNode("ask", func(ctx agent.Context, _ any) (string, error) {
