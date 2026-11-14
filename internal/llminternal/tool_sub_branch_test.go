@@ -103,3 +103,49 @@ func TestBuildContents_SkipsToolSubBranchEvents(t *testing.T) {
 		}
 	})
 }
+
+func TestIsToolBranch(t *testing.T) {
+	callIDs := map[string]struct{}{"fc-1": {}, "1": {}}
+	tests := []struct {
+		name     string
+		branch   string
+		nodeName string
+		want     bool
+	}{
+		{"empty branch", "", "worker", false},
+		{"segment without run id", "worker", "worker", false},
+		{"tool message branch", "do@fc-1", "worker", true},
+		{"tool message branch below a parent", "coordinator.do@fc-1", "worker", true},
+		{"agent run as a tool names itself", "coordinator.worker@fc-1", "worker", false},
+		{"only the last segment counts", "do@fc-1.worker@2", "worker", false},
+		{"id of no recorded call", "do@fc-unknown", "worker", false},
+		{"empty trailing id", "do@", "worker", false},
+		{"split at the last @, name matches", "a@b@fc-1", "a@b", false},
+		{"split at the last @, name differs", "a@b@fc-1", "a", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsToolBranch(tc.branch, tc.nodeName, callIDs); got != tc.want {
+				t.Errorf("IsToolBranch(%q, %q) = %v, want %v", tc.branch, tc.nodeName, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFunctionCallIDs(t *testing.T) {
+	call := func(ids ...string) *session.Event {
+		var parts []*genai.Part
+		for _, id := range ids {
+			parts = append(parts, &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "t"}})
+		}
+		return subBranchEvent("agent", "", &genai.Content{Role: genai.RoleModel, Parts: parts})
+	}
+	events := []*session.Event{nil, subBranchEvent("agent", "", nil), call(""), call("fc-1"), call("fc-2", "fc-3")}
+	want := map[string]struct{}{"fc-1": {}, "fc-2": {}, "fc-3": {}}
+	if diff := cmp.Diff(want, FunctionCallIDs(events)); diff != "" {
+		t.Errorf("FunctionCallIDs mismatch (-want +got):\n%s", diff)
+	}
+	if got := FunctionCallIDs(nil); got == nil || len(got) != 0 {
+		t.Errorf("FunctionCallIDs(nil) = %v, want an empty non-nil map", got)
+	}
+}
