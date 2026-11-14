@@ -201,6 +201,58 @@ func TestProcessRequest(t *testing.T) {
 	}
 }
 
+func TestProcessRequest_RAGRetrievalConfig(t *testing.T) {
+	testCases := []struct {
+		name string
+		cfg  *genai.RAGRetrievalConfig
+	}{
+		{name: "nil"},
+		{name: "empty", cfg: &genai.RAGRetrievalConfig{}},
+		{name: "empty filter", cfg: &genai.RAGRetrievalConfig{Filter: &genai.RAGRetrievalConfigFilter{}}},
+		{name: "empty hybrid search", cfg: &genai.RAGRetrievalConfig{HybridSearch: &genai.RAGRetrievalConfigHybridSearch{}}},
+		{name: "empty ranking", cfg: &genai.RAGRetrievalConfig{Ranking: &genai.RAGRetrievalConfigRanking{}}},
+		{
+			name: "zero values",
+			cfg: &genai.RAGRetrievalConfig{
+				Filter: &genai.RAGRetrievalConfigFilter{
+					VectorDistanceThreshold:   new(float64(0)),
+					VectorSimilarityThreshold: new(float64(0)),
+				},
+				HybridSearch: &genai.RAGRetrievalConfigHybridSearch{Alpha: new(float32(0))},
+				TopK:         new(int32(0)),
+			},
+		},
+		{
+			name: "llm ranker only",
+			cfg: &genai.RAGRetrievalConfig{Ranking: &genai.RAGRetrievalConfigRanking{
+				LlmRanker: &genai.RAGRetrievalConfigRankingLlmRanker{ModelName: "gemini-2.5-flash"},
+			}},
+		},
+		{
+			name: "rank service only",
+			cfg: &genai.RAGRetrievalConfig{Ranking: &genai.RAGRetrievalConfigRanking{
+				RankService: &genai.RAGRetrievalConfigRankingRankService{ModelName: "semantic-ranker-512@latest"},
+			}},
+		},
+		{name: "full", cfg: retrievalConfig()},
+	}
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			tl, err := vertexairagtool.New(vertexairagtool.Config{
+				Description:        "d",
+				RAGResources:       []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus}},
+				RAGRetrievalConfig: tt.cfg,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.cfg, processStore(t, tl).RAGRetrievalConfig); diff != "" {
+				t.Errorf("ProcessRequest() retrieval config mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // processStore runs ProcessRequest on a fresh Gemini request and returns the
 // Vertex RAG store it added.
 func processStore(t *testing.T, tl tool.Tool) *genai.VertexRAGStore {
@@ -219,8 +271,25 @@ func processStore(t *testing.T, tl tool.Tool) *genai.VertexRAGStore {
 func wantStore() *genai.VertexRAGStore {
 	return &genai.VertexRAGStore{
 		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
+		RAGRetrievalConfig:      retrievalConfig(),
 		SimilarityTopK:          new(int32(3)),
 		VectorDistanceThreshold: new(0.5),
+	}
+}
+
+func retrievalConfig() *genai.RAGRetrievalConfig {
+	return &genai.RAGRetrievalConfig{
+		Filter: &genai.RAGRetrievalConfigFilter{
+			MetadataFilter:            "category = \"docs\"",
+			VectorDistanceThreshold:   new(0.4),
+			VectorSimilarityThreshold: new(0.6),
+		},
+		HybridSearch: &genai.RAGRetrievalConfigHybridSearch{Alpha: new(float32(0.7))},
+		Ranking: &genai.RAGRetrievalConfigRanking{
+			LlmRanker:   &genai.RAGRetrievalConfigRankingLlmRanker{ModelName: "gemini-2.5-flash"},
+			RankService: &genai.RAGRetrievalConfigRankingRankService{ModelName: "semantic-ranker-512@latest"},
+		},
+		TopK: new(int32(5)),
 	}
 }
 
@@ -231,9 +300,11 @@ func TestNew_CopiesConfig(t *testing.T) {
 	resources := []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: fileIDs}}
 	topK := int32(3)
 	threshold := 0.5
+	retrieval := retrievalConfig()
 	tl, err := vertexairagtool.New(vertexairagtool.Config{
 		Description:             "d",
 		RAGResources:            resources,
+		RAGRetrievalConfig:      retrieval,
 		SimilarityTopK:          &topK,
 		VectorDistanceThreshold: &threshold,
 	})
@@ -246,6 +317,13 @@ func TestNew_CopiesConfig(t *testing.T) {
 	resources[0] = &genai.VertexRAGStoreRAGResource{RAGCorpus: "projects/other/locations/us-east1/ragCorpora/replaced"}
 	topK = 99
 	threshold = 0.9
+	retrieval.Filter.MetadataFilter = "changed"
+	*retrieval.Filter.VectorDistanceThreshold = 0.9
+	*retrieval.Filter.VectorSimilarityThreshold = 0.1
+	*retrieval.HybridSearch.Alpha = 0.2
+	retrieval.Ranking.LlmRanker.ModelName = "changed-llm"
+	retrieval.Ranking.RankService.ModelName = "changed-ranker"
+	*retrieval.TopK = 99
 
 	if diff := cmp.Diff(wantStore(), processStore(t, tl)); diff != "" {
 		t.Errorf("ProcessRequest() store mismatch (-want +got):\n%s", diff)
@@ -258,6 +336,7 @@ func TestProcessRequest_CopiesStorePerRequest(t *testing.T) {
 	tl, err := vertexairagtool.New(vertexairagtool.Config{
 		Description:             "d",
 		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
+		RAGRetrievalConfig:      retrievalConfig(),
 		SimilarityTopK:          new(int32(3)),
 		VectorDistanceThreshold: new(0.5),
 	})
@@ -271,6 +350,13 @@ func TestProcessRequest_CopiesStorePerRequest(t *testing.T) {
 	first.RAGResources = append(first.RAGResources, &genai.VertexRAGStoreRAGResource{RAGCorpus: "extra"})
 	*first.SimilarityTopK = 99
 	*first.VectorDistanceThreshold = 0.9
+	first.RAGRetrievalConfig.Filter.MetadataFilter = "changed"
+	*first.RAGRetrievalConfig.Filter.VectorDistanceThreshold = 0.9
+	*first.RAGRetrievalConfig.Filter.VectorSimilarityThreshold = 0.1
+	*first.RAGRetrievalConfig.HybridSearch.Alpha = 0.2
+	first.RAGRetrievalConfig.Ranking.LlmRanker.ModelName = "changed-llm"
+	first.RAGRetrievalConfig.Ranking.RankService.ModelName = "changed-ranker"
+	*first.RAGRetrievalConfig.TopK = 99
 
 	if diff := cmp.Diff(wantStore(), processStore(t, tl)); diff != "" {
 		t.Errorf("second ProcessRequest() store mismatch (-want +got):\n%s", diff)
