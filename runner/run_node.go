@@ -303,6 +303,17 @@ func (r *Runner) runNode(
 			continue
 		}
 
+		// A partial event stays its producer's. The workflow forwards it
+		// without waiting for this loop (adk-python
+		// InvocationContext._enqueue_event), so the node's goroutine may still
+		// be reading it, and the runner and its plugins work on a copy of it.
+		// A non-partial event is this loop's until it is yielded, because its
+		// producer waits for that, so it is used as it is.
+		if event.Partial {
+			owned := *event
+			event = &owned
+		}
+
 		// Stamp the agent as author on engine control events that have
 		// none, else a later turn's findAgentToRun logs a spurious
 		// "unknown agent" warning for the empty author.
