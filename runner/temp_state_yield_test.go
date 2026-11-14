@@ -28,6 +28,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
@@ -602,6 +603,21 @@ func TestRunner_RunLive_YieldedEventsHaveNoTempKeys(t *testing.T) {
 	}
 }
 
+// tkGraphRoot is a root graph workflow whose one node records "temp:x" from the
+// session state it runs under.
+func tkGraphRoot(t *testing.T, readTempX *any) agent.Agent {
+	t.Helper()
+	step := workflow.NewFunctionNode("step", func(ctx agent.Context, _ *genai.Content) (string, error) {
+		*readTempX, _ = ctx.State().Get("temp:x")
+		return "ok", nil
+	}, workflow.NodeConfig{})
+	a, err := workflowagent.New(workflowagent.Config{Name: "root", Edges: workflow.Chain(workflow.Start, step)})
+	if err != nil {
+		t.Fatalf("workflowagent.New() error = %v", err)
+	}
+	return a
+}
+
 type tkReadingNode struct {
 	workflow.BaseNode
 	readTempX *any
@@ -626,6 +642,16 @@ func TestRun_YieldedUserEventHasNoTempKeys(t *testing.T) {
 				return runner.Config{Node: &tkReadingNode{BaseNode: workflow.NewBaseNode("reader", "", workflow.NodeConfig{}), readTempX: &readTempX}}
 			},
 			msg: userText("hi"),
+		},
+		{
+			name: "graph_root_with_message",
+			cfg:  func(t *testing.T) runner.Config { return runner.Config{Agent: tkGraphRoot(t, &readTempX)} },
+			msg:  userText("hi"),
+		},
+		{
+			name: "graph_root_content_less",
+			cfg:  func(t *testing.T) runner.Config { return runner.Config{Agent: tkGraphRoot(t, &readTempX)} },
+			msg:  nil,
 		},
 	}
 	for _, tc := range tests {
