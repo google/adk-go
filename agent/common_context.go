@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"sync"
 	"time"
 
@@ -744,6 +745,23 @@ func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 // ErrUnsupportedContext.
 func (c *commonContext) RenderUIWidget(widget session.UIWidget) error {
 	return appendUIWidget(c.actions, widget)
+}
+
+// mergeArtifactDelta implements the contract of [MergeArtifactDelta]. A
+// context without event actions, such as one built by NewContext or Promote,
+// cannot record.
+func (c *commonContext) mergeArtifactDelta(delta map[string]int64) error {
+	if c.actions == nil {
+		return fmt.Errorf("context of type %T cannot record an artifact delta: %w", c, errors.ErrUnsupported)
+	}
+	if len(delta) == 0 {
+		return nil
+	}
+	if c.actions.ArtifactDelta == nil {
+		c.actions.ArtifactDelta = make(map[string]int64, len(delta))
+	}
+	maps.Copy(c.actions.ArtifactDelta, delta)
+	return nil
 }
 
 func (c *commonContext) InvocationContext() InvocationContext {

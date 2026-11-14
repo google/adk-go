@@ -166,6 +166,11 @@ func (c *toolContextWrapper) RenderUIWidget(widget session.UIWidget) error {
 	return RenderUIWidget(c.context, widget)
 }
 
+// mergeArtifactDelta forwards [MergeArtifactDelta] to the wrapped context.
+func (c *toolContextWrapper) mergeArtifactDelta(delta map[string]int64) error {
+	return MergeArtifactDelta(c.context, delta)
+}
+
 // SearchMemory implements [Context].
 func (c *toolContextWrapper) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	return c.context.SearchMemory(ctx, query)
