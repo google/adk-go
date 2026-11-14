@@ -15,6 +15,7 @@
 package agenttool_test
 
 import (
+	"context"
 	"errors"
 	"iter"
 	"log"
@@ -315,6 +316,74 @@ func TestAgentTool_Run_WithoutSchema(t *testing.T) {
 	want := map[string]any{"result": "First text part is returned This should not be ignored"}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("Run() result diff (-want +got):\n%s", diff)
+	}
+}
+
+// Without an input schema, the agent's request is the "request" argument, or,
+// without one, the arguments as adk-python's json.dumps(args,
+// ensure_ascii=False, sort_keys=True) writes them.
+func TestAgentTool_Run_WithoutSchemaRequestText(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{name: "request_argument_wins", args: map[string]any{"request": "find shoes", "brand": "Nike"}, want: "find shoes"},
+		{name: "empty", args: map[string]any{}, want: "{}"},
+		{
+			name: "keys_sorted_non_ascii_kept",
+			args: map[string]any{"product": "Laufschuhe für Damen", "brand": "Nike & Co"},
+			want: `{"brand": "Nike & Co", "product": "Laufschuhe für Damen"}`,
+		},
+		{
+			name: "nested",
+			args: map[string]any{"filter": map[string]any{"size": 38.0, "colors": []any{"rot", "grün"}}},
+			want: `{"filter": {"colors": ["rot", "grün"], "size": 38}}`,
+		},
+		{
+			name: "string_with_quote_comma_colon",
+			args: map[string]any{"note": `say "hi, then: go`},
+			want: `{"note": "say \"hi, then: go"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := &requestTextModel{}
+			ag := createAgentWithModel(t, nil, nil, recorder)
+			toolImpl, ok := agenttool.New(ag, nil).(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
+
+			if _, err := toolImpl.Run(createToolContext(t, ag), tt.args); err != nil {
+				t.Fatalf("Run(%v) failed unexpectedly: %v", tt.args, err)
+			}
+
+			if diff := cmp.Diff([]string{tt.want}, recorder.texts); diff != "" {
+				t.Errorf("request texts the agent's model received (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// requestTextModel answers every request with "done" and records the text of
+// the request's last content.
+type requestTextModel struct {
+	model.LLM
+	texts []string
+}
+
+func (m *requestTextModel) Name() string { return "request-text-mock" }
+
+func (m *requestTextModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		var text string
+		if n := len(req.Contents); n > 0 && len(req.Contents[n-1].Parts) > 0 {
+			text = req.Contents[n-1].Parts[0].Text
+		}
+		m.texts = append(m.texts, text)
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("done", genai.RoleModel)}, nil)
 	}
 }
 
@@ -1001,12 +1070,27 @@ func TestAgentTool_Run_SkipSummarizationNotSetOnInvalidArgs(t *testing.T) {
 		Required: []string{"city", "days"},
 	}
 	tests := []struct {
-		name        string
-		inputSchema *genai.Schema
-		args        map[string]any
+		name          string
+		inputSchema   *genai.Schema
+		args          any
+		wantErrPrefix string
 	}{
-		{name: "input_schema_missing_required", inputSchema: inputSchema, args: map[string]any{"city": "Paris"}},
-		{name: "no_schema_missing_request", args: map[string]any{"query": "Paris"}},
+		{
+			name:          "input_schema_missing_required",
+			inputSchema:   inputSchema,
+			args:          map[string]any{"city": "Paris"},
+			wantErrPrefix: "argument validation failed for agent math_agent: ",
+		},
+		{
+			name:          "no_schema_args_not_an_object",
+			args:          "Paris",
+			wantErrPrefix: "agentTool expects map[string]any arguments, got string",
+		},
+		{
+			name:          "no_schema_args_not_json",
+			args:          map[string]any{"callback": func() {}},
+			wantErrPrefix: "error serializing tool arguments for agent math_agent: ",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1018,8 +1102,12 @@ func TestAgentTool_Run_SkipSummarizationNotSetOnInvalidArgs(t *testing.T) {
 				t.Fatal("agentTool does not implement FunctionTool")
 			}
 
-			if _, err := toolImpl.Run(toolCtx, tt.args); err == nil {
+			_, err := toolImpl.Run(toolCtx, tt.args)
+			if err == nil {
 				t.Fatalf("Run(%v) succeeded unexpectedly, wanted error", tt.args)
+			}
+			if !strings.HasPrefix(err.Error(), tt.wantErrPrefix) {
+				t.Errorf("Run(%v) error = %q, want prefix %q", tt.args, err, tt.wantErrPrefix)
 			}
 
 			if toolCtx.Actions().SkipSummarization {

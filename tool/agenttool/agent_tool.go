@@ -18,6 +18,7 @@
 package agenttool
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -122,6 +123,10 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 // Run executes the wrapped agent with the provided arguments.
 // It creates a new session for the sub-agent, runs the agent, and returns
 // the final result. Artifacts are accessed through the parent tool context.
+//
+// When the agent has no input schema, its request is the "request" argument,
+// or, when the arguments have none, the arguments as JSON text with sorted
+// keys, as adk-python sends them.
 func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
@@ -146,14 +151,15 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		}
 		content = genai.NewContentFromText(string(jsonData), genai.RoleUser)
 	} else {
-		input, ok := margs["request"]
-		if !ok {
-			return nil, fmt.Errorf("missing required argument 'request' for agent %s", t.agent.Name())
-		}
-		inputText, ok := input.(string)
-		if !ok {
-			// Try to convert to string if not already one
-			inputText = fmt.Sprint(input)
+		var inputText string
+		if input, ok := margs["request"]; ok {
+			inputText, ok = input.(string)
+			if !ok {
+				// Try to convert to string if not already one
+				inputText = fmt.Sprint(input)
+			}
+		} else if inputText, err = pythonJSON(margs); err != nil {
+			return nil, fmt.Errorf("error serializing tool arguments for agent %s: %w", t.agent.Name(), err)
 		}
 		content = genai.NewContentFromText(inputText, genai.RoleUser)
 	}
@@ -342,6 +348,45 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 // run_async) and the flow wraps it.
 func noTextResult(abortMessage string) map[string]any {
 	return map[string]any{"result": abortMessage}
+}
+
+// pythonJSON writes v the way adk-python's json.dumps(v, ensure_ascii=False,
+// sort_keys=True) writes it (tools/agent_tool.py, run_async): map keys
+// sorted, ", " and ": " between items, and no escaping of non-ASCII or of &,
+// < and >. Some differences remain. Go always escapes U+2028 and U+2029.
+// Go formats some floats differently from Python's repr:
+//
+//	value     Go                  Python
+//	38.0      38                  38.0
+//	0.00001   0.00001             1e-05
+//	1e-7      1e-7                1e-07
+//	1e16      10000000000000000   1e+16
+//	-0.0      -0                  -0.0
+func pythonJSON(v any) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	var out strings.Builder
+	inString, escaped := false, false
+	// Multi-byte UTF-8 sequences hold no ASCII bytes, so a byte scan finds
+	// every quote, backslash, comma and colon.
+	for _, c := range bytes.TrimSuffix(buf.Bytes(), []byte("\n")) {
+		out.WriteByte(c)
+		switch {
+		case escaped:
+			escaped = false
+		case inString && c == '\\':
+			escaped = true
+		case c == '"':
+			inString = !inString
+		case !inString && (c == ',' || c == ':'):
+			out.WriteByte(' ')
+		}
+	}
+	return out.String(), nil
 }
 
 // parseJSONOutput parses the reply of a sub-agent that has an

@@ -223,6 +223,9 @@ func WithYieldUserMessage() RunOption {
 // no user message of the invocation is stored and msg is nil ("no user
 // message available for resuming invocation: <id>").
 //
+// With [WithAbortSignal], the abort applies to the resumed invocation as to a
+// new one.
+//
 // The option is safe to use from concurrent Run calls.
 func WithInvocationID(id string) RunOption {
 	return func(o *runOptions) {
@@ -267,6 +270,23 @@ func WithInvocationID(id string) RunOption {
 // message, runs the before-run and after-run callbacks, runs no agent or
 // workflow, and seals the invocation. A signal closed after the run ended
 // does nothing.
+//
+// A resumed run takes the signal like any other run: see [WithInvocationID].
+// The signal belongs to one call of Run. Each call that finds it closed seals
+// the calls of the invocation that are still unanswered at that moment,
+// including calls of earlier runs, so an invocation that was aborted, resumed
+// and aborted again is sealed again; a call that an earlier seal answered is
+// not sealed twice, and when no call is open the run appends the event with
+// no content. A sealed call counts as answered: when the seal answers the
+// calls of a single call event, resuming the aborted invocation continues from
+// the sealed responses and does not run those calls' tools again. A resume
+// with no message whose signal is closed before it starts stores no user
+// event; with [WithStateDelta] it still stores the event with no content that
+// carries the delta. On the classic path of a resumable runner (a root that
+// is neither an LlmAgent nor a [Config.Node], with [Config.Resumable] set), a
+// resume of an agent that has already ended returns at once and writes
+// nothing, even when the signal is closed. On the node path the resumed run is
+// sealed like any other.
 //
 // A nil channel means no abort monitoring; the run behaves as without the
 // option. [Runner.RunLive] ignores the option. One channel may be given to
