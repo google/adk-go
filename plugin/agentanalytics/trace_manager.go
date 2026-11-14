@@ -3532,14 +3532,15 @@ func (tm *traceManager) clearError(ctx context.Context, id identity, key string)
 //     agent outside a parallel branch that writes an event and then returns
 //     an error, or an AfterAgentCallback that returns an error when no
 //     parallel sibling is still open. Because contextFailureCause returns a
-//     cause only when the outermost span sharing it is a parallel branch
-//     (top.isParallelBranch), any cause recorded on a custom agent's own
-//     WithCancelCause is ignored (and is not promoted into retiredCauses by
-//     retireAgentLocked), whether the custom agent handles the sub-agent's
-//     failure or propagates it after the sub-agent already emitted content,
-//     and including when a ParallelAgent runs under such a canceled outer
-//     context. The callbacks see the same as for a caller that stopped
-//     reading once it had the response.
+//     cause only when some span on the walk sharing it is a parallel branch,
+//     any cause recorded on a custom agent's own WithCancelCause with no
+//     parallel branch on that walk is ignored (and is not promoted into
+//     retiredCauses by retireAgentLocked), whether the custom agent handles
+//     the sub-agent's failure or propagates it after the sub-agent already
+//     emitted content. When a ParallelAgent runs under such a canceled outer
+//     context, a parallel branch on the walk keeps the cause (#1984). The
+//     callbacks otherwise see the same as for a caller that stopped reading
+//     once it had the response.
 //   - A run that fails without a recorded error, and without starting more
 //     work, after a partial event, such as a custom agent that writes a
 //     progress event without content and then returns an error. The
@@ -4991,29 +4992,33 @@ func (rec *spanRecord) isParallelBranch() bool {
 // contextFailureCause returns the rawContextFailureCause of rec's own context
 // scoped to a parallel agent branch. When rec's context ended with a
 // qualifying cause (neither context.Canceled nor bare
-// context.DeadlineExceeded), it walks up rec's ancestors to the outermost
-// span sharing such a context cause and returns that cause only when that
-// outermost span is a parallel branch (top.isParallelBranch). Because
-// top.isParallelBranch is false for custom agents and their sub-agents when a
-// custom agent cancels its own context.WithCancelCause(ic), any cause
-// recorded on a custom agent's WithCancelCause is ignored by
-// contextFailureCause (and is therefore not promoted into retiredCauses by
-// retireAgentLocked either), whether the custom agent handles the sub-agent's
-// failure or propagates it after the sub-agent already emitted content, and
-// including when a ParallelAgent runs under such a canceled outer context.
+// context.DeadlineExceeded), it walks up rec's ancestors while they share such
+// a context cause and returns that cause if any span on the walk is a parallel
+// branch. Checking only the outermost span used to drop a parallel branch's
+// cause when a custom WithCancelCause parent sat above the ParallelAgent
+// (#1984). A custom agent that cancels its own context.WithCancelCause without
+// a parallel branch on the walk still returns nil (and the cause is not
+// promoted into retiredCauses by retireAgentLocked), whether the custom agent
+// handles the sub-agent's failure or propagates it after the sub-agent already
+// emitted content.
 func (rec *spanRecord) contextFailureCause() error {
 	cause := rec.rawContextFailureCause()
 	if cause == nil {
 		return nil
 	}
-	top := rec
-	for top.parent != nil && top.parent.rawContextFailureCause() != nil {
-		top = top.parent
+	// Keep the cause when any span from rec up through the outermost span that
+	// shares it is a parallel branch. Climbing past a ParallelAgent to a custom
+	// WithCancelCause parent used to drop the branch's cause because only the
+	// outermost span was checked (see #1984). A custom agent alone still
+	// returns nil: no span on the walk is a parallel branch.
+	for cur := rec; ; cur = cur.parent {
+		if cur.isParallelBranch() {
+			return cause
+		}
+		if cur.parent == nil || cur.parent.rawContextFailureCause() == nil {
+			return nil
+		}
 	}
-	if !top.isParallelBranch() {
-		return nil
-	}
-	return cause
 }
 
 // openFailureCause returns rec's contextFailureCause, or else the first of
