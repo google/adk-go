@@ -37,33 +37,42 @@ func nlPlanningRequestProcessor(ctx agent.InvocationContext, req *model.LLMReque
 // own entry of req.Config.Tools, creating the config when it is nil, or fails
 // when the request's model name is not a Gemini name and
 // ADK_DISABLE_GEMINI_MODEL_ID_CHECK is not set (adk-python
-// code_executors/built_in_code_executor.py, process_llm_request). It leaves
-// req unchanged for a nil executor and for any other executor.
+// code_executors/built_in_code_executor.py, process_llm_request). Then, for
+// every executor, it replaces the code execution parts of req.Contents with
+// fenced text (adk-python flows/llm_flows/extensions/_code_execution.py),
+// without editing the contents it replaces. It leaves req unchanged for a nil
+// executor.
 func codeExecutionRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		if _, ok := getCodeExecutor(ctx).(codeexecutor.BuiltIn); !ok {
+		exec := getCodeExecutor(ctx)
+		if exec == nil {
 			return
 		}
-		ok := googlellm.IsGeminiModelExact(req.Model) || googlellm.IsGeminiModelIDCheckDisabled()
-		if !ok {
-			yield(nil, fmt.Errorf("Gemini code execution tool is not supported for model %s", req.Model)) //nolint:staticcheck // ST1005: the message text is pinned by adk-python and by the conformance test
-			return
+		if _, ok := exec.(codeexecutor.BuiltIn); ok {
+			ok := googlellm.IsGeminiModelExact(req.Model) || googlellm.IsGeminiModelIDCheckDisabled()
+			if !ok {
+				yield(nil, fmt.Errorf("Gemini code execution tool is not supported for model %s", req.Model)) //nolint:staticcheck // ST1005: the message text is pinned by adk-python and by the conformance test
+				return
+			}
+			if req.Config == nil {
+				req.Config = &genai.GenerateContentConfig{}
+			}
+			req.Config.Tools = append(req.Config.Tools, &genai.Tool{CodeExecution: &genai.ToolCodeExecution{}})
 		}
-		if req.Config == nil {
-			req.Config = &genai.GenerateContentConfig{}
-		}
-		req.Config.Tools = append(req.Config.Tools, &genai.Tool{CodeExecution: &genai.ToolCodeExecution{}})
+		convertCodeExecutionHistory(req.Contents, exec.Settings())
 	}
 }
 
-func nlPlanningResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
+func nlPlanningResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error] {
 	// TODO: implement (adk-python src/google/adk/_nl_planning.py)
-	return nil
+	return func(yield func(*session.Event, error) bool) {}
 }
 
-func codeExecutionResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
-	// TODO: implement (adk-python src/google/adk_code_execution.py)
-	return nil
+// codeExecutionResponseProcessor runs the code the model wrote and emits the
+// code, result and image events; see codeExecutionPostProcess. req is not
+// used.
+func codeExecutionResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error] {
+	return codeExecutionPostProcess(ctx, resp)
 }
 
 // getCodeExecutor returns the code executor of the agent in ctx, or nil when
