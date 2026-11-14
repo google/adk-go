@@ -32,6 +32,7 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -486,6 +487,127 @@ func TestCallTool(t *testing.T) {
 			}
 			if tc.check != nil {
 				tc.check(t)
+			}
+		})
+	}
+}
+
+func TestHandleFunctionCalls_CallbackArgEditsDoNotReachTheCallEvent(t *testing.T) {
+	echoTool := &mockFunctionTool{
+		name: "echo",
+		runFunc: func(_ agent.Context, args map[string]any) (map[string]any, error) {
+			return map[string]any{"args": args}, nil
+		},
+	}
+	echoArgs := func(_ agent.Context, _ tool.Tool, args map[string]any, _ error) (map[string]any, error) {
+		args["input_str"] = "modified_input"
+		return map[string]any{"args": args}, nil
+	}
+	for _, tc := range []struct {
+		name         string
+		toolName     string
+		callArgs     map[string]any
+		before       BeforeToolCallback
+		onToolError  OnToolErrorCallback
+		wantResponse map[string]any
+		wantCallArgs map[string]any
+	}{
+		{
+			name:     "before-tool callback adds an argument",
+			toolName: "echo",
+			callArgs: map[string]any{},
+			before: func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				args["input_str"] = "modified_input"
+				return nil, nil
+			},
+			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
+			wantCallArgs: map[string]any{},
+		},
+		{
+			name:     "before-tool callback adds an argument to a call without arguments",
+			toolName: "echo",
+			callArgs: nil,
+			before: func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				args["input_str"] = "modified_input"
+				return nil, nil
+			},
+			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
+			wantCallArgs: nil,
+		},
+		{
+			name:     "before-tool callback edits a nested object",
+			toolName: "echo",
+			callArgs: map[string]any{"filter": map[string]any{"limit": 1}},
+			before: func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				args["filter"].(map[string]any)["limit"] = 2
+				return nil, nil
+			},
+			wantResponse: map[string]any{"args": map[string]any{"filter": map[string]any{"limit": 2}}},
+			wantCallArgs: map[string]any{"filter": map[string]any{"limit": 1}},
+		},
+		{
+			name:     "before-tool callback edits a nested list",
+			toolName: "echo",
+			callArgs: map[string]any{"tags": []any{"a", map[string]any{"k": "v"}}},
+			before: func(_ agent.Context, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				tags := args["tags"].([]any)
+				tags[0] = "b"
+				tags[1].(map[string]any)["k"] = "w"
+				return nil, nil
+			},
+			wantResponse: map[string]any{"args": map[string]any{"tags": []any{"b", map[string]any{"k": "w"}}}},
+			wantCallArgs: map[string]any{"tags": []any{"a", map[string]any{"k": "v"}}},
+		},
+		{
+			name:         "nil nested values stay nil",
+			toolName:     "echo",
+			callArgs:     map[string]any{"filter": map[string]any(nil), "tags": []any(nil)},
+			wantResponse: map[string]any{"args": map[string]any{"filter": map[string]any(nil), "tags": []any(nil)}},
+			wantCallArgs: map[string]any{"filter": map[string]any(nil), "tags": []any(nil)},
+		},
+		{
+			name:         "on-tool-error callback edits the arguments of an unknown tool",
+			toolName:     "missing",
+			callArgs:     map[string]any{"input_str": "original"},
+			onToolError:  echoArgs,
+			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
+			wantCallArgs: map[string]any{"input_str": "original"},
+		},
+		{
+			name:         "on-tool-error callback edits the arguments of a tool that cannot run",
+			toolName:     "plain",
+			callArgs:     map[string]any{"input_str": "original"},
+			onToolError:  echoArgs,
+			wantResponse: map[string]any{"args": map[string]any{"input_str": "modified_input"}},
+			wantCallArgs: map[string]any{"input_str": "original"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &Flow{}
+			if tc.before != nil {
+				f.BeforeToolCallbacks = []BeforeToolCallback{tc.before}
+			}
+			if tc.onToolError != nil {
+				f.OnToolErrorCallbacks = []OnToolErrorCallback{tc.onToolError}
+			}
+			call := &genai.FunctionCall{ID: "call_1", Name: tc.toolName, Args: tc.callArgs}
+			resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}}}
+			toolsDict := map[string]tool.Tool{"echo": echoTool, "plain": &fakeTool{name: "plain"}}
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				InvocationID: "inv_1",
+				Agent:        &mockAgent{name: "agent_1"},
+			})
+
+			ev, err := f.handleFunctionCalls(invCtx, toolsDict, resp, nil, nil)
+			if err != nil {
+				t.Fatalf("handleFunctionCalls() error = %v", err)
+			}
+
+			if diff := cmp.Diff(tc.wantResponse, ev.LLMResponse.Content.Parts[0].FunctionResponse.Response); diff != "" {
+				t.Errorf("function response mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantCallArgs, call.Args); diff != "" {
+				t.Errorf("function call args mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -1273,6 +1395,59 @@ func TestRun_ThoughtOnlyTurnCountResets(t *testing.T) {
 	}
 }
 
+// A response without content is dropped unless it carries something the
+// caller needs, such as grounding metadata from a search tool.
+func TestRunKeepsGroundingOnlyResponse(t *testing.T) {
+	grounding := &genai.GroundingMetadata{WebSearchQueries: []string{"test query"}}
+	tests := []struct {
+		name string
+		resp *model.LLMResponse
+		want []*genai.GroundingMetadata
+	}{
+		{
+			name: "grounding metadata only",
+			resp: &model.LLMResponse{GroundingMetadata: grounding},
+			want: []*genai.GroundingMetadata{grounding},
+		},
+		{
+			name: "empty response",
+			resp: &model.LLMResponse{},
+			want: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						yield(tc.resp, nil)
+					}
+				},
+			}
+			f := &Flow{Model: m}
+			ctx := icontext.NewInvocationContext(
+				runconfig.ToContext(t.Context(), &runconfig.RunConfig{}),
+				icontext.InvocationContextParams{
+					InvocationID: "inv_1",
+					Agent:        &mockAgent{name: "agent_1"},
+				},
+			)
+
+			var got []*genai.GroundingMetadata
+			for ev, err := range f.Run(ctx) {
+				if err != nil {
+					t.Fatalf("Run() yielded error: %v", err)
+				}
+				got = append(got, ev.GroundingMetadata)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("Run() event grounding metadata mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestFlowRunPartialLastEvent verifies that Flow.Run does not return an error
 // when the last event from runOneStep has Partial=true.
 // This is a regression test for https://github.com/google/adk-go/issues/600.
@@ -1539,6 +1714,118 @@ func TestCallLLMSkipsNilResponseAndContinues(t *testing.T) {
 			}
 			if gotResponses != tc.wantResponses {
 				t.Fatalf("callLLM() yielded %d responses, want %d", gotResponses, tc.wantResponses)
+			}
+		})
+	}
+}
+
+// A model response event's id comes from the UUID provider on the context.
+// generateContent draws an id when a response arrives, never ahead of one, and
+// draws one id for each distinct event id across the responses it yields.
+func TestGenerateContentDrawsOneIDPerEvent(t *testing.T) {
+	text := func(s string) *genai.Content { return genai.NewContentFromText(s, genai.RoleModel) }
+	type yielded struct {
+		resp *model.LLMResponse
+		err  error
+	}
+	boom := errors.New("boom")
+	for _, tc := range []struct {
+		name      string
+		responses []yielded
+		wantIDs   []string
+		wantErrs  []error
+		wantDraws int
+	}{
+		{
+			name:      "no responses draw no ids",
+			responses: nil,
+			wantIDs:   nil,
+			wantErrs:  nil,
+			wantDraws: 0,
+		},
+		{
+			name:      "an empty response draws no ids",
+			responses: []yielded{{}},
+			wantIDs:   nil,
+			wantErrs:  nil,
+			wantDraws: 0,
+		},
+		{
+			name:      "one complete response",
+			responses: []yielded{{resp: &model.LLMResponse{Content: text("done")}}},
+			wantIDs:   []string{"id-1"},
+			wantErrs:  []error{nil},
+			wantDraws: 1,
+		},
+		{
+			name: "partials share the id of the response that completes them",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("a"), Partial: true}},
+				{resp: &model.LLMResponse{Content: text("b"), Partial: true}},
+				{resp: &model.LLMResponse{Content: text("ab")}},
+			},
+			wantIDs:   []string{"id-1", "id-1", "id-1"},
+			wantErrs:  []error{nil, nil, nil},
+			wantDraws: 1,
+		},
+		{
+			name: "each complete response gets its own id",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("first")}},
+				{resp: &model.LLMResponse{Content: text("second")}},
+			},
+			wantIDs:   []string{"id-1", "id-2"},
+			wantErrs:  []error{nil, nil},
+			wantDraws: 2,
+		},
+		{
+			name: "an error ends the id",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("a"), Partial: true}},
+				{resp: &model.LLMResponse{Content: text("b"), Partial: true}, err: boom},
+				{resp: &model.LLMResponse{Content: text("after")}},
+			},
+			wantIDs:   []string{"id-1", "id-1", "id-2"},
+			wantErrs:  []error{nil, boom, nil},
+			wantDraws: 2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			draws := 0
+			ctx := platform.WithUUIDProvider(t.Context(), func() string {
+				draws++
+				return fmt.Sprintf("id-%d", draws)
+			})
+			invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{InvocationID: "inv-1"})
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						for _, r := range tc.responses {
+							if !yield(r.resp, r.err) {
+								return
+							}
+						}
+					}
+				},
+			}
+
+			var gotIDs []string
+			var gotErrs []error
+			for resp, err := range generateContent(invCtx, m, &model.LLMRequest{}, true) {
+				gotIDs = append(gotIDs, resp.eventID)
+				gotErrs = append(gotErrs, err)
+			}
+
+			if diff := cmp.Diff(tc.wantIDs, gotIDs); diff != "" {
+				t.Errorf("event ids mismatch (-want +got):\n%s", diff)
+			}
+			sameErr := cmp.Comparer(func(a, b error) bool { return a == b })
+			if diff := cmp.Diff(tc.wantErrs, gotErrs, sameErr); diff != "" {
+				t.Errorf("errors mismatch (-want +got):\n%s", diff)
+			}
+			if draws != tc.wantDraws {
+				t.Errorf("drew %d ids from the provider, want %d", draws, tc.wantDraws)
 			}
 		})
 	}

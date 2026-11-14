@@ -367,9 +367,7 @@ func TestLLMClassifierRequestConstruction(t *testing.T) {
 		if cfg.ResponseMIMEType != "application/json" {
 			t.Errorf("ResponseMIMEType = %q, want application/json", cfg.ResponseMIMEType)
 		}
-		zero := 0.0
-		one := 1.0
-		numProp := &genai.Schema{Type: genai.TypeNumber, Minimum: &zero, Maximum: &one}
+		numProp := &genai.Schema{Type: genai.TypeNumber, Minimum: new(0.0), Maximum: new(1.0)}
 		wantSchema := &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
@@ -879,10 +877,9 @@ func TestLLMClassifierEndToEndWithGeminiModelAndWorkflowNode(t *testing.T) {
 		t.Fatalf("gemini.NewModel() error: %v", err)
 	}
 
-	temp := float32(0.0)
 	clf, err := classifier.NewLLM(classifier.LLMConfig{
 		Model:                 gemModel,
-		GenerateContentConfig: &genai.GenerateContentConfig{Temperature: &temp},
+		GenerateContentConfig: &genai.GenerateContentConfig{Temperature: new(float32(0.0))},
 	})
 	if err != nil {
 		t.Fatalf("NewLLM() error: %v", err)

@@ -128,16 +128,13 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	// not on a tool sub-branch below it, in its isolation scope, and not
 	// excluded.
 	visible := func(ev *session.Event) bool {
-		content := utils.Content(ev)
 		// Skip events without content or generated neither by user nor
 		// by model, UNLESS they have transcriptions.
 		//
 		// Compaction events are exempt: they carry their summary on
 		// Actions.Compaction rather than on Content, and compaction.Apply
 		// below expands them into content.
-		if (content == nil || content.Role == "" || len(content.Parts) == 0) &&
-			ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil &&
-			!compactioninternal.HasUsableSummary(ev) {
+		if isEmptyEvent(ev) {
 			// TODO: log a bad event with content but no Role is skipped
 			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
 			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
@@ -845,6 +842,13 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		if len(unanswered) > 0 {
 			continue
 		}
+		// An event that gives the model nothing to read is left out of the
+		// contents, so it cannot start the turn either: it would slice out
+		// the input before it (matching adk-python's
+		// _should_include_event_in_context gate here).
+		if isEmptyEvent(event) {
+			continue
+		}
 		// An event discarded by foreign conversion cannot start a visible
 		// turn: keep searching so it does not slice out the preceding input.
 		if isOtherAgentReply(agentName, event) && !compactioninternal.HasUsableSummary(event) && ConvertForeignEvent(event) == nil {
@@ -875,6 +879,15 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
 	// but that may be a bug.
 	return buildContentsDefault(agentName, branch, isolationScope, events, isSingleTurn, userContent)
+}
+
+// isEmptyEvent reports whether ev gives the model nothing to read: no content
+// with a role and parts, no transcription and no usable compaction summary.
+func isEmptyEvent(ev *session.Event) bool {
+	content := utils.Content(ev)
+	return (content == nil || content.Role == "" || len(content.Parts) == 0) &&
+		ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil &&
+		!compactioninternal.HasUsableSummary(ev)
 }
 
 // isSubmittedToolResult reports whether ev is a tool result the caller posted
