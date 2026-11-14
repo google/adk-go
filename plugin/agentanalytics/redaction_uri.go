@@ -37,21 +37,50 @@ import (
 // or a segment (/token:...) are redacted too. The bool result reports whether
 // the URI was changed.
 func sanitizeURI(raw string) (string, bool) {
-	return sanitizeURIWith(raw, redactURIComponent, true)
+	return sanitizeURIWith(raw, redactURIComponent, scannerURIKeys)
 }
+
+// uriKeys tells sanitizeURIWith which names of a URI are sensitive: the path
+// segments that start a /<key>/<value> pair, and the keys of path segment,
+// query and fragment pairs whose values are redacted. decodeQueryKeys reads
+// each query key with each "+" as a space, as redactQueryComponent and
+// url.QueryUnescape read a query, and also counts a key that ends in a
+// sensitive key name after a space or another byte that no key name holds
+// (see sanitizeQueryPairs). scrubKeys scrubs such a key as text too, as any
+// other key is, so that a credential written before the key name, as the
+// Bearer SECRET of ?Bearer+SECRET+token=..., which the text scrub of a key
+// that is no sensitive key redacts, is redacted with it.
+type uriKeys struct {
+	pathSegment, key func(string) bool
+	decodeQueryKeys  bool
+	scrubKeys        bool
+}
+
+var (
+	// scannerURIKeys are the names that sanitizeURI reads as sensitive.
+	scannerURIKeys = uriKeys{isSensitivePathSegment, isSensitiveKey, true, true}
+	// legacyURIKeys are the names that the expressions on main read as
+	// sensitive in a URI, with a "+" in a key read as itself (see
+	// isLegacySensitiveKey), and whose own text main kept, so that the
+	// legacy scrub leaves for its text passes what main left (see
+	// legacyScrubTokensTraced).
+	legacyURIKeys = uriKeys{isLegacySensitiveKey, isLegacySensitiveKey, false, false}
+	// compoundLegacyURIKeys are scannerURIKeys with a "+" in a key read as
+	// itself and the text of a sensitive key kept, for
+	// compoundLegacyScrubErrorTokens.
+	compoundLegacyURIKeys = uriKeys{isSensitivePathSegment, isSensitiveKey, false, false}
+)
 
 // uriComponentScrub scrubs one decoded URI component (a path segment, a
 // query key or value, or the fragment) and reports whether it changed it
 // (see redactURIComponent).
 type uriComponentScrub func(string) (string, bool)
 
-// sanitizeURIWith is sanitizeURI with scrub in place of redactURIComponent,
-// so that the legacy-pattern backstop reads the components of a URI as the
-// expressions on main did (see legacyRedactURIComponent). decodeQueryKeys
-// reads each query key as redactQueryComponent reads its text, with a "+" as
-// a space, as sanitizeURI does (see sanitizeQueryPairs); the legacy scrubs
-// read a "+" in a key as itself, as main did.
-func sanitizeURIWith(raw string, scrub uriComponentScrub, decodeQueryKeys bool) (string, bool) {
+// sanitizeURIWith is sanitizeURI with scrub in place of redactURIComponent
+// and keys in place of scannerURIKeys, so that the legacy-pattern backstop
+// reads a URI as the expressions on main did (see legacyRedactURIComponent
+// and legacyURIKeys).
+func sanitizeURIWith(raw string, scrub uriComponentScrub, keys uriKeys) (string, bool) {
 	if raw == "" {
 		return raw, false
 	}
@@ -61,7 +90,7 @@ func sanitizeURIWith(raw string, scrub uriComponentScrub, decodeQueryKeys bool) 
 	}
 	pathChanged := false
 	if escapedPath := u.EscapedPath(); escapedPath != "" {
-		if sanitizedPath, unescapedPath, ok := sanitizePathSegments(escapedPath, scrub); ok {
+		if sanitizedPath, unescapedPath, ok := sanitizePathSegments(escapedPath, scrub, keys); ok {
 			u.Path = unescapedPath
 			u.RawPath = sanitizedPath
 			pathChanged = true
@@ -69,12 +98,14 @@ func sanitizeURIWith(raw string, scrub uriComponentScrub, decodeQueryKeys bool) 
 	}
 	queryChanged := false
 	if u.RawQuery != "" {
-		u.RawQuery, queryChanged = sanitizeQueryPairs(u.RawQuery, false, scrub, decodeQueryKeys)
+		u.RawQuery, queryChanged = sanitizeQueryPairs(u.RawQuery, false, scrub, keys)
 	}
 	fragmentChanged := false
 	if u.Fragment != "" {
 		rawFragment := u.EscapedFragment()
-		if sanitizedFrag, ok := sanitizeQueryPairs(rawFragment, true, scrub, false); ok {
+		fragKeys := keys
+		fragKeys.decodeQueryKeys = false
+		if sanitizedFrag, ok := sanitizeQueryPairs(rawFragment, true, scrub, fragKeys); ok {
 			if unescaped, err := url.PathUnescape(sanitizedFrag); err == nil {
 				u.Fragment = unescaped
 			} else {
@@ -95,7 +126,7 @@ func sanitizeURIWith(raw string, scrub uriComponentScrub, decodeQueryKeys bool) 
 	return u.String(), true
 }
 
-func sanitizePathSegments(escapedPath string, scrub uriComponentScrub) (escaped, unescaped string, changed bool) {
+func sanitizePathSegments(escapedPath string, scrub uriComponentScrub, keys uriKeys) (escaped, unescaped string, changed bool) {
 	segments := strings.Split(escapedPath, "/")
 	escapedRedacted := url.QueryEscape(redactedValue)
 	redactNext := false
@@ -110,7 +141,7 @@ func sanitizePathSegments(escapedPath string, scrub uriComponentScrub) (escaped,
 			redactNext = false
 			continue
 		}
-		if isSensitivePathSegment(seg) {
+		if keys.pathSegment(seg) {
 			segments[i] = escapedRedacted
 			changed = true
 			redactNext = true
@@ -118,27 +149,31 @@ func sanitizePathSegments(escapedPath string, scrub uriComponentScrub) (escaped,
 		}
 		if rawKey, value, hasEq := strings.Cut(seg, "="); hasEq {
 			canonKey := canonicalizeCredentialMarker(rawKey)
-			if isSensitiveKey(canonKey) || normalizeKey(canonKey) == "key" {
+			if keys.key(canonKey) || normalizeKey(canonKey) == "key" {
+				left, rawValue, hasRawEq := strings.Cut(rawSeg, "=")
+				if !hasRawEq {
+					left, rawValue = url.PathEscape(canonKey), escapedRedacted
+				}
+				keyChanged := false
+				if keys.scrubKeys {
+					left, keyChanged = redactPathComponent(left, scrub)
+				}
 				if isRedactedMarker(value) {
 					// Already redacted, as when redacted text is
 					// scrubbed again.
+					if keyChanged {
+						segments[i] = left + "=" + rawValue
+						changed = true
+					}
 					continue
 				}
-				if rawLeft, _, hasRawEq := strings.Cut(rawSeg, "="); hasRawEq {
-					segments[i] = rawLeft + "=" + escapedRedacted
-				} else {
-					segments[i] = url.PathEscape(canonKey) + "=" + escapedRedacted
-				}
+				segments[i] = left + "=" + escapedRedacted
 				changed = true
 				continue
 			}
 		}
-		decoded, err := url.PathUnescape(rawSeg)
-		if err != nil {
-			decoded = rawSeg
-		}
-		if safeSeg, ok := scrub(decoded); ok {
-			segments[i] = url.PathEscape(safeSeg)
+		if safeSeg, ok := redactPathComponent(rawSeg, scrub); ok {
+			segments[i] = safeSeg
 			changed = true
 		}
 	}
@@ -151,6 +186,20 @@ func sanitizePathSegments(escapedPath string, scrub uriComponentScrub) (escaped,
 		unescaped = escaped
 	}
 	return escaped, unescaped, true
+}
+
+// redactPathComponent scrubs one escaped path segment, or the key of a
+// key=value segment, as text with scrub and returns it escaped again.
+func redactPathComponent(raw string, scrub uriComponentScrub) (string, bool) {
+	decoded, err := url.PathUnescape(raw)
+	if err != nil {
+		decoded = raw
+	}
+	safe, changed := scrub(decoded)
+	if !changed {
+		return raw, false
+	}
+	return url.PathEscape(safe), true
 }
 
 // isSensitivePathSegment reports whether seg is a standalone URL path segment
@@ -197,8 +246,10 @@ func isSensitivePathSegment(k string) bool {
 // text scrub of key=value reads it (see endsInSensitiveTextKey), so that
 // these values are redacted, as the text scrub of an error message redacts
 // them; a "+" in a key such as a+b, which is no sensitive key either way, is
-// kept as it is.
-func sanitizeQueryPairs(raw string, requireEquals bool, scrub uriComponentScrub, decodeQueryKeys bool) (string, bool) {
+// kept as it is. With scrubKeys, a sensitive key is scrubbed as text as
+// every other key is (see redactQueryComponent), also when its value is
+// redacted already.
+func sanitizeQueryPairs(raw string, requireEquals bool, scrub uriComponentScrub, keys uriKeys) (string, bool) {
 	pairs := strings.Split(raw, "&")
 	changed := false
 	for i, pair := range pairs {
@@ -207,17 +258,25 @@ func sanitizeQueryPairs(raw string, requireEquals bool, scrub uriComponentScrub,
 			continue
 		}
 		keyText := rawKey
-		if decodeQueryKeys {
+		if keys.decodeQueryKeys {
 			keyText = strings.ReplaceAll(rawKey, "+", " ")
 		}
 		key := canonicalizeCredentialMarker(keyText)
-		if isSensitiveKey(key) || normalizeKey(key) == "key" || (decodeQueryKeys && endsInSensitiveTextKey(key)) {
+		if keys.key(key) || normalizeKey(key) == "key" || (keys.decodeQueryKeys && endsInSensitiveTextKey(key)) {
+			safeKey, keyChanged := rawKey, false
+			if keys.scrubKeys {
+				safeKey, keyChanged = redactQueryComponent(rawKey, scrub)
+			}
 			if hasEq && isRedactedMarker(rawValue) {
 				// Already redacted, as when redacted text is scrubbed
 				// again: re-encoding "[REDACTED]" is not a change.
+				if keyChanged {
+					pairs[i] = safeKey + "=" + rawValue
+					changed = true
+				}
 				continue
 			}
-			pairs[i] = rawKey + "=" + url.QueryEscape(redactedValue)
+			pairs[i] = safeKey + "=" + url.QueryEscape(redactedValue)
 			changed = true
 			continue
 		}
@@ -314,26 +373,30 @@ func legacyRedactURIComponentWith(s string, scrub func(string) string) (string, 
 }
 
 // scrubURITokens redacts the credentials in the URIs in msg (see
-// sanitizeURI).
-func scrubURITokens(msg string) string {
-	return scrubURITokensWith(msg, redactURIComponent, true)
-}
-
-// scrubURITokensWith is scrubURITokens with scrub in place of
-// redactURIComponent (see sanitizeURIWith).
-func scrubURITokensWith(msg string, scrub uriComponentScrub, decodeQueryKeys bool) string {
-	if strings.Contains(msg, "://") {
-		msg = uriTokenRe.ReplaceAllStringFunc(msg, func(token string) string {
-			trimmed := trimTrailingPunctuation(token)
-			suffix := token[len(trimmed):]
-			sanitized, changed := sanitizeURIWith(trimmed, scrub, decodeQueryKeys)
-			if !changed {
-				return token
-			}
-			return sanitized + suffix
-		})
+// sanitizeURIWith) with scrub and keys, which scrubErrorTokens sets to
+// redactURIComponent and scannerURIKeys, recording in tr, when it is not
+// nil, the runs of the result copied from msg and the bytes of each
+// rewritten URI that its rewrite does not keep (see spanWriter.rewriteURI),
+// so that what the legacy scrubs remove from a URI, as a credential in a
+// component or a value of a sensitive key, counts as removed by them (see
+// leavesLegacyValue).
+func scrubURITokens(msg string, scrub uriComponentScrub, keys uriKeys, tr *passTrace) string {
+	w := spanWriter{s: msg, tr: tr}
+	if !strings.Contains(msg, "://") {
+		return w.done(0)
 	}
-	return msg
+	last := 0
+	for _, loc := range uriTokenRe.FindAllStringIndex(msg, -1) {
+		trimmed := trimTrailingPunctuation(msg[loc[0]:loc[1]])
+		sanitized, changed := sanitizeURIWith(trimmed, scrub, keys)
+		if !changed {
+			continue
+		}
+		w.copy(last, loc[0])
+		w.rewriteURI(loc[0], loc[0]+len(trimmed), sanitized)
+		last = loc[0] + len(trimmed)
+	}
+	return w.done(last)
 }
 
 // trimTrailingPunctuation strips the punctuation that may follow a URI or a

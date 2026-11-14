@@ -15,7 +15,6 @@
 package agentanalytics
 
 import (
-	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -83,12 +82,15 @@ const (
 // trailingQuotedSensitiveKey), such as X-Amz-Security-Token, db/password or
 // abc&"token", is nestedKey only when the whole value starts a line without a
 // preceding joined value, as a nested key does in YAML: lineStart reports
-// that. On the line of the key before it (or after a joined value or a
-// path-prefixed dotted segment that redactTextKeyValues skips), such a value
-// may begin with a credential before the nested key, as in the Go error
-// "password=dev-SECRET-password: dial tcp ...", so nestsSensitiveKey then
-// returns valueEndingInKeyName, and where the key name in it starts, so that
-// the value is redacted together with the value of the pair it starts.
+// that. Words before its key that main read as part of a value, as a path
+// with a backslash or before a key that main did not have, keep it from being
+// one (see mainReadsNestedKey). On the line of the key before it (or after a
+// joined value or a path-prefixed dotted segment that redactTextKeyValues
+// skips), or after such words, such a value may begin with a credential
+// before the nested key, as in the Go error "password=dev-SECRET-password:
+// dial tcp ...", so nestsSensitiveKey then returns valueEndingInKeyName, and
+// where the key name in it starts, so that the value is redacted together
+// with the value of the pair it starts.
 func nestsSensitiveKey(s string, start, end int, lineStart bool, openQ openQuoteState, st *quoteScanState) (nestedKeyKind, int) {
 	kind, pair := classifyNestedKey(s, start, end, lineStart, openQ, st)
 	if kind == nestedKey && isSkippedPathDottedPair(s, pair) {
@@ -107,24 +109,23 @@ func classifyNestedKey(s string, start, end int, lineStart bool, openQ openQuote
 		cur = cEnd
 	}
 	if cur > start {
+		// The text after the closed containers may end in a key, as the
+		// token of [abc];token: v, whose pair is redacted with them. A
+		// container is never a key, and neither is a placeholder that an
+		// earlier pass wrote, glued to other text as in [REDACTED]x/token:,
+		// so the value is never left for a later pass.
 		var kind nestedKeyKind
 		var pair int
 		if end-cur > maxNestedKeyLen {
-			if s[start:cur] == redactedValue && hasRedactedOverBudgetTail(s, cur, end, st) {
-				return nestedKey, cur
-			}
 			kind, pair = classifyOverBudgetNestedKey(s, cur, end, openQ, st)
 		} else {
 			kind, pair = classifyNestedKey(s, cur, end, false, openQ, st)
 		}
-		if kind == notNestedKey {
+		switch kind {
+		case notNestedKey:
 			return notNestedKey, 0
-		}
-		if kind == gluedAfterValue {
+		case gluedAfterValue:
 			return gluedAfterValue, pair
-		}
-		if s[start:cur] == redactedValue && !isSkippedPathDottedPair(s, pair) && !hasUnredactedDelimiter(s, cur, pair) {
-			return nestedKey, cur
 		}
 		return valueEndingInKeyName, pair
 	}
@@ -199,23 +200,17 @@ func classifyNestedKey(s string, start, end int, lineStart bool, openQ openQuote
 		}
 		return notNestedKey, 0
 	}
-	strayEscDoubleEnd, strayEscSingleEnd := 0, 0
-	strayOuter := -1
 	// unplaced reports that a quote in the value opens a string that runs
 	// past end and that none of the checks below places.
 	unplaced := false
 	for idx := 0; idx < len(v); idx++ {
 		switch v[idx] {
 		case '"', '\'', '\\':
-			// A quote escaped by a backslash, such as the one of an escaped
-			// quote \" that does not close (see scanEscapedQuoted), opens no
-			// string, so it cannot skip brackets or delimiters after it.
+			// A backslash before a quote starts a string quoted with escaped
+			// quotes (see scanEscapedQuoted); before anything else it is
+			// skipped, and a quote that a backslash escapes is read with it.
 			if v[idx] == '\\' {
 				if start+idx+1 >= len(s) || !isQuoteByte(s[start+idx+1]) {
-					continue
-				}
-				if (s[start+idx+1] == '"' && start+idx+2 < strayEscDoubleEnd) ||
-					(s[start+idx+1] == '\'' && start+idx+2 < strayEscSingleEnd) {
 					continue
 				}
 			} else if !isUnescapedQuote(v, 0, idx) {
@@ -223,43 +218,12 @@ func classifyNestedKey(s string, start, end int, lineStart bool, openQ openQuote
 			}
 			if valPos, ok := danglingQuoteKeyAt(s, start, start+idx, openQ, st); ok {
 				// The quote closes a key rather than opening a string, as
-				// the token" of DB_PASSWORD: token":{k: "SECRET"}.
+				// the token" of DB_PASSWORD: token": SECRET.
 				return gluedAfterValue, valPos
 			}
 			qEnd, qOK := scanQuotedAt(s, start+idx, st)
 			if !qOK {
 				continue
-			}
-			if outer := strayQuoteOuter(s, start+idx, qEnd, end, st); outer >= 0 {
-				// The quote is stray, as the one of x"S0/creds:{"k":
-				// "SECRET"}, x"S0/creds:{ "k": "SECRET"} or
-				// x"S0/creds:[1,"SECRET"], whose closing quote opens a
-				// member of a container that opens in the value, also
-				// when the value seems to end before that quote, at the
-				// space or "," in the container, so the container after it
-				// is read, as in classifyOverBudgetNestedKey. When the
-				// string encloses that container and others after it, as
-				// in x":{'a': "1"} {'b': 'SECRET'}", they are all redacted
-				// with the value.
-				if last, _ := enclosedContainerRun(s, start+idx, qEnd, outer, st); last > outer {
-					return gluedAfterValue, last
-				}
-				if st != nil && st.openerBudgetExhausted {
-					return gluedAfterValue, len(s)
-				}
-				if v[idx] == '\\' {
-					if s[start+idx+1] == '"' {
-						strayEscDoubleEnd = max(strayEscDoubleEnd, qEnd)
-					} else {
-						strayEscSingleEnd = max(strayEscSingleEnd, qEnd)
-					}
-				}
-				strayOuter = outer
-				idx = outer - start - 1
-				continue
-			}
-			if st != nil && st.openerBudgetExhausted {
-				return gluedAfterValue, len(s)
 			}
 			if qEnd <= end {
 				idx = qEnd - start - 1
@@ -271,59 +235,29 @@ func classifyNestedKey(s string, start, end int, lineStart bool, openQ openQuote
 			if kind, pair := trailingDelimitedKeyInValue(s, v, start, end, openQ, st); kind != notNestedKey {
 				return kind, pair
 			}
-			if idx > 0 && enclosesMixedQuoteContainer(s, start+idx, qEnd, end, st) {
-				if st != nil && st.openerBudgetExhausted {
-					return gluedAfterValue, len(s)
-				}
-				return gluedAfterValue, start + idx
-			}
-			if last := spacedStrayQuoteContainer(s, start+idx, qEnd, end, st); last >= 0 {
-				// The quoted string encloses containers after a delimiter
-				// in it and seems to end inside them, as the one of
-				// x": {'msg': "it's ok", 'k': 'SECRET'}" at the member in
-				// the same quote, or the one of x":{'msg': 'say "hi"'}" at
-				// the quote in the member in other quotes: the containers
-				// are redacted with the value.
-				return gluedAfterValue, last
-			}
-			if st != nil && st.openerBudgetExhausted {
-				return gluedAfterValue, len(s)
-			}
-			// No check places the string that the quote opens, as the
-			// apostrophe of user's": {'msg': "it's ok", 'k': 'SECRET'}" or
-			// the ' of a'x": {'a': "1", 'b': 'SECRET'}", whose string seems
-			// to close in the container: the scan goes on with the byte
-			// after the quote, so that a later quote that opens the string
-			// around the container, as the " of both, is still read. Only
-			// a later quote is read, since the string of such a quote may
-			// enclose the rest of the value: a container that no stray
-			// quote leads to, as the {a: it's} of x"S0/creds:{a: it's}",
-			// ends the scan, and the value stays a value, so that a word in
-			// it that runs the container to the end of the text, as it's,
-			// does not take the text after it.
+			// No check places the string that the quote opens: the scan
+			// goes on with the byte after the quote, so that a later quote
+			// is still read, and a container after it ends the scan.
 			unplaced = true
 			continue
 		case '{', '[':
-			if unplaced && start+idx != strayOuter {
+			if unplaced {
 				return notNestedKey, 0
 			}
 			if idx > 0 && end < len(s) {
-				dIdx := delimBeforePos(v, idx)
-				if dIdx > 0 || start+idx == strayOuter {
+				if dIdx := delimBeforePos(v, idx); dIdx > 0 {
 					cEnd, closed := scanBalancedContainer(s, start+idx, end)
 					if closed {
 						idx = cEnd - start - 1
 						continue
 					}
-					if dIdx > 0 {
-						if kind, pair := nestedKeyName(v[:dIdx], start, lineStart); kind != notNestedKey {
-							return kind, pair
-						}
+					if kind, pair := nestedKeyName(v[:dIdx], start, lineStart); kind != notNestedKey {
+						return kind, pair
 					}
 					// A container after a delimiter in the value that is
 					// still open at end, as the {"k": "SECRET"} of
 					// x/creds:{"k": "SECRET"}, runs past the value and is
-					// redacted with it, as in classifyOverBudgetNestedKey.
+					// redacted with it.
 					return gluedAfterValue, start + idx
 				}
 			}
@@ -364,150 +298,6 @@ func classifyNestedKey(s string, start, end int, lineStart bool, openQ openQuote
 		return notNestedKey, 0
 	}
 	return nestedKeyName(v[:i], start, lineStart)
-}
-
-// isOverBudgetKeyEnd reports whether s[floor:end], the text before a
-// delimiter in an over-budget value, ends in a sensitive key name, quoted or
-// not. In strict mode, used to tell whether an over-budget tail is already
-// redacted (see hasRedactedOverBudgetTail), a quoted key name must be a single
-// token, without inner whitespace, so that a quoted value ending in a key
-// word, as in "SECRET password", is not taken for a key, and a path-prefixed
-// ".key" filename that redactTextKeyValues skips is not a key either.
-func isOverBudgetKeyEnd(s string, floor, end int, strict bool) bool {
-	for end > floor && isDelimSpace(s[end-1]) {
-		end--
-	}
-	if end <= floor {
-		return false
-	}
-	if inner, quote := unquoteValue(s[floor:end]); quote != "" {
-		return isOverBudgetQuotedKey(trimInlineSpaces(inner), strict)
-	}
-	if end-2 >= floor && s[end-2] == '\\' && (s[end-1] == '"' || s[end-1] == '\'') && isUnescapedQuote(s, floor, end-2) {
-		if kStart, key := matchPaddedQuotedTextKey(s, floor, end); kStart >= 0 {
-			return !strict || !hasInnerSpace(key)
-		}
-		q := s[end-1]
-		for openIdx := end - 4; openIdx >= floor; openIdx-- {
-			if s[openIdx] == '\\' && s[openIdx+1] == q && isUnescapedQuote(s, floor, openIdx) {
-				return (openIdx == floor || isJoinBeforeQuotedKey(s[openIdx-1])) &&
-					isOverBudgetQuotedKey(trimInlineSpaces(s[openIdx+2:end-2]), strict)
-			}
-		}
-		return false
-	}
-	if end-1 >= floor && (s[end-1] == '"' || s[end-1] == '\'') && isUnescapedQuote(s, floor, end-1) {
-		if kStart, key := matchPaddedQuotedTextKey(s, floor, end); kStart >= 0 {
-			return !strict || !hasInnerSpace(key)
-		}
-		q := s[end-1]
-		for openIdx := end - 2; openIdx >= floor; openIdx-- {
-			if s[openIdx] == q && isUnescapedQuote(s, floor, openIdx) {
-				return isOverBudgetQuotedKey(trimInlineSpaces(s[openIdx+1:end-1]), strict)
-			}
-		}
-		return false
-	}
-	kStart := findTextKeyStart(s, floor, end)
-	if kStart < 0 {
-		return false
-	}
-	return !strict || !isSkippedPathDottedPair(s, kStart)
-}
-
-// isOverBudgetQuotedKey reports whether trimmed, the trimmed interior of a
-// quoted string, is a key name (see isPaddedQuotedTextKey), which in strict
-// mode must also hold no inner whitespace.
-func isOverBudgetQuotedKey(trimmed string, strict bool) bool {
-	return isPaddedQuotedTextKey(trimmed) && (!strict || !hasInnerSpace(trimmed))
-}
-
-// hasInnerSpace reports whether s holds whitespace or a control byte.
-func hasInnerSpace(s string) bool {
-	return strings.IndexFunc(s, func(r rune) bool {
-		return r <= 0x20 || r == 0x7f || unicode.IsSpace(r) || unicode.In(r, unicode.Z)
-	}) >= 0
-}
-
-// hasUnredactedDelimiter reports whether s[from:to] holds a ":" or "=" that
-// is not followed by a redacted placeholder (see startsWithRedactedValue): an
-// assignment whose value may be a credential, as the =SECRET in
-// [REDACTED]/x=SECRET/password:[REDACTED], so that the text around it is not
-// taken for text that an earlier pass redacted. A delimiter followed only by
-// whitespace and quotes up to to, which joins the text before it to a key
-// that starts at to, as in [REDACTED]:"api.key": ..., does not count.
-func hasUnredactedDelimiter(s string, from, to int) bool {
-	for i := from; i < to; i++ {
-		if (s[i] != ':' && s[i] != '=') || startsWithRedactedValue(s[i+1:]) {
-			continue
-		}
-		j := i + 1
-		for j < to && (isDelimSpace(s[j]) || s[j] == '"' || s[j] == '\'' || s[j] == '\\') {
-			j++
-		}
-		if j < to {
-			return true
-		}
-	}
-	return false
-}
-
-// hasRedactedOverBudgetTail reports whether s[cur:end], the over-budget tail
-// of a value after a redacted placeholder, as in
-// dbPassword=[REDACTED]/<long>-password: "[REDACTED]", is already redacted
-// text that a second pass leaves alone: it ends in a single sensitive key
-// whose value is a redacted placeholder, and every other ":" or "=" in it is
-// followed by a redacted placeholder too. Any other assignment in the tail,
-// as in [REDACTED]/<long>=SECRET/password:[REDACTED], may hold a credential,
-// so the tail is not skipped and the whole value is redacted.
-func hasRedactedOverBudgetTail(s string, cur, end int, st *quoteScanState) bool {
-	if hasUnredactedDelimiter(s, cur, end) {
-		return false
-	}
-	v := s[cur:end]
-	for idx := cur; idx < end; idx++ {
-		switch s[idx] {
-		case '"', '\'', '\\':
-			if s[idx] != '\\' && !isUnescapedQuote(s, cur, idx) {
-				continue
-			}
-			qEnd, ok := scanQuotedAt(s, idx, st)
-			if !ok {
-				continue
-			}
-			if qEnd <= end {
-				idx = qEnd - 1
-				continue
-			}
-			dPos := skipDelimSpaceFwd(s, qEnd)
-			if dPos < len(s) && (s[dPos] == ':' || s[dPos] == '=') && startsWithRedactedValue(s[dPos+1:]) {
-				inner, quote := unquoteValue(s[idx:qEnd])
-				return quote != "" && isOverBudgetQuotedKey(trimInlineSpaces(inner), true)
-			}
-			return false
-		case '{', '[':
-			if idx > cur && delimBeforePos(s[cur:idx], idx-cur) > 0 {
-				cEnd, closed := scanBalancedContainer(s, idx, end)
-				if closed {
-					idx = cEnd - 1
-					continue
-				}
-				return false
-			}
-		}
-	}
-	if strings.HasSuffix(v, ":") || strings.HasSuffix(v, "=") {
-		return startsWithRedactedValue(s[end:]) && isOverBudgetKeyEnd(s, cur, end-1, true)
-	}
-	dPos := skipDelimSpaceFwd(s, end)
-	if dPos < len(s) && (s[dPos] == ':' || s[dPos] == '=') {
-		return startsWithRedactedValue(s[dPos+1:]) && isOverBudgetKeyEnd(s, cur, end, true)
-	}
-	i := strings.LastIndexAny(v, ":=")
-	if i <= 0 {
-		return false
-	}
-	return startsWithRedactedValue(s[cur+i+1:]) && isOverBudgetKeyEnd(s, cur, cur+i, true)
 }
 
 // trailingDelimitedKeyInValue handles a value v = s[start:end] in which a
@@ -552,14 +342,6 @@ func classifySpanningQuoteInNestedKey(s, v string, start, q, qEnd int, lineStart
 		if okVal, gluedEnd := nestedValueAfter(s, start+q, openQ, st); okVal {
 			if kind, pair := nestedKeyName(v[:dIdx], start, lineStart); kind != notNestedKey {
 				if gluedEnd > 0 {
-					// The nested value is a quoted string with text glued
-					// after it, whose closing quote may really open a value
-					// nested in it, as the "a token: "x SECRET" of
-					// temp:a="a token: "x SECRET"; the value goes on to
-					// where it really ends (see quotedValueRealEnd).
-					if realEnd, ok := quotedValueRealEnd(s, start+q, qEnd, 0, openQ, st); ok && realEnd > gluedEnd {
-						return gluedAfterValue, realEnd
-					}
 					return gluedAfterValue, gluedEnd
 				}
 				return kind, pair
@@ -612,10 +394,17 @@ func classifySpanningQuoteInNestedKey(s, v string, start, q, qEnd int, lineStart
 	return notNestedKey, 0
 }
 
-// classifyOverBudgetNestedKey fails closed when s[start:end] exceeds
-// maxNestedKeyLen: if an unclosed container or quote inside the over-budget
-// span carries a trailing value past end, or a delimiter and value follow end,
-// it returns gluedAfterValue so the outer replacement consumes that value too.
+// classifyOverBudgetNestedKey classifies s[start:end], a value longer than
+// maxNestedKeyLen, which is redacted as a value, as on main, without reading
+// the keys in it, so that a value is never read again from each key in it.
+// Only the end of the value is read: a quoted value that ends in a key name
+// or is a padded quoted key (see isPaddedQuotedTextKey) and that a delimiter
+// follows, or a bare value that ends in a delimiter or that a delimiter
+// follows, with a value after it, may end in a key, and is redacted together
+// with that value (gluedAfterValue at where it starts), so that such a key is
+// never redacted without its value; so is a quoted value with text glued to
+// it, or a quoted key after its closing quote (see
+// stolenQuotedKeyAfterQuoteEnd).
 func classifyOverBudgetNestedKey(s string, start, end int, openQ openQuoteState, st *quoteScanState) (nestedKeyKind, int) {
 	v := s[start:end]
 	if inner, quote := unquoteValue(v); quote != "" {
@@ -635,155 +424,6 @@ func classifyOverBudgetNestedKey(s string, start, end int, openQ openQuoteState,
 		}
 		return notNestedKey, 0
 	}
-	strayEscDoubleEnd, strayEscSingleEnd := 0, 0
-	strayOuter := -1
-	// unplaced is as in classifyNestedKey.
-	unplaced := false
-	for idx := start; idx < end; idx++ {
-		switch s[idx] {
-		case '"', '\'', '\\':
-			if s[idx] == '\\' {
-				if idx+1 >= len(s) || !isQuoteByte(s[idx+1]) {
-					continue
-				}
-				if (s[idx+1] == '"' && idx+2 < strayEscDoubleEnd) ||
-					(s[idx+1] == '\'' && idx+2 < strayEscSingleEnd) {
-					continue
-				}
-			} else if !isUnescapedQuote(s, start, idx) {
-				continue
-			}
-			if valPos, ok := danglingQuoteKeyAt(s, start, idx, openQ, st); ok {
-				past, closedEnd := valueEndsPast(s, valPos, end, st)
-				if st != nil && st.openerBudgetExhausted {
-					return gluedAfterValue, len(s)
-				}
-				if past {
-					// The quote closes a key whose value starts after the
-					// value, as the password" of password": {"k": "SECRET"},
-					// or is a quoted string or a container that runs past
-					// it, as the "a SECRET" of
-					// <130a>=S0/my_api_key":"a SECRET" or the
-					// {"value": "SECRET"} of <130a>=S0/credentials":{...}.
-					// Any other value that starts inside it is redacted
-					// with it, so that the scan moves past end and chains
-					// stay linear.
-					return gluedAfterValue, valPos
-				}
-				// The quote closes a key, so it opens no string that could
-				// pair with a later quote and skip the containers and quotes
-				// after it, as the password" of
-				// password":S0/<130a>/credentials:{"k": "SECRET"}. A bare
-				// value, or a quoted string that opens a member of a
-				// container (see opensContainerMember), is read on from the
-				// quote. A quoted string or a container that closes inside
-				// the value is skipped as a whole, so that it is read once.
-				// The skip keeps the scan linear: a container that closes at
-				// the end of the text, which the "{" and "[" case below does
-				// not skip, would otherwise be scanned again from each
-				// dangling key quote nested in it, as in
-				// <130a>/password":x/token":{/password":x/token":{...}},
-				// which takes quadratic time.
-				if closedEnd > 0 {
-					idx = closedEnd - 1
-				}
-				continue
-			}
-			qEnd, ok := scanQuotedAt(s, idx, st)
-			if !ok {
-				continue
-			}
-			if outer := strayQuoteOuter(s, idx, qEnd, end, st); outer >= 0 {
-				// The quote is stray, as the one of x"y/credentials:{"k":
-				// "SECRET"}, x"y/credentials:{\n  "k": "SECRET"} or
-				// x"y/credentials:[true, "SECRET"], whose closing quote
-				// opens a member of a container that opens in the value,
-				// also past end, so the container after it is read, with
-				// the containers after it that the string encloses, as in
-				// classifyNestedKey.
-				if last, _ := enclosedContainerRun(s, idx, qEnd, outer, st); last > outer {
-					return gluedAfterValue, last
-				}
-				if st != nil && st.openerBudgetExhausted {
-					return gluedAfterValue, len(s)
-				}
-				if s[idx] == '\\' {
-					if s[idx+1] == '"' {
-						strayEscDoubleEnd = max(strayEscDoubleEnd, qEnd)
-					} else {
-						strayEscSingleEnd = max(strayEscSingleEnd, qEnd)
-					}
-				}
-				strayOuter = outer
-				idx = outer - 1
-				continue
-			}
-			if st != nil && st.openerBudgetExhausted {
-				return gluedAfterValue, len(s)
-			}
-			if qEnd <= end {
-				idx = qEnd - 1
-				continue
-			}
-			if okVal, gluedEnd := nestedValueFollowsDelimiter(s, qEnd, openQ, st); okVal {
-				if inner, quote := unquoteValue(s[idx:qEnd]); quote != "" && isPaddedQuotedTextKey(trimInlineSpaces(inner)) {
-					if gluedEnd > 0 {
-						return gluedAfterValue, gluedEnd
-					}
-					return gluedAfterValue, valAfterDelim(s, skipDelimSpaceFwd(s, qEnd)+1)
-				}
-			}
-			if idx > start {
-				if dRel := delimBeforePos(s[start:idx], idx-start); dRel > 0 && isOverBudgetKeyEnd(s, start, start+dRel, false) {
-					if okVal, gluedEnd := nestedValueAfter(s, idx, openQ, st); okVal {
-						if gluedEnd > 0 {
-							return gluedAfterValue, gluedEnd
-						}
-						return gluedAfterValue, idx
-					}
-				}
-			}
-			if isGluedTokenAfterQuote(s, qEnd) &&
-				(idx == start || (!isWordByte(s[idx-1]) && s[idx-1] != '"' && s[idx-1] != '\'' && s[idx-1] != '\\')) {
-				if inner, quote := unquoteValue(s[idx:qEnd]); quote != "" && innerContinuesIntoGluedToken(inner, st) {
-					return gluedAfterValue, qEnd
-				}
-			}
-			if idx > start && enclosesMixedQuoteContainer(s, idx, qEnd, end, st) {
-				if st != nil && st.openerBudgetExhausted {
-					return gluedAfterValue, len(s)
-				}
-				return gluedAfterValue, idx
-			}
-			if last := spacedStrayQuoteContainer(s, idx, qEnd, end, st); last >= 0 {
-				// The quoted string encloses the containers after a
-				// delimiter in it, as in classifyNestedKey.
-				return gluedAfterValue, last
-			}
-			if st != nil && st.openerBudgetExhausted {
-				return gluedAfterValue, len(s)
-			}
-			// The scan goes on past a quote that no check places, as in
-			// classifyNestedKey.
-			unplaced = true
-			continue
-		case '{', '[':
-			if unplaced && idx != strayOuter {
-				return notNestedKey, 0
-			}
-			if idx > start && end < len(s) && (delimBeforePos(s[start:idx], idx-start) > 0 || idx == strayOuter) {
-				cEnd, closed := scanBalancedContainer(s, idx, end)
-				if closed {
-					idx = cEnd - 1
-					continue
-				}
-				return gluedAfterValue, idx
-			}
-		}
-	}
-	if unplaced {
-		return notNestedKey, 0
-	}
 	if strings.HasSuffix(v, ":") || strings.HasSuffix(v, "=") {
 		if okVal, gluedEnd := nestedValueAfter(s, end, openQ, st); okVal {
 			if gluedEnd > 0 {
@@ -792,13 +432,11 @@ func classifyOverBudgetNestedKey(s string, start, end int, openQ openQuoteState,
 			return gluedAfterValue, valAfterDelim(s, end)
 		}
 	}
-	if followedByDelimiter(s, end) {
-		if okVal, gluedEnd := nestedValueFollowsDelimiter(s, end, openQ, st); okVal {
-			if gluedEnd > 0 {
-				return gluedAfterValue, gluedEnd
-			}
-			return gluedAfterValue, valAfterDelim(s, skipDelimSpaceFwd(s, end)+1)
+	if okVal, gluedEnd := nestedValueFollowsDelimiter(s, end, openQ, st); okVal {
+		if gluedEnd > 0 {
+			return gluedAfterValue, gluedEnd
 		}
+		return gluedAfterValue, valAfterDelim(s, skipDelimSpaceFwd(s, end)+1)
 	}
 	return notNestedKey, 0
 }
@@ -988,17 +626,6 @@ func isPathErrorColon(s string, i int) bool {
 	return true
 }
 
-// isBareKeyPairAt reports whether a pair whose key is made only of compound
-// key bytes (see isCompoundKeyByte), with no quote, starts at s[pair], so
-// that redactTextKeyValues matches it on its own.
-func isBareKeyPairAt(s string, pair int) bool {
-	i := pair
-	for i < len(s) && isCompoundKeyByte(s[i]) {
-		i++
-	}
-	return i > pair && followedByDelimiter(s, i)
-}
-
 // isJSONColonAfter reports whether s[i:] begins with ":" after optional JSON
 // whitespace, so redactJSONKeyValues will match a preceding double-quoted key.
 func isJSONColonAfter(s string, i int) bool {
@@ -1163,9 +790,12 @@ func nestedKeyNameStrip(name string, at int, lineStart, stripQuotes bool) (neste
 		// The expression reads only ASCII whitespace as \s, so its prefix
 		// may hold another space or control character, as the U+00A0 of
 		// SECRET<U+00A0>x/signing_key; a key name on a line of its own holds
-		// none, so such a name only ends in a key name.
+		// none, so such a name only ends in a key name. Words before the key
+		// are part of a nested key only where main read them so too (see
+		// mainReadsNestedKey).
 		if lineStart && (q == 0 || m[2] == q) && !strings.ContainsAny(name[:m[2]], "&;|") && !hasSpaceOrControl(name[:m[2]]) &&
-			(!strings.Contains(prefixAfterState, ":") || hasFoldPrefix(prefixAfterState, session.KeyPrefixTemp) || (q == 0 && isPathLikePrefix(name[:m[2]]))) {
+			(!strings.Contains(prefixAfterState, ":") || hasFoldPrefix(prefixAfterState, session.KeyPrefixTemp) || (q == 0 && isPathLikePrefix(name[:m[2]]))) &&
+			(m[2] <= stateStart || mainReadsNestedKey(name)) {
 			return nestedKey, at + m[2]
 		}
 		return valueEndingInKeyName, at + m[2]
@@ -1191,7 +821,7 @@ func nestedKeyNameStrip(name string, at int, lineStart, stripQuotes bool) (neste
 		hasFoldPrefix(name[tk-len(session.KeyPrefixTemp):tk], session.KeyPrefixTemp) {
 		tStart := tk - len(session.KeyPrefixTemp)
 		if tStart == stateStart || hasValidCompoundPrefix(name[q:tStart]) {
-			if lineStart && endTrim == len(name) && (tStart == stateStart || (q == 0 && isPathLikePrefix(name[:tStart]))) {
+			if lineStart && endTrim == len(name) && (tStart == stateStart || (q == 0 && isPathLikePrefix(name[:tStart]) && mainReadsNestedKey(name))) {
 				return nestedKey, at + tStart
 			}
 			return valueEndingInKeyName, at + tStart
@@ -1207,7 +837,7 @@ func nestedKeyNameStrip(name string, at int, lineStart, stripQuotes bool) (neste
 	}
 	if off < len(name) && (off == stateStart || hasValidCompoundPrefix(name[q:off])) {
 		if kStart := sensitiveKeyStart(name, off, len(name)); kStart >= 0 {
-			if lineStart && (off == stateStart || (q == 0 && isPathLikePrefix(name[:kStart]) && isBareSensitiveKeyName(name[kStart:]))) {
+			if lineStart && (off == stateStart || (q == 0 && isPathLikePrefix(name[:kStart]) && isBareSensitiveKeyName(name[kStart:]) && mainReadsNestedKey(name))) {
 				return nestedKey, at + kStart
 			}
 			return valueEndingInKeyName, at + kStart
@@ -1239,6 +869,21 @@ func hasSpaceOrControl(s string) bool {
 		}
 	}
 	return false
+}
+
+// mainReadsNestedKey reports whether the expressions on main read name, the
+// name of a pair that a value on a line of its own starts, as a nested key,
+// whose pair they redacted on its own, keeping the words before its key, as
+// the /etc/ssl/ of credentials:\n  /etc/ssl/password: v (see
+// legacyNestedKeyName). They read no other words before a key so: not a path
+// that holds a backslash, as C:\ssl\password, nor a path before a key that
+// they did not have, as /etc/ssl/secret_key, which they redacted as the value
+// of the pair on the line above. nestedKeyName keeps the words before the key
+// of such a name only where they did, and redacts the name otherwise, with
+// the value of the pair that it starts (see valueEndingInKeyName).
+func mainReadsNestedKey(name string) bool {
+	kind, _ := legacyNestedKeyName(name, 0, true)
+	return kind == nestedKey
 }
 
 func isPathLikePrefix(prefix string) bool {
@@ -1329,15 +974,15 @@ func nestedPairEndWithState(s string, pair, open int, openQ openQuoteState, st *
 		if !ok {
 			return failClosedNestedPairEnd(s, pair, open, openQ, st)
 		}
+		if !st.consumeOpenerBudget(end - pair) {
+			return len(s)
+		}
 		kind, next := nestsSensitiveKey(s, start, end, startsLine(s, delimAfter, start), openQ, st)
 		if st != nil && st.openerBudgetExhausted {
 			return len(s)
 		}
 		switch kind {
 		case notNestedKey:
-			if realEnd, ok := quotedValueRealEnd(s, start, end, open, openQ, st); ok {
-				return max(end, realEnd)
-			}
 			if _, quote := unquoteValue(s[start:end]); quote != "" &&
 				hasGluedSuffixAfterQuotedValue(s, start, end, openQ, st) {
 				return max(end, extendGluedValueEnd(s, end, open, openQ, st))
@@ -1457,369 +1102,6 @@ func danglingClosedKeyAfterQuoteEnd(s string, cur int, openQ openQuoteState, st 
 	return nextVal, true
 }
 
-// quotedValueRealEnd handles a quoted value s[valStart:end] whose closing
-// quote is really the opening quote of a key or a value nested in it, or a
-// quote inside the containers that the value encloses, returning where the
-// value really ends and true:
-//
-//   - when the closing quote opens a member of a "{" or "[" container that
-//     the value opens (see containerMemberOpener), as the {"k": of
-//     "a:token:{"k": "SECRET"}, the { "k": of "a:token:{ "k": "SECRET"} or
-//     the [1,"SECRET"] of "a:token:[1,"SECRET"], the value runs on to the end
-//     of that container (or of s, when it is not closed); when the opening
-//     quote closes the string right after the outermost container open at
-//     that quote and the containers that follow it (see
-//     enclosedContainerRun), as in "{'a': "1"} {'b': 'SECRET'}", the value
-//     runs on to that quote;
-//   - when a token is glued to the closing quote (see isGluedTokenAfterQuote)
-//     or the closing quote comes inside a member of a container that opens
-//     in the value (see closingQuoteInMember), which then comes inside
-//     containers that open right after the opening quote or after a ":" or
-//     "=" in the value, and the opening quote closes the string right after
-//     them (see quotedValueContainerRun), as the "hi" of
-//     "{'msg': 'say "hi"', 'k': 'SECRET'}", the " hi" of
-//     "{'msg': 'say " hi"', 'k': 'SECRET'}" or the it's of
-//     'S0/x: {"msg": "it's ok", "k": "SECRET"}', the value runs on to that
-//     quote; a value such as "{abc" that a stop follows is not scanned, so
-//     that many of them stay linear;
-//   - when the value ends in a sensitive key name, possibly quoted and padded
-//     as ' api.key ', and a delimiter followed by a line break, as in
-//     "a token:\n  " SECRET"tail, or by optional spaces and the closing quote
-//     with text glued after it, as in "a password="SECRET" or
-//     "a token: "x SECRET", the quote opens the value of that key, and the
-//     value runs on to the end of that nested value (see
-//     extendGluedValueEnd); when another string follows the closing quote
-//     after spaces, as in "' api.key ':\t" "SECRET", that string is the
-//     value.
-//
-// Otherwise it returns false.
-func quotedValueRealEnd(s string, valStart, end, open int, openQ openQuoteState, st *quoteScanState) (int, bool) {
-	inner, quote := unquoteValue(s[valStart:end])
-	if quote == "" {
-		return 0, false
-	}
-	t := len(inner)
-	for t > 0 && isDelimSpace(inner[t-1]) {
-		t--
-	}
-	if t == 0 {
-		return 0, false
-	}
-	qPos := end - len(quote)
-	brace, outer := quotedContainerOpeners(s, valStart, end, st)
-	last := -1
-	if brace >= 0 {
-		last, _ = enclosedContainerRun(s, valStart, end, outer, st)
-	} else if o, ok := closingQuoteInMember(s, valStart, end, st); ok {
-		// The containers start at the outermost one open at the closing
-		// quote, wherever it opens in the value, as the { of
-		// "prefix {'a': 'say " hi', 'k': 'SECRET'}" or of
-		// "({'a': 'say " hi', 'k': 'SECRET'})".
-		last, _ = enclosedContainerRun(s, valStart, end, o, st)
-	} else if isGluedTokenAfterQuote(s, end) {
-		last = quotedValueContainerRun(s, valStart, end, st)
-	}
-	if st != nil && st.openerBudgetExhausted {
-		return len(s), true
-	}
-	if last >= 0 {
-		// The opening quote closes the string right after the last
-		// container, possibly after delimiter whitespace and the ")" of
-		// groups around the containers (see enclosedContainerRun), and that
-		// quote ends the value, so that it cannot open a string with a later
-		// quote.
-		cEnd, _ := scanBalancedContainer(s, last, len(s))
-		closeQuote := skipGroupClosers(s, cEnd)
-		if !st.consumeOpenerBudget(closeQuote - last) {
-			return len(s), true
-		}
-		return closeQuote + len(quote), true
-	}
-	if brace >= 0 {
-		cEnd, _ := scanBalancedContainer(s, brace, len(s))
-		return cEnd, true
-	}
-	if c := inner[t-1]; c != ':' && c != '=' {
-		return 0, false
-	}
-	if !strings.ContainsAny(inner[t:], "\r\n") && !isGluedTokenAfterQuote(s, end) && !isStringAfterSpaces(s, end) {
-		return 0, false
-	}
-	nameEnd := t - 1
-	for nameEnd > 0 && isDelimSpace(inner[nameEnd-1]) {
-		nameEnd--
-	}
-	nameStart := nameEnd
-	for nameStart > 0 && !isDelimSpace(inner[nameStart-1]) {
-		nameStart--
-	}
-	kind, _ := nestedKeyName(inner[nameStart:nameEnd], 0, false)
-	if kind == notNestedKey && nameEnd > 0 && isQuoteByte(inner[nameEnd-1]) {
-		// A quoted key padded with spaces, as ' api.key '.
-		if open := strings.LastIndexByte(inner[:nameEnd-1], inner[nameEnd-1]); open >= 0 {
-			if name := trimInlineSpaces(inner[open+1 : nameEnd-1]); name != "" {
-				kind, _ = nestedKeyName(name, 0, false)
-			}
-		}
-	}
-	if kind == notNestedKey {
-		return 0, false
-	}
-	if next := skipInlineSpacesFwd(s, end, len(s)); next > end && isStringAfterSpaces(s, end) {
-		// The value is the next string, as in "' api.key ':\t" "SECRET".
-		if nEnd, ok := scanQuotedAt(s, next, st); ok {
-			return max(nEnd, extendGluedValueEnd(s, nEnd, open, openQ, st)), true
-		}
-	}
-	return extendGluedValueEnd(s, qPos, open, openQ, st), true
-}
-
-// quotedValueContainerRun returns where the last of the "{" or "["
-// containers that the quoted value s[q:qEnd] encloses starts, when the first
-// of them opens before the closing quote of s[q:qEnd], right after the opening
-// quote or after a ":" or "=" in the value, in either case possibly after
-// delimiter whitespace, and the value seems to close inside them (see
-// enclosedContainerRun), as the { of "{'msg': 'say "hi"', 'k': 'SECRET'}", of
-// 'S0/x: {"msg": "it's ok", "k": "SECRET"}' or of ": ['say "hi"', 'SECRET']";
-// otherwise it returns -1. Containers that stay open, that the opening quote
-// does not close the string right after, or that it closes right after, as in
-// "{a: 1}", leave the value as it is. The openers are tried in order, each
-// past the first container of the one before, and every byte read is charged
-// to st, so that repeated unclosed containers stay linear; once st runs out of
-// budget it returns -1 and the caller fails closed.
-func quotedValueContainerRun(s string, q, qEnd int, st *quoteScanState) int {
-	_, quote := unquoteValue(s[q:qEnd])
-	if quote == "" {
-		return -1
-	}
-	from, seemsClose := q+len(quote), qEnd-len(quote)
-	if !st.consumeOpenerBudget(seemsClose - from) {
-		return -1
-	}
-	opener := skipDelimSpaceFwd(s, from)
-	for opener < seemsClose {
-		if s[opener] == '{' || s[opener] == '[' {
-			last, firstEnd := enclosedContainerRun(s, q, qEnd, opener, st)
-			if last >= 0 || firstEnd < 0 || firstEnd >= seemsClose {
-				return last
-			}
-			opener = firstEnd
-		}
-		d := strings.IndexAny(s[opener:seemsClose], ":=")
-		if d < 0 {
-			return -1
-		}
-		opener = skipDelimSpaceFwd(s, opener+d+1)
-	}
-	return -1
-}
-
-// closingQuoteInMember reports whether the closing quote of the quoted string
-// s[q:qEnd] comes inside a member of a "{" or "[" container that opens in the
-// string, after any text, and is still open at that quote (see
-// opensMemberAfter), and returns where the outermost container open at that
-// quote starts: inside a string in other quotes that opens a member or a part
-// of one there and closes past that quote, as the 'say " hi"' of
-// "{'msg': 'say " hi"', 'k': 'SECRET'}", the 'say " hi' of
-// "{'a': ('say " hi'), 'k': 'SECRET'}" or of
-// "{'a': 'x' + 'say " hi', 'k': 'SECRET'}", or right where a member or a part
-// of one starts, also after a string prefix, the closing quote then opening a
-// string, as the " 1\n2" of "{'a': " 1\n2", 'k': 'SECRET'}", the " a" of
-// "{ " a", 'SECRET'}" or the b" SECRET" of "{'k': b" SECRET", 'm': 1}" or of
-// "{'a': 'x' b" SECRET", 'm': 1}". Either string may hold line breaks and must
-// end a member or a part of one (see memberStringEnds). Strings that close
-// before the closing quote are skipped, a backslash escapes only a quote or a
-// backslash, so that the { of "\{'a': 1}" opens a container, and a quote
-// joined to a word, as in it's, opens no string unless that word is a string
-// prefix (see isStringPrefixQuote), so that "{abc", "{it's}" and the "{" of
-// "{" user=bob are not such values, and their quoted values are not scanned
-// for containers. Every byte read is charged to st.
-func closingQuoteInMember(s string, q, qEnd int, st *quoteScanState) (int, bool) {
-	_, quote := unquoteValue(s[q:qEnd])
-	if quote == "" {
-		return -1, false
-	}
-	from, qPos := q+len(quote), qEnd-len(quote)
-	if !st.consumeOpenerBudget(qPos - from) {
-		return -1, false
-	}
-	outerQuote, outerEscaped := quote[len(quote)-1], len(quote) == 2
-	var stack []byte
-	// outer is where the outermost container in stack starts.
-	outer := -1
-	// prev is the last byte read other than delimiter whitespace, or
-	// closedString after a string, and wordPrev is the one before the word
-	// that ends at prev.
-	prev, wordPrev := byte(0), byte(0)
-	for i := from; i < qPos; i++ {
-		switch c := s[i]; c {
-		case '\\':
-			if i+1 < qPos && (isQuoteByte(s[i+1]) || s[i+1] == '\\') {
-				i++
-			}
-			prev = '\\'
-		case '{', '[':
-			if len(stack) == 0 {
-				outer = i
-			}
-			stack = append(stack, c)
-			prev = c
-		case '}', ']':
-			if len(stack) > 0 {
-				stack = stack[:len(stack)-1]
-			}
-			prev = c
-		case '"', '\'':
-			memberPrev := prev
-			if i > from && isWordByte(s[i-1]) {
-				if !isStringPrefixQuote(s, from, i, st) {
-					prev = c
-					continue
-				}
-				memberPrev = wordPrev
-			}
-			if c == outerQuote && !outerEscaped {
-				prev = c
-				continue
-			}
-			end, ok := scanSimpleQuoted(s, i, c, st)
-			if !ok {
-				prev = c
-				continue
-			}
-			if end > qPos {
-				if opensMemberAfter(stack, memberPrev) && memberStringEnds(s, qPos, end, st) {
-					return outer, true
-				}
-				return -1, false
-			}
-			i = end - 1
-			prev = closedString
-		default:
-			if !isDelimSpace(c) {
-				if isWordByte(c) && (i == from || !isWordByte(s[i-1])) {
-					wordPrev = prev
-				}
-				prev = c
-			}
-		}
-	}
-	memberPrev := prev
-	if qPos > from && isWordByte(s[qPos-1]) {
-		// The closing quote right after a string prefix, as the b" of
-		// "{'k': b" SECRET", 'm': 1}", starts a member after the byte before
-		// that prefix.
-		if stringPrefixStart(s, from, qPos) < 0 {
-			return -1, false
-		}
-		memberPrev = wordPrev
-	}
-	if !opensMemberAfter(stack, memberPrev) {
-		return -1, false
-	}
-	if end, ok := scanQuotedAt(s, qPos, st); ok && memberStringEnds(s, qPos, end, st) {
-		return outer, true
-	}
-	return -1, false
-}
-
-// closedString stands for the closing quote of a string that
-// closingQuoteInMember skips, as the last byte it read: that byte is never
-// delimiter whitespace, which takes in every control byte, so closedString
-// is never a byte that it reads.
-const closedString byte = 0x01
-
-// opensMemberAfter reports whether a member of the innermost of the open
-// containers in stack, or a part of one, starts after prev, the last byte
-// before it other than delimiter whitespace: after the "{" or "[" that opens
-// it, a "," or a "(", which may open a tuple, after the ":" or "=" of a key of
-// a "{" container, or after a "+" or another string (closedString), which
-// add the part to the member, as the 'say " hi' of 'x' + 'say " hi' and of
-// the implicit concatenation 'x' 'say " hi' does.
-func opensMemberAfter(stack []byte, prev byte) bool {
-	if len(stack) == 0 {
-		return false
-	}
-	switch prev {
-	case '{', '[', ',', '(', '+', closedString:
-		return true
-	case ':', '=':
-		return stack[len(stack)-1] == '{'
-	}
-	return false
-}
-
-// memberStringEnds reports whether s[:end], the end of a string that runs on
-// past from, ends a member or a part of one, possibly before delimiter
-// whitespace: whether a ",", ":", "=", "}", "]" or ")", a "+" or another string,
-// with or without a string prefix, follows it, as the ) of (b'x}y'), the + of
-// b'x}y' + 'z' or the 'z' of b'x}y' 'z' do, or, right after its closing
-// quote, a subscript or an attribute, as the [0] of b'x}y'[0] or the .decode
-// of b'x}y'.decode() does. The bytes from from on are charged to st.
-func memberStringEnds(s string, from, end int, st *quoteScanState) bool {
-	d := skipDelimSpaceFwd(s, end)
-	if !st.consumeOpenerBudget(d - from) {
-		return false
-	}
-	if d >= len(s) {
-		return false
-	}
-	if strings.IndexByte(",:=}])+", s[d]) >= 0 || isQuoteByte(s[d]) {
-		return true
-	}
-	if d == end && (s[d] == '[' || (s[d] == '.' && d+1 < len(s) && isWordByte(s[d+1]))) {
-		return true
-	}
-	q := d
-	for q < len(s) && q-d < 3 && isWordByte(s[q]) {
-		q++
-	}
-	return q < len(s) && isQuoteByte(s[q]) && stringPrefixStart(s, d, q) == d
-}
-
-// isStringPrefixQuote reports whether the quote at s[i] follows a Python string
-// prefix that makes up the whole word before it (see stringPrefixStart) and
-// opens a string that closes, possibly past line breaks, as other strings in a
-// container may, and that ends a member or a part of one (see
-// memberStringEnds), as the b'x}SECRET'} of {k: b'x}SECRET'}, the
-// b'x}\nSECRET', of {k: b'x}\nSECRET', m: 1}, the u'k': of {u'k': 1} or the
-// b'x}y') of {k: (b'x}y')}, so that the apostrophe of B's in Plan B's budget,
-// whose string runs on to a word, opens no string. The string is read with st
-// (see scanSimpleQuoted), and the bytes read are charged to it.
-func isStringPrefixQuote(s string, from, i int, st *quoteScanState) bool {
-	if stringPrefixStart(s, from, i) < 0 {
-		return false
-	}
-	end, ok := scanSimpleQuoted(s, i, s[i], st)
-	return ok && memberStringEnds(s, i, end, st)
-}
-
-// stringPrefixStart returns where the word right before s[i] starts when that
-// word, which starts at from or later, is a Python string prefix (b, r, u or
-// f, or br, rb, fr or rf, in either case), and -1 otherwise.
-func stringPrefixStart(s string, from, i int) int {
-	start := i
-	for start > from && i-start <= 2 && isWordByte(s[start-1]) {
-		start--
-	}
-	if start == i || i-start > 2 {
-		return -1
-	}
-	for _, p := range [...]string{"b", "r", "u", "f", "br", "rb", "fr", "rf"} {
-		if strings.EqualFold(s[start:i], p) {
-			return start
-		}
-	}
-	return -1
-}
-
-// isStringAfterSpaces reports whether horizontal spaces and then a quoted
-// string follow s[:i].
-func isStringAfterSpaces(s string, i int) bool {
-	j := skipInlineSpacesFwd(s, i, len(s))
-	return j > i && j < len(s) && (isQuoteByte(s[j]) || (s[j] == '\\' && j+1 < len(s) && isQuoteByte(s[j+1])))
-}
-
 // quotedValueEndsInKey reports whether s[from:to], the inner text of a quoted
 // value followed by a delimiter, ends, possibly before spaces, in a sensitive
 // key name at any boundary that findTextKeyStart accepts, as the secret of
@@ -1856,1003 +1138,6 @@ func danglingQuoteKeyAt(s string, floor, q int, openQ openQuoteState, st *quoteS
 	return valAfterDelim(s, d+1), true
 }
 
-// valueEndsPast reports whether the value that starts at s[valPos] runs past
-// end: at or past end itself, a quoted string, possibly with escaped quotes,
-// that closes past end, or a "{" or "[" container that is still open at end
-// (see scanBalancedContainer). For a container or a quoted string that closes
-// at or before end, it also returns the index right after its closer or
-// closing quote, so that the caller skips it as a whole, and 0 otherwise, as
-// for a quoted string whose closing quote opens a member of a container (see
-// opensContainerMember).
-func valueEndsPast(s string, valPos, end int, st *quoteScanState) (bool, int) {
-	if valPos >= end {
-		return true, 0
-	}
-	switch c := s[valPos]; {
-	case c == '{' || c == '[':
-		cEnd, closed := scanBalancedContainer(s, valPos, end)
-		if !closed {
-			return true, 0
-		}
-		return false, cEnd
-	case isQuoteByte(c) || c == '\\':
-		qEnd, ok := scanQuotedAt(s, valPos, st)
-		if !ok {
-			return false, 0
-		}
-		if qEnd > end {
-			return true, 0
-		}
-		if opensContainerMember(s, valPos, qEnd, st) {
-			return false, 0
-		}
-		if st != nil && st.openerBudgetExhausted {
-			return true, 0
-		}
-		return false, qEnd
-	}
-	return false, 0
-}
-
-// opensContainerMember reports whether the closing quote of the quoted string
-// s[q:qEnd] opens a member of a "{" or "[" container that opens in that
-// string (see containerMemberOpener), as the "k": of "S0/x:{"k": "SECRET"},
-// the "a", of "S0/x:[ "a", "SECRET"] or the "SECRET"] of
-// "S0/x:[1,"SECRET"]: that quote then opens a member of a container rather
-// than closing the string (see quotedValueRealEnd), so that string is not
-// skipped as a whole, which would skip the container too.
-func opensContainerMember(s string, q, qEnd int, st *quoteScanState) bool {
-	return containerMemberOpener(s, q, qEnd, st) >= 0
-}
-
-// containerMemberOpener returns where the "{" or "[" container whose member
-// the closing quote of the quoted string s[q:qEnd] opens starts, or -1. The
-// container opens in the string and is still open at that quote, which
-// follows, after optional delimiter whitespace, line breaks and other control
-// bytes included (see isDelimSpace), either the opener, as in "S0/x:{ "k" or
-// "S0/x:[\n  "a", or a "," after other members, as in "S0/x:[1,"SECRET" or
-// "S0/x:[true, "SECRET", and opens a quoted key or array element there (see
-// isQuotedMemberAt); or the ":" or "=" of a key of a "{" container, as in
-// "S0/x:{k: "SECRET", and opens its quoted value (see
-// isQuotedMemberValueAt). Brackets inside quoted strings in s[q:qEnd] are
-// skipped, and st caches the scan per closing quote and charges it to its
-// budget, so repeated checks stay linear; once that budget runs out, it
-// returns -1 and the caller fails closed (see consumeOpenerBudget).
-func containerMemberOpener(s string, q, qEnd int, st *quoteScanState) int {
-	innerOpener, _ := quotedContainerOpeners(s, q, qEnd, st)
-	return innerOpener
-}
-
-// strayQuoteOuter returns where the outermost "{" or "[" container opened in
-// s[q:qEnd] before end starts when the closing quote of s[q:qEnd] opens a
-// member of a container opened in it (see containerMemberOpener), as the {"k"
-// of x"S0/creds:[1, {"k": "SECRET"}], whose value ends at the first ",", or -1.
-func strayQuoteOuter(s string, q, qEnd, end int, st *quoteScanState) int {
-	_, outerOpener := quotedContainerOpeners(s, q, qEnd, st)
-	if outerOpener >= 0 && outerOpener < end {
-		return outerOpener
-	}
-	return -1
-}
-
-// spacedStrayQuoteContainer returns where the last of the "{" or "["
-// containers that the quoted string s[q:qEnd] encloses starts, when they follow
-// the quote that opens the string, or a ":" or "=" after it in the value
-// s[:end], and delimiter whitespace, or when the string seems to close in a
-// member of them, wherever they open in it, and the string seems to close
-// inside them (see enclosedContainerRun); otherwise it returns -1. Containers
-// that the string seems to close in a member of, as the { of
-// x"{'msg': 'say " hi"', 'k': 'SECRET'}" or of
-// x"prefix {'msg': 'say " hi"', 'k': 'SECRET'}", start at the outermost one
-// open at the closing quote (see closingQuoteInMember), and containers right
-// after the quote are also read when the string seems to close before a glued
-// token, as for a quoted value (see quotedValueRealEnd), so that values such
-// as x"{abc" that a stop follows are not scanned. The containers open past end
-// when the value ends at the whitespace after the delimiter, as the { of
-// x": {'msg': "it's ok", 'k': 'SECRET'}" or the [ of x": [1, "SECRET"]", or
-// in the value, as the { of x":{'msg': 'say "hi"', 'k': 'SECRET'}", whose
-// string seems to close at the quote in a member in other quotes. The value is
-// then redacted together with the containers that the string encloses, as when
-// the string seems to close at a member of the first one (see
-// strayQuoteOuter), while containers that stay open, that the string does not
-// close right after, or that it seems to close after leave the text after the
-// value as it is. The delimiters are tried in order, each past the first
-// container of the one before, and every byte read is charged to st, so that
-// repeated unclosed containers stay linear; once st runs out of budget it
-// returns -1 and the caller fails closed.
-func spacedStrayQuoteContainer(s string, q, qEnd, end int, st *quoteScanState) int {
-	_, quote := unquoteValue(s[q:qEnd])
-	from := q + len(quote)
-	if quote == "" || end >= len(s) || !st.consumeOpenerBudget(end-from) {
-		return -1
-	}
-	if strings.ContainsAny(s[from:qEnd-len(quote)], "{[") {
-		if o, ok := closingQuoteInMember(s, q, qEnd, st); ok {
-			if last, _ := enclosedContainerRun(s, q, qEnd, o, st); last >= 0 {
-				return last
-			}
-		}
-	}
-	if opener := skipDelimSpaceFwd(s, from); opener < len(s) && (s[opener] == '{' || s[opener] == '[') && isGluedTokenAfterQuote(s, qEnd) {
-		// Containers right after the quote are also read before a glued
-		// token, behind the same gate as those of a quoted value.
-		if !st.consumeOpenerBudget(max(opener-end, 0)) {
-			return -1
-		}
-		if last, _ := enclosedContainerRun(s, q, qEnd, opener, st); last >= 0 {
-			return last
-		}
-	}
-	for d := from; d < end; d++ {
-		if s[d] != ':' && s[d] != '=' {
-			continue
-		}
-		opener := skipDelimSpaceFwd(s, d+1)
-		if !st.consumeOpenerBudget(max(opener-end, 0)) {
-			return -1
-		}
-		if opener >= len(s) || (s[opener] != '{' && s[opener] != '[') {
-			continue
-		}
-		last, firstEnd := enclosedContainerRun(s, q, qEnd, opener, st)
-		if last >= 0 || firstEnd < 0 {
-			return last
-		}
-		d = firstEnd - 1
-	}
-	return -1
-}
-
-// enclosedContainerRun scans the "{" or "[" container at s[opener], which opens
-// after the quote that opens the quoted string s[q:qEnd], and the containers
-// that follow it with nothing but delimiter whitespace, possibly around a ",",
-// between them. When that quote closes the string right after the last of
-// them, possibly after delimiter whitespace and the ")" of groups around them
-// (see skipGroupClosers), and the closing quote of s[q:qEnd], where the
-// string seems to close, lies inside them, as the one of the "1" of
-// x": {'a': "1"} {'b': 'SECRET'}" or
-// x": {'a': "1"}, {'b': 'SECRET'}" or of the "hi" of x": {'msg': 'say "hi"'}"
-// or x"({'msg': 'say "hi"'})", it returns where the last of them starts;
-// otherwise it returns -1. It also
-// returns where the first container ends, or -1 when that container stays
-// open. Strings in either quote inside the containers are skipped (see
-// scanBalancedContainer). Every byte read is charged to st, and once st runs
-// out of budget it returns -1 for both.
-func enclosedContainerRun(s string, q, qEnd, opener int, st *quoteScanState) (last, firstEnd int) {
-	_, quote := unquoteValue(s[q:qEnd])
-	if quote == "" {
-		return -1, -1
-	}
-	seemsClose := qEnd - len(quote)
-	firstEnd = -1
-	for cur := opener; cur < len(s) && (s[cur] == '{' || s[cur] == '['); {
-		cEnd, closed := scanBalancedContainer(s, cur, len(s))
-		if !st.consumeOpenerBudget(cEnd - cur) {
-			return -1, -1
-		}
-		if !closed {
-			return -1, firstEnd
-		}
-		if firstEnd < 0 {
-			firstEnd = cEnd
-		}
-		next := skipDelimSpaceFwd(s, cEnd)
-		closeQuote := skipGroupClosers(s, cEnd)
-		if !st.consumeOpenerBudget(closeQuote - cEnd) {
-			return -1, -1
-		}
-		if strings.HasPrefix(s[closeQuote:], quote) {
-			if opener < seemsClose && seemsClose < cEnd {
-				return cur, firstEnd
-			}
-			return -1, firstEnd
-		}
-		if next < len(s) && s[next] == ',' {
-			// A "," between containers, as in {'a': 1}, {'b': 'SECRET'},
-			// goes on with the run only when another container follows it.
-			after := skipDelimSpaceFwd(s, next+1)
-			if !st.consumeOpenerBudget(after - next) {
-				return -1, -1
-			}
-			if after >= len(s) || (s[after] != '{' && s[after] != '[') {
-				return -1, firstEnd
-			}
-			next = after
-		}
-		cur = next
-	}
-	return -1, firstEnd
-}
-
-// skipGroupClosers returns where the first byte after s[:i] other than
-// delimiter whitespace and the ")" that close groups around containers, as
-// the ) of ({'k': 'v'}) or of (1, {'k': 'v'}), is.
-func skipGroupClosers(s string, i int) int {
-	i = skipDelimSpaceFwd(s, i)
-	for i < len(s) && s[i] == ')' {
-		i = skipDelimSpaceFwd(s, i+1)
-	}
-	return i
-}
-
-// enclosesMixedQuoteContainer reports whether the spanning quoted string
-// s[q:qEnd] (with qEnd > end) closes right after one or more delimited "{" or
-// "[" containers whose sequence opened after a delimiter before end, or right
-// after the opening quote, possibly after delimiter whitespace, as in
-// x"{'k': 'SECRET'}", or after any other text, from the first container in
-// the string on, possibly in groups whose ")" come before the closing quote,
-// as in x"prefix {'k': 'SECRET'}" or x"({'k': 'SECRET'})", and holds a member
-// in other quotes, as in x"S0/creds:{ 'k': 'SECRET'}",
-// x": {'k': 'SECRET'}", x"S0/creds:{ k1: 1, 'k2': 'SECRET'}",
-// x"S0/creds:[1, 2, 'SECRET']", x"S0/creds:{ a: { 'k': 'SECRET' }}",
-// x"S0/creds:{ 'k': 'SECRET'} {a:1}" or x": {'a': '1'}, {'k': 'SECRET'}"
-// (see scanMixedQuoteContainers). The delimiter may be the first byte in
-// the quotes. Its scans are charged to st, and once st runs out of budget it
-// reports true, so that the caller fails closed.
-func enclosesMixedQuoteContainer(s string, q, qEnd, end int, st *quoteScanState) bool {
-	if st != nil && st.openerBudgetExhausted {
-		return true
-	}
-	inner, quote := unquoteValue(s[q:qEnd])
-	if quote == "" {
-		return false
-	}
-	from := q + len(quote)
-	qPos := from + len(inner)
-	t := qPos
-	for t > from && isDelimSpace(s[t-1]) {
-		t--
-	}
-	// The containers end at tg when ")" close groups around them right
-	// before the closing quote, as in x"({'k': 'SECRET'})".
-	tg := t
-	for tg > from && s[tg-1] == ')' {
-		for tg--; tg > from && isDelimSpace(s[tg-1]); tg-- {
-		}
-	}
-	if tg <= from || (s[tg-1] != '}' && s[tg-1] != ']') {
-		return false
-	}
-	escaped := len(quote) == 2
-	qByte := quote[len(quote)-1]
-	if tg < t {
-		return mixedQuoteContainersAfterText(s, from, tg, qEnd, qByte, escaped, st)
-	}
-	if cand := skipDelimSpaceFwd(s, from); cand < t && (s[cand] == '{' || s[cand] == '[') {
-		// The containers open right after the quote, as the { of
-		// x"{'k': 'SECRET'}".
-		if !st.consumeOpenerBudget(cand - from) {
-			return true
-		}
-		if mixedQuoteContainersCached(s, cand, t, qEnd, qByte, escaped, st) {
-			return true
-		}
-	}
-	dLimit := min(end, t)
-	cStart := -1
-	for dPos := from; dPos < dLimit; dPos++ {
-		if !st.consumeOpenerBudget(1) {
-			return true
-		}
-		if s[dPos] != ':' && s[dPos] != '=' {
-			continue
-		}
-		cand := skipDelimSpaceFwd(s, dPos+1)
-		if !st.consumeOpenerBudget(cand - (dPos + 1)) {
-			return true
-		}
-		if cand >= t || (s[cand] != '{' && s[cand] != '[') {
-			dPos = cand - 1
-			continue
-		}
-		cStart = cand
-		cur := cand
-		for {
-			cEnd, closed := scanBalancedContainer(s, cur, dLimit)
-			if !st.consumeOpenerBudget(max(cEnd-cur, 1)) {
-				return true
-			}
-			if !closed {
-				dPos = dLimit
-				break
-			}
-			next := cEnd
-			for next < t && isDelimSpace(s[next]) {
-				next++
-			}
-			if next < t && s[next] == ',' {
-				// A "," goes on with the run only when another container
-				// follows it.
-				after := next + 1
-				for after < t && isDelimSpace(s[after]) {
-					after++
-				}
-				if after < t && (s[after] == '{' || s[after] == '[') {
-					next = after
-				}
-			}
-			if !st.consumeOpenerBudget(next - cEnd) {
-				return true
-			}
-			if next == t || (next < t && (s[next] == '{' || s[next] == '[')) {
-				if next >= dLimit {
-					dPos = dLimit
-					break
-				}
-				cur = next
-				continue
-			}
-			cStart = -1
-			dPos = cEnd - 1
-			break
-		}
-	}
-	if cStart >= 0 {
-		return mixedQuoteContainersCached(s, cStart, t, qEnd, qByte, escaped, st)
-	}
-	return mixedQuoteContainersAfterText(s, from, t, qEnd, qByte, escaped, st)
-}
-
-// mixedQuoteContainersAfterText is mixedQuoteContainersCached for the
-// containers that the first "{" or "[" in s[from:limit], the inside of the
-// spanning quoted string that ends at qEnd, starts after any other text, as
-// the { of x"prefix {'k': 'SECRET'}" or of x"({'k': 'SECRET'})". The bytes
-// before that container are charged to st.
-func mixedQuoteContainersAfterText(s string, from, limit, qEnd int, qByte byte, escaped bool, st *quoteScanState) bool {
-	c := strings.IndexAny(s[from:limit], "{[")
-	if c < 0 {
-		return false
-	}
-	if !st.consumeOpenerBudget(c) {
-		return true
-	}
-	return mixedQuoteContainersCached(s, from+c, limit, qEnd, qByte, escaped, st)
-}
-
-// mixedQuoteContainersCached is scanMixedQuoteContainers for the containers
-// from s[cStart] to limit in the spanning quoted string that ends at qEnd,
-// with its result cached in st per string and start. Once st runs out of
-// budget it reports true, so that the caller fails closed.
-func mixedQuoteContainersCached(s string, cStart, limit, qEnd int, qByte byte, escaped bool, st *quoteScanState) bool {
-	var cache *quoteContainerCache
-	if st != nil {
-		cache = &st.containers[quoteKindIndex(qByte, escaped)]
-		if cache.mixedQEnd == qEnd && cache.mixedFrom == cStart {
-			return cache.mixedResult
-		}
-	}
-	res := scanMixedQuoteContainers(s, cStart, limit, qByte, escaped, st)
-	if st != nil && st.openerBudgetExhausted {
-		return true
-	}
-	if cache != nil {
-		cache.mixedQEnd = qEnd
-		cache.mixedFrom = cStart
-		cache.mixedResult = res
-	}
-	return res
-}
-
-// scanMixedQuoteContainers reports whether s[cStart:limit] is a run of one or
-// more balanced "{" or "[" containers, separated only by delimiter whitespace
-// (see isDelimSpace), as the vertical tab of {'a': '1'}\v{'b': 'SECRET'}, or
-// by a "," with such whitespace around it, as in {'a': '1'}, {'b': 'SECRET'},
-// any of which holds, at any depth, a member in quotes other than the
-// spanning quote (outerQuote, outerEscaped) around them (see
-// isMixedContainerMemberQuoteAt), as the 'k2' of { k1: 1, 'k2': 'SECRET'} or
-// the 'SECRET' of [1, 2, 'SECRET']. Delimiter whitespace also separates a
-// member from the bytes around it. Brackets inside inner quoted strings are
-// skipped, and a quote joined to a word, as in it's, opens no string unless
-// that word is a string prefix (see isStringPrefixQuote), as the b of
-// b'x}SECRET'. Every byte it reads is charged to st, and once st runs out of
-// budget it reports true, so that the caller fails closed.
-func scanMixedQuoteContainers(s string, cStart, limit int, outerQuote byte, outerEscaped bool, st *quoteScanState) bool {
-	foundQuotedMember := false
-	pos := cStart
-	var stack []byte
-	for pos < limit {
-		if s[pos] != '{' && s[pos] != '[' {
-			return false
-		}
-		stack = append(stack[:0], s[pos])
-		// wordPrev is the byte other than delimiter whitespace before the
-		// word that ends at prevNonSpace.
-		prevNonSpace, wordPrev := s[pos], s[pos]
-		if !st.consumeOpenerBudget(1) {
-			return true
-		}
-		i := pos + 1
-		for i < limit && len(stack) > 0 {
-			topOpen := stack[len(stack)-1]
-			c := s[i]
-			switch c {
-			case '\\':
-				m := 1
-				for i+m < limit && s[i+m] == '\\' {
-					m++
-				}
-				next := i + m
-				if m%2 == 0 {
-					if !st.consumeOpenerBudget(m) {
-						return true
-					}
-					prevNonSpace = '\\'
-					i = next
-					continue
-				}
-				if next < limit && isQuoteByte(s[next]) && !isWordByte(s[i-1]) {
-					q := s[next]
-					if m&3 == 1 && (q != outerQuote || !outerEscaped) {
-						if isMixedContainerMemberQuoteAt(s, next-1, topOpen, prevNonSpace) {
-							foundQuotedMember = true
-						}
-						if end, ok := scanEscapedQuoted(s, next-1, q, st); ok && end <= limit {
-							if !st.consumeOpenerBudget(end - i) {
-								return true
-							}
-							prevNonSpace = q
-							i = end
-							continue
-						}
-					} else if outerEscaped && q == outerQuote && m&3 == 3 {
-						if !st.consumeOpenerBudget(next + 1 - i) {
-							return true
-						}
-						if end := scanTripleEscapedQuoteEnd(s, next+1, limit, q, st); end > 0 {
-							if isTripleEscapedMemberAt(s, i, end, limit, topOpen, prevNonSpace) {
-								foundQuotedMember = true
-							}
-							prevNonSpace = q
-							i = end
-							continue
-						}
-						if st != nil && st.openerBudgetExhausted {
-							return true
-						}
-						prevNonSpace = q
-						i = next + 1
-						continue
-					}
-				}
-				step := min(next+1, limit) - i
-				if !st.consumeOpenerBudget(step) {
-					return true
-				}
-				prevNonSpace = s[min(next, limit-1)]
-				i = min(next+1, limit)
-			case '"', '\'':
-				joined := isWordByte(s[i-1])
-				if (!outerEscaped && c == outerQuote) || (joined && !isStringPrefixQuote(s, pos, i, st)) {
-					if !st.consumeOpenerBudget(1) {
-						return true
-					}
-					prevNonSpace = c
-					i++
-					continue
-				}
-				memberPrev := prevNonSpace
-				if joined {
-					// The quote after a string prefix, as the b' of
-					// b'x}SECRET', starts a member after the byte before
-					// that prefix.
-					memberPrev = wordPrev
-				}
-				if isMixedContainerMemberQuoteAt(s, i, topOpen, memberPrev) {
-					foundQuotedMember = true
-				}
-				if end, ok := scanSimpleQuoted(s, i, c, st); ok && end <= limit {
-					if !st.consumeOpenerBudget(end - i) {
-						return true
-					}
-					prevNonSpace = c
-					i = end
-					continue
-				}
-				if !st.consumeOpenerBudget(1) {
-					return true
-				}
-				prevNonSpace = c
-				i++
-			case '{', '[':
-				if !st.consumeOpenerBudget(1) {
-					return true
-				}
-				stack = append(stack, c)
-				prevNonSpace = c
-				i++
-			case '}', ']':
-				if !st.consumeOpenerBudget(1) {
-					return true
-				}
-				if (c == '}' && topOpen != '{') || (c == ']' && topOpen != '[') {
-					return false
-				}
-				stack = stack[:len(stack)-1]
-				prevNonSpace = c
-				i++
-			default:
-				if !st.consumeOpenerBudget(1) {
-					return true
-				}
-				if !isDelimSpace(c) {
-					if isWordByte(c) && !isWordByte(s[i-1]) {
-						wordPrev = prevNonSpace
-					}
-					prevNonSpace = c
-				}
-				i++
-			}
-		}
-		if len(stack) > 0 {
-			return false
-		}
-		pos = i
-		for pos < limit && isDelimSpace(s[pos]) {
-			if !st.consumeOpenerBudget(1) {
-				return true
-			}
-			pos++
-		}
-		if pos < limit && s[pos] == ',' {
-			// A "," between containers, as in {'a': '1'}, {'b': 'SECRET'},
-			// needs another container after it.
-			for pos++; pos < limit && isDelimSpace(s[pos]); pos++ {
-				if !st.consumeOpenerBudget(1) {
-					return true
-				}
-			}
-			if pos >= limit {
-				return false
-			}
-			if !st.consumeOpenerBudget(1) {
-				return true
-			}
-		}
-	}
-	return foundQuotedMember
-}
-
-// isMixedContainerMemberQuoteAt reports whether the quote at s[q], which
-// follows prevNonSpace in a container that topOpen opens, starts a member of
-// that container: in an object, a quoted key after the "{" or a "," (see
-// isQuotedMemberAt) or a quoted value after the ":" or "=" of a key (see
-// isQuotedMemberValueAt); in an array, a quoted element after the "[" or a
-// ",".
-func isMixedContainerMemberQuoteAt(s string, q int, topOpen, prevNonSpace byte) bool {
-	if topOpen == '{' {
-		switch prevNonSpace {
-		case '{', ',':
-			return isQuotedMemberAt(s, q, '{')
-		case ':', '=':
-			return isQuotedMemberValueAt(s, q)
-		}
-		return false
-	}
-	if prevNonSpace == '[' || prevNonSpace == ',' {
-		return isQuotedMemberAt(s, q, '[')
-	}
-	return false
-}
-
-// isTripleEscapedMemberAt is isMixedContainerMemberQuoteAt for a string in
-// triple-escaped quotes (\\\" or \\\'), the inner quotes of a string in
-// escaped quotes, that runs from s[qStart] to s[end]: whether the byte after
-// it, past delimiter whitespace and before limit, ends a non-empty key (":" or
-// "="), a value ("," or "}") or an element ("," or "]") where that string
-// starts.
-func isTripleEscapedMemberAt(s string, qStart, end, limit int, topOpen, prevNonSpace byte) bool {
-	empty := end-(qStart+4) == 4
-	d := end
-	for d < limit && isDelimSpace(s[d]) {
-		d++
-	}
-	if d >= limit {
-		return false
-	}
-	if topOpen == '{' {
-		switch prevNonSpace {
-		case '{', ',':
-			return !empty && (s[d] == ':' || s[d] == '=')
-		case ':', '=':
-			return s[d] == ',' || s[d] == '}'
-		}
-		return false
-	}
-	if prevNonSpace == '[' || prevNonSpace == ',' {
-		return s[d] == ',' || s[d] == ']' || (!empty && (s[d] == ':' || s[d] == '='))
-	}
-	return false
-}
-
-const (
-	memberFlagObj uint8 = 1 << iota
-	memberFlagArr
-	memberFlagVal
-	memberFlagsComputed
-)
-
-func quoteKindIndex(q byte, escaped bool) int {
-	if escaped {
-		if q == '"' {
-			return 2
-		}
-		return 3
-	}
-	if q == '"' {
-		return 0
-	}
-	return 1
-}
-
-func insideInnerQuote(pos int, starts, ends []int) bool {
-	i, found := slices.BinarySearch(starts, pos)
-	if found {
-		return false
-	}
-	return i > 0 && pos < ends[i-1]
-}
-
-func memberFlagsAt(s string, qPos int, cache *quoteContainerCache) uint8 {
-	if cache != nil && cache.memberFlags&memberFlagsComputed != 0 && cache.memberFlagsQPos == qPos {
-		return cache.memberFlags
-	}
-	flags := memberFlagsComputed
-	if end, empty := quotedMemberEnd(s, qPos); end >= 0 {
-		d := end
-		for d < len(s) && isDelimSpace(s[d]) {
-			d++
-		}
-		if d < len(s) {
-			switch s[d] {
-			case ':', '=':
-				if !empty {
-					flags |= memberFlagObj | memberFlagArr
-				}
-			case ',':
-				flags |= memberFlagArr | memberFlagVal
-			case ']':
-				flags |= memberFlagArr
-			case '}':
-				flags |= memberFlagVal
-			}
-		}
-	}
-	if cache != nil {
-		cache.memberFlags = flags
-		cache.memberFlagsQPos = qPos
-	}
-	return flags
-}
-
-// quotedContainerOpeners scans s[q:qEnd] for unclosed "{" and "[" openers
-// (ignoring brackets inside inner quoted strings) and returns the innermost
-// and outermost openers when s[qEnd-len(quote)] starts a container member, or
-// a part of one after a "(", a "+" or another string, as the b" of
-// "{'a': (1 + b" SECRET"), 'k': 'v'}" or of "{'a': 'x' b" SECRET", 'k': 'v'}"
-// does when its string ends a member or a part of one (see memberStringEnds).
-func quotedContainerOpeners(s string, q, qEnd int, st *quoteScanState) (innerOpener, outerOpener int) {
-	if st != nil && st.openerBudgetExhausted {
-		return -1, -1
-	}
-	inner, quote := unquoteValue(s[q:qEnd])
-	if quote == "" {
-		return -1, -1
-	}
-	from := q + len(quote)
-	qPos := from + len(inner)
-	t := qPos
-	for t > from && isDelimSpace(s[t-1]) {
-		t--
-	}
-	if p := stringPrefixStart(s, from, qPos); p >= 0 {
-		// The closing quote right after a string prefix, as the b" of
-		// "{'k': b" SECRET", 'm': 1}", starts a member where that prefix
-		// starts.
-		t = p
-		for t > from && isDelimSpace(s[t-1]) {
-			t--
-		}
-	}
-	if t <= from {
-		return -1, -1
-	}
-	c := s[t-1]
-	// part reports that the closing quote opens a part of a member, and
-	// limit is where the span scan stops: past the closing quote of another
-	// string right before, so that the scan reads that string as one.
-	part, limit := false, t-1
-	switch c {
-	case '{', '[', ',', ':', '=':
-	case '(', '+':
-		part = true
-	default:
-		if !isQuoteByte(c) {
-			return -1, -1
-		}
-		part, limit = true, t
-	}
-	escaped := len(quote) == 2
-	qByte := quote[len(quote)-1]
-	var cache *quoteContainerCache
-	if st != nil {
-		cache = &st.containers[quoteKindIndex(qByte, escaped)]
-	}
-	var flags uint8
-	if part {
-		if end, ok := scanQuotedAt(s, qPos, st); !ok || !memberStringEnds(s, qPos, end, st) {
-			return -1, -1
-		}
-	} else {
-		flags = memberFlagsAt(s, qPos, cache)
-	}
-	if c == '{' && flags&memberFlagObj == 0 {
-		return -1, -1
-	}
-	if c == '[' && flags&memberFlagArr == 0 {
-		return -1, -1
-	}
-	if c == ',' && flags&(memberFlagObj|memberFlagArr) == 0 {
-		return -1, -1
-	}
-	if (c == ':' || c == '=') && flags&memberFlagVal == 0 {
-		return -1, -1
-	}
-	var openers []int
-	// ends lists where the strings that the span scan skipped end.
-	var ends []int
-	hit := false
-	if cache != nil {
-		if cache.checkedQEnd != qEnd {
-			cache.checkedQEnd = qEnd
-			cache.numSpans = 0
-		}
-		for i := range cache.numSpans {
-			sp := &cache.spans[i]
-			if from >= sp.checkedFrom && !insideInnerQuote(from, sp.iqStarts, sp.iqEnds) {
-				idx, _ := slices.BinarySearch(sp.openers, from)
-				openers = sp.openers[idx:]
-				ends = sp.iqEnds
-				hit = true
-				break
-			}
-		}
-	}
-	if !hit {
-		var iqStarts []int
-		openers, iqStarts, ends = scanOpenersInSpan(s, from, limit, qByte, escaped, st)
-		if st != nil && st.openerBudgetExhausted {
-			return -1, -1
-		}
-		if c == '{' || c == '[' {
-			openers = append(openers, t-1)
-		}
-		if cache != nil {
-			slot := cache.numSpans
-			if slot < len(cache.spans) {
-				cache.numSpans++
-			} else {
-				slot = len(cache.spans) - 1
-			}
-			cache.spans[slot] = quoteContainerSpan{
-				checkedFrom: from,
-				openers:     openers,
-				iqStarts:    iqStarts,
-				iqEnds:      ends,
-			}
-		}
-	}
-	if len(openers) == 0 {
-		return -1, -1
-	}
-	o := openers[len(openers)-1]
-	switch c {
-	case '{', '[', '(', '+':
-		return o, openers[0]
-	case ',':
-		if (s[o] == '{' && flags&memberFlagObj != 0) || (s[o] == '[' && flags&memberFlagArr != 0) {
-			return o, openers[0]
-		}
-	case ':', '=':
-		if s[o] == '{' && flags&memberFlagVal != 0 {
-			return o, openers[0]
-		}
-	default:
-		// The quote right before closes another string only when the span
-		// scan skipped a string that ends there, so that the apostrophe of
-		// it's " SECRET" starts no part.
-		if _, found := slices.BinarySearch(ends, t); found {
-			return o, openers[0]
-		}
-	}
-	return -1, -1
-}
-
-// scanOpenersInSpan scans s[from:limit], the interior prefix of a quoted
-// string opened by (outerQuote, outerEscaped), and returns the positions of
-// all "{" and "[" brackets that remain open at limit, ignoring brackets inside
-// closed inner quoted strings, along with the skipped inner-quote spans.
-func scanOpenersInSpan(s string, from, limit int, outerQuote byte, outerEscaped bool, st *quoteScanState) (openers, iqStarts, iqEnds []int) {
-	noMoreTripleEsc := false
-	for i := from; i < limit; i++ {
-		c := s[i]
-		switch c {
-		case '\\':
-			m := 1
-			for i+m < limit && s[i+m] == '\\' {
-				m++
-			}
-			next := i + m
-			if m%2 == 0 {
-				if !st.consumeOpenerBudget(m) {
-					return nil, nil, nil
-				}
-				i = next - 1
-				continue
-			}
-			if next < limit && isQuoteByte(s[next]) && (i == from || !isWordByte(s[i-1])) {
-				q := s[next]
-				if m&3 == 1 && (q != outerQuote || (!outerEscaped && len(openers) > 0)) {
-					if end, ok := scanEscapedQuoted(s, next-1, q, st); ok && end <= limit {
-						if !st.consumeOpenerBudget(end - i) {
-							return nil, nil, nil
-						}
-						iqStarts = append(iqStarts, next-1)
-						iqEnds = append(iqEnds, end)
-						i = end - 1
-						continue
-					}
-				} else if outerEscaped && q == outerQuote && m&3 == 3 && len(openers) > 0 && !noMoreTripleEsc {
-					if !st.consumeOpenerBudget(next + 1 - i) {
-						return nil, nil, nil
-					}
-					if end := scanTripleEscapedQuoteEnd(s, next+1, limit, q, st); end > 0 {
-						iqStarts = append(iqStarts, i)
-						iqEnds = append(iqEnds, end)
-						i = end - 1
-						continue
-					}
-					if st != nil && st.openerBudgetExhausted {
-						return nil, nil, nil
-					}
-					noMoreTripleEsc = true
-					i = next
-					continue
-				}
-			}
-			if !st.consumeOpenerBudget(min(next+1, limit) - i) {
-				return nil, nil, nil
-			}
-			i = next
-		case '"', '\'':
-			if (!outerEscaped && c == outerQuote) || (i > from && isWordByte(s[i-1]) && !isStringPrefixQuote(s, from, i, st)) {
-				if !st.consumeOpenerBudget(1) {
-					return nil, nil, nil
-				}
-				continue
-			}
-			if end, ok := scanSimpleQuoted(s, i, c, st); ok && end <= limit {
-				if !st.consumeOpenerBudget(end - i) {
-					return nil, nil, nil
-				}
-				iqStarts = append(iqStarts, i)
-				iqEnds = append(iqEnds, end)
-				i = end - 1
-				continue
-			}
-			if !st.consumeOpenerBudget(1) {
-				return nil, nil, nil
-			}
-		case '{', '[':
-			if !st.consumeOpenerBudget(1) {
-				return nil, nil, nil
-			}
-			openers = append(openers, i)
-		case '}', ']':
-			if !st.consumeOpenerBudget(1) {
-				return nil, nil, nil
-			}
-			if len(openers) > 0 {
-				openers = openers[:len(openers)-1]
-			}
-		default:
-			if !st.consumeOpenerBudget(1) {
-				return nil, nil, nil
-			}
-		}
-	}
-	return openers, iqStarts, iqEnds
-}
-
-func scanTripleEscapedQuoteEnd(s string, pos, limit int, q byte, st *quoteScanState) int {
-	for i := pos; i < limit; {
-		m := 0
-		for i < limit && s[i] == '\\' {
-			m++
-			i++
-		}
-		if m > 0 && !st.consumeOpenerBudget(m) {
-			return -1
-		}
-		if i >= limit {
-			return -1
-		}
-		if !st.consumeOpenerBudget(1) {
-			return -1
-		}
-		c := s[i]
-		if c < 0x20 || c == 0x7f {
-			return -1
-		}
-		i++
-		if c == q && m&3 == 3 {
-			return i
-		}
-	}
-	return -1
-}
-
-// isQuotedMemberAt reports whether a quoted member of a container that open
-// ("{" or "[") opens starts at s[q]: a quoted string (see quotedMemberEnd)
-// followed, after optional delimiter whitespace, by a ":" or "=" when it is a
-// non-empty key, as the "k": of {"k": 1}, the "user:foo": of
-// {"user:foo": 1}, the "a b"= of {"a b"= 1} or the \'k\': of {\'k\': 1}, or,
-// in an array, by a "," or "]" when it is an element, as the "a", of
-// ["a", 1]. A key may hold any other byte, as a JSON key may, so that a key
-// such as "a/b" is read as one.
-func isQuotedMemberAt(s string, q int, open byte) bool {
-	end, empty := quotedMemberEnd(s, q)
-	if end < 0 {
-		return false
-	}
-	d := end
-	for d < len(s) && isDelimSpace(s[d]) {
-		d++
-	}
-	if d >= len(s) {
-		return false
-	}
-	switch s[d] {
-	case ':', '=':
-		return !empty
-	case ',', ']':
-		return open == '['
-	}
-	return false
-}
-
-// isQuotedMemberValueAt reports whether the quoted value of a member of a "{"
-// container starts at s[q]: a quoted string (see quotedMemberEnd) followed,
-// after optional delimiter whitespace, by a "," or the "}" that closes the
-// container, as the "SECRET"} of {k: "SECRET"}.
-func isQuotedMemberValueAt(s string, q int) bool {
-	end, _ := quotedMemberEnd(s, q)
-	if end < 0 {
-		return false
-	}
-	for end < len(s) && isDelimSpace(s[end]) {
-		end++
-	}
-	return end < len(s) && (s[end] == ',' || s[end] == '}')
-}
-
-// quotedMemberEnd returns the index right after the quoted string that starts
-// at s[q], and whether that string is empty, or -1: a string opened by a quote
-// that may be escaped by a backslash (", ', \" or \') and closed by the same
-// quote, that may escape a byte with a backslash (with m&3 backslash parity
-// inside \" and \') and may span lines and hold control bytes, as the strings
-// that the container scans skip may (see scanSimpleQuoted and
-// scanEscapedQuoted).
-func quotedMemberEnd(s string, q int) (int, bool) {
-	end, ok := scanQuotedAt(s, q, nil)
-	if !ok {
-		return -1, false
-	}
-	if s[q] == '\\' {
-		return end, end-q == 4
-	}
-	return end, end-q == 2
-}
-
 // isDanglingKeyPathByte reports whether c may be part of a key, possibly
 // joined to earlier text by a path separator, punctuation or a quote, that
 // runs up to the delimiter after it (see danglingClosedKeyAfterQuoteEnd): any
@@ -2861,6 +1146,15 @@ func isDanglingKeyPathByte(c byte) bool {
 	return !isDelimSpace(c) && !isTextValueStop(c) && c != ':' && c != '='
 }
 
+// extendGluedValueEnd returns where the text to redact with a value ends when
+// the value goes on at s[valPos], glued to it: past each value that a key
+// glued to the one before it starts, to the end of the first one that does
+// not go on. Each step reads one value, from cur to the next value stop; a
+// value longer than maxNestedKeyLen is taken as a whole (see
+// classifyOverBudgetNestedKey), so that a step past the budget moves past
+// what it read, and a step within it reads at most maxNestedKeyLen bytes.
+// Every byte read is also charged to st, and once st runs out of budget the
+// text to redact runs to the end of s.
 func extendGluedValueEnd(s string, valPos, open int, openQ openQuoteState, st *quoteScanState) int {
 	cur := valPos
 	for cur < len(s) {
@@ -2890,15 +1184,27 @@ func extendGluedValueEnd(s string, valPos, open int, openQ openQuoteState, st *q
 			}
 		}
 		vEnd := scanValueEnd(s, cur, isTextValueStop, st)
+		if !st.consumeOpenerBudget(vEnd - cur) {
+			return len(s)
+		}
+		if vEnd-cur > maxNestedKeyLen {
+			// A value past the budget is redacted as a value as a whole,
+			// without reading the keys in it, and only its end may run on
+			// into the value after a delimiter (see
+			// classifyOverBudgetNestedKey), so that a run of glued pairs
+			// with no value stop, as "token":"x"/ repeated, is read once.
+			if kind, next := classifyOverBudgetNestedKey(s, cur, vEnd, openQ, st); kind == gluedAfterValue {
+				cur = max(next, vEnd)
+				continue
+			}
+			return textValueEnd(s, cur, vEnd, open)
+		}
 		kind, next := nestsSensitiveKey(s, cur, vEnd, false, openQ, st)
 		if st != nil && st.openerBudgetExhausted {
 			return len(s)
 		}
 		switch kind {
 		case notNestedKey:
-			if realEnd, ok := quotedValueRealEnd(s, cur, vEnd, open, openQ, st); ok {
-				return max(vEnd, realEnd)
-			}
 			if _, quote := unquoteValue(s[cur:vEnd]); quote != "" &&
 				hasGluedSuffixAfterQuotedValue(s, cur, vEnd, openQ, st) {
 				cur = vEnd
@@ -2910,9 +1216,6 @@ func extendGluedValueEnd(s string, valPos, open int, openQ openQuoteState, st *q
 			}
 			return textValueEnd(s, cur, vEnd, open)
 		case gluedAfterValue:
-			if realEnd, ok := quotedValueRealEnd(s, cur, vEnd, open, openQ, st); ok {
-				return max(vEnd, realEnd)
-			}
 			if next <= cur {
 				return textValueEnd(s, cur, vEnd, open)
 			}

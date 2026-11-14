@@ -2769,6 +2769,7 @@ func TestSanitizeRawText(t *testing.T) {
 			{`[ERROR] POST /v1/login: 400: {"msg":"retry\npassword=SECRET123"}`, unparseableJSONPlaceholder},
 			{`[ERROR] POST /v1/login: 400: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`, unparseableJSONPlaceholder},
 			{`POST /v1/login: {"msg":"retry\npassword=SECRET123"} (status 400)`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"password=SECRET123"}`, `{"msg":"password=[REDACTED]}`},
 			{`{"msg":"retry\npassword=dev-SECRET123-password: dial"}`, redactedSensitiveTextPlaceholder},
 			{`{"msg":"retry\npassword=hunter2val token=abc-SECRET123-token: dial"}`, redactedSensitiveTextPlaceholder},
 			{`["retry\npassword=dev-SECRET123-password: dial"]`, redactedSensitiveTextPlaceholder},
@@ -2835,10 +2836,20 @@ func TestSanitizeRawText(t *testing.T) {
 			if got != tt.want || !lost {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tt.raw, got, lost, tt.want)
 			}
+			// A value that is a JSON object or array as a whole keeps its
+			// structure in SmartTruncate, which redacts its string leaves
+			// one by one, as redactErrorMessage does.
+			wantTrunc := tt.want
+			if trimmed := strings.TrimSpace(tt.raw); (strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")) && json.Valid([]byte(trimmed)) {
+				wantTrunc = redactErrorMessage(tt.raw)
+				if strings.Contains(wantTrunc, "SECRET123") || !json.Valid([]byte(wantTrunc)) {
+					t.Errorf("redactErrorMessage(%q) = %q, want valid JSON without the secret", tt.raw, wantTrunc)
+				}
+			}
 			truncJSON, truncated, err := SmartTruncate(tt.raw, 4096)
 			var trunc string
-			if err != nil || json.Unmarshal(truncJSON, &trunc) != nil || trunc != tt.want || !truncated {
-				t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want (%q, true, nil)", tt.raw, truncJSON, truncated, err, tt.want)
+			if err != nil || json.Unmarshal(truncJSON, &trunc) != nil || trunc != wantTrunc || !truncated {
+				t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want (%q, true, nil)", tt.raw, truncJSON, truncated, err, wantTrunc)
 			}
 		}
 		for _, depth := range []int{5, 9} {
@@ -2862,19 +2873,18 @@ func TestSanitizeRawText(t *testing.T) {
 			t.Errorf("scrubErrorText unescaped JSON pair = %q, want %q", got, want)
 		}
 		// Scrubbing the text of the valid JSON value takes its closing quote
-		// with the redacted value. sanitizeRawText keeps that malformed text,
-		// which reads as redacted prose; SmartTruncate fails such text closed
-		// on its next pass, so it fails it closed on the first, and a second
-		// SmartTruncate changes nothing.
-		if got, lost := sanitizeRawText(`{"msg":"password=SECRET123"}`); got != `{"msg":"password=[REDACTED]}` || !lost {
-			t.Errorf("sanitizeRawText(unescaped JSON pair) = (%q, %v), want (%q, true)", got, lost, `{"msg":"password=[REDACTED]}`)
+		// with the redacted value, which sanitizeRawText keeps, as on main,
+		// as text that reads as redacted prose. SmartTruncate redacts the
+		// leaves of the JSON value instead, as redactErrorMessage does, so
+		// the value stays valid JSON, and a second SmartTruncate changes
+		// nothing.
+		wantDoc := `"{\"msg\":\"password=[REDACTED]\"}"`
+		raw, truncated, err := SmartTruncate(`{"msg":"password=SECRET123"}`, 4096)
+		if err != nil || !truncated || string(raw) != wantDoc {
+			t.Errorf("SmartTruncate(unescaped JSON pair) = (%s, %v, %v), want (%s, true, nil)", raw, truncated, err, wantDoc)
 		}
-		wantBlob := `"` + unparseableJSONPlaceholder + `"`
-		if raw, truncated, err := SmartTruncate(`{"msg":"password=SECRET123"}`, 4096); err != nil || !truncated || string(raw) != wantBlob {
-			t.Errorf("SmartTruncate(unescaped JSON pair) = (%s, %v, %v), want (%s, true, nil)", raw, truncated, err, wantBlob)
-		}
-		if raw, truncated, err := SmartTruncate(unparseableJSONPlaceholder, 4096); err != nil || truncated || string(raw) != wantBlob {
-			t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want unchanged", unparseableJSONPlaceholder, raw, truncated, err)
+		if again, truncated, err := SmartTruncate(`{"msg":"password=[REDACTED]"}`, 4096); err != nil || truncated || string(again) != wantDoc {
+			t.Errorf("SmartTruncate(%s) = (%s, %v, %v), want unchanged", raw, again, truncated, err)
 		}
 		for _, harmless := range []string{
 			`C:\new\file.txt`,

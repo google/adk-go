@@ -30,66 +30,67 @@ import (
 // key=value or key: value passes of scrubTextPatterns.
 
 func scrubErrorTokens(msg string) string {
-	return scrubTextPatterns(scrubURITokens(msg))
+	return scrubErrorTokensTraced(msg, nil)
+}
+
+// scrubErrorTokensTraced is scrubErrorTokens, recording in tr, when it is not
+// nil, the runs of the result copied from msg (see passTrace).
+func scrubErrorTokensTraced(msg string, tr *passTrace) string {
+	return scrubErrorTokensTracedWith(msg, redactURIComponent, tr)
+}
+
+// scrubErrorTokensTracedWith is scrubErrorTokensTraced with scrub, which
+// returns what redactURIComponent does, in its place (see
+// scrubMemo.componentScrub).
+func scrubErrorTokensTracedWith(msg string, scrub uriComponentScrub, tr *passTrace) string {
+	c := startPasses(msg, tr)
+	c.run(func(s string, tr *passTrace) string {
+		return scrubURITokens(s, scrub, scannerURIKeys, tr)
+	})
+	c.run(scrubTextPatterns)
+	return c.end(tr)
 }
 
 // scrubTextPatterns redacts Authorization and API-key headers, bearer and
-// basic credentials, and the values of sensitive key-value pairs in s.
-func scrubTextPatterns(s string) string {
+// basic credentials, and the values of sensitive key-value pairs in s,
+// recording in tr, when it is not nil, the runs of the result copied from s.
+func scrubTextPatterns(s string, tr *passTrace) string {
+	c := startPasses(s, tr)
 	if !mayMatchTextPatterns(s) {
-		return s
+		return c.end(tr)
 	}
 	hasColonOrEq := strings.ContainsAny(s, ":=")
 	if hasColonOrEq && strings.Contains(s, ":") {
-		s = redactAuthHeaders(s)
+		c.run(redactAuthHeaders)
 	}
-	if strings.ContainsAny(s, "bB") {
-		s = redactBearerTokens(s)
-		s = redactBasicCredentials(s)
+	if strings.ContainsAny(c.s, "bB") {
+		c.run(redactBearerTokens)
+		c.run(redactBasicCredentials)
 	}
-	if hasColonOrEq && strings.Contains(s, `"`) && strings.Contains(s, ":") {
-		s = redactJSONKeyValues(s)
-		if s == redactedSensitiveTextPlaceholder {
-			return s
+	if hasColonOrEq && strings.Contains(c.s, `"`) && strings.Contains(c.s, ":") {
+		c.run(redactJSONKeyValues)
+		if c.s == redactedSensitiveTextPlaceholder {
+			return c.end(tr)
 		}
 	}
-	if strings.ContainsAny(s, "=:") {
-		s = redactTextKeyValues(s)
+	if strings.ContainsAny(c.s, "=:") {
+		c.run(redactTextKeyValues)
 	}
-	return s
+	return c.end(tr)
 }
 
 // openerScanBudgetMultiplier and minOpenerScanBudget bound the bytes that the
-// container scans of one quoteScanState (scanOpenersInSpan,
-// scanTripleEscapedQuoteEnd, enclosesMixedQuoteContainer and
-// scanMixedQuoteContainers) read over a text s to
-// max(openerScanBudgetMultiplier*len(s), minOpenerScanBudget), so that their
-// total work stays linear in len(s) also when inner quotes keep a check from
-// reusing an earlier scan of the same quoted string. Text that is not built
-// to defeat those caches reads each byte a few times at most; text that runs
-// the scans out of budget fails closed (see consumeOpenerBudget).
+// lookahead scans of one quoteScanState read past the value they classify
+// (the runs of glued values that extendGluedValueEnd and nestedPairEndWithState
+// follow, and the pairs that innerContinuesIntoGluedToken reads) over a text s
+// to max(openerScanBudgetMultiplier*len(s), minOpenerScanBudget), so that
+// their total work stays linear in len(s). Text that is not built to defeat
+// them reads each byte a few times at most; text that runs the scans out of
+// budget fails closed (see consumeOpenerBudget).
 const (
 	minOpenerScanBudget        = 8192
 	openerScanBudgetMultiplier = 8
 )
-
-type quoteContainerSpan struct {
-	checkedFrom int
-	openers     []int
-	iqStarts    []int
-	iqEnds      []int
-}
-
-type quoteContainerCache struct {
-	checkedQEnd     int
-	numSpans        int
-	spans           [6]quoteContainerSpan
-	memberFlags     uint8
-	memberFlagsQPos int
-	mixedQEnd       int
-	mixedFrom       int
-	mixedResult     bool
-}
 
 type quoteScanState struct {
 	unclosedDoubleFrom    int
@@ -108,13 +109,12 @@ type quoteScanState struct {
 	closedEscDoubleUntil  int
 	closedEscSingleFrom   int
 	closedEscSingleUntil  int
-	containers            [4]quoteContainerCache
 	openerScanBudget      int
 	openerBudgetExhausted bool
 }
 
 // newQuoteScanState returns the scan state of a text of textLen bytes, with
-// empty caches and the container scan budget of that text (see
+// empty caches and the scan budget of that text (see
 // openerScanBudgetMultiplier).
 func newQuoteScanState(textLen int) quoteScanState {
 	return quoteScanState{
@@ -130,7 +130,7 @@ func newQuoteScanState(textLen int) quoteScanState {
 	}
 }
 
-// consumeOpenerBudget takes steps bytes of container scan work from the budget
+// consumeOpenerBudget takes steps bytes of lookahead scan work from the budget
 // of st and reports whether the scan may go on. Once the budget runs out, st
 // stays exhausted and the scans fail closed: the value being classified runs
 // to the end of s, and redactJSONKeyValues and redactTextKeyValues return
@@ -195,9 +195,18 @@ func isTempKeyBodyByte(c byte) bool {
 }
 
 func trimInlineSpaces(s string) string {
-	return strings.TrimFunc(s, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.In(r, unicode.Z)
-	})
+	return strings.TrimFunc(s, isInlineSpaceRune)
+}
+
+func isInlineSpaceRune(r rune) bool {
+	return unicode.IsSpace(r) || unicode.In(r, unicode.Z)
+}
+
+// trimmedSpan returns the span of s[from:to] that trimInlineSpaces keeps.
+func trimmedSpan(s string, from, to int) (int, int) {
+	left := strings.TrimLeftFunc(s[from:to], isInlineSpaceRune)
+	from = to - len(left)
+	return from, from + len(strings.TrimRightFunc(left, isInlineSpaceRune))
 }
 
 func skipInlineSpacesFwd(s string, pos, limit int) int {
@@ -487,8 +496,8 @@ func matchAuthHeaderAtEnd(s string, last, hdrEnd int) int {
 	return -1
 }
 
-func redactAuthHeaders(s string) string {
-	var b strings.Builder
+func redactAuthHeaders(s string, tr *passTrace) string {
+	w := spanWriter{s: s, tr: tr}
 	last, pos := 0, 0
 	// deferUntil is the end of a line that ends in a nested key (see
 	// nestedKeyBeforeNextLine), whose later headers are part of the
@@ -541,14 +550,12 @@ func redactAuthHeaders(s string) string {
 			if inner, _ := unquoteValue(s[valStart:vEnd]); vEnd == valStart || isRedactedMarker(inner) {
 				continue
 			}
-			b.WriteString(s[last:hdrStart])
-			b.WriteString(s[hdrStart:hdrEnd])
-			b.WriteString(": ")
-			b.WriteString(redactedValue)
+			w.copy(last, hdrEnd)
+			w.lit(": " + redactedValue)
 			if vEnd == keyStart {
 				// The key was joined to the redacted text, as the token of
 				// SECRET/token:, and is now written apart from it.
-				b.WriteByte(' ')
+				w.lit(" ")
 			}
 			last = vEnd
 			continue
@@ -557,18 +564,12 @@ func redactAuthHeaders(s string) string {
 			pos = valEnd
 			continue
 		}
-		b.WriteString(s[last:hdrStart])
-		b.WriteString(s[hdrStart:hdrEnd])
-		b.WriteString(": ")
-		b.WriteString(redactedValue)
+		w.copy(last, hdrEnd)
+		w.lit(": " + redactedValue)
 		last = valEnd
 		pos = valEnd
 	}
-	if last == 0 {
-		return s
-	}
-	b.WriteString(s[last:])
-	return b.String()
+	return w.done(last)
 }
 
 // nestedKeyBeforeNextLine reports whether the header value
@@ -685,9 +686,9 @@ func matchWordFoldASCII(s string, pos int, word string) bool {
 	return strings.EqualFold(s[pos:pos+len(word)], word)
 }
 
-func redactBearerTokens(s string) string {
+func redactBearerTokens(s string, tr *passTrace) string {
 	qState := newQuoteScanState(len(s))
-	var b strings.Builder
+	w := spanWriter{s: s, tr: tr}
 	last, pos := 0, 0
 	for pos+7 <= len(s) {
 		rel := strings.IndexAny(s[pos:], "bB")
@@ -723,18 +724,12 @@ func redactBearerTokens(s string) string {
 			pos = valEnd
 			continue
 		}
-		b.WriteString(s[last:i])
-		b.WriteString(s[i:afterWord])
-		b.WriteByte(' ')
-		b.WriteString(redactedValue)
+		w.copy(last, afterWord)
+		w.lit(" " + redactedValue)
 		last = valEnd
 		pos = valEnd
 	}
-	if last == 0 {
-		return s
-	}
-	b.WriteString(s[last:])
-	return b.String()
+	return w.done(last)
 }
 
 func scanBearerValueEnd(s string, valStart int, st *quoteScanState) int {
@@ -787,8 +782,8 @@ func isBase64BodyByte(c byte) bool {
 	return ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z') || ('0' <= c && c <= '9') || c == '+' || c == '/'
 }
 
-func redactBasicCredentials(s string) string {
-	var b strings.Builder
+func redactBasicCredentials(s string, tr *passTrace) string {
+	w := spanWriter{s: s, tr: tr}
 	last, pos := 0, 0
 	for pos+6 <= len(s) {
 		rel := strings.IndexAny(s[pos:], "bB")
@@ -832,18 +827,12 @@ func redactBasicCredentials(s string) string {
 				continue
 			}
 		}
-		b.WriteString(s[last:i])
-		b.WriteString(s[i:afterWord])
-		b.WriteByte(' ')
-		b.WriteString(redactedValue)
+		w.copy(last, afterWord)
+		w.lit(" " + redactedValue)
 		last = end
 		pos = end
 	}
-	if last == 0 {
-		return s
-	}
-	b.WriteString(s[last:])
-	return b.String()
+	return w.done(last)
 }
 
 func isBase64Byte(c byte) bool {
@@ -858,11 +847,11 @@ func isUnescapedQuote(s string, floor, quotePos int) bool {
 	return bs%2 == 0
 }
 
-func redactJSONKeyValues(s string) string {
+func redactJSONKeyValues(s string, tr *passTrace) string {
 	qState := newQuoteScanState(len(s))
 	var brackets openBrackets
 	var quotes openQuotes
-	var b strings.Builder
+	w := spanWriter{s: s, tr: tr}
 	last, pos := 0, 0
 	for pos < len(s) {
 		rel := strings.IndexByte(s[pos:], ':')
@@ -898,8 +887,7 @@ func redactJSONKeyValues(s string) string {
 		}
 		keyStart := skipInlineSpacesFwd(s, openQuote+1, closeQuote)
 		keyEnd := skipInlineSpacesBack(s, keyStart, closeQuote)
-		key := s[keyStart:keyEnd]
-		if !isValidJSONPatternKey(key) {
+		if !isValidJSONPatternKey(s[keyStart:keyEnd]) {
 			pos = colonPos + 1
 			continue
 		}
@@ -916,31 +904,23 @@ func redactJSONKeyValues(s string) string {
 		openQ := quotes.before(s, colonPos)
 		kind, pair := nestsSensitiveKey(s, valStart, end, startsLine(s, colonPos+1, valStart), openQ, &qState)
 		if qState.openerBudgetExhausted {
-			return redactedSensitiveTextPlaceholder
+			return w.failClosed()
 		}
 		switch kind {
 		case nestedKey:
 			pos = valStart
 			continue
 		case valueEndingInKeyName, gluedAfterValue:
-			realEnd, _ := quotedValueRealEnd(s, valStart, end, open, openQ, &qState)
 			if kind == gluedAfterValue {
-				end = max(end, realEnd, extendGluedValueEnd(s, pair, open, openQ, &qState))
+				end = max(end, extendGluedValueEnd(s, pair, open, openQ, &qState))
 			} else {
-				end = max(end, realEnd, nestedPairEndWithState(s, pair, open, openQ, &qState))
+				end = max(end, nestedPairEndWithState(s, pair, open, openQ, &qState))
 			}
 			if qState.openerBudgetExhausted {
-				return redactedSensitiveTextPlaceholder
+				return w.failClosed()
 			}
 			brackets.skip(end)
-			b.WriteString(s[last:openQuote])
-			b.WriteByte('"')
-			b.WriteString(key)
-			b.WriteString(`":`)
-			b.WriteString(headerLineBreak(s, openQuote, colonPos, valStart))
-			b.WriteByte('"')
-			b.WriteString(redactedValue)
-			b.WriteByte('"')
+			writeJSONPair(&w, last, openQuote, keyStart, keyEnd, closeQuote, colonPos, valStart)
 			last = end
 			pos = end
 			continue
@@ -948,13 +928,11 @@ func redactJSONKeyValues(s string) string {
 		origEnd := end
 		_, origQuote := unquoteValue(s[valStart:origEnd])
 		if origQuote != "" {
-			if realEnd, ok := quotedValueRealEnd(s, valStart, end, open, openQ, &qState); ok {
-				end = max(end, realEnd)
-			} else if hasGluedSuffixAfterQuotedValue(s, valStart, end, openQ, &qState) {
+			if hasGluedSuffixAfterQuotedValue(s, valStart, end, openQ, &qState) {
 				end = max(end, extendGluedValueEnd(s, end, open, openQ, &qState))
 			}
 			if qState.openerBudgetExhausted {
-				return redactedSensitiveTextPlaceholder
+				return w.failClosed()
 			}
 		} else {
 			end = sensitiveValueEnd(s, valStart, end)
@@ -966,25 +944,14 @@ func redactJSONKeyValues(s string) string {
 				continue
 			}
 		}
-		b.WriteString(s[last:openQuote])
-		b.WriteByte('"')
-		b.WriteString(key)
-		b.WriteString(`":`)
-		b.WriteString(headerLineBreak(s, openQuote, colonPos, valStart))
-		b.WriteByte('"')
-		b.WriteString(redactedValue)
-		b.WriteByte('"')
+		writeJSONPair(&w, last, openQuote, keyStart, keyEnd, closeQuote, colonPos, valStart)
 		last = end
 		pos = end
 	}
 	if qState.openerBudgetExhausted {
-		return redactedSensitiveTextPlaceholder
+		return w.failClosed()
 	}
-	if last == 0 {
-		return s
-	}
-	b.WriteString(s[last:])
-	return b.String()
+	return w.done(last)
 }
 
 func isCompoundKeyRuneBack(s string, floor, pos int) int {
@@ -1033,11 +1000,11 @@ func findTextKeyStart(s string, last, keyEnd int) int {
 	return sensitiveKeyStart(s, fullStart, keyEnd)
 }
 
-func redactTextKeyValues(s string) string {
+func redactTextKeyValues(s string, tr *passTrace) string {
 	qState := newQuoteScanState(len(s))
 	var brackets openBrackets
 	var quotes openQuotes
-	var b strings.Builder
+	w := spanWriter{s: s, tr: tr}
 	last, pos := 0, 0
 	for pos < len(s) {
 		rel := strings.IndexAny(s[pos:], "=:")
@@ -1071,18 +1038,20 @@ func redactTextKeyValues(s string) string {
 			quoteStart, keyEnd = p-1, p-1
 			keyStart = findTextKeyStart(s, last, keyEnd)
 		}
-		var rewrittenKey string
+		// rewritten holds the spans of a key whose padding or stray quote
+		// the redacted pair drops.
+		var rewritten keyCopy
 		if keyStart < 0 && quoteStart < p {
-			keyStart, rewrittenKey = matchPaddedQuotedTextKey(s, last, p)
+			keyStart, rewritten = matchPaddedQuotedTextKey(s, last, p)
 		}
 		if keyStart < 0 && p-2 > last && isQuoteByte(s[p-1]) && isQuoteByte(s[p-2]) {
 			// A stray quote after the closing quote of a key, as in
 			// "client_secret"':SECRET or " password"": SECRET, which is
 			// dropped from the redacted pair.
-			keyStart, rewrittenKey = matchPaddedQuotedTextKey(s, last, p-1)
+			keyStart, rewritten = matchPaddedQuotedTextKey(s, last, p-1)
 			if keyStart < 0 && s[p-3] != '\\' {
 				if ks := findTextKeyStart(s, last, p-2); ks >= 0 {
-					keyStart, rewrittenKey = ks, s[ks:p-1]
+					keyStart, rewritten = ks, keyCopy{spans: [3][2]int{{ks, p - 1}}, n: 1}
 				}
 			}
 		}
@@ -1095,7 +1064,7 @@ func redactTextKeyValues(s string) string {
 		openQ := quotes.before(s, delimPos)
 		kind, pair := nestsSensitiveKey(s, valStart, end, startsLine(s, delimPos+1, valStart), openQ, &qState)
 		if qState.openerBudgetExhausted {
-			return redactedSensitiveTextPlaceholder
+			return w.failClosed()
 		}
 		switch kind {
 		case nestedKey:
@@ -1103,53 +1072,43 @@ func redactTextKeyValues(s string) string {
 			continue
 		case valueEndingInKeyName, gluedAfterValue:
 			_, quote := unquoteValue(s[valStart:end])
-			realEnd, _ := quotedValueRealEnd(s, valStart, end, open, openQ, &qState)
 			if kind == gluedAfterValue {
-				end = max(end, realEnd, extendGluedValueEnd(s, pair, open, openQ, &qState))
+				end = max(end, extendGluedValueEnd(s, pair, open, openQ, &qState))
 			} else {
-				end = max(end, realEnd, nestedPairEndWithState(s, pair, open, openQ, &qState))
+				end = max(end, nestedPairEndWithState(s, pair, open, openQ, &qState))
 			}
 			if qState.openerBudgetExhausted {
-				return redactedSensitiveTextPlaceholder
+				return w.failClosed()
 			}
 			brackets.skip(end)
-			b.WriteString(s[last:keyStart])
-			if rewrittenKey != "" {
-				b.WriteString(rewrittenKey)
-			} else {
-				b.WriteString(s[keyStart:keyEnd])
-				b.WriteString(s[quoteStart:p])
-			}
-			b.WriteByte(s[delimPos])
-			b.WriteString(keyLineBreak(s, last, keyStart, p, delimPos, valStart, quoteStart == p))
-			b.WriteString(quote)
-			b.WriteString(redactedValue)
-			b.WriteString(quote)
+			writeTextPairKey(&w, last, keyStart, p, rewritten)
+			w.copy(delimPos, keyLineBreakEnd(s, last, keyStart, p, delimPos, valStart, quoteStart == p))
+			w.lit(quote + redactedValue + quote)
 			last = end
 			pos = end
 			continue
 		}
-		if rewrittenKey == "" && quoteStart == p && s[delimPos] == ':' && valStart == delimPos+1 &&
+		if rewritten.n == 0 && quoteStart == p && s[delimPos] == ':' && valStart == delimPos+1 &&
 			hasFoldPrefix(s[keyStart:keyEnd], session.KeyPrefixTemp) {
 			if stackedValPos, ok := scanStackedBareTempTail(s, valStart, openQ, &qState); ok {
 				end = max(end, extendGluedValueEnd(s, stackedValPos, open, openQ, &qState))
 			}
 			if qState.openerBudgetExhausted {
-				return redactedSensitiveTextPlaceholder
+				return w.failClosed()
 			}
 		}
 		origEnd := end
 		_, origQuote := unquoteValue(s[valStart:origEnd])
-		// gap is the text between the delimiter and a value in the next
-		// string, which is kept (see isQuoteGapBeforeNextString).
-		gap := ""
+		// s[valStart:gapEnd] is the text between the delimiter and a value
+		// in the next string, which is kept (see isQuoteGapBeforeNextString).
+		gapEnd := valStart
 		if origQuote != "" {
 			if nextOpen := end - len(origQuote); isQuoteGapBeforeNextString(s, valStart, end, openQ, &qState) {
 				// The key ends the enclosing string, and its value is the
 				// next string, as in msg: "password=" "SECRET", which is
 				// redacted as msg: "password=" "[REDACTED]", keeping the
 				// quotes balanced.
-				gap = s[valStart:nextOpen]
+				gapEnd = nextOpen
 				nEnd, _ := scanQuotedAt(s, nextOpen, &qState)
 				if inner, _ := unquoteValue(s[nextOpen:nEnd]); isRedactedValue(inner) &&
 					!hasGluedSuffixAfterQuotedValue(s, nextOpen, nEnd, openQuoteState{}, &qState) {
@@ -1160,39 +1119,33 @@ func redactTextKeyValues(s string) string {
 				if hasGluedSuffixAfterQuotedValue(s, nextOpen, end, openQuoteState{}, &qState) {
 					end = max(end, extendGluedValueEnd(s, end, open, openQuoteState{}, &qState))
 				}
-			} else if realEnd, ok := quotedValueRealEnd(s, valStart, end, open, openQ, &qState); ok {
-				end = max(end, realEnd)
 			} else if hasGluedSuffixAfterQuotedValue(s, valStart, end, openQ, &qState) {
 				end = max(end, extendGluedValueEnd(s, end, open, openQ, &qState))
 			}
 			if qState.openerBudgetExhausted {
-				return redactedSensitiveTextPlaceholder
+				return w.failClosed()
 			}
 		} else {
 			end = textValueEnd(s, valStart, end, open)
 			if (s[valStart] == '{' || s[valStart] == '[') && end > origEnd && end < len(s) &&
 				!isTextValueStop(s[end]) && s[end] != '}' && s[end] != ']' && s[end] != ')' {
 				tailEnd := scanValueEnd(s, end, isTextValueStop, &qState)
-				if !(tailEnd-end > maxNestedKeyLen && hasRedactedOverBudgetTail(s, end, tailEnd, &qState)) {
+				{
 					switch tKind, tPair := nestsSensitiveKey(s, end, tailEnd, false, openQ, &qState); tKind {
 					case notNestedKey:
 						end = textValueEnd(s, end, tailEnd, open)
 					case gluedAfterValue:
 						end = max(tailEnd, extendGluedValueEnd(s, tPair, open, openQ, &qState))
 					case valueEndingInKeyName:
-						// A bare nested key, as in dbPassword={a: b}/password: v,
-						// is matched on its own after end. Any other one, such
-						// as a quoted key, or a path-prefixed ".key" filename
-						// that this pass skips (see nestsSensitiveKey), as in
-						// password: [a b]/private.key: SECRET, is redacted with
-						// the value of the pair it starts, as a second pass
-						// over "[REDACTED]/private.key: SECRET" does.
-						if isSkippedPathDottedPair(s, tPair) || !isBareKeyPairAt(s, tPair) {
-							end = max(tailEnd, nestedPairEndWithState(s, tPair, open, openQ, &qState))
-						}
+						// A nested key after the container, as the password: of
+						// dbPassword={a: b}/password: v, is redacted with the
+						// value of the pair it starts, as a second pass over
+						// "[REDACTED]/password: v" does: a placeholder glued to
+						// other text is no whole value (see classifyNestedKey).
+						end = max(tailEnd, nestedPairEndWithState(s, tPair, open, openQ, &qState))
 					}
 					if qState.openerBudgetExhausted {
-						return redactedSensitiveTextPlaceholder
+						return w.failClosed()
 					}
 				}
 			}
@@ -1212,53 +1165,72 @@ func redactTextKeyValues(s string) string {
 				continue
 			}
 		}
-		b.WriteString(s[last:keyStart])
-		if rewrittenKey != "" {
-			b.WriteString(rewrittenKey)
-		} else {
-			b.WriteString(s[keyStart:keyEnd])
-			b.WriteString(s[quoteStart:p])
-		}
-		b.WriteByte(s[delimPos])
-		b.WriteString(keyLineBreak(s, last, keyStart, p, delimPos, valStart, quoteStart == p))
-		b.WriteString(gap)
-		b.WriteString(quote)
-		b.WriteString(redactedValue)
-		b.WriteString(quote)
+		writeTextPairKey(&w, last, keyStart, p, rewritten)
+		w.copy(delimPos, keyLineBreakEnd(s, last, keyStart, p, delimPos, valStart, quoteStart == p))
+		w.copy(valStart, gapEnd)
+		w.lit(quote + redactedValue + quote)
 		last = end
 		pos = end
 	}
 	if qState.openerBudgetExhausted {
-		return redactedSensitiveTextPlaceholder
+		return w.failClosed()
 	}
-	if last == 0 {
-		return s
-	}
-	b.WriteString(s[last:])
-	return b.String()
+	return w.done(last)
 }
 
-// keyLineBreak returns the line break to keep before the redacted value of a
-// text pair (see authHeaderLineBreak and headerLineBreak).
-func keyLineBreak(s string, last, keyStart, keyEnd, delimPos, valStart int, unquoted bool) string {
-	if gap := authHeaderLineBreak(s, last, keyEnd, delimPos, valStart, unquoted); gap != "" {
-		return gap
+// keyLineBreakEnd returns where the line break to keep before the redacted
+// value of a text pair, which follows the delimiter at s[delimPos], ends: at
+// valStart when it is kept (see authHeaderLineBreak and headerLineBreak), and
+// right after the delimiter otherwise.
+func keyLineBreakEnd(s string, last, keyStart, keyEnd, delimPos, valStart int, unquoted bool) int {
+	if authHeaderLineBreak(s, last, keyEnd, delimPos, valStart, unquoted) || headerLineBreak(s, keyStart, delimPos, valStart) {
+		return valStart
 	}
-	return headerLineBreak(s, keyStart, delimPos, valStart)
+	return delimPos + 1
 }
 
-// headerLineBreak returns the whitespace to keep between the delimiter at
-// s[delimPos] and a redacted value that starts at valStart on a following
-// line, when the key, which starts at keyStart, ends a line that holds an
-// Authorization or API-key header before it, as the "token" of
-// api_key: x "token":\n  SECRET other=ok (see nestedKeyBeforeNextLine), and ""
-// otherwise. redactAuthHeaders redacts the header value up to such a key;
+// writeTextPairKey writes, after the text from last on, the key of a text
+// pair that starts at s[keyStart] and, with its closing quote, ends at s[p]:
+// as it is, or without the padding or stray quote that rewritten drops.
+func writeTextPairKey(w *spanWriter, last, keyStart, p int, rewritten keyCopy) {
+	w.copy(last, keyStart)
+	if rewritten.n == 0 {
+		w.copy(keyStart, p)
+		return
+	}
+	for _, sp := range rewritten.spans[:rewritten.n] {
+		w.copy(sp[0], sp[1])
+	}
+}
+
+// writeJSONPair writes, after the text from last on, the quoted JSON key
+// whose name s[keyStart:keyEnd] stands between the quotes at s[openQuote]
+// and s[closeQuote], without its padding, the ":" at s[colonPos], the line
+// break that headerLineBreak keeps and the placeholder in quotes.
+func writeJSONPair(w *spanWriter, last, openQuote, keyStart, keyEnd, closeQuote, colonPos, valStart int) {
+	w.copy(last, openQuote+1)
+	w.copy(keyStart, keyEnd)
+	w.copy(closeQuote, closeQuote+1)
+	lbEnd := colonPos + 1
+	if headerLineBreak(w.s, openQuote, colonPos, valStart) {
+		lbEnd = valStart
+	}
+	w.copy(colonPos, lbEnd)
+	w.lit(`"` + redactedValue + `"`)
+}
+
+// headerLineBreak reports whether to keep the whitespace between the
+// delimiter at s[delimPos] and a redacted value that starts at valStart on a
+// following line: the key, which starts at keyStart, ends a line that holds
+// an Authorization or API-key header before it, as the "token" of
+// api_key: x "token":\n  SECRET other=ok (see nestedKeyBeforeNextLine).
+// redactAuthHeaders redacts the header value up to such a key;
 // writing the redacted value on the line of the header, as in
 // api_key: [REDACTED] "token":"[REDACTED]" other=ok, would make a second pass
 // redact the whole rest of the line, the text after the value too.
-func headerLineBreak(s string, keyStart, delimPos, valStart int) string {
+func headerLineBreak(s string, keyStart, delimPos, valStart int) bool {
 	if !startsLine(s, delimPos+1, valStart) {
-		return ""
+		return false
 	}
 	ls := strings.LastIndexAny(s[:keyStart], "\r\n") + 1
 	for c := ls; c < keyStart; c++ {
@@ -1270,34 +1242,31 @@ func headerLineBreak(s string, keyStart, delimPos, valStart int) string {
 			hdrEnd--
 		}
 		if matchAuthHeaderAtEnd(s, ls, hdrEnd) >= 0 {
-			return s[delimPos+1 : valStart]
+			return true
 		}
 	}
-	return ""
+	return false
 }
 
-// authHeaderLineBreak returns the whitespace to keep between the delimiter
-// at s[delimPos] and a redacted value that starts at valStart: the text
-// between them when the key, which ends at keyEnd and is unquoted when
-// unquoted is true, is an Authorization or API-key header name (see
-// redactAuthHeaders) followed by a ":" and its value starts a line, as in
-// "api_key:\n  SECRET other=ok", and "" otherwise. redactAuthHeaders redacts
+// authHeaderLineBreak reports whether to keep the whitespace between the
+// delimiter at s[delimPos] and a redacted value that starts at valStart: the
+// key, which ends at keyEnd and is unquoted when unquoted is true, is an
+// Authorization or API-key header name (see redactAuthHeaders) followed by a
+// ":" and its value starts a line, as in "api_key:\n  SECRET other=ok".
+// redactAuthHeaders redacts
 // the whole rest of the line after such a header, so writing the redacted
 // value on the line of the header, as in "api_key:[REDACTED] other=ok", would
 // make a second pass redact the text after it too.
-func authHeaderLineBreak(s string, last, keyEnd, delimPos, valStart int, unquoted bool) string {
+func authHeaderLineBreak(s string, last, keyEnd, delimPos, valStart int, unquoted bool) bool {
 	if !unquoted || s[delimPos] != ':' || !startsLine(s, delimPos+1, valStart) {
-		return ""
+		return false
 	}
 	for i := keyEnd; i < delimPos; i++ {
 		if s[i] != ' ' && s[i] != '\t' {
-			return ""
+			return false
 		}
 	}
-	if matchAuthHeaderAtEnd(s, last, keyEnd) < 0 {
-		return ""
-	}
-	return s[delimPos+1 : valStart]
+	return matchAuthHeaderAtEnd(s, last, keyEnd) >= 0
 }
 
 // isPaddedQuotedTextKey reports whether trimmed, the space-trimmed interior of
@@ -1310,11 +1279,20 @@ func isPaddedQuotedTextKey(trimmed string) bool {
 	return trimmed != "" && !strings.ContainsAny(trimmed, "\"'\r\n,{}") && findTextKeyStart(trimmed, 0, len(trimmed)) >= 0
 }
 
+// keyCopy holds the spans of s, written in order, that make up a key written
+// without its padding or a stray quote (see redactTextKeyValues).
+type keyCopy struct {
+	spans [3][2]int
+	n     int
+}
+
 // matchPaddedQuotedTextKey matches a quoted sensitive key (", ', \" or \')
 // ending at s[:p] whose interior has whitespace padding (such as
 // ' client_secret ' or " password ") that findTextKeyStart rejected, returning
-// the index of its opening quote and its canonical trimmed quoted form.
-func matchPaddedQuotedTextKey(s string, last, p int) (int, string) {
+// the index of its opening quote and its canonical trimmed quoted form as the
+// spans of s that it copies: the opening quote, the trimmed name and the
+// closing quote.
+func matchPaddedQuotedTextKey(s string, last, p int) (int, keyCopy) {
 	if p-2 >= last && s[p-2] == '\\' && (s[p-1] == '"' || s[p-1] == '\'') && isUnescapedQuote(s, last, p-2) {
 		q := s[p-1]
 		closePos := p - 2
@@ -1322,10 +1300,8 @@ func matchPaddedQuotedTextKey(s string, last, p int) (int, string) {
 			c := s[openIdx]
 			if c == '\\' && s[openIdx+1] == q {
 				if isUnescapedQuote(s, last, openIdx) {
-					trimmed := trimInlineSpaces(s[openIdx+2 : closePos])
-					if isPaddedQuotedTextKey(trimmed) {
-						lit := s[closePos:p]
-						return openIdx, lit + trimmed + lit
+					if from, to := trimmedSpan(s, openIdx+2, closePos); isPaddedQuotedTextKey(s[from:to]) {
+						return openIdx, keyCopy{spans: [3][2]int{{openIdx, openIdx + 2}, {from, to}, {closePos, p}}, n: 3}
 					}
 				}
 				break
@@ -1334,7 +1310,7 @@ func matchPaddedQuotedTextKey(s string, last, p int) (int, string) {
 				break
 			}
 		}
-		return -1, ""
+		return -1, keyCopy{}
 	}
 	if p-1 >= last && (s[p-1] == '"' || s[p-1] == '\'') && isUnescapedQuote(s, last, p-1) {
 		q := s[p-1]
@@ -1347,9 +1323,8 @@ func matchPaddedQuotedTextKey(s string, last, p int) (int, string) {
 			c := s[openIdx]
 			if c == q {
 				if isUnescapedQuote(s, last, openIdx) {
-					trimmed := trimInlineSpaces(s[openIdx+1 : closePos])
-					if isPaddedQuotedTextKey(trimmed) {
-						return openIdx, string(q) + trimmed + string(q)
+					if from, to := trimmedSpan(s, openIdx+1, closePos); isPaddedQuotedTextKey(s[from:to]) {
+						return openIdx, keyCopy{spans: [3][2]int{{openIdx, openIdx + 1}, {from, to}, {closePos, p}}, n: 3}
 					}
 				}
 				break
@@ -1359,7 +1334,7 @@ func matchPaddedQuotedTextKey(s string, last, p int) (int, string) {
 			}
 		}
 	}
-	return -1, ""
+	return -1, keyCopy{}
 }
 
 // scanStackedBareTempTail checks whether s[pos:], immediately after a bare

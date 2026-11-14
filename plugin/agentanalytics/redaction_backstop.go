@@ -31,338 +31,87 @@ import (
 // or left out) and of "temp:" keys, leaving a value that is itself the name
 // of a nested pair for that pair, and failing text closed when decoding its
 // escapes changed what they redacted (see hasBackslashEscapedCredentialWith).
-// The scanners that replaced them also read compound and state-prefixed
-// keys, nested keys and quotes that the expressions did not, and so take
-// other paths through the text. legacyScrubErrorTokens redoes what the
-// expressions did, with linear-time matchers in place of the expressions,
-// and compoundLegacyScrubErrorTokens does the same with every key that
-// isSensitiveKey accepts. leavesLegacyValue checks the scanners' result
-// against both: text in which the scanners keep a word that either redacts,
-// or that either fails closed while the scanners keep a word of it, fails
-// closed. So whatever the expressions redacted stays redacted, whatever path
-// the scanners take through quotes, escapes and nested keys.
+// The scanners that replaced them also read compound and state-prefixed keys
+// and nested keys that the expressions did not, and so take other paths
+// through the text. legacyScrubErrorTokens redoes what the expressions did,
+// with linear-time matchers in place of the expressions, and
+// compoundLegacyScrubErrorTokens does the same with every key that
+// isSensitiveKey accepts. Both record the spans of the text that they remove
+// (see spanWriter), and leavesLegacyValue checks the scanners' result against
+// them byte by byte: text in which the scanners keep a byte that either
+// removes, or that either fails closed while the scanners keep a byte of it,
+// fails closed. So whatever the expressions removed stays removed, whatever
+// path the scanners take through quotes, escapes and nested keys, and
+// whatever the removed bytes spell: punctuation, or a word that also stands
+// elsewhere in the text, counts as any other byte.
 
-// leavesLegacyValue reports whether the legacy expressions redact a word of
-// raw that scrubbed, the scrub of raw, keeps, counting every word as
-// redacted when they fail raw closed (see scrubErrorText).
-func leavesLegacyValue(raw, scrubbed string) bool {
-	var m scrubMemo
-	return m.leavesLegacyValue(raw, scrubbed)
-}
-
-// leavesLegacyValue is leavesLegacyValue with the scrubs of m.
-func (m *scrubMemo) leavesLegacyValue(raw, scrubbed string) bool {
+// leavesLegacyValue reports whether scrubbed, the scrub of raw whose bytes
+// copied from raw kept maps back to raw (see copyRun), keeps a byte that the
+// legacy expressions remove from raw, counting every byte as removed when they
+// fail raw closed (see scrubErrorText and keepsRemovedByte).
+func (m *scrubMemo) leavesLegacyValue(raw, scrubbed string, kept []copyRun) bool {
 	if !strings.ContainsAny(raw, `\%`) && !mayMatchTextPatterns(raw) {
 		return false
 	}
-	var kept *legacyKept
+	var c *spanCheck
 	for _, compound := range []bool{false, true} {
-		scrub := m.legacy
-		if compound {
-			scrub = m.compound
-		}
-		legacy := scrub(raw)
-		if exposesEncodedPattern(legacy, scrub) || hasBackslashEscapedCredentialWith(raw, legacy, scrub) {
-			// The expressions fail raw closed, removing every word of it.
-			legacy = redactedSensitiveTextPlaceholder
-		}
+		legacy, removed := m.legacyRemoved(raw, compound)
 		if legacy == raw || legacy == scrubbed {
 			continue
 		}
-		if kept == nil {
-			kept = newLegacyKept(raw, scrubbed, !m.component)
+		if c == nil {
+			c = newSpanCheck(raw, scrubbed, kept)
 		}
-		if kept.keepsRemovedWord(legacy, compound) {
+		if c.keepsRemovedByte(removed, compound) {
 			return true
 		}
 	}
 	return false
 }
 
-// legacyKept holds the words of raw (see legacyWords) and where scrubbed, the
-// scrub of raw, keeps them, to compare with what the expressions keep.
-type legacyKept struct {
-	raw, scrubbed string
-	words         []legacyWord
-	kept          []int
-	glued         []bool
-	// keyBytes holds redactedKeyBytes of scrubbed, for the expressions
-	// on main and, at index 1, for every key that isSensitiveKey accepts.
-	keyBytes [2][]bool
+// legacyRemoved returns the legacy scrub of raw (see legacyScrubErrorTokens,
+// or compoundLegacyScrubErrorTokens when compound is true) and the spans of
+// raw that it removes: all of raw when decoding an escape in it exposes a
+// pattern that the scrub redacts, as the expressions on main failed such text
+// closed.
+func (m *scrubMemo) legacyRemoved(raw string, compound bool) (string, [][2]int) {
+	scrub := m.legacy
+	runs := &m.legacyRuns
+	if compound {
+		scrub = m.compound
+		runs = &m.compoundRuns
+	}
+	e := runs.do(raw, m.legacyPass(compound))
+	if exposesEncodedPattern(e.out, scrub) || hasBackslashEscapedCredentialWith(raw, e.out, scrub) {
+		return redactedSensitiveTextPlaceholder, [][2]int{{0, len(raw)}}
+	}
+	return e.out, e.trace.removed
 }
 
-// newLegacyKept returns the words of raw and where scrubbed keeps them. With
-// exemptGlued, the words of the value token that a placeholder starts are
-// exempt (see wordsAfterPlaceholder), unless their run holds a pair that is
-// not redacted as a whole (see dropGluedBeforeUnredactedPair), also in text
-// that the scrub leaves as it is: the scanners may read such a pair as
-// redacted, as the api_key:\n  [REDACTED] of
-// password: [REDACTED]SECRET/api_key:\n  [REDACTED], whose header the
-// expressions on main redact again. The check of one decoded URI component
-// (see scrubURIComponentText) exempts none, as the check of the whole text,
-// which reads the component escaped and so finds no placeholder in it, does
-// not either: a word glued to a placeholder in a component counts, so that a
-// URI formatted on its own and a URI in an error message are checked alike.
-func newLegacyKept(raw, scrubbed string, exemptGlued bool) *legacyKept {
-	words := legacyWords(raw, true)
-	var glued []bool
-	if exemptGlued {
-		glued = wordsAfterPlaceholder(raw, words)
-		dropGluedBeforeUnredactedPair(raw, words, glued)
-	} else {
-		glued = make([]bool, len(words))
+// legacyPass returns the legacy scrub of m (see legacyScrubTokensTraced).
+func (m *scrubMemo) legacyPass(compound bool) tracedPass {
+	if m.component {
+		return func(s string, tr *passTrace) string { return legacyScrubComponentTextTraced(s, compound, tr) }
 	}
-	return &legacyKept{
-		raw:      raw,
-		scrubbed: scrubbed,
-		words:    words,
-		kept:     legacyKeptWords(raw, words, scrubbed),
-		glued:    glued,
+	kind, scrub := legacyComponent, legacyRedactURIComponent
+	if compound {
+		kind, scrub = compoundLegacyComponent, compoundLegacyRedactURIComponent
 	}
-}
-
-// keepsRemovedWord reports whether scrubbed keeps a word of raw that legacy,
-// another redaction of raw, removes. A word that scrubbed keeps as part of a
-// sensitive key whose value it redacts (see redactedKeyBytes), or that
-// follows a redaction placeholder in raw with no whitespace in between, as
-// the tail of an already-redacted value does in a run whose pairs are all
-// redacted (see dropGluedBeforeUnredactedPair), does not count: the
-// expressions redacted such text again, the scanners do not. compoundKeys
-// reports that legacy is the scrub with every key that isSensitiveKey
-// accepts (see redactedKeyBytesWith).
-func (k *legacyKept) keepsRemovedWord(legacy string, compoundKeys bool) bool {
-	keptLegacy := legacyKeptWords(k.raw, k.words, legacy)
-	idx := 0
-	if compoundKeys {
-		idx = 1
-	}
-	for j := range k.words {
-		if k.kept[j] < 0 || keptLegacy[j] >= 0 || k.glued[j] {
-			continue
-		}
-		if k.keyBytes[idx] == nil {
-			k.keyBytes[idx] = redactedKeyBytesWith(k.scrubbed, compoundKeys)
-		}
-		if !k.keyBytes[idx][k.kept[j]] {
-			return true
-		}
-	}
-	return false
-}
-
-// wordsAfterPlaceholder reports, for each word of s, whether it is part of
-// the value token that a redaction placeholder starts: the placeholder ends
-// before it with nothing in between that ends a value or starts another pair,
-// that is, no whitespace or control byte, no ",", ";" or "&" (see
-// isTextValueStop), no ":" or "=", and no quote or bracket. So the tail of an
-// already-redacted value, as the /x/token of [REDACTED]/x/token, counts, but
-// a pair after it, as the token=v of x=[REDACTED];token=v, does not. Only
-// the placeholders of redacted values start such a token (see
-// redactionPlaceholderLenAt): a word glued to one that stands for content,
-// as the SECRET of [BINARY DATA]SECRET, is no tail of a redacted value.
-func wordsAfterPlaceholder(s string, words []legacyWord) []bool {
-	glued := make([]bool, len(words))
-	after := false
-	j := 0
-	for i := 0; i < len(s) && j < len(words); i++ {
-		if i == words[j].start {
-			glued[j] = after
-			i = words[j].end - 1
-			j++
-			continue
-		}
-		switch c := s[i]; {
-		case c == '[':
-			after = false
-			if n := knownSentinelLenAt(s, i); n > 0 {
-				after = redactionPlaceholderLenAt(s, i) == n
-				i += n - 1
-			}
-		case isDelimSpace(c) || isTextValueStop(c) || c >= utf8.RuneSelf || strings.IndexByte(`:="'{}]()<>\`, c) >= 0:
-			// A non-ASCII byte outside a word is part of a space (see
-			// legacyWords), and a backslash may start an escaped line break
-			// or quote.
-			after = false
-		}
-	}
-	return glued
-}
-
-// dropGluedBeforeUnredactedPair clears the marks of glued, the result of
-// wordsAfterPlaceholder for the words of s, in each run of bytes up to
-// whitespace or a control byte that holds a ":" or "=" whose value, in the
-// run or after the whitespace, is not a redaction placeholder as a whole (see
-// isRedactedPairValueAt). Such a run is not the tail of an already-redacted
-// value but a value that runs into the key of a pair that is not redacted
-// yet, as the SECRET[api_key: of password: [REDACTED]SECRET[api_key: v,
-// which the expressions on main redacted with the value of password while
-// the scanners, after redacting the pair, keep it. Every delimiter of the run
-// counts, not only the last, so that a redacted pair later in the run, as
-// the other=[REDACTED] of
-// password: [REDACTED]/SECRET/api_key:v,other=[REDACTED], or the
-// x=[REDACTED] in the query of a URI value, does not hide the pair that the
-// words run into. So does a delimiter right after the run and whitespace, as
-// the = of password = [REDACTED]SECRET/token = v, whose key ends the run. A
-// run whose pairs are all redacted already, as the /x/token: of
-// password: [REDACTED]/x/token: [REDACTED] api_key=v, keeps its marks, so
-// that redacted text stays as it is.
-func dropGluedBeforeUnredactedPair(s string, words []legacyWord, glued []bool) {
-	runEnd, drop := -1, false
-	for j, w := range words {
-		if !glued[j] {
-			continue
-		}
-		if w.start >= runEnd {
-			runEnd = w.end
-			for runEnd < len(s) && s[runEnd] > ' ' && s[runEnd] != 0x7f {
-				runEnd++
-			}
-			drop = hasUnredactedPairIn(s, w.end, runEnd)
-			if d := runEnd; !drop {
-				for d < len(s) && isDelimSpace(s[d]) {
-					d++
-				}
-				drop = d < len(s) && (s[d] == ':' || s[d] == '=') && !isRedactedPairValueAt(s, d)
-			}
-		}
-		if drop {
-			glued[j] = false
-		}
-	}
-}
-
-// hasUnredactedPairIn reports whether s[from:to] holds a ":" or "=" whose
-// value is not a redaction placeholder as a whole (see
-// isRedactedPairValueAt). In a run without whitespace, only the value of the
-// last delimiter can reach past the run to read the word after it, so the
-// scan stays linear.
-func hasUnredactedPairIn(s string, from, to int) bool {
-	for i := from; i < to; i++ {
-		if (s[i] == ':' || s[i] == '=') && !isRedactedPairValueAt(s, i) {
-			return true
-		}
-	}
-	return false
-}
-
-// isRedactedPairValueAt reports whether the value after the ":" or "=" at
-// s[d] is a redaction placeholder as a whole, as a pass that redacts the
-// value of a pair leaves it: optional spaces or tabs, but no line break, then
-// "[REDACTED]" or "[REDACTED_SENSITIVE_URI]", possibly in one pair of quotes,
-// either of which may be escaped by a backslash, and then the end of the
-// value (see endsRedactedValueAt). The other placeholders that this package
-// writes, as the [BINARY DATA] of a part, stand for content rather than for a
-// redacted value. So the "" [REDACTED] SECRET of
-// api_key: "" [REDACTED] SECRET, the line break of token:\n  [REDACTED], the
-// [BINARY DATA] of api_key: [BINARY DATA] SECRET, the "[REDACTED] SECRET" of
-// "token": "[REDACTED] SECRET", and the "[REDACTED]"/SECRET of
-// token: "[REDACTED]"/SECRET are no redacted values: the value of such a
-// pair, which the scrub may change, may still hold a credential.
-func isRedactedPairValueAt(s string, d int) bool {
-	i := d + 1
-	for i < len(s) && isInlineDelimSpace(s[i]) {
-		i++
-	}
-	quote := ""
-	if i < len(s) && isQuoteByte(s[i]) {
-		quote = s[i : i+1]
-	} else if i+1 < len(s) && s[i] == '\\' && isQuoteByte(s[i+1]) {
-		quote = s[i : i+2]
-	}
-	i += len(quote)
-	n := redactionPlaceholderLenAt(s, i)
-	if n == 0 || !strings.HasPrefix(s[i+n:], quote) {
-		return false
-	}
-	return endsRedactedValueAt(s, i+n+len(quote), isHeaderKeyBefore(s, d))
-}
-
-// redactionPlaceholderLenAt returns the length of the placeholder of a
-// redacted value, "[REDACTED]" or, for a URI with credentials,
-// "[REDACTED_SENSITIVE_URI]", that starts at s[i], or 0.
-func redactionPlaceholderLenAt(s string, i int) int {
-	for _, p := range [...]string{redactedValue, redactedURIPlaceholder} {
-		if strings.HasPrefix(s[i:], p) {
-			return len(p)
-		}
-	}
-	return 0
-}
-
-// endsRedactedValueAt reports whether the redacted value of a pair ends at
-// s[i], right after its placeholder and closing quote: the text or the line
-// ends there, after optional spaces or tabs; or, unless header reports that
-// the key of the pair is an Authorization or API-key header name, whose value
-// runs to the end of the line (see isHeaderKeyBefore), a value stop (",", ";"
-// or "&") or closing brackets, quotes and full stops end the value (see
-// isRedactedPlaceholderBoundary), as the "} of {"token":"[REDACTED]"}, or
-// another pair follows after spaces or tabs, as the api_key=v of
-// password: [REDACTED] api_key=v. A word glued to the placeholder, as the
-// SECRET of api_key: [REDACTED]SECRET, or one after spaces that holds no
-// delimiter, as the SECRET of api_key: [REDACTED] SECRET, may still be part
-// of the value.
-func endsRedactedValueAt(s string, i int, header bool) bool {
-	j := i
-	for j < len(s) && isInlineDelimSpace(s[j]) {
-		j++
-	}
-	if j == len(s) || s[j] == '\n' || s[j] == '\r' {
-		return true
-	}
-	if header {
-		return false
-	}
-	if j == i {
-		return isRedactedPlaceholderBoundary(s[i:])
-	}
-	for k := j + 1; k < len(s) && !isDelimSpace(s[k]); k++ {
-		if s[k] == ':' || s[k] == '=' {
-			return true
-		}
-	}
-	return false
-}
-
-// isHeaderKeyBefore reports whether the delimiter at s[d] is a ":" after an
-// Authorization or API-key header name and optional spaces or tabs, as the
-// expressions on main read a header (see legacyRedactHeaders), which redact
-// its value through the end of the line.
-func isHeaderKeyBefore(s string, d int) bool {
-	if s[d] != ':' {
-		return false
-	}
-	e := d
-	for e > 0 && (s[e-1] == ' ' || s[e-1] == '\t') {
-		e--
-	}
-	// Every header name ends in "key" or "authorization".
-	if e == 0 || (s[e-1]|0x20 != 'y' && s[e-1]|0x20 != 'n') {
-		return false
-	}
-	for _, name := range legacyHeaderNames {
-		if _, ok := matchSuffixFoldBack(s, 0, e, name); ok {
-			return true
-		}
-	}
-	return false
-}
-
-// isInlineDelimSpace reports whether c is a delimiter space (see
-// isDelimSpace) other than a line break.
-func isInlineDelimSpace(c byte) bool {
-	return isDelimSpace(c) && c != '\n' && c != '\r'
+	scrub = m.componentScrub(kind, scrub)
+	return func(s string, tr *passTrace) string { return legacyScrubTokensTracedWith(s, compound, scrub, tr) }
 }
 
 // redactedKeyBytes marks the bytes of s that belong to a sensitive key whose
 // value is a redaction placeholder ("[REDACTED]" or, for a URI with
-// credentials, "[REDACTED_SENSITIVE_URI]"): the key, an optional (escaped)
-// quote, ":" or "=" and an optional (escaped) quote before the placeholder.
+// credentials, "[REDACTED_SENSITIVE_URI]"): the key with its quotes, possibly
+// escaped, and padding, and the delimiter, whitespace and opening quote of
+// the value before the placeholder.
 // When only the end of the name is a sensitive key, as the token of
 // x/token:[REDACTED] or of "x/token":[REDACTED], only that end is marked:
-// the words before it may be the value of an earlier pair. So is the fixed
-// key at the end of a compound or "temp:" name within a line (see
-// exemptKeyStart), as the token of api_key: [REDACTED] sk_v1_token:
-// [REDACTED].
+// the words before it may be the value of an earlier pair, on a line of its
+// own too. So is the fixed key at the end of a compound or "temp:" name
+// within a line (see exemptKeyStart), as the token of api_key: [REDACTED]
+// sk_v1_token: [REDACTED].
 func redactedKeyBytes(s string) []bool {
 	return redactedKeyBytesWith(s, false)
 }
@@ -393,6 +142,7 @@ func redactedKeyBytesWith(s string, compoundKeys bool) []bool {
 			p++
 			continue
 		}
+		phStart := p
 		k := p
 		for k > 0 && (isQuoteByte(s[k-1]) || s[k-1] == '\\' || isDelimSpace(s[k-1])) {
 			k--
@@ -431,9 +181,11 @@ func redactedKeyBytesWith(s string, compoundKeys bool) []bool {
 			}
 		} else {
 			// Only the longest name after a "/", "\", ":" or "=" that is a
-			// key counts, but for a path on a line of its own, as the
-			// C:\ssl\password of credentials:\n  C:\ssl\password: v, which
-			// nestedKeyName reads as a nested key as a whole.
+			// key counts, on a line of its own too: the scanners keep the
+			// words before the key of such a name, as the /etc/ssl/ of
+			// credentials:\n  /etc/ssl/password: v, only where the
+			// expressions on main read the name as a nested key and kept them
+			// (see mainReadsNestedKey), so that none of them is removed.
 			at := -1
 			for j := len(key) - 1; j > 0 && len(key)-j <= maxNestedKeyLen; j-- {
 				if strings.IndexByte(`/\:=`, key[j-1]) >= 0 && isSensitiveKey(key[j:]) {
@@ -443,18 +195,27 @@ func redactedKeyBytesWith(s string, compoundKeys bool) []bool {
 			if at < 0 {
 				continue
 			}
-			if !isPathLikePrefix(key[:at]) || !startsLineAt(s, start) {
-				from = keyAt + at
-				if !compoundKeys {
-					off := exemptKeyStart(key[at:])
-					if off < 0 {
-						continue
-					}
-					from += off
+			from = keyAt + at
+			if !compoundKeys {
+				off := exemptKeyStart(key[at:])
+				if off < 0 {
+					continue
+				}
+				from += off
+			}
+		}
+		if from == keyAt {
+			// The whole name counts, with its padding and opening quote,
+			// possibly escaped.
+			from = start
+			if from > 0 && isQuoteByte(s[from-1]) {
+				from--
+				if from > 0 && s[from-1] == '\\' {
+					from--
 				}
 			}
 		}
-		for b := from; b < end; b++ {
+		for b := from; b < phStart; b++ {
 			marked[b] = true
 		}
 	}
@@ -503,7 +264,7 @@ func startsLineAt(s string, i int) bool {
 // (see isTextValueStop). An unquoted name runs back to whitespace, a control
 // byte, a non-ASCII space, a value stop, a bracket or a quote, or a backslash
 // escape of a control byte, as the \n of SECRET\ntoken, which separates
-// words (see legacyWords).
+// words.
 func redactedKeyStart(s string, end int) (int, bool) {
 	if end > 0 && isQuoteByte(s[end-1]) {
 		q := s[end-1]
@@ -542,110 +303,6 @@ func redactedKeyStart(s string, end int) (int, bool) {
 		start--
 	}
 	return start, true
-}
-
-// legacyWord is a word of a text: a run of ASCII letters and digits or of
-// non-ASCII characters other than spaces, at s[start:end].
-type legacyWord struct{ start, end int }
-
-func isLegacyWordByte(c byte) bool {
-	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c >= utf8.RuneSelf
-}
-
-// legacyWords splits s into words, skipping redaction placeholders. With
-// escapes set, a backslash escape that unescapeBackslashControls decodes to a
-// control character, a quote or "/" separates words as the decoded byte
-// would, so that a text and its redactions split alike.
-func legacyWords(s string, escapes bool) []legacyWord {
-	var words []legacyWord
-	start := -1
-	flush := func(i int) {
-		if start >= 0 {
-			words = append(words, legacyWord{start, i})
-			start = -1
-		}
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == '[':
-			flush(i)
-			if n := knownSentinelLenAt(s, i); n > 0 {
-				i += n - 1
-			}
-		case c == '%' && len(s)-i >= 14 && strings.EqualFold(s[i:i+14], "%5BREDACTED%5D"):
-			flush(i)
-			i += 13
-		case c == '\\' && escapes:
-			flush(i)
-			j := i + 1
-			for j < len(s) && s[j] == '\\' {
-				j++
-			}
-			if j < len(s) && strings.IndexByte("bfnrt/\"'", s[j]) >= 0 {
-				i = j
-			} else {
-				i = j - 1
-			}
-		case c >= utf8.RuneSelf:
-			r, size := utf8.DecodeRuneInString(s[i:])
-			if unicode.IsSpace(r) || unicode.In(r, unicode.Z) {
-				flush(i)
-			} else if start < 0 {
-				start = i
-			}
-			i += size - 1
-		case isLegacyWordByte(c):
-			if start < 0 {
-				start = i
-			}
-		default:
-			flush(i)
-		}
-	}
-	flush(len(s))
-	return words
-}
-
-// knownSentinelLenAt returns the length of the redaction placeholder that
-// starts at s[i], or 0.
-func knownSentinelLenAt(s string, i int) int {
-	end := strings.IndexByte(s[i:min(len(s), i+maxKnownSentinelLen)], ']')
-	if end >= 0 && isKnownSentinel(s[i:i+end+1]) {
-		return end + 1
-	}
-	return 0
-}
-
-// legacyKeptWords returns, for each word of raw, where redacted, a redaction
-// of raw, keeps it, or -1: the words of redacted are matched in order, each
-// to the first equal word of raw after the last one matched.
-func legacyKeptWords(raw string, words []legacyWord, redacted string) []int {
-	at := make(map[string][]int, len(words))
-	for j, w := range words {
-		k := raw[w.start:w.end]
-		at[k] = append(at[k], j)
-	}
-	next := make(map[string]int, len(at))
-	kept := make([]int, len(words))
-	for j := range kept {
-		kept[j] = -1
-	}
-	last := -1
-	for _, w := range legacyWords(redacted, true) {
-		k := redacted[w.start:w.end]
-		list, p := at[k], next[k]
-		for p < len(list) && list[p] <= last {
-			p++
-		}
-		if p < len(list) {
-			kept[list[p]] = w.start
-			last = list[p]
-			p++
-		}
-		next[k] = p
-	}
-	return kept
 }
 
 // legacyKeyNames holds the lowercased names in sensitiveKeys, but for the
@@ -759,7 +416,7 @@ func isLegacyBoundary(s string, i int) bool {
 // it, including in the components of the URIs in msg, which the expressions
 // on main scrubbed as text too (see legacyRedactURIComponent).
 func legacyScrubErrorTokens(msg string) string {
-	return legacyScrubComponentText(scrubURITokensWith(msg, legacyRedactURIComponent, false))
+	return legacyScrubTokensTraced(msg, false, nil)
 }
 
 // compoundLegacyScrubErrorTokens is legacyScrubErrorTokens with the
@@ -768,37 +425,79 @@ func legacyScrubErrorTokens(msg string) string {
 // ".key" file name before the ":" of a Go path error (see
 // isSkippedPathDottedPair).
 func compoundLegacyScrubErrorTokens(msg string) string {
-	return compoundLegacyScrubComponentText(scrubURITokensWith(msg, compoundLegacyRedactURIComponent, false))
+	return legacyScrubTokensTraced(msg, true, nil)
+}
+
+// legacyScrubTokensTraced is legacyScrubErrorTokens, or
+// compoundLegacyScrubErrorTokens when compound is true, recording in tr, when
+// it is not nil, the runs of the result copied from msg and the spans of msg
+// that it removes: the bytes of each URI that its rewrite does not keep (see
+// scrubURITokens), and each value, header value or credential that the
+// expressions replaced.
+func legacyScrubTokensTraced(msg string, compound bool, tr *passTrace) string {
+	scrub := legacyRedactURIComponent
+	if compound {
+		scrub = compoundLegacyRedactURIComponent
+	}
+	return legacyScrubTokensTracedWith(msg, compound, scrub, tr)
+}
+
+// legacyScrubTokensTracedWith is legacyScrubTokensTraced with scrub, which
+// returns what legacyRedactURIComponent, or compoundLegacyRedactURIComponent
+// when compound is true, does, in its place (see scrubMemo.componentScrub).
+func legacyScrubTokensTracedWith(msg string, compound bool, scrub uriComponentScrub, tr *passTrace) string {
+	keys := legacyURIKeys
+	if compound {
+		keys = compoundLegacyURIKeys
+	}
+	c := startPasses(msg, tr)
+	c.run(func(s string, tr *passTrace) string { return scrubURITokens(s, scrub, keys, tr) })
+	c.run(func(s string, tr *passTrace) string { return legacyScrubComponentTextTraced(s, compound, tr) })
+	return c.end(tr)
 }
 
 // legacyScrubComponentText is legacyScrubErrorTokens without reading URIs,
 // for one decoded URI component or text whose URIs are scrubbed already.
 func legacyScrubComponentText(s string) string {
-	if !mayMatchTextPatterns(s) {
-		return s
-	}
-	return legacyScrubTextPatterns(s, false)
+	return legacyScrubComponentTextTraced(s, false, nil)
 }
 
 // compoundLegacyScrubComponentText is compoundLegacyScrubErrorTokens without
 // reading URIs (see legacyScrubComponentText).
 func compoundLegacyScrubComponentText(s string) string {
-	if !mayMatchTextPatterns(s) {
-		return s
-	}
-	return legacyScrubTextPatterns(s, true)
+	return legacyScrubComponentTextTraced(s, true, nil)
 }
 
 // legacyScrubTextPatterns is scrubTextPatterns as the legacy expressions did
-// it, for text that mayMatchTextPatterns accepts, with every key that
-// isSensitiveKey accepts when compound is set.
+// it, with every key that isSensitiveKey accepts when compound is set.
 func legacyScrubTextPatterns(s string, compound bool) string {
+	return legacyScrubComponentTextTraced(s, compound, nil)
+}
+
+// legacyScrubComponentTextTraced is legacyScrubComponentText, or
+// compoundLegacyScrubComponentText when compound is true, recording what it
+// does in tr as legacyScrubTokensTraced does.
+func legacyScrubComponentTextTraced(s string, compound bool, tr *passTrace) string {
+	c := startPasses(s, tr)
+	if !mayMatchTextPatterns(s) {
+		return c.end(tr)
+	}
 	budget := 4*len(s) + 4096
-	s = legacyRedactHeaders(s)
-	s = legacyReplace(s, &budget, compound, "bB", (*legacyText).bearerAt)
-	s = legacyReplace(s, &budget, compound, "bB", (*legacyText).basicAt)
-	s = legacyReplace(s, &budget, compound, `"`, (*legacyText).jsonPairAt)
-	return legacyReplace(s, &budget, compound, "", (*legacyText).textPairAt)
+	c.run(legacyRedactHeaders)
+	for _, m := range []struct {
+		starts string
+		match  legacyMatcher
+	}{
+		{"bB", (*legacyText).bearerAt},
+		{"bB", (*legacyText).basicAt},
+		{`"`, (*legacyText).jsonPairAt},
+		{"", (*legacyText).textPairAt},
+	} {
+		c.run(func(s string, tr *passTrace) string {
+			return legacyReplace(s, tr, &budget, compound, m.starts, m.match)
+		})
+	}
+	return c.end(tr)
 }
 
 // legacyScrubChanges reports whether the legacy expressions redact a part of
@@ -814,6 +513,43 @@ func legacyScrubChanges(s string) bool {
 	return legacyScrubErrorTokens(s) != s
 }
 
+// legacySensitiveKeyNames holds the names in sensitiveKeyNames but for the
+// secret_key and signing_key that came with the scanners: the names that
+// isSensitiveKey read on main.
+var legacySensitiveKeyNames = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(sensitiveKeys))
+	for k := range sensitiveKeys {
+		if k != "secret_key" && k != "signing_key" {
+			m[strings.ReplaceAll(k, "_", "")] = struct{}{}
+		}
+	}
+	return m
+}()
+
+// isLegacySensitiveKey is isSensitiveKey as it was on main: a "temp:" key,
+// or a name in legacySensitiveKeyNames after a "user:" or "app:" prefix,
+// compared ignoring case and the "_" and "-" separators, but not compound
+// names or "." separators.
+func isLegacySensitiveKey(k string) bool {
+	n := strings.ToLower(strings.TrimSpace(k))
+	if strings.HasPrefix(n, session.KeyPrefixTemp) {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(n, session.KeyPrefixUser); ok {
+		n = rest
+	} else {
+		n = strings.TrimPrefix(n, session.KeyPrefixApp)
+	}
+	n = strings.Map(func(r rune) rune {
+		if r == '_' || r == '-' {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(n))
+	_, ok := legacySensitiveKeyNames[n]
+	return ok
+}
+
 // legacyHeaderNames are the header names of the expressions, longest first.
 var legacyHeaderNames = [...]string{
 	"proxy-authorization", "proxy_authorization", "authorization",
@@ -822,9 +558,10 @@ var legacyHeaderNames = [...]string{
 
 // legacyRedactHeaders replaces each header name followed by optional spaces
 // or tabs and ":" with the name, ": " and the placeholder, through the end of
-// the line.
-func legacyRedactHeaders(s string) string {
-	var b strings.Builder
+// the line, recording the value after the ":" and the spaces or tabs as
+// removed.
+func legacyRedactHeaders(s string, tr *passTrace) string {
+	w := spanWriter{s: s, tr: tr}
 	last := 0
 	for d := 0; d < len(s); {
 		i := strings.IndexByte(s[d:], ':')
@@ -844,40 +581,60 @@ func legacyRedactHeaders(s string) string {
 		for _, name := range legacyHeaderNames {
 			// matchSuffixFoldBack folds U+017F and U+212A as RE2 (?i) does
 			// and checks the word boundary before the name.
-			start, ok := matchSuffixFoldBack(s, last, e, name)
-			if !ok {
+			if _, ok := matchSuffixFoldBack(s, last, e, name); !ok {
 				continue
 			}
-			end := d
+			valStart := d
+			for valStart < len(s) && (s[valStart] == ' ' || s[valStart] == '\t') {
+				valStart++
+			}
+			end := valStart
 			for end < len(s) && s[end] != '\r' && s[end] != '\n' {
 				end++
 			}
-			b.WriteString(s[last:start])
-			b.WriteString(s[start:e])
-			b.WriteString(": " + redactedValue)
+			w.copy(last, e)
+			w.lit(": " + redactedValue)
+			w.remove(valStart, end)
 			last, d = end, end
 			break
 		}
 	}
-	if last == 0 {
-		return s
-	}
-	b.WriteString(s[last:])
-	return b.String()
+	return w.done(last)
 }
+
+// legacyRepl is the text that replaces a match of a legacy pass that ends at
+// s[end]: pre, the copy of s[from:to], the copy of the delimiter at s[delim]
+// when delim >= 0, and lit. The pass removes s[core[0]:core[1]], the value
+// that the placeholder in lit stands for.
+type legacyRepl struct {
+	pre, lit string
+	from, to int
+	delim    int
+	core     [2]int
+	end      int
+}
+
+// keepRepl is the replacement of a match at s[i:end] that keeps it as it is.
+func keepRepl(i, end int) legacyRepl {
+	return legacyRepl{from: i, to: end, delim: -1, end: end}
+}
+
+// legacyMatcher reports whether a match of a legacy pass starts at s[i] (see
+// legacyReplace) and returns its replacement.
+type legacyMatcher func(t *legacyText, i, pos int, brackets *openBrackets) (legacyRepl, bool)
 
 // legacyReplace replaces the matches of match in s, searching from the start
 // of s and, after each match, from where the text it replaced or kept ends,
-// as replaceMatchesFunc on main did. match reports whether a match starts at
-// s[i], given that the search resumed at pos (a word boundary holds there),
-// and returns its replacement and end. A match starts with a byte in starts,
-// or with a letter when starts is empty.
-func legacyReplace(s string, budget *int, compound bool, starts string, match func(t *legacyText, i, pos int, brackets *openBrackets) (string, int, bool)) string {
+// as replaceMatchesFunc on main did, recording in tr what it copies and
+// removes. match reports whether a match starts at s[i], given that the
+// search resumed at pos (a word boundary holds there). A match starts with a
+// byte in starts, or with a letter when starts is empty.
+func legacyReplace(s string, tr *passTrace, budget *int, compound bool, starts string, match legacyMatcher) string {
+	w := spanWriter{s: s, tr: tr}
 	if starts != "" && !strings.ContainsAny(s, starts) {
-		return s
+		return w.done(0)
 	}
 	t := &legacyText{s: s, budget: budget, compound: compound}
-	var b strings.Builder
 	var brackets openBrackets
 	last, pos := 0, 0
 	for i := 0; i < len(s); i++ {
@@ -897,21 +654,23 @@ func legacyReplace(s string, budget *int, compound bool, starts string, match fu
 		} else if !isLegacyLetterAt(s, i) {
 			continue
 		}
-		repl, end, ok := match(t, i, pos, &brackets)
+		r, ok := match(t, i, pos, &brackets)
 		if !ok {
 			continue
 		}
-		b.WriteString(s[last:i])
-		b.WriteString(repl)
-		last = end
-		pos = max(end, i+1)
+		w.copy(last, i)
+		w.lit(r.pre)
+		w.copy(r.from, r.to)
+		if r.delim >= 0 {
+			w.copy(r.delim, r.delim+1)
+		}
+		w.lit(r.lit)
+		w.remove(r.core[0], r.core[1])
+		last = r.end
+		pos = max(r.end, i+1)
 		i = pos - 1
 	}
-	if last == 0 {
-		return s
-	}
-	b.WriteString(s[last:])
-	return b.String()
+	return w.done(last)
 }
 
 // legacyText is a text being matched as the expressions did. dq, sq, edq and
@@ -942,35 +701,35 @@ func (t *legacyText) isSensitiveKey(k string) bool {
 // bearerAt matches "bearer" and whitespace followed by a quoted value, a
 // bracketed value or a run of bytes other than whitespace, ",", ";", ")",
 // quotes and "]", as redactBearerToken on main did.
-func (t *legacyText) bearerAt(i, pos int, _ *openBrackets) (string, int, bool) {
+func (t *legacyText) bearerAt(i, pos int, _ *openBrackets) (legacyRepl, bool) {
 	s := t.s
 	if (s[i] != 'b' && s[i] != 'B') || (i != pos && !isLegacyBoundary(s, i)) {
-		return "", 0, false
+		return legacyRepl{}, false
 	}
 	word := legacyFoldPrefixEnd(s, i, "bearer")
 	if word < 0 || word >= len(s) {
-		return "", 0, false
+		return legacyRepl{}, false
 	}
 	j := word
 	for j < len(s) && isRegexpSpace(s[j]) {
 		j++
 	}
 	if j == word || j == len(s) {
-		return "", 0, false
+		return legacyRepl{}, false
 	}
 	end := t.bearerValueEnd(j)
 	if end < 0 {
-		return "", 0, false
+		return legacyRepl{}, false
 	}
 	if rest := s[j:]; len(rest) >= 2 && strings.EqualFold(rest[:2], "of") {
 		if r, _ := utf8.DecodeRuneInString(rest[2:]); len(rest) == 2 || unicode.IsSpace(r) {
-			return s[i:end], end, true
+			return keepRepl(i, end), true
 		}
 	}
 	if inner, _ := legacyUnquote(s[j:end]); isRedactedValue(inner) {
-		return s[i:end], end, true
+		return keepRepl(i, end), true
 	}
-	return s[i:word] + " " + redactedValue, end, true
+	return legacyRepl{from: i, to: word, delim: -1, lit: " " + redactedValue, core: [2]int{j, end}, end: end}, true
 }
 
 func (t *legacyText) bearerValueEnd(j int) int {
@@ -1001,14 +760,14 @@ func (t *legacyText) bearerValueEnd(j int) int {
 
 // basicAt matches "basic", whitespace and a base64 token, replaced as
 // redactBasicCredential on main did when it holds a basic credential.
-func (t *legacyText) basicAt(i, pos int, _ *openBrackets) (string, int, bool) {
+func (t *legacyText) basicAt(i, pos int, _ *openBrackets) (legacyRepl, bool) {
 	s := t.s
 	if (s[i] != 'b' && s[i] != 'B') || (i != pos && !isLegacyBoundary(s, i)) {
-		return "", 0, false
+		return legacyRepl{}, false
 	}
 	word := legacyFoldPrefixEnd(s, i, "basic")
 	if word < 0 || word >= len(s) {
-		return "", 0, false
+		return legacyRepl{}, false
 	}
 	j := word
 	for j < len(s) && isRegexpSpace(s[j]) {
@@ -1019,30 +778,30 @@ func (t *legacyText) basicAt(i, pos int, _ *openBrackets) (string, int, bool) {
 		k++
 	}
 	if j == word || k == j {
-		return "", 0, false
+		return legacyRepl{}, false
 	}
 	for n := 0; n < 2 && k < len(s) && s[k] == '='; n++ {
 		k++
 	}
 	if k < len(s) && isBase64Byte(s[k]) {
-		return s[i:k], k, true
+		return keepRepl(i, k), true
 	}
 	if encoded := s[j:k]; len(encoded) <= maxBasicCredentialBytes {
 		decoded, err := base64.StdEncoding.DecodeString(encoded)
 		if err != nil || (!strings.Contains(encoded, "=") && !bytes.Contains(decoded, []byte(":"))) {
-			return s[i:k], k, true
+			return keepRepl(i, k), true
 		}
 	}
-	return s[i:word] + " " + redactedValue, k, true
+	return legacyRepl{from: i, to: word, delim: -1, lit: " " + redactedValue, core: [2]int{j, k}, end: k}, true
 }
 
 // jsonPairAt matches a quoted sensitive key, ":" and a quoted value or a run
 // of bytes other than whitespace, "," and "}", replaced as
 // redactJSONKeyValue on main did.
-func (t *legacyText) jsonPairAt(i, _ int, _ *openBrackets) (string, int, bool) {
+func (t *legacyText) jsonPairAt(i, _ int, _ *openBrackets) (legacyRepl, bool) {
 	s := t.s
 	if s[i] != '"' {
-		return "", 0, false
+		return legacyRepl{}, false
 	}
 	k := skipInlineSpacesFwd(s, i+1, len(s))
 	for _, keyEnd := range t.keyEndsAt(k, true) {
@@ -1070,47 +829,46 @@ func (t *legacyText) jsonPairAt(i, _ int, _ *openBrackets) (string, int, bool) {
 		}
 		end = t.valueEnd(j, end)
 		if inner, _ := legacyUnquote(s[j:end]); isRedactedValue(inner) {
-			return s[i:end], end, true
+			return keepRepl(i, end), true
 		}
-		return `"` + s[k:keyEnd] + `":"` + redactedValue + `"`, end, true
+		return legacyRepl{pre: `"`, from: k, to: keyEnd, delim: -1, lit: `":"` + redactedValue + `"`, core: [2]int{j, end}, end: end}, true
 	}
-	return "", 0, false
+	return legacyRepl{}, false
 }
 
 // textPairAt matches a sensitive key, an optional (escaped) quote, ":" or
 // "=" between optional whitespace or control bytes, and a quoted value or a
 // run of bytes other than whitespace, ",", ";" and "&", replaced as
 // redactTextKeyValue on main did.
-func (t *legacyText) textPairAt(i, pos int, brackets *openBrackets) (string, int, bool) {
+func (t *legacyText) textPairAt(i, pos int, brackets *openBrackets) (legacyRepl, bool) {
 	s := t.s
 	if !isLegacyLetterAt(s, i) || (i != pos && !isLegacyBoundary(s, i)) {
-		return "", 0, false
+		return legacyRepl{}, false
 	}
-	keyEnd, quoteEnd, delim, start, end, ok := t.textPairFields(i)
+	_, quoteEnd, delim, start, end, ok := t.textPairFields(i)
 	if !ok {
-		return "", 0, false
+		return legacyRepl{}, false
 	}
 	open := brackets.before(s, i)
-	keep := s[i:keyEnd] + s[keyEnd:quoteEnd] + s[delim:delim+1]
 	switch kind, pair := t.nestedKind(start, end, startsLine(s, delim+1, start)); kind {
 	case nestedKey:
-		return s[i:start], start, true
+		return keepRepl(i, start), true
 	case valueEndingInKeyName:
 		_, quote := legacyUnquote(s[start:end])
 		end = t.nestedPairEnd(pair, open)
 		brackets.skip(end)
-		return keep + quote + redactedValue + quote, end, true
+		return legacyRepl{from: i, to: quoteEnd, delim: delim, lit: quote + redactedValue + quote, core: [2]int{start, end}, end: end}, true
 	}
 	end = t.textValueEnd(start, end, open)
 	brackets.skip(end)
 	if end == start {
-		return s[i:end], end, true
+		return keepRepl(i, end), true
 	}
 	inner, quote := legacyUnquote(s[start:end])
 	if isRedactedValue(inner) {
-		return s[i:end], end, true
+		return keepRepl(i, end), true
 	}
-	return keep + quote + redactedValue + quote, end, true
+	return legacyRepl{from: i, to: quoteEnd, delim: delim, lit: quote + redactedValue + quote, core: [2]int{start, end}, end: end}, true
 }
 
 func (t *legacyText) textPairFields(i int) (keyEnd, quoteEnd, delim, valStart, valEnd int, ok bool) {

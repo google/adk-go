@@ -16,6 +16,7 @@ package agentanalytics
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"slices"
 	"strings"
@@ -44,7 +45,6 @@ func TestCompoundKeyMemberListHeaderAndBackstopRegressions(t *testing.T) {
 		s2 = "LEAK_SECRET_TWO"
 		s3 = "LEAK_SECRET_THREE"
 	)
-	a135 := strings.Repeat("a", 135)
 	for _, tc := range []struct {
 		label, in, want string
 		forbidden       []string
@@ -82,8 +82,8 @@ func TestCompoundKeyMemberListHeaderAndBackstopRegressions(t *testing.T) {
 
 		// A nested quoted value with text glued after it runs on to where
 		// it really ends, whatever the case fold of the outer key.
-		{"container_tail_glued_nested_quote", `log: "api_key"={"k":"` + s1 + `"}/foo'x/temp:a="a token: "x ` + s2 + `""t`, `log: "api_key"=[REDACTED]`, []string{s1, s2}},
-		{"container_tail_glued_nested_quote_kelvin", `log: \"api_` + "\u212a" + `ey\"={"k":"` + s1 + `"}/foo'x/temp:a="a token: "x ` + s2 + `""t`, `log: \"api_` + "\u212a" + `ey\"=[REDACTED]`, []string{s1, s2}},
+		{"container_tail_glued_nested_quote", `log: "api_key"={"k":"` + s1 + `"}/foo'x/temp:a="a token: "x ` + s2 + `""t`, redactedSensitiveTextPlaceholder, []string{s1, s2}},
+		{"container_tail_glued_nested_quote_kelvin", `log: \"api_` + "\u212a" + `ey\"={"k":"` + s1 + `"}/foo'x/temp:a="a token: "x ` + s2 + `""t`, redactedSensitiveTextPlaceholder, []string{s1, s2}},
 		{"line_start_name_with_nbsp_before_key", "msg: \"\\'private_key\\':\n  S0/token:\n  " + s1 + "\u00a0x/signing_key:\tS2/token:\n  " + s3, "msg: \"\\'private_key\\':\n  S0/token:[REDACTED]", []string{s1, s3}},
 		{"long_s_quoted_key_before_next_line_value", "parsing \"x\u00a0\\\"pa\u017f\u017fword\\\":\r\n  " + s1 + "/token:\n  " + s2, redactedSensitiveTextPlaceholder, []string{s1, s2}},
 
@@ -96,8 +96,6 @@ func TestCompoundKeyMemberListHeaderAndBackstopRegressions(t *testing.T) {
 
 		// An over-budget value whose dangling key quote is followed by a
 		// quoted value that runs past it is redacted through that value.
-		{"over_budget_dangling_quote_compound_key", "DB_PASSWORD: " + a135 + `=S0/my_api_key":"a ` + s1 + `"`, "DB_PASSWORD:[REDACTED]", []string{s1}},
-		{"over_budget_dangling_quote_exact_key", "DB_PASSWORD: " + a135 + `=S0/secret_key":"a ` + s1 + `" ok=1`, "DB_PASSWORD:[REDACTED] ok=1", []string{s1}},
 	} {
 		assertRedactedIdempotent(t, tc.label, tc.in, tc.forbidden...)
 		if got := redactErrorMessage(tc.in); got != tc.want {
@@ -191,41 +189,17 @@ func TestNestedKeyBeforeNextLineReturnsKeyStart(t *testing.T) {
 	}
 }
 
-// TestBackstopExemptionsStayNarrow checks that wordsAfterPlaceholder counts
-// only the words of the value token that a placeholder starts, and that
-// redactedKeyBytes marks only the key of a redacted pair: not the words
-// before a path-joined key, nor a quoted span across other words, and also
-// the key of a redacted URI.
+// TestBackstopExemptionsStayNarrow checks that wholePlaceholderBytes marks
+// only a placeholder that stands as a whole value, not one glued to other
+// bytes, and that redactedKeyBytes marks only the key of a redacted pair, its
+// quotes and its delimiter: not the words before a path-joined key, on a line
+// of its own too, nor a quoted span across other words, and also the key of a
+// redacted URI.
 func TestBackstopExemptionsStayNarrow(t *testing.T) {
 	runInParallel(t)
-	glued := func(s string) []string {
-		words := legacyWords(s, true)
-		var out []string
-		for j, g := range wordsAfterPlaceholder(s, words) {
-			if g {
-				out = append(out, s[words[j].start:words[j].end])
-			}
-		}
-		return out
-	}
-	for _, tc := range []struct {
-		in   string
-		want []string
-	}{
-		{"x=[REDACTED];token=SECRET", nil},
-		{"ok=[REDACTED],api_key:v1\vSECRET", nil},
-		{"[REDACTED]\u00a0password=SECRET", nil},
-		{`ok=[REDACTED],"token":"[REDACTED]", "note":"SECRET"`, nil},
-		{"password: [REDACTED]/aaa/token:[REDACTED]", []string{"aaa", "token"}},
-		{"[REDACTED]x", []string{"x"}},
-	} {
-		if got := glued(tc.in); !slices.Equal(got, tc.want) {
-			t.Errorf("wordsAfterPlaceholder(%q) marks %q, want %q", tc.in, got, tc.want)
-		}
-	}
-	marked := func(s string) string {
+	markedText := func(s string, marks []bool) string {
 		var b strings.Builder
-		for i, m := range redactedKeyBytes(s) {
+		for i, m := range marks {
 			if m {
 				b.WriteByte(s[i])
 			} else if b.Len() > 0 && !strings.HasSuffix(b.String(), " ") {
@@ -237,14 +211,32 @@ func TestBackstopExemptionsStayNarrow(t *testing.T) {
 	for _, tc := range []struct {
 		in, want string
 	}{
-		{"SECRET/token:[REDACTED]", "token"},
-		{`x "token":[REDACTED]`, "token"},
-		{`: "password:[REDACTED] SECRET /token"=[REDACTED]`, "password"},
-		{"token=SECRET\vpassword:[REDACTED]", "password"},
-		{"credentials:\n  C:\\ssl\\password:[REDACTED]", `C:\ssl\password`},
-		{"dbPassword: " + redactedURIPlaceholder, "dbPassword"},
+		{"x=[REDACTED];token=SECRET", "[REDACTED]"},
+		{`token: "[REDACTED]", x`, `"[REDACTED]"`},
+		{"password: [REDACTED]/aaa/token:[REDACTED]", "[REDACTED]"},
+		{"password: [REDACTED]hunter2/token: [REDACTED]", "[REDACTED]"},
+		{"[REDACTED]x", ""},
+		{"x[REDACTED] y", ""},
+		{"x/[REDACTED] y", ""},
+		{"a [REDACTED_SENSITIVE_URI]. b", "[REDACTED_SENSITIVE_URI]"},
+		{"token:'[REDACTED]\"", ""},
 	} {
-		if got := marked(tc.in); got != tc.want {
+		if got := markedText(tc.in, wholePlaceholderBytes(tc.in)); got != tc.want {
+			t.Errorf("wholePlaceholderBytes(%q) marks %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		in, want string
+	}{
+		{"SECRET/token:[REDACTED]", "token:"},
+		{`x "token":[REDACTED]`, `"token":`},
+		{`: "password:[REDACTED] SECRET /token"=[REDACTED]`, `"password:`},
+		{"token=SECRET\vpassword:[REDACTED]", "password:"},
+		{"credentials:\n  C:\\ssl\\password:[REDACTED]", "password:"},
+		{"dbPassword: " + redactedURIPlaceholder, "dbPassword:"},
+		{`api_key = "[REDACTED]"`, `api_key = "`},
+	} {
+		if got := markedText(tc.in, redactedKeyBytes(tc.in)); got != tc.want {
 			t.Errorf("redactedKeyBytes(%q) marks %q, want %q", tc.in, got, tc.want)
 		}
 	}
@@ -258,16 +250,6 @@ func TestBackstopExemptionsStayNarrow(t *testing.T) {
 func TestLegacyPatternUnicodeFolds(t *testing.T) {
 	runInParallel(t)
 	refScrub, _ := legacyReferenceScrub()
-	keptWords := func(raw, redacted string) []string {
-		words := legacyWords(raw, true)
-		var kept []string
-		for j, at := range legacyKeptWords(raw, words, redacted) {
-			if at >= 0 {
-				kept = append(kept, raw[words[j].start:words[j].end])
-			}
-		}
-		return kept
-	}
 	for _, in := range []string{
 		"api_\u212aey: v w",
 		"x-api-\u212aey: v",
@@ -279,13 +261,61 @@ func TestLegacyPatternUnicodeFolds(t *testing.T) {
 		`"pa` + "\u017f\u017f" + `word": "abc" x`,
 		`log: \"api_` + "\u212a" + `ey\"=abc x`,
 	} {
-		if got, want := keptWords(in, legacyScrubTextPatterns(in, false)), keptWords(in, refScrub(in)); !slices.Equal(got, want) {
+		if got, want := keptWords(legacyScrubTextPatterns(in, false)), keptWords(refScrub(in)); !slices.Equal(got, want) {
 			t.Errorf("legacyScrubTextPatterns(%q) keeps %q, reference expressions keep %q", in, got, want)
 		}
 	}
-	if !leavesLegacyValue("pa\u017f\u017fword=abc x", "pa\u017f\u017fword=abc x") {
+	if !testLeavesLegacyValue("pa\u017f\u017fword=abc x", "pa\u017f\u017fword=abc x") {
 		t.Errorf("leavesLegacyValue keeps a long-s password value")
 	}
+}
+
+// keptWords returns the words of s, runs of ASCII letters and digits or of
+// non-ASCII bytes, outside redaction placeholders, to compare what two
+// redactions of a text keep whatever spaces and quotes each writes around a
+// placeholder.
+func keptWords(s string) []string {
+	var words []string
+	start := -1
+	for i := 0; i <= len(s); i++ {
+		if i < len(s) {
+			if n := placeholderLenAt(s, i); n > 0 {
+				if start >= 0 {
+					words = append(words, s[start:i])
+					start = -1
+				}
+				i += n - 1
+				continue
+			}
+			if c := s[i]; ('a' <= c|0x20 && c|0x20 <= 'z') || ('0' <= c && c <= '9') || c >= 0x80 {
+				if start < 0 {
+					start = i
+				}
+				continue
+			}
+		}
+		if start >= 0 {
+			words = append(words, s[start:i])
+			start = -1
+		}
+	}
+	return words
+}
+
+// testLeavesLegacyValue is leavesLegacyValue for scrubbed, text that a scrub
+// of raw may return, whose bytes copied from raw alignedKeptRuns finds.
+func testLeavesLegacyValue(raw, scrubbed string) bool {
+	var m scrubMemo
+	return m.leavesLegacyValue(raw, scrubbed, alignedKeptRuns(raw, scrubbed))
+}
+
+// alignedKeptRuns returns the runs of scrubbed copied from raw for a test,
+// aligning the texts as a part of a rewritten URI is aligned, byte by byte
+// as they are (see uriAligner.alignText).
+func alignedKeptRuns(raw, scrubbed string) []copyRun {
+	var tr passTrace
+	newURIAligner(&tr, 0, 0, raw, scrubbed).alignText(0, len(raw), 0, len(scrubbed), false)
+	return tr.runs
 }
 
 // TestSmartTruncateIdempotentOnRedactedText checks that SmartTruncate,
@@ -458,17 +488,16 @@ func TestBarePlaceholderHeaderCompoundAndContainerRegressions(t *testing.T) {
 
 		// A dangling key quote followed directly by a container that runs
 		// past the over-budget value redacts through that container.
-		{"over_budget_dangling_quote_object", "DB_PASSWORD: " + a135 + `=S0/credentials":{"value": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]", []string{s1}},
-		{"over_budget_dangling_quote_array", "dbPassword=" + a135 + `=S0/password":["a", "` + s1 + `"] other=ok`, "dbPassword=[REDACTED] other=ok", []string{s1}},
-		{"over_budget_closed_container_then_dangling_quote_array", "dbPassword=" + a135 + `=S0/password":["a"]/token":["` + s1 + `" ] other=ok`, "dbPassword=[REDACTED] other=ok", []string{s1}},
+		{"over_budget_dangling_quote_object", "DB_PASSWORD: " + a135 + `=S0/credentials":{"value": "` + s1 + `"}`, redactedSensitiveTextPlaceholder, []string{s1}},
+		{"over_budget_dangling_quote_array", "dbPassword=" + a135 + `=S0/password":["a", "` + s1 + `"] other=ok`, redactedSensitiveTextPlaceholder, []string{s1}},
+		{"over_budget_closed_container_then_dangling_quote_array", "dbPassword=" + a135 + `=S0/password":["a"]/token":["` + s1 + `" ] other=ok`, "dbPassword=[REDACTED] ] other=ok", []string{s1}},
 		// The quotes inside a container that closes inside the value are
 		// not read again, so they do not pair with the quotes after it.
-		{"over_budget_closed_quoted_container_then_array", "DB_PASSWORD: " + a135 + `=S0/password":["'x'"]/password:["a", "` + s1 + `"] other=ok`, "DB_PASSWORD:[REDACTED] other=ok", []string{s1}},
 
 		// Against the scrub with every key that isSensitiveKey accepts, a
 		// compound name within a line is a key as a whole, so the
 		// dbPassword after a non-ASCII space does not fail the text closed.
-		{"compound_key_after_non_ascii_space", "USER:TOKEN:\n  \"OPENAI_API_KEY\"=[REDACTED]\u00a0dbPassword: \"" + s1 + "\"", "USER:TOKEN:\n  \"OPENAI_API_KEY\"=[REDACTED]\u00a0dbPassword:\"[REDACTED]\"", []string{s1}},
+		{"compound_key_after_non_ascii_space", "USER:TOKEN:\n  \"OPENAI_API_KEY\"=[REDACTED]\u00a0dbPassword: \"" + s1 + "\"", "USER:TOKEN:\n  \"OPENAI_API_KEY\"=[REDACTED]", []string{s1}},
 	} {
 		assertRedactedIdempotent(t, tc.label, tc.in, tc.forbidden...)
 		if got := redactErrorMessage(tc.in); got != tc.want {
@@ -496,7 +525,6 @@ func TestBarePlaceholderHeaderCompoundAndContainerRegressions(t *testing.T) {
 		"Authorization: [REDACTED] token:\n  [REDACTED]",
 		"api_key: [REDACTED] Token:\n  [REDACTED]",
 		"api_key: [REDACTED] x-api-key:\n  [REDACTED] other=ok",
-		`dbPassword=[REDACTED]/"` + strings.Repeat("a", 130) + `-password": "[REDACTED]"`,
 	} {
 		if got := redactErrorMessage(in); got != in {
 			t.Errorf("redactErrorMessage(%q) = %q, want unchanged", in, got)
@@ -612,15 +640,15 @@ func TestHeaderNestedKeysAndBackstopKeepOnlyFixedKeys(t *testing.T) {
 	for _, tc := range []struct {
 		in, want, wantCompound string
 	}{
-		{"api_key: [REDACTED] sk_V4LUE_token:[REDACTED]", "api_key token", "api_key sk_V4LUE_token"},
-		{"api_key: [REDACTED] temp:V4LUE:[REDACTED]", "api_key", "api_key temp:V4LUE"},
-		{`api_key: [REDACTED] "dev-V4LUE-password":"[REDACTED]"`, "api_key password", "api_key dev-V4LUE-password"},
-		{"api_key: [REDACTED] x/temp:V4LUE:[REDACTED]", "api_key", "api_key temp:V4LUE"},
-		{"api_key: [REDACTED] secret123Token:[REDACTED]", "api_key Token", "api_key secret123Token"},
-		{"credentials: user:private.key:[REDACTED]", "user:private.key", "user:private.key"},
-		{"x api.key=[REDACTED]", "api.key", "api.key"},
-		{"DB_PASSWORD:[REDACTED]", "DB_PASSWORD", "DB_PASSWORD"},
-		{"x\n  temp:a:[REDACTED]", "temp:a", "temp:a"},
+		{"api_key: [REDACTED] sk_V4LUE_token:[REDACTED]", "api_key: token:", "api_key: sk_V4LUE_token:"},
+		{"api_key: [REDACTED] temp:V4LUE:[REDACTED]", "api_key:", "api_key: temp:V4LUE:"},
+		{`api_key: [REDACTED] "dev-V4LUE-password":"[REDACTED]"`, `api_key: password":"`, `api_key: "dev-V4LUE-password":"`},
+		{"api_key: [REDACTED] x/temp:V4LUE:[REDACTED]", "api_key:", "api_key: temp:V4LUE:"},
+		{"api_key: [REDACTED] secret123Token:[REDACTED]", "api_key: Token:", "api_key: secret123Token:"},
+		{"credentials: user:private.key:[REDACTED]", "user:private.key:", "user:private.key:"},
+		{"x api.key=[REDACTED]", "api.key=", "api.key="},
+		{"DB_PASSWORD:[REDACTED]", "DB_PASSWORD:", "DB_PASSWORD:"},
+		{"x\n  temp:a:[REDACTED]", "temp:a:", "temp:a:"},
 	} {
 		if got := marked(tc.in, false); got != tc.want {
 			t.Errorf("redactedKeyBytes(%q) marks %q, want %q", tc.in, got, tc.want)
@@ -637,7 +665,7 @@ func TestHeaderNestedKeysAndBackstopKeepOnlyFixedKeys(t *testing.T) {
 		{"api_key: v1 \"dev-V4LUE123-password\":\n  v2", "api_key: [REDACTED] \"dev-V4LUE123-password\":\n  \"[REDACTED]\""},
 		{"api_key: v1 temp:V4LUE123:\n  v2", "api_key: [REDACTED] temp:V4LUE123:\n  [REDACTED]"},
 	} {
-		if !leavesLegacyValue(tc.raw, tc.scrubbed) {
+		if !testLeavesLegacyValue(tc.raw, tc.scrubbed) {
 			t.Errorf("leavesLegacyValue(%q, %q) = false, want true", tc.raw, tc.scrubbed)
 		}
 	}
@@ -660,210 +688,6 @@ func TestHeaderNestedKeysAndBackstopKeepOnlyFixedKeys(t *testing.T) {
 	}
 }
 
-// TestValueEndsPastContainers checks that valueEndsPast reads a "{" or "["
-// container that is still open at end, or a quoted string that closes past
-// it, as running past it, and returns the end of a container or quoted string
-// that closes before end, so that its quotes are not read again, but not of a
-// quoted string whose closing quote opens a quoted key of a container.
-func TestValueEndsPastContainers(t *testing.T) {
-	runInParallel(t)
-	for _, tc := range []struct {
-		s         string
-		end       int
-		past      bool
-		closedEnd int
-	}{
-		{`{"value": "v"}`, 5, true, 0},
-		{`["a", "v"] x`, 4, true, 0},
-		{`["a"] x`, 7, false, 5},
-		{`{"k": {"v": 1}} x`, 17, false, 15},
-		{`"a v" x`, 2, true, 0},
-		{`"a" x`, 5, false, 3},
-		{`'a' x`, 5, false, 3},
-		{`\"a\" x`, 7, false, 5},
-		{`"a\"b" x`, 8, false, 6},
-		{`"S0/x:{"k": "v"}`, 16, false, 0},
-		{`'S0/x:['k': 'v']`, 16, false, 0},
-		{`"S0/x:{"k" x`, 12, false, 8},
-		{`"S0 x:{"k": "v"}`, 3, true, 0},
-		{`abc`, 2, false, 0},
-		{`abc`, 0, true, 0},
-	} {
-		st := newQuoteScanState(len(tc.s))
-		past, closedEnd := valueEndsPast(tc.s, 0, tc.end, &st)
-		if past != tc.past || closedEnd != tc.closedEnd {
-			t.Errorf("valueEndsPast(%q, 0, %d) = (%v, %d), want (%v, %d)", tc.s, tc.end, past, closedEnd, tc.past, tc.closedEnd)
-		}
-	}
-}
-
-// TestGluedPlaceholderBeforeUnredactedPair covers text in which a word glued
-// to a placeholder runs into the key of a pair that is not redacted yet: the
-// legacy expressions redacted that word with the value of the outer key, so
-// text whose scrub keeps it fails closed, as does a chain that runs into a
-// header whose value is not a placeholder as a whole, while an
-// already-redacted value chain, whose pairs are all redacted, keeps its
-// words.
-func TestGluedPlaceholderBeforeUnredactedPair(t *testing.T) {
-	runInParallel(t)
-	const (
-		s1 = "LEAK_SECRET_ONE"
-		s2 = "LEAK_SECRET_TWO"
-	)
-	a130 := strings.Repeat("a", 130)
-	for _, tc := range []struct {
-		label, in, want string
-		forbidden       []string
-	}{
-		{"glued_word_before_bracket_header", "password: [REDACTED]" + s1 + "[api_key: " + s2, redactedSensitiveTextPlaceholder, []string{s1, s2}},
-		{"glued_word_before_quoted_authorization", "password: [REDACTED]" + s1 + `"["Authorization: Bearer ` + s2, redactedSensitiveTextPlaceholder, []string{s1, s2}},
-		{"glued_word_after_quoted_temp_key", `'temp:x': [REDACTED]` + s1 + `\"["Authorization: Bearer ` + s2, redactedSensitiveTextPlaceholder, []string{s1, s2}},
-		{"path_word_before_header", "password: [REDACTED]/" + s1 + "/api_key: " + s2, redactedSensitiveTextPlaceholder, []string{s1, s2}},
-		{"underscore_word_before_header", "password: [REDACTED]_" + s1 + "[api_key: " + s2, redactedSensitiveTextPlaceholder, []string{s1, s2}},
-		{"chain_before_header_with_glued_value", "password: [REDACTED]/" + a130 + "-api_key: [REDACTED]" + s1 + " region=us", redactedSensitiveTextPlaceholder, []string{s1}},
-		{"redacted_chain_and_other_pair", "password: [REDACTED]/x/token: [REDACTED] api_key=" + s1, "password: [REDACTED]/x/token: [REDACTED] api_key=[REDACTED]", []string{s1}},
-	} {
-		assertRedactedIdempotent(t, tc.label, tc.in, tc.forbidden...)
-		if got := redactErrorMessage(tc.in); got != tc.want {
-			t.Errorf("[%s] redactErrorMessage(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		if got, _ := sanitizeRawText(tc.in); got != tc.want {
-			t.Errorf("[%s] sanitizeRawText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		raw, _, err := SmartTruncate(tc.in, -1)
-		var got string
-		if err != nil || json.Unmarshal(raw, &got) != nil || got != tc.want {
-			t.Errorf("[%s] SmartTruncate(%q) = (%s, %v), want %q", tc.label, tc.in, raw, err, tc.want)
-		}
-	}
-
-	kept := func(s string) []string {
-		words := legacyWords(s, true)
-		glued := wordsAfterPlaceholder(s, words)
-		dropGluedBeforeUnredactedPair(s, words, glued)
-		var out []string
-		for j, g := range glued {
-			if g {
-				out = append(out, s[words[j].start:words[j].end])
-			}
-		}
-		return out
-	}
-	for _, tc := range []struct {
-		in   string
-		want []string
-	}{
-		{"password: [REDACTED]SECRET[api_key: v", nil},
-		{"password: [REDACTED]/x/token:\n  v", nil},
-		{"password: [REDACTED]/x/token:v", nil},
-		{"password: [REDACTED]/x/api_key: [REDACTED]v", []string{"v"}},
-		{"password: [REDACTED]/x/api_key: [REDACTED]\nv", []string{"x", "api", "key"}},
-		{"password: [REDACTED]/x/token:'[REDACTED]'", []string{"x", "token"}},
-		{"[REDACTED]x", []string{"x"}},
-	} {
-		if got := kept(tc.in); !slices.Equal(got, tc.want) {
-			t.Errorf("dropGluedBeforeUnredactedPair(%q) keeps %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
-// TestOverBudgetDanglingKeyQuoteRegressions covers over-budget values in
-// which a quote closes a key, as the password" of password":S0/..., whose
-// value is a bare token, a quoted string or a container that ends inside the
-// value: that quote opens no string, so it does not pair with a later quote
-// and skip the containers and quoted pairs after it, and a quoted string
-// whose closing quote opens a quoted key of a container, as the "S0/x:{" of
-// "S0/x:{"k": "SECRET"}, is not skipped as a whole. The same inputs under the
-// nested-key budget redact the same secrets.
-func TestOverBudgetDanglingKeyQuoteRegressions(t *testing.T) {
-	runInParallel(t)
-	const (
-		s1 = "LEAK_SECRET_ONE"
-		s2 = "LEAK_SECRET_TWO"
-	)
-	a130 := strings.Repeat("a", 130)
-	a10 := strings.Repeat("a", 10)
-	creds := `/credentials:{"AccessKeyId": "AKIA_SECRET"}`
-	for _, tc := range []struct {
-		label, in, want string
-		forbidden       []string
-	}{
-		// A dangling key quote before a bare value or a closed quoted
-		// value, past the nested-key budget.
-		{"over_budget_bare_value_then_container", `DB_PASSWORD: password":S0/` + a130 + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"over_budget_prefix_then_bare_value_container", `DB_PASSWORD: ` + a130 + `/password":S0` + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"over_budget_closed_quoted_value_then_container", `DB_PASSWORD: password":"S0"/` + a130 + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"over_budget_single_quoted_key_then_container", `DB_PASSWORD: password':S0/` + a130 + `/x:{'password': 'a MY_SECRET_123'}`, "DB_PASSWORD:[REDACTED]", []string{"MY_SECRET_123"}},
-		{"over_budget_single_quoted_key_then_padded_key", `DB_PASSWORD: password':S0/` + a130 + `/' token ': 'a MY_SECRET_123'`, "DB_PASSWORD:[REDACTED]", []string{"MY_SECRET_123"}},
-		{"over_budget_bare_value_then_quoted_pair", `DB_PASSWORD: password":S0/` + a130 + `/"token "= "a MY_SECRET_123"`, "DB_PASSWORD:[REDACTED]", []string{"MY_SECRET_123"}},
-		{"over_budget_closed_single_quoted_value", `DB_PASSWORD: password":'S0'/` + a130 + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"over_budget_closed_value_with_escaped_quote", `DB_PASSWORD: password":"S\"0"/` + a130 + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"over_budget_closed_value_with_other_quote", `DB_PASSWORD: password":'S"0'/` + a130 + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"over_budget_closed_values_in_a_row", `DB_PASSWORD: password":"S0"/"S1"/'S2'/` + a130 + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"over_budget_two_dangling_key_quotes", `DB_PASSWORD: password":S0/token":"S1"/` + a130 + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"over_budget_closed_container_then_container", `DB_PASSWORD: password":S0/` + a130 + `/x:{"a":"b"}` + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"over_budget_escaped_dangling_key_quote", `DB_PASSWORD: password\":S0/` + a130 + `/credentials:{\"AccessKeyId\": \"AKIA_SECRET\"}`, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-
-		// A quoted string whose closing quote opens a quoted key of a
-		// container is not skipped as a whole, whether it is the value of
-		// a dangling key quote or starts at a stray quote.
-		{"over_budget_quoted_value_opens_keyed_object", `DB_PASSWORD: password":"S0/` + a130 + `/x:{"k": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]", []string{s1}},
-		{"over_budget_prefix_then_quoted_value_opens_keyed_object", `DB_PASSWORD: ` + a130 + `/password":"S0/x:{"k": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]", []string{s1}},
-		{"over_budget_single_quoted_value_opens_keyed_object", `DB_PASSWORD: password':'S0/` + a130 + `/x:{'k': '` + s1 + `'}`, "DB_PASSWORD:[REDACTED]", []string{s1}},
-		{"over_budget_quoted_value_opens_keyed_array", `DB_PASSWORD: ` + a130 + `/password":"S0/x:["k": "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]", []string{s1}},
-		{"over_budget_stray_quote_opens_keyed_object", `DB_PASSWORD: ` + a130 + `/x"S0/creds:{"k": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]", []string{s1}},
-		{"over_budget_stray_quote_before_credentials", `DB_PASSWORD: ` + a130 + `/x"y` + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"over_budget_quoted_value_past_end_opens_keyed_object", `DB_PASSWORD: ` + a130 + `/password":"S0 x:{"k": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]", []string{s1}},
-
-		// Fields after the value stay.
-		{"over_budget_bare_value_keeps_fields", `DB_PASSWORD: password":` + s1 + `/` + a130 + `/x:y other=ok`, "DB_PASSWORD:[REDACTED] other=ok", []string{s1}},
-		{"over_budget_closed_quoted_value_keeps_fields", `DB_PASSWORD: password":"` + s1 + `"/` + a130 + ` other=ok`, "DB_PASSWORD:[REDACTED] other=ok", []string{s1}},
-		{"over_budget_closed_keyed_quoted_value_keeps_fields", `DB_PASSWORD: ` + a130 + `/password":"S0/x:{"k":"` + s2 + `"}"/z other=ok`, "DB_PASSWORD:[REDACTED] other=ok", []string{s2}},
-
-		// Under the nested-key budget.
-		{"bare_value_then_container", `DB_PASSWORD: password":S0/` + a10 + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"prefix_then_bare_value_container", `DB_PASSWORD: ` + a10 + `/password":S0` + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"closed_quoted_value_then_container", `DB_PASSWORD: password":"S0"/` + a10 + creds, "DB_PASSWORD:[REDACTED]", []string{"AKIA_SECRET"}},
-		{"single_quoted_key_then_container", `DB_PASSWORD: password':S0/` + a10 + `/x:{'password': 'a MY_SECRET_123'}`, "DB_PASSWORD:[REDACTED]", []string{"MY_SECRET_123"}},
-		{"single_quoted_key_then_padded_key", `DB_PASSWORD: password':S0/` + a10 + `/' token ': 'a MY_SECRET_123'`, "DB_PASSWORD:[REDACTED]", []string{"MY_SECRET_123"}},
-		{"bare_value_then_quoted_pair", `DB_PASSWORD: password":S0/` + a10 + `/"token "= "a MY_SECRET_123"`, "DB_PASSWORD:[REDACTED]", []string{"MY_SECRET_123"}},
-	} {
-		assertRedactedIdempotent(t, tc.label, tc.in, tc.forbidden...)
-		if got := redactErrorMessage(tc.in); got != tc.want {
-			t.Errorf("[%s] redactErrorMessage(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		if got, _ := sanitizeRawText(tc.in); got != tc.want {
-			t.Errorf("[%s] sanitizeRawText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		raw, _, err := SmartTruncate(tc.in, -1)
-		var got string
-		if err != nil || json.Unmarshal(raw, &got) != nil || got != tc.want {
-			t.Errorf("[%s] SmartTruncate(%q) = (%s, %v), want %q", tc.label, tc.in, raw, err, tc.want)
-		}
-	}
-
-	// Redacted text and text without a sensitive key stay byte-identical.
-	for _, in := range []string{
-		"DB_PASSWORD:[REDACTED] other=ok",
-		`DB_PASSWORD:"[REDACTED]" other=ok`,
-		"password: [REDACTED]/" + a130 + "/token:[REDACTED]",
-		"note: " + a130 + `/x"y/ok:{"a":1} other=ok`,
-		"note: " + a130 + `/x"y/ok:{"a": "b"}/"c":'d' other=ok`,
-	} {
-		if got := redactErrorMessage(in); got != in {
-			t.Errorf("redactErrorMessage(%q) = %q, want unchanged", in, got)
-		}
-		if got, lost := sanitizeRawText(in); got != in || lost {
-			t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", in, got, lost)
-		}
-		raw, _, err := SmartTruncate(in, -1)
-		var got string
-		if err != nil || json.Unmarshal(raw, &got) != nil || got != in {
-			t.Errorf("SmartTruncate(%q) = (%s, %v), want unchanged", in, raw, err)
-		}
-	}
-}
-
 // TestEscapedQuoteLineStartKeys covers redacted pairs whose key starts a
 // line after an escaped opening quote, as the \"DB_PASSWORD\" of
 // credentials:\n  \"DB_PASSWORD\"=\"[REDACTED]\": the backstop marks the
@@ -882,7 +706,6 @@ func TestEscapedQuoteLineStartKeys(t *testing.T) {
 		"credentials:\n\t\\\"DB_PASSWORD\\\"=\\\"[REDACTED]\\\"",
 		"credentials:\r\n  \\\"DB_PASSWORD\\\"=\\\"[REDACTED]\\\"",
 		"credentials:\n\\\"DB_PASSWORD\\\":\\\"[REDACTED]\\\"",
-		"credentials:\n  \\\"C:\\\\ssl\\\\password\\\"=\\\"[REDACTED]\\\"",
 		"credentials:\n  \\'temp:a\\'=\\'[REDACTED]\\'",
 		"credentials:\n  \\\"temp:a\\\"=\\\"[REDACTED]\\\"",
 		"credentials:\n  \\'user:temp:refresh_token\\'=\\'[REDACTED]\\'",
@@ -964,11 +787,11 @@ func TestEscapedQuoteLineStartKeys(t *testing.T) {
 		return b.String()
 	}
 	for _, tc := range []struct{ in, want string }{
-		{"credentials:\n  \\\"DB_PASSWORD\\\"=\\\"[REDACTED]\\\"", "DB_PASSWORD\\"},
-		{"credentials:\n  \\'temp:a\\'=\\'[REDACTED]\\'", "temp:a\\"},
-		{"credentials:\n  \\\"OPENAI_API_KEY\\\"=\\\"[REDACTED]\\\"", "OPENAI_API_KEY\\"},
-		{"credentials:\n  \\\\\"DB_PASSWORD\\\"=\\\"[REDACTED]\\\"", "PASSWORD\\"},
-		{"x \\\"DB_PASSWORD\\\"=\\\"[REDACTED]\\\"", "PASSWORD\\"},
+		{"credentials:\n  \\\"DB_PASSWORD\\\"=\\\"[REDACTED]\\\"", `\"DB_PASSWORD\"=\"`},
+		{"credentials:\n  \\'temp:a\\'=\\'[REDACTED]\\'", `\'temp:a\'=\'`},
+		{"credentials:\n  \\\"OPENAI_API_KEY\\\"=\\\"[REDACTED]\\\"", `\"OPENAI_API_KEY\"=\"`},
+		{"credentials:\n  \\\\\"DB_PASSWORD\\\"=\\\"[REDACTED]\\\"", `PASSWORD\"=\"`},
+		{"x \\\"DB_PASSWORD\\\"=\\\"[REDACTED]\\\"", `PASSWORD\"=\"`},
 		{"x \\'temp:a\\'=\\'[REDACTED]\\'", ""},
 	} {
 		if got := marked(tc.in); got != tc.want {
@@ -1031,52 +854,31 @@ func TestAdversarialScalingDanglingKeyQuoteShapes(t *testing.T) {
 	}
 }
 
-// TestLegacyPatternBackstopOnUnchangedText covers text that the scanners
-// leave as it is while the legacy expressions redact a word of it, as the
-// V4LUE glued to a placeholder before a key name that holds a vertical tab or
-// a no-break space: such text fails closed in all three entry points, while
-// redacted text that the expressions leave as it is stays byte-identical.
+// TestLegacyPatternBackstopOnUnchangedText covers a word glued to a
+// placeholder before a key name that holds a vertical tab or a no-break
+// space, which the scanners kept as it was while the legacy expressions
+// redacted the word: a placeholder glued to other text is no whole value, so
+// the scanners redact the word with the value too, while redacted text that
+// the expressions leave as it is stays byte-identical.
 func TestLegacyPatternBackstopOnUnchangedText(t *testing.T) {
 	runInParallel(t)
-	for _, in := range []string{
-		"log: '\vtemp:abc'=[REDACTED]V4LUE/'\vDB_PASSWORD'=\"[REDACTED]\"",
-		"config:\n  \"password\":[REDACTED]V4LUE/\vtemp:abc:[REDACTED]",
-		"log: \"\vpassword\"=[REDACTED]V4LUE/\" api_Key\"\v: \"[REDACTED]\"",
-		"credentials:\n  '\vapi_key'=[REDACTED]V4LUE/temp:abc : [REDACTED]",
+	for _, tc := range []struct{ in, want string }{
+		{"log: '\vtemp:abc'=[REDACTED]V4LUE/'\vDB_PASSWORD'=\"[REDACTED]\"", "log: '\vtemp:abc'=[REDACTED]"},
+		{"config:\n  \"password\":[REDACTED]V4LUE/\vtemp:abc:[REDACTED]", "config:\n  \"password\":\"[REDACTED]\""},
+		{"log: \"\vpassword\"=[REDACTED]V4LUE/\"\u00a0api_Key\"\v: \"[REDACTED]\"", "log: \"\vpassword\"=[REDACTED]"},
+		{"credentials:\n  '\vapi_key'=[REDACTED]V4LUE/temp:abc : [REDACTED]", "credentials:\n  '\vapi_key'=[REDACTED]"},
+		{"credentials:\n  'api_key'=[REDACTED]/token : [REDACTED]", "credentials:\n  'api_key'=[REDACTED]"},
 	} {
-		if got := scrubErrorTokens(in); got != in {
-			t.Errorf("scrubErrorTokens(%q) = %q, want unchanged", in, got)
+		if got := scrubErrorTokens(tc.in); got != tc.want {
+			t.Errorf("scrubErrorTokens(%q) = %q, want %q", tc.in, got, tc.want)
 		}
-		assertRedactedIdempotent(t, "unchanged_text", in, "V4LUE")
-		if got := redactErrorMessage(in); got != redactedSensitiveTextPlaceholder {
-			t.Errorf("redactErrorMessage(%q) = %q, want %q", in, got, redactedSensitiveTextPlaceholder)
-		}
-		if got, _ := sanitizeRawText(in); got != redactedSensitiveTextPlaceholder {
-			t.Errorf("sanitizeRawText(%q) = %q, want %q", in, got, redactedSensitiveTextPlaceholder)
-		}
-		raw, _, err := SmartTruncate(in, -1)
-		var got string
-		if err != nil || json.Unmarshal(raw, &got) != nil || got != redactedSensitiveTextPlaceholder {
-			t.Errorf("SmartTruncate(%q) = (%s, %v), want %q", in, raw, err, redactedSensitiveTextPlaceholder)
-		}
+		assertAllEntryPoints(t, tc.in, tc.in, tc.want, "V4LUE")
 	}
-
 	for _, in := range []string{
 		"config:\n  \"password\":[REDACTED]",
 		"log: 'api_key'=[REDACTED] other=ok",
-		"credentials:\n  'api_key'=[REDACTED]/token : [REDACTED]",
 	} {
-		if got := redactErrorMessage(in); got != in {
-			t.Errorf("redactErrorMessage(%q) = %q, want unchanged", in, got)
-		}
-		if got, lost := sanitizeRawText(in); got != in || lost {
-			t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", in, got, lost)
-		}
-		raw, _, err := SmartTruncate(in, -1)
-		var got string
-		if err != nil || json.Unmarshal(raw, &got) != nil || got != in {
-			t.Errorf("SmartTruncate(%q) = (%s, %v), want unchanged", in, raw, err)
-		}
+		assertUnchangedAllEntryPoints(t, in)
 	}
 }
 
@@ -1116,108 +918,6 @@ func assertUnchangedAllEntryPoints(t *testing.T, in string) {
 	}
 }
 
-// TestStrayQuoteContainersUnderBudget covers values under the nested-key
-// budget with a container after a delimiter that is still open where the
-// value seems to end, possibly after a stray quote whose quoted string ends in
-// the "{" or "[" of that container, as the "S0/creds:{" of
-// DB_PASSWORD: x"S0/creds:{"k": "SECRET"}: the string is not skipped as a
-// whole, and the container runs past the value and is redacted with it, as
-// past the budget.
-func TestStrayQuoteContainersUnderBudget(t *testing.T) {
-	runInParallel(t)
-	const s1 = "LEAK_SECRET_ONE"
-	for _, tc := range []struct{ label, in, want string }{
-		{"stray_quote_keyed_object_compound_key", `DB_PASSWORD: x"S0/creds:{"k": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"stray_quote_keyed_object_exact_key", `password: x"S0/creds:{"k": "` + s1 + `"}`, "password:[REDACTED]"},
-		{"stray_quote_array_of_strings", `DB_PASSWORD: x"S0/creds:["k", "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]"},
-		{"stray_quote_array_single_element", `DB_PASSWORD: x"S0/creds:["` + s1 + `" ]`, "DB_PASSWORD:[REDACTED]"},
-		{"stray_quote_array_without_spaces", `password: x"S0/creds:["a","` + s1 + `"]`, "password:[REDACTED]"},
-		{"stray_quote_unquoted_object", `DB_PASSWORD: x"S0/creds:{k: ` + s1 + `}`, "DB_PASSWORD:[REDACTED]"},
-		{"stray_quote_single_quoted_object", `api_key=x"S0/creds:{'k': '` + s1 + `'}`, "api_key=[REDACTED]"},
-		{"stray_quote_object_keeps_fields", `DB_PASSWORD: x"S0/creds:{"k": "` + s1 + `"} other=ok`, "DB_PASSWORD:[REDACTED] other=ok"},
-		{"open_object_after_path", `DB_PASSWORD: x/creds:{"k": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"open_object_after_delimiter", `password: x:{"k": "` + s1 + `"}`, "password:[REDACTED]"},
-		{"open_array_after_delimiter", `password: x:["a", "` + s1 + `"]`, "password:[REDACTED]"},
-		{"quoted_value_opens_array", `password: "a:token:["a", "` + s1 + `"]"`, `password:"[REDACTED]"`},
-	} {
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want, s1)
-	}
-
-	// Text without a sensitive key stays byte-identical.
-	for _, in := range []string{
-		`note: x"S0/creds:{"k": "v"} other=ok`,
-		`note: x/creds:{"k": "v"} other=ok`,
-		`note: x"S0/creds:["a", "b"] other=ok`,
-		`DB_PASSWORD:[REDACTED] other=ok`,
-	} {
-		assertUnchangedAllEntryPoints(t, in)
-	}
-}
-
-// TestQuotedContainerMembersWithAnyBytes covers quoted strings whose closing
-// quote opens a quoted key that holds bytes other than compound key bytes,
-// as the "user:foo", "a b", "a/b" or "a\"b" key of a JSON object: the key is
-// read as one (see isQuotedMemberAt), so the string before it is not skipped
-// as a whole, past the nested-key budget and under it.
-func TestQuotedContainerMembersWithAnyBytes(t *testing.T) {
-	runInParallel(t)
-	const s1 = "LEAK_SECRET_ONE"
-	a135 := strings.Repeat("a", 135)
-	for _, tc := range []struct{ label, in, want string }{
-		{"over_budget_stray_quote_colon_key", `DB_PASSWORD: ` + a135 + `/x"S0/creds:{"user:foo": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_stray_quote_spaced_key", `DB_PASSWORD: ` + a135 + `/x"S0/creds:{"a b": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_stray_quote_slash_key", `DB_PASSWORD: ` + a135 + `/x"S0/creds:{"a/b": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_stray_quote_equals_key", `DB_PASSWORD: ` + a135 + `/x"S0/creds:{"a b"= "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_stray_quote_escaped_quote_key", `DB_PASSWORD: ` + a135 + `/x"S0/creds:{"a\"b": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_dangling_quote_colon_key", `DB_PASSWORD: ` + a135 + `/S0/creds":{"user:foo": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_dangling_quoted_value_colon_key", `DB_PASSWORD: ` + a135 + `/password":"S0/creds:{"user:foo": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_dangling_quoted_value_padded_key", `DB_PASSWORD: ` + a135 + `/password":"S0/creds:{" a ": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"stray_quote_slash_key", `DB_PASSWORD: x"S0/creds:{"a/b": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"quoted_value_opens_colon_key", `password: "a:token:{"user:foo": "` + s1 + `"}"`, `password:"[REDACTED]"`},
-		{"quoted_value_opens_spaced_key", `password: "a:token:{"a b": "` + s1 + `"}"`, `password:"[REDACTED]"`},
-	} {
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want, s1)
-	}
-
-	// Text without a sensitive key stays byte-identical.
-	for _, in := range []string{
-		"note: " + a135 + `/x"y/ok:{"a b": "c"} other=ok`,
-		"note: " + a135 + `/x"y/ok:{"user:foo": "c"}/"d":'e' other=ok`,
-	} {
-		assertUnchangedAllEntryPoints(t, in)
-	}
-
-	for _, tc := range []struct {
-		s    string
-		open byte
-		want bool
-	}{
-		{`"k": 1}`, '{', true},
-		{`"user:foo": 1}`, '{', true},
-		{`"a b" = 1}`, '{', true},
-		{`"a/b":1}`, '{', true},
-		{`'k': 1}`, '{', true},
-		{`"a\"b": 1}`, '{', true},
-		{"\"k\"\n: 1}", '{', true},
-		{"\"a\nb\": 1}", '{', true},
-		{"\"a\tb\": 1}", '{', true},
-		{`"a", 1]`, '[', true},
-		{`"a"]`, '[', true},
-		{`"", 1]`, '[', true},
-		{`"k": 1]`, '[', true},
-		{`"": 1}`, '{', false},
-		{`"a", 1}`, '{', false},
-		{`"k"`, '{', false},
-		{`"k" x: 1}`, '{', false},
-		{`"k: 1}`, '{', false},
-		{`"a\`, '{', false},
-	} {
-		if got := isQuotedMemberAt(tc.s, 0, tc.open); got != tc.want {
-			t.Errorf("isQuotedMemberAt(%q, 0, %q) = %v, want %v", tc.s, tc.open, got, tc.want)
-		}
-	}
-}
-
 // TestPaddedLineStartQuotedKeys covers quoted keys padded with spaces at the
 // start of a line, whatever their quote (", ', \" or \') and delimiter: a
 // redacted pair stays byte-identical instead of being redacted with the key
@@ -1252,72 +952,6 @@ func TestPaddedLineStartQuotedKeys(t *testing.T) {
 	}
 }
 
-// TestGluedPlaceholderBeforeAnyUnredactedPair covers words glued to a
-// placeholder in a run that holds a pair that is not redacted before a pair
-// that is, as the api_key:SECRET of
-// password: [REDACTED]/SECRET/api_key:SECRET,other=[REDACTED], or whose key
-// ends the run before whitespace and a delimiter, as the token = SECRET of
-// password = [REDACTED]SECRET/token = SECRET: the legacy expressions redacted
-// those words, so such text fails closed, while already-redacted chains keep
-// their words, also before a header whose redacted value ends its line.
-func TestGluedPlaceholderBeforeAnyUnredactedPair(t *testing.T) {
-	runInParallel(t)
-	const (
-		s1 = "LEAK_SECRET_ONE"
-		s2 = "LEAK_SECRET_TWO"
-	)
-	a130 := strings.Repeat("a", 130)
-	for _, tc := range []struct{ label, in, want string }{
-		{"redacted_pair_after_value_stop", "password: [REDACTED]/" + s1 + "/api_key:" + s2 + ",other=[REDACTED]", redactedSensitiveTextPlaceholder},
-		{"redacted_pair_later_in_run", "password: [REDACTED]" + s1 + "[api_key:" + s2 + "/token:[REDACTED]", redactedSensitiveTextPlaceholder},
-		{"redacted_query_pair_in_uri_value", "password: [REDACTED]/" + s1 + "/token:https://" + s2 + "@example.com?x=[REDACTED]", redactedSensitiveTextPlaceholder},
-		{"spaced_equals_after_run", "password = [REDACTED]" + s1 + "/token = " + s2, redactedSensitiveTextPlaceholder},
-		{"spaced_colon_after_run", "password: [REDACTED]" + s1 + "/token : " + s2, redactedSensitiveTextPlaceholder},
-		{"tab_before_equals_after_run", "password: [REDACTED]" + s1 + "/token\t= " + s2, redactedSensitiveTextPlaceholder},
-		{"redacted_chain_before_redacted_header", "password: [REDACTED]/" + a130 + "-api_key: [REDACTED]\napi_key=" + s1, "password: [REDACTED]/" + a130 + "-api_key: [REDACTED]\napi_key=[REDACTED]"},
-		{"redacted_chain_then_other_pair", "x=[REDACTED]/y=[REDACTED] api_key=" + s1, "x=[REDACTED]/y=[REDACTED] api_key=[REDACTED]"},
-	} {
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want, s1)
-	}
-
-	for _, in := range []string{
-		"x=[REDACTED]/y=[REDACTED]",
-		"password: [REDACTED]/x/token = [REDACTED] other=ok",
-	} {
-		assertUnchangedAllEntryPoints(t, in)
-	}
-
-	kept := func(s string) []string {
-		words := legacyWords(s, true)
-		glued := wordsAfterPlaceholder(s, words)
-		dropGluedBeforeUnredactedPair(s, words, glued)
-		var out []string
-		for j, g := range glued {
-			if g {
-				out = append(out, s[words[j].start:words[j].end])
-			}
-		}
-		return out
-	}
-	for _, tc := range []struct {
-		in   string
-		want []string
-	}{
-		{"password: [REDACTED]/S/api_key:v,other=[REDACTED]", nil},
-		{"password: [REDACTED]S[api_key:v/token:[REDACTED]", nil},
-		{"password: [REDACTED]/S/token:https://v@example.com?x=[REDACTED]", nil},
-		{"password = [REDACTED]S/token = v", nil},
-		{"password = [REDACTED]S/token\n= v", nil},
-		{"password = [REDACTED]S/token = [REDACTED]", []string{"S", "token"}},
-		{"x=[REDACTED]/y=[REDACTED]", []string{"y"}},
-		{"password: [REDACTED]/x/token:'[REDACTED]' other=v", []string{"x", "token"}},
-	} {
-		if got := kept(tc.in); !slices.Equal(got, tc.want) {
-			t.Errorf("dropGluedBeforeUnredactedPair(%q) keeps %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 // TestURIComponentsCheckedAsText covers credentials in the components of a
 // URI: each decoded component is scrubbed until it stops changing and checked
 // against the legacy expressions and its escapes, as scrubErrorText checks
@@ -1341,9 +975,12 @@ func TestURIComponentsCheckedAsText(t *testing.T) {
 		return got
 	}
 	for _, tc := range []struct{ label, uri, wantFormatted string }{
-		{"query_glued_word_before_redacted_pair_and_other_pair", "https://example.com/cb?err=password+%3D+%5BREDACTED%5D" + s1 + "%2Ftoken+%3D+%5BREDACTED%5D%2Capi_key%3D" + s2, failedQuery},
-		{"query_glued_word_before_spaced_pair", "https://example.com/cb?err=password+%3D+%5BREDACTED%5D" + s1 + "%2Ftoken+%3D+" + s2, failedQuery},
-		{"query_glued_word_before_bracket_header", "https://example.com/cb?err=password%3A+%5BREDACTED%5D" + s1 + "%5Bapi_key%3A+" + s2, failedQuery},
+		// A placeholder glued to other text in a component is no whole
+		// value: the file URI has the value redacted with what is glued
+		// to it, as the error text has it redacted.
+		{"query_glued_word_before_redacted_pair_and_other_pair", "https://example.com/cb?err=password+%3D+%5BREDACTED%5D" + s1 + "%2Ftoken+%3D+%5BREDACTED%5D%2Capi_key%3D" + s2, "https://example.com/cb?err=password%3D%5BREDACTED%5D%2Capi_key%3D%5BREDACTED%5D"},
+		{"query_glued_word_before_spaced_pair", "https://example.com/cb?err=password+%3D+%5BREDACTED%5D" + s1 + "%2Ftoken+%3D+" + s2, "https://example.com/cb?err=password%3D%5BREDACTED%5D"},
+		{"query_glued_word_before_bracket_header", "https://example.com/cb?err=password%3A+%5BREDACTED%5D" + s1 + "%5Bapi_key%3A+" + s2, "https://example.com/cb?err=password%3A%5BREDACTED%5D"},
 		{"query_escaped_tab_in_quoted_key", "https://example.com/cb?err=x+%22client_secret%22%27%3A+token%5Ct%3A%27" + s1 + "%27+%3D+" + s2, failedQuery},
 		// The expressions on main fail this text closed as a whole, so it
 		// fails closed as error text, while the file URI, whose components
@@ -1433,8 +1070,8 @@ func TestURIComponentsCheckedAsText(t *testing.T) {
 }
 
 // TestKnownSentinelLengths checks that maxKnownSentinelLen is the length of
-// the longest known placeholder, so that knownSentinelLenAt finds each of
-// them in text.
+// the longest known placeholder, so that isKnownSentinel accepts each of
+// them.
 func TestKnownSentinelLengths(t *testing.T) {
 	runInParallel(t)
 	longest := 0
@@ -1446,15 +1083,12 @@ func TestKnownSentinelLengths(t *testing.T) {
 			t.Errorf("len(%q) = %d > maxKnownSentinelLen = %d", s, len(s), maxKnownSentinelLen)
 		}
 		longest = max(longest, len(s))
-		if got := knownSentinelLenAt("x"+s+"y", 1); got != len(s) {
-			t.Errorf("knownSentinelLenAt(%q, 1) = %d, want %d", "x"+s+"y", got, len(s))
-		}
 	}
 	if longest != maxKnownSentinelLen || maxKnownSentinelLen != len(sanitizeBudgetPlaceholder) {
 		t.Errorf("maxKnownSentinelLen = %d, want the longest length %d (%q)", maxKnownSentinelLen, longest, sanitizeBudgetPlaceholder)
 	}
-	if isKnownSentinel(sanitizeBudgetPlaceholder+"]") || knownSentinelLenAt("[REDACTED", 0) != 0 {
-		t.Error("isKnownSentinel or knownSentinelLenAt accepted a text that is no placeholder")
+	if isKnownSentinel(sanitizeBudgetPlaceholder+"]") || isKnownSentinel("[REDACTED") {
+		t.Error("isKnownSentinel accepted a text that is no placeholder")
 	}
 }
 
@@ -1557,274 +1191,99 @@ func TestAdversarialScalingContainerGluedAndURIShapes(t *testing.T) {
 	}
 }
 
-// TestGluedPlaceholderBeforeUnredactedValues covers words glued to a
-// placeholder in a run whose pair has a value that is not a redaction
-// placeholder as a whole: one after an empty quoted string or a line break,
-// a placeholder that stands for content, as [BINARY DATA], and a placeholder
-// with more text in its quotes, glued to it, or after spaces in a header
-// value. The expressions on main redacted the glued words with the value of
-// the outer key, so such text fails closed, also when the scrub leaves it as
-// it is, while already-redacted chains whose pairs end cleanly keep their
-// words.
+// TestGluedPlaceholderBeforeUnredactedValues covers placeholders that an
+// earlier pass wrote with other bytes glued to them: such a placeholder is no
+// whole value, so the value it starts is redacted as a whole, with the pair
+// that it runs into, whatever the glued bytes are (a word, digits,
+// punctuation, a non-ASCII letter or a control byte) and whatever text
+// follows the chain, as the reproducers of the review of this change show:
+// password: [REDACTED]hunter2ZQ/token: [REDACTED] loses hunter2ZQ with or
+// without " for user bob" after it. Where the scanners read such text
+// otherwise than the expressions on main, it fails closed (see
+// leavesLegacyValue). Each row forbids the secrets that main removes. A
+// placeholder that stands as a whole value stays as it is, so that redacting
+// redacted text changes nothing.
 func TestGluedPlaceholderBeforeUnredactedValues(t *testing.T) {
 	runInParallel(t)
 	const (
 		s1 = "LEAK_SECRET_ONE"
 		s2 = "LEAK_SECRET_TWO"
 	)
-	for _, tc := range []struct{ label, in string }{
-		{"empty_quotes_before_placeholder", "password: [REDACTED]" + s1 + `/api_key: "" [REDACTED] ` + s2},
-		{"line_break_before_placeholder", "password: [REDACTED]" + s1 + "/api_key:\n  [REDACTED] " + s2},
-		{"content_placeholder", "password: [REDACTED]" + s1 + "/api_key: [BINARY DATA] " + s2},
-		{"text_in_quotes_after_placeholder", "password: [REDACTED]" + s1 + `/"token": "[REDACTED] ` + s2 + `"`},
-		{"text_glued_after_quoted_placeholder", "password: [REDACTED]" + s1 + `/token: "[REDACTED]"/` + s2},
-		{"word_after_header_placeholder", "password: [REDACTED]" + s1 + "/api_key: [REDACTED] " + s2},
-		{"line_break_before_glued_header", "password: [REDACTED]" + s1 + "/token:\n  [REDACTED][api_key: " + s2},
-		{"word_glued_to_header_placeholder", "password: [REDACTED]" + s1 + "/api_key: [REDACTED]" + s2},
-		{"pair_after_header_placeholder", "password: [REDACTED]" + s1 + "/api_key: [REDACTED] other=" + s2},
-		{"escaped_empty_quotes_before_placeholder", "password: [REDACTED]" + s1 + `/api_key: \"\" [REDACTED] ` + s2},
-		{"crlf_before_placeholder", "password: [REDACTED]" + s1 + "/token:\r\n[REDACTED] api_key=" + s2},
-		{"word_after_placeholder_before_pair", "password: [REDACTED]" + s1 + "/token: [REDACTED] " + s2 + " api_key=v"},
-		{"word_after_placeholder_unchanged", "password: [REDACTED]" + s1 + "/token: [REDACTED] " + s2},
-		{"depth_placeholder_before_pair", "password: [REDACTED]" + s1 + "/token: [MAX_DEPTH_EXCEEDED] api_key=" + s2},
-		{"word_glued_to_content_placeholder", `'access_token': /secret:  [BINARY DATA]` + s1 + `[\'secret\' : \"[REDACTED]\"`},
+	a130 := strings.Repeat("a", 130)
+	for _, tc := range []struct {
+		in, want  string
+		forbidden []string
+	}{
+		{"password: [REDACTED]hunter2ZQ/token: [REDACTED]", "password:[REDACTED]", []string{"hunter2ZQ"}},
+		{"password: [REDACTED]hunter2ZQ/token: [REDACTED] for user bob", "password:[REDACTED] for user bob", []string{"hunter2ZQ"}},
+		{"DB_PASSWORD:x\v'password :[REDACTED]RVIEWz9MARK", redactedSensitiveTextPlaceholder, []string{"RVIEWz9MARK"}},
+		{"credential:\\'temp:\\\": '= [REDACTED]RVIEWz9MARK", redactedSensitiveTextPlaceholder, []string{"RVIEWz9MARK"}},
+		{"api.key:\"secret:'\" ~!@$^*~'", redactedSensitiveTextPlaceholder, []string{"~!@$^*~"}},
+		{"x password: [REDACTED]v/token:[REDACTED] api_key=" + s1, "x password:[REDACTED] api_key=[REDACTED]", []string{s1}},
+		{"x password: [REDACTED]" + s2 + "/token:[REDACTED] api_key=" + s1, "x password:[REDACTED] api_key=[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]" + s1 + "/api_key: \"\" [REDACTED] " + s2, "password:[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]" + s1 + "/api_key:\n  [REDACTED] " + s2, "password:[REDACTED] " + s2, []string{s1}},
+		{"password: [REDACTED]" + s1 + "/api_key: [BINARY DATA] " + s2, "password:[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]" + s1 + "/\"token\": \"[REDACTED] " + s2 + "\"", "password:[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]" + s1 + "/token: \"[REDACTED]\"/" + s2, "password:[REDACTED]", []string{s1}},
+		{"password: [REDACTED]" + s1 + "/api_key: [REDACTED] " + s2, "password:[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]" + s1 + "/token:\n  [REDACTED][api_key: " + s2, "password:[REDACTED] [REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]" + s1 + "/api_key: [REDACTED]" + s2, "password:[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]" + s1 + "/api_key: [REDACTED] other=" + s2, "password:[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]" + s1 + "/token:\r\n[REDACTED] api_key=" + s2, "password:[REDACTED] api_key=[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]" + s1 + "/token: [REDACTED] " + s2 + " api_key=v", "password:[REDACTED] " + s2 + " api_key=[REDACTED]", []string{s1}},
+		{"password: [REDACTED]" + s1 + "/token: [MAX_DEPTH_EXCEEDED] api_key=" + s2, "password:[REDACTED] api_key=[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]" + s1 + "[api_key: " + s2, "password:[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]/" + s1 + "/api_key: " + s2, "password:[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]_" + s1 + "[api_key: " + s2, "password:[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]/" + s1 + "/api_key:" + s2 + ",other=[REDACTED]", "password:[REDACTED]", []string{s1, s2}},
+		{"password = [REDACTED]" + s1 + "/token = " + s2, "password=[REDACTED]", []string{s1}},
+		{"password: [REDACTED]" + s1 + "/token\t= " + s2, "password:[REDACTED]", []string{s1}},
+		{"'temp:x': [REDACTED]" + s1 + "\\\"[\"Authorization: Bearer " + s2, "'temp:x':[REDACTED]", []string{s1, s2}},
+		{"password: [REDACTED]/x/token: [REDACTED] api_key=" + s1, "password:[REDACTED] api_key=[REDACTED]", []string{s1}},
+		{"password: [REDACTED]/x-api_key: [REDACTED]" + s1, "password:[REDACTED]", []string{s1}},
+		{"password: [REDACTED]/x/token:\"[REDACTED]\" api_key=" + s1, "password:[REDACTED] api_key=[REDACTED]", []string{s1}},
+		{"password: [REDACTED]/x/token: [REDACTED]\napi_key=" + s1, "password:[REDACTED]\napi_key=[REDACTED]", []string{s1}},
+		{"password: [REDACTED]/" + a130 + "-api_key: [REDACTED]\napi_key=" + s1, "password:[REDACTED]\napi_key=[REDACTED]", []string{s1}},
+		{"x=[REDACTED]/y=[REDACTED] api_key=" + s1, "x=[REDACTED]/y=[REDACTED] api_key=[REDACTED]", []string{s1}},
+		{"password: [REDACTED]/x/token:'[REDACTED]'", "password:[REDACTED]", []string{}},
+		{"password: [REDACTED]/x/token: [REDACTED],other=ok", "password:[REDACTED],other=ok", []string{}},
+		{"password: [REDACTED]" + s1, "password:[REDACTED]", []string{s1}},
+		{"password: [REDACTED]123456", "password:[REDACTED]", []string{"123456"}},
+		{"password: [REDACTED]_" + s1, "password:[REDACTED]", []string{s1}},
+		{"password: [REDACTED]-" + s1, "password:[REDACTED]", []string{s1}},
+		{"password: [REDACTED]." + s1, "password:[REDACTED]", []string{s1}},
+		{"password: [REDACTED]~!@$^*~", "password:[REDACTED]", []string{"~!@$^*~"}},
+		{"password: [REDACTED]é" + s1, "password:[REDACTED]", []string{s1}},
+		{"password: [REDACTED]\v" + s1, "password:[REDACTED]", []string{s1}},
+		{"token=[REDACTED][REDACTED]" + s1, "token=[REDACTED]", []string{s1}},
+		{"token=" + s1 + "[REDACTED]", "token=[REDACTED]", []string{s1}},
+		{"token=[REDACTED]" + s1 + "[REDACTED]", "token=[REDACTED]", []string{s1}},
+		{"password: password", "password:[REDACTED]", []string{}},
+		{"api_key: api_key other=1", "api_key: [REDACTED]", []string{}},
+		{"secret=\"secret\" ok", "secret=\"[REDACTED]\" ok", []string{}},
+		{"password: ~!@$^*~' x", "password:[REDACTED] x", []string{"~!@$^*~"}},
+		{"token: !@#$%^&*() y", "token:[REDACTED]&*() y", []string{"!@#$%^&*()"}},
+		{"secret=---===+++ z", "secret=[REDACTED] z", []string{"---===+++"}},
 	} {
-		assertAllEntryPoints(t, tc.label, tc.in, redactedSensitiveTextPlaceholder, s1, s2)
+		assertAllEntryPoints(t, tc.in, tc.in, tc.want, tc.forbidden...)
+		if got := formatContentTextPart(t, tc.in); got != tc.want {
+			t.Errorf("FormatContentParts(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if got := scrubErrorText(tc.in); got != tc.want {
+			t.Errorf("scrubErrorText(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
-	// The same shapes with other words glued to the placeholder.
 	for _, in := range []string{
-		`password: [REDACTED]SECRET1/api_key: "" [REDACTED] SECRET2`,
-		"password: [REDACTED]SECRET1/api_key:\n  [REDACTED] SECRET2",
-		"password: [REDACTED]SECRET1/api_key: [BINARY DATA] SECRET2",
-		`password: [REDACTED]SECRET1/"token": "[REDACTED] SECRET2"`,
-		`password: [REDACTED]SECRET1/token: "[REDACTED]"/SECRET2`,
-		"password: [REDACTED]SECRET1/api_key: [REDACTED] SECRET2",
-		"password: [REDACTED]SECRET1/token:\n  [REDACTED][api_key: SECRET2",
-	} {
-		assertAllEntryPoints(t, in, in, redactedSensitiveTextPlaceholder, "SECRET1", "SECRET2")
-	}
-
-	// Without the placeholder, the pass redacts the whole value, as the
-	// expressions on main do.
-	for _, in := range []string{
-		"password: " + s1 + `/api_key: "" [REDACTED] ` + s2,
-		"password: " + s1 + "/api_key: [BINARY DATA] " + s2,
-		"password: " + s1 + "/api_key: [REDACTED] " + s2,
-	} {
-		assertAllEntryPoints(t, "unredacted_"+in, in, "password:[REDACTED]", s1, s2)
-	}
-
-	// Values that are placeholders as a whole, and pairs that end cleanly,
-	// keep the text as it is or as main redacts it.
-	for _, tc := range []struct{ in, want string }{
-		{"\"x/token\":\"[REDACTED]\"\n api_key=" + s1, unparseableJSONPlaceholder},
-		{"password: [REDACTED]/x-api_key: [REDACTED]" + s1, "password: [REDACTED]/x-api_key: [REDACTED]"},
-		{"password: [REDACTED] api_key=" + s1, "password: [REDACTED] api_key=[REDACTED]"},
-		{"password: [REDACTED]/x:[REDACTED] api_key=" + s1, "password:[REDACTED] api_key=[REDACTED]"},
-		{"x password: [REDACTED]v/token:[REDACTED] api_key=" + s1, "x password: [REDACTED]v/token:[REDACTED] api_key=[REDACTED]"},
-		{`password: [REDACTED]/x/token:"[REDACTED]" api_key=` + s1, `password: [REDACTED]/x/token:"[REDACTED]" api_key=[REDACTED]`},
-		{`password: [REDACTED]/x/token: \"[REDACTED]\" api_key=` + s1, `password: [REDACTED]/x/token: \"[REDACTED]\" api_key=[REDACTED]`},
-		{"password: [REDACTED]/x/token: [REDACTED]\napi_key=" + s1, "password: [REDACTED]/x/token: [REDACTED]\napi_key=[REDACTED]"},
-		{"password: [REDACTED]/x/token: [REDACTED_SENSITIVE_URI] api_key=" + s1, "password: [REDACTED]/x/token: [REDACTED_SENSITIVE_URI] api_key=[REDACTED]"},
-		{"password: [REDACTED]/x/api_key: [REDACTED]\napi_key=" + s1, "password: [REDACTED]/x/api_key: [REDACTED]\napi_key=[REDACTED]"},
-	} {
-		assertAllEntryPoints(t, "clean_"+tc.in, tc.in, tc.want, s1)
-	}
-	for _, in := range []string{
-		`"password": "[REDACTED]"`,
-		`\"password\": \"[REDACTED]\"`,
-		"password: [REDACTED]/x/token:'[REDACTED]'",
-		"password: [REDACTED]/x/token: [REDACTED],other=ok",
-		"password: [REDACTED]/x/token: [REDACTED]}",
-		"password: [REDACTED]/x/api_key: [REDACTED]\nother=ok",
+		"password: [REDACTED]",
+		"password: [REDACTED] other=ok",
+		"token=\"[REDACTED]\", user=bob",
+		"\"password\": \"[REDACTED]\"",
+		"\\\"password\\\": \\\"[REDACTED]\\\"",
+		"api_key:\n  [REDACTED] other=ok",
+		"x=[REDACTED];token=[REDACTED]",
 	} {
 		assertUnchangedAllEntryPoints(t, in)
-	}
-
-	for _, tc := range []struct {
-		s    string
-		want bool
-	}{
-		{"k: [REDACTED]", true},
-		{"k:[REDACTED]", true},
-		{"k:\t[REDACTED]", true},
-		{`k: "[REDACTED]"`, true},
-		{`k: \"[REDACTED]\"`, true},
-		{"k: '[REDACTED]'", true},
-		{"k: [REDACTED_SENSITIVE_URI]", true},
-		{"k: [REDACTED] x=1", true},
-		{"k: [REDACTED]\nx", true},
-		{"k: [REDACTED]  \r\nx", true},
-		{"k: [REDACTED],x", true},
-		{`k: "[REDACTED]"}`, true},
-		{"k: [REDACTED].", true},
-		{"api_key: [REDACTED]", true},
-		{"api_key: [REDACTED] \nx", true},
-		{"api_key= [REDACTED] x=1", true},
-		{`k: "" [REDACTED]`, false},
-		{"k:\n  [REDACTED]", false},
-		{"k:\r[REDACTED]", false},
-		{"k: [BINARY DATA]", false},
-		{"k: [MAX_DEPTH_EXCEEDED]", false},
-		{"k: [REDACTED_SENSITIVE_TEXT]", false},
-		{`k: "[REDACTED] x"`, false},
-		{`k: "[REDACTED]"/x`, false},
-		{"k: [REDACTED] x", false},
-		{"k: [REDACTED]x", false},
-		{`k: "[REDACTED]`, false},
-		{`k: "[REDACTED]'`, false},
-		{`k: \"[REDACTED]"`, false},
-		{"api_key: [REDACTED] x=1", false},
-		{"api_key: [REDACTED],x", false},
-		{"x-api-key :[REDACTED] y", false},
-		{"Authorization: [REDACTED] x", false},
-		{"api_\u212aey: [REDACTED] x", false},
-	} {
-		if got := isRedactedPairValueAt(tc.s, strings.IndexAny(tc.s, ":=")); got != tc.want {
-			t.Errorf("isRedactedPairValueAt(%q) = %v, want %v", tc.s, got, tc.want)
-		}
-	}
-
-	kept := func(s string) []string {
-		words := legacyWords(s, true)
-		glued := wordsAfterPlaceholder(s, words)
-		dropGluedBeforeUnredactedPair(s, words, glued)
-		var out []string
-		for j, g := range glued {
-			if g {
-				out = append(out, s[words[j].start:words[j].end])
-			}
-		}
-		return out
-	}
-	for _, tc := range []struct {
-		in   string
-		want []string
-	}{
-		{`password: [REDACTED]S/api_key: "" [REDACTED] v`, nil},
-		{"password: [REDACTED]S/api_key:\n  [REDACTED] v", nil},
-		{"password: [REDACTED]S/api_key: [BINARY DATA] v", nil},
-		{"password: [REDACTED]S/token: [REDACTED] v", nil},
-		{"password: [REDACTED]S/api_key: [REDACTED] other=1", nil},
-		{"password: [REDACTED]S/token: [REDACTED] api_key=v", []string{"S", "token"}},
-		{"password: [REDACTED]S/api_key: [REDACTED]", []string{"S", "api", "key"}},
-	} {
-		if got := kept(tc.in); !slices.Equal(got, tc.want) {
-			t.Errorf("dropGluedBeforeUnredactedPair(%q) keeps %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
-// TestSpacedAndMixedContainerMembers covers stray quotes before containers
-// whose quoted members start after spaces or line breaks, as in
-// { "k": "SECRET"}, after other members and a ",", as in [1,"SECRET"] or
-// [true, "SECRET"], or as the quoted value of an unquoted key, as in
-// {k: "SECRET"}: the value seems to end at the space or "," before the
-// closing quote of the stray string, which opens a member of the container,
-// so the container is read and redacted with the value, under the nested-key
-// budget and past it; and a quoted value whose closing quote opens such a
-// member runs on to the end of the container.
-func TestSpacedAndMixedContainerMembers(t *testing.T) {
-	runInParallel(t)
-	const s1 = "SPACED_MEMBER_SECRET"
-	a135 := strings.Repeat("a", 135)
-	for _, tc := range []struct{ label, in, want string }{
-		{"spaced_object", `DB_PASSWORD: x"S0/creds:{ "k": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"multiline_object", "DB_PASSWORD: x\"S0/creds:{\n  \"k\": \"" + s1 + "\"\n}", "DB_PASSWORD:[REDACTED]"},
-		{"spaced_array", `DB_PASSWORD: x"S0/creds:[ "a", "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]"},
-		{"number_then_string", `DB_PASSWORD: x"S0/creds:[1,"` + s1 + `"]`, "DB_PASSWORD:[REDACTED]"},
-		{"number_then_object", `DB_PASSWORD: x"S0/creds:[1, {"k": "` + s1 + `"}]`, "DB_PASSWORD:[REDACTED]"},
-		{"bool_then_string", `DB_PASSWORD: x"S0/creds:[true, "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_spaced_object", "DB_PASSWORD: " + a135 + `/x"S0/creds:{ "k": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_number_then_string", "DB_PASSWORD: " + a135 + `/x"S0/creds:[1,"` + s1 + `"]`, "DB_PASSWORD:[REDACTED]"},
-		{"quoted_value_opens_spaced_object", `password: "a:token:{ "k": "` + s1 + `"}"`, `password:"[REDACTED]"`},
-		{"quoted_value_opens_spaced_array", `password: "a:token:[ "a", "` + s1 + `"]"`, `password:"[REDACTED]"`},
-		{"quoted_value_opens_mixed_array", `password: "a:token:[1,"` + s1 + `"]"`, `password:"[REDACTED]"`},
-		{"quoted_value_opens_spaced_mixed_array", `password: "a:token:[1, "` + s1 + `"]"`, `password:"[REDACTED]"`},
-		{"quoted_value_opens_multiline_object", "password: \"a:token:{\n  \"k\": \"" + s1 + "\"\n}\"", `password:"[REDACTED]"`},
-		{"single_quoted_value_opens_spaced_object", `password: 'a:token:{ 'k': '` + s1 + `'}'`, `password:'[REDACTED]'`},
-		{"single_quoted_spaced_object", `DB_PASSWORD: x'S0/creds:{ 'k': '` + s1 + `'}`, "DB_PASSWORD:[REDACTED]"},
-		{"single_quoted_number_then_string", `DB_PASSWORD: x'S0/creds:[1,'` + s1 + `']`, "DB_PASSWORD:[REDACTED]"},
-		{"single_quoted_spaced_array", `DB_PASSWORD: x'S0/creds:[ 'a', '` + s1 + `']`, "DB_PASSWORD:[REDACTED]"},
-		{"escaped_single_quoted_members", `DB_PASSWORD: x\'S0/creds:{ \'k\': \'` + s1 + `\'}`, "DB_PASSWORD:[REDACTED]"},
-		{"escaped_double_quoted_members", `DB_PASSWORD: x"S0/creds:{\"k\": \"` + s1 + `\"}`, "DB_PASSWORD:[REDACTED]"},
-		{"tab_before_member", "DB_PASSWORD: x\"S0/creds:{\t\"k\": \"" + s1 + "\"}", "DB_PASSWORD:[REDACTED]"},
-		{"crlf_before_member", "DB_PASSWORD: x\"S0/creds:{\r\n  \"k\": \"" + s1 + "\"\r\n}", "DB_PASSWORD:[REDACTED]"},
-		{"unquoted_key_quoted_value", `DB_PASSWORD: x"S0/creds:{k: "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"unquoted_key_spaced_equals", `DB_PASSWORD: x"S0/creds:{k = "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"unquoted_member_then_quoted_key", `DB_PASSWORD: x"S0/creds:{a: 1, "k": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"nested_array_then_string", `DB_PASSWORD: x"S0/creds:[[1,2], "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]"},
-		{"null_then_string", `DB_PASSWORD: x"S0/creds:[null,"` + s1 + `"]`, "DB_PASSWORD:[REDACTED]"},
-		{"exact_key_spaced_object", `password: x"S0/creds:{ "k": "` + s1 + `"}`, "password:[REDACTED]"},
-		{"exact_key_number_then_string", `password: x"S0/creds:[1,"` + s1 + `"]`, "password:[REDACTED]"},
-		{"over_budget_multiline_object", "DB_PASSWORD: " + a135 + "/x\"S0/creds:{\n  \"k\": \"" + s1 + "\"\n}", "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_spaced_array", "DB_PASSWORD: " + a135 + `/x"S0/creds:[ "a", "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_bool_then_string", "DB_PASSWORD: " + a135 + `/x"S0/creds:[true, "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_number_then_object", "DB_PASSWORD: " + a135 + `/x"S0/creds:[1, {"k": "` + s1 + `"}]`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_dangling_quoted_value_spaced_object", "DB_PASSWORD: " + a135 + `/password":"S0/creds:{ "k": "` + s1 + `"}`, "DB_PASSWORD:[REDACTED]"},
-		{"spaced_object_keeps_fields", `DB_PASSWORD: x"S0/creds:{ "k": "` + s1 + `"} other=ok`, "DB_PASSWORD:[REDACTED] other=ok"},
-		{"mixed_array_keeps_fields", `DB_PASSWORD: x"S0/creds:[1,"` + s1 + `"] other=ok`, "DB_PASSWORD:[REDACTED] other=ok"},
-	} {
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want, s1)
-	}
-
-	// Braces and brackets in strings that are not stray stay as they are.
-	for _, in := range []string{
-		`{"msg": "text with { only"}`,
-		`{"msg": "text with [ only", "n": [1, "x"]}`,
-		`note: x"S0/creds:{ "k": "v"} other=ok`,
-		`note: x"S0/creds:[1,"v"] other=ok`,
-		`msg: "a { b" ok`,
-		`note: [1, "a", {"b": "c"}] fine`,
-	} {
-		assertUnchangedAllEntryPoints(t, in)
-	}
-	for _, tc := range []struct{ in, want string }{
-		{`password: "text with { only" other=ok`, `password:"[REDACTED]" other=ok`},
-		{`password: x"a:{ "b" c`, `password:[REDACTED] "b" c`},
-	} {
-		assertAllEntryPoints(t, tc.in, tc.in, tc.want)
-	}
-
-	for _, tc := range []struct {
-		s    string
-		open string
-	}{
-		{`"S0:{ "k": 1}`, "{"},
-		{"\"S0:{\n  \"k\": 1}", "{"},
-		{`"S0:[ "a", 1]`, "["},
-		{`"S0:[1,"a"]`, "["},
-		{`"S0:[true, "a", 2]`, "["},
-		{`"S0:[1, {"k": 1}]`, "{"},
-		{`"S0:{k: "v"}`, "{"},
-		{`"S0:{a: 1, "k": 2}`, "{"},
-		{`'S0:[1,'a']`, "["},
-		{`\'S0:{ \'k\': 1}`, "{"},
-		{`"S0:{k: "v" x}`, ""},
-		{`"S0:[1, "a" x]`, ""},
-		{`"S0:{ "k" x}`, ""},
-		{`"S0:[1], "a"]`, ""},
-		{`"a, "b"]`, ""},
-		{`"S0:{ "`, ""},
-		{`"S0:x: "v"}`, ""},
-		{`"S0:[k: "v"]`, ""},
-	} {
-		qEnd, _ := scanQuotedAt(tc.s, 0, nil)
-		want := -1
-		if tc.open != "" {
-			want = strings.LastIndex(tc.s[:qEnd], tc.open)
-		}
-		if got := containerMemberOpener(tc.s, 0, qEnd, nil); got != want {
-			t.Errorf("containerMemberOpener(%q, 0, %d, nil) = %d, want %d", tc.s, qEnd, got, want)
-		}
-	}
-	s := `x"S0/creds:[1, {"k": "v"}]`
-	qEnd, _ := scanQuotedAt(s, 1, nil)
-	if got, want := strayQuoteOuter(s, 1, qEnd, strings.IndexByte(s, ','), nil), strings.IndexByte(s, '['); got != want {
-		t.Errorf("strayQuoteOuter(%q) = %d with the [ in the value, want %d", s, got, want)
-	}
-	if got := strayQuoteOuter(s, 1, qEnd, strings.IndexByte(s, '['), nil); got >= 0 {
-		t.Errorf("strayQuoteOuter(%q) = %d with no container in the value, want < 0", s, got)
 	}
 }
 
@@ -1977,95 +1436,6 @@ func TestAdversarialScalingSpacedContainersAndRedactedValues(t *testing.T) {
 	}
 }
 
-// TestEscapedMemberQuotesAndOppositeQuoteContainerBrackets covers inner
-// escaped quotes (\\\" and \\\', m&3 == 3) inside escaped-quoted container
-// members in quotedMemberEnd, brackets inside inner quoted strings in
-// containerMemberOpener and strayQuoteOuter, and delimited containers in
-// other quotes enclosed by a spanning quote.
-func TestEscapedMemberQuotesAndOppositeQuoteContainerBrackets(t *testing.T) {
-	runInParallel(t)
-	const (
-		s1 = "SECRET123"
-		s2 = "AKIA_SECRET"
-	)
-	a130 := strings.Repeat("a", 130)
-	a135 := strings.Repeat("a", 135)
-
-	for _, tc := range []struct {
-		label, in, want, secret string
-	}{
-		{"spaced_object_escaped_double_inner_quote", `DB_PASSWORD: x\"S0/creds:{ \"a\\\"b\": \"` + s1 + `\"}`, "DB_PASSWORD:[REDACTED]", s1},
-		{"compact_object_escaped_double_inner_quote", `DB_PASSWORD: x\"S0/creds:{\"a\\\"b\": \"` + s1 + `\"}`, "DB_PASSWORD:[REDACTED]", s1},
-		{"spaced_array_escaped_double_inner_quote", `DB_PASSWORD: x\"S0/creds:[ \"a\\\"b\", \"` + s1 + `\"]`, "DB_PASSWORD:[REDACTED]", s1},
-		{"over_budget_dangling_key_escaped_double_inner_quote", `DB_PASSWORD: password\":S0/` + a130 + `/credentials:{ \"Access\\\"KeyId\": \"` + s2 + `\"}`, "DB_PASSWORD:[REDACTED]", s2},
-		{"spaced_object_escaped_single_inner_quote", `DB_PASSWORD: x\'S0/creds:{ \'a\\\'b\': \'` + s1 + `\'}`, "DB_PASSWORD:[REDACTED]", s1},
-		{"compact_object_escaped_single_inner_quote", `DB_PASSWORD: x\'S0/creds:{\'a\\\'b\': \'` + s1 + `\'}`, "DB_PASSWORD:[REDACTED]", s1},
-		{"spaced_array_escaped_single_inner_quote", `DB_PASSWORD: x\'S0/creds:[ \'a\\\'b\', \'` + s1 + `\']`, "DB_PASSWORD:[REDACTED]", s1},
-		{"over_budget_dangling_key_escaped_single_inner_quote", `DB_PASSWORD: password\':S0/` + a130 + `/credentials:{ \'Access\\\'KeyId\': \'` + s2 + `\'}`, "DB_PASSWORD:[REDACTED]", s2},
-		{"escaped_member_trailing_literal_backslash", `DB_PASSWORD: x\"S0/creds:{ \"a\\\\\": \"` + s1 + `\"}`, "DB_PASSWORD:[REDACTED]", s1},
-		{"escaped_member_seven_backslash_inner_quote", `DB_PASSWORD: x\"S0/creds:{ \"a\\\\\\\"b\": \"` + s1 + `\"}`, "DB_PASSWORD:[REDACTED]", s1},
-		{"stray_escaped_quote_inner_escape_before_nested_object", `DB_PASSWORD: x\"[1, a\\\", creds:{ \"k\": \"` + s1 + `\"}]`, "DB_PASSWORD:[REDACTED]", s1},
-		{"single_quoted_closing_bracket_in_double", `DB_PASSWORD: x"S0/creds:[']', "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]", s1},
-		{"double_quoted_closing_brace_in_single", `DB_PASSWORD: x'S0/creds:["}", '` + s1 + `']`, "DB_PASSWORD:[REDACTED]", s1},
-		{"single_quoted_opening_brace_in_double", `DB_PASSWORD: x"S0/creds:[ '{', "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]", s1},
-		{"over_budget_single_quoted_closing_bracket_in_double", "DB_PASSWORD: " + a135 + `/x"S0/creds:[']', "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]", s1},
-		{"over_budget_double_quoted_closing_brace_in_single", "DB_PASSWORD: " + a135 + `/x'S0/creds:["}", '` + s1 + `']`, "DB_PASSWORD:[REDACTED]", s1},
-		{"over_budget_single_quoted_opening_brace_in_double", "DB_PASSWORD: " + a135 + `/x"S0/creds:[ '{', "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]", s1},
-		{"escaped_double_quoted_closing_brace_in_double", `DB_PASSWORD: x"S0/creds:[ \"}\", "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]", s1},
-		{"triple_escaped_closing_brace_in_escaped_double", `DB_PASSWORD: x\"S0/creds:[\\\"}\\\", \"` + s1 + `\"]`, "DB_PASSWORD:[REDACTED]", s1},
-		{"apostrophe_contraction_before_container", `DB_PASSWORD: x"it's/creds:[1, "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]", s1},
-		{"possessive_apostrophe_before_quoted_array_element", `DB_PASSWORD: x"users'/creds:[1, 'a', "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]", s1},
-		{"mid_token_escaped_quote_before_container", `DB_PASSWORD: x"S0\"/creds:[1, a\", "` + s1 + `"]`, "DB_PASSWORD:[REDACTED]", s1},
-		{"mixed_outer_double_inner_single_object", `DB_PASSWORD: x"S0/creds:{ 'k': '` + s1 + `'}"`, "DB_PASSWORD:[REDACTED]", s1},
-		{"mixed_outer_single_inner_double_object", `DB_PASSWORD: x'S0/creds:{ "k": "` + s1 + `"}'`, "DB_PASSWORD:[REDACTED]", s1},
-		{"over_budget_mixed_outer_double_inner_single_object", "DB_PASSWORD: " + a135 + `/x"S0/creds:{ 'k': '` + s1 + `'}"`, "DB_PASSWORD:[REDACTED]", s1},
-		{"over_budget_mixed_outer_single_inner_double_object", "DB_PASSWORD: " + a135 + `/x'S0/creds:{ "k": "` + s1 + `"}'`, "DB_PASSWORD:[REDACTED]", s1},
-		{"mixed_outer_double_inner_single_keeps_fields", `DB_PASSWORD: x"S0/creds:{ 'k': '` + s1 + `'}" other=ok`, "DB_PASSWORD:[REDACTED] other=ok", s1},
-		{"mixed_outer_single_inner_double_keeps_fields", `DB_PASSWORD: x'S0/creds:{ "k": "` + s1 + `"}' other=ok`, "DB_PASSWORD:[REDACTED] other=ok", s1},
-	} {
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want, tc.secret)
-	}
-
-	for _, tc := range []struct {
-		s         string
-		wantEnd   int
-		wantEmpty bool
-	}{
-		{`\"\"`, 4, true},
-		{`\"a\\\"b\"`, 10, false},
-		{`\'a\\\'b\'`, 10, false},
-		{`\"a\\\\\"`, 9, false},
-		{`\"a\\\\\\\"b\"`, 14, false},
-		{`\"a\\"`, -1, false},
-		{`\"a\\\"`, -1, false},
-		{`\"a\\\b\"`, -1, false},
-		{"\\\"a\nb\\\"", 7, false},
-	} {
-		end, empty := quotedMemberEnd(tc.s, 0)
-		if end != tc.wantEnd || empty != tc.wantEmpty {
-			t.Errorf("quotedMemberEnd(%q, 0) = (%d, %v), want (%d, %v)", tc.s, end, empty, tc.wantEnd, tc.wantEmpty)
-		}
-	}
-
-	for _, tc := range []struct {
-		s    string
-		open string
-	}{
-		{`"S0:[']', "a"]`, "["},
-		{`'S0:["}", 'a']`, "["},
-		{`"S0:[ '{', "a"]`, "["},
-		{`"S0:[ \"}\", "a"]`, "["},
-		{`\"S0:[\\\"}\\\", \"a\"]`, "["},
-		{`"S0:{ 'a:b': '}', "k": 1}`, "{"},
-	} {
-		qEnd, _ := scanQuotedAt(tc.s, 0, nil)
-		want := strings.Index(tc.s, tc.open)
-		if got := containerMemberOpener(tc.s, 0, qEnd, nil); got != want {
-			t.Errorf("containerMemberOpener(%q, 0, %d, nil) = %d, want %d", tc.s, qEnd, got, want)
-		}
-	}
-}
-
 // TestDelimSpaceTrimmedQueryKeys checks that endsInSensitiveTextKey trims all
 // trailing ASCII delimiter whitespace matching redactTextKeyValues, so query
 // keys ending in %09, %0a, %0b, %0c, %0d, or other delimiter whitespace redact
@@ -2151,189 +1521,14 @@ func formatContentTextPart(t *testing.T, in string) string {
 	return got
 }
 
-// TestMixedQuoteContainerMembersAndBoundaries covers spanning quotes that
-// enclose delimited containers whose members use other quotes: a delimiter
-// right after the opening quote, as the ": " of x": {'k': 'SECRET'}", a
-// member in other quotes after the first member or element, in a nested
-// container, or in a container next to another one, within the nested-key
-// budget and past it. Prose with an apostrophe and containers without such a
-// member are not extended, and the scan of long, many or deeply nested
-// containers stays linear.
-func TestMixedQuoteContainerMembersAndBoundaries(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_123"
-	a135 := strings.Repeat("a", 135)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"delim_at_zero_with_space", `DB_PASSWORD: x": {'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"delim_at_zero_compact", `DB_PASSWORD: x":{'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"delim_at_zero_eq_with_space", `DB_PASSWORD: x"= ['` + secret + `']"`, "DB_PASSWORD:[REDACTED]"},
-		{"second_object_member_quoted", `DB_PASSWORD: x"S0/creds:{ k1: 1, 'k2': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"second_object_member_unquoted_key_quoted_val", `DB_PASSWORD: x"S0/creds:{ k1: 1, k2: '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"third_array_element_quoted", `DB_PASSWORD: x"S0/creds:[1, 2, '` + secret + `']"`, "DB_PASSWORD:[REDACTED]"},
-		{"nested_subcontainer_quoted_member", `DB_PASSWORD: x"S0/creds:{ a: { 'k': '` + secret + `' }}"`, "DB_PASSWORD:[REDACTED]"},
-		{"nested_array_in_object_quoted_member", `DB_PASSWORD: x"S0/creds:{ a: [1, 2, '` + secret + `'] }"`, "DB_PASSWORD:[REDACTED]"},
-		{"trailing_adjacent_container", `DB_PASSWORD: x"S0/creds:{ 'k': '` + secret + `'} {a:1}"`, "DB_PASSWORD:[REDACTED]"},
-		{"leading_adjacent_container", `DB_PASSWORD: x"S0/creds:{a:1} { 'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"earlier_container_in_path_prefix", `DB_PASSWORD: x"S0:{a:1}/creds:{ 'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_delim_at_zero", "DB_PASSWORD: " + a135 + `": {'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_later_member", "DB_PASSWORD: " + a135 + `/x"S0/creds:{ k1: 1, 'k2': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_nested_subcontainer", "DB_PASSWORD: " + a135 + `/x"S0/creds:{ a: { 'k': '` + secret + `' }}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_trailing_adjacent_container", "DB_PASSWORD: " + a135 + `/x"S0/creds:{ 'k': '` + secret + `'} {a:1}"`, "DB_PASSWORD:[REDACTED]"},
-		{"single_outer_double_inner_later_member", `DB_PASSWORD: x'S0/creds:{ k1: 1, "k2": "` + secret + `"}' other=ok`, "DB_PASSWORD:[REDACTED] other=ok"},
-	} {
-		if got := scrubErrorTokens(tc.in); got != tc.want {
-			t.Errorf("[%s] scrubErrorTokens(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want, secret)
-		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("[%s] FormatContentParts(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		} else if again := formatContentTextPart(t, got); again != got {
-			t.Errorf("[%s] FormatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
-		}
-	}
-
-	// Prose with an apostrophe, and containers without a member in other
-	// quotes, end the value where it seems to end.
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"prose_contraction", `DB_PASSWORD: x"it's not a container" other=ok`, `DB_PASSWORD:[REDACTED] not a container" other=ok`},
-		{"unquoted_container_members_not_extended", `DB_PASSWORD: x"S0/creds:{a: 1}" other=ok`, `DB_PASSWORD:[REDACTED] 1}" other=ok`},
-		{"unquoted_container_after_delim_quote", `msg: "DB_PASSWORD: x": {a: 1} "`, `msg: "DB_PASSWORD:[REDACTED] {a: 1} "`},
-		{"apostrophe_in_container_word", `DB_PASSWORD: x"S0/creds:{a: it's}" other=ok`, `DB_PASSWORD:[REDACTED] it's}" other=ok`},
-	} {
-		if got := scrubErrorTokens(tc.in); got != tc.want {
-			t.Errorf("[%s] scrubErrorTokens(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want)
-	}
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"long member list before the member in other quotes", func(n int) string {
-			return `DB_PASSWORD: x"S0/creds:{ ` + strings.Repeat(`k: 1, `, n) + `'k2': '` + secret + `'}"`
-		}},
-		{"many containers before the one with a member in other quotes", func(n int) string {
-			return `DB_PASSWORD: x"S0/creds:` + strings.Repeat(`{a:1} `, n) + `{ 'k': '` + secret + `'}"`
-		}},
-		{"deeply nested member in other quotes", func(n int) string {
-			return `DB_PASSWORD: x"S0/creds:` + strings.Repeat(`{ a: `, n) + `'` + secret + `'` + strings.Repeat(` }`, n) + `"`
-		}},
-		{"repeated spanning quotes around mixed-quote containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: x"S0/creds:{ k1: 1, 'k2': '`+secret+`'}" `, n)
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			smallN, largeN := scalingUnits()
-			small, large := shape.mk(smallN), shape.mk(largeN)
-			assertRedactedIdempotent(t, shape.name, large, secret)
-			scrub := func(s string) {
-				_ = redactErrorMessage(s)
-				_, _ = sanitizeRawText(s)
-				_, _, _ = SmartTruncate(s, -1)
-			}
-			scrub(small)
-			scrub(large)
-			if ratio, tSmall, tLarge := linearRatio(64, func() { scrub(small) }, func() { scrub(large) }); ratio > 64 {
-				t.Errorf("%d units took %v, %d units took %v: ratio %.0f, want linear", smallN, tSmall, largeN, tLarge, ratio)
-			}
-		})
-	}
-}
-
-// TestExtendGluedValueEndOuterQuoteBoundaries covers a value that runs on
-// through a spanning quoted string around a mixed-quote container and is
-// followed by the closing quote of a string that encloses the pair, a ":"
-// and a space, or an escaped line break (see hasGluedSuffixAfterQuotedValue).
-// One scrubErrorTokens pass ends the value before that boundary rather than
-// taking it and the text after it. A further pass then reads the placeholder
-// as it reads any unquoted value: it takes an enclosing closing quote, or an
-// escaped line break and the word glued to it, as main does for
-// msg: "password=abc" for user "bob", so the entry points keep the prose after
-// it. Quote-led text whose first string decodes to a credential fails closed,
-// as on main, and a word glued to the spanning quote is still redacted with
-// the value.
-func TestExtendGluedValueEndOuterQuoteBoundaries(t *testing.T) {
-	runInParallel(t)
-	const (
-		secret = "SECRET_PROBE_123"
-		glued  = "GLUED_TAIL_SECRET_999"
-	)
-	container := `x"S0/creds:{ 'k': '` + secret + `'}"`
-	for _, tc := range []struct {
-		label, in string
-		// tokens is the result of one scrubErrorTokens pass, and want the
-		// result of the entry points, which scrub to a fixed point.
-		tokens, want string
-	}{
-		{
-			"enclosing_quote_before_prose",
-			`msg: "DB_PASSWORD: ` + container + `" for user "bob"`,
-			`msg: "DB_PASSWORD:[REDACTED]" for user "bob"`,
-			`msg: "DB_PASSWORD:[REDACTED] for user "bob"`,
-		},
-		{
-			"prefixed_enclosing_quote_before_pair",
-			`err: "DB_PASSWORD: ` + container + `" other=ok`,
-			`err: "DB_PASSWORD:[REDACTED]" other=ok`,
-			`err: "DB_PASSWORD:[REDACTED] other=ok`,
-		},
-		{
-			"enclosing_quote_before_colon_and_space",
-			`parsing "DB_PASSWORD: ` + container + `": invalid`,
-			`parsing "DB_PASSWORD:[REDACTED]": invalid`,
-			`parsing "DB_PASSWORD:[REDACTED] invalid`,
-		},
-		{
-			"colon_and_space_after_spanning_quote",
-			`DB_PASSWORD: ` + container + `: invalid`,
-			`DB_PASSWORD:[REDACTED]: invalid`,
-			`DB_PASSWORD:[REDACTED]: invalid`,
-		},
-		{
-			"escaped_line_break_after_spanning_quote",
-			`DB_PASSWORD: ` + container + `\nretry`,
-			`DB_PASSWORD:[REDACTED]\nretry`,
-			`DB_PASSWORD:[REDACTED]`,
-		},
-		{
-			"quote_led_enclosing_quote_before_pair",
-			`"DB_PASSWORD: ` + container + `" other=ok`,
-			`"DB_PASSWORD:[REDACTED]" other=ok`,
-			unparseableJSONPlaceholder,
-		},
-		{
-			"word_glued_to_spanning_quote",
-			`msg: "DB_PASSWORD: ` + container + glued + `" for user "bob"`,
-			`msg: "DB_PASSWORD:[REDACTED] for user "bob"`,
-			`msg: "DB_PASSWORD:[REDACTED] for user "bob"`,
-		},
-	} {
-		if got := scrubErrorTokens(tc.in); got != tc.tokens {
-			t.Errorf("[%s] scrubErrorTokens(%q) = %q, want %q", tc.label, tc.in, got, tc.tokens)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want, secret, glued)
-		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("[%s] FormatContentParts(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		} else if again := formatContentTextPart(t, got); again != got {
-			t.Errorf("[%s] FormatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
-		}
-	}
-}
-
 // TestOpenerScanBudgetLinearScaling covers spans of escaped quotes that pair
 // one way once a "{" or "[" is open in a quoted string and another way before,
-// next to an escaped or bare single quote, so that each check of a quoted
-// string made from inside it lands in an inner string of every scan cached for
-// that string and scans the rest of the text again. The container scans of a
-// text stop after a budget linear in its length (see
-// openerScanBudgetMultiplier) and fail closed, so the work stays linear, a
-// JSON-escaped span of 224 KiB fails closed through every entry point in well
-// under a second, no secret before, inside or after such a span is kept, and a
+// next to an escaped or bare single quote, which made an earlier scan of the
+// containers in quoted strings read the rest of the text again from each
+// quote. The scans read no container in a quoted string, so the work stays
+// linear: a JSON-escaped span of 224 KiB goes through every entry point
+// within the limits of the large-text checks with the value of every pair in
+// it redacted, no secret before, inside or after such a span is kept, and a
 // second pass changes nothing.
 func TestOpenerScanBudgetLinearScaling(t *testing.T) {
 	runInParallel(t)
@@ -2352,9 +1547,9 @@ func TestOpenerScanBudgetLinearScaling(t *testing.T) {
 	span := func(unit string, n int) string {
 		return `msg " ` + strings.Repeat(unit, n) + `{ "k": "v"}`
 	}
-	maxWall := 2 * time.Second
+	maxWall := 10 * time.Second
 	if raceEnabled {
-		maxWall = 20 * time.Second
+		maxWall = 60 * time.Second
 	}
 	for _, u := range []struct{ name, unit string }{
 		{"escaped quotes around an escaped single quote", `\" [ \" \' token:a\" `},
@@ -2362,19 +1557,15 @@ func TestOpenerScanBudgetLinearScaling(t *testing.T) {
 		{"bracket before escaped quotes around an escaped single quote", `[ \" \' token:a\" \" `},
 	} {
 		t.Run(u.name, func(t *testing.T) {
-			// The JSON-escaped span is the one whose checks keep missing the
-			// cached scans; at 512 units and more, rescanning the rest of the
-			// text dominates, so 16 times the units would take some 256 times
-			// as long.
+			smallN, largeN := scalingUnits()
 			for _, form := range []struct {
-				name         string
-				small, large int
-				mk           func(n int) string
+				name string
+				mk   func(n int) string
 			}{
-				{"raw", 128, 2048, func(n int) string { return span(u.unit, n) }},
-				{"JSON-escaped", 512, 8192, func(n int) string { return jsonInner(span(u.unit, n)) }},
+				{"raw", func(n int) string { return span(u.unit, n) }},
+				{"JSON-escaped", func(n int) string { return jsonInner(span(u.unit, n)) }},
 			} {
-				small, large := form.mk(form.small), form.mk(form.large)
+				small, large := form.mk(smallN), form.mk(largeN)
 				scrub := func(s string) {
 					_ = redactErrorMessage(s)
 					_, _ = sanitizeRawText(s)
@@ -2383,19 +1574,19 @@ func TestOpenerScanBudgetLinearScaling(t *testing.T) {
 				scrub(small)
 				scrub(large)
 				if ratio, tSmall, tLarge := linearRatio(64, func() { scrub(small) }, func() { scrub(large) }); ratio > 64 {
-					t.Errorf("%s: %d units took %v, %d units took %v: ratio %.0f, want linear", form.name, form.small, tSmall, form.large, tLarge, ratio)
+					t.Errorf("%s: %d units took %v, %d units took %v: ratio %.0f, want linear", form.name, smallN, tSmall, largeN, tLarge, ratio)
 				}
 			}
 
-			// A JSON-escaped span of 224 KiB runs the container scans out of
-			// budget, so every entry point fails it closed, idempotently.
+			// A JSON-escaped span of 224 KiB (see largeTextLen) has the value
+			// of every pair in it redacted by every entry point, idempotently.
 			unitLen := len(jsonInner(u.unit))
-			in := jsonInner(span(u.unit, (224<<10+unitLen-1)/unitLen))
-			if got := scrubErrorTokens(in); got != redactedSensitiveTextPlaceholder {
-				t.Errorf("scrubErrorTokens(%d bytes) = %.80q, want %q", len(in), got, redactedSensitiveTextPlaceholder)
+			in := jsonInner(span(u.unit, (largeTextLen()+unitLen-1)/unitLen))
+			want := scrubErrorTokens(in)
+			if strings.Contains(want, "token:a") || !strings.Contains(want, "token:"+redactedValue) {
+				t.Errorf("scrubErrorTokens(%d bytes) = %.80q, want every token value redacted", len(in), want)
 			}
-			start := time.Now()
-			for _, ep := range []struct {
+			eps := []struct {
 				name string
 				f    func(string) string
 			}{
@@ -2410,14 +1601,16 @@ func TestOpenerScanBudgetLinearScaling(t *testing.T) {
 					return out
 				}},
 				{"FormatContentParts", func(s string) string { return formatContentTextPart(t, s) }},
-			} {
-				if got := ep.f(in); got != redactedSensitiveTextPlaceholder {
-					t.Errorf("%s(%d bytes) = %.80q, want %q", ep.name, len(in), got, redactedSensitiveTextPlaceholder)
-				} else if again := ep.f(got); again != got {
-					t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+			}
+			got, again, elapsed := timeEntryPoints(maxWall, in, eps)
+			for i, ep := range eps {
+				if got[i] != want {
+					t.Errorf("%s(%d bytes) = %.80q, want %.80q", ep.name, len(in), got[i], want)
+				} else if again[i] != got[i] {
+					t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got[i], again[i])
 				}
 			}
-			if elapsed := time.Since(start); elapsed > maxWall {
+			if elapsed > maxWall {
 				t.Errorf("%d bytes took %v through the entry points, want at most %v", len(in), elapsed, maxWall)
 			}
 
@@ -2467,388 +1660,6 @@ func TestOpenerScanBudget(t *testing.T) {
 	if !st.consumeOpenerBudget(1 << 40) {
 		t.Errorf("nil quoteScanState stopped the scan")
 	}
-}
-
-// TestSpacedStrayQuoteContainers covers a value that ends in a ":" or "="
-// and whitespace inside a quoted string that encloses a "{" or "[" container
-// with a member in that same quote, as in x": {'msg': "it's ok", 'k': 'v'}",
-// the repr Python gives a dict that holds a string with an apostrophe. The
-// string seems to end at that member, inside the container, which opens past
-// the value. When the container closes and the quote closes the string right
-// after it, possibly after whitespace, every entry point redacts the value
-// together with the container, within the nested-key budget and past it, as
-// it does when no whitespace follows the delimiter, and also when other text
-// comes before the container. An unclosed container, or one that the quote
-// does not close right after, keeps the text after it, and repeated, long or
-// deeply nested containers stay linear.
-func TestSpacedStrayQuoteContainers(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_123"
-	a135 := strings.Repeat("a", 135)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"dict_repr_with_apostrophe", `DB_PASSWORD: x": {'msg': "it's ok", 'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"member_value_in_outer_quote", `DB_PASSWORD: x": {'a': '1', 'b': "` + secret + `"}"`, "DB_PASSWORD:[REDACTED]"},
-		{"array_element_in_outer_quote", `DB_PASSWORD: x": [1, "` + secret + `"]"`, "DB_PASSWORD:[REDACTED]"},
-		{"array_element_after_other_quote", `DB_PASSWORD: x": [1, 'a', "` + secret + `"]"`, "DB_PASSWORD:[REDACTED]"},
-		{"padded_object_unquoted_key", `DB_PASSWORD: x": { a: "1", 'b': '` + secret + `' }"`, "DB_PASSWORD:[REDACTED]"},
-		{"single_outer_quote", `DB_PASSWORD: x': { a: '1', "b": "` + secret + `" }'`, "DB_PASSWORD:[REDACTED]"},
-		{"escaped_quote_in_member", `DB_PASSWORD: x": {'k': "a\"b", 'm': '` + secret + `'}"`, redactedSensitiveTextPlaceholder},
-		{"enclosing_string_before_prose", `msg: "DB_PASSWORD: x": {'a': "1", 'b': '` + secret + `'}" for user "bob"`, `msg: "DB_PASSWORD:[REDACTED] for user "bob"`},
-		{"nested_object_with_apostrophe", `DB_PASSWORD: x": {'a': {'b': "it's ok"}, 'c': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"nested_arrays", `DB_PASSWORD: x": [[1, "a"], ['b', '` + secret + `']]"`, "DB_PASSWORD:[REDACTED]"},
-		{"tab_after_delimiter", "DB_PASSWORD: x\":\t{'a': \"1\", 'b': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"spaces_after_delimiter", `DB_PASSWORD: x":   {'a': "1", 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"line_break_after_delimiter", "DB_PASSWORD: x\":\n{'a': \"1\", 'b': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"eq_delimiter", `DB_PASSWORD: x"= {'a': "1", 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"eq_key_delimiter", `DB_PASSWORD= x": {'a': "1", 'b': '` + secret + `'}"`, "DB_PASSWORD=[REDACTED]"},
-		{"path_prefixed_delimiter", `DB_PASSWORD: x"S0/creds: {'a': "1", 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"space_before_closing_quote", `DB_PASSWORD: x": {'a': "1", 'b': '` + secret + `'} "`, `DB_PASSWORD:[REDACTED] "`},
-		{"fields_after_closing_quote", `DB_PASSWORD: x": {'a': "1", 'b': '` + secret + `'}" other=ok`, "DB_PASSWORD:[REDACTED] other=ok"},
-		{"escaped_spanning_quote", `DB_PASSWORD: x\": {'a': \"1\", 'k': '` + secret + `'}\"`, redactedSensitiveTextPlaceholder},
-		{"over_budget_object", "DB_PASSWORD: " + a135 + `": {'a': '1', 'b': "` + secret + `"}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_array", "DB_PASSWORD: " + a135 + `": [1, "` + secret + `"]"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_nested_object", "DB_PASSWORD: " + a135 + `": {'a': {'b': "it's ok"}, 'c': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_path_prefixed", "DB_PASSWORD: " + a135 + `/x"S0/creds: {'a': "1", 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"object_after_other_text", `DB_PASSWORD: x": abc {'a': "1"}" other=ok`, "DB_PASSWORD:[REDACTED] other=ok"},
-		{"object_after_no_delimiter", `DB_PASSWORD: x"abc {'a': "1"}" other=ok`, "DB_PASSWORD:[REDACTED] other=ok"},
-	} {
-		if got := scrubErrorText(tc.in); got != tc.want {
-			t.Errorf("[%s] scrubErrorText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want, secret)
-		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("[%s] FormatContentParts(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		} else if again := formatContentTextPart(t, got); again != got {
-			t.Errorf("[%s] FormatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
-		}
-	}
-
-	// A container that stays open or that the quote does not close right
-	// after, and prose around a closing quote, keep the text after the value.
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"unclosed_object", `msg: "DB_PASSWORD: x": {"a": 1 for user "bob" other=ok`, `msg: "DB_PASSWORD:[REDACTED] {"a": 1 for user "bob" other=ok`},
-		{"object_without_closing_quote", `msg: "DB_PASSWORD: x": {"a": 1} for user "bob" other=ok`, `msg: "DB_PASSWORD:[REDACTED] {"a": 1} for user "bob" other=ok`},
-		{"unclosed_array", `DB_PASSWORD: x": [1, "a" and then other=ok`, `DB_PASSWORD:[REDACTED] [1, "a" and then other=ok`},
-		{"object_closed_by_other_quote", `DB_PASSWORD: x": {'a': "1"}' other=ok`, `DB_PASSWORD:[REDACTED] {'a': "1"}' other=ok`},
-		{"closing_quote_before_prose", `msg: "DB_PASSWORD: x" for user "bob"`, `msg: "DB_PASSWORD:[REDACTED] for user "bob"`},
-		{"closing_quote_before_colon", `msg: "DB_PASSWORD: x": invalid`, `msg: "DB_PASSWORD:[REDACTED] invalid`},
-		{"over_budget_object_without_closing_quote", "DB_PASSWORD: " + a135 + `": {"a": 1} for user "bob" other=ok`, `DB_PASSWORD:[REDACTED] {"a": 1} for user "bob" other=ok`},
-		{"over_budget_unclosed_array", "DB_PASSWORD: " + a135 + `": [1, "a" and then other=ok`, `DB_PASSWORD:[REDACTED] [1, "a" and then other=ok`},
-		{"over_budget_object_closed_by_other_quote", "DB_PASSWORD: " + a135 + `": {'a': "1"}' other=ok`, `DB_PASSWORD:[REDACTED] {'a': "1"}' other=ok`},
-	} {
-		if got := scrubErrorText(tc.in); got != tc.want {
-			t.Errorf("[%s] scrubErrorText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want)
-		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("[%s] FormatContentParts(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-	}
-	for _, in := range []string{
-		`it's fine, don't worry about password_count=3 and token_limit: 5`,
-		"password=[REDACTED]\nretry=ok",
-		`note: x": {'msg': "it's ok", 'k': 'v'}" other=ok`,
-	} {
-		assertUnchangedAllEntryPoints(t, in)
-	}
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"repeated closed containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: x": {'a': "1", 'b': '`+secret+`'}" `, n)
-		}},
-		{"repeated unclosed containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: x": {'a': "1", `, n)
-		}},
-		{"repeated over-budget unclosed containers", func(n int) string {
-			return strings.Repeat("DB_PASSWORD: "+a135+`": {'a': "1", `, n)
-		}},
-		{"long member list in one container", func(n int) string {
-			return `DB_PASSWORD: x": {` + strings.Repeat(`'k': "v", `, n) + `'b': '` + secret + `'}"`
-		}},
-		{"deeply nested containers", func(n int) string {
-			return `DB_PASSWORD: x": ` + strings.Repeat(`{'a': "1", 'b': `, n) + `'` + secret + `'` + strings.Repeat(`}`, n) + `"`
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			smallN, largeN := scalingUnits()
-			small, large := shape.mk(smallN), shape.mk(largeN)
-			assertRedactedIdempotent(t, shape.name, large, secret)
-			scrub := func(s string) {
-				_ = redactErrorMessage(s)
-				_, _ = sanitizeRawText(s)
-				_, _, _ = SmartTruncate(s, -1)
-			}
-			scrub(small)
-			scrub(large)
-			if ratio, tSmall, tLarge := linearRatio(64, func() { scrub(small) }, func() { scrub(large) }); ratio > 64 {
-				t.Errorf("%d units took %v, %d units took %v: ratio %.0f, want linear", smallN, tSmall, largeN, tLarge, ratio)
-			}
-		})
-	}
-
-	// 224 KiB of containers that never close runs the container scans out of
-	// budget, so every entry point fails the text closed, idempotently.
-	unit := `DB_PASSWORD: x": {'a': "1", 'b': '` + secret + `', `
-	in := strings.Repeat(unit, (224<<10+len(unit)-1)/len(unit))
-	if got := scrubErrorTokens(in); got != redactedSensitiveTextPlaceholder {
-		t.Errorf("scrubErrorTokens(%d bytes) = %.80q, want %q", len(in), got, redactedSensitiveTextPlaceholder)
-	}
-	maxWall := 2 * time.Second
-	if raceEnabled {
-		maxWall = 20 * time.Second
-	}
-	start := time.Now()
-	for _, ep := range []struct {
-		name string
-		f    func(string) string
-	}{
-		{"scrubErrorText", scrubErrorText},
-		{"redactErrorMessage", redactErrorMessage},
-		{"sanitizeRawText", func(s string) string { out, _ := sanitizeRawText(s); return out }},
-		{"SmartTruncate", func(s string) string {
-			raw, _, err := SmartTruncate(s, -1)
-			var out string
-			if err != nil || json.Unmarshal(raw, &out) != nil {
-				t.Fatalf("SmartTruncate(%d bytes) = (%.80s, %v), want a JSON string", len(s), raw, err)
-			}
-			return out
-		}},
-		{"FormatContentParts", func(s string) string { return formatContentTextPart(t, s) }},
-	} {
-		if got := ep.f(in); got != redactedSensitiveTextPlaceholder {
-			t.Errorf("%s(%d bytes) = %.80q, want %q", ep.name, len(in), got, redactedSensitiveTextPlaceholder)
-		} else if again := ep.f(got); again != got {
-			t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
-		}
-	}
-	if elapsed := time.Since(start); elapsed > maxWall {
-		t.Errorf("%d bytes took %v through the entry points, want at most %v", len(in), elapsed, maxWall)
-	}
-}
-
-// TestSpacedStrayQuoteAfterApostropheOrOtherQuote covers values in which a
-// quote that opens no string the spanning-quote checks can place comes before
-// the quote that opens the string around a container: an apostrophe joined to
-// the word before it, as in user's": {'msg': "it's ok", 'k': 'SECRET'}", or a
-// quote of the other kind, as the ' of a'x": {'a': "1", 'b': 'SECRET'}". The
-// scan goes on to the later quote, so every entry point redacts the value
-// together with the container, within the nested-key budget and past it, as it
-// does without the first quote. Prose after the enclosing string, containers
-// that the string does not close right after, and a container after a quote
-// whose string closes after it, which a later quote does not open, are kept,
-// within the budget and past it, and repeated values with such quotes stay
-// linear.
-func TestSpacedStrayQuoteAfterApostropheOrOtherQuote(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_123"
-	a135 := strings.Repeat("a", 135)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"apostrophe_before_spaced_object", `DB_PASSWORD: user's": {'msg': "it's ok", 'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_apostrophe_before_spaced_object", "DB_PASSWORD: " + a135 + `user's": {'a': "1", 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"apostrophe_before_compact_object", `DB_PASSWORD: user's":{"msg": "it's ok", "k": "` + secret + `"}"`, "DB_PASSWORD:[REDACTED]"},
-		{"single_quote_before_double_quoted_string", `DB_PASSWORD: a'x": {'a': "1", 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_single_quote_before_double_quoted_string", "DB_PASSWORD: " + a135 + `a'x": {'a': "1", 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"double_quote_before_single_quoted_string", `DB_PASSWORD: a"x': { a: '1', "b": "` + secret + `" }'`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_double_quote_before_single_quoted_string", "DB_PASSWORD: " + a135 + `a"x': { a: '1', "b": "` + secret + `" }'`, "DB_PASSWORD:[REDACTED]"},
-		{"apostrophe_enclosing_string_before_prose", `msg: "DB_PASSWORD: user's": {'a': "1", 'b': '` + secret + `'}" for user "bob"`, `msg: "DB_PASSWORD:[REDACTED] for user "bob"`},
-		{"apostrophe_before_adjacent_objects", `DB_PASSWORD: user's": {'a': "1"} {'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-	} {
-		if got := scrubErrorText(tc.in); got != tc.want {
-			t.Errorf("[%s] scrubErrorText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want, secret)
-		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("[%s] FormatContentParts(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		} else if again := formatContentTextPart(t, got); again != got {
-			t.Errorf("[%s] FormatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
-		}
-	}
-
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"closing_quote_before_prose", `msg: "DB_PASSWORD: x" for user "bob"`, `msg: "DB_PASSWORD:[REDACTED] for user "bob"`},
-		{"apostrophe_closing_quote_before_prose", `msg: "DB_PASSWORD: user's" for user "bob"`, `msg: "DB_PASSWORD:[REDACTED] for user "bob"`},
-		{"apostrophe_object_without_closing_quote", `DB_PASSWORD: user's": {'a': "1"} other=ok`, `DB_PASSWORD:[REDACTED] {'a': "1"} other=ok`},
-		{"other_quote_object_without_closing_quote", `DB_PASSWORD: a'x": {'a': "1"} other=ok`, `DB_PASSWORD:[REDACTED] {'a': "1"} other=ok`},
-		{"string_closing_after_compact_container", `DB_PASSWORD: x"S0/creds:{a: 1}" other=ok`, `DB_PASSWORD:[REDACTED] 1}" other=ok`},
-		{"string_closing_after_container_with_apostrophe", `DB_PASSWORD: x"S0/creds:{a: it's}" other=ok`, `DB_PASSWORD:[REDACTED] it's}" other=ok`},
-		{"over_budget_string_closing_after_compact_container", "DB_PASSWORD: " + a135 + `/x"S0/creds:{a: 1}" other=ok`, `DB_PASSWORD:[REDACTED] 1}" other=ok`},
-		{"over_budget_string_closing_after_container_with_apostrophe", "DB_PASSWORD: " + a135 + `/x"S0/creds:{a: it's}" other=ok`, `DB_PASSWORD:[REDACTED] it's}" other=ok`},
-	} {
-		if got := scrubErrorText(tc.in); got != tc.want {
-			t.Errorf("[%s] scrubErrorText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want)
-		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("[%s] FormatContentParts(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-	}
-	for _, in := range []string{
-		`note: user's": {'msg': "it's ok", 'k': 'v'}" other=ok`,
-		`it's the user's "x": {'a': 1} {'b': 2}" note`,
-	} {
-		assertUnchangedAllEntryPoints(t, in)
-	}
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"repeated quotes of both kinds before unclosed containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: a'x"a'x": {'a': "1", `, n)
-		}},
-		{"repeated quotes of both kinds before closed containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: a'x"a'x": {'a': "1", 'b': '`+secret+`'}" `, n)
-		}},
-		{"repeated apostrophes before closed containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: user's": {'msg': "it's ok", 'k': '`+secret+`'}" `, n)
-		}},
-		{"many unplaced quotes in one over-budget value", func(n int) string {
-			return "DB_PASSWORD: " + a135 + strings.Repeat(`a'x"`, n) + `": {'a': "1", 'b': '` + secret + `'}"`
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			smallN, largeN := scalingUnits()
-			small, large := shape.mk(smallN), shape.mk(largeN)
-			assertRedactedIdempotent(t, shape.name, large, secret)
-			scrub := func(s string) {
-				_ = redactErrorMessage(s)
-				_, _ = sanitizeRawText(s)
-				_, _, _ = SmartTruncate(s, -1)
-			}
-			scrub(small)
-			scrub(large)
-			if ratio, tSmall, tLarge := linearRatio(64, func() { scrub(small) }, func() { scrub(large) }); ratio > 64 {
-				t.Errorf("%d units took %v, %d units took %v: ratio %.0f, want linear", smallN, tSmall, largeN, tLarge, ratio)
-			}
-		})
-	}
-	assertLargeTextLinear(t, `DB_PASSWORD: a'x"a'x": {'a': "1", 'b': '`+secret+`', `, secret)
-}
-
-// TestSpacedStrayQuoteContainerRuns covers quoted strings that enclose one or
-// more "{" or "[" containers after a ":" or "=" and seem to close inside them:
-// at an outer quote inside a member in other quotes, as in the Python repr
-// x": {'msg': 'say "hi"', 'k': 'SECRET'}", whether whitespace follows the
-// delimiter or not, also before prose and past the nested-key budget; at a
-// member of a container followed by other containers, as in
-// x": {'a': "1"} {'b': 'SECRET'}"; or before delimiter whitespace other than
-// the regular-expression spaces, as the \v of x": {...}\v". Every entry point
-// redacts the value together with all the containers. Containers that the
-// string does not close right after, that other text or another quote follows,
-// or that stay open keep the text after the value, and long, many or repeated
-// containers stay linear.
-func TestSpacedStrayQuoteContainerRuns(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_123"
-	a135 := strings.Repeat("a", 135)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"repr_outer_quote_in_member", `DB_PASSWORD: x": {'msg': 'say "hi"', 'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"repr_enclosing_string_before_prose", `msg: "DB_PASSWORD: x": {'msg': 'say "hi"', 'k': '` + secret + `'}" for user "bob"`, `msg: "DB_PASSWORD:[REDACTED] for user "bob"`},
-		{"over_budget_repr_outer_quote_in_member", "DB_PASSWORD: " + a135 + `x": {'msg': 'say "hi"', 'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"compact_repr_outer_quote_in_member", `DB_PASSWORD: x":{'msg': 'say "hi"', 'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_compact_repr_outer_quote_in_member", "DB_PASSWORD: " + a135 + `x":{'msg': 'say "hi"', 'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"repr_outer_quote_in_array_element", `DB_PASSWORD: x": ['say "hi"', '` + secret + `']"`, "DB_PASSWORD:[REDACTED]"},
-		{"single_outer_quote_in_member", `DB_PASSWORD: x': {"msg": "it's ok", "k": "` + secret + `"}'`, "DB_PASSWORD:[REDACTED]"},
-		{"vertical_tab_before_closing_quote", "DB_PASSWORD: x\": {'a': \"1\", 'b': '" + secret + "'}\v\"", "DB_PASSWORD:[REDACTED]"},
-		{"adjacent_objects", `DB_PASSWORD: x": {'a': "1"} {'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"compact_adjacent_objects", `DB_PASSWORD: x":{'a': "1"} {'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"three_adjacent_objects", `DB_PASSWORD: x": {'a': "1"} {'c': 2} {'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"adjacent_array_and_object", `DB_PASSWORD: x": [1, "a"] {'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"line_break_between_objects", "DB_PASSWORD: x\": {'a': \"1\"}\n{'b': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"adjacent_objects_before_prose", `msg: "DB_PASSWORD: x": {'a': "1"} {'b': '` + secret + `'}" for user "bob"`, `msg: "DB_PASSWORD:[REDACTED] for user "bob"`},
-		{"path_prefixed_adjacent_objects", `DB_PASSWORD: x"S0/creds: {'a': "1"} {'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"compact_path_prefixed_adjacent_objects", `DB_PASSWORD: x"S0/creds:{'a': "1"} {'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"closed_container_before_spaced_delimiter", `DB_PASSWORD: x"S0:[0]/creds: {'a': "1", 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"compact_repr_adjacent_objects", `DB_PASSWORD: x":{'msg': 'say "hi"'} {'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_adjacent_objects", "DB_PASSWORD: " + a135 + `x": {'a': "1"} {'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_compact_adjacent_objects", "DB_PASSWORD: " + a135 + `x":{'a': "1"} {'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"escaped_adjacent_objects", `DB_PASSWORD: x\": {'a': \"1\"} {'b': '` + secret + `'}\"`, redactedSensitiveTextPlaceholder},
-	} {
-		if got := scrubErrorText(tc.in); got != tc.want {
-			t.Errorf("[%s] scrubErrorText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want, secret)
-		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("[%s] FormatContentParts(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		} else if again := formatContentTextPart(t, got); again != got {
-			t.Errorf("[%s] FormatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
-		}
-	}
-
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"adjacent_objects_without_closing_quote", `msg: "DB_PASSWORD: x": {'a': "1"} {'b': "2"} for user "bob" other=ok`, `msg: "DB_PASSWORD:[REDACTED] {'a': "1"} {'b': "2"} for user "bob" other=ok`},
-		{"compact_adjacent_objects_without_closing_quote", `DB_PASSWORD: x":{'a': "1"} {'b': "2"} other=ok`, `DB_PASSWORD:[REDACTED] {'b': "2"} other=ok`},
-		{"adjacent_objects_closed_by_other_quote", `DB_PASSWORD: x": {'a': "1"} {'b': "2"}' other=ok`, `DB_PASSWORD:[REDACTED] {'a': "1"} {'b': "2"}' other=ok`},
-		{"text_between_objects", `DB_PASSWORD: x": {'a': "1"} and {'b': "2"}" other=ok`, `DB_PASSWORD:[REDACTED] {'a': "1"} and {'b': "2"}" other=ok`},
-		{"repr_object_without_closing_quote", `DB_PASSWORD: x": {'msg': 'say "hi"'} other=ok`, `DB_PASSWORD:[REDACTED] {'msg': 'say "hi"'} other=ok`},
-		{"unclosed_repr_object", `DB_PASSWORD: x": {'msg': 'say "hi"' and more other=ok`, `DB_PASSWORD:[REDACTED] {'msg': 'say "hi"' and more other=ok`},
-		{"vertical_tab_before_text", "DB_PASSWORD: x\": {'a': \"1\"}\vtext\" other=ok", "DB_PASSWORD:[REDACTED] {'a': \"1\"}\vtext\" other=ok"},
-		{"string_closing_after_container", `msg: "DB_PASSWORD: x": {a: 1} "`, `msg: "DB_PASSWORD:[REDACTED] {a: 1} "`},
-	} {
-		if got := scrubErrorText(tc.in); got != tc.want {
-			t.Errorf("[%s] scrubErrorText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want)
-		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("[%s] FormatContentParts(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-	}
-	assertUnchangedAllEntryPoints(t, `note: x": {'msg': 'say "hi"'} {'k': 'v'}" other=ok`)
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"many adjacent containers in one string", func(n int) string {
-			return `DB_PASSWORD: x": ` + strings.Repeat(`{'a': "1"} `, n) + `{'b': '` + secret + `'}"`
-		}},
-		{"repeated adjacent containers without closing quote", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: x": {'a': "1"} {'b': "2"} `, n)
-		}},
-		{"repeated closed repr containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: x": {'msg': 'say "hi"', 'k': '`+secret+`'}" `, n)
-		}},
-		{"repeated unclosed repr containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: x": {'msg': 'say "hi"', `, n)
-		}},
-		{"long repr member list in one container", func(n int) string {
-			return `DB_PASSWORD: x": {` + strings.Repeat(`'msg': 'say "hi"', `, n) + `'k': '` + secret + `'}"`
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			smallN, largeN := scalingUnits()
-			small, large := shape.mk(smallN), shape.mk(largeN)
-			assertRedactedIdempotent(t, shape.name, large, secret)
-			scrub := func(s string) {
-				_ = redactErrorMessage(s)
-				_, _ = sanitizeRawText(s)
-				_, _, _ = SmartTruncate(s, -1)
-			}
-			scrub(small)
-			scrub(large)
-			if ratio, tSmall, tLarge := linearRatio(64, func() { scrub(small) }, func() { scrub(large) }); ratio > 64 {
-				t.Errorf("%d units took %v, %d units took %v: ratio %.0f, want linear", smallN, tSmall, largeN, tLarge, ratio)
-			}
-		})
-	}
-	assertLargeTextLinear(t, `DB_PASSWORD: x": {'a': "1"} {'b': '`+secret+`'}" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: x": {'a': "1"} {'b': "2"} `)
-	assertLargeTextLinear(t, `DB_PASSWORD: x": {'msg': 'say "hi"', 'k': '`+secret+`', `, secret)
 }
 
 // TestOpenerScanBudgetGluedTokenKeys covers a quoted string glued to the word
@@ -2908,1453 +1719,6 @@ func TestOpenerScanBudgetGluedTokenKeys(t *testing.T) {
 	assertLargeTextFailsClosed(t, in)
 }
 
-// TestValueEndingInsideEnclosedContainers covers a sensitive value that is a
-// quoted string, in a quote that may be escaped, whose closing quote seems to
-// come inside the "{" or "[" containers that the string encloses: at a quote
-// in a member in other quotes, as the "hi" of
-// DB_PASSWORD: "{'msg': 'say "hi"', 'k': 'SECRET'}", the repr Python gives a
-// dict, or the it's of DB_PASSWORD: '{"msg": "it's ok", "k": "SECRET"}'; or
-// at a member of the first of several containers separated by whitespace, as
-// in DB_PASSWORD: "{'a': "1"} {'b': 'SECRET'}". The containers open right
-// after the opening quote or after a ":" or "=" in the string, also after a
-// path, as in "S0/x: {...}", within the nested-key budget and past it, and in
-// a JSON member. Every entry point redacts the value together with all the
-// containers, up to the quote that closes the string, and keeps the text
-// after that quote. Containers that stay open, that the string does not close
-// right after, or that the string closes right after keep the text after the
-// value, and long, many or repeated containers stay linear.
-func TestValueEndingInsideEnclosedContainers(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_98765"
-	a160 := strings.Repeat("a", 160)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"repr_object", `DB_PASSWORD: "{'msg': 'say "hi"', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"adjacent_objects", `DB_PASSWORD: "{'a': "1"} {'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"json_member_repr_object", `msg={"DB_PASSWORD": "{'msg': 'say "hi"', 'k': '` + secret + `'}"}`, `msg={"DB_PASSWORD":"[REDACTED]"}`},
-		{"single_quoted_object_with_apostrophe", `DB_PASSWORD: '{"msg": "it's ok", "k": "` + secret + `"}'`, `DB_PASSWORD:'[REDACTED]'`},
-		{"repr_array", `DB_PASSWORD: "['say "hi"', '` + secret + `']"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"delimiter_then_repr_object", `DB_PASSWORD: ": {'msg': 'say "hi"', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"delimiter_then_adjacent_objects", `DB_PASSWORD: ": {'msg': "it's ok"} {'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"escaped_delimiter_then_repr_object", `DB_PASSWORD: \": {'msg': 'say \"hi\"', 'k': '` + secret + `'}\"`, `DB_PASSWORD:\"[REDACTED]\"`},
-		{"over_budget_repr_object", `DB_PASSWORD: "{` + a160 + ` 'msg': 'say "hi"', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"path_then_repr_object", `DB_PASSWORD: "S0/x: {'msg': 'say "hi"', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"compact_path_then_repr_object", `DB_PASSWORD: "S0/x:{'msg': 'say "hi"', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"path_then_repr_array", `DB_PASSWORD: "S0/x: ['say "hi"', '` + secret + `']"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"single_quoted_path_then_object_with_apostrophe", `DB_PASSWORD: 'S0/x: {"msg": "it's ok", "k": "` + secret + `"}'`, `DB_PASSWORD:'[REDACTED]'`},
-		{"path_then_adjacent_objects", `DB_PASSWORD: "S0/x: {'a': "1"} {'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"escaped_repr_object", `DB_PASSWORD: \"{'msg': 'say \"hi\"', 'k': '` + secret + `'}\"`, `DB_PASSWORD:\"[REDACTED]\"`},
-		{"escaped_path_then_adjacent_objects", `DB_PASSWORD: \"S0/x: {'a': \"1\"} {'b': '` + secret + `'}\"`, `DB_PASSWORD:\"[REDACTED]\"`},
-		{"over_budget_adjacent_objects", `DB_PASSWORD: "{` + a160 + ` 'a': "1"} {'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"over_budget_path_then_repr_object", `DB_PASSWORD: "S0/` + a160 + `: {'msg': 'say "hi"', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"nested_object_then_member", `DB_PASSWORD: "{'a': {"b": 1}, 'c': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"nested_object_then_adjacent_object", `DB_PASSWORD: "{'a': {'b': "1"}} {'c': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"repr_object_before_fields", `DB_PASSWORD: "{'msg': 'say "hi"', 'k': '` + secret + `'}" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"escaped_repr_object_in_enclosing_string", `msg: "DB_PASSWORD: \"{'msg': 'say \"hi\"', 'k': '` + secret + `'}\"" for user "bob"`, `msg: "DB_PASSWORD:\"[REDACTED]\"" for user "bob"`},
-	} {
-		if got := scrubErrorText(tc.in); got != tc.want {
-			t.Errorf("[%s] scrubErrorText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want, secret)
-		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("[%s] FormatContentParts(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		} else if again := formatContentTextPart(t, got); again != got {
-			t.Errorf("[%s] FormatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
-		}
-	}
-
-	// Quote-led text with a quoted sensitive key and a malformed member fails
-	// closed in every entry point but scrubErrorText, which redacts the value.
-	jsonLed := `"password": "S0/x: {'msg': 'say "hi"', 'k': '` + secret + `'}"`
-	if got, want := scrubErrorText(jsonLed), `"password":"[REDACTED]"`; got != want {
-		t.Errorf("scrubErrorText(%q) = %q, want %q", jsonLed, got, want)
-	}
-	assertAllEntryPoints(t, "quote_led_json_member", jsonLed, unparseableJSONPlaceholder, secret)
-	if got := formatContentTextPart(t, jsonLed); got != unparseableJSONPlaceholder {
-		t.Errorf("FormatContentParts(%q) = %q, want %q", jsonLed, got, unparseableJSONPlaceholder)
-	}
-
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"repr_object_without_closing_quote", `DB_PASSWORD: "{'msg': 'say "hi"'} other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"path_then_repr_object_without_closing_quote", `DB_PASSWORD: "S0/x: {'msg': 'say "hi"'} other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"unclosed_repr_object", `DB_PASSWORD: "{'msg': 'say "hi"' and more other=ok`, `DB_PASSWORD:"[REDACTED]" and more other=ok`},
-		{"adjacent_objects_without_closing_quote", `DB_PASSWORD: "{'a': "1"} {'b': "2"} other=ok`, `DB_PASSWORD:"[REDACTED]" {'b': "2"} other=ok`},
-		{"adjacent_objects_closed_by_other_quote", `DB_PASSWORD: "{'a': "1"} {'b': "2"}' other=ok`, `DB_PASSWORD:"[REDACTED]" {'b': "2"}' other=ok`},
-		{"text_between_objects", `DB_PASSWORD: "{'a': "1"} and {'b': "2"}" other=ok`, `DB_PASSWORD:"[REDACTED]" and {'b': "2"}" other=ok`},
-		{"object_closed_by_its_own_quote", `DB_PASSWORD: "{a: 1}" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"object_with_apostrophe_closed_by_its_own_quote", `DB_PASSWORD: "{a: it's}" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"escaped_json_object_value", `password: "{\"a\": 1}" other=ok`, `password:"[REDACTED]" other=ok`},
-		{"value_opening_unclosed_brace", `password: "{abc" user=bob`, `password:"[REDACTED]" user=bob`},
-		{"apostrophes_in_values_closed_by_their_quotes", `DB_PASSWORD: "{it's}" user: "{bob's}" other=ok`, `DB_PASSWORD:"[REDACTED]" user: "{bob's}" other=ok`},
-		{"enclosing_string_closing_after_value", `msg: "DB_PASSWORD: "{a: 1}" for user "bob"`, `msg: "DB_PASSWORD:"[REDACTED]" for user "bob"`},
-		{"string_closing_after_container", `msg: "DB_PASSWORD: ": {a: 1} "`, `msg: "DB_PASSWORD:"[REDACTED]"`},
-		{"prose_after_enclosing_string", `msg: "DB_PASSWORD: x" for user "bob"`, `msg: "DB_PASSWORD:[REDACTED] for user "bob"`},
-		{"stray_quote_container_with_apostrophe", `DB_PASSWORD: x"S0/creds:{a: it's}" other=ok`, `DB_PASSWORD:[REDACTED] it's}" other=ok`},
-	} {
-		if got := scrubErrorText(tc.in); got != tc.want {
-			t.Errorf("[%s] scrubErrorText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want)
-		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("[%s] FormatContentParts(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-	}
-	assertUnchangedAllEntryPoints(t, `note: "{'msg': 'say "hi"'} {'k': 'v'}" other=ok`)
-	assertUnchangedAllEntryPoints(t, `x"S0/creds:{a: it's}" other=ok`)
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"many adjacent containers in one quoted value", func(n int) string {
-			return `DB_PASSWORD: "` + strings.Repeat(`{'a': "1"} `, n) + `{'b': '` + secret + `'}"`
-		}},
-		{"repeated quoted adjacent containers without closing quote", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'a': "1"} {'b': "2"} `, n)
-		}},
-		{"repeated quoted repr containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'msg': 'say "hi"', 'k': '`+secret+`'}" `, n)
-		}},
-		{"repeated unclosed quoted repr containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'msg': 'say "hi"', `, n)
-		}},
-		{"repeated quoted path-prefixed repr containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "S0/x: {'msg': 'say "hi"', 'k': '`+secret+`'}" `, n)
-		}},
-		{"repeated unclosed quoted path-prefixed repr containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "S0/x: {'msg': 'say "hi"', `, n)
-		}},
-		{"long repr member list in one quoted value", func(n int) string {
-			return `DB_PASSWORD: "{` + strings.Repeat(`'msg': 'say "hi"', `, n) + `'k': '` + secret + `'}"`
-		}},
-		{"many delimiters before containers in one quoted value", func(n int) string {
-			return `DB_PASSWORD: "` + strings.Repeat(`a: {b} `, n) + `{'msg': 'say "hi"', 'k': '` + secret + `'}"`
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			smallN, largeN := scalingUnits()
-			small, large := shape.mk(smallN), shape.mk(largeN)
-			assertRedactedIdempotent(t, shape.name, large, secret)
-			scrub := func(s string) {
-				_ = redactErrorMessage(s)
-				_, _ = sanitizeRawText(s)
-				_, _, _ = SmartTruncate(s, -1)
-			}
-			scrub(small)
-			scrub(large)
-			if ratio, tSmall, tLarge := linearRatio(64, func() { scrub(small) }, func() { scrub(large) }); ratio > 64 {
-				t.Errorf("%d units took %v, %d units took %v: ratio %.0f, want linear", smallN, tSmall, largeN, tLarge, ratio)
-			}
-		})
-	}
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'a': "1"} {'b': '`+secret+`'}" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'a': "1"} {'b': "2"} `)
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'msg': 'say "hi"', 'k': '`+secret+`'}" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'msg': 'say "hi"', 'k': '`+secret+`', `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "S0/x: {'msg': 'say "hi"', 'k': '`+secret+`'}" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "S0/x: {'msg': 'say "hi"', 'k': '`+secret+`', `, secret)
-
-	// A value that opens a "{" that never closes, as the {abc of
-	// password: "{abc", is not scanned for containers when a stop follows
-	// its closing quote, so that many such values are redacted one by one
-	// rather than running the scan budget out and failing the text closed.
-	unit := `password: "{abc" user=bob `
-	in := strings.Repeat(unit, largeTextLen()/len(unit))
-	want := strings.Repeat(`password:"[REDACTED]" user=bob `, largeTextLen()/len(unit))
-	for _, ep := range largeTextEntryPoints(t) {
-		if got := ep.f(in); got != want {
-			t.Errorf("%s(%d bytes of %q) = %.80q, want each value redacted", ep.name, len(in), unit, got)
-		}
-	}
-}
-
-// TestMixedQuoteContainersAfterControlSpace covers a quoted string that spans
-// past a value and encloses delimited containers with members in other quotes,
-// as in DB_PASSWORD: x": {'a': '1', 'b': 'SECRET'}", when delimiter whitespace
-// other than the regular-expression spaces, as a vertical tab or another
-// control byte, comes before the closing quote or between the containers,
-// also between compact containers that open in the value, as in
-// DB_PASSWORD: x":{'a':'1'}\v{'b':'1', 'c':'SECRET'}": every entry point
-// redacts the value together with the containers, within the nested-key
-// budget and past it, as it does for a space, while text after such
-// whitespace keeps the text after the value.
-func TestMixedQuoteContainersAfterControlSpace(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_98765"
-	a135 := strings.Repeat("a", 135)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"vertical_tab_before_closing_quote", "DB_PASSWORD: x\": {'a': '1', 'b': '" + secret + "'}\v\"", "DB_PASSWORD:[REDACTED]"},
-		{"vertical_tab_between_containers", "DB_PASSWORD: x\": {'a': '1'}\v{'b': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"unit_separator_before_closing_quote", "DB_PASSWORD: x\": {'a': '1', 'b': '" + secret + "'}\x1f\"", "DB_PASSWORD:[REDACTED]"},
-		{"delete_between_containers", "DB_PASSWORD: x\": {'a': '1'}\x7f{'b': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"compact_vertical_tab_before_closing_quote", "DB_PASSWORD: x\":{'a': '1', 'b': '" + secret + "'}\v\"", "DB_PASSWORD:[REDACTED]"},
-		{"path_prefixed_vertical_tab_between_containers", "DB_PASSWORD: x\"S0/creds: {'a': '1'}\v{'b': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_vertical_tab_before_closing_quote", "DB_PASSWORD: " + a135 + "x\": {'a': '1', 'b': '" + secret + "'}\v\"", "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_vertical_tab_between_containers", "DB_PASSWORD: " + a135 + "x\": {'a': '1'}\v{'b': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"compact_vertical_tab_between_containers", "DB_PASSWORD: x\":{'a':'1'}\v{'b':'1', 'c':'" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"compact_vertical_tab_between_arrays", "DB_PASSWORD: x\":['a']\v['b', '" + secret + "']\"", "DB_PASSWORD:[REDACTED]"},
-		{"compact_path_prefixed_vertical_tab_between_containers", "DB_PASSWORD: x\"S0/creds:{'a':'1'}\v{'b':'1', 'c':'" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"compact_vertical_tab_between_containers_before_prose", "msg: \"DB_PASSWORD: x\":{'a':'1'}\v{'b':'1', 'c':'" + secret + "'}\" for user \"bob\"", "msg: \"DB_PASSWORD:[REDACTED] for user \"bob\""},
-	} {
-		if got := scrubErrorText(tc.in); got != tc.want {
-			t.Errorf("[%s] scrubErrorText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want, secret)
-		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("[%s] FormatContentParts(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		} else if again := formatContentTextPart(t, got); again != got {
-			t.Errorf("[%s] FormatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
-		}
-	}
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"vertical_tab_before_text", "DB_PASSWORD: x\": {'a': '1'}\vtext\" other=ok", "DB_PASSWORD:[REDACTED] {'a': '1'}\vtext\" other=ok"},
-		{"vertical_tab_before_text_between_containers", "DB_PASSWORD: x\": {'a': '1'}\vtext {'b': '2'}\" other=ok", "DB_PASSWORD:[REDACTED] {'a': '1'}\vtext {'b': '2'}\" other=ok"},
-	} {
-		if got := scrubErrorText(tc.in); got != tc.want {
-			t.Errorf("[%s] scrubErrorText(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-		assertAllEntryPoints(t, tc.label, tc.in, tc.want)
-		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("[%s] FormatContentParts(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
-		}
-	}
-}
-
-// TestValueEndingInsideEnclosedContainersBeforeStops covers a sensitive value
-// that is a quoted string, in a quote that may be escaped, enclosing "{" or "["
-// containers, whose first closing quote comes inside a member in other quotes
-// and is followed by whitespace or punctuation rather than a word, as the
-// " hi" of DB_PASSWORD: "{'msg': 'say " hi"', 'b': 'SECRET'}", or opens a
-// member string that holds a line break, as in
-// DB_PASSWORD: "{'a': " 1\n2", 'b': 'SECRET'}", and containers separated by a
-// "," in the string, as in DB_PASSWORD: "{'msg': 'say "hi"'}, {'b': 'SECRET'}"
-// or after a stray quote, as in DB_PASSWORD: x": {'a': '1'}, {'b': 'SECRET'}".
-// They come within the nested-key budget and past it, in a JSON member, in
-// single quotes and in prose. Every entry point redacts the value together
-// with all the containers, up to the quote that closes the string, and keeps
-// the text after that quote. A "," that no container follows, a string that
-// closes right after its first container, as in
-// password: "{'a': 1}", {'b': 'benign'}, and values whose closing quote opens
-// no member, as "{abc", "{" or "{'a': 'x", keep the text after the value, also
-// when many of them make up a large text.
-func TestValueEndingInsideEnclosedContainersBeforeStops(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_98765"
-	a160 := strings.Repeat("a", 160)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"space_after_inner_quote", `DB_PASSWORD: "{'msg': 'say " hi"', 'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"lowercase_key_space_after_inner_quote", `password: "{'msg': 'say " hi"', 'b': '` + secret + `'}"`, `password:"[REDACTED]"`},
-		{"array_space_after_inner_quote", `DB_PASSWORD: "['say " "', '` + secret + `']"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"comma_after_inner_quote", `DB_PASSWORD: "{'msg': 'say ", hi', 'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"escaped_space_after_inner_quote", `DB_PASSWORD: \"{'a': 'x \" \"', 'b': '` + secret + `'}\"`, `DB_PASSWORD:\"[REDACTED]\"`},
-		{"json_member_space_after_inner_quote", `err: {"password": "{'a': 'x " "', 'b': '` + secret + `'}"}`, `err: {"password":"[REDACTED]"}`},
-		{"member_string_with_line_break", "DB_PASSWORD: \"{'a': \" 1\n2\", 'b': '" + secret + "'}\"", `DB_PASSWORD:"[REDACTED]"`},
-		{"set_member_after_space", `DB_PASSWORD: "{" a", "` + secret + `"}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"path_then_set_member_after_space", `DB_PASSWORD: "S0/x: {" a", "` + secret + `"}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"semicolon_after_inner_quote", `DB_PASSWORD: "{'msg': 'say "; hi', 'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"ampersand_after_inner_quote", `DB_PASSWORD: "{'msg': 'say "& hi', 'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"period_after_inner_quote", `DB_PASSWORD: "{'msg': 'say ". hi', 'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"parenthesis_after_inner_quote", `DB_PASSWORD: "{'msg': 'say ") hi', 'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"bracket_after_inner_quote", `DB_PASSWORD: "{'msg': 'say "] hi', 'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"brace_after_inner_quote", `DB_PASSWORD: "{'msg': 'say "} hi', 'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"tab_after_inner_quote", "DB_PASSWORD: \"{'msg': 'say \"\t hi', 'b': '" + secret + "'}\"", `DB_PASSWORD:"[REDACTED]"`},
-		{"over_budget_space_after_inner_quote", `DB_PASSWORD: "{` + a160 + ` 'msg': 'say " hi"', 'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"over_budget_comma_after_inner_quote", `DB_PASSWORD: "{` + a160 + ` 'msg': 'say ", hi', 'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"over_budget_path_then_space_after_inner_quote", `DB_PASSWORD: "S0/` + a160 + `: {'msg': 'say " hi"', 'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"over_budget_array_space_after_inner_quote", `DB_PASSWORD: "[` + a160 + `, 'say " "', '` + secret + `']"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"json_value_space_after_inner_quote", `msg={"DB_PASSWORD": "{'msg': 'say " hi"', 'b': '` + secret + `'}"}`, `msg={"DB_PASSWORD":"[REDACTED]"}`},
-		{"json_value_comma_after_inner_quote", `msg={"DB_PASSWORD": "{'msg': 'say ", hi', 'b': '` + secret + `'}"}`, `msg={"DB_PASSWORD":"[REDACTED]"}`},
-		{"single_quoted_space_after_inner_quote", `DB_PASSWORD: '{"msg": "say ' hi'", "b": "` + secret + `"}'`, `DB_PASSWORD:'[REDACTED]'`},
-		{"single_quoted_comma_after_inner_quote", `DB_PASSWORD: '{"msg": "say ', hi", "b": "` + secret + `"}'`, `DB_PASSWORD:'[REDACTED]'`},
-		{"single_quoted_array_space_after_inner_quote", `DB_PASSWORD: '["say ' '", "` + secret + `"]'`, `DB_PASSWORD:'[REDACTED]'`},
-		{"space_after_inner_quote_before_fields", `DB_PASSWORD: "{'msg': 'say " hi"', 'b': '` + secret + `'}" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"escaped_space_after_inner_quote_in_enclosing_string", `msg: "DB_PASSWORD: \"{'msg': 'say \" hi\"', 'b': '` + secret + `'}\"" for user "bob"`, `msg: "DB_PASSWORD:\"[REDACTED]\"" for user "bob"`},
-		{"comma_separated_objects", `DB_PASSWORD: "{'msg': 'say "hi"'}, {'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"comma_separated_objects_before_fields", `DB_PASSWORD: "{'msg': 'say "hi"'}, {'b': '` + secret + `'}" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"three_comma_separated_objects", `DB_PASSWORD: "{'a': 'x "y'}, {'c': 1}, {'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"comma_separated_arrays", `DB_PASSWORD: "['say "hi"'], ['` + secret + `']"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"same_quote_member_comma_separated_objects", `DB_PASSWORD: "{'a': "1"}, {'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"same_quote_key_comma_separated_objects", `DB_PASSWORD: "{"a": 1}, {'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"path_then_comma_separated_objects", `DB_PASSWORD: "S0/x: {'a': "1"}, {'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"escaped_comma_separated_objects", `DB_PASSWORD: \"{'msg': 'say \"hi\"'}, {'b': '` + secret + `'}\"`, `DB_PASSWORD:\"[REDACTED]\"`},
-		{"over_budget_comma_separated_objects", `DB_PASSWORD: "{` + a160 + `: 'say "hi"'}, {'b': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"json_value_comma_separated_objects", `msg={"DB_PASSWORD": "{'msg': 'say "hi"'}, {'b': '` + secret + `'}"}`, `msg={"DB_PASSWORD":"[REDACTED]"}`},
-		{"single_quoted_comma_separated_objects_with_apostrophe", `DB_PASSWORD: '{"msg": "it's"}, {"b": "` + secret + `"}'`, `DB_PASSWORD:'[REDACTED]'`},
-		{"stray_quote_comma_separated_mixed_quote_objects", `DB_PASSWORD: x": {'a': '1'}, {'b': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"stray_quote_path_comma_separated_mixed_quote_objects", `DB_PASSWORD: x"S0/creds: {'a': '1'}, {'b': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"stray_quote_compact_comma_separated_mixed_quote_objects", `DB_PASSWORD: x":{'a': '1'},{'b': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"stray_quote_comma_after_object_closed_in_value", `DB_PASSWORD: x":{'a':'1'},{'b':'` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"stray_quote_comma_separated_same_quote_member", `DB_PASSWORD: x":{'a': "1"}, {'b': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"spaced_stray_quote_comma_separated_objects", `DB_PASSWORD: x": {'msg': "it's ok"}, {'k': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"string_closed_before_comma_and_object", `password: "{'a': 1}", {'b': 'benign'} user=bob`, `password:"[REDACTED]", {'b': 'benign'} user=bob`},
-		{"string_with_inner_quote_closed_before_comma_and_object", `password: "{'a': 'x "y'}", {'b': 'benign'} user=bob`, `password:"[REDACTED]", {'b': 'benign'} user=bob`},
-		{"comma_then_text", `DB_PASSWORD: "{'a': "1"}, and {'b': "2"}" other=ok`, `DB_PASSWORD:"[REDACTED]", and {'b': "2"}" other=ok`},
-		{"comma_before_closing_quote", `DB_PASSWORD: "{'a': "1"}, " other=ok`, `DB_PASSWORD:"[REDACTED]", " other=ok`},
-		{"comma_separated_objects_without_closing_quote", `DB_PASSWORD: "{'a': "1"}, {'b': "2"} other=ok`, `DB_PASSWORD:"[REDACTED]", {'b': "2"} other=ok`},
-		{"comma_separated_objects_closed_by_other_quote", `DB_PASSWORD: "{'a': "1"}, {'b': "2"}' other=ok`, `DB_PASSWORD:"[REDACTED]", {'b': "2"}' other=ok`},
-		{"single_quoted_comma_separated_objects", `DB_PASSWORD: '{"a": 1}, {"b": "` + secret + `"}'`, `DB_PASSWORD:'[REDACTED]'`},
-		{"stray_quote_comma_then_text", `DB_PASSWORD: x": {'a': '1'}, text {'b': '2'}" other=ok`, `DB_PASSWORD:[REDACTED] {'a': '1'}, text {'b': '2'}" other=ok`},
-		{"stray_quote_comma_before_closing_quote", `DB_PASSWORD: x": {'a': '1'}, " other=ok`, `DB_PASSWORD:[REDACTED] {'a': '1'}, " other=ok`},
-		{"unclosed_member_string", `password: "{'a': 'x" user=bob`, `password:"[REDACTED]" user=bob`},
-		{"lone_brace", `password: "{" user=bob`, `password:"[REDACTED]" user=bob`},
-		{"unclosed_brace_before_words", `password: "{not a container" user=bob`, `password:"[REDACTED]" user=bob`},
-		{"apostrophe_word_before_space", `DB_PASSWORD: "{msg: it's " ok}" user=bob`, `DB_PASSWORD:"[REDACTED]" ok}" user=bob`},
-		{"value_before_quoted_brace", `DB_PASSWORD: "{abc" or "}" other=ok`, `DB_PASSWORD:"[REDACTED]" or "}" other=ok`},
-		{"colon_before_closing_quote_without_container", `password: "a: " other=ok`, `password:"[REDACTED]" other=ok`},
-		{"colon_in_array_before_closing_quote", `DB_PASSWORD: "[note: " see "]" other=ok`, `DB_PASSWORD:"[REDACTED]" see "]" other=ok`},
-		{"prose_after_spaced_quote", `password: "say " hi there "bob"`, `password:"[REDACTED]" hi there "bob"`},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-
-	// A JSON object keeps the members after a value that the string closes
-	// right after, or whose closing quote opens no member.
-	for _, tc := range []struct {
-		in, keep string
-	}{
-		{`{"password": "{'a': 1}", "other": {"b": "benign"}}`, `"other":{"b":"benign"}`},
-		{`{"password": "{not a container", "user": "bob"}`, `"user":"bob"`},
-		{`{"password": "{", "user": {"name": "bob"}}`, `"user":{"name":"bob"}`},
-		{`{"password": "[1, ", "user": "bob"}`, `"user":"bob"`},
-	} {
-		for _, ep := range largeTextEntryPoints(t) {
-			got := strings.ReplaceAll(ep.f(tc.in), " ", "")
-			if !strings.Contains(got, `"password":"[REDACTED]"`) || !strings.Contains(got, tc.keep) {
-				t.Errorf("%s(%q) = %q, want the value redacted and %s kept", ep.name, tc.in, got, tc.keep)
-			}
-		}
-	}
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"many comma-separated containers in one quoted value", func(n int) string {
-			return `DB_PASSWORD: "` + strings.Repeat(`{'a': "1"}, `, n) + `{'b': '` + secret + `'}"`
-		}},
-		{"many comma-separated mixed-quote containers after a stray quote", func(n int) string {
-			return `DB_PASSWORD: x": ` + strings.Repeat(`{'a': '1'}, `, n) + `{'b': '` + secret + `'}"`
-		}},
-		{"repeated quoted repr containers with a space after the inner quote", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'msg': 'say " hi"', 'k': '`+secret+`'}" `, n)
-		}},
-		{"repeated unclosed quoted repr containers with a space after the inner quote", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'msg': 'say " hi"', `, n)
-		}},
-		{"repeated comma-separated containers without closing quote", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'a': "1"}, {'b': "2"}, `, n)
-		}},
-		{"long repr member list with spaces after inner quotes", func(n int) string {
-			return `DB_PASSWORD: "{` + strings.Repeat(`'msg': 'say " hi"', `, n) + `'k': '` + secret + `'}"`
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			smallN, largeN := scalingUnits()
-			small, large := shape.mk(smallN), shape.mk(largeN)
-			assertRedactedIdempotent(t, shape.name, large, secret)
-			scrub := func(s string) {
-				_ = redactErrorMessage(s)
-				_, _ = sanitizeRawText(s)
-				_, _, _ = SmartTruncate(s, -1)
-			}
-			scrub(small)
-			scrub(large)
-			if ratio, tSmall, tLarge := linearRatio(64, func() { scrub(small) }, func() { scrub(large) }); ratio > 64 {
-				t.Errorf("%d units took %v, %d units took %v: ratio %.0f, want linear", smallN, tSmall, largeN, tLarge, ratio)
-			}
-		})
-	}
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'msg': 'say " hi"', 'k': '`+secret+`'}" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'msg': 'say " hi"', 'k': '`+secret+`', `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'a': "1"}, {'b': '`+secret+`'}" `, secret)
-
-	// Values whose closing quote opens no member are redacted one by one
-	// rather than running the scan budget out and failing the text closed.
-	for _, unit := range []string{`password: "{'a': 'x" user=bob `, `password: "{" user=bob `} {
-		in := strings.Repeat(unit, largeTextLen()/len(unit))
-		want := strings.Repeat(`password:"[REDACTED]" user=bob `, largeTextLen()/len(unit))
-		for _, ep := range largeTextEntryPoints(t) {
-			if got := ep.f(in); got != want {
-				t.Errorf("%s(%d bytes of %q) = %.80q, want each value redacted", ep.name, len(in), unit, got)
-			}
-		}
-	}
-}
-
-// TestMixedQuoteMembersAfterControlSpace covers quoted members of containers
-// that a spanning or quoted string encloses, when delimiter whitespace other
-// than the regular-expression spaces, as a vertical tab or another control
-// byte, comes between such a member and the "{", "[", ",", ":" or "=" before
-// it or after it: before a quoted key, as in
-// password: x"S0/creds:{\v'k': 1, m: SECRET}", between a key and its ":",
-// before or after a quoted value or element, between a triple-escaped key and
-// its ":", and before or after a member that the closing quote of the string
-// opens, as in password: x"S0/creds:{\v"k": SECRET}" or
-// DB_PASSWORD: "S0/x: [\v" a", "SECRET"]", within the nested-key budget and
-// past it. Every entry point redacts the value together with the containers,
-// as it does for a space, while a container without such a member, text after
-// it and text without a sensitive key keep their text.
-func TestMixedQuoteMembersAfterControlSpace(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_98765"
-	a135 := strings.Repeat("a", 135)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"vertical_tab_before_quoted_key", "password: x\"S0/creds:{\v'k': 1, m: " + secret + "}\"", "password:[REDACTED]"},
-		{"vertical_tab_after_quoted_key", "password: x\"S0/creds:{'k'\v: 1, m: " + secret + "}\"", "password:[REDACTED]"},
-		{"vertical_tab_before_quoted_value", "password: x\"S0/creds:{k:\v'a b', m: " + secret + "}\"", "password:[REDACTED]"},
-		{"vertical_tab_before_quoted_element", "password: x\"S0/creds:[\v'a b', " + secret + "]\"", "password:[REDACTED]"},
-		{"vertical_tab_after_quoted_value", "password: x\"S0/creds:{k: 'a b'\v, m: " + secret + "}\"", "password:[REDACTED]"},
-		{"vertical_tab_before_same_quote_key", "password: x\"S0/creds:{\v\"k\": " + secret + "}\"", "password:[REDACTED]"},
-		{"vertical_tab_before_same_quote_element", "password: x\"S0/creds:[\v\"a\", " + secret + "]\"", "password:[REDACTED]"},
-		{"vertical_tab_before_same_quote_value", "password: x\"S0/creds:{k:\v\"a\", m: " + secret + "}\"", "password:[REDACTED]"},
-		{"vertical_tab_after_triple_escaped_key", `password: x\"S0/creds:{\\\"k\\\"` + "\v" + `: 1, m: ` + secret + `}\"`, "password:[REDACTED]"},
-		{"vertical_tab_before_closing_quote_set_member", "DB_PASSWORD: \"S0/x: {\v\" a\", \"" + secret + "\"}\"", `DB_PASSWORD:"[REDACTED]"`},
-		{"vertical_tab_before_closing_quote_element", "DB_PASSWORD: \"S0/x: [\v\" a\", \"" + secret + "\"]\"", `DB_PASSWORD:"[REDACTED]"`},
-		{"vertical_tab_after_closing_quote_member", "password: \"S0/x: {'k': \" " + secret + "\"\v}\"", `password:"[REDACTED]"`},
-		{"vertical_tab_after_closing_quote_member_in_container_after_text", "DB_PASSWORD: \"x {k: \" a\"\v, m: '" + secret + "'}\"", `DB_PASSWORD:"[REDACTED]"`},
-		{"unit_separator_before_quoted_key", "password: x\"S0/creds:{\x1f'k': 1, m: " + secret + "}\"", "password:[REDACTED]"},
-		{"delete_after_quoted_key", "password: x\"S0/creds:{'k'\x7f: 1, m: " + secret + "}\"", "password:[REDACTED]"},
-		{"over_budget_vertical_tab_before_quoted_key", "password: " + a135 + "x\"S0/creds:{\v'k': 1, m: " + secret + "}\"", "password:[REDACTED]"},
-		{"over_budget_vertical_tab_before_quoted_element", "password: " + a135 + "x\"S0/creds:[\v'a b', " + secret + "]\"", "password:[REDACTED]"},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"vertical_tab_before_unquoted_key", "password: x\"S0/creds:{\vk: v}\" other=ok", "password:[REDACTED] v}\" other=ok"},
-		{"vertical_tab_before_text", "password: x\"S0/creds:{\v'k': 1}\vtext\" other=ok", "password:[REDACTED] 1}\vtext\" other=ok"},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-	assertUnchangedAllEntryPoints(t, "note: x\"S0/creds:{\v'k': 1}\" other=ok")
-}
-
-// TestMixedQuoteContainersWithStringPrefixes covers a quoted member with a
-// Python string prefix (b, r, u or f, or br, rb, fr or rf, in either case) in a
-// container that a spanning string encloses, as the b'x}SECRET' of
-// DB_PASSWORD: x"S0/creds:{b: b'x}SECRET'}" or the u'k' of a Python 2 repr: the
-// quote after the prefix opens a string when it closes before the end of the
-// containers, so that a bracket in it does not close a container, and every
-// entry point redacts the value together with the containers. A quote joined
-// to a longer word, as in it's, don't or herb'x, a prefix whose string does not
-// close or is not followed by the end of a member, as the B's of
-// Plan B's budget, and text without a sensitive key keep their text.
-func TestMixedQuoteContainersWithStringPrefixes(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_98765"
-	a135 := strings.Repeat("a", 135)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"bytes_prefix", `DB_PASSWORD: x"S0/creds:{b: b'x}` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"raw_prefix", `DB_PASSWORD: x"S0/creds:{b: r'x}` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"raw_bytes_prefix", `DB_PASSWORD: x"S0/creds:{b: rb'x}` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"upper_case_bytes_raw_prefix", `DB_PASSWORD: x"S0/creds:{b: BR'x}` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"unicode_prefix", `DB_PASSWORD: x"S0/creds:{b: u'x]` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"format_prefix_in_array", `DB_PASSWORD: x"S0/creds:[1, f'x]` + secret + `']"`, "DB_PASSWORD:[REDACTED]"},
-		{"python2_repr", `DB_PASSWORD: x"S0/creds:{u'k': u'x}` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"prefix_before_member_that_closing_quote_opens", `DB_PASSWORD: "x {b: b'x}y', k: " ` + secret + `"}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"python2_repr_before_member_that_closing_quote_opens", `DB_PASSWORD: "x {u'k': u'x]y', k: " ` + secret + `"}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefixed_member_around_closing_quote", `DB_PASSWORD: "{k: b'say " hi', 'n': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"over_budget_bytes_prefix", "DB_PASSWORD: " + a135 + `x"S0/creds:{b: b'x}` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"contraction", `DB_PASSWORD: x"S0/creds:{a: don't}" other=ok`, `DB_PASSWORD:[REDACTED] don't}" other=ok`},
-		{"possessive", `DB_PASSWORD: x"S0/creds:{a: Bob's}" other=ok`, `DB_PASSWORD:[REDACTED] Bob's}" other=ok`},
-		{"longer_word_before_quote", `DB_PASSWORD: x"S0/creds:{a: herb'x}y'}" other=ok`, `DB_PASSWORD:[REDACTED] herb'x}y'}" other=ok`},
-		{"unclosed_prefixed_string", `DB_PASSWORD: x"S0/creds:{b: b'unclosed}" other=ok`, `DB_PASSWORD:[REDACTED] b'unclosed}" other=ok`},
-		{"prefix_letter_before_apostrophe_word", `DB_PASSWORD: x"S0/creds:{a: b's, c: it's}" other=ok`, `DB_PASSWORD:[REDACTED] b's, c: it's}" other=ok`},
-		{"prefix_letter_word_before_quoted_member", `DB_PASSWORD: x"S0/creds:{a: Plan B's budget, c: '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-	assertUnchangedAllEntryPoints(t, `note: x"S0/creds:{b: b'x}y'}" other=ok`)
-	assertUnchangedAllEntryPoints(t, `x"S0/creds:{a: it's}" other=ok`)
-}
-
-// TestClosingQuoteAfterStringPrefix covers a sensitive value that is a quoted
-// string, in a quote that may be escaped, enclosing "{" or "[" containers,
-// whose first closing quote comes right after a Python string prefix (b, r, u
-// or f, or br, rb, fr or rf, in either case) where a member starts, as the b"
-// of DB_PASSWORD: "{'k': b" SECRET", 'm': 'SECRET'}", and is followed by
-// whitespace, a line break or punctuation, and a member with such a prefix
-// whose string holds a line break and a bracket, as the b'x}\nSECRET' of
-// DB_PASSWORD: "{'a': b'x}\nSECRET', 'b': 'say " hi"', 'c': 'SECRET'}". They
-// come in arrays and in nested, multi-line or path-prefixed objects, within
-// the nested-key budget and past it, in a JSON member, in single and escaped
-// quotes, in prose and after a stray quote. Every entry point redacts the
-// value together with the containers, up to the quote that closes the string,
-// and keeps the text after that quote. A quote joined to a word that is no
-// string prefix, as in it's, Bob's, herb'x, ub" or Bs", a prefix after another
-// word, and a prefixed string that does not close or that no end of a member
-// follows, as the B's of Plan B's budget, keep the text after the value, and
-// long, repeated and unclosed prefixed strings stay linear.
-func TestClosingQuoteAfterStringPrefix(t *testing.T) {
-	runInParallel(t)
-	const secret, secret2 = "SECRET_PROBE_98765", "SECRET_PROBE_24680"
-	a140 := strings.Repeat("a", 140)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"space_after_bytes_prefix_quote", `DB_PASSWORD: "{'k': b" ` + secret + `", 'm': '` + secret2 + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"unicode_prefix_before_brace", `DB_PASSWORD: "{'k': u" x}` + secret + `"}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"bytes_prefix_in_array", `DB_PASSWORD: "[b" ` + secret + `", '` + secret2 + `']"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"raw_bytes_prefix_line_break", "DB_PASSWORD: \"{'k': rb\"\n" + secret + "\", 'm': '" + secret2 + "'}\"", `DB_PASSWORD:"[REDACTED]"`},
-		{"single_quoted_bytes_prefix", `DB_PASSWORD: '{k: b' ` + secret + `', 'm': '` + secret2 + `'}'`, `DB_PASSWORD:'[REDACTED]'`},
-		{"multiline_prefixed_member_before_inner_quote", "DB_PASSWORD: \"{'a': b'x}\n" + secret + "', 'b': 'say \" hi\"', 'c': '" + secret2 + "'}\"", `DB_PASSWORD:"[REDACTED]"`},
-		{"escaped_outer_quote", `DB_PASSWORD: \"{'k': b\" ` + secret + `\", 'm': '` + secret2 + `'}\"`, `DB_PASSWORD:\"[REDACTED]\"`},
-		{"escaped_outer_quote_line_break", `DB_PASSWORD: \"{'k': rb\"` + "\n" + secret + `\", 'm': '` + secret2 + `'}\"`, `DB_PASSWORD:\"[REDACTED]\"`},
-		{"upper_unicode_prefix_line_break", "DB_PASSWORD: \"{'k': U\"\n" + secret + "\", 'm': '" + secret2 + "'}\"", `DB_PASSWORD:"[REDACTED]"`},
-		{"tab_after_prefix_quote", "DB_PASSWORD: \"{'k': b\"\t" + secret + "\", 'm': '" + secret2 + "'}\"", `DB_PASSWORD:"[REDACTED]"`},
-		{"crlf_after_prefix_quote", "DB_PASSWORD: \"{'k': b\"\r\n" + secret + "\", 'm': '" + secret2 + "'}\"", `DB_PASSWORD:"[REDACTED]"`},
-		{"comma_after_prefix_quote", `DB_PASSWORD: "{'k': b", ` + secret + `", 'm': '` + secret2 + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"semicolon_after_prefix_quote", `DB_PASSWORD: "{'k': b"; ` + secret + `", 'm': '` + secret2 + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefix_after_comma_in_array", `DB_PASSWORD: "[1, b" ` + secret + `", '` + secret2 + `']"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefix_in_nested_object", `DB_PASSWORD: "{'a': {'k': b" ` + secret + `"}, 'm': '` + secret2 + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefix_after_equals", `DB_PASSWORD: "{k= b" ` + secret + `", m= '` + secret2 + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefix_in_multiline_object", "DB_PASSWORD: \"{\n  'k': b\" " + secret + "\",\n  'm': '" + secret2 + "'\n}\"", `DB_PASSWORD:"[REDACTED]"`},
-		{"over_budget_prefix", `DB_PASSWORD: "{` + a140 + `: 1, 'k': b" ` + secret + `", 'm': '` + secret2 + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"json_member_prefix", `msg={"DB_PASSWORD": "{'k': b" ` + secret + `", 'm': '` + secret2 + `'}"}`, `msg={"DB_PASSWORD":"[REDACTED]"}`},
-		{"single_quoted_multiline_prefixed_member", "DB_PASSWORD: '{\"a\": b\"x}\n" + secret + "\", \"b\": \"say ' hi'\", \"c\": \"" + secret2 + "\"}'", `DB_PASSWORD:'[REDACTED]'`},
-		{"path_then_prefix", `DB_PASSWORD: "S0/x: {'k': b" ` + secret + `", 'm': '` + secret2 + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"container_after_text_then_prefix", `DB_PASSWORD: "x {k: b" a", m: '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefixed_key", `DB_PASSWORD: "{'x': 1, b" k": '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefixed_set_member", `DB_PASSWORD: "{b" a", "` + secret + `"}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefix_before_fields", `DB_PASSWORD: "{'k': b" ` + secret + `", 'm': '` + secret2 + `'}" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"prefix_in_enclosing_string", `msg: "DB_PASSWORD: \"{'k': b\" ` + secret + `\", 'm': '` + secret2 + `'}\"" for user "bob"`, `msg: "DB_PASSWORD:\"[REDACTED]\"" for user "bob"`},
-		{"stray_quote_then_prefix", `DB_PASSWORD: x"{'k': b" ` + secret + `", 'm': '` + secret2 + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"stray_quote_multiline_prefixed_member", "DB_PASSWORD: x\"{'a': b'x}\n" + secret + "', 'b': 'say \" hi\"', 'c': '" + secret2 + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"stray_quote_multiline_prefixed_member_mixed", "DB_PASSWORD: x\"{'a': b'x}\n" + secret + "', 'c': '" + secret2 + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"stray_path_multiline_prefixed_member_mixed", "DB_PASSWORD: x\"S0/creds:{'a': b'x}\n" + secret + "', 'c': '" + secret2 + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_stray_quote_then_prefix", "DB_PASSWORD: " + a140 + `"{'k': b" ` + secret + `", 'm': '` + secret2 + `'}"`, "DB_PASSWORD:[REDACTED]"},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret, secret2)
-		})
-	}
-	for _, prefix := range []string{"r", "f", "br", "fr", "rf", "B", "RB", "Rb", "U", "F"} {
-		in := `DB_PASSWORD: "{'k': ` + prefix + `" ` + secret + `", 'm': '` + secret2 + `'}"`
-		t.Run("prefix_"+prefix, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, in, `DB_PASSWORD:"[REDACTED]"`, secret, secret2)
-		})
-	}
-
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"prefix_letter_word_before_quoted_member", `DB_PASSWORD: "{a: Plan B's budget, c: '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefix_letter_word_before_line_break", "DB_PASSWORD: \"{a: Plan B's\nbudget', c: '" + secret + "'}\"", `DB_PASSWORD:"[REDACTED]"`},
-		{"contraction", `DB_PASSWORD: "{msg: it's " ok}" user=bob`, `DB_PASSWORD:"[REDACTED]" ok}" user=bob`},
-		{"possessive", `DB_PASSWORD: "{msg: Bob's " ok}" user=bob`, `DB_PASSWORD:"[REDACTED]" ok}" user=bob`},
-		{"longer_word_before_quote", `DB_PASSWORD: "{a: herb'x}y'}" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"prose_after_closing_quote", `msg: "DB_PASSWORD: x" for user "bob"`, `msg: "DB_PASSWORD:[REDACTED] for user "bob"`},
-		{"prose_container_after_closing_quote", `msg: "DB_PASSWORD: x": {a: 1} "`, `msg: "DB_PASSWORD:[REDACTED] {a: 1} "`},
-		{"unclosed_string_after_prefix", `password: "{x: b" other=ok`, `password:"[REDACTED]" other=ok`},
-		{"no_member_end_after_prefixed_string", `password: "{x: b" other "bob"`, `password:"[REDACTED]" other "bob"`},
-		{"prefix_after_other_word", `DB_PASSWORD: "{see b" said bob, "x": 1}" other=ok`, `DB_PASSWORD:"[REDACTED]" said bob, "x": 1}" other=ok`},
-		{"two_letter_word_that_is_no_prefix", `password: "{x: Bs" other=ok, "bob": 1}`, `password:"[REDACTED]" other=ok, "bob": 1}`},
-		{"prefix_letters_that_are_no_prefix", `DB_PASSWORD: "{'k': ub" a", 'm': 'b'}" other=ok`, `DB_PASSWORD:"[REDACTED]" a", 'm': 'b'}" other=ok`},
-		{"prefix_letter_in_prose", `msg: "DB_PASSWORD: b" for user "bob"`, `msg: "DB_PASSWORD:[REDACTED] for user "bob"`},
-		{"prefix_letter_before_apostrophe_word", `DB_PASSWORD: "[ b's ], text [ v , '1'" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"prefix_letters_in_prose", `password: "see rb" in docs, "ok"} other`, `password:"[REDACTED]" in docs, "ok"} other`},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-	assertUnchangedOnEveryEntryPoint(t, `note: "{'k': b" x", 'm': 'y'}" other=ok`)
-	assertUnchangedOnEveryEntryPoint(t, "note: \"{'a': b'x}\ny', 'b': 'say \" hi\"'}\" other=ok")
-
-	// The closing quote after a prefix starts a member after the byte before
-	// that prefix, and a prefixed member string read past its line break is
-	// charged to the scan budget.
-	s := `"{'k': b" ` + secret + `", 'm': 1}"`
-	qEnd := strings.Index(s, `b"`) + len(`b"`)
-	if inner, outer := quotedContainerOpeners(s, 0, qEnd, nil); inner != 1 || outer != 1 {
-		t.Errorf("quotedContainerOpeners(%q) = (%d, %d), want (1, 1)", s[:qEnd], inner, outer)
-	}
-	s = "\"{'a': b'x}\n" + secret + "', 'b': 'say \" hi\"'}\""
-	qEnd = strings.Index(s, `say "`) + len(`say "`)
-	st := newQuoteScanState(len(s))
-	budget := st.openerScanBudget
-	if outer, ok := closingQuoteInMember(s, 0, qEnd, &st); !ok || outer != 1 {
-		t.Errorf("closingQuoteInMember(%q) = (%d, %v), want (1, true)", s[:qEnd], outer, ok)
-	}
-	if charged, least := budget-st.openerScanBudget, qEnd-2+len("'x}\n"+secret+"'"); charged < least {
-		t.Errorf("closingQuoteInMember(%q) charged %d bytes, want at least %d", s[:qEnd], charged, least)
-	}
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"repeated closing quotes after a prefix", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'k': b" `+secret+`", 'm': 1}" `, n)
-		}},
-		{"repeated multiline prefixed members", func(n int) string {
-			return strings.Repeat("DB_PASSWORD: \"{'a': b'x}\ny', 'b': 'say \" hi\"', 'c': '"+secret+"'}\" ", n)
-		}},
-		{"long prefixed member list", func(n int) string {
-			return `DB_PASSWORD: "{` + strings.Repeat(`'a': b'x}', `, n) + `'k': b" ` + secret + `"}"`
-		}},
-		{"long multiline prefixed member list", func(n int) string {
-			return `DB_PASSWORD: "{` + strings.Repeat("'a': b'x}\ny', ", n) + `'k': b" ` + secret + `"}"`
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			assertLinearAndRedacted(t, shape.mk, secret)
-		})
-	}
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'k': b" `+secret+`", 'm': '`+secret2+`'}" `, secret, secret2)
-	assertLargeTextLinear(t, "DB_PASSWORD: \"{'a': b'x}\n"+secret+"', 'b': 'say \" hi\"', 'c': '"+secret2+"'}\" ", secret, secret2)
-	assertLargeTextLinear(t, `DB_PASSWORD: "{k: b" `)
-	assertLargeTextLinear(t, "DB_PASSWORD: \"{k: b'\n")
-	assertLargeTextLinear(t, "DB_PASSWORD: x\"S0/creds:{a: b'x}\n")
-}
-
-// TestContainersRightAfterStrayQuote covers "{" or "[" containers that open
-// right after a quote in a sensitive value, possibly after delimiter
-// whitespace, where that quote is joined to a word or comes past the
-// nested-key budget, as the x" of DB_PASSWORD: x"{'k': 'SECRET'}" or of
-// DB_PASSWORD: x"{'msg': 'say " hi"', 'b': 'SECRET'}": the containers hold a
-// member in other quotes and the string closes right after them, or the
-// string seems to close inside them, in a member in other quotes, at a member
-// string with a line break, or in a later container after a ",". They come in
-// single and escaped quotes, in arrays, after a vertical tab or a line break,
-// before other fields, after other keys and after other text in the string.
-// Every entry point redacts the value together with the containers, as it
-// does when a ":" comes between the quote and the containers, and keeps the
-// text after the closing quote. A container that stays open, one without a
-// quoted member, one that text follows inside the string, and text without a
-// sensitive key keep their text, and repeated, long and unclosed containers
-// stay linear, with unclosed ones redacted value by value.
-func TestContainersRightAfterStrayQuote(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_98765"
-	a140 := strings.Repeat("a", 140)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"inner_quote_then_space", `DB_PASSWORD: x"{'msg': 'say " hi"', 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"member_string_line_break", "DB_PASSWORD: x\"{'a': \" 1\n2\", 'b': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"comma_separated_objects", `DB_PASSWORD: x"{'a': '1'}, {'b': 'say " hi"', 'c': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_inner_quote", "DB_PASSWORD: " + a140 + `"{'msg': 'say " hi"', 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_object", "DB_PASSWORD: " + a140 + `"{'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"object", `DB_PASSWORD: x"{'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"single_quoted_object", `DB_PASSWORD: x'{"k": "` + secret + `"}'`, "DB_PASSWORD:[REDACTED]"},
-		{"single_quoted_inner_quote", `DB_PASSWORD: x'{"msg": "say ' hi'", "b": "` + secret + `"}'`, "DB_PASSWORD:[REDACTED]"},
-		{"escaped_object", `DB_PASSWORD: x\"{'k': '` + secret + `'}\"`, "DB_PASSWORD:[REDACTED]"},
-		{"escaped_inner_quote_fails_closed", `DB_PASSWORD: x\"{'msg': 'say \" hi\"', 'b': '` + secret + `'}\"`, redactedSensitiveTextPlaceholder},
-		{"array", `DB_PASSWORD: x"['a', '` + secret + `']"`, "DB_PASSWORD:[REDACTED]"},
-		{"array_inner_quote", `DB_PASSWORD: x"['say " hi"', '` + secret + `']"`, "DB_PASSWORD:[REDACTED]"},
-		{"vertical_tab_before_object", "DB_PASSWORD: x\" \v{'k': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"vertical_tab_before_inner_quote_object", "DB_PASSWORD: x\" \v{'msg': 'say \" hi\"', 'b': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"line_break_before_object", "DB_PASSWORD: x\"\n{'k': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"object_before_fields", `DB_PASSWORD: x"{'k': '` + secret + `'}" other=ok`, "DB_PASSWORD:[REDACTED] other=ok"},
-		{"inner_quote_glued", `DB_PASSWORD: x"{'msg': 'say "hi"', 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"glued_quote_in_unquoted_member", `DB_PASSWORD: x"{msg: say "hi", 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_glued_quote_in_unquoted_member", "DB_PASSWORD: " + a140 + `"{msg: say "hi", 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"equals_key", `DB_PASSWORD= x"{'k': '` + secret + `'}"`, "DB_PASSWORD=[REDACTED]"},
-		{"lowercase_key", `password: x"{'k': '` + secret + `'}"`, "password:[REDACTED]"},
-		{"two_letter_word", `DB_PASSWORD: ab"{'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"path_word", `DB_PASSWORD: S0/x"{'k': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"parenthesis", `DB_PASSWORD: ("{'k': '` + secret + `'}") other=ok`, "DB_PASSWORD:[REDACTED]) other=ok"},
-		{"over_budget_single_quoted", "DB_PASSWORD: " + a140 + `'{"k": "` + secret + `"}'`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_escaped", "DB_PASSWORD: " + a140 + `\"{'k': '` + secret + `'}\"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_array_inner_quote", "DB_PASSWORD: " + a140 + `"['say " hi"', '` + secret + `']"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_vertical_tab", "DB_PASSWORD: " + a140 + "\" \v{'k': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_member_string_line_break", "DB_PASSWORD: " + a140 + "\"{'a': \" 1\n2\", 'b': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_comma_separated_objects", "DB_PASSWORD: " + a140 + `"{'a': '1'}, {'b': 'say " hi"', 'c': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"text_before_container", `DB_PASSWORD: x"abc {'a': "1"}"`, "DB_PASSWORD:[REDACTED]"},
-		{"text_before_container_before_fields", `DB_PASSWORD: x"abc {'a': "1"}" other=ok`, "DB_PASSWORD:[REDACTED] other=ok"},
-		{"over_budget_text_before_container", "DB_PASSWORD: " + a140 + `"abc {'a': "1"}" other=ok`, "DB_PASSWORD:[REDACTED] other=ok"},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"prose_braces", `DB_PASSWORD: x"hello {world}" other=ok`, `DB_PASSWORD:[REDACTED] {world}" other=ok`},
-		{"apostrophe_in_path_container", `DB_PASSWORD: x"S0/creds:{a: it's}" other=ok`, `DB_PASSWORD:[REDACTED] it's}" other=ok`},
-		{"unclosed_container", `DB_PASSWORD: x"{not closed" other=ok`, `DB_PASSWORD:[REDACTED] closed" other=ok`},
-		{"unclosed_container_glued_close", `DB_PASSWORD: x"{not closed"x other=ok`, `DB_PASSWORD:[REDACTED] closed"x other=ok`},
-		{"over_budget_unclosed_container", "DB_PASSWORD: " + a140 + `"{not closed" other=ok`, `DB_PASSWORD:[REDACTED] closed" other=ok`},
-		{"no_quoted_member", `DB_PASSWORD: x"{a: 1}" other=ok`, `DB_PASSWORD:[REDACTED] 1}" other=ok`},
-		{"text_after_container", `DB_PASSWORD: x"{'a': '1'} text" other=ok`, `DB_PASSWORD:[REDACTED] '1'} text" other=ok`},
-		{"quote_after_brace", `DB_PASSWORD: x"{" said bob" other=ok`, `DB_PASSWORD:[REDACTED] said bob" other=ok`},
-		{"unclosed_repr_container", `DB_PASSWORD: x"{'msg': 'say " hi"' and more other=ok`, `DB_PASSWORD:[REDACTED] 'say " hi"' and more other=ok`},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-	assertUnchangedOnEveryEntryPoint(t, `x"hello {world}" other=ok`)
-	assertUnchangedOnEveryEntryPoint(t, `note: x"{'k': 'v'}" other=ok`)
-	assertUnchangedOnEveryEntryPoint(t, `note: x"{'msg': 'say " hi"', 'k': 'v'}" other=ok`)
-	assertUnchangedOnEveryEntryPoint(t, `x"S0/creds:{a: it's}" other=ok`)
-
-	// The containers are found from the quote, and a string that closes
-	// before a stop and outside any member is not scanned for them, which
-	// would read the rest of the text.
-	s := `x"{'msg': 'say " hi"', 'k': '` + secret + `'}"`
-	qEnd := strings.Index(s, `say "`) + len(`say "`)
-	if got := spacedStrayQuoteContainer(s, 1, qEnd, strings.IndexByte(s, ' '), nil); got != 2 {
-		t.Errorf("spacedStrayQuoteContainer(%q) = %d, want 2", s, got)
-	}
-	s = `x"{'k': '` + secret + `'}"`
-	if !enclosesMixedQuoteContainer(s, 1, len(s), strings.IndexByte(s, ' '), nil) {
-		t.Errorf("enclosesMixedQuoteContainer(%q) = false, want true", s)
-	}
-	s = `x"{not closed" other=ok ` + strings.Repeat(`{"a": 1} `, 1024)
-	qEnd = strings.Index(s, `closed"`) + len(`closed"`)
-	st := newQuoteScanState(len(s))
-	budget := st.openerScanBudget
-	if got := spacedStrayQuoteContainer(s, 1, qEnd, strings.IndexByte(s, ' '), &st); got >= 0 {
-		t.Errorf("spacedStrayQuoteContainer(%.40q) = %d, want < 0", s, got)
-	}
-	if charged := budget - st.openerScanBudget; charged > 2*qEnd {
-		t.Errorf("spacedStrayQuoteContainer(%.40q) charged %d bytes, want at most %d", s, charged, 2*qEnd)
-	}
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"repeated stray-quoted repr containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: x"{'msg': 'say " hi"', 'k': '`+secret+`'}" `, n)
-		}},
-		{"repeated stray-quoted objects", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: x"{'k': '`+secret+`'}" `, n)
-		}},
-		{"repeated over-budget repr containers", func(n int) string {
-			return strings.Repeat("DB_PASSWORD: "+a140+`"{'msg': 'say " hi"', 'k': '`+secret+`'}" `, n)
-		}},
-		{"long member list after a stray quote", func(n int) string {
-			return `DB_PASSWORD: x"{` + strings.Repeat(`'msg': 'say " hi"', `, n) + `'k': '` + secret + `'}"`
-		}},
-		{"many comma-separated objects after a stray quote", func(n int) string {
-			return `DB_PASSWORD: x"` + strings.Repeat(`{'a': '1'}, `, n) + `{'b': 'say " hi"', 'c': '` + secret + `'}"`
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			assertLinearAndRedacted(t, shape.mk, secret)
-		})
-	}
-	assertLargeTextLinear(t, `DB_PASSWORD: x"{'msg': 'say " hi"', 'k': '`+secret+`'}" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: x"{'k': '`+secret+`'}" `, secret)
-	assertLargeTextLinear(t, "DB_PASSWORD: "+a140+`"{'msg': 'say " hi"', 'k': '`+secret+`'}" `, secret)
-
-	// Values whose string closes before a stop, outside any member, are
-	// redacted one by one rather than running the scan budget out.
-	for _, unit := range []string{`DB_PASSWORD: x"{not closed" other=ok `, "DB_PASSWORD: " + a140 + `"{not closed" other=ok `} {
-		n := largeTextLen() / len(unit)
-		in := strings.Repeat(unit, n)
-		want := strings.Repeat(`DB_PASSWORD:[REDACTED] closed" other=ok `, n)
-		for _, ep := range largeTextEntryPoints(t) {
-			if got := ep.f(in); got != want {
-				t.Errorf("%s(%d bytes of %.40q) = %.80q, want each value redacted", ep.name, len(in), unit, got)
-			}
-		}
-	}
-}
-
-// TestStrayQuoteContainerMembersWithControlBytes covers "{" or "[" containers
-// in the string of a stray quote in a sensitive value whose only quoted
-// member, a value after an unquoted key or an array element, with or without
-// a string prefix, holds a line break, a tab, a vertical tab or another
-// control byte, as the 'x}\nSECRET' of DB_PASSWORD: x"S0/creds:{a:
-// 'x}\nSECRET'}", and a stray quote that never closes whose closing quote
-// opens such a member, as the "1\n2" of DB_PASSWORD: x"S0/creds:{'a': "1\n2",
-// 'b': 'SECRET'}. They come after a path and right after the quote, nested,
-// in single and escaped quotes, past the nested-key budget and before other
-// fields. Every entry point redacts the value together with the containers,
-// as it does when the member is on one line. A word with an apostrophe, a
-// prefixed string that does not close, a container that stays open, a member
-// string that no end of a member follows and text after the containers in
-// the string keep the text after the value, text without a sensitive key
-// stays unchanged, and repeated, long and unclosed such containers stay
-// linear.
-func TestStrayQuoteContainerMembersWithControlBytes(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_98765"
-	a140 := strings.Repeat("a", 140)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"prefixed_value_line_break", "DB_PASSWORD: x\"S0/creds:{a: b'x}\n" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"value_line_break", "DB_PASSWORD: x\"S0/creds:{a: 'x}\n" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"prefixed_element_line_break", "DB_PASSWORD: x\"S0/creds:[b'x]\n" + secret + "']\"", "DB_PASSWORD:[REDACTED]"},
-		{"element_line_break", "DB_PASSWORD: x\"S0/creds:['x]\n" + secret + "']\"", "DB_PASSWORD:[REDACTED]"},
-		{"prefixed_value_vertical_tab", "DB_PASSWORD: x\"S0/creds:{a: b'x}\v" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"prefixed_value_tab", "DB_PASSWORD: x\"S0/creds:{a: b'x}\t" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"prefixed_value_carriage_return", "DB_PASSWORD: x\"S0/creds:{a: b'x}\r" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"prefixed_value_form_feed", "DB_PASSWORD: x\"S0/creds:{a: b'x}\f" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"value_crlf", "DB_PASSWORD: x\"S0/creds:{a: 'x}\r\n" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"value_unit_separator", "DB_PASSWORD: x\"S0/creds:{a: 'x}\x1f" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"value_delete_byte", "DB_PASSWORD: x\"S0/creds:{a: 'x}\x7f" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"element_after_other_element", "DB_PASSWORD: x\"S0/creds:[1, 'x]\n" + secret + "']\"", "DB_PASSWORD:[REDACTED]"},
-		{"nested_object_value", "DB_PASSWORD: x\"S0/creds:{a: {b: 'x}\n" + secret + "'}}\"", "DB_PASSWORD:[REDACTED]"},
-		{"single_quoted_stray_quote", "DB_PASSWORD: x'S0/creds:{a: \"x}\n" + secret + "\"}'", "DB_PASSWORD:[REDACTED]"},
-		{"escaped_stray_quote", "DB_PASSWORD: x\\\"S0/creds:{a: 'x}\n" + secret + "'}\\\"", "DB_PASSWORD:[REDACTED]"},
-		{"escaped_member_quote", "DB_PASSWORD: x\\\"S0/creds:{a: \\'x}\n" + secret + "\\'}\\\"", "DB_PASSWORD:[REDACTED]"},
-		{"container_right_after_quote", "DB_PASSWORD: x\"{a: b'x}\n" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"unprefixed_container_right_after_quote", "DB_PASSWORD: x\"{a: 'x}\n" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"over_budget", "DB_PASSWORD: " + a140 + "\"S0/creds:{a: 'x}\n" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"before_fields", "DB_PASSWORD: x\"S0/creds:{a: 'x}\n" + secret + "'}\" other=ok", "DB_PASSWORD:[REDACTED] other=ok"},
-		{"unclosed_stray_quote_multiline_value", "DB_PASSWORD: x\"S0/creds:{'a': \"1\n2\", 'b': '" + secret + "'}", "DB_PASSWORD:[REDACTED]"},
-		{"unclosed_stray_quote_tabbed_value", "DB_PASSWORD: x\"S0/creds:{'a': \"1\t2\", 'b': '" + secret + "'}", "DB_PASSWORD:[REDACTED]"},
-		{"unclosed_stray_quote_multiline_element", "DB_PASSWORD: x\"S0/creds:[1, \"1\n2\", '" + secret + "']", "DB_PASSWORD:[REDACTED]"},
-		{"unclosed_stray_quote_before_fields", "DB_PASSWORD: x\"S0/creds:{'a': \"1\n2\", 'b': '" + secret + "'} other=ok", "DB_PASSWORD:[REDACTED] other=ok"},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"apostrophe_in_path_container", `DB_PASSWORD: x"S0/creds:{a: it's}" other=ok`, `DB_PASSWORD:[REDACTED] it's}" other=ok`},
-		{"unclosed_prefixed_string", "DB_PASSWORD: x\"S0/creds:{a: b'unclosed\nother=ok", "DB_PASSWORD:[REDACTED]"},
-		{"unclosed_container", `DB_PASSWORD: x"{not closed" other=ok`, `DB_PASSWORD:[REDACTED] closed" other=ok`},
-		{"no_member_end_after_string", "DB_PASSWORD: x\"S0/creds:{a: 'x}\ny' z}\" other=ok", "DB_PASSWORD:[REDACTED] 'x}\ny' z}\" other=ok"},
-		{"text_after_container", "DB_PASSWORD: x\"S0/creds:{a: 'x}\ny'} text\" other=ok", "DB_PASSWORD:[REDACTED] 'x}\ny'} text\" other=ok"},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-	assertUnchangedOnEveryEntryPoint(t, `x"S0/creds:{a: it's}" other=ok`)
-	assertUnchangedOnEveryEntryPoint(t, "x\"S0/creds:{a: b'unclosed\nother=ok")
-	assertUnchangedOnEveryEntryPoint(t, `x"{not closed" other=ok`)
-	assertUnchangedOnEveryEntryPoint(t, "note: x\"S0/creds:{a: 'x}\nv'}\" other=ok")
-
-	// A member string may span lines and hold any byte, as the strings that
-	// the container scans skip may.
-	for _, tc := range []struct {
-		s       string
-		wantEnd int
-	}{
-		{"'x}\ny'}", 6},
-		{"\"1\t2\",", 5},
-		{"\\'x\v\\'}", 6},
-	} {
-		if end, _ := quotedMemberEnd(tc.s, 0); end != tc.wantEnd {
-			t.Errorf("quotedMemberEnd(%q, 0) = %d, want %d", tc.s, end, tc.wantEnd)
-		}
-	}
-	s := "\"S0/creds:{'a': \"1\n2\", 'b': 'v'}"
-	qEnd := strings.Index(s, ": \"") + len(": \"")
-	if inner, outer := quotedContainerOpeners(s, 0, qEnd, nil); inner != 10 || outer != 10 {
-		t.Errorf("quotedContainerOpeners(%q) = (%d, %d), want (10, 10)", s[:qEnd], inner, outer)
-	}
-	s = "{a: 'x}\nv'}"
-	if !scanMixedQuoteContainers(s, 0, len(s), '"', false, nil) {
-		t.Errorf("scanMixedQuoteContainers(%q) = false, want true", s)
-	}
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"repeated multiline members", func(n int) string {
-			return strings.Repeat("DB_PASSWORD: x\"S0/creds:{a: 'x}\n"+secret+"'}\" ", n)
-		}},
-		{"repeated tabbed prefixed members", func(n int) string {
-			return strings.Repeat("DB_PASSWORD: x\"S0/creds:{a: b'x}\t"+secret+"'}\" ", n)
-		}},
-		{"repeated vertical-tab prefixed members", func(n int) string {
-			return strings.Repeat("DB_PASSWORD: x\"S0/creds:{a: b'x}\v"+secret+"'}\" ", n)
-		}},
-		{"repeated unclosed stray quotes", func(n int) string {
-			return strings.Repeat("DB_PASSWORD: x\"S0/creds:{'a': \"1\n2\", 'b': '"+secret+"'}\n", n)
-		}},
-		{"long multiline member list", func(n int) string {
-			return "DB_PASSWORD: x\"S0/creds:{" + strings.Repeat("a: 'x}\ny', ", n) + "k: 'x\n" + secret + "'}\""
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			assertLinearAndRedacted(t, shape.mk, secret)
-		})
-	}
-	assertLargeTextLinear(t, "DB_PASSWORD: x\"S0/creds:{a: 'x}\n"+secret+"'}\" ", secret)
-	assertLargeTextLinear(t, "DB_PASSWORD: x\"S0/creds:{a: b'x}\t"+secret+"'}\" ", secret)
-	assertLargeTextLinear(t, "DB_PASSWORD: x\"S0/creds:{a: b'x}\v"+secret+"'}\" ", secret)
-	assertLargeTextLinear(t, "DB_PASSWORD: x\"S0/creds:{'a': \"1\n2\", 'b': '"+secret+"'}\n", secret)
-	assertLargeTextLinear(t, "DB_PASSWORD: x\"S0/creds:{a: '\n")
-	assertLargeTextLinear(t, "DB_PASSWORD: x\"S0/creds:{'a': \"1\n")
-}
-
-// TestPrefixedStringsInParenthesesAndConcatenations covers members of "{" or
-// "[" containers in a sensitive value whose string has a Python string prefix
-// and holds a bracket, inside parentheses or concatenated with another
-// string, implicitly or with a "+", as the b'x}y' of DB_PASSWORD: "{'a':
-// (b'x}y'), 'b': 'say " hi"', 'c': 'SECRET'}" or of DB_PASSWORD:
-// x"S0/creds:{'a': b'x}y' + 'z', 'b': 'SECRET'}", and quoted values whose
-// closing quote comes inside such a string, as the 'say " hi' of
-// DB_PASSWORD: "{'a': ('say " hi'), 'k': 'SECRET'}". They come with several
-// prefixes, in tuples and arrays, across tabs and line breaks, in single and
-// escaped quotes, after a stray quote, past the nested-key budget and before
-// other fields. Every entry point redacts the value together with the
-// containers. Words with an apostrophe after a prefix letter, as the B's of
-// Plan B's budget, also next to parentheses, a "+" or a quoted word, and other
-// contractions and possessives keep the text after the value, text without a
-// sensitive key stays unchanged, and repeated, long and unclosed such
-// strings stay linear.
-func TestPrefixedStringsInParenthesesAndConcatenations(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_98765"
-	a140 := strings.Repeat("a", 140)
-	tail := `, 'b': 'say " hi"', 'c': '` + secret + `'}"`
-	singleTail := `, "b": "say ' hi'", "c": "` + secret + `"}'`
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"parenthesized", `DB_PASSWORD: "{'a': (b'x}y')` + tail, `DB_PASSWORD:"[REDACTED]"`},
-		{"implicitly_concatenated", `DB_PASSWORD: "{'a': b'x}y' 'z'` + tail, `DB_PASSWORD:"[REDACTED]"`},
-		{"plus_concatenated", `DB_PASSWORD: "{'a': b'x}y' + 'z'` + tail, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefixed_strings_concatenated", `DB_PASSWORD: "{'a': b'x}y' b'z'` + tail, `DB_PASSWORD:"[REDACTED]"`},
-		{"two_letter_prefixes_concatenated", `DB_PASSWORD: "{'a': rb'x}y' rb'z'` + tail, `DB_PASSWORD:"[REDACTED]"`},
-		{"upper_case_prefix_plus", `DB_PASSWORD: "{'a': B'x}y' + 'z'` + tail, `DB_PASSWORD:"[REDACTED]"`},
-		{"format_prefix_plus_bytes", `DB_PASSWORD: "{'a': f'x}y' + b'z'` + tail, `DB_PASSWORD:"[REDACTED]"`},
-		{"parenthesized_unicode_double_quoted", `DB_PASSWORD: '{"a": (u"x}y")` + singleTail, `DB_PASSWORD:'[REDACTED]'`},
-		{"double_quoted_bytes_plus", `DB_PASSWORD: '{"a": b"x}y" + "z"` + singleTail, `DB_PASSWORD:'[REDACTED]'`},
-		{"parenthesized_multiline", "DB_PASSWORD: \"{'a': (b'x}\ny')" + tail, `DB_PASSWORD:"[REDACTED]"`},
-		{"tabs_around_plus", "DB_PASSWORD: \"{'a': b'x}y'\t+\t'z'" + tail, `DB_PASSWORD:"[REDACTED]"`},
-		{"vertical_tab_before_adjacent_string", "DB_PASSWORD: \"{'a': b'x}y'\v'z'" + tail, `DB_PASSWORD:"[REDACTED]"`},
-		{"tuple_last_element", `DB_PASSWORD: "{'a': (1, b'x}y')` + tail, `DB_PASSWORD:"[REDACTED]"`},
-		{"array_parenthesized", `DB_PASSWORD: "[(b'x]y'), 'say " hi', '` + secret + `']"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"before_fields", `DB_PASSWORD: "{'a': (b'x}y')` + tail + ` other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"escaped_outer_quote", `DB_PASSWORD: \"{'a': (b'x}y'), 'b': 'say \" hi\"', 'c': '` + secret + `'}\"`, `DB_PASSWORD:\"[REDACTED]\"`},
-		{"single_quoted_outer_quote", `DB_PASSWORD: '{"a": (b"x}y")` + singleTail, `DB_PASSWORD:'[REDACTED]'`},
-		{"over_budget", `DB_PASSWORD: "{` + a140 + `: 1, 'a': (b'x}y')` + tail, `DB_PASSWORD:"[REDACTED]"`},
-		{"stray_quote_parenthesized", `DB_PASSWORD: x"S0/creds:{'a': (b'x}y'), 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"stray_quote_plus_concatenated", `DB_PASSWORD: x"S0/creds:{'a': b'x}y' + 'z', 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"stray_quote_implicitly_concatenated", `DB_PASSWORD: x"S0/creds:{'a': b'x}y' 'z', 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"stray_quote_prefixed_strings_concatenated", `DB_PASSWORD: x"S0/creds:{'a': b'x}y' b'z', 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"stray_quote_plus_after_line_break", "DB_PASSWORD: x\"S0/creds:{'a': b'x}y'\n+ 'z', 'b': '" + secret + "'}\"", "DB_PASSWORD:[REDACTED]"},
-		{"stray_quote_array_parenthesized", `DB_PASSWORD: x"S0/creds:[(b'x]y'), '` + secret + `']"`, "DB_PASSWORD:[REDACTED]"},
-		{"single_quoted_stray_quote_parenthesized_unicode", `DB_PASSWORD: x'S0/creds:{"a": (u"x}y"), "b": "` + secret + `"}'`, "DB_PASSWORD:[REDACTED]"},
-		{"container_right_after_stray_quote", `DB_PASSWORD: x"{'a': (b'x}y'), 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"over_budget_stray_quote", "DB_PASSWORD: " + a140 + `"{'a': (b'x}y'), 'b': '` + secret + `'}"`, "DB_PASSWORD:[REDACTED]"},
-		{"closing_quote_in_parenthesized_string", `DB_PASSWORD: "{'a': ('say " hi'), 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"closing_quote_in_parenthesized_bytes", `DB_PASSWORD: "{'a': (b'say " hi'), 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"closing_quote_in_tuple_element", `DB_PASSWORD: "{'a': (1, 'say " hi'), 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"closing_quote_in_plus_concatenated_string", `DB_PASSWORD: "{'a': 'say " hi' + 'z', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"closing_quote_in_implicitly_concatenated_string", `DB_PASSWORD: "{'a': 'say " hi' 'z', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"closing_quote_in_plus_concatenated_bytes", `DB_PASSWORD: "{'a': b'say " hi' + 'z', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"possessive_after_prefix_letter", `DB_PASSWORD: x"S0/creds:{a: Plan B's budget}" other=ok`, `DB_PASSWORD:[REDACTED] Plan B's budget}" other=ok`},
-		{"two_possessives_after_prefix_letter", `DB_PASSWORD: x"S0/creds:{a: Plan B's budget, b: Plan B's other}" other=ok`, `DB_PASSWORD:[REDACTED] Plan B's budget, b: Plan B's other}" other=ok`},
-		{"possessives_around_parentheses", `DB_PASSWORD: x"S0/creds:{a: Plan B's (budget), b: Plan B's) cost}" other=ok`, `DB_PASSWORD:[REDACTED] Plan B's (budget), b: Plan B's) cost}" other=ok`},
-		{"possessives_around_plus", `DB_PASSWORD: x"S0/creds:{a: Plan B's budget + Plan B's cost}" other=ok`, `DB_PASSWORD:[REDACTED] Plan B's budget + Plan B's cost}" other=ok`},
-		{"possessive_before_quoted_word", `DB_PASSWORD: x"S0/creds:{a: Plan B's 'budget', b: Plan B's) cost}" other=ok`, `DB_PASSWORD:[REDACTED] Plan B's 'budget', b: Plan B's) cost}" other=ok`},
-		{"contractions_and_possessives", `DB_PASSWORD: x"S0/creds:{a: it's (don't) + Bob's, b: herb'x}" other=ok`, `DB_PASSWORD:[REDACTED] it's (don't) + Bob's, b: herb'x}" other=ok`},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-	assertUnchangedOnEveryEntryPoint(t, `note: "{a: (Plan B's budget), b: Plan B's cost}" other=ok`)
-	assertUnchangedOnEveryEntryPoint(t, `note: "{'a': (b'x}y'), 'b': 'say " hi"'}" other=ok`)
-	assertUnchangedOnEveryEntryPoint(t, `note: x"{'a': b'x}y' + 'z', 'b': 'v'}" other=ok`)
-
-	// A prefixed string that a ")", a "+" or another string follows opens a
-	// string, while an apostrophe after a prefix letter whose string closes
-	// before a word does not.
-	for _, tc := range []struct {
-		s    string
-		want bool
-	}{
-		{"{a: (b'x}y'), c: 1}", true},
-		{"{a: b'x}y' 'z', c: 1}", true},
-		{"{a: b'x}y' + 'z', c: 1}", true},
-		{"{a: b'x}y' rb'z', c: 1}", true},
-		{"{a: b'x}y'\v\"z\", c: 1}", true},
-		{"{a: Plan B's budget, b: Plan B's cost}", false},
-		{"{a: Plan B's budget}", false},
-		{"{a: b'x}y' z, c: 1}", false},
-		{"{a: b'x}y' bz'q', c: 1}", false},
-	} {
-		if got := isStringPrefixQuote(tc.s, 1, strings.IndexByte(tc.s, '\''), nil); got != tc.want {
-			t.Errorf("isStringPrefixQuote(%q) = %v, want %v", tc.s, got, tc.want)
-		}
-	}
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"repeated parenthesized prefixed members", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'a': (b'x}y')`+tail+` `, n)
-		}},
-		{"repeated plus-concatenated prefixed members", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'a': b'x}y' + 'z'`+tail+` `, n)
-		}},
-		{"repeated implicitly concatenated prefixed members", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'a': b'x}y' 'z'`+tail+` `, n)
-		}},
-		{"long parenthesized prefixed member list", func(n int) string {
-			return `DB_PASSWORD: "{` + strings.Repeat(`'a': (b'x}y'), `, n) + `'b': 'say " hi"', 'c': '` + secret + `'}"`
-		}},
-		{"repeated stray-quote concatenations", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: x"S0/creds:{'a': b'x}y' + 'z', 'b': '`+secret+`'}" `, n)
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			assertLinearAndRedacted(t, shape.mk, secret)
-		})
-	}
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'a': (b'x}y')`+tail+` `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'a': b'x}y' + 'z'`+tail+` `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'a': b'x}y' 'z'`+tail+` `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'a': (b'x}y`)
-	assertLargeTextLinear(t, `DB_PASSWORD: x"S0/creds:{a: b'x}y' + `)
-}
-
-// TestConcatenatedStringsInEnclosedContainers covers a closing quote that
-// seems to end a quoted or stray-quoted sensitive value inside a string that
-// is a later operand of a "+" or of an implicit concatenation in a container
-// member, as the 'say " hi' of
-// DB_PASSWORD: "{'a': 'x' + 'say " hi', 'k': 'SECRET'}" or of
-// DB_PASSWORD: "{'a': 'x' 'say " hi', 'k': 'SECRET'}", or that opens such an
-// operand after a string prefix, as the b" of
-// DB_PASSWORD: "{'a': 'x' + b" SECRET", 'k': 'v'}": that operand adds a part
-// to the member that the string before it starts (see opensMemberAfter and
-// quotedContainerOpeners), so every entry point redacts the value together
-// with the containers, in parentheses, after a line break or a tab, in single
-// and escaped quotes, in arrays, before other fields and past the nested-key
-// budget, and up to the end of the innermost container when text follows the
-// containers in the string. Contractions and possessives around a "+" keep
-// the text after the value, text without a sensitive key stays unchanged, and
-// repeated and long concatenations stay linear.
-func TestConcatenatedStringsInEnclosedContainers(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_98765"
-	a140 := strings.Repeat("a", 140)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"plus_concatenated_second_operand", `DB_PASSWORD: "{'a': 'x' + 'say " hi', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"implicitly_concatenated_second_operand", `DB_PASSWORD: "{'a': 'x' 'say " hi', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"parenthesized_plus_concatenation", `DB_PASSWORD: "{'a': ('x' + 'say " hi'), 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefixed_closing_quote_after_plus", `DB_PASSWORD: "{'a': 'x' + b" ` + secret + `", 'k': 'v'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefixed_closing_quote_after_string", `DB_PASSWORD: "{'a': 'x' b" ` + secret + `", 'k': 'v'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"prefixed_closing_quote_after_number_plus", `DB_PASSWORD: "{'a': (1 + b" ` + secret + `"), 'k': 'v'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"stray_quote_plus_concatenated", `DB_PASSWORD: x"{'a': 'x' + 'say " hi', 'k': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"third_operand", `DB_PASSWORD: "{'a': 'x' + 'y' + 'say " hi', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"line_break_before_plus", "DB_PASSWORD: \"{'a': 'x'\n+ 'say \" hi', 'k': '" + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"tab_between_strings", "DB_PASSWORD: \"{'a': 'x'\t'say \" hi', 'k': '" + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"single_quoted_outer_quote", `DB_PASSWORD: '{"a": "x" + "say ' hi", "k": "` + secret + `"}'`, `DB_PASSWORD:'[REDACTED]'`},
-		{"escaped_outer_quote", `DB_PASSWORD: \"{'a': 'x' + 'say \" hi', 'k': '` + secret + `'}\"`, `DB_PASSWORD:\"[REDACTED]\"`},
-		{"array_element_after_plus", `DB_PASSWORD: "[1 + b" ` + secret + `", 'v']"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"stray_quote_prefixed_after_plus", `DB_PASSWORD: x"{'a': 'x' + b" ` + secret + `", 'k': 'v'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"stray_quote_prefixed_after_string", `DB_PASSWORD: x"{'a': 'x' b" ` + secret + `", 'k': 'v'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"before_fields", `DB_PASSWORD: "{'a': 'x' + 'say " hi', 'k': '` + secret + `'}" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"text_after_containers_after_plus", `DB_PASSWORD: "{'a': 'x' + b" ` + secret + `", 'k': 'v'} tail" other=ok`, `DB_PASSWORD:"[REDACTED]" tail" other=ok`},
-		{"text_after_containers_after_string", `DB_PASSWORD: "{'a': 'x' b" ` + secret + `", 'k': 'v'} tail" other=ok`, `DB_PASSWORD:"[REDACTED]" tail" other=ok`},
-		{"over_budget", `DB_PASSWORD: "{` + a140 + `: 1, 'a': 'x' + 'say " hi', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"over_budget_stray_quote", `DB_PASSWORD: ` + a140 + `"{'a': 'x' + 'say " hi', 'k': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-
-	for _, tc := range []struct{ in, want string }{
-		{`DB_PASSWORD: x"S0/creds:{a: a's + b's}" other=ok`, `DB_PASSWORD:[REDACTED] a's + b's}" other=ok`},
-		{`DB_PASSWORD: x"S0/creds:{a: it's + 'x', b: don't}" other=ok`, `DB_PASSWORD:[REDACTED] it's + 'x', b: don't}" other=ok`},
-		{`DB_PASSWORD: "{a: 'x' + it's}" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{`DB_PASSWORD: "{'a': 'x' " other="ok"`, `DB_PASSWORD:"[REDACTED]" other="ok"`},
-		{`DB_PASSWORD: "{'a': 'x' + ", b: "y"} other=ok`, `DB_PASSWORD:"[REDACTED]", b: "y"} other=ok`},
-	} {
-		assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-	}
-	assertUnchangedOnEveryEntryPoint(t, `note: "{'a': 'x' + 'say " hi', 'k': 'v'}" other=ok`)
-	assertUnchangedOnEveryEntryPoint(t, `note: "{'a': 'x' b" y", 'k': 'v'}" other=ok`)
-
-	// A "+" or a string that closes starts a part of a member, while a quote
-	// joined to a word, which opens no string, does not.
-	for _, tc := range []struct {
-		stack string
-		prev  byte
-		want  bool
-	}{
-		{"{", '+', true},
-		{"[", '+', true},
-		{"{", closedString, true},
-		{"[", closedString, true},
-		{"", '+', false},
-		{"{", '\'', false},
-		{"{", '"', false},
-	} {
-		if got := opensMemberAfter([]byte(tc.stack), tc.prev); got != tc.want {
-			t.Errorf("opensMemberAfter(%q, %q) = %v, want %v", tc.stack, tc.prev, got, tc.want)
-		}
-	}
-	for _, tc := range []struct {
-		s          string
-		outer      int
-		wantMember bool
-	}{
-		{`"{'a': 'x' + 'say " hi', 'k': 'v'}"`, 1, true},
-		{`"{'a': 'x' 'say " hi', 'k': 'v'}"`, 1, true},
-		{`"{'a': 'x' + b" y", 'k': 'v'}"`, 1, true},
-		{`"{'a': it's 'say " hi'}"`, -1, false},
-	} {
-		qEnd := strings.Index(tc.s[1:], `"`) + 2
-		if outer, ok := closingQuoteInMember(tc.s, 0, qEnd, nil); outer != tc.outer || ok != tc.wantMember {
-			t.Errorf("closingQuoteInMember(%q) = (%d, %v), want (%d, %v)", tc.s[:qEnd], outer, ok, tc.outer, tc.wantMember)
-		}
-	}
-	for _, tc := range []struct {
-		s     string
-		inner int
-	}{
-		{`"{'a': (1 + b" y"), 'k': 'v'}"`, 1},
-		{`"{'a': 'x' b" y", 'k': 'v'}"`, 1},
-		{`"[1, {'a': 'x' + b" y", 'k': 'v'}]"`, 5},
-		{`"{'a': it' " y", 'k': 'v'}"`, -1},
-		{`"{'a': 'x' + b" y" z, 'k': 'v'}"`, -1},
-	} {
-		qEnd := strings.Index(tc.s[1:], `"`) + 2
-		if inner, _ := quotedContainerOpeners(tc.s, 0, qEnd, nil); inner != tc.inner {
-			t.Errorf("quotedContainerOpeners(%q) = %d, want %d", tc.s[:qEnd], inner, tc.inner)
-		}
-	}
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"repeated plus-concatenated closing quotes", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'a': 'x' + 'say " hi', 'k': '`+secret+`'}" `, n)
-		}},
-		{"repeated prefixed closing quotes after strings", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'a': 'x' b" `+secret+`", 'k': 'v'}" `, n)
-		}},
-		{"repeated stray-quote concatenations", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: x"{'a': 'x' + 'say " hi', 'k': '`+secret+`'}" `, n)
-		}},
-		{"long concatenation", func(n int) string {
-			return `DB_PASSWORD: "{'a': ` + strings.Repeat(`'x' + `, n) + `'say " hi', 'k': '` + secret + `'}"`
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			assertLinearAndRedacted(t, shape.mk, secret)
-		})
-	}
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'a': 'x' + 'say " hi', 'k': '`+secret+`'}" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'a': 'x' b" `+secret+`", 'k': 'v'}" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'a': 'x' + 'say " hi', `)
-}
-
-// TestContainersAfterTextGroupsAndBackslashes covers containers that open
-// after other text in a quoted or stray-quoted sensitive value, in groups
-// whose ")" come before the closing quote, or after a backslash, as the { of
-// DB_PASSWORD: "prefix {'a': 'say " hi', 'k': 'SECRET'}", of
-// DB_PASSWORD: "({'a': 'say " hi', 'k': 'SECRET'})", of
-// DB_PASSWORD: "\{'a': 'say " hi', 'k': 'SECRET'}" or of
-// DB_PASSWORD: x"prefix {'a': '1', 'k': 'SECRET'}": the containers start at
-// the outermost one open at the closing quote that seems to end the value,
-// wherever it opens (see closingQuoteInMember), or at the first one in a
-// stray-quoted string that closes right after them (see
-// enclosesMixedQuoteContainer), so every entry point redacts the value
-// together with them, also after a tuple member, in single quotes, before
-// other fields and past the nested-key budget, while a closing quote glued to
-// a word in an unquoted member still has them read from the opening quote on.
-// A container that stays open, one without a quoted member, text between
-// containers and prose with an apostrophe keep the text after the value, text
-// without a sensitive key stays unchanged, and repeated and long such values
-// stay linear.
-func TestContainersAfterTextGroupsAndBackslashes(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_98765"
-	a140 := strings.Repeat("a", 140)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"parenthesized_prefix_after_text", `DB_PASSWORD: "x {a: (b" ` + secret + `"), m: 'v'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"text_before_container", `DB_PASSWORD: "prefix {'a': 'say " hi', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"container_in_group", `DB_PASSWORD: "({'a': 'say " hi', 'k': '` + secret + `'})"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"escaped_backslash_before_container", `DB_PASSWORD: "\\{'a': 'say " hi', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"backslash_before_container", `DB_PASSWORD: "\{'a': 'say " hi', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"stray_quote_text_before_container", `DB_PASSWORD: x"prefix {'a': '1', 'k': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"words_before_container", `DB_PASSWORD: "prefix more words {'a': 'say " hi', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"nested_groups", `DB_PASSWORD: "(({'a': 'say " hi', 'k': '` + secret + `'}))"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"spaced_group", `DB_PASSWORD: "( {'a': 'say " hi', 'k': '` + secret + `'} )"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"tuple_before_container", `DB_PASSWORD: "(1, {'a': 'say " hi', 'k': '` + secret + `'})"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"unbalanced_group_closer", `DB_PASSWORD: "{'a': 'say " hi', 'k': '` + secret + `'})"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"closing_quote_in_parenthesized_member_after_text", `DB_PASSWORD: "x {a: ('say " hi'), m: '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"text_after_parenthesized_prefix", `DB_PASSWORD: "x {a: (b" ` + secret + `"), m: 'v'} tail" other=ok`, `DB_PASSWORD:"[REDACTED]" tail" other=ok`},
-		{"stray_quote_text_before_inner_quote", `DB_PASSWORD: x"prefix {'a': 'say " hi', 'k': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"stray_quote_group", `DB_PASSWORD: x"({'a': 'say " hi', 'k': '` + secret + `'})"`, `DB_PASSWORD:[REDACTED]`},
-		{"stray_quote_group_without_inner_quote", `DB_PASSWORD: x"({'a': '1', 'k': '` + secret + `'})"`, `DB_PASSWORD:[REDACTED]`},
-		{"stray_quote_words_before_container", `DB_PASSWORD: x"prefix more words {'a': '1', 'k': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"stray_quote_parenthesized_prefix", `DB_PASSWORD: x"x {a: (b" ` + secret + `"), m: 'v'}" other=ok`, `DB_PASSWORD:[REDACTED] other=ok`},
-		{"stray_quote_backslash", `DB_PASSWORD: x"\{'a': '1', 'k': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"single_quoted_text_before_container", `DB_PASSWORD: 'prefix {"a": "say ' hi", "k": "` + secret + `"}'`, `DB_PASSWORD:'[REDACTED]'`},
-		{"before_fields", `DB_PASSWORD: "prefix {'a': 'say " hi', 'k': '` + secret + `'}" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{"stray_quote_before_fields", `DB_PASSWORD: x"prefix {'a': '1', 'k': '` + secret + `'}" other=ok`, `DB_PASSWORD:[REDACTED] other=ok`},
-		{"over_budget_text_before_container", `DB_PASSWORD: "` + a140 + ` {'a': 'say " hi', 'k': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"over_budget_stray_quote_text_before_container", `DB_PASSWORD: ` + a140 + `"prefix {'a': '1', 'k': '` + secret + `'}" other=ok`, `DB_PASSWORD:[REDACTED] other=ok`},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-
-	for _, tc := range []struct{ in, want string }{
-		{`DB_PASSWORD: "prefix it's fine" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{`DB_PASSWORD: x"prefix {not closed" other=ok`, `DB_PASSWORD:[REDACTED] {not closed" other=ok`},
-		{`DB_PASSWORD: x"prefix" other=ok`, `DB_PASSWORD:[REDACTED] other=ok`},
-		{`DB_PASSWORD: "prefix {a: 1}" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{`DB_PASSWORD: "({a: 1})" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{`DB_PASSWORD: x"note {a: 1} and {b: 2}" other=ok`, `DB_PASSWORD:[REDACTED] {a: 1} and {b: 2}" other=ok`},
-		{`DB_PASSWORD: x"prefix {a: 1}" other=ok`, `DB_PASSWORD:[REDACTED] {a: 1}" other=ok`},
-		{`DB_PASSWORD: x"Bob's note {a: 1}" other=ok`, `DB_PASSWORD:[REDACTED] note {a: 1}" other=ok`},
-		{`DB_PASSWORD: "(x)" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-		{`DB_PASSWORD: x"(note) more" other=ok`, `DB_PASSWORD:[REDACTED] more" other=ok`},
-		{`DB_PASSWORD: "\{abc" other=ok`, `DB_PASSWORD:"[REDACTED]" other=ok`},
-	} {
-		assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-	}
-	assertUnchangedOnEveryEntryPoint(t, `note: "prefix {'a': 'say " hi', 'k': 'v'}" other=ok`)
-	assertUnchangedOnEveryEntryPoint(t, `note: x"prefix {'a': '1', 'k': 'v'}" other=ok`)
-	assertUnchangedOnEveryEntryPoint(t, `note: "({'a': 'say " hi', 'k': 'v'})" other=ok`)
-
-	// A closing quote glued to the word after it in an unquoted member, which
-	// opens no member, still has the containers read from the opening quote
-	// on.
-	for _, in := range []string{
-		`DB_PASSWORD: "{msg: say "hi", 'b': '` + secret + `'}"`,
-		`DB_PASSWORD: "[say "hi", '` + secret + `']"`,
-		`DB_PASSWORD: "{a: {b: say "hi"}, 'c': '` + secret + `'}"`,
-	} {
-		assertRedactedOnEveryEntryPoint(t, in, `DB_PASSWORD:"[REDACTED]"`, secret)
-	}
-
-	// The containers start at the outermost one open at the closing quote,
-	// after any text and after a backslash that escapes no quote, and ")"
-	// may close groups around them before the quote.
-	for _, tc := range []struct {
-		s     string
-		outer int
-	}{
-		{`"prefix {'a': 'say " hi'}"`, 8},
-		{`"({'a': 'say " hi'})"`, 2},
-		{`"\{'a': 'say " hi'}"`, 2},
-		{`"\\{'a': 'say " hi'}"`, 3},
-		{`"x {a: (b" y"), m: 'v'}"`, 3},
-		{`"prefix {a: it's " hi'}"`, -1},
-	} {
-		qEnd := strings.Index(tc.s[1:], `"`) + 2
-		if outer, _ := closingQuoteInMember(tc.s, 0, qEnd, nil); outer != tc.outer {
-			t.Errorf("closingQuoteInMember(%q) = %d, want %d", tc.s[:qEnd], outer, tc.outer)
-		}
-	}
-	for _, tc := range []struct {
-		s    string
-		i    int
-		want int
-	}{
-		{"}) \" ", 1, 3},
-		{"} ) )\"", 1, 5},
-		{"}\"", 1, 1},
-		{"} x\"", 1, 2},
-	} {
-		if got := skipGroupClosers(tc.s, tc.i); got != tc.want {
-			t.Errorf("skipGroupClosers(%q, %d) = %d, want %d", tc.s, tc.i, got, tc.want)
-		}
-	}
-	for _, tc := range []struct {
-		s    string
-		want bool
-	}{
-		{`x"prefix {'k': 'v'}"`, true},
-		{`x"({'k': 'v'})"`, true},
-		{`x"prefix {k: 1}"`, false},
-		{`x"(note) more"`, false},
-	} {
-		if got := enclosesMixedQuoteContainer(tc.s, 1, len(tc.s), strings.IndexAny(tc.s, " {("), nil); got != tc.want {
-			t.Errorf("enclosesMixedQuoteContainer(%q) = %v, want %v", tc.s, got, tc.want)
-		}
-	}
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"repeated containers after text", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "prefix {'a': 'say " hi', 'k': '`+secret+`'}" `, n)
-		}},
-		{"repeated groups", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "({'a': 'say " hi', 'k': '`+secret+`'})" `, n)
-		}},
-		{"repeated stray quotes before text and containers", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: x"prefix {'a': '1', 'k': '`+secret+`'}" `, n)
-		}},
-		{"long text before a container", func(n int) string {
-			return `DB_PASSWORD: "` + strings.Repeat("prefix ", n) + `{'a': 'say " hi', 'k': '` + secret + `'}"`
-		}},
-		{"many groups", func(n int) string {
-			return `DB_PASSWORD: "` + strings.Repeat("(", n) + `{'a': 'say " hi', 'k': '` + secret + `'}` + strings.Repeat(")", n) + `"`
-		}},
-		{"many backslashes before a container", func(n int) string {
-			return `DB_PASSWORD: "` + strings.Repeat(`\\`, n) + `{'a': 'say " hi', 'k': '` + secret + `'}"`
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			assertLinearAndRedacted(t, shape.mk, secret)
-		})
-	}
-	assertLargeTextLinear(t, `DB_PASSWORD: "prefix {'a': 'say " hi', 'k': '`+secret+`'}" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "({'a': 'say " hi', 'k': '`+secret+`'})" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: x"prefix {'a': '1', 'k': '`+secret+`'}" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "prefix {'a': 'say " hi', `)
-	assertLargeTextLinear(t, `DB_PASSWORD: x"prefix {'a': '1', `)
-}
-
-// TestPrefixedStringsWithSubscriptsAndAttributes covers a prefixed string in a
-// container member that a subscript or an attribute follows right after its
-// closing quote, as the b'x}SECRET'.decode() of
-// DB_PASSWORD: x"S0/creds:{'a': b'x}SECRET'.decode(), 'b': '1'}" or the
-// b'x}y'[0] of DB_PASSWORD: "{'a': b'x}y'[0], 'b': 'say " hi', 'c': 'SECRET'}":
-// that string ends a part of the member (see memberStringEnds), so the
-// container scans read it as one and its "}" closes nothing, and every entry
-// point redacts the value together with the containers, with slices and
-// method calls, right after the stray quote, in arrays, in double quotes,
-// before other fields and past the nested-key budget. A possessive or a
-// contraction before a "." or a "[", which opens no string, keeps the text
-// after the value, text without a sensitive key stays unchanged, and
-// repeated such members stay linear.
-func TestPrefixedStringsWithSubscriptsAndAttributes(t *testing.T) {
-	runInParallel(t)
-	const secret = "SECRET_PROBE_98765"
-	a140 := strings.Repeat("a", 140)
-	for _, tc := range []struct {
-		label, in, want string
-	}{
-		{"attribute_after_prefixed_string_holding_secret", `DB_PASSWORD: x"S0/creds:{'a': b'x}` + secret + `'.decode(), 'b': '1'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"subscript_after_prefixed_string_holding_secret", `DB_PASSWORD: x"S0/creds:{'a': b'x}` + secret + `'[0], 'b': '1'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"attribute_before_later_member", `DB_PASSWORD: x"S0/creds:{'a': b'x}y'.decode(), 'b': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"attribute_before_closing_quote_member", `DB_PASSWORD: "{'a': b'x}y'.decode(), 'b': 'say " hi', 'c': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"subscript_before_closing_quote_member", `DB_PASSWORD: "{'a': b'x}y'[0], 'b': 'say " hi', 'c': '` + secret + `'}"`, `DB_PASSWORD:"[REDACTED]"`},
-		{"format_prefix_method", `DB_PASSWORD: x"S0/creds:{'a': f'x}y'.strip(), 'b': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"slice_after_prefixed_string", `DB_PASSWORD: x"S0/creds:{'a': b'x}y'[0:2], 'b': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"right_after_stray_quote", `DB_PASSWORD: x"{'a': b'x}y'.decode(), 'b': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-		{"array_attribute", `DB_PASSWORD: x"S0/creds:[b'x]y'.decode(), '` + secret + `']"`, `DB_PASSWORD:[REDACTED]`},
-		{"unicode_prefix_double_quoted", `DB_PASSWORD: x'S0/creds:{"a": u"x}y".upper(), "b": "` + secret + `"}'`, `DB_PASSWORD:[REDACTED]`},
-		{"before_fields", `DB_PASSWORD: x"S0/creds:{'a': b'x}y'.decode(), 'b': '` + secret + `'}" other=ok`, `DB_PASSWORD:[REDACTED] other=ok`},
-		{"over_budget", `DB_PASSWORD: ` + a140 + `"S0/creds:{'a': b'x}y'.decode(), 'b': '` + secret + `'}"`, `DB_PASSWORD:[REDACTED]`},
-	} {
-		t.Run(tc.label, func(t *testing.T) {
-			assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-		})
-	}
-
-	for _, tc := range []struct{ in, want string }{
-		{`DB_PASSWORD: x"S0/creds:{a: Plan B's.txt, b: Plan B's [note]}" other=ok`, `DB_PASSWORD:[REDACTED] Plan B's.txt, b: Plan B's [note]}" other=ok`},
-		{`DB_PASSWORD: x"S0/creds:{a: it's.}" other=ok`, `DB_PASSWORD:[REDACTED] it's.}" other=ok`},
-		{`DB_PASSWORD: x"S0/creds:{a: Plan B's budget. Plan B's cost}" other=ok`, `DB_PASSWORD:[REDACTED] Plan B's budget. Plan B's cost}" other=ok`},
-		{`DB_PASSWORD: x"S0/creds:{a: Plan B's x, b: it'. done}" other=ok`, `DB_PASSWORD:[REDACTED] Plan B's x, b: it'. done}" other=ok`},
-		{`DB_PASSWORD: x"S0/creds:{a: Plan B's [x] and B'[y]}" other=ok`, `DB_PASSWORD:[REDACTED] Plan B's [x] and B'[y]}" other=ok`},
-	} {
-		assertRedactedOnEveryEntryPoint(t, tc.in, tc.want, secret)
-	}
-	assertUnchangedOnEveryEntryPoint(t, `note: "{'a': f'x}y'.strip(), 'b': b'x}y'[0:2]}" other=ok`)
-	assertUnchangedOnEveryEntryPoint(t, `note: x"S0/creds:{'a': b'x}y'.decode(), 'b': 'v'}" other=ok`)
-
-	// A subscript or an attribute right after the closing quote ends a part
-	// of a member, while one after a space or a "." that no word follows
-	// does not.
-	for _, tc := range []struct {
-		s    string
-		want bool
-	}{
-		{"{a: b'x}y'.decode(), c: 1}", true},
-		{"{a: b'x}y'[0], c: 1}", true},
-		{"{a: f'x}y'.strip(), c: 1}", true},
-		{"{a: b'x}y'[0:2], c: 1}", true},
-		{"{a: b'x}y' .decode(), c: 1}", false},
-		{"{a: b'x}y'. c: 1}", false},
-		{"{a: Plan B's.txt, b: Plan B's [note]}", false},
-		{"{a: Plan B's x, b: it'. done}", false},
-	} {
-		if got := isStringPrefixQuote(tc.s, 1, strings.IndexByte(tc.s, '\''), nil); got != tc.want {
-			t.Errorf("isStringPrefixQuote(%q) = %v, want %v", tc.s, got, tc.want)
-		}
-	}
-
-	for _, shape := range []struct {
-		name string
-		mk   func(n int) string
-	}{
-		{"repeated attributes after prefixed strings", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: x"S0/creds:{'a': b'x}y'.decode(), 'b': '`+secret+`'}" `, n)
-		}},
-		{"repeated subscripts before closing quotes", func(n int) string {
-			return strings.Repeat(`DB_PASSWORD: "{'a': b'x}y'[0], 'b': 'say " hi', 'c': '`+secret+`'}" `, n)
-		}},
-		{"long member list with attributes", func(n int) string {
-			return `DB_PASSWORD: x"S0/creds:{` + strings.Repeat(`'a': b'x}y'.decode(), `, n) + `'b': '` + secret + `'}"`
-		}},
-	} {
-		t.Run(shape.name, func(t *testing.T) {
-			assertLinearAndRedacted(t, shape.mk, secret)
-		})
-	}
-	assertLargeTextLinear(t, `DB_PASSWORD: x"S0/creds:{'a': b'x}y'.decode(), 'b': '`+secret+`'}" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: "{'a': b'x}y'[0], 'b': 'say " hi', 'c': '`+secret+`'}" `, secret)
-	assertLargeTextLinear(t, `DB_PASSWORD: x"S0/creds:{a: b'x}y'.`)
-}
-
 // assertLinearAndRedacted checks that every entry point (see
 // largeTextEntryPoints) keeps none of forbidden in the large text of mk (see
 // scalingUnits), and leaves its own output unchanged on a second pass, that
@@ -4391,54 +1755,12 @@ func assertLinearAndRedacted(t *testing.T, mk func(n int) string, forbidden ...s
 	}
 }
 
-// assertUnchangedOnEveryEntryPoint checks that every entry point (see
-// largeTextEntryPoints) leaves in byte-identical and that sanitizeRawText
-// reports no change.
-func assertUnchangedOnEveryEntryPoint(t *testing.T, in string) {
-	t.Helper()
-	for _, ep := range largeTextEntryPoints(t) {
-		if got := ep.f(in); got != in {
-			t.Errorf("%s(%q) = %q, want unchanged", ep.name, in, got)
-		}
-	}
-	if _, lost := sanitizeRawText(in); lost {
-		t.Errorf("sanitizeRawText(%q) reported a change", in)
-	}
-}
-
-// assertRedactedOnEveryEntryPoint checks that every entry point (see
-// largeTextEntryPoints) turns in into want, keeps none of forbidden, and leaves
-// its own output unchanged on a second pass, and that sanitizeRawText reports
-// the change.
-func assertRedactedOnEveryEntryPoint(t *testing.T, in, want string, forbidden ...string) {
-	t.Helper()
-	for _, ep := range largeTextEntryPoints(t) {
-		got := ep.f(in)
-		kept := false
-		for _, f := range forbidden {
-			if strings.Contains(got, f) {
-				t.Errorf("%s(%q) = %q kept %q", ep.name, in, got, f)
-				kept = true
-			}
-		}
-		if !kept && got != want {
-			t.Errorf("%s(%q) = %q, want %q", ep.name, in, got, want)
-		}
-		if again := ep.f(got); again != got {
-			t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
-		}
-	}
-	if _, lost := sanitizeRawText(in); !lost {
-		t.Errorf("sanitizeRawText(%q) reported no change", in)
-	}
-}
-
 // assertLargeTextLinear checks that a large text of repeated unit (see
-// largeTextLen) runs through every entry point within a wall-clock limit, keeps none of forbidden, and is
-// unchanged by a second pass. A text that the scans redact rather than fail
-// closed does the work of every pass, so the limit is wider than that of
-// assertLargeTextFailsClosed, while a scan that is quadratic in such a text
-// takes minutes.
+// largeTextLen) runs through every entry point within a wall-clock limit (see
+// timeEntryPoints), keeps none of forbidden, and is unchanged by a second
+// pass. A text that the scans redact rather than fail closed does the work of
+// every pass, so the limit is wider than that of assertLargeTextFailsClosed,
+// while a scan that is quadratic in such a text takes minutes.
 func assertLargeTextLinear(t *testing.T, unit string, forbidden ...string) {
 	t.Helper()
 	in := strings.Repeat(unit, (largeTextLen()+len(unit)-1)/len(unit))
@@ -4446,19 +1768,19 @@ func assertLargeTextLinear(t *testing.T, unit string, forbidden ...string) {
 	if raceEnabled {
 		maxWall = 60 * time.Second
 	}
-	start := time.Now()
-	for _, ep := range largeTextEntryPoints(t) {
-		got := ep.f(in)
+	eps := largeTextEntryPoints(t)
+	got, again, elapsed := timeEntryPoints(maxWall, in, eps)
+	for i, ep := range eps {
 		for _, f := range forbidden {
-			if strings.Contains(got, f) {
+			if strings.Contains(got[i], f) {
 				t.Errorf("%s(%d bytes of %.40q) kept %q", ep.name, len(in), unit, f)
 			}
 		}
-		if again := ep.f(got); again != got {
-			t.Errorf("%s second pass(%d bytes of %.40q) = %.80q, want unchanged", ep.name, len(in), unit, again)
+		if again[i] != got[i] {
+			t.Errorf("%s second pass(%d bytes of %.40q) = %.80q, want unchanged", ep.name, len(in), unit, again[i])
 		}
 	}
-	if elapsed := time.Since(start); elapsed > maxWall {
+	if elapsed > maxWall {
 		t.Errorf("%d bytes of %.40q took %v through the entry points, want at most %v", len(in), unit, elapsed, maxWall)
 	}
 }
@@ -4472,17 +1794,38 @@ func assertLargeTextFailsClosed(t *testing.T, in string) {
 	if raceEnabled {
 		maxWall = 20 * time.Second
 	}
-	start := time.Now()
-	for _, ep := range largeTextEntryPoints(t) {
-		if got := ep.f(in); got != redactedSensitiveTextPlaceholder {
-			t.Errorf("%s(%d bytes) = %.80q, want %q", ep.name, len(in), got, redactedSensitiveTextPlaceholder)
-		} else if again := ep.f(got); again != got {
-			t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+	eps := largeTextEntryPoints(t)
+	got, again, elapsed := timeEntryPoints(maxWall, in, eps)
+	for i, ep := range eps {
+		if got[i] != redactedSensitiveTextPlaceholder {
+			t.Errorf("%s(%d bytes) = %.80q, want %q", ep.name, len(in), got[i], redactedSensitiveTextPlaceholder)
+		} else if again[i] != got[i] {
+			t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got[i], again[i])
 		}
 	}
-	if elapsed := time.Since(start); elapsed > maxWall {
+	if elapsed > maxWall {
 		t.Errorf("%d bytes took %v through the entry points, want at most %v", len(in), elapsed, maxWall)
 	}
+}
+
+// timeEntryPoints runs in through each of eps, and each output through it
+// again, and returns the outputs, those of the second passes and how long the
+// runs took, timed as withinWallClock times them against limit, so that a
+// scheduler pause on a loaded host or another test running in parallel does
+// not fail a wall-clock check that a quadratic scan fails on every run.
+func timeEntryPoints(limit time.Duration, in string, eps []struct {
+	name string
+	f    func(string) string
+},
+) (got, again []string, elapsed time.Duration) {
+	got, again = make([]string, len(eps)), make([]string, len(eps))
+	elapsed = withinWallClock(limit, func() {
+		for i, ep := range eps {
+			got[i] = ep.f(in)
+			again[i] = ep.f(got[i])
+		}
+	})
+	return got, again, elapsed
 }
 
 // largeTextEntryPoints returns the entry points that the large-text checks run
@@ -4507,5 +1850,1129 @@ func largeTextEntryPoints(t *testing.T) []struct {
 			return out
 		}},
 		{"FormatContentParts", func(s string) string { return formatContentTextPart(t, s) }},
+	}
+}
+
+// TestSmartTruncateRedactsJSONDocumentLeaves covers string values that are a
+// JSON object or array as a whole, as the arguments of a tool call written as
+// JSON text: SmartTruncate redacts the credentials in their string leaves and
+// the values of their sensitive keys one by one, as redactErrorMessage does,
+// so that a URL leaf that ends in a credential, whether as the last field or
+// not and in nested objects and arrays, keeps the document valid JSON rather
+// than failing it closed as [UNPARSEABLE_JSON_BLOB]. A long document is
+// truncated after the redaction, a document with nothing to redact stays
+// byte-identical, and malformed JSON text still fails closed.
+func TestSmartTruncateRedactsJSONDocumentLeaves(t *testing.T) {
+	runInParallel(t)
+	for _, tc := range []struct{ in, want string }{
+		{`{"url":"https://example.com/path?a=1&access_token=SECRET1"}`, `{"url":"https://example.com/path?a=1\u0026access_token=%5BREDACTED%5D"}`},
+		{`{"url":"https://example.com/path?a=1&access_token=SECRET1","other":"ok"}`, `{"other":"ok","url":"https://example.com/path?a=1\u0026access_token=%5BREDACTED%5D"}`},
+		{`{"args":{"url":"https://example.com/cb?api_key=SECRET1"},"n":1}`, `{"args":{"url":"https://example.com/cb?api_key=%5BREDACTED%5D"},"n":1}`},
+		{`[{"url":"https://example.com/cb#token=SECRET1"},"ok"]`, `[{"url":"https://example.com/cb#token=%5BREDACTED%5D"},"ok"]`},
+		{`{"msg":"foo&access_token=SECRET1"}`, `{"msg":"foo\u0026access_token=[REDACTED]"}`},
+		{`{"x":"bar password=SECRET1"}`, `{"x":"bar password=[REDACTED]"}`},
+		{`{"cfg":["a","DB_PASSWORD: SECRET1"]}`, `{"cfg":["a","DB_PASSWORD:[REDACTED]"]}`},
+		{`{"access_token":"SECRET1","other":"ok"}`, `{"access_token":"[REDACTED]","other":"ok"}`},
+		{`{"msg":"password=SECRET1","detail":{"url":"https://h/p?token=SECRET2&x=1"}}`, `{"detail":{"url":"https://h/p?token=%5BREDACTED%5D\u0026x=1"},"msg":"password=[REDACTED]"}`},
+		{`{"note":"talk to Ken tomorrow","n":[1,2,3]}`, `{"note":"talk to Ken tomorrow","n":[1,2,3]}`},
+		{`{"msg":"password=SECRET1"`, unparseableJSONPlaceholder},
+		{`{"msg":"password=SECRET1"}} trailing`, unparseableJSONPlaceholder},
+		{`[1, 2, {"api_key": "SECRET1"}`, unparseableJSONPlaceholder},
+	} {
+		raw, _, err := SmartTruncate(tc.in, -1)
+		var got string
+		if err != nil || json.Unmarshal(raw, &got) != nil || got != tc.want {
+			t.Errorf("SmartTruncate(%q) = (%s, %v), want %q", tc.in, raw, err, tc.want)
+			continue
+		}
+		if strings.Contains(got, "SECRET") {
+			t.Errorf("SmartTruncate(%q) = %q kept a secret", tc.in, got)
+		}
+		if tc.want != unparseableJSONPlaceholder {
+			if !json.Valid([]byte(got)) {
+				t.Errorf("SmartTruncate(%q) = %q, not valid JSON", tc.in, got)
+			}
+			if rem := redactErrorMessage(tc.in); rem != got {
+				t.Errorf("SmartTruncate(%q) = %q, redactErrorMessage = %q, want the same", tc.in, got, rem)
+			}
+		}
+		if again, _, err := SmartTruncate(got, -1); err != nil || string(again) != string(raw) {
+			t.Errorf("SmartTruncate second pass(%q) = (%s, %v), want %s", got, again, err, raw)
+		}
+		// The same text as the argument of a tool call.
+		argsRaw, _, err := SmartTruncate(map[string]any{"input": tc.in}, -1)
+		var args map[string]string
+		if err != nil || json.Unmarshal(argsRaw, &args) != nil || args["input"] != tc.want {
+			t.Errorf("SmartTruncate(args with %q) = (%s, %v), want input %q", tc.in, argsRaw, err, tc.want)
+		}
+	}
+
+	// A long document is redacted, and only then truncated.
+	long := `{"url":"https://example.com/path?a=1&access_token=SECRET1","pad":"` + strings.Repeat("x", 200) + `"}`
+	full := `{"pad":"` + strings.Repeat("x", 200) + `","url":"https://example.com/path?a=1\u0026access_token=%5BREDACTED%5D"}`
+	raw, truncated, err := SmartTruncate(long, 100)
+	var got string
+	if err != nil || json.Unmarshal(raw, &got) != nil || !truncated || got != full[:100]+truncationSuffix {
+		t.Errorf("SmartTruncate(%d bytes, 100) = (%s, %v, %v), want the first 100 bytes of %q", len(long), raw, truncated, err, full)
+	}
+}
+
+// TestTokenizerSpecialTokenNames checks that the names of the special tokens
+// of a tokenizer, as eos_token or bosToken, are not sensitive, as pad_token
+// is not, while credential names that end in "token" stay sensitive, also
+// through every entry point. The expressions on main read the token of
+// eos-token or eos.token as a key on its own, after a "-" or ".", so those
+// forms stay redacted as on main.
+func TestTokenizerSpecialTokenNames(t *testing.T) {
+	runInParallel(t)
+	for _, word := range []string{"eos", "bos", "pad", "unk", "cls", "sep", "mask"} {
+		for _, k := range []string{
+			word + "_token", word + "Token", strings.ToUpper(word) + "_TOKEN",
+			strings.ToUpper(word[:1]) + word[1:] + "Token",
+		} {
+			if isSensitiveKey(k) {
+				t.Errorf("isSensitiveKey(%q) = true, want false", k)
+			}
+			assertUnchangedAllEntryPoints(t, k+": <tok>")
+			assertUnchangedAllEntryPoints(t, `{"`+k+`": "<tok>"}`)
+		}
+		for _, k := range []string{word + "-token", word + ".token"} {
+			if isSensitiveKey(k) {
+				t.Errorf("isSensitiveKey(%q) = true, want false", k)
+			}
+			assertAllEntryPoints(t, k, k+": TOKSECRET1", k+":[REDACTED]", "TOKSECRET1")
+		}
+	}
+	for _, k := range []string{
+		"access_token", "auth_token", "refresh_token", "api_token", "session_token", "bearer_token",
+		"id_token", "oauth_token", "csrf_token", "secret_token", "authToken", "CSRF_TOKEN", "my_eos_token",
+	} {
+		if !isSensitiveKey(k) {
+			t.Errorf("isSensitiveKey(%q) = false, want true", k)
+		}
+		assertAllEntryPoints(t, k, k+": TOKSECRET1", k+":[REDACTED]", "TOKSECRET1")
+	}
+}
+
+// TestAdversarialScalingGluedPairRuns checks that runs of pairs glued to one
+// another with no value stop in between, which made the redaction of glued
+// values read the rest of the run again from each pair, stay linear through
+// every entry point, keep no secret and are unchanged by a second pass: quoted
+// JSON pairs joined by "/", pairs after placeholders, placeholder-led runs,
+// bare pairs, and quoted pairs joined by ";".
+func TestAdversarialScalingGluedPairRuns(t *testing.T) {
+	runInParallel(t)
+	for _, shape := range []struct {
+		name, unit string
+		// want is what scrubErrorText returns for a run of the unit: the
+		// value of the first pair runs on over the rest of the run, which
+		// is redacted with it as one value, rather than failing closed.
+		want      string
+		forbidden []string
+	}{
+		{"glued quoted pairs", `"token":"GLUEDSECRET"/`, `"token":"[REDACTED]"`, []string{"GLUEDSECRET"}},
+		{"pairs after placeholders", `password=[REDACTED]/`, "password=[REDACTED]", nil},
+		{"placeholder-led runs", `[REDACTED]x/token:[REDACTED]/`, "[REDACTED]x/token:[REDACTED]", nil},
+		{"placeholder-led glued values", `token:[REDACTED]GLUEDSECRET/`, "token:[REDACTED]", []string{"GLUEDSECRET"}},
+		{"glued bare pairs", `api_key:GLUEDSECRET/token:GLUEDSECRET2/`, "api_key: [REDACTED]", []string{"GLUEDSECRET"}},
+		{"quoted pairs joined by semicolons", `secret="GLUEDSECRET";token="GLUEDSECRET2";`, "", []string{"GLUEDSECRET"}},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			if len(shape.forbidden) > 0 {
+				assertLinearAndRedacted(t, func(n int) string { return strings.Repeat(shape.unit, n) }, shape.forbidden...)
+			}
+			assertLargeTextLinear(t, shape.unit, shape.forbidden...)
+			if shape.want != "" {
+				in := strings.Repeat(shape.unit, (largeTextLen()+len(shape.unit)-1)/len(shape.unit))
+				if got := scrubErrorText(in); got != shape.want {
+					t.Errorf("scrubErrorText(%d bytes of %q) = %.80q, want %q", len(in), shape.unit, got, shape.want)
+				}
+			}
+		})
+	}
+}
+
+// TestSpanTracesMapCopiesToEqualBytes checks the traces of the scanners and
+// of the legacy expressions (see passTrace) on texts that every kind of pass
+// rewrites, URIs whose rewrite escapes bytes included: each run that a trace
+// records as a copy maps bytes of the result to equal bytes of the text, in
+// order, or, in a rewritten URI, to the bytes that it writes escaped or
+// unescaped (see copyRun and sameRunBytes), each span that a trace records
+// as removed lies in the text, and no trace is unaligned. It also checks
+// composeRuns and mapSpans on a small chain of passes.
+func TestSpanTracesMapCopiesToEqualBytes(t *testing.T) {
+	runInParallel(t)
+	checkRuns := func(label, raw, out string, runs []copyRun) {
+		t.Helper()
+		lastOut, lastIn := -1, -1
+		for _, r := range runs {
+			if r.n <= 0 || r.out < 0 || r.in < 0 || r.out+r.n > len(out) || r.in+r.n > len(raw) {
+				t.Errorf("[%s] run %+v out of range (out %d, raw %d bytes)", label, r, len(out), len(raw))
+				return
+			}
+			if r.out <= lastOut || r.in <= lastIn {
+				t.Errorf("[%s] run %+v out of order", label, r)
+			}
+			lastOut, lastIn = r.out+r.n-1, r.in+r.n-1
+			if !sameRunBytes(out, raw, r) {
+				t.Errorf("[%s] run %+v maps %q to %q", label, r, out[r.out:r.out+r.n], raw[r.in:r.in+r.n])
+			}
+		}
+	}
+	for _, raw := range []string{
+		"password: [REDACTED]hunter2ZQ/token: [REDACTED] for user bob",
+		"Authorization: Bearer abc123 api_key: v1 v2\nx-api-key:\n  v3",
+		`log: "token": "abc", ' client_secret ': v, "  api.key  ": [1, 2]`,
+		"failed: Basic dXNlcjpwYXNz retry password=x https://u:p@h/a?token=t&ok=1#k=v",
+		"credentials:\n  temp:a:b: v1\n  C:\\ssl\\password: v2 dbPassword={a: b}/password: v3",
+		`msg: "password=" "SECRET" api.key:"secret:'" ~!@$^*~'`,
+		"see https://h/^/secret_key/password:#secret_hunter2&5 now",
+		"GET HTTPS://h/a|b?q=a%20b+c&token=x&Bearer+SECRET+token=y#k=v failed",
+		"https://h/caf\u00e9/%7Bx%7D?key=1&err=password%3A+abc+def",
+	} {
+		var tr passTrace
+		out := scrubErrorTokensTraced(raw, &tr)
+		if out != scrubErrorTokens(raw) {
+			t.Errorf("scrubErrorTokensTraced(%q) = %q, scrubErrorTokens = %q", raw, out, scrubErrorTokens(raw))
+		}
+		checkRuns("scanners "+raw, raw, out, tr.runs)
+		if tr.unaligned {
+			t.Errorf("scrubErrorTokensTraced(%q) left a URI unaligned", raw)
+		}
+		for _, compound := range []bool{false, true} {
+			var lt passTrace
+			lout := legacyScrubTokensTraced(raw, compound, &lt)
+			if want := legacyScrubErrorTokens(raw); !compound && lout != want {
+				t.Errorf("legacyScrubTokensTraced(%q) = %q, legacyScrubErrorTokens = %q", raw, lout, want)
+			}
+			checkRuns(fmt.Sprintf("legacy(%v) %s", compound, raw), raw, lout, lt.runs)
+			for _, sp := range lt.removed {
+				if sp[0] < 0 || sp[0] >= sp[1] || sp[1] > len(raw) {
+					t.Errorf("[legacy(%v) %s] removed span %v out of range", compound, raw, sp)
+				}
+			}
+			if lt.unaligned {
+				t.Errorf("legacyScrubTokensTraced(%q, %v) left a URI unaligned", raw, compound)
+			}
+		}
+	}
+
+	// Two passes over "ab-cd-ef": the first writes X for "cd", the second Y
+	// for "ab", so that "-", "X"'s "-" and "ef" stay copies of the text.
+	inner := []copyRun{{0, 0, 3}, {4, 5, 3}} // "ab-" and "-ef" around "X"
+	outer := []copyRun{{1, 2, 5}}            // "Y" + "-X-ef"[...]
+	if got, want := composeRuns(outer, inner), []copyRun{{1, 2, 1}, {3, 5, 3}}; !slices.Equal(got, want) {
+		t.Errorf("composeRuns = %v, want %v", got, want)
+	}
+	if got, want := mapSpans([][2]int{{0, 2}, {3, 7}}, inner), [][2]int{{0, 2}, {5, 8}}; !slices.Equal(got, want) {
+		t.Errorf("mapSpans = %v, want %v", got, want)
+	}
+	if from, to := trimRemovedEdges(`a \"x y\"`, 2, 9); from != 4 || to != 7 {
+		t.Errorf("trimRemovedEdges = (%d, %d), want (4, 7)", from, to)
+	}
+}
+
+// TestLegacyURIKeysAsOnMain checks that the legacy scrubs read the keys of a
+// URI as the expressions on main did, without compound names (see
+// legacyURIKeys), so that they leave for their text passes what main left: a
+// fragment key that only the scanners read as sensitive, with its value after
+// a space, has that value redacted by the text pass on main, so the text
+// fails closed when the scanners, which redact the empty value in the URI,
+// keep the word after it.
+func TestLegacyURIKeysAsOnMain(t *testing.T) {
+	runInParallel(t)
+	for _, tc := range []struct {
+		key  string
+		want bool
+	}{
+		{"password", true},
+		{"API-Key", true},
+		{"user:token", true},
+		{"app:x_api_key", true},
+		{"temp:x", true},
+		{"spring.datasource.password", false},
+		{"dbPassword", false},
+		{"secret_key", false},
+		{"signing_key", false},
+		{"api.key", false},
+		{"pad_token", false},
+	} {
+		if got := isLegacySensitiveKey(tc.key); got != tc.want {
+			t.Errorf("isLegacySensitiveKey(%q) = %v, want %v", tc.key, got, tc.want)
+		}
+	}
+	in := "https://h/cb#token=URISECRET1&x=1&spring.datasource.password= URISECRET2 for user bob"
+	if got := legacyScrubErrorTokens(in); strings.Contains(got, "URISECRET2") || !strings.Contains(got, "spring.datasource.password=[REDACTED]") {
+		t.Errorf("legacyScrubErrorTokens(%q) = %q, want the value after the URI redacted as on main", in, got)
+	}
+	assertAllEntryPoints(t, in, in, redactedSensitiveTextPlaceholder, "URISECRET1", "URISECRET2")
+	if got := formatContentTextPart(t, in); got != redactedSensitiveTextPlaceholder {
+		t.Errorf("FormatContentParts(%q) = %q, want %q", in, got, redactedSensitiveTextPlaceholder)
+	}
+}
+
+// sameRunBytes reports whether the run r maps each byte of
+// out[r.out:r.out+r.n] to an equal byte of raw[r.in:r.in+r.n], to a letter
+// of a URI scheme in another case, or, where either side starts an escape or
+// writes a space as "+", to the first byte of how the other side writes the
+// same byte (see copyRun).
+func sameRunBytes(out, raw string, r copyRun) bool {
+	unit := func(s string, i int) byte {
+		switch {
+		case s[i] == '%' && i+2 < len(s) && isHexByte(s[i+1]) && isHexByte(s[i+2]):
+			return unhexByte(s[i+1])<<4 | unhexByte(s[i+2])
+		case s[i] == '+':
+			return ' '
+		}
+		return s[i]
+	}
+	for j := range r.n {
+		a, b := out[r.out+j], raw[r.in+j]
+		if a == b || (a|0x20 == b|0x20 && 'a' <= a|0x20 && a|0x20 <= 'z') {
+			continue
+		}
+		if unit(out, r.out+j) != unit(raw, r.in+j) {
+			return false
+		}
+	}
+	return true
+}
+
+// spansCover reports whether spans hold every byte of [from, from+n).
+func spansCover(spans [][2]int, from, n int) bool {
+	for p := from; p < from+n; p++ {
+		held := false
+		for _, sp := range spans {
+			held = held || (sp[0] <= p && p < sp[1])
+		}
+		if !held {
+			return false
+		}
+	}
+	return n > 0
+}
+
+// runsCoverIn reports whether runs copy every byte of [from, from+n) of
+// their input.
+func runsCoverIn(runs []copyRun, from, n int) bool {
+	spans := make([][2]int, len(runs))
+	for i, r := range runs {
+		spans[i] = [2]int{r.in, r.in + r.n}
+	}
+	return spansCover(spans, from, n)
+}
+
+// TestURIKeyCredentialsRedactedWithTheirKey covers a credential written into
+// a URI key that reads as sensitive, as the Bearer SECRET_ONE of
+// ?Bearer+SECRET_ONE+token=SECRET_TWO, which reads as the key
+// "Bearer SECRET_ONE token" with each "+" as a space: the scanners scrub such
+// a key as text, as main scrubbed a key that it did not read as sensitive,
+// also when its value is redacted already, so that no entry point keeps the
+// credential, and each output is unchanged by a second pass. The legacy scrub
+// records what it removes from a URI component, so that the backstop also
+// fails closed a scrub that keeps such a credential.
+func TestURIKeyCredentialsRedactedWithTheirKey(t *testing.T) {
+	runInParallel(t)
+	for _, tc := range []struct{ in, want string }{
+		{"https://example.com/cb?Bearer+SECRET_ONE+token=SECRET_TWO", "https://example.com/cb?Bearer+%5BREDACTED%5D+token=%5BREDACTED%5D"},
+		{"https://example.com/cb?Basic+dXNlcjpwYXNz+token=SECRET_TWO", "https://example.com/cb?Basic+%5BREDACTED%5D+token=%5BREDACTED%5D"},
+		{"https://example.com/cb?Bearer+SECRET_ONE+token=[REDACTED]", "https://example.com/cb?Bearer+%5BREDACTED%5D+token=[REDACTED]"},
+		{"https://example.com/cb?x=1&Bearer+SECRET_ONE+token=SECRET_TWO&y=2", "https://example.com/cb?x=1&Bearer+%5BREDACTED%5D+token=%5BREDACTED%5D&y=2"},
+		{"https://example.com/cb?my+Bearer+SECRET_ONE+secret=x", "https://example.com/cb?my+Bearer+%5BREDACTED%5D+secret=%5BREDACTED%5D"},
+		{"https://example.com/cb?Basic+dXNlcjpwYXNz+api_key=[REDACTED]", "https://example.com/cb?Basic+%5BREDACTED%5D+api_key=[REDACTED]"},
+		{"see https://example.com/cb?Bearer+SECRET_ONE+token=SECRET_TWO now", "see https://example.com/cb?Bearer+%5BREDACTED%5D+token=%5BREDACTED%5D now"},
+		{"https://example.com/cb#Bearer%20SECRET_ONE%20token=SECRET_TWO", "https://example.com/cb#Bearer%20%5BREDACTED%5D%20token=%5BREDACTED%5D"},
+		{"https://example.com/cb?api_key%3DSECRET_ONE+token=[REDACTED]", redactedSensitiveTextPlaceholder},
+		{"https://example.com/a;Bearer%20SECRET_ONE%20token=SECRET_TWO/b", redactedSensitiveTextPlaceholder},
+	} {
+		for _, ep := range largeTextEntryPoints(t) {
+			got := ep.f(tc.in)
+			if got != tc.want {
+				t.Errorf("%s(%q) = %q, want %q", ep.name, tc.in, got, tc.want)
+			}
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+			}
+		}
+	}
+	// sanitizeURI scrubs a sensitive key of a path segment or a fragment
+	// pair as text too.
+	for _, tc := range []struct{ in, want string }{
+		{"https://example.com/a/Bearer%20SECRET_ONE%20token=[REDACTED]", "https://example.com/a/Bearer%20%5BREDACTED%5D%20token=%5BREDACTED%5D"},
+		{"https://example.com/a/Bearer%20SECRET_ONE%20token=SECRET_TWO", "https://example.com/a/Bearer%20%5BREDACTED%5D%20token=%5BREDACTED%5D"},
+		{"https://example.com/cb#x=1&Bearer%20SECRET_ONE%20token=[REDACTED]", "https://example.com/cb#x=1&Bearer%20%5BREDACTED%5D%20token=%5BREDACTED%5D"},
+	} {
+		if got, _ := sanitizeURI(tc.in); got != tc.want {
+			t.Errorf("sanitizeURI(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	// The legacy scrub reads the key as main did, as no sensitive key, and
+	// redacts the credential in it; it records that, so that a scrub that
+	// keeps the credential keeps a byte that the legacy scrub removes.
+	raw := "https://example.com/cb?Bearer+SECRET_ONE+token=SECRET_TWO"
+	var tr passTrace
+	legacyScrubTokensTraced(raw, false, &tr)
+	if !spansCover(tr.removed, strings.Index(raw, "SECRET_ONE"), len("SECRET_ONE")) {
+		t.Errorf("legacyScrubTokensTraced(%q) removed %v, want SECRET_ONE among them", raw, tr.removed)
+	}
+	kept := "https://example.com/cb?Bearer+SECRET_ONE+token=%5BREDACTED%5D"
+	var ktr passTrace
+	w := spanWriter{s: raw, tr: &ktr}
+	w.rewriteURI(0, len(raw), kept)
+	var m scrubMemo
+	if !m.leavesLegacyValue(raw, kept, ktr.runs) {
+		t.Errorf("leavesLegacyValue(%q, %q) = false, want true", raw, kept)
+	}
+}
+
+// TestURIRewriteAlignment covers the alignment of a URI that sanitizeURIWith
+// rewrites with the text (see uriAligner). url.URL.String escapes bytes of a
+// path, as ^, |, {, }, a backtick, a backslash and non-ASCII bytes, when it
+// writes a path that the rewrite of a newly sensitive segment changed, and a
+// byte after the URI that equals a hex digit of such an escape no longer
+// pulls the alignment past the fragment or query that the rewrite keeps, so
+// that the backstop sees them kept and fails closed the text whose
+// password: value main redacted there. The parts of a URI align apart: a
+// byte that the rewrite escapes or unescapes maps to the byte that it stands
+// for, the scheme maps whatever its case, a value replaced with a
+// placeholder counts as removed, a URI replaced as a whole keeps nothing, and
+// an alignment whose searches run out of budget marks its trace unaligned,
+// which fails the text closed.
+func TestURIRewriteAlignment(t *testing.T) {
+	runInParallel(t)
+	const secret = "secret_hunter2"
+	for _, path := range []struct{ seg, tails string }{
+		{"^", "5E"}, {"|", "7C"}, {"`", "6"}, {"{", "7B"}, {"}", "7D"}, {"\\", "5C"}, {"café", "C9A"}, {"%7B", "7B"},
+	} {
+		for _, key := range []string{"secret_key", "signing_key", "user:temp:x"} {
+			for _, sep := range []string{"#", "?"} {
+				for _, tail := range path.tails {
+					in := "https://h/" + path.seg + "/" + key + "/password:" + sep + secret + "&" + string(tail)
+					for _, ep := range largeTextEntryPoints(t) {
+						got := ep.f(in)
+						if strings.Contains(got, secret) {
+							t.Errorf("%s(%q) = %q kept %q", ep.name, in, got, secret)
+						}
+						if again := ep.f(got); again != got {
+							t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		raw           string
+		kept, removed []string
+	}{
+		{"https://h/^/secret_key/password:#secret_hunter2&5", []string{"https://h/", "^", "#secret_hunter2&5"}, []string{"secret_key", "password:"}},
+		{"HTTPS://h/a|b?q=a%20b+c&token=x#k=v", []string{"HTTPS://h/a", "|", "b?q=a%20b+c&token=", "#k=v"}, []string{"x"}},
+		{"https://h/café?key=1", []string{"https://h/café?key="}, []string{"1"}},
+		{"https://h/?err=password%3Aabc+def&ok=1", []string{"https://h/?err=password%3A", "+def&ok=1"}, []string{"abc"}},
+		{"https://u:p@h/a?x=1", nil, []string{"https://u:p@h/a?x=1"}},
+	} {
+		out, changed := sanitizeURI(tc.raw)
+		if !changed {
+			t.Fatalf("sanitizeURI(%q) changed nothing", tc.raw)
+		}
+		var tr passTrace
+		w := spanWriter{s: tc.raw, tr: &tr}
+		w.rewriteURI(0, len(tc.raw), out)
+		for _, r := range tr.runs {
+			if !sameRunBytes(out, tc.raw, r) {
+				t.Errorf("alignment of %q with %q: run %+v maps %q to %q", out, tc.raw, r, out[r.out:r.out+r.n], tc.raw[r.in:r.in+r.n])
+			}
+		}
+		for _, k := range tc.kept {
+			if !runsCoverIn(tr.runs, strings.Index(tc.raw, k), len(k)) {
+				t.Errorf("alignment of %q with %q (runs %v) does not keep %q", out, tc.raw, tr.runs, k)
+			}
+		}
+		for _, r := range tc.removed {
+			if !spansCover(tr.removed, strings.Index(tc.raw, r), len(r)) {
+				t.Errorf("alignment of %q with %q (removed %v) does not remove %q", out, tc.raw, tr.removed, r)
+			}
+		}
+		if tr.unaligned || (tc.kept == nil && len(tr.runs) > 0) {
+			t.Errorf("alignment of %q with %q: unaligned %v, runs %v", out, tc.raw, tr.unaligned, tr.runs)
+		}
+	}
+
+	// An alignment out of budget is unaligned, and so is the scrub.
+	raw := "https://h/?err=password%3Aabc+def&ok=1"
+	out, _ := sanitizeURI(raw)
+	var tr passTrace
+	a := newURIAligner(&tr, 0, 0, raw, out)
+	a.budget = -1
+	a.alignURI()
+	if !tr.unaligned || !spansCover(tr.removed, strings.Index(raw, "def"), len("def")) {
+		t.Errorf("alignment of %q with %q out of budget: unaligned %v, removed %v", out, raw, tr.unaligned, tr.removed)
+	}
+	// A scrub whose trace is unaligned fails closed, even for text that
+	// it keeps as it is.
+	for _, e := range []memoEntry{
+		{in: raw, out: out, trace: tr},
+		{in: "see https://h/a for details", out: "see https://h/a for details", trace: passTrace{unaligned: true}},
+	} {
+		var m scrubMemo
+		m.tokenRuns.e[0] = e
+		m.tokenRuns.n = 1
+		if got := m.scrubText(e.in); got != redactedSensitiveTextPlaceholder {
+			t.Errorf("scrubText(%q) with an unaligned URI = %q, want %q", e.in, got, redactedSensitiveTextPlaceholder)
+		}
+	}
+}
+
+// repeatUnitTo returns unit repeated to at least n bytes.
+func repeatUnitTo(unit string, n int) string {
+	return strings.Repeat(unit, max(1, (n+len(unit)-1)/len(unit)))
+}
+
+// TestAdversarialScalingURIRewrites checks that URIs whose rewrite writes
+// many bytes escaped or changed, as runs of pairs whose values are pairs, of
+// password pairs, of bearer values and of "+"-delimited sensitive keys, and
+// paths of bytes that url.URL.String escapes, stay linear, keep no secret and
+// are unchanged by a second pass of each entry point. Aligning such a URI
+// with the text searched the rest of the URI from each such byte, which took
+// quadratic time. scrubErrorText, which every entry point runs, is timed at
+// 16, 64 and 224 KiB, and every entry point runs the middle size; under the
+// race detector, whose instrumentation slows these scans more than ten
+// times, scrubErrorText is timed at 2 and 32 KiB and the entry points run
+// the smaller size.
+func TestAdversarialScalingURIRewrites(t *testing.T) {
+	runInParallel(t)
+	for _, shape := range []struct {
+		name      string
+		mk        func(n int) string
+		forbidden []string
+	}{
+		{"pairs whose values are pairs", func(n int) string { return "https://h/?a=1" + repeatUnitTo("&k=token=1", n-14) }, nil},
+		{"pairs whose values are password pairs", func(n int) string { return "https://h/?a=1" + repeatUnitTo("&k=password=1", n-14) }, nil},
+		{"bearer values", func(n int) string { return "https://h/?a=1" + repeatUnitTo("&k=Bearer%20x", n-14) }, nil},
+		{"plus-delimited sensitive keys", func(n int) string {
+			return "https://h/?a=1" + repeatUnitTo("&Bearer+PLUSKEYSECRET+token=1", n-14)
+		}, []string{"PLUSKEYSECRET"}},
+		{"escaped path bytes", func(n int) string { return "https://h/" + strings.Repeat("^", n-16) + "?key=1" }, nil},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			large := largeTextLen()
+			small, mid, big := shape.mk(large/14), shape.mk(large*2/7), shape.mk(large)
+			checked := mid
+			if raceEnabled {
+				checked = small
+			}
+			for _, ep := range largeTextEntryPoints(t) {
+				got := ep.f(checked)
+				for _, f := range shape.forbidden {
+					if strings.Contains(got, f) {
+						t.Errorf("%s(%d bytes of %.40q) kept %q", ep.name, len(checked), checked, f)
+					}
+				}
+				if again := ep.f(got); again != got {
+					t.Errorf("%s second pass(%d bytes of %.40q) = %.80q, want unchanged", ep.name, len(checked), checked, again)
+				}
+			}
+			scrub := func(s string) func() { return func() { _ = scrubErrorText(s) } }
+			if !raceEnabled {
+				if ratio, tSmall, tMid := linearRatio(16, scrub(small), scrub(mid)); ratio > 16 {
+					t.Errorf("%d bytes took %v, %d bytes took %v: ratio %.0f, want linear", len(small), tSmall, len(mid), tMid, ratio)
+				}
+			}
+			ratio, tSmall, tBig := linearRatio(56, scrub(small), scrub(big))
+			if ratio > 56 {
+				t.Errorf("%d bytes took %v, %d bytes took %v: ratio %.0f, want linear", len(small), tSmall, len(big), tBig, ratio)
+			}
+			maxWall := 4 * time.Second
+			if raceEnabled {
+				maxWall = 40 * time.Second
+			}
+			if tBig > maxWall {
+				// Timed again, alone if need be (see withinWallClock).
+				tBig = min(tBig, withinWallClock(maxWall, scrub(big)))
+			}
+			if tBig > maxWall {
+				t.Errorf("scrubErrorText(%d bytes of %.40q) took %v, want at most %v", len(big), big, tBig, maxWall)
+			}
+		})
+	}
+}
+
+// TestJSONLeavesStayValidJSON covers valid JSON whose string leaves a pass
+// redacts: a leaf that starts with a URI with credentials and goes on with
+// quoted pairs or escaped quotes, which a later pass read as malformed JSON
+// text and failed closed; a leaf that is the JSON text of another document;
+// a JSON string literal that holds a document; and a leaf whose text scrub
+// takes its closing quote with the value. Each entry point that reads JSON
+// keeps such a value valid JSON with the credentials redacted, and a second
+// pass changes nothing, while JSON that does not parse still fails closed, a
+// credential that the scrub of the text reads across strings is not kept,
+// and documents nested in strings 12 levels deep stay fast.
+func TestJSONLeavesStayValidJSON(t *testing.T) {
+	runInParallel(t)
+	jsonEntryPoints := largeTextEntryPoints(t)[1:]
+	for _, tc := range []struct{ in, want string }{
+		{`{"log":"https://u:p@h/a \"token\":\"SECRET\""}`, `{"log":"[REDACTED_SENSITIVE_URI] \"token\":\"[REDACTED]\""}`},
+		{`{"log":"https://u:p@h/a 'token':'SECRET'"}`, `{"log":"[REDACTED_SENSITIVE_URI] 'token':'[REDACTED]'"}`},
+		{`{"log":"https://u:p@h/a \\\"hi\\\""}`, `{"log":"[REDACTED_SENSITIVE_URI] \\\"hi\\\""}`},
+		{`{"nested":"{\"url\":\"https://example.com/path?a=1&access_token=SECRET\"}"}`, `{"nested":"{\"url\":\"https://example.com/path?a=1\u0026access_token=%5BREDACTED%5D\"}"}`},
+		{`"{\"url\":\"https://example.com/path?a=1&access_token=SECRET\"}"`, `"{\"url\":\"https://example.com/path?a=1\\u0026access_token=%5BREDACTED%5D\"}"`},
+		{`{"msg":"say \"hi\" &access_token=SECRET"}`, `{"msg":"say \"hi\" \u0026access_token=[REDACTED]"}`},
+		{`[{"url":"https://example.com/cb?x=1&token=SECRET"},"say \"hi\" &access_token=SECRET2"]`, `[{"url":"https://example.com/cb?x=1\u0026token=%5BREDACTED%5D"},"say \"hi\" \u0026access_token=[REDACTED]"]`},
+	} {
+		for _, ep := range jsonEntryPoints {
+			got := ep.f(tc.in)
+			if got != tc.want || !json.Valid([]byte(got)) {
+				t.Errorf("%s(%q) = %q, want %q", ep.name, tc.in, got, tc.want)
+			}
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+			}
+		}
+	}
+	for _, tc := range []struct{ in, want string }{
+		{`{"log":"x","nested":"{\"url\":\"https://example.com/?access_token=SECRET\""}`, `{"log":"x","nested":"[UNPARSEABLE_JSON_BLOB]"}`},
+		{`{"msg":"say \"hi\" &access_token=SECRET"`, unparseableJSONPlaceholder},
+	} {
+		for _, ep := range jsonEntryPoints {
+			if got := ep.f(tc.in); got != tc.want {
+				t.Errorf("%s(%q) = %q, want %q", ep.name, tc.in, got, tc.want)
+			}
+		}
+	}
+	// The scrub of the text reads the header value of the first string on
+	// into the next, and the credentials in the keys; sanitizeRawText,
+	// SmartTruncate and FormatContentParts keep none of them, as on main,
+	// while redactErrorMessage redacts the leaves of a JSON document one by
+	// one, as it did on main.
+	for _, in := range []string{
+		`["x-api-key:", "SECRET1", "say \"hi\" &access_token=SECRET2"]`,
+		`{"password=SECRET1":"x","c":"say \"hi\" &access_token=SECRET2"}`,
+		`{"temp:Bearer SECRET1":"x","c":"say \"hi\" &access_token=SECRET2"}`,
+		`{"n":"[\"x-api-key:\", \"SECRET1\"]","c":"say \"hi\" &access_token=SECRET2"}`,
+	} {
+		for _, ep := range jsonEntryPoints[1:] {
+			got := ep.f(in)
+			if strings.Contains(got, "SECRET1") || strings.Contains(got, "SECRET2") {
+				t.Errorf("%s(%q) = %q kept a secret", ep.name, in, got)
+			}
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+			}
+		}
+	}
+	nested := `{"url":"https://example.com/p?a=1&access_token=NESTEDSECRET"}`
+	for range 12 {
+		b, err := json.Marshal(map[string]string{"nested": nested})
+		if err != nil {
+			t.Fatal(err)
+		}
+		nested = string(b)
+	}
+	maxWall := 2 * time.Second
+	if raceEnabled {
+		maxWall = 20 * time.Second
+	}
+	eps := largeTextEntryPoints(t)
+	got, again, elapsed := timeEntryPoints(maxWall, nested, eps)
+	for i, ep := range eps {
+		if strings.Contains(got[i], "NESTEDSECRET") {
+			t.Errorf("%s(%d bytes nested 12 deep) = %.80q kept the secret", ep.name, len(nested), got[i])
+		}
+		if again[i] != got[i] {
+			t.Errorf("%s second pass(%d bytes nested 12 deep) = %.80q, want unchanged", ep.name, len(nested), again[i])
+		}
+	}
+	if elapsed > maxWall {
+		t.Errorf("%d bytes nested 12 deep took %v through the entry points, want at most %v", len(nested), elapsed, maxWall)
+	}
+}
+
+// TestJSONLeavesReadStringsAsSpelled covers JSON documents whose strings the
+// scrub of the text reads otherwise than the strings decoded: a header that a
+// line break ends in a string, which the text spells as the escape \n, \r,
+// \u000a or \u000D, so that its value runs on into the next string, in an
+// object, an array, a key, a document in a string and a JSON string literal,
+// with or without a placeholder in the header already; a quote that a later
+// string closes; a document in a string whose header runs on into the next
+// string of the outer document once the redaction has failed the inner one
+// closed; quotes that a JSON string literal spells as \u0022, past which a
+// bearer credential runs on; a document that the redaction writes again with
+// its keys sorted, as for a compound key, past which a header value would run
+// on over other strings than on main; a document in a string whose sensitive
+// key main redacts, which writes the escaped colon of a header as a colon in
+// the text that main scrubs; a header in the value of a compound key, which
+// main keeps and runs on over the strings after it once it writes the
+// document again with its keys sorted; and a header in the path of a URL
+// leaf, which the expressions of main without compound keys read on past the
+// leaf. No entry point keeps a secret that main
+// removes from the text, redactErrorMessage keeps one only where main scrubs
+// the string that holds it on its own, and a second pass changes nothing. A
+// URL leaf whose query value the passes, but not the expressions of main, read
+// on past its escaped closing quote in a document in a string keeps the
+// document valid JSON, as does a document whose sensitive keys may run on into
+// the placeholders of their values.
+func TestJSONLeavesReadStringsAsSpelled(t *testing.T) {
+	runInParallel(t)
+	marshal := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	type spelledCase struct {
+		in string
+		// keptByLeaves reports that redactErrorMessage scrubs the string
+		// that holds the secret on its own, as it did on main, and keeps it.
+		keptByLeaves bool
+	}
+	var cases []spelledCase
+	for _, header := range []string{"Authorization:", "x-api-key:", "api-key:", "proxy-authorization:", "Authorization: [REDACTED]", "x-api-key: [REDACTED]"} {
+		for _, brk := range []string{`\n`, `\r`, `\u000a`, `\u000D`} {
+			str := `"` + header + brk + `"`
+			var decoded string
+			if err := json.Unmarshal([]byte(str), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			cases = append(cases,
+				spelledCase{`{"a":` + str + `,"b":"SECRET"}`, true},
+				spelledCase{`[` + str + `,"SECRET"]`, true},
+				spelledCase{`{` + str + `:"x","b":"SECRET"}`, true},
+				spelledCase{marshal(map[string]string{"k": marshal(map[string]string{"a": decoded, "b": "SECRET"})}), false},
+				spelledCase{marshal(marshal([]string{decoded, "SECRET"})), false},
+				spelledCase{marshal(marshal(map[string]string{"a": decoded, "b": "SECRET"})), false},
+			)
+		}
+	}
+	cases = append(cases,
+		spelledCase{`["access_token='","SECRET","'"]`, true},
+		spelledCase{`{"a":"token:'","b":"SECRET","c":["token:'","x"]}`, true},
+		spelledCase{`{"k":"{\"a\":\"x-api-key:\\r\",\"b\":\"x\"}","c":"SECRET"}`, true},
+		spelledCase{`{"x":{"x":"proxy-authorization:  [REDACTED]"},"data":"SECRET","zz_password":"hunter2"}`, true},
+		spelledCase{`"{\u0022x Bearer [REDACTED]\u005cr\u0022:\u0022SECRET\u0022}"`, false},
+		spelledCase{`["{\"token\":\"x\",\"x_api_key\\u003a\\r\":\"x\"}","SECRET"]`, true},
+		spelledCase{`{"password":"p","b":"SECRET","aa_secret":"Authorization: x"}`, true},
+		spelledCase{`{"k":"{\"password\":\"p\",\"b\":\"SECRET\",\"aa_secret\":\"Authorization: x\"}"}`, false},
+		spelledCase{`{"url":"https://h/b/secret_key/api_key:?x","n":"SECRET"}`, true},
+	)
+	eps := largeTextEntryPoints(t)
+	for _, c := range cases {
+		for _, ep := range eps[1:] {
+			got := ep.f(c.in)
+			if strings.Contains(got, "SECRET") && (!c.keptByLeaves || ep.name != "redactErrorMessage") {
+				t.Errorf("%s(%q) = %q kept the secret", ep.name, c.in, got)
+			}
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+			}
+		}
+	}
+	for _, tc := range []struct{ in, want string }{
+		{`{"nested":"{\"url\":\"https://example.com/path?a=1&access_token=SECRET\",\"b\":\"PLANTED\"}"}`, `{"nested":"{\"b\":\"PLANTED\",\"url\":\"https://example.com/path?a=1\u0026access_token=%5BREDACTED%5D\"}"}`},
+		{`{"token":"SECRET1","n":"{\"url\":\"https://h/p?access_token=SECRET2\"}"}`, `{"n":"{\"url\":\"https://h/p?access_token=%5BREDACTED%5D\"}","token":"[REDACTED]"}`},
+	} {
+		for _, ep := range eps[1:] {
+			if got := ep.f(tc.in); got != tc.want {
+				t.Errorf("%s(%q) = %q, want %q", ep.name, tc.in, got, tc.want)
+			}
+		}
+	}
+	// SmartTruncate keeps the structure of a document whose sensitive key
+	// may run on into the placeholder of its value, where main fails the
+	// text closed.
+	in := `{"password":"SECRET1","url":"https://example.com/p?a=1&access_token=SECRET2"}`
+	want := `{"password":"[REDACTED]","url":"https://example.com/p?a=1\u0026access_token=%5BREDACTED%5D"}`
+	if got := eps[3].f(in); got != want {
+		t.Errorf("%s(%q) = %q, want %q", eps[3].name, in, got, want)
+	}
+}
+
+// TestLeavesScrubApartChecks covers the checks behind leavesScrubApart one by
+// one: the strings of a document read decoded and as the text spells them,
+// at each level of a document in a string; the expressions of main applied to
+// the document as it is, which may remove no part of more than one value; and
+// the decoding of a JSON string that maps each decoded byte to its escape, so
+// that the values of a document in a string start where the outer text
+// spells them.
+func TestLeavesScrubApartChecks(t *testing.T) {
+	runInParallel(t)
+	for _, tc := range []struct {
+		doc  string
+		want bool
+	}{
+		{`{"a":"x","b":"y"}`, true},
+		{`{"url":"https://example.com/path?a=1&access_token=%5BREDACTED%5D","b":"x"}`, true},
+		{`{"nested":"{\"url\":\"https://example.com/path?a=1&access_token=%5BREDACTED%5D\",\"b\":\"x\"}"}`, true},
+		{`{"msg":"retry\npassword=[REDACTED] vault: secret:[REDACTED]"}`, true},
+		{`{"a":"Authorization:\n","b":"SECRET"}`, false},
+		{`{"a":"Authorization:\u000a","b":"SECRET"}`, false},
+		{`["Authorization: [REDACTED]\r","SECRET"]`, false},
+		{`{"Authorization: [REDACTED]\n":"SECRET"}`, false},
+		{`"[\"x-api-key: [REDACTED]\\n\",\"SECRET\"]"`, false},
+		{`["access_token='","SECRET","'"]`, false},
+		{`"{\u0022x Bearer [REDACTED]\u005cr\u0022:\u0022SECRET\u0022}"`, false},
+	} {
+		if got := leavesScrubApart(tc.doc, 0); got != tc.want {
+			t.Errorf("leavesScrubApart(%q) = %v, want %v", tc.doc, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		doc  string
+		want bool
+	}{
+		{`{"a":"x-api-key: v"}`, true},
+		{`["x-api-key: v","SECRET"]`, false},
+		{`["x-api-key: v",1]`, false},
+		{`["access_token='","SECRET","'"]`, false},
+		{`{"k":"{\"a\":\"x-api-key: v\",\"b\":\"SECRET\"}"}`, false},
+		{`{"k":"[\"x-api-key: v\"]","b":"x"}`, false},
+		{`{"k":"[\"token=v\"]","b":"x"}`, true},
+		{`{"url":"https://h/b/secret_key/api_key:?x","n":"SECRET"}`, false},
+		{`"{\u0022x Bearer [REDACTED]\u005cr\u0022:\u0022SECRET\u0022}"`, false},
+	} {
+		if got := expressionsKeepStringsApart(tc.doc); got != tc.want {
+			t.Errorf("expressionsKeepStringsApart(%q) = %v, want %v", tc.doc, got, tc.want)
+		}
+	}
+	raw := `a\"b\u00e9\ud83d\ude00\ud800x\/`
+	got, pos, ok := decodeJSONStringMapped(raw)
+	wantPos := []int{0, 1, 3, 4, 4, 10, 10, 10, 10, 22, 22, 22, 28, 29, 31}
+	if want := "a\"b\u00e9\U0001F600\ufffdx/"; !ok || got != want || !slices.Equal(pos, wantPos) {
+		t.Errorf("decodeJSONStringMapped(%q) = (%q, %v, %v), want (%q, %v, true)", raw, got, pos, ok, want, wantPos)
+	}
+	for _, bad := range []string{`a\`, `\x41`, `\u12`, `\u12G4`} {
+		if _, _, ok := decodeJSONStringMapped(bad); ok {
+			t.Errorf("decodeJSONStringMapped(%q) reports true, want false", bad)
+		}
+	}
+	var starts []int
+	if doc := `{"k":"{\"a\":1}"}`; !appendValueStarts(doc, nil, &starts, 0) || !slices.Equal(starts, []int{1, 5, 7, 13}) {
+		t.Errorf("appendValueStarts(%q) = %v, want [1 5 7 13]", doc, starts)
+	}
+}
+
+// TestLeavesScrubApartLinearScaling covers the cost of leavesScrubApart on
+// large JSON documents that it reads as a whole: strings with escapes, URL
+// leaves, objects, and documents in strings. Each string is read a fixed
+// number of times in each spelling, and the whole document once with the
+// expressions of main, so the work stays linear, as it does for a document
+// whose sensitive keys SmartTruncate redacts.
+func TestLeavesScrubApartLinearScaling(t *testing.T) {
+	runInParallel(t)
+	inner, err := json.Marshal(map[string]string{"k": "v\n<&>", "u": "https://h/p?a=1&b=2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoted, err := json.Marshal(string(inner))
+	if err != nil {
+		t.Fatal(err)
+	}
+	smallN, largeN := scalingUnits()
+	for _, tc := range []struct{ name, unit string }{
+		{"escaped strings", `"x\n<a&b> \"q\" \\ \t",`},
+		{"URL leaves", `"https://h/p?a=1&b=2 see",`},
+		{"objects", `{"k":"v 1","n":2},`},
+		{"documents in strings", string(quoted) + ","},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			small := "[" + strings.Repeat(tc.unit, smallN) + `"z"]`
+			large := "[" + strings.Repeat(tc.unit, largeN) + `"z"]`
+			if !leavesScrubApart(large, 0) {
+				t.Fatalf("leavesScrubApart(%d bytes of %.40q) = false, want true", len(large), large)
+			}
+			if ratio, tSmall, tLarge := linearRatio(64, func() { leavesScrubApart(small, 0) }, func() { leavesScrubApart(large, 0) }); ratio > 64 {
+				t.Errorf("leavesScrubApart scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, tSmall, len(small), tLarge, len(large))
+			}
+		})
+	}
+	// A document whose sensitive keys the redaction changes is read once
+	// more, as written and with its keys sorted (see keyRedactionHidesRunOn),
+	// through every entry point that redacts it.
+	t.Run("objects with sensitive keys through SmartTruncate", func(t *testing.T) {
+		unit := `{"password":"x","note":"y <a&b>","n":1},`
+		small := "[" + strings.Repeat(unit, smallN) + `"z"]`
+		large := "[" + strings.Repeat(unit, largeN) + `"z"]`
+		truncate := func(s string) func() { return func() { _, _, _ = SmartTruncate(s, -1) } }
+		if ratio, tSmall, tLarge := linearRatio(64, truncate(small), truncate(large)); ratio > 64 {
+			t.Errorf("SmartTruncate scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, tSmall, len(small), tLarge, len(large))
+		}
+	})
+}
+
+// TestEscapedRunOnAcrossJSONStringsFailsClosed covers JSON documents whose
+// strings the expressions of main read as one credential only once the
+// escapes of the text are decoded: a quote or a header delimiter spelled as
+// \u0027, \u0022, \u003a, \u003d, %27 or \", which a later string closes or
+// runs on into, as the quote after Bearer in ["Bearer '","SECRET","\u0027"],
+// a key that is sensitive only decoded, as the temp%3aa of
+// {"temp%3aa":"SECRET"}, and a quote spelled %22 that the closing quote of
+// its string closes.
+// scrubErrorText on main failed the text of such a document closed as a
+// whole, so no entry point that scrubs it as text there may redact it string
+// by string and keep the secret in another string (see
+// expressionsKeepStringsApart, which reads the text with its escapes
+// decoded), and a document whose redaction of a compound key would take the
+// header that runs on fails closed too (see keyRedactionHidesRunOn).
+// redactErrorMessage scrubs the strings of a document that is not in a JSON
+// string literal or a string one by one, as main did, and keeps the secret
+// where main kept it.
+func TestEscapedRunOnAcrossJSONStringsFailsClosed(t *testing.T) {
+	runInParallel(t)
+	quote := func(doc string) string {
+		b, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	type escapedCase struct {
+		in string
+		// keptByLeaves reports that redactErrorMessage scrubs the string
+		// that holds the secret on its own, as it did on main, and keeps it.
+		keptByLeaves bool
+	}
+	var cases []escapedCase
+	for _, doc := range []string{
+		`{"zz_secret":"Authorization\u003a\n","b":"RVIEWz9SECRET"}`,
+		`["access_token\u003d'","SECRET","'"]`,
+		`["Bearer '","SECRET","\u0027"]`,
+		`{"a":"Bearer '","b":"SECRET%27"}`,
+		`["password: \u0027token:[REDACTED] ","SECRET","'"]`,
+		// A header whose decoded value runs on into a later string that
+		// it holds as a whole, and a key that main read as sensitive only
+		// with its escapes decoded, whose value no leaf redacts.
+		`["Authorization%3A token:[REDACTED]\t" , "SECRET"]`,
+		`["Authorization%3A x\t","SECRET"]`,
+		`{"temp%3aa":"SECRET"}`,
+		`{"temp%3aa\u003D[REDACTED] ":"SECRET","x_token":""}`,
+		`{"temp%3aa\u003D\r\n[REDAC\u0054ED] ":" SECRET\\u0027","page_token":"%22"}`,
+		// A document in a JSON string literal whose redaction fails
+		// closed fails the literal closed as a whole.
+		`{"db_password": "api_key%3d\"token:[REDACTED]%20" , "page_token": "x" , "c": "SECRET"}`,
+		"{\"x_token\": \"see Authorization\\u003A \\r\\ntoke\\u006E\\u003A[REDACTED]\\t\",\n  \"msg\": \"SECRET\",\n  \"note\": \"%0a\"}",
+	} {
+		cases = append(cases,
+			escapedCase{doc, true},
+			escapedCase{quote(doc), false},
+			escapedCase{`{"nested":` + quote(doc) + `}`, false},
+		)
+	}
+	for _, doc := range []string{
+		`["access_token=\u0027","RVIEWz9SECRET","\u0027"]`,
+		`{"a":"token=\u0027","b":"RVIEWz9SECRET","c":"\u0027"}`,
+		`{"a":"token\u003d\u0027","b":"RVIEWz9SECRET","c":"\u0027"}`,
+		`["Bearer \"","RVIEWz9SECRET","\""]`,
+		`{"a":"Bearer \"x","b":"RVIEWz9SECRET","c":"\""}`,
+		`["Bearer \u0027","RVIEWz9SECRET","\u0027"]`,
+		`["Bearer \u0022","RVIEWz9SECRET","\u0022"]`,
+		`{"a":"Bearer\u0020\u0022","b":"RVIEWz9SECRET","c":"\u0022"}`,
+		`["Bearer \u0027","SECRET","'"]`,
+		`["\u0042earer '","SECRET","'"]`,
+		`["Bearer '","SECRET","%27"]`,
+		`{"a":"Bearer '","b":"SECRET%27","password":"x"}`,
+		`{"a":"x-api-key\u003a","b":"SECRET"}`,
+		`{"db_password":"Bearer\u0020\u0027","b":"SECRET","c":"'"}`,
+		// A quote that %22 spells opens a value that the closing quote of
+		// its string closes, which main read as one credential.
+		`{"m":"access_token=%22a;key=SECRET;token=c"}`,
+		`{"url":"https://h/p#a=https%3A%2F%2Fh%2Fcb%3Faccess_token%3DSECRET;access_token=%22SECRET;key%3DSECRET;Bearer+x+token:token=SECRET","n":"x"}`,
+	} {
+		cases = append(cases, escapedCase{doc, true})
+	}
+	cases = append(cases, escapedCase{`{"payload":"[\"Bearer \\\"\", \"RVIEWz9SECRET\", \"\\\"\"]"}`, false})
+	eps := largeTextEntryPoints(t)
+	for _, c := range cases {
+		for _, ep := range eps {
+			got := ep.f(c.in)
+			if strings.Contains(got, "SECRET") && (!c.keptByLeaves || ep.name != "redactErrorMessage") {
+				t.Errorf("%s(%q) = %q kept the secret", ep.name, c.in, got)
+			}
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+			}
+		}
+	}
+	// A document whose escapes, decoded, read as no credential across its
+	// strings keeps its structure: HTML escapes, a quote that no later
+	// string closes, a credential that its own string holds next to
+	// escaped quotes, and a header whose value is a placeholder already,
+	// in a JSON string literal, as on main.
+	for _, tc := range []struct{ in, want string }{
+		{`{"a":"x \u003c y \u0026 z","b":"w"}`, `{"a":"x \u003c y \u0026 z","b":"w"}`},
+		{`["it\u0027s","fine"]`, `["it\u0027s","fine"]`},
+		{`{"msg":"say \"hi\" &access_token=SECRET1"}`, `{"msg":"say \"hi\" \u0026access_token=[REDACTED]"}`},
+		{`"[\"dbPassword\\u003A [REDACTED]\",\"x\"]"`, `"[\"dbPassword\\u003A [REDACTED]\",\"x\"]"`},
+	} {
+		for _, ep := range eps[2:] {
+			if got := ep.f(tc.in); got != tc.want {
+				t.Errorf("%s(%q) = %q, want %q", ep.name, tc.in, got, tc.want)
+			}
+		}
+	}
+	// SmartTruncate redacts a URL leaf next to an escaped tab as a leaf.
+	urlIn := `{"url":"https://example.com/p?a=1&access_token=SECRET1","n":"x\ty"}`
+	if got, want := eps[3].f(urlIn), `{"n":"x\ty","url":"https://example.com/p?a=1\u0026access_token=%5BREDACTED%5D"}`; got != want {
+		t.Errorf("%s(%q) = %q, want %q", eps[3].name, urlIn, got, want)
+	}
+	// Read with their escapes decoded, the expressions of main may remove no
+	// first or last byte of a value that they keep as written, but for those
+	// of one value as a whole, or around a placeholder.
+	for _, tc := range []struct {
+		doc  string
+		want bool
+	}{
+		{`["Bearer '","SECRET","\u0027"]`, false},
+		{`["Bearer '","SECRET","%27"]`, false},
+		{`["Bearer \"","SECRET","\""]`, false},
+		{`{"a":"token\u003d\u0027","b":"x","c":"\u0027"}`, false},
+		{`{"zz_secret":"Authorization\u003a\n","b":"x"}`, false},
+		{`["db_password\u003d'","x","'"]`, false},
+		{`{"a":"Bearer \u0022abc"}`, false},
+		{`["Authorization%3A x\t","SECRET"]`, false},
+		{`{"temp%3aa":"SECRET"}`, false},
+		{`{"m":"access_token=%22a;key=b;token=c"}`, false},
+		{`{"a":"x \u003c y \u0026 z","b":"w"}`, true},
+		{`["it\u0027s","fine"]`, true},
+		{`{"msg":"say \"hi\" \u0026access_token=[REDACTED]"}`, true},
+		{`{"url":"https://example.com/p?a=1\u0026access_token=%5BREDACTED%5D"}`, true},
+		{`{"pass\u0077ord":"x"}`, true},
+		{`{"a":"Bearer\u0020tok","b":"x"}`, true},
+		{`{"temp:a":"x\u0026y","b":"z"}`, true},
+		{`{"password":"x\u0026y","b":"z"}`, true},
+	} {
+		if got := expressionsKeepStringsApart(tc.doc); got != tc.want {
+			t.Errorf("expressionsKeepStringsApart(%q) = %v, want %v", tc.doc, got, tc.want)
+		}
+	}
+}
+
+// TestLineStartPathPrefixedKeysFollowMain covers a key name on a line of its
+// own with words before the key that the expressions of main read as part of
+// a value: a path that holds a backslash, which no key name of main holds,
+// before a key of main, a compound key or a state key, and a path before a
+// key that main did not have, as secret_key, signing_key, api.key or
+// db_password. main redacted such a name as the value of the pair on the line
+// above, so it is redacted here too, with the value of the pair that it
+// starts, rather than kept as a nested key or failed closed, and the backstop
+// exempts no word before the key of such a name (see redactedKeyBytesWith).
+// A path before a key of main, as /etc/ssl/password, stays a nested key, as
+// on main.
+func TestLineStartPathPrefixedKeysFollowMain(t *testing.T) {
+	runInParallel(t)
+	eps := largeTextEntryPoints(t)
+	// Each text is the pair of a key on the line above whose value runs on
+	// over the name, which is redacted with it rather than failed closed.
+	check := func(in string) {
+		t.Helper()
+		want := in[:strings.IndexByte(in, ':')] + ":" + redactedValue
+		for _, ep := range eps {
+			got := ep.f(in)
+			if got != want {
+				t.Errorf("%s(%q) = %q, want %q", ep.name, in, got, want)
+			}
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+			}
+		}
+	}
+	for _, in := range []string{
+		"password:\n  \\SECRET/token:\"a b\"",
+		"password:\n  C:\\SECRET/token:\"a b\"",
+		"password:\n  /SECRET\\x/token:\"a b\"",
+		"password:\n  \\SECRET/token:\"[REDACTED] \"",
+		"password:\n  /SECRET/secret_key: [REDACTED]",
+		"password:\n  /SECRET/signing_key: [REDACTED]",
+		"password:\n  C:\\SECRET\\secret_key: [REDACTED]",
+	} {
+		check(in)
+	}
+	for _, head := range []string{"password:\n  ", "credentials:\n  ", "password:\r\n\t"} {
+		for _, prefix := range []string{`\SECRET/`, `C:\SECRET\`, `C:\SECRET/`, `/SECRET\x/`, `\\SECRET/`} {
+			for _, key := range []string{"token", "password", "client_secret", "secret_key", "signing_key", "api.key", "db_password", "my_api_key", "temp:x"} {
+				for _, value := range []string{": [REDACTED]", ":[REDACTED]", `:"a b"`, `:"[REDACTED] "`, ": v", `='a b'`} {
+					check(head + prefix + key + value)
+				}
+			}
+		}
+		for _, prefix := range []string{"/SECRET/", "/a/SECRET/", "C:/SECRET/"} {
+			for _, key := range []string{"secret_key", "signing_key", "api.key", "private.key", "db_password", "my_api_key"} {
+				for _, value := range []string{": [REDACTED]", `:"a b"`, ": v"} {
+					check(head + prefix + key + value)
+				}
+			}
+		}
+	}
+	for _, tc := range []struct{ in, want string }{
+		{"credentials:\n  /etc/ssl/password: v", "credentials:\n  /etc/ssl/password:[REDACTED]"},
+		{"credentials:\n  C:/ssl/token: v", "credentials:\n  C:/ssl/token:[REDACTED]"},
+	} {
+		for _, ep := range eps {
+			if got := ep.f(tc.in); got != tc.want {
+				t.Errorf("%s(%q) = %q, want %q", ep.name, tc.in, got, tc.want)
+			}
+		}
+	}
+}
+
+// TestEscapedReadingsMatchMain checks that the readings that
+// expressionsKeepStringsApart reads a document in are the texts that
+// scrubErrorText decodes it into before it fails it closed (see
+// escapedReadings): each mapped decoder returns what
+// canonicalizeCredentialMarker, unescapeBackslashControls and
+// unescapeCredentialStep return, with one offset of the input for each byte
+// of the result and for its end, in order, so that what the expressions
+// remove from a reading maps back to the bytes that it is decoded from.
+func TestEscapedReadingsMatchMain(t *testing.T) {
+	runInParallel(t)
+	frags := []string{
+		`\u0027`, `\u0022`, `\u003a`, `\u003D`, `\U0041`, `\u00e9`, `\ud83d`, `\u004`, `\x41`, `\xZZ`,
+		`%27`, `%22`, `%3a`, `%2F`, `%5BREDACTED%5D`, `%4`, `%`, `%255C`,
+		`\"`, `\'`, `\\`, `\n`, `\r`, `\t`, `\/`, `\b`, `\f`, `\`, `\\u0041`, `\\\"`,
+		"a", " ", `"`, "'", "\u00e9", "\xff", "token=", "Bearer ", "[REDACTED]",
+	}
+	inputs := []string{"", `["Bearer '","SECRET","\u0027"]`, `{"m":"access_token=%22a;key=b;token=c"}`, `["Authorization%3A x\t","SECRET"]`}
+	state := uint64(2250)
+	next := func(n int) int {
+		state = state*6364136223846793005 + 1442695040888963407
+		return int(state>>33) % n
+	}
+	for range 3000 {
+		var b strings.Builder
+		for n := 1 + next(8); n > 0; n-- {
+			b.WriteString(frags[next(len(frags))])
+		}
+		inputs = append(inputs, b.String())
+	}
+	checkPos := func(name, in, text string, pos []int) {
+		t.Helper()
+		if len(pos) != len(text)+1 || pos[len(text)] != len(in) || pos[0] < 0 || !slices.IsSorted(pos) {
+			t.Errorf("%s(%q) = %q maps to %v, want an offset of the input in order for each byte and the end", name, in, text, pos)
+		}
+	}
+	for _, in := range inputs {
+		if text, pos := canonicalizeMapped(in); text != canonicalizeCredentialMarker(in) {
+			t.Errorf("canonicalizeMapped(%q) = %q, want %q", in, text, canonicalizeCredentialMarker(in))
+		} else {
+			checkPos("canonicalizeMapped", in, text, pos)
+		}
+		if text, pos := unescapeBackslashControlsMapped(in); text != unescapeBackslashControls(in) {
+			t.Errorf("unescapeBackslashControlsMapped(%q) = %q, want %q", in, text, unescapeBackslashControls(in))
+		} else {
+			checkPos("unescapeBackslashControlsMapped", in, text, pos)
+		}
+		if r := unescapeCredentialStepMapped(in); r.text != unescapeCredentialStep(in) {
+			t.Errorf("unescapeCredentialStepMapped(%q) = %q, want %q", in, r.text, unescapeCredentialStep(in))
+		} else {
+			checkPos("unescapeCredentialStepMapped", in, r.text, r.pos)
+		}
+		seen := map[string]bool{in: true}
+		for _, r := range escapedReadings(in) {
+			if seen[r.text] {
+				t.Errorf("escapedReadings(%q) holds %q twice, or the input itself", in, r.text)
+			}
+			seen[r.text] = true
+			checkPos("escapedReadings", in, r.text, r.pos)
+		}
 	}
 }

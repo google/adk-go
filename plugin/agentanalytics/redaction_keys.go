@@ -656,16 +656,18 @@ func splitCompoundKey(k string) (compact string, starts []bool) {
 
 // isPageTokenKey reports whether before, the words of a compound key before
 // its last word "token" (see splitCompoundKey), make the key a pagination,
-// sync or padding token rather than a credential: "next", "prev", "previous"
-// or "pad" directly before "token" (as in next_token, NextToken, prev_token or
-// pad_token), or "page", "sync" or "continuation" after no other word or after
-// "next", "prev" or "previous" (as in page_token, next_page_token,
+// sync or tokenizer token rather than a credential: "next", "prev" or
+// "previous" directly before "token" (as in next_token, NextToken or
+// prev_token), the name of a special token of a tokenizer, "pad", "eos",
+// "bos", "unk", "cls", "sep" or "mask" (as in pad_token, eos_token, bosToken
+// or mask-token), or "page", "sync" or "continuation" after no other word or
+// after "next", "prev" or "previous" (as in page_token, next_page_token,
 // nextPageToken, sync_token, syncToken, nextSyncToken, continuation_token or
 // continuationToken). A key whose other words differ, such as fb_page_token,
 // the access token of a Facebook Page, is not a cursor.
 func isPageTokenKey(before string, starts []bool) bool {
 	switch before {
-	case "next", "prev", "previous", "pad":
+	case "next", "prev", "previous", "pad", "eos", "bos", "unk", "cls", "sep", "mask":
 		return true
 	}
 	for _, cursor := range []string{"page", "sync", "continuation"} {
