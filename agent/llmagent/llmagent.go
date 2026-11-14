@@ -54,6 +54,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/codeexecutor"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -136,6 +137,7 @@ func New(cfg Config) (agent.Agent, error) {
 			GlobalInstruction:         cfg.GlobalInstruction,
 			GlobalInstructionProvider: llminternal.InstructionProvider(cfg.GlobalInstructionProvider),
 			OutputKey:                 cfg.OutputKey,
+			CodeExecutor:              cfg.CodeExecutor,
 		},
 	}
 
@@ -505,6 +507,23 @@ type Config struct {
 	//
 	// Default value is ModeChat as a sub-agent, ModeSingleTurn as a node in a workflow.
 	Mode Mode
+
+	// CodeExecutor lets the agent run code that the model writes.
+	//
+	// When nil (the default), the request is not changed and no code is run.
+	// A codeexecutor.BuiltIn, such as codeexecutor.NewBuiltInExecutor(),
+	// adds the model's built-in code-execution tool to every request, as its
+	// own entry of the request's tools ahead of the agent's function
+	// declarations, and needs a Gemini model name: any other name fails the
+	// step before the model is called with "Gemini code execution tool is not
+	// supported for model <name>". Set ADK_DISABLE_GEMINI_MODEL_ID_CHECK to
+	// true or 1 to skip that check for the whole process; the variable is read
+	// on every request. Any other executor is stored on the agent; this
+	// package does not run it.
+	//
+	// The executor is shared by every invocation of the agent and must be
+	// safe for concurrent use.
+	CodeExecutor codeexecutor.CodeExecutor
 }
 
 // Mode is the delegation mode of an LLMAgent. See [Config.Mode] for details.

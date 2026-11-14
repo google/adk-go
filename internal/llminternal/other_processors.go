@@ -15,9 +15,14 @@
 package llminternal
 
 import (
+	"fmt"
 	"iter"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/codeexecutor"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
@@ -27,9 +32,28 @@ func nlPlanningRequestProcessor(ctx agent.InvocationContext, req *model.LLMReque
 	return func(yield func(*session.Event, error) bool) {}
 }
 
+// codeExecutionRequestProcessor prepares req for the agent's code executor.
+// For a codeexecutor.BuiltIn it appends the model's code-execution tool as its
+// own entry of req.Config.Tools, creating the config when it is nil, or fails
+// when the request's model name is not a Gemini name and
+// ADK_DISABLE_GEMINI_MODEL_ID_CHECK is not set (adk-python
+// code_executors/built_in_code_executor.py, process_llm_request). It leaves
+// req unchanged for a nil executor and for any other executor.
 func codeExecutionRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
-	// TODO: implement (adk-python src/google/adk/flows/llm_flows/_code_execution.py)
-	return func(yield func(*session.Event, error) bool) {}
+	return func(yield func(*session.Event, error) bool) {
+		if _, ok := getCodeExecutor(ctx).(codeexecutor.BuiltIn); !ok {
+			return
+		}
+		ok := googlellm.IsGeminiModelExact(req.Model) || googlellm.IsGeminiModelIDCheckDisabled()
+		if !ok {
+			yield(nil, fmt.Errorf("Gemini code execution tool is not supported for model %s", req.Model)) //nolint:staticcheck // ST1005: the message text is pinned by adk-python and by the conformance test
+			return
+		}
+		if req.Config == nil {
+			req.Config = &genai.GenerateContentConfig{}
+		}
+		req.Config.Tools = append(req.Config.Tools, &genai.Tool{CodeExecution: &genai.ToolCodeExecution{}})
+	}
 }
 
 func nlPlanningResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
@@ -40,4 +64,14 @@ func nlPlanningResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequ
 func codeExecutionResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
 	// TODO: implement (adk-python src/google/adk_code_execution.py)
 	return nil
+}
+
+// getCodeExecutor returns the code executor of the agent in ctx, or nil when
+// the agent is not an LLM agent or has no code executor.
+func getCodeExecutor(ctx agent.InvocationContext) codeexecutor.CodeExecutor {
+	llmAgent := asLLMAgent(ctx.Agent())
+	if llmAgent == nil {
+		return nil
+	}
+	return llmAgent.internal().CodeExecutor
 }
