@@ -33,8 +33,19 @@ type UIWidgetRenderer interface {
 
 // ErrUnsupportedContext is returned by [RenderUIWidget] when the context does
 // not implement [UIWidgetRenderer], or is one that carries no event actions,
-// such as one built by [NewContext] or [Promote].
-var ErrUnsupportedContext = errors.New("context does not implement UIWidgetRenderer")
+// such as one built by [NewContext] or [Promote]. It wraps
+// [errors.ErrUnsupported].
+var ErrUnsupportedContext error = &unsupportedError{msg: "context does not implement UIWidgetRenderer"}
+
+// unsupportedError is an error that wraps [errors.ErrUnsupported] with a
+// specific message.
+type unsupportedError struct {
+	msg string
+}
+
+func (e *unsupportedError) Error() string { return e.msg }
+
+func (e *unsupportedError) Unwrap() error { return errors.ErrUnsupported }
 
 // RenderUIWidget asks the UI host to render widget alongside the event that ctx
 // produces, by appending it to the RenderUIWidgets of ctx's event actions. Within
