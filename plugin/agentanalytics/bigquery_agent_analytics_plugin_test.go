@@ -760,7 +760,7 @@ func TestCallbacks_WriteRows(t *testing.T) {
 		Contents: []*genai.Content{textContent("user", "hello")},
 		Config: &genai.GenerateContentConfig{
 			SystemInstruction: textContent("", "be brief"),
-			Temperature:       genai.Ptr[float32](0.5),
+			Temperature:       new(float32(0.5)),
 			Labels:            map[string]string{"env": "test"},
 		},
 	}

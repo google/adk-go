@@ -274,8 +274,7 @@ func (c *countingSummarizer) count() int {
 // difference between "compaction ran and its failure was tolerated" and
 // "compaction never ran".
 func TestPubSubTriggerActuallyRunsCompaction(t *testing.T) {
-	runCount := 0
-	testAgent := createMockAgent(t, nil, &runCount, nil)
+	testAgent := createMockAgent(t, nil, new(0), nil)
 	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
 	summarizer := &countingSummarizer{}
 
@@ -388,8 +387,7 @@ func TestPubSubTriggerHandler_EnforcesMaxConcurrentRuns(t *testing.T) {
 // from review: MaxConcurrentRuns<=0 must mean "no limit" (nil semaphore), not a
 // zero-capacity channel that would block every request forever.
 func TestPubSubTriggerHandler_ZeroMaxConcurrentRunsIsUnlimited(t *testing.T) {
-	runCount := 0
-	testAgent := createMockAgent(t, nil, &runCount, nil)
+	testAgent := createMockAgent(t, nil, new(0), nil)
 	cfg := defaultTriggerConfig
 	cfg.MaxConcurrentRuns = 0
 	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}

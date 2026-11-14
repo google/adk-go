@@ -707,7 +707,6 @@ func TestNewModel_AnthropicCredentialsAndConfig(t *testing.T) {
 	})
 
 	t.Run("invalid_client_configs", func(t *testing.T) {
-		negOne := -1
 		cases := []struct {
 			name      string
 			modelName string
@@ -741,7 +740,7 @@ func TestNewModel_AnthropicCredentialsAndConfig(t *testing.T) {
 			{
 				name:      "negative_max_retries",
 				modelName: "claude-sonnet-4-5-20250929",
-				cfg:       anthropicmodel.ClientConfig{APIKey: "k", MaxRetries: &negOne},
+				cfg:       anthropicmodel.ClientConfig{APIKey: "k", MaxRetries: new(-1)},
 			},
 			{
 				name:      "invalid_effort",
@@ -1448,8 +1447,6 @@ func TestToolsAndToolConfig(t *testing.T) {
 	})
 
 	t.Run("rejected_tools_and_tool_configs", func(t *testing.T) {
-		streamArgs := true
-		budget := int32(1024)
 		cases := []struct {
 			name    string
 			cfg     *genai.GenerateContentConfig
@@ -1534,7 +1531,7 @@ func TestToolsAndToolConfig(t *testing.T) {
 				cfg: &genai.GenerateContentConfig{
 					Tools: weatherTools,
 					ToolConfig: &genai.ToolConfig{
-						IncludeServerSideToolInvocations: &streamArgs,
+						IncludeServerSideToolInvocations: new(true),
 					},
 				},
 				wantSub: "IncludeServerSideToolInvocations",
@@ -1575,7 +1572,7 @@ func TestToolsAndToolConfig(t *testing.T) {
 				name: "any_with_thinking_enabled",
 				cfg: &genai.GenerateContentConfig{
 					Tools:          weatherTools,
-					ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: &budget},
+					ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: new(int32(1024))},
 					ToolConfig: &genai.ToolConfig{
 						FunctionCallingConfig: &genai.FunctionCallingConfig{Mode: genai.FunctionCallingConfigModeAny},
 					},
@@ -1601,7 +1598,7 @@ func TestToolsAndToolConfig(t *testing.T) {
 					Tools: weatherTools,
 					ToolConfig: &genai.ToolConfig{
 						FunctionCallingConfig: &genai.FunctionCallingConfig{
-							StreamFunctionCallArguments: &streamArgs,
+							StreamFunctionCallArguments: new(true),
 						},
 					},
 				},
@@ -2690,7 +2687,6 @@ func TestConcurrencyAndNonMutation(t *testing.T) {
 		t.Fatalf("NewModel() error = %v", err)
 	}
 
-	temp := float32(0.2)
 	sharedReq := &model.LLMRequest{
 		Model: "claude-sonnet-4-5-20250929",
 		Contents: []*genai.Content{
@@ -2710,7 +2706,7 @@ func TestConcurrencyAndNonMutation(t *testing.T) {
 		},
 		Config: &genai.GenerateContentConfig{
 			SystemInstruction: genai.NewContentFromText("Be helpful.", genai.RoleUser),
-			Temperature:       &temp,
+			Temperature:       new(float32(0.2)),
 			StopSequences:     []string{"STOP"},
 			Tools: []*genai.Tool{
 				{
@@ -3774,16 +3770,14 @@ func TestExecutableCodeAndURISchemePrivacy(t *testing.T) {
 
 func TestMaxRetriesAndInFlightNonStreamingCancellation(t *testing.T) {
 	t.Run("max_retries_honored", func(t *testing.T) {
-		zero := 0
-		one := 1
 		cases := []struct {
 			name       string
 			maxRetries *int
 			wantCalls  int
 		}{
 			{name: "nil_default_2_retries", maxRetries: nil, wantCalls: 3},
-			{name: "zero_retries", maxRetries: &zero, wantCalls: 1},
-			{name: "one_retry", maxRetries: &one, wantCalls: 2},
+			{name: "zero_retries", maxRetries: new(0), wantCalls: 1},
+			{name: "one_retry", maxRetries: new(1), wantCalls: 2},
 		}
 
 		for _, tc := range cases {
