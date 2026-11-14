@@ -36,6 +36,12 @@ func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			return
 		}
 
+		// Unlike adk-python, follow adk-js and omit identity when all agent
+		// transfers are disabled, so agent names do not vary a shared prompt.
+		if !shouldUseAutoFlow(ctx.Agent()) {
+			return
+		}
+
 		parts := []string{fmt.Sprintf("You are an agent. Your internal name is %q.", ctx.Agent().Name())}
 		if description := ctx.Agent().Description(); description != "" {
 			parts = append(parts, fmt.Sprintf("The description about you is %q.", description))
