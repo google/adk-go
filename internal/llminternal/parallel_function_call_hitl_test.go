@@ -26,6 +26,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
@@ -548,5 +549,491 @@ func TestConfirmedToolWithSkipSummarizationEndsTheTurn(t *testing.T) {
 	}
 	if !turn2Events[0].IsFinalResponse() {
 		t.Errorf("turn 2 event IsFinalResponse() = false, want true")
+	}
+}
+
+// TestResumedToolRequestsSecondConfirmation verifies that when a resumed tool
+// calls ctx.RequestConfirmation a second time, ADK emits a new
+// adk_request_confirmation call (preserving the original ThoughtSignature) and
+// pauses until the client answers that second confirmation.
+func TestResumedToolRequestsSecondConfirmation(t *testing.T) {
+	wantSig := []byte("sig-book-room")
+	step := 0
+	bookRoom, err := functiontool.New(functiontool.Config{
+		Name:        "book_room",
+		Description: "Books a room and notifies the team.",
+	}, func(ctx agent.Context, _ map[string]any) (map[string]any, error) {
+		c := ctx.ToolConfirmation()
+		if c == nil {
+			return map[string]any{"status": "waiting for approval"}, ctx.RequestConfirmation("Book room A?", nil)
+		}
+		if !c.Confirmed {
+			return map[string]any{"status": "rejected"}, nil
+		}
+		step++
+		if step == 1 {
+			return map[string]any{"booking": "done", "notify": "waiting for approval"}, ctx.RequestConfirmation("Notify the team?", nil)
+		}
+		return map[string]any{"booking": "done", "notify": "sent"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	modelCalls := 0
+	m := &stepByStepModel{
+		generate: func(_ context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+			modelCalls++
+			if modelCalls == 1 {
+				return &model.LLMResponse{
+					Content: &genai.Content{
+						Role: genai.RoleModel,
+						Parts: []*genai.Part{{
+							ThoughtSignature: wantSig,
+							FunctionCall: &genai.FunctionCall{
+								ID:   "call-1",
+								Name: "book_room",
+								Args: map[string]any{"room": "A"},
+							},
+						}},
+					},
+				}, nil
+			}
+			return &model.LLMResponse{
+				Content: genai.NewContentFromText("Done.", genai.RoleModel),
+			}, nil
+		},
+	}
+
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "assistant",
+		Model: m,
+		Tools: []tool.Tool{bookRoom},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.InMemoryService()
+	created, err := sessions.Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "testApp", Agent: a, SessionService: sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runTurn := func(msg *genai.Content) []*session.Event {
+		t.Helper()
+		var events []*session.Event
+		for ev, err := range r.Run(t.Context(), "user", created.Session.ID(), msg, agent.RunConfig{}) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			events = append(events, ev)
+		}
+		return events
+	}
+
+	findConfirmationPart := func(events []*session.Event) *genai.Part {
+		for _, ev := range events {
+			if ev.Content == nil {
+				continue
+			}
+			for _, p := range ev.Content.Parts {
+				if p.FunctionCall != nil && p.FunctionCall.Name == toolconfirmation.FunctionCallName {
+					return p
+				}
+			}
+		}
+		return nil
+	}
+
+	// Turn 1: initial call asks for "Book room A?".
+	firstPart := findConfirmationPart(runTurn(genai.NewContentFromText("Book room A", genai.RoleUser)))
+	if firstPart == nil {
+		t.Fatal("turn 1: no confirmation request emitted for booking")
+	}
+
+	// Turn 2: approving the first confirmation resumes book_room, which asks
+	// for "Notify the team?". A second adk_request_confirmation call must be
+	// emitted and the model must not be called yet.
+	turn2Events := runTurn(&genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       firstPart.FunctionCall.ID,
+				Name:     toolconfirmation.FunctionCallName,
+				Response: map[string]any{"confirmed": true},
+			},
+		}},
+	})
+	secondPart := findConfirmationPart(turn2Events)
+	if secondPart == nil {
+		t.Fatal("turn 2: resumed tool asked for a second confirmation, but no adk_request_confirmation call was emitted")
+	}
+	if diff := cmp.Diff(wantSig, secondPart.ThoughtSignature); diff != "" {
+		t.Errorf("turn 2 confirmation ThoughtSignature diff (-want +got):\n%s", diff)
+	}
+	if modelCalls != 1 {
+		t.Errorf("modelCalls after turn 2 = %d, want 1", modelCalls)
+	}
+
+	// Turn 3: approving the second confirmation finishes the tool and lets the
+	// model summarize.
+	turn3Events := runTurn(&genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       secondPart.FunctionCall.ID,
+				Name:     toolconfirmation.FunctionCallName,
+				Response: map[string]any{"confirmed": true},
+			},
+		}},
+	})
+	if modelCalls != 2 {
+		t.Errorf("modelCalls after turn 3 = %d, want 2", modelCalls)
+	}
+	if len(turn3Events) != 2 {
+		t.Fatalf("turn 3 yielded %d events, want 2 (tool response + final model answer)", len(turn3Events))
+	}
+	if got := turn3Events[1].Content.Parts[0].Text; got != "Done." {
+		t.Errorf("turn 3 final text = %q, want %q", got, "Done.")
+	}
+}
+
+type stepByStepModel struct {
+	model.LLM
+	generate func(context.Context, *model.LLMRequest) (*model.LLMResponse, error)
+}
+
+func (m *stepByStepModel) Name() string { return "step-by-step-model" }
+
+func (m *stepByStepModel) GenerateContent(ctx context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		resp, err := m.generate(ctx, req)
+		yield(resp, err)
+	}
+}
+
+// TestParallelResumedCallsOneRequestsSecondConfirmation verifies that when two
+// parallel tool calls (only the first carrying a ThoughtSignature, as Gemini
+// emits) are both approved and only one asks for a second confirmation on
+// resume, the pending follow-up confirmation blocks model summarization of the
+// completed sibling call until the second confirmation is also approved.
+func TestParallelResumedCallsOneRequestsSecondConfirmation(t *testing.T) {
+	sigA := []byte("sigA")
+	stepA := 0
+	toolA, err := functiontool.New(functiontool.Config{
+		Name:        "tool_a",
+		Description: "Two-step confirmation tool.",
+	}, func(ctx agent.Context, _ map[string]any) (map[string]any, error) {
+		c := ctx.ToolConfirmation()
+		if c == nil {
+			return map[string]any{"status": "waiting"}, ctx.RequestConfirmation("Approve A step 1?", nil)
+		}
+		if !c.Confirmed {
+			return map[string]any{"status": "rejected"}, nil
+		}
+		stepA++
+		if stepA == 1 {
+			return map[string]any{"step1": "done", "step2": "waiting"}, ctx.RequestConfirmation("Approve A step 2?", nil)
+		}
+		return map[string]any{"status": "done"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	toolB, err := functiontool.New(functiontool.Config{
+		Name:        "tool_b",
+		Description: "Single-step confirmation tool.",
+	}, func(ctx agent.Context, _ map[string]any) (map[string]any, error) {
+		c := ctx.ToolConfirmation()
+		if c == nil {
+			return map[string]any{"status": "waiting"}, ctx.RequestConfirmation("Approve B?", nil)
+		}
+		if !c.Confirmed {
+			return map[string]any{"status": "rejected"}, nil
+		}
+		return map[string]any{"status": "done"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	modelCalls := 0
+	var lastReq *model.LLMRequest
+	m := &stepByStepModel{
+		generate: func(_ context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+			modelCalls++
+			lastReq = req
+			if modelCalls == 1 {
+				return &model.LLMResponse{
+					Content: &genai.Content{
+						Role: genai.RoleModel,
+						Parts: []*genai.Part{
+							{
+								ThoughtSignature: sigA,
+								FunctionCall: &genai.FunctionCall{
+									ID:   "call-a",
+									Name: "tool_a",
+									Args: map[string]any{"x": 1},
+								},
+							},
+							{
+								FunctionCall: &genai.FunctionCall{
+									ID:   "call-b",
+									Name: "tool_b",
+									Args: map[string]any{"y": 2},
+								},
+							},
+						},
+					},
+				}, nil
+			}
+			return &model.LLMResponse{
+				Content: genai.NewContentFromText("All done.", genai.RoleModel),
+			}, nil
+		},
+	}
+
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "assistant",
+		Model: m,
+		Tools: []tool.Tool{toolA, toolB},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.InMemoryService()
+	created, err := sessions.Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "testApp", Agent: a, SessionService: sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runTurn := func(msg *genai.Content) []*session.Event {
+		t.Helper()
+		var events []*session.Event
+		for ev, err := range r.Run(t.Context(), "user", created.Session.ID(), msg, agent.RunConfig{}) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			events = append(events, ev)
+		}
+		return events
+	}
+
+	findConfirmationParts := func(events []*session.Event) []*genai.Part {
+		var parts []*genai.Part
+		for _, ev := range events {
+			if ev.Content == nil {
+				continue
+			}
+			for _, p := range ev.Content.Parts {
+				if p.FunctionCall != nil && p.FunctionCall.Name == toolconfirmation.FunctionCallName {
+					parts = append(parts, p)
+				}
+			}
+		}
+		return parts
+	}
+
+	// Turn 1: both parallel calls ask for confirmation.
+	turn1Confirmations := findConfirmationParts(runTurn(genai.NewContentFromText("Run A and B", genai.RoleUser)))
+	if len(turn1Confirmations) != 2 {
+		t.Fatalf("turn 1: got %d confirmation parts, want 2", len(turn1Confirmations))
+	}
+
+	// Turn 2: approve both. tool_b finishes, while tool_a asks for a second
+	// confirmation. Only one follow-up confirmation (for call-a, with sigA)
+	// must be emitted, and the model must not be called early.
+	turn2Events := runTurn(&genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{
+			{
+				FunctionResponse: &genai.FunctionResponse{
+					ID:       turn1Confirmations[0].FunctionCall.ID,
+					Name:     toolconfirmation.FunctionCallName,
+					Response: map[string]any{"confirmed": true},
+				},
+			},
+			{
+				FunctionResponse: &genai.FunctionResponse{
+					ID:       turn1Confirmations[1].FunctionCall.ID,
+					Name:     toolconfirmation.FunctionCallName,
+					Response: map[string]any{"confirmed": true},
+				},
+			},
+		},
+	})
+	turn2Confirmations := findConfirmationParts(turn2Events)
+	if len(turn2Confirmations) != 1 {
+		t.Fatalf("turn 2: got %d follow-up confirmation parts, want 1", len(turn2Confirmations))
+	}
+	if diff := cmp.Diff(sigA, turn2Confirmations[0].ThoughtSignature); diff != "" {
+		t.Errorf("turn 2 follow-up ThoughtSignature diff (-want +got):\n%s", diff)
+	}
+	if modelCalls != 1 {
+		t.Errorf("modelCalls after turn 2 = %d, want 1 (pending follow-up must block summarization)", modelCalls)
+	}
+
+	// Turn 3: approve tool_a's second confirmation. The model is now called once
+	// with both completed tool responses.
+	turn3Events := runTurn(&genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       turn2Confirmations[0].FunctionCall.ID,
+				Name:     toolconfirmation.FunctionCallName,
+				Response: map[string]any{"confirmed": true},
+			},
+		}},
+	})
+	if modelCalls != 2 {
+		t.Errorf("modelCalls after turn 3 = %d, want 2", modelCalls)
+	}
+	if len(turn3Events) != 2 {
+		t.Fatalf("turn 3 yielded %d events, want 2", len(turn3Events))
+	}
+	if got := turn3Events[1].Content.Parts[0].Text; got != "All done." {
+		t.Errorf("turn 3 final text = %q, want %q", got, "All done.")
+	}
+	if lastReq == nil || len(lastReq.Contents) == 0 {
+		t.Fatal("turn 3: model did not receive request contents")
+	}
+	lastContent := lastReq.Contents[len(lastReq.Contents)-1]
+	wantFinalResponses := []*genai.Part{
+		{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       "call-a",
+				Name:     "tool_a",
+				Response: map[string]any{"status": "done"},
+			},
+		},
+		{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       "call-b",
+				Name:     "tool_b",
+				Response: map[string]any{"status": "done"},
+			},
+		},
+	}
+	if diff := cmp.Diff(wantFinalResponses, lastContent.Parts); diff != "" {
+		t.Errorf("turn 3 final function responses sent to model diff (-want +got):\n%s", diff)
+	}
+}
+
+// TestFollowUpConfirmationEarlyStop verifies that when a caller breaks out of
+// runner.Run at the first final event (the resumed tool's function response),
+// yielding the follow-up confirmation event does not panic in Flow.preprocess.
+func TestFollowUpConfirmationEarlyStop(t *testing.T) {
+	runs := 0
+	twoStep, err := functiontool.New(functiontool.Config{
+		Name:                "two_step",
+		Description:         "requests a second confirmation on resume",
+		RequireConfirmation: true,
+	}, func(ctx agent.Context, _ map[string]any) (map[string]any, error) {
+		runs++
+		if runs == 1 {
+			return map[string]any{"status": "pending"}, ctx.RequestConfirmation("approve step two?", nil)
+		}
+		return map[string]any{"ok": true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &stepByStepModel{
+		generate: func(_ context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+			return &model.LLMResponse{
+				Content: &genai.Content{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call_1",
+							Name: "two_step",
+							Args: map[string]any{},
+						},
+					}},
+				},
+			}, nil
+		},
+	}
+	child, err := llmagent.New(llmagent.Config{
+		Name:  "child",
+		Model: m,
+		Tools: []tool.Tool{twoStep},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{child},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss := session.InMemoryService()
+	if _, err := ss.Create(t.Context(), &session.CreateRequest{AppName: "a", UserID: "u", SessionID: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{Agent: root, SessionService: ss, AppName: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 1: read everything and find the confirmation request.
+	var confID string
+	for ev, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p.FunctionCall != nil && p.FunctionCall.Name == toolconfirmation.FunctionCallName {
+				confID = p.FunctionCall.ID
+			}
+		}
+	}
+	if confID == "" {
+		t.Fatal("turn 1: no confirmation request emitted")
+	}
+
+	// Turn 2: approve, then stop at the first final event (the resumed function response).
+	approved, err := json.Marshal(toolconfirmation.ToolConfirmation{Confirmed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approve := &genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				Name:     toolconfirmation.FunctionCallName,
+				ID:       confID,
+				Response: map[string]any{"response": string(approved)},
+			},
+		}},
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			t.Fatalf("runner.Run panicked after the caller stopped: %v", p)
+		}
+	}()
+	for ev, err := range r.Run(t.Context(), "u", "s", approve, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.IsFinalResponse() {
+			break
+		}
 	}
 }
