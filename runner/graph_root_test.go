@@ -204,18 +204,27 @@ func TestRun_GraphWorkflowRoot_EmptyMessageStored(t *testing.T) {
 // user event without content and yields it with yield_user_message
 // (workflow/_node_runner_utils.py), on any runner.
 func TestRun_GraphWorkflowRoot_RetryStateDeltaStored(t *testing.T) {
-	for _, resumable := range []bool{false, true} {
-		t.Run(fmt.Sprintf("resumable_%v", resumable), func(t *testing.T) {
+	tests := []struct {
+		resumable bool
+		// A resumable graph workflow root that finishes ends with its
+		// end-of-agent event.
+		wantEvents []string
+	}{
+		{resumable: false, wantEvents: []string{"user empty", "root empty"}},
+		{resumable: true, wantEvents: []string{"user empty", "root empty", "root end"}},
+	}
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("resumable_%v", tc.resumable), func(t *testing.T) {
 			svc := session.InMemoryService()
 			seedResumeSession(t, svc, seedUser("inv-0", "earlier"))
 			root := iidGraphRoot(t)
-			r := newIIDRunner(t, root, svc, resumable)
+			r := newIIDRunner(t, root, svc, tc.resumable)
 
 			runTurn(t, r, userText("hi"), runner.WithInvocationID("inv-g"))
 			events := runTurn(t, r, userText("hi"), runner.WithInvocationID("inv-g"),
 				runner.WithStateDelta(map[string]any{"k": "v2"}), runner.WithYieldUserMessage())
 
-			if diff := cmp.Diff([]string{"user empty", "root empty"}, describeEvents(events)); diff != "" {
+			if diff := cmp.Diff(tc.wantEvents, describeEvents(events)); diff != "" {
 				t.Fatalf("yielded events (-want +got):\n%s", diff)
 			}
 			if diff := cmp.Diff(map[string]any{"k": "v2"}, events[0].Actions.StateDelta); diff != "" {
@@ -297,6 +306,44 @@ func TestRun_LlmAgentRoot_RetryStateDeltaStored(t *testing.T) {
 	}
 	if got, err := storedNodeTestSession(t, t.Context(), svc).State().Get("k"); err != nil || got != "v2" {
 		t.Errorf("state[k] = %v, %v; want %q", got, err, "v2")
+	}
+}
+
+// adk-python runs a root graph workflow on its node runtime, which never
+// resumes an invocation the classic way (runners.py,
+// _setup_context_for_resumed_invocation): on a resumable runner, an
+// invocation ID with no stored user message runs the workflow on the run's
+// message, or on none (workflow/_node_runner_utils.py, node_input).
+func TestRun_GraphWorkflowRoot_ResumableRunWithoutStoredMessage(t *testing.T) {
+	tests := []struct {
+		name       string
+		seed       []*session.Event
+		msg        *genai.Content
+		wantInputs []string
+		wantStored []string
+	}{
+		{name: "fresh_session", msg: userText("first"), wantInputs: []string{"first"}, wantStored: []string{"user text first"}},
+		{name: "no_stored_message_nil_msg", seed: []*session.Event{seedUser("inv-0", "earlier")}, wantInputs: []string{"<none>"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := session.InMemoryService()
+			seedResumeSession(t, svc, tt.seed...)
+			var inputs []string
+			r := newIIDRunner(t, iidRoot{agent: textRecordingGraph(t, &inputs)}, svc, true)
+
+			_, errs := collectRun(r.Run(t.Context(), nodeTestUser, nodeTestSession, tt.msg, agent.RunConfig{}, runner.WithInvocationID("inv-g")))
+
+			if len(errs) != 0 {
+				t.Errorf("Run() errors = %q, want none", errorTexts(errs))
+			}
+			if diff := cmp.Diff(tt.wantInputs, inputs); diff != "" {
+				t.Errorf("workflow inputs (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.wantStored, storedUserEvents(t, svc, "inv-g")); diff != "" {
+				t.Errorf("stored user events (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

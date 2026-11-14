@@ -235,17 +235,18 @@ func WithYieldUserMessage() RunOption {
 // event and runs no on-user-message callback. It does not skip an agent that
 // already ended.
 //
-// On any other runner (the classic path), if [Config.Resumable] is true, the
-// run resumes the invocation: it restores the original user message when msg
+// On any other runner (the classic path), if [Config.Resumable] is true and
+// the root is not a graph workflow (workflowagent.New), the run resumes the
+// invocation: it restores the original user message when msg
 // is nil; when msg is given, it appends msg under id unless the invocation
 // already holds a user message, in which case msg is a retry and no user
 // event is appended; it rebuilds the agents' states from the invocation's
 // events, routes to the agent that was active, and yields nothing if that
 // agent already ended. If [Config.Resumable] is false, the run's events
-// carry id. On either runner, a root graph workflow (workflowagent.New),
-// which adk-python runs as a node, runs with the invocation's original user
-// message when the invocation holds one and msg is nil or has no function
-// response.
+// carry id. A root graph workflow, which adk-python runs as a node, runs
+// under id without that resume on either runner: with the invocation's
+// original user message when the invocation holds one and msg is nil or has
+// no function response, and otherwise with msg, or with no message.
 //
 // Without this option, a message on a runner whose root is an LlmAgent, a
 // [Config.Node] or a graph workflow can join an open task delegation and
@@ -261,10 +262,11 @@ func WithYieldUserMessage() RunOption {
 // function response, when the invocation id already holds a user message,
 // is a retry of that turn; see [Runner.Run].
 //
-// On the resumable classic path, Run yields an error and adds no event when
-// the session has no events ("session <id> has no events to resume") or when
-// no user message of the invocation is stored and msg is nil ("no user
-// message available for resuming invocation: <id>").
+// On the resumable classic path, for a root that is not a graph workflow,
+// Run yields an error that matches [ErrInvalidMessage] and adds no event
+// when the session has no events ("session <id> has no events to resume")
+// or when no user message of the invocation is stored and msg is nil ("no
+// user message available for resuming invocation: <id>").
 //
 // With [WithAbortSignal], the abort applies to the resumed invocation as to a
 // new one.
@@ -1179,6 +1181,9 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // the root receives the stored message. A retry that carries a function
 // call is refused as any message is.
 //
+// Every error with which Run refuses a message, as described above, matches
+// [ErrInvalidMessage], as do the resume refusals of [WithInvocationID].
+//
 // On a runner whose root is a Config.Node, an LlmAgent or a graph
 // workflow (workflowagent.New), a message that is given no invocation ID
 // and holds no function response with an ID joins an open task
@@ -1387,9 +1392,11 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// A resumable runner treats an invocation ID, given by the caller or
 		// resolved from a function response, as a resume. Its refusals come
 		// before anything is stored (adk-python Runner.run_async and
-		// Runner._setup_context_for_resumed_invocation).
+		// Runner._setup_context_for_resumed_invocation). A root graph
+		// workflow never resumes this way: adk-python runs it on the node
+		// runtime, which has no such resume or refusals.
 		userContent := msg
-		resuming := r.resumable && invocationID != ""
+		resuming := r.resumable && invocationID != "" && !r.rootIsNode()
 		var agentStates map[string]map[string]any
 		var ended map[string]bool
 		if resuming {
@@ -1691,8 +1698,8 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext, isLive bool) 
 
 // errUserFunctionCall rejects a user message that carries a function call.
 // Only a model makes function calls, so storing one would put a call no model
-// produced into the history.
-var errUserFunctionCall = errors.New("user message cannot contain function calls")
+// produced into the history. It wraps [ErrInvalidMessage].
+var errUserFunctionCall = refuseMessagef("user message cannot contain function calls")
 
 type liveAgent interface {
 	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
@@ -2115,7 +2122,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 	}
 
 	if !r.runsAsNode(path) && len(msg.Parts) == 0 {
-		return ctx, nil, replaced, errors.New("no parts in the new_message")
+		return ctx, nil, replaced, refuseMessagef("no parts in the new_message")
 	}
 	if err := rejectFunctionCalls(msg); err != nil {
 		return ctx, nil, replaced, err
@@ -2229,7 +2236,7 @@ func (r *Runner) validateNodeRootMessage(msg *genai.Content) error {
 		}
 	}
 	if hasResumeResponse && hasText {
-		return errors.New("message cannot contain both function responses and text: function responses resume an existing invocation while text starts a new one")
+		return refuseMessagef("message cannot contain both function responses and text: function responses resume an existing invocation while text starts a new one")
 	}
 	return nil
 }
@@ -2596,7 +2603,7 @@ func isDigits(s string) bool {
 // stored (adk-python Runner._setup_context_for_resumed_invocation).
 func resumedUserContent(sess session.Session, msg *genai.Content, invocationID string) (*genai.Content, error) {
 	if sess.Events().Len() == 0 {
-		return nil, fmt.Errorf("session %s has no events to resume", sess.ID())
+		return nil, refuseMessagef("session %s has no events to resume", sess.ID())
 	}
 	if msg != nil {
 		return msg, nil
@@ -2604,7 +2611,7 @@ func resumedUserContent(sess session.Session, msg *genai.Content, invocationID s
 	if stored := utils.FindUserMessageForInvocation(sess.Events(), invocationID); stored != nil {
 		return stored, nil
 	}
-	return nil, fmt.Errorf("no user message available for resuming invocation: %s", invocationID)
+	return nil, refuseMessagef("no user message available for resuming invocation: %s", invocationID)
 }
 
 // rebuildAgentStates returns the agent states and the ended agents of the

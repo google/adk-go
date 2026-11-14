@@ -16,12 +16,40 @@ package runner
 
 import (
 	"errors"
+	"fmt"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
+
+// ErrInvalidMessage is matched, with [errors.Is], by every error with which
+// [Runner.Run] refuses the run's message, or a resume under
+// [WithInvocationID], before anything is stored: a message that carries a
+// function call, has no parts, mixes text with a function response, or holds
+// function responses that lack an ID, match no stored call, or answer calls
+// of several invocations; and a resume of a session without events or of an
+// invocation without a stored user message when no message is given. Each
+// such error keeps its own text, which describes the refusal; ErrInvalidMessage
+// is not in it. These are the refusals adk-python raises as ValueError.
+var ErrInvalidMessage = errors.New("invalid message")
+
+// messageRefusal is an error that wraps [ErrInvalidMessage] with the text of
+// one refusal.
+type messageRefusal struct {
+	msg string
+}
+
+func (e *messageRefusal) Error() string { return e.msg }
+
+func (e *messageRefusal) Unwrap() error { return ErrInvalidMessage }
+
+// refuseMessagef returns a refusal of the run's message whose text is
+// fmt.Sprintf(format, args...) and which wraps [ErrInvalidMessage].
+func refuseMessagef(format string, args ...any) error {
+	return &messageRefusal{msg: fmt.Sprintf(format, args...)}
+}
 
 // runPath names the two ways a run executes its root: the loop in
 // Runner.run, or Runner.runNode.
@@ -103,7 +131,7 @@ func (r *Runner) runInvocationID(sess session.Session, msg *genai.Content, calle
 	}
 	mode := r.resolutionMode(path, callerID)
 	if mode == resolveStrict && responses[0].ID == "" && (callerID != "" || !r.runsAsNode(path)) {
-		return "", errors.New("function response id is required to resume an invocation")
+		return "", refuseMessagef("function response id is required to resume an invocation")
 	}
 	id, err := resolveInvocationID(sess, msg, mode)
 	if err != nil {
