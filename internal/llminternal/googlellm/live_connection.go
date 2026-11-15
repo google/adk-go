@@ -115,13 +115,18 @@ func withoutThoughtSignature(part *genai.Part) (*genai.Part, bool) {
 	stripped := *part
 	stripped.ThoughtSignature = nil
 	// A signature can arrive on a part of its own, possibly marked as a
-	// thought; without the signature such a part says nothing. PartMetadata
-	// is the caller's bookkeeping, not content, so it does not keep the part
-	// alive either (an empty map is not zero to reflect, yet it encodes to
-	// nothing).
+	// thought; without the signature such a part says nothing. Fields that
+	// only describe other content do not keep the part alive either:
+	// PartMetadata is the caller's bookkeeping (an empty map is not zero to
+	// reflect, yet it encodes to nothing), and the media and speech settings
+	// apply to text or media that the part does not carry.
 	rest := stripped
 	rest.Thought = false
 	rest.PartMetadata = nil
+	rest.VideoMetadata = nil
+	rest.MediaResolution = nil
+	rest.MediaProcessing = ""
+	rest.SpeechMetadata = nil
 	if reflect.ValueOf(rest).IsZero() {
 		return nil, false
 	}

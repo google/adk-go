@@ -349,6 +349,16 @@ func TestLiveConnectionSendHistoryFiltersInternalParts(t *testing.T) {
 					Role:  "model",
 					Parts: []*genai.Part{{Thought: true, ThoughtSignature: []byte("sig-marked")}},
 				},
+				{
+					// Metadata that only describes text or media the part
+					// does not carry is not content either.
+					Role: "model",
+					Parts: []*genai.Part{
+						{ThoughtSignature: []byte("sig-speech"), SpeechMetadata: &genai.SpeechMetadata{Speaker: "a"}},
+						{ThoughtSignature: []byte("sig-video"), VideoMetadata: &genai.VideoMetadata{FPS: genai.Ptr(1.0)}},
+						{ThoughtSignature: []byte("sig-media"), MediaResolution: &genai.PartMediaResolution{}, MediaProcessing: genai.MediaProcessingStatic},
+					},
+				},
 			},
 			want: []*genai.Content{
 				{
