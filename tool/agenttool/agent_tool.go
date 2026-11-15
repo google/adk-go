@@ -90,6 +90,21 @@ func (t *agentTool) DisplayResultOnSkipSummarization() bool {
 	return true
 }
 
+// inputSchema returns the input schema of an LLM agent, or of the first
+// sub-agent of any other agent, and nil when there is none.
+func inputSchema(cur agent.Agent) *genai.Schema {
+	if cur == nil {
+		return nil
+	}
+	if llmAgent, ok := cur.(llminternal.Agent); ok && llmAgent != nil {
+		return llminternal.Reveal(llmAgent).InputSchema
+	}
+	if len(cur.SubAgents()) > 0 {
+		return inputSchema(cur.SubAgents()[0])
+	}
+	return nil
+}
+
 // Declaration returns the function declaration for the wrapped agent.
 // It generates a function declaration based on the agent's input schema.
 // If the agent does not have an input schema, a default schema with a
@@ -100,18 +115,7 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 		Description: t.Description(),
 	}
 
-	var agentInputSchema *genai.Schema
-	llmAgent, ok := t.agent.(llminternal.Agent)
-	if ok && llmAgent != nil {
-		// TODO - understand what build_function_declaration does in python and apply if needed.
-		internalLlmAgent, ok := t.agent.(llminternal.Agent)
-		if !ok {
-			return nil
-		}
-		agentInputSchema = llminternal.Reveal(internalLlmAgent).InputSchema
-	}
-
-	if agentInputSchema != nil {
+	if agentInputSchema := inputSchema(t.agent); agentInputSchema != nil {
 		decl.Parameters = agentInputSchema
 	} else {
 		decl.Parameters = &genai.Schema{
@@ -141,16 +145,11 @@ func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, er
 		}
 	}
 
-	var agentInputSchema *genai.Schema
+	// The same lookup as Declaration, so that a workflow agent takes the
+	// arguments of its first sub-agent's input schema.
+	agentInputSchema := inputSchema(t.agent)
 	llmAgent, ok := t.agent.(llminternal.Agent)
 	isLllmAgent := (ok && llmAgent != nil)
-	if isLllmAgent {
-		internalLlmAgent, ok := t.agent.(llminternal.Agent)
-		if !ok {
-			return nil, fmt.Errorf("internal error: failed to convert to llm agent")
-		}
-		agentInputSchema = llminternal.Reveal(internalLlmAgent).InputSchema
-	}
 
 	var content *genai.Content
 	var err error
