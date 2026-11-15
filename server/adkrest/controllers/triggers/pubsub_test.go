@@ -16,6 +16,7 @@ package triggers_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -274,5 +275,70 @@ func TestPubSubTriggerHandler_ZeroMaxConcurrentRunsIsUnlimited(t *testing.T) {
 	}
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+}
+
+func TestPubSubTriggerHandler_CancelDuringBackoff(t *testing.T) {
+	throttled := make(chan struct{}, 1)
+	runCount := 0
+	throttledAgent, err := agent.New(agent.Config{
+		Name: "test-agent",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				runCount++
+				throttled <- struct{}{}
+				yield(nil, fmt.Errorf("429 ResourceExhausted"))
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	ctrl := triggers.NewPubSubController(sessionService, agent.NewSingleLoader(throttledAgent), nil, nil, runner.PluginConfig{}, triggers.TriggerConfig{
+		MaxConcurrentRuns: 1,
+		MaxRetries:        3,
+		BaseDelay:         time.Minute,
+		MaxDelay:          time.Minute,
+	})
+
+	reqObj := models.PubSubTriggerRequest{
+		Message:      models.PubSubMessage{Data: []byte(base64.StdEncoding.EncodeToString([]byte("hello")))},
+		Subscription: "test-sub",
+	}
+	reqBytes, err := json.Marshal(reqObj)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "/apps/test-agent/triggers/pubsub", bytes.NewBuffer(reqBytes))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req = mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctrl.PubSubTriggerHandler(rr, req)
+	}()
+
+	// Cancel once the handler is waiting out the backoff, as when the
+	// client goes away during it.
+	<-throttled
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler still waiting out the backoff after its request was cancelled")
+	}
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d so the message is not acknowledged", rr.Code, http.StatusInternalServerError)
+	}
+	if runCount != 1 {
+		t.Errorf("run attempts = %d, want 1", runCount)
 	}
 }
