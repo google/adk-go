@@ -61,6 +61,7 @@ import (
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/workflow"
 )
 
 type mockTransport struct {
@@ -14879,6 +14880,188 @@ func TestRunner_RecoveredFinishTaskEndsWorkerSpanAndDelegator(t *testing.T) {
 		}
 		if got := len(agentRowsOfType(rows, EventAgentCompleted, "coordinator")); got != 2 {
 			t.Errorf("coordinator AGENT_COMPLETED count = %d, want 2", got)
+		}
+	})
+
+	t.Run("nested_workflow_node_retires_worker_and_completes_delegator", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		failBeforePlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "fail_finish_task",
+			BeforeToolCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName {
+					return nil, errors.New("finish_task failed")
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+		worker, err := llmagent.New(llmagent.Config{
+			Name: "task_worker", Description: "executes delegated tasks", Mode: llmagent.ModeTask,
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "call_finish", Name: finishTaskToolName, Args: map[string]any{"result": "recovered output"},
+				}}}}},
+			}},
+			OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+				func(_ agent.Context, tl tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+					if tl.Name() == finishTaskToolName {
+						return map[string]any{"result": "Task completed."}, nil
+					}
+					return nil, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		coordinator, err := llmagent.New(llmagent.Config{
+			Name: "coordinator", Mode: llmagent.ModeChat, SubAgents: []agent.Agent{worker},
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "call-worker", Name: "task_worker", Args: map[string]any{"request": "go"},
+				}}}}},
+				{Content: textContent("model", "coordinator final"), TurnComplete: true},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		dyn := workflow.NewDynamicNode[any, any]("dyn_coord", func(ctx agent.Context, input any, emit func(*session.Event) error) (any, error) {
+			var out any
+			for ev, err := range llmagent.RunLLMAgentAsNode(coordinator, ctx, input) {
+				if err != nil {
+					return nil, err
+				}
+				if ev.Output != nil {
+					out = ev.Output
+				}
+				if err := emit(ev); err != nil {
+					return nil, err
+				}
+			}
+			return out, nil
+		}, workflow.NodeConfig{})
+		nestedWfNode, err := workflow.NewWorkflowNode("nested_wf", workflow.Chain(workflow.Start, dyn))
+		if err != nil {
+			t.Fatalf("workflow.NewWorkflowNode: %v", err)
+		}
+		outerWf, err := workflow.New("outer_wf", workflow.Chain(workflow.Start, nestedWfNode))
+		if err != nil {
+			t.Fatalf("workflow.New: %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{coordinator},
+			Run:       outerWf.Run,
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p, failBeforePlugin).Run(t.Context(), "u1", "s1", textContent("user", "start"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error: %v", err)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		rootStart := onlyRowOfType(t, agentRowsOfType(rows, EventAgentStarting, "root"), EventAgentStarting)
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 0 {
+			t.Errorf("task_worker AGENT_COMPLETED count = %d, want 0", got)
+		}
+		if got := len(agentRowsOfType(rows, EventAgentError, "task_worker")); got != 0 {
+			t.Errorf("task_worker AGENT_ERROR count = %d, want 0", got)
+		}
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		coordStarts := agentRowsOfType(rows, EventAgentStarting, "coordinator")
+		coordEnds := agentRowsOfType(rows, EventAgentCompleted, "coordinator")
+		if len(workerStarts) != 1 || len(coordStarts) != 2 || len(coordEnds) != 2 {
+			t.Fatalf("workerStarts=%d coordStarts=%d coordEnds=%d, want 1, 2, 2; events=%v",
+				len(workerStarts), len(coordStarts), len(coordEnds), eventTypes(rows))
+		}
+		if coordEnds[0]["span_id"] != coordStarts[0]["span_id"] || coordEnds[1]["span_id"] != coordStarts[1]["span_id"] {
+			t.Errorf("coordinator AGENT_COMPLETED span_ids = (%v, %v), want (%v, %v)",
+				coordEnds[0]["span_id"], coordEnds[1]["span_id"], coordStarts[0]["span_id"], coordStarts[1]["span_id"])
+		}
+		if coordStarts[1]["parent_span_id"] != rootStart["span_id"] {
+			t.Errorf("coordinator second activation parent_span_id = %v (worker=%v), want root span %v",
+				coordStarts[1]["parent_span_id"], workerStarts[0]["span_id"], rootStart["span_id"])
+		}
+	})
+
+	t.Run("later_after_tool_callback_recovers_finish_task", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		failAndRecoverAfterPlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "fail_and_recover_after",
+			BeforeToolCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName {
+					return nil, errors.New("finish_task failed")
+				}
+				return nil, nil
+			},
+			AfterToolCallback: func(_ agent.Context, tl tool.Tool, _, _ map[string]any, err error) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName && err != nil {
+					return map[string]any{"result": "Task completed."}, nil
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+		worker, err := llmagent.New(llmagent.Config{
+			Name: "task_worker", Description: "executes delegated tasks", Mode: llmagent.ModeTask,
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "call_finish", Name: finishTaskToolName, Args: map[string]any{"result": "recovered output"},
+				}}}}},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		coordinator, err := llmagent.New(llmagent.Config{
+			Name: "coordinator", SubAgents: []agent.Agent{worker},
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "call-worker", Name: "task_worker", Args: map[string]any{"request": "go"},
+				}}}}},
+				{Content: textContent("model", "coordinator final"), TurnComplete: true},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		for _, err := range newTestRunner(t, coordinator, p, failAndRecoverAfterPlugin).Run(t.Context(), "u1", "s1", textContent("user", "start"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error: %v", err)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		onlyToolErr := onlyRowOfType(t, rows, EventToolError)
+		if onlyToolErr["agent"] != "task_worker" {
+			t.Errorf("TOOL_ERROR agent = %v, want task_worker", onlyToolErr["agent"])
+		}
+		if got := len(agentRowsOfType(rows, EventToolCompleted, "task_worker")); got != 0 {
+			t.Errorf("task_worker TOOL_COMPLETED count = %d, want 0", got)
+		}
+		// Because a later AfterToolCallback runs after p.afterTool saw (nil, err),
+		// p records the call as unfinished and emits AGENT_COMPLETED.
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 1 {
+			t.Errorf("task_worker AGENT_COMPLETED count = %d, want 1", got)
+		}
+		if got := len(agentRowsOfType(rows, EventAgentError, "task_worker")); got != 0 {
+			t.Errorf("task_worker AGENT_ERROR count = %d, want 0", got)
+		}
+		coordStarts := agentRowsOfType(rows, EventAgentStarting, "coordinator")
+		coordEnds := agentRowsOfType(rows, EventAgentCompleted, "coordinator")
+		if len(coordStarts) != 2 || len(coordEnds) != 2 {
+			t.Fatalf("coordinator starts=%d ends=%d, want 2 and 2; events=%v", len(coordStarts), len(coordEnds), eventTypes(rows))
 		}
 	})
 }

@@ -34260,3 +34260,1958 @@ func TestTraceManager_PopTaskAgentSpanRecoveredFinishBranches(t *testing.T) {
 		}
 	})
 }
+
+func TestTraceManager_SupersededFinishedTaskAndSoleOwnerCrossTurn(t *testing.T) {
+	finishPart := func(id string, args map[string]any) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: finishTaskToolName, Args: args}}
+	}
+	fcParts := func(ids ...string) *genai.Content {
+		parts := make([]*genai.Part, len(ids))
+		for i, id := range ids {
+			parts[i] = finishPart(id, map[string]any{"result": id})
+		}
+		return genai.NewContentFromParts(parts, genai.RoleModel)
+	}
+
+	t.Run("older_superseded_batch_preserves_newer_finished_tasks_on_original_span", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task_worker",
+			Mode:  llmagent.ModeTask,
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		rootAgent, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			Model:     &scriptedLLM{},
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-finished-batch-scope", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		act2 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+
+		// Turn 1 of act1: ["bad" failed (deltaOld), "reused" succeeded (hidden callbacks -> not in finishedTasks)];
+		// its merged FR is delayed.
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("bad", "reused")}, nil))
+		deltaOld := map[string]any{"batch": "old"}
+		tOldBad := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "bad"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: deltaOld},
+		}
+		errs.add(p.beforeTool(tOldBad, finishTool, map[string]any{}))
+		errs.add(p.afterTool(tOldBad, finishTool, map[string]any{}, taskFailed(), nil))
+
+		// Turn 2 of act1: finish_task("reused") succeeds in AfterToolCallback (recorded in act1.finishedTasks
+		// with Turn 2's modelCallSeq).
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("reused")}, nil))
+		tNewReused := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "reused"), ic: act1.ic}
+		errs.add(p.beforeTool(tNewReused, finishTool, map[string]any{"result": "ok"}))
+		errs.add(p.afterTool(tNewReused, finishTool, map[string]any{"result": "ok"}, taskCompleted(), nil))
+
+		// Concurrent peer activation act2 starts with a pending finish_task("reused").
+		errs.add(p.beforeAgent(act2))
+		errs.add(p.beforeModel(act2, &model.LLMRequest{}))
+		errs.add(p.afterModel(act2, &model.LLMResponse{Content: fcParts("reused")}, nil))
+
+		// Delayed Turn 1 merged FR arrives carrying deltaOld: must NOT consume act1's Turn 2 finishedTasks entry.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaOld},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "bad", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
+		// Now act1's Turn 2 "reused" FR arrives without StateDelta: because act1.finishedTasks still holds
+		// Turn 2's "reused", AGENT_COMPLETED must be written on act1's span (the first worker start), not act2's!
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(act2))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(workerStarts) != 2 || len(workerEnds) < 1 {
+			t.Fatalf("workerStarts=%d workerEnds=%d; events=%v", len(workerStarts), len(workerEnds), eventTypes(rows))
+		}
+		if workerEnds[0]["span_id"] != workerStarts[0]["span_id"] {
+			t.Fatalf("first task_worker AGENT_COMPLETED span_id = %v (act2=%v), want act1 span_id %v",
+				workerEnds[0]["span_id"], workerStarts[1]["span_id"], workerStarts[0]["span_id"])
+		}
+	})
+
+	t.Run("sole_owner_unknown_batch_preserves_newer_rejection", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task_worker",
+			Mode:  llmagent.ModeTask,
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		rootAgent, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			Model:     &scriptedLLM{},
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-sole-owner-cross-turn", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act))
+
+		// Newer finish_task("reused") fails with deltaNew and recovers via taskCompleted().
+		errs.add(p.beforeModel(act, &model.LLMRequest{}))
+		errs.add(p.afterModel(act, &model.LLMResponse{Content: fcParts("reused")}, nil))
+		deltaNew := map[string]any{"batch": "new"}
+		tNew := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "reused"), ic: act.ic},
+			actions:               &session.EventActions{StateDelta: deltaNew},
+		}
+		errs.add(p.beforeTool(tNew, finishTool, map[string]any{"result": "r"}))
+		errs.add(p.onToolError(tNew, finishTool, map[string]any{"result": "r"}, errors.New("fail")))
+		errs.add(p.afterTool(tNew, finishTool, map[string]any{"result": "r"}, taskCompleted(), nil))
+
+		// Deliver an older merged response ["bad" failed, "reused" completed] with a StateDelta
+		// the owner never recorded (older batch answered by an earlier plugin).
+		deltaOldUnrecorded := map[string]any{"batch": "old-unrecorded"}
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaOldUnrecorded},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "bad", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
+		// Deliver the newer recovered response: must preserve the rejection and emit 0 AGENT_COMPLETED.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaNew},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 0 {
+			t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 0; events=%v", got, eventTypes(rows))
+		}
+	})
+
+	for _, mergedNew := range []bool{false, true} {
+		name := "failed_response_does_not_match_newer_finished_single"
+		if mergedNew {
+			name = "failed_response_does_not_match_newer_finished_merged"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := newClockedPlugin(t)
+			p.config.DisableFlushOnRunEnd = true
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "task_worker",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			rootAgent, err := llmagent.New(llmagent.Config{
+				Name:      "coordinator",
+				Model:     &scriptedLLM{},
+				SubAgents: []agent.Agent{taskAgent},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(coordinator): %v", err)
+			}
+			finishTool := &fakeTool{name: finishTaskToolName}
+			baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-" + name, agentName: "coordinator"}
+			rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+			act := &taskActivationContext{
+				mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+				ic:                    &runningInvocation{running: taskAgent},
+			}
+
+			var errs callbackErrors
+			errs.add(p.beforeRun(rootCtx))
+			errs.add(p.beforeAgent(rootCtx))
+			errs.add(p.beforeAgent(act))
+
+			// Newer turn [finish_task("bad"), finish_task("reused")]:
+			// "bad" completes cleanly (finishedTasks{"bad", M2}), and "reused" is non-first
+			// (firstInBatch == false) and fails with deltaNew + recovered.
+			errs.add(p.beforeModel(act, &model.LLMRequest{}))
+			errs.add(p.afterModel(act, &model.LLMResponse{Content: fcParts("bad", "reused")}, nil))
+			tBad := &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "bad"), ic: act.ic}
+			errs.add(p.beforeTool(tBad, finishTool, map[string]any{"result": "b"}))
+			errs.add(p.afterTool(tBad, finishTool, map[string]any{"result": "b"}, taskCompleted(), nil))
+
+			deltaNew := map[string]any{"batch": "new"}
+			tReused := &taskToolContext{
+				taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "reused"), ic: act.ic},
+				actions:               &session.EventActions{StateDelta: deltaNew},
+			}
+			errs.add(p.beforeTool(tReused, finishTool, map[string]any{"result": "r"}))
+			errs.add(p.onToolError(tReused, finishTool, map[string]any{"result": "r"}, errors.New("fail")))
+			errs.add(p.afterTool(tReused, finishTool, map[string]any{"result": "r"}, taskCompleted(), nil))
+
+			// Older merged ["bad" failed, "reused" completed] on coordinator ctx with unknown StateDelta:
+			// a failed "bad" cannot answer newer finishedTasks{"bad", M2}, so rejectedTasks{"reused", M2} must stay.
+			deltaOldUnrecorded := map[string]any{"batch": "old-unrecorded"}
+			errs.add(p.onEvent(rootCtx, &session.Event{
+				Author:  "task_worker",
+				Actions: session.EventActions{StateDelta: deltaOldUnrecorded},
+				LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+					{FunctionResponse: &genai.FunctionResponse{ID: "bad", Name: finishTaskToolName, Response: taskFailed()}},
+					{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+				}, genai.RoleUser)},
+			}))
+
+			newParts := []*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+			}
+			if mergedNew {
+				newParts = append(newParts, &genai.Part{
+					FunctionResponse: &genai.FunctionResponse{ID: "bad", Name: finishTaskToolName, Response: taskCompleted()},
+				})
+			}
+			errs.add(p.onEvent(rootCtx, &session.Event{
+				Author:      "task_worker",
+				Actions:     session.EventActions{StateDelta: deltaNew},
+				LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts(newParts, genai.RoleUser)},
+			}))
+			errs.add(p.afterAgent(rootCtx))
+			errs.check(t)
+			p.afterRun(rootCtx)
+
+			rows := p.takeRows()
+			if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 0 {
+				t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 0; events=%v", got, eventTypes(rows))
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name             string
+		withLeadingOther bool
+		failSibling      bool
+	}{
+		{name: "first_in_batch_rejection_survives_older_superseded_batch_with_pending_sibling"},
+		{name: "first_in_batch_rejection_survives_older_superseded_batch_with_failed_sibling", failSibling: true},
+		{name: "first_finish_after_non_finish_tool_survives_older_superseded_batch", withLeadingOther: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newClockedPlugin(t)
+			p.config.DisableFlushOnRunEnd = true
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "task_worker",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			rootAgent, err := llmagent.New(llmagent.Config{
+				Name:      "coordinator",
+				Model:     &scriptedLLM{},
+				SubAgents: []agent.Agent{taskAgent},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(coordinator): %v", err)
+			}
+			finishTool := &fakeTool{name: finishTaskToolName}
+			baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-" + tc.name, agentName: "coordinator"}
+			rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+			act := &taskActivationContext{
+				mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+				ic:                    &runningInvocation{running: taskAgent},
+			}
+
+			var errs callbackErrors
+			errs.add(p.beforeRun(rootCtx))
+			errs.add(p.beforeAgent(rootCtx))
+			errs.add(p.beforeAgent(act))
+
+			// Newer batch: [optional non-finish tool, finish_task("reused") (rejected with deltaNew), finish_task("shared") (pending or failed in plain sight)].
+			errs.add(p.beforeModel(act, &model.LLMRequest{}))
+			var modelParts []*genai.Part
+			if tc.withLeadingOther {
+				modelParts = append(modelParts, &genai.Part{FunctionCall: &genai.FunctionCall{
+					ID: "c-note", Name: "record_note", Args: map[string]any{"note": "lead"},
+				}})
+			}
+			modelParts = append(modelParts,
+				finishPart("reused", map[string]any{"result": "r"}),
+				finishPart("shared", map[string]any{"result": "s"}),
+			)
+			errs.add(p.afterModel(act, &model.LLMResponse{Content: genai.NewContentFromParts(modelParts, genai.RoleModel)}, nil))
+			deltaNew := map[string]any{"batch": "new"}
+			tReused := &taskToolContext{
+				taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "reused"), ic: act.ic},
+				actions:               &session.EventActions{StateDelta: deltaNew},
+			}
+			errs.add(p.beforeTool(tReused, finishTool, map[string]any{"result": "r"}))
+			errs.add(p.onToolError(tReused, finishTool, map[string]any{"result": "r"}, errors.New("fail")))
+			errs.add(p.afterTool(tReused, finishTool, map[string]any{"result": "r"}, taskCompleted(), nil))
+			if tc.failSibling {
+				tShared := &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "shared"), ic: act.ic}
+				errs.add(p.beforeTool(tShared, finishTool, map[string]any{"result": "s"}))
+				errs.add(p.afterTool(tShared, finishTool, map[string]any{"result": "s"}, taskFailed(), nil))
+			}
+
+			// Older merged event ["shared" failed, "reused" completed] with an unrecorded StateDelta:
+			// "reused" was firstInBatch in the newer batch, so the superseded response cannot consume its rejection.
+			deltaOldUnrecorded := map[string]any{"batch": "old-unrecorded"}
+			errs.add(p.onEvent(rootCtx, &session.Event{
+				Author:  "task_worker",
+				Actions: session.EventActions{StateDelta: deltaOldUnrecorded},
+				LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+					{FunctionResponse: &genai.FunctionResponse{ID: "shared", Name: finishTaskToolName, Response: taskFailed()}},
+					{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+				}, genai.RoleUser)},
+			}))
+
+			// Newer batch's completion-carrying response with deltaNew must preserve 0 worker AGENT_COMPLETED.
+			errs.add(p.onEvent(rootCtx, &session.Event{
+				Author:  "task_worker",
+				Actions: session.EventActions{StateDelta: deltaNew},
+				LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()},
+				}}, genai.RoleUser)},
+			}))
+			errs.add(p.afterAgent(rootCtx))
+			errs.check(t)
+			p.afterRun(rootCtx)
+
+			rows := p.takeRows()
+			if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 0 {
+				t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 0; events=%v", got, eventTypes(rows))
+			}
+		})
+	}
+
+	t.Run("same_batch_duplicate_id_rejected_and_clean_consumes_rejection", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task_worker",
+			Mode:  llmagent.ModeTask,
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		rootAgent, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			Model:     &scriptedLLM{},
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-same-batch-dup-id", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		act2 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+
+		// Interleave concurrent execution: t1 starts first (taking firstInBatch=true), t2 starts and completes
+		// cleanly first (noteTaskFinished), then t1 fails+recovers last (noteTaskRejected keeps firstInBatch=true).
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("c-fin", "c-fin")}, nil))
+		t1 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic}
+		t2 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic}
+		errs.add(p.beforeTool(t1, finishTool, map[string]any{"result": "one"}))
+		errs.add(p.beforeTool(t2, finishTool, map[string]any{"result": "two"}))
+		errs.add(p.afterTool(t2, finishTool, map[string]any{"result": "two"}, taskCompleted(), nil))
+		errs.add(p.onToolError(t1, finishTool, map[string]any{"result": "one"}, errors.New("fail")))
+		errs.add(p.afterTool(t1, finishTool, map[string]any{"result": "one"}, taskCompleted(), nil))
+
+		// act1's merged [completed, completed] response pairs #2 in paired and must consume #1's rejection via calls[1]
+		// so act1 leaves nothing in endedRejectingFrames to block act2.
+		errs.add(p.onEvent(act1, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
+		// act2 (hidden callbacks) completes with reused "c-fin": must emit its own AGENT_COMPLETED immediately (2 total),
+		// without being deferred by act1 leaving #1 in endedRejectingFrames.
+		errs.add(p.beforeAgent(act2))
+		errs.add(p.beforeModel(act2, &model.LLMRequest{}))
+		errs.add(p.afterModel(act2, &model.LLMResponse{Content: fcParts("c-fin")}, nil))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.check(t)
+		rows := p.takeRows()
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 2 {
+			t.Fatalf("task_worker AGENT_COMPLETED count before run end = %d, want 2 (act1 and act2); events=%v", got, eventTypes(rows))
+		}
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+	})
+
+	t.Run("shown_ctx_unknown_delta_preserves_non_first_newer_rejection_without_shared_sibling", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task_worker",
+			Mode:  llmagent.ModeTask,
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		rootAgent, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			Model:     &scriptedLLM{},
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-p5-shown-unknown-delta", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act))
+
+		// Newer turn: ["turn2_only" failed, "reused" rejected with deltaNew (!firstInBatch)].
+		errs.add(p.beforeModel(act, &model.LLMRequest{}))
+		errs.add(p.afterModel(act, &model.LLMResponse{Content: fcParts("turn2_only", "reused")}, nil))
+		tLead := &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "turn2_only"), ic: act.ic}
+		errs.add(p.beforeTool(tLead, finishTool, map[string]any{"result": "l"}))
+		errs.add(p.afterTool(tLead, finishTool, map[string]any{"result": "l"}, taskFailed(), nil))
+		deltaNew := map[string]any{"batch": "new"}
+		tReused := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "reused"), ic: act.ic},
+			actions:               &session.EventActions{StateDelta: deltaNew},
+		}
+		errs.add(p.beforeTool(tReused, finishTool, map[string]any{"result": "r"}))
+		errs.add(p.onToolError(tReused, finishTool, map[string]any{"result": "r"}, errors.New("fail")))
+		errs.add(p.afterTool(tReused, finishTool, map[string]any{"result": "r"}, taskCompleted(), nil))
+
+		// Delayed older batch ["unrelated_old" failed, "reused" completed] delivered on act's own ctx (self > 0)
+		// with an unrecorded StateDelta (!hasEvBatchModelSeq): zero shared sibling IDs, so otherCallSeqs has no M_new
+		// and "reused" rejection must stay intact.
+		deltaOldUnrecorded := map[string]any{"batch": "old-unrecorded"}
+		errs.add(p.onEvent(act, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaOldUnrecorded},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "unrelated_old", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
+		// Deliver newer turn's completion-carrying response with deltaNew: must emit 0 worker AGENT_COMPLETED.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaNew},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 0 {
+			t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 0; events=%v", got, eventTypes(rows))
+		}
+	})
+
+	t.Run("ev_batch_model_seq_mismatch_preserves_newer_non_first_rejection", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task_worker",
+			Mode:  llmagent.ModeTask,
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		rootAgent, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			Model:     &scriptedLLM{},
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-ev-batch-seq-mismatch", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act))
+
+		// Turn 1 (M1): "lead_fail" fails with deltaOld; Turn 1's merged FR also carries a superseded "reused"
+		// whose call was not noted in Turn 1 (leaving untakenFinishCallsLocked(act, "reused", answered) empty).
+		errs.add(p.beforeModel(act, &model.LLMRequest{}))
+		errs.add(p.afterModel(act, &model.LLMResponse{Content: fcParts("lead_fail")}, nil))
+		deltaOld := map[string]any{"batch": "t1"}
+		tOldLead := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "lead_fail"), ic: act.ic},
+			actions:               &session.EventActions{StateDelta: deltaOld},
+		}
+		errs.add(p.beforeTool(tOldLead, finishTool, map[string]any{"result": "l1"}))
+		errs.add(p.afterTool(tOldLead, finishTool, map[string]any{"result": "l1"}, taskFailed(), nil))
+
+		// Turn 2 (M2): ["lead_fail" failed in plain sight, "reused" rejected with deltaNew (!firstInBatch)].
+		errs.add(p.beforeModel(act, &model.LLMRequest{}))
+		errs.add(p.afterModel(act, &model.LLMResponse{Content: fcParts("lead_fail", "reused")}, nil))
+		tNewLead := &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "lead_fail"), ic: act.ic}
+		errs.add(p.beforeTool(tNewLead, finishTool, map[string]any{"result": "l2"}))
+		errs.add(p.afterTool(tNewLead, finishTool, map[string]any{"result": "l2"}, taskFailed(), nil))
+		deltaNew := map[string]any{"batch": "t2"}
+		tNewReused := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "reused"), ic: act.ic},
+			actions:               &session.EventActions{StateDelta: deltaNew},
+		}
+		errs.add(p.beforeTool(tNewReused, finishTool, map[string]any{"result": "r2"}))
+		errs.add(p.onToolError(tNewReused, finishTool, map[string]any{"result": "r2"}, errors.New("fail")))
+		errs.add(p.afterTool(tNewReused, finishTool, map[string]any{"result": "r2"}, taskCompleted(), nil))
+
+		// Delayed Turn 1 merged FR carrying deltaOld (hasEvBatchModelSeq == true, evBatchModelSeq == M1 != M2):
+		// even though "lead_fail" shares an ID with Turn 2, hasEvBatchModelSeq scoping must preserve Turn 2's rejection.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaOld},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "lead_fail", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
+		// Deliver Turn 2's completion-carrying response with deltaNew: must emit 0 worker AGENT_COMPLETED.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaNew},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 0 {
+			t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 0; events=%v", got, eventTypes(rows))
+		}
+	})
+}
+
+func TestTraceManager_TaskBatchScopingAndEndedRejected(t *testing.T) {
+	finishPart := func(id string, args map[string]any) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: finishTaskToolName, Args: args}}
+	}
+	fcParts := func(ids ...string) *genai.Content {
+		parts := make([]*genai.Part, len(ids))
+		for i, id := range ids {
+			parts[i] = finishPart(id, map[string]any{"result": id})
+		}
+		return genai.NewContentFromParts(parts, genai.RoleModel)
+	}
+	newWorkers := func(t *testing.T) (agent.Agent, agent.Agent) {
+		t.Helper()
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task_worker",
+			Mode:  llmagent.ModeTask,
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(task_worker): %v", err)
+		}
+		rootAgent, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			Model:     &scriptedLLM{},
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		return taskAgent, rootAgent
+	}
+	newCtxs := func(t *testing.T, invID string, taskAgent, rootAgent agent.Agent) (
+		*taskActivationContext,
+		func() *taskActivationContext,
+	) {
+		t.Helper()
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: invID, agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		newAct := func() *taskActivationContext {
+			return &taskActivationContext{
+				mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: invID, agentName: "task_worker"},
+				ic:                    &runningInvocation{running: taskAgent},
+			}
+		}
+		return rootCtx, newAct
+	}
+
+	t.Run("paired_finished_older_batch_does_not_steal_open_call", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		rootCtx, newAct := newCtxs(t, "inv-paired-finished-batch-scope", taskAgent, rootAgent)
+		act1 := newAct()
+		noteTool := &fakeTool{name: "record_note"}
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+
+		// Turn 1: [record_note(deltaOld), finish_task("shared") (left open in toolSpans)].
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		noteCall := &genai.Part{FunctionCall: &genai.FunctionCall{ID: "c-note", Name: "record_note", Args: map[string]any{"note": "a"}}}
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			noteCall,
+			finishPart("", map[string]any{"result": "t1"}),
+		}, genai.RoleModel)}, nil))
+		deltaOld := map[string]any{"batch": "t1"}
+		tNote := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-note"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: deltaOld},
+		}
+		errs.add(p.beforeTool(tNote, noteTool, map[string]any{"note": "a"}))
+		errs.add(p.afterTool(tNote, noteTool, map[string]any{"note": "a"}, map[string]any{"ok": true}, nil))
+		tOpen1 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, ""), ic: act1.ic}
+		errs.add(p.beforeTool(tOpen1, finishTool, map[string]any{"result": "t1"}))
+
+		// Turn 2: newer finish_task completes in AfterToolCallback -> finishedTasks(M2).
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("")}, nil))
+		tNew := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, ""), ic: act1.ic}
+		errs.add(p.beforeTool(tNew, finishTool, map[string]any{"result": "t2"}))
+		errs.add(p.afterTool(tNew, finishTool, map[string]any{"result": "t2"}, taskCompleted(), nil))
+		errs.check(t)
+
+		// Deliver Turn 1's FR [finish_task(completed), finish_task(failed)] with deltaOld to completeResponseEvent:
+		// Turn 2's finishedTasks entry must NOT steal calls[0] from Turn 1's open call.
+		evContent := genai.NewContentFromParts([]*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{Name: finishTaskToolName, Response: taskCompleted()}},
+			{FunctionResponse: &genai.FunctionResponse{Name: finishTaskToolName, Response: taskFailed()}},
+		}, genai.RoleUser)
+		p.traces.completeResponseEvent(rootCtx, identityOf(rootCtx), "task_worker", "", functionResponseCallSpecs(evContent), deltaOld)
+
+		inv := p.traces.invocation(rootCtx, identityOf(rootCtx))
+		inv.mu.Lock()
+		var settled, unfinished int
+		for _, rec := range inv.agentStack {
+			if rec.name == "task_worker" {
+				settled = len(rec.settledTaskCalls)
+				unfinished = len(rec.unfinishedFinishCalls)
+			}
+		}
+		inv.mu.Unlock()
+		if settled != 1 || unfinished != 0 {
+			t.Fatalf("after Turn 1 completeResponseEvent: settled=%d unfinished=%d, want 1 and 0", settled, unfinished)
+		}
+	})
+
+	t.Run("sole_owner_blocked_by_other_open_task_frame", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		rootCtx, newAct := newCtxs(t, "inv-sole-owner-open-frame", taskAgent, rootAgent)
+		act1 := newAct()
+		act2 := newAct()
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeAgent(act2))
+
+		errs.add(p.beforeModel(act2, &model.LLMRequest{}))
+		errs.add(p.afterModel(act2, &model.LLMResponse{Content: fcParts("bad", "reused")}, nil))
+		tBad := &taskActivationContext{mockInvocationContext: withFunctionCall(act2.mockInvocationContext, "bad"), ic: act2.ic}
+		errs.add(p.beforeTool(tBad, finishTool, map[string]any{}))
+		errs.add(p.afterTool(tBad, finishTool, map[string]any{}, taskFailed(), nil))
+
+		deltaRej := map[string]any{"batch": "rej"}
+		tRej := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act2.mockInvocationContext, "reused"), ic: act2.ic},
+			actions:               &session.EventActions{StateDelta: deltaRej},
+		}
+		errs.add(p.beforeTool(tRej, finishTool, map[string]any{}))
+		errs.add(p.onToolError(tRej, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(tRej, finishTool, map[string]any{}, taskCompleted(), nil))
+
+		// No StateDelta: act1 is another open task frame, so soleTaskOwnerForCall must keep act2's rejection.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "bad", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+		// Delayed completion for act2's rejected call with deltaRej must emit 0 AGENT_COMPLETED.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaRej},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(act1))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 1 {
+			// act1 ended cleanly via afterAgent (1); act2 must emit 0.
+			t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 1 (act1 only); events=%v", got, eventTypes(rows))
+		}
+	})
+
+	t.Run("sole_owner_blocked_by_retired_unfinished_call_despite_completion_calls", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		rootCtx, newAct := newCtxs(t, "inv-sole-owner-retired-unfinished", taskAgent, rootAgent)
+		act1 := newAct()
+		act2 := newAct()
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+
+		// act1 has 1 unfinishedFinishCall ("reused") and then completes via a hidden-callback call ("reused")
+		// whose FR carries act1's own context (shown=act1 -> completionCalls=["reused"]).
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("reused")}, nil))
+		t1Fail := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "reused"), ic: act1.ic}
+		errs.add(p.beforeTool(t1Fail, finishTool, map[string]any{}))
+		errs.add(p.onToolError(t1Fail, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(t1Fail, finishTool, map[string]any{}, taskFailed(), nil))
+		errs.add(p.onEvent(act1, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+
+		// act2 rejects "reused" in ["bad", "reused"] batch.
+		errs.add(p.beforeAgent(act2))
+		errs.add(p.beforeModel(act2, &model.LLMRequest{}))
+		errs.add(p.afterModel(act2, &model.LLMResponse{Content: fcParts("bad", "reused")}, nil))
+		tBad := &taskActivationContext{mockInvocationContext: withFunctionCall(act2.mockInvocationContext, "bad"), ic: act2.ic}
+		errs.add(p.beforeTool(tBad, finishTool, map[string]any{}))
+		errs.add(p.afterTool(tBad, finishTool, map[string]any{}, taskFailed(), nil))
+		deltaRej := map[string]any{"batch": "act2-rej"}
+		tRej := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act2.mockInvocationContext, "reused"), ic: act2.ic},
+			actions:               &session.EventActions{StateDelta: deltaRej},
+		}
+		errs.add(p.beforeTool(tRej, finishTool, map[string]any{}))
+		errs.add(p.onToolError(tRej, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(tRej, finishTool, map[string]any{}, taskCompleted(), nil))
+
+		// No StateDelta: act1's retired unfinishedFinishCalls["reused"] must block cleanup despite completionCalls.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "bad", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaRej},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 1 {
+			// Only act1 emitted AGENT_COMPLETED; act2 must emit 0.
+			t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 1 (act1 only); events=%v", got, eventTypes(rows))
+		}
+	})
+
+	t.Run("deferred_peer_started_before_owner_reindexes_owner", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, _ := newWorkers(t)
+		subCoord, err := llmagent.New(llmagent.Config{
+			Name:      "sub_coord",
+			Model:     &scriptedLLM{},
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(sub_coord): %v", err)
+		}
+		rootSeq, err := sequentialagent.New(sequentialagent.Config{
+			AgentConfig: agent.Config{
+				Name:      "coordinator",
+				SubAgents: []agent.Agent{taskAgent, subCoord},
+			},
+		})
+		if err != nil {
+			t.Fatalf("sequentialagent.New: %v", err)
+		}
+		rootCtx, newAct := newCtxs(t, "inv-deferred-peer-reindex", taskAgent, rootSeq)
+		subCtx := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: "inv-deferred-peer-reindex", agentName: "sub_coord"},
+			ic:                    &runningInvocation{running: subCoord},
+		}
+		actPeer := newAct()
+		actOwner := newAct()
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+
+		// Start deferring peer BEFORE subCoord and owner so owner sits at the end of agentStack.
+		errs.add(p.beforeAgent(actPeer))
+		errs.add(p.beforeModel(actPeer, &model.LLMRequest{}))
+		errs.add(p.afterModel(actPeer, &model.LLMResponse{Content: fcParts("bad")}, nil))
+		tPeerNote := &taskActivationContext{mockInvocationContext: withFunctionCall(actPeer.mockInvocationContext, "p-note"), ic: actPeer.ic}
+		errs.add(p.beforeTool(tPeerNote, &fakeTool{name: "record_note"}, map[string]any{}))
+		errs.add(p.afterTool(tPeerNote, &fakeTool{name: "record_note"}, map[string]any{}, map[string]any{"ok": true}, nil))
+
+		errs.add(p.beforeAgent(subCtx))
+		errs.add(p.beforeAgent(actOwner))
+		errs.add(p.beforeModel(actOwner, &model.LLMRequest{}))
+		errs.add(p.afterModel(actOwner, &model.LLMResponse{Content: fcParts("other", "bad")}, nil))
+		tOther := &taskActivationContext{mockInvocationContext: withFunctionCall(actOwner.mockInvocationContext, "other"), ic: actOwner.ic}
+		p.traces.noteTaskUnfinished(tOther, identityOf(tOther), "other")
+		deltaBad := map[string]any{"batch": "owner-bad"}
+		tBad := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(actOwner.mockInvocationContext, "bad"), ic: actOwner.ic},
+			actions:               &session.EventActions{StateDelta: deltaBad},
+		}
+		p.traces.noteTaskRejected(tBad, identityOf(tBad), "bad")
+
+		// No-delta "bad" defers actPeer on actOwner.deferredRejections["bad"].
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "bad", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		// Merged ["other"(failed), "bad"(completed)] with deltaBad proves actPeer and shifts actOwner's index!
+		// Re-indexing owner keeps lineageLocked(i) in bounds so sub_coord is marked responded.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaBad},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "other", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "bad", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+		inv := p.traces.invocation(rootCtx, identityOf(rootCtx))
+		inv.mu.Lock()
+		var subResponded bool
+		for _, rec := range inv.agentStack {
+			if rec.name == "sub_coord" {
+				subResponded = rec.responded()
+			}
+		}
+		inv.mu.Unlock()
+		if !subResponded {
+			t.Fatalf("sub_coord.responded() = false after peer retirement shifted owner index, want true")
+		}
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		if got := len(agentRowsOfType(rows, EventAgentError, "sub_coord")); got != 0 {
+			t.Fatalf("sub_coord AGENT_ERROR count = %d, want 0 (lineage must be marked responded after re-index); events=%v", got, eventTypes(rows))
+		}
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(workerStarts) != 2 || len(workerEnds) != 1 || workerEnds[0]["span_id"] != workerStarts[0]["span_id"] {
+			t.Fatalf("workerStarts=%d workerEnds=%d; want 1 AGENT_COMPLETED for actPeer; events=%v", len(workerStarts), len(workerEnds), eventTypes(rows))
+		}
+	})
+
+	t.Run("retire_deferred_with_proof_records_completion_calls", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		rootCtx, newAct := newCtxs(t, "inv-retire-deferred-completion-calls", taskAgent, rootAgent)
+		actA := newAct()
+		actB := newAct()
+		actC := newAct()
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+
+		// actA rejects "shared"; actB defers on "shared"; actA's deltaA proves actB with completionCalls=["shared"].
+		errs.add(p.beforeAgent(actA))
+		errs.add(p.beforeModel(actA, &model.LLMRequest{}))
+		errs.add(p.afterModel(actA, &model.LLMResponse{Content: fcParts("other_a", "shared")}, nil))
+		tOtherA := &taskActivationContext{mockInvocationContext: withFunctionCall(actA.mockInvocationContext, "other_a"), ic: actA.ic}
+		errs.add(p.beforeTool(tOtherA, finishTool, map[string]any{}))
+		errs.add(p.afterTool(tOtherA, finishTool, map[string]any{}, taskFailed(), nil))
+		deltaA := map[string]any{"batch": "actA"}
+		tSharedA := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(actA.mockInvocationContext, "shared"), ic: actA.ic},
+			actions:               &session.EventActions{StateDelta: deltaA},
+		}
+		errs.add(p.beforeTool(tSharedA, finishTool, map[string]any{}))
+		errs.add(p.onToolError(tSharedA, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(tSharedA, finishTool, map[string]any{}, taskCompleted(), nil))
+
+		errs.add(p.beforeAgent(actB))
+		errs.add(p.beforeModel(actB, &model.LLMRequest{}))
+		errs.add(p.afterModel(actB, &model.LLMResponse{Content: fcParts("shared")}, nil))
+
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "shared", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaA},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "other_a", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "shared", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+		// Cleanly retire actA on a distinct Turn 2 call so actC becomes the sole open frame.
+		errs.add(p.beforeModel(actA, &model.LLMRequest{}))
+		errs.add(p.afterModel(actA, &model.LLMResponse{Content: fcParts("actA_done")}, nil))
+		tActADone := &taskActivationContext{mockInvocationContext: withFunctionCall(actA.mockInvocationContext, "actA_done"), ic: actA.ic}
+		errs.add(p.beforeTool(tActADone, finishTool, map[string]any{"result": "done"}))
+		errs.add(p.afterTool(tActADone, finishTool, map[string]any{"result": "done"}, taskCompleted(), nil))
+		errs.add(p.onEvent(actA, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "actA_done", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+
+		// actC rejects "shared" in ["bad2", "shared"] with deltaC1.
+		errs.add(p.beforeAgent(actC))
+		errs.add(p.beforeModel(actC, &model.LLMRequest{}))
+		errs.add(p.afterModel(actC, &model.LLMResponse{Content: fcParts("bad2", "shared")}, nil))
+		tBad2 := &taskActivationContext{mockInvocationContext: withFunctionCall(actC.mockInvocationContext, "bad2"), ic: actC.ic}
+		errs.add(p.beforeTool(tBad2, finishTool, map[string]any{}))
+		errs.add(p.afterTool(tBad2, finishTool, map[string]any{}, taskFailed(), nil))
+		deltaC1 := map[string]any{"batch": "actC-t1"}
+		tSharedC := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(actC.mockInvocationContext, "shared"), ic: actC.ic},
+			actions:               &session.EventActions{StateDelta: deltaC1},
+		}
+		errs.add(p.beforeTool(tSharedC, finishTool, map[string]any{}))
+		errs.add(p.onToolError(tSharedC, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(tSharedC, finishTool, map[string]any{}, taskCompleted(), nil))
+
+		// No-delta ["bad2"(failed), "shared"(completed)]: must consume actC's rejection because actB.completionCalls == ["shared"].
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "bad2", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "shared", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+		// actC Turn 2 (tool callbacks hidden by earlier plugin) succeeds with "shared": must emit AGENT_COMPLETED!
+		errs.add(p.beforeModel(actC, &model.LLMRequest{}))
+		errs.add(p.afterModel(actC, &model.LLMResponse{Content: fcParts("shared")}, nil))
+		deltaC2 := map[string]any{"batch": "actC-t2"}
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaC2},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "shared", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 3 {
+			// actB + actA + actC (3 total); if actB lacked completionCalls, actC's Turn 2 FR is dropped (2).
+			t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 3; events=%v", got, eventTypes(rows))
+		}
+	})
+
+	t.Run("pending_finish_call_blocks_deferred_batch_arm", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		rootCtx, newAct := newCtxs(t, "inv-pending-blocks-deferred-batch", taskAgent, rootAgent)
+		act1 := newAct()
+		act2 := newAct()
+		noteTool := &fakeTool{name: "record_note"}
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+
+		// act1 Turn 1: [record_note(deltaNote), finish_task("c-fin") (#1 rejected w/ deltaFin), finish_task("c-fin") (#2 hidden -> pendingFinishCalls)].
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		noteCall := &genai.Part{FunctionCall: &genai.FunctionCall{ID: "c-note", Name: "record_note", Args: map[string]any{"note": "n"}}}
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			noteCall,
+			finishPart("c-fin", map[string]any{"result": "one"}),
+			finishPart("c-fin", map[string]any{"result": "two"}),
+		}, genai.RoleModel)}, nil))
+		deltaNote := map[string]any{"batch": "note"}
+		tNote := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-note"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: deltaNote},
+		}
+		errs.add(p.beforeTool(tNote, noteTool, map[string]any{"note": "n"}))
+		errs.add(p.afterTool(tNote, noteTool, map[string]any{"note": "n"}, map[string]any{"ok": true}, nil))
+
+		deltaFin := map[string]any{"batch": "fin"}
+		tFin1 := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: deltaFin},
+		}
+		errs.add(p.beforeTool(tFin1, finishTool, map[string]any{"result": "one"}))
+		errs.add(p.onToolError(tFin1, finishTool, map[string]any{"result": "one"}, errors.New("fail")))
+		errs.add(p.afterTool(tFin1, finishTool, map[string]any{"result": "one"}, taskCompleted(), nil))
+
+		// act2 defers on no-delta "c-fin", moving act1's rejection to act1.deferredRejections.
+		errs.add(p.beforeAgent(act2))
+		errs.add(p.beforeModel(act2, &model.LLMRequest{}))
+		errs.add(p.afterModel(act2, &model.LLMResponse{Content: fcParts("c-fin")}, nil))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+
+		// Merged Turn 1 FR carrying deltaNote (not deltaFin!) arrives while act1 still has #2 "c-fin" in pendingFinishCalls:
+		// pendingFinishCalls guard must keep act1 from being swallowed by deferredRejections!
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaNote},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-note", Name: "record_note", Response: map[string]any{"ok": true}}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(workerStarts) != 2 || len(workerEnds) < 1 || workerEnds[0]["span_id"] != workerStarts[0]["span_id"] {
+			t.Fatalf("workerStarts=%d workerEnds=%d; want act1 to emit AGENT_COMPLETED; events=%v", len(workerStarts), len(workerEnds), eventTypes(rows))
+		}
+	})
+
+	t.Run("owner_known_preserves_batch_model_seq_after_delta_eviction", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		rootCtx, newAct := newCtxs(t, "inv-owner-known-after-delta-eviction", taskAgent, rootAgent)
+		actPeer := newAct()
+		act1 := newAct()
+		noteTool := &fakeTool{name: "record_note"}
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+
+		// Open peer before act1 so soleTaskOwnerForCall returns false.
+		errs.add(p.beforeAgent(actPeer))
+		errs.add(p.beforeAgent(act1))
+
+		// act1 Turn 1: ["bad"(failed), "c-rej"(rejected with delta1)].
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("bad", "c-rej")}, nil))
+		tBad := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "bad"), ic: act1.ic}
+		errs.add(p.beforeTool(tBad, finishTool, map[string]any{}))
+		errs.add(p.afterTool(tBad, finishTool, map[string]any{}, taskFailed(), nil))
+		delta1 := map[string]any{"batch": "rej1"}
+		tRej := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-rej"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: delta1},
+		}
+		errs.add(p.beforeTool(tRej, finishTool, map[string]any{}))
+		errs.add(p.onToolError(tRej, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(tRej, finishTool, map[string]any{}, taskCompleted(), nil))
+
+		var rows []map[string]any
+		// Evict delta1 from act1.toolStateDeltas via >maxTaskToolDeltas tool deltas while keeping delta1 in rejectedTasks.
+		for idx := range maxTaskToolDeltas + 1 {
+			tNote := &taskToolContext{
+				taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, fmt.Sprintf("n-%d", idx)), ic: act1.ic},
+				actions:               &session.EventActions{StateDelta: map[string]any{"idx": idx}},
+			}
+			errs.add(p.beforeTool(tNote, noteTool, map[string]any{"idx": idx}))
+			errs.add(p.afterTool(tNote, noteTool, map[string]any{"idx": idx}, map[string]any{"ok": true}, nil))
+			rows = append(rows, p.takeRows()...)
+		}
+
+		// Turn 1's merged FR with delta1 arrives via rootCtx (self=0, hasEvEpoch=false, hasEvBatchModelSeq=true):
+		// ownerKnown must be true so "c-rej" rejection is consumed despite open peer actPeer.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: delta1},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "bad", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-rej", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
+		// Turn 2 of act1 (tool callbacks hidden, delta2) completes cleanly: must emit AGENT_COMPLETED for act1.
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("c-rej")}, nil))
+		delta2 := map[string]any{"batch": "t2"}
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: delta2},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c-rej", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows = append(rows, p.takeRows()...)
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(workerStarts) != 2 || len(workerEnds) != 1 || workerEnds[0]["span_id"] != workerStarts[1]["span_id"] {
+			t.Fatalf("workerStarts=%d workerEnds=%d; want act1 (second start) to emit AGENT_COMPLETED; events=%v", len(workerStarts), len(workerEnds), eventTypes(rows))
+		}
+	})
+
+	t.Run("intervening_model_call_clears_ended_rejected", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		rootCtx, newAct := newCtxs(t, "inv-ended-rejected-model-clear", taskAgent, rootAgent)
+		act1 := newAct()
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("c1")}, nil))
+		delta1 := map[string]any{"batch": "rej"}
+		tC1 := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c1"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: delta1},
+		}
+		errs.add(p.beforeTool(tC1, finishTool, map[string]any{}))
+		errs.add(p.onToolError(tC1, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(tC1, finishTool, map[string]any{}, taskCompleted(), nil))
+
+		// Response event with taskEnded=false (no Output) arms act1.endedRejected.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: delta1},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c1", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		// Subsequent model call clears endedRejected; delegator re-entry must NOT retire coordinator or act1!
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.check(t)
+
+		rows := p.takeRows()
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "coordinator")); got != 0 {
+			t.Fatalf("coordinator AGENT_COMPLETED count = %d, want 0 while act1 stayed active", got)
+		}
+	})
+
+	t.Run("superseded_cleanup_preserves_other_call_when_shown_without_delta", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		rootCtx, newAct := newCtxs(t, "inv-shown-without-delta", taskAgent, rootAgent)
+		act := newAct()
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act))
+
+		// Turn 1: "other_rej" fails and recovers with deltaOther -> rejectedTasks[0].
+		errs.add(p.beforeModel(act, &model.LLMRequest{}))
+		errs.add(p.afterModel(act, &model.LLMResponse{Content: fcParts("other_rej")}, nil))
+		deltaOther := map[string]any{"batch": "other-rej"}
+		tOther := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "other_rej"), ic: act.ic},
+			actions:               &session.EventActions{StateDelta: deltaOther},
+		}
+		errs.add(p.beforeTool(tOther, finishTool, map[string]any{}))
+		errs.add(p.onToolError(tOther, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(tOther, finishTool, map[string]any{}, taskCompleted(), nil))
+
+		// Turn 2: "bad" fails cleanly, "reused" fails and recovers WITHOUT StateDelta -> rejectedTasks[1].
+		errs.add(p.beforeModel(act, &model.LLMRequest{}))
+		errs.add(p.afterModel(act, &model.LLMResponse{Content: fcParts("bad", "reused")}, nil))
+		tBad := &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "bad"), ic: act.ic}
+		errs.add(p.beforeTool(tBad, finishTool, map[string]any{}))
+		errs.add(p.afterTool(tBad, finishTool, map[string]any{}, taskFailed(), nil))
+		tRej := &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "reused"), ic: act.ic}
+		errs.add(p.beforeTool(tRej, finishTool, map[string]any{}))
+		errs.add(p.onToolError(tRej, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(tRej, finishTool, map[string]any{}, taskCompleted(), nil))
+
+		// Event with act context (self > 0 => ownerKnown == true) and NO StateDelta (hasEvBatchModelSeq == false):
+		// must skip "other_rej" and delete only "reused" from act.rejectedTasks.
+		errs.add(p.onEvent(act, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "bad", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
+		// Delayed FR for "other_rej" (deltaOther) must still see its preserved rejection and emit 0 AGENT_COMPLETED.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaOther},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "other_rej", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.check(t)
+		if got := len(agentRowsOfType(p.takeRows(), EventAgentCompleted, "task_worker")); got != 0 {
+			t.Fatalf("task_worker AGENT_COMPLETED before Turn 3 = %d, want 0 (other_rej preserved)", got)
+		}
+
+		// Turn 3 retry of "reused" (hidden tool callbacks) succeeds cleanly because "reused" was deleted.
+		errs.add(p.beforeModel(act, &model.LLMRequest{}))
+		errs.add(p.afterModel(act, &model.LLMResponse{Content: fcParts("reused")}, nil))
+		errs.add(p.onEvent(act, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		if got := len(agentRowsOfType(p.takeRows(), EventAgentCompleted, "task_worker")); got != 1 {
+			t.Fatalf("task_worker AGENT_COMPLETED after Turn 3 = %d, want 1", got)
+		}
+	})
+
+	t.Run("other_call_seqs_answered_source", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		rootCtx, newAct := newCtxs(t, "inv-other-seqs-answered", taskAgent, rootAgent)
+		act1 := newAct()
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+
+		// act1 Turn 1: "good" completes in AfterToolCallback (finishedTasks only, cleared from pendingFinishCalls),
+		// "reused" fails with deltaRej and recovers.
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("good", "reused")}, nil))
+		tGood := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "good"), ic: act1.ic}
+		errs.add(p.beforeTool(tGood, finishTool, map[string]any{"result": "g"}))
+		errs.add(p.afterTool(tGood, finishTool, map[string]any{"result": "g"}, taskCompleted(), nil))
+		deltaRej := map[string]any{"batch": "rej"}
+		tReused := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "reused"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: deltaRej},
+		}
+		errs.add(p.beforeTool(tReused, finishTool, map[string]any{"result": "r"}))
+		errs.add(p.onToolError(tReused, finishTool, map[string]any{"result": "r"}, errors.New("fail")))
+		errs.add(p.afterTool(tReused, finishTool, map[string]any{"result": "r"}, taskCompleted(), nil))
+
+		// No-delta ["bad" failed, "good" completed, "reused" completed] on rootCtx (!ownerKnown):
+		// "good" is superseded, so matchedSuperseded removes it from finishedTasks and puts it ONLY in answered.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "bad", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "good", Name: finishTaskToolName, Response: taskCompleted()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
+		// Turn 2 retry of "reused" (hidden callbacks): must emit 1 AGENT_COMPLETED because answered cleared Turn 1's rejection.
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("reused")}, nil))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		if got := len(agentRowsOfType(p.takeRows(), EventAgentCompleted, "task_worker")); got != 1 {
+			t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 1", got)
+		}
+	})
+
+	t.Run("other_call_seqs_paired_finished_source", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		rootCtx, newAct := newCtxs(t, "inv-other-seqs-paired", taskAgent, rootAgent)
+		act1 := newAct()
+		act2 := newAct()
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+
+		// act1 Turn 1: "good" completes in AfterToolCallback (finishedTasks only, not in answered or finishCallSlotsLocked),
+		// "reused" fails with deltaRej and recovers.
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("good", "reused")}, nil))
+		tGood := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "good"), ic: act1.ic}
+		errs.add(p.beforeTool(tGood, finishTool, map[string]any{"result": "g"}))
+		errs.add(p.afterTool(tGood, finishTool, map[string]any{"result": "g"}, taskCompleted(), nil))
+		deltaRej := map[string]any{"batch": "rej"}
+		tReused := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "reused"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: deltaRej},
+		}
+		errs.add(p.beforeTool(tReused, finishTool, map[string]any{"result": "r"}))
+		errs.add(p.onToolError(tReused, finishTool, map[string]any{"result": "r"}, errors.New("fail")))
+		errs.add(p.afterTool(tReused, finishTool, map[string]any{"result": "r"}, taskCompleted(), nil))
+
+		// No-delta ["good" completed, "reused" completed] on rootCtx (!ownerKnown):
+		// "good" pairs in pairedFinished, so paired must populate otherCallSeqs to clear act1's "reused" rejection.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "good", Name: finishTaskToolName, Response: taskCompleted()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
+		// act2 (hidden callbacks) completes "reused": must not be blocked by act1 in endedRejectingFrames.
+		errs.add(p.beforeAgent(act2))
+		errs.add(p.beforeModel(act2, &model.LLMRequest{}))
+		errs.add(p.afterModel(act2, &model.LLMResponse{Content: fcParts("reused")}, nil))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.check(t)
+		if got := len(agentRowsOfType(p.takeRows(), EventAgentCompleted, "task_worker")); got != 2 {
+			t.Fatalf("task_worker AGENT_COMPLETED before run end = %d, want 2 (act1 and act2)", got)
+		}
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+	})
+
+	t.Run("other_call_seqs_ignores_non_finish_tool", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		rootCtx, newAct := newCtxs(t, "inv-other-seqs-non-finish", taskAgent, rootAgent)
+		act := newAct()
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act))
+
+		// Newer turn has hidden finish_task("shared") and recovered finish_task("reused") with deltaNew.
+		errs.add(p.beforeModel(act, &model.LLMRequest{}))
+		errs.add(p.afterModel(act, &model.LLMResponse{Content: fcParts("shared", "reused")}, nil))
+		deltaNew := map[string]any{"batch": "new"}
+		tReused := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "reused"), ic: act.ic},
+			actions:               &session.EventActions{StateDelta: deltaNew},
+		}
+		errs.add(p.beforeTool(tReused, finishTool, map[string]any{"result": "r"}))
+		errs.add(p.onToolError(tReused, finishTool, map[string]any{"result": "r"}, errors.New("fail")))
+		errs.add(p.afterTool(tReused, finishTool, map[string]any{"result": "r"}, taskCompleted(), nil))
+
+		// Older event with non-finish_task tool echo("shared") and superseded finish_task("reused") on rootCtx (!ownerKnown):
+		// echo("shared") must NOT match finish_task("shared") in finishCallSlotsLocked to delete rejectedTasks{"reused"}.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "shared", Name: "echo", Response: map[string]any{"ok": true}}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "bad", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
+		// Deliver newer recovered response with deltaNew: must emit 0 AGENT_COMPLETED.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaNew},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "reused", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		if got := len(agentRowsOfType(p.takeRows(), EventAgentCompleted, "task_worker")); got != 0 {
+			t.Fatalf("task_worker AGENT_COMPLETED = %d, want 0", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name    string
+		trigger func(p *clockedPlugin, act *taskActivationContext, finishTool tool.Tool, errs *callbackErrors)
+	}{
+		{
+			name: "pushToolSpanWithKind",
+			trigger: func(p *clockedPlugin, act *taskActivationContext, _ tool.Tool, errs *callbackErrors) {
+				noteTool := &fakeTool{name: "record_note"}
+				tNote := &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "n1"), ic: act.ic}
+				errs.add(p.beforeTool(tNote, noteTool, map[string]any{"n": 1}))
+				errs.add(p.afterTool(tNote, noteTool, map[string]any{"n": 1}, map[string]any{"ok": true}, nil))
+			},
+		},
+		{
+			name: "recordError",
+			trigger: func(p *clockedPlugin, act *taskActivationContext, _ tool.Tool, errs *callbackErrors) {
+				errs.add(p.onModelError(act, &model.LLMRequest{}, errors.New("boom")))
+			},
+		},
+		{
+			name: "noteTaskFinishCalls",
+			trigger: func(p *clockedPlugin, act *taskActivationContext, _ tool.Tool, errs *callbackErrors) {
+				errs.add(p.afterModel(act, &model.LLMResponse{Content: fcParts("c2")}, nil))
+			},
+		},
+		{
+			name: "noteTaskFinished",
+			trigger: func(p *clockedPlugin, act *taskActivationContext, finishTool tool.Tool, errs *callbackErrors) {
+				tFin := &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "c2"), ic: act.ic}
+				errs.add(p.afterTool(tFin, finishTool, map[string]any{}, taskCompleted(), nil))
+			},
+		},
+		{
+			name: "noteTaskRejected",
+			trigger: func(p *clockedPlugin, act *taskActivationContext, _ tool.Tool, _ *callbackErrors) {
+				p.traces.noteTaskRejected(act, identityOf(act), "c2")
+			},
+		},
+		{
+			name: "noteTaskUnfinished",
+			trigger: func(p *clockedPlugin, act *taskActivationContext, finishTool tool.Tool, errs *callbackErrors) {
+				tFin := &taskActivationContext{mockInvocationContext: withFunctionCall(act.mockInvocationContext, "c2"), ic: act.ic}
+				errs.add(p.afterTool(tFin, finishTool, map[string]any{}, taskFailed(), nil))
+			},
+		},
+		{
+			name: "empty_call_completeResponseEvent",
+			trigger: func(p *clockedPlugin, act *taskActivationContext, _ tool.Tool, errs *callbackErrors) {
+				errs.add(p.onEvent(act, &session.Event{
+					Author:      "task_worker",
+					LLMResponse: model.LLMResponse{Content: textContent("model", "retried")},
+				}))
+			},
+		},
+	} {
+		t.Run("clear_ended_rejected_"+tc.name, func(t *testing.T) {
+			p := newClockedPlugin(t)
+			p.config.DisableFlushOnRunEnd = true
+			taskAgent, rootAgent := newWorkers(t)
+			rootCtx, newAct := newCtxs(t, "inv-clear-ended-rejected-"+tc.name, taskAgent, rootAgent)
+			act1 := newAct()
+			finishTool := &fakeTool{name: finishTaskToolName}
+
+			var errs callbackErrors
+			errs.add(p.beforeRun(rootCtx))
+			errs.add(p.beforeAgent(rootCtx))
+			errs.add(p.beforeAgent(act1))
+			errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+			errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("c1")}, nil))
+			delta1 := map[string]any{"batch": "rej"}
+			tC1 := &taskToolContext{
+				taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c1"), ic: act1.ic},
+				actions:               &session.EventActions{StateDelta: delta1},
+			}
+			errs.add(p.beforeTool(tC1, finishTool, map[string]any{}))
+			errs.add(p.onToolError(tC1, finishTool, map[string]any{}, errors.New("fail")))
+			errs.add(p.afterTool(tC1, finishTool, map[string]any{}, taskCompleted(), nil))
+			errs.add(p.onEvent(rootCtx, &session.Event{
+				Author:  "task_worker",
+				Actions: session.EventActions{StateDelta: delta1},
+				LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{ID: "c1", Name: finishTaskToolName, Response: taskCompleted()},
+				}}, genai.RoleUser)},
+			}))
+
+			tc.trigger(p, act1, finishTool, &errs)
+			errs.add(p.beforeAgent(rootCtx))
+			errs.check(t)
+
+			rows := p.takeRows()
+			if got := len(agentRowsOfType(rows, EventAgentCompleted, "coordinator")); got != 0 {
+				t.Fatalf("coordinator AGENT_COMPLETED count = %d, want 0 while act1 remained active after %s", got, tc.name)
+			}
+		})
+	}
+
+	t.Run("pop_ended_rejected_requires_child_membership", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, _ := newWorkers(t)
+		coordNoChild, err := llmagent.New(llmagent.Config{
+			Name:  "coordinator",
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		rootCtx, newAct := newCtxs(t, "inv-ended-rejected-child-membership", taskAgent, coordNoChild)
+		act1 := newAct()
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("c1")}, nil))
+		delta1 := map[string]any{"batch": "rej"}
+		tC1 := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c1"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: delta1},
+		}
+		errs.add(p.beforeTool(tC1, finishTool, map[string]any{}))
+		errs.add(p.onToolError(tC1, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(tC1, finishTool, map[string]any{}, taskCompleted(), nil))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: delta1},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c1", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+
+		// Re-entering coordinator when task_worker is not in coordinator.children must NOT retire act1.
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.afterAgent(act1))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(workerStarts) != 1 || len(workerEnds) != 1 || workerEnds[0]["span_id"] != workerStarts[0]["span_id"] {
+			t.Fatalf("workerStarts=%d workerEnds=%d (span match=%v); events=%v",
+				len(workerStarts), len(workerEnds), len(workerStarts) == 1 && len(workerEnds) == 1 && workerEnds[0]["span_id"] == workerStarts[0]["span_id"], eventTypes(rows))
+		}
+	})
+
+	t.Run("pop_ended_rejected_requires_same_goroutine", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		rootCtx, newAct := newCtxs(t, "inv-ended-rejected-same-goroutine", taskAgent, rootAgent)
+		act1 := newAct()
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+
+		// Start act1 on a separate goroutine so act1.goroutineID != main goroutine ID.
+		var startErr error
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, startErr = p.beforeAgent(act1)
+		}()
+		<-done
+		errs.add(nil, startErr)
+
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("c1")}, nil))
+		delta1 := map[string]any{"batch": "rej"}
+		tC1 := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c1"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: delta1},
+		}
+		errs.add(p.beforeTool(tC1, finishTool, map[string]any{}))
+		errs.add(p.onToolError(tC1, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(tC1, finishTool, map[string]any{}, taskCompleted(), nil))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: delta1},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c1", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+
+		// Re-entering coordinator on the main goroutine must NOT retire act1 started on another goroutine.
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.afterAgent(act1))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(workerStarts) != 1 || len(workerEnds) != 1 || workerEnds[0]["span_id"] != workerStarts[0]["span_id"] {
+			t.Fatalf("workerStarts=%d workerEnds=%d; want act1 span_id preserved; events=%v", len(workerStarts), len(workerEnds), eventTypes(rows))
+		}
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "coordinator")); got != 1 {
+			t.Fatalf("coordinator AGENT_COMPLETED count = %d, want 1; events=%v", got, eventTypes(rows))
+		}
+	})
+
+	t.Run("pop_ended_rejected_ignores_non_llm_parent", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, _ := newWorkers(t)
+		nonLLMCoord, err := agent.New(agent.Config{
+			Name:      "coordinator",
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(nonLLMCoord): %v", err)
+		}
+		rootCtx, newAct := newCtxs(t, "inv-ended-rejected-non-llm", taskAgent, nonLLMCoord)
+		act1 := newAct()
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("c1")}, nil))
+		delta1 := map[string]any{"batch": "rej"}
+		tC1 := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c1"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: delta1},
+		}
+		errs.add(p.beforeTool(tC1, finishTool, map[string]any{}))
+		errs.add(p.onToolError(tC1, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(tC1, finishTool, map[string]any{}, taskCompleted(), nil))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: delta1},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c1", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+
+		// Re-entering a non-LLM agent with the same name must NOT retire act1.
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.afterAgent(act1))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(workerStarts) != 1 || len(workerEnds) != 1 || workerEnds[0]["span_id"] != workerStarts[0]["span_id"] {
+			t.Fatalf("workerStarts=%d workerEnds=%d (span match=%v); events=%v",
+				len(workerStarts), len(workerEnds), len(workerStarts) == 1 && len(workerEnds) == 1 && workerEnds[0]["span_id"] == workerStarts[0]["span_id"], eventTypes(rows))
+		}
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "coordinator")); got != 1 {
+			t.Fatalf("coordinator AGENT_COMPLETED count = %d, want 1; events=%v", got, eventTypes(rows))
+		}
+	})
+
+	for _, tc := range []struct {
+		name      string
+		reenterID func(invID string, otherCoord agent.Agent) *taskActivationContext
+	}{
+		{
+			name: "name_mismatch",
+			reenterID: func(invID string, otherCoord agent.Agent) *taskActivationContext {
+				return &taskActivationContext{
+					mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: invID, agentName: "other_coordinator", branch: "b1", path: "wf/n1"},
+					ic:                    &runningInvocation{running: otherCoord},
+				}
+			},
+		},
+		{
+			name: "branch_mismatch",
+			reenterID: func(invID string, coord agent.Agent) *taskActivationContext {
+				return &taskActivationContext{
+					mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: invID, agentName: "coordinator", branch: "other-branch", path: "wf/n1"},
+					ic:                    &runningInvocation{running: coord},
+				}
+			},
+		},
+		{
+			name: "path_mismatch",
+			reenterID: func(invID string, coord agent.Agent) *taskActivationContext {
+				return &taskActivationContext{
+					mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: invID, agentName: "coordinator", branch: "b1", path: "wf/n2"},
+					ic:                    &runningInvocation{running: coord},
+				}
+			},
+		},
+	} {
+		t.Run("pop_ended_rejected_requires_matching_parent_"+tc.name, func(t *testing.T) {
+			p := newClockedPlugin(t)
+			p.config.DisableFlushOnRunEnd = true
+			taskAgent, _ := newWorkers(t)
+			otherCoord, err := llmagent.New(llmagent.Config{
+				Name:      "other_coordinator",
+				Model:     &scriptedLLM{},
+				SubAgents: []agent.Agent{taskAgent},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(other_coordinator): %v", err)
+			}
+			coord, err := llmagent.New(llmagent.Config{
+				Name:      "coordinator",
+				Model:     &scriptedLLM{},
+				SubAgents: []agent.Agent{taskAgent},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(coordinator): %v", err)
+			}
+			invID := "inv-ended-rejected-parent-" + tc.name
+			coordCtx := &taskActivationContext{
+				mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: invID, agentName: "coordinator", branch: "b1", path: "wf/n1"},
+				ic:                    &runningInvocation{running: coord},
+			}
+			act1 := &taskActivationContext{
+				mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: invID, agentName: "task_worker", branch: "b1", path: "wf/n1"},
+				ic:                    &runningInvocation{running: taskAgent},
+			}
+			finishTool := &fakeTool{name: finishTaskToolName}
+
+			var errs callbackErrors
+			errs.add(p.beforeRun(coordCtx))
+			errs.add(p.beforeAgent(coordCtx))
+			errs.add(p.beforeAgent(act1))
+			errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+			errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("c1")}, nil))
+			delta1 := map[string]any{"batch": "rej"}
+			tC1 := &taskToolContext{
+				taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c1"), ic: act1.ic},
+				actions:               &session.EventActions{StateDelta: delta1},
+			}
+			errs.add(p.beforeTool(tC1, finishTool, map[string]any{}))
+			errs.add(p.onToolError(tC1, finishTool, map[string]any{}, errors.New("fail")))
+			errs.add(p.afterTool(tC1, finishTool, map[string]any{}, taskCompleted(), nil))
+			errs.add(p.onEvent(coordCtx, &session.Event{
+				Author:  "task_worker",
+				Branch:  "b1",
+				Actions: session.EventActions{StateDelta: delta1},
+				LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{ID: "c1", Name: finishTaskToolName, Response: taskCompleted()},
+				}}, genai.RoleUser)},
+			}))
+
+			reenterAgent := coord
+			if tc.name == "name_mismatch" {
+				reenterAgent = otherCoord
+			}
+			reenterCtx := tc.reenterID(invID, reenterAgent)
+			errs.add(p.beforeAgent(reenterCtx))
+			errs.add(p.afterAgent(reenterCtx))
+			errs.add(p.afterAgent(act1))
+			errs.add(p.afterAgent(coordCtx))
+			errs.check(t)
+			p.afterRun(coordCtx)
+
+			rows := p.takeRows()
+			workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+			workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+			if len(workerStarts) != 1 || len(workerEnds) != 1 || workerEnds[0]["span_id"] != workerStarts[0]["span_id"] {
+				t.Fatalf("workerStarts=%d workerEnds=%d (span match=%v); events=%v",
+					len(workerStarts), len(workerEnds), len(workerStarts) == 1 && len(workerEnds) == 1 && workerEnds[0]["span_id"] == workerStarts[0]["span_id"], eventTypes(rows))
+			}
+			wantCoordEnds := 2
+			if tc.name == "name_mismatch" {
+				wantCoordEnds = 1
+			}
+			if got := len(agentRowsOfType(rows, EventAgentCompleted, "coordinator")); got != wantCoordEnds {
+				t.Fatalf("coordinator AGENT_COMPLETED count = %d, want %d; events=%v", got, wantCoordEnds, eventTypes(rows))
+			}
+		})
+	}
+
+	t.Run("pop_ended_rejected_requires_direct_parent_span", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, _ := newWorkers(t)
+		innerCoord, err := llmagent.New(llmagent.Config{
+			Name:      "inner_coord",
+			Model:     &scriptedLLM{},
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(inner_coord): %v", err)
+		}
+		outerCoord, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			Model:     &scriptedLLM{},
+			SubAgents: []agent.Agent{innerCoord, taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(outer_coord): %v", err)
+		}
+		rootCtx, newAct := newCtxs(t, "inv-ended-rejected-direct-parent", taskAgent, outerCoord)
+		innerCtx := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: "inv-ended-rejected-direct-parent", agentName: "inner_coord"},
+			ic:                    &runningInvocation{running: innerCoord},
+		}
+		act1 := newAct()
+		finishTool := &fakeTool{name: finishTaskToolName}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(innerCtx))
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("c1")}, nil))
+		delta1 := map[string]any{"batch": "rej"}
+		tC1 := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c1"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: delta1},
+		}
+		errs.add(p.beforeTool(tC1, finishTool, map[string]any{}))
+		errs.add(p.onToolError(tC1, finishTool, map[string]any{}, errors.New("fail")))
+		errs.add(p.afterTool(tC1, finishTool, map[string]any{}, taskCompleted(), nil))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: delta1},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c1", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+
+		// outer_coord also lists task_worker in SubAgents, so only rec.parentSpanID == parent.spanID keeps act1 alive.
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.afterAgent(act1))
+		errs.add(p.afterAgent(innerCtx))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(workerStarts) != 1 || len(workerEnds) != 1 || workerEnds[0]["span_id"] != workerStarts[0]["span_id"] {
+			t.Fatalf("workerStarts=%d workerEnds=%d (span match=%v); events=%v",
+				len(workerStarts), len(workerEnds), len(workerStarts) == 1 && len(workerEnds) == 1 && workerEnds[0]["span_id"] == workerStarts[0]["span_id"], eventTypes(rows))
+		}
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "coordinator")); got != 1 {
+			t.Fatalf("coordinator AGENT_COMPLETED count = %d, want 1; events=%v", got, eventTypes(rows))
+		}
+		if got := len(agentRowsOfType(rows, EventAgentError, "coordinator")); got != 1 {
+			t.Fatalf("coordinator AGENT_ERROR count = %d, want 1; events=%v", got, eventTypes(rows))
+		}
+	})
+}

@@ -997,7 +997,7 @@ func (p *analyticsPlugin) logDeferredTaskCompletions(ctx context.Context, baseID
 // llmagent.isFinishTaskSuccessFR); a first finish_task response that reports no
 // completion, and any subsequent finish_task responses in the event, end their
 // finish_task calls without ending the activation (see
-// traceManager.completeResponseEvent and popTaskAgentSpanWithDelta).
+// traceManager.completeResponseEvent and popTaskAgentSpanWithEvent).
 // Streamed partial events end nothing: AfterModelCallback ends the model call
 // with the final response, which carries the call's latency.
 // A partial event, with or without content, records instead that its author
@@ -1223,6 +1223,7 @@ func (p *analyticsPlugin) beforeAgent(ctx agent.Context) (*genai.Content, error)
 	defer p.recoverCallback(EventAgentStarting)
 	id := identityOf(ctx)
 	p.logDeferredTaskCompletions(ctx, id, p.traces.popDeferredTaskCompletionsForDelegator(ctx, id))
+	p.traces.popEndedRejectedTasksForDelegator(ctx, id)
 	if span, ok := p.traces.popDelegatingAgentSpan(ctx, id); ok {
 		p.logEvent(ctx, id, EventAgentCompleted, func() rowSpan { return span }, nil)
 	}
