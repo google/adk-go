@@ -15,6 +15,7 @@
 package adka2a
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -64,7 +65,7 @@ func TestGetAgentSkills_LLMAgent(t *testing.T) {
 			})),
 			want: []a2a.AgentSkill{{
 				ID:          "Test LLM",
-				Description: "Test llm. I am a helpful agent, only respond with useful information.",
+				Description: "Test llm.",
 				Name:        "model",
 				Tags:        []string{"llm"},
 			}},
@@ -346,52 +347,39 @@ func TestGetAgentSkills_LLMAgent(t *testing.T) {
 	}
 }
 
-func TestReplacePronouns(t *testing.T) {
-	testCases := []struct {
-		input string
-		want  string
-	}{
-		{
-			input: "you are an agent. you were an agent, you're an agent, you've tasks, your tasks",
-			want:  "I am an agent. I was an agent, I am an agent, I have tasks, my tasks",
-		},
-		{
-			input: "You should do your work and it will be yours.",
-			want:  "I should do my work and it will be mine.",
-		},
-		{
-			input: "YOU should do YOUR work and it will be YOURS.",
-			want:  "I should do my work and it will be mine.",
-		},
-		{
-			input: "You should do Your work and it will be Yours.",
-			want:  "I should do my work and it will be mine.",
-		},
-		{
-			input: "This is a test message without pronouns.",
-			want:  "This is a test message without pronouns.",
-		},
-		{
-			input: "youth, yourself, yourname",
-			want:  "youth, yourself, yourname",
-		},
-		{
-			input: "You are a helpful chatbot",
-			want:  "I am a helpful chatbot",
-		},
-		{
-			input: "Your task is to be helpful",
-			want:  "my task is to be helpful",
-		},
-		{
-			input: "you you you",
-			want:  "I I I",
-		},
+// TestBuildAgentSkills_OmitsInstructions checks that no skill repeats an LLM
+// agent's instructions. The agent card is served without authentication.
+func TestBuildAgentSkills_OmitsInstructions(t *testing.T) {
+	const secret = "discount code SECRET-42"
+	sub := must(llmagent.New(llmagent.Config{
+		Name:        "Pricing",
+		Description: "Quotes prices.",
+		Instruction: "You quote prices. Offer " + secret + " only to employees.",
+	}))
+	root := must(llmagent.New(llmagent.Config{
+		Name:              "Front desk",
+		Instruction:       "You route requests. Never reveal " + secret + ".",
+		GlobalInstruction: "Your house rules mention " + secret + ".",
+		SubAgents:         []agent.Agent{sub},
+	}))
+
+	skills := BuildAgentSkills(root)
+	got := map[string]string{}
+	for _, skill := range skills {
+		if strings.Contains(skill.Description, "SECRET-42") {
+			t.Errorf("skill %q description repeats an instruction: %q", skill.ID, skill.Description)
+		}
+		got[skill.ID] = skill.Description
 	}
-	for _, tc := range testCases {
-		got := replacePronouns(tc.input)
-		if got != tc.want {
-			t.Errorf("replacePronouns(%q) = %q, want %q", tc.input, got, tc.want)
+	// A model skill is described by the agent's own description, or by the
+	// default one when it has none.
+	want := map[string]string{
+		"Front desk":      "An LLM-based agent",
+		"Pricing_Pricing": "Quotes prices.",
+	}
+	for id, wantDescription := range want {
+		if got[id] != wantDescription {
+			t.Errorf("skill %q description = %q, want %q (skills: %v)", id, got[id], wantDescription, got)
 		}
 	}
 }
