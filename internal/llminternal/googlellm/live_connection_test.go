@@ -169,6 +169,8 @@ func TestLiveConnectionSendHistoryFiltersInternalParts(t *testing.T) {
 		want []*genai.Content
 		// wantTurnComplete mirrors whether want ends in a user turn.
 		wantTurnComplete bool
+		// backend defaults to the Gemini API.
+		backend genai.Backend
 	}{
 		{
 			name: "DropsInternalArtifactRefsAndKeepsRest",
@@ -360,10 +362,59 @@ func TestLiveConnectionSendHistoryFiltersInternalParts(t *testing.T) {
 			},
 			wantTurnComplete: false,
 		},
+		{
+			// PartMetadata is caller bookkeeping that encodes to nothing when
+			// empty, so a signature-only part carrying it is still dropped
+			// rather than sent as a bare {} part. With the final model turn
+			// gone, the history ends in a user turn and completes it.
+			name: "DropsSignatureOnlyPartWithEmptyMetadata",
+			history: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+				{
+					Role:  "model",
+					Parts: []*genai.Part{{ThoughtSignature: []byte("sig-meta"), PartMetadata: map[string]any{}}},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+			},
+			wantTurnComplete: true,
+		},
+		{
+			name:    "DropsSignatureOnlyPartWithEmptyMetadataVertex",
+			backend: genai.BackendVertexAI,
+			history: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+				{
+					Role:  "model",
+					Parts: []*genai.Part{{Thought: true, ThoughtSignature: []byte("sig-meta"), PartMetadata: map[string]any{}}},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+			},
+			wantTurnComplete: true,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			conn, frames := connectFakeLive(t, genai.BackendGeminiAPI, "gemini-2.0-flash-live-001")
+			backend := tc.backend
+			if backend == genai.BackendUnspecified {
+				backend = genai.BackendGeminiAPI
+			}
+			conn, frames := connectFakeLive(t, backend, "gemini-2.0-flash-live-001")
 			if err := conn.SendHistory(t.Context(), tc.history); err != nil {
 				t.Fatalf("SendHistory failed: %v", err)
 			}

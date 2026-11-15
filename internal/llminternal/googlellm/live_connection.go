@@ -115,9 +115,13 @@ func withoutThoughtSignature(part *genai.Part) (*genai.Part, bool) {
 	stripped := *part
 	stripped.ThoughtSignature = nil
 	// A signature can arrive on a part of its own, possibly marked as a
-	// thought; without the signature such a part says nothing.
+	// thought; without the signature such a part says nothing. PartMetadata
+	// is the caller's bookkeeping, not content, so it does not keep the part
+	// alive either (an empty map is not zero to reflect, yet it encodes to
+	// nothing).
 	rest := stripped
 	rest.Thought = false
+	rest.PartMetadata = nil
 	if reflect.ValueOf(rest).IsZero() {
 		return nil, false
 	}
