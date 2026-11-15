@@ -17,6 +17,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
@@ -56,7 +57,11 @@ type Config struct {
 	MemoryService memory.Service
 	// optional
 	PluginConfig PluginConfig
-	// optional
+	// optional. When true, Run and RunLive create the session if it does not
+	// exist. The session is created when the session ID is empty, so the
+	// service generates one, or when the session service's Get reports
+	// [session.ErrNotFound]. Any other Get error is returned as is, so a
+	// transient storage failure never replaces an existing session.
 	AutoCreateSession bool
 }
 
@@ -146,29 +151,10 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// context and the stored event all see the same message.
 		msg = asUserContent(msg)
 
-		var storedSession session.Session
-		getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
-			AppName:   r.appName,
-			UserID:    userID,
-			SessionID: sessionID,
-		})
+		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
 		if err != nil {
-			if !r.autoCreateSession {
-				yield(nil, err)
-				return
-			}
-			createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
-				AppName:   r.appName,
-				UserID:    userID,
-				SessionID: sessionID,
-			})
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			storedSession = createResp.Session
-		} else {
-			storedSession = getResp.Session
+			yield(nil, err)
+			return
 		}
 
 		agentToRun, err := r.findAgentToRun(storedSession, msg)
@@ -272,6 +258,31 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 	}
+}
+
+func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string) (session.Session, error) {
+	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
+		AppName:   r.appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err == nil {
+		return getResp.Session, nil
+	}
+	// Services reject an empty ID in Get with a validation error, not
+	// ErrNotFound. Create generates an ID for it.
+	if !r.autoCreateSession || (sessionID != "" && !errors.Is(err, session.ErrNotFound)) {
+		return nil, err
+	}
+	createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   r.appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return createResp.Session, nil
 }
 
 // runBeforeRunCallback processes and persists a plugin's replacement reply.
@@ -383,27 +394,9 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		opt(&options)
 	}
 
-	var storedSession session.Session
-	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
-		AppName:   r.appName,
-		UserID:    userID,
-		SessionID: sessionID,
-	})
+	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
 	if err != nil {
-		if !r.autoCreateSession {
-			return nil, nil, err
-		}
-		createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
-			AppName:   r.appName,
-			UserID:    userID,
-			SessionID: sessionID,
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-		storedSession = createResp.Session
-	} else {
-		storedSession = getResp.Session
+		return nil, nil, err
 	}
 
 	// msg is nil for Live run as it's streaming
