@@ -240,10 +240,8 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 					}
 					continue
 				}
-				if modifiedEvent != nil {
-					event = modifiedEvent
-					stampTimestamp(ctx, event) // a replacement may be a struct literal too
-				}
+				event = fromPlugin(event, modifiedEvent)
+				stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
 			}
 
 			// only commit non-partial event to a session service
@@ -305,15 +303,13 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	}
 	// Stamp after OnEvent so a replacement keeps its BeforeRun origin, without
 	// changing plugin-owned metadata.
-	if modifiedEvent != nil {
-		event = modifiedEvent
-	}
+	event = fromPlugin(event, modifiedEvent)
 	reply := *event
 	reply.CustomMetadata = make(map[string]any, len(event.CustomMetadata)+1)
 	maps.Copy(reply.CustomMetadata, event.CustomMetadata)
 	reply.CustomMetadata[plugininternal.BeforeRunReplyKey] = true
 	event = &reply
-	stampTimestamp(ctx, event) // a replacement may be a struct literal
+	stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
 	if !event.Partial {
 		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
 			return nil, fmt.Errorf("failed to add event to session: %w", err)
@@ -515,10 +511,8 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					}
 					continue
 				}
-				if modifiedEvent != nil {
-					event = modifiedEvent
-					stampTimestamp(iCtx, event) // a replacement may be a struct literal too
-				}
+				event = fromPlugin(event, modifiedEvent)
+				stampTimestamp(iCtx, event) // a plugin may have rewritten the event in place
 			}
 
 			// Chronological event buffering logic for Live streaming.
@@ -771,9 +765,34 @@ func hasInlineData(event *session.Event) bool {
 	return false
 }
 
-// stampTimestamp gives an event that an agent yielded, or a plugin returned in
-// its place, without a timestamp the time the runner received it, as
-// adk-python's Event does on construction.
+// fromPlugin merges an OnEvent plugin's replacement onto the original event.
+// A replacement keeps the identity of the event it replaces: its ID,
+// invocation ID and timestamp, and its author when the replacement names none,
+// as adk-python's Runner._get_output_event does. adk-python keeps every other
+// field the replacement did not set too; a Go struct cannot tell an unset field
+// from a zero one, so here the replacement's other fields win as given.
+//
+// The replacement itself is not written to: the result is a copy, so a plugin
+// that returns one shared event for several originals leaves it as it built it.
+func fromPlugin(original, modified *session.Event) *session.Event {
+	if modified == nil {
+		return original
+	}
+	out := *modified
+	out.ID = original.ID
+	out.InvocationID = original.InvocationID
+	out.Timestamp = original.Timestamp
+	if out.Author == "" {
+		out.Author = original.Author
+	}
+	return &out
+}
+
+// stampTimestamp gives an event without a timestamp the time the runner
+// received it, as adk-python's Event does on construction. That is an event an
+// agent yielded without one, or one a plugin rewrote in place and left without
+// one. A replacement a plugin returns has already inherited the original's
+// timestamp through fromPlugin.
 //
 // An event built as a struct literal never passes through session.NewEvent.
 // Stored with a zero timestamp it moves the session's last update time back to
