@@ -615,6 +615,26 @@ func TestMisapplied(t *testing.T) {
 	}
 }
 
+// TestCELNodePassesDoubles checks that a double one node outputs is a double
+// in the next, whether or not it is a whole number.
+func TestCELNodePassesDoubles(t *testing.T) {
+	doc := workflowDoc(`
+      - { id: half,  type: cel, output: "double(user.content) / 2.0" }
+      - { id: twice, type: cel, output: "string(input * 2.0)" }
+`, `
+      - { from_node: START, to_node: half }
+      - { from_node: half,  to_node: twice }
+`)
+	agents := loadDoc(t, doc, &fakeModel{})
+
+	// 7 / 2 is 3.5 and 8 / 2 is 4.0, which must not arrive as the integer 4.
+	for _, n := range []string{"7", "8"} {
+		if got := runAgent(t, agents, "flow", n); got != n {
+			t.Errorf("half then twice of %s = %q, want %q", n, got, n)
+		}
+	}
+}
+
 // TestEdgeRouteList routes two of a node's three outcomes over one edge.
 func TestEdgeRouteList(t *testing.T) {
 	doc := workflowDoc(`
@@ -934,6 +954,15 @@ func TestScopeIssues(t *testing.T) {
 			name:     "parallel agent node whose agent transfers to an agent with tools",
 			nodes:    "      - { id: n, type: agent, agent: desk, parallel_worker: true }\n",
 			agents:   fmt.Sprintf(desk, "helper") + helper + "    tools: [word_count]\n",
+			wantPath: "agents[0].nodes[0].agent",
+			wantMsg:  `a parallel worker drops the tool calls and output_key of agent "helper"`,
+		},
+		{
+			// desk transfers to mid, and mid to helper.
+			name:  "parallel agent node whose agent transfers, two levels down, to an agent with tools",
+			nodes: "      - { id: n, type: agent, agent: desk, parallel_worker: true }\n",
+			agents: fmt.Sprintf(desk, "mid") + strings.Replace(fmt.Sprintf(desk, "helper"), "name: desk", "name: mid", 1) +
+				helper + "    tools: [word_count]\n",
 			wantPath: "agents[0].nodes[0].agent",
 			wantMsg:  `a parallel worker drops the tool calls and output_key of agent "helper"`,
 		},

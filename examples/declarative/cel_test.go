@@ -16,10 +16,12 @@ package main
 
 import (
 	"errors"
+	"math"
 	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -101,8 +103,8 @@ func TestPlainValue(t *testing.T) {
 	}{
 		{name: "nil", in: nil, want: nil},
 		{name: "int", in: 3, want: int64(3)},
-		// What a JSON session store returns for a state value of 2.
-		{name: "whole float", in: 2.0, want: int64(2)},
+		// A double one node outputs is a double in the next, whole or not.
+		{name: "whole float", in: 2.0, want: 2.0},
 		{name: "fractional float", in: 2.5, want: 2.5},
 		{name: "content", in: genai.NewContentFromText("hi", genai.RoleUser), want: "hi"},
 		{name: "struct", in: pair{N: 2, F: 0.5}, want: map[string]any{"n": int64(2), "f": 0.5}},
@@ -120,11 +122,18 @@ func TestPlainValue(t *testing.T) {
 // TestContextVarsConvertsStateByKey checks that a state value with no JSON
 // form becomes a string on its own, rather than turning the whole state into
 // one string.
+// TestContextVarsConvertsStateByKey checks each state value on its own: a
+// whole float64, which is what a JSON session store returns for 2, becomes an
+// int64, and a value with no JSON form becomes a string without turning the
+// whole state into one.
 func TestContextVarsConvertsStateByKey(t *testing.T) {
 	resp, err := session.InMemoryService().Create(t.Context(), &session.CreateRequest{
 		AppName: "app",
 		UserID:  "user",
-		State:   map[string]any{"turn": 2, "callback": func() {}},
+		State: map[string]any{
+			"turn": 2, "stored": 2.0, "ratio": 2.5, "huge": 1e300, "low": -1e300, "nan": math.NaN(),
+			"callback": func() {},
+		},
 	})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -138,10 +147,15 @@ func TestContextVarsConvertsStateByKey(t *testing.T) {
 	if !ok {
 		t.Fatalf("state = %T, want map[string]any", contextVars(ctx)["state"])
 	}
-	if got := state["turn"]; got != int64(2) {
-		t.Errorf("state.turn = %#v, want int64(2)", got)
-	}
 	if _, ok := state["callback"].(string); !ok {
 		t.Errorf("state.callback = %T, want string", state["callback"])
+	}
+	delete(state, "callback")
+	// 1e300 and -1e300 are whole, but no int64 holds them.
+	want := map[string]any{
+		"turn": int64(2), "stored": int64(2), "ratio": 2.5, "huge": 1e300, "low": -1e300, "nan": math.NaN(),
+	}
+	if diff := cmp.Diff(want, state, cmpopts.EquateNaNs()); diff != "" {
+		t.Errorf("state mismatch (-want +got):\n%s", diff)
 	}
 }
