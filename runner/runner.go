@@ -38,6 +38,7 @@ import (
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/platform"
 	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/session"
 )
@@ -231,6 +232,14 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				continue
 			}
 
+			if event == nil {
+				err := fmt.Errorf("adk: agent %q yielded a nil event", r.rootAgent.Name())
+				log.Printf("%v", err)
+				yield(nil, err)
+				return
+			}
+			stampTimestamp(ctx, event)
+
 			if pluginManager != nil {
 				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
 				if err != nil {
@@ -241,14 +250,8 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				}
 				if modifiedEvent != nil {
 					event = modifiedEvent
+					stampTimestamp(ctx, event) // a replacement may be a struct literal too
 				}
-			}
-
-			if event == nil {
-				err := fmt.Errorf("adk: agent %q yielded a nil event", r.rootAgent.Name())
-				log.Printf("%v", err)
-				yield(nil, err)
-				return
 			}
 
 			// only commit non-partial event to a session service
@@ -293,6 +296,7 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	maps.Copy(reply.CustomMetadata, event.CustomMetadata)
 	reply.CustomMetadata[plugininternal.BeforeRunReplyKey] = true
 	event = &reply
+	stampTimestamp(ctx, event) // a replacement may be a struct literal
 	if !event.Partial {
 		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
 			return nil, fmt.Errorf("failed to add event to session: %w", err)
@@ -481,19 +485,6 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				continue
 			}
 
-			if r.pluginManager != nil {
-				modifiedEvent, pluginErr := r.pluginManager.RunOnEventCallback(iCtx, event)
-				if pluginErr != nil {
-					if !yield(nil, pluginErr) {
-						return
-					}
-					continue
-				}
-				if modifiedEvent != nil {
-					event = modifiedEvent
-				}
-			}
-
 			if event == nil {
 				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
 				if len(bufferedEvents) > 0 {
@@ -506,6 +497,21 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				log.Printf("%v", err)
 				yield(nil, err)
 				return
+			}
+			stampTimestamp(iCtx, event)
+
+			if r.pluginManager != nil {
+				modifiedEvent, pluginErr := r.pluginManager.RunOnEventCallback(iCtx, event)
+				if pluginErr != nil {
+					if !yield(nil, pluginErr) {
+						return
+					}
+					continue
+				}
+				if modifiedEvent != nil {
+					event = modifiedEvent
+					stampTimestamp(iCtx, event) // a replacement may be a struct literal too
+				}
 			}
 
 			// Chronological event buffering logic for Live streaming.
@@ -746,4 +752,18 @@ func hasInlineData(event *session.Event) bool {
 		}
 	}
 	return false
+}
+
+// stampTimestamp gives an event that an agent yielded, or a plugin returned in
+// its place, without a timestamp the time the runner received it, as
+// adk-python's Event does on construction.
+//
+// An event built as a struct literal never passes through session.NewEvent.
+// Stored with a zero timestamp it moves the session's last update time back to
+// year 1, and a backend that orders events by time, such as session/database,
+// reads it back ahead of every message before it.
+func stampTimestamp(ctx context.Context, event *session.Event) {
+	if event.Timestamp.IsZero() {
+		event.Timestamp = platform.Now(ctx)
+	}
 }

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -165,7 +166,10 @@ func TestNewParallelAgent(t *testing.T) {
 				slices.SortFunc(tt.wantEvents, eventCompareFunc)
 				slices.SortFunc(gotEvents, eventCompareFunc)
 
-				if diff := cmp.Diff(tt.wantEvents, gotEvents); diff != "" {
+				// Timestamps are filled in when the events are run, so they
+				// cannot be expressed in a fixture. This test is about which
+				// events came out and who authored them.
+				if diff := cmp.Diff(tt.wantEvents, gotEvents, cmpopts.IgnoreFields(session.Event{}, "Timestamp")); diff != "" {
 					t.Errorf("events mismatch (-want +got):\n%s", diff)
 				}
 			}
