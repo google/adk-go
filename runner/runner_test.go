@@ -115,7 +115,7 @@ func TestRunner_findAgentToRun(t *testing.T) {
 			r := &Runner{
 				rootAgent: tt.rootAgent,
 			}
-			gotAgent, err := r.findAgentToRun(tt.session, tt.userMessage)
+			gotAgent, _, err := r.findAgentToRun(tt.session, tt.userMessage)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Runner.findAgentToRun() error = %v, wantErr %v", err, tt.wantErr)
 				return

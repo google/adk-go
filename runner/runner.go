@@ -157,7 +157,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
-		agentToRun, err := r.findAgentToRun(storedSession, msg)
+		agentToRun, branch, err := r.findAgentToRun(storedSession, msg)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -193,6 +193,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			Artifacts:   artifacts,
 			Memory:      memoryImpl,
 			Session:     storedSession,
+			Branch:      branch,
 			Agent:       agentToRun,
 			UserContent: msg,
 			RunConfig:   &cfg,
@@ -224,7 +225,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			if event == nil {
-				err := fmt.Errorf("adk: agent %q yielded a nil event", r.rootAgent.Name())
+				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
 				log.Printf("%v", err)
 				yield(nil, err)
 				return
@@ -400,7 +401,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	}
 
 	// msg is nil for Live run as it's streaming
-	agentToRun, err := r.findAgentToRun(storedSession, nil)
+	agentToRun, _, err := r.findAgentToRun(storedSession, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -624,6 +625,7 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 				Artifacts:    ctx.Artifacts(),
 				Memory:       ctx.Memory(),
 				Session:      ctx.Session(),
+				Branch:       ctx.Branch(),
 				Agent:        ctx.Agent(),
 				UserContent:  msg,
 				RunConfig:    ctx.RunConfig(),
@@ -666,12 +668,14 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 }
 
 // findAgentToRun returns the agent that should handle the next request based on
-// session history.
-func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (agent.Agent, error) {
+// session history, along with the branch it should run on when resuming a
+// sub-agent's function call (matching adk-python's find_agent_to_run and
+// restore_branch_from_history).
+func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (agent.Agent, string, error) {
 	if event := handleUserFunctionCallResponse(session.Events(), msg); event != nil {
 		subAgent := r.rootAgent.FindAgent(event.Author)
 		if subAgent != nil {
-			return subAgent, nil
+			return subAgent, event.Branch, nil
 		}
 		log.Printf("Function call from an unknown agent: %s, event id: %s", event.Author, event.ID)
 	}
@@ -692,12 +696,12 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 		}
 
 		if r.isTransferableAcrossAgentTree(subAgent) {
-			return subAgent, nil
+			return subAgent, "", nil
 		}
 	}
 
 	// Falls back to root agent if no suitable agents are found in the session.
-	return r.rootAgent, nil
+	return r.rootAgent, "", nil
 }
 
 // handleUserFunctionCallResponse finds the function call event that matches the function response id
