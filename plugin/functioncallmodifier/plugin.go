@@ -114,6 +114,9 @@ func afterModelCallback(cfg FunctionCallModifierConfig) func(agent.CallbackConte
 		}
 
 		for _, part := range llmResponse.Content.Parts {
+			if part == nil {
+				continue
+			}
 			if fc := part.FunctionCall; fc != nil {
 				if !cfg.Predicate(fc.Name) {
 					continue
