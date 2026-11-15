@@ -295,8 +295,7 @@ func stringDurations(v any, t reflect.Type) {
 		if t.Kind() != reflect.Struct {
 			return
 		}
-		for i := range t.NumField() {
-			f := t.Field(i)
+		for f := range t.Fields() {
 			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
 			val, ok := v[name]
 			if !ok {

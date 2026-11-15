@@ -696,7 +696,7 @@ func TestModel_RespectsRequestModel(t *testing.T) {
 				Model:    tt.reqModel,
 				Contents: genai.Text("ping"),
 			}
-			for range geminiModel.GenerateContent(t.Context(), req, false) {
+			for range geminiModel.GenerateContent(t.Context(), req, false) { //nolint:errcheck // the interceptor fails the request; the test asserts the URL it captured
 			}
 
 			if capturedURL == "" {

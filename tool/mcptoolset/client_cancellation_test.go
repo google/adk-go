@@ -110,8 +110,8 @@ func TestSessionWaitCancellation(t *testing.T) {
 						t.Errorf("canceled waiter started an extra connection: %d", transport.calls.Load())
 					}
 					select {
-					case <-ownerDone:
-						t.Fatal("canceling waiter interrupted owner")
+					case err := <-ownerDone:
+						t.Fatalf("canceling waiter interrupted owner: %v", err)
 					default:
 					}
 					close(transport.gate)
@@ -120,7 +120,7 @@ func TestSessionWaitCancellation(t *testing.T) {
 						t.Fatalf("owner failed: %v", err)
 					}
 					if !waiterReturned {
-						<-waiterDone
+						<-waiterDone //nolint:errcheck // only reaps the waiter; the select above already reported that it did not return
 					}
 					ownerSession := c.session
 					if ownerSession == nil {
@@ -221,10 +221,10 @@ func TestCloseWaitsForConnectionInProgress(t *testing.T) {
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- c.Close() }()
 	select {
-	case <-closeDone:
+	case err := <-closeDone:
 		close(transport.gate)
 		<-ownerDone
-		t.Fatal("Close returned while a connection attempt was in progress")
+		t.Fatalf("Close returned while a connection attempt was in progress: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 

@@ -129,8 +129,7 @@ func credentialFromValue(scheme *toolauth.Scheme, v any) (*toolauth.Credential, 
 		if v == nil {
 			return nil, nil
 		}
-		c := *v
-		return &c, nil
+		return new(*v), nil
 	case map[string]any:
 		return decodeCredential(v)
 	case string:

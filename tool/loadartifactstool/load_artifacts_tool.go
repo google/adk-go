@@ -101,8 +101,14 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal artifact_names to JSON: %w", err)
 		}
-		if err := json.Unmarshal(artifactNamesJson, &artifactNames); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal artifact_names from JSON to []string: %w", err)
+		// Like adk-python, answer arguments the model can correct with a result
+		// rather than a tool error. A JSON null element decodes to "", which
+		// names no artifact, so it is rejected as well.
+		if err := json.Unmarshal(artifactNamesJson, &artifactNames); err != nil || hasNullElement(artifactNamesRaw) {
+			return map[string]any{
+				"error":      "'artifact_names' must be a list of strings.",
+				"error_code": "INVALID_ARGUMENTS",
+			}, nil
 		}
 		// Ensure the slice is not nil if it's empty
 		if artifactNames == nil {
@@ -113,6 +119,17 @@ func (t *artifactsTool) Run(ctx agent.Context, args any) (map[string]any, error)
 		"artifact_names": artifactNames,
 	}
 	return result, nil
+}
+
+// hasNullElement reports whether v is a list that holds a JSON null.
+func hasNullElement(v any) bool {
+	list, _ := v.([]any)
+	for _, e := range list {
+		if e == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // ProcessRequest processes the LLM request. It packs the tool, appends initial

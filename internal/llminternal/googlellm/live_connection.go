@@ -126,10 +126,9 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 			return nil
 		}
 
-		turnComplete := true
 		err := c.sdkSession.SendClientContent(genai.LiveClientContentInput{
 			Turns:        []*genai.Content{content},
-			TurnComplete: &turnComplete,
+			TurnComplete: new(true),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to send content: %w", err)

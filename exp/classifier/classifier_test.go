@@ -454,7 +454,7 @@ func TestValidateInput(t *testing.T) {
 		{name: "nil_part_in_exported_struct_field", input: struct{ Part *genai.Part }{}, wantErr: true},
 		{name: "embedded_content_struct", input: ticketWithEmbeddedContent{Content: *thoughtContent, ID: "t-1"}, wantErr: true},
 		{name: "embedded_content_ptr", input: ticketWithEmbeddedContentPtr{Content: thoughtContent, ID: "t-1"}, wantErr: true},
-		{name: "content_behind_double_pointer", input: map[string]any{"c": func() **genai.Content { c := thoughtContent; return &c }()}, wantErr: true},
+		{name: "content_behind_double_pointer", input: map[string]any{"c": func() **genai.Content { return new(thoughtContent) }()}, wantErr: true},
 		// genai structs with their own MarshalJSON, reached through a promoted
 		// method or a json.Marshaler-typed interface, serialize themselves.
 		{name: "embedded_response_ptr_promotes_marshaler", input: ticketWithEmbeddedResponse{GenerateContentResponse: thoughtResponse, ID: "t-1"}, wantErr: true},
@@ -588,8 +588,6 @@ func TestValidateAnswer(t *testing.T) {
 }
 
 func TestResponseAndAnswerJSONRoundTrip(t *testing.T) {
-	conf9 := 0.9
-	conf5 := 0.5
 	orig := classifier.Response{
 		ModelVersion: "m",
 		Answers: map[string]classifier.Answer{
@@ -599,12 +597,12 @@ func TestResponseAndAnswerJSONRoundTrip(t *testing.T) {
 			},
 			"risky": classifier.BinaryAnswer{
 				Probability: 0.2,
-				Confidence:  &conf9,
+				Confidence:  new(0.9),
 			},
 			"urgency": classifier.ScoreAnswer{
 				Score:         0.75,
 				Probabilities: map[int]float64{0: 0.25, 1: 0.75},
-				Confidence:    &conf5,
+				Confidence:    new(0.5),
 			},
 		},
 	}

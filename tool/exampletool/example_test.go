@@ -34,7 +34,7 @@ type keywordProvider struct {
 func (p *keywordProvider) Examples(_ context.Context, query string) ([]*exampletool.Example, error) {
 	var matched []*exampletool.Example
 	for _, ex := range p.examples {
-		for _, word := range strings.Fields(query) {
+		for word := range strings.FieldsSeq(query) {
 			if strings.Contains(ex.Input.Parts[0].Text, word) {
 				matched = append(matched, ex)
 				break
