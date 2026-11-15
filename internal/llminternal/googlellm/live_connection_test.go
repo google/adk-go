@@ -355,7 +355,7 @@ func TestLiveConnectionSendHistoryFiltersInternalParts(t *testing.T) {
 					Role: "model",
 					Parts: []*genai.Part{
 						{ThoughtSignature: []byte("sig-speech"), SpeechMetadata: &genai.SpeechMetadata{Speaker: "a"}},
-						{ThoughtSignature: []byte("sig-video"), VideoMetadata: &genai.VideoMetadata{FPS: genai.Ptr(1.0)}},
+						{ThoughtSignature: []byte("sig-video"), VideoMetadata: &genai.VideoMetadata{FPS: new(1.0)}},
 						{ThoughtSignature: []byte("sig-media"), MediaResolution: &genai.PartMediaResolution{}, MediaProcessing: genai.MediaProcessingStatic},
 					},
 				},
