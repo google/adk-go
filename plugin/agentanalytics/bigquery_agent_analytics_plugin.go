@@ -88,7 +88,8 @@ const (
 	//   - on a pointer context, suppression requires unchanged JSON-shaped
 	//     arguments within the digest bounds (each string or byte slice up to
 	//     64 KiB and 1 MiB in all, each map, slice, or array of JSON-shaped
-	//     values up to 256 entries, and up to 1024 values in all; pointers,
+	//     values up to 256 entries and 32 levels of container nesting, and up
+	//     to 1024 values in all; pointers,
 	//     structs, functions, and channels are treated as opaque incomplete
 	//     evidence, and reusing the same pointer context with identical
 	//     JSON-shaped arguments in the same turn without observing the retry's

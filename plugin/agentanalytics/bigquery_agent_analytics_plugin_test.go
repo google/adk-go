@@ -14316,3 +14316,244 @@ func TestPlugin_OverlappingTaskActivations_LateFunctionResponseKeepsRetryEcho(t 
 		})
 	}
 }
+
+func TestRunner_SupersededRejectedFinishDoesNotLeakRejection(t *testing.T) {
+	finish := func(id string, args map[string]any) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: finishTaskToolName, Args: args}}
+	}
+
+	t.Run("same_activation_cached_retry", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		var call0Count atomic.Int32
+		var cachedAttempt sync.Map
+		cachePlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "earlier_cache",
+			BeforeToolCallback: func(ctx agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName && ctx.FunctionCallID() == "call_0" {
+					if call0Count.Add(1) == 2 {
+						cachedAttempt.Store(ctx.Actions(), true)
+						return map[string]any{"result": "Task completed."}, nil
+					}
+				}
+				return nil, nil
+			},
+			AfterToolCallback: func(ctx agent.Context, _ tool.Tool, _, result map[string]any, _ error) (map[string]any, error) {
+				if _, ok := cachedAttempt.LoadAndDelete(ctx.Actions()); ok {
+					return result, nil
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(cache): %v", err)
+		}
+		var failOnce atomic.Bool
+		recoverPlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "fail_and_recover_once",
+			BeforeToolCallback: func(ctx agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName && ctx.FunctionCallID() == "call_0" && failOnce.CompareAndSwap(false, true) {
+					return nil, errors.New("transient finish failure")
+				}
+				return nil, nil
+			},
+			OnToolErrorCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName {
+					return map[string]any{"result": "Task completed."}, nil
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(recover): %v", err)
+		}
+
+		worker, err := llmagent.New(llmagent.Config{
+			Name: "task_worker", Description: "executes delegated tasks", Mode: llmagent.ModeTask,
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					finish("c-bad", map[string]any{}),
+					finish("call_0", map[string]any{"result": "draft"}),
+				}}},
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					finish("call_0", map[string]any{"result": "final"}),
+				}}},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		coordinator, err := llmagent.New(llmagent.Config{
+			Name: "coordinator", SubAgents: []agent.Agent{worker},
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "call-worker", Name: "task_worker", Args: map[string]any{"request": "go"},
+				}}}}},
+				{Content: textContent("model", "all done"), TurnComplete: true},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, coordinator, cachePlugin, p, recoverPlugin).Run(t.Context(), "u1", "s1", textContent("user", "start"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error: %v", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 1 {
+			t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 1; events=%v", got, eventTypes(rows))
+		}
+		if got := len(agentRowsOfType(rows, EventAgentError, "task_worker")); got != 0 {
+			t.Fatalf("task_worker AGENT_ERROR count = %d, want 0; events=%v", got, eventTypes(rows))
+		}
+	})
+
+	t.Run("later_activation_reuses_call_id_after_standard_completion", func(t *testing.T) {
+		p, requests, mCtx := setupTestPlugin(t)
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task_worker",
+			Mode:  llmagent.ModeTask,
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		rootAgent, err := agent.New(agent.Config{
+			Name:      "coordinator",
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(coordinator): %v", err)
+		}
+		finishTool := &fakeTool{name: finishTaskToolName}
+		rootCtx := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: mCtx.InvocationID(), agentName: "coordinator"},
+			ic:                    &runningInvocation{running: rootAgent},
+		}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: mCtx.InvocationID(), agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		act2 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: mCtx.InvocationID(), agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		fcParts := func(ids ...string) *genai.Content {
+			parts := make([]*genai.Part, len(ids))
+			for i, id := range ids {
+				parts[i] = finish(id, map[string]any{"result": id})
+			}
+			return genai.NewContentFromParts(parts, genai.RoleModel)
+		}
+
+		var errs callbackErrors
+		errs.add(p.BeforeAgentCallback()(rootCtx))
+
+		// Activation 1, turn 1: ["c-bad", "call_0"] where "c-bad" fails validation
+		// and "call_0" fails in tool and is recovered into {"result": "Task completed."},
+		// making "call_0" superseded in the merged FunctionResponse event.
+		errs.add(p.BeforeAgentCallback()(act1))
+		errs.add(p.BeforeModelCallback()(act1, &model.LLMRequest{}))
+		errs.add(p.AfterModelCallback()(act1, &model.LLMResponse{Content: fcParts("c-bad", "call_0")}, nil))
+		errs.add(p.OnEventCallback()(rootCtx, &session.Event{
+			Author:      "task_worker",
+			LLMResponse: model.LLMResponse{Content: fcParts("c-bad", "call_0")},
+		}))
+		delta1Bad := map[string]any{"slot": "bad"}
+		delta1Rec := map[string]any{"slot": "rec"}
+		tool1Bad := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-bad"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: delta1Bad},
+		}
+		tool1Rec := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "call_0"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: delta1Rec},
+		}
+		errs.add(p.BeforeToolCallback()(tool1Bad, finishTool, map[string]any{}))
+		errs.add(p.AfterToolCallback()(tool1Bad, finishTool, map[string]any{}, map[string]any{"error": "missing result"}, nil))
+		errs.add(p.BeforeToolCallback()(tool1Rec, finishTool, map[string]any{"result": "draft"}))
+		errs.add(p.OnToolErrorCallback()(tool1Rec, finishTool, map[string]any{"result": "draft"}, errors.New("transient failure")))
+		errs.add(p.AfterToolCallback()(tool1Rec, finishTool, map[string]any{"result": "draft"}, map[string]any{"result": "Task completed."}, nil))
+		errs.add(p.OnEventCallback()(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: delta1Bad},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-bad", Name: finishTaskToolName, Response: map[string]any{"error": "missing result"}}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "call_0", Name: finishTaskToolName, Response: map[string]any{"result": "Task completed."}}},
+			}, genai.RoleUser)},
+		}))
+
+		// Activation 1, turn 2: standard completion on a distinct ID ("call_1").
+		errs.add(p.BeforeModelCallback()(act1, &model.LLMRequest{}))
+		errs.add(p.AfterModelCallback()(act1, &model.LLMResponse{Content: fcParts("call_1")}, nil))
+		errs.add(p.OnEventCallback()(rootCtx, &session.Event{
+			Author:      "task_worker",
+			LLMResponse: model.LLMResponse{Content: fcParts("call_1")},
+		}))
+		delta1Done := map[string]any{"slot": "done"}
+		tool1Done := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "call_1"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: delta1Done},
+		}
+		errs.add(p.BeforeToolCallback()(tool1Done, finishTool, map[string]any{"result": "done1"}))
+		errs.add(p.AfterToolCallback()(tool1Done, finishTool, map[string]any{"result": "done1"}, map[string]any{"result": "Task completed."}, nil))
+		errs.add(p.OnEventCallback()(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: delta1Done},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "call_1", Name: finishTaskToolName, Response: map[string]any{"result": "Task completed."}}},
+			}, genai.RoleUser)},
+		}))
+
+		// Activation 2 reuses "call_0" (tool callbacks answered by an earlier caching plugin).
+		errs.add(p.BeforeAgentCallback()(act2))
+		errs.add(p.BeforeModelCallback()(act2, &model.LLMRequest{}))
+		errs.add(p.AfterModelCallback()(act2, &model.LLMResponse{Content: fcParts("call_0")}, nil))
+		errs.add(p.OnEventCallback()(rootCtx, &session.Event{
+			Author:      "task_worker",
+			LLMResponse: model.LLMResponse{Content: fcParts("call_0")},
+		}))
+		errs.add(p.OnEventCallback()(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "call_0", Name: finishTaskToolName, Response: map[string]any{"result": "Task completed."}}},
+			}, genai.RoleUser)},
+		}))
+
+		// Coordinator emits its final response after act2 already finished.
+		errs.add(p.OnEventCallback()(rootCtx, &session.Event{
+			Author:      "coordinator",
+			LLMResponse: model.LLMResponse{Content: textContent("model", "post-delegations")},
+		}))
+		errs.add(p.AfterAgentCallback()(rootCtx))
+		errs.check(t)
+		p.AfterRunCallback()(rootCtx)
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		ends := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(ends) != 2 {
+			t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 2; events=%v", len(ends), eventTypes(rows))
+		}
+		coordRespIdx := -1
+		secondWorkerEndIdx := -1
+		seenWorkerEnds := 0
+		for idx, r := range rows {
+			if r["agent"] == "task_worker" && r["event_type"] == EventAgentCompleted {
+				seenWorkerEnds++
+				if seenWorkerEnds == 2 {
+					secondWorkerEndIdx = idx
+				}
+			}
+			if r["agent"] == "coordinator" && r["event_type"] == EventAgentResponse {
+				coordRespIdx = idx
+			}
+		}
+		if secondWorkerEndIdx < 0 || coordRespIdx < 0 || secondWorkerEndIdx > coordRespIdx {
+			t.Errorf("second task_worker AGENT_COMPLETED at row %d came after coordinator AGENT_RESPONSE at row %d (stolen by leaked rejection and deferred); events=%v",
+				secondWorkerEndIdx, coordRespIdx, eventTypes(rows))
+		}
+	})
+}

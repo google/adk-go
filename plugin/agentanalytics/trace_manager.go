@@ -408,10 +408,6 @@ type spanRecord struct {
 	// not wipe an entry just noted for the next turn (see
 	// completeResponseEvent). At most maxTaskToolDeltas are kept.
 	unseenModelFinishCalls []unseenModelFinish
-	// latestModelEventSeen reports whether the session event of the latest
-	// model response noted by AfterModelCallback on this activation has arrived
-	// or been superseded by a subsequent model/tool callback or deferral.
-	latestModelEventSeen bool
 	// completionCalls holds, once an event whose first finish_task response
 	// reported completion retired this task-mode activation and showed which
 	// call it answered (see popTaskAgentSpanWithDelta), the function call ID of
@@ -3449,7 +3445,6 @@ func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identi
 						// model response event that arrives is that of a
 						// later model call (see unseenModelFinishCalls).
 						other.unseenModelFinishCalls = nil
-						other.latestModelEventSeen = true
 						// The event may be the peer's, so the response of
 						// the rejected call may still arrive.
 						rej.deferral = other.deferredFinish
@@ -3673,26 +3668,7 @@ func (tm *traceManager) noteTaskFinishCalls(ctx context.Context, id identity, ca
 		if k < 0 {
 			return false
 		}
-		if rec.unseenModelFinishCalls[k].modelCallSeq == rec.modelCallSeq {
-			rec.latestModelEventSeen = true
-		}
 		rec.unseenModelFinishCalls = slices.Delete(rec.unseenModelFinishCalls, k, k+1)
-		return true
-	}
-	// pendingEchoOf reports whether rec's latest model call already noted a
-	// pending finish_task call matching calls whose session event has not yet
-	// been observed (for example, if an earlier function response or cap
-	// trimmed unseenModelFinishCalls before the model event arrived).
-	pendingEchoOf := func(rec *spanRecord) bool {
-		if rec.latestModelEventSeen {
-			return false
-		}
-		if !slices.ContainsFunc(rec.pendingFinishCalls, func(c taskFinishCall) bool {
-			return c.callSeq > rec.modelCallSeq && slices.Contains(calls, c.call)
-		}) {
-			return false
-		}
-		rec.latestModelEventSeen = true
 		return true
 	}
 	var target *spanRecord
@@ -3705,7 +3681,7 @@ func (tm *traceManager) noteTaskFinishCalls(ctx context.Context, id identity, ca
 			target = inv.agentStack[j]
 		}
 		if target != nil {
-			if echoOf(target) || pendingEchoOf(target) {
+			if echoOf(target) {
 				return
 			}
 		} else {
@@ -3726,11 +3702,6 @@ func (tm *traceManager) noteTaskFinishCalls(ctx context.Context, id identity, ca
 			runsTool := make(map[string]bool)
 			for _, open := range inv.toolSpans {
 				runsTool[open.parentSpanID] = true
-			}
-			for j := len(inv.agentStack) - 1; j > 0; j-- {
-				if r := inv.agentStack[j]; matchesTaskFrame(r) && r.deferredFinish == nil && !runsTool[r.spanID] && pendingEchoOf(r) {
-					return
-				}
 			}
 			awaitsCall := func(r *spanRecord) bool {
 				return slices.ContainsFunc(r.pendingFinishCalls, func(c taskFinishCall) bool {
@@ -3781,7 +3752,6 @@ func (tm *traceManager) noteTaskFinishCalls(ctx context.Context, id identity, ca
 		// before did not complete the task (see modelCallSeq), while those of
 		// the event, recorded below, come after it.
 		target.modelCallSeq = inv.lastSeq
-		target.latestModelEventSeen = true
 	}
 	// The calls run in the activation's current turn: the one that popLLMSpan
 	// started for a response that AfterModelCallback notes, or else the one
@@ -3811,7 +3781,6 @@ func (tm *traceManager) noteTaskFinishCalls(ctx context.Context, id identity, ca
 		// completion awaits no model response event (see
 		// selectResponseOwnerLocked).
 		target.deferredFinish = nil
-		target.latestModelEventSeen = false
 		if len(target.unseenModelFinishCalls) >= maxTaskToolDeltas {
 			target.unseenModelFinishCalls = slices.Delete(target.unseenModelFinishCalls, 0, len(target.unseenModelFinishCalls)-maxTaskToolDeltas+1)
 		}
@@ -3870,7 +3839,6 @@ func (rec *spanRecord) clearFinishCall(c taskFinishCall) {
 	rec.pendingFinishCalls = slices.DeleteFunc(rec.pendingFinishCalls, c.same)
 	if len(rec.pendingFinishCalls) == 0 {
 		rec.unseenModelFinishCalls = nil
-		rec.latestModelEventSeen = true
 	}
 }
 
@@ -5040,9 +5008,6 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 			owner.unseenModelFinishCalls = slices.DeleteFunc(owner.unseenModelFinishCalls, func(u unseenModelFinish) bool {
 				return u.modelCallSeq <= batchModelSeq
 			})
-			if batchModelSeq >= owner.modelCallSeq {
-				owner.latestModelEventSeen = true
-			}
 		} else {
 			matchesLatest := slices.ContainsFunc(owner.unseenModelFinishCalls, func(u unseenModelFinish) bool {
 				return u.modelCallSeq == owner.modelCallSeq && slices.ContainsFunc(calls, func(fr functionResponseCall) bool {
@@ -5056,7 +5021,6 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 			})
 			if matchesLatest && !hasEarlierPending {
 				owner.unseenModelFinishCalls = nil
-				owner.latestModelEventSeen = true
 			} else {
 				owner.unseenModelFinishCalls = slices.DeleteFunc(owner.unseenModelFinishCalls, func(u unseenModelFinish) bool {
 					return u.modelCallSeq < owner.modelCallSeq
@@ -5106,9 +5070,13 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 	// response is whose. Non-first finish_task responses whose payload carried
 	// ADK's completion sentinel (superseded == true) pair with remaining
 	// finishedTasks entries and consume them immediately, since ADK only lets
-	// the first finish_task response complete the activation. skipped marks
-	// those that report no completion and are left beyond the open calls, and
-	// answered holds the calls that the open calls' and superseded finishedTasks'
+	// the first finish_task response complete the activation; when the event
+	// shows the owner and no other untaken call of the owner shares the ID, a
+	// remaining superseded response likewise consumes the owner's matching
+	// rejectedTasks entry (from a recovered finish_task error in the batch) so
+	// the answered rejection cannot outlive the batch. skipped marks those that
+	// report no completion and are left beyond the open calls, and answered
+	// holds the calls that the open calls' and superseded finishedTasks'
 	// responses answered.
 	spare := make(map[string]int)
 	for _, fr := range calls {
@@ -5119,7 +5087,7 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 	for _, o := range finishOpen {
 		spare[o.call]--
 	}
-	ownerKnown := self > 0 || hasEvEpoch || len(owner.finishedTasks) > 0
+	ownerKnown := self > 0 || hasEvEpoch
 	taken := make([]bool, len(calls))
 	skipped := make([]bool, len(calls))
 	pairedFinished := make([]bool, len(owner.finishedTasks))
@@ -5173,7 +5141,7 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 			// no other call may be the one that it answers, and is kept with
 			// all of them, the open call included, which keeps running,
 			// otherwise (see recordUnfinishedTaskResponseLocked).
-			if fr.unfinished && !(fr.superseded && ownerKnown) && self <= 0 && !hasEvEpoch {
+			if fr.unfinished && !ownerKnown {
 				running = true
 				break
 			}
@@ -5198,6 +5166,27 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 	}
 	for k, fr := range calls {
 		if !fr.unfinished || taken[k] {
+			continue
+		}
+		if fr.superseded && ownerKnown && len(inv.untakenFinishCallsLocked(owner, fr.call, answered)) == 0 {
+			matchesCall := func(rej rejectedTaskCall) bool { return rej.call == fr.call }
+			matchesDelta := func(rej rejectedTaskCall) bool {
+				return rej.call == fr.call && evDeltaPtr != 0 && rej.delta.matches(evDeltaPtr)
+			}
+			switch {
+			case slices.ContainsFunc(owner.rejectedTasks, matchesDelta):
+				idx := slices.IndexFunc(owner.rejectedTasks, matchesDelta)
+				owner.rejectedTasks = slices.Delete(owner.rejectedTasks, idx, idx+1)
+			case slices.ContainsFunc(owner.deferredRejections, matchesDelta):
+				idx := slices.IndexFunc(owner.deferredRejections, matchesDelta)
+				owner.deferredRejections = slices.Delete(owner.deferredRejections, idx, idx+1)
+			case slices.ContainsFunc(owner.rejectedTasks, matchesCall):
+				idx := slices.IndexFunc(owner.rejectedTasks, matchesCall)
+				owner.rejectedTasks = slices.Delete(owner.rejectedTasks, idx, idx+1)
+			case slices.ContainsFunc(owner.deferredRejections, matchesCall):
+				idx := slices.IndexFunc(owner.deferredRejections, matchesCall)
+				owner.deferredRejections = slices.Delete(owner.deferredRejections, idx, idx+1)
+			}
 			continue
 		}
 		inv.recordUnfinishedTaskResponseLocked(taskID, fr.call, evDeltaPtr, answered, shown)
@@ -5746,9 +5735,6 @@ func (inv *invocationTrace) resolveUnattributedFinishFailuresLocked() {
 			inv.endFinishCallLocked(call.rec, taskFinishCall{call: failures[first].call, epoch: call.epoch, callSeq: call.callSeq}, math.MaxUint64)
 		}
 	}
-	// If ending forced calls shrank the candidate slots of an earlier-arriving
-	// failure with another call ID (not possible here since answerFinishCallSlotsLocked
-	// scopes by call ID, and math.MaxUint64 marks rather than deletes), clear dirty.
 	inv.unattributedFailuresDirty = false
 }
 
@@ -7274,7 +7260,6 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 		// (see modelCallSeq).
 		owner.ranFinishCalls = nil
 		owner.unseenModelFinishCalls = nil
-		owner.latestModelEventSeen = true
 		owner.modelCallSeq = inv.lastSeq
 	}
 	rec := inv.newChild(owner, spanKindLLM, now)
@@ -7490,7 +7475,6 @@ func (tm *traceManager) pushToolSpanWithKind(ctx context.Context, id identity, k
 		// arrived or an earlier plugin replaced it (see
 		// unseenModelFinishCalls).
 		owner.unseenModelFinishCalls = nil
-		owner.latestModelEventSeen = true
 		if owner.taskMode && (toolName == "" || toolName == finishTaskToolName) {
 			if call := toolKeyCall(key); call != "" {
 				owner.settledTaskCalls = slices.DeleteFunc(owner.settledTaskCalls, func(settled taskFinishCall) bool {
@@ -7694,7 +7678,6 @@ func (tm *traceManager) popToolSpanWithKind(ctx context.Context, id identity, ke
 		// earlier plugin replaced it, even when an earlier plugin answered
 		// the call's BeforeToolCallback (see unseenModelFinishCalls).
 		owningAgent.unseenModelFinishCalls = nil
-		owningAgent.latestModelEventSeen = true
 	}
 	if owningAgent != nil && owningAgent.taskMode && !deltaRef.empty() {
 		deltaRef.call = toolKeyCall(key)
@@ -8077,7 +8060,6 @@ func (rec *spanRecord) clearTaskDeltas() {
 	rec.deferredFinish = nil
 	rec.ranFinishCalls = nil
 	rec.unseenModelFinishCalls = nil
-	rec.latestModelEventSeen = true
 }
 
 // dropContexts drops what rec keeps of the callbacks of its run: the context
@@ -8145,16 +8127,17 @@ func (inv *invocationTrace) pruneRetiredFrameRefsLocked() {
 	if len(inv.taskFrames) == 0 && len(inv.endedRejectingFrames) == 0 {
 		return
 	}
+	open := inv.agentStack[1:]
 	hasDangling := false
 	for _, r := range inv.taskFrames {
-		if r.parent != nil || r.canceled != nil {
+		if (r.parent != nil || r.canceled != nil) && !slices.Contains(open, r) {
 			hasDangling = true
 			break
 		}
 	}
 	if !hasDangling {
 		for _, r := range inv.endedRejectingFrames {
-			if r.parent != nil || r.canceled != nil {
+			if (r.parent != nil || r.canceled != nil) && !slices.Contains(open, r) {
 				hasDangling = true
 				break
 			}
@@ -8163,8 +8146,8 @@ func (inv *invocationTrace) pruneRetiredFrameRefsLocked() {
 	if !hasDangling {
 		return
 	}
-	openSet := make(map[*spanRecord]bool, len(inv.agentStack))
-	for _, r := range inv.agentStack[1:] {
+	openSet := make(map[*spanRecord]bool, len(open))
+	for _, r := range open {
 		openSet[r] = true
 	}
 	var keepParent map[*spanRecord]bool
