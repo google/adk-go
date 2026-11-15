@@ -31,6 +31,7 @@ import (
 var (
 	a2aDataPartMetaTypeKey        = ToA2AMetaKey("type")
 	a2aDataPartMetaLongRunningKey = ToA2AMetaKey("is_long_running")
+	a2aPartMetaVideoMetadataKey   = ToA2AMetaKey("video_metadata")
 )
 
 const (
@@ -145,7 +146,7 @@ func toA2AFilePart(v *genai.Part) (*a2a.Part, error) {
 		if err != nil {
 			return nil, err
 		}
-		r.SetMeta("video_metadata", data)
+		r.SetMeta(a2aPartMetaVideoMetadataKey, data)
 	}
 
 	return r, nil
@@ -272,7 +273,20 @@ func ToGenAIParts(parts []*a2a.Part) ([]*genai.Part, error) {
 func toGenAIFilePart(part *a2a.Part) (*genai.Part, error) {
 	if raw := part.Raw(); raw != nil {
 		data := &genai.Blob{Data: raw, MIMEType: part.MediaType, DisplayName: part.Filename}
-		return &genai.Part{InlineData: data}, nil
+		r := &genai.Part{InlineData: data}
+		if vm, ok := part.Metadata[a2aPartMetaVideoMetadataKey]; ok {
+			vmJSON, err := json.Marshal(vm)
+			if err != nil {
+				return nil, fmt.Errorf("encode %s part metadata: %w", a2aPartMetaVideoMetadataKey, err)
+			}
+			// genai's offsets are durations, so an offset that does not parse is
+			// rejected rather than dropped; adk-python passes any string on. The
+			// decode error quotes the peer's value, so it is not wrapped.
+			if err := json.Unmarshal(vmJSON, &r.VideoMetadata); err != nil {
+				return nil, fmt.Errorf("decode %s part metadata: want an object whose offsets are durations such as \"1.5s\"", a2aPartMetaVideoMetadataKey)
+			}
+		}
+		return r, nil
 	}
 
 	if url := part.URL(); url != "" {
