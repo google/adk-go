@@ -669,7 +669,7 @@ func jsonHexRune(s string) (rune, bool) {
 // across the strings of s, a JSON document or a JSON string literal that holds
 // one at depth (see expressionsKeepStringsApart, which reads escapes decoded
 // too), as written or as main writes it again once it redacts a key in it,
-// with the keys sorted (see sortedJSONText). A document whose redaction of
+// with the keys sorted (see sortedJSONTextDepth). A document whose redaction of
 // sensitive keys changes it then fails closed: the redaction may take the
 // value that runs on, as a header in the value of a compound key, which main
 // keeps, as the Authorization\u003a\n of
@@ -1172,6 +1172,11 @@ func isPositivelyHarmlessProse(raw, trimmed string) bool {
 	if canon != raw && strings.ContainsAny(canon, "{[") {
 		allowRedactedProse = false
 	}
+	if spaceFolded := foldUnicodeSpaces(canon); spaceFolded != canon {
+		if scrubErrorText(spaceFolded) != spaceFolded || legacyScrubChanges(spaceFolded) || hasQuotedSensitiveKeyWithRedacted(spaceFolded, allowRedactedProse) {
+			return false
+		}
+	}
 	if hasQuotedSensitiveKeyWithRedacted(canon, allowRedactedProse) {
 		return false
 	}
@@ -1182,6 +1187,58 @@ func isPositivelyHarmlessProse(raw, trimmed string) bool {
 	// hold a JSON string whose escapes the checks above do not all decode.
 	return (strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, `"`)) &&
 		!hasJSONEscapedCredential(raw)
+}
+
+// foldUnicodeSpaces replaces non-ASCII Unicode whitespace, separator, and BOM
+// runes (such as U+00A0, U+2000..U+200A, U+202F, U+205F, U+3000, and U+FEFF)
+// with ASCII spaces, and Unicode line/paragraph separators (U+0085, U+2028,
+// U+2029) with '\n', for credential-marker detection in malformed JSON or
+// quote-led text.
+func foldUnicodeSpaces(s string) string {
+	hasNonASCII := false
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			hasNonASCII = true
+			break
+		}
+	}
+	if !hasNonASCII {
+		return s
+	}
+	var b strings.Builder
+	changed := false
+	for i := 0; i < len(s); {
+		if s[i] < utf8.RuneSelf {
+			if changed {
+				b.WriteByte(s[i])
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		var repl byte
+		switch {
+		case r == '\u0085' || r == '\u2028' || r == '\u2029':
+			repl = '\n'
+		case isInlineSpaceRune(r) || r == '\ufeff':
+			repl = ' '
+		}
+		if repl != 0 {
+			if !changed {
+				b.Grow(len(s))
+				b.WriteString(s[:i])
+				changed = true
+			}
+			b.WriteByte(repl)
+		} else if changed {
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	if !changed {
+		return s
+	}
+	return b.String()
 }
 
 // hasJSONEscapedCredential reports whether the text between two consecutive
@@ -2201,6 +2258,12 @@ func hasAnyCredentialMarker(s string) bool {
 	canon := canonicalizeCredentialMarker(s)
 	if hasQuotedSensitiveKey(canon) {
 		return true
+	}
+	if spaceFolded := foldUnicodeSpaces(canon); spaceFolded != canon {
+		return (canon != s && scrubErrorTokens(canon) != canon) ||
+			scrubErrorText(spaceFolded) != spaceFolded ||
+			legacyScrubChanges(spaceFolded) ||
+			hasQuotedSensitiveKey(spaceFolded)
 	}
 	return canon != s && scrubErrorTokens(canon) != canon
 }

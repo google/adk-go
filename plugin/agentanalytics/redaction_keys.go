@@ -737,14 +737,15 @@ func hasCanonicalizableEscape(s string) bool {
 // canonicalizeCredentialMarker and canonicalizeMapped decode from a \u, \x or
 // % escape: ASCII (<= 0x7F), one of the three non-ASCII runes that case-fold
 // to ASCII key letters (U+0130 'İ' -> 'i', U+017F 'ſ' -> 's', U+212A 'K' ->
-// 'k'), or, for a 4-hex \uXXXX escape (unicodeEscape), a Unicode whitespace
-// or separator rune (such as \u00a0) that trimInlineSpaces and
-// followedByKeyDelimiterWithRedacted skip around keys and delimiters.
+// 'k'), or, for a 4-hex \uXXXX escape (unicodeEscape), a Unicode whitespace,
+// separator, or BOM rune (such as \u00a0 or \ufeff) that trimBOMAndSpace,
+// trimInlineSpaces, and foldUnicodeSpaces skip or fold around keys and
+// delimiters.
 func isFoldedEscapeRune(r rune, unicodeEscape bool) bool {
 	if r <= 0x7F || r == '\u0130' || r == '\u017f' || r == '\u212a' {
 		return true
 	}
-	return unicodeEscape && (unicode.IsSpace(r) || unicode.In(r, unicode.Z))
+	return unicodeEscape && (unicode.IsSpace(r) || unicode.In(r, unicode.Z) || r == '\ufeff')
 }
 
 func hasEscapePrefixInTail(out []byte) bool {
