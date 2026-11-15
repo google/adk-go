@@ -186,16 +186,12 @@ func (p *a2aAgentRunProcessor) buildNonPartialAggregation(ctx agent.InvocationCo
 // convertToSessionEvent converts A2A client SendStreamingMessage result to a session event. Returns nil if nothing should be emitted.
 func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext, a2aEvent a2a.Event, err error) (*session.Event, error) {
 	if err != nil {
-		event := toErrorEvent(ctx, err)
-		p.updateCustomMetadata(event, nil)
-		return event, nil
+		return nil, err
 	}
 
 	event, err := adka2a.ToSessionEventWithParts(ctx, a2aEvent, p.partConverter)
 	if err != nil {
-		event := toErrorEvent(ctx, fmt.Errorf("failed to convert a2aEvent: %w", err))
-		p.updateCustomMetadata(event, nil)
-		return event, nil
+		return nil, fmt.Errorf("failed to convert a2aEvent: %w", err)
 	}
 
 	if event != nil {
