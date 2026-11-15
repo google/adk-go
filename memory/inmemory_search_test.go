@@ -190,6 +190,38 @@ func Test_inMemoryService_SearchMemory_NonASCII(t *testing.T) {
 	}
 }
 
+func Test_inMemoryService_SearchMemory_SkipsThoughtParts(t *testing.T) {
+	thought := &genai.Part{Text: "secret plan", Thought: true}
+	visible := genai.NewPartFromText("deploy ready")
+	s := memory.InMemoryService()
+	if err := s.AddSessionToMemory(t.Context(), makeSession(t, "app", "user", "session", []*session.Event{
+		{ID: "thought-only", LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{thought}, genai.RoleModel)}},
+		{ID: "mixed", LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{thought, visible}, genai.RoleModel)}},
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.SearchMemory(t.Context(), &memory.SearchRequest{AppName: "app", UserID: "user", Query: "secret plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Memories) != 0 {
+		t.Errorf("SearchMemory(%q) matched thought text, got %d entries", "secret plan", len(got.Memories))
+	}
+
+	got, err = s.SearchMemory(t.Context(), &memory.SearchRequest{AppName: "app", UserID: "user", Query: "deploy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Memories) != 1 {
+		t.Fatalf("SearchMemory(%q) returned %d entries, want 1", "deploy", len(got.Memories))
+	}
+	want := genai.NewContentFromParts([]*genai.Part{visible}, genai.RoleModel)
+	if diff := cmp.Diff(want, got.Memories[0].Content); diff != "" {
+		t.Errorf("SearchMemory() content mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func memoryTextEvent(id string, texts ...string) *session.Event {
 	var parts []*genai.Part
 	for _, text := range texts {
