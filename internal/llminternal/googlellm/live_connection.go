@@ -206,6 +206,9 @@ func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
 	}
 
 	resp := &model.LLMResponse{}
+	if msg.UsageMetadata != nil {
+		resp.UsageMetadata = liveUsageMetadata(msg.UsageMetadata)
+	}
 
 	if msg.SessionResumptionUpdate != nil {
 		resp.SessionResumptionHandle = msg.SessionResumptionUpdate.NewHandle
@@ -283,6 +286,27 @@ func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
 	}
 
 	return resp, nil
+}
+
+// liveUsageMetadata converts the Live API token usage to the usage type that
+// [model.LLMResponse] carries. The Live API names output tokens
+// ResponseTokenCount and ResponseTokensDetails, where the GenerateContent type
+// calls them CandidatesTokenCount and CandidatesTokensDetails. adk-python maps
+// the fields the same way.
+func liveUsageMetadata(u *genai.UsageMetadata) *genai.GenerateContentResponseUsageMetadata {
+	return &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:           u.PromptTokenCount,
+		CachedContentTokenCount:    u.CachedContentTokenCount,
+		CandidatesTokenCount:       u.ResponseTokenCount,
+		TotalTokenCount:            u.TotalTokenCount,
+		ThoughtsTokenCount:         u.ThoughtsTokenCount,
+		ToolUsePromptTokenCount:    u.ToolUsePromptTokenCount,
+		PromptTokensDetails:        u.PromptTokensDetails,
+		CacheTokensDetails:         u.CacheTokensDetails,
+		CandidatesTokensDetails:    u.ResponseTokensDetails,
+		ToolUsePromptTokensDetails: u.ToolUsePromptTokensDetails,
+		TrafficType:                u.TrafficType,
+	}
 }
 
 // Close closes the live server connection.
