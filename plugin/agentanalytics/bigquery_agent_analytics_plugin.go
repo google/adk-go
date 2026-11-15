@@ -1016,10 +1016,11 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
 			evID.path = ev.NodeInfo.Path
 		}
+		var settledPeers []deferredAgentCompletion
 		if ev.Partial {
 			p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil)
 		} else if ev.Content != nil || ev.Output != nil {
-			p.traces.completeResponseEvent(ctx, evID, ev.Author, ev.Branch, functionResponseCallSpecs(ev.Content), eventStateDelta(ev))
+			settledPeers = p.traces.completeResponseEvent(ctx, evID, ev.Author, ev.Branch, functionResponseCallSpecs(ev.Content), eventStateDelta(ev))
 		} else {
 			p.traces.clearLastPartial(ctx, evID)
 		}
@@ -1027,6 +1028,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 			p.traces.recordNodeCompletion(ctx, evID, workflowName, ev.NodeInfo.Path, ev.Branch, failed)
 		}
 		p.emitSessionEventSignals(ctx, ev)
+		p.logDeferredTaskCompletions(ctx, evID, settledPeers)
 		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor {
 			if finishCalls := finishTaskFunctionCalls(ev.Content); len(finishCalls) > 0 {
 				taskID := evID
@@ -1038,7 +1040,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 				taskID := evID
 				taskID.agentName = ev.Author
 				taskID.branch = ev.Branch
-				if span, ok := p.traces.popTaskAgentSpanWithDelta(ctx, taskID, calls, eventStateDelta(ev)); ok {
+				if span, ok := p.traces.popTaskAgentSpanWithEvent(ctx, taskID, calls, eventStateDelta(ev), ev.Output != nil); ok {
 					p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
 				}
 			}
@@ -1498,13 +1500,15 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 }
 
 // endUnfinishedFinishTask records how a finish_task call that did not complete
-// its task ended (see traceManager.popTaskAgentSpanWithDelta). A call whose
-// result still reports completion, although it failed or an error callback
-// recovered it, is rejected, so that its function response event ends no task
-// activation. Any other call, such as one whose arguments the tool rejected or
-// one that waits for confirmation, is unfinished, so that the function call
-// that the model made no longer counts as evidence that a later response
-// event answers it. Calls of other tools are left alone.
+// its task cleanly ended (see traceManager.popTaskAgentSpanWithEvent). A call
+// whose result still reports completion, although it failed or an error
+// callback recovered it, is rejected, so that its function response event
+// writes no AGENT_COMPLETED row for the task activation (while retiring the
+// activation's span and marking its delegator if ADK's runTask ended the task
+// on that response). Any other call, such as one whose arguments the tool
+// rejected or one that waits for confirmation, is unfinished, so that the
+// function call that the model made no longer counts as evidence that a later
+// response event answers it. Calls of other tools are left alone.
 func (p *analyticsPlugin) endUnfinishedFinishTask(ctx context.Context, id identity, name, callID string, result map[string]any, confirmationOutcome bool) {
 	if name != finishTaskToolName {
 		return

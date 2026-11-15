@@ -14556,4 +14556,329 @@ func TestRunner_SupersededRejectedFinishDoesNotLeakRejection(t *testing.T) {
 				secondWorkerEndIdx, coordRespIdx, eventTypes(rows))
 		}
 	})
+
+	t.Run("same_activation_cached_first_call_and_retry", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		var call0Count atomic.Int32
+		var cachedAttempt sync.Map
+		cachePlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "earlier_cache",
+			BeforeToolCallback: func(ctx agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName && ctx.FunctionCallID() == "c-bad" {
+					cachedAttempt.Store(ctx.Actions(), true)
+					return map[string]any{"error": "cached missing result"}, nil
+				}
+				if tl.Name() == finishTaskToolName && ctx.FunctionCallID() == "call_0" {
+					if call0Count.Add(1) == 2 {
+						cachedAttempt.Store(ctx.Actions(), true)
+						return map[string]any{"result": "Task completed."}, nil
+					}
+				}
+				return nil, nil
+			},
+			AfterToolCallback: func(ctx agent.Context, _ tool.Tool, _, result map[string]any, _ error) (map[string]any, error) {
+				if _, ok := cachedAttempt.LoadAndDelete(ctx.Actions()); ok {
+					return result, nil
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(cache): %v", err)
+		}
+		var failOnce atomic.Bool
+		recoverPlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "fail_and_recover_once",
+			BeforeToolCallback: func(ctx agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName && ctx.FunctionCallID() == "call_0" && failOnce.CompareAndSwap(false, true) {
+					return nil, errors.New("transient finish failure")
+				}
+				return nil, nil
+			},
+			OnToolErrorCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName {
+					return map[string]any{"result": "Task completed."}, nil
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(recover): %v", err)
+		}
+
+		worker, err := llmagent.New(llmagent.Config{
+			Name: "task_worker", Description: "executes delegated tasks", Mode: llmagent.ModeTask,
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					finish("c-bad", map[string]any{}),
+					finish("call_0", map[string]any{"result": "draft"}),
+				}}},
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					finish("call_0", map[string]any{"result": "final"}),
+				}}},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		coordinator, err := llmagent.New(llmagent.Config{
+			Name: "coordinator", SubAgents: []agent.Agent{worker},
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "call-worker", Name: "task_worker", Args: map[string]any{"request": "go"},
+				}}}}},
+				{Content: textContent("model", "all done"), TurnComplete: true},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, coordinator, cachePlugin, p, recoverPlugin).Run(t.Context(), "u1", "s1", textContent("user", "start"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error: %v", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 1 {
+			t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 1; events=%v", got, eventTypes(rows))
+		}
+		if got := len(agentRowsOfType(rows, EventAgentError, "task_worker")); got != 0 {
+			t.Fatalf("task_worker AGENT_ERROR count = %d, want 0; events=%v", got, eventTypes(rows))
+		}
+	})
+}
+
+func TestRunner_RecoveredFinishTaskEndsWorkerSpanAndDelegator(t *testing.T) {
+	t.Run("agent_on_tool_error_callback", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		failBeforePlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "fail_finish_task",
+			BeforeToolCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName {
+					return nil, errors.New("finish_task failed")
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+		worker, err := llmagent.New(llmagent.Config{
+			Name: "task_worker", Description: "executes delegated tasks", Mode: llmagent.ModeTask,
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "call_finish", Name: finishTaskToolName, Args: map[string]any{"result": "recovered output"},
+				}}}}},
+			}},
+			OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+				func(_ agent.Context, tl tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+					if tl.Name() == finishTaskToolName {
+						return map[string]any{"result": "Task completed."}, nil
+					}
+					return nil, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		coordinator, err := llmagent.New(llmagent.Config{
+			Name: "coordinator", SubAgents: []agent.Agent{worker},
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "call-worker", Name: "task_worker", Args: map[string]any{"request": "go"},
+				}}}}},
+				{Content: textContent("model", "coordinator final"), TurnComplete: true},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		for _, err := range newTestRunner(t, coordinator, p, failBeforePlugin).Run(t.Context(), "u1", "s1", textContent("user", "start"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error: %v", err)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		invStart := onlyRowOfType(t, rows, EventInvocationStarting)
+		onlyToolErr := onlyRowOfType(t, rows, EventToolError)
+		if onlyToolErr["agent"] != "task_worker" {
+			t.Errorf("TOOL_ERROR agent = %v, want task_worker", onlyToolErr["agent"])
+		}
+		if got := len(agentRowsOfType(rows, EventToolCompleted, "task_worker")); got != 0 {
+			t.Errorf("task_worker TOOL_COMPLETED count = %d, want 0", got)
+		}
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 0 {
+			t.Errorf("task_worker AGENT_COMPLETED count = %d, want 0", got)
+		}
+		if got := len(agentRowsOfType(rows, EventAgentError, "task_worker")); got != 0 {
+			t.Errorf("task_worker AGENT_ERROR count = %d, want 0", got)
+		}
+		if got := len(agentRowsOfType(rows, EventAgentResponse, "task_worker")); got != 0 {
+			t.Errorf("task_worker AGENT_RESPONSE count = %d, want 0", got)
+		}
+
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		coordStarts := agentRowsOfType(rows, EventAgentStarting, "coordinator")
+		coordEnds := agentRowsOfType(rows, EventAgentCompleted, "coordinator")
+		if len(workerStarts) != 1 || len(coordStarts) != 2 || len(coordEnds) != 2 {
+			t.Fatalf("workerStarts=%d coordStarts=%d coordEnds=%d, want 1, 2, 2; events=%v",
+				len(workerStarts), len(coordStarts), len(coordEnds), eventTypes(rows))
+		}
+		if coordEnds[0]["span_id"] != coordStarts[0]["span_id"] || coordEnds[1]["span_id"] != coordStarts[1]["span_id"] {
+			t.Errorf("coordinator AGENT_COMPLETED span_ids = (%v, %v), want (%v, %v)",
+				coordEnds[0]["span_id"], coordEnds[1]["span_id"], coordStarts[0]["span_id"], coordStarts[1]["span_id"])
+		}
+		if coordStarts[1]["parent_span_id"] != invStart["span_id"] {
+			t.Errorf("coordinator second activation parent_span_id = %v (worker span = %v), want invocation span %v",
+				coordStarts[1]["parent_span_id"], workerStarts[0]["span_id"], invStart["span_id"])
+		}
+	})
+
+	t.Run("later_plugin_recovers_parallel_batch_with_sibling_state_delta", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		type noteArgs struct {
+			Note string `json:"note"`
+		}
+		noteTool, err := functiontool.New(functiontool.Config{
+			Name:        "record_note",
+			Description: "records a note in state",
+		}, func(ctx agent.Context, in noteArgs) (map[string]any, error) {
+			if err := ctx.State().Set("note", in.Note); err != nil {
+				return nil, err
+			}
+			return map[string]any{"saved": in.Note}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New: %v", err)
+		}
+		laterRecoverPlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "later_recover_finish",
+			BeforeToolCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName {
+					return nil, errors.New("finish_task transient failure")
+				}
+				return nil, nil
+			},
+			OnToolErrorCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName {
+					return map[string]any{"result": "Task completed."}, nil
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(later_recover_finish): %v", err)
+		}
+		worker, err := llmagent.New(llmagent.Config{
+			Name: "task_worker", Description: "executes delegated tasks", Mode: llmagent.ModeTask,
+			Tools: []tool.Tool{noteTool},
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: "c-note", Name: "record_note", Args: map[string]any{"note": "step1"}}},
+					{FunctionCall: &genai.FunctionCall{ID: "c-fin", Name: finishTaskToolName, Args: map[string]any{"result": "done"}}},
+				}}},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		coordinator, err := llmagent.New(llmagent.Config{
+			Name: "coordinator", SubAgents: []agent.Agent{worker},
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "call-worker", Name: "task_worker", Args: map[string]any{"request": "go"},
+				}}}}},
+				{Content: textContent("model", "coordinator after parallel worker"), TurnComplete: true},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		for _, err := range newTestRunner(t, coordinator, p, laterRecoverPlugin).Run(t.Context(), "u1", "s1", textContent("user", "start"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error: %v", err)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		invStart := onlyRowOfType(t, rows, EventInvocationStarting)
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 0 {
+			t.Errorf("task_worker AGENT_COMPLETED count = %d, want 0", got)
+		}
+		if got := len(agentRowsOfType(rows, EventToolCompleted, "task_worker")); got != 1 {
+			t.Errorf("task_worker TOOL_COMPLETED count = %d (record_note only), want 1", got)
+		}
+		coordStarts := agentRowsOfType(rows, EventAgentStarting, "coordinator")
+		coordEnds := agentRowsOfType(rows, EventAgentCompleted, "coordinator")
+		if len(coordStarts) != 2 || len(coordEnds) != 2 {
+			t.Fatalf("coordStarts=%d coordEnds=%d, want 2 and 2; events=%v", len(coordStarts), len(coordEnds), eventTypes(rows))
+		}
+		if coordStarts[1]["parent_span_id"] != invStart["span_id"] {
+			t.Errorf("coordinator second activation parent_span_id = %v, want invocation span %v",
+				coordStarts[1]["parent_span_id"], invStart["span_id"])
+		}
+	})
+
+	t.Run("retryandreflect_recovery_continues_worker_until_clean_finish", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		rrPlugin := retryandreflect.MustNew(retryandreflect.WithMaxRetries(2))
+		var failOnce atomic.Bool
+		failOncePlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "fail_finish_once",
+			BeforeToolCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName && failOnce.CompareAndSwap(false, true) {
+					return nil, errors.New("transient finish_task error")
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+		worker, err := llmagent.New(llmagent.Config{
+			Name: "task_worker", Description: "executes delegated tasks", Mode: llmagent.ModeTask,
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "c-fin-1", Name: finishTaskToolName, Args: map[string]any{"result": "attempt1"},
+				}}}}},
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "c-fin-2", Name: finishTaskToolName, Args: map[string]any{"result": "attempt2"},
+				}}}}},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		coordinator, err := llmagent.New(llmagent.Config{
+			Name: "coordinator", SubAgents: []agent.Agent{worker},
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "call-worker", Name: "task_worker", Args: map[string]any{"request": "go"},
+				}}}}},
+				{Content: textContent("model", "coordinator done"), TurnComplete: true},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		for _, err := range newTestRunner(t, coordinator, p, failOncePlugin, rrPlugin).Run(t.Context(), "u1", "s1", textContent("user", "start"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error: %v", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 1 {
+			t.Errorf("task_worker AGENT_COMPLETED count = %d, want 1", got)
+		}
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "coordinator")); got != 2 {
+			t.Errorf("coordinator AGENT_COMPLETED count = %d, want 2", got)
+		}
+	})
 }

@@ -31,8 +31,12 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
+	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 func TestDocGo_ParityBulletsReferenceExistingTests(t *testing.T) {
@@ -101,7 +105,7 @@ func TestDocGo_ParityBulletsReferenceExistingTests(t *testing.T) {
 	}
 	flush()
 
-	const wantBulletCount = 24
+	const wantBulletCount = 25
 	if len(bullets) != wantBulletCount {
 		t.Fatalf("parsed %d behavioral-differences bullets in doc.go, want %d", len(bullets), wantBulletCount)
 	}
@@ -1086,4 +1090,85 @@ func TestDocParity_ResponseSummaryAndFunctionNameBounds(t *testing.T) {
 			t.Errorf("unredacted LLM_RESPONSE is_truncated = %v, want false", unredactedRow["is_truncated"])
 		}
 	})
+}
+
+func TestDocParity_RecoveredFinishTaskOmitsWorkerAgentCompleted(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	failFinishPlugin, err := baseplugin.New(baseplugin.Config{
+		Name: "fail_finish_task",
+		BeforeToolCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+			if tl.Name() == finishTaskToolName {
+				return nil, errors.New("finish_task failed")
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+	worker, err := llmagent.New(llmagent.Config{
+		Name:        "task_worker",
+		Description: "executes delegated tasks",
+		Mode:        llmagent.ModeTask,
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "call_finish", Name: finishTaskToolName, Args: map[string]any{"result": "recovered summary"},
+			}}}}},
+		}},
+		OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+			func(_ agent.Context, tl tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+				if tl.Name() == finishTaskToolName {
+					return map[string]any{"result": "Task completed."}, nil
+				}
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(worker): %v", err)
+	}
+	coordinator, err := llmagent.New(llmagent.Config{
+		Name:      "coordinator",
+		SubAgents: []agent.Agent{worker},
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "call-worker", Name: "task_worker", Args: map[string]any{"request": "go"},
+			}}}}},
+			{Content: textContent("model", "coordinator summary"), TurnComplete: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coordinator): %v", err)
+	}
+	for _, err := range newTestRunner(t, coordinator, p, failFinishPlugin).Run(t.Context(), "u1", "s1", textContent("user", "start"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("runner.Run error: %v", err)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	requireInvocationCompletedOK(t, rows)
+	invStart := onlyRowOfType(t, rows, EventInvocationStarting)
+	toolErrRow := onlyRowOfType(t, rows, EventToolError)
+	if toolErrRow["agent"] != "task_worker" {
+		t.Errorf("TOOL_ERROR agent = %v, want task_worker", toolErrRow["agent"])
+	}
+	if got := len(agentRowsOfType(rows, EventToolCompleted, "task_worker")); got != 0 {
+		t.Errorf("task_worker TOOL_COMPLETED count = %d, want 0", got)
+	}
+	if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 0 {
+		t.Errorf("task_worker AGENT_COMPLETED count = %d, want 0", got)
+	}
+	if got := len(agentRowsOfType(rows, EventAgentError, "task_worker")); got != 0 {
+		t.Errorf("task_worker AGENT_ERROR count = %d, want 0", got)
+	}
+	coordStarts := agentRowsOfType(rows, EventAgentStarting, "coordinator")
+	coordEnds := agentRowsOfType(rows, EventAgentCompleted, "coordinator")
+	if len(coordStarts) != 2 || len(coordEnds) != 2 {
+		t.Fatalf("coordinator starts=%d ends=%d, want 2 and 2; events=%v", len(coordStarts), len(coordEnds), eventTypes(rows))
+	}
+	if coordStarts[1]["parent_span_id"] != invStart["span_id"] {
+		t.Errorf("coordinator second activation parent_span_id = %v, want invocation span %v",
+			coordStarts[1]["parent_span_id"], invStart["span_id"])
+	}
 }

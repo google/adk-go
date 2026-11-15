@@ -96,12 +96,14 @@
 //     only when AfterToolCallback sees unchanged JSON-shaped arguments within
 //     the comparison bounds. A finish_task function response event of a
 //     task-mode agent no longer shows which activation wrote it: a delayed
-//     response of a finish_task call that failed or was recovered ends no
-//     activation unless an open or settled finish_task call shows a newer
-//     completion (or a hidden-callback peer's deferred completion settles once
-//     the activation ends, unless a finish_task response of that peer reports
-//     no completion), so the [EventAgentCompleted] row of a task-mode agent
-//     can move to the end of its parent or run.
+//     response of a finish_task call that failed or was recovered writes no
+//     [EventAgentCompleted] row unless an open or settled finish_task call
+//     shows a newer completion (or a hidden-callback peer's deferred completion
+//     settles once the activation ends, unless a finish_task response of that
+//     peer reports no completion), so the [EventAgentCompleted] row of a
+//     task-mode agent can move to the end of its parent or run, or be omitted
+//     when another open or ended rejecting frame makes ownership ambiguous and
+//     an earlier plugin also hides the retry's callbacks.
 //
 // # Behavioral Differences from adk-python
 //
@@ -215,6 +217,21 @@
 //     function-call parts. (Pinned by TestSessionEvents_EmitRichLifecycleTypes in
 //     events_test.go and TestDocParity_HITLInputRequestFromRequestedInput in
 //     doc_test.go).
+//   - [EventAgentCompleted] omitted for a task-mode activation whose finish_task
+//     call failed and was recovered with "Task completed.": Because ADK Go runs
+//     no AfterAgentCallback when llmagent.ModeTask exits via finish_task, Go
+//     writes AGENT_COMPLETED only for a clean finish_task completion. When
+//     finish_task fails (recording [EventToolError]) and an OnToolErrorCallback
+//     or later AfterToolCallback substitutes {"result": "Task completed."}, ADK's
+//     runTask still ends the task activation on that response; Go retires the
+//     task activation's span and marks its delegating parent so the coordinator's
+//     interrupted activation writes AGENT_COMPLETED and its next activation is
+//     parented cleanly, while omitting AGENT_COMPLETED for the task activation
+//     whose finish_task failed. adk-python writes AGENT_COMPLETED for every
+//     agent run via after_agent_callback. (Pinned by
+//     TestRunner_RecoveredFinishTaskEndsWorkerSpanAndDelegator in
+//     bigquery_agent_analytics_plugin_test.go and
+//     TestDocParity_RecoveredFinishTaskOmitsWorkerAgentCompleted in doc_test.go).
 //
 // Payload shape, metadata keys, and operational defaults:
 //

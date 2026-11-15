@@ -2985,6 +2985,26 @@ func (rec *spanRecord) batchEpochOf(evPtr uintptr) (uint64, bool) {
 	return 0, false
 }
 
+// batchModelSeqOf returns the modelCallSeq of the tool batch in which the
+// task-mode activation rec recorded the StateDelta map at evPtr (in
+// toolStateDeltas or on a recorded rejection), and whether rec recorded it.
+func (rec *spanRecord) batchModelSeqOf(evPtr uintptr) (uint64, bool) {
+	if evPtr == 0 {
+		return 0, false
+	}
+	for _, d := range rec.toolStateDeltas {
+		if d.matches(evPtr) {
+			return d.modelCallSeq, true
+		}
+	}
+	for _, rej := range slices.Concat(rec.rejectedTasks, rec.deferredRejections) {
+		if rej.delta.matches(evPtr) {
+			return rej.modelCallSeq, true
+		}
+	}
+	return 0, false
+}
+
 // deferredTaskFinish records an ambiguous finish_task FunctionResponse event
 // without StateDelta provenance that arrived while an older task activation
 // held a matching rejectedTasks entry and this unnoted peer activation held
@@ -3089,6 +3109,17 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 // completion that goes to an activation only because no other one may have
 // written it shows no call (see completionCalls).
 func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identity, calls []string, evStateDelta map[string]any) (span rowSpan, ok bool) {
+	return tm.popTaskAgentSpanWithEvent(ctx, id, calls, evStateDelta, false)
+}
+
+// popTaskAgentSpanWithEvent is popTaskAgentSpanWithDelta with taskEnded
+// reporting whether ADK's runTask ended the task activation on the event
+// (ev.Output != nil; see llmagent.runTask and runChat). When a recorded or
+// deferred rejection drops the event's AGENT_COMPLETED row for an open task
+// activation that ended on that batch without starting later model or tool
+// work, its span is retired without a row and its delegating parent is marked
+// taskDelegated.
+func (tm *traceManager) popTaskAgentSpanWithEvent(ctx context.Context, id identity, calls []string, evStateDelta map[string]any, taskEnded bool) (span rowSpan, ok bool) {
 	evDeltaPtr := mapPtr(evStateDelta)
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
@@ -3202,6 +3233,37 @@ func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identi
 		}
 	}
 
+	// retireEndedRejected ends an open rejecting task activation without an
+	// AGENT_COMPLETED row (and marks its delegating parent) when ADK's runTask
+	// terminated the task on this completion-carrying response (taskEnded, i.e.
+	// ev.Output != nil; see llmagent.runTask and runChat) and the activation has
+	// not started any later model or tool work since the rejected batch.
+	retireEndedRejected := func(rec *spanRecord, rejSeq uint64) {
+		if !taskEnded || rec.modelCallSeq != rejSeq || hasPositiveFinishEvidence(rec) {
+			return
+		}
+		idx := slices.Index(inv.agentStack, rec)
+		if idx <= 0 {
+			return
+		}
+		for _, open := range inv.toolSpans {
+			if open.parentSpanID == rec.spanID {
+				return
+			}
+		}
+		inv.markTaskDelegatorLocked(rec, now)
+		inv.retireAgentLocked(idx, false, noFrame)
+		inv.retireLateSettledLocked()
+	}
+	consumeRejectedTask := func(rec *spanRecord, list *[]rejectedTaskCall, idx int, retire bool) rejectedTaskCall {
+		rej := (*list)[idx]
+		*list = slices.Delete(*list, idx, idx+1)
+		if retire {
+			retireEndedRejected(rec, rej.modelCallSeq)
+		}
+		return rej
+	}
+
 	// deferral reports that the event shows that an earlier event, on which
 	// the activation that it retires deferred its completion, was that
 	// activation's, and shown that the event shows itself as the activation's
@@ -3229,24 +3291,25 @@ func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identi
 		// call's delayed response, so the entry ends with it.
 		deferredRej := slices.IndexFunc(owner.deferredRejections, rejectionOf)
 		if peerIdx > 0 {
+			peerRec := inv.agentStack[peerIdx]
 			if deferredRej >= 0 {
-				owner.deferredRejections = slices.Delete(owner.deferredRejections, deferredRej, deferredRej+1)
+				consumeRejectedTask(owner, &owner.deferredRejections, deferredRej, true)
 			}
-			i, deferral = peerIdx, true
+			i, deferral = slices.Index(inv.agentStack, peerRec), true
 		} else {
 			// An activation that ended takes the event for its rejected
 			// call's delayed response as an open one does, and does not end
 			// again (see deltaOwnerIdx).
 			if !finishedCall(owner) {
 				if idx := slices.IndexFunc(owner.rejectedTasks, rejectionOf); idx >= 0 {
-					owner.rejectedTasks = slices.Delete(owner.rejectedTasks, idx, idx+1)
+					consumeRejectedTask(owner, &owner.rejectedTasks, idx, true)
 					return rowSpan{}, false
 				}
 				// The peer that deferred its completion on the earlier event
 				// has retired or ended its call since, and this event is
 				// still the rejected call's delayed response: it ends nothing.
 				if deferredRej >= 0 {
-					owner.deferredRejections = slices.Delete(owner.deferredRejections, deferredRej, deferredRej+1)
+					consumeRejectedTask(owner, &owner.deferredRejections, deferredRej, true)
 					return rowSpan{}, false
 				}
 				// The event answers the tool batch in which owner recorded its
@@ -3258,14 +3321,31 @@ func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identi
 				if !ok {
 					evEpoch = math.MaxUint64
 				}
-				if idx := slices.IndexFunc(owner.rejectedTasks, func(rej rejectedTaskCall) bool {
-					return slices.Contains(calls, rej.call)
-				}); idx >= 0 && !finishEvidenceBy(owner, evEpoch) {
-					owner.rejectedTasks = slices.Delete(owner.rejectedTasks, idx, idx+1)
-					return rowSpan{}, false
+				evBatchSeq, hasBatchSeq := owner.batchModelSeqOf(evDeltaPtr)
+				batchRejected := func(rej rejectedTaskCall) bool {
+					return (!hasBatchSeq || rej.modelCallSeq == evBatchSeq) && slices.Contains(calls, rej.call)
+				}
+				if !finishEvidenceBy(owner, evEpoch) {
+					if idx := slices.IndexFunc(owner.rejectedTasks, batchRejected); idx >= 0 {
+						consumeRejectedTask(owner, &owner.rejectedTasks, idx, true)
+						return rowSpan{}, false
+					}
+					if idx := slices.IndexFunc(owner.deferredRejections, batchRejected); idx >= 0 &&
+						!slices.ContainsFunc(owner.pendingFinishCalls, func(p taskFinishCall) bool {
+							return p.epoch <= evEpoch && slices.Contains(calls, p.call)
+						}) {
+						rej := consumeRejectedTask(owner, &owner.deferredRejections, idx, true)
+						if peerIdx := inv.deferringPeerLocked(rej); peerIdx > 0 {
+							i, deferral = peerIdx, true
+						} else {
+							return rowSpan{}, false
+						}
+					}
 				}
 			}
-			i = deltaOwnerIdx
+			if !deferral {
+				i = deltaOwnerIdx
+			}
 		}
 	} else if self > 0 {
 		// The event is the response of a call of the activation that wrote
@@ -3282,12 +3362,11 @@ func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identi
 		i, shown = self, true
 		if !hasOpenOrSettledFinishEvidence(rec) {
 			if idx := slices.IndexFunc(rec.rejectedTasks, rejectedCall); idx >= 0 {
-				rec.rejectedTasks = slices.Delete(rec.rejectedTasks, idx, idx+1)
+				consumeRejectedTask(rec, &rec.rejectedTasks, idx, true)
 				return rowSpan{}, false
 			}
 			if idx := slices.IndexFunc(rec.deferredRejections, rejectedCall); idx >= 0 && !hasPositiveFinishEvidence(rec) {
-				rej := rec.deferredRejections[idx]
-				rec.deferredRejections = slices.Delete(rec.deferredRejections, idx, idx+1)
+				rej := consumeRejectedTask(rec, &rec.deferredRejections, idx, true)
 				if i = inv.deferringPeerLocked(rej); i <= 0 {
 					return rowSpan{}, false
 				}
@@ -3407,7 +3486,24 @@ func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identi
 			// before rec ended, so it shows nothing about this one. If it
 			// takes the event, it defers the completion of a peer that may
 			// have written the event instead.
-			takeRejection := func(rec *spanRecord, open bool) bool {
+			soleRejectingOwner := func(rec *spanRecord) bool {
+				hasMatchingRej := func(r *spanRecord) bool {
+					return slices.ContainsFunc(r.rejectedTasks, func(rej rejectedTaskCall) bool { return slices.Contains(calls, rej.call) }) ||
+						slices.ContainsFunc(r.deferredRejections, func(rej rejectedTaskCall) bool { return slices.Contains(calls, rej.call) })
+				}
+				for _, other := range inv.agentStack[1:] {
+					if other != rec && matchesTaskFrame(other) && (hasPositiveFinishEvidence(other) || hasMatchingRej(other)) {
+						return false
+					}
+				}
+				for _, ended := range inv.endedRejectingFrames {
+					if ended != rec && matchesTaskFrame(ended) && hasMatchingRej(ended) {
+						return false
+					}
+				}
+				return true
+			}
+			takeRejection := func(rec *spanRecord, open bool) (taken bool, takenSeq uint64, deferred bool) {
 				idx := slices.IndexFunc(rec.rejectedTasks, func(rej rejectedTaskCall) bool {
 					if !slices.Contains(calls, rej.call) {
 						return false
@@ -3422,7 +3518,7 @@ func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identi
 					return false
 				})
 				if idx < 0 {
-					return false
+					return false, 0, false
 				}
 				rej := rec.rejectedTasks[idx]
 				rec.rejectedTasks = slices.Delete(rec.rejectedTasks, idx, idx+1)
@@ -3449,13 +3545,17 @@ func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identi
 						// the rejected call may still arrive.
 						rej.deferral = other.deferredFinish
 						rec.deferredRejections = keepLatest(rec.deferredRejections, rej)
+						deferred = true
 						break
 					}
 				}
-				return true
+				return true, rej.modelCallSeq, deferred
 			}
 			for j, rec := range rejectingFrames() {
-				if takeRejection(rec, j > 0) {
+				if taken, takenSeq, deferred := takeRejection(rec, j > 0); taken {
+					if !deferred && soleRejectingOwner(rec) {
+						retireEndedRejected(rec, takenSeq)
+					}
 					return rowSpan{}, false
 				}
 			}
@@ -3475,7 +3575,7 @@ func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identi
 				if idx := slices.IndexFunc(rec.deferredRejections, func(rej rejectedTaskCall) bool {
 					return slices.Contains(calls, rej.call)
 				}); idx >= 0 {
-					rec.deferredRejections = slices.Delete(rec.deferredRejections, idx, idx+1)
+					consumeRejectedTask(rec, &rec.deferredRejections, idx, soleRejectingOwner(rec))
 					return rowSpan{}, false
 				}
 			}
@@ -3568,14 +3668,25 @@ func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identi
 		inv.answerLatestFinishCallsLocked(rec, remaining)
 	}
 	inv.resolveUnattributedFinishFailuresLocked()
+	inv.markTaskDelegatorLocked(rec, now)
+	inv.retireAgentLocked(i, false, noFrame)
+	inv.retireLateSettledLocked()
+	span = inv.rowSpan(rec, latencyOf(rec, now), ambient)
+	span.timestamp = now
+	return span, true
+}
+
+// markTaskDelegatorLocked touches rec.parent's activity at at and marks an
+// open delegating LLM parent activation on agentStack as taskDelegated. A
+// resumed task can start before its delegating chat's callback, placing its
+// span under a still-running ancestor instead, so only a parent activation
+// that has this task configured as its child is marked; non-LLM workflow
+// agents run their own AfterAgentCallback and are excluded. inv.mu must be
+// held.
+func (inv *invocationTrace) markTaskDelegatorLocked(rec *spanRecord, at time.Time) {
 	if rec.parent != nil && rec.parent.kind == spanKindAgent {
-		inv.touchAgentActivityLocked(rec.parent, now)
+		inv.touchAgentActivityLocked(rec.parent, at)
 	}
-	// A resumed task can start before its delegating chat's callback, placing
-	// its span under a still-running ancestor instead. Only mark a parent
-	// activation that actually has this task configured as its child.
-	// Non-LLM workflow agents run their own AfterAgentCallback, so nonLLM is
-	// defensively excluded.
 	for j := range inv.agentStack {
 		if inv.agentStack[j].spanID == rec.parentSpanID &&
 			inv.agentStack[j].kind == spanKindAgent &&
@@ -3585,11 +3696,6 @@ func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identi
 			break
 		}
 	}
-	inv.retireAgentLocked(i, false, noFrame)
-	inv.retireLateSettledLocked()
-	span = inv.rowSpan(rec, latencyOf(rec, now), ambient)
-	span.timestamp = now
-	return span, true
 }
 
 // finishedTaskLocked returns the index in agentStack of the open activation
@@ -3929,6 +4035,10 @@ func (inv *invocationTrace) deferringPeerLocked(rej rejectedTaskCall) int {
 // unresolved deferredTaskFinish (see deferredTaskFinish) and has not failed,
 // returning its AGENT_COMPLETED row span and identity. inv.mu must be held.
 func (inv *invocationTrace) retireDeferredTaskActivationLocked(idx int) (deferredAgentCompletion, bool) {
+	return inv.retireDeferredTaskWithProofLocked(idx, false, time.Time{}, "")
+}
+
+func (inv *invocationTrace) retireDeferredTaskWithProofLocked(idx int, proven bool, now time.Time, ambient string) (deferredAgentCompletion, bool) {
 	rec := inv.agentStack[idx]
 	df := rec.deferredFinish
 	if df == nil || rec.kind != spanKindAgent || !rec.taskMode || !slices.ContainsFunc(rec.pendingFinishCalls, func(pending taskFinishCall) bool {
@@ -3942,37 +4052,35 @@ func (inv *invocationTrace) retireDeferredTaskActivationLocked(idx int) (deferre
 	if len(inv.failuresLocked(idx, false, nil, true)) > 0 {
 		return deferredAgentCompletion{}, false
 	}
-	// The deferred call stays: the activation retires with it, and no
-	// response showed that the one that deferred the completion was the
-	// activation's, so a failed response that showed no activation as its own
-	// may still answer the call, whether it arrived before or arrives later
-	// (see completionCalls and resolveUnattributedFinishFailuresLocked).
 	rec.deferredFinish = nil
-	// The response is taken to be this activation's, so the rejected call
-	// whose response it was taken for awaits its own response again, as
-	// before the response arrived.
-	if by := df.rejectedBy; by != nil {
-		if k := slices.IndexFunc(by.deferredRejections, func(rej rejectedTaskCall) bool { return rej.deferral == df }); k >= 0 {
-			by.rejectedTasks = keepLatest(by.rejectedTasks, by.deferredRejections[k])
-			by.deferredRejections = slices.Delete(by.deferredRejections, k, k+1)
+	at := df.at
+	amb := df.ambient
+	if proven {
+		rec.completionCalls = []string{df.call}
+		inv.answerFinishCallSlotsLocked(df.call, df.seq, func(s finishCallSlot) bool { return s.rec == rec && s.callSeq == df.callSeq })
+		at = now
+		amb = ambient
+	} else {
+		// The deferred call stays: the activation retires with it, and no
+		// response showed that the one that deferred the completion was the
+		// activation's, so a failed response that showed no activation as its
+		// own may still answer the call, whether it arrived before or arrives
+		// later (see completionCalls and resolveUnattributedFinishFailuresLocked).
+		// The response is taken to be this activation's, so the rejected call
+		// whose response it was taken for awaits its own response again, as
+		// before the response arrived.
+		if by := df.rejectedBy; by != nil {
+			if k := slices.IndexFunc(by.deferredRejections, func(rej rejectedTaskCall) bool { return rej.deferral == df }); k >= 0 {
+				by.rejectedTasks = keepLatest(by.rejectedTasks, by.deferredRejections[k])
+				by.deferredRejections = slices.Delete(by.deferredRejections, k, k+1)
+			}
 		}
 	}
-	if rec.parent != nil && rec.parent.kind == spanKindAgent {
-		inv.touchAgentActivityLocked(rec.parent, df.at)
-	}
-	for j := range inv.agentStack {
-		if inv.agentStack[j].spanID == rec.parentSpanID &&
-			inv.agentStack[j].kind == spanKindAgent &&
-			!inv.agentStack[j].nonLLM &&
-			slices.Contains(inv.agentStack[j].children, rec.name) {
-			inv.agentStack[j].taskDelegated = true
-			break
-		}
-	}
+	inv.markTaskDelegatorLocked(rec, at)
 	inv.retireAgentLocked(idx, false, noFrame)
 	inv.retireLateSettledLocked()
-	span := inv.rowSpan(rec, latencyOf(rec, df.at), df.ambient)
-	span.timestamp = df.at
+	span := inv.rowSpan(rec, latencyOf(rec, at), amb)
+	span.timestamp = at
 	return deferredAgentCompletion{
 		span:      span,
 		agentName: rec.name,
@@ -4846,10 +4954,11 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 // without agent callbacks: a tool of it may already run a sub-agent on its
 // branch and node path while the callback of the event that called the tool
 // runs, which would be taken for the activation that the agent runs under.
-func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, author, branch string, calls []functionResponseCall, evStateDelta map[string]any) {
+func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, author, branch string, calls []functionResponseCall, evStateDelta map[string]any) (settled []deferredAgentCompletion) {
 	evDeltaPtr := mapPtr(evStateDelta)
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
+	ambient := ambientTraceID(ctx)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	wasPartial := inv.lastSessionEventPartial
@@ -4862,7 +4971,7 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 	}
 	if i <= 0 {
 		if author == "" || author == userAuthor {
-			return
+			return settled
 		}
 		// ADK runs an agent's own AfterAgentCallback after this plugin's
 		// retired the agent's activation, so recovery content that a custom
@@ -4884,13 +4993,13 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 			inv.bumpAgentTurnEpochsLocked(identity{path: id.path, agentName: author, branch: branch})
 		}
 		if author == id.agentName {
-			return
+			return settled
 		}
 		if j := slices.Index(inv.agentStack, parent); j > 0 {
 			inv.touchAgentActivityLocked(inv.agentStack[j], now)
 			inv.markRespondedLocked(inv.lineageLocked(j))
 		}
-		return
+		return settled
 	}
 	var matchedPending, absorbed bool
 	i, matchedPending, absorbed = inv.selectResponseOwnerLocked(i, self > 0, calls, evDeltaPtr, wasPartial, partialSpanID, now)
@@ -4901,7 +5010,7 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 		if len(calls) > 0 {
 			inv.bumpTurnEpochKeyLocked(llmKey(identity{path: id.path, agentName: author, branch: branch}))
 		}
-		return
+		return settled
 	}
 	owner := inv.agentStack[i]
 	if len(calls) > 0 {
@@ -4950,6 +5059,7 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 	// An event whose StateDelta shows the tool batch that it answers answers
 	// no call that the owner started in a later turn (see batchEpochOf).
 	evEpoch, hasEvEpoch := owner.batchEpochOf(evDeltaPtr)
+	evBatchModelSeq, hasEvBatchModelSeq := owner.batchModelSeqOf(evDeltaPtr)
 	// The open calls that the event answers end in the order in which they
 	// started.
 	var answeredKeys []string
@@ -4972,17 +5082,8 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 				hasBatchModelSeq = true
 			}
 		}
-		if evDeltaPtr != 0 {
-			for _, d := range owner.toolStateDeltas {
-				if d.matches(evDeltaPtr) {
-					noteBatchSeq(d.modelCallSeq, false)
-				}
-			}
-			for _, rej := range slices.Concat(owner.rejectedTasks, owner.deferredRejections) {
-				if rej.delta.matches(evDeltaPtr) {
-					noteBatchSeq(rej.modelCallSeq, false)
-				}
-			}
+		if hasEvBatchModelSeq {
+			noteBatchSeq(evBatchModelSeq, false)
 		}
 		if !hasBatchModelSeq {
 			for _, key := range answeredKeys {
@@ -5071,13 +5172,15 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 	// ADK's completion sentinel (superseded == true) pair with remaining
 	// finishedTasks entries and consume them immediately, since ADK only lets
 	// the first finish_task response complete the activation; when the event
-	// shows the owner and no other untaken call of the owner shares the ID, a
+	// shows the owner (or the owner is the sole task frame that could have
+	// written the call) and no other untaken call of the owner shares the ID, a
 	// remaining superseded response likewise consumes the owner's matching
-	// rejectedTasks entry (from a recovered finish_task error in the batch) so
-	// the answered rejection cannot outlive the batch. skipped marks those that
-	// report no completion and are left beyond the open calls, and answered
-	// holds the calls that the open calls' and superseded finishedTasks'
-	// responses answered.
+	// rejectedTasks or deferredRejections entry (scoped to the batch's
+	// modelCallSeq when StateDelta identifies the batch, settling any peer that
+	// deferred on the rejection) so the answered rejection cannot outlive its
+	// batch. skipped marks those that report no completion and are left beyond
+	// the open calls, and answered holds the calls that the open calls' and
+	// superseded finishedTasks' responses answered.
 	spare := make(map[string]int)
 	for _, fr := range calls {
 		if fr.name == "" || fr.name == finishTaskToolName {
@@ -5087,7 +5190,7 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 	for _, o := range finishOpen {
 		spare[o.call]--
 	}
-	ownerKnown := self > 0 || hasEvEpoch
+	ownerKnown := self > 0 || hasEvEpoch || hasEvBatchModelSeq
 	taken := make([]bool, len(calls))
 	skipped := make([]bool, len(calls))
 	pairedFinished := make([]bool, len(owner.finishedTasks))
@@ -5164,28 +5267,67 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 	if self > 0 {
 		shown = owner
 	}
+	soleTaskOwnerForCall := func(call string) bool {
+		for _, other := range inv.agentStack[1:] {
+			if other != owner && other.isTaskFrameOf(taskID) {
+				return false
+			}
+		}
+		hasCall := func(rej rejectedTaskCall) bool { return rej.call == call }
+		for _, ended := range inv.endedRejectingFrames {
+			if ended.isTaskFrameOf(taskID) &&
+				(slices.ContainsFunc(ended.rejectedTasks, hasCall) || slices.ContainsFunc(ended.deferredRejections, hasCall)) {
+				return false
+			}
+		}
+		for _, tf := range inv.taskFrames {
+			if tf == owner || !tf.isTaskFrameOf(taskID) {
+				continue
+			}
+			if slices.ContainsFunc(tf.finishedTasks, func(c taskFinishCall) bool { return c.call == call }) {
+				return false
+			}
+			recSlots := inv.untakenFinishCallsLocked(tf, call, answered)
+			retAnswered := 0
+			for _, c := range tf.completionCalls {
+				if c == call {
+					retAnswered++
+				}
+			}
+			for _, c := range slices.Backward(recSlots) {
+				if !slices.ContainsFunc(tf.unfinishedFinishCalls, c.same) && retAnswered > 0 {
+					retAnswered--
+					continue
+				}
+				return false
+			}
+		}
+		return true
+	}
 	for k, fr := range calls {
 		if !fr.unfinished || taken[k] {
 			continue
 		}
-		if fr.superseded && ownerKnown && len(inv.untakenFinishCallsLocked(owner, fr.call, answered)) == 0 {
-			matchesCall := func(rej rejectedTaskCall) bool { return rej.call == fr.call }
-			matchesDelta := func(rej rejectedTaskCall) bool {
-				return rej.call == fr.call && evDeltaPtr != 0 && rej.delta.matches(evDeltaPtr)
+		if fr.superseded && (ownerKnown || soleTaskOwnerForCall(fr.call)) && len(inv.untakenFinishCallsLocked(owner, fr.call, answered)) == 0 {
+			matchesRej := func(rej rejectedTaskCall) bool {
+				return rej.call == fr.call && (!hasEvBatchModelSeq || rej.modelCallSeq == evBatchModelSeq)
 			}
-			switch {
-			case slices.ContainsFunc(owner.rejectedTasks, matchesDelta):
-				idx := slices.IndexFunc(owner.rejectedTasks, matchesDelta)
+			if idx := slices.IndexFunc(owner.rejectedTasks, matchesRej); idx >= 0 {
 				owner.rejectedTasks = slices.Delete(owner.rejectedTasks, idx, idx+1)
-			case slices.ContainsFunc(owner.deferredRejections, matchesDelta):
-				idx := slices.IndexFunc(owner.deferredRejections, matchesDelta)
+				continue
+			}
+			if idx := slices.IndexFunc(owner.deferredRejections, matchesRej); idx >= 0 {
+				rej := owner.deferredRejections[idx]
 				owner.deferredRejections = slices.Delete(owner.deferredRejections, idx, idx+1)
-			case slices.ContainsFunc(owner.rejectedTasks, matchesCall):
-				idx := slices.IndexFunc(owner.rejectedTasks, matchesCall)
-				owner.rejectedTasks = slices.Delete(owner.rejectedTasks, idx, idx+1)
-			case slices.ContainsFunc(owner.deferredRejections, matchesCall):
-				idx := slices.IndexFunc(owner.deferredRejections, matchesCall)
-				owner.deferredRejections = slices.Delete(owner.deferredRejections, idx, idx+1)
+				if peerIdx := inv.deferringPeerLocked(rej); peerIdx > 0 {
+					if comp, ok := inv.retireDeferredTaskWithProofLocked(peerIdx, true, now, ambient); ok {
+						settled = append(settled, comp)
+					} else {
+						inv.agentStack[peerIdx].deferredFinish = nil
+					}
+					i = slices.Index(inv.agentStack, owner)
+				}
+				continue
 			}
 			continue
 		}
@@ -5193,7 +5335,9 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 	}
 	inv.resolveUnattributedFinishFailuresLocked()
 	inv.syncOpenCallsLocked()
-	inv.markRespondedLocked(inv.lineageLocked(i))
+	if i > 0 {
+		inv.markRespondedLocked(inv.lineageLocked(i))
+	}
 	inv.markRespondedLocked(under)
 	if !owner.propagatesChildError && owner.contextFailureCause() == nil {
 		inv.retireDrainedDescendantsLocked(func(p *spanRecord, _ map[string]bool) bool {
@@ -5207,6 +5351,7 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 	// markToolRunsDoneLocked).
 	inv.settleFinishedLocked()
 	inv.retireLateSettledLocked()
+	return settled
 }
 
 // recordUnfinishedTaskResponseLocked handles a finish_task function response
