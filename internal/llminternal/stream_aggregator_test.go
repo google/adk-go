@@ -1258,6 +1258,44 @@ func TestUsageMetadataRetainedWhenLaterChunkHasNoUsageMetadata(t *testing.T) {
 	}
 }
 
+// TestCloseKeepsModelVersion checks that the aggregated response reports the
+// model version of the stream's last chunk, as a non-streamed response does
+// and as adk-python's StreamingResponseAggregator.close does.
+func TestCloseKeepsModelVersion(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	const modelVersion = "gemini-2.5-flash-001"
+	chunks := []*genai.GenerateContentResponse{
+		{
+			Candidates: []*genai.Candidate{{Content: genai.NewContentFromText("Hello", "model")}},
+		},
+		{
+			Candidates: []*genai.Candidate{{
+				Content:      genai.NewContentFromText(" world", "model"),
+				FinishReason: genai.FinishReasonStop,
+			}},
+			ModelVersion: modelVersion,
+		},
+	}
+
+	for _, chunk := range chunks {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error processing chunk: %v", err)
+			}
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected a final aggregated response, got nil")
+	}
+	if finalResponse.ModelVersion != modelVersion {
+		t.Errorf("final response ModelVersion = %q, want %q", finalResponse.ModelVersion, modelVersion)
+	}
+}
+
 // Verify that a later chunk with non-nil UsageMetadata correctly overwrites an earlier one.
 func TestUsageMetadataUpdatedByLaterChunkWithValue(t *testing.T) {
 	aggregator := llminternal.NewStreamingResponseAggregator()
