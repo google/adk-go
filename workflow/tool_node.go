@@ -121,8 +121,7 @@ func (n *ToolNode) runTool(toolCtx agent.Context, input any) (any, error) {
 
 	output, err := runnable.Run(toolCtx, toolInput)
 	if err != nil {
-		var panicErr *toolinternal.PanicError
-		if errors.As(err, &panicErr) {
+		if _, ok := errors.AsType[*toolinternal.PanicError](err); ok {
 			// A recovered panic's text carries the panic value and the
 			// goroutine stack, and a workflow run error can reach REST
 			// clients and models. Keep the detail on the active span and
