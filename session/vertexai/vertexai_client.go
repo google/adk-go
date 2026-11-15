@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"regexp"
 	"strconv"
@@ -70,9 +71,16 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 	pbSession := &aiplatformpb.Session{
 		UserId: req.UserID,
 	}
+	// temp: keys belong to a single invocation and are never stored, so they
+	// are dropped here as AppendEvent trims them from every state delta.
+	// adk-python's create_session does the same (vertex_ai_session_service.py).
+	state := maps.Clone(req.State)
+	maps.DeleteFunc(state, func(key string, _ any) bool {
+		return strings.HasPrefix(key, session.KeyPrefixTemp)
+	})
 	// Convert and set the initial state if provided
-	if len(req.State) > 0 {
-		stateStruct, err := toStructPB(req.State)
+	if len(state) > 0 {
+		stateStruct, err := toStructPB(state)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert state to structpb: %w", err)
 		}
