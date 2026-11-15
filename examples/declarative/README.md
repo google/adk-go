@@ -34,7 +34,7 @@ example, not an ADK API. It covers two agent classes and seven node types:
 | `agent` | `workflow.NewAgentNode` around a declared agent | the agent's reply |
 | `llm` | a single-turn `llmagent` named after the node, with optional `tools` | the model's reply |
 | `cel` | `workflow.NewFunctionNode` | `output`, or the node's input when omitted |
-| `join` | `workflow.NewJoinNode` | a map from predecessor id to its output |
+| `join` | `workflow.NewJoinNode` | a map from predecessor name to its output: the node id, or the agent's name for an `agent` node |
 | `tool` | `workflow.NewNamedToolNode` around a registered tool; the input is its arguments | the tool's result |
 | `workflow` | `workflow.NewWorkflowNode` over its own `nodes` and `edges` | the output of its last node |
 | `input` | `workflow.NewRequestInputEvent` with `message`, a CEL string | the user's reply, on the next turn |
@@ -282,8 +282,10 @@ The bicycle evolved from the 1817 German draisine to … the 1937 Hindenburg dis
   dropped, so the loader rejects `routes` and `state_delta` on a parallel
   `cel` node, and `tools` or an `output_key` on a parallel model call. It also
   rejects a parallel `agent` node that runs a Workflow agent, whose graph it
-  does not check for those; nest the graph in a `workflow` node instead. End
-  the graph with a `cel` node that formats the list, as `publish` does.
+  does not check for those; nest the graph in a `workflow` node instead. Both
+  rules cover every agent the node's agent can transfer to through
+  `sub_agents`. End the graph with a `cel` node that formats the list, as
+  `publish` does.
 - **An `input` node's successor gets the reply, not the node's input.** The
   reply arrives on the next turn, so what the workflow asked about has to be
   in session state by then: `condense` and `count_args` write
@@ -291,7 +293,8 @@ The bicycle evolved from the 1817 German draisine to … the 1937 Hindenburg dis
   client sent, not always text, so `verdict` checks its type.
 - **An `input` node belongs to the top-level graph of a Workflow agent.**
   Inside a `workflow` node, or in a Workflow agent that another graph runs as
-  an `agent` node, the reply would become the output of that node and skip
-  the rest of its graph, so the loader rejects both. A graph also cannot loop
+  an `agent` node or reaches through that node's `sub_agents`, the reply
+  would not resume the graph that asked, so the loader rejects each. A graph
+  also cannot loop
   back into an `input` node it has already paused at: the workflow engine
   does not resume the second pause.

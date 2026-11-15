@@ -188,12 +188,12 @@ func contextVars(ctx agent.ReadonlyContext) map[string]any {
 
 // plainValue converts a runtime value into JSON-shaped Go values, so CEL sees
 // maps, lists, strings, bools, int64 and float64 whatever produced it. A whole
-// number nested in a map or list becomes an int64 even if it was a float64,
-// because a session service that stores state as JSON cannot tell 2 from 2.0;
-// an expression that needs a double writes double(state.x).
+// number becomes an int64 even if it was a float64, because a session service
+// that stores state as JSON cannot tell 2 from 2.0; an expression that needs a
+// double writes double(state.x).
 func plainValue(v any) any {
 	switch t := v.(type) {
-	case nil, string, bool, int64, float64:
+	case nil, string, bool, int64:
 		return t
 	case *genai.Content:
 		return contentText(t)

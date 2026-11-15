@@ -60,7 +60,8 @@ func TestStudioEndToEnd(t *testing.T) {
 
 		m := regexp.MustCompile(`^Final draft after ([1-5]) turn\(s\), [0-3]/3 approvals:\n\n\S`).FindStringSubmatch(got)
 		if m == nil {
-			t.Fatalf("reply = %q, want a published final draft", got)
+			// The reply is model output, so the message gives only its size.
+			t.Fatalf("reply of %d bytes is not a published final draft", len(got))
 		}
 		turns, _ := strconv.Atoi(m[1])
 		counts := map[string]int{}

@@ -440,20 +440,25 @@ func (v *validator) node(path string, n *nodeSpec, in scope) {
 
 	switch n.Type {
 	case nodeAgent:
-		a := v.agentSpec(n.Agent)
-		switch {
-		case a == nil:
+		family := v.family(n.Agent)
+		if family == nil {
 			v.add(path+".agent", "agent %q is not declared", n.Agent)
-		case slices.ContainsFunc(a.Nodes, func(n nodeSpec) bool { return n.Type == nodeInput }):
-			// The reply would become the output of this node, skipping the
-			// rest of the agent's graph.
-			v.add(path+".agent", "workflow %q pauses for input, which it cannot do as a node", n.Agent)
-		case dropped && a.AgentClass == classWorkflow:
-			// Its graph is checked as its own agent, not as one under a
-			// parallel worker.
-			v.add(path+".agent", "a parallel worker cannot run workflow agent %q: nest its graph in a workflow node", n.Agent)
-		case dropped && (len(a.Tools) > 0 || a.OutputKey != ""):
-			v.add(path+".agent", lost, fmt.Sprintf("the tool calls and output_key of agent %q", n.Agent))
+		}
+		// What the node cannot run, the agents it can transfer to cannot be
+		// either.
+		for _, a := range family {
+			switch {
+			case slices.ContainsFunc(a.Nodes, func(n nodeSpec) bool { return n.Type == nodeInput }):
+				// The reply would become the output of this node, skipping
+				// the rest of the agent's graph.
+				v.add(path+".agent", "workflow %q pauses for input, which it cannot do under an agent node", a.Name)
+			case dropped && a.AgentClass == classWorkflow:
+				// Its graph is checked as its own agent, not as one under a
+				// parallel worker.
+				v.add(path+".agent", "a parallel worker cannot run workflow agent %q: nest its graph in a workflow node", a.Name)
+			case dropped && (len(a.Tools) > 0 || a.OutputKey != ""):
+				v.add(path+".agent", lost, fmt.Sprintf("the tool calls and output_key of agent %q", a.Name))
+			}
 		}
 	case nodeLLM:
 		v.checkModel(path+".model", n.Model)
@@ -498,12 +503,27 @@ func (v *validator) node(path string, n *nodeSpec, in scope) {
 	v.configs[n] = cfg
 }
 
-func (v *validator) agentSpec(name string) *agentSpec {
-	i := slices.IndexFunc(v.spec.Agents, func(a agentSpec) bool { return a.Name == name })
-	if i < 0 {
-		return nil
+// family returns the agent declared as name, followed by every agent it can
+// transfer to through sub_agents at any depth. It is nil when no agent is
+// declared as name.
+func (v *validator) family(name string) []*agentSpec {
+	var family []*agentSpec
+	seen := map[string]bool{}
+	var visit func(name string)
+	visit = func(name string) {
+		i := slices.IndexFunc(v.spec.Agents, func(a agentSpec) bool { return a.Name == name })
+		if i < 0 || seen[name] {
+			return
+		}
+		seen[name] = true
+		a := &v.spec.Agents[i]
+		family = append(family, a)
+		for _, sub := range a.SubAgents {
+			visit(sub)
+		}
 	}
-	return &v.spec.Agents[i]
+	visit(name)
+	return family
 }
 
 // nodeConfig translates the timeout and retry_config of n, which count in
@@ -515,10 +535,10 @@ func nodeConfig(n *nodeSpec) (workflow.NodeConfig, []issue) {
 			issues = append(issues, issue{Path: path, Message: message})
 		}
 	}
-	// A duration holds about 292 years, which +Inf and 1e300 are not.
-	const maxSeconds = float64(math.MaxInt64 / int64(time.Second))
+	// A time.Duration holds about 292 years.
+	const maxSeconds = math.MaxInt64 / int64(time.Second)
 	seconds := func(path string, s float64) time.Duration {
-		check(s >= 0 && s <= maxSeconds, path, "must be a number of seconds that is not negative")
+		check(s >= 0 && s <= float64(maxSeconds), path, fmt.Sprintf("must be between 0 and %d seconds", maxSeconds))
 		return time.Duration(s * float64(time.Second))
 	}
 	cfg := workflow.NodeConfig{Timeout: seconds(".timeout", n.Timeout)}

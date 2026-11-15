@@ -543,8 +543,9 @@ func TestNodeConfig(t *testing.T) {
 			wantIssues: []string{".retry_config.jitter"},
 		},
 		{
+			// 1e10 seconds is just over what a time.Duration holds.
 			name:       "seconds a duration cannot hold",
-			node:       nodeSpec{Timeout: math.Inf(1), RetryConfig: &retrySpec{InitialDelay: ptr(1e300), MaxDelay: ptr(math.NaN())}},
+			node:       nodeSpec{Timeout: math.Inf(1), RetryConfig: &retrySpec{InitialDelay: ptr(1e10), MaxDelay: ptr(math.NaN())}},
 			wantIssues: []string{".timeout", ".retry_config.initial_delay", ".retry_config.max_delay"},
 		},
 	}
@@ -803,6 +804,20 @@ func TestUnknownNodeType(t *testing.T) {
 	}
 }
 
+// TestAgentNodeSubAgentCycle checks that agents that transfer to each other
+// are reported when built, not followed forever when validated.
+func TestAgentNodeSubAgentCycle(t *testing.T) {
+	const peer = "  - name: %s\n    agent_class: LlmAgent\n    model: default\n    sub_agents: [%s]\n"
+	doc := append(workflowDoc("      - { id: n, type: agent, agent: a }\n", "      - { from_node: START, to_node: n }\n"),
+		fmt.Sprintf(peer, "a", "b")+fmt.Sprintf(peer, "b", "a")...)
+
+	_, err := loadSystem(doc, testRegistry(t, &fakeModel{}))
+
+	if err == nil || !strings.Contains(err.Error(), `agent "a" refers to itself`) {
+		t.Errorf("loadSystem() error = %v, want a reference cycle error", err)
+	}
+}
+
 // TestScopeIssues checks what a document may not put under a parallel worker
 // or in a nested workflow, and what it may.
 func TestScopeIssues(t *testing.T) {
@@ -813,10 +828,14 @@ func TestScopeIssues(t *testing.T) {
 		each = "      - id: n\n        type: workflow\n        parallel_worker: true\n        nodes:\n%s" +
 			"        edges:\n          - { from_node: START, to_node: inner }\n"
 		helper = "  - name: helper\n    agent_class: LlmAgent\n    model: default\n    mode: single_turn\n"
+		// desk transfers to the agent named as its only sub-agent.
+		desk   = "  - name: desk\n    agent_class: LlmAgent\n    model: default\n    sub_agents: [%s]\n"
 		pauses = "  - name: pauses\n    agent_class: Workflow\n    nodes:\n" +
 			"      - { id: ask, type: input, message: \"'Go on?'\" }\n" +
 			"    edges:\n      - { from_node: START, to_node: ask }\n"
 	)
+	// plain is a workflow agent that does not pause.
+	plain := strings.NewReplacer("pauses", "plain", "type: input, message", "type: cel, output").Replace(pauses)
 	tests := []struct {
 		name   string
 		nodes  string
@@ -893,9 +912,42 @@ func TestScopeIssues(t *testing.T) {
 		{
 			name:     "parallel agent node whose agent is a workflow",
 			nodes:    "      - { id: n, type: agent, agent: plain, parallel_worker: true }\n",
-			agents:   strings.NewReplacer("pauses", "plain", "type: input, message", "type: cel, output").Replace(pauses),
+			agents:   plain,
 			wantPath: "agents[0].nodes[0].agent",
 			wantMsg:  `a parallel worker cannot run workflow agent "plain"`,
+		},
+		{
+			name:     "agent node whose agent is a workflow in a parallel workflow node",
+			nodes:    fmt.Sprintf(each, "          - { id: inner, type: agent, agent: plain }\n"),
+			agents:   plain,
+			wantPath: "agents[0].nodes[0].nodes[0].agent",
+			wantMsg:  `a parallel worker cannot run workflow agent "plain"`,
+		},
+		{
+			name:     "parallel agent node whose agent transfers to a workflow",
+			nodes:    "      - { id: n, type: agent, agent: desk, parallel_worker: true }\n",
+			agents:   fmt.Sprintf(desk, "plain") + plain,
+			wantPath: "agents[0].nodes[0].agent",
+			wantMsg:  `a parallel worker cannot run workflow agent "plain"`,
+		},
+		{
+			name:     "parallel agent node whose agent transfers to an agent with tools",
+			nodes:    "      - { id: n, type: agent, agent: desk, parallel_worker: true }\n",
+			agents:   fmt.Sprintf(desk, "helper") + helper + "    tools: [word_count]\n",
+			wantPath: "agents[0].nodes[0].agent",
+			wantMsg:  `a parallel worker drops the tool calls and output_key of agent "helper"`,
+		},
+		{
+			name:   "agent node whose agent transfers to an agent with tools and to a workflow",
+			nodes:  "      - { id: n, type: agent, agent: desk }\n",
+			agents: fmt.Sprintf(desk, "helper, plain") + helper + "    tools: [word_count]\n" + plain,
+		},
+		{
+			name:     "agent node whose agent transfers to a workflow with an input node",
+			nodes:    "      - { id: n, type: agent, agent: desk }\n",
+			agents:   fmt.Sprintf(desk, "pauses") + pauses,
+			wantPath: "agents[0].nodes[0].agent",
+			wantMsg:  `workflow "pauses" pauses for input`,
 		},
 		{
 			name: "input node in a nested workflow",
@@ -915,7 +967,7 @@ func TestScopeIssues(t *testing.T) {
 		{
 			name:   "agent node whose agent is a workflow without an input node",
 			nodes:  "      - { id: n, type: agent, agent: plain }\n",
-			agents: strings.NewReplacer("pauses", "plain", "type: input, message", "type: cel, output").Replace(pauses),
+			agents: plain,
 		},
 	}
 	for _, tc := range tests {
@@ -983,14 +1035,14 @@ func TestLoadSystemReportsNodeIssues(t *testing.T) {
 			old:      "timeout: 120",
 			new:      "timeout: -120",
 			wantPath: "agents[0].nodes[1].timeout",
-			wantMsg:  "must be a number of seconds",
+			wantMsg:  "must be between 0 and 9223372036 seconds",
 		},
 		{
 			name:     "negative retry delay",
 			old:      "initial_delay: 1 ",
 			new:      "initial_delay: -1 ",
 			wantPath: "agents[0].nodes[1].retry_config.initial_delay",
-			wantMsg:  "must be a number of seconds",
+			wantMsg:  "must be between 0 and 9223372036 seconds",
 		},
 		{
 			name:     "field of another node type",

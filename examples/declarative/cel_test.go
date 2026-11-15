@@ -101,6 +101,9 @@ func TestPlainValue(t *testing.T) {
 	}{
 		{name: "nil", in: nil, want: nil},
 		{name: "int", in: 3, want: int64(3)},
+		// What a JSON session store returns for a state value of 2.
+		{name: "whole float", in: 2.0, want: int64(2)},
+		{name: "fractional float", in: 2.5, want: 2.5},
 		{name: "content", in: genai.NewContentFromText("hi", genai.RoleUser), want: "hi"},
 		{name: "struct", in: pair{N: 2, F: 0.5}, want: map[string]any{"n": int64(2), "f": 0.5}},
 		{name: "nested", in: map[string]any{"l": []int{1, 2}}, want: map[string]any{"l": []any{int64(1), int64(2)}}},
