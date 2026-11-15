@@ -39,6 +39,13 @@ type EventarcController struct {
 
 // NewEventarcController creates a new EventarcController.
 func NewEventarcController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig) *EventarcController {
+	// A non-positive MaxConcurrentRuns means "no limit": leave semaphore nil so
+	// the guard in EventarcTriggerHandler is skipped. make(chan, 0) would be an
+	// unbuffered channel (not nil), which would make every request block forever.
+	var semaphore chan struct{}
+	if triggerConfig.MaxConcurrentRuns > 0 {
+		semaphore = make(chan struct{}, triggerConfig.MaxConcurrentRuns)
+	}
 	return &EventarcController{
 		runner: &RetriableRunner{
 			sessionService:  sessionService,
@@ -48,7 +55,7 @@ func NewEventarcController(sessionService session.Service, agentLoader agent.Loa
 			pluginConfig:    pluginConfig,
 			triggerConfig:   triggerConfig,
 		},
-		semaphore: make(chan struct{}, triggerConfig.MaxConcurrentRuns),
+		semaphore: semaphore,
 	}
 }
 
