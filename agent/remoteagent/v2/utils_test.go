@@ -50,16 +50,31 @@ func newTestInvocationContext(t *testing.T, agentName string, events ...*session
 			return nil
 		}
 	}
-	agent, err := agent.New(agent.Config{Name: agentName})
+	name := agentName
+	if name == "" {
+		name = "anonymous"
+	}
+	a, err := agent.New(agent.Config{Name: name})
 	if err != nil {
 		t.Errorf("agent.New() error = %v", err)
 		return nil
 	}
+	if agentName == "" {
+		a = anonymousAgent{a}
+	}
 	return icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Agent:   agent,
+		Agent:   a,
 		Session: resp.Session,
 	})
 }
+
+// anonymousAgent reports an empty name. agent.New rejects one, but a wrapper
+// that embeds an agent and overrides Name can still run with it.
+type anonymousAgent struct {
+	agent.Agent
+}
+
+func (anonymousAgent) Name() string { return "" }
 
 func newEventFromParts(author string, parts ...*genai.Part) *session.Event {
 	var role genai.Role = genai.RoleModel
