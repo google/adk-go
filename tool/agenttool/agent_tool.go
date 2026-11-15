@@ -252,7 +252,7 @@ func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, er
 	}
 
 	if lastEvent == nil {
-		return map[string]any{}, nil
+		return map[string]any{"result": ""}, nil
 	}
 
 	lastContent := lastEvent.LLMResponse.Content
@@ -276,8 +276,12 @@ func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, er
 	}
 	outputText := strings.Join(textParts, "\n")
 
+	// A reply without text is an empty result even when the agent has an
+	// output schema, because there is nothing to validate. adk-python
+	// validates the empty text against the schema when the reply has parts,
+	// and raises.
 	if outputText == "" {
-		return map[string]any{}, nil
+		return map[string]any{"result": ""}, nil
 	}
 	if isLllmAgent {
 		internalLlmAgent, ok := t.agent.(llminternal.Agent)
