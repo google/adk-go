@@ -15,6 +15,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"iter"
@@ -176,9 +177,20 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 		copiedSession.state = s.mergeStates(storedSession.state, appName, storedSession.UserID())
 		sessions = append(sessions, copiedSession)
 	}
+	slices.SortStableFunc(sessions, compareByLastUpdate)
 	return &ListResponse{
 		Sessions: sessions,
 	}, nil
+}
+
+// compareByLastUpdate orders sessions by last update time ascending, ties by
+// user ID then session ID, as [Service.List] documents.
+func compareByLastUpdate(a, b Session) int {
+	return cmp.Or(
+		a.LastUpdateTime().Compare(b.LastUpdateTime()),
+		strings.Compare(a.UserID(), b.UserID()),
+		strings.Compare(a.ID(), b.ID()),
+	)
 }
 
 func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error {
