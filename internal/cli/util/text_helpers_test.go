@@ -128,7 +128,7 @@ func cmdArgs(value string) ([]string, error) {
 func TestValidateDockerfileSafe_AcceptedValuesKeepCMDParseable(t *testing.T) {
 	// Every single byte, so that no control byte, escape character or invalid
 	// UTF-8 byte slips through unnoticed.
-	for b := 0; b < 0x100; b++ {
+	for b := range 0x100 {
 		value := "http://x" + string([]byte{byte(b)}) + "y"
 		if ValidateDockerfileSafe(value, "test value") != nil {
 			continue
@@ -174,7 +174,7 @@ func TestValidateDockerfileSafe_AcceptedValuesKeepCMDParseable(t *testing.T) {
 func TestValidateShellArgSafe_ByteClass(t *testing.T) {
 	const allowedASCII = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-"
 
-	for b := 0; b < 0x80; b++ {
+	for b := range 0x80 {
 		accepted := ValidateShellArgSafe(string([]byte{byte(b)}), "test value") == nil
 		want := strings.ContainsRune(allowedASCII, rune(b))
 		if accepted != want {

@@ -577,11 +577,14 @@ type cachedDeclarationTool struct {
 	decl *genai.FunctionDeclaration
 }
 
-func (c *cachedDeclarationTool) Name() string                                   { return c.decl.Name }
-func (c *cachedDeclarationTool) Description() string                            { return c.decl.Description }
-func (c *cachedDeclarationTool) IsLongRunning() bool                            { return false }
-func (c *cachedDeclarationTool) Declaration() *genai.FunctionDeclaration        { return c.decl }
-func (c *cachedDeclarationTool) Run(agent.Context, any) (map[string]any, error) { return nil, nil }
+func (c *cachedDeclarationTool) Name() string                            { return c.decl.Name }
+func (c *cachedDeclarationTool) Description() string                     { return c.decl.Description }
+func (c *cachedDeclarationTool) IsLongRunning() bool                     { return false }
+func (c *cachedDeclarationTool) Declaration() *genai.FunctionDeclaration { return c.decl }
+
+func (c *cachedDeclarationTool) Run(agent.Context, any) (map[string]any, error) {
+	return nil, nil
+}
 
 func propertyNames(decl *genai.FunctionDeclaration) []string {
 	if decl.Parameters == nil {
@@ -639,8 +642,7 @@ func cloneLLMRequest(t *testing.T, req *model.LLMRequest) *model.LLMRequest {
 					newParams := *decl.Parameters // Shallow copy of Schema
 					newParams.Properties = make(map[string]*genai.Schema)
 					for k, v := range decl.Parameters.Properties {
-						prop := *v
-						newParams.Properties[k] = &prop
+						newParams.Properties[k] = new(*v)
 					}
 					newDecl.Parameters = &newParams
 				}

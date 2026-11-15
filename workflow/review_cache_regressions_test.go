@@ -213,13 +213,13 @@ func TestWorkflowNode_DelegatedControlOwnership(t *testing.T) {
 }
 
 func TestResume_RejectedResponseConsumerExit(t *testing.T) {
-	for trial := 0; trial < 20; trial++ {
+	for range 20 {
 		var started, ended atomic.Int32
 		entered := make(chan struct{}, 10)
 		var edges []Edge
 		state := NewRunState()
 		responses := map[string]any{"invalid": "wrong"}
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			name := fmt.Sprintf("valid%d", i)
 			node := NewDynamicNode(name, func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
 				started.Add(1)
@@ -270,8 +270,7 @@ func TestResume_RejectedResponseConsumerExit(t *testing.T) {
 }
 
 func TestSubScheduler_WaitForOutputHasNoFailureMarker(t *testing.T) {
-	wait := true
-	child := NewDynamicNode("wait", func(agent.Context, any, func(*session.Event) error) (any, error) { return nil, nil }, NodeConfig{WaitForOutput: &wait})
+	child := NewDynamicNode("wait", func(agent.Context, any, func(*session.Event) error) (any, error) { return nil, nil }, NodeConfig{WaitForOutput: new(true)})
 	ctx := newMockCtx(t)
 	var events sliceEvents
 	sub := newDynamicSubScheduler(agent.Promote(ctx), "parent", func(ev *session.Event) error { events = append(events, ev); return nil }).(*dynamicSubScheduler)
@@ -465,8 +464,7 @@ func TestWorkflow_CancelledParallelNestedChildren(t *testing.T) {
 	if err != nil {
 		t.Fatal("workflow execution failed")
 	}
-	path := "root@1"
-	resumeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &path})
+	resumeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("root@1")})
 	for _, err := range wf.Resume(resumeCtx, state, map[string]any{"b": "approved"}) {
 		if err != nil {
 			t.Fatal("workflow execution failed")
@@ -672,12 +670,11 @@ func TestSubScheduler_NilDelegationPreservesOwnOutput(t *testing.T) {
 }
 
 func TestSubScheduler_NilCompletionControlIsNotOutput(t *testing.T) {
-	wait := true
 	child := NewDynamicNode("child", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
 		ev := session.NewEvent(ctx, ctx.InvocationID())
 		ev.CustomMetadata = map[string]any{workflowNodeCompletedKey: true, workflowDelegatedOutputKey: nil}
 		return nil, emit(ev)
-	}, NodeConfig{WaitForOutput: &wait})
+	}, NodeConfig{WaitForOutput: new(true)})
 	sub := newDynamicSubScheduler(agent.Promote(newMockCtx(t)), "parent", noopEmit).(*dynamicSubScheduler)
 	_, err := sub.runNode(child, nil, runNodeOptions{})
 	if !errors.Is(err, ErrNodeWaitingForOutput) {

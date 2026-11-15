@@ -286,7 +286,7 @@ func TestContinuation_AutomaticContinuationOff(t *testing.T) {
 				"t1": {candidate("two", "STOP", "")},
 			}}
 			req := continuationRequest()
-			req.Config = &genai.GenerateContentConfig{AutomaticContinuation: genai.Ptr(false)}
+			req.Config = &genai.GenerateContentConfig{AutomaticContinuation: new(false)}
 			var final *model.LLMResponse
 			for resp, err := range newContinuationModel(t, api).GenerateContent(t.Context(), req, stream) {
 				if err != nil {

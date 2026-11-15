@@ -367,9 +367,7 @@ func TestLLMClassifierRequestConstruction(t *testing.T) {
 		if cfg.ResponseMIMEType != "application/json" {
 			t.Errorf("ResponseMIMEType = %q, want application/json", cfg.ResponseMIMEType)
 		}
-		zero := 0.0
-		one := 1.0
-		numProp := &genai.Schema{Type: genai.TypeNumber, Minimum: &zero, Maximum: &one}
+		numProp := &genai.Schema{Type: genai.TypeNumber, Minimum: new(0.0), Maximum: new(1.0)}
 		wantSchema := &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
@@ -569,9 +567,7 @@ func TestLLMClassifierConcurrencyAndErrors(t *testing.T) {
 		}
 		var wg sync.WaitGroup
 		for range 8 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				resp, cErr := clf.Classify(t.Context(), "x", map[string]classifier.Question{
 					"risky": classifier.Binary{},
 				})
@@ -582,7 +578,7 @@ func TestLLMClassifierConcurrencyAndErrors(t *testing.T) {
 				if got := resp.Answers["risky"].(classifier.BinaryAnswer).Probability; got != 0.4 {
 					t.Errorf("Probability = %v, want 0.4", got)
 				}
-			}()
+			})
 		}
 		wg.Wait()
 		if got := len(llm.requests); got != 8 {
@@ -881,10 +877,9 @@ func TestLLMClassifierEndToEndWithGeminiModelAndWorkflowNode(t *testing.T) {
 		t.Fatalf("gemini.NewModel() error: %v", err)
 	}
 
-	temp := float32(0.0)
 	clf, err := classifier.NewLLM(classifier.LLMConfig{
 		Model:                 gemModel,
-		GenerateContentConfig: &genai.GenerateContentConfig{Temperature: &temp},
+		GenerateContentConfig: &genai.GenerateContentConfig{Temperature: new(float32(0.0))},
 	})
 	if err != nil {
 		t.Fatalf("NewLLM() error: %v", err)

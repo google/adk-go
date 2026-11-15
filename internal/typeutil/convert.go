@@ -17,6 +17,7 @@ package typeutil
 
 import (
 	"encoding/json"
+	"slices"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -89,10 +90,5 @@ func schemaExpectsObject(resolved *jsonschema.Resolved) bool {
 	if root.Type == "object" {
 		return true
 	}
-	for _, t := range root.Types {
-		if t == "object" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(root.Types, "object")
 }
