@@ -37,6 +37,13 @@ type PubSubController struct {
 
 // NewPubSubController creates a new PubSubController.
 func NewPubSubController(sessionService session.Service, agentLoader agent.Loader, memoryService memory.Service, artifactService artifact.Service, pluginConfig runner.PluginConfig, triggerConfig TriggerConfig) *PubSubController {
+	// A non-positive MaxConcurrentRuns means "no limit": leave semaphore nil so
+	// the guard in PubSubTriggerHandler is skipped. make(chan, 0) would be an
+	// unbuffered channel (not nil), which would make every request block forever.
+	var semaphore chan struct{}
+	if triggerConfig.MaxConcurrentRuns > 0 {
+		semaphore = make(chan struct{}, triggerConfig.MaxConcurrentRuns)
+	}
 	return &PubSubController{
 		runner: &RetriableRunner{
 			sessionService:  sessionService,
@@ -46,7 +53,7 @@ func NewPubSubController(sessionService session.Service, agentLoader agent.Loade
 			pluginConfig:    pluginConfig,
 			triggerConfig:   triggerConfig,
 		},
-		semaphore: make(chan struct{}, triggerConfig.MaxConcurrentRuns),
+		semaphore: semaphore,
 	}
 }
 
