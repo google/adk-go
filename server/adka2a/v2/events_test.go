@@ -175,7 +175,7 @@ func TestToSessionEvent(t *testing.T) {
 				},
 				Author:  agentName,
 				Branch:  branch,
-				Actions: session.EventActions{Escalate: true},
+				Actions: session.EventActions{Escalate: true, SkipSummarization: true},
 			},
 		},
 		{
@@ -505,8 +505,9 @@ func TestToSessionEvent(t *testing.T) {
 					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
 					TurnComplete:   true,
 				},
-				Author: agentName,
-				Branch: branch,
+				Author:  agentName,
+				Branch:  branch,
+				Actions: session.EventActions{SkipSummarization: true},
 			},
 		},
 		{
@@ -525,8 +526,9 @@ func TestToSessionEvent(t *testing.T) {
 					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
 					TurnComplete:   true,
 				},
-				Author: agentName,
-				Branch: branch,
+				Author:  agentName,
+				Branch:  branch,
+				Actions: session.EventActions{SkipSummarization: true},
 			},
 		},
 		{
@@ -552,8 +554,9 @@ func TestToSessionEvent(t *testing.T) {
 					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
 					TurnComplete:   true,
 				},
-				Author: agentName,
-				Branch: branch,
+				Author:  agentName,
+				Branch:  branch,
+				Actions: session.EventActions{SkipSummarization: true},
 			},
 		},
 		{
@@ -809,5 +812,65 @@ func TestToSessionEvent_EmptyTextPart(t *testing.T) {
 	want := []*genai.Part{{Text: "foo"}, {Text: ""}}
 	if diff := cmp.Diff(want, got.Content.Parts); diff != "" {
 		t.Errorf("ToSessionEvent() parts mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestToSessionEvent_finalResponseByTaskState pins that a completed, failed
+// or canceled task is the remote agent's final response even when its
+// artifacts replay the tool calls the peer made, as an ADK peer's do. Without
+// SkipSummarization those function call and response parts make
+// IsFinalResponse report false: the event is still emitted, but an LLM parent
+// calls its model again after the remote reply, and a workflow agent node
+// wrapping the remote agent gets no output. adk-python sets
+// skip_summarization for the same three states with parts
+// (to_adk_event.py, convert_a2a_task_to_event). Rejected and auth-required
+// tasks are not final here, as in Python, although a2a-go counts rejected as
+// terminal.
+func TestToSessionEvent_finalResponseByTaskState(t *testing.T) {
+	t.Parallel()
+	a2aAgent, err := agent.New(agent.Config{Name: "a2a agent"})
+	if err != nil {
+		t.Fatalf("failed to create an agent: %v", err)
+	}
+	toolParts := func() a2a.ContentParts {
+		call := a2a.NewDataPart(map[string]any{"id": "call-1", "name": "get_weather", "args": map[string]any{"city": "Warsaw"}})
+		call.Metadata = map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionCall}
+		resp := a2a.NewDataPart(map[string]any{"id": "call-1", "name": "get_weather", "response": map[string]any{"temp": "20C"}})
+		resp.Metadata = map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionResponse}
+		return a2a.ContentParts{call, resp, a2a.NewTextPart("It is 20C in Warsaw.")}
+	}
+
+	tests := []struct {
+		state     a2a.TaskState
+		wantFinal bool
+	}{
+		{state: a2a.TaskStateCompleted, wantFinal: true},
+		{state: a2a.TaskStateFailed, wantFinal: true},
+		{state: a2a.TaskStateCanceled, wantFinal: true},
+		{state: a2a.TaskStateRejected, wantFinal: false},
+		{state: a2a.TaskStateAuthRequired, wantFinal: false},
+		{state: a2a.TaskStateWorking, wantFinal: false},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.state), func(t *testing.T) {
+			t.Parallel()
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: a2aAgent})
+			task := &a2a.Task{
+				ID:        a2a.NewTaskID(),
+				ContextID: a2a.NewContextID(),
+				Artifacts: []*a2a.Artifact{{ID: a2a.NewArtifactID(), Parts: toolParts()}},
+				Status:    a2a.TaskStatus{State: tc.state},
+			}
+			got, err := ToSessionEvent(ctx, task)
+			if err != nil {
+				t.Fatalf("ToSessionEvent() error = %v", err)
+			}
+			if got == nil {
+				t.Fatal("ToSessionEvent() = nil, want an event")
+			}
+			if final := got.IsFinalResponse(); final != tc.wantFinal {
+				t.Errorf("IsFinalResponse() = %v, want %v (SkipSummarization = %v)", final, tc.wantFinal, got.Actions.SkipSummarization)
+			}
+		})
 	}
 }
