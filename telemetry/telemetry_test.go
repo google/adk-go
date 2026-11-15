@@ -331,6 +331,48 @@ func TestResolveResourceProject(t *testing.T) {
 	}
 }
 
+func TestResolveResourceProjectID(t *testing.T) {
+	const projectIDKey = attribute.Key("gcp.project_id")
+	// resource.Default() reads OTEL_RESOURCE_ATTRIBUTES once per process, so
+	// compare against what it holds rather than against a fixed value.
+	defaultProject, defaultHasProject := resource.Default().Set().Value(projectIDKey)
+
+	testCases := []struct {
+		name        string
+		opts        []Option
+		wantProject string
+		wantOK      bool
+	}{
+		{
+			name:        "no project keeps the default resource's",
+			wantProject: defaultProject.AsString(),
+			wantOK:      defaultHasProject,
+		},
+		{
+			name:        "configured project",
+			opts:        []Option{WithGcpResourceProject("option-project")},
+			wantProject: "option-project",
+			wantOK:      true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := configFromOpts(tc.opts...)
+			if err != nil {
+				t.Fatalf("configFromOpts() unexpected error: %v", err)
+			}
+			r, err := resolveResource(t.Context(), cfg)
+			if err != nil {
+				t.Fatalf("resolveResource() unexpected error: %v", err)
+			}
+			got, ok := r.Set().Value(projectIDKey)
+			if ok != tc.wantOK || got.AsString() != tc.wantProject {
+				t.Errorf("gcp.project_id = (%q, %v), want (%q, %v)", got.AsString(), ok, tc.wantProject, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestResolveQuotaProject(t *testing.T) {
 	testCases := []struct {
 		name        string
