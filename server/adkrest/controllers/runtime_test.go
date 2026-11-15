@@ -246,6 +246,7 @@ func TestRunSSEHandler(t *testing.T) {
 		})
 	}
 }
+
 func TestRunHandlersAutoCreateSession(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -305,5 +306,44 @@ func TestRunHandlersAutoCreateSession(t *testing.T) {
 				t.Errorf("session exists after the run = %v, want %v (Get error: %v)", gotSession, tt.wantSession, err)
 			}
 		})
+	}
+}
+
+func TestRunHandlerNoEventsReturnsEmptyList(t *testing.T) {
+	quietAgent, err := agent.New(agent.Config{Name: "testApp", Run: testAgent(nil)})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+	sessionService := session.InMemoryService()
+	if _, err := sessionService.Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	controller := NewRuntimeAPIController(
+		sessionService,
+		nil,
+		agent.NewSingleLoader(quietAgent),
+		nil,
+		10*time.Second,
+		runner.PluginConfig{},
+		false,
+	)
+
+	reqBytes, err := json.Marshal(models.RunAgentRequest{
+		AppName:    "testApp",
+		UserId:     "testUser",
+		SessionId:  "testSession",
+		NewMessage: genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "Hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	NewErrorHandler(controller.RunHandler)(rr, httptest.NewRequest(http.MethodPost, "/run", bytes.NewBuffer(reqBytes)))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got, want := strings.TrimSpace(rr.Body.String()), "[]"; got != want {
+		t.Errorf("body = %s, want %s", got, want)
 	}
 }
