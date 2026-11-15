@@ -181,6 +181,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			endInvocation: ctx.Ended(),
 		}
 		event, err := runBeforeAgentCallbacks(ctx)
+		if event != nil && a.OnBeforeAgentCallbackEvent != nil {
+			a.OnBeforeAgentCallbackEvent(event)
+		}
 		if event != nil || err != nil {
 			if !yield(event, err) {
 				return
