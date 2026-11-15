@@ -145,11 +145,13 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-	artifact := req.Part
 	// If file is user scoped, store it under user scope path
 	if fileHasUserNamespace(fileName) {
 		sessionID = userScopedArtifactKey
 	}
+	// Copy before taking the lock. The copy only reads the caller's part, and
+	// inline data can be large.
+	part := clonePart(req.Part)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -158,7 +160,7 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	if internalVer, _, ok := s.find(appName, userID, sessionID, fileName); ok {
 		nextVersion = internalVer + 1
 	}
-	s.set(appName, userID, sessionID, fileName, nextVersion, artifact)
+	s.set(appName, userID, sessionID, fileName, nextVersion, part)
 	return &SaveResponse{Version: nextVersion}, nil
 }
 
@@ -204,21 +206,22 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	var part *genai.Part
+	var ok bool
 	if version > 0 {
-		artifact, ok := s.get(appName, userID, sessionID, fileName, version)
-		if !ok {
-			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
-		}
-		return &LoadResponse{Part: artifact}, nil
+		part, ok = s.get(appName, userID, sessionID, fileName, version)
+	} else {
+		// pick the latest version
+		_, part, ok = s.find(appName, userID, sessionID, fileName)
 	}
-	// pick the latest version
-	_, artifact, ok := s.find(appName, userID, sessionID, fileName)
+	s.mu.RUnlock()
+
 	if !ok {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
-	return &LoadResponse{Part: artifact}, nil
+	// Copy after unlocking. A stored part never changes after Save, and inline
+	// data can be large.
+	return &LoadResponse{Part: clonePart(part)}, nil
 }
 
 // List implements [artifact.Service]
