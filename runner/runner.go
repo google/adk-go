@@ -141,6 +141,11 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			opt(&options)
 		}
 
+		// The inbound message is always a user turn, whatever Role the caller
+		// set. Normalize it once here so that findAgentToRun, the invocation
+		// context and the stored event all see the same message.
+		msg = asUserContent(msg)
+
 		var storedSession session.Session
 		getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
 			AppName:   r.appName,
@@ -617,7 +622,10 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 			return ctx, fmt.Errorf("error running on run user message callback : %w", err)
 		}
 		if modifiedMsg != nil {
-			msg = modifiedMsg
+			// A plugin can return a message with any Role. Normalize it before
+			// it becomes the invocation context's UserContent: NewInvocationContext
+			// copies the struct value, so a later reassignment would not reach it.
+			msg = asUserContent(modifiedMsg)
 			// update ctx user message
 			ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 				Artifacts:    ctx.Artifacts(),
@@ -780,4 +788,19 @@ func (r *Runner) withPluginManager(ctx context.Context) context.Context {
 		return plugininternal.ToContext(ctx, inherited)
 	}
 	return plugininternal.ToContext(ctx, r.pluginManager)
+}
+
+// asUserContent returns a copy of msg with Role set to [genai.RoleUser] and its
+// own Parts slice, so the caller's struct is never modified. The inbound
+// message of a run is a user turn: an empty Role would be skipped when the
+// model request is built, and a "model" Role would present the caller's text
+// as the model's own earlier turn. A nil msg is returned as is.
+func asUserContent(msg *genai.Content) *genai.Content {
+	if msg == nil {
+		return nil
+	}
+	out := *msg
+	out.Role = genai.RoleUser
+	out.Parts = slices.Clone(msg.Parts)
+	return &out
 }
