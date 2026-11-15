@@ -134,7 +134,7 @@ func ToSessionEventWithParts(ctx agent.InvocationContext, event a2a.Event, partC
 			return nil, nil
 		}
 		event.TurnComplete = false
-		if len(event.Content.Parts) == 0 {
+		if event.Content == nil || len(event.Content.Parts) == 0 {
 			return nil, nil
 		}
 		if err := processA2AMeta(v, event); err != nil {
