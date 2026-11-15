@@ -118,44 +118,15 @@ func isKnownSentinel(s string) bool {
 // markdown links "[docs](https://...)", log tags "[INFO] ready", or template
 // text "{{template}} rendered") when it is not valid JSON and contains no
 // raw or encoded credential markers.
-//
-// A JSON document that parses keeps its structure. Scrubbing it as text, as
-// on main, may take the closing quote of a leaf with a value that it redacts,
-// as of {"msg":"say \"hi\" &access_token=SECRET"}, or break a JSON document
-// in a leaf, which a later pass then fails closed as [UNPARSEABLE_JSON_BLOB],
-// which no JSON that parses is. Such a document has its leaves redacted one
-// by one instead, as SmartTruncate and redactErrorMessage redact them (see
-// redactJSONDocumentText), and a document whose leaves are redacted already
-// is kept, so that a pass over the result changes nothing, but only where the
-// scrub of the text reads no credential across its strings (see
-// leavesScrubApartFrom).
 func sanitizeRawText(raw string) (string, bool) {
-	out, lost := sanitizeRawTextPasses(raw)
-	if out == raw {
-		return out, lost
-	}
-	leaves, ok, leavesLost := redactJSONDocumentText(raw)
-	if !ok || addsUnparseablePlaceholder(raw, leaves) || !leavesScrubApartFrom(raw, leaves, 0) {
-		return out, lost
-	}
-	if leaves == raw {
-		return raw, false
-	}
-	if addsUnparseablePlaceholder(raw, out) {
-		return leaves, leavesLost
-	}
-	return out, lost
-}
-
-// sanitizeRawTextPasses runs sanitizeRawTextOnce over raw until the text
-// stops changing (see maxRedactionPasses).
-func sanitizeRawTextPasses(raw string) (string, bool) {
-	out, lost := sanitizeRawTextOnce(raw)
-	for cur, pass := raw, 1; out != cur && !isScrubbedPlainText(out); pass++ {
+	out, lost, settled := sanitizeRawTextOnce(raw)
+	for cur, pass := raw, 1; !settled && out != cur && !isScrubbedPlainText(out); pass++ {
 		if pass == maxRedactionPasses {
 			return redactedSensitiveTextPlaceholder, true
 		}
-		next, nextLost := sanitizeRawTextOnce(out)
+		var next string
+		var nextLost bool
+		next, nextLost, settled = sanitizeRawTextOnce(out)
 		if next == out {
 			break
 		}
@@ -164,227 +135,26 @@ func sanitizeRawTextPasses(raw string) (string, bool) {
 	return out, lost
 }
 
-// addsUnparseablePlaceholder reports whether out, a redaction of raw, holds
-// unparseableJSONPlaceholder more often than raw does.
-func addsUnparseablePlaceholder(raw, out string) bool {
-	return strings.Count(out, unparseableJSONPlaceholder) > strings.Count(raw, unparseableJSONPlaceholder)
-}
-
-// scrubSentinel is a word that no scrub redacts by itself, which
-// leavesScrubApart writes after a string of a JSON document to find a
-// credential pattern that runs on past the string.
-const scrubSentinel = "zqxSentinel7"
-
-// leavesScrubApart reports whether doc, a JSON document at depth, or a JSON
-// string literal that holds one, has no credential that the scrub of the
-// document as text reads across its strings: no string that scrubErrorText
-// reads as a header, a bearer or basic credential, or a key that runs on into
-// the string after it, as the "x-api-key:" of ["x-api-key:", "SECRET"], no key
-// with a credential in it, and the same for each JSON document in a string, so
-// that redacting its string leaves one by one (see scrubErrorJSONStrings)
-// removes what the scrub of the text does. A key whose value redactJSONValue
-// redacts may run on into its value, but not past it. Each string is read as
-// the text spells it as well as decoded (see endsApart), and the expressions
-// of main, applied to doc as it is, may remove no part of more than one value
-// (see expressionsKeepStringsApart).
-func leavesScrubApart(doc string, depth int) bool {
-	return docScrubsApart(doc, depth, 0) && expressionsKeepStringsApart(doc)
-}
-
-// leavesScrubApartFrom reports whether out, the leaves of in, a JSON
-// document at depth or a JSON string literal that holds one, redacted one by
-// one, reads as no credential across its strings (see leavesScrubApart), and
-// neither does in, as the expressions of main read it (see
-// expressionsKeepStringsApart), as written and as the redaction of its
-// sensitive keys writes it again, which fails it closed where main would run
-// a value on in the text it scrubs once it redacts a key (see
-// keyRedactionHidesRunOn). A leaf that the redaction replaces may run on into
-// the next in such text, as the header of the inner document of
-// {"k":"{\"a\":\"x-api-key:\\r\",\"b\":\"x\"}","c":"SECRET"} runs on into
-// SECRET. Each check reads the text both as written and as main read it with
-// its escapes decoded (see expressionsKeepStringsApart), as in
-// ["Bearer '","SECRET","%27"], whose decoded %27 closes the quote after
-// Bearer: main redacted no string of such a text on its own, and failed it
-// closed, as the text passes do.
-func leavesScrubApartFrom(in, out string, depth int) bool {
-	if !leavesScrubApart(out, depth) {
-		return false
-	}
-	if out == in {
-		return true
-	}
-	if !expressionsKeepStringsApart(in) {
-		return false
-	}
-	redacted, changed, _ := redactJSONTextWithBudget(in, depth, &nodeBudget{remaining: maxSanitizeNodes})
-	return !changed || (!isKnownSentinel(redacted) && (redacted == out || expressionsKeepStringsApart(redacted)))
-}
-
-// docScrubsApart is leavesScrubApart for doc, which wraps levels of JSON
-// string encoding enclose in the text: none for the text itself, one for a
-// document in a string of it, as the JSON text in a tool argument, or in a
-// JSON string literal, and so on.
-func docScrubsApart(doc string, depth, wraps int) bool {
-	trimmed := trimBOMAndSpace(doc)
-	if trimmed == "" || depth >= maxSanitizeDepth {
-		return false
-	}
-	if trimmed[0] == '"' {
-		var inner string
-		return json.Unmarshal([]byte(trimmed), &inner) == nil && docScrubsApart(inner, depth+1, wraps+1)
-	}
-	dec := json.NewDecoder(strings.NewReader(trimmed))
-	dec.UseNumber()
-	var v any
-	if dec.Decode(&v) != nil {
-		return false
-	}
-	return jsonValueScrubsApart(v, depth+1, wraps)
-}
-
-// jsonValueScrubsApart is leavesScrubApart for v, a JSON value at depth in a
-// document that wraps levels of JSON string encoding enclose.
-func jsonValueScrubsApart(v any, depth, wraps int) bool {
-	if depth >= maxSanitizeDepth {
-		return false
-	}
-	switch x := v.(type) {
-	case map[string]any:
-		for k, val := range x {
-			if !keyScrubsApart(k, wraps) || !jsonValueScrubsApart(val, depth+1, wraps) {
-				return false
-			}
-		}
-	case []any:
-		for _, val := range x {
-			if !jsonValueScrubsApart(val, depth+1, wraps) {
-				return false
-			}
-		}
-	case string:
-		if !endsApart(x, wraps, `", "`, `","`) {
-			return false
-		}
-		if t := trimBOMAndSpace(x); t != "" && strings.IndexByte(`{["`, t[0]) >= 0 && json.Valid([]byte(t)) {
-			return docScrubsApart(t, depth+1, wraps+1)
-		}
-	}
-	return true
-}
-
-// keyScrubsApart reports whether k, a key of a JSON document that wraps
-// levels of JSON string encoding enclose, holds no credential and runs on
-// into no value (see endsApart), but for the value of a sensitive key, which
-// redactJSONValue redacts: such a key may run on into the placeholder that
-// takes the place of its value, but not past it.
-func keyScrubsApart(k string, wraps int) bool {
-	if scrubErrorText(k) != k {
-		return false
-	}
-	if isSensitiveKey(k) {
-		return endsApart(k, wraps, `": "`+redactedValue+`", "`, `":"`+redactedValue+`","`)
-	}
-	return endsApart(k, wraps, `": "`, `":"`)
-}
-
-// endsApart reports whether scrubSentinel, written after s, a key or string
-// of a JSON document that wraps levels of JSON string encoding enclose, and
-// each of delims, the text after s up to the next string, spaced or not, is
-// kept in each spelling that s may have in the text that the passes scrub.
-// scrubErrorText reads s decoded. The expressions of main read s as the text
-// of the document spells it (see legacyKeepsScrubSentinel), where a line break
-// in s is the escape \n, past which a header value runs on, with "<", ">" and
-// "&" as they are (see marshalJSONText) and as json.Marshal escapes them: the
-// run-on that the decoded string hides is theirs. scrubErrorText would fail
-// such text closed wherever decoding an escape in it, such as \n or \u0026,
-// exposes a credential pattern, even a redacted one, which is the decoded
-// string read again. For a document in a string, the encoded text is encoded
-// once more for each level that encloses it, and read as the outermost text,
-// which the passes scrub, and the one inside it, which redactErrorMessage
-// scrubs as a string of a document, hold it (see encodedEndsApart).
-func endsApart(s string, wraps int, delims ...string) bool {
-	plain, html := jsonStringText(s, false), jsonStringText(s, true)
-	for _, d := range delims {
-		// scrubErrorText fails text closed where the expressions remove a
-		// byte that the passes keep, so that it reads plain+d for them when s
-		// needs no escape.
-		if !keepsScrubSentinel(s+d) || !encodedEndsApart(plain+d, wraps, false, plain != s) || (html != plain && !encodedEndsApart(html+d, wraps, true, true)) {
-			return false
-		}
-	}
-	return true
-}
-
-// encodedEndsApart reports whether legacyKeepsScrubSentinel reports true for
-// text, a string of a document and the text after it as the document spells
-// them, when own is set, and for text encoded again, with "<", ">" and "&"
-// escaped when escapeHTML is set, as the outermost of the wraps levels of
-// JSON string encoding that enclose the document spells it, and as the one
-// inside that does. The passes read an escaped quote after a URI query value
-// in such text as part of the value, where the expressions stop.
-func encodedEndsApart(text string, wraps int, escapeHTML, own bool) bool {
-	for level := 0; ; level++ {
-		if ((level == 0 && own) || (level > 0 && level >= wraps-1)) && !legacyKeepsScrubSentinel(text) {
-			return false
-		}
-		if level == wraps {
-			return true
-		}
-		text = jsonStringText(text, escapeHTML)
-	}
-}
-
-// jsonStringText returns s as a JSON string spells it, without the quotes,
-// with "<", ">" and "&" escaped as json.Marshal writes them when escapeHTML
-// is set, and as they are, as marshalJSONText writes them, otherwise.
-func jsonStringText(s string, escapeHTML bool) string {
-	var b strings.Builder
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(escapeHTML)
-	if enc.Encode(s) != nil {
-		return s
-	}
-	out := b.String()
-	return out[1 : len(out)-len("\"\n")]
-}
-
-// keepsScrubSentinel reports whether scrubErrorText keeps scrubSentinel after
-// prefix.
-func keepsScrubSentinel(prefix string) bool {
-	return strings.Contains(scrubErrorText(prefix+scrubSentinel), scrubSentinel)
-}
-
-// legacyKeepsScrubSentinel reports whether the expressions that scrubbed text
-// on main, with and without the compound keys of the scanners (see
-// legacyScrubErrorTokens and compoundLegacyScrubErrorTokens), keep
-// scrubSentinel after prefix.
-func legacyKeepsScrubSentinel(prefix string) bool {
-	s := prefix + scrubSentinel
-	return strings.Contains(legacyScrubErrorTokens(s), scrubSentinel) && strings.Contains(compoundLegacyScrubErrorTokens(s), scrubSentinel)
-}
-
 // expressionsKeepStringsApart reports whether the expressions that scrubbed
 // text on main, with and without the compound keys of the scanners (see
 // legacyScrubTokensTraced), remove from doc, a JSON document or a JSON string
 // literal that holds one, no part of more than one value, as the text spells
-// it and as main read it with its escapes decoded. As the text spells it,
-// what they remove, but for the quotes and spaces at its ends (see
-// trimRemovedEdges), holds the start of no value, a string, number, true,
-// false or null, of doc, or of a JSON document in a string of it at any
-// level, but for the value it starts in, as the value of a header, or of a
-// key whose quote a later string closes, as the access_token=' of
-// ["access_token='", "SECRET", "'"], does. A scrub of that value alone reads
-// what they remove from it. Read with its escapes decoded (see
+// it and as main read it with its escapes decoded (see keyRedactionHidesRunOn).
+// As the text spells it, what they remove, but for the quotes and spaces at
+// its ends (see trimRemovedEdges), holds the start of no value, a string,
+// number, true, false or null, of doc, or of a JSON document in a string of it
+// at any level, but for the value it starts in, as the value of a header, or
+// of a key whose quote a later string closes, as the access_token=' of
+// ["access_token='", "SECRET", "'"], does. Read with its escapes decoded (see
 // escapedReadings), as main read text before it failed it closed, what they
 // remove, unless it is a placeholder that they take again, as the [REDACTED]
 // that a decoded \u0026 or %26 puts after an "&access_token=", may hold no
 // first or last byte of a value that they keep in doc as written, but for
-// those of one value that the leaves redacted one by one keep no part of, as
-// the value of a sensitive key, which it holds as a whole (see
-// keepsValueEdge): the quote after Bearer in ["Bearer '","SECRET","\u0027"]
-// opens a value that the decoded \u0027 closes, and the decoded \" after
-// Bearer in ["Bearer \"","SECRET","\""] opens one that the closing quote of
-// its string closes.
+// those of one value that the redaction of sensitive keys replaces, which it
+// holds as a whole (see keepsValueEdge): the quote after Bearer in
+// ["Bearer '","SECRET","\u0027"] opens a value that the decoded \u0027
+// closes, and the decoded \" after Bearer in ["Bearer \"","SECRET","\""]
+// opens one that the closing quote of its string closes.
 func expressionsKeepStringsApart(doc string) bool {
 	var values []jsonValueSpan
 	if !appendValueSpans(doc, nil, &values, 0) {
@@ -438,13 +208,15 @@ func expressionsKeepStringsApart(doc string) bool {
 
 // jsonValueSpan is where a value of a JSON document starts and ends in the
 // outermost text: its first byte and its last, the opening and the closing
-// quote of a string, however escaped (see appendValueSpans). redacted reports
-// that no part of the value is kept in the leaves redacted one by one: it is
-// the string, number, true, false or null value of a sensitive key, which
-// redactJSONValue replaces.
+// quote of a string, however escaped (see appendValueSpans). closeEnd is the
+// end of the source of its last byte: end+1, or, for a closing quote that the
+// outermost text spells as an escape, as the \" that closes a string of a
+// document in a JSON string literal, the end of that escape. redacted
+// reports that redactJSONValue replaces the value: it is the string, number,
+// true, false or null value of a sensitive key.
 type jsonValueSpan struct {
-	start, end int
-	redacted   bool
+	start, end, closeEnd int
+	redacted             bool
 }
 
 // valueEdge is the first or the last byte of the value at index v of the
@@ -469,12 +241,12 @@ func valueEdges(values []jsonValueSpan) []valueEdge {
 // expressions remove from a reading of doc with its escapes decoded, holds
 // the first or the last byte of a value that they keep in doc as written (see
 // removed, the sorted spans that they remove from it). It may hold both of
-// one value that the leaves redacted one by one keep no part of (see
-// jsonValueSpan), which it then holds as a whole, as the value of a sensitive
-// key; a value that the leaves keep, as the SECRET of
-// ["Authorization%3A x\t","SECRET"], whose decoded header runs on into it, or
-// of {"temp%3aa":"SECRET"}, whose key only main read decoded, is a value that
-// main read as part of a credential, and failed closed.
+// one value that the redaction of sensitive keys replaces (see
+// jsonValueSpan), which it then holds as a whole; a value that the redaction
+// keeps, as the SECRET of ["Authorization%3A x\t","SECRET"], whose decoded
+// header runs on into it, or of {"temp%3aa":"SECRET"}, whose key only main
+// read decoded, is a value that main read as part of a credential, and
+// failed closed.
 // A bare value (see expressionsKeepStringsApart) may also end at the closing
 // quote of the string that it starts in, as the value of password in the
 // decoded "retry\npassword=SECRET" does: the expressions as written read that
@@ -484,13 +256,17 @@ func valueEdges(values []jsonValueSpan) []valueEdge {
 // expressions as written take that closing quote too but keep a part of the
 // value, as they keep the ;key=b; of {"m":"access_token=%22a;key=b;token=c"},
 // whose decoded %22 opens a value that runs on to the end of the string.
+// The closing quote of a value is the whole source of that quote (see
+// jsonValueSpan): a span of a reading that ends at the decoded quote of a
+// \" ends past both of its bytes, and still at the quote, as in a JSON
+// string literal that holds {"m":"Bearer \"SECRET;key=b;token=c"}.
 func keepsValueEdge(values []jsonValueSpan, edges []valueEdge, removed [][2]int, from, to int, bare bool) bool {
 	whole, kept := -1, 0
 	k, _ := slices.BinarySearchFunc(edges, from, func(e valueEdge, p int) int { return e.pos - p })
 	for ; k < len(edges) && edges[k].pos < to; k++ {
 		e := edges[k]
 		if j, _ := slices.BinarySearchFunc(removed, e.pos+1, func(sp [2]int, p int) int { return sp[0] - p }); j > 0 && e.pos < removed[j-1][1] {
-			if !bare && e.pos == to-1 && values[e.v].end == e.pos && values[e.v].start < from && removed[j-1][0] > from {
+			if v := values[e.v]; !bare && v.end == e.pos && to <= v.closeEnd && v.start < from && removed[j-1][0] > from {
 				return true
 			}
 			continue
@@ -658,11 +434,15 @@ func canonicalizeMapped(s string) (string, []int) {
 				break
 			}
 			decoded, err := strconv.ParseUint(string(digits), 16, 32)
-			if err != nil || decoded > 0x7F {
+			if err != nil || !isFoldedEscapeRune(rune(decoded), escapeStart == n-6) {
 				break
 			}
-			out = append(out[:escapeStart], byte(decoded))
-			pos = pos[:escapeStart+1]
+			escapePos := pos[escapeStart]
+			out = utf8.AppendRune(out[:escapeStart], rune(decoded))
+			pos = pos[:escapeStart]
+			for len(pos) < len(out) {
+				pos = append(pos, escapePos)
+			}
 		}
 	}
 	return string(out), append(pos, len(s))
@@ -712,28 +492,16 @@ func unescapeBackslashControlsMapped(s string) (string, []int) {
 	return string(b), append(pos, len(s))
 }
 
-// appendValueStarts appends to starts where each value of text starts in the
-// outermost text (see appendValueSpans).
-func appendValueStarts(text string, pos []int, starts *[]int, depth int) bool {
-	var values []jsonValueSpan
-	if !appendValueSpans(text, pos, &values, depth) {
-		return false
-	}
-	for _, v := range values {
-		*starts = append(*starts, v.start)
-	}
-	return true
-}
-
 // appendValueSpans appends to values where each value of text, a JSON
 // document or a JSON string literal at depth, and of each JSON document in a
 // string of it, at any level, starts and ends in the outermost text: at the
 // opening and the closing quote of a string, however escaped, or the first
-// and the last byte of a number, true, false or null, and whether the leaves
-// redacted one by one keep no part of it (see jsonValueSpan). pos maps each
-// byte of text, and its end, to the byte of the outermost text that it is
-// decoded from, or is nil when text is the outermost text. It reports false
-// when depth runs out or text holds a string that does not end or decode.
+// and the last byte of a number, true, false or null, with the end of the
+// source of that last byte, and whether the redaction of sensitive keys
+// replaces it (see jsonValueSpan). pos maps each byte of text, and its end,
+// to the byte of the outermost text that it is decoded from, or is nil when
+// text is the outermost text. It reports false when depth runs out or text
+// holds a string that does not end or decode.
 func appendValueSpans(text string, pos []int, values *[]jsonValueSpan, depth int) bool {
 	if depth >= maxSanitizeDepth {
 		return false
@@ -755,7 +523,7 @@ func appendValueSpans(text string, pos []int, values *[]jsonValueSpan, depth int
 				for i+1 < len(text) && strings.IndexByte(structural, text[i+1]) < 0 {
 					i++
 				}
-				*values = append(*values, jsonValueSpan{at(start), at(i), sensitiveKey})
+				*values = append(*values, jsonValueSpan{at(start), at(i), at(i + 1), sensitiveKey})
 				sensitiveKey = false
 			} else if c == '{' || c == '[' {
 				sensitiveKey = false
@@ -772,19 +540,24 @@ func appendValueSpans(text string, pos []int, values *[]jsonValueSpan, depth int
 		if j >= len(text) {
 			return false
 		}
+		isKey := false
+		if k := skipJSONSpace(text, j+1); k < len(text) && text[k] == ':' {
+			isKey = true
+		}
 		content, inner, innerPos := text[i+1:j], text[i+1:j], []int(nil)
-		// Only a string with an escape can hold a string of its own.
+		// Only a key or a string that may hold a JSON document of its own
+		// needs its escapes decoded.
 		if strings.IndexByte(content, '\\') >= 0 {
 			var ok bool
 			if inner, innerPos, ok = decodeJSONStringMapped(content); !ok {
 				return false
 			}
 		}
-		if k := skipJSONSpace(text, j+1); k < len(text) && text[k] == ':' {
-			*values = append(*values, jsonValueSpan{at(i), at(j), false})
+		if isKey {
+			*values = append(*values, jsonValueSpan{at(i), at(j), at(j + 1), false})
 			sensitiveKey = isSensitiveKey(inner)
 		} else {
-			*values = append(*values, jsonValueSpan{at(i), at(j), sensitiveKey})
+			*values = append(*values, jsonValueSpan{at(i), at(j), at(j + 1), sensitiveKey})
 			sensitiveKey = false
 		}
 		if innerPos != nil {
@@ -902,45 +675,52 @@ func jsonHexRune(s string) (rune, bool) {
 // keeps, as the Authorization\u003a\n of
 // {"zz_secret":"Authorization\u003a\n","b":"SECRET"}, or write it before
 // other strings than in s, and keep a string that main redacts with it.
+func hasHexOrPercentEscape(s string) bool {
+	return strings.IndexByte(s, '%') >= 0 ||
+		strings.Contains(s, `\u`) || strings.Contains(s, `\U`) ||
+		strings.Contains(s, `\x`) || strings.Contains(s, `\X`)
+}
+
 func keyRedactionHidesRunOn(s string, depth int) bool {
 	if !expressionsKeepStringsApart(s) {
 		return true
 	}
-	sorted, ok := sortedJSONText(s, depth)
+	sorted, ok := sortedJSONTextDepth(s, depth, &nodeBudget{remaining: maxSanitizeNodes})
 	return !ok || (sorted != s && !expressionsKeepStringsApart(sorted))
 }
 
-// sortedJSONText returns the value of s, a JSON document or a JSON string
+// sortedJSONTextDepth returns the value of s, a JSON document or a JSON string
 // literal that holds one at depth, as json.Marshal writes it, with the keys
 // of each object sorted and each string that is such text written so in turn,
 // as main writes a document again when it redacts a key in it, and reports
-// true. It reports false when s does not parse or depth runs out.
-func sortedJSONText(s string, depth int) (string, bool) {
+// true. It reports false when s does not parse, depth or budget runs out, or
+// the text that it writes is too long (see rewritesTooLong).
+func sortedJSONTextDepth(s string, depth int, budget *nodeBudget) (string, bool) {
 	if depth >= maxSanitizeDepth {
 		return "", false
 	}
-	v, _, exceeded, err := unmarshalJSONStrictWithBudget([]byte(trimBOMAndSpace(s)), &nodeBudget{remaining: maxSanitizeNodes})
+	v, _, exceeded, err := unmarshalJSONStrictWithBudget(trimBOMAndSpace(s), budget)
 	if err != nil || exceeded {
 		return "", false
 	}
-	if v, ok := sortedJSONValue(v, depth+1); ok {
-		if b, err := json.Marshal(v); err == nil {
+	if v, ok := sortedJSONValue(v, depth+1, budget); ok {
+		if b, err := json.Marshal(v); err == nil && !rewritesTooLong(s, b) {
 			return string(b), true
 		}
 	}
 	return "", false
 }
 
-// sortedJSONValue is sortedJSONText for v, a JSON value at depth, written in
-// place.
-func sortedJSONValue(v any, depth int) (any, bool) {
+// sortedJSONValue is sortedJSONTextDepth for v, a JSON value at depth, written
+// in place.
+func sortedJSONValue(v any, depth int, budget *nodeBudget) (any, bool) {
 	if depth >= maxSanitizeDepth {
 		return nil, false
 	}
 	switch x := v.(type) {
 	case map[string]any:
 		for k, val := range x {
-			sorted, ok := sortedJSONValue(val, depth+1)
+			sorted, ok := sortedJSONValue(val, depth+1, budget)
 			if !ok {
 				return nil, false
 			}
@@ -948,7 +728,7 @@ func sortedJSONValue(v any, depth int) (any, bool) {
 		}
 	case []any:
 		for i, val := range x {
-			sorted, ok := sortedJSONValue(val, depth+1)
+			sorted, ok := sortedJSONValue(val, depth+1, budget)
 			if !ok {
 				return nil, false
 			}
@@ -956,32 +736,10 @@ func sortedJSONValue(v any, depth int) (any, bool) {
 		}
 	case string:
 		if t := trimBOMAndSpace(x); t != "" && strings.IndexByte(`{["`, t[0]) >= 0 && json.Valid([]byte(t)) {
-			return sortedJSONText(t, depth+1)
+			return sortedJSONTextDepth(t, depth+1, budget)
 		}
 	}
 	return v, true
-}
-
-// redactJSONDocumentText redacts raw, text that is a JSON document as a whole
-// (see redactJSONDocumentLeaves), leaf by leaf until it stops changing (see
-// maxRedactionPasses), and reports true and whether content was lost; it
-// reports false for any other text.
-func redactJSONDocumentText(raw string) (out string, ok, lost bool) {
-	out, ok, lost = redactJSONDocumentLeaves(raw, 0, &nodeBudget{remaining: maxSanitizeNodes})
-	if !ok {
-		return "", false, false
-	}
-	for cur, pass := raw, 1; out != cur; pass++ {
-		if pass == maxRedactionPasses {
-			return redactedSensitiveTextPlaceholder, true, true
-		}
-		next, nextOK, nextLost := redactJSONDocumentLeaves(out, 0, &nodeBudget{remaining: maxSanitizeNodes})
-		if !nextOK || next == out {
-			break
-		}
-		cur, out, lost = out, next, lost || nextLost
-	}
-	return out, true, lost
 }
 
 // isScrubbedPlainText reports whether out, text that a pass of
@@ -1011,12 +769,14 @@ const maxRedactionPasses = 4
 // further pass with a budget of its own, so that sanitizing a sanitized value
 // changes nothing.
 func redactStringValue(str string, depth int, budget *nodeBudget) (string, bool) {
-	out, lost := redactStringValueOnce(str, depth, budget)
-	for cur, pass := str, 1; out != cur && !isScrubbedPlainText(out); pass++ {
+	out, lost, settled := redactStringValueOnce(str, depth, budget)
+	for cur, pass := str, 1; !settled && out != cur && !isScrubbedPlainText(out); pass++ {
 		if pass == maxRedactionPasses {
 			return redactedSensitiveTextPlaceholder, true
 		}
-		next, nextLost := redactStringValueOnce(out, depth, &nodeBudget{remaining: maxSanitizeNodes})
+		var next string
+		var nextLost bool
+		next, nextLost, settled = redactStringValueOnce(out, depth, &nodeBudget{remaining: maxSanitizeNodes})
 		if next == out {
 			break
 		}
@@ -1025,109 +785,50 @@ func redactStringValue(str string, depth int, budget *nodeBudget) (string, bool)
 	return out, lost
 }
 
-// redactStringValueOnce is one pass of redactStringValue. A value that is a
-// JSON object or array as a whole, as the arguments of a tool call written as
-// JSON text, keeps its structure: its sensitive keys and the credentials in
-// its string leaves are redacted one by one, as redactErrorMessage redacts
-// them (see redactJSONDocumentLeaves), rather than scrubbing the document as
-// text, which may take the closing quote of a leaf with a value, as the URL
-// leaf of {"url":"https://h/p?access_token=SECRET"} ends in, and leave text
-// that is no JSON. Text that does not parse, or whose text scrub reads a
-// credential across its strings (see leavesScrubApartFrom), goes through the
-// text passes, as on main, and malformed JSON fails closed there.
-func redactStringValueOnce(str string, depth int, budget *nodeBudget) (string, bool) {
-	if out, ok, lost := redactJSONDocumentLeaves(str, depth, budget); ok && leavesScrubApartFrom(str, out, depth) {
-		return out, lost
+// redactStringValueOnce is one pass of redactStringValue. As in
+// sanitizeRawTextOnce, malformed JSON text that is positively harmless prose
+// (see isPositivelyHarmlessProse) is kept rather than failed closed: the scrub
+// of a JSON document as text may take the closing quote of a value with a
+// credential that it redacts, as the header value of
+// {"log": "x-api-key: SECRET\nrequest id: 42"}, which the text spells with
+// the escape \n, runs on to the end of the text. The next pass reads what is
+// left as malformed JSON, and keeps it, as main and sanitizeRawText keep it,
+// rather than failing the whole value closed. settled reports that the result
+// is already a fixed point of redactStringValueOnce and needs no further pass.
+func redactStringValueOnce(str string, depth int, budget *nodeBudget) (out string, lost, settled bool) {
+	redacted, changed, lost := redactJSONTextWithBudget(str, depth, budget)
+	if changed && redacted == unparseableJSONPlaceholder && isPositivelyHarmlessProse(str, trimBOMAndSpace(str)) {
+		return str, false, true
 	}
-	str, _, lost := redactJSONTextWithBudget(str, depth, budget)
-	if scrubbed := scrubErrorText(str); scrubbed != str {
-		return scrubbed, true
+	if scrubbed := scrubErrorText(redacted); scrubbed != redacted {
+		return scrubbed, true, false
 	}
-	return str, lost
-}
-
-// redactJSONDocumentLeaves redacts s, a string value at depth that is a JSON
-// object or array as a whole, or a JSON string literal that holds one, as
-// redactErrorMessage does: the values of its sensitive keys (see
-// redactJSONValue) and the credentials in its string leaves (see
-// scrubErrorJSONStrings), marshaling the result again when that changed
-// anything, and reports true, and whether content was lost. It reports
-// false, and does nothing, for any other text, including JSON text that does
-// not parse or that runs out of budget, which redactJSONTextWithBudget
-// handles.
-func redactJSONDocumentLeaves(s string, depth int, budget *nodeBudget) (out string, ok, lost bool) {
-	trimmed := trimBOMAndSpace(s)
-	if depth >= maxSanitizeDepth || len(trimmed) > maxInspectableJSONTextBytes {
-		return "", false, false
-	}
-	if strings.HasPrefix(trimmed, `"`) {
-		var inner string
-		if json.Unmarshal([]byte(trimmed), &inner) != nil {
-			return "", false, false
-		}
-		innerOut, ok, lost := redactJSONDocumentLeaves(inner, depth+1, budget)
-		switch {
-		case !ok:
-			return "", false, false
-		case innerOut == inner:
-			return s, true, false
-		case isKnownSentinel(innerOut):
-			return innerOut, true, true
-		}
-		b, err := json.Marshal(innerOut)
-		if err != nil {
-			return unparseableJSONPlaceholder, true, true
-		}
-		return string(b), true, lost
-	}
-	if (!strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[")) || startsWithRedactedURI(trimmed) {
-		return "", false, false
-	}
-	decoded, sawDuplicateKey, exceeded, err := unmarshalJSONStrictWithBudget([]byte(trimmed), budget)
-	if err != nil || exceeded {
-		return "", false, false
-	}
-	redacted, valChanged, valLost := redactJSONValue(decoded, depth+1, budget)
-	if str, isStr := redacted.(string); isStr && str == sanitizeBudgetPlaceholder {
-		return sanitizeBudgetPlaceholder, true, true
-	}
-	scrubbed, strChanged := scrubErrorJSONStrings(redacted, depth+1, budget)
-	if !valChanged && !sawDuplicateKey && !valLost && !strChanged {
-		return s, true, false
-	}
-	b, err := json.Marshal(scrubbed)
-	if err != nil {
-		return unparseableJSONPlaceholder, true, true
-	}
-	// As in redactJSONTextWithBudget, a redacted key value is no lost
-	// content, while a credential scrubbed from a leaf is, as it is when
-	// scrubErrorText changes a string value.
-	return string(b), true, valLost || strChanged
+	return redacted, lost, !lost
 }
 
 // sanitizeRawTextOnce is one pass of sanitizeRawText.
-func sanitizeRawTextOnce(raw string) (string, bool) {
+func sanitizeRawTextOnce(raw string) (out string, lost, settled bool) {
 	budget := &nodeBudget{remaining: maxSanitizeNodes}
 	sanitized, changed, lost := redactJSONTextWithBudget(raw, 0, budget)
 	if !changed {
 		scrubbed := scrubErrorText(raw)
 		if scrubbed != raw {
-			return scrubbed, true
+			return scrubbed, true, false
 		}
-		return raw, false
+		return raw, false, true
 	}
 	if sanitized != unparseableJSONPlaceholder {
 		scrubbed := scrubErrorText(sanitized)
 		if scrubbed != sanitized {
-			return scrubbed, true
+			return scrubbed, true, false
 		}
-		return sanitized, lost
+		return sanitized, lost, !lost
 	}
 	trimmed := trimBOMAndSpace(raw)
 	if isPositivelyHarmlessProse(raw, trimmed) {
-		return raw, false
+		return raw, false, true
 	}
-	return sanitized, lost
+	return sanitized, lost, true
 }
 
 func hasCandidateQuotedSensitiveKey(s string, depth int) bool {
@@ -1448,6 +1149,9 @@ func isPositivelyHarmlessProse(raw, trimmed string) bool {
 	if len(raw) > maxInspectableJSONTextBytes {
 		return false
 	}
+	if strings.HasPrefix(trimmed, `"`) && startsLikeEncodedContainer(trimmed) {
+		return false
+	}
 	// An escaped quote can hide a quoted credential key from the pattern
 	// checks below; other backslashes (paths, regexes) are harmless.
 	if strings.Contains(raw, `\"`) {
@@ -1471,16 +1175,13 @@ func isPositivelyHarmlessProse(raw, trimmed string) bool {
 	if hasQuotedSensitiveKeyWithRedacted(canon, allowRedactedProse) {
 		return false
 	}
-	// Bracket- or brace-led text that failed JSON parsing and carries no
-	// credential pattern is prose (e.g. `[INFO] user clicked "Submit"`).
-	if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
-		return true
-	}
-	// Quote-led text is prose on the same basis (e.g. `"Hello," she said
-	// [laughing]. "Bye."` or `"What does [this] mean?"`), unless a quoted
-	// string in it decodes to a credential: the text may be a JSON string
-	// literal, whose escapes the checks above do not all decode.
-	return strings.HasPrefix(trimmed, `"`) && !hasJSONEscapedCredential(raw)
+	// Bracket-, brace- or quote-led text that failed JSON parsing and
+	// carries no credential pattern is prose (e.g.
+	// `[INFO] user clicked "Submit"` or `"Hello," she said [laughing].`),
+	// unless a quoted string in it decodes to a credential: the text may
+	// hold a JSON string whose escapes the checks above do not all decode.
+	return (strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, `"`)) &&
+		!hasJSONEscapedCredential(raw)
 }
 
 // hasJSONEscapedCredential reports whether the text between two consecutive
@@ -1511,24 +1212,79 @@ func hasJSONEscapedCredential(s string) bool {
 	return false
 }
 
+// maxRewriteGrowth and maxRewriteSlack bound how much longer than the text
+// that it replaces redactJSONTextWithBudget writes a JSON value again (see
+// rewritesTooLong). json.Marshal writes "<", ">" and "&" as six bytes each, and
+// each level of JSON string encoding around a document, as a JSON string
+// literal or a string leaf of another document that holds it, escapes the
+// escapes inside it once more: the "&" of a document whose sensitive key is
+// redacted takes 6 bytes written again, 7 in a literal, 9 in a literal in a
+// literal, and 2^k+5 at k levels, so that a document nested in many levels
+// would grow by a factor for each level as it is written again.
+const (
+	maxRewriteGrowth = 8
+	maxRewriteSlack  = 4096
+)
+
+// rewritesTooLong reports whether out, the JSON text that the redaction writes
+// in place of in, is longer than maxRewriteGrowth times in and
+// maxRewriteSlack bytes, or than maxInspectableJSONTextBytes. Such a value
+// fails closed, as text longer than maxInspectableJSONTextBytes does.
+func rewritesTooLong(in string, out []byte) bool {
+	return len(out) > maxInspectableJSONTextBytes || len(out) > maxRewriteGrowth*len(in)+maxRewriteSlack
+}
+
 // redactJSONTextWithBudget inspects s if it is a JSON object, array, or
 // JSON-encoded string literal, recursively redacting values under sensitive
 // keys. When a JSON-like blob cannot be parsed or exceeds maxSanitizeDepth or
-// budget, it fails closed and reports contentLost = true.
+// budget, it fails closed and reports contentLost = true, as it does when the
+// redaction would write it again too long (see rewritesTooLong).
 func redactJSONTextWithBudget(s string, depth int, budget *nodeBudget) (sanitized string, changed, contentLost bool) {
+	sanitized, changed, contentLost, _ = redactJSONTextInner(s, depth, false, true, budget)
+	return sanitized, changed, contentLost
+}
+
+// literalRunsIntoSuffix reports whether the expressions on main, with or
+// without compound keys, remove any byte after litEnd (in the suffix after a
+// leading JSON string literal) from doc as written or with its escapes
+// decoded (see escapedReadings).
+func literalRunsIntoSuffix(doc string, litEnd int) bool {
+	readings := escapedReadings(doc)
+	for _, compound := range [...]bool{false, true} {
+		var tr passTrace
+		legacyScrubTokensTraced(doc, compound, &tr)
+		for _, sp := range tr.removed {
+			if sp[1] > litEnd {
+				return true
+			}
+		}
+		for _, r := range readings {
+			var rt passTrace
+			legacyScrubTokensTraced(r.text, compound, &rt)
+			for _, sp := range mergeSpans(rt.removed) {
+				if !isPlaceholderSpan(r.text, sp[0], sp[1]) && r.pos[sp[1]] > litEnd {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func redactJSONTextInner(s string, depth int, inContainer, allowCandidateRecheck bool, budget *nodeBudget) (sanitized string, changed, contentLost, rewriteExceeded bool) {
 	trimmed := trimBOMAndSpace(s)
 	if trimmed == "" || isKnownSentinel(trimmed) {
-		return s, false, false
+		return s, false, false, false
 	}
 	if strings.HasPrefix(trimmed, `"`) {
 		if depth >= maxSanitizeDepth {
-			return maxDepthPlaceholder, true, true
+			return maxDepthPlaceholder, true, true, false
 		}
 		if budget != nil && !budget.take() {
-			return sanitizeBudgetPlaceholder, true, true
+			return sanitizeBudgetPlaceholder, true, true, false
 		}
 		if len(trimmed) > maxInspectableJSONTextBytes {
-			return unparseableJSONPlaceholder, true, true
+			return unparseableJSONPlaceholder, true, true, false
 		}
 		dec := json.NewDecoder(strings.NewReader(trimmed))
 		var decoded string
@@ -1537,36 +1293,40 @@ func redactJSONTextWithBudget(s string, depth int, budget *nodeBudget) (sanitize
 			if strings.HasPrefix(afterQuote, "{") || strings.HasPrefix(afterQuote, "[") ||
 				strings.HasPrefix(afterQuote, `\`) || strings.HasPrefix(afterQuote, `"`) ||
 				hasAnyCredentialMarker(trimmed) {
-				return unparseableJSONPlaceholder, true, true
+				return unparseableJSONPlaceholder, true, true, false
 			}
-			return s, false, false
+			return s, false, false, false
 		}
-		suffix := trimmed[dec.InputOffset():]
+		litEnd := int(dec.InputOffset())
+		suffix := trimmed[litEnd:]
 		trimmedSuffix := trimBOMAndSpace(suffix)
 		if trimmedSuffix != "" {
 			if hasRedactableContainerText(suffix, trimmed) || strings.HasPrefix(trimmedSuffix, `\`) ||
 				isUnbalancedQuotedKeyText(trimmed, decoded, suffix) ||
 				(hasMalformedQuotedMembers(trimmed) && hasCandidateQuotedSensitiveKey(trimmed, 0)) ||
 				hasAnyCredentialMarker(suffix) || inspectQuotedFragments(suffix, depth+1, budget) {
-				return unparseableJSONPlaceholder, true, true
+				return unparseableJSONPlaceholder, true, true, false
 			}
 			// Scrubbing the text may leave it malformed, as when a redacted
-			// value takes a quote with it; it then fails closed here
-			// already, so that a pass over the scrubbed text agrees.
+			// value takes a quote with it; it then fails closed here already,
+			// so that a pass over the scrubbed text agrees. Non-quote results
+			// (such as redactedSensitiveTextPlaceholder) are checked only after
+			// inspecting decoded below so malformed/credential-bearing literals
+			// still return unparseableJSONPlaceholder.
 			if scrubbed := scrubErrorText(trimmed); scrubbed != trimmed && strings.HasPrefix(scrubbed, `"`) {
 				if again, _, _ := redactJSONTextWithBudget(scrubbed, depth+1, budget); again == unparseableJSONPlaceholder {
-					return unparseableJSONPlaceholder, true, true
+					return unparseableJSONPlaceholder, true, true, false
 				}
 			}
 		}
 		trimmedInner := trimBOMAndSpace(decoded)
 		var innerSanitized string
-		var innerChanged, innerLost bool
+		var innerChanged, innerLost, innerExceeded bool
 		switch {
 		case strings.HasPrefix(trimmedInner, "{") || strings.HasPrefix(trimmedInner, "[") || strings.HasPrefix(trimmedInner, `"`):
-			innerSanitized, innerChanged, innerLost = redactJSONTextWithBudget(decoded, depth+1, budget)
+			innerSanitized, innerChanged, innerLost, innerExceeded = redactJSONTextInner(decoded, depth+1, true, true, budget)
 		case hasRedactableContainerText(decoded, decoded) || hasAnyCredentialMarker(decoded) || inspectQuotedFragments(decoded, depth+1, budget):
-			return unparseableJSONPlaceholder, true, true
+			return unparseableJSONPlaceholder, true, true, false
 		}
 		// A document in the literal that fails closed, as one whose redaction
 		// of sensitive keys would hide a value that runs on (see
@@ -1574,87 +1334,107 @@ func redactJSONTextWithBudget(s string, depth int, budget *nodeBudget) (sanitize
 		// standing in it as a JSON string.
 		if innerChanged && (innerSanitized == unparseableJSONPlaceholder || innerSanitized == maxDepthPlaceholder ||
 			innerSanitized == sanitizeBudgetPlaceholder || innerSanitized == redactedSensitiveTextPlaceholder) {
-			return innerSanitized, true, true
+			return innerSanitized, true, true, innerExceeded
 		}
 		if !innerChanged {
-			return s, false, false
-		}
-		if keyRedactionHidesRunOn(trimmed[:dec.InputOffset()], depth) {
-			return redactedSensitiveTextPlaceholder, true, true
+			if trimmedSuffix != "" {
+				if scrubbed := scrubErrorText(trimmed); scrubbed != trimmed && (scrubbed == redactedSensitiveTextPlaceholder || !strings.HasPrefix(scrubbed, `"`)) {
+					return redactedSensitiveTextPlaceholder, true, true, false
+				}
+			}
+			return s, false, false, false
 		}
 		b, err := json.Marshal(innerSanitized)
-		if err != nil {
-			return unparseableJSONPlaceholder, true, true
+		if err != nil || rewritesTooLong(trimmed[:litEnd], b) {
+			return unparseableJSONPlaceholder, true, true, true
 		}
-		return string(b) + suffix, true, innerLost
+		if trimmedSuffix != "" {
+			if !inContainer && keyRedactionHidesRunOn(trimmed[:litEnd], depth) {
+				return redactedSensitiveTextPlaceholder, true, true, false
+			}
+			if literalRunsIntoSuffix(trimmed, litEnd) {
+				return redactedSensitiveTextPlaceholder, true, true, false
+			}
+			if scrubbed := scrubErrorText(trimmed); scrubbed != trimmed && (scrubbed == redactedSensitiveTextPlaceholder || !strings.HasPrefix(scrubbed, `"`)) {
+				return redactedSensitiveTextPlaceholder, true, true, false
+			}
+			candidate := string(b) + suffix
+			if allowCandidateRecheck {
+				freshBudget := &nodeBudget{remaining: maxSanitizeNodes}
+				if again, againChanged, againLost, _ := redactJSONTextInner(candidate, depth, true, false, freshBudget); againChanged || againLost {
+					return again, true, true, false
+				}
+			}
+			if scrubbed := scrubErrorText(candidate); scrubbed != candidate {
+				if scrubbed == redactedSensitiveTextPlaceholder || !strings.HasPrefix(scrubbed, `"`) {
+					return redactedSensitiveTextPlaceholder, true, true, false
+				}
+				freshBudget := &nodeBudget{remaining: maxSanitizeNodes}
+				if again, _, _, _ := redactJSONTextInner(scrubbed, depth, true, false, freshBudget); again == unparseableJSONPlaceholder {
+					return unparseableJSONPlaceholder, true, true, false
+				}
+			}
+			return candidate, true, innerLost, innerExceeded
+		}
+		if !inContainer && keyRedactionHidesRunOn(trimmed, depth) {
+			return redactedSensitiveTextPlaceholder, true, true, false
+		}
+		return string(b), true, innerLost, innerExceeded
 	}
 
 	if !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
-		return s, false, false
+		return s, false, false, false
 	}
 	if startsWithRedactedURI(trimmed) {
 		// Text that an earlier pass left starting with a redacted URI is not
-		// a JSON array but text. A string leaf of a JSON value (depth > 0)
-		// that the passes redacted already (see isRedactedURIText) is kept,
-		// so that a pass over a JSON value that a pass redacted, as one with
-		// the leaf [REDACTED_SENSITIVE_URI] "token":"[REDACTED]", keeps it
-		// valid JSON. Other text is kept when redactErrorMessage and
+		// a JSON array but text, which is kept when redactErrorMessage and
 		// sanitizeRawText would both keep it as malformed JSON (see
-		// redactErrorMessageOnce and isPositivelyHarmlessProse), and fails
-		// closed otherwise.
-		if depth > 0 && isRedactedURIText(trimmed) {
-			return s, false, false
-		}
+		// redactErrorMessageOnce and isPositivelyHarmlessProse), so that a
+		// pass over it changes nothing.
 		if hasAnyCredentialMarker(trimmed) || hasEncodedCredentialMarker(trimmed) || hasCandidateQuotedSensitiveKey(trimmed, 0) ||
 			!isPositivelyHarmlessProse(s, trimmed) {
-			return unparseableJSONPlaceholder, true, true
+			return unparseableJSONPlaceholder, true, true, false
 		}
-		return s, false, false
+		return s, false, false, false
 	}
 	if depth >= maxSanitizeDepth {
-		return maxDepthPlaceholder, true, true
+		return maxDepthPlaceholder, true, true, false
 	}
 	if budget != nil && !budget.take() {
-		return sanitizeBudgetPlaceholder, true, true
+		return sanitizeBudgetPlaceholder, true, true, false
 	}
 	if len(trimmed) > maxInspectableJSONTextBytes {
-		return unparseableJSONPlaceholder, true, true
+		return unparseableJSONPlaceholder, true, true, false
 	}
-	decoded, sawDuplicateKey, budgetExceeded, err := unmarshalJSONStrictWithBudget([]byte(trimmed), budget)
+	decoded, sawDuplicateKey, budgetExceeded, err := unmarshalJSONStrictWithBudget(trimmed, budget)
 	if budgetExceeded {
-		return sanitizeBudgetPlaceholder, true, true
+		return sanitizeBudgetPlaceholder, true, true, false
 	}
 	if err != nil {
-		return unparseableJSONPlaceholder, true, true
+		return unparseableJSONPlaceholder, true, true, false
 	}
-	redacted, valChanged, valLost := redactJSONValue(decoded, depth+1, budget)
+	redacted, valChanged, valLost, valExceeded := redactJSONValueInner(decoded, depth+1, true, budget)
 	if str, ok := redacted.(string); ok && str == sanitizeBudgetPlaceholder {
-		return sanitizeBudgetPlaceholder, true, true
+		return sanitizeBudgetPlaceholder, true, true, false
 	}
 	if !valChanged && !sawDuplicateKey && !valLost {
-		return s, false, false
+		return s, false, false, false
 	}
-	if keyRedactionHidesRunOn(trimmed, depth) {
-		return redactedSensitiveTextPlaceholder, true, true
+	if valExceeded {
+		return redactedSensitiveTextPlaceholder, true, true, true
 	}
 	b, err := json.Marshal(redacted)
-	if err != nil {
-		return unparseableJSONPlaceholder, true, true
+	if err != nil || rewritesTooLong(trimmed, b) {
+		return unparseableJSONPlaceholder, true, true, true
 	}
-	return string(b), true, valLost
-}
-
-// isRedactedURIText reports whether s, text that starts with a redacted URI
-// (see startsWithRedactedURI), is redacted already: scrubErrorText and the
-// legacy expressions leave it as it is (see legacyScrubChanges), decoding an
-// escape in it exposes no credential, and every quoted sensitive key in it,
-// possibly escaped, has a redacted value. The quotes or escaped quotes of
-// such text, as the \"hi\" of [REDACTED_SENSITIVE_URI] \"hi\", hide no
-// credential that those checks miss.
-func isRedactedURIText(s string) bool {
-	return startsWithRedactedURI(s) && scrubErrorText(s) == s && !legacyScrubChanges(s) && !hasEncodedCredentialMarker(s) &&
-		!hasCandidateQuotedSensitiveKeyWithRedacted(s, 0, true) &&
-		!hasQuotedSensitiveKeyWithRedacted(canonicalizeCredentialMarker(s), true)
+	if !inContainer {
+		if keyRedactionHidesRunOn(trimmed, depth) {
+			return redactedSensitiveTextPlaceholder, true, true, false
+		}
+	} else if hasHexOrPercentEscape(trimmed) && !expressionsKeepStringsApart(trimmed) {
+		return redactedSensitiveTextPlaceholder, true, true, false
+	}
+	return string(b), true, valLost, false
 }
 
 // startsWithRedactedURI reports whether s starts with the placeholder that
@@ -1817,66 +1597,93 @@ func startsLikeEncodedContainer(s string) bool {
 }
 
 func redactJSONValue(v any, depth int, budget *nodeBudget) (out any, changed, contentLost bool) {
+	out, changed, contentLost, _ = redactJSONValueInner(v, depth, false, budget)
+	return out, changed, contentLost
+}
+
+func budgetTruncatedMap(outMap map[string]any, lastKey string, hasLastKey, rewriteExceeded bool) (any, bool, bool, bool) {
+	if len(outMap) == 0 {
+		return sanitizeBudgetPlaceholder, true, true, rewriteExceeded
+	}
+	if hasLastKey {
+		delete(outMap, lastKey)
+	}
+	outMap[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
+	return outMap, true, true, rewriteExceeded
+}
+
+func redactJSONValueInner(v any, depth int, inContainer bool, budget *nodeBudget) (out any, changed, contentLost, rewriteExceeded bool) {
 	if depth >= maxSanitizeDepth {
-		return maxDepthPlaceholder, true, true
+		return maxDepthPlaceholder, true, true, false
 	}
 	if budget != nil && !budget.take() {
-		return sanitizeBudgetPlaceholder, true, true
+		return sanitizeBudgetPlaceholder, true, true, false
 	}
 	switch x := v.(type) {
 	case map[string]any:
 		outMap := make(map[string]any, min(len(x), maxContainerAlloc))
+		var lastKey string
+		var hasLastKey bool
 		for k, val := range x {
 			if budget != nil && budget.remaining <= 0 {
-				outMap[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
-				return outMap, true, true
+				return budgetTruncatedMap(outMap, lastKey, hasLastKey, rewriteExceeded)
 			}
 			if isSensitiveKey(k) {
 				if budget != nil && !budget.take() {
-					outMap[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
-					return outMap, true, true
+					return budgetTruncatedMap(outMap, lastKey, hasLastKey, rewriteExceeded)
 				}
 				if str, ok := val.(string); !ok || str != redactedValue {
 					changed = true
 				}
 				outMap[k] = redactedValue
+				lastKey, hasLastKey = k, true
 				continue
 			}
-			newVal, c, lost := redactJSONValue(val, depth+1, budget)
+			newVal, c, lost, exc := redactJSONValueInner(val, depth+1, inContainer, budget)
 			if str, ok := newVal.(string); ok && str == sanitizeBudgetPlaceholder && budget != nil && budget.remaining <= 0 {
-				outMap[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
-				return outMap, true, true
+				return budgetTruncatedMap(outMap, lastKey, hasLastKey, rewriteExceeded || exc)
 			}
 			outMap[k] = newVal
+			lastKey, hasLastKey = k, true
 			changed = changed || c
 			contentLost = contentLost || lost
+			rewriteExceeded = rewriteExceeded || exc
 		}
-		return outMap, changed, contentLost
+		return outMap, changed, contentLost, rewriteExceeded
 	case []any:
 		outSlice := make([]any, 0, min(len(x), maxContainerAlloc))
 		for _, val := range x {
 			if budget != nil && budget.remaining <= 0 {
-				outSlice = append(outSlice, sanitizeBudgetPlaceholder)
-				return outSlice, true, true
+				if len(outSlice) == 0 {
+					return sanitizeBudgetPlaceholder, true, true, rewriteExceeded
+				}
+				outSlice[len(outSlice)-1] = sanitizeBudgetPlaceholder
+				return outSlice, true, true, rewriteExceeded
 			}
-			newVal, c, lost := redactJSONValue(val, depth+1, budget)
+			newVal, c, lost, exc := redactJSONValueInner(val, depth+1, inContainer, budget)
 			outSlice = append(outSlice, newVal)
 			changed = changed || c
 			contentLost = contentLost || lost
+			rewriteExceeded = rewriteExceeded || exc
 			if str, ok := newVal.(string); ok && str == sanitizeBudgetPlaceholder && budget != nil && budget.remaining <= 0 {
-				return outSlice, true, true
+				if len(outSlice) <= 1 {
+					return sanitizeBudgetPlaceholder, true, true, rewriteExceeded
+				}
+				outSlice[len(outSlice)-2] = sanitizeBudgetPlaceholder
+				return outSlice[:len(outSlice)-1], true, true, rewriteExceeded
 			}
 		}
-		return outSlice, changed, contentLost
+		return outSlice, changed, contentLost, rewriteExceeded
 	case string:
-		return redactJSONTextWithBudget(x, depth+1, budget)
+		san, c, lost, exc := redactJSONTextInner(x, depth+1, inContainer, true, budget)
+		return san, c, lost, exc
 	default:
-		return v, false, false
+		return v, false, false, false
 	}
 }
 
-func unmarshalJSONStrictWithBudget(b []byte, budget *nodeBudget) (val any, sawDuplicateKey, budgetExceeded bool, err error) {
-	dec := json.NewDecoder(strings.NewReader(string(b)))
+func unmarshalJSONStrictWithBudget(s string, budget *nodeBudget) (val any, sawDuplicateKey, budgetExceeded bool, err error) {
+	dec := json.NewDecoder(strings.NewReader(s))
 	dec.UseNumber()
 	val, sawDuplicateKey, budgetExceeded, err = decodeJSONValue(dec, 0, budget)
 	if err != nil || budgetExceeded {
@@ -1960,12 +1767,13 @@ func decodeJSONValue(dec *json.Decoder, depth int, budget *nodeBudget) (any, boo
 // path or userinfo credentials, Authorization/API-key headers, Bearer/Basic
 // authorization tokens, and sensitive key=value or key: value pairs.
 func redactErrorMessage(msg string) string {
-	out := redactErrorMessageOnce(msg)
-	for cur, pass := msg, 1; out != cur && !isScrubbedPlainText(out); pass++ {
+	out, settled := redactErrorMessageOnce(msg)
+	for cur, pass := msg, 1; !settled && out != cur && !isScrubbedPlainText(out); pass++ {
 		if pass == maxRedactionPasses {
 			return redactedSensitiveTextPlaceholder
 		}
-		next := redactErrorMessageOnce(out)
+		var next string
+		next, settled = redactErrorMessageOnce(out)
 		if next == out {
 			break
 		}
@@ -1976,58 +1784,47 @@ func redactErrorMessage(msg string) string {
 
 // redactErrorMessageOnce is one pass of redactErrorMessage (see
 // maxRedactionPasses).
-func redactErrorMessageOnce(msg string) string {
+func redactErrorMessageOnce(msg string) (out string, settled bool) {
 	if msg == "" || isKnownSentinel(msg) {
-		return msg
+		return msg, true
 	}
 	budget := &nodeBudget{remaining: maxSanitizeNodes}
 	trimmed := trimBOMAndSpace(msg)
 	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
-		if decoded, sawDuplicateKey, exceeded, err := unmarshalJSONStrictWithBudget([]byte(trimmed), budget); err == nil && !exceeded {
+		if decoded, sawDuplicateKey, exceeded, err := unmarshalJSONStrictWithBudget(trimmed, budget); err == nil && !exceeded {
 			redacted, valChanged, valLost := redactJSONValue(decoded, 1, budget)
-			scrubbed, strChanged := scrubErrorJSONStrings(redacted, 1, budget)
+			scrubbed, strChanged := scrubErrorJSONStrings(redacted, 1)
 			if valChanged || sawDuplicateKey || valLost || strChanged {
 				if b, err := json.Marshal(scrubbed); err == nil {
-					return string(b)
+					return string(b), !strChanged && !valLost
 				}
 			}
-			return msg
+			return msg, true
 		}
 		// Malformed JSON document: if it contains any sensitive key pattern or credential marker,
 		// fail closed rather than falling through to partial regex rewriting.
 		if hasAnyCredentialMarker(trimmed) || hasEncodedCredentialMarker(trimmed) || hasCandidateQuotedSensitiveKey(trimmed, 0) {
-			return unparseableJSONPlaceholder
+			return unparseableJSONPlaceholder, true
 		}
-		return scrubErrorText(msg)
+		scrubbed := scrubErrorText(msg)
+		return scrubbed, scrubbed == msg
 	}
 	if strings.HasPrefix(trimmed, `"`) {
-		// A JSON string literal that holds a JSON document keeps the
-		// structure of the document, as a document does above, where no
-		// credential reads across its strings (see leavesScrubApartFrom).
-		if out, ok, _ := redactJSONDocumentLeaves(msg, 0, budget); ok && leavesScrubApartFrom(msg, out, 0) {
-			return out
-		}
 		if redacted, ok, _ := redactJSONTextWithBudget(msg, 0, budget); ok {
 			// As in sanitizeRawText, quote-led prose that only failed JSON
 			// parsing is kept.
 			if redacted == unparseableJSONPlaceholder && isPositivelyHarmlessProse(msg, trimmed) {
-				return msg
+				return msg, true
 			}
-			return scrubErrorText(redacted)
+			scrubbed := scrubErrorText(redacted)
+			return scrubbed, scrubbed == redacted
 		}
 	}
-	return scrubErrorText(msg)
+	scrubbed := scrubErrorText(msg)
+	return scrubbed, scrubbed == msg
 }
 
-// scrubErrorJSONStrings scrubs the string leaves of v, a JSON value at depth
-// whose sensitive keys redactJSONValue has redacted, with scrubErrorText. A
-// leaf that is a JSON document as a whole, or a JSON string literal that
-// holds one, as a tool argument that holds the JSON text of a call, keeps
-// its structure: its own leaves are scrubbed one by one (see
-// scrubJSONDocumentLeaves), as scrubbing it as text may take the closing
-// quote of a nested leaf with a value that it redacts, as of the URL that
-// {"url":"https://h/p?access_token=SECRET"} ends in.
-func scrubErrorJSONStrings(v any, depth int, budget *nodeBudget) (any, bool) {
+func scrubErrorJSONStrings(v any, depth int) (any, bool) {
 	if depth >= maxSanitizeDepth {
 		return v, false
 	}
@@ -2036,7 +1833,7 @@ func scrubErrorJSONStrings(v any, depth int, budget *nodeBudget) (any, bool) {
 		changed := false
 		out := make(map[string]any, len(x))
 		for k, val := range x {
-			newVal, c := scrubErrorJSONStrings(val, depth+1, budget)
+			newVal, c := scrubErrorJSONStrings(val, depth+1)
 			out[k] = newVal
 			changed = changed || c
 		}
@@ -2045,7 +1842,7 @@ func scrubErrorJSONStrings(v any, depth int, budget *nodeBudget) (any, bool) {
 		changed := false
 		out := make([]any, len(x))
 		for i, val := range x {
-			newVal, c := scrubErrorJSONStrings(val, depth+1, budget)
+			newVal, c := scrubErrorJSONStrings(val, depth+1)
 			out[i] = newVal
 			changed = changed || c
 		}
@@ -2054,76 +1851,11 @@ func scrubErrorJSONStrings(v any, depth int, budget *nodeBudget) (any, bool) {
 		if isKnownSentinel(x) {
 			return x, false
 		}
-		if out, ok := scrubJSONDocumentLeaves(x, depth, budget); ok {
-			return out, out != x
-		}
 		scrubbed := scrubErrorText(x)
 		return scrubbed, scrubbed != x
 	default:
 		return v, false
 	}
-}
-
-// scrubJSONDocumentLeaves scrubs s, a string leaf at depth that is a JSON
-// object or array as a whole, or a JSON string literal that holds one, leaf
-// by leaf (see scrubErrorJSONStrings), marshaling it again when that changed
-// anything, and reports true. It reports false, and does nothing, for any
-// other text, JSON text that does not parse, text whose text scrub reads a
-// credential across its strings (see leavesScrubApartFrom), or when depth or
-// budget runs out, which the caller scrubs as text. depth bounds how many
-// levels of JSON text in a leaf are read.
-func scrubJSONDocumentLeaves(s string, depth int, budget *nodeBudget) (string, bool) {
-	trimmed := trimBOMAndSpace(s)
-	if trimmed == "" || depth >= maxSanitizeDepth || len(trimmed) > maxInspectableJSONTextBytes || startsWithRedactedURI(trimmed) {
-		return "", false
-	}
-	var out any
-	changed := false
-	switch trimmed[0] {
-	case '{', '[':
-		decoded, _, exceeded, err := unmarshalJSONStrictWithBudget([]byte(trimmed), budget)
-		if err != nil || exceeded {
-			return "", false
-		}
-		out, changed = scrubErrorJSONStrings(decoded, depth+1, budget)
-	case '"':
-		var inner string
-		if json.Unmarshal([]byte(trimmed), &inner) != nil {
-			return "", false
-		}
-		innerOut, ok := scrubJSONDocumentLeaves(inner, depth+1, budget)
-		if !ok {
-			return "", false
-		}
-		out, changed = innerOut, innerOut != inner
-	default:
-		return "", false
-	}
-	text := s
-	if changed {
-		var err error
-		if text, err = marshalJSONText(out); err != nil {
-			return "", false
-		}
-	}
-	if !leavesScrubApartFrom(s, text, depth) {
-		return "", false
-	}
-	return text, true
-}
-
-// marshalJSONText returns the JSON text of v, as json.Marshal does but with
-// "<", ">" and "&" written as they are, as the JSON text in a string leaf
-// that scrubJSONDocumentLeaves writes again holds them: the document that
-// holds the leaf escapes them when it is marshaled.
-func marshalJSONText(v any) (string, error) {
-	var b strings.Builder
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return "", err
-	}
-	return strings.TrimSuffix(b.String(), "\n"), nil
 }
 
 // scrubErrorText redacts the credentials in msg with scrubErrorTokens, run

@@ -3589,14 +3589,6 @@ func TestValueEndingInKeyName(t *testing.T) {
 			if tt.wantResponse != "" {
 				wantResponse = tt.wantResponse
 			}
-			// SmartTruncate, which formats tool arguments, results and
-			// attributes, redacts the leaves of a value that is a JSON object
-			// or array as a whole one by one, as redactErrorMessage does, so
-			// that the value stays valid JSON.
-			wantArgs := wantContent
-			if trimmed := strings.TrimSpace(tt.text); (strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")) && json.Valid([]byte(trimmed)) {
-				wantArgs = redactErrorMessage(tt.text)
-			}
 			userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
 			if got, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary"); got != wantContent {
 				t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %v, want %q", got, wantContent)
@@ -3612,19 +3604,19 @@ func TestValueEndingInKeyName(t *testing.T) {
 				t.Errorf("LLM_REQUEST content_parts = %v, want text %q", parts, wantContent)
 			}
 			startRow := onlyRowOfType(t, rows, EventToolStarting)
-			if got, _ := lookup(jsonObjectColumn(t, startRow, "content"), "args", "input"); got != wantArgs {
-				t.Errorf("TOOL_STARTING content.args.input = %v, want %q", got, wantArgs)
+			if got, _ := lookup(jsonObjectColumn(t, startRow, "content"), "args", "input"); got != wantContent {
+				t.Errorf("TOOL_STARTING content.args.input = %v, want %q", got, wantContent)
 			}
 			toolRow := onlyRowOfType(t, rows, EventToolCompleted)
-			if got, _ := lookup(jsonObjectColumn(t, toolRow, "content"), "result", "output"); got != wantArgs {
-				t.Errorf("TOOL_COMPLETED content.result.output = %v, want %q", got, wantArgs)
+			if got, _ := lookup(jsonObjectColumn(t, toolRow, "content"), "result", "output"); got != wantContent {
+				t.Errorf("TOOL_COMPLETED content.result.output = %v, want %q", got, wantContent)
 			}
 			errRow := onlyRowOfType(t, rows, EventToolError)
 			if got := errRow["error_message"]; got != tt.want {
 				t.Errorf("TOOL_ERROR error_message = %v, want %q", got, tt.want)
 			}
-			if got, _ := lookup(jsonObjectColumn(t, errRow, "content"), "args", "input"); got != wantArgs {
-				t.Errorf("TOOL_ERROR content.args.input = %v, want %q", got, wantArgs)
+			if got, _ := lookup(jsonObjectColumn(t, errRow, "content"), "args", "input"); got != wantContent {
+				t.Errorf("TOOL_ERROR content.args.input = %v, want %q", got, wantContent)
 			}
 			evRow := onlyRowOfType(t, rows, EventAgentResponse)
 			if got, _ := lookup(jsonObjectColumn(t, evRow, "content"), "response"); got != wantResponse {
@@ -3633,8 +3625,8 @@ func TestValueEndingInKeyName(t *testing.T) {
 			if parts, _ := evRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != wantContent {
 				t.Errorf("AGENT_RESPONSE content_parts = %v, want text %q", parts, wantContent)
 			}
-			if got, _ := lookup(jsonObjectColumn(t, evRow, "attributes"), "adk", "branch"); got != wantArgs {
-				t.Errorf("AGENT_RESPONSE attributes.adk.branch = %v, want %q", got, wantArgs)
+			if got, _ := lookup(jsonObjectColumn(t, evRow, "attributes"), "adk", "branch"); got != wantContent {
+				t.Errorf("AGENT_RESPONSE attributes.adk.branch = %v, want %q", got, wantContent)
 			}
 			for _, row := range rows {
 				s := fmt.Sprint(row)

@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"google.golang.org/adk/v2/session"
@@ -152,10 +153,18 @@ var patternWords = func() []string {
 	return minimal
 }()
 
-// patternWordsByFirst holds patternWords by their first byte.
-var patternWordsByFirst = func() (m [128][]string) {
+// patternWordsFirstByte reports whether any word in patternWords starts with c.
+var patternWordsFirstByte = func() (m [128]bool) {
 	for _, w := range patternWords {
-		m[w[0]] = append(m[w[0]], w)
+		m[w[0]] = true
+	}
+	return m
+}()
+
+// patternWordsByFirst2 holds patternWords indexed by their first two bytes.
+var patternWordsByFirst2 = func() (m [128][128][]string) {
+	for _, w := range patternWords {
+		m[w[0]][w[1]] = append(m[w[0]][w[1]], w)
 	}
 	return m
 }()
@@ -169,13 +178,26 @@ var patternWordsByFirst = func() (m [128][]string) {
 // inside one.
 func mayMatchTextPatterns(s string) bool {
 	for i, size := 0, 0; i < len(s); i += size {
-		var c byte
-		c, size = patternFoldAt(s, i)
-		if c >= utf8.RuneSelf {
+		var c0 byte
+		c0, size = patternFoldAt(s, i)
+		if c0 >= utf8.RuneSelf || !patternWordsFirstByte[c0] {
 			continue
 		}
-		for _, w := range patternWordsByFirst[c] {
-			if foldedHasPrefix(s, i, w) {
+		j := i + size
+		var c1 byte
+		for j < len(s) {
+			var sz int
+			c1, sz = patternFoldAt(s, j)
+			j += sz
+			if c1 != 0 {
+				break
+			}
+		}
+		if c1 == 0 || c1 >= utf8.RuneSelf {
+			continue
+		}
+		for _, w := range patternWordsByFirst2[c0][c1] {
+			if foldedHasPrefix(s, j, w[2:]) {
 				return true
 			}
 		}
@@ -711,10 +733,34 @@ func hasCanonicalizableEscape(s string) bool {
 	return false
 }
 
-// canonicalizeCredentialMarker decodes nested ASCII \u, \x and percent
-// escapes, and escaped quotes (\" and \'), in one pass. The result is used
-// for detection only: callers keep the original text unless the canonical
-// form exposes a credential construct.
+// isFoldedEscapeRune reports whether r is a rune that
+// canonicalizeCredentialMarker and canonicalizeMapped decode from a \u, \x or
+// % escape: ASCII (<= 0x7F), one of the three non-ASCII runes that case-fold
+// to ASCII key letters (U+0130 'İ' -> 'i', U+017F 'ſ' -> 's', U+212A 'K' ->
+// 'k'), or, for a 4-hex \uXXXX escape (unicodeEscape), a Unicode whitespace
+// or separator rune (such as \u00a0) that trimInlineSpaces and
+// followedByKeyDelimiterWithRedacted skip around keys and delimiters.
+func isFoldedEscapeRune(r rune, unicodeEscape bool) bool {
+	if r <= 0x7F || r == '\u0130' || r == '\u017f' || r == '\u212a' {
+		return true
+	}
+	return unicodeEscape && (unicode.IsSpace(r) || unicode.In(r, unicode.Z))
+}
+
+func hasEscapePrefixInTail(out []byte) bool {
+	for _, b := range out[max(0, len(out)-5):] {
+		if b == '\\' || b == '%' {
+			return true
+		}
+	}
+	return false
+}
+
+// canonicalizeCredentialMarker decodes nested ASCII, case-folded (\u0130,
+// \u017f, \u212a) and \uXXXX whitespace \u, \x and percent escapes, and
+// escaped quotes (\" and \'), in one pass. The result is used for detection
+// only: callers keep the original text unless the canonical form exposes a
+// credential construct.
 func canonicalizeCredentialMarker(s string) string {
 	if !hasCanonicalizableEscape(s) {
 		return s
@@ -722,6 +768,17 @@ func canonicalizeCredentialMarker(s string) string {
 	output := make([]byte, 0, len(s))
 	changed := false
 	for i := 0; i < len(s); i++ {
+		if !hasEscapePrefixInTail(output) {
+			n := strings.IndexAny(s[i:], `\%`)
+			if n < 0 {
+				output = append(output, s[i:]...)
+				break
+			}
+			if n > 0 {
+				output = append(output, s[i:i+n]...)
+				i += n
+			}
+		}
 		output = append(output, s[i])
 		for {
 			n := len(output)
@@ -749,10 +806,10 @@ func canonicalizeCredentialMarker(s string) string {
 				break
 			}
 			decoded, err := strconv.ParseUint(string(digits), 16, 32)
-			if err != nil || decoded > 0x7F {
+			if err != nil || !isFoldedEscapeRune(rune(decoded), escapeStart == n-6) {
 				break
 			}
-			output = append(output[:escapeStart], byte(decoded))
+			output = utf8.AppendRune(output[:escapeStart], rune(decoded))
 			changed = true
 		}
 	}

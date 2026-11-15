@@ -333,12 +333,12 @@ func redactQueryComponent(raw string, scrub uriComponentScrub) (string, bool) {
 // redactURIComponent scrubs one decoded URI component (a path segment, a
 // query key or value, or the fragment) with the text patterns, as adk-python
 // does, run until the text stops changing, and fails closed when decoding an
-// escape in it exposes a credential pattern, or when the scrub keeps a word
-// that the legacy expressions redact, as scrubErrorText does for text (see
-// scrubURIComponentText). So a URI that is formatted on its own, as the
-// file URI of a content part, is checked as text in an error message is. A
-// URL nested in the component is not parsed again, which keeps the work
-// linear; its key-value pairs are still matched as text.
+// escape in it exposes a credential pattern, or when the scrub keeps a byte
+// that the legacy expressions remove (see leavesLegacyValue), as
+// scrubErrorText does for text (see scrubURIComponentText). So a URI that is
+// formatted on its own, as the file URI of a content part, is checked as text
+// in an error message is. A URL nested in the component is not parsed again,
+// which keeps the work linear; its key-value pairs are still matched as text.
 func redactURIComponent(s string) (string, bool) {
 	if s == "" || isKnownSentinel(s) {
 		return s, false

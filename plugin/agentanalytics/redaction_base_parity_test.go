@@ -80,6 +80,11 @@ func TestRedactionBaseParity(t *testing.T) {
 				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
 			}
 		}
+		if san, _ := sanitizeRawText(c.In); san != "" {
+			if _, againLost := sanitizeRawText(san); againLost {
+				t.Errorf("sanitizeRawText second pass(%q) reported contentLost", san)
+			}
+		}
 		for _, s := range c.Secrets {
 			if !strings.Contains(c.Base[1], s) {
 				redactedByBase++
@@ -110,6 +115,51 @@ func TestRedactionBaseParity(t *testing.T) {
 		`{"m": "access_token=%22QZX7SEC;key=QZX7SEC"}`,
 		"password:\n  C:\\SECRET/token:\"a b\"",
 		"password:\n  /SECRET/secret_key: [REDACTED]",
+		`"{\"m\":\"zqxSentinel7 Authorization:\\n;key=SECRETZQ\"}"`,
+		`"{\"m\":\"Bearer \\\"SECRETZQ;key=b;token=c\"}"`,
+		`{"note":"password:\n\"[REDACTED]\".hunter2ZQ"}`,
+		`{"log": "x-api-key: SECRETZQ\nrequest id: 42"}`,
+		`{"msg": "to\u212aen=SECRETZQ"`,
+		`{"msg": "pa\u017f\u017fword=SECRETZQ"`,
+		`[INFO] "pa\u017f\u017fword=SECRETZQ"`,
+		`{"msg": "ap\u0130_key=SECRETZQ"`,
+		"{\"log\": \"x-api-key: [REDACTED]\n\"pa\\u017f\\u017fword=SECRETZQ\"",
+		`[REDACTED_SENSITIVE_URI] "pa\u017f\u017fword=SECRETZQ"`,
+		`{"k": "{\"zz_a\":\"Authorization: x\",\"aa_b\":\"SECRETZQ\",\"z\":\"{\\\"DB_PASSWORD\\\":\\\"p\\\"}\"}"}`,
+		`["{\"zz_a\":\"Authorization: x\",\"aa_b\":\"SECRETZQ\",\"z\":\"{\\\"DB_PASSWORD\\\":\\\"p\\\"}\"}"]`,
+		`{"k": "{\"zz_a\":\"access_token='\",\"b_sec\":\"SECRETZQ\",\"c_close\":\"'\",\"z\":\"{\\\"DB_PASSWORD\\\":\\\"p\\\"}\"}"}`,
+		`["{\"zz_a\":\"access_token='\",\"b_sec\":\"SECRETZQ\",\"c_close\":\"'\",\"z\":\"{\\\"DB_PASSWORD\\\":\\\"p\\\"}\"}"]`,
+		`{"a": "{\"zz_a\":\"access_token='\",\"b_sec\":\"SECRETZQ\",\"c_close\":\"'\",\"z\":\"{\\\"DB_PASSWORD\\\":\\\"p\\\"}\"}", "b": "plain"}`,
+		`{"k":"{\"inner\":\"{\\\"zz_password\\\":\\\"Authorization: x\\\"}\",\"other\":\"SECRETZQ\"}"}`,
+		`["{\"inner\":\"{\\\"zz_password\\\":\\\"Authorization: x\\\"}\",\"other\":\"SECRETZQ\"}"]`,
+		`"{\"k\":\"{\\\"inner\\\":\\\"{\\\\\\\"zz_password\\\\\\\":\\\\\\\"Authorization: x\\\\\\\"}\\\",\\\"other\\\":\\\"SECRETZQ\\\"}\"}"`,
+		`{"outer":"{\"k\":\"{\\\"inner\\\":\\\"{\\\\\\\"zz_password\\\\\\\":\\\\\\\"Authorization: x\\\\\\\"}\\\",\\\"other\\\":\\\"SECRETZQ\\\"}\"}"}`,
+		`{"k":"[\"{\\\"zz_password\\\":\\\"Bearer '\\\"}\",\"SECRETZQ\",\"'\"]"}`,
+		`{"k":"{\"other\":\"SECRETZQ\",\"a_inner\":\"{\\\"zz_password\\\":\\\"Authorization: x\\\",\\\"password\\\":\\\"p\\\"}\"}"}`,
+		`{"a":"{\"other\":\"SECRETZQ\",\"a_inner\":\"{\\\"zz_password\\\":\\\"Authorization: x\\\",\\\"password\\\":\\\"p\\\"}\"}","b":"plain"}`,
+		`[INFO] "unclosed: "'token'\u00a0:\u00a0SECRETZQ`,
+		`{"msg": "unclosed: 'token'\u00a0:\u00a0SECRETZQ`,
+		"{\"\t\\u00a0token\": \"SECRETZQ\"}",
+		`{'\u00a0token': 'SECRETZQ'}`,
+		`{'token'\u00a0:\u00a0'SECRETZQ'}`,
+		`[INFO] 'token'\u00a0:\u00a0SECRETZQ`,
+		`[REDACTED_SENSITIVE_URI] 'token'\u00a0:\u00a0SECRETZQ`,
+		"{\"msg\": \"line1\n'token'\\u00a0:\\u00a0SECRETZQ\"}",
+		`"\u007b\u0022DB_PASSWORD\u0022:\u0022Authorization: x\u0022\u007d" SECRETZQ`,
+		`"{\" DB_PASSWORD \":\" Authorization: x\"}" SECRETZQ`,
+		`"{\" DB_PASSWORD \":\" Bearer '\"}" SECRETZQ'`,
+		`"{\" DB_PASSWORD \":\" Bearer '\"}" SECRETZQ' " }"`,
+		`"{\" DB_PASSWORD \":\" Bearer '\"}" SECRETZQ%27`,
+		`"{\" DB_PASSWORD \":\" Bearer '\"}" SECRETZQ\u0027`,
+		`"{\" password \":\" SECRETZQ \"}" and 'hi'`,
+		`"\u007b\u0022password\u0022:\u0022SECRETZQ\u0022\u007d" ok`,
+		`"[\u0022Bearer \'\u0022,\u0022SECRETZQ\u0022]" ok`,
+		`"\"{\\\"DB_PASSWORD\\\":\\\"Bearer%20%22x\\\\\\\" tail\\\",\\\"b\\\":\\\"SECRETZQ\\\"}\""`,
+		`"\"\\\"{\\\\\\\"DB_PASSWORD\\\\\\\":\\\\\\\"Bearer%20%22x\\\\\\\\\\\\\\\" tail\\\\\\\",\\\\\\\"b\\\\\\\":\\\\\\\"SECRETZQ\\\\\\\"}\\\"\""`,
+		`{"k":"{\"k\":\"\\\"{\\\\\\\"DB_PASSWORD\\\\\\\":\\\\\\\"Bearer%20%22x\\\\\\\\\\\\\\\" tail\\\\\\\",\\\\\\\"b\\\\\\\":\\\\\\\"SECRETZQ\\\\\\\"}\\\"\"}"}`,
+		`{"k":"\"\\\"{\\\\\\\"DB_PASSWORD\\\\\\\":\\\\\\\"Bearer%20%22x\\\\\\\\\\\\\\\" tail\\\\\\\",\\\\\\\"b\\\\\\\":\\\\\\\"SECRETZQ\\\\\\\"}\\\"\""}`,
+		`"\"{\\\"DB_PASSWORD\\\":\\\"Bearer%20%22x\\\\\\\" tail\\\",\\\"b\\\":\\\"SECRETZQ\\\"}\"" ok`,
+		`"\"{\\\"DB_PASSWORD\\\":\\\"Bearer%20%22x\\\\\\\" tail\\\",\\\"b\\\":\\\"SECRETZQ\\\",\\\"c\\\":\\\"%22\\\"}\"" ok`,
 	} {
 		found := false
 		for _, c := range corpus.Cases {

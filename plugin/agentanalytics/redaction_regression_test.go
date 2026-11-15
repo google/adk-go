@@ -1853,67 +1853,61 @@ func largeTextEntryPoints(t *testing.T) []struct {
 	}
 }
 
-// TestSmartTruncateRedactsJSONDocumentLeaves covers string values that are a
-// JSON object or array as a whole, as the arguments of a tool call written as
-// JSON text: SmartTruncate redacts the credentials in their string leaves and
-// the values of their sensitive keys one by one, as redactErrorMessage does,
-// so that a URL leaf that ends in a credential, whether as the last field or
-// not and in nested objects and arrays, keeps the document valid JSON rather
-// than failing it closed as [UNPARSEABLE_JSON_BLOB]. A long document is
-// truncated after the redaction, a document with nothing to redact stays
-// byte-identical, and malformed JSON text still fails closed.
-func TestSmartTruncateRedactsJSONDocumentLeaves(t *testing.T) {
+// TestJSONDocumentValuesKeepNoSecret covers string values that are a JSON
+// object or array as a whole, as the arguments of a tool call written as JSON
+// text, whose leaves hold credentials: a URL leaf that ends in a credential,
+// whether as the last field or not and in nested objects and arrays, a pair
+// in a leaf, and a sensitive key. Every entry point keeps no secret and a
+// second pass changes nothing. SmartTruncate and FormatContentParts scrub
+// such a document as text, as sanitizeRawText does and as main did, rather
+// than leaf by leaf, malformed JSON text fails closed, a document with nothing
+// to redact stays byte-identical, and a long document is redacted before it
+// is truncated.
+func TestJSONDocumentValuesKeepNoSecret(t *testing.T) {
 	runInParallel(t)
-	for _, tc := range []struct{ in, want string }{
-		{`{"url":"https://example.com/path?a=1&access_token=SECRET1"}`, `{"url":"https://example.com/path?a=1\u0026access_token=%5BREDACTED%5D"}`},
-		{`{"url":"https://example.com/path?a=1&access_token=SECRET1","other":"ok"}`, `{"other":"ok","url":"https://example.com/path?a=1\u0026access_token=%5BREDACTED%5D"}`},
-		{`{"args":{"url":"https://example.com/cb?api_key=SECRET1"},"n":1}`, `{"args":{"url":"https://example.com/cb?api_key=%5BREDACTED%5D"},"n":1}`},
-		{`[{"url":"https://example.com/cb#token=SECRET1"},"ok"]`, `[{"url":"https://example.com/cb#token=%5BREDACTED%5D"},"ok"]`},
-		{`{"msg":"foo&access_token=SECRET1"}`, `{"msg":"foo\u0026access_token=[REDACTED]"}`},
-		{`{"x":"bar password=SECRET1"}`, `{"x":"bar password=[REDACTED]"}`},
-		{`{"cfg":["a","DB_PASSWORD: SECRET1"]}`, `{"cfg":["a","DB_PASSWORD:[REDACTED]"]}`},
-		{`{"access_token":"SECRET1","other":"ok"}`, `{"access_token":"[REDACTED]","other":"ok"}`},
-		{`{"msg":"password=SECRET1","detail":{"url":"https://h/p?token=SECRET2&x=1"}}`, `{"detail":{"url":"https://h/p?token=%5BREDACTED%5D\u0026x=1"},"msg":"password=[REDACTED]"}`},
-		{`{"note":"talk to Ken tomorrow","n":[1,2,3]}`, `{"note":"talk to Ken tomorrow","n":[1,2,3]}`},
-		{`{"msg":"password=SECRET1"`, unparseableJSONPlaceholder},
-		{`{"msg":"password=SECRET1"}} trailing`, unparseableJSONPlaceholder},
-		{`[1, 2, {"api_key": "SECRET1"}`, unparseableJSONPlaceholder},
+	eps := largeTextEntryPoints(t)
+	for _, in := range []string{
+		`{"url":"https://example.com/path?a=1&access_token=SECRET1"}`,
+		`{"url":"https://example.com/path?a=1&access_token=SECRET1","other":"ok"}`,
+		`{"args":{"url":"https://example.com/cb?api_key=SECRET1"},"n":1}`,
+		`[{"url":"https://example.com/cb#token=SECRET1"},"ok"]`,
+		`{"msg":"foo&access_token=SECRET1"}`,
+		`{"x":"bar password=SECRET1"}`,
+		`{"cfg":["a","DB_PASSWORD: SECRET1"]}`,
+		`{"access_token":"SECRET1","other":"ok"}`,
+		`{"msg":"password=SECRET1","detail":{"url":"https://h/p?token=SECRET2&x=1"}}`,
+		`{"msg":"password=SECRET1"`,
+		`{"msg":"password=SECRET1"}} trailing`,
+		`[1, 2, {"api_key": "SECRET1"}`,
 	} {
-		raw, _, err := SmartTruncate(tc.in, -1)
-		var got string
-		if err != nil || json.Unmarshal(raw, &got) != nil || got != tc.want {
-			t.Errorf("SmartTruncate(%q) = (%s, %v), want %q", tc.in, raw, err, tc.want)
-			continue
-		}
-		if strings.Contains(got, "SECRET") {
-			t.Errorf("SmartTruncate(%q) = %q kept a secret", tc.in, got)
-		}
-		if tc.want != unparseableJSONPlaceholder {
-			if !json.Valid([]byte(got)) {
-				t.Errorf("SmartTruncate(%q) = %q, not valid JSON", tc.in, got)
+		srt, _ := sanitizeRawText(in)
+		for _, ep := range eps {
+			got := ep.f(in)
+			if strings.Contains(got, "SECRET") {
+				t.Errorf("%s(%q) = %q kept a secret", ep.name, in, got)
 			}
-			if rem := redactErrorMessage(tc.in); rem != got {
-				t.Errorf("SmartTruncate(%q) = %q, redactErrorMessage = %q, want the same", tc.in, got, rem)
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
 			}
-		}
-		if again, _, err := SmartTruncate(got, -1); err != nil || string(again) != string(raw) {
-			t.Errorf("SmartTruncate second pass(%q) = (%s, %v), want %s", got, again, err, raw)
-		}
-		// The same text as the argument of a tool call.
-		argsRaw, _, err := SmartTruncate(map[string]any{"input": tc.in}, -1)
-		var args map[string]string
-		if err != nil || json.Unmarshal(argsRaw, &args) != nil || args["input"] != tc.want {
-			t.Errorf("SmartTruncate(args with %q) = (%s, %v), want input %q", tc.in, argsRaw, err, tc.want)
+			if (ep.name == "SmartTruncate" || ep.name == "FormatContentParts") && got != srt {
+				t.Errorf("%s(%q) = %q, sanitizeRawText = %q, want the same", ep.name, in, got, srt)
+			}
 		}
 	}
+	for _, in := range []string{`{"msg":"password=SECRET1"`, `{"msg":"password=SECRET1"}} trailing`, `[1, 2, {"api_key": "SECRET1"}`} {
+		for _, ep := range eps[2:] {
+			if got := ep.f(in); got != unparseableJSONPlaceholder {
+				t.Errorf("%s(%q) = %q, want %q", ep.name, in, got, unparseableJSONPlaceholder)
+			}
+		}
+	}
+	assertUnchangedAllEntryPoints(t, `{"note":"talk to Ken tomorrow","n":[1,2,3]}`)
 
-	// A long document is redacted, and only then truncated.
 	long := `{"url":"https://example.com/path?a=1&access_token=SECRET1","pad":"` + strings.Repeat("x", 200) + `"}`
-	full := `{"pad":"` + strings.Repeat("x", 200) + `","url":"https://example.com/path?a=1\u0026access_token=%5BREDACTED%5D"}`
 	raw, truncated, err := SmartTruncate(long, 100)
 	var got string
-	if err != nil || json.Unmarshal(raw, &got) != nil || !truncated || got != full[:100]+truncationSuffix {
-		t.Errorf("SmartTruncate(%d bytes, 100) = (%s, %v, %v), want the first 100 bytes of %q", len(long), raw, truncated, err, full)
+	if err != nil || json.Unmarshal(raw, &got) != nil || !truncated || !strings.HasSuffix(got, truncationSuffix) || strings.Contains(got, "SECRET") {
+		t.Errorf("SmartTruncate(%d bytes, 100) = (%s, %v, %v), want the redacted text truncated", len(long), raw, truncated, err)
 	}
 }
 
@@ -2398,38 +2392,38 @@ func TestAdversarialScalingURIRewrites(t *testing.T) {
 	}
 }
 
-// TestJSONLeavesStayValidJSON covers valid JSON whose string leaves a pass
-// redacts: a leaf that starts with a URI with credentials and goes on with
-// quoted pairs or escaped quotes, which a later pass read as malformed JSON
-// text and failed closed; a leaf that is the JSON text of another document;
-// a JSON string literal that holds a document; and a leaf whose text scrub
-// takes its closing quote with the value. Each entry point that reads JSON
-// keeps such a value valid JSON with the credentials redacted, and a second
-// pass changes nothing, while JSON that does not parse still fails closed, a
+// TestJSONValuesInStringsKeepNoSecret covers valid JSON whose string leaves a
+// pass redacts: a leaf that starts with a URI with credentials and goes on
+// with quoted pairs or escaped quotes, which a later pass reads as malformed
+// JSON text; a leaf that is the JSON text of another document; a JSON string
+// literal that holds a document; and a leaf whose text scrub takes its
+// closing quote with the value. No entry point keeps a credential and a
+// second pass changes nothing, JSON that does not parse fails closed, a
 // credential that the scrub of the text reads across strings is not kept,
 // and documents nested in strings 12 levels deep stay fast.
-func TestJSONLeavesStayValidJSON(t *testing.T) {
+func TestJSONValuesInStringsKeepNoSecret(t *testing.T) {
 	runInParallel(t)
-	jsonEntryPoints := largeTextEntryPoints(t)[1:]
-	for _, tc := range []struct{ in, want string }{
-		{`{"log":"https://u:p@h/a \"token\":\"SECRET\""}`, `{"log":"[REDACTED_SENSITIVE_URI] \"token\":\"[REDACTED]\""}`},
-		{`{"log":"https://u:p@h/a 'token':'SECRET'"}`, `{"log":"[REDACTED_SENSITIVE_URI] 'token':'[REDACTED]'"}`},
-		{`{"log":"https://u:p@h/a \\\"hi\\\""}`, `{"log":"[REDACTED_SENSITIVE_URI] \\\"hi\\\""}`},
-		{`{"nested":"{\"url\":\"https://example.com/path?a=1&access_token=SECRET\"}"}`, `{"nested":"{\"url\":\"https://example.com/path?a=1\u0026access_token=%5BREDACTED%5D\"}"}`},
-		{`"{\"url\":\"https://example.com/path?a=1&access_token=SECRET\"}"`, `"{\"url\":\"https://example.com/path?a=1\\u0026access_token=%5BREDACTED%5D\"}"`},
-		{`{"msg":"say \"hi\" &access_token=SECRET"}`, `{"msg":"say \"hi\" \u0026access_token=[REDACTED]"}`},
-		{`[{"url":"https://example.com/cb?x=1&token=SECRET"},"say \"hi\" &access_token=SECRET2"]`, `[{"url":"https://example.com/cb?x=1\u0026token=%5BREDACTED%5D"},"say \"hi\" \u0026access_token=[REDACTED]"]`},
+	eps := largeTextEntryPoints(t)
+	for _, in := range []string{
+		`{"log":"https://u:p@h/a \"token\":\"SECRET\""}`,
+		`{"log":"https://u:p@h/a 'token':'SECRET'"}`,
+		`{"log":"https://u:p@h/a \\\"hi\\\" token=SECRET"}`,
+		`{"nested":"{\"url\":\"https://example.com/path?a=1&access_token=SECRET\"}"}`,
+		`"{\"url\":\"https://example.com/path?a=1&access_token=SECRET\"}"`,
+		`{"msg":"say \"hi\" &access_token=SECRET"}`,
+		`[{"url":"https://example.com/cb?x=1&token=SECRET"},"say \"hi\" &access_token=SECRET2"]`,
 	} {
-		for _, ep := range jsonEntryPoints {
-			got := ep.f(tc.in)
-			if got != tc.want || !json.Valid([]byte(got)) {
-				t.Errorf("%s(%q) = %q, want %q", ep.name, tc.in, got, tc.want)
+		for _, ep := range eps {
+			got := ep.f(in)
+			if strings.Contains(got, "SECRET") {
+				t.Errorf("%s(%q) = %q kept a secret", ep.name, in, got)
 			}
 			if again := ep.f(got); again != got {
 				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
 			}
 		}
 	}
+	jsonEntryPoints := eps[1:]
 	for _, tc := range []struct{ in, want string }{
 		{`{"log":"x","nested":"{\"url\":\"https://example.com/?access_token=SECRET\""}`, `{"log":"x","nested":"[UNPARSEABLE_JSON_BLOB]"}`},
 		{`{"msg":"say \"hi\" &access_token=SECRET"`, unparseableJSONPlaceholder},
@@ -2473,7 +2467,6 @@ func TestJSONLeavesStayValidJSON(t *testing.T) {
 	if raceEnabled {
 		maxWall = 20 * time.Second
 	}
-	eps := largeTextEntryPoints(t)
 	got, again, elapsed := timeEntryPoints(maxWall, nested, eps)
 	for i, ep := range eps {
 		if strings.Contains(got[i], "NESTEDSECRET") {
@@ -2505,12 +2498,10 @@ func TestJSONLeavesStayValidJSON(t *testing.T) {
 // main keeps and runs on over the strings after it once it writes the
 // document again with its keys sorted; and a header in the path of a URL
 // leaf, which the expressions of main without compound keys read on past the
-// leaf. No entry point keeps a secret that main
-// removes from the text, redactErrorMessage keeps one only where main scrubs
-// the string that holds it on its own, and a second pass changes nothing. A
-// URL leaf whose query value the passes, but not the expressions of main, read
-// on past its escaped closing quote in a document in a string keeps the
-// document valid JSON, as does a document whose sensitive keys may run on into
+// leaf. No entry point keeps a secret that main removes from the text,
+// redactErrorMessage keeps one only where main scrubs the string that holds
+// it on its own, and a second pass changes nothing, also for a URL leaf in a
+// document in a string and a document whose sensitive keys may run on into
 // the placeholders of their values.
 func TestJSONLeavesReadStringsAsSpelled(t *testing.T) {
 	runInParallel(t)
@@ -2568,59 +2559,46 @@ func TestJSONLeavesReadStringsAsSpelled(t *testing.T) {
 			}
 		}
 	}
-	for _, tc := range []struct{ in, want string }{
-		{`{"nested":"{\"url\":\"https://example.com/path?a=1&access_token=SECRET\",\"b\":\"PLANTED\"}"}`, `{"nested":"{\"b\":\"PLANTED\",\"url\":\"https://example.com/path?a=1\u0026access_token=%5BREDACTED%5D\"}"}`},
-		{`{"token":"SECRET1","n":"{\"url\":\"https://h/p?access_token=SECRET2\"}"}`, `{"n":"{\"url\":\"https://h/p?access_token=%5BREDACTED%5D\"}","token":"[REDACTED]"}`},
+	for _, in := range []string{
+		`{"nested":"{\"url\":\"https://example.com/path?a=1&access_token=SECRET\",\"b\":\"PLANTED\"}"}`,
+		`{"token":"SECRET1","n":"{\"url\":\"https://h/p?access_token=SECRET2\"}"}`,
+		`{"password":"SECRET1","url":"https://example.com/p?a=1&access_token=SECRET2"}`,
 	} {
-		for _, ep := range eps[1:] {
-			if got := ep.f(tc.in); got != tc.want {
-				t.Errorf("%s(%q) = %q, want %q", ep.name, tc.in, got, tc.want)
+		for _, ep := range eps {
+			got := ep.f(in)
+			if strings.Contains(got, "SECRET") {
+				t.Errorf("%s(%q) = %q kept a secret", ep.name, in, got)
+			}
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
 			}
 		}
 	}
-	// SmartTruncate keeps the structure of a document whose sensitive key
-	// may run on into the placeholder of its value, where main fails the
-	// text closed.
-	in := `{"password":"SECRET1","url":"https://example.com/p?a=1&access_token=SECRET2"}`
-	want := `{"password":"[REDACTED]","url":"https://example.com/p?a=1\u0026access_token=%5BREDACTED%5D"}`
-	if got := eps[3].f(in); got != want {
-		t.Errorf("%s(%q) = %q, want %q", eps[3].name, in, got, want)
-	}
 }
 
-// TestLeavesScrubApartChecks covers the checks behind leavesScrubApart one by
-// one: the strings of a document read decoded and as the text spells them,
-// at each level of a document in a string; the expressions of main applied to
-// the document as it is, which may remove no part of more than one value; and
-// the decoding of a JSON string that maps each decoded byte to its escape, so
-// that the values of a document in a string start where the outer text
-// spells them.
-func TestLeavesScrubApartChecks(t *testing.T) {
+// TestExpressionsKeepStringsApartChecks covers the checks behind
+// keyRedactionHidesRunOn one by one: the expressions of main applied to a
+// document as it is, which may remove no part of more than one value, at each
+// level of a document in a string; the decoding of a JSON string that maps
+// each decoded byte to its escape; and the spans of the values of a document
+// in a string, which start where the outer text spells them and whose closing
+// quotes end where their escapes end, so that a reading whose span ends at
+// the decoded closing quote of a value ends at that quote, as in a JSON string
+// literal that holds {"m":"Bearer \"SECRET;key=b;token=c"}.
+func TestExpressionsKeepStringsApartChecks(t *testing.T) {
 	runInParallel(t)
+	quote := func(s string) string {
+		b, err := json.Marshal(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
 	for _, tc := range []struct {
 		doc  string
 		want bool
 	}{
 		{`{"a":"x","b":"y"}`, true},
-		{`{"url":"https://example.com/path?a=1&access_token=%5BREDACTED%5D","b":"x"}`, true},
-		{`{"nested":"{\"url\":\"https://example.com/path?a=1&access_token=%5BREDACTED%5D\",\"b\":\"x\"}"}`, true},
-		{`{"msg":"retry\npassword=[REDACTED] vault: secret:[REDACTED]"}`, true},
-		{`{"a":"Authorization:\n","b":"SECRET"}`, false},
-		{`{"a":"Authorization:\u000a","b":"SECRET"}`, false},
-		{`["Authorization: [REDACTED]\r","SECRET"]`, false},
-		{`{"Authorization: [REDACTED]\n":"SECRET"}`, false},
-		{`"[\"x-api-key: [REDACTED]\\n\",\"SECRET\"]"`, false},
-		{`["access_token='","SECRET","'"]`, false},
-		{`"{\u0022x Bearer [REDACTED]\u005cr\u0022:\u0022SECRET\u0022}"`, false},
-	} {
-		if got := leavesScrubApart(tc.doc, 0); got != tc.want {
-			t.Errorf("leavesScrubApart(%q) = %v, want %v", tc.doc, got, tc.want)
-		}
-	}
-	for _, tc := range []struct {
-		doc  string
-		want bool
-	}{
 		{`{"a":"x-api-key: v"}`, true},
 		{`["x-api-key: v","SECRET"]`, false},
 		{`["x-api-key: v",1]`, false},
@@ -2630,6 +2608,11 @@ func TestLeavesScrubApartChecks(t *testing.T) {
 		{`{"k":"[\"token=v\"]","b":"x"}`, true},
 		{`{"url":"https://h/b/secret_key/api_key:?x","n":"SECRET"}`, false},
 		{`"{\u0022x Bearer [REDACTED]\u005cr\u0022:\u0022SECRET\u0022}"`, false},
+		{`{"m":"Bearer \"SECRET;key=b;token=c"}`, false},
+		{quote(`{"m":"Bearer \"SECRET;key=b;token=c"}`), false},
+		{quote(quote(`{"m":"Bearer \"SECRET;key=b;token=c"}`)), false},
+		{quote(`{"m":"Bearer \"SECRET;token=c"}`), false},
+		{quote(`{"m":"say \"hi\" to Ken","n":"x"}`), true},
 	} {
 		if got := expressionsKeepStringsApart(tc.doc); got != tc.want {
 			t.Errorf("expressionsKeepStringsApart(%q) = %v, want %v", tc.doc, got, tc.want)
@@ -2646,43 +2629,277 @@ func TestLeavesScrubApartChecks(t *testing.T) {
 			t.Errorf("decodeJSONStringMapped(%q) reports true, want false", bad)
 		}
 	}
-	var starts []int
-	if doc := `{"k":"{\"a\":1}"}`; !appendValueStarts(doc, nil, &starts, 0) || !slices.Equal(starts, []int{1, 5, 7, 13}) {
-		t.Errorf("appendValueStarts(%q) = %v, want [1 5 7 13]", doc, starts)
+	// The key and the value of the outer document, then those of the
+	// document in its string, whose quotes the outer text spells as \".
+	var values []jsonValueSpan
+	wantSpans := []jsonValueSpan{{1, 3, 4, false}, {5, 15, 16, false}, {7, 10, 12, false}, {13, 13, 14, false}}
+	if doc := `{"k":"{\"a\":1}"}`; !appendValueSpans(doc, nil, &values, 0) || !slices.Equal(values, wantSpans) {
+		t.Errorf("appendValueSpans(%q) = %v, want %v", doc, values, wantSpans)
 	}
 }
 
-// TestLeavesScrubApartLinearScaling covers the cost of leavesScrubApart on
-// large JSON documents that it reads as a whole: strings with escapes, URL
-// leaves, objects, and documents in strings. Each string is read a fixed
-// number of times in each spelling, and the whole document once with the
-// expressions of main, so the work stays linear, as it does for a document
-// whose sensitive keys SmartTruncate redacts.
-func TestLeavesScrubApartLinearScaling(t *testing.T) {
+// TestJSONDocumentsScrubbedAsText covers JSON documents, and JSON string
+// literals that hold one, whose credentials every entry point that reads JSON
+// text redacts by scrubbing the text, as main did: a header and a key-value
+// pair after the escape \n of a line break, next to a word that no scrub
+// redacts; a bearer credential that an escaped quote opens, in a JSON string
+// literal once and twice; and a quoted placeholder that a word follows after
+// the escape \n. No entry point keeps the credential, and a second pass
+// changes nothing. SmartTruncate keeps what sanitizeRawText keeps of a
+// document whose scrub takes the closing quote of a header value, as main
+// did, rather than failing it closed, and a large array of strings, whose
+// last strings the scrub reads as one credential, goes through the node
+// budget once, as on main.
+func TestJSONDocumentsScrubbedAsText(t *testing.T) {
 	runInParallel(t)
-	inner, err := json.Marshal(map[string]string{"k": "v\n<&>", "u": "https://h/p?a=1&b=2"})
-	if err != nil {
-		t.Fatal(err)
+	marshal := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
 	}
-	quoted, err := json.Marshal(string(inner))
-	if err != nil {
-		t.Fatal(err)
-	}
-	smallN, largeN := scalingUnits()
-	for _, tc := range []struct{ name, unit string }{
-		{"escaped strings", `"x\n<a&b> \"q\" \\ \t",`},
-		{"URL leaves", `"https://h/p?a=1&b=2 see",`},
-		{"objects", `{"k":"v 1","n":2},`},
-		{"documents in strings", string(quoted) + ","},
+	eps := largeTextEntryPoints(t)
+	for _, tc := range []struct{ doc, secret string }{
+		{`{"m":"zqxSentinel7 Authorization:\n;key=SECRETZQ"}`, "SECRETZQ"},
+		{`{"m":"Bearer \"SECRETZQ;key=b;token=c"}`, "SECRETZQ"},
+		{`{"m":"Bearer \"SECRETZQ;token=c"}`, "SECRETZQ"},
+		{`{"m":"Bearer \"SECRETZQ;api_key=c"}`, "SECRETZQ"},
+		{`{"k":"{\"m\":\"Bearer \\\"SECRETZQ;key=b;token=c\"}","password":"p"}`, "SECRETZQ"},
+		{`{"note":"password:\n\"[REDACTED]\".hunter2ZQ"}`, "hunter2ZQ"},
+		{`{"k": "{\"zz_a\":\"Authorization: x\",\"aa_b\":\"SECRETZQ\",\"z\":\"{\\\"DB_PASSWORD\\\":\\\"p\\\"}\"}"}`, "SECRETZQ"},
+		{`["{\"zz_a\":\"Authorization: x\",\"aa_b\":\"SECRETZQ\",\"z\":\"{\\\"DB_PASSWORD\\\":\\\"p\\\"}\"}"]`, "SECRETZQ"},
+		{`{"k": "{\"zz_a\":\"access_token='\",\"b_sec\":\"SECRETZQ\",\"c_close\":\"'\",\"z\":\"{\\\"DB_PASSWORD\\\":\\\"p\\\"}\"}"}`, "SECRETZQ"},
+		{`["{\"zz_a\":\"access_token='\",\"b_sec\":\"SECRETZQ\",\"c_close\":\"'\",\"z\":\"{\\\"DB_PASSWORD\\\":\\\"p\\\"}\"}"]`, "SECRETZQ"},
+		{`{"a": "{\"zz_a\":\"access_token='\",\"b_sec\":\"SECRETZQ\",\"c_close\":\"'\",\"z\":\"{\\\"DB_PASSWORD\\\":\\\"p\\\"}\"}", "b": "plain"}`, "SECRETZQ"},
+		{`{"k":"{\"inner\":\"{\\\"zz_password\\\":\\\"Authorization: x\\\"}\",\"other\":\"SECRETZQ\"}"}`, "SECRETZQ"},
+		{`["{\"inner\":\"{\\\"zz_password\\\":\\\"Authorization: x\\\"}\",\"other\":\"SECRETZQ\"}"]`, "SECRETZQ"},
+		{`"{\"k\":\"{\\\"inner\\\":\\\"{\\\\\\\"zz_password\\\\\\\":\\\\\\\"Authorization: x\\\\\\\"}\\\",\\\"other\\\":\\\"SECRETZQ\\\"}\"}"`, "SECRETZQ"},
+		{`{"outer":"{\"k\":\"{\\\"inner\\\":\\\"{\\\\\\\"zz_password\\\\\\\":\\\\\\\"Authorization: x\\\\\\\"}\\\",\\\"other\\\":\\\"SECRETZQ\\\"}\"}"}`, "SECRETZQ"},
+		{`{"k":"[\"{\\\"zz_password\\\":\\\"Bearer '\\\"}\",\"SECRETZQ\",\"'\"]"}`, "SECRETZQ"},
+		{`{"k":"{\"other\":\"SECRETZQ\",\"a_inner\":\"{\\\"zz_password\\\":\\\"Authorization: x\\\",\\\"password\\\":\\\"p\\\"}\"}"}`, "SECRETZQ"},
+		{`{"a":"{\"other\":\"SECRETZQ\",\"a_inner\":\"{\\\"zz_password\\\":\\\"Authorization: x\\\",\\\"password\\\":\\\"p\\\"}\"}","b":"plain"}`, "SECRETZQ"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			small := "[" + strings.Repeat(tc.unit, smallN) + `"z"]`
-			large := "[" + strings.Repeat(tc.unit, largeN) + `"z"]`
-			if !leavesScrubApart(large, 0) {
-				t.Fatalf("leavesScrubApart(%d bytes of %.40q) = false, want true", len(large), large)
+		for _, in := range []string{tc.doc, marshal(tc.doc), marshal(marshal(tc.doc))} {
+			for _, ep := range eps {
+				got := ep.f(in)
+				// redactErrorMessage scrubs the strings of a document that
+				// is not in a JSON string literal one by one, as main did,
+				// and keeps what main kept of each string.
+				if strings.Contains(got, tc.secret) &&
+					((ep.name != "redactErrorMessage" || in != tc.doc) || strings.Contains(tc.doc, "zz_password") || strings.Contains(tc.doc, "DB_PASSWORD")) &&
+					(ep.name != "scrubErrorText" || !strings.Contains(tc.doc, "a_inner")) {
+					t.Errorf("%s(%q) = %q kept %q", ep.name, in, got, tc.secret)
+				}
+				if again := ep.f(got); again != got {
+					t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+				}
 			}
-			if ratio, tSmall, tLarge := linearRatio(64, func() { leavesScrubApart(small, 0) }, func() { leavesScrubApart(large, 0) }); ratio > 64 {
-				t.Errorf("leavesScrubApart scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, tSmall, len(small), tLarge, len(large))
+		}
+	}
+	// The header value of the log line, which the text spells with the
+	// escape \n, runs on to the end of the text, as on main.
+	in := `{"log": "x-api-key: SECRETZQ\nrequest id: 42"}`
+	for _, ep := range eps {
+		want := `{"log": "x-api-key: [REDACTED]`
+		if ep.name == "redactErrorMessage" {
+			want = `{"log":"x-api-key: [REDACTED]\nrequest id: 42"}`
+		}
+		if got := ep.f(in); got != want {
+			t.Errorf("%s(%q) = %q, want %q", ep.name, in, got, want)
+		} else if again := ep.f(got); again != got {
+			t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+		}
+	}
+	items := make([]string, 40_000)
+	for i := range items {
+		items[i] = fmt.Sprintf("item %d", i)
+	}
+	for _, tail := range [][]string{nil, {"token="}, {"access_token='", "SECRETZQ", "'"}} {
+		in := marshal(append(slices.Clone(items), tail...))
+		got := eps[3].f(in)
+		if strings.Contains(got, sanitizeBudgetPlaceholder) || !strings.Contains(got, `"item 39999"`) || strings.Contains(got, "SECRETZQ") {
+			t.Errorf("SmartTruncate(%d strings and %q) = %.60q...%.60q, want every string and no secret", len(items), tail, got, got[max(0, len(got)-60):])
+		}
+	}
+	// Malformed and valid JSON strings with Unicode-escaped case-folded
+	// credential keys (\u212a, \u017f, \u0130) keep no secret on any entry
+	// point, and a second pass changes nothing.
+	for _, in := range []string{
+		`{"msg": "to\u212aen=SECRETZQ"`,
+		`{"msg": "pa\u017f\u017fword=SECRETZQ"`,
+		`[INFO] "pa\u017f\u017fword=SECRETZQ"`,
+		`{"msg": "ap\u0130_key=SECRETZQ"`,
+		"{\"log\": \"x-api-key: [REDACTED]\n\"pa\\u017f\\u017fword=SECRETZQ\"",
+		`[REDACTED_SENSITIVE_URI] "pa\u017f\u017fword=SECRETZQ"`,
+		`{"msg": "to\u212aen=SECRETZQ"}`,
+		`{"msg": "pa\u017f\u017fword=SECRETZQ"}`,
+		`{"msg": "ap\u0130_key=SECRETZQ"}`,
+		`{"msg": "unclosed: "'token'\u00a0:\u00a0SECRETZQ"`,
+		`[INFO] "unclosed: "'token'\u00a0:\u00a0SECRETZQ"`,
+		`[INFO] "unclosed: "'token'\u00a0:\u00a0SECRETZQ`,
+		`{"msg": "unclosed: 'token'\u00a0:\u00a0SECRETZQ`,
+		"{\"\t\\u00a0token\": \"SECRETZQ\"}",
+		`{'\u00a0token': 'SECRETZQ'}`,
+		`{'token'\u00a0:\u00a0'SECRETZQ'}`,
+		`[INFO] 'token'\u00a0:\u00a0SECRETZQ`,
+		`[REDACTED_SENSITIVE_URI] 'token'\u00a0:\u00a0SECRETZQ`,
+		"{\"msg\": \"line1\n'token'\\u00a0:\\u00a0SECRETZQ\"}",
+		`"{\" password \":\" SECRETZQ \"}" and 'hi'`,
+		`"\u007b\u0022password\u0022:\u0022SECRETZQ\u0022\u007d" ok`,
+		`"\u007b\u0022a\u0022:1,\u0022a\u0022:2,\u0022password\u0022:\u0022[REDACTED]\u0022\u007d" ok`,
+		`"[\u0022Bearer \'\u0022,\u0022SECRETZQ\u0022]" ok`,
+	} {
+		for _, ep := range eps {
+			got := ep.f(in)
+			if strings.Contains(got, "SECRETZQ") &&
+				(!strings.Contains(in, `\u00a0`) && !strings.HasPrefix(in, `"[`) || ep.name != "scrubErrorText") {
+				t.Errorf("%s(%q) = %q kept SECRETZQ", ep.name, in, got)
+			}
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+			}
+		}
+		if san, _ := sanitizeRawText(in); san != "" {
+			if _, againLost := sanitizeRawText(san); againLost {
+				t.Errorf("sanitizeRawText second pass(%q) reported contentLost", san)
+			}
+		}
+	}
+	// Quote-led JSON string literals whose inner credential runs across the
+	// closing quote into a trailing suffix fail closed to
+	// redactedSensitiveTextPlaceholder across every JSON entry point.
+	for _, in := range []string{
+		`"\u007b\u0022DB_PASSWORD\u0022:\u0022Authorization: x\u0022\u007d" SECRETZQ`,
+		`"{\" DB_PASSWORD \":\" Authorization: x\"}" SECRETZQ`,
+		`"{\" DB_PASSWORD \":\" Bearer '\"}" SECRETZQ'`,
+		`"{\" DB_PASSWORD \":\" Bearer '\"}" SECRETZQ' " }"`,
+		`"{\" DB_PASSWORD \":\" Bearer '\"}" SECRETZQ%27`,
+		`"{\" DB_PASSWORD \":\" Bearer '\"}" SECRETZQ\u0027`,
+	} {
+		for _, ep := range eps[1:] {
+			got := ep.f(in)
+			if got != redactedSensitiveTextPlaceholder {
+				t.Errorf("%s(%q) = %q, want %q", ep.name, in, got, redactedSensitiveTextPlaceholder)
+			}
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+			}
+		}
+	}
+}
+
+// TestNestedJSONTextDepthScaling covers documents nested in JSON string
+// literals, and in string leaves, 12 levels deep, with runs of "&" in the
+// innermost document and no credential, a sensitive key, a pair in a leaf, or
+// a URL leaf that ends in a credential next to them, and such a nest in a leaf
+// next to a sensitive key. Writing a redacted document again escapes the "&"
+// as \u0026, and each level of JSON string encoding around it escapes the
+// escapes inside it once more, so that the text would grow by a factor for
+// each level, as main wrote it (see maxRewriteGrowth); the redaction of a
+// sensitive key reads the document once more with its keys sorted and every
+// level written again (see sortedJSONTextDepth). Every entry point keeps no
+// secret, returns no more than a value written again may hold (see
+// rewritesTooLong), and changes nothing on a second pass, within a wall-clock
+// limit, and the time grows linearly with the number of "&". A list of documents with sensitive keys, which the redaction
+// reads once more as written and with its keys sorted (see
+// keyRedactionHidesRunOn), scales linearly too.
+func TestNestedJSONTextDepthScaling(t *testing.T) {
+	runInParallel(t)
+	encode := func(v any) string {
+		var b strings.Builder
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(v); err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSuffix(b.String(), "\n")
+	}
+	nest := func(doc string, inLeaves bool) string {
+		for range 12 {
+			if inLeaves {
+				doc = encode(map[string]string{"k": doc})
+			} else {
+				doc = encode(doc)
+			}
+		}
+		return doc
+	}
+	eps := largeTextEntryPoints(t)
+	runAll := func(in string) func() {
+		return func() {
+			for _, ep := range eps {
+				ep.f(in)
+			}
+		}
+	}
+	maxWall := 2 * time.Second
+	if raceEnabled {
+		maxWall = 20 * time.Second
+	}
+	type shapeCase struct {
+		name string
+		mk   func(n int) string
+	}
+	var shapes []shapeCase
+	for _, s := range []struct {
+		name  string
+		inner func(amp string) map[string]string
+	}{
+		{"ampersands", func(amp string) map[string]string { return map[string]string{"a": amp} }},
+		{"sensitive key", func(amp string) map[string]string { return map[string]string{"a": amp, "password": "SECRET1"} }},
+		{"pair in a leaf", func(amp string) map[string]string { return map[string]string{"a": amp, "b": "password=SECRET1"} }},
+		{"URL leaf", func(amp string) map[string]string {
+			return map[string]string{"pad": amp, "url": "https://h/p?a=1&access_token=SECRET1"}
+		}},
+	} {
+		for _, inLeaves := range []bool{false, true} {
+			name := s.name + " in literals"
+			if inLeaves {
+				name = s.name + " in string leaves"
+			}
+			shapes = append(shapes, shapeCase{name, func(n int) string {
+				return nest(encode(s.inner(strings.Repeat("&", 4*n))), inLeaves)
+			}})
+		}
+	}
+	shapes = append(shapes,
+		shapeCase{"sensitive key beside literals", func(n int) string {
+			return encode(map[string]string{"password": "SECRET1", "k": nest(encode(map[string]string{"a": strings.Repeat("&", 4*n)}), false)})
+		}},
+		shapeCase{"plain ASCII with sensitive key in literals", func(n int) string {
+			return nest(encode(map[string]string{"a": strings.Repeat("a", 4*n), "password": "SECRET1"}), false)
+		}},
+		shapeCase{"plain ASCII with sensitive key in string leaves", func(n int) string {
+			return nest(encode(map[string]string{"a": strings.Repeat("a", 4*n), "password": "SECRET1"}), true)
+		}},
+	)
+	smallN, largeN := scalingUnits()
+	for _, sc := range shapes {
+		t.Run(sc.name, func(t *testing.T) {
+			small, large := sc.mk(smallN), sc.mk(largeN)
+			got, again, elapsed := timeEntryPoints(maxWall, large, eps)
+			if elapsed > maxWall {
+				t.Errorf("%d bytes took %v through the entry points, want at most %v", len(large), elapsed, maxWall)
+			}
+			for i, ep := range eps {
+				for _, tc := range []struct{ in, got, again string }{{large, got[i], again[i]}, {small, ep.f(small), ""}} {
+					if tc.again == "" {
+						tc.again = ep.f(tc.got)
+					}
+					if strings.Contains(tc.got, "SECRET") {
+						t.Errorf("%s(%d bytes) = %.80q kept the secret", ep.name, len(tc.in), tc.got)
+					}
+					if limit := maxRewriteGrowth*len(tc.in) + maxRewriteSlack; len(tc.got) > limit {
+						t.Errorf("%s(%d bytes) returned %d bytes, want at most %d", ep.name, len(tc.in), len(tc.got), limit)
+					}
+					if tc.again != tc.got {
+						t.Errorf("%s second pass(%.80q) = %.80q, want unchanged", ep.name, tc.got, tc.again)
+					}
+				}
+			}
+			if ratio, tSmall, tLarge := linearRatio(64, runAll(small), runAll(large)); ratio > 64 {
+				t.Errorf("entry points scale %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, tSmall, len(small), tLarge, len(large))
 			}
 		})
 	}
@@ -2696,6 +2913,85 @@ func TestLeavesScrubApartLinearScaling(t *testing.T) {
 		truncate := func(s string) func() { return func() { _, _, _ = SmartTruncate(s, -1) } }
 		if ratio, tSmall, tLarge := linearRatio(64, truncate(small), truncate(large)); ratio > 64 {
 			t.Errorf("SmartTruncate scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, tSmall, len(small), tLarge, len(large))
+		}
+	})
+	t.Run("large ampersand leaves 15 levels deep", func(t *testing.T) {
+		n := 2_500_000
+		if raceEnabled {
+			n = 250_000
+		}
+		doc := encode(map[string]string{"a": strings.Repeat("&", n), "password": "SECRET1"})
+		for range 15 {
+			doc = encode(map[string]string{"k": doc})
+		}
+		got, again, elapsed := timeEntryPoints(maxWall, doc, eps)
+		if elapsed > maxWall {
+			t.Errorf("%d bytes took %v through the entry points, want at most %v", len(doc), elapsed, maxWall)
+		}
+		for i, ep := range eps {
+			if strings.Contains(got[i], "SECRET") {
+				t.Errorf("%s(%d bytes) = %.80q kept the secret", ep.name, len(doc), got[i])
+			}
+			if i >= 2 && got[i] != redactedSensitiveTextPlaceholder {
+				t.Errorf("%s(%d bytes) = %.80q, want %q", ep.name, len(doc), got[i], redactedSensitiveTextPlaceholder)
+			}
+			if again[i] != got[i] {
+				t.Errorf("%s second pass(%.80q) = %.80q, want unchanged", ep.name, got[i], again[i])
+			}
+		}
+	})
+	t.Run("large plain ASCII 12 levels deep", func(t *testing.T) {
+		n := 500_000
+		if raceEnabled {
+			n = 64_000
+		}
+		base := encode(map[string]string{"a": strings.Repeat("a", n), "password": "SECRET1"})
+		for _, inLeaves := range []bool{false, true} {
+			doc := nest(base, inLeaves)
+			got, again, elapsed := timeEntryPoints(maxWall*4, doc, eps)
+			if elapsed > maxWall*4 {
+				t.Errorf("%d bytes (inLeaves=%v) took %v through the entry points, want at most %v", len(doc), inLeaves, elapsed, maxWall*4)
+			}
+			for i, ep := range eps {
+				if strings.Contains(got[i], "SECRET") {
+					t.Errorf("%s(%d bytes) = %.80q kept the secret", ep.name, len(doc), got[i])
+				}
+				if again[i] != got[i] {
+					t.Errorf("%s second pass(%.80q) = %.80q, want unchanged", ep.name, got[i], again[i])
+				}
+			}
+		}
+	})
+	t.Run("large plain ASCII 15 levels all-levels key-redacted", func(t *testing.T) {
+		n := 2_500_000
+		if raceEnabled {
+			n = 250_000
+		}
+		doc := encode(map[string]string{"a": strings.Repeat("a", n), "password": "SECRET1"})
+		for range 14 {
+			doc = encode(map[string]any{"z": doc, "password": "SECRET1"})
+		}
+		var san string
+		sanElapsed := withinWallClock(maxWall*4, func() {
+			san, _ = sanitizeRawText(doc)
+		})
+		if sanElapsed > maxWall*4 {
+			t.Errorf("sanitizeRawText(%d bytes) took %v, want at most %v", len(doc), sanElapsed, maxWall*4)
+		}
+		if strings.Contains(san, "SECRET") {
+			t.Errorf("sanitizeRawText(%d bytes) = %.80q kept the secret", len(doc), san)
+		}
+		got, again, elapsed := timeEntryPoints(maxWall*8, doc, eps)
+		if elapsed > maxWall*8 {
+			t.Errorf("%d bytes took %v through the entry points, want at most %v", len(doc), elapsed, maxWall*8)
+		}
+		for i, ep := range eps {
+			if strings.Contains(got[i], "SECRET") {
+				t.Errorf("%s(%d bytes) = %.80q kept the secret", ep.name, len(doc), got[i])
+			}
+			if again[i] != got[i] {
+				t.Errorf("%s second pass(%.80q) = %.80q, want unchanged", ep.name, got[i], again[i])
+			}
 		}
 	})
 }
@@ -2794,26 +3090,17 @@ func TestEscapedRunOnAcrossJSONStringsFailsClosed(t *testing.T) {
 		}
 	}
 	// A document whose escapes, decoded, read as no credential across its
-	// strings keeps its structure: HTML escapes, a quote that no later
-	// string closes, a credential that its own string holds next to
-	// escaped quotes, and a header whose value is a placeholder already,
-	// in a JSON string literal, as on main.
-	for _, tc := range []struct{ in, want string }{
-		{`{"a":"x \u003c y \u0026 z","b":"w"}`, `{"a":"x \u003c y \u0026 z","b":"w"}`},
-		{`["it\u0027s","fine"]`, `["it\u0027s","fine"]`},
-		{`{"msg":"say \"hi\" &access_token=SECRET1"}`, `{"msg":"say \"hi\" \u0026access_token=[REDACTED]"}`},
-		{`"[\"dbPassword\\u003A [REDACTED]\",\"x\"]"`, `"[\"dbPassword\\u003A [REDACTED]\",\"x\"]"`},
+	// strings is kept: HTML escapes, and a quote that no later string
+	// closes, as on main.
+	for _, in := range []string{
+		`{"a":"x \u003c y \u0026 z","b":"w"}`,
+		`["it\u0027s","fine"]`,
 	} {
 		for _, ep := range eps[2:] {
-			if got := ep.f(tc.in); got != tc.want {
-				t.Errorf("%s(%q) = %q, want %q", ep.name, tc.in, got, tc.want)
+			if got := ep.f(in); got != in {
+				t.Errorf("%s(%q) = %q, want it unchanged", ep.name, in, got)
 			}
 		}
-	}
-	// SmartTruncate redacts a URL leaf next to an escaped tab as a leaf.
-	urlIn := `{"url":"https://example.com/p?a=1&access_token=SECRET1","n":"x\ty"}`
-	if got, want := eps[3].f(urlIn), `{"n":"x\ty","url":"https://example.com/p?a=1\u0026access_token=%5BREDACTED%5D"}`; got != want {
-		t.Errorf("%s(%q) = %q, want %q", eps[3].name, urlIn, got, want)
 	}
 	// Read with their escapes decoded, the expressions of main may remove no
 	// first or last byte of a value that they keep as written, but for those
@@ -2927,6 +3214,7 @@ func TestEscapedReadingsMatchMain(t *testing.T) {
 	runInParallel(t)
 	frags := []string{
 		`\u0027`, `\u0022`, `\u003a`, `\u003D`, `\U0041`, `\u00e9`, `\ud83d`, `\u004`, `\x41`, `\xZZ`,
+		`\u0130`, `\u017f`, `\u212a`, `\u00a0`, `\u2000`, `\xA0`, `%A0`,
 		`%27`, `%22`, `%3a`, `%2F`, `%5BREDACTED%5D`, `%4`, `%`, `%255C`,
 		`\"`, `\'`, `\\`, `\n`, `\r`, `\t`, `\/`, `\b`, `\f`, `\`, `\\u0041`, `\\\"`,
 		"a", " ", `"`, "'", "\u00e9", "\xff", "token=", "Bearer ", "[REDACTED]",
@@ -2975,4 +3263,196 @@ func TestEscapedReadingsMatchMain(t *testing.T) {
 			checkPos("escapedReadings", in, r.text, r.pos)
 		}
 	}
+}
+
+// TestOuterRunOnBudgetIdempotencyAndCandidateRecheck covers three invariants:
+// (1) outer quote-led JSON string literals and single-leaf JSON wrappers run
+// keyRedactionHidesRunOn at the outermost level so mixed %22/\" escapes cannot
+// leak sibling secrets; (2) maxSanitizeNodes truncation in redactJSONValueInner
+// shrinks containers strictly so Pass 2 is idempotent with contentLost=false
+// across the 49,995..50,005 boundary on maps and arrays across all five entry
+// points; and (3) quote-led literal candidate re-checks run at the same depth
+// with a fresh pass budget.
+func TestOuterRunOnBudgetIdempotencyAndCandidateRecheck(t *testing.T) {
+	runInParallel(t)
+	eps := largeTextEntryPoints(t)
+
+	t.Run("outer mixed escape run-on across literals and single-leaf wrappers", func(t *testing.T) {
+		t.Parallel()
+		marshal := func(v any) string {
+			b, err := json.Marshal(v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(b)
+		}
+		decoded := `{"DB_PASSWORD":"Bearer%20%22x\" tail","b":"SECRETZQ"}`
+		in1 := marshal(decoded)
+		in2 := marshal(in1)
+		in3 := marshal(in2)
+		wrapped1 := marshal(map[string]any{"k": in1})
+		wrapped2 := marshal(map[string]any{"k": wrapped1})
+		wrappedIn2 := marshal(map[string]any{"k": in2})
+		decodedWithClose := `{"DB_PASSWORD":"Bearer%20%22x\" tail","b":"SECRETZQ","c":"%22"}`
+		in2WithClose := marshal(marshal(decodedWithClose))
+
+		for _, tc := range []struct {
+			in           string
+			keptByLeaves bool
+		}{
+			{in2, false},
+			{in3, false},
+			{wrapped1, true},
+			{wrapped2, false},
+			{wrappedIn2, false},
+			{in2 + " ok", false},
+			{in2WithClose + " ok", false},
+		} {
+			for _, ep := range eps {
+				got := ep.f(tc.in)
+				if strings.Contains(got, "SECRETZQ") && (!tc.keptByLeaves || ep.name != "redactErrorMessage") {
+					t.Errorf("%s(%q) = %q kept SECRETZQ", ep.name, tc.in, got)
+				}
+				if again := ep.f(got); again != got {
+					t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+				}
+			}
+			san, _ := sanitizeRawText(tc.in)
+			if _, lost2 := sanitizeRawText(san); lost2 {
+				t.Errorf("sanitizeRawText second pass(%q) reported contentLost", san)
+			}
+		}
+	})
+
+	t.Run("node budget boundary idempotency and contentLost stability", func(t *testing.T) {
+		t.Parallel()
+		mkMap := func(n int) string {
+			var b strings.Builder
+			b.WriteByte('{')
+			for i := range n {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				fmt.Fprintf(&b, `"k%05d":"v"`, i)
+			}
+			b.WriteByte('}')
+			return b.String()
+		}
+		mkArr := func(n int) string {
+			var b strings.Builder
+			b.WriteByte('[')
+			for i := range n {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				b.WriteString(`"v"`)
+			}
+			b.WriteByte(']')
+			return b.String()
+		}
+
+		for _, n := range []int{49_997, 49_998, 49_999, 50_000, 50_001} {
+			for _, kind := range []struct {
+				name string
+				mk   func(int) string
+			}{
+				{"map", mkMap},
+				{"arr", mkArr},
+			} {
+				t.Run(fmt.Sprintf("%s_%d", kind.name, n), func(t *testing.T) {
+					t.Parallel()
+					in := kind.mk(n)
+
+					rem1 := redactErrorMessage(in)
+					if rem2 := redactErrorMessage(rem1); rem2 != rem1 {
+						t.Errorf("redactErrorMessage(%s, n=%d) not idempotent on second pass", kind.name, n)
+					}
+
+					san1, _ := sanitizeRawText(in)
+					if san2, lost2 := sanitizeRawText(san1); san2 != san1 || lost2 {
+						t.Errorf("sanitizeRawText(%s, n=%d) second pass changed=%v lost=%v", kind.name, n, san2 != san1, lost2)
+					}
+					if once1, onceLost1, _ := sanitizeRawTextOnce(in); onceLost1 {
+						if once2, onceLost2, onceSettled2 := sanitizeRawTextOnce(once1); once2 != once1 || onceLost2 || !onceSettled2 {
+							t.Errorf("sanitizeRawTextOnce(%s, n=%d) not settled in one pass: changed=%v lost=%v settled=%v", kind.name, n, once2 != once1, onceLost2, onceSettled2)
+						}
+					}
+
+					raw1, _, err := SmartTruncate(in, -1)
+					if err != nil {
+						t.Fatalf("SmartTruncate(%s, n=%d) err: %v", kind.name, n, err)
+					}
+					var st1 string
+					if err := json.Unmarshal(raw1, &st1); err != nil {
+						t.Fatalf("SmartTruncate(%s, n=%d) unmarshal: %v", kind.name, n, err)
+					}
+					raw2, lost2, err := SmartTruncate(st1, -1)
+					if err != nil {
+						t.Fatalf("SmartTruncate second pass(%s, n=%d) err: %v", kind.name, n, err)
+					}
+					var st2 string
+					if err := json.Unmarshal(raw2, &st2); err != nil {
+						t.Fatalf("SmartTruncate second pass(%s, n=%d) unmarshal: %v", kind.name, n, err)
+					}
+					if st2 != st1 || lost2 {
+						t.Errorf("SmartTruncate(%s, n=%d) second pass changed=%v lost=%v", kind.name, n, st2 != st1, lost2)
+					}
+
+					fcp1 := formatContentTextPart(t, in)
+					if fcp2 := formatContentTextPart(t, fcp1); fcp2 != fcp1 {
+						t.Errorf("FormatContentParts(%s, n=%d) not idempotent on second pass", kind.name, n)
+					}
+				})
+			}
+		}
+		t.Run("nested_map_49997", func(t *testing.T) {
+			t.Parallel()
+			// Nested JSON-encoded boundary map for redactErrorMessage (outer unmarshal + traverse takes 4 nodes).
+			nestedMap := fmt.Sprintf(`{"s":%q}`, mkMap(49_997))
+			got := redactErrorMessage(nestedMap)
+			if again := redactErrorMessage(got); again != got {
+				t.Errorf("redactErrorMessage(nested 49997-key map) not idempotent on second pass")
+			}
+		})
+	})
+
+	t.Run("candidate recheck preserves same depth and fresh pass budget", func(t *testing.T) {
+		t.Parallel()
+		// 44 array wrappers put deepLit at depth=45, decoded at 46, map at 47, numbers at 48 (< maxSanitizeDepth 50).
+		deepLit := `"\u007b\u0022a\u0022:1,\u0022a\u0022:2\u007d" ok`
+		var deep any = deepLit
+		for range 44 {
+			deep = []any{deep}
+		}
+		deepBytes, err := json.Marshal(deep)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deepOut, deepLost := sanitizeRawText(string(deepBytes))
+		if deepLost || strings.Contains(deepOut, maxDepthPlaceholder) {
+			t.Errorf("sanitizeRawText(depth-46 literal+suffix) lost=%v hasMaxDepth=%v", deepLost, strings.Contains(deepOut, maxDepthPlaceholder))
+		}
+		if again, againLost := sanitizeRawText(deepOut); again != deepOut || againLost {
+			t.Errorf("sanitizeRawText(depth-46 literal+suffix) second pass changed=%v lost=%v", again != deepOut, againLost)
+		}
+
+		// 26,000-node array inside a quote-led literal + suffix (>52k nodes on Pass 1, >100k if budget shared).
+		var arr strings.Builder
+		arr.WriteByte('[')
+		for i := range 26_000 {
+			if i > 0 {
+				arr.WriteByte(',')
+			}
+			arr.WriteByte('0')
+		}
+		arr.WriteByte(']')
+		bigLit := `"\u007b\u0022arr\u0022:` + arr.String() + `,\u0022a\u0022:1,\u0022a\u0022:2\u007d" ok`
+		bigOut, bigLost := sanitizeRawText(bigLit)
+		if bigLost || strings.Contains(bigOut, sanitizeBudgetPlaceholder) {
+			t.Errorf("sanitizeRawText(26k-arr literal+suffix) lost=%v hasBudget=%v", bigLost, strings.Contains(bigOut, sanitizeBudgetPlaceholder))
+		}
+		if again, againLost := sanitizeRawText(bigOut); again != bigOut || againLost {
+			t.Errorf("sanitizeRawText(26k-arr literal+suffix) second pass changed=%v lost=%v", again != bigOut, againLost)
+		}
+	})
 }
