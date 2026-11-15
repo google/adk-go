@@ -22967,7 +22967,7 @@ func TestSortedMapKeysByteBounds(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := reflect.ValueOf(tc.m)
-			keys, ok := sortedMapKeys(v, tc.maxKeyBytes)
+			keys, _, ok := sortedMapKeys(v, tc.maxKeyBytes)
 			if ok != tc.wantOK {
 				t.Fatalf("sortedMapKeys() ok = %v, want %v", ok, tc.wantOK)
 			}
@@ -23980,14 +23980,14 @@ func TestTraceManager_DeferredPeerModelEventStartsTurn(t *testing.T) {
 // and an earlier plugin answers their AfterToolCallbacks. A second call with
 // the ID takes the first one's tool span (see toolKey), so only calls without
 // IDs keep one each. The merged function response event of the calls answers
-// each call once, whichever of its responses report completion: an open call
-// takes a response with its ID, in the order in which the calls started, and
-// the responses that no open call takes are the earliest of those that
-// report no completion, which end the other calls. So a response that reports
-// completion settles an open call (see settledTaskCalls), with an identity of
-// its own (see taskFinishCall), and it ends the activation despite the
-// rejection, while no call is left pending that a response of the event
-// answered.
+// each call once, matching ADK's isFinishTaskSuccessFR rule where only the
+// first finish_task response decides whether the activation completes: when
+// the first finish_task response reports completion, it settles its open call
+// (see settledTaskCalls) and ends the activation despite the earlier
+// rejection, while any later finish_task responses in the same event end their
+// calls without completion; when the first finish_task response fails, every
+// finish_task response in the event ends its call without completing the
+// activation, leaving no call pending.
 func TestTraceManager_MergedFinishResponsesAnswerCallsOnce(t *testing.T) {
 	taskAgent, err := llmagent.New(llmagent.Config{
 		Name:  "test-agent",
@@ -24110,57 +24110,76 @@ func TestTraceManager_MergedFinishResponsesAnswerCallsOnce(t *testing.T) {
 					t.Fatalf("got %d open finish_task tool spans, want %d", len(spanCalls), setup.openSpans)
 				}
 
+				completes := len(order.completed) > 0 && order.completed[0]
 				var specs []functionResponseCall
 				var completedCalls []string
 				parts := make([]*genai.Part, 0, len(order.completed))
-				for _, ok := range order.completed {
+				for idx, ok := range order.completed {
 					resp := map[string]any{"error": "summary is invalid"}
 					call := setup.callID
 					if call == "" {
 						call = finishTaskToolName
 					}
+					callCompletes := idx == 0 && ok
+					superseded := idx > 0 && ok
 					if ok {
 						resp = map[string]any{"result": "Task completed."}
+					}
+					if callCompletes {
 						completedCalls = append(completedCalls, call)
 					}
-					specs = append(specs, functionResponseCall{call: call, name: finishTaskToolName, unfinished: !ok})
+					specs = append(specs, functionResponseCall{
+						call:       call,
+						name:       finishTaskToolName,
+						unfinished: !callCompletes,
+						superseded: superseded,
+					})
 					parts = append(parts, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: setup.callID, Name: finishTaskToolName, Response: resp}})
 				}
-				if got := functionResponseCallSpecs(genai.NewContentFromParts(parts, genai.RoleUser)); !cmp.Equal(got, specs, cmp.AllowUnexported(functionResponseCall{})) {
+				evContent := genai.NewContentFromParts(parts, genai.RoleUser)
+				if got := functionResponseCallSpecs(evContent); !cmp.Equal(got, specs, cmp.AllowUnexported(functionResponseCall{})) {
 					t.Fatalf("functionResponseCallSpecs = %+v, want %+v", got, specs)
+				}
+				if got := taskCompletedCalls(evContent); !slices.Equal(got, completedCalls) {
+					t.Fatalf("taskCompletedCalls = %v, want %v", got, completedCalls)
+				}
+				if got := hasTaskCompletedResponse(evContent); got != completes {
+					t.Fatalf("hasTaskCompletedResponse = %v, want %v", got, completes)
 				}
 				p.traces.completeResponseEvent(runnerCtx, identityOf(runnerCtx), "test-agent", "", specs, stateDelta)
 
-				completions := len(completedCalls)
-				failures := len(order.completed) - completions
-				wantSettled := min(setup.openSpans, completions)
+				wantSettled := 0
+				if completes {
+					wantSettled = min(setup.openSpans, 1)
+				}
 				locked(func(_ *invocationTrace, rec *spanRecord) {
 					var settled []uint64
 					for _, c := range rec.settledTaskCalls {
 						settled = append(settled, c.callSeq)
 					}
 					if len(settled) != wantSettled {
-						t.Errorf("settled calls %v, want %d: one for each response that reports completion and that an open call takes", settled, wantSettled)
+						t.Errorf("settled calls %v, want %d", settled, wantSettled)
 					}
 					if len(spanCalls) == len(order.completed) {
-						// The open calls take the responses in order.
 						var want []uint64
-						for i, ok := range order.completed {
-							if ok {
-								want = append(want, spanCalls[i])
-							}
+						if completes {
+							want = []uint64{spanCalls[0]}
 						}
 						if !slices.Equal(settled, want) {
-							t.Errorf("settled calls %v, want %v, the calls of the open spans that took the responses that report completion", settled, want)
+							t.Errorf("settled calls %v, want %v", settled, want)
 						}
 					}
 					alive := map[uint64]bool{}
 					for _, c := range slices.Concat(rec.pendingFinishCalls, rec.settledTaskCalls) {
 						alive[c.callSeq] = true
 					}
-					if want := len(order.completed) - failures; len(alive) != want {
-						t.Errorf("activation keeps pending calls %+v and settled calls %+v, want %d calls: each response that reports no completion ends one of the two",
-							rec.pendingFinishCalls, rec.settledTaskCalls, want)
+					wantAlive := 0
+					if completes {
+						wantAlive = 1
+					}
+					if len(alive) != wantAlive {
+						t.Errorf("activation keeps pending calls %+v and settled calls %+v, want %d calls",
+							rec.pendingFinishCalls, rec.settledTaskCalls, wantAlive)
 					}
 					if len(rec.unfinishedFinishCalls) != 0 {
 						t.Errorf("activation keeps unfinished calls %+v, want none", rec.unfinishedFinishCalls)
@@ -24169,7 +24188,7 @@ func TestTraceManager_MergedFinishResponsesAnswerCallsOnce(t *testing.T) {
 
 				taskID := identityOf(runnerCtx)
 				taskID.agentName = "test-agent"
-				if completions == 0 {
+				if !completes {
 					return
 				}
 				if _, ok := p.traces.popTaskAgentSpanWithDelta(runnerCtx, taskID, completedCalls, stateDelta); !ok {
@@ -30616,12 +30635,12 @@ func TestTraceManager_SameTurnFinishCallsWithMixedOutcomes(t *testing.T) {
 	}{
 		{name: "first_completes_hidden_second_fails", steps: "b1_b2_a2f", resp: "cf", hiddenCompletion: true, kept: 1},
 		{name: "first_completes_second_fails_hidden", steps: "b1_a1c_b2", resp: "cf"},
-		{name: "first_fails_second_completes_hidden", steps: "b1_a1f_b2", resp: "fc", hiddenCompletion: true, kept: 1},
+		{name: "first_fails_second_completes_hidden", steps: "b1_a1f_b2", resp: "fc"},
 		{name: "first_fails_hidden_second_completes", steps: "b1_b2_a2c", resp: "fc"},
 		{name: "first_completes_second_fails_hidden_overlapping", steps: "b1_b2_a1c", resp: "cf"},
-		{name: "first_fails_second_completes_hidden_overlapping", steps: "b1_b2_a1f", resp: "fc", hiddenCompletion: true, kept: 1},
-		{name: "both_complete_second_hidden", steps: "b1_a1c_b2", resp: "cc", kept: 1},
-		{name: "both_complete_first_hidden", steps: "b1_b2_a2c", resp: "cc", kept: 1},
+		{name: "first_fails_second_completes_hidden_overlapping", steps: "b1_b2_a1f", resp: "fc"},
+		{name: "both_complete_second_hidden", steps: "b1_a1c_b2", resp: "cc"},
+		{name: "both_complete_first_hidden", steps: "b1_b2_a2c", resp: "cc"},
 	} {
 		for _, callID := range []string{"call-finish-shared", ""} {
 			idName, call := "with_id", callID
@@ -30631,13 +30650,18 @@ func TestTraceManager_SameTurnFinishCallsWithMixedOutcomes(t *testing.T) {
 			for _, via := range []string{"context", "delta", "batch", "late_batch", "runner"} {
 				for _, failure := range []string{"first", "after"} {
 					t.Run(fmt.Sprintf("%s/%s/%s/failure_%s", idName, order.name, via, failure), func(t *testing.T) {
-						unproven := order.hiddenCompletion && via == "runner"
+						firstCompletes := order.resp[0] == 'c'
+						unproven := firstCompletes && order.hiddenCompletion && via == "runner"
 						wantHidden := 0
 						if unproven {
 							wantHidden = 1
 						}
 						r := newTaskPeerRun(t, "inv-same-turn-mixed-outcomes")
 						r.start("old", "hidden", "a")
+						var aSpanID string
+						r.locked(func(_ *invocationTrace, open map[string]*spanRecord) {
+							aSpanID = open["a"].spanID
+						})
 						// deferHidden rejects the oldest activation's call and
 						// defers the hidden peer's completion on the rejection.
 						deferHidden := func() {
@@ -30720,14 +30744,33 @@ func TestTraceManager_SameTurnFinishCallsWithMixedOutcomes(t *testing.T) {
 							LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts(responses, genai.RoleUser)},
 							Actions:     session.EventActions{StateDelta: delta},
 						}))
+						if !firstCompletes {
+							r.locked(func(inv *invocationTrace, open map[string]*spanRecord) {
+								a := open["a"]
+								if a == nil {
+									t.Fatal("A retired when the first finish_task response failed, want A still open")
+								}
+								if kept := inv.finishCallSlotsLocked(a, call); len(kept) != 0 || len(a.unfinishedFinishCalls) != 0 || len(a.finishedTasks) != 0 {
+									t.Errorf("A stays open with calls %+v, unfinished %+v, finished %+v; want all empty",
+										kept, a.unfinishedFinishCalls, a.finishedTasks)
+								}
+							})
+							// A now retries finish_task in its next turn and completes cleanly.
+							retryDelta := map[string]any{"retry": true}
+							r.model("a", callID)
+							retryTool := r.tool("a", callID, retryDelta)
+							r.beforeTool(retryTool)
+							r.afterTool(retryTool, taskCompleted())
+							r.respond(r.runner, taskCompleted(), retryDelta, callID)
+						}
 						r.locked(func(inv *invocationTrace, open map[string]*spanRecord) {
 							if open["a"] != nil {
-								t.Fatal("A is still open after the merged response of its calls")
+								t.Fatal("A is still open after its completing finish_task response")
 							}
 							if unproven && failure == "first" {
 								return
 							}
-							i := slices.IndexFunc(inv.taskFrames, func(rec *spanRecord) bool { return rec.isActivationOf(r.acts["a"]) })
+							i := slices.IndexFunc(inv.taskFrames, func(rec *spanRecord) bool { return rec.spanID == aSpanID })
 							if i < 0 {
 								t.Fatal("A left no task frame")
 							}
@@ -31174,5 +31217,511 @@ func TestTraceManager_FailedCallOfBatchLeavesLaterFailureToPeer(t *testing.T) {
 			rows, ends := r.finish()
 			r.checkEnds(rows, ends, map[string]int{"old": 1, "hidden": tc.wantHidden, "a": 1})
 		})
+	}
+}
+
+func TestResolveUnattributedFinishFailures_BoundedCandidatesAndDirtySkip(t *testing.T) {
+	t.Run("64_failures_across_64_activations_resolve_all_slots", func(t *testing.T) {
+		const (
+			n    = maxTaskToolDeltas
+			call = "call_0"
+		)
+		r := newTaskPeerRun(t, "inv-64x64-shared-failures")
+		names := make([]string, n)
+		for i := range n {
+			names[i] = fmt.Sprintf("act-%02d", i)
+		}
+		r.start(names...)
+		for _, name := range names {
+			r.model(name, call)
+			r.modelEvent(r.runner, finishTaskCalls(call))
+		}
+		start := time.Now()
+		for range n {
+			r.respond(r.runner, taskFailed(), nil, call)
+		}
+		elapsed := time.Since(start)
+		if elapsed > 2*time.Second {
+			t.Errorf("resolving %d shared failures across %d activations took %v, want <= 2s", n, n, elapsed)
+		}
+		r.locked(func(_ *invocationTrace, open map[string]*spanRecord) {
+			for _, name := range names {
+				if len(open[name].pendingFinishCalls) != 0 {
+					t.Errorf("%s still keeps pending calls %+v after %d failures for %d calls", name, open[name].pendingFinishCalls, n, n)
+				}
+			}
+		})
+	})
+
+	t.Run("sequential_delegations_cap_slots_and_keep_per_event_fast", func(t *testing.T) {
+		const (
+			delegations = 70
+			attempts    = 20
+			call        = "call_0"
+		)
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task_worker",
+			Mode:  llmagent.ModeTask,
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		tm := newTraceManager()
+		mCtx := &mockInvocationContext{ctx: t.Context(), agentName: "coordinator", invocationID: "inv-70-delegations"}
+		runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+		evID := identityOf(runnerCtx)
+		taskID := evID
+		taskID.agentName = "task_worker"
+		tm.invocationSpan(runnerCtx, evID, taskAgent)
+		failSpecs := []functionResponseCall{{call: call, name: finishTaskToolName, unfinished: true}}
+		okSpecs := []functionResponseCall{{call: call, name: finishTaskToolName, unfinished: false}}
+
+		var lastDelegationElapsed time.Duration
+		for range delegations {
+			act := &taskActivationContext{
+				mockInvocationContext: &mockInvocationContext{ctx: t.Context(), agentName: "task_worker", invocationID: "inv-70-delegations"},
+				ic:                    &runningInvocation{running: taskAgent},
+			}
+			id := identityOf(act)
+			tm.pushAgentSpan(act, id)
+			t0 := time.Now()
+			for range attempts {
+				tm.pushLLMSpan(act, id)
+				tm.popLLMSpan(act, id, true)
+				tm.noteTaskFinishCalls(act, id, []string{call}, false)
+				tm.noteTaskFinishCalls(runnerCtx, taskID, []string{call}, true)
+				tm.completeResponseEvent(runnerCtx, evID, "task_worker", "", failSpecs, nil)
+			}
+			tm.pushLLMSpan(act, id)
+			tm.popLLMSpan(act, id, true)
+			tm.noteTaskFinishCalls(act, id, []string{call}, false)
+			tm.noteTaskFinishCalls(runnerCtx, taskID, []string{call}, true)
+			tm.completeResponseEvent(runnerCtx, evID, "task_worker", "", okSpecs, nil)
+			tm.popTaskAgentSpanWithDelta(runnerCtx, taskID, []string{call}, nil)
+			lastDelegationElapsed = time.Since(t0)
+		}
+
+		inv := tm.invocation(mCtx, identityOf(mCtx))
+		inv.mu.Lock()
+		maxSlots := 0
+		for _, f := range inv.unattributedFinishFailures {
+			maxSlots = max(maxSlots, len(f.slots))
+		}
+		inv.mu.Unlock()
+		if maxSlots > maxTaskToolDeltas {
+			t.Errorf("kept failure retains %d candidate slots, want <= %d", maxSlots, maxTaskToolDeltas)
+		}
+		// 42 events in delegation 70 should remain sub-50ms even under -race (was ~2s+ on delegation 70 at 3d5ff093).
+		if lastDelegationElapsed > 250*time.Millisecond {
+			t.Errorf("delegation %d (42 events) took %v, want <= 250ms", delegations, lastDelegationElapsed)
+		}
+	})
+}
+
+func BenchmarkResolveUnattributedFinishFailures(b *testing.B) {
+	b.Run("one_reconciliation_64_failures_64_slots", func(b *testing.B) {
+		const (
+			n    = maxTaskToolDeltas
+			call = "call_0"
+		)
+		tm := newTraceManager()
+		mCtx := &mockInvocationContext{ctx: context.Background(), agentName: "coordinator", invocationID: "bench-one-reconcile"}
+		inv := tm.invocation(mCtx, identityOf(mCtx))
+		slots := make([]finishCallSlot, n)
+		for i := range n {
+			rec := &spanRecord{
+				spanID:   fmt.Sprintf("span-%d", i),
+				kind:     spanKindAgent,
+				name:     "task_worker",
+				taskMode: true,
+			}
+			c := taskFinishCall{call: call, epoch: 1, callSeq: uint64(i + 1)}
+			rec.pendingFinishCalls = []taskFinishCall{c}
+			slots[i] = finishCallSlot{rec: rec, epoch: 1, callSeq: c.callSeq}
+		}
+		// Keep n-1 failures across n slots so no slot is forced yet and every
+		// iteration exercises the full candidate index + augmenting-path + BFS pass.
+		base := make([]unattributedFinishFailure, n-1)
+		for i := range base {
+			base[i] = unattributedFinishFailure{
+				call:  call,
+				seq:   uint64(100 + i),
+				slots: slots,
+			}
+		}
+		inv.unattributedFinishFailures = slices.Clone(base)
+		b.ResetTimer()
+		for b.Loop() {
+			inv.unattributedFailuresDirty = true
+			inv.resolveUnattributedFinishFailuresLocked()
+		}
+	})
+
+	b.Run("per_event_after_70_delegations", func(b *testing.B) {
+		const (
+			delegations = 70
+			attempts    = 20
+			call        = "call_0"
+		)
+		taskAgent, err := llmagent.New(llmagent.Config{Name: "task_worker", Mode: llmagent.ModeTask, Model: &scriptedLLM{}})
+		if err != nil {
+			b.Fatal(err)
+		}
+		failSpecs := []functionResponseCall{{call: call, name: finishTaskToolName, unfinished: true}}
+		okSpecs := []functionResponseCall{{call: call, name: finishTaskToolName, unfinished: false}}
+		tm := newTraceManager()
+		mCtx := &mockInvocationContext{ctx: context.Background(), agentName: "coordinator", invocationID: "bench-per-event-70"}
+		runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+		evID := identityOf(runnerCtx)
+		taskID := evID
+		taskID.agentName = "task_worker"
+		tm.invocationSpan(runnerCtx, evID, taskAgent)
+		for range delegations {
+			act := &taskActivationContext{
+				mockInvocationContext: &mockInvocationContext{ctx: context.Background(), agentName: "task_worker", invocationID: "bench-per-event-70"},
+				ic:                    &runningInvocation{running: taskAgent},
+			}
+			id := identityOf(act)
+			tm.pushAgentSpan(act, id)
+			for range attempts {
+				tm.pushLLMSpan(act, id)
+				tm.popLLMSpan(act, id, true)
+				tm.noteTaskFinishCalls(act, id, []string{call}, false)
+				tm.noteTaskFinishCalls(runnerCtx, taskID, []string{call}, true)
+				tm.completeResponseEvent(runnerCtx, evID, "task_worker", "", failSpecs, nil)
+			}
+			tm.pushLLMSpan(act, id)
+			tm.popLLMSpan(act, id, true)
+			tm.noteTaskFinishCalls(act, id, []string{call}, false)
+			tm.noteTaskFinishCalls(runnerCtx, taskID, []string{call}, true)
+			tm.completeResponseEvent(runnerCtx, evID, "task_worker", "", okSpecs, nil)
+			tm.popTaskAgentSpanWithDelta(runnerCtx, taskID, []string{call}, nil)
+		}
+		// Keep one live activation open after 70 retired delegations to measure
+		// steady-state per-event latency on subsequent non-finish events.
+		liveAct := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: context.Background(), agentName: "task_worker", invocationID: "bench-per-event-70"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		tm.pushAgentSpan(liveAct, identityOf(liveAct))
+		otherSpecs := []functionResponseCall{{call: "call_lookup", name: "lookup"}}
+		b.ResetTimer()
+		for b.Loop() {
+			tm.completeResponseEvent(runnerCtx, evID, "task_worker", "", otherSpecs, nil)
+		}
+	})
+
+	b.Run("64_failures_64_activations", func(b *testing.B) {
+		const (
+			n    = maxTaskToolDeltas
+			call = "call_0"
+		)
+		taskAgent, err := llmagent.New(llmagent.Config{Name: "task_worker", Mode: llmagent.ModeTask, Model: &scriptedLLM{}})
+		if err != nil {
+			b.Fatal(err)
+		}
+		for b.Loop() {
+			tm := newTraceManager()
+			mCtx := &mockInvocationContext{ctx: context.Background(), agentName: "coordinator", invocationID: "bench-64x64"}
+			runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+			tm.invocationSpan(runnerCtx, identityOf(runnerCtx), taskAgent)
+			for range n {
+				act := &taskActivationContext{
+					mockInvocationContext: &mockInvocationContext{ctx: context.Background(), agentName: "task_worker", invocationID: "bench-64x64"},
+					ic:                    &runningInvocation{running: taskAgent},
+				}
+				id := identityOf(act)
+				tm.pushAgentSpan(act, id)
+				tm.pushLLMSpan(act, id)
+				tm.popLLMSpan(act, id, true)
+				tm.noteTaskFinishCalls(act, id, []string{call}, false)
+			}
+			evID := identityOf(runnerCtx)
+			specs := []functionResponseCall{{call: call, name: finishTaskToolName, unfinished: true}}
+			for range n {
+				tm.completeResponseEvent(runnerCtx, evID, "task_worker", "", specs, nil)
+			}
+		}
+	})
+
+	b.Run("70_delegations_20_failures_hidden_callbacks", func(b *testing.B) {
+		const (
+			delegations = 70
+			attempts    = 20
+			call        = "call_0"
+		)
+		taskAgent, err := llmagent.New(llmagent.Config{Name: "task_worker", Mode: llmagent.ModeTask, Model: &scriptedLLM{}})
+		if err != nil {
+			b.Fatal(err)
+		}
+		failSpecs := []functionResponseCall{{call: call, name: finishTaskToolName, unfinished: true}}
+		okSpecs := []functionResponseCall{{call: call, name: finishTaskToolName, unfinished: false}}
+		for b.Loop() {
+			tm := newTraceManager()
+			mCtx := &mockInvocationContext{ctx: context.Background(), agentName: "coordinator", invocationID: "bench-70x20"}
+			runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+			evID := identityOf(runnerCtx)
+			taskID := evID
+			taskID.agentName = "task_worker"
+			tm.invocationSpan(runnerCtx, evID, taskAgent)
+			for range delegations {
+				act := &taskActivationContext{
+					mockInvocationContext: &mockInvocationContext{ctx: context.Background(), agentName: "task_worker", invocationID: "bench-70x20"},
+					ic:                    &runningInvocation{running: taskAgent},
+				}
+				id := identityOf(act)
+				tm.pushAgentSpan(act, id)
+				for range attempts {
+					tm.pushLLMSpan(act, id)
+					tm.popLLMSpan(act, id, true)
+					tm.noteTaskFinishCalls(act, id, []string{call}, false)
+					tm.noteTaskFinishCalls(runnerCtx, taskID, []string{call}, true)
+					tm.completeResponseEvent(runnerCtx, evID, "task_worker", "", failSpecs, nil)
+				}
+				tm.pushLLMSpan(act, id)
+				tm.popLLMSpan(act, id, true)
+				tm.noteTaskFinishCalls(act, id, []string{call}, false)
+				tm.noteTaskFinishCalls(runnerCtx, taskID, []string{call}, true)
+				tm.completeResponseEvent(runnerCtx, evID, "task_worker", "", okSpecs, nil)
+				tm.popTaskAgentSpanWithDelta(runnerCtx, taskID, []string{call}, nil)
+			}
+		}
+	})
+}
+
+func TestBoundedArgsDigest_NestedMapsChargeKeysAtAdmissionAndBoundDepth(t *testing.T) {
+	t.Run("nested_map_under_early_sorted_key_cannot_reuse_outer_key_budget", func(t *testing.T) {
+		// Outer map has 15 keys of 64 KiB ("z_00".."z_14", 960 KiB total) plus
+		// key "a" (sorted first, 1 byte) holding an inner map with two 40 KiB
+		// keys (80 KiB). When node budget expires inside "a" before the outer
+		// loop reaches "z_00".."z_14", charging key bytes at map admission must
+		// already have deducted all 960 KiB + 1 bytes from d.bytes.
+		outer := make(map[string]any, 16)
+		prefix := strings.Repeat("z", maxDigestStringBytes-4)
+		wantOuterKeyBytes := 1 // "a"
+		for i := range 15 {
+			k := fmt.Sprintf("%s_%02d", prefix, i)
+			outer[k] = i
+			wantOuterKeyBytes += len(k)
+		}
+		outer["a"] = commonPrefixKeys(2, 40<<10)
+
+		d := argsDigester{nodes: 3, bytes: maxDigestBytes}
+		d.hash(reflect.ValueOf(outer))
+		if wantMaxLeft := maxDigestBytes - wantOuterKeyBytes; d.bytes > wantMaxLeft {
+			t.Errorf("d.bytes after admitting outer map keys = %d, want <= %d (outer key bytes were not charged at admission)", d.bytes, wantMaxLeft)
+		}
+
+		makeArgs := func(innerVal int) map[string]any {
+			m := maps.Clone(outer)
+			inner := commonPrefixKeys(2, 40<<10)
+			inner["v"] = innerVal
+			m["a"] = inner
+			return m
+		}
+		a1 := makeArgs(1)
+		a2 := makeArgs(2)
+		d1, trunc1 := boundedArgsDigest(a1)
+		_, trunc2 := boundedArgsDigest(a2)
+		if !trunc1 || !trunc2 {
+			t.Fatalf("nested maps exceeding combined key byte budget: truncated = (%v, %v), want (true, true)", trunc1, trunc2)
+		}
+		if dRepeat, _ := boundedArgsDigest(a1); dRepeat != d1 {
+			t.Errorf("truncated nested map digest not deterministic: %d != %d", dRepeat, d1)
+		}
+		id1, _ := toolCallIdentityOf(context.Background(), a1)
+		id2, _ := toolCallIdentityOf(context.Background(), a2)
+		if id1.sameArgs(id2) {
+			t.Error("sameArgs() = true on truncated nested maps with distinct inner values, want false")
+		}
+	})
+
+	t.Run("deeply_nested_maps_past_depth_bound_are_truncated", func(t *testing.T) {
+		buildDeep := func(depth, leaf int) map[string]any {
+			cur := map[string]any{"leaf": leaf}
+			for range depth {
+				cur = map[string]any{"next": cur}
+			}
+			return cur
+		}
+		// Shallow nesting within bound hashes in full.
+		shallow1 := buildDeep(8, 1)
+		shallow2 := buildDeep(8, 1)
+		ds1, truncShallow := boundedArgsDigest(shallow1)
+		ds2, _ := boundedArgsDigest(shallow2)
+		if truncShallow || ds1 != ds2 {
+			t.Fatalf("8-deep map: truncated=%v digests=(%d,%d), want false and equal", truncShallow, ds1, ds2)
+		}
+
+		// Deep chain (64 levels, only ~130 nodes and < 300 bytes) must hit the depth cap.
+		deep1 := buildDeep(64, 1)
+		deep2 := buildDeep(64, 2)
+		dd1, truncDeep1 := boundedArgsDigest(deep1)
+		_, truncDeep2 := boundedArgsDigest(deep2)
+		if !truncDeep1 || !truncDeep2 {
+			t.Fatalf("64-deep map chain: truncated = (%v, %v), want (true, true)", truncDeep1, truncDeep2)
+		}
+		if ddRepeat, _ := boundedArgsDigest(deep1); ddRepeat != dd1 {
+			t.Errorf("64-deep map digest not deterministic: %d != %d", ddRepeat, dd1)
+		}
+		id1, _ := toolCallIdentityOf(context.Background(), deep1)
+		id2, _ := toolCallIdentityOf(context.Background(), deep2)
+		if id1.sameArgs(id2) {
+			t.Error("sameArgs() = true on depth-truncated maps with distinct leaves, want false")
+		}
+	})
+}
+
+func TestTraceManager_RetiredTaskFrameDropsCallbackContexts(t *testing.T) {
+	type ctxSentinel [64]byte
+	type sentinelKey struct{}
+
+	const callID = "call_0"
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:  "task_worker",
+		Mode:  llmagent.ModeTask,
+		Model: &scriptedLLM{},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	rootAgent, err := agent.New(agent.Config{
+		Name:      "coordinator",
+		SubAgents: []agent.Agent{taskAgent},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	p := newClockedPlugin(t)
+	p.config.DisableFlushOnRunEnd = true
+	baseCtx := &mockInvocationContext{ctx: t.Context(), agentName: "coordinator", invocationID: "inv-retired-task-frame-gc"}
+	rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+	runnerCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{}}
+	finish := &fakeTool{name: finishTaskToolName}
+
+	var errs callbackErrors
+	errs.add(p.beforeAgent(rootCtx))
+
+	// Old activation rejects call_0 so a later peer can arm deferredFinish.
+	actOld := &taskActivationContext{
+		mockInvocationContext: &mockInvocationContext{ctx: t.Context(), agentName: "task_worker", invocationID: baseCtx.invocationID},
+		ic:                    &runningInvocation{running: taskAgent},
+	}
+	toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(actOld.mockInvocationContext, callID), ic: actOld.ic}
+	fc := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"result": "done"}},
+	}}, genai.RoleModel)
+	completedFR := func() *session.Event {
+		return &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}
+	}
+	errs.add(p.beforeAgent(actOld))
+	errs.add(p.beforeModel(actOld, &model.LLMRequest{}))
+	errs.add(p.afterModel(actOld, &model.LLMResponse{Content: fc}, nil))
+	errs.add(p.beforeTool(toolOld, finish, nil))
+	errs.add(p.afterTool(toolOld, finish, nil, taskRejected(), nil))
+
+	// Hidden peer defers completion on old's rejection.
+	actPeer := &taskActivationContext{
+		mockInvocationContext: &mockInvocationContext{ctx: t.Context(), agentName: "task_worker", invocationID: baseCtx.invocationID},
+		ic:                    &runningInvocation{running: taskAgent},
+	}
+	errs.add(p.beforeAgent(actPeer))
+	errs.add(p.beforeModel(actPeer, &model.LLMRequest{}))
+	errs.add(p.afterModel(actPeer, &model.LLMResponse{Content: fc}, nil))
+	errs.add(p.onEvent(runnerCtx, completedFR()))
+
+	// Run and retire a task activation in an inner scope so stack references to its
+	// callback context and InvocationContext disappear before GC.
+	var retiredSpanID string
+	weakSentinel, weakActCtx := func() (weak.Pointer[ctxSentinel], weak.Pointer[taskActivationContext]) {
+		sentinel := &ctxSentinel{}
+		withVal := context.WithValue(t.Context(), sentinelKey{}, sentinel)
+		act := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: withVal, agentName: "task_worker", invocationID: baseCtx.invocationID},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		errs.add(p.beforeAgent(act))
+		inv := p.traces.invocation(baseCtx, identityOf(baseCtx))
+		inv.mu.Lock()
+		if idx := inv.findAgentForContext(act, "", "task_worker", ""); idx > 0 {
+			retiredSpanID = inv.agentStack[idx].spanID
+		}
+		inv.mu.Unlock()
+
+		// Make two calls (first hidden failure + second completion, hidden tool callbacks)
+		// and retire unproven via runnerCtx so the retired frame still acts as a rival for late attribution.
+		errs.add(p.beforeModel(act, &model.LLMRequest{}))
+		errs.add(p.afterModel(act, &model.LLMResponse{Content: fc}, nil))
+		errs.add(p.onEvent(runnerCtx, completedFR()))
+		return weak.Make(sentinel), weak.Make(act)
+	}()
+	errs.check(t)
+
+	inv := p.traces.invocation(baseCtx, identityOf(baseCtx))
+	inv.mu.Lock()
+	idx := slices.IndexFunc(inv.taskFrames, func(rec *spanRecord) bool { return rec.spanID == retiredSpanID })
+	if idx < 0 {
+		inv.mu.Unlock()
+		t.Fatalf("retired task span %q not found in inv.taskFrames", retiredSpanID)
+	}
+	retired := inv.taskFrames[idx]
+	hasCanceled := retired.canceled != nil
+	hasEnded := retired.ended != nil
+	hasActivation := retired.activation != nil
+	hasParent := retired.parent != nil
+	hasRetiredCauses := retired.retiredCauses != nil
+	hasToolDeltas := retired.toolStateDeltas != nil
+	inv.mu.Unlock()
+
+	if hasCanceled || hasEnded || hasActivation || hasParent || hasRetiredCauses || hasToolDeltas {
+		t.Errorf("retired task frame still retains refs: canceled=%v ended=%v activation=%v parent=%v retiredCauses=%v toolStateDeltas=%v; want all false",
+			hasCanceled, hasEnded, hasActivation, hasParent, hasRetiredCauses, hasToolDeltas)
+	}
+
+	for range 4 {
+		runtime.GC()
+	}
+	if weakSentinel.Value() != nil || weakActCtx.Value() != nil {
+		t.Errorf("retired task frame kept callback context alive across GC: sentinel=%v actCtx=%v, want both nil",
+			weakSentinel.Value() != nil, weakActCtx.Value() != nil)
+	}
+
+	// Late attribution still works using the retired frame's lightweight slots:
+	// one ambiguous failure may belong to the retired unproven frame, so actPeer keeps its deferral;
+	// a second ambiguous failure exhausts both candidates and cancels actPeer's deferral.
+	errs.add(p.onEvent(runnerCtx, &session.Event{
+		Author: "task_worker",
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: taskFailed()},
+		}}, genai.RoleUser)},
+	}))
+	inv.mu.Lock()
+	peerIdx := inv.findAgentForContext(actPeer, "", "task_worker", "")
+	stillDeferredAfterOne := peerIdx > 0 && inv.agentStack[peerIdx].deferredFinish != nil
+	inv.mu.Unlock()
+	if !stillDeferredAfterOne {
+		t.Fatal("actPeer lost its deferral after a single failure when the retired unproven task frame remained a candidate")
+	}
+
+	errs.add(p.onEvent(runnerCtx, &session.Event{
+		Author: "task_worker",
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: taskFailed()},
+		}}, genai.RoleUser)},
+	}))
+	errs.check(t)
+	inv.mu.Lock()
+	peerIdx = inv.findAgentForContext(actPeer, "", "task_worker", "")
+	stillDeferredAfterTwo := peerIdx > 0 && inv.agentStack[peerIdx].deferredFinish != nil
+	inv.mu.Unlock()
+	if stillDeferredAfterTwo {
+		t.Error("actPeer still defers completion after two failures exhausted both the retired frame and actPeer")
 	}
 }

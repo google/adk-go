@@ -991,9 +991,11 @@ func (p *analyticsPlugin) logDeferredTaskCompletions(ctx context.Context, baseID
 // such a call, and a custom agent or workflow node may respond with an output
 // alone. The function responses of such an event end the tool calls that they
 // answer, which an earlier plugin's AfterToolCallback may have hidden from
-// this plugin. A finish_task function response that reports no completion
-// also ends the task-mode activation's finish_task call without ending the
-// activation, and one that reports completion ends the activation (see
+// this plugin. When an event's first finish_task function response reports
+// completion, it ends the task-mode activation (matching
+// llmagent.isFinishTaskSuccessFR); a first finish_task response that reports no
+// completion, and any subsequent finish_task responses in the event, end their
+// finish_task calls without ending the activation (see
 // traceManager.completeResponseEvent and popTaskAgentSpanWithDelta).
 // Streamed partial events end nothing: AfterModelCallback ends the model call
 // with the final response, which carries the call's latency.
@@ -1103,27 +1105,31 @@ func isTaskCompletedResult(resp map[string]any) bool {
 }
 
 // taskCompletedCalls returns the function call ID, or else finishTaskToolName,
-// of each successful finish_task function response ("result": "Task completed.")
-// in c.
+// of the first finish_task function response in c when that response reports
+// completion ("result": "Task completed."). ADK lets the first finish_task
+// response decide whether the event ends the task-mode activation (see
+// llmagent.isFinishTaskSuccessFR), so later finish_task responses in c never
+// complete it.
 func taskCompletedCalls(c *genai.Content) []string {
 	if c == nil {
 		return nil
 	}
-	var calls []string
 	for _, part := range c.Parts {
-		if part == nil || part.FunctionResponse == nil {
+		if part == nil || part.FunctionResponse == nil || part.FunctionResponse.Name != finishTaskToolName {
 			continue
 		}
-		if part.FunctionResponse.Name == finishTaskToolName && isTaskCompletedResult(part.FunctionResponse.Response) {
-			calls = append(calls, cmp.Or(part.FunctionResponse.ID, finishTaskToolName))
+		if isTaskCompletedResult(part.FunctionResponse.Response) {
+			return []string{cmp.Or(part.FunctionResponse.ID, finishTaskToolName)}
 		}
+		return nil
 	}
-	return calls
+	return nil
 }
 
-// hasTaskCompletedResponse reports whether c carries a successful
-// finish_task function response ("result": "Task completed."), which ends a
-// task-mode LLM agent in ADK without running its AfterAgentCallback.
+// hasTaskCompletedResponse reports whether c's first finish_task function
+// response carries ADK's completion sentinel ("result": "Task completed."),
+// which ends a task-mode LLM agent in ADK without running its
+// AfterAgentCallback.
 func hasTaskCompletedResponse(c *genai.Content) bool {
 	return len(taskCompletedCalls(c)) > 0
 }
@@ -1175,21 +1181,31 @@ func functionResponseCalls(c *genai.Content) []string {
 
 // functionResponseCallSpecs returns each function response in c paired with
 // its tool name so open tool spans are matched by both call ID and tool name,
-// and with whether it is a finish_task response that reports no completion.
+// and with whether a finish_task response leaves the task unfinished: either
+// because its payload does not report completion, or because an earlier
+// finish_task response preceded it in c (superseded).
 func functionResponseCallSpecs(c *genai.Content) []functionResponseCall {
 	if c == nil {
 		return nil
 	}
 	var calls []functionResponseCall
+	seenFinish := false
 	for _, part := range c.Parts {
 		if part == nil || part.FunctionResponse == nil {
 			continue
+		}
+		isFinish := part.FunctionResponse.Name == finishTaskToolName
+		completedPayload := isFinish && isTaskCompletedResult(part.FunctionResponse.Response)
+		completes := completedPayload && !seenFinish
+		if isFinish {
+			seenFinish = true
 		}
 		if call := cmp.Or(part.FunctionResponse.ID, part.FunctionResponse.Name); call != "" {
 			calls = append(calls, functionResponseCall{
 				call:       call,
 				name:       part.FunctionResponse.Name,
-				unfinished: part.FunctionResponse.Name == finishTaskToolName && !isTaskCompletedResult(part.FunctionResponse.Response),
+				unfinished: isFinish && !completes,
+				superseded: completedPayload && !completes,
 			})
 		}
 	}

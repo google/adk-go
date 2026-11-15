@@ -14096,3 +14096,223 @@ func TestPlugin_RecoveredToolError_RejectedFinishThreeHoles(t *testing.T) {
 		}
 	})
 }
+
+func TestRunner_TwoFinishCallsFirstFails(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	finish := func(id string, args map[string]any) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "finish_task", Args: args}}
+	}
+	worker, err := llmagent.New(llmagent.Config{
+		Name: "task_worker", Description: "executes delegated tasks", Mode: llmagent.ModeTask,
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+				finish("c-bad", map[string]any{}), // fails validation
+				finish("c-good", map[string]any{"result": "first answer"}),
+			}}},
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+				finish("c-retry", map[string]any{"result": "second answer"}),
+			}}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := llmagent.New(llmagent.Config{
+		Name: "coordinator", SubAgents: []agent.Agent{worker},
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "call-task-worker", Name: "task_worker", Args: map[string]any{"request": "run the task"},
+			}}}}},
+			{Content: textContent("model", "all done"), TurnComplete: true},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range newTestRunner(t, coordinator, p).Run(t.Context(), "u1", "s1", textContent("user", "start"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run error: %v", err)
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	workerSpan, completedAt, lastLLM := "", -1, -1
+	for i, row := range rows {
+		if row["agent"] != "task_worker" {
+			continue
+		}
+		switch row["event_type"] {
+		case EventAgentStarting:
+			workerSpan = placeOf(row).span
+		case EventAgentCompleted:
+			if completedAt < 0 {
+				completedAt = i
+			}
+		case EventLLMRequest:
+			lastLLM = i
+			if got := placeOf(row).parent; got != workerSpan {
+				t.Errorf("row %d: task_worker LLM_REQUEST parent = %q, want the worker's span %q", i, got, workerSpan)
+			}
+		}
+	}
+	if completedAt < 0 || lastLLM > completedAt {
+		t.Errorf("task_worker AGENT_COMPLETED at row %d, last model call at row %d: want the row after the task's last model call", completedAt, lastLLM)
+	}
+}
+
+// TestPlugin_OverlappingTaskActivations_LateFunctionResponseKeepsRetryEcho
+// runs two overlapping activations of one task-mode agent when turn 1's failed
+// finish_task function response event arrives after turn 2's
+// AfterModelCallback has already noted turn 2's finish_task call. Turn 2's
+// model response event is still recognized as an echo of actA's turn 2 model
+// call rather than assigned as an unseen model call to actB, so turn 2's
+// completion retires actA while actB remains open to finish its own run.
+func TestPlugin_OverlappingTaskActivations_LateFunctionResponseKeepsRetryEcho(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		turn1ID   string
+		turn2ID   string
+		withDelta bool
+		bySelfCtx bool
+	}{
+		{name: "distinct_ids_with_delta", turn1ID: "c-turn1", turn2ID: "c-turn2", withDelta: true},
+		{name: "reused_id_with_delta", turn1ID: "call_0", turn2ID: "call_0", withDelta: true},
+		{name: "distinct_ids_self_ctx_without_delta", turn1ID: "c-turn1", turn2ID: "c-turn2", bySelfCtx: true},
+		{name: "reused_id_self_ctx_without_delta", turn1ID: "call_0", turn2ID: "call_0", bySelfCtx: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "test-agent",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			rootAgent, err := agent.New(agent.Config{
+				Name:      "root",
+				SubAgents: []agent.Agent{taskAgent},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+			finish := &fakeTool{name: finishTaskToolName}
+			icRoot := &runningInvocation{running: rootAgent}
+			icA := &runningInvocation{running: taskAgent}
+			icB := &runningInvocation{running: taskAgent}
+			rootCtx := &taskActivationContext{
+				mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: mCtx.InvocationID(), agentName: "root"},
+				ic:                    icRoot,
+			}
+			actA := &taskActivationContext{mockInvocationContext: mCtx, ic: icA}
+			actB := &taskActivationContext{mockInvocationContext: mCtx, ic: icB}
+
+			var turn1Delta map[string]any
+			var toolA1 agent.Context = &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, tc.turn1ID), ic: icA}
+			if tc.withDelta {
+				turn1Delta = map[string]any{"turn": 1}
+				toolA1 = &taskToolContext{
+					taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, tc.turn1ID), ic: icA},
+					actions:               &session.EventActions{StateDelta: turn1Delta},
+				}
+			}
+
+			fcContent := func(callID string) *genai.Content {
+				return genai.NewContentFromParts([]*genai.Part{{
+					FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"result": "done"}},
+				}}, genai.RoleModel)
+			}
+			completedFREvent := func(callID string) *session.Event {
+				return &session.Event{
+					Author: "test-agent",
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+						FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: map[string]any{"result": "Task completed."}},
+					}}, genai.RoleUser)},
+				}
+			}
+
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(rootCtx))
+			errs.add(p.BeforeAgentCallback()(actA))
+			errs.add(p.BeforeAgentCallback()(actB))
+
+			// actA turn 1: model call, model event, and failed finish_task tool callbacks.
+			errs.add(p.BeforeModelCallback()(actA, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actA, &model.LLMResponse{Content: fcContent(tc.turn1ID)}, nil))
+			errs.add(p.OnEventCallback()(rootCtx, &session.Event{
+				Author:      "test-agent",
+				LLMResponse: model.LLMResponse{Content: fcContent(tc.turn1ID)},
+			}))
+			errs.add(p.BeforeToolCallback()(toolA1, finish, map[string]any{}))
+			errs.add(p.AfterToolCallback()(toolA1, finish, map[string]any{}, map[string]any{"error": "missing result"}, nil))
+
+			// actA turn 2 starts and notes its finish_task call before turn 1's FR event is forwarded.
+			errs.add(p.BeforeModelCallback()(actA, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actA, &model.LLMResponse{Content: fcContent(tc.turn2ID)}, nil))
+
+			// Turn 1's late FunctionResponse arrives now, followed by turn 2's model event.
+			var frCtx agent.InvocationContext = rootCtx
+			if tc.bySelfCtx {
+				frCtx = actA
+			}
+			errs.add(p.OnEventCallback()(frCtx, &session.Event{
+				Author:  "test-agent",
+				Actions: session.EventActions{StateDelta: turn1Delta},
+				LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{ID: tc.turn1ID, Name: finishTaskToolName, Response: map[string]any{"error": "missing result"}},
+				}}, genai.RoleUser)},
+			}))
+			errs.add(p.OnEventCallback()(rootCtx, &session.Event{
+				Author:      "test-agent",
+				LLMResponse: model.LLMResponse{Content: fcContent(tc.turn2ID)},
+			}))
+
+			// actA turn 2's finish_task completes (tool callbacks hidden by an earlier plugin)
+			// and its FunctionResponse arrives: it must retire actA, not actB.
+			errs.add(p.OnEventCallback()(rootCtx, completedFREvent(tc.turn2ID)))
+
+			// actB now runs its own model + finish_task call and completes.
+			errs.add(p.BeforeModelCallback()(actB, &model.LLMRequest{}))
+			errs.add(p.AfterModelCallback()(actB, &model.LLMResponse{Content: fcContent("c-peer-b")}, nil))
+			errs.add(p.OnEventCallback()(rootCtx, &session.Event{
+				Author:      "test-agent",
+				LLMResponse: model.LLMResponse{Content: fcContent("c-peer-b")},
+			}))
+			errs.add(p.OnEventCallback()(rootCtx, completedFREvent("c-peer-b")))
+
+			errs.add(p.OnEventCallback()(rootCtx, &session.Event{
+				Author:      "root",
+				LLMResponse: model.LLMResponse{Content: textContent("model", "root done")},
+			}))
+			errs.add(p.AfterAgentCallback()(rootCtx))
+			errs.check(t)
+			p.AfterRunCallback()(rootCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOK(t, rows)
+			starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+			ends := agentRowsOfType(rows, EventAgentCompleted, "test-agent")
+			if len(starts) != 2 || len(ends) != 2 {
+				t.Fatalf("got task starts=%d ends=%d, want 2 and 2; events=%v", len(starts), len(ends), eventTypes(rows))
+			}
+			spanA, spanB := starts[0]["span_id"], starts[1]["span_id"]
+			if got := ends[0]["span_id"]; got != spanA {
+				t.Errorf("first AGENT_COMPLETED span_id = %v, want actA %v (actB=%v)", got, spanA, spanB)
+			}
+			if got := ends[1]["span_id"]; got != spanB {
+				t.Errorf("second AGENT_COMPLETED span_id = %v, want actB %v", got, spanB)
+			}
+			// actB's LLM_REQUEST ran after actA completed and must be parented to actB's still-open span.
+			var llmParents []string
+			for _, r := range rows {
+				if r["agent"] == "test-agent" && r["event_type"] == EventLLMRequest {
+					llmParents = append(llmParents, placeOf(r).parent)
+				}
+			}
+			wantParents := []string{spanA.(string), spanA.(string), spanB.(string)}
+			if !slices.Equal(llmParents, wantParents) {
+				t.Errorf("task LLM_REQUEST parent spans = %v, want %v", llmParents, wantParents)
+			}
+		})
+	}
+}
