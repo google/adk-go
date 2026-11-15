@@ -117,6 +117,7 @@ func New(opts ...PluginOption) (*plugin.Plugin, error) {
 		Name:                "RetryAndReflectPlugin",
 		AfterToolCallback:   r.afterTool,
 		OnToolErrorCallback: r.onToolError,
+		AfterRunCallback:    r.afterRun,
 	})
 }
 
@@ -142,6 +143,19 @@ func (r *retryAndReflect) afterTool(ctx agent.ToolContext, tool tool.Tool, args,
 		}
 	}
 	return nil, nil
+}
+
+// afterRun drops the failure counts of an invocation once its run has ended.
+// Nothing reads them afterwards, so keeping them would grow
+// scopedFailureCounters with every invocation that saw a failure. Every scope
+// but Global keys its counts by invocation ID, as scopeKey does.
+func (r *retryAndReflect) afterRun(ictx agent.InvocationContext) {
+	if r.scope == Global {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.scopedFailureCounters, ictx.InvocationID())
 }
 
 func (r *retryAndReflect) onToolError(ctx agent.ToolContext, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
