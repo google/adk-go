@@ -20,7 +20,6 @@ import (
 	"iter"
 	"maps"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -121,17 +120,24 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 		// create a new slice header pointing to the same array
 		filteredEvents = filteredEvents[start:]
 	}
-	// apply timestamp filter, assuming list is sorted
-	if !req.After.IsZero() && len(filteredEvents) > 0 {
-		firstIndexToKeep := sort.Search(len(filteredEvents), func(i int) bool {
-			// Find the first event that is not before the timestamp
-			return !filteredEvents[i].Timestamp.Before(req.After)
-		})
-		filteredEvents = filteredEvents[firstIndexToKeep:]
-	}
 
 	copiedSession.events = make([]*Event, 0, len(filteredEvents))
-	copiedSession.events = append(copiedSession.events, filteredEvents...)
+	for _, event := range filteredEvents {
+		// Test every event rather than searching for a cut point: events are
+		// kept in append order, which need not be timestamp order, so a
+		// binary search over it could keep events from before req.After and
+		// drop ones at or after it. With NumRecentEvents unset, this returns
+		// every event at or after req.After, as the database and Vertex AI
+		// backends do. With it set, the trim above runs first, in append
+		// order, as in adk-python, while those backends filter first and
+		// then take the newest N. adk-python's in-memory filter scans back
+		// from the newest event to the first one before After, so it also
+		// drops a qualifying event appended ahead of that one.
+		if !req.After.IsZero() && event.Timestamp.Before(req.After) {
+			continue
+		}
+		copiedSession.events = append(copiedSession.events, event)
+	}
 
 	return &GetResponse{
 		Session: copiedSession,
