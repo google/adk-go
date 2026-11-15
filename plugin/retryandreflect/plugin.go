@@ -269,6 +269,8 @@ func (r *retryAndReflect) createToolRetryExceedMsg(tool tool.Tool, toolArgs map[
 		ToolName:     tool.Name(),
 		ErrorDetails: errType + ": " + errDetails,
 		ArgsSummary:  argsSummary,
+		RetryCount:   r.maxRetries,
+		MaxRetries:   r.maxRetries,
 	}
 
 	var buf bytes.Buffer
