@@ -1257,13 +1257,26 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 	return telemetry.InstrumentGenerateContent(ctx, params, response, func(spanCtx context.Context) iter.Seq2[*responseWithEventID, error] {
 		ctx := ctx.WithContext(spanCtx)
 		return func(yield func(*responseWithEventID, error) bool) {
+			// The partial chunks of a streamed response share one event id with
+			// the response that completes them. A complete response ends the id,
+			// and so does an error, because an on-model-error callback may turn
+			// it into a saved event. A new id is drawn when the next response
+			// arrives, never ahead of one.
+			var eventID string
 			for resp, err := range m.GenerateContent(ctx, req, useStream) {
 				if resp == nil && err == nil {
 					// Third-party model implementations may yield an empty response.
 					continue
 				}
-				if !yield(newResponseWithEventID(ctx, resp), err) {
+				if eventID == "" {
+					eventID = platform.NewUUID(ctx)
+				}
+				if !yield(&responseWithEventID{resp, eventID}, err) {
 					return
+				}
+				// resp is non-nil whenever err is nil; the empty case is skipped above.
+				if err != nil || !resp.Partial {
+					eventID = ""
 				}
 			}
 		}
@@ -1531,13 +1544,11 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				confirmation = toolConfirmations[fnCall.ID]
 			}
 			toolCtx := agent.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
-			// A call without args reaches the tool and its callbacks as an
-			// empty map, so a tool that returns its args, as
+			// The callbacks and the tool may edit the arguments; the function
+			// call event keeps the ones the model sent. A call without args
+			// reaches them as an empty map, so a tool that returns its args, as
 			// set_model_response does, returns an object rather than nil.
-			args := fnCall.Args
-			if args == nil {
-				args = map[string]any{}
-			}
+			args := cloneArgs(fnCall.Args)
 
 			var result map[string]any
 			var curTool tool.Tool
@@ -1790,6 +1801,39 @@ func (f *Flow) finishToolCall(toolCtx agent.Context, tool tool.Tool, fArgs, resp
 		return map[string]any{"error": errText}
 	}
 	return response
+}
+
+// cloneArgs returns a copy of a function call's arguments for the callbacks
+// and the tool to edit. Nested map[string]any and []any values, the shapes
+// decoded JSON arguments hold, are copied too; other values are shared. A nil
+// map becomes an empty one, so a callback can add an argument to a call that
+// had none.
+func cloneArgs(args map[string]any) map[string]any {
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		out[k] = cloneArgValue(v)
+	}
+	return out
+}
+
+func cloneArgValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		if t == nil {
+			return t
+		}
+		return cloneArgs(t)
+	case []any:
+		if t == nil {
+			return t
+		}
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = cloneArgValue(e)
+		}
+		return out
+	}
+	return v
 }
 
 func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
