@@ -15,12 +15,15 @@
 package vertexai
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -70,9 +73,16 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 	pbSession := &aiplatformpb.Session{
 		UserId: req.UserID,
 	}
+	// temp: keys belong to a single invocation and are never stored, so they
+	// are dropped here as AppendEvent trims them from every state delta.
+	// adk-python's create_session does the same (vertex_ai_session_service.py).
+	state := maps.Clone(req.State)
+	maps.DeleteFunc(state, func(key string, _ any) bool {
+		return strings.HasPrefix(key, session.KeyPrefixTemp)
+	})
 	// Convert and set the initial state if provided
-	if len(req.State) > 0 {
-		stateStruct, err := toStructPB(req.State)
+	if len(state) > 0 {
+		stateStruct, err := toStructPB(state)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert state to structpb: %w", err)
 		}
@@ -240,7 +250,21 @@ func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequ
 		}
 		sessions = append(sessions, session)
 	}
+	sortSessionsByLastUpdate(sessions)
 	return sessions, nil
+}
+
+// sortSessionsByLastUpdate orders sessions by last update time ascending, ties
+// by user ID then session ID, as [session.Service.List] documents. The
+// ListSessions RPC has no ordering guarantee of its own.
+func sortSessionsByLastUpdate(sessions []session.Session) {
+	slices.SortStableFunc(sessions, func(a, b session.Session) int {
+		return cmp.Or(
+			a.LastUpdateTime().Compare(b.LastUpdateTime()),
+			strings.Compare(a.UserID(), b.UserID()),
+			strings.Compare(a.ID(), b.ID()),
+		)
+	})
 }
 
 func filterNilValues(originalMap map[string]any) map[string]any {
