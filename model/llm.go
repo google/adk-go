@@ -44,6 +44,24 @@ type Capabilities struct {
 	// toolsets), ADK omits ResponseSchema and ResponseMIMEType from the
 	// request config and uses the set_model_response tool workaround instead.
 	OutputSchemaAndTools bool
+
+	// ClientFunctionCallIDs reports whether the model accepts the function
+	// call IDs ADK generates (prefixed "adk-") on the function calls and
+	// function responses it receives, and pairs tool calls with their
+	// results by ID.
+	//
+	// When true, ADK keeps those IDs in the requests it sends to the model.
+	// When false, ADK removes them from the request; IDs issued by the
+	// model provider are always kept, and the session events keep every ID.
+	//
+	// A model that does not implement [CapabilitiesProvider] is treated as
+	// false, so a type that only embeds [LLM] and implements no provider
+	// gets the IDs removed. A custom [LLM] that pairs calls by ID implements
+	// CapabilitiesProvider and sets this field. A model that wraps another
+	// returns the inner model's Capabilities, copied, with only the fields
+	// it changes overridden, so the wrapper keeps the IDs exactly when the
+	// inner model does.
+	ClientFunctionCallIDs bool
 }
 
 // CapabilitiesProvider is an optional interface that an [LLM] may implement to
@@ -51,9 +69,19 @@ type Capabilities struct {
 //
 // When an [LLM] implements CapabilitiesProvider, ADK uses the returned
 // [Capabilities] directly instead of inferring support from the model name or
-// backend variant. When an [LLM] does not implement CapabilitiesProvider, ADK
-// falls back to granting OutputSchemaAndTools only to Gemini models on the
-// Vertex AI backend.
+// backend variant: the returned value replaces the name-based default of
+// OutputSchemaAndTools, even when it leaves that field false. When an [LLM]
+// does not implement CapabilitiesProvider, ADK falls back to granting
+// OutputSchemaAndTools only to Gemini models on the Vertex AI backend, and
+// treats ClientFunctionCallIDs as false.
+//
+// A model that wraps another [LLM] implements CapabilitiesProvider by
+// returning the inner model's Capabilities, copied, with only the fields the
+// wrapper changes overridden, so the wrapper keeps ADK's function call IDs
+// exactly when the inner model does. A type that only embeds [LLM] does not
+// get the inner model's Capabilities method, because [LLM] does not declare
+// it: ADK treats such a type as a model with no provider, removes ADK's
+// function call IDs from its requests and applies the name-based default.
 //
 // Implementations of Capabilities must be safe for concurrent use and must not
 // mutate the model or have observable side effects.
