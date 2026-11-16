@@ -75,7 +75,6 @@ func main() {
 			HybridSearch: &genai.RAGRetrievalConfigHybridSearch{
 				Alpha: new(float32(0.1)),
 			},
-			// Filter configures metadata/vector thresholds; Ranking configures reranking.
 		},
 	})
 	if err != nil {
