@@ -226,8 +226,22 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 	}
 }
 
-// Recv receives a response from the live server connection.
+// Recv receives a response from the live server connection. Every non-nil
+// response carries the identifier the server gave the connection in its
+// setupComplete message, as LiveSessionID; it is empty when the server gave
+// none.
 func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
+	resp, err := c.recv(ctx)
+	// Stamped here rather than where each response is built, so buffered
+	// responses carry it too, as adk-python's gemini_llm_connection.py stamps
+	// every response it yields.
+	if resp != nil && c.sdkSession.SetupComplete != nil {
+		resp.LiveSessionID = c.sdkSession.SetupComplete.SessionID
+	}
+	return resp, err
+}
+
+func (c *LiveConnection) recv(ctx context.Context) (*model.LLMResponse, error) {
 	if len(c.bufferedResponses) > 0 {
 		resp := c.bufferedResponses[0]
 		c.bufferedResponses = c.bufferedResponses[1:]

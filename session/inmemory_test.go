@@ -1959,6 +1959,23 @@ func TestInMemoryService_AppendEvent_RoundTripsCompleteEvent(t *testing.T) {
 	}
 }
 
+// The in-memory service keeps an event's live session id. The test fails if
+// AppendEvent copies the response field by field and leaves LiveSessionID out.
+func TestInMemoryService_AppendEvent_KeepsLiveSessionID(t *testing.T) {
+	svc := session.InMemoryService()
+	held := createAt(t, svc, "app-live", "s1")
+	ev := &session.Event{ID: "e1", InvocationID: "inv1", Author: "model", Timestamp: time.Unix(1700000000, 0).UTC()}
+	ev.LiveSessionID = "live-mem-1"
+
+	if err := svc.AppendEvent(t.Context(), held, ev); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	if got := getStored(t, svc, held).Events().At(0).LiveSessionID; got != "live-mem-1" {
+		t.Errorf("stored LiveSessionID = %q, want \"live-mem-1\"", got)
+	}
+}
+
 func TestInMemoryService_AppendEvent_KeepsPartialSet(t *testing.T) {
 	ctx := t.Context()
 	svc := session.InMemoryService()

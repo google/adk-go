@@ -965,6 +965,16 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if opts.dropEmptyResponses && isEmptyLiveResponse(&ev.LLMResponse) {
 						continue
 					}
+					// adk-python builds transcription and session resumption
+					// events without the live session id
+					// (live/_live_llm_flow.py:269-273, :422-449).
+					if ev.LLMResponse.Content == nil && !ev.TurnComplete && !ev.Interrupted && (ev.InputTranscription != nil || ev.OutputTranscription != nil || ev.SessionResumptionHandle != "") {
+						ev.LiveSessionID = ""
+					}
+					// After the response processors, as in adk-python: they see
+					// the calls as the model sent them, and a call they add
+					// still gets an id.
+					utils.PopulateClientFunctionCallID(ctx, ev.LLMResponse.Content)
 					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
 					var tools map[string]tool.Tool
 					if len(fnCalls) > 0 {
@@ -1045,6 +1055,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 							return
 						}
 						if respEv != nil {
+							// The response event belongs to the connection that
+							// sent the calls; a non-live run sets no id.
+							respEv.LiveSessionID = ev.LiveSessionID
 							if !sess.pushEvent(respEv) {
 								cleanup()
 								return

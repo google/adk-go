@@ -191,6 +191,7 @@ func epFullEvent() *session.Event {
 			FinishReason:            genai.FinishReasonStop,
 			ModelVersion:            "v1",
 			SessionResumptionHandle: "h1",
+			LiveSessionID:           "live-sess-orig",
 			AvgLogprobs:             -0.5,
 			UsageMetadata:           &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 3},
 			CitationMetadata:        &genai.CitationMetadata{},
@@ -284,6 +285,14 @@ func TestRunner_OnEventReplacement_MergesFieldsAcrossLoops(t *testing.T) {
 				ev.Output = map[string]any{"k2": "v2"}
 				ev.ErrorMessage = "msg2"
 			},
+			wantState: map[string]any{"sk": "sv"},
+		},
+		{
+			name: "live_session_id_override",
+			replacement: func() *session.Event {
+				return &session.Event{LLMResponse: model.LLMResponse{LiveSessionID: "live-sess-override"}}
+			},
+			want:      func(ev *session.Event) { ev.LiveSessionID = "live-sess-override" },
 			wantState: map[string]any{"sk": "sv"},
 		},
 	}

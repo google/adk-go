@@ -68,6 +68,7 @@ type Event struct {
 	ModelVersion        string                                      `json:"modelVersion,omitempty"`
 	InputTranscription  *genai.Transcription                        `json:"inputTranscription,omitempty"`
 	OutputTranscription *genai.Transcription                        `json:"outputTranscription,omitempty"`
+	LiveSessionID       string                                      `json:"liveSessionId,omitempty"`
 	Actions             EventActions                                `json:"actions"`
 	Output              any                                         `json:"output,omitempty"`
 	NodeInfo            *session.NodeInfo                           `json:"nodeInfo,omitempty"`
@@ -139,6 +140,7 @@ func ToSessionEvent(event Event) (*session.Event, error) {
 			ModelVersion:        event.ModelVersion,
 			InputTranscription:  event.InputTranscription,
 			OutputTranscription: event.OutputTranscription,
+			LiveSessionID:       event.LiveSessionID,
 		},
 		Actions: session.EventActions{
 			StateDelta:                 event.Actions.StateDelta,
@@ -199,6 +201,7 @@ func FromSessionEvent(event session.Event) Event {
 		ModelVersion:        event.LLMResponse.ModelVersion,
 		InputTranscription:  event.LLMResponse.InputTranscription,
 		OutputTranscription: event.LLMResponse.OutputTranscription,
+		LiveSessionID:       event.LLMResponse.LiveSessionID,
 		Actions: EventActions{
 			StateDelta:                 event.Actions.StateDelta,
 			ArtifactDelta:              event.Actions.ArtifactDelta,

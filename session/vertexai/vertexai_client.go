@@ -403,6 +403,9 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		// and keeps transcriptions in raw_event only, so this does the same.
 		event.InputTranscription != nil ||
 		event.OutputTranscription != nil ||
+		// No SessionEvent column holds the live session id; adk-python keeps
+		// it in raw_event (sessions/vertex_ai_session_service.py:491-498).
+		event.LiveSessionID != "" ||
 		// A context-compaction summary lives entirely on Actions.Compaction:
 		// its Content is nil and it has no state or artifact delta, so without
 		// raw_event nothing about it reaches the backend. On reload the session

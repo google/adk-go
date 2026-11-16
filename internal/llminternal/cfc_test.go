@@ -716,6 +716,64 @@ func TestCFCAfterModelCallbackReplacementKeepsEventAndTurnComplete(t *testing.T)
 	}
 }
 
+// A CFC model event carries the live connection's session id. An after-model
+// callback's replacement does not inherit it, as adk-python's
+// _inherit_unset_model_fields fills only partial, turn_complete and
+// usage_metadata (flows/llm_flows/core/_finalizer.py:212-216); a replacement
+// that sets its own id keeps it.
+func TestCFCModelEventLiveSessionID(t *testing.T) {
+	replaceWith := func(liveSessionID string) AfterModelCallback {
+		return func(_ agent.Context, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+			if resp.Content == nil {
+				return nil, nil
+			}
+			return &model.LLMResponse{Content: genai.NewContentFromText("scrubbed", genai.RoleModel), LiveSessionID: liveSessionID}, nil
+		}
+	}
+	tests := []struct {
+		name              string
+		callbacks         []AfterModelCallback
+		wantLiveSessionID string
+	}{
+		{name: "no callback", wantLiveSessionID: "cfc-live-1"},
+		{name: "replacement without an id", callbacks: []AfterModelCallback{replaceWith("")}, wantLiveSessionID: ""},
+		{name: "replacement with its own id", callbacks: []AfterModelCallback{replaceWith("from-callback")}, wantLiveSessionID: "from-callback"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			baseline, _ := runLiveStacks()
+			defer assertNoRunLiveLeak(t, baseline)
+			client := startLiveServerWithSetupComplete(t, func(int) string { return `{"setupComplete":{"sessionId":"cfc-live-1"}}` }, func(_ int, conn *websocket.Conn) {
+				if !writeFrames(t, conn, cfcRawTurn) {
+					return
+				}
+				blockUntilClientCloses(conn)
+			})
+			f := &Flow{
+				Model:               &cfcModel{name: "gemini-2.0-flash", client: client},
+				RequestProcessors:   liveOnlyProcessors,
+				AfterModelCallbacks: tc.callbacks,
+			}
+			ctx := newCFCContext(t, cfcRun{agent: newCFCAgent(t, "test-live-agent", &State{}), runConfig: agent.RunConfig{SupportCFC: true}})
+
+			events, errs := collectEvents(t, f.Run(ctx))
+
+			if len(errs) != 0 {
+				t.Fatalf("Run() errors = %v, want none", errs)
+			}
+			if len(events) != 1 {
+				t.Fatalf("Run() events = %v, want one", describeCFCEvents(events))
+			}
+			if got := events[0].LiveSessionID; got != tc.wantLiveSessionID {
+				t.Errorf("event LiveSessionID = %q, want %q", got, tc.wantLiveSessionID)
+			}
+			if !events[0].TurnComplete {
+				t.Error("event TurnComplete = false, want true")
+			}
+		})
+	}
+}
+
 // An after-model callback that edits a live function call edits the event
 // the consumer gets, not the call the live loop runs, and does not race with
 // it (run with -race).
