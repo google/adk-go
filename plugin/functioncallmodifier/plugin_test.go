@@ -642,8 +642,7 @@ func cloneLLMRequest(t *testing.T, req *model.LLMRequest) *model.LLMRequest {
 					newParams := *decl.Parameters // Shallow copy of Schema
 					newParams.Properties = make(map[string]*genai.Schema)
 					for k, v := range decl.Parameters.Properties {
-						prop := *v
-						newParams.Properties[k] = &prop
+						newParams.Properties[k] = new(*v)
 					}
 					newDecl.Parameters = &newParams
 				}

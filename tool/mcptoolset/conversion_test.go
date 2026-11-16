@@ -768,8 +768,8 @@ func TestGeminiToJSONSchema(t *testing.T) {
 			schema: &genai.Schema{
 				Type:      genai.TypeString,
 				Pattern:   "^a.*",
-				MinLength: genai.Ptr[int64](2),
-				MaxLength: genai.Ptr[int64](8),
+				MinLength: new(int64(2)),
+				MaxLength: new(int64(8)),
 			},
 			want: map[string]any{
 				"type":      "string",
@@ -783,8 +783,8 @@ func TestGeminiToJSONSchema(t *testing.T) {
 			schema: &genai.Schema{
 				Type:      genai.TypeInteger,
 				Pattern:   "^a.*",
-				MinLength: genai.Ptr[int64](2),
-				MaxLength: genai.Ptr[int64](8),
+				MinLength: new(int64(2)),
+				MaxLength: new(int64(8)),
 				Minimum:   new(1.0),
 			},
 			want: map[string]any{
@@ -837,10 +837,10 @@ func TestGeminiToJSONSchema(t *testing.T) {
 				Type: genai.TypeArray,
 				Items: &genai.Schema{
 					Type:      genai.TypeString,
-					MaxLength: genai.Ptr[int64](4),
+					MaxLength: new(int64(4)),
 				},
-				MinItems: genai.Ptr[int64](1),
-				MaxItems: genai.Ptr[int64](3),
+				MinItems: new(int64(1)),
+				MaxItems: new(int64(3)),
 			},
 			want: map[string]any{
 				"type": "array",
@@ -862,8 +862,8 @@ func TestGeminiToJSONSchema(t *testing.T) {
 			schema: &genai.Schema{
 				Type:     genai.TypeString,
 				Items:    &genai.Schema{Type: genai.TypeString},
-				MinItems: genai.Ptr[int64](1),
-				MaxItems: genai.Ptr[int64](3),
+				MinItems: new(int64(1)),
+				MaxItems: new(int64(3)),
 			},
 			want: map[string]any{"type": "string"},
 		},
@@ -874,7 +874,7 @@ func TestGeminiToJSONSchema(t *testing.T) {
 				Properties: map[string]*genai.Schema{
 					"name": {
 						Type:      genai.TypeString,
-						MaxLength: genai.Ptr[int64](10),
+						MaxLength: new(int64(10)),
 					},
 					"tags": {
 						Type:  genai.TypeArray,
@@ -882,8 +882,8 @@ func TestGeminiToJSONSchema(t *testing.T) {
 					},
 				},
 				Required:      []string{"name"},
-				MinProperties: genai.Ptr[int64](1),
-				MaxProperties: genai.Ptr[int64](2),
+				MinProperties: new(int64(1)),
+				MaxProperties: new(int64(2)),
 			},
 			want: map[string]any{
 				"type": "object",
@@ -910,8 +910,8 @@ func TestGeminiToJSONSchema(t *testing.T) {
 					"name": {Type: genai.TypeString},
 				},
 				Required:      []string{"name"},
-				MinProperties: genai.Ptr[int64](1),
-				MaxProperties: genai.Ptr[int64](2),
+				MinProperties: new(int64(1)),
+				MaxProperties: new(int64(2)),
 			},
 			want: map[string]any{"type": "string"},
 		},

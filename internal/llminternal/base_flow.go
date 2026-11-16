@@ -454,6 +454,15 @@ func hasRealtimeInput(v any) bool {
 	return true
 }
 
+// isEmptyLiveResponse reports whether r carries nothing worth an event, as
+// the response built from the Live API's setupComplete does. adk-python's live
+// flow skips the same responses.
+func isEmptyLiveResponse(r *model.LLMResponse) bool {
+	return r.Content == nil && r.ErrorCode == "" && !r.Interrupted && !r.TurnComplete &&
+		r.InputTranscription == nil && r.OutputTranscription == nil && r.UsageMetadata == nil &&
+		r.SessionResumptionHandle == "" && r.GroundingMetadata == nil
+}
+
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	clientProvider, ok := f.Model.(interface {
 		Client() *genai.Client
@@ -494,8 +503,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		// it needs its own copy: the caller may reuse its LiveRunConfig.
 		sessionResumption := runCfg.Live.SessionResumption
 		if sessionResumption != nil {
-			sessionResumptionCopy := *sessionResumption
-			sessionResumption = &sessionResumptionCopy
+			sessionResumption = new(*sessionResumption)
 		}
 
 		liveConnectConfig := &genai.LiveConnectConfig{
@@ -668,6 +676,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 									sess.audioMgr.CacheOutput(ctx, part.InlineData.Data, part.InlineData.MIMEType)
 								}
 							}
+						}
+						if isEmptyLiveResponse(resp) {
+							continue
 						}
 						ev := session.NewEvent(ctx, ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()
@@ -927,10 +938,11 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, err)
 				return
 			}
-			// Skip the model response event if there is no content and no error code.
+			// Skip the model response event if it carries no content, error code,
+			// interruption or grounding metadata.
 			// This is needed for the code executor to trigger another loop according to
 			// adk-python src/google/adk/flows/llm_flows/base_llm_flow.py BaseLlmFlow._postprocess_async.
-			if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted {
+			if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted && resp.GroundingMetadata == nil {
 				continue
 			}
 
@@ -1245,13 +1257,26 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 	return telemetry.InstrumentGenerateContent(ctx, params, response, func(spanCtx context.Context) iter.Seq2[*responseWithEventID, error] {
 		ctx := ctx.WithContext(spanCtx)
 		return func(yield func(*responseWithEventID, error) bool) {
+			// The partial chunks of a streamed response share one event id with
+			// the response that completes them. A complete response ends the id,
+			// and so does an error, because an on-model-error callback may turn
+			// it into a saved event. A new id is drawn when the next response
+			// arrives, never ahead of one.
+			var eventID string
 			for resp, err := range m.GenerateContent(ctx, req, useStream) {
 				if resp == nil && err == nil {
 					// Third-party model implementations may yield an empty response.
 					continue
 				}
-				if !yield(newResponseWithEventID(ctx, resp), err) {
+				if eventID == "" {
+					eventID = platform.NewUUID(ctx)
+				}
+				if !yield(&responseWithEventID{resp, eventID}, err) {
 					return
+				}
+				// resp is non-nil whenever err is nil; the empty case is skipped above.
+				if err != nil || !resp.Partial {
+					eventID = ""
 				}
 			}
 		}
@@ -1505,6 +1530,11 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				confirmation = toolConfirmations[fnCall.ID]
 			}
 			toolCtx := agent.NewToolContext(toolCallCtx, fnCall.ID, &session.EventActions{StateDelta: make(map[string]any)}, confirmation)
+			// The callbacks and the tool may edit the arguments; the function
+			// call event keeps the ones the model sent. A call without args
+			// reaches them as an empty map, so a tool that returns its args, as
+			// set_model_response does, returns an object rather than nil.
+			args := cloneArgs(fnCall.Args)
 
 			var result map[string]any
 			var curTool tool.Tool
@@ -1522,7 +1552,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				curTool, found = toolsDict[fnCall.Name]
 				if !found {
 					err := newToolNotFoundError(fnCall.Name, toolNames)
-					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, args, err)
 					if err != nil {
 						result = map[string]any{"error": err.Error()}
 					}
@@ -1544,7 +1574,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 								}
 								cancel()
 							}()
-							for chunk, err := range streamTool.RunStream(cancelToolCtx, fnCall.Args) {
+							for chunk, err := range streamTool.RunStream(cancelToolCtx, args) {
 								select {
 								case <-cancelCtx.Done():
 									return
@@ -1570,7 +1600,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						}()
 					} else {
 						var sb strings.Builder
-						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
+						for chunk, err := range streamTool.RunStream(toolCtx, args) {
 							if err != nil {
 								errText, _ := toolinternal.ModelErrorText(streamTool.Name(), err)
 								result = map[string]any{"error": errText}
@@ -1584,12 +1614,12 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					}
 				} else if funcTool, ok := curTool.(toolinternal.FunctionTool); !ok {
 					err := newToolNotFoundError(fnCall.Name, toolNames)
-					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, fnCall.Args, err)
+					result, err = f.runOnToolErrorCallbacks(toolCtx, &fakeTool{name: fnCall.Name}, args, err)
 					if err != nil {
 						result = map[string]any{"error": err.Error()}
 					}
 				} else {
-					result = f.callTool(toolCtx, funcTool, fnCall.Args)
+					result = f.callTool(toolCtx, funcTool, args)
 				}
 			}
 
@@ -1600,6 +1630,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				if curTool != nil && curTool.IsLongRunning() {
 					return
 				}
+				result = map[string]any{"result": nil}
 			}
 
 			parts := []*genai.Part{
@@ -1734,6 +1765,39 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 		return map[string]any{"error": errText}
 	}
 	return response
+}
+
+// cloneArgs returns a copy of a function call's arguments for the callbacks
+// and the tool to edit. Nested map[string]any and []any values, the shapes
+// decoded JSON arguments hold, are copied too; other values are shared. A nil
+// map becomes an empty one, so a callback can add an argument to a call that
+// had none.
+func cloneArgs(args map[string]any) map[string]any {
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		out[k] = cloneArgValue(v)
+	}
+	return out
+}
+
+func cloneArgValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		if t == nil {
+			return t
+		}
+		return cloneArgs(t)
+	case []any:
+		if t == nil {
+			return t
+		}
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = cloneArgValue(e)
+		}
+		return out
+	}
+	return v
 }
 
 func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {

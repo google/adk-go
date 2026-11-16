@@ -13511,8 +13511,7 @@ func TestConcurrencyRace_CachedChildOnDescendantBranchUnderUndeclaredSibling(t *
 								cachedErr = errors.New("sibling did not answer")
 								return
 							}
-							nested := "nested"
-							nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &nested})
+							nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("nested")})
 							// Drop cached_child's event so only contextEnded
 							// settled after parent joins can mark it responded.
 							for _, runErr := range cachedChild.Run(nestedCtx) {
@@ -14043,8 +14042,7 @@ func TestConcurrencyRace_SameOverrideBranchSiblingAndCachedChild(t *testing.T) {
 							cachedErr  error
 							stoppedOut bool
 						)
-						nestedS := "nested"
-						sibCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &nestedS})
+						sibCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("nested")})
 						wg.Go(func() {
 							select {
 							case <-siblingAnswered:
@@ -14052,8 +14050,7 @@ func TestConcurrencyRace_SameOverrideBranchSiblingAndCachedChild(t *testing.T) {
 								cachedErr = errors.New("sibling did not answer")
 								return
 							}
-							nested := "nested"
-							nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &nested})
+							nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("nested")})
 							for _, runErr := range cachedChild.Run(nestedCtx) {
 								if runErr != nil && cachedErr == nil {
 									cachedErr = runErr
@@ -14168,8 +14165,7 @@ func TestConcurrencyRace_NestedDescendantBranchCachedChildUnderOverrideSibling(t
 						cachedErr = errors.New("sibling did not answer")
 						return
 					}
-					nested := "b1.nested"
-					nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &nested})
+					nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("b1.nested")})
 					for _, runErr := range cachedChild.Run(nestedCtx) {
 						if runErr != nil && cachedErr == nil {
 							cachedErr = runErr
@@ -14177,8 +14173,7 @@ func TestConcurrencyRace_NestedDescendantBranchCachedChildUnderOverrideSibling(t
 					}
 				})
 				wg.Go(func() {
-					b1 := "b1"
-					b1Ctx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &b1})
+					b1Ctx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("b1")})
 					for ev, runErr := range sibling.Run(b1Ctx) {
 						if !yield(ev, runErr) {
 							stoppedOut = true
@@ -15235,8 +15230,7 @@ func TestConcurrencyRace_ParallelLookingBranchOverrideUnderCustomParent(t *testi
 				defer close(done)
 				var wg sync.WaitGroup
 				wg.Go(func() {
-					sibBranch := "parent.sibling"
-					sibCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &sibBranch})
+					sibCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("parent.sibling")})
 					for ev, runErr := range sibling.Run(sibCtx) {
 						if ev != nil {
 							ack := make(chan bool, 1)
@@ -15261,8 +15255,7 @@ func TestConcurrencyRace_ParallelLookingBranchOverrideUnderCustomParent(t *testi
 						ch <- item{err: errors.New("sibling did not start")}
 						return
 					}
-					nestedBranch := "parent.sibling.nested"
-					nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &nestedBranch})
+					nestedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: new("parent.sibling.nested")})
 					// Drop cached_child's event so settlement relies on contextEnded.
 					for _, runErr := range cachedChild.Run(nestedCtx) {
 						if runErr != nil {
@@ -15620,8 +15613,7 @@ func TestConcurrencyRace_ConcurrentSameAgentWithPromotedSubNodePath(t *testing.T
 						if !yield(answer, nil) {
 							return
 						}
-						subPath := "custom@1"
-						promotedCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath})
+						promotedCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("custom@1")})
 						type item struct {
 							ev  *session.Event
 							err error
@@ -15776,8 +15768,7 @@ func TestConcurrencyRace_LiveToolConcurrentSameChildWithPromotedPathUnderInvocat
 	runHelper, err := functiontool.New(functiontool.Config{Name: "run_helper", Description: "Runs helper twice concurrently"},
 		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
 			// Promote the context to helper@1, as a Live tool would.
-			subPath := "helper@1"
-			promotedCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath})
+			promotedCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("helper@1")})
 
 			// Each run creates its own runCtx via WithICDelta(nil) so each
 			// has a distinct activation pointer (rec.activation !=
@@ -17634,8 +17625,7 @@ func TestConcurrencyRace_LiveToolReturnsBeforeUnjoinedCachedChild(t *testing.T) 
 	}
 	startHelper, err := functiontool.New(functiontool.Config{Name: "start_helper", Description: "Starts helper without waiting for it"},
 		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
-			subPath := "helper@1"
-			runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath}).WithICDelta(nil)
+			runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("helper@1")}).WithICDelta(nil)
 			go func() {
 				defer close(helperDone)
 				for range helper.Run(runCtx) { //nolint:errcheck // a detached helper's error cannot be reported from the tool; the rows below carry the outcome
@@ -21173,8 +21163,7 @@ func TestRunner_LiveToolSubAgentCallMovesToLateState(t *testing.T) {
 	helperDone := make(chan struct{})
 	startHelper, err := functiontool.New(functiontool.Config{Name: "start_helper", Description: "Starts helper without waiting for it"},
 		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
-			subPath := "helper@1"
-			runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath}).WithICDelta(nil)
+			runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("helper@1")}).WithICDelta(nil)
 			go func() {
 				defer close(helperDone)
 				for range helper.Run(runCtx) { //nolint:errcheck // a detached helper's error cannot be reported from the tool; the rows below carry the outcome
@@ -21296,8 +21285,7 @@ func TestRunner_LiveToolReturnsBeforeHelperModelCallEnds_KeepsHelperOpen(t *test
 			}
 			startHelper, err := functiontool.New(functiontool.Config{Name: "start_helper", Description: "Starts helper without waiting for it"},
 				func(ctx agent.Context, _ struct{}) (map[string]any, error) {
-					subPath := "helper@1"
-					runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath}).WithICDelta(nil)
+					runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: new("helper@1")}).WithICDelta(nil)
 					go func() {
 						defer close(helperDone)
 						for range helper.Run(runCtx) { //nolint:errcheck // a detached helper's error cannot be reported from the tool; the rows below carry the outcome
