@@ -32,6 +32,7 @@ import (
 
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
 	storagepb "cloud.google.com/go/bigquery/storage/apiv1/storagepb"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/api/option"
 	statuspb "google.golang.org/genproto/googleapis/rpc/status"
@@ -8322,7 +8323,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 							{
 								Index:   1,
 								Code:    storagepb.RowError_ROW_ERROR_CODE_UNSPECIFIED,
-								Message: "invalid field; Authorization: Bearer secret-row-token-123",
+								Message: "invalid field\r\nFAKE_LOG_LINE; Authorization: Bearer secret-row-token-123",
 							},
 						},
 					}, nil
@@ -8362,13 +8363,13 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		}
 
 		logged := logger.String()
-		wantLog := "WARNING: Dropping 1/3 row(s) rejected by BigQuery RowErrors (first index=1, code=ROW_ERROR_CODE_UNSPECIFIED, out_of_range=0): invalid field; Authorization: [REDACTED]"
+		wantLog := "WARNING: Dropping 1/3 row(s) rejected by BigQuery RowErrors (first index=1, code=ROW_ERROR_CODE_UNSPECIFIED, out_of_range=0, message_bytes=72)"
 		if logged != wantLog {
 			t.Errorf("logger output mismatch:\ngot:  %q\nwant: %q", logged, wantLog)
 		}
-		for _, forbidden := range []string{"RAW_PAYLOAD_SECRET_ZERO", "RAW_PAYLOAD_SECRET_ONE", "RAW_PAYLOAD_SECRET_TWO", "secret-row-token-123"} {
+		for _, forbidden := range []string{"RAW_PAYLOAD_SECRET_ZERO", "RAW_PAYLOAD_SECRET_ONE", "RAW_PAYLOAD_SECRET_TWO", "secret-row-token-123", "FAKE_LOG_LINE", "\r", "\n"} {
 			if strings.Contains(logged, forbidden) {
-				t.Errorf("logger leaked sensitive content %q in:\n%s", forbidden, logged)
+				t.Errorf("logger leaked sensitive or framing content %q in:\n%s", forbidden, logged)
 			}
 		}
 	})
@@ -8891,7 +8892,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		}
 		logged := logger.String()
 		for _, wantSubstr := range []string{
-			"WARNING: Dropping 1/3 row(s) rejected by BigQuery RowErrors (first index=1, code=ROW_ERROR_CODE_UNSPECIFIED, out_of_range=0): invalid row 1",
+			"WARNING: Dropping 1/3 row(s) rejected by BigQuery RowErrors (first index=1, code=ROW_ERROR_CODE_UNSPECIFIED, out_of_range=0, message_bytes=13)",
 			"ERROR: Failed to write batch to BigQuery: batch append error from BigQuery: 1 row(s) rejected by RowErrors",
 		} {
 			if !strings.Contains(logged, wantSubstr) {
@@ -9081,6 +9082,244 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 			t.Errorf("append offsets mismatch (-want +got):\n%s", diff)
 		}
 	})
+
+	t.Run("pass cap stops isolating after maxRowErrorIsolationPasses and counts remaining rows as AppendFailureDrops", func(t *testing.T) {
+		var calls atomic.Int32
+		srv, sent := recordingServer(t, func(_ []string) *storagepb.AppendRowsResponse {
+			calls.Add(1)
+			// Always reject index 0 of whatever slice remains.
+			return rowErrors(0)
+		})
+
+		bp := newProcessor(t, srv, false, &recordingLogger{})
+		totalRows := maxRowErrorIsolationPasses + 2
+		ids := make([]string, totalRows)
+		for i := range ids {
+			ids[i] = fmt.Sprintf("r-%d", i)
+		}
+		err := bp.writeBatch(context.Background(), eventRows(ids...))
+		wantErrSubstr := fmt.Sprintf("exceeded max RowErrors isolation passes (%d) with 2 row(s) unconfirmed", maxRowErrorIsolationPasses)
+		if err == nil || !strings.Contains(err.Error(), wantErrSubstr) {
+			t.Fatalf("writeBatch() error = %v, want substring %q", err, wantErrSubstr)
+		}
+		if got := int(calls.Load()); got != maxRowErrorIsolationPasses {
+			t.Errorf("AppendRows calls = %d, want %d", got, maxRowErrorIsolationPasses)
+		}
+		if got := len(sent()); got != maxRowErrorIsolationPasses {
+			t.Errorf("sent batch count = %d, want %d", got, maxRowErrorIsolationPasses)
+		}
+		wantDrops := DropStats{
+			RowErrorDrops:      int64(maxRowErrorIsolationPasses),
+			AppendFailureDrops: 2,
+			TotalDrops:         int64(totalRows),
+		}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("RowErrors with PermissionDenied does not isolate or resend survivors", func(t *testing.T) {
+		var calls atomic.Int32
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(_ int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				calls.Add(1)
+				return &storagepb.AppendRowsResponse{
+					Response: &storagepb.AppendRowsResponse_Error{
+						Error: &statuspb.Status{
+							Code:    int32(codes.PermissionDenied),
+							Message: "permission denied",
+						},
+					},
+					RowErrors: []*storagepb.RowError{{Index: 0, Message: "bad 0"}},
+				}, nil
+			},
+		}
+
+		bp := newProcessor(t, srv, false, &recordingLogger{})
+		err := bp.writeBatch(context.Background(), eventRows("r0", "r1"))
+		if err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Fatalf("writeBatch() error = %v, want permission denied", err)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("AppendRows calls = %d, want 1 (no survivor resend on PermissionDenied)", got)
+		}
+		wantDrops := DropStats{
+			AppendFailureDrops: 2,
+			TotalDrops:         2,
+		}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("RowErrors with Unavailable after retries exhausted does not isolate or resend survivors", func(t *testing.T) {
+		var calls atomic.Int32
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(_ int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				calls.Add(1)
+				return &storagepb.AppendRowsResponse{
+					Response: &storagepb.AppendRowsResponse_Error{
+						Error: &statuspb.Status{
+							Code:    int32(codes.Unavailable),
+							Message: "service unavailable",
+						},
+					},
+					RowErrors: []*storagepb.RowError{{Index: 0, Message: "bad 0"}},
+				}, nil
+			},
+		}
+
+		bp := newProcessor(t, srv, false, &recordingLogger{})
+		err := bp.writeBatch(context.Background(), eventRows("r0", "r1"))
+		if err == nil || !strings.Contains(err.Error(), "service unavailable") {
+			t.Fatalf("writeBatch() error = %v, want service unavailable", err)
+		}
+		// newProcessor configures RetryConfig.MaxRetries = 1, so 2 total calls (initial + 1 retry)
+		// and NO 3rd survivor resend once retries are exhausted.
+		if got := calls.Load(); got != 2 {
+			t.Errorf("AppendRows calls = %d, want 2 (1 initial + 1 retry, no survivor resend)", got)
+		}
+		wantDrops := DropStats{
+			AppendFailureDrops: 2,
+			TotalDrops:         2,
+		}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("fallback branch redacts sensitive tokens and prevents log-framing injection", func(t *testing.T) {
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(_ int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				return &storagepb.AppendRowsResponse{
+					Response: &storagepb.AppendRowsResponse_Error{
+						Error: &statuspb.Status{
+							Code:    int32(codes.PermissionDenied),
+							Message: "denied\r\nFAKE_STATUS_LOG; Authorization: Bearer fallback-secret-999",
+						},
+					},
+					RowErrors: []*storagepb.RowError{{
+						Index:   0,
+						Message: "row detail\r\nFAKE_ROW_LOG; Authorization: Bearer row-secret-888",
+					}},
+				}, nil
+			},
+		}
+
+		logger := &recordingLogger{}
+		bp := newProcessor(t, srv, false, logger)
+		err := bp.writeBatch(context.Background(), eventRows("r0", "r1"))
+		if err == nil {
+			t.Fatal("writeBatch() error = nil, want non-nil error")
+		}
+		wantErr := "batch append error from BigQuery: denied  FAKE_STATUS_LOG; Authorization: [REDACTED]"
+		if err.Error() != wantErr {
+			t.Errorf("writeBatch() error = %q, want %q", err.Error(), wantErr)
+		}
+
+		logger.mu.Lock()
+		lines := slices.Clone(logger.lines)
+		logger.mu.Unlock()
+		if len(lines) != 1 {
+			t.Fatalf("logger recorded %d lines, want 1: %q", len(lines), lines)
+		}
+		wantLog := "BigQuery response error (code=PermissionDenied, row_errors=1): denied  FAKE_STATUS_LOG; Authorization: [REDACTED]"
+		if lines[0] != wantLog {
+			t.Errorf("logger line mismatch:\ngot:  %q\nwant: %q", lines[0], wantLog)
+		}
+		for _, forbidden := range []string{"fallback-secret-999", "row-secret-888", "FAKE_ROW_LOG", "\r", "\n"} {
+			if strings.Contains(lines[0], forbidden) || strings.Contains(err.Error(), forbidden) {
+				t.Errorf("fallback path leaked %q (log=%q, err=%q)", forbidden, lines[0], err.Error())
+			}
+		}
+	})
+
+	t.Run("RowErrors with only nil entries fails cleanly without out-of-range error", func(t *testing.T) {
+		logger := &recordingLogger{}
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "agent_events"
+		cfg.Logger = logger
+		cfg.RetryConfig.MaxRetries = 0
+		bp, err := NewBatchProcessor(context.Background(), nil, "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(bp.Close)
+
+		ms := &mockStream{
+			recvRes: &storagepb.AppendRowsResponse{
+				RowErrors: []*storagepb.RowError{nil, nil},
+			},
+		}
+		bp.streamWriter.stream = ms
+
+		err = bp.writeBatch(context.Background(), eventRows("r0", "r1"))
+		if err == nil || !strings.Contains(err.Error(), "RowErrors contained only nil entries") {
+			t.Fatalf("writeBatch() error = %v, want RowErrors contained only nil entries", err)
+		}
+		if strings.Contains(err.Error(), "out of range") {
+			t.Errorf("writeBatch() error = %v, must not report out of range", err)
+		}
+		if got := atomic.LoadInt32(&ms.sendCount); got != 1 {
+			t.Errorf("AppendRows calls = %d, want 1", got)
+		}
+		wantDrops := DropStats{
+			AppendFailureDrops: 2,
+			TotalDrops:         2,
+		}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+		wantLog := "WARNING: BigQuery RowErrors contained 2 nil entry(ies) with no valid row error (batch_size=2)"
+		if logged := logger.String(); logged != wantLog {
+			t.Errorf("logger output mismatch:\ngot:  %q\nwant: %q", logged, wantLog)
+		}
+	})
+
+	t.Run("Arrow record is released when AppendRows panics on initial and retry isolation passes", func(t *testing.T) {
+		for _, panicOnPass := range []int{1, 2} {
+			t.Run(fmt.Sprintf("panic_pass_%d", panicOnPass), func(t *testing.T) {
+				cfg := DefaultConfig()
+				cfg.ProjectID = "test-proj"
+				cfg.DatasetID = "test-ds"
+				cfg.TableName = "agent_events"
+				cfg.RetryConfig.MaxRetries = 0
+				bp, err := NewBatchProcessor(context.Background(), nil, "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
+				if err != nil {
+					t.Fatalf("NewBatchProcessor() error = %v", err)
+				}
+				t.Cleanup(bp.Close)
+
+				checked := memory.NewCheckedAllocator(memory.NewGoAllocator())
+				bp.allocator = checked
+
+				var sendCalls int
+				bp.streamWriter.stream = &mockStream{
+					onSend: func() {
+						sendCalls++
+						if sendCalls == panicOnPass {
+							panic("boom in AppendRows Send")
+						}
+					},
+					recvSeq: []mockRecv{
+						{res: rowErrors(0)},
+					},
+				}
+
+				var recovered any
+				func() {
+					defer func() { recovered = recover() }()
+					_ = bp.writeBatch(context.Background(), eventRows("bad-0", "good-1"))
+				}()
+				if recovered == nil {
+					t.Fatal("expected panic from mockStream.Send, got nil")
+				}
+				checked.AssertSize(t, 0)
+			})
+		}
+	})
 }
 
 func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.T) {
@@ -9104,6 +9343,21 @@ func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.
 					Error: &statuspb.Status{
 						Code:    int32(codes.InvalidArgument),
 						Message: "row 0 invalid",
+					},
+				},
+				RowErrors: []*storagepb.RowError{{
+					Index:   0,
+					Message: "row 0 invalid",
+				}},
+			},
+		},
+		{
+			name: "AlreadyExists status with RowErrors after ambiguous send fails without advancing offset or replaying survivors",
+			attempt2Resp: &storagepb.AppendRowsResponse{
+				Response: &storagepb.AppendRowsResponse_Error{
+					Error: &statuspb.Status{
+						Code:    int32(codes.AlreadyExists),
+						Message: "already exists",
 					},
 				},
 				RowErrors: []*storagepb.RowError{{

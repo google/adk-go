@@ -222,7 +222,12 @@ type GCSContentOffloader interface {
 // retries remain if the code is Unavailable, ResourceExhausted, Internal,
 // DeadlineExceeded, or Aborted, whereas adk-python resends it only for
 // DeadlineExceeded, Internal, or Unavailable, and drops the batch for any
-// other code.
+// other code. When AppendRowsResponse.RowErrors reports valid in-range row
+// indices alongside a nil or InvalidArgument status (and not after an
+// ambiguous send under ExactlyOnceDelivery), Go isolates the rejected rows
+// under DropStats.RowErrorDrops and resends surviving rows up to 8 passes
+// per chunk, counting any remaining unconfirmed rows under AppendFailureDrops,
+// whereas adk-python drops the entire batch.
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from

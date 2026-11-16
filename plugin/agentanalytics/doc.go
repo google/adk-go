@@ -276,11 +276,14 @@
 //   - [DropStats] structure: Go exposes [DropStats] as a typed struct of five
 //     category counters (QueueFullDrops, AppendFailureDrops, RowErrorDrops,
 //     FormatterFailureDrops, ShutdownDrops) plus TotalDrops via
-//     [BigQueryAgentAnalyticsPlugin.DropStats], whereas adk-python's
+//     [BigQueryAgentAnalyticsPlugin.DropStats], and isolates per-row
+//     AppendRowsResponse.RowErrors rejections (up to 8 passes per chunk) under
+//     RowErrorDrops instead of dropping the whole batch, whereas adk-python's
 //     get_drop_stats() returns a dictionary of per-reason counts. (Pinned by
 //     TestBigQueryAgentAnalyticsPlugin_DropStats in
-//     bigquery_agent_analytics_plugin_test.go, and TestBatchProcessor_DropStats
-//     and TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats in
+//     bigquery_agent_analytics_plugin_test.go, and TestBatchProcessor_DropStats,
+//     TestBatchProcessor_RowErrorsIsolation, and
+//     TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats in
 //     batch_processor_test.go).
 //   - Response summary and function-name bounds: When [Config.MaxContentLen]
 //     sets a limit (MaxContentLen >= 0 and [Config.CaptureFullMessageContent]
