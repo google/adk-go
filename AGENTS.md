@@ -136,6 +136,10 @@ See `CONTRIBUTING.md` for the full process and CLA. Key points for agents:
 most PRs (beyond trivial docs/typos) need a linked issue; include a **Testing
 Plan**; attach logs or screenshots for behavior changes (Runner output / ADK Web).
 
+To have the release notes link the issue a PR fixes, end the commit message with
+a `Fixes #123` line. Release tooling reads issue references only from that
+final trailer block, never from the PR description.
+
 ## Alignment with adk-python
 
 [adk-python](https://github.com/google/adk-python) is the source of truth for

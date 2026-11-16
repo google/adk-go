@@ -65,7 +65,11 @@ information on using pull requests.
 -   All PRs, other than small documentation or typo fixes, should have an Issue
     associated. If a relevant issue doesn't exist, please create one first or
     you may instead describe the bug or feature directly within the PR
-    description, following the structure of our issue templates.
+    description, following the structure of our issue templates. For the release
+    notes to link the issue a PR fixes, the merged commit message must also end
+    with a line such as `Fixes #<number>`. On a single-commit PR, end your
+    commit message with it. On a PR with several commits, the maintainer who
+    merges moves it to the end of the squash message.
 -   Small, focused PRs. Keep changes minimal—one concern per PR.
 -   For bug fixes or features, please provide logs or screenshots after the fix
     is applied to help reviewers better understand the fix.
