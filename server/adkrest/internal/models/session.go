@@ -137,3 +137,19 @@ func RedactedState(stored session.ReadonlyState) map[string]json.RawMessage {
 	}
 	return redacted
 }
+
+// StateIsCredential reports whether the state, as the API encodes it, is
+// itself a credential: a JSON object with a top-level authType that names a
+// credential type.
+func StateIsCredential(stored session.ReadonlyState) bool {
+	if stored == nil {
+		return false
+	}
+	state := stateValues{}
+	maps.Insert(state, stored.All())
+	m, err := asJSONObject(state)
+	if err != nil {
+		return false
+	}
+	return isCredential(m)
+}

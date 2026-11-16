@@ -193,6 +193,12 @@ func isCredential(m map[string]any) bool {
 	return false
 }
 
+// IsCredential reports whether a JSON object has a top-level authType that
+// names a credential type.
+func IsCredential(m map[string]any) bool {
+	return isCredential(m)
+}
+
 // dropSecretKeys deletes credentialSecretKeys from every JSON object in v.
 func dropSecretKeys(v any) {
 	switch v := v.(type) {

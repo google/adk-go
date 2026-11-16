@@ -246,6 +246,10 @@ func (c *SessionsAPIController) UpdateSessionHandler(rw http.ResponseWriter, req
 			http.StatusBadRequest)
 		return
 	}
+	if err := rejectDeclassifyingAuthTypeDelta(storedSession.Session.State(), stateDelta); err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// An empty or absent delta is a no-op: return the session as it stands
 	// rather than record an event that changes nothing.
@@ -371,6 +375,34 @@ func dropEchoedKeys(delta map[string]any, stored session.ReadonlyState) map[stri
 		kept[key] = value
 	}
 	return kept
+}
+
+// rejectDeclassifyingAuthTypeDelta rejects a delta that would make a state
+// map that is itself a credential stop being recognized as one. A state delta
+// is merged key by key, so changing the top-level authType leaves the stored
+// credential fields in place; outbound redaction keys off that authType and
+// would return the retained secrets in plaintext.
+func rejectDeclassifyingAuthTypeDelta(stored session.ReadonlyState, delta map[string]any) error {
+	if !models.StateIsCredential(stored) {
+		return nil
+	}
+	read := models.RedactedState(stored)
+	merged := make(map[string]any)
+	for _, key := range []string{"authType", "auth_type"} {
+		if raw, ok := read[key]; ok {
+			var value any
+			if err := json.Unmarshal(raw, &value); err == nil {
+				merged[key] = value
+			}
+		}
+		if value, ok := delta[key]; ok {
+			merged[key] = value
+		}
+	}
+	if models.IsCredential(merged) {
+		return nil
+	}
+	return fmt.Errorf("stateDelta cannot change the top-level authType of a credential to a non-credential value; use the auth flow to replace the credential")
 }
 
 // strippedOnRead reports whether readValue, the value a read returns for key,
