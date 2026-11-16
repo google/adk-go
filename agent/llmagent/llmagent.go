@@ -798,7 +798,8 @@ func (a *llmAgent) runResumedSubAgent(ctx agent.InvocationContext, sub agent.Age
 // it is the target of the transfer that event holds, if any. When the last
 // event is a user function response to a call the agent made, there is none.
 // Otherwise it is the target of the agent's last transfer. A user event that
-// answers no call of the invocation is an error. It ports adk-python's
+// answers no call of the invocation is an error, and so is a transfer to a
+// name the agent tree does not have. It ports adk-python's
 // LlmAgent._get_subagent_to_resume (agents/llm_agent.py).
 func (a *llmAgent) getSubAgentToResume(ctx agent.InvocationContext) (agent.Agent, error) {
 	events := llminternal.InvocationEvents(ctx, true, true)
@@ -807,7 +808,7 @@ func (a *llmAgent) getSubAgentToResume(ctx agent.InvocationContext) (agent.Agent
 	}
 	last := events[len(events)-1]
 	if last.Author == a.Name() {
-		return a.transferTargetOf(ctx, last), nil
+		return a.transferTargetOf(ctx, last)
 	}
 	if last.Author == "user" {
 		var call *session.Event
@@ -822,26 +823,28 @@ func (a *llmAgent) getSubAgentToResume(ctx agent.InvocationContext) (agent.Agent
 		}
 	}
 	for _, event := range slices.Backward(events) {
-		if target := a.transferTargetOf(ctx, event); target != nil {
-			return target, nil
+		target, err := a.transferTargetOf(ctx, event)
+		if err != nil || target != nil {
+			return target, err
 		}
 	}
 	return nil, nil
 }
 
 // transferTargetOf returns the agent that ev, a transfer_to_agent response
-// of this agent, hands the invocation to, or nil when ev is not one.
-func (a *llmAgent) transferTargetOf(ctx agent.InvocationContext, ev *session.Event) agent.Agent {
+// of this agent, hands the invocation to, or nil when ev is not one. It
+// returns an error when the agent tree has no agent of the name ev holds.
+func (a *llmAgent) transferTargetOf(ctx agent.InvocationContext, ev *session.Event) (agent.Agent, error) {
 	target := ev.Actions.TransferToAgent
 	if ev.Author != a.Name() || target == "" || target == a.Name() {
-		return nil
+		return nil, nil
 	}
 	for _, fr := range utils.FunctionResponses(ev.Content) {
 		if fr.Name == llminternal.TransferToAgentToolName {
 			return llminternal.TransferTarget(ctx, target)
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // RunLive runs the agent over a live model connection. It saves output to

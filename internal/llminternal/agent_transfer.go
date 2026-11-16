@@ -16,15 +16,17 @@ package llminternal
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"iter"
 	"slices"
 	"strings"
+	"text/template"
 
-	"github.com/google/safehtml/template"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
@@ -74,16 +76,21 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 			return
 		}
 
-		parents := parentmap.FromContext(ctx)
-
-		targets := transferTargets(agent, parents[agent.Name()])
+		parent := parentOf(ctx, agent)
+		targets := transferTargets(agent, parent)
 		if len(targets) == 0 {
+			return
+		}
+		if skip, err := builtinSearchGuard(ctx, f, agent, targets); err != nil {
+			yield(nil, err)
+			return
+		} else if skip {
 			return
 		}
 
 		// TODO(hyangah): why do we set this up in request processor
 		// instead of registering this as a normal function tool of the Agent?
-		transferToAgentTool, err := NewTransferToAgentTool(ctx, agent, parents[agent.Name()], targets)
+		transferToAgentTool, err := NewTransferToAgentTool(ctx, agent, parent, targets)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -94,6 +101,34 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 			yield(nil, err)
 		}
 	}
+}
+
+// parentOf returns the agent that a's transfers, and a's model inheritance,
+// treat as a's parent: the parent the run's parent map
+// (parentmap.FromContext(ctx)) holds for a.Name() when there is one, else the
+// parent link agent.New recorded (agentinternal.ParentOf), as the link's owner
+// when it has one and otherwise as the inner agent. It returns nil when a has
+// no parent from either source, when a holds no inner agent (innerAgent(a) ==
+// nil, as for the mock agents of the tests), and when the link's parent is not
+// an agent.Agent. The run's map wins wherever it knows a, so an agent listed
+// in two trees has the parent of the tree being run. Safe for concurrent use:
+// the link is read under agentinternal.ParentOf's lock.
+func parentOf(ctx context.Context, a agent.Agent) agent.Agent {
+	if parent := parentmap.FromContext(ctx)[a.Name()]; parent != nil {
+		return parent
+	}
+	inner := innerAgent(a)
+	if inner == nil {
+		return nil
+	}
+	parent, owner := agentinternal.ParentOf(agentinternal.Reveal(inner))
+	if owner, ok := owner.(agent.Agent); ok {
+		return owner
+	}
+	if parent, ok := parent.(agent.Agent); ok {
+		return parent
+	}
+	return nil
 }
 
 const transferAgentName = "transfer_to_agent"
@@ -327,7 +362,11 @@ func instructionsForTransferToAgent(ctx agent.InvocationContext, curAgent, paren
 		return "", nil
 	}
 
-	if cur.internal().DisallowTransferToParent {
+	// The parent line names the parent only when it is a target: a non-LLM
+	// parent, or one DisallowTransferToParent excludes, cannot be transferred
+	// to. adk-python writes the line for any parent
+	// (flows/llm_flows/extensions/_agent_transfer.py:226-229).
+	if parent != nil && !slices.ContainsFunc(targets, func(target agent.Agent) bool { return target.Name() == parent.Name() }) {
 		parent = nil
 	}
 

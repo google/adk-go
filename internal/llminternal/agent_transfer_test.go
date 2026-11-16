@@ -665,3 +665,148 @@ func stringify(v any) string {
 	s, _ := json.Marshal(v)
 	return string(s)
 }
+
+// transferInstruction returns the system instruction text of req.
+func transferInstruction(req *model.LLMRequest) string {
+	if req.Config == nil {
+		return ""
+	}
+	return strings.Join(utils.TextParts(req.Config.SystemInstruction), "\n")
+}
+
+// Agent names and descriptions reach the transfer instruction exactly as
+// given, as adk-python's f-strings write them.
+// Fails when the template HTML-escapes its data (rows "special characters"
+// and "special characters in the name"), when data is parsed as template
+// text (row "template action"), or when an empty description drops its line.
+func TestAgentTransferInstruction_KeepsNamesAndDescriptionsRaw(t *testing.T) {
+	m := searchGuardModel{name: "unused"}
+	for _, tc := range []struct {
+		name        string
+		subName     string
+		description string
+		want        []string
+		wantAbsent  []string
+	}{
+		{
+			name:        "special characters",
+			subName:     "sub",
+			description: `a<b>&'"c`,
+			want:        []string{"Agent name: sub\nAgent description: a<b>&'\"c\n"},
+		},
+		{
+			name:        "template action",
+			subName:     "sub",
+			description: "{{.AgentName}}",
+			want:        []string{"Agent description: {{.AgentName}}\n"},
+		},
+		{
+			name:    "empty description",
+			subName: "sub",
+			want:    []string{"Agent name: sub\nAgent description: \n\n"},
+		},
+		{
+			name:       "special characters in the name",
+			subName:    "r&d<1>",
+			want:       []string{"Agent name: r&d<1>\n", "function are\n`r&d<1>`.\n"},
+			wantAbsent: []string{"transfer to your parent agent"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sub := utils.Must(llmagent.New(llmagent.Config{Name: tc.subName, Description: tc.description, Model: m}))
+			top := utils.Must(llmagent.New(llmagent.Config{Name: "top", Model: m, SubAgents: []agent.Agent{sub}}))
+
+			got := transferInstruction(transferRequest(t, t.Context(), top))
+
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("instruction does not contain %q; got:\n%s", want, got)
+				}
+			}
+			for _, absent := range tc.wantAbsent {
+				if strings.Contains(got, absent) {
+					t.Errorf("instruction contains %q; got:\n%s", absent, got)
+				}
+			}
+		})
+	}
+}
+
+// The parent line of the transfer instruction names the parent only when the
+// parent is a transfer target. A non-LLM parent is not one, wherever the
+// parent comes from.
+// Fails when the line is written whenever a parent exists, as adk-python
+// writes it (_agent_transfer.py:226-229).
+func TestAgentTransferInstruction_NonLLMParent(t *testing.T) {
+	build := func(t *testing.T) (cur, seq agent.Agent) {
+		m := searchGuardModel{name: "unused"}
+		sub := utils.Must(llmagent.New(llmagent.Config{Name: "sub", Model: m}))
+		cur = utils.Must(llmagent.New(llmagent.Config{Name: "cur", Model: m, SubAgents: []agent.Agent{sub}}))
+		seq = utils.Must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "seq", SubAgents: []agent.Agent{cur}}}))
+		return cur, seq
+	}
+	check := func(t *testing.T, req *model.LLMRequest) {
+		t.Helper()
+		if diff := cmp.Diff([]string{"sub"}, transferEnum(t, req)); diff != "" {
+			t.Errorf("transfer_to_agent enum mismatch (-want +got):\n%s", diff)
+		}
+		got := transferInstruction(req)
+		if want := "**NOTE**: the only available agents for `transfer_to_agent` function are\n`sub`."; !strings.Contains(got, want) {
+			t.Errorf("instruction does not contain %q; got:\n%s", want, got)
+		}
+		for _, absent := range []string{"transfer to your parent agent", "seq"} {
+			if strings.Contains(got, absent) {
+				t.Errorf("instruction contains %q; got:\n%s", absent, got)
+			}
+		}
+	}
+
+	t.Run("ParentFromMap", func(t *testing.T) {
+		cur, seq := build(t)
+		check(t, transferRequest(t, withParents(t, t.Context(), seq), cur))
+	})
+	t.Run("ParentFromLink", func(t *testing.T) {
+		cur, _ := build(t)
+		check(t, transferRequest(t, t.Context(), cur))
+	})
+}
+
+// An agent that can transfer to its LLM parent is told to fall back to it,
+// as adk-python's parent line does.
+// Fails when the parent line is never written.
+func TestAgentTransferInstruction_LLMParentLine(t *testing.T) {
+	m := searchGuardModel{name: "unused"}
+	cur := utils.Must(llmagent.New(llmagent.Config{Name: "cur", Model: m}))
+	utils.Must(llmagent.New(llmagent.Config{Name: "root", Model: m, SubAgents: []agent.Agent{cur}}))
+
+	got := transferInstruction(transferRequest(t, t.Context(), cur))
+
+	if want := "\nIf neither you nor the other agents are best for the question, transfer to your parent agent root.\n"; !strings.Contains(got, want) {
+		t.Errorf("instruction does not contain %q; got:\n%s", want, got)
+	}
+}
+
+// panickyDescriptionAgent is an agent whose Description panics, which makes
+// the transfer instruction's template fail.
+type panickyDescriptionAgent struct{ agent.Agent }
+
+func (panickyDescriptionAgent) Description() string { panic("boom") }
+
+// When the transfer instruction cannot be built, the processor yields the
+// error and leaves the request as it was.
+// Fails when the template error is ignored, or when the tool is added to the
+// request before the instruction is built.
+func TestAgentTransferRequestProcessor_TemplateErrorLeavesRequestUntouched(t *testing.T) {
+	m := searchGuardModel{name: "unused"}
+	sub := utils.Must(agent.New(agent.Config{Name: "bad"}))
+	top := utils.Must(llmagent.New(llmagent.Config{Name: "top", Model: m, SubAgents: []agent.Agent{panickyDescriptionAgent{sub}}}))
+
+	req, errs := runTransferProcessor(t, top, top, "unused")
+
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "error calling Description: boom") {
+		t.Errorf("processor errors = %v, want one containing %q", errs, "error calling Description: boom")
+	}
+	if diff := cmp.Diff(&model.LLMRequest{}, req); diff != "" {
+		t.Errorf("request changed (-want +got):\n%s", diff)
+	}
+}
