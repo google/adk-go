@@ -32,6 +32,22 @@
 // as the delimiters that fence code in model text. A Settings field left
 // unset means Python's default for that field, and Settings.WithDefaults
 // fills the defaults in. The CodeExecutor example shows a minimal executor.
-// llmagent adds the built-in tool for a BuiltIn executor and does not run any
-// other executor itself.
+//
+// The agent runs an executor that is not a BuiltIn itself, in its own
+// process. It runs the first code block of each model response, an
+// executable-code part or a block fenced in the text by one of
+// Settings.CodeBlockDelimiters: it yields an event with the code, calls
+// ExecuteCode, yields an event with the result and calls the model again. In
+// later requests the code and the result are sent as fenced text. After
+// Settings.ErrorRetryAttempts consecutive executions with a non-empty Stderr,
+// the agent runs no more code in that invocation. Only with
+// Settings.OptimizeDataFile does the agent tell the model to fence its code
+// and pass CSV data from user messages as input files; otherwise the agent's
+// instruction has to say how to fence code. Running such an executor needs an
+// artifact service on the runner (runner.Config.ArtifactService), or the run
+// fails with "artifact service is not initialized" after the first execution.
+// Under agent.RunConfig.SupportCFC an agent without a parent agent uses a
+// built-in executor instead. The doc comment of llmagent.Config.CodeExecutor
+// gives the details, and the example of llmagent.Config named CodeExecutor
+// builds an agent that runs a custom executor.
 package codeexecutor
