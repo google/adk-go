@@ -173,7 +173,7 @@ func (r *Runner) runNode(
 			// replacement, which may answer a sub-agent's call. Its branch is
 			// restored from the invocation's own events only, as adk-python
 			// does, so it never takes a branch of an earlier invocation.
-			agentToRun, err = r.findAgentToRun(storedSession, turnMessage(ictx))
+			agentToRun, err = r.findAgentToRun(storedSession, nil)
 			if err != nil {
 				yield(nil, err)
 				return
