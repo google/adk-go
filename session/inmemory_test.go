@@ -15,6 +15,7 @@
 package session_test
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -50,7 +52,10 @@ func Test_inMemoryService_CreateUsesProviders(t *testing.T) {
 }
 
 func Test_inMemoryService(t *testing.T) {
-	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true} // InMemory supports custom IDs
+	opts := sessiontestsuite.SuiteOptions{
+		SupportsUserProvidedSessionID: true, // InMemory supports custom IDs
+		ChecksRequestedAuthConfigs:    true,
+	}
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return session.InMemoryService()
 	})
@@ -63,7 +68,6 @@ func Test_inMemoryService_CreateConcurrentAccess(t *testing.T) {
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(goroutines)
 
 	req := &session.CreateRequest{
 		AppName:   "race-app",
@@ -75,8 +79,7 @@ func Test_inMemoryService_CreateConcurrentAccess(t *testing.T) {
 	var errorCount atomic.Int32
 
 	for range goroutines {
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			for range attempts {
 				_, err := s.Create(t.Context(), req)
@@ -86,7 +89,7 @@ func Test_inMemoryService_CreateConcurrentAccess(t *testing.T) {
 					errorCount.Add(1)
 				}
 			}
-		}()
+		})
 	}
 
 	close(start)
@@ -195,10 +198,8 @@ func TestInMemoryState_All_ConcurrentSet(t *testing.T) {
 	// These calls serialize against each other (AppendEvent holds the service
 	// mutex for its whole body); what races is each of them against the reader
 	// goroutine's All() below.
-	wg.Add(writers)
 	for w := range writers {
-		go func(w int) {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			for i := range iterations {
 				ev := &session.Event{
@@ -216,14 +217,12 @@ func TestInMemoryState_All_ConcurrentSet(t *testing.T) {
 					t.Errorf("AppendEvent(w%d, i%d) failed: %v", w, i, err)
 				}
 			}
-		}(w)
+		})
 	}
 
 	// Concurrent reader: iterate all state entries, checking the seed key
 	// survives every snapshot and the count never goes backwards.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-start
 		prevCount := 0
 		for range iterations {
@@ -243,7 +242,7 @@ func TestInMemoryState_All_ConcurrentSet(t *testing.T) {
 			}
 			prevCount = count
 		}
-	}()
+	})
 
 	close(start)
 	wg.Wait()
@@ -544,6 +543,35 @@ func TestInMemoryService_AppendEvent_CopiesCompaction(t *testing.T) {
 	}
 }
 
+// TestInMemoryService_AppendEvent_CopiesRequestedAuthConfigs pins that a
+// write to the map the caller passed in does not reach the stored event.
+func TestInMemoryService_AppendEvent_CopiesRequestedAuthConfigs(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+	createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	apiKey := toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Key"}
+	event := &session.Event{ID: "e1", Author: "agent", Actions: session.EventActions{
+		RequestedAuthConfigs: map[string]toolauth.Config{"call-1": {AuthScheme: apiKey, CredentialKey: "k1"}},
+	}}
+	if err := service.AppendEvent(ctx, createResp.Session, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	event.Actions.RequestedAuthConfigs["call-2"] = toolauth.Config{AuthScheme: apiKey, CredentialKey: "k2"}
+
+	got, err := service.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: createResp.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	stored := got.Session.Events().At(0).Actions.RequestedAuthConfigs
+	if _, ok := stored["call-2"]; ok || len(stored) != 1 {
+		t.Errorf("stored RequestedAuthConfigs has %d entries, want only call-1: the caller's write reached the stored event", len(stored))
+	}
+}
+
 // TestInMemoryService_AppendEvent_ConcurrentActionMapWrites checks that
 // AppendEvent finishes reading the current *Event, including cloning its
 // action maps and extracting StateDelta, before Session.Events exposes it to
@@ -763,6 +791,40 @@ func TestInMemoryService_AppendEvent_CanonicalRecordDoesNotAliasLiveDelta(t *tes
 				t.Errorf("canonical StateDelta = %v, want the non-temp key preserved", canonical)
 			}
 		})
+	}
+}
+
+func TestInMemoryService_ListOrderedByLastUpdateTime(t *testing.T) {
+	s := session.InMemoryService()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) context.Context {
+		return platform.WithTimeProvider(t.Context(), func() time.Time { return base.Add(d) })
+	}
+	created := map[string]session.Session{}
+	for i, id := range []string{"a", "b", "c"} {
+		resp, err := s.Create(at(time.Duration(i)*time.Second), &session.CreateRequest{AppName: "app", UserID: "u", SessionID: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		created[id] = resp.Session
+	}
+	// Make the oldest session the most recently active one.
+	ev := session.NewEvent(t.Context(), "inv")
+	ev.Timestamp = base.Add(time.Minute)
+	if err := s.AppendEvent(t.Context(), created["a"], ev); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := s.List(t.Context(), &session.ListRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, sess := range resp.Sessions {
+		got = append(got, sess.ID())
+	}
+	if want := []string{"b", "c", "a"}; !slices.Equal(got, want) {
+		t.Errorf("List() session order = %v, want %v (oldest update first)", got, want)
 	}
 }
 

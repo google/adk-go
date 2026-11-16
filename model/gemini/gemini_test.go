@@ -696,7 +696,7 @@ func TestModel_RespectsRequestModel(t *testing.T) {
 				Model:    tt.reqModel,
 				Contents: genai.Text("ping"),
 			}
-			for range geminiModel.GenerateContent(t.Context(), req, false) {
+			for range geminiModel.GenerateContent(t.Context(), req, false) { //nolint:errcheck // the interceptor fails the request; the test asserts the URL it captured
 			}
 
 			if capturedURL == "" {
@@ -837,5 +837,45 @@ func TestModel_GenerateWithoutCandidates(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestModel_MaybeAppendUserContent(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents []*genai.Content
+		want     []*genai.Content
+	}{
+		{
+			name: "user turn last",
+			contents: []*genai.Content{
+				genai.NewContentFromText("Hello", genai.RoleUser),
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Hello", genai.RoleUser),
+			},
+		},
+		{
+			name: "model turn last",
+			contents: []*genai.Content{
+				genai.NewContentFromText("Hello", genai.RoleUser),
+				genai.NewContentFromText("Response", genai.RoleModel),
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Hello", genai.RoleUser),
+				genai.NewContentFromText("Response", genai.RoleModel),
+				genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"),
+			},
+		},
+	}
+	// reference: test_maybe_append_user_content
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &model.LLMRequest{Contents: tt.contents}
+			(&geminiModel{}).maybeAppendUserContent(req)
+			if diff := cmp.Diff(tt.want, req.Contents); diff != "" {
+				t.Errorf("maybeAppendUserContent() diff (-want +got):\n%s", diff)
+			}
+		})
 	}
 }

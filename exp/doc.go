@@ -24,8 +24,12 @@
 //   - [google.golang.org/adk/v2/exp/appinfo]: the app-info endpoint, which
 //     describes an app's agents, instructions and tools, and the web
 //     sublauncher that serves it
+//   - [google.golang.org/adk/v2/exp/authflow]: lets a tool ask the end user
+//     for a credential, such as an OAuth2 sign-in, and read the answer
 //   - [google.golang.org/adk/v2/exp/classifier]: decision models that answer
 //     typed questions with probability distributions
 //   - [google.golang.org/adk/v2/exp/classifier/typesafe]: a classifier backed
 //     by TypeSafe's Jev decision models
+//   - [google.golang.org/adk/v2/exp/vertexairagtool]: a tool that grounds responses
+//     on a Vertex AI RAG corpus
 package exp

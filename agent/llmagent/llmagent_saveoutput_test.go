@@ -71,6 +71,12 @@ func TestLlmAgent_MaybeSaveOutputToState(t *testing.T) {
 			wantStateDelta: map[string]any{"result": "Test response"},
 		},
 		{
+			name:           "skips task mode: finish_task delivers the result, not a text turn",
+			agentConfig:    Config{Name: "test_agent", OutputKey: "result", Mode: ModeTask},
+			event:          createTestEvent("test_agent", "Which language?", true),
+			wantStateDelta: map[string]any{},
+		},
+		{
 			name:           "skips when output_key is not set",
 			agentConfig:    Config{Name: "test_agent"}, // No OutputKey
 			event:          createTestEvent("test_agent", "Test response", true),

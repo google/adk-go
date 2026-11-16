@@ -29,12 +29,13 @@ import (
 
 // EventActions represent a data model for session.EventActions
 type EventActions struct {
-	StateDelta                 map[string]any                               `json:"stateDelta"`
+	StateDelta                 stateValues                                  `json:"stateDelta"`
 	ArtifactDelta              map[string]int64                             `json:"artifactDelta"`
 	Escalate                   bool                                         `json:"escalate,omitempty"`
 	SkipSummarization          bool                                         `json:"skipSummarization,omitempty"`
 	TransferToAgent            string                                       `json:"transferToAgent,omitempty"`
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
+	RequestedAuthConfigs       authConfigs                                  `json:"requestedAuthConfigs,omitempty"`
 	Compaction                 *session.EventCompaction                     `json:"compaction,omitempty"`
 }
 
@@ -145,6 +146,10 @@ func ToSessionEvent(event Event) (*session.Event, error) {
 			// text into it as a model turn. Only the runner writes these.
 			// FromSessionEvent still returns them, so a client can read
 			// summaries it did not author.
+			// Actions.RequestedAuthConfigs is not mapped inbound either. Only a
+			// tool writes a credential request, and one taken from a request body
+			// would claim a sign-in no tool asked for, which compaction then
+			// holds open as an unanswered call.
 		},
 	}, nil
 }
@@ -187,6 +192,7 @@ func FromSessionEvent(event session.Event) Event {
 			SkipSummarization:          event.Actions.SkipSummarization,
 			TransferToAgent:            event.Actions.TransferToAgent,
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
+			RequestedAuthConfigs:       event.Actions.RequestedAuthConfigs,
 			Compaction:                 event.Actions.Compaction,
 		},
 	}
@@ -229,10 +235,21 @@ func (e Event) MarshalJSON() ([]byte, error) {
 	if e.Content != nil {
 		aux.Content = &ProxyContent{
 			Content: e.Content,
-			Parts:   make([]*ProxyPart, len(e.Content.Parts)),
+			Parts:   make([]*ProxyPart, 0, len(e.Content.Parts)),
 		}
 
-		for i, part := range e.Content.Parts {
+		for _, part := range e.Content.Parts {
+			// A nil part (e.g. a null in a stored request body) has nothing to
+			// wrap; drop it from the output so REST clients — including the
+			// bundled web UI, which reads fields off every part it renders —
+			// never see a null part.
+			if part == nil {
+				continue
+			}
+			part, err := withoutCredentialSecrets(part)
+			if err != nil {
+				return nil, err
+			}
 			// Wrap the original part
 			proxyPart := &ProxyPart{Part: part}
 
@@ -249,7 +266,7 @@ func (e Event) MarshalJSON() ([]byte, error) {
 					Args:         args,
 				}
 			}
-			aux.Content.Parts[i] = proxyPart
+			aux.Content.Parts = append(aux.Content.Parts, proxyPart)
 		}
 	}
 

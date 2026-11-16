@@ -57,11 +57,9 @@ var (
 	// URI, leaving nothing to name the media.
 	ErrMediaURIRequired = errors.New("openai: file data part is missing a uri")
 	// ErrMediaOnAssistantTurn is returned when a replayed assistant turn
-	// carries media. The Responses endpoint replays a prior assistant turn as
-	// "output_text" items, which have no field for an image or a file, so
-	// media there is refused rather than dropped on the way out. Chat
-	// Completions does not return it yet: it refuses all media with an
-	// unsupported content part error until its emitter lands.
+	// carries media on either the Responses or Chat Completions endpoint.
+	// Neither endpoint's assistant message representation can carry an image
+	// or a file, so media there is refused rather than silently dropped.
 	ErrMediaOnAssistantTurn = errors.New("openai: media on a replayed assistant turn is not supported")
 	// ErrUnsupportedConfigField is returned when a generation config field has no equivalent on the selected API; the message names it.
 	ErrUnsupportedConfigField = errors.New("openai: unsupported generation config field")

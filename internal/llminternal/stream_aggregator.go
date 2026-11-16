@@ -39,7 +39,7 @@ type streamingResponseAggregator struct {
 	currentThoughtSignature []byte
 
 	sequence             []*genai.Part
-	currentTextBuffer    string
+	currentTextBuffer    strings.Builder
 	currentTextIsThought bool
 	// currentTextSignature is the first thought signature streamed on a chunk
 	// of currentTextBuffer, for the part the buffer is flushed into. Unlike
@@ -105,20 +105,21 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 
 	for _, part := range llmResponse.Content.Parts {
 		// gemini 3 in streaming returns a last response with an empty part. We will filter it out.
-		if reflect.ValueOf(*part).IsZero() {
+		// A nil part would panic the reflect check below, so skip it the same way.
+		if part == nil || reflect.ValueOf(*part).IsZero() {
 			continue
 		}
 		if len(part.ThoughtSignature) > 0 {
 			s.currentThoughtSignature = part.ThoughtSignature
 		}
 		if part.Text != "" {
-			if s.currentTextBuffer != "" && part.Thought != s.currentTextIsThought {
+			if s.currentTextBuffer.Len() > 0 && part.Thought != s.currentTextIsThought {
 				s.flushTextBufferToSequence()
 			}
-			if s.currentTextBuffer == "" {
+			if s.currentTextBuffer.Len() == 0 {
 				s.currentTextIsThought = part.Thought
 			}
-			s.currentTextBuffer += part.Text
+			s.currentTextBuffer.WriteString(part.Text)
 			if len(part.ThoughtSignature) > 0 && s.currentTextSignature == nil {
 				s.currentTextSignature = part.ThoughtSignature
 			}
@@ -152,6 +153,10 @@ func (s *streamingResponseAggregator) processFunctionCallPart(part *genai.Part) 
 			}
 			s.currentThoughtSignature = nil
 			s.sequence = append(s.sequence, part)
+		} else if part.FunctionCall.ID == "" {
+			// A nameless chunk continues the call being streamed, for example by
+			// only setting WillContinue to false, so it carries that call's id.
+			part.FunctionCall.ID = s.currentFunctionID
 		}
 	}
 }
@@ -163,6 +168,8 @@ func (s *streamingResponseAggregator) processStreamingFunctionCallPart(part *gen
 	}
 	if part.FunctionCall.ID != "" {
 		s.currentFunctionID = part.FunctionCall.ID
+	} else {
+		part.FunctionCall.ID = s.currentFunctionID
 	}
 	for _, arg := range part.FunctionCall.PartialArgs {
 		segments, ok := parseJSONPath(arg.JsonPath)
@@ -416,14 +423,14 @@ func valueByPath(args map[string]any, segments []pathSegment) (any, bool) {
 
 func (s *streamingResponseAggregator) flushTextBufferToSequence() {
 	// Check if buffer has content (strings.Builder.Len() is efficient)
-	if s.currentTextBuffer != "" {
+	if s.currentTextBuffer.Len() > 0 {
 		s.sequence = append(s.sequence, &genai.Part{
-			Text:             s.currentTextBuffer,
+			Text:             s.currentTextBuffer.String(),
 			Thought:          s.currentTextIsThought,
 			ThoughtSignature: s.currentTextSignature,
 		})
 		// Reset the buffer and the state
-		s.currentTextBuffer = ""
+		s.currentTextBuffer.Reset()
 		s.currentTextIsThought = false
 		s.currentTextSignature = nil
 	}
@@ -477,6 +484,7 @@ func (s *streamingResponseAggregator) Close() *model.LLMResponse {
 			ErrorCode:         errorCode,
 			ErrorMessage:      errorMessage,
 			FinishReason:      s.finishReason,
+			ModelVersion:      s.response.ModelVersion,
 		}
 	}
 	return nil

@@ -20,16 +20,18 @@ import (
 	"google.golang.org/genai"
 )
 
+// supportedFunctionToolFields is the only genai.Tool field openaimodel sends.
+// Everything else is refused so a new genai field cannot be dropped silently.
+var supportedFunctionToolFields = []string{"FunctionDeclarations"}
+
 // EnsureFunctionToolOnly rejects a nil tool, one declaring no functions, and
 // one carrying a non-function tool neither API is sent; idx names it.
 func EnsureFunctionToolOnly(idx int, tool *genai.Tool) error {
 	if tool == nil {
 		return fmt.Errorf("openai: tool %d is nil", idx)
 	}
-	if tool.Retrieval != nil || tool.GoogleSearch != nil || tool.GoogleSearchRetrieval != nil ||
-		tool.GoogleMaps != nil || tool.EnterpriseWebSearch != nil ||
-		tool.URLContext != nil || tool.ComputerUse != nil || tool.CodeExecution != nil {
-		return fmt.Errorf("openai: non-function tools are not supported (tool %d)", idx)
+	if err := rejectUnsupportedFields("", tool, supportedFunctionToolFields); err != nil {
+		return fmt.Errorf("openai: non-function tools are not supported (tool %d): %w", idx, err)
 	}
 	if len(tool.FunctionDeclarations) == 0 {
 		return fmt.Errorf("openai: tool %d does not declare any functions", idx)

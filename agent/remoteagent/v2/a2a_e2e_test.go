@@ -249,6 +249,108 @@ func TestA2AInputRequired(t *testing.T) {
 	}
 }
 
+func TestA2ARunnerResumesMixedFunctionResponses(t *testing.T) {
+	for _, name := range []string{"peer-first", "local-first"} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			peer := newInputRequestingAgent(t, "peer", newLongRunningTool(t))
+			server := startA2AServer(newAgentExecutor(peer, nil, adka2a.OutputArtifactPerRun))
+			defer server.Close()
+			client := newA2AClient(t, server)
+			defer func() {
+				if err := client.Destroy(); err != nil {
+					t.Errorf("client.Destroy() error = %v", err)
+				}
+			}()
+
+			var taskID a2a.TaskID
+			defer func() {
+				if taskID == "" {
+					return
+				}
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+				defer cleanupCancel()
+				task, err := client.GetTask(cleanupCtx, &a2a.GetTaskRequest{ID: taskID})
+				if err == nil && task.Status.State.Terminal() {
+					return
+				}
+				if _, err := client.CancelTask(cleanupCtx, &a2a.CancelTaskRequest{ID: taskID}); err != nil {
+					t.Errorf("cleanup CancelTask() error = %v", err)
+				}
+			}()
+
+			remote := newA2ARemoteAgent(t, "remote", server)
+			store := session.InMemoryService()
+			created, err := store.Create(ctx, &session.CreateRequest{AppName: "local", UserID: "user"})
+			if err != nil {
+				t.Fatalf("store.Create() error = %v", err)
+			}
+			r, err := runner.New(runner.Config{AppName: "local", Agent: remote, SessionService: store})
+			if err != nil {
+				t.Fatalf("runner.New() error = %v", err)
+			}
+			config := agent.RunConfig{StreamingMode: agent.StreamingModeNone}
+			var pending *genai.FunctionResponse
+			for event, err := range r.Run(ctx, "user", created.Session.ID(), genai.NewContentFromText("perform task", genai.RoleUser), config) {
+				if err != nil {
+					t.Fatalf("initial Run() error = %v", err)
+				}
+				if event.ErrorMessage != "" {
+					t.Fatalf("initial Run() reported error: %s", event.ErrorMessage)
+				}
+				if id, _ := adka2a.GetA2ATaskInfo(event); id != "" {
+					taskID = a2a.TaskID(id)
+				}
+				for _, response := range utils.FunctionResponses(event.Content) {
+					if response.Name == approvalToolName {
+						pending = response
+					}
+				}
+			}
+			if pending == nil || taskID == "" {
+				t.Fatal("initial Run() did not expose a pending remote tool and task")
+			}
+			before, err := client.GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
+			if err != nil || before.Status.State != a2a.TaskStateInputRequired {
+				t.Fatalf("initial remote task is not input-required: %v", err)
+			}
+
+			local := genai.NewPartFromFunctionResponse("local_tool", map[string]any{"ok": true})
+			local.FunctionResponse.ID = "fc-local"
+			parts := []*genai.Part{createLongRunningToolApproval(t, pending), local}
+			if name == "local-first" {
+				parts[0], parts[1] = parts[1], parts[0]
+			}
+			completed := false
+			for event, err := range r.Run(ctx, "user", created.Session.ID(), genai.NewContentFromParts(parts, genai.RoleUser), config) {
+				if err != nil {
+					t.Errorf("resume Run() error = %v", err)
+					break
+				}
+				if event.ErrorMessage != "" {
+					t.Errorf("resume Run() reported error: %s", event.ErrorMessage)
+				}
+				if event.Content != nil {
+					for _, part := range event.Content.Parts {
+						completed = completed || part.Text == modelTextTaskComplete
+					}
+				}
+			}
+			if !completed {
+				t.Error("Runner did not receive the remote task's completion result")
+			}
+			after, err := client.GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
+			if err != nil {
+				t.Fatalf("GetTask() after resume error = %v", err)
+			}
+			if after.Status.State != a2a.TaskStateCompleted {
+				t.Errorf("original remote task state = %q, want %q", after.Status.State, a2a.TaskStateCompleted)
+			}
+		})
+	}
+}
+
 // assertADKExtensionMeta fails unless meta carries the ADK A2A extension key.
 func assertADKExtensionMeta(t *testing.T, subject string, meta map[string]any) {
 	t.Helper()
@@ -357,7 +459,7 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 			wantFirstArtifactParts: toA2AParts(t, []*genai.Part{
 				genai.NewPartFromText(modelTextRootTransfer),
 				genai.NewPartFromFunctionCall(transferToolName, map[string]any{"agent_name": remoteAgentName}),
-				genai.NewPartFromFunctionResponse(transferToolName, nil),
+				genai.NewPartFromFunctionResponse(transferToolName, map[string]any{"result": nil}),
 				genai.NewPartFromText(modelTextRequiresApproval),
 				genai.NewPartFromText(modelTextWaitingForApproval),
 			}, []string{}),
@@ -374,7 +476,7 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 			wantFirstArtifactParts: toA2AParts(t, []*genai.Part{
 				genai.NewPartFromText(modelTextRootTransfer),
 				genai.NewPartFromFunctionCall(transferToolName, map[string]any{"agent_name": remoteAgentName}),
-				genai.NewPartFromFunctionResponse(transferToolName, nil),
+				genai.NewPartFromFunctionResponse(transferToolName, map[string]any{"result": nil}),
 				genai.NewPartFromText(modelTextRequiresApproval),
 				genai.NewPartFromFunctionCall(approvalToolName, nil),
 				genai.NewPartFromFunctionResponse(approvalToolName, map[string]any{"status": string(approvalStatusPending)}),
@@ -526,9 +628,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 	// remoteStreamingChan closes when the subagent's own output first reaches the client.
 	statusUpdateEventChan := make(chan a2a.Event, 10)
 	remoteStreamingChan := make(chan struct{})
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer close(statusUpdateEventChan)
 		remoteStreaming := false
 		msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("work"))
@@ -546,7 +646,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 			}
 			statusUpdateEventChan <- event
 		}
-	}()
+	})
 
 	// Cancel only after the subagent's output reaches the client: before that the
 	// parent doesn't know the subagent task ID, so cancellation can't propagate.
@@ -554,9 +654,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 	taskID := firstUpdate.TaskInfo().TaskID
 	testutil.AwaitN(t, remoteStreamingChan, 1, "remote subagent streaming")
 	cancelResultChan := make(chan *a2a.Task, 1)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer close(cancelResultChan)
 		task, err := client.CancelTask(t.Context(), &a2a.CancelTaskRequest{ID: taskID})
 		if err != nil {
@@ -564,7 +662,7 @@ func TestA2ACleanupPropagation(t *testing.T) {
 			return
 		}
 		cancelResultChan <- task
-	}()
+	})
 
 	// Check the streaming message sender got a canceled state task in their response
 	var lastStreamingUpdate a2a.Event
@@ -611,6 +709,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 	testCases := []struct {
 		name              string
 		agentFn           func(*testing.T) agent.Agent
+		sessionService    session.Service
 		wantArtifactParts a2a.ContentParts
 		wantState         a2a.TaskState
 		wantStatusContain string
@@ -664,12 +763,14 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 			name: "internal error",
 			agentFn: func(t *testing.T) agent.Agent {
 				return utils.Must(agent.New(agent.Config{
+					Name: "internal_error",
 					Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
 						return func(yield func(*session.Event, error) bool) {}
 					},
 				}))
 			},
-			wantStatusContain: "app_name and user_id are required, got app_name: ",
+			sessionService:    failingCreateSessionService{Service: session.InMemoryService()},
+			wantStatusContain: "failed to create a session: session creation failed",
 			wantState:         a2a.TaskStateFailed,
 			wantArtifactParts: a2a.ContentParts{},
 		},
@@ -726,7 +827,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			executor := newAgentExecutor(tc.agentFn(t), nil, adka2a.OutputArtifactPerRun)
+			executor := newAgentExecutor(tc.agentFn(t), tc.sessionService, adka2a.OutputArtifactPerRun)
 			server := startA2AServer(executor)
 			defer server.Close()
 
@@ -1084,6 +1185,16 @@ func newRootAgent(name string, subAgent agent.Agent) agent.Agent {
 			},
 		},
 	}))
+}
+
+// failingCreateSessionService fails every session creation, so the executor
+// fails before the agent runs.
+type failingCreateSessionService struct {
+	session.Service
+}
+
+func (failingCreateSessionService) Create(context.Context, *session.CreateRequest) (*session.CreateResponse, error) {
+	return nil, errors.New("session creation failed")
 }
 
 func newAgentExecutor(agnt agent.Agent, service session.Service, mode adka2a.OutputMode) a2asrv.AgentExecutor {

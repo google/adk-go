@@ -16,6 +16,8 @@
 package exampletool
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -34,20 +36,37 @@ type Example struct {
 	Output []*genai.Content `json:"output"`
 }
 
+// Provider fetches few-shot examples for a user query.
+//
+// Examples takes a context.Context and returns an error because providers may
+// perform I/O.
+type Provider interface {
+	Examples(ctx context.Context, query string) ([]*Example, error)
+}
+
 // ExampleToolConfig configures an example tool with the few-shot examples to add.
+// Set either Examples or Provider, not both.
 type ExampleToolConfig struct {
 	Examples []*Example
+	Provider Provider
 }
 
 // exampleTool is a tool that adds (few-shot) examples to the LLM request.
 type exampleTool struct {
 	examples []*Example
+	provider Provider
 }
 
 // New creates an example tool that adds the configured few-shot examples to the
 // LLM request.
 func New(config ExampleToolConfig) (*exampleTool, error) {
-	return &exampleTool{examples: config.Examples}, nil
+	if config.Examples != nil && config.Provider != nil {
+		return nil, errors.New("exampletool: cannot specify both Examples and Provider")
+	}
+	return &exampleTool{
+		examples: config.Examples,
+		provider: config.Provider,
+	}, nil
 }
 
 // Name implements tool.Tool.
@@ -67,13 +86,46 @@ func (s exampleTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) er
 		return nil
 	}
 	parts := userContent.Parts
-	if len(parts) == 0 || parts[0] == nil || parts[0].Text == "" {
+	if len(parts) == 0 {
 		return nil
 	}
 
-	instruction := buildExamplesSystemInstruction(s.examples, req.Model)
+	var examples []*Example
+	if s.provider != nil {
+		query := userQuery(userContent)
+		if query == "" {
+			return nil
+		}
+		var err error
+		// Unlike adk-python's get_examples, the provider takes a context and
+		// returns an error because it may perform I/O.
+		examples, err = s.provider.Examples(ctx, query)
+		if err != nil {
+			return fmt.Errorf("exampletool: fetch examples: %w", err)
+		}
+	} else {
+		// Unlike adk-python, the static list path checks only the first part for
+		// non-empty text to preserve existing behavior.
+		if parts[0] == nil || parts[0].Text == "" {
+			return nil
+		}
+		examples = s.examples
+	}
+
+	instruction := buildExamplesSystemInstruction(examples, req.Model)
 	utils.AppendInstructions(req, instruction)
 	return nil
+}
+
+// userQuery joins the non-empty, non-thought text parts of c with spaces.
+func userQuery(c *genai.Content) string {
+	var texts []string
+	for _, p := range c.Parts {
+		if p != nil && !p.Thought && p.Text != "" {
+			texts = append(texts, p.Text)
+		}
+	}
+	return strings.Join(texts, " ")
 }
 
 // IsLongRunning implements tool.Tool.

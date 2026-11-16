@@ -15,6 +15,8 @@
 package models
 
 import (
+	"maps"
+
 	"google.golang.org/adk/v2/session"
 )
 
@@ -101,10 +103,7 @@ type DeleteSessionResponse struct {
 }
 
 func FromSession(sess session.Session) SessionData {
-	stateMap := make(map[string]any)
-	for k, v := range sess.State().All() {
-		stateMap[k] = v
-	}
+	stateMap := maps.Collect(sess.State().All())
 
 	evs := []session.Event{}
 	for ev := range sess.Events().All() {

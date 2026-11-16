@@ -15,6 +15,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"iter"
@@ -176,9 +177,20 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 		copiedSession.state = s.mergeStates(storedSession.state, appName, storedSession.UserID())
 		sessions = append(sessions, copiedSession)
 	}
+	slices.SortStableFunc(sessions, compareByLastUpdate)
 	return &ListResponse{
 		Sessions: sessions,
 	}, nil
+}
+
+// compareByLastUpdate orders sessions by last update time ascending, ties by
+// user ID then session ID, as [Service.List] documents.
+func compareByLastUpdate(a, b Session) int {
+	return cmp.Or(
+		a.LastUpdateTime().Compare(b.LastUpdateTime()),
+		strings.Compare(a.UserID(), b.UserID()),
+		strings.Compare(a.ID(), b.ID()),
+	)
 }
 
 func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error {
@@ -209,6 +221,11 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	}
 	if event.Partial {
 		return nil
+	}
+	// A backend that persists events could not read this request back, so
+	// this one refuses it too.
+	if err := sessionutils.CheckRequestedAuthConfigs(event.Actions.RequestedAuthConfigs); err != nil {
+		return fmt.Errorf("cannot append event: %w", err)
 	}
 	// Give the event an identity if it arrived without one, the same way a
 	// missing session ID is filled in on Create. [NewEvent] assigns one, but an
@@ -250,8 +267,9 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	// Only StateDelta comes from the trim above; every other field below is
 	// read off event. The canonical record is not a mirror of the one
-	// appendEvent stored locally — it clones Compaction, ArtifactDelta and
-	// RequestedToolConfirmations where the local record aliases them.
+	// appendEvent stored locally — it clones Compaction, ArtifactDelta,
+	// RequestedToolConfirmations and RequestedAuthConfigs where the local record
+	// aliases them.
 	eventCopy := &Event{
 		ID:             event.ID,
 		InvocationID:   event.InvocationID,
@@ -263,6 +281,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			StateDelta:                 trimmedDelta,
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
 			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
+			RequestedAuthConfigs:       maps.Clone(event.Actions.RequestedAuthConfigs),
 			TransferToAgent:            event.Actions.TransferToAgent,
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,

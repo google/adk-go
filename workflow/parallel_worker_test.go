@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -133,12 +134,12 @@ func TestParallelWorker_Run(t *testing.T) {
 }
 
 func TestParallelWorker_Concurrency(t *testing.T) {
-	var counter int32
+	var counter atomic.Int32
 	blockCh := make(chan struct{})
 
 	startedCh := make(chan struct{}, 4)
 	wrapped := NewFunctionNode("blocking", func(ctx agent.Context, input int) (int, error) {
-		atomic.AddInt32(&counter, 1)
+		counter.Add(1)
 		startedCh <- struct{}{}
 		<-blockCh
 		return input, nil
@@ -155,7 +156,7 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		for range pw.Run(exCtx, input) {
+		for range pw.Run(exCtx, input) { //nolint:errcheck // this drain only releases the workers; concurrency is asserted through startedCh
 		}
 		close(done)
 	}()
@@ -165,7 +166,7 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 	<-startedCh
 	<-startedCh
 
-	c := atomic.LoadInt32(&counter)
+	c := counter.Load()
 	if c != 2 {
 		t.Errorf("expected counter to be 2, got %d", c)
 	}
@@ -188,7 +189,7 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 	}
 
 	// After unblocking, all workers should have run
-	c = atomic.LoadInt32(&counter)
+	c = counter.Load()
 	if c != 4 {
 		t.Errorf("expected final counter to be 4, got %d", c)
 	}
@@ -372,7 +373,7 @@ func TestParallelWorker_Retry(t *testing.T) {
 }
 
 func TestParallelWorker_FailFast(t *testing.T) {
-	var workerCCancelled int32
+	var workerCCancelled atomic.Int32
 	cancelledCh := make(chan struct{})
 
 	wrapped := NewFunctionNode("fail_fast_node", func(ctx agent.Context, input string) (string, error) {
@@ -382,7 +383,7 @@ func TestParallelWorker_FailFast(t *testing.T) {
 		if input == "c" {
 			// Block until canceled
 			<-ctx.Done()
-			atomic.StoreInt32(&workerCCancelled, 1)
+			workerCCancelled.Store(1)
 			close(cancelledCh)
 			return "", ctx.Err()
 		}
@@ -423,7 +424,7 @@ func TestParallelWorker_FailFast(t *testing.T) {
 		t.Fatal("timeout waiting for worker C to be canceled")
 	}
 
-	if atomic.LoadInt32(&workerCCancelled) != 1 {
+	if workerCCancelled.Load() != 1 {
 		t.Error("expected worker c to be canceled")
 	}
 }
@@ -561,6 +562,213 @@ func TestParallelWorker_CancelDuringRetryDelay(t *testing.T) {
 	}
 }
 
+// ignoresCancellation returns a node function that waits for its context to
+// end and then succeeds, like a wrapped node that does not check ctx.Err().
+func ignoresCancellation(started chan<- struct{}) func(agent.Context, int) (int, error) {
+	return func(ctx agent.Context, input int) (int, error) {
+		if started != nil {
+			started <- struct{}{}
+		}
+		<-ctx.Done()
+		return input, nil
+	}
+}
+
+func TestParallelWorker_CancelDuringDispatch(t *testing.T) {
+	// With maxConcurrency 1, items 2 and 3 are still waiting for a slot when
+	// the caller cancels. The dispatch loop skips them without reporting an
+	// error, and item 1 succeeds, so no worker reports a failure.
+	started := make(chan struct{}, 1)
+	wrapped := NewFunctionNode("ignores_cancellation", ignoresCancellation(started), defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 1, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	exCtx := agent.NewContext(&MockInvocationContext{Context: ctx})
+
+	done := make(chan struct{})
+	var gotErr error
+	var gotOutput any
+	go func() {
+		for ev, err := range pw.Run(exCtx, []any{1, 2, 3}) {
+			if err != nil {
+				gotErr = err
+			}
+			if out, ok := extractOutput(ev); ok {
+				gotOutput = out
+			}
+		}
+		close(done)
+	}()
+
+	<-started
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for cancellation during dispatch to complete")
+	}
+
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Errorf("Run() error = %v, want %v", gotErr, context.Canceled)
+	}
+	if gotOutput != nil {
+		t.Errorf("Run() yielded output %v, want none", gotOutput)
+	}
+}
+
+func TestParallelWorker_CancelAfterDispatch(t *testing.T) {
+	// Every item is running when the caller cancels, and each one then
+	// returns no output and no error. No item is skipped at dispatch and no
+	// worker reports a failure.
+	started := make(chan struct{}, 3)
+	wrapped := NewFunctionNode("no_output_on_cancel", func(ctx agent.Context, input int) (any, error) {
+		started <- struct{}{}
+		<-ctx.Done()
+		return nil, nil
+	}, defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	exCtx := agent.NewContext(&MockInvocationContext{Context: ctx})
+
+	done := make(chan struct{})
+	var gotErr error
+	var gotOutput any
+	go func() {
+		for ev, err := range pw.Run(exCtx, []any{1, 2, 3}) {
+			if err != nil {
+				gotErr = err
+			}
+			if out, ok := extractOutput(ev); ok {
+				gotOutput = out
+			}
+		}
+		close(done)
+	}()
+
+	for range 3 {
+		<-started
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for cancellation after dispatch to complete")
+	}
+
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Errorf("Run() error = %v, want %v", gotErr, context.Canceled)
+	}
+	if gotOutput != nil {
+		t.Errorf("Run() yielded output %v, want none", gotOutput)
+	}
+}
+
+func TestParallelWorker_FailureBeforeCancelIsReturned(t *testing.T) {
+	// Item 1 fails and cancels item 2. The caller cancels only after that,
+	// while item 2 is still running, so the failure has to win over
+	// ctx.Err(). Item 1 fails only once item 2 has started, because the
+	// dispatch loop skips any item it has not reached by then.
+	errBoom := errors.New("boom")
+	item2Started := make(chan struct{})
+	sawFailFast := make(chan struct{})
+	release := make(chan struct{})
+	wrapped := NewFunctionNode("fails_then_cancels", func(ctx agent.Context, input int) (int, error) {
+		if input == 1 {
+			<-item2Started
+			return 0, errBoom
+		}
+		close(item2Started)
+		<-ctx.Done()
+		close(sawFailFast)
+		<-release
+		return input, nil
+	}, defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	exCtx := agent.NewContext(&MockInvocationContext{Context: ctx})
+
+	done := make(chan struct{})
+	var gotErr error
+	go func() {
+		for _, err := range pw.Run(exCtx, []any{1, 2}) {
+			if err != nil {
+				gotErr = err
+			}
+		}
+		close(done)
+	}()
+
+	select {
+	case <-sawFailFast:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for item 1's failure to cancel item 2")
+	}
+	cancel()
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Run to return")
+	}
+
+	if !errors.Is(gotErr, errBoom) {
+		t.Errorf("Run() error = %v, want %v", gotErr, errBoom)
+	}
+}
+
+func TestParallelWorker_TimeoutDuringDispatchInWorkflow(t *testing.T) {
+	// The node timeout cancels the ParallelWorker while the workflow's own
+	// context stays live, so the scheduler is not draining and would pass a
+	// partial result on to the caller. Whether it does depends on a select
+	// in runNode, so the scenario runs several times.
+	for range 20 {
+		itemsNode := NewFunctionNode("items", func(ctx agent.Context, input any) ([]any, error) {
+			return []any{1, 2, 3}, nil
+		}, defaultNodeConfig)
+		wrapped := NewFunctionNode("ignores_cancellation", ignoresCancellation(nil), defaultNodeConfig)
+		pw, err := NewParallelWorker("parallel", wrapped, 1, NodeConfig{Timeout: 10 * time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := mustNew(t, []Edge{
+			{From: Start, To: itemsNode},
+			{From: itemsNode, To: pw},
+		})
+
+		var gotErr error
+		for ev, err := range w.Run(newMockCtx(t)) {
+			if err != nil {
+				gotErr = err
+			}
+			if out, ok := extractOutput(ev); ok {
+				if items, ok := out.([]any); ok && slices.Contains(items, nil) {
+					t.Fatalf("workflow yielded partial ParallelWorker output %v after the node timed out", items)
+				}
+			}
+		}
+		if !errors.Is(gotErr, context.DeadlineExceeded) {
+			t.Fatalf("workflow error = %v, want %v", gotErr, context.DeadlineExceeded)
+		}
+	}
+}
+
 func TestParallelWorker_ConcurrentMultiOutputOrder(t *testing.T) {
 	releaseA := make(chan struct{})
 	releaseB := make(chan struct{})
@@ -658,10 +866,10 @@ func (n *delayedMultiOutputTestNode) Description() string { return "" }
 func (n *delayedMultiOutputTestNode) Config() NodeConfig  { return defaultNodeConfig }
 
 func TestParallelWorker_SchedulerDoesNotRetryOnFailure(t *testing.T) {
-	var wrappedAttempts int32
+	var wrappedAttempts atomic.Int32
 
 	wrapped := NewFunctionNode("worker", func(ctx agent.Context, input string) (string, error) {
-		atomic.AddInt32(&wrappedAttempts, 1)
+		wrappedAttempts.Add(1)
 		return "", errors.New("persistent failure")
 	}, defaultNodeConfig)
 
@@ -707,8 +915,8 @@ func TestParallelWorker_SchedulerDoesNotRetryOnFailure(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 
-	if atomic.LoadInt32(&wrappedAttempts) != 2 {
-		t.Errorf("expected 2 attempts for wrapped node, got %d (scheduler likely retried the node)", atomic.LoadInt32(&wrappedAttempts))
+	if wrappedAttempts.Load() != 2 {
+		t.Errorf("expected 2 attempts for wrapped node, got %d (scheduler likely retried the node)", wrappedAttempts.Load())
 	}
 }
 
@@ -770,7 +978,7 @@ func TestParallelWorker_PerItemSpans(t *testing.T) {
 			}
 
 			// Drain; span outcomes asserted below.
-			for range pw.Run(agent.NewContext(newMockCtx(t)), tc.input) {
+			for range pw.Run(agent.NewContext(newMockCtx(t)), tc.input) { //nolint:errcheck // a case may fail by design; the spans carry the outcome
 			}
 
 			spans := spanExp.GetSpans()
@@ -797,9 +1005,9 @@ func TestParallelWorker_RetryEmitsSpanPerAttempt(t *testing.T) {
 	spanExp := tracetest.NewInMemoryExporter()
 	telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp)))
 
-	var attempts int32
+	var attempts atomic.Int32
 	wrapped := NewFunctionNode("flaky", func(ctx agent.Context, in string) (string, error) {
-		if atomic.AddInt32(&attempts, 1) == 1 {
+		if attempts.Add(1) == 1 {
 			return "", errors.New("boom")
 		}
 		return in, nil
@@ -816,7 +1024,7 @@ func TestParallelWorker_RetryEmitsSpanPerAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for range pw.Run(agent.NewContext(newMockCtx(t)), []any{"x"}) {
+	for range pw.Run(agent.NewContext(newMockCtx(t)), []any{"x"}) { //nolint:errcheck // the first attempt fails by design; the spans below carry each attempt's outcome
 	}
 
 	spans := spanExp.GetSpans()
@@ -844,13 +1052,13 @@ func TestParallelWorker_RetryEmitsSpanPerAttempt(t *testing.T) {
 
 func TestParallelWorker_MaxConcurrencyFailFast(t *testing.T) {
 	const nItems = 5
-	var started int32
+	var started atomic.Int32
 
 	wrapped := NewFunctionNode("slow_or_fail", func(ctx agent.Context, input int) (int, error) {
 		if input == 0 {
 			return 0, errors.New("error 0")
 		}
-		atomic.AddInt32(&started, 1)
+		started.Add(1)
 		time.Sleep(50 * time.Millisecond)
 		return input, nil
 	}, defaultNodeConfig)
@@ -895,7 +1103,7 @@ func TestParallelWorker_MaxConcurrencyFailFast(t *testing.T) {
 	// chance to run under maxConcurrency=1. Fail-fast cancellation should
 	// stop the remaining items from ever being dispatched, so well under
 	// nItems-1 of them should have started.
-	if got := atomic.LoadInt32(&started); got >= nItems-1 {
+	if got := started.Load(); got >= nItems-1 {
 		t.Errorf("started = %d, want well under %d (fail-fast should stop dispatch of items still waiting on the semaphore)", got, nItems-1)
 	}
 }

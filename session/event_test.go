@@ -20,7 +20,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
@@ -95,5 +97,67 @@ func TestNewEventDeterministicReplay(t *testing.T) {
 		if !first[i].Timestamp.Equal(second[i].Timestamp) {
 			t.Errorf("event %d Timestamp: first run %v, second run %v", i, first[i].Timestamp, second[i].Timestamp)
 		}
+	}
+}
+
+// IsFinalResponse classifies events for console, plugin and analytics readers,
+// and a Content may carry nil Parts entries (a malformed REST request, a
+// provider edge case). The classification helpers must skip them the way the
+// rest of the codebase does, not panic.
+func TestIsFinalResponseNilParts(t *testing.T) {
+	tests := []struct {
+		name  string
+		parts []*genai.Part
+		want  bool
+	}{
+		{"only a nil part", []*genai.Part{nil}, true},
+		{"nil before a function call", []*genai.Part{nil, {FunctionCall: &genai.FunctionCall{Name: "f"}}}, false},
+		{"nil before a function response", []*genai.Part{nil, {FunctionResponse: &genai.FunctionResponse{Name: "f"}}}, false},
+		{"nil trailing part after text", []*genai.Part{{Text: "done"}, nil}, true},
+		{"nil after a code execution result", []*genai.Part{{CodeExecutionResult: &genai.CodeExecutionResult{}}, nil}, false},
+		{"nil before a code execution result", []*genai.Part{nil, {CodeExecutionResult: &genai.CodeExecutionResult{}}}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := &session.Event{LLMResponse: model.LLMResponse{
+				Content: &genai.Content{Parts: tc.parts},
+			}}
+			if got := event.IsFinalResponse(); got != tc.want {
+				t.Errorf("IsFinalResponse() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsFinalResponseErrorEvent(t *testing.T) {
+	functionCall := &genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}}
+	functionResponse := &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "f"}}
+	codeResult := &genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{}}
+	tests := []struct {
+		name      string
+		errorCode string
+		partial   bool
+		parts     []*genai.Part
+		want      bool
+	}{
+		{"error with a function response is final", "SOME_ERROR", false, []*genai.Part{functionResponse}, true},
+		{"error with a trailing code execution result is final", "SOME_ERROR", false, []*genai.Part{codeResult}, true},
+		{"error without content is final", "SOME_ERROR", false, nil, true},
+		{"error with a function call is not final", "SOME_ERROR", false, []*genai.Part{functionCall}, false},
+		{"partial error is not final", "SOME_ERROR", true, []*genai.Part{{Text: "partial"}}, false},
+		{"function response without error is not final", "", false, []*genai.Part{functionResponse}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := &session.Event{LLMResponse: model.LLMResponse{
+				Content:      &genai.Content{Parts: tc.parts},
+				ErrorCode:    tc.errorCode,
+				ErrorMessage: "Something went wrong",
+				Partial:      tc.partial,
+			}}
+			if got := event.IsFinalResponse(); got != tc.want {
+				t.Errorf("IsFinalResponse() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
