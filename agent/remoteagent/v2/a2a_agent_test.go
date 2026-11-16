@@ -1942,6 +1942,87 @@ func TestRemoteAgent_CleanupCallback(t *testing.T) {
 	}
 }
 
+// A remote task that stops to wait for input or authorization is left for the
+// caller to resolve, so a run that ends there normally must not cancel it. A run
+// that fails still cancels it, as it does a task in any other unfinished state.
+func TestRemoteAgent_InterruptedTaskCleanup(t *testing.T) {
+	testCases := []struct {
+		name      string
+		state     a2a.TaskState
+		runErr    error
+		wantState a2a.TaskState
+	}{
+		{name: "input required", state: a2a.TaskStateInputRequired, wantState: a2a.TaskStateInputRequired},
+		{name: "auth required", state: a2a.TaskStateAuthRequired, wantState: a2a.TaskStateAuthRequired},
+		{name: "input required, run failed", state: a2a.TaskStateInputRequired, runErr: errors.New("callback error"), wantState: a2a.TaskStateCanceled},
+		{name: "auth required, run failed", state: a2a.TaskStateAuthRequired, runErr: errors.New("callback error"), wantState: a2a.TaskStateCanceled},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			remoteTaskIDChan := make(chan a2a.TaskID, 1)
+			server := startA2AServer(&mockA2AExecutor{
+				executeFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+					return func(yield func(a2a.Event, error) bool) {
+						remoteTaskIDChan <- reqCtx.TaskID
+						if !yield(a2a.NewSubmittedTask(reqCtx, reqCtx.Message), nil) {
+							return
+						}
+						msg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("waiting for the caller"))
+						yield(a2a.NewStatusUpdateEvent(reqCtx, tc.state, msg), nil)
+					}
+				},
+				cancelFn: func(ctx context.Context, reqCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+					return func(yield func(a2a.Event, error) bool) {
+						yield(a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCanceled, nil), nil)
+					}
+				},
+			})
+			defer server.Close()
+
+			card := &a2a.AgentCard{
+				SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(server.URL, a2a.TransportProtocolJSONRPC)},
+			}
+			cfg := A2AConfig{Name: "a2a", AgentCard: card}
+			if tc.runErr != nil {
+				cfg.AfterRequestCallbacks = []AfterA2ARequestCallback{
+					func(ctx agent.Context, req *a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error) {
+						return nil, tc.runErr
+					},
+				}
+			}
+			remoteAgent, err := NewA2A(cfg)
+			if err != nil {
+				t.Fatalf("NewA2A() error = %v", err)
+			}
+
+			session := prepareSession(t, t.Context(), []*session.Event{newUserHello()})
+			ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Session:   session,
+				RunConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeNone},
+			})
+			var runErr error
+			for _, err := range remoteAgent.Run(ictx) {
+				if err != nil {
+					runErr = err
+				}
+			}
+			if !errors.Is(runErr, tc.runErr) {
+				t.Fatalf("remoteAgent.Run() error = %v, want %v", runErr, tc.runErr)
+			}
+
+			remoteTaskID := <-remoteTaskIDChan
+			task, err := newA2AClient(t, server).GetTask(t.Context(), &a2a.GetTaskRequest{ID: remoteTaskID})
+			if err != nil {
+				t.Fatalf("client.GetTask() error = %v", err)
+			}
+			if task.Status.State != tc.wantState {
+				t.Fatalf("task.Status.State = %q, want %q", task.Status.State, tc.wantState)
+			}
+		})
+	}
+}
+
 func TestRemoteAgent_PartConverter(t *testing.T) {
 	event := &session.Event{
 		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
