@@ -1556,7 +1556,8 @@ func TestAuthRedirectPolicy(t *testing.T) {
 			endpointURL := strings.Replace(endpoint.URL, "127.0.0.1", "localhost", 1) + "/mcp"
 			if tc.crossHost {
 				mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-					http.Redirect(w, r, target.URL+"/mcp", http.StatusTemporaryRedirect)
+					// Shaped like an SSO bounce: the refusal must not echo it.
+					http.Redirect(w, r, target.URL+"/mcp?code=SECRET-CODE&state=xyz", http.StatusTemporaryRedirect)
 				})
 			} else {
 				mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
@@ -1603,6 +1604,12 @@ func TestAuthRedirectPolicy(t *testing.T) {
 			}
 			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 				t.Errorf("Tools() error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			// net/http puts the raw Location into the *url.Error it wraps a
+			// CheckRedirect error in, and a cross-host Location is often an
+			// SSO bounce carrying a code or a token.
+			if err != nil && strings.Contains(err.Error(), "SECRET-CODE") {
+				t.Errorf("Tools() error = %v, want it not to carry the Location's query string", err)
 			}
 
 			mu.Lock()

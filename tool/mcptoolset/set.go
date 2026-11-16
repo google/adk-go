@@ -16,9 +16,12 @@
 package mcptoolset
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -161,8 +164,9 @@ func httpClient(base *http.Client, provider auth.CredentialProvider) *http.Clien
 // bounds where it travels, and next may refuse more but never allow more.
 func authCheckRedirect(next func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
+		method := via[0].Method
 		if err := credredirect.Check(req, via); err != nil {
-			return refuseRedirect(via, err)
+			return refuseRedirect(method, err)
 		}
 		if next == nil {
 			if len(via) >= credredirect.MaxRedirects {
@@ -171,15 +175,16 @@ func authCheckRedirect(next func(*http.Request, []*http.Request) error) func(*ht
 			return nil
 		}
 		// net/http sends req as next leaves it, and next can edit via too, so
-		// judge the hop again against copies taken before next ran. Check
-		// also holds the Host header, path and opaque URL to the URL's host,
-		// which a forward proxy or a front end would otherwise route by.
+		// judge the hop again against copies taken before next ran, and
+		// report it by the method the chain started with. Check also holds
+		// the Host header, path and opaque URL to the URL's host, which a
+		// forward proxy or a front end would otherwise route by.
 		orig, prev := *via[0].URL, *via[len(via)-1].URL
 		if err := next(req, via); err != nil {
 			return err
 		}
 		if err := credredirect.Check(req, []*http.Request{{URL: &orig}, {URL: &prev}}); err != nil {
-			return refuseRedirect(via, err)
+			return refuseRedirect(method, err)
 		}
 		return nil
 	}
@@ -195,11 +200,72 @@ func authCheckRedirect(next func(*http.Request, []*http.Request) error) func(*ht
 // 3xx on a reconnect, still fails the session, with the status text as the
 // reason. The JSON-RPC traffic is POST, where the error is the clearer
 // failure. Either way the next hop is not sent.
-func refuseRedirect(via []*http.Request, err error) error {
-	if via[0].Method == http.MethodGet {
+func refuseRedirect(method string, err error) error {
+	if method == http.MethodGet {
 		return http.ErrUseLastResponse
 	}
-	return fmt.Errorf("mcptoolset: %w: Config.Auth is set and the credential would follow", err)
+	return &redirectRefusedError{err: err}
+}
+
+// redirectRefusedError marks a refusal from authCheckRedirect so that
+// redactRedirectTarget can find it under the layers the SDK and net/http add.
+type redirectRefusedError struct{ err error }
+
+func (e *redirectRefusedError) Error() string {
+	return "mcptoolset: " + e.err.Error() + ": Config.Auth is set and the credential would follow"
+}
+
+func (e *redirectRefusedError) Unwrap() error { return e.err }
+
+// redactRedirectTarget strips the redirect target out of a refused redirect's
+// error. net/http wraps a CheckRedirect error in a *url.Error whose URL is the
+// server's Location header as sent, query string and all, and a cross-host
+// Location is often an SSO bounce carrying a code or a token. The refusal
+// itself already names both origins, so the *url.Error is replaced by it.
+func redactRedirectTarget(err error) error {
+	var refused *redirectRefusedError
+	if !errors.As(err, &refused) {
+		return err
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) || urlErr.Err != refused {
+		return err
+	}
+	return replaceLeaf(err, urlErr, refused)
+}
+
+// replaceLeaf returns err with the wrapped error old replaced by new, keeping
+// the message of every layer above it. It follows fmt.Errorf's %w chains,
+// including one wrapping two errors, which the SDK uses between a request
+// and its transport error.
+func replaceLeaf(err, old, new error) error {
+	if err == old {
+		return new
+	}
+	var inner []error
+	switch u := err.(type) {
+	case interface{ Unwrap() []error }:
+		inner = u.Unwrap()
+	case interface{ Unwrap() error }:
+		if e := u.Unwrap(); e != nil {
+			inner = []error{e}
+		}
+	}
+	msg := err.Error()
+	for _, e := range inner {
+		replaced := replaceLeaf(e, old, new)
+		if replaced == e {
+			continue
+		}
+		// Rebuild the layer with the replaced error in place of the old
+		// text, when the layer's message carries it; otherwise the layer
+		// added nothing worth keeping over the redacted error.
+		if before, after, ok := strings.Cut(msg, e.Error()); ok {
+			return fmt.Errorf("%s%w%s", before, replaced, after)
+		}
+		return replaced
+	}
+	return err
 }
 
 // Config provides initial configuration for the MCP ToolSet.
@@ -247,15 +313,19 @@ type Config struct {
 	// With Auth, a redirect is followed only when it stays on the endpoint's
 	// host and port and either keeps the scheme or upgrades http to https,
 	// each scheme's default port counting as the same port, because the
-	// credential is applied again on every hop. A CheckRedirect on the
-	// HTTPClient runs after that check, not instead of it, and may not point
-	// the request at another host through its Host header, path or opaque
-	// URL either. A refused redirect fails the call. On the SDK's optional
-	// server-to-client stream the unfollowed 3xx goes back to the SDK
-	// instead: a 3xx not labeled text/event-stream on the first stream
-	// request means no stream and the session goes on, while one labeled
-	// text/event-stream, or any 3xx on a reconnect, fails the session with
-	// the status text as the reason.
+	// credential is applied again on every hop. The bound covers the
+	// redirects the http.Client follows: a Transport supplied through the
+	// HTTPClient sits below the credential and is outside it. A
+	// CheckRedirect on the HTTPClient runs after that check, not instead of
+	// it, and may not point the request at another host through its Host
+	// header, path or opaque URL either. A refused redirect fails the call,
+	// except on a GET, which the SDK sends only for its optional
+	// server-to-client stream on protocol versions before 2026-07-28: there
+	// the unfollowed 3xx goes back to the SDK. With the SDK release in go.mod,
+	// a 3xx not labeled text/event-stream on the first stream request means
+	// no stream and the session goes on, while one labeled text/event-stream,
+	// or any 3xx on a reconnect, fails the session with the status text as
+	// the reason.
 	//
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two

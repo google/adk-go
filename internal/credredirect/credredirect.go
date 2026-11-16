@@ -37,11 +37,12 @@ const MaxRedirects = 10
 // downgrades its scheme, and one whose request would address another host on
 // the wire than its URL names. It does not cap the number of hops.
 func Check(req *http.Request, via []*http.Request) error {
-	// Check against the hop just taken, which refuses a chain climbing to
-	// https and then dropping back to http, and against the original request
-	// as a second line: sameTarget keeps a chain on one host and port, so the
-	// original refuses nothing on its own today, and the comparison stays in
-	// case that ever changes.
+	// Check against the original request, then against the hop just taken.
+	// The previous hop is what refuses a chain climbing to https and then
+	// dropping back to http. The original is a second line: sameTarget keeps
+	// a chain on one host and port, so it refuses nothing on its own today,
+	// and the comparison stays in case that ever changes. The order only
+	// decides which origin a refusal names.
 	for _, from := range []*url.URL{via[0].URL, via[len(via)-1].URL} {
 		if !sameTarget(from, req.URL) {
 			return fmt.Errorf("refusing redirect from %s to %s", origin(from), origin(req.URL))
@@ -102,6 +103,9 @@ func sameTarget(from, to *url.URL) bool {
 	}
 }
 
+// dialName returns the address net/http dials for u, falling back to the
+// written name when the lookup mapping fails, as net/http does.
+//
 // net/http derives two names from a URL's host, and a redirect is the same
 // target only when both agree. It dials the IDNA lookup form, which maps
 // characters before encoding, and it writes the Host header and a forward
@@ -111,9 +115,6 @@ func sameTarget(from, to *url.URL) bool {
 // rejects is dialed as written while its Host header is still encoded. An
 // ASCII name is taken as written by both, so a Unicode name and its punycode
 // form compare equal, and an empty punycode label is not dropped.
-
-// dialName returns the address net/http dials for u, falling back to the
-// written name when the lookup mapping fails, as net/http does.
 func dialName(u *url.URL) string {
 	host := u.Hostname()
 	if isASCII(host) {

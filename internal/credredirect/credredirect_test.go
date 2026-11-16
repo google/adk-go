@@ -15,8 +15,13 @@
 package credredirect
 
 import (
+	"context"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strconv"
+	"sync"
 	"testing"
 )
 
@@ -81,6 +86,9 @@ func TestSameTarget(t *testing.T) {
 		{name: "underscore and sharp s, same name", from: "https://fa\u00df_x.example/rpc", to: "https://fa\u00df_x.example/rpc", want: true},
 		{name: "underscore and sharp s against capital sharp s", from: "https://fa\u00df_x.example/rpc", to: "https://fa\u1e9e_x.example/rpc", want: false},
 		{name: "ascii underscore names differ", from: "https://mcp_server/rpc", to: "https://evil_host/rpc", want: false},
+		// A punycode label net/http cannot encode has no Host header, so
+		// the request could not be sent, and the hop is refused.
+		{name: "invalid punycode label beside a unicode one", from: "https://xn--zzz-.fa\u00df.example/rpc", to: "https://xn--zzz-.fa\u00df.example/rpc", want: false},
 		{name: "ipv6 literal, same", from: "https://[::1]:8443/rpc", to: "https://[::1]:8443/rpc", want: true},
 		{name: "ipv6 literals differ", from: "https://[::1]:8443/rpc", to: "https://[2001:db8::1]:8443/rpc", want: false},
 	}
@@ -180,6 +188,61 @@ func TestHostNames(t *testing.T) {
 			got, ok := hostName(u)
 			if !ok || got != tc.wantHost {
 				t.Errorf("hostName(%q) = %q, %v, want %q, true", tc.host, got, ok, tc.wantHost)
+			}
+		})
+	}
+}
+
+// TestHostNamesMatchNetHTTP checks dialName and hostName against net/http
+// itself rather than against literals: a client whose dialer records the
+// address it is given and a server that records the Host header it receives.
+func TestHostNamesMatchNetHTTP(t *testing.T) {
+	var mu sync.Mutex
+	var dialed, hostHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hostHeader = r.Host
+		mu.Unlock()
+	}))
+	defer srv.Close()
+	port := srv.Listener.Addr().(*net.TCPAddr).Port
+	client := &http.Client{Transport: &http.Transport{
+		// Every request dials, so each one records its own address.
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			mu.Lock()
+			dialed = addr
+			mu.Unlock()
+			return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
+		},
+	}}
+	for _, host := range []string{
+		"api.example",
+		"mcp.example.com.xn--",
+		"fa\u00df.example",
+		"xn--fa-hia.example",
+		"fa\u1e9e.example",
+		"ap\u00adi.example",
+		"M\u00dcNCHEN.example",
+		"fa\u00df_x.example",
+	} {
+		t.Run(host, func(t *testing.T) {
+			u := &url.URL{Scheme: "http", Host: net.JoinHostPort(host, strconv.Itoa(port)), Path: "/"}
+			resp, err := client.Do(&http.Request{Method: http.MethodGet, URL: u, Header: http.Header{}})
+			if err != nil {
+				t.Fatalf("Do(%s) error = %v", u, err)
+			}
+			if err := resp.Body.Close(); err != nil {
+				t.Error(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if want := net.JoinHostPort(dialName(u), strconv.Itoa(port)); dialed != want {
+				t.Errorf("net/http dialed %q, dialName gives %q", dialed, want)
+			}
+			name, ok := hostName(u)
+			if want := net.JoinHostPort(name, strconv.Itoa(port)); !ok || hostHeader != want {
+				t.Errorf("net/http sent Host %q, hostName gives %q, %v", hostHeader, want, ok)
 			}
 		})
 	}

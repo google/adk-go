@@ -611,6 +611,7 @@ func TestCheckRedirect(t *testing.T) {
 	tests := []struct {
 		name    string
 		urls    []string
+		host    string // req.Host on the hop under test
 		wantErr string
 	}{
 		{name: "same origin", urls: []string{"https://h/a", "https://h/b"}},
@@ -625,10 +626,24 @@ func TestCheckRedirect(t *testing.T) {
 			urls:    []string{"http://h/a", "https://h/b", "http://h/c"},
 			wantErr: "refusing redirect",
 		},
+		// The rule is shared with mcptoolset through internal/credredirect.
+		// These are the decisions that differ from comparing the hostnames
+		// as written: a name and its punycode form are one target, two
+		// spellings net/http would dial or send as Host differently are not,
+		// a port written out on one side is the port implied on the other,
+		// and a Host header has to name the URL's host.
+		{name: "unicode host to its punycode form", urls: []string{"https://fa\u00df.example/a", "https://xn--fa-hia.example/a"}},
+		{name: "sharp s to capital sharp s", urls: []string{"https://fa\u00df.example/a", "https://fa\u1e9e.example/a"}, wantErr: "refusing redirect"},
+		{name: "unicode case differs", urls: []string{"https://M\u00dcNCHEN.example/a", "https://m\u00fcnchen.example/a"}, wantErr: "refusing redirect"},
+		{name: "upgrade with the http default written out", urls: []string{"http://h/a", "https://h:80/a"}},
+		{name: "upgrade with the https default written out", urls: []string{"http://h:443/a", "https://h/a"}},
+		{name: "host header names the url's host", urls: []string{"https://h/a", "https://h/b"}, host: "h"},
+		{name: "host header names another host", urls: []string{"https://h/a", "https://h/b"}, host: "other", wantErr: "refusing redirect"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			req, via := chain(tc.urls...)
+			req.Host = tc.host
 			err := checkRedirect(req, via)
 			if tc.wantErr == "" {
 				if err != nil {

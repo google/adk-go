@@ -179,20 +179,20 @@ func withRetry[T any](ctx context.Context, c *connectionRefresher, fn func(*mcp.
 
 	session, err := c.getSession(ctx)
 	if err != nil {
-		return zero, false, err
+		return zero, false, redactRedirectTarget(err)
 	}
 
 	result, err := fn(session)
 	if err != nil {
 		if !shouldRefreshConnection(err) {
-			return zero, false, err
+			return zero, false, redactRedirectTarget(err)
 		}
 		session, refreshErr := c.refreshConnection(ctx)
 		if refreshErr != nil {
-			return zero, false, fmt.Errorf("%w (reconnection also failed: %v)", err, refreshErr)
+			return zero, false, fmt.Errorf("%w (reconnection also failed: %v)", redactRedirectTarget(err), redactRedirectTarget(refreshErr))
 		}
 		result, err = fn(session)
-		return result, true, err
+		return result, true, redactRedirectTarget(err)
 	}
 	return result, false, err
 }
