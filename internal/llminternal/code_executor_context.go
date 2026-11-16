@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"maps"
@@ -36,6 +37,9 @@ const (
 	// executionSessionIDKey is the entry of the code execution context that
 	// holds the execution ID of a stateful executor.
 	executionSessionIDKey = "execution_session_id"
+	// processedInputFilesKey is the entry of the code execution context that
+	// lists the names of the input files already explored.
+	processedInputFilesKey = "processed_input_files"
 	// codeExecutorInputFilesKey holds a []*codeexecutor.File with raw bytes.
 	codeExecutorInputFilesKey = "_code_executor_input_files"
 	// codeExecutorErrorCountsKey holds a map[string]int by invocation ID.
@@ -146,6 +150,96 @@ func (c *codeExecutorContext) inputFiles() ([]*codeexecutor.File, error) {
 		return nil, fmt.Errorf("%s holds %T, want []*codeexecutor.File", codeExecutorInputFilesKey, v)
 	}
 	return slices.Clone(files), nil
+}
+
+// storeInputFile stores f, a non-nil file, in the list of input files. A
+// stored file with f's name, MIME type and bytes is left as it is. A stored
+// file with f's name and other content is replaced in place, and its name is
+// removed from the processed input files, so that it is explored again.
+func (c *codeExecutorContext) storeInputFile(f *codeexecutor.File) error {
+	codeExecutorStateMu.Lock()
+	defer codeExecutorStateMu.Unlock()
+	files, err := c.inputFiles()
+	if err != nil {
+		return err
+	}
+	i := slices.IndexFunc(files, func(stored *codeexecutor.File) bool { return stored != nil && stored.Name == f.Name })
+	if i < 0 {
+		return c.set(codeExecutorInputFilesKey, append(files, f))
+	}
+	if files[i].MimeType == f.MimeType && bytes.Equal(files[i].Content, f.Content) {
+		return nil
+	}
+	files[i] = f
+	if err := c.set(codeExecutorInputFilesKey, files); err != nil {
+		return err
+	}
+	names, err := c.processedFileNames()
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(names, f.Name) {
+		return nil
+	}
+	return c.setProcessedFileNames(slices.DeleteFunc(names, func(n string) bool { return n == f.Name }))
+}
+
+// processedFileNames returns a copy of the names of the input files already
+// explored, nil when none is listed. It accepts the list as a []string or, as
+// a persistent session service reads it back from JSON, a []any of strings.
+func (c *codeExecutorContext) processedFileNames() ([]string, error) {
+	ctxMap, _, err := c.executionContext()
+	if err != nil {
+		return nil, err
+	}
+	switch v := ctxMap[processedInputFilesKey].(type) {
+	case nil:
+		return nil, nil
+	case []string:
+		return slices.Clone(v), nil
+	case []any:
+		names := make([]string, len(v))
+		for i, e := range v {
+			name, ok := e.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s.%s holds an element of type %T, want string", codeExecutionContextKey, processedInputFilesKey, e)
+			}
+			names[i] = name
+		}
+		return names, nil
+	default:
+		return nil, fmt.Errorf("%s.%s holds %T, want a list of strings", codeExecutionContextKey, processedInputFilesKey, v)
+	}
+}
+
+// addProcessedFileName lists name as an explored input file. It writes
+// nothing when name is already listed.
+func (c *codeExecutorContext) addProcessedFileName(name string) error {
+	codeExecutorStateMu.Lock()
+	defer codeExecutorStateMu.Unlock()
+	names, err := c.processedFileNames()
+	if err != nil {
+		return err
+	}
+	if slices.Contains(names, name) {
+		return nil
+	}
+	return c.setProcessedFileNames(append(names, name))
+}
+
+// setProcessedFileNames stores names as the processed input files in a copy
+// of the code execution context. The caller holds codeExecutorStateMu.
+func (c *codeExecutorContext) setProcessedFileNames(names []string) error {
+	ctxMap, _, err := c.executionContext()
+	if err != nil {
+		return err
+	}
+	updated := maps.Clone(ctxMap)
+	if updated == nil {
+		updated = map[string]any{}
+	}
+	updated[processedInputFilesKey] = names
+	return c.set(codeExecutionContextKey, updated)
 }
 
 // errorCount returns the number of consecutive failed executions of the

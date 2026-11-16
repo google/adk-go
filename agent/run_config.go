@@ -204,6 +204,26 @@ type RunConfig struct {
 	// GenerateContentConfig still make the connector return an error.
 	Labels *map[string]string
 
+	// SupportCFC serves every model call of the invocation over the model's live
+	// connection (compositional function calling, CFC), including the calls of
+	// sub-agents, and gives the agent that has no parent agent and no built-in
+	// code executor the built-in code executor for this invocation. The agent
+	// itself is not changed, and a later invocation without SupportCFC behaves
+	// as configured.
+	//
+	// The runner's root agent must be an LLM agent whose model name starts with
+	// "gemini-2" (a plain prefix test, so "models/gemini-2.0-flash" and
+	// "gemini-3-pro" fail), and every model that serves a call must support a
+	// live connection. A root agent that is not an LLM agent is not checked.
+	// When the check fails, Run yields the error "CFC is not supported for
+	// model: <model> in agent: <agent>" before it stores the message. A nested
+	// run through agenttool never has SupportCFC set.
+	//
+	// Zero value: false, every model call is a unary GenerateContent call.
+	//
+	// EXPERIMENTAL: RunConfig.SupportCFC is experimental; its API and behavior may change or be removed in a later version.
+	SupportCFC bool
+
 	// ModelInputContext holds transient contents that every model request of
 	// the invocation receives besides the session history. The runner does not
 	// write them to the session: they are neither events nor part of the

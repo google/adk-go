@@ -125,3 +125,63 @@ func TestAgentTool_Run_ForwardsMaxLLMCalls(t *testing.T) {
 		}
 	})
 }
+
+// childReplyModel answers every call with "child reply" and records the
+// requests it gets. It has no live connection.
+type childReplyModel struct {
+	model.LLM
+	name string
+	reqs []*model.LLMRequest
+}
+
+func (m *childReplyModel) Name() string { return m.name }
+
+func (m *childReplyModel) GenerateContent(ctx context.Context, req *model.LLMRequest, useStream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.reqs = append(m.reqs, req)
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("child reply", genai.RoleModel)}, nil)
+	}
+}
+
+// A nested run never inherits SupportCFC, as adk-python's AgentTool turns it
+// off (tools/agent_tool.py): the child makes a unary call, is not refused for
+// a model without the gemini-2 prefix, and gets no built-in code executor.
+func TestAgentTool_Run_DoesNotForwardSupportCFC(t *testing.T) {
+	m := &childReplyModel{name: "gemini-3-pro"}
+	child, err := llmagent.New(llmagent.Config{Name: "child", Model: m})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	created, err := session.InMemoryService().Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "testUser"})
+	if err != nil {
+		t.Fatalf("session Create() failed: %v", err)
+	}
+	ctx := runconfig.ToContext(t.Context(), &runconfig.RunConfig{})
+	ictx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Session:   created.Session,
+		RunConfig: &agent.RunConfig{SupportCFC: true},
+	})
+	toolCtx := agent.NewToolContext(ictx, "", &session.EventActions{}, nil)
+	toolImpl, ok := agenttool.New(child, nil).(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("agentTool does not implement FunctionTool")
+	}
+
+	result, err := toolImpl.Run(toolCtx, map[string]any{"request": "hello"})
+	if err != nil {
+		t.Fatalf("Run() failed: %v", err)
+	}
+	if got := result["result"]; got != "child reply" {
+		t.Errorf("Run() result = %v, want the child's reply", result)
+	}
+	if len(m.reqs) != 1 {
+		t.Fatalf("child model calls = %d, want 1", len(m.reqs))
+	}
+	if cfg := m.reqs[0].Config; cfg != nil {
+		for _, tl := range cfg.Tools {
+			if tl.CodeExecution != nil {
+				t.Errorf("child request has a code execution tool, want none")
+			}
+		}
+	}
+}
