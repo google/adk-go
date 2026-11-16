@@ -285,6 +285,43 @@ func TestExecuteSQL_ConfigInRequests(t *testing.T) {
 	}
 }
 
+// TestExecuteSQL_ApplicationNameLabel checks that ApplicationName is made a
+// valid label value, since BigQuery rejects a job with an invalid one.
+func TestExecuteSQL_ApplicationNameLabel(t *testing.T) {
+	tests := []struct {
+		name    string
+		appName string
+		want    string
+	}{
+		{name: "valid", appName: "my-agent_2", want: "my-agent_2"},
+		{name: "uppercase and slash", appName: "MyAgent/1.0", want: "myagent_1_0"},
+		{name: "long", appName: strings.Repeat("a", 70), want: strings.Repeat("a", 63)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _ := runSQL(t, Config{ApplicationName: tc.appName}, map[string]fakeResponse{
+				dryRunPath: {body: selectDryRun},
+				queryPath:  {body: page(oneColumn("1"), "")},
+			}, map[string]any{"project_id": "p", "query": "SELECT 1"})
+
+			bodies := f.requestBodies()
+			if len(bodies) != 2 {
+				t.Fatalf("got %d requests, want 2", len(bodies))
+			}
+			dryRun := bodies[0].(map[string]any)["configuration"].(map[string]any)["labels"].(map[string]any)
+			query := bodies[1].(map[string]any)["labels"].(map[string]any)
+			for name, labels := range map[string]map[string]any{"dry run": dryRun, "query": query} {
+				if got := labels["adk-bigquery-application-name"]; got != tc.want {
+					t.Errorf("%s application name label = %v, want %q", name, got, tc.want)
+				}
+			}
+			if ua := f.lastRequest().UserAgent(); !strings.Contains(ua, " "+tc.appName) {
+				t.Errorf("User-Agent = %q, want it to contain %q unchanged", ua, tc.appName)
+			}
+		})
+	}
+}
+
 // TestExecuteSQL_JobLabelsAreCopied checks that changing Config.JobLabels
 // after New does not change the labels of later jobs.
 func TestExecuteSQL_JobLabelsAreCopied(t *testing.T) {
@@ -552,18 +589,20 @@ func TestRowValues_JSONKeepsLargeIntegers(t *testing.T) {
 
 func TestRowValues_Errors(t *testing.T) {
 	tests := []struct {
-		name  string
-		field string
-		cell  string
+		name    string
+		field   string
+		cell    string
+		wantErr string
 	}{
-		{name: "float", field: `{"type":"FLOAT"}`, cell: `"x"`},
-		{name: "timestamp", field: `{"type":"TIMESTAMP"}`, cell: `"2024-01-02"`},
-		{name: "datetime", field: `{"type":"DATETIME"}`, cell: `"x"`},
-		{name: "time", field: `{"type":"TIME"}`, cell: `"x"`},
-		{name: "json", field: `{"type":"JSON"}`, cell: `"{"`},
-		{name: "non-string cell", field: `{"type":"STRING"}`, cell: `1`},
-		{name: "repeated item", field: `{"type":"INTEGER","mode":"REPEATED"}`, cell: `[{"v":"x"}]`},
-		{name: "record field", field: `{"type":"RECORD","fields":[{"name":"n","type":"INT64"}]}`, cell: `{"f":[{"v":"x"}]}`},
+		{name: "integer", field: `{"name":"c","type":"INTEGER"}`, cell: `"secret"`, wantErr: "column c: invalid INTEGER value"},
+		{name: "float", field: `{"name":"c","type":"FLOAT"}`, cell: `"secret"`, wantErr: "column c: invalid FLOAT value"},
+		{name: "timestamp", field: `{"name":"c","type":"TIMESTAMP"}`, cell: `"2024-01-02"`, wantErr: "column c: invalid TIMESTAMP value"},
+		{name: "datetime", field: `{"name":"c","type":"DATETIME"}`, cell: `"secret"`, wantErr: "column c: invalid DATETIME value"},
+		{name: "time", field: `{"name":"c","type":"TIME"}`, cell: `"secret"`, wantErr: "column c: invalid TIME value"},
+		{name: "json", field: `{"name":"c","type":"JSON"}`, cell: `"{secret"`, wantErr: "column c: invalid JSON value"},
+		{name: "non-string cell", field: `{"name":"c","type":"STRING"}`, cell: `1`, wantErr: "column c: BigQuery returned a float64 for a STRING value"},
+		{name: "repeated item", field: `{"name":"c","type":"INTEGER","mode":"REPEATED"}`, cell: `[{"v":"secret"}]`, wantErr: "column c: invalid INTEGER value"},
+		{name: "record field", field: `{"name":"c","type":"RECORD","fields":[{"name":"n","type":"INT64"}]}`, cell: `{"f":[{"v":"secret"}]}`, wantErr: "column c: column n: invalid INT64 value"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -573,8 +612,13 @@ func TestRowValues_Errors(t *testing.T) {
 			}
 			row := decodeJSON(t, `{"f":[{"v":`+tc.cell+`}]}`).(map[string]any)
 
-			if got, err := rowValues([]field{f}, row); err == nil {
-				t.Errorf("rowValues() = %v, want an error", got)
+			got, err := rowValues([]field{f}, row)
+			if err == nil {
+				t.Fatalf("rowValues() = %v, want an error", got)
+			}
+			// The cell is customer data and must not reach the error.
+			if err.Error() != tc.wantErr {
+				t.Errorf("rowValues() error = %q, want %q", err, tc.wantErr)
 			}
 		})
 	}

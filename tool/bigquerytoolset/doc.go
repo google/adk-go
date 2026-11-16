@@ -24,8 +24,10 @@
 // job's creationTime, startTime and endTime statistics as the strings the REST
 // API sends, where adk-python returns numbers; execute_sql returns some
 // values adk-python turns into Python strings as the REST API sends them,
-// and sets result_is_likely_truncated only when rows were left out (see
-// [Config.MaxQueryResultRows]). When
+// converts each value inside a STRUCT or ARRAY on its own, where adk-python
+// returns the whole STRUCT or ARRAY as one string when any value inside is
+// not JSON, and sets result_is_likely_truncated only when rows were left out
+// (see [Config.MaxQueryResultRows]). When
 // BigQuery rejects a call, for example because a dataset does not exist, or
 // an id argument is empty, the tool returns
 // {"status": "ERROR", "error_details": "..."} to the model so it can correct

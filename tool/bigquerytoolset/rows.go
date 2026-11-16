@@ -103,13 +103,13 @@ func scalarValue(f field, v any) (any, error) {
 	case "INTEGER", "INT64":
 		n, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
-			return nil, err
+			return nil, invalidValue(f)
 		}
 		return n, nil
 	case "FLOAT", "FLOAT64":
 		x, err := strconv.ParseFloat(s, 64)
 		if err != nil {
-			return nil, err
+			return nil, invalidValue(f)
 		}
 		if math.IsNaN(x) || math.IsInf(x, 0) {
 			return s, nil
@@ -118,19 +118,19 @@ func scalarValue(f field, v any) (any, error) {
 	case "TIMESTAMP":
 		micros, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
-			return nil, err
+			return nil, invalidValue(f)
 		}
 		return pythonDateTime(time.UnixMicro(micros).UTC()) + "+00:00", nil
 	case "DATETIME":
 		t, err := time.Parse("2006-01-02T15:04:05.999999", s)
 		if err != nil {
-			return nil, err
+			return nil, invalidValue(f)
 		}
 		return pythonDateTime(t), nil
 	case "TIME":
 		t, err := time.Parse("15:04:05.999999", s)
 		if err != nil {
-			return nil, err
+			return nil, invalidValue(f)
 		}
 		return pythonTime(t), nil
 	case "JSON":
@@ -138,11 +138,17 @@ func scalarValue(f field, v any) (any, error) {
 		d := json.NewDecoder(strings.NewReader(s))
 		d.UseNumber()
 		if err := d.Decode(&val); err != nil {
-			return nil, err
+			return nil, invalidValue(f)
 		}
 		return val, nil
 	}
 	return s, nil
+}
+
+// invalidValue reports a cell that does not parse as its column type. The
+// parsers' own errors quote the cell, which is customer data.
+func invalidValue(f field) error {
+	return fmt.Errorf("invalid %s value", f.Type)
 }
 
 // pythonDateTime formats t the way Python's str(datetime) does, without the

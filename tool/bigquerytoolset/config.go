@@ -47,6 +47,8 @@ type Config struct {
 	// BigQuery usage can be attributed to the agent. An [option.WithUserAgent]
 	// in ClientOptions replaces the whole header, including this name. It must
 	// not contain spaces or characters a request header cannot carry.
+	// execute_sql also puts it, adapted to label rules, in a job label (see
+	// JobLabels).
 	ApplicationName string
 
 	// Location is the BigQuery location, such as "US" or "europe-west4", that
@@ -78,6 +80,9 @@ type Config struct {
 	// with "adk-bigquery-" are reserved for the labels the tools add
 	// themselves: adk-bigquery-tool with the tool name, and
 	// adk-bigquery-application-name with ApplicationName when it is set.
+	// Since label values allow only lowercase letters, digits, '_' and '-',
+	// ApplicationName is lowercased there, other characters become '_' and
+	// it is cut to 63 characters: "MyAgent/1.0" becomes "myagent_1_0".
 	JobLabels map[string]string
 
 	// DefaultProjectID is the project the tools use when the model does not

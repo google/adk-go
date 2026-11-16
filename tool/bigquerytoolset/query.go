@@ -20,6 +20,7 @@ import (
 	"maps"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"google.golang.org/adk/v2/agent"
 )
@@ -77,9 +78,30 @@ func (b *bigQuery) jobLabels(toolName string) map[string]string {
 	}
 	labels[reservedLabelPrefix+"tool"] = toolName
 	if b.applicationName != "" {
-		labels[reservedLabelPrefix+"application-name"] = b.applicationName
+		labels[reservedLabelPrefix+"application-name"] = labelValue(b.applicationName)
 	}
 	return labels
+}
+
+// maxLabelValueLen is the longest value a BigQuery job label can have.
+const maxLabelValueLen = 63
+
+// labelValue turns s, which Config validation keeps to ASCII, into a valid
+// job label value: lowercase letters, digits, '_' and '-', at most 63
+// characters. Other characters become '_'. BigQuery rejects the whole job
+// for an invalid label value, so a name like "MyAgent/1.0" would otherwise
+// fail every query.
+func labelValue(s string) string {
+	b := []byte(strings.ToLower(s))
+	for i, c := range b {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' && c != '-' {
+			b[i] = '_'
+		}
+	}
+	if len(b) > maxLabelValueLen {
+		b = b[:maxLabelValueLen]
+	}
+	return string(b)
 }
 
 // dryRun validates query without running it and returns the dry run job as
