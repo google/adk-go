@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -172,6 +173,27 @@ type liveSessionImpl struct {
 	audioMgr    *AudioCacheManager
 	mu          sync.Mutex
 	activeTools map[string][]activeTask
+	// finalErr buffers one terminal error for recvIter to deliver after
+	// done is closed: the iterator cannot rely on outputCh (unbuffered)
+	// once Close has been called, because the consumer may be parked in Send.
+	finalMu  sync.Mutex
+	finalErr error
+}
+
+func (s *liveSessionImpl) setFinalError(err error) {
+	s.finalMu.Lock()
+	defer s.finalMu.Unlock()
+	if s.finalErr == nil {
+		s.finalErr = err
+	}
+}
+
+func (s *liveSessionImpl) takeFinalError() error {
+	s.finalMu.Lock()
+	defer s.finalMu.Unlock()
+	err := s.finalErr
+	s.finalErr = nil
+	return err
 }
 
 func (s *liveSessionImpl) RegisterStreamingTool(toolName, callID string, cancel context.CancelFunc) {
@@ -244,12 +266,23 @@ func (s *liveSessionImpl) Send(req agent.LiveRequest) error {
 func (s *liveSessionImpl) recvIter() iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for {
+			if err := s.takeFinalError(); err != nil {
+				// Deliver the buffered terminal error; no more events follow.
+				_ = yield(nil, err)
+				return
+			}
 			select {
 			case res := <-s.outputCh:
 				if !yield(res.event, res.err) {
 					return
 				}
 			case <-s.done:
+				// done closing and finalErr being set are not ordered with
+				// the iterator's first check, so drain the terminal error
+				// here too instead of dropping it.
+				if err := s.takeFinalError(); err != nil {
+					_ = yield(nil, err)
+				}
 				return
 			}
 		}
@@ -317,13 +350,30 @@ func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Dura
 //
 // Both the reader and the sender goroutine report into the same errChan and
 // the flow acts on whichever arrives first, so the two must classify the same
-// connection loss the same way. They do not produce the same text: the reader
-// sees the websocket close ("close 1006 ... unexpected EOF"), while the sender
-// sees the raw socket write failure, whose wording is platform-specific
-// ("write: broken pipe" on Linux, "wsasend: An established connection was
-// aborted by the software in your host machine." on Windows). Matching the
-// transport failure by type rather than by text keeps the verdict the same on
-// every platform.
+// connection loss the same way. They do not produce the same text. The reader
+// usually sees the websocket close ("close 1006 ... unexpected EOF"), and on a
+// reset it can get the raw socket error instead. The sender sees the raw
+// socket write failure, whose wording is platform-specific ("write: broken
+// pipe" on Linux, "wsasend: An established connection was aborted by the
+// software in your host machine." on Windows), and over wss:// it arrives
+// wrapped by crypto/tls. Matching the *net.OpError by type rather than by text
+// gives a dropped or reset connection the same verdict on both goroutines and
+// on every platform.
+//
+// A timed-out connection does not always get one verdict, because the kernel
+// reports the timeout to only one call. On Linux every later call sees a
+// closed connection instead: a read gets EOF, which gorilla reports as
+// close 1006, and a write gets EPIPE, and both resume. The call that does get
+// ETIMEDOUT is fatal if gorilla/websocket hides it, which it does for any
+// net.Error whose Temporary() is true (hideTempErr). That is the case for a
+// read over ws:// or wss:// and for a write over ws://. crypto/tls wraps a
+// failed write in an error whose Temporary() is always false, so a timed-out
+// write over wss:// keeps the *net.OpError and resumes. So on Linux a
+// timed-out connection resumes or ends depending on which goroutine reaches
+// errChan first, unless the timeout lands on a wss:// write. On Windows the
+// timeout is WSAETIMEDOUT (10060) and the other call gets WSAECONNRESET
+// (10054). Go treats neither as temporary, so both keep the *net.OpError and
+// the connection resumes whichever goroutine reports first.
 func isResumable(err error) bool {
 	if err == nil {
 		return false
@@ -338,11 +388,16 @@ func isResumable(err error) bool {
 	if errors.As(err, &opErr) {
 		return true
 	}
+	// Match the close code rather than the text: gorilla puts the socket
+	// addresses in its error text, so a port such as 41008 would match "1008".
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) && closeErr.Code == websocket.ClosePolicyViolation {
+		return true
+	}
 	errStr := err.Error()
 	return strings.Contains(errStr, "broken pipe") ||
 		strings.Contains(errStr, "connection reset") ||
 		strings.Contains(errStr, "EOF") ||
-		strings.Contains(errStr, "1008") ||
 		strings.Contains(errStr, "GoAway")
 }
 
@@ -353,6 +408,23 @@ func isEmptyLiveResponse(r *model.LLMResponse) bool {
 	return r.Content == nil && r.ErrorCode == "" && !r.Interrupted && !r.TurnComplete &&
 		r.InputTranscription == nil && r.OutputTranscription == nil && r.UsageMetadata == nil &&
 		r.SessionResumptionHandle == "" && r.GroundingMetadata == nil
+}
+
+// hasRealtimeInput reports whether v should be passed to SendRealtime. A nil
+// pointer of one of the types LiveRequest.RealtimeInput documents carries no
+// input, as a None field in adk-python does.
+func hasRealtimeInput(v any) bool {
+	switch v := v.(type) {
+	case nil:
+		return false
+	case *genai.Blob:
+		return v != nil
+	case *genai.ActivityStart:
+		return v != nil
+	case *genai.ActivityEnd:
+		return v != nil
+	}
+	return true
 }
 
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
@@ -517,7 +589,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			}
 
 			connectedAt := time.Now()
-			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name(), googlellm.GetGoogleLLMVariant(f.Model))
+			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name())
 
 			cleanup := func() {
 				cancelConn()
@@ -604,7 +676,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								return
 							}
 						}
-						if req.RealtimeInput != nil {
+						if hasRealtimeInput(req.RealtimeInput) {
 							if blob, ok := req.RealtimeInput.(*genai.Blob); ok {
 								sess.audioMgr.CacheInput(ctx, blob.Data, blob.MIMEType)
 							}
@@ -620,10 +692,32 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				}
 			}()
 
+			// pendingSend holds a function response awaiting delivery to the
+			// model, queued on sess.inputCh so the sender goroutine is the
+			// connection's only writer; a direct write from this loop races
+			// it and panics (#1819). It is declared inside the per-connection
+			// loop, so a response pending when the connection drops is
+			// discarded with the socket: carrying one across needs the value
+			// to survive until the write is confirmed, which stays open on
+			// #1819.
+			var pendingSend *genai.Content
+
 			reconnect := false
 			for !reconnect {
+				// Arm the inputCh send only while a response is pending, and
+				// hold further events until it is delivered, so a second tool
+				// response cannot overwrite the first (nil channel cases never
+				// fire in a select).
+				eventCase := eventsChan
+				var inputCase chan agent.LiveRequest
+				var inputReq agent.LiveRequest
+				if pendingSend != nil {
+					inputCase = sess.inputCh
+					inputReq = agent.LiveRequest{Content: pendingSend}
+					eventCase = nil
+				}
 				select {
-				case ev := <-eventsChan:
+				case ev := <-eventCase:
 					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
 					var tools map[string]tool.Tool
 					if len(fnCalls) > 0 {
@@ -697,14 +791,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								cleanup()
 								return
 							}
-							// Send function response back to model
-							if err := liveConn.SendContent(connCtx, respEv.LLMResponse.Content); err != nil {
-								sess.pushError(err)
-								cleanup()
-								return
-							}
+							// Queue the function response for the sender
+							// goroutine, the connection's only writer.
+							pendingSend = respEv.LLMResponse.Content
 						}
 					}
+				case inputCase <- inputReq:
+					pendingSend = nil
 				case ce := <-errChan:
 					if isResumable(ce.err) {
 						log.Printf("Connection error, attempting to resume: %v\n", ce.err)
@@ -727,7 +820,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						reconnect = true
 						break // Break the select
 					}
-					sess.pushError(ce.err)
+					// pushError would park here until the consumer pulls from
+					// outputCh, but the consumer may already be blocked in Send,
+					// which only Close can release. Buffer the terminal error so
+					// the iterator can deliver it; the deferred Close above ends
+					// waits in Send and recvIter when this goroutine returns.
+					sess.setFinalError(ce.err)
 					cleanup()
 					return
 				case <-sess.done:
