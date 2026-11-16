@@ -17,6 +17,7 @@ package llminternal
 import (
 	"context"
 	"fmt"
+	"iter"
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
@@ -109,40 +110,47 @@ func processorModel(ctx agent.InvocationContext, f *Flow) model.LLM {
 // ancestorModel returns the model of the nearest LLM-agent ancestor of a
 // that has one, or nil.
 func ancestorModel(ctx context.Context, a agent.Agent) model.LLM {
-	cur := a
-	if parents := parentmap.FromContext(ctx); parents != nil {
-		for {
-			parent := parents[cur.Name()]
-			if parent == nil {
-				break // cur is the run's root
-			}
-			if m := ownModel(parent); m != nil {
-				return m
-			}
-			cur = parent
+	for parent := range ancestors(ctx, a) {
+		if m := ownModel(parent); m != nil {
+			return m
 		}
-	}
-	return staticAncestorModel(innerAgent(cur))
-}
-
-// staticAncestorModel follows the parent links agent.New records, starting
-// at the parent of inner. It reads them through agentinternal.ParentOf, so
-// it is safe while another goroutine constructs a parent of an agent on the
-// walk.
-func staticAncestorModel(inner agentinternal.Agent) model.LLM {
-	for inner != nil {
-		parent, owner := agentinternal.ParentOf(agentinternal.Reveal(inner))
-		if parent == nil {
-			return nil
-		}
-		if owner, ok := owner.(agent.Agent); ok {
-			if m := ownModel(owner); m != nil {
-				return m
-			}
-		}
-		inner = parent
 	}
 	return nil
+}
+
+// ancestors yields a's parent, then its parent, and so on up to the root of
+// a's tree. Each step reads the parent through parentOf, the rule transfers
+// use: the run's parent map while it knows the current agent, then, from the
+// run's root upward, only the parent links agent.New records, so that a map
+// entry for an agent above the run's root is never followed.
+func ancestors(ctx context.Context, a agent.Agent) iter.Seq[agent.Agent] {
+	return func(yield func(agent.Agent) bool) {
+		cur := a
+		for parentmap.FromContext(ctx)[cur.Name()] != nil {
+			cur = parentOf(ctx, cur)
+			if !yield(cur) {
+				return
+			}
+		}
+		links := parentmap.ToContext(ctx, nil)
+		for parent := parentOf(links, cur); parent != nil; parent = parentOf(links, parent) {
+			if !yield(parent) {
+				return
+			}
+		}
+	}
+}
+
+// rootOf returns the root of a's agent tree: the last agent ancestors(ctx, a)
+// yields, or a itself when it has no parent. It ports adk-python's
+// BaseAgent.root_agent (agents/base_agent.py), with the parent read by
+// parentOf.
+func rootOf(ctx context.Context, a agent.Agent) agent.Agent {
+	root := a
+	for parent := range ancestors(ctx, a) {
+		root = parent
+	}
+	return root
 }
 
 // ownModel returns the model configured on a when a is an LLM agent, or a

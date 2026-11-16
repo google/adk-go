@@ -150,6 +150,61 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 	}
 }
 
+// Fails when exitLoop stops setting Actions().Escalate or
+// Actions().SkipSummarization: the loop agent reads Escalate to stop, and the
+// flow reads SkipSummarization to end the agent's turn on the response.
+func TestExitLoopTool_ResponseEventActions(t *testing.T) {
+	type actions struct {
+		Escalate          bool
+		SkipSummarization bool
+	}
+	// The text replies are there so that a tool that drops an action keeps the
+	// run going until the assertion instead of exhausting the model.
+	mockModel := &testutil.MockModel{Responses: []*genai.Content{
+		genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
+		genai.NewContentFromText("not reached", "model"),
+		genai.NewContentFromText("not reached", "model"),
+		genai.NewContentFromText("not reached", "model"),
+		genai.NewContentFromText("not reached", "model"),
+	}}
+	exitLoopTool, err := exitlooptool.New()
+	if err != nil {
+		t.Fatalf("exitlooptool.New() error = %v", err)
+	}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "worker",
+		Model: mockModel,
+		Tools: []tool.Tool{exitLoopTool},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	looper, err := loopagent.New(loopagent.Config{
+		AgentConfig:   agent.Config{Name: "looper", SubAgents: []agent.Agent{a}},
+		MaxIterations: 3,
+	})
+	if err != nil {
+		t.Fatalf("loopagent.New() error = %v", err)
+	}
+	runner := testutil.NewTestAgentRunner(t, looper)
+
+	var got []actions
+	for ev, err := range runner.Run(t, "id", "message") {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if ev.Content == nil || len(ev.Content.Parts) == 0 || ev.Content.Parts[0].FunctionResponse == nil {
+			continue
+		}
+		got = append(got, actions{Escalate: ev.Actions.Escalate, SkipSummarization: ev.Actions.SkipSummarization})
+	}
+
+	want := []actions{{Escalate: true, SkipSummarization: true}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("actions of the function-response events mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // exit_loop returns no result of its own, so after-tool callbacks see nil. The
 // model is still sent {"result": null}.
 func TestExitLoopToolAfterToolCallbackSeesNoResult(t *testing.T) {
