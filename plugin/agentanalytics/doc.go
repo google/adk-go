@@ -104,7 +104,26 @@
 //     task-mode agent can move to the end of its parent or run, or be omitted
 //     when another open or ended activation of the agent holds a rejected
 //     finish_task call, making ownership ambiguous, and an earlier plugin also
-//     hides the retry's callbacks.
+//     hides the retry's callbacks. Likewise, when plugins registered before
+//     this plugin hide or replace earlier callbacks or events while
+//     finish_task call IDs are reused across turns, merged finish_task cleanup
+//     is conservative: if an earlier plugin replaces an earlier turn's failed
+//     finish_task response event and a later turn merges a cached tool with a
+//     same-ID failure and a recovered superseded finish_task, the ambiguous
+//     sibling failure is not attributed to the newer batch, so if the
+//     subsequent completing turn's tool callbacks are also hidden (for
+//     example, answered by an earlier cache plugin), the kept rejection
+//     suppresses [EventAgentCompleted] for the worker and its interrupted
+//     delegating parent activation; conversely, if an entire earlier turn
+//     (model response and tool callbacks) was hidden from this plugin and its
+//     delayed merged response arrives with an unrecognized StateDelta after a
+//     newer turn's rejected finish_task reusing the same call IDs, the older
+//     sibling failure can be attributed to the newer turn's slot and consume
+//     the newer rejection, emitting a false [EventAgentCompleted]. If more
+//     than 64 (maxTaskToolDeltas) unattributed finish_task failures or
+//     candidate slots overflow for a call ID within an invocation,
+//     attribution-based rejection cleanup is conservatively disabled for that
+//     call ID for the rest of that invocation.
 //
 // # Behavioral Differences from adk-python
 //
