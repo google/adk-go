@@ -313,9 +313,10 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 
 	// The runner drops Output from events flagged MessageAsOutput, which
 	// would discard a non-null parsed value, so that case skips the flag. For a
-	// null reply Output holds a nil map, and stored events do not round-trip
-	// it. The flag keeps the reply text as the node output once the event is
-	// stored.
+	// null reply Output holds a nil map. The database and Vertex AI session
+	// services write it as JSON null and read back no output, so the flag
+	// keeps the reply text as the node output once the event is stored. The
+	// in-memory service keeps the nil map as it is.
 	if parsed != nil {
 		return nil
 	}
