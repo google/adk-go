@@ -122,7 +122,7 @@ var ErrClientUnavailable = errors.New("gcp: default credentials client unavailab
 var ErrNoActingUser = errors.New("gcp: no acting user")
 
 // defaultInitTimeout bounds how long a caller waits for the default client. The
-// build itself cannot be bounded by a context — FindDefaultCredentials reads the
+// build itself cannot be bounded by a context — credential discovery reads the
 // credentials file with os.ReadFile and probes with the context-free
 // metadata.OnGCE(), neither of which observes cancellation — so the bound lives
 // on the waiting side.

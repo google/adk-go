@@ -20,6 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"cloud.google.com/go/auth/credentials"
+	"cloud.google.com/go/auth/oauth2adapt"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/idtoken"
@@ -151,23 +153,26 @@ func TokenSourceProvider(ts oauth2.TokenSource) CredentialProvider {
 // scopeCloudPlatform is the default ADC scope, matching adk-python and gcloud.
 const scopeCloudPlatform = "https://www.googleapis.com/auth/cloud-platform"
 
-func adcTokenSource(ctx context.Context, scopes []string) (oauth2.TokenSource, error) {
+// adcTokenSource discovers Application Default Credentials. Discovery reads the
+// environment and takes no context, and the returned source mints tokens on
+// its own context, so nothing here is bound to the caller's.
+func adcTokenSource(scopes []string) (oauth2.TokenSource, error) {
 	if len(scopes) == 0 {
 		scopes = []string{scopeCloudPlatform}
 	}
-	creds, err := google.FindDefaultCredentials(ctx, scopes...)
+	creds, err := credentials.DetectDefault(&credentials.DetectOptions{Scopes: scopes})
 	if err != nil {
 		return nil, fmt.Errorf("auth: find default credentials: %w", err)
 	}
-	return creds.TokenSource, nil
+	return oauth2adapt.TokenSourceFromTokenProvider(creds), nil
 }
 
 // ADC returns a provider backed by Google Application Default Credentials.
 // Credentials are discovered lazily on first use and reused thereafter; with no
 // scopes the cloud-platform scope is used.
 func ADC(scopes ...string) CredentialProvider {
-	return lazyTokenSource(func(ctx context.Context) (oauth2.TokenSource, error) {
-		return adcTokenSource(ctx, scopes)
+	return lazyTokenSource(func(context.Context) (oauth2.TokenSource, error) {
+		return adcTokenSource(scopes)
 	})
 }
 
@@ -219,7 +224,7 @@ func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 			}
 			return creds.TokenSource, nil
 		}
-		return adcTokenSource(ctx, cfg.Scopes)
+		return adcTokenSource(cfg.Scopes)
 	})
 }
 

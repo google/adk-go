@@ -16,7 +16,11 @@ package gcp
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -709,10 +713,46 @@ func TestNewClientOutlivesConstructionCtx(t *testing.T) {
 	wantBearer(t, got.Credential, "tok")
 }
 
+// TestNewClientForwardsQuotaProject: when the ADC file names a quota project
+// (gcloud writes one on `auth application-default set-quota-project`), the
+// default client sends it as X-Goog-User-Project, as the Google Cloud client
+// libraries do. A hand-written bearer header drops it.
+func TestNewClientForwardsQuotaProject(t *testing.T) {
+	fakeADCWithQuotaProject(t, "quota-p")
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Goog-User-Project")
+		_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
+	}))
+	defer srv.Close()
+
+	c, err := NewClient(t.Context(), &Config{AgentIdentityEndpoint: srv.URL, ConnectorEndpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	if _, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"}); err != nil {
+		t.Fatalf("RetrieveCredential() error = %v", err)
+	}
+	if got != "quota-p" {
+		t.Errorf("X-Goog-User-Project = %q, want the ADC quota project %q", got, "quota-p")
+	}
+}
+
 // fakeADC points Application Default Credentials at a local token server so the
 // ADC branch of NewClient runs offline. The token expires immediately, so every
 // call mints a fresh one and the token source's own context stays observable.
 func fakeADC(t *testing.T) {
+	t.Helper()
+	fakeADCWithQuotaProject(t, "")
+}
+
+// fakeADCWithQuotaProject is fakeADC with a quota_project_id in the credentials
+// file when quotaProject is non-empty.
+//
+// The file is a service-account key rather than an authorized_user credential
+// because credential discovery honors a service-account key's token_uri but
+// sends a user credential's token requests to Google's endpoint regardless.
+func fakeADCWithQuotaProject(t *testing.T, quotaProject string) {
 	t.Helper()
 	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -720,8 +760,32 @@ func fakeADC(t *testing.T) {
 	}))
 	t.Cleanup(tokenSrv.Close)
 
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := map[string]string{
+		"type":           "service_account",
+		"project_id":     "p",
+		"private_key_id": "key-id",
+		"private_key":    string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+		"client_email":   "sa@p.iam.gserviceaccount.com",
+		"client_id":      "1",
+		"token_uri":      tokenSrv.URL,
+	}
+	if quotaProject != "" {
+		file["quota_project_id"] = quotaProject
+	}
+	b, err := json.Marshal(file)
+	if err != nil {
+		t.Fatal(err)
+	}
 	adc := filepath.Join(t.TempDir(), "adc.json")
-	if err := os.WriteFile(adc, []byte(`{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r","token_uri":"`+tokenSrv.URL+`"}`), 0o600); err != nil {
+	if err := os.WriteFile(adc, b, 0o600); err != nil {
 		t.Fatalf("write fake ADC: %v", err)
 	}
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adc)

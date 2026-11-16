@@ -16,6 +16,11 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
@@ -233,21 +238,21 @@ func TestLazyTokenSourceKeepsInitErrorTextPastTimeout(t *testing.T) {
 	}
 }
 
-// TestProvidersMintTokensAfterInit: ADC and ServiceAccount mint through an
-// authorized_user source, which requests tokens on its construction context.
+// TestProvidersMintTokensAfterInit: ADC and ServiceAccount mint through a
+// service-account source, and keep minting once the first token has expired,
+// after the construction context has been released.
 func TestProvidersMintTokensAfterInit(t *testing.T) {
+	const tokenTTL = time.Second
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := hits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		// Inside oauth2's expiry margin, so every Apply refreshes.
-		_, _ = fmt.Fprintf(w, `{"access_token":"tok%d","token_type":"Bearer","expires_in":1}`, n)
+		_, _ = fmt.Fprintf(w, `{"access_token":"tok%d","token_type":"Bearer","expires_in":%d}`, n, int(tokenTTL.Seconds()))
 	}))
 	defer srv.Close()
 
 	credsFile := filepath.Join(t.TempDir(), "adc.json")
-	creds := fmt.Sprintf(`{"type":"authorized_user","client_id":"id","client_secret":"secret","refresh_token":"refresh","token_uri":%q}`, srv.URL)
-	if err := os.WriteFile(credsFile, []byte(creds), 0o600); err != nil {
+	if err := os.WriteFile(credsFile, serviceAccountKey(t, srv.URL), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
@@ -266,7 +271,14 @@ func TestProvidersMintTokensAfterInit(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Credential() error = %v", err)
 			}
+			var minted []string
 			for i := range 2 {
+				if i > 0 {
+					// Past the first token's expiry, so this Apply cannot be served
+					// from cache. Waiting it out rather than issuing an expired token:
+					// the source treats a token with no usable expiry as never expiring.
+					time.Sleep(tokenTTL + 100*time.Millisecond)
+				}
 				h := http.Header{}
 				if err := cred.Apply(h); err != nil {
 					t.Fatalf("Apply() #%d error = %v", i+1, err)
@@ -274,10 +286,43 @@ func TestProvidersMintTokensAfterInit(t *testing.T) {
 				if !strings.HasPrefix(h.Get("Authorization"), "Bearer tok") {
 					t.Errorf("Apply() #%d Authorization = %q, want a minted bearer token", i+1, h.Get("Authorization"))
 				}
+				minted = append(minted, h.Get("Authorization"))
+			}
+			if minted[0] == minted[1] {
+				t.Errorf("Apply() reused %q after it expired, want a fresh token", minted[0])
 			}
 			if got := hits.Load() - before; got != 2 {
 				t.Errorf("token endpoint hit %d times, want 2 (one mint per Apply)", got)
 			}
 		})
 	}
+}
+
+// serviceAccountKey is a service-account key file whose token requests go to
+// tokenURI. A service-account key rather than an authorized_user credential,
+// because credential discovery honors a service-account key's token_uri but
+// sends a user credential's token requests to Google's endpoint regardless.
+func serviceAccountKey(t *testing.T, tokenURI string) []byte {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(map[string]string{
+		"type":           "service_account",
+		"project_id":     "p",
+		"private_key_id": "key-id",
+		"private_key":    string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+		"client_email":   "sa@p.iam.gserviceaccount.com",
+		"client_id":      "1",
+		"token_uri":      tokenURI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
