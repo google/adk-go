@@ -1934,8 +1934,16 @@ func (f *Flow) handleFunctionCallsInOrder(ctx agent.InvocationContext, toolsDict
 	// Tool calls run via the context's task runner: concurrent goroutines by
 	// default, or a caller-installed runner (platform.WithTaskRunner).
 	tasks := make([]func(context.Context), len(fnCalls))
+	// Orders the calls' use of session state by call index (see
+	// agent.Context.State). A batch of one gets an order too, so that its call
+	// does not keep the place of an enclosing batch.
+	order := adkcontext.NewCallOrder(len(fnCalls))
 	for i, fnCall := range fnCalls {
 		tasks[i] = func(taskCtx context.Context) {
+			// Deferred so that every return path, including an early return
+			// without a response and a panic, releases the later calls.
+			defer order.Finish(i)
+			taskCtx = adkcontext.WithCallPlace(taskCtx, order, i)
 			name := fnCall.Name
 			if name == "" {
 				name = unnamedTool
@@ -2108,7 +2116,7 @@ func (f *Flow) handleFunctionCallsInOrder(ctx agent.InvocationContext, toolsDict
 		}
 	}
 	platform.RunTasks(ctx, tasks)
-	mergedEvent, err = mergeParallelFunctionResponseEvents(fnResponseEvents)
+	mergedEvent, err = mergeParallelResponses(ctx, fnResponseEvents)
 	if err != nil {
 		return mergedEvent, err
 	}
@@ -2305,6 +2313,15 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	// Concatenated without a duplicate check, as in adk-python
 	// (flows/llm_flows/tools/_batch_executor.py).
 	base.RenderUIWidgets = append(base.RenderUIWidgets, other.RenderUIWidgets...)
+	if other.RewindBeforeInvocationID != "" {
+		base.RewindBeforeInvocationID = other.RewindBeforeInvocationID
+	}
+	if other.EndOfAgent != nil {
+		base.EndOfAgent = other.EndOfAgent
+	}
+	if other.AgentState != nil {
+		base.AgentState = deepMergeMap(base.AgentState, other.AgentState)
+	}
 	return base
 }
 

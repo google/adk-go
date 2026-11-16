@@ -30,6 +30,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
@@ -1035,6 +1036,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		for _, opt := range opts {
 			opt(&options)
 		}
+		ctx = adkcontext.WithoutCallPlace(ctx)
 
 		// The inbound message is always a user turn, whatever Role the caller
 		// set. Normalize it once here so that findAgentToRun, the invocation

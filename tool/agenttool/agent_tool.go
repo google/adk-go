@@ -173,7 +173,10 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 
 	stateMap := make(map[string]any)
 
-	for k, v := range toolCtx.State().All() {
+	// ReadonlyState, so that several agent tools called in one model turn do
+	// not wait for each other's calls to return before they start (see
+	// agent.Context.State).
+	for k, v := range toolCtx.ReadonlyState().All() {
 		// Filter out adk internal states.
 		if !strings.HasPrefix(k, "_adk") {
 			stateMap[k] = v

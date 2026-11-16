@@ -165,6 +165,33 @@ type Context interface {
 	InvocationContext
 
 	// Callback context
+
+	// State returns this context's view of the session state: a read sees the
+	// writes made through this context first, then the session's state; a write
+	// goes to this context's state delta and to the session's state.
+	//
+	// When a model turn holds several function calls, ADK runs the calls
+	// concurrently and orders their use of State by position in the model's
+	// response. The first time a call uses State (Get, Set or All), ADK waits
+	// until every earlier call has returned, or until the call's context is
+	// done. In that case Get and Set return an error that wraps the context's
+	// error, and All yields nothing. A call therefore sees every write of the
+	// calls before it, a read-modify-write in two calls (read n, write n+1)
+	// adds 2, and two calls' updates of one key apply in call order, even when
+	// a call blocks between its read and its write. A call that never uses
+	// State is never delayed, and ReadonlyState never waits: a call that only
+	// reads should use it, so that it does not wait for the calls before it.
+	//
+	// A call must not wait for something that a later call does with State:
+	// the later call is waiting for it, and both wait until the context is
+	// done. The guarantee covers this method only. ReadonlyState, every run
+	// that a tool starts with a runner (such as an agent tool's sub-agent),
+	// and use of State after the call has returned (a streaming tool's
+	// goroutine in live mode) are not ordered.
+	//
+	// The returned State, like the call's context, belongs to one call at a
+	// time: Set writes the call's state delta, a plain map, so a call must not
+	// use it from several goroutines at once.
 	State() session.State
 
 	// Tool context section
