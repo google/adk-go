@@ -138,13 +138,13 @@ func (n *ToolNode) ValidateOutput(out any) (any, error) {
 		return out, nil
 	}
 	// Try standard validation first.
-	if validated, err := defaultValidateOutput(out, schema); err == nil {
+	if validated, err := strictValidateOutput(out, schema); err == nil {
 		return validated, nil
 	}
 	// Fallback: unwrap {"result": X} (FunctionTool convention).
 	if m, ok := out.(map[string]any); ok {
 		if val, ok := m["result"]; ok {
-			if validated, err := defaultValidateOutput(val, schema); err == nil {
+			if validated, err := strictValidateOutput(val, schema); err == nil {
 				return validated, nil
 			}
 		}
@@ -152,7 +152,7 @@ func (n *ToolNode) ValidateOutput(out any) (any, error) {
 	// Both attempts failed: return the error from validating the
 	// original output, not the one from the {"result": X} fallback,
 	// so the caller sees the actual schema mismatch.
-	return defaultValidateOutput(out, schema)
+	return strictValidateOutput(out, schema)
 }
 
 // Run implements the Node interface and executes the tool.

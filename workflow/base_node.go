@@ -17,6 +17,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -88,20 +89,67 @@ func (b BaseNode) ValidateInput(in any) (any, error) {
 	return defaultValidateInput(in, b.inputSchema)
 }
 
-// ValidateOutput validates the output against the node's output schema.
+// ValidateOutput validates out against the node's output schema and
+// returns the value the node's successors receive.
+//
+// A nil schema or a nil out returns out unchanged, as do the framework
+// control values *session.Event and *session.RequestInput. A
+// *genai.Content or a genai.Content is unwrapped: an empty schema ({} or
+// true) keeps the Content, as a *genai.Content; a string schema validates
+// its non-thought text; any other schema validates the text parsed as
+// JSON, or the text itself when it is not JSON. When that text fails and
+// the schema is one generated from the genai.Content type (its root
+// declares the property "parts"), the Content is kept if it satisfies
+// the schema. Every other value is validated in its JSON form after the
+// schema's defaults are filled in for absent properties, at any depth; a
+// null in a property the schema lists as optional is then dropped. A string that fails the schema is accepted
+// when it holds a JSON number or boolean that passes, so "42" satisfies an
+// integer schema as float64(42); a string holding a JSON object, array or
+// null is not parsed.
+//
+// The result is out itself when out is already made of JSON values
+// (map[string]any, []any, strings, booleans, numbers) and validation
+// changed nothing. Otherwise it is the JSON form: a struct, a pointer or a
+// typed map or slice validated against a schema arrives as map[string]any
+// or []any. out is never modified. On failure ValidateOutput returns nil
+// and the schema error.
 func (b BaseNode) ValidateOutput(out any) (any, error) {
-	return defaultValidateOutput(out, b.outputSchema)
+	return strictValidateOutput(out, b.outputSchema)
 }
 
-// defaultValidateOutput backs BaseNode.ValidateOutput. Framework
-// control values (*session.Event, *session.RequestInput) bypass the
-// schema — they ride through Event.Output but are not user payloads.
-// When direct validation fails on model text (a string, or a
-// *genai.Content built by synthesizeAgentOutput), projectTextOntoSchema
-// retries via the schema; on total failure the original error wins so
-// downstream parse details don't mask the real mismatch. Mirrors
-// adk-python _validate_output_data.
+// stringOutput selects how validateOutput treats a string output that
+// fails the schema.
+type stringOutput int
+
+const (
+	// scalarStrings accepts the string's JSON parse only when it is a
+	// number or a boolean.
+	scalarStrings stringOutput = iota
+	// modelTextStrings accepts any JSON document the string holds, for
+	// model text that answers a structured output request.
+	modelTextStrings
+)
+
+// strictValidateOutput is the output validation every node kind gets by
+// default; see BaseNode.ValidateOutput.
+func strictValidateOutput(out any, schema *jsonschema.Resolved) (any, error) {
+	return validateOutput(out, schema, scalarStrings)
+}
+
+// defaultValidateOutput is the output validation for model text, used by
+// AgentNode.ValidateOutput: as strictValidateOutput, except that a string
+// that fails the schema is parsed as any JSON document and validated
+// again. Mirrors adk-python _validate_output_data.
 func defaultValidateOutput(out any, schema *jsonschema.Resolved) (any, error) {
+	return validateOutput(out, schema, modelTextStrings)
+}
+
+// validateOutput implements strictValidateOutput and
+// defaultValidateOutput; mode is the only difference between them. When
+// a string output fails the schema and its parse fails too, the error of
+// the string itself is returned, so a parse detail does not mask the real
+// mismatch.
+func validateOutput(out any, schema *jsonschema.Resolved, mode stringOutput) (any, error) {
 	if schema == nil || out == nil {
 		return out, nil
 	}
@@ -109,16 +157,107 @@ func defaultValidateOutput(out any, schema *jsonschema.Resolved) (any, error) {
 	case *session.Event, *session.RequestInput:
 		return out, nil
 	}
-	err := schema.Validate(out)
-	if err == nil {
-		return out, nil
+	if c, ok := asContent(out); ok {
+		return validateContentOutput(c, schema)
 	}
-	if text, ok := modelText(out); ok {
-		if v, ok := projectTextOntoSchema(text, schema); ok {
-			return v, nil
+	form, unchanged, err := conform(out, schema)
+	if err == nil {
+		if unchanged {
+			return out, nil
+		}
+		return form, nil
+	}
+	if text, ok := out.(string); ok {
+		if parsed, ok := parseString(text, mode); ok {
+			if form, perr := conformed(parsed, schema); perr == nil {
+				return form, nil
+			}
 		}
 	}
 	return nil, err
+}
+
+// validateContentOutput validates the payload of c, as adk-python's
+// _unwrap_content_payload and validate_node_data do
+// (utils/_schema_utils.py): a schema that accepts any value keeps c; a
+// string schema validates c's non-thought text; any other schema validates
+// the text parsed as JSON, or, when the text is not JSON (empty text
+// included), the text itself. When that payload fails, the schema
+// describes genai.Content (see schemaDescribesContent) and c satisfies it
+// in its JSON form, c is kept: adk-python keeps a Content only for an
+// annotation that accepts Content (annotation_accepts_content). It
+// returns the conformed payload or c, or nil and the payload's error. A
+// nil c returns nil.
+func validateContentOutput(c *genai.Content, schema *jsonschema.Resolved) (any, error) {
+	if c == nil {
+		return nil, nil
+	}
+	if schemaAcceptsAnyValue(schema) {
+		return c, nil
+	}
+	payload, err := conformed(contentPayload(c, schema), schema)
+	if err == nil {
+		return payload, nil
+	}
+	if !schemaDescribesContent(schema) {
+		return nil, err
+	}
+	if form, _, ferr := jsonForm(c); ferr == nil && schema.Validate(form) == nil {
+		return c, nil
+	}
+	return nil, err
+}
+
+// schemaDescribesContent reports whether schema's root declares the parts
+// property of genai.Content, as the schema generated from the
+// genai.Content type does. It keeps a Content whose JSON form satisfies a
+// schema for other data by accident, such as an open object schema, from
+// passing as that data.
+func schemaDescribesContent(schema *jsonschema.Resolved) bool {
+	root := schema.Schema()
+	return root != nil && root.Properties["parts"] != nil
+}
+
+// contentPayload returns the value of c that schema validates: its
+// non-thought text for a string schema, otherwise the text parsed as JSON,
+// or the text itself when it is not JSON.
+func contentPayload(c *genai.Content, schema *jsonschema.Resolved) any {
+	text, _ := modelText(c)
+	if rootSchemaIsString(schema) {
+		return text
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		return text
+	}
+	return parsed
+}
+
+// parseString returns the JSON value s holds when mode accepts it:
+// modelTextStrings accepts any JSON document, scalarStrings only a number
+// or a boolean.
+func parseString(s string, mode stringOutput) (any, bool) {
+	var parsed any
+	if err := json.Unmarshal([]byte(s), &parsed); err != nil {
+		return nil, false
+	}
+	if mode == modelTextStrings {
+		return parsed, true
+	}
+	switch parsed.(type) {
+	case float64, bool:
+		return parsed, true
+	}
+	return nil, false
+}
+
+// schemaAcceptsAnyValue reports whether schema's root is the empty schema
+// ({} or true), which every value satisfies. jsonschema-go refuses to
+// validate a Go struct even against the empty schema, so a caller that
+// must keep a struct such as *genai.Content checks this first.
+func schemaAcceptsAnyValue(schema *jsonschema.Resolved) bool {
+	root := schema.Schema()
+	return root != nil && reflect.ValueOf(*root).IsZero()
 }
 
 // modelText returns the model text carried by an output value: the
@@ -142,31 +281,6 @@ func modelText(out any) (string, bool) {
 	}
 }
 
-// projectTextOntoSchema projects model text onto schema: return it
-// directly for a string schema (after re-validating so per-string
-// constraints like minLength or pattern still apply), otherwise
-// JSON-parse and re-validate. ok is false when no valid value can be
-// produced, leaving error reporting to the caller.
-func projectTextOntoSchema(s string, schema *jsonschema.Resolved) (any, bool) {
-	if rootSchemaIsString(schema) {
-		if err := schema.Validate(s); err != nil {
-			return nil, false
-		}
-		return s, true
-	}
-	if strings.TrimSpace(s) == "" {
-		return nil, false
-	}
-	var parsed any
-	if err := json.Unmarshal([]byte(s), &parsed); err != nil {
-		return nil, false
-	}
-	if err := schema.Validate(parsed); err != nil {
-		return nil, false
-	}
-	return parsed, true
-}
-
 // rootSchemaIsString reports whether schema's root permits the "string"
 // type, via either the single Type field or the Types list. The two are
 // mutually exclusive in jsonschema.Schema, so checking both covers a root
@@ -187,10 +301,17 @@ func rootSchemaIsString(schema *jsonschema.Resolved) bool {
 func validateAndStampOutput(n Node, out any, ev *session.Event) (any, error) {
 	validated, err := n.ValidateOutput(out)
 	if err != nil {
-		return nil, fmt.Errorf("%w: output validation failed for node %q: %w", ErrNodeFailed, n.Name(), err)
+		return nil, outputValidationError(n.Name(), err)
 	}
 	if ev.Output != nil {
 		ev.Output = validated
 	}
 	return validated, nil
+}
+
+// outputValidationError reports that the output of the node or workflow
+// called name failed its schema with err. It wraps both ErrNodeFailed and
+// err.
+func outputValidationError(name string, err error) error {
+	return fmt.Errorf("%w: output validation failed for node %q: %w", ErrNodeFailed, name, err)
 }

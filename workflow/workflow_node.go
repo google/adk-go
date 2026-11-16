@@ -19,6 +19,8 @@ import (
 	"iter"
 	"strings"
 
+	"github.com/google/jsonschema-go/jsonschema"
+
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/session"
 )
@@ -40,6 +42,29 @@ func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 		BaseNode:    NewBaseNode(name, "", NodeConfig{}),
 		subWorkflow: wf,
 	}, nil
+}
+
+// NewWorkflowNodeWithSchemas is NewWorkflowNode with an input and an output schema on the node.
+//
+// It takes the arguments and returns the errors of NewWorkflowNode. Either
+// schema may be nil, which means no validation on that side; both must
+// already be resolved. The returned node's InputSchema and OutputSchema
+// return them.
+//
+// The enclosing workflow validates the node like any other node. Its
+// input is validated before the nested workflow starts, so a failure
+// wraps [ErrInputValidation] and no inner node runs; as a successor of
+// [Start] the node validates the user message as [WithInputSchema]
+// describes. Its single terminal output is validated, with defaults
+// filled, before the next node receives it, and a failure wraps
+// [ErrNodeFailed].
+func NewWorkflowNodeWithSchemas(name string, edges []Edge, inputSchema, outputSchema *jsonschema.Resolved) (*WorkflowNode, error) {
+	n, err := NewWorkflowNode(name, edges)
+	if err != nil {
+		return nil, err
+	}
+	n.BaseNode = NewBaseNodeWithSchemas(name, "", NodeConfig{}, inputSchema, outputSchema)
+	return n, nil
 }
 
 // Run executes the sub-workflow with the given input.

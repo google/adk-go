@@ -228,6 +228,19 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 	}
 }
 
+// ValidateOutput validates out against the node's output schema as
+// [BaseNode.ValidateOutput] does, except that a string output that fails
+// the schema is parsed as any JSON document and validated again: an
+// agent's output is model text, and a model asked for structured output
+// answers with JSON text. So `{"answer":"sunny"}` satisfies an object
+// schema here and arrives as map[string]any.
+//
+// The value receiver keeps ValidateOutput in the method set of AgentNode
+// values, where the embedded BaseNode method put it.
+func (n AgentNode) ValidateOutput(out any) (any, error) {
+	return defaultValidateOutput(out, n.OutputSchema())
+}
+
 // synthesizeAgentOutput sets Event.Output from concatenated model
 // text on final model responses so RunNode returns the agent's
 // reply instead of the zero value. Empty model text yields an empty

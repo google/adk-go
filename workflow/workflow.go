@@ -14,6 +14,22 @@
 
 // Package workflow hosts workflow definitions and primitives for building
 // multi-agent applications.
+//
+// # Input and output schemas
+//
+// A node validates what it receives and what it emits against the schemas
+// its InputSchema and OutputSchema return. A workflow run as the root takes
+// its own schemas through [WithInputSchema] and [WithOutputSchema]: the input
+// schema validates the user message before any node runs, and the output
+// schema validates the single terminal output when the run finishes. A
+// workflow nested as a node carries its schemas on the node, see
+// [NewWorkflowNodeWithSchemas]. Validation fills schema defaults at any depth
+// reached through properties, patternProperties, additionalProperties,
+// prefixItems, items, allOf and local $ref (not through anyOf or oneOf), and
+// drops optional properties whose value is null. Keys a schema does not
+// declare are kept when the schema leaves additionalProperties open and
+// rejected under additionalProperties: false. A Go struct validated against a
+// schema arrives downstream as its JSON form, a map[string]any.
 package workflow
 
 import (
@@ -170,6 +186,12 @@ type Workflow struct {
 	// stateSchema holds the state schema for the workflow.
 	stateSchema *jsonschema.Resolved
 
+	// inputSchema validates the input of every RunNode call and the seed
+	// ReconstructRunState rebuilds. Nil means no validation. Set via
+	// WithInputSchema. The output schema lives on graph, which the
+	// scheduler's finalize reads.
+	inputSchema *jsonschema.Resolved
+
 	// isRootWrapper marks this workflow as a synthetic single-node wrapper
 	// created by Runner.runNode to drive a standalone agent.
 	isRootWrapper bool
@@ -185,6 +207,8 @@ type Option func(*workflowOptions)
 type workflowOptions struct {
 	maxConcurrency    int
 	stateSchema       *jsonschema.Resolved
+	inputSchema       *jsonschema.Resolved
+	outputSchema      *jsonschema.Resolved
 	isRootWrapper     bool
 	isNodeRootWrapper bool
 }
@@ -253,6 +277,58 @@ func WithStateSchema(s *jsonschema.Resolved) Option {
 	}
 }
 
+// WithInputSchema sets the schema the workflow's own input must satisfy.
+//
+// s must already be resolved; nil, the default, means no input
+// validation. Every [Workflow.RunNode] call, and so every [Workflow.Run],
+// validates its input before any node is scheduled. The user message that
+// Run passes is validated as [BaseNode.ValidateOutput] validates a
+// *genai.Content: the empty schema keeps the message, and so does a schema
+// generated from genai.Content when the message's text fails it and the
+// message satisfies it; each successor of [Start] then receives the
+// message as it would without s. Otherwise the message's text is parsed
+// as JSON unless s is a string schema, defaults are filled, and optional
+// properties that are null are dropped; the conformed value replaces the
+// input, so the successors of [Start] receive it whatever their
+// [NodeConfig.ContentInput] says. A nil input, and a run without user
+// content, pass unchanged.
+//
+// When validation fails the run yields no event and runs no node; it
+// yields one error that wraps [ErrInputValidation] and the schema error.
+// [Workflow.ReconstructRunState] validates the input it rebuilds from
+// history in the same way and returns the same error.
+//
+// s is shared by every run of the workflow and is never modified.
+func WithInputSchema(s *jsonschema.Resolved) Option {
+	return func(o *workflowOptions) {
+		o.inputSchema = s
+	}
+}
+
+// WithOutputSchema sets the schema the workflow's single terminal output must satisfy.
+//
+// s must already be resolved; nil, the default, means no output
+// validation. When a run or a resume ends with no node waiting and
+// exactly one terminal node produced output, that output is validated
+// against s, with defaults filled first as for a node's output. On
+// failure the run's last item is an error that wraps [ErrNodeFailed] and
+// the schema error and names the workflow:
+// `workflow: dynamic child failed: output validation failed for node "<name>": ...`.
+// The terminal node's own events have already been yielded by then.
+//
+// Nothing is validated while a node waits for input, nor when no terminal
+// node produced output. More than one terminal output fails with
+// [ErrMultipleTerminalOutputs] before the schema is consulted. The value
+// validation produces is not emitted; the terminal node's event keeps the
+// output it yielded.
+//
+// s is shared by every run of the workflow and is never modified.
+func WithOutputSchema(s *jsonschema.Resolved) Option {
+	return func(o *workflowOptions) {
+		o.outputSchema = s
+	}
+}
+
 // New creates a new Workflow engine with the given name and edges.
 //
 // The name labels this workflow's nodes on the paths Run records: Run
@@ -297,6 +373,7 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	graph := newGraph(edges)
 	graph.isRootWrapper = o.isRootWrapper
 	graph.isNodeRootWrapper = o.isNodeRootWrapper
+	graph.outputSchema = o.outputSchema
 	if err := validateWorkflow(graph, o.stateSchema); err != nil {
 		return nil, err
 	}
@@ -305,6 +382,7 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 		name:           name,
 		maxConcurrency: o.maxConcurrency,
 		stateSchema:    o.stateSchema,
+		inputSchema:    o.inputSchema,
 		isRootWrapper:  o.isRootWrapper,
 	}, nil
 }
@@ -314,6 +392,18 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 // prefix.
 func (w *Workflow) Name() string {
 	return w.name
+}
+
+// InputSchema returns the schema set by WithInputSchema, or nil.
+// The returned schema is shared and must not be modified.
+func (w *Workflow) InputSchema() *jsonschema.Resolved {
+	return w.inputSchema
+}
+
+// OutputSchema returns the schema set by WithOutputSchema, or nil.
+// The returned schema is shared and must not be modified.
+func (w *Workflow) OutputSchema() *jsonschema.Resolved {
+	return w.graph.outputSchema
 }
 
 // Run drives the workflow to completion or to a graceful pause
@@ -356,8 +446,16 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 
 // RunNode drives the workflow with the given input.
 // This is used by WorkflowNode to run nested workflows.
+//
+// With an input schema (see WithInputSchema), input is validated first;
+// on failure RunNode yields only the error and schedules nothing.
 func (w *Workflow) RunNode(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		input, err := w.validateRootInput(input)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
 		s := newScheduler(ctx, w.graph, w.maxConcurrency)
 		s.workflowName = w.name
 		// Seed: schedule START with the supplied input.
@@ -370,6 +468,19 @@ func (w *Workflow) RunNode(ctx agent.Context, input any) iter.Seq2[*session.Even
 		// All goroutines have returned; ensure no leak.
 		s.wg.Wait()
 	}
+}
+
+// validateRootInput conforms input to the workflow's input schema (see
+// WithInputSchema) and returns the conformed value. Without a schema it
+// returns input untouched, a startSeed included. A failure wraps
+// ErrInputValidation and names the workflow, as a node's input failure
+// names the node.
+func (w *Workflow) validateRootInput(input any) (any, error) {
+	validated, err := defaultValidateInput(input, w.inputSchema)
+	if err != nil {
+		return nil, fmt.Errorf("%w for node %q: %w", ErrInputValidation, w.name, err)
+	}
+	return validated, nil
 }
 
 // startSeed is the input Workflow.Run gives Start: the user message in

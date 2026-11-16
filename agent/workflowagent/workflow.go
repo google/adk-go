@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"iter"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -41,6 +42,11 @@ type Config struct {
 	BeforeAgentCallbacks []agent.BeforeAgentCallback
 	AfterAgentCallbacks  []agent.AfterAgentCallback
 	Edges                []workflow.Edge
+
+	// InputSchema, when non-nil, validates the workflow's input. See workflow.WithInputSchema.
+	InputSchema *jsonschema.Resolved
+	// OutputSchema, when non-nil, validates the workflow's terminal output. See workflow.WithOutputSchema.
+	OutputSchema *jsonschema.Resolved
 }
 
 // New creates a new Workflow agent. A single returned agent
@@ -50,6 +56,13 @@ type Config struct {
 // workflow resumes on a follow-up turn when the user submits a
 // FunctionResponse targeting the InterruptID emitted by the
 // paused node.
+//
+// cfg.InputSchema and cfg.OutputSchema are passed to the workflow as
+// [workflow.WithInputSchema] and [workflow.WithOutputSchema]: a run whose
+// input fails the input schema yields an error wrapping
+// [workflow.ErrInputValidation] before any node runs, and a run whose
+// terminal output fails the output schema ends with an error wrapping
+// [workflow.ErrNodeFailed].
 //
 // In a resumable run (runner.Config.Resumable) the agent yields one
 // end-of-agent event, authored by itself, after the workflow has finished with
@@ -71,7 +84,9 @@ type Config struct {
 // does not apply, and a resumed turn may, for example, fail, run nodes or
 // sub-agents again, or end before every branch has finished.
 func New(cfg Config) (agent.Agent, error) {
-	w, err := workflow.New(cfg.Name, cfg.Edges)
+	w, err := workflow.New(cfg.Name, cfg.Edges,
+		workflow.WithInputSchema(cfg.InputSchema),
+		workflow.WithOutputSchema(cfg.OutputSchema))
 	if err != nil {
 		return nil, err
 	}

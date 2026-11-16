@@ -14,6 +14,8 @@
 
 package workflow
 
+import "github.com/google/jsonschema-go/jsonschema"
+
 // graph is the precomputed structural view of a workflow's edges.
 // Built once at workflow construction; queried by the engine at
 // dispatch time.
@@ -25,6 +27,10 @@ type graph struct {
 	// guarantees a single edge, so every node other than Start is the
 	// node root.
 	isNodeRootWrapper bool
+	// outputSchema is set by WithOutputSchema. The scheduler's finalize
+	// validates the single terminal output of a finished run or resume
+	// against it. Nil means no validation.
+	outputSchema *jsonschema.Resolved
 }
 
 // newGraph indexes edges by source and target node so successor
