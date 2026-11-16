@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/big"
 	"slices"
 	"strings"
 	"sync"
@@ -1198,6 +1199,264 @@ func TestInMemoryService_AppendEvent_RetryDoesNotReadStoredEvent(t *testing.T) {
 	}
 }
 
+// A retry may re-deliver the caller's own event, or a shallow copy of it. Get
+// hands out the stored event and the state it applied, and a caller may write
+// into them, so the retry must not read that memory, or the two race.
+func TestInMemoryService_AppendEvent_RetryOfCallersEventDoesNotReadStoredMemory(t *testing.T) {
+	tests := []struct {
+		name  string
+		retry func(*session.Event) *session.Event
+		write func(stored *session.Event, storedCfg map[string]any, i int)
+	}{
+		{
+			name:  "same event, writer edits stored CustomMetadata",
+			retry: func(e *session.Event) *session.Event { return e },
+			write: func(stored *session.Event, _ map[string]any, i int) { stored.CustomMetadata["w"] = i },
+		},
+		{
+			name: "shallow copy, writer edits stored Content",
+			retry: func(e *session.Event) *session.Event {
+				c := *e
+				return &c
+			},
+			write: func(stored *session.Event, _ map[string]any, i int) { stored.Content.Parts[0].Text = fmt.Sprint(i) },
+		},
+		{
+			name:  "same event, writer edits a nested state value",
+			retry: func(e *session.Event) *session.Event { return e },
+			write: func(_ *session.Event, storedCfg map[string]any, i int) { storedCfg["w"] = i },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			s := session.InMemoryService()
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			event := &session.Event{
+				ID:        "event1",
+				Author:    "agent",
+				Timestamp: time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC),
+				Actions:   session.EventActions{StateDelta: map[string]any{"cfg": map[string]any{"mode": "fast"}}},
+			}
+			event.Content = genai.NewContentFromText("answer", genai.RoleModel)
+			event.CustomMetadata = map[string]any{"k": 1}
+			if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+			got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			stored := got.Session.Events().At(0)
+			cfg, err := got.Session.State().Get("cfg")
+			if err != nil {
+				t.Fatalf("State().Get(%q) error = %v", "cfg", err)
+			}
+			storedCfg, ok := cfg.(map[string]any)
+			if !ok {
+				t.Fatalf("State().Get(%q) = %T, want map[string]any", "cfg", cfg)
+			}
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for i := range 2000 {
+					tt.write(stored, storedCfg, i)
+				}
+			}()
+			for range 2000 {
+				if err := s.AppendEvent(ctx, created.Session, tt.retry(event)); err != nil {
+					t.Errorf("AppendEvent() retry error = %v", err)
+				}
+			}
+			<-done
+
+			got, err = s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if n := got.Session.Events().Len(); n != 1 {
+				t.Errorf("stored session holds %d events, want 1", n)
+			}
+		})
+	}
+}
+
+// The service stores its own copy of an appended event, so an edit the caller
+// makes to its event afterwards reaches neither the stored event nor the
+// state the event applied.
+func TestInMemoryService_AppendEvent_StoredEventIgnoresLaterCallerEdits(t *testing.T) {
+	ctx := t.Context()
+	s := session.InMemoryService()
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	cfg := map[string]any{"mode": "fast"}
+	output := map[string]any{"total": 1}
+	event := &session.Event{
+		ID:        "event1",
+		Author:    "agent",
+		Timestamp: time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC),
+		Actions:   session.EventActions{StateDelta: map[string]any{"cfg": cfg}},
+		Output:    output,
+	}
+	event.Content = genai.NewContentFromText("first", genai.RoleModel)
+	event.CustomMetadata = map[string]any{"k": "v1"}
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	event.Content.Parts[0].Text = "second"
+	event.CustomMetadata["k"] = "v2"
+	output["total"] = 2
+	cfg["mode"] = "slow"
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	stored := got.Session.Events().At(0)
+	if text := stored.Content.Parts[0].Text; text != "first" {
+		t.Errorf("stored Content text = %q, want %q", text, "first")
+	}
+	if v := stored.CustomMetadata["k"]; v != "v1" {
+		t.Errorf("stored CustomMetadata[%q] = %v, want %q", "k", v, "v1")
+	}
+	if storedOutput, ok := stored.Output.(map[string]any); !ok || storedOutput["total"] != 1 {
+		t.Errorf("stored Output = %v, want map[total:1]", stored.Output)
+	}
+	if storedCfg, ok := stored.Actions.StateDelta["cfg"].(map[string]any); !ok || storedCfg["mode"] != "fast" {
+		t.Errorf("stored StateDelta[%q] = %v, want map[mode:fast]", "cfg", stored.Actions.StateDelta["cfg"])
+	}
+	stateCfg, err := got.Session.State().Get("cfg")
+	if err != nil {
+		t.Fatalf("State().Get(%q) error = %v", "cfg", err)
+	}
+	if m, ok := stateCfg.(map[string]any); !ok || m["mode"] != "fast" {
+		t.Errorf("State().Get(%q) = %v, want map[mode:fast]", "cfg", stateCfg)
+	}
+}
+
+type stateTreeNode struct {
+	Name     string
+	Parent   *stateTreeNode
+	Children []*stateTreeNode
+}
+
+// A state value with back-references, such as children that point to their
+// parent, is stored as a copy with the same shape: each node is copied once,
+// so the copy's children point to the copy of their parent.
+func TestInMemoryService_AppendEvent_CopiesCyclicStateValueOnce(t *testing.T) {
+	ctx := t.Context()
+	s := session.InMemoryService()
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	root := &stateTreeNode{Name: "root"}
+	root.Children = []*stateTreeNode{{Name: "a", Parent: root}, {Name: "b", Parent: root}}
+	event := &session.Event{
+		ID:        "event1",
+		Author:    "agent",
+		Timestamp: time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC),
+		Actions:   session.EventActions{StateDelta: map[string]any{"tree": root}},
+	}
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	v, err := got.Session.State().Get("tree")
+	if err != nil {
+		t.Fatalf("State().Get(%q) error = %v", "tree", err)
+	}
+	stored, ok := v.(*stateTreeNode)
+	if !ok {
+		t.Fatalf("State().Get(%q) = %T, want *stateTreeNode", "tree", v)
+	}
+	if stored == root {
+		t.Fatal("stored tree is the caller's root, want a copy")
+	}
+	if len(stored.Children) != 2 {
+		t.Fatalf("stored tree has %d children, want 2", len(stored.Children))
+	}
+	for _, child := range stored.Children {
+		if child.Parent != stored {
+			t.Errorf("stored child %q has Parent %p, want the stored root %p", child.Name, child.Parent, stored)
+		}
+	}
+}
+
+var errStateSentinel = errors.New("sentinel")
+
+// A value whose type has unexported fields cannot be copied field by field
+// without breaking the type, so the service stores it as the caller's own
+// value: it stays usable and keeps its identity.
+func TestInMemoryService_AppendEvent_KeepsStateValuesWithUnexportedFields(t *testing.T) {
+	ctx := t.Context()
+	s := session.InMemoryService()
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	var builder strings.Builder
+	builder.WriteString("x")
+	number := big.NewInt(-5)
+	notes := &stateNotes{}
+	notes.B.WriteString("x")
+	event := &session.Event{
+		ID:        "event1",
+		Author:    "agent",
+		Timestamp: time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC),
+		Actions: session.EventActions{StateDelta: map[string]any{
+			"builder": &builder,
+			"number":  number,
+			"err":     errStateSentinel,
+			"notes":   notes,
+		}},
+	}
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	state := got.Session.State()
+	if v, _ := state.Get("builder"); v != &builder {
+		t.Errorf("State().Get(%q) = %p, want the caller's builder %p", "builder", v, &builder)
+	}
+	if v, _ := state.Get("number"); v != number {
+		t.Errorf("State().Get(%q) = %p, want the caller's *big.Int %p", "number", v, number)
+	}
+	v, _ := state.Get("err")
+	if err, ok := v.(error); !ok || !errors.Is(err, errStateSentinel) {
+		t.Errorf("State().Get(%q) = %v, want an error that is errStateSentinel", "err", v)
+	}
+	v, _ = state.Get("notes")
+	storedNotes, ok := v.(*stateNotes)
+	if !ok || storedNotes != notes {
+		t.Fatalf("State().Get(%q) = %p, want the caller's notes %p", "notes", v, notes)
+	}
+	storedNotes.B.WriteString("y")
+	if s := storedNotes.B.String(); s != "xy" {
+		t.Errorf("stored notes = %q, want %q", s, "xy")
+	}
+}
+
+// stateNotes has only exported fields, but holds a strings.Builder by value.
+type stateNotes struct {
+	B strings.Builder
+}
+
 func TestInMemoryService_AppendEvent_RedeliveryLeavesStateAndUpdateTime(t *testing.T) {
 	ctx := t.Context()
 	s := session.InMemoryService()
@@ -1234,14 +1493,20 @@ func TestInMemoryService_AppendEvent_RedeliveryLeavesStateAndUpdateTime(t *testi
 func TestInMemoryService_AppendEvent_IgnoresRedeliveryOfSameInstant(t *testing.T) {
 	tests := []struct {
 		name    string
+		ts      time.Time
 		convert func(time.Time) time.Time
 	}{
 		{
+			// time.Now carries a monotonic clock reading, which Round(0) drops.
 			name:    "monotonic reading dropped",
+			ts:      time.Now(),
 			convert: func(ts time.Time) time.Time { return ts.Round(0) },
 		},
 		{
+			// A UTC original encodes differently from its UTC+1 copy on every
+			// host, whatever the local time zone.
 			name:    "another location",
+			ts:      time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC),
 			convert: func(ts time.Time) time.Time { return ts.In(time.FixedZone("UTC+1", 3600)) },
 		},
 	}
@@ -1253,7 +1518,7 @@ func TestInMemoryService_AppendEvent_IgnoresRedeliveryOfSameInstant(t *testing.T
 			if err != nil {
 				t.Fatalf("Create() error = %v", err)
 			}
-			event := &session.Event{ID: "event1", Author: "user", Timestamp: time.Now()}
+			event := &session.Event{ID: "event1", Author: "user", Timestamp: tt.ts}
 			retry := *event
 			retry.Timestamp = tt.convert(event.Timestamp)
 

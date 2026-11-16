@@ -30,6 +30,7 @@ import (
 	"rsc.io/omap"
 	"rsc.io/ordered"
 
+	"google.golang.org/adk/v2/internal/deepcopy"
 	"google.golang.org/adk/v2/internal/sessionutils"
 	"google.golang.org/adk/v2/platform"
 )
@@ -243,14 +244,24 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("unexpected session type %T for session ID %s", curSession, curSession.ID())
 	}
 
-	// Trim here, before sess.appendEvent publishes its own trimmed event into
-	// the live session's event list: the map cloned below is then one no other
-	// goroutine can reach. The database backend trims twice for the same
-	// reason, once for the live session and once for what it persists.
-	trimmed := trimTempDeltaState(event)
-	// Encoded before taking s.mu, so the encoding's cost does not stall other
-	// sessions.
-	key, keyErr := redeliveryKey(trimmed)
+	// The service stores, and Get hands out, a deep copy of the event with its
+	// temp: keys removed, and it applies state from that copy. An edit the
+	// caller makes afterwards to its event, or to a value it put in the
+	// event, changes neither the stored history nor the state, and a retry
+	// that re-delivers the caller's event reads none of what Get handed out.
+	// The exception is a value whose type has unexported fields, such as a
+	// *big.Int, or holds one by value: deepcopy.Of cannot copy it, so the
+	// stored event and state share it with the caller. adk-python's main
+	// branch stores a deep copy too (_copy_event in
+	// in_memory_session_service.py, added after 2.14.1).
+	//
+	// The copy is taken before sess.appendEvent publishes event in the live
+	// session, and nothing after that call reads event, so a Session.Events
+	// reader that writes into a newly appended event cannot race with
+	// AppendEvent. The copy and its key are made before taking s.mu, so their
+	// cost does not stall other sessions.
+	stored := deepcopy.Of(trimTempDeltaState(event))
+	key, keyErr := redeliveryKey(stored)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -263,70 +274,36 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	// A caller that retries AppendEvent re-delivers the event it just stored.
 	// Appending it again would duplicate it and re-apply its state delta, so
 	// an event whose key equals that of the latest stored event with its ID
-	// returns here. Distinct events that only share an ID have different
-	// keys and are kept. Comparing only the latest one keeps each append's
+	// returns here. An event that shares an ID but whose JSON encoding
+	// differs is kept. Comparing only the latest one keeps each append's
 	// cost constant while it holds s.mu, however many stored events share an
 	// ID.
-	if prev, ok := stored_session.latestKeyByID[event.ID]; ok && keyErr == nil && prev == key {
+	if prev, ok := stored_session.latestKeyByID[stored.ID]; ok && keyErr == nil && prev == key {
 		return nil
 	}
-	trimmedDelta := maps.Clone(trimmed.Actions.StateDelta)
 
 	// update the in-memory session
-	// Keep the session locked until AppendEvent finishes all reads of event.
-	// Otherwise, concurrent Session.Events readers can mutate its action maps
-	// during those reads, potentially causing a fatal concurrent map read write runtime throw.
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	if err := sess.appendEvent(event); err != nil {
 		return fmt.Errorf("fail to set state on appendEvent: %w", err)
 	}
 
-	// Only StateDelta comes from the trim above; every other field below is
-	// read off event. The canonical record is not a mirror of the one
-	// appendEvent stored locally — it clones Compaction, ArtifactDelta,
-	// RequestedToolConfirmations and RequestedAuthConfigs where the local record
-	// aliases them.
-	eventCopy := &Event{
-		ID:             event.ID,
-		InvocationID:   event.InvocationID,
-		Timestamp:      event.Timestamp,
-		Author:         event.Author,
-		Branch:         event.Branch,
-		IsolationScope: event.IsolationScope,
-		Actions: EventActions{
-			StateDelta:                 trimmedDelta,
-			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
-			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
-			RequestedAuthConfigs:       maps.Clone(event.Actions.RequestedAuthConfigs),
-			TransferToAgent:            event.Actions.TransferToAgent,
-			Escalate:                   event.Actions.Escalate,
-			SkipSummarization:          event.Actions.SkipSummarization,
-			Compaction:                 event.Actions.Compaction.clone(),
-		},
-		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
-		Routes:             slices.Clone(event.Routes),
-		RequestedInput:     event.RequestedInput,
-		LLMResponse:        event.LLMResponse,
-		Output:             event.Output,
-		NodeInfo:           event.NodeInfo,
-	}
-
 	// update the in-memory session service
-	stored_session.events = append(stored_session.events, eventCopy)
+	stored_session.events = append(stored_session.events, stored)
 	if keyErr != nil {
 		// The event just appended is the latest with its ID, and it has no
 		// key, so nothing re-delivered matches it.
-		delete(stored_session.latestKeyByID, event.ID)
+		delete(stored_session.latestKeyByID, stored.ID)
 	} else {
 		if stored_session.latestKeyByID == nil {
 			stored_session.latestKeyByID = make(map[string]string)
 		}
-		stored_session.latestKeyByID[event.ID] = key
+		stored_session.latestKeyByID[stored.ID] = key
 	}
-	stored_session.updatedAt = event.Timestamp
-	if len(event.Actions.StateDelta) > 0 {
-		appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
+	stored_session.updatedAt = stored.Timestamp
+	if len(stored.Actions.StateDelta) > 0 {
+		appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(stored.Actions.StateDelta)
 		s.updateAppState(appDelta, curSession.AppName())
 		s.updateUserState(userDelta, curSession.AppName(), curSession.UserID())
 		maps.Copy(stored_session.state, sessionDelta)
@@ -392,10 +369,11 @@ type session struct {
 	state     map[string]any
 	updatedAt time.Time
 
-	// latestKeyByID maps each event ID in events to the [redeliveryKey] of the
-	// latest event appended with that ID. Only the service's stored copy sets
-	// it, and inMemoryService.mu guards it, not mu above. AppendEvent uses it
-	// to recognize a retried append.
+	// latestKeyByID maps an event ID to the [redeliveryKey] of the latest
+	// event appended with that ID. An ID whose latest event could not be
+	// encoded has no entry. Only the service's stored copy sets it, and
+	// inMemoryService.mu guards it, not mu above. AppendEvent uses it to
+	// recognize a retried append.
 	latestKeyByID map[string]string
 }
 
@@ -542,26 +520,24 @@ func trimTempDeltaState(event *Event) *Event {
 // memory held per event ID small, whatever the event carries.
 //
 // The key is a string that no session handle can reach. The stored *Event is
-// handed out by Get, and it shares Content, CustomMetadata, RequestedInput,
-// NodeInfo and Output with the caller, so comparing against it would read
-// memory that another goroutine may be writing, and would see in-place edits
-// made after the append.
+// handed out by Get, and a caller may write into it, so comparing against it
+// would read memory that another goroutine may be writing.
 //
-// The key compares by value, as adk-python's event equality does. UTC drops
-// the location and the monotonic clock reading, so two copies of one instant
-// get the same key. The encoding holds every field a persisting backend
-// stores; the fields it skips, such as a response schema's property order,
-// only affect presentation. An error means the event holds a value JSON
-// cannot encode, such as NaN, a channel or a func.
+// Two events get the same key when their JSON encodings match, which is
+// close to adk-python's event equality but looser: a difference the encoding
+// does not record, such as an unexported field, or a []byte against the
+// base64 string it encodes to, gives equal keys. UTC drops the location and
+// the monotonic clock reading, so two copies of one instant get the same key.
+// An error means the event holds a value JSON cannot encode, such as NaN, a
+// channel or a func.
 func redeliveryKey(event *Event) (string, error) {
 	e := *event
 	e.Timestamp = e.Timestamp.UTC()
-	b, err := json.Marshal(&e)
-	if err != nil {
+	h := sha256.New()
+	if err := json.NewEncoder(h).Encode(&e); err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(b)
-	return string(sum[:]), nil
+	return string(h.Sum(nil)), nil
 }
 
 // updateSessionState updates the session state based on the event state delta.

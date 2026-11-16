@@ -390,33 +390,6 @@ type EventCompaction struct {
 	ExcludedEvents []EventRef `json:"excludedEvents,omitempty"`
 }
 
-// clone returns a deep copy, or nil for a nil receiver.
-//
-// A stored compaction decides which events every future prompt drops, so of all
-// the fields on [EventActions] it is the one a producer must not be able to
-// edit after the append. Sharing the pointer let a caller move EndTimestamp
-// afterwards and silently change what history the agent sees, and tripped the
-// race detector on the way.
-func (c *EventCompaction) clone() *EventCompaction {
-	if c == nil {
-		return nil
-	}
-	out := *c
-	out.ExcludedEvents = slices.Clone(c.ExcludedEvents)
-	if c.CompactedContent != nil {
-		content := *c.CompactedContent
-		content.Parts = slices.Clone(c.CompactedContent.Parts)
-		for i, p := range content.Parts {
-			if p == nil {
-				continue
-			}
-			content.Parts[i] = new(*p)
-		}
-		out.CompactedContent = &content
-	}
-	return &out
-}
-
 // EventRef identifies a stored event by fields that survive a storage round
 // trip, for a record that has to refer to an event it does not contain.
 //
