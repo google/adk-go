@@ -21,44 +21,6 @@ import (
 	"google.golang.org/genai"
 )
 
-func TestSchemaToMap(t *testing.T) {
-	tests := []struct {
-		name    string
-		schema  *genai.Schema
-		wantErr bool
-		want    map[string]any
-	}{
-		{
-			name:   "nil schema",
-			schema: nil,
-			want:   nil,
-		},
-		{
-			name:   "string type",
-			schema: &genai.Schema{Type: genai.TypeString},
-			want:   map[string]any{"type": "string"}, // Marshals as "STRING" if using standard json, but we lower it
-		},
-		{
-			name:    "invalid type",
-			schema:  &genai.Schema{Example: make(chan int)},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := SchemaToMap(tc.schema)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("SchemaToMap() error = %v, wantErr %v", err, tc.wantErr)
-			} else {
-				if got["type"] != tc.want["type"] {
-					t.Fatalf("unexpected map: %+v, want %+v", got, tc.want)
-				}
-			}
-		})
-	}
-}
-
 func TestNormalizeSchema(t *testing.T) {
 	tests := []struct {
 		name    string

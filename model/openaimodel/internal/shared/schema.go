@@ -21,7 +21,6 @@ import (
 	"maps"
 	"regexp"
 	"slices"
-	"strings"
 
 	"google.golang.org/genai"
 )
@@ -160,51 +159,6 @@ func EnforceStrictOpenAISchema(val any) {
 	if itemsVal, ok := schema["items"]; ok {
 		if _, isMap := itemsVal.(map[string]any); isMap {
 			EnforceStrictOpenAISchema(itemsVal)
-		}
-	}
-}
-
-// SchemaToMap converts a genai schema to the JSON-schema map both APIs take,
-// with its type names lowercased.
-func SchemaToMap(schema *genai.Schema) (map[string]any, error) {
-	if schema == nil {
-		return nil, nil
-	}
-	bytes, err := json.Marshal(schema)
-	if err != nil {
-		return nil, fmt.Errorf("openai: marshal schema: %w", err)
-	}
-	var result map[string]any
-	if err := json.Unmarshal(bytes, &result); err != nil {
-		return nil, fmt.Errorf("openai: unmarshal schema: %w", err)
-	}
-	lowercaseSchemaTypes(result)
-	return result, nil
-}
-
-// lowercaseSchemaTypes rewrites genai's upper-case type names, at every depth
-// of a decoded schema, to the lower case JSON Schema uses.
-func lowercaseSchemaTypes(val any) {
-	switch v := val.(type) {
-	case map[string]any:
-		if t, ok := v["type"]; ok {
-			switch tVal := t.(type) {
-			case string:
-				v["type"] = strings.ToLower(tVal)
-			case []any:
-				for i, item := range tVal {
-					if str, ok := item.(string); ok {
-						tVal[i] = strings.ToLower(str)
-					}
-				}
-			}
-		}
-		for _, child := range v {
-			lowercaseSchemaTypes(child)
-		}
-	case []any:
-		for _, child := range v {
-			lowercaseSchemaTypes(child)
 		}
 	}
 }

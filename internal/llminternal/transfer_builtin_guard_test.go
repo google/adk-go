@@ -76,7 +76,7 @@ func transferEnum(t *testing.T, req *model.LLMRequest) []string {
 	if !ok {
 		t.Fatalf("req.Tools[transfer_to_agent] is %T, want *llminternal.TransferToAgentTool", raw)
 	}
-	return tt.Declaration().Parameters.Properties["agent_name"].Enum
+	return jsonEnum(t, tt.Declaration())
 }
 
 // hasTransferInstruction reports whether any system instruction of req

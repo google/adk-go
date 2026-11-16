@@ -15,6 +15,7 @@
 package llminternal_test
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -22,12 +23,14 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/exp/feature"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
@@ -126,7 +129,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 				t.Fatalf("failed to type convert tool %v, got %T", wantToolName, gotTool)
 			}
 			declaration := transferTool.Declaration()
-			gotEnums := slices.Clone(declaration.Parameters.Properties["agent_name"].Enum)
+			gotEnums := jsonEnum(t, declaration)
 			wantEnums := slices.Clone(wantAgents)
 			// Add parent to the list of agents to transfer to, if not already present.
 			if wantParent != "" && !slices.Contains(wantAgents, wantParent) {
@@ -153,7 +156,7 @@ func TestAgentTransferRequestProcessor(t *testing.T) {
 		wantToolDescription := curTool.Description()
 		functions := utils.FunctionDecls(req.Config)
 		if !slices.ContainsFunc(functions, func(f *genai.FunctionDeclaration) bool {
-			return f.Name == wantToolName && strings.Contains(f.Description, wantToolDescription) && f.ParametersJsonSchema == nil
+			return f.Name == wantToolName && strings.Contains(f.Description, wantToolDescription) && f.ParametersJsonSchema != nil && f.Parameters == nil
 		}) {
 			t.Errorf("AgentTransferRequestProcessor() did not append the function declaration, got: %v", stringify(functions))
 		}
@@ -661,6 +664,25 @@ func TestTransferToAgentToolRun(t *testing.T) {
 	})
 }
 
+// jsonEnum returns the agent_name enum of a JSON-form transfer_to_agent
+// declaration, as strings.
+func jsonEnum(t *testing.T, decl *genai.FunctionDeclaration) []string {
+	t.Helper()
+	schema, ok := decl.ParametersJsonSchema.(*jsonschema.Schema)
+	if !ok {
+		t.Fatalf("ParametersJsonSchema is %T, want *jsonschema.Schema", decl.ParametersJsonSchema)
+	}
+	var names []string
+	for _, v := range schema.Properties["agent_name"].Enum {
+		name, ok := v.(string)
+		if !ok {
+			t.Fatalf("agent_name enum value is %T, want string", v)
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
 func stringify(v any) string {
 	s, _ := json.Marshal(v)
 	return string(s)
@@ -809,4 +831,197 @@ func TestAgentTransferRequestProcessor_TemplateErrorLeavesRequestUntouched(t *te
 	if diff := cmp.Diff(&model.LLMRequest{}, req); diff != "" {
 		t.Errorf("request changed (-want +got):\n%s", diff)
 	}
+}
+
+// transferBackendModel is a model double of a Google backend. The transfer
+// processor reads only its backend.
+type transferBackendModel struct {
+	model.LLM
+	backend genai.Backend
+}
+
+func (m transferBackendModel) GetGoogleLLMVariant() genai.Backend { return m.backend }
+
+// transferDeclaration runs AgentTransferRequestProcessor for cur on a context
+// derived from parent, with llm as the flow's model. It returns the
+// transfer_to_agent declaration the request carries and the description of
+// the tool the request holds.
+func transferDeclaration(t *testing.T, parent context.Context, cur agent.Agent, llm model.LLM) (*genai.FunctionDeclaration, string) {
+	t.Helper()
+	ctx := icontext.NewInvocationContext(parent, icontext.InvocationContextParams{Agent: cur})
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.AgentTransferRequestProcessor(ctx, req, &llminternal.Flow{Model: llm}) {
+		if err != nil {
+			t.Fatalf("AgentTransferRequestProcessor failed: %v", err)
+		}
+	}
+	tt, ok := req.Tools["transfer_to_agent"].(*llminternal.TransferToAgentTool)
+	if !ok {
+		t.Fatalf("req.Tools[transfer_to_agent] is %T, want *llminternal.TransferToAgentTool", req.Tools["transfer_to_agent"])
+	}
+	decls := utils.FunctionDecls(req.Config)
+	if len(decls) != 1 {
+		t.Fatalf("request has %d function declarations, want 1", len(decls))
+	}
+	return decls[0], tt.Description()
+}
+
+// The transfer_to_agent declaration has Python's description and schema, in
+// the JSON form by default and the typed form under the legacy switch, with a
+// null response schema on Vertex AI only; the form follows each request.
+// Fails when the description loses a line or keeps adk-go's old text, when a
+// schema gains a description on agent_name or loses its root type, enum or
+// required list, when the switch or the backend is ignored or read as fixed,
+// or when both parameter fields are set.
+func TestTransferToAgentTool_DeclarationFormsAndDescription(t *testing.T) {
+	const wantDescription = "Transfer the query to another agent.\n\nUse this tool to hand off control to another agent that is more suitable to\nanswer the user's query according to the agent's description.\n\nArgs:\n  agent_name: the agent name to transfer to."
+	jsonDecl := &genai.FunctionDeclaration{
+		Name:        "transfer_to_agent",
+		Description: wantDescription,
+		ParametersJsonSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"agent_name": {Type: "string", Enum: []any{"Sub1", "Sub2"}},
+			},
+			Required: []string{"agent_name"},
+		},
+	}
+	jsonVertexDecl := &genai.FunctionDeclaration{
+		Name:        "transfer_to_agent",
+		Description: wantDescription,
+		ParametersJsonSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"agent_name": {Type: "string", Enum: []any{"Sub1", "Sub2"}},
+			},
+			Required: []string{"agent_name"},
+		},
+		ResponseJsonSchema: &jsonschema.Schema{Type: "null"},
+	}
+	typedDecl := &genai.FunctionDeclaration{
+		Name:        "transfer_to_agent",
+		Description: wantDescription,
+		Parameters: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"agent_name": {Type: genai.TypeString, Enum: []string{"Sub1", "Sub2"}},
+			},
+			Required: []string{"agent_name"},
+		},
+	}
+	typedVertexDecl := &genai.FunctionDeclaration{
+		Name:        "transfer_to_agent",
+		Description: wantDescription,
+		Parameters: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"agent_name": {Type: genai.TypeString, Enum: []string{"Sub1", "Sub2"}},
+			},
+			Required: []string{"agent_name"},
+		},
+		Response: &genai.Schema{Type: genai.TypeNULL},
+	}
+	nonGoogle := &struct{ model.LLM }{}
+	newAgent := func() agent.Agent {
+		return utils.Must(llmagent.New(llmagent.Config{
+			Name:  "Cur",
+			Model: nonGoogle,
+			SubAgents: []agent.Agent{
+				utils.Must(llmagent.New(llmagent.Config{Name: "Sub1", Model: nonGoogle})),
+				utils.Must(llmagent.New(llmagent.Config{Name: "Sub2", Model: nonGoogle})),
+			},
+		}))
+	}
+
+	tests := []struct {
+		name   string
+		parent context.Context
+		llm    model.LLM
+		want   *genai.FunctionDeclaration
+	}{
+		{
+			name:   "default, non-Google model",
+			parent: t.Context(),
+			llm:    nonGoogle,
+			want:   jsonDecl,
+		},
+		{
+			name:   "switch on, non-Google model",
+			parent: feature.WithLegacyFunctionDeclarationSchema(t.Context(), true),
+			llm:    nonGoogle,
+			want:   typedDecl,
+		},
+		{
+			name:   "switch off, Gemini API",
+			parent: feature.WithLegacyFunctionDeclarationSchema(t.Context(), false),
+			llm:    transferBackendModel{backend: genai.BackendGeminiAPI},
+			want:   jsonDecl,
+		},
+		{
+			name:   "switch on, Gemini API",
+			parent: feature.WithLegacyFunctionDeclarationSchema(t.Context(), true),
+			llm:    transferBackendModel{backend: genai.BackendGeminiAPI},
+			want:   typedDecl,
+		},
+		{
+			name:   "switch off, Vertex AI",
+			parent: feature.WithLegacyFunctionDeclarationSchema(t.Context(), false),
+			llm:    transferBackendModel{backend: genai.BackendVertexAI},
+			want:   jsonVertexDecl,
+		},
+		{
+			name:   "switch on, Vertex AI",
+			parent: feature.WithLegacyFunctionDeclarationSchema(t.Context(), true),
+			llm:    transferBackendModel{backend: genai.BackendVertexAI},
+			want:   typedVertexDecl,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, gotToolDescription := transferDeclaration(t, tc.parent, newAgent(), tc.llm)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("declaration mismatch (-want +got):\n%s", diff)
+			}
+			if gotToolDescription != wantDescription {
+				t.Errorf("tool Description() = %q, want %q", gotToolDescription, wantDescription)
+			}
+		})
+	}
+
+	t.Run("one agent, three runs", func(t *testing.T) {
+		cur := newAgent()
+		gotDefault, _ := transferDeclaration(t, t.Context(), cur, nonGoogle)
+		gotOn, _ := transferDeclaration(t, feature.WithLegacyFunctionDeclarationSchema(t.Context(), true), cur, nonGoogle)
+		gotOff, _ := transferDeclaration(t, feature.WithLegacyFunctionDeclarationSchema(t.Context(), false), cur, nonGoogle)
+		if diff := cmp.Diff(jsonDecl, gotDefault); diff != "" {
+			t.Errorf("first run, no switch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(typedDecl, gotOn); diff != "" {
+			t.Errorf("second run, switch on (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(jsonDecl, gotOff); diff != "" {
+			t.Errorf("third run, switch off (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("zero value", func(t *testing.T) {
+		zero := &llminternal.TransferToAgentTool{}
+		want := &genai.FunctionDeclaration{
+			Name:        "transfer_to_agent",
+			Description: wantDescription,
+			ParametersJsonSchema: &jsonschema.Schema{
+				Type: "object",
+				Properties: map[string]*jsonschema.Schema{
+					"agent_name": {Type: "string"},
+				},
+				Required: []string{"agent_name"},
+			},
+		}
+		if diff := cmp.Diff(want, zero.Declaration()); diff != "" {
+			t.Errorf("zero value Declaration() mismatch (-want +got):\n%s", diff)
+		}
+		if got := zero.Description(); got != wantDescription {
+			t.Errorf("zero value Description() = %q, want %q", got, wantDescription)
+		}
+	})
 }

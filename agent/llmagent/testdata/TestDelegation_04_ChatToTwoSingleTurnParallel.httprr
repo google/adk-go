@@ -67,14 +67,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-3.5-flash",
   "responseId": "VnoyavS1H8PmnsEP1uDjsQo"
 }
-936 1778
+956 1778
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 704
+Content-Length: 724
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"{\"request\":\"good morning\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Translate the given English phrase into Spanish. Reply\nwith ONLY the Spanish translation, no other words.\n\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"{\"request\":\"good morning\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Translate the given English phrase into Spanish. Reply\nwith ONLY the Spanish translation, no other words.\n\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the query to another agent.\n\nUse this tool to hand off control to another agent that is more suitable to\nanswer the user's query according to the agent's description.\n\nArgs:\n  agent_name: the agent name to transfer to.","name":"transfer_to_agent","parametersJsonSchema":{"properties":{"agent_name":{"enum":["coordinator"],"type":"string"}},"required":["agent_name"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 17 Jun 2026 10:43:37 GMT
 Server: scaffolding on HTTPServer2
@@ -119,14 +119,14 @@ X-Xss-Protection: 0
   "modelVersion": "gemini-3.5-flash",
   "responseId": "V3oyaruKPJWonsEPtsmCiA8"
 }
-934 1496
+954 1496
 POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
 Host: generativelanguage.googleapis.com
 User-Agent: Go-http-client/1.1
-Content-Length: 702
+Content-Length: 722
 Content-Type: application/json
 
-{"contents":[{"parts":[{"text":"{\"request\":\"good morning\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Translate the given English phrase into French. Reply\nwith ONLY the French translation, no other words.\n\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the question to another agent.\nThis tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.","name":"transfer_to_agent","parameters":{"properties":{"agent_name":{"description":"the agent name to transfer to","enum":["coordinator"],"type":"STRING"}},"required":["agent_name"],"type":"OBJECT"}}]}]}HTTP/2.0 200 OK
+{"contents":[{"parts":[{"text":"{\"request\":\"good morning\"}"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"Translate the given English phrase into French. Reply\nwith ONLY the French translation, no other words.\n\n"}],"role":"user"},"tools":[{"functionDeclarations":[{"description":"Transfer the query to another agent.\n\nUse this tool to hand off control to another agent that is more suitable to\nanswer the user's query according to the agent's description.\n\nArgs:\n  agent_name: the agent name to transfer to.","name":"transfer_to_agent","parametersJsonSchema":{"properties":{"agent_name":{"enum":["coordinator"],"type":"string"}},"required":["agent_name"],"type":"object"}}]}]}HTTP/2.0 200 OK
 Content-Type: application/json; charset=UTF-8
 Date: Wed, 17 Jun 2026 10:43:38 GMT
 Server: scaffolding on HTTPServer2

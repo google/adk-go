@@ -27,6 +27,7 @@ import (
 	"github.com/openai/openai-go/v3/shared/constant"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
 
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
@@ -576,7 +577,7 @@ func newJSONSchemaFormat(cfg *genai.GenerateContentConfig) (*oairesponses.Respon
 	case cfg.ResponseJsonSchema != nil:
 		schema, err = shared.NormalizeSchema(cfg.ResponseJsonSchema)
 	case cfg.ResponseSchema != nil:
-		schema, err = shared.SchemaToMap(cfg.ResponseSchema)
+		schema, err = typeutil.GenaiSchemaToJSONMap(cfg.ResponseSchema)
 	default:
 		return nil, fmt.Errorf("openai: json schema requested without schema")
 	}
