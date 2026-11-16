@@ -428,7 +428,7 @@ func isValidProjectID(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		b := s[i]
 		if !isIdentChar(b) && b != '-' && b != '.' && b != ':' {
 			return false
@@ -441,7 +441,7 @@ func isValidIdentifier(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		b := s[i]
 		if !isIdentChar(b) && b != '-' {
 			return false
@@ -454,7 +454,7 @@ func isValidDatasetID(s string) bool {
 	if s == "" || len(s) > maxBigQueryIdentifierLen {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if !isIdentChar(s[i]) {
 			return false
 		}

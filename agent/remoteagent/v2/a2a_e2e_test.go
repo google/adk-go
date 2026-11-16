@@ -300,7 +300,7 @@ func TestA2ARunnerResumesMixedFunctionResponses(t *testing.T) {
 					t.Fatalf("initial Run() reported error: %s", event.ErrorMessage)
 				}
 				if id, _ := adka2a.GetA2ATaskInfo(event); id != "" {
-					taskID = a2a.TaskID(id)
+					taskID = id
 				}
 				for _, response := range utils.FunctionResponses(event.Content) {
 					if response.Name == approvalToolName {
@@ -1370,7 +1370,6 @@ func newGeminiTestClientConfig(t *testing.T, rrfile string) (http.RoundTripper, 
 func newGeminiModel(t *testing.T, modelName string) model.LLM {
 	apiKey := "fakeKey"
 	trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))
-	recording := false
 	transport, recording := newGeminiTestClientConfig(t, trace)
 	if recording { // if we are recording httprr trace, don't use the fakeKey.
 		apiKey = ""

@@ -619,7 +619,7 @@ func hasCandidateQuotedSensitiveKey(s string, depth int) bool {
 	start := 0
 	escaped := false
 
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		b := s[i]
 		if !inQuote {
 			if b == '"' || b == '\'' {

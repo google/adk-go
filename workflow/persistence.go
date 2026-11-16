@@ -197,7 +197,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 		return s
 	}
 
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		ev := events.At(i)
 		if ev == nil {
 			continue
@@ -295,7 +295,7 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 	completed = map[string]bool{}
 	interruptOwner := map[string]string{}
 	resolved := map[string]bool{}
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		ev := events.At(i)
 		if ev == nil {
 			continue
@@ -557,7 +557,7 @@ func (w *Workflow) predecessorInput(node Node, nodeOutputs map[string]any, workf
 // that invocation's user events are considered, so the seed is the
 // current run's prompt rather than an earlier run's.
 func firstUserInput(events session.Events, invocationID string) any {
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		ev := events.At(i)
 		if ev == nil || ev.Author != "user" || ev.Content == nil {
 			continue
@@ -596,8 +596,7 @@ func firstUserInput(events session.Events, invocationID string) any {
 // LlmAgent node path, where Author == node name and no path is set.
 func eventNodeName(ev *session.Event, nodesByName map[string]Node) string {
 	if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
-		for seg := range strings.SplitSeq(ev.NodeInfo.Path, "/") {
-			name := seg
+		for name := range strings.SplitSeq(ev.NodeInfo.Path, "/") {
 			if idx := strings.IndexByte(name, '@'); idx >= 0 {
 				name = name[:idx]
 			}

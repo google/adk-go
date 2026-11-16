@@ -308,7 +308,7 @@ And another optional artifact:
 			// Setup Artifacts
 			var artifacts agent.Artifacts
 			if !tc.expectNilService {
-				svc := artifact.Service(artifact.InMemoryService())
+				svc := artifact.InMemoryService()
 				if tc.customArtifactService != nil {
 					svc = tc.customArtifactService
 				}

@@ -16,13 +16,20 @@ formatters:
 
 linters:
   enable:
+    - copyloopvar
     - forbidigo
     - goheader
-    - revive
+    - intrange
     - misspell
     - modernize
+    - revive
+    - unconvert
+    - wastedassign
+    - whitespace
 
   settings:
+    copyloopvar:
+      check-alias: true
 
     # Library code must not write diagnostics to a process-wide sink: an
     # application embedding ADK cannot silence, route or filter them. See
@@ -63,6 +70,8 @@ linters:
           arguments:
             - disableStutteringCheck
         - name: package-comments
+        - name: var-declaration
+        - name: use-slices-sort
 
     
     goheader:

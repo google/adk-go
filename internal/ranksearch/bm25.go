@@ -15,8 +15,9 @@
 package ranksearch
 
 import (
+	"cmp"
 	"math"
-	"sort"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -79,7 +80,7 @@ func rankBM25(query string, docs [][]string) []scoredDoc {
 			scored = append(scored, scoredDoc{index: i, score: score})
 		}
 	}
-	sort.SliceStable(scored, func(a, b int) bool { return scored[a].score > scored[b].score })
+	slices.SortStableFunc(scored, func(a, b scoredDoc) int { return cmp.Compare(b.score, a.score) })
 	return scored
 }
 

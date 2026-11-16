@@ -88,12 +88,11 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		}
 		subAgents = selected
 	}
-	for _, sa := range subAgents {
-		branch := fmt.Sprintf("%s.%s", curAgent.Name(), sa.Name())
+	for _, subAgent := range subAgents {
+		branch := fmt.Sprintf("%s.%s", curAgent.Name(), subAgent.Name())
 		if ctx.Branch() != "" {
 			branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
 		}
-		subAgent := sa
 		errGroup.Go(func() error {
 			// Keep the parent's isolation scope: a workflow node stamps it on
 			// every event the branches emit, and the LLM history filter matches
