@@ -124,7 +124,17 @@
 //     candidate slots overflow for a call ID within an invocation,
 //     attribution-based rejection cleanup is conservatively disabled for that
 //     call ID (or across all call IDs once more than 64 distinct call IDs have
-//     overflowed) for the rest of that invocation.
+//     overflowed) for the rest of that invocation. Likewise, when a single
+//     model batch emits multiple finish_task calls with the same call ID,
+//     concurrent tool callbacks bind to their emitted batch position by unique
+//     emitted argument-map identity first (surviving identical, >64 KiB
+//     truncated, and in-place-mutated arguments under stock ADK dispatch), then
+//     by unique complete argument digest; when a custom runner clones identical
+//     or digest-truncated argument maps (or two parts alias the same map
+//     pointer) and dispatches callbacks out of order, batch position is
+//     ambiguous and the plugin does not treat an arbitrary pending slot as
+//     proven first in the batch (so a clean survivor's [EventAgentCompleted]
+//     row is not dropped based on callback start order).
 //
 // # Behavioral Differences from adk-python
 //
@@ -244,9 +254,10 @@
 //     Go omits AGENT_COMPLETED when finish_task fails (recording
 //     [EventToolError]) and an agent or later plugin OnToolErrorCallback
 //     substitutes {"result": "Task completed."} (including when a subsequent
-//     finish_task call in the same model batch, with a distinct or duplicate
-//     call ID, succeeds cleanly, because llmagent.runTask settles on the
-//     batch's first finish_task response). ADK's runTask still ends the
+//     finish_task call in the same model batch, with a distinct ID or a
+//     duplicate ID distinguishable by emitted argument-map identity or complete
+//     argument digest, succeeds cleanly, because llmagent.runTask settles on
+//     the batch's first finish_task response). ADK's runTask still ends the
 //     task activation on that response; Go retires the activation's span then
 //     (or, when a nested workflow.NewWorkflowNode clears Event.Output, once its
 //     delegating parent re-enters BeforeAgentCallback) and marks its delegating
@@ -257,7 +268,8 @@
 //     unfinished, so the task activation still writes [EventAgentCompleted].)
 //     adk-python writes AGENT_COMPLETED for every agent run via
 //     after_agent_callback. (Pinned by
-//     TestRunner_RecoveredFinishTaskEndsWorkerSpanAndDelegator in
+//     TestRunner_RecoveredFinishTaskEndsWorkerSpanAndDelegator,
+//     TestRunner_DuplicateIDFinishTaskBatchOrder in
 //     bigquery_agent_analytics_plugin_test.go and
 //     TestDocParity_RecoveredFinishTaskOmitsWorkerAgentCompleted in doc_test.go).
 //

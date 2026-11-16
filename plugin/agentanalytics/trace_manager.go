@@ -297,22 +297,23 @@ type spanRecord struct {
 	// row and marks the parent taskDelegated.
 	endedRejected bool
 	// finishedTasks holds the finish_task calls that the activation's own
-	// tool callbacks saw complete (see noteTaskFinished), so that the function
-	// response event that reports one of them ends this activation rather than
-	// another run of the same agent on the same branch, on another node path
-	// or, if no other run on the event's node path saw a call with that ID
-	// complete, on the same one (see finishedTaskLocked and popTaskAgentSpan).
-	// Each keeps its identity (see taskFinishCall), with ran set to the start
-	// of the tool call that ran it, or, when this plugin did not see that
-	// start, to the sequence number at which the AfterToolCallback saw it
-	// complete: the callback shows that the call got no failed response that
-	// arrived after that, whichever activation the event that reports the
-	// call's completion retires (see popTaskAgentSpanWithEvent).
+	// tool callbacks saw complete (see noteTaskFinishedWithArgs), so that the
+	// function response event that reports one of them ends this activation
+	// rather than another run of the same agent on the same branch, on another
+	// node path or, if no other run on the event's node path saw a call with
+	// that ID complete, on the same one (see finishedTaskLocked and
+	// popTaskAgentSpan). Each keeps its identity (see taskFinishCall), with ran
+	// set to the start of the tool call that ran it, or, when this plugin did
+	// not see that start, to the sequence number at which the
+	// AfterToolCallback saw it complete: the callback shows that the call got
+	// no failed response that arrived after that, whichever activation the event
+	// that reports the call's completion retires (see
+	// popTaskAgentSpanWithEvent). At most maxTaskToolDeltas are kept.
 	finishedTasks []taskFinishCall
 	// rejectedTasks holds the function call IDs (or finishTaskToolName when
 	// the call ID is empty) and StateDelta provenance of failed or recovered
 	// finish_task calls whose result map still reported "Task completed."
-	// (see noteTaskRejected and popTaskAgentSpanWithEvent), so that their
+	// (see noteTaskRejectedWithArgs and popTaskAgentSpanWithEvent), so that their
 	// FunctionResponse events do not end this or a sibling task activation
 	// when no newer matching finish_task completed cleanly. Kept once the
 	// activation ended (see endedRejectingFrames). At most maxTaskToolDeltas
@@ -341,7 +342,7 @@ type spanRecord struct {
 	// its completion, or the peer's call once a tool call of the same model
 	// response ended the deferral. Kept once the activation ended (see
 	// endedRejectingFrames), and cleared by a later-batch completion of the
-	// call that the activation's own tool callbacks saw (see noteTaskFinished).
+	// call that the activation's own tool callbacks saw (see noteTaskFinishedWithArgs).
 	// At most maxTaskToolDeltas are kept.
 	deferredRejections []rejectedTaskCall
 	// rejectedTasksEvicted reports that keepLatest dropped at least one entry
@@ -362,7 +363,7 @@ type spanRecord struct {
 	// them (see taskFinishCall). At most maxTaskToolDeltas are kept.
 	pendingFinishCalls []taskFinishCall
 	// unfinishedFinishCalls holds this task-mode activation's finish_task
-	// calls that ended without completing the task (see noteTaskUnfinished)
+	// calls that ended without completing the task (see noteTaskUnfinishedWithArgs)
 	// and whose function response events have not arrived, so that such an
 	// event, which reports no completion, is not taken for another
 	// activation's (see recordUnfinishedTaskResponseLocked). At most
@@ -401,12 +402,12 @@ type spanRecord struct {
 	// model call that an earlier plugin's BeforeModelCallback answered shows
 	// only through its response event, which starts it in turn: an event with
 	// finish_task calls that AfterModelCallback did not note (see
-	// noteTaskFinishCalls), and one without such calls whose context shows the
+	// noteTaskFinishCallSpecs), and one without such calls whose context shows the
 	// activation's run (see completeResponseEvent).
 	modelCallSeq uint64
 	// unseenModelFinishCalls holds the finish_task calls and modelCallSeq of
 	// each model response of this activation that AfterModelCallback noted and
-	// whose session event has not arrived (see noteTaskFinishCalls), so that
+	// whose session event has not arrived (see noteTaskFinishCallSpecs), so that
 	// the event, which carries those calls again, records no call of its own.
 	// Within an activation, ADK delivers the session event of a model response
 	// before the response's tool calls run and before the activation's next
@@ -426,7 +427,7 @@ type spanRecord struct {
 	// call it answered (see popTaskAgentSpanWithEvent), the exact finish_task
 	// call slots it answered (unless the activation's own tool callbacks already
 	// saw a call with that ID complete; see finishedTasks and
-	// noteTaskFinished), or the call for which the activation deferred its
+	// noteTaskFinishedWithArgs), or the call for which the activation deferred its
 	// completion when a later event shows that the deferring one was the
 	// activation's (see deferredTaskFinish). A failed response that arrives
 	// later answers none of those slots (see
@@ -2897,7 +2898,7 @@ func mapPtr(m map[string]any) uintptr {
 
 // rejectedTaskCall is a finish_task call whose result reported completion
 // although the call failed or an error callback recovered it (see
-// noteTaskRejected), with the StateDelta map that its function response
+// noteTaskRejectedWithArgs), with the StateDelta map that its function response
 // event carries. deferral is, for an entry of spanRecord.deferredRejections,
 // the completion that a peer deferred when a response was taken for the
 // call's (see deferredTaskFinish): the entry is held for the peer while the
@@ -2935,14 +2936,27 @@ type unseenModelFinish struct {
 // plugin did not see, which it takes for this call, so it shows nothing about
 // a failure that arrived before it (see answerLatestFinishCallsLocked).
 type taskFinishCall struct {
-	call          string
-	epoch         uint64
-	callSeq       uint64
-	modelCallSeq  uint64
-	ran           uint64
-	argsDigest    uint64
-	argsTruncated bool
-	firstInBatch  bool
+	call                    string
+	epoch                   uint64
+	callSeq                 uint64
+	modelCallSeq            uint64
+	ran                     uint64
+	argsMap                 map[string]any
+	argsPtr                 uintptr
+	argsDigest              uint64
+	argsTruncated           bool
+	firstInBatch            bool
+	uniqueCallInBatch       bool
+	uniqueArgsPtrInBatch    bool
+	uniqueArgsDigestInBatch bool
+}
+
+// withoutArgsMap returns a copy of c without the retained emitted Args map
+// reference so settled, open, and retired slices never keep user argument maps
+// alive past pending dispatch.
+func (c taskFinishCall) withoutArgsMap() taskFinishCall {
+	c.argsMap = nil
+	return c
 }
 
 // same reports whether c and o are the same call.
@@ -3124,21 +3138,16 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	return tm.popTaskAgentSpanWithEvent(ctx, id, calls, nil, false)
 }
 
-// popTaskAgentSpanWithDelta is popTaskAgentSpanWithEvent with taskEnded false.
-func (tm *traceManager) popTaskAgentSpanWithDelta(ctx context.Context, id identity, calls []string, evStateDelta map[string]any) (span rowSpan, ok bool) {
-	return tm.popTaskAgentSpanWithEvent(ctx, id, calls, evStateDelta, false)
-}
-
 // popTaskAgentSpanWithEvent is popTaskAgentSpan for a function response event
 // that carries evStateDelta, with taskEnded reporting whether ADK's runTask
 // ended the task activation on the event (ev.Output != nil; see llmagent.runTask
 // and runChat). A task-mode activation that recorded that map for one of its
 // tool calls (see recordTaskToolDeltaLocked) or for a rejected finish_task call
-// (see noteTaskRejected), deferred or not (see deferredRejections), wrote the
+// (see noteTaskRejectedWithArgs), deferred or not (see deferredRejections), wrote the
 // event, also one that ended since (see endedRejectingFrames), which does not
 // end again. Without such a match, the activation that ctx shows wrote it, if
 // ctx shows one (see contextActivationLocked), as completeResponseEvent and
-// noteTaskFinishCalls take it. A recorded rejection of one of the calls, by
+// noteTaskFinishCallSpecs take it. A recorded rejection of one of the calls, by
 // that activation or else by any, also by one that ended, drops the event
 // unless an open or settled finish_task call shows that a newer call completed
 // (see hasOpenOrSettledFinishEvidence), and so does a deferred one, unless a
@@ -3224,7 +3233,7 @@ func (tm *traceManager) popTaskAgentSpanWithEvent(ctx context.Context, id identi
 	}
 	// hasPositiveFinishEvidence also counts the finish_task function calls that
 	// owner's model responses made and that have not ended yet (see
-	// noteTaskFinishCalls), unless owner's model was called again since (see
+	// noteTaskFinishCallSpecs), unless owner's model was called again since (see
 	// modelCallSeq): ADK ends a task-mode activation right after an event whose
 	// first finish_task response reports completion, so such a call did not. A
 	// pending call shows only that the call was made, not that the event
@@ -3488,7 +3497,7 @@ func (tm *traceManager) popTaskAgentSpanWithEvent(ctx context.Context, id identi
 			// which the switch below uses only when no such call is one of
 			// calls, and notedSettledFinishIdx is settledFinishIdx among the
 			// activations with such calls. None of these defers a completion:
-			// noteTaskFinished and noteTaskRejected cancel a deferral, which
+			// noteTaskFinishedWithArgs and noteTaskRejectedWithArgs cancel a deferral, which
 			// only an activation without such calls gets. settledIdx is that
 			// of the latest activation that keeps a settled call with one of
 			// the IDs (see settledTaskCalls), as one whose open call the event
@@ -3667,7 +3676,7 @@ func (tm *traceManager) popTaskAgentSpanWithEvent(ctx context.Context, id identi
 			// An activation that defers a completion is taken to have
 			// ended with the call for which it defers it (see
 			// deferredTaskFinish), so either way one that defers none
-			// goes first, as in noteTaskFinishCalls, and one without
+			// goes first, as in noteTaskFinishCallSpecs, and one without
 			// finished or rejected calls before one with them.
 			case undeferredFinishIdx >= 0:
 				i = undeferredFinishIdx
@@ -3697,7 +3706,7 @@ func (tm *traceManager) popTaskAgentSpanWithEvent(ctx context.Context, id identi
 	rec.deferredFinish = nil
 	// Each time that the response carries the ID of a call whose completion
 	// the activation's own tool callbacks saw, it answers that call, which no
-	// longer counts among the activation's calls (see noteTaskFinished), and
+	// longer counts among the activation's calls (see noteTaskFinishedWithArgs), and
 	// none of the calls that remain. On the deltaOwner branch, only finished
 	// calls from the identified StateDelta batch may be consumed so a delayed
 	// earlier-batch retirement cannot consume a later turn's finishedTasks
@@ -3786,7 +3795,7 @@ func (inv *invocationTrace) markTaskDelegatorLocked(rec *spanRecord, at time.Tim
 
 // finishedTaskLocked returns the index in agentStack of the open activation
 // of the agent of id, on the node path of id, that saw one of the finish_task
-// calls in calls complete (see noteTaskFinished), or -1 if there is none, or
+// calls in calls complete (see noteTaskFinishedWithArgs), or -1 if there is none, or
 // more than one. A function call ID is scoped to the activation that made the
 // call, not unique: ADK keeps the ID that a model gives a call, and providers
 // reuse IDs such as "call_0" (see toolKey). So another run of the agent on the
@@ -3813,7 +3822,7 @@ func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string) int 
 	return found
 }
 
-// noteTaskFinishCalls records the finish_task calls in calls, which a model
+// noteTaskFinishCallSpecs records the finish_task calls in specs, which a model
 // response of the task-mode agent of id made, on the agent's activation, so
 // that a function response event that answers one of them is recognized even
 // when an earlier plugin skips both tool callbacks of the call (see
@@ -3839,14 +3848,6 @@ func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string) int 
 // shows that the activation ran its call: its calls go to such an activation
 // only when every activation of the agent that runs no tool call defers one,
 // as the event does (see selectResponseOwnerLocked).
-func (tm *traceManager) noteTaskFinishCalls(ctx context.Context, id identity, calls []string, fromEvent bool) {
-	specs := make([]finishTaskCallSpec, len(calls))
-	for i, c := range calls {
-		specs[i] = finishTaskCallSpec{call: c, argsTruncated: true}
-	}
-	tm.noteTaskFinishCallSpecs(ctx, id, specs, fromEvent)
-}
-
 func (tm *traceManager) noteTaskFinishCallSpecs(ctx context.Context, id identity, specs []finishTaskCallSpec, fromEvent bool) {
 	if len(specs) == 0 {
 		return
@@ -3962,6 +3963,29 @@ func (tm *traceManager) noteTaskFinishCallSpecs(ctx context.Context, id identity
 	epoch := inv.activationTurnEpochLocked(target)
 	// Each of specs is a call of its own, also one whose ID another one
 	// repeats: the response made both (see taskFinishCall).
+	callCounts := make(map[string]int, len(specs))
+	ptrCounts := make(map[string]map[uintptr]int, len(specs))
+	digestCounts := make(map[string]map[uint64]int, len(specs))
+	truncatedCounts := make(map[string]int, len(specs))
+	for _, spec := range specs {
+		if spec.call != "" {
+			callCounts[spec.call]++
+			if spec.argsPtr != 0 {
+				if ptrCounts[spec.call] == nil {
+					ptrCounts[spec.call] = make(map[uintptr]int)
+				}
+				ptrCounts[spec.call][spec.argsPtr]++
+			}
+			if spec.argsTruncated {
+				truncatedCounts[spec.call]++
+			} else {
+				if digestCounts[spec.call] == nil {
+					digestCounts[spec.call] = make(map[uint64]int)
+				}
+				digestCounts[spec.call][spec.argsDigest]++
+			}
+		}
+	}
 	firstInBatch := true
 	callIDs := make([]string, len(specs))
 	for idx, spec := range specs {
@@ -3972,14 +3996,21 @@ func (tm *traceManager) noteTaskFinishCallSpecs(ctx context.Context, id identity
 		if len(target.pendingFinishCalls) >= maxTaskToolDeltas {
 			target.pendingFinishCalls = slices.Delete(target.pendingFinishCalls, 0, len(target.pendingFinishCalls)-maxTaskToolDeltas+1)
 		}
+		uniqueArgsPtrInBatch := spec.argsPtr != 0 && ptrCounts[spec.call][spec.argsPtr] == 1
+		uniqueArgsDigestInBatch := !spec.argsTruncated && truncatedCounts[spec.call] == 0 && digestCounts[spec.call][spec.argsDigest] == 1
 		target.pendingFinishCalls = append(target.pendingFinishCalls, taskFinishCall{
-			call:          spec.call,
-			epoch:         epoch,
-			callSeq:       inv.nextSeqLocked(),
-			modelCallSeq:  target.modelCallSeq,
-			argsDigest:    spec.argsDigest,
-			argsTruncated: spec.argsTruncated,
-			firstInBatch:  firstInBatch,
+			call:                    spec.call,
+			epoch:                   epoch,
+			callSeq:                 inv.nextSeqLocked(),
+			modelCallSeq:            target.modelCallSeq,
+			argsMap:                 spec.argsMap,
+			argsPtr:                 spec.argsPtr,
+			argsDigest:              spec.argsDigest,
+			argsTruncated:           spec.argsTruncated,
+			firstInBatch:            firstInBatch,
+			uniqueCallInBatch:       callCounts[spec.call] == 1,
+			uniqueArgsPtrInBatch:    uniqueArgsPtrInBatch,
+			uniqueArgsDigestInBatch: uniqueArgsDigestInBatch,
 		})
 		firstInBatch = false
 	}
@@ -4010,7 +4041,7 @@ func (tm *traceManager) noteTaskFinishCallSpecs(ctx context.Context, id identity
 func (rec *spanRecord) latestPendingFinishCall(call string) (taskFinishCall, bool) {
 	for _, pending := range slices.Backward(rec.pendingFinishCalls) {
 		if pending.call == call && pending.callSeq > rec.modelCallSeq {
-			return pending, true
+			return pending.withoutArgsMap(), true
 		}
 	}
 	return taskFinishCall{}, false
@@ -4100,15 +4131,18 @@ func (inv *invocationTrace) endingFinishCallLocked(rec *spanRecord, call string,
 }
 
 // idlePendingFinishCallLocked returns the pending finish_task call with ID
-// call that rec made in turn epoch, preferring one whose complete arguments
-// digest matches curID so concurrent same-ID calls bind to their emitted part
-// order, unless a tool call of rec runs it or ran
-// it: an open tool call runs it, its tool span ended and its AfterToolCallback
-// has not recorded how it ended yet (see ranFinishCalls), or a function
-// response event settled it (see settledTaskCalls). inv.mu must be held.
+// call that rec made in turn epoch, preferring a unique match on the emitted
+// arguments map identity (curID.argsPtr) first and then a unique complete
+// argument digest (curID.argsDigest) so concurrent same-ID calls bind to their
+// emitted part order even when arguments are identical, >64 KiB truncated, or
+// mutated in place. When multiple idle slots remain indistinguishable (e.g., a
+// custom runner cloned identical or digest-truncated argument maps, or two
+// parts aliased the same map pointer), firstInBatch is cleared so callback
+// start order never claims a superseded rejection as first in the batch. Calls
+// already settled, open in toolSpans, or ended in ranFinishCalls are skipped.
+// inv.mu must be held.
 func (inv *invocationTrace) idlePendingFinishCallLocked(rec *spanRecord, call string, epoch uint64, curID toolCallIdentity) (taskFinishCall, bool) {
-	var fallback taskFinishCall
-	hasFallback := false
+	var idle []taskFinishCall
 	for _, c := range rec.pendingFinishCalls {
 		if c.call != call || c.epoch != epoch || slices.ContainsFunc(rec.settledTaskCalls, c.same) ||
 			slices.ContainsFunc(rec.ranFinishCalls, func(r ranFinishCall) bool { return r.same(c) }) {
@@ -4124,14 +4158,52 @@ func (inv *invocationTrace) idlePendingFinishCallLocked(rec *spanRecord, call st
 		if running {
 			continue
 		}
-		if !curID.argsTruncated && !c.argsTruncated && c.argsDigest == curID.argsDigest {
-			return c, true
+		idle = append(idle, c)
+	}
+	if len(idle) == 0 {
+		return taskFinishCall{}, false
+	}
+	if curID.argsPtr != 0 {
+		var ptrMatches []taskFinishCall
+		for _, c := range idle {
+			if c.argsPtr != 0 && c.argsPtr == curID.argsPtr {
+				ptrMatches = append(ptrMatches, c)
+			}
 		}
-		if !hasFallback {
-			fallback, hasFallback = c, true
+		if len(ptrMatches) == 1 {
+			chosen := ptrMatches[0].withoutArgsMap()
+			chosen.firstInBatch = chosen.firstInBatch && chosen.uniqueArgsPtrInBatch
+			return chosen, true
+		}
+		if len(ptrMatches) > 1 {
+			chosen := ptrMatches[0].withoutArgsMap()
+			chosen.firstInBatch = false
+			return chosen, true
 		}
 	}
-	return fallback, hasFallback
+	if !curID.argsTruncated {
+		var digestMatches []taskFinishCall
+		for _, c := range idle {
+			if !c.argsTruncated && c.argsDigest == curID.argsDigest {
+				digestMatches = append(digestMatches, c)
+			}
+		}
+		if len(digestMatches) == 1 {
+			chosen := digestMatches[0].withoutArgsMap()
+			chosen.firstInBatch = chosen.firstInBatch && chosen.uniqueArgsDigestInBatch
+			return chosen, true
+		}
+		if len(digestMatches) > 1 {
+			chosen := digestMatches[0].withoutArgsMap()
+			chosen.firstInBatch = false
+			return chosen, true
+		}
+	}
+	chosen := idle[0].withoutArgsMap()
+	if !chosen.uniqueCallInBatch || len(idle) > 1 {
+		chosen.firstInBatch = false
+	}
+	return chosen, true
 }
 
 // deferringPeerLocked returns the index in agentStack of the open activation
@@ -4350,19 +4422,15 @@ func (tm *traceManager) popEndedRejectedTasksForDelegator(ctx context.Context, i
 	}
 }
 
-// noteTaskFinished records that the finish_task call callID of the agent
-// activation that ctx and id identify completed, so that the function response
-// event that reports it ends that activation (see popTaskAgentSpan). Unconsumed
-// rejections for the same call from earlier model batches on that activation
-// are cleared so a retry after a suppressed FunctionResponse event still closes
-// the activation, while rejections from the current model batch
+// noteTaskFinishedWithArgs records that the finish_task call callID of the
+// agent activation that ctx and id identify completed, so that the function
+// response event that reports it ends that activation (see popTaskAgentSpan).
+// Unconsumed rejections for the same call from earlier model batches on that
+// activation are cleared so a retry after a suppressed FunctionResponse event
+// still closes the activation, while rejections from the current model batch
 // (rej.modelCallSeq == rec.modelCallSeq) are preserved so a sibling completion
 // in the same batch does not erase them before the merged FunctionResponse
 // event arrives.
-func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callID string) {
-	tm.noteTaskFinishedWithArgs(ctx, id, callID, nil, false)
-}
-
 func (tm *traceManager) noteTaskFinishedWithArgs(ctx context.Context, id identity, callID string, args map[string]any, hasArgs bool) {
 	call := cmp.Or(callID, finishTaskToolName)
 	deltaRef := toolContextTaskDeltaRef(ctx, call)
@@ -4393,19 +4461,15 @@ func (tm *traceManager) noteTaskFinishedWithArgs(ctx context.Context, id identit
 		if c.ran == 0 {
 			c.ran = inv.nextSeqLocked()
 		}
-		rec.finishedTasks = append(rec.finishedTasks, c)
+		rec.finishedTasks = keepLatest(rec.finishedTasks, c.withoutArgsMap())
 	}
 }
 
-// noteTaskRejected records that the finish_task call callID of the agent
-// activation that ctx and id identify failed or was recovered by an error
-// callback even though its result map still carries "Task completed.", so that
-// the subsequent FunctionResponse event does not end a task activation when no
-// newer matching finish_task succeeded cleanly (see popTaskAgentSpan).
-func (tm *traceManager) noteTaskRejected(ctx context.Context, id identity, callID string) {
-	tm.noteTaskRejectedWithArgs(ctx, id, callID, nil, false)
-}
-
+// noteTaskRejectedWithArgs records that the finish_task call callID of the
+// agent activation that ctx and id identify failed or was recovered by an
+// error callback even though its result map still carries "Task completed.",
+// so that the subsequent FunctionResponse event does not end a task activation
+// when no newer matching finish_task succeeded cleanly (see popTaskAgentSpan).
 func (tm *traceManager) noteTaskRejectedWithArgs(ctx context.Context, id identity, callID string, args map[string]any, hasArgs bool) {
 	call := cmp.Or(callID, finishTaskToolName)
 	deltaRef := toolContextTaskDeltaRef(ctx, call)
@@ -4441,19 +4505,15 @@ func (tm *traceManager) noteTaskRejectedWithArgs(ctx context.Context, id identit
 	}
 }
 
-// noteTaskUnfinished records that the finish_task call callID of the agent
-// activation that ctx and id identify ended without completing the task, as
-// when the tool rejects its arguments or a confirmation is pending, so that
+// noteTaskUnfinishedWithArgs records that the finish_task call callID of the
+// agent activation that ctx and id identify ended without completing the task,
+// as when the tool rejects its arguments or a confirmation is pending, so that
 // the call made by the activation's model response no longer counts as
 // evidence that a function response event answers it (see
 // popTaskAgentSpanWithEvent). Its function response event reports no
 // completion, so no rejection needs to be recorded; the activation keeps the
 // call, as the same call (see taskFinishCall), until that event arrives (see
 // unfinishedFinishCalls).
-func (tm *traceManager) noteTaskUnfinished(ctx context.Context, id identity, callID string) {
-	tm.noteTaskUnfinishedWithArgs(ctx, id, callID, nil, false)
-}
-
 func (tm *traceManager) noteTaskUnfinishedWithArgs(ctx context.Context, id identity, callID string, args map[string]any, hasArgs bool) {
 	call := cmp.Or(callID, finishTaskToolName)
 	curID, _ := toolCallIdentityOf(ctx, args)
@@ -5070,7 +5130,7 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 // id, as in eventSpan, because the event callback gets the agent that the
 // runner runs rather than the author, unless ctx shows the activation that
 // wrote the event (see contextActivationLocked), which then owns it, as
-// noteTaskFinishCalls and popTaskAgentSpanWithEvent take it. calls describes
+// noteTaskFinishCallSpecs and popTaskAgentSpanWithEvent take it. calls describes
 // the function responses of the event (see functionResponseCall), and
 // evStateDelta is the event's StateDelta map.
 //
@@ -5245,7 +5305,7 @@ func (tm *traceManager) completeResponseEvent(ctx context.Context, id identity, 
 		// earlier plugin's BeforeModelCallback answered it. Either way, the
 		// calls that the activation made before did not complete the task (see
 		// modelCallSeq). An event that shows no activation shows nothing of the
-		// kind, unless it makes finish_task calls (see noteTaskFinishCalls).
+		// kind, unless it makes finish_task calls (see noteTaskFinishCallSpecs).
 		if self > 0 && len(owner.unseenModelFinishCalls) == 0 {
 			owner.modelCallSeq = inv.lastSeq
 		}
@@ -5945,7 +6005,7 @@ func (inv *invocationTrace) unfinishedResponseSlotsLocked(id identity, call stri
 		}
 		for _, pending := range rec.pendingFinishCalls {
 			if pending.call == call && !slices.ContainsFunc(recSlots, pending.same) {
-				recSlots = append(recSlots, pending)
+				recSlots = append(recSlots, pending.withoutArgsMap())
 			}
 		}
 		if len(taken) > 0 {
@@ -6236,7 +6296,7 @@ func (inv *invocationTrace) finishCallSlotsLocked(rec *spanRecord, call string) 
 	}
 	for _, pending := range rec.pendingFinishCalls {
 		if pending.call == call && !slices.ContainsFunc(slots, pending.same) {
-			slots = append(slots, pending)
+			slots = append(slots, pending.withoutArgsMap())
 		}
 	}
 	slices.SortFunc(slots, func(a, b taskFinishCall) int {
@@ -6508,9 +6568,9 @@ func (inv *invocationTrace) selectResponseOwnerLocked(i int, shown bool, calls [
 		// response that made the call, so the activation awaits no model
 		// response event, even one that it counts (see awaitingModelEvent)
 		// because an earlier plugin replaced it: a model callback that shows
-		// that it went on cancels the deferral (see noteTaskFinishCalls). A
+		// that it went on cancels the deferral (see noteTaskFinishCallSpecs). A
 		// model response event is taken for it only when every open peer
-		// defers a completion too, as in noteTaskFinishCalls.
+		// defers a completion too, as in noteTaskFinishCallSpecs.
 		if undeferred := slices.DeleteFunc(slices.Clone(peerIdxs), func(j int) bool {
 			return inv.agentStack[j].deferredFinish != nil
 		}); len(undeferred) > 0 {
@@ -8750,6 +8810,9 @@ func (rec *spanRecord) clearTaskDeltas() {
 	rec.deferredFinish = nil
 	rec.ranFinishCalls = nil
 	rec.unseenModelFinishCalls = nil
+	for k := range rec.pendingFinishCalls {
+		rec.pendingFinishCalls[k].argsMap = nil
+	}
 }
 
 // dropContexts drops what rec keeps of the callbacks of its run: the context
@@ -8887,6 +8950,7 @@ type toolCallIdentity struct {
 	actionsPtr  uintptr
 	actionsWeak weak.Pointer[session.EventActions]
 	hasWeakAct  bool
+	argsPtr     uintptr
 	argsDigest  uint64
 	// argsTruncated reports that argsDigest covers only part of the
 	// arguments, so that equal digests do not prove equal arguments.
@@ -8949,6 +9013,7 @@ func toolCallIdentityOf(ctx context.Context, args map[string]any) (toolCallIdent
 			delta = d
 		}
 	}
+	id.argsPtr = mapPtr(args)
 	id.argsDigest, id.argsTruncated = boundedArgsDigest(args)
 	return id, delta
 }

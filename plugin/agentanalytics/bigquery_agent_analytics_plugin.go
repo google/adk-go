@@ -1138,12 +1138,15 @@ func hasTaskCompletedResponse(c *genai.Content) bool {
 }
 
 // finishTaskCallSpec describes one finish_task FunctionCall part in a model
-// response: its function call ID (or finishTaskToolName when empty) and a
-// bounded digest of its arguments so concurrent same-ID finish_task calls in a
-// batch bind back to their emitted part order regardless of goroutine start
-// order.
+// response: its function call ID (or finishTaskToolName when empty), the
+// emitted Args map (retained only while the slot is pending so stock ADK
+// dispatch keeps exact map-pointer identity across identical, digest-truncated,
+// or in-place-mutated arguments), and a bounded digest fallback for custom
+// runners that clone argument maps before dispatching tool callbacks.
 type finishTaskCallSpec struct {
 	call          string
+	argsMap       map[string]any
+	argsPtr       uintptr
 	argsDigest    uint64
 	argsTruncated bool
 }
@@ -1163,6 +1166,8 @@ func finishTaskFunctionCalls(c *genai.Content) []finishTaskCallSpec {
 			digest, truncated := boundedArgsDigest(part.FunctionCall.Args)
 			calls = append(calls, finishTaskCallSpec{
 				call:          cmp.Or(part.FunctionCall.ID, finishTaskToolName),
+				argsMap:       part.FunctionCall.Args,
+				argsPtr:       mapPtr(part.FunctionCall.Args),
 				argsDigest:    digest,
 				argsTruncated: truncated,
 			})
@@ -1458,7 +1463,7 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	if closedByError {
 		// onToolError already wrote TOOL_ERROR; even when an agent
 		// OnToolErrorCallback or a later plugin recovered or replaced the error,
-		// suppress TOOL_COMPLETED, noteTaskFinished, and AGENT_RESPONSE.
+		// suppress TOOL_COMPLETED, noteTaskFinishedWithArgs, and AGENT_RESPONSE.
 		p.endUnfinishedFinishTask(ctx, id, name, callID, args, result, confirmationOutcome)
 		return nil, nil
 	}
