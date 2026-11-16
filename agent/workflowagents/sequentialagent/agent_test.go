@@ -1206,7 +1206,7 @@ func TestSequentialAgent_ResumablePauseSkipsLaterSubAgents(t *testing.T) {
 
 	events, errs := runResumable(t, root)
 
-	if diff := cmp.Diff([]string{"a:a text", "b:FC(ask)"}, events); diff != "" {
+	if diff := cmp.Diff([]string{"root:", "a:a text", "root:", "b:FC(ask)"}, events); diff != "" {
 		t.Errorf("events (-want +got):\n%s", diff)
 	}
 	if len(errs) != 0 {
@@ -1251,7 +1251,7 @@ func TestSequentialAgent_ResumablePauseLetsPausedSubAgentFinish(t *testing.T) {
 
 	events, errs := runResumable(t, root)
 
-	want := []string{"first:FC(ask_human)FC(lookup)", "first:FR(lookup)"}
+	want := []string{"root:", "first:FC(ask_human)FC(lookup)", "first:FR(lookup)"}
 	if diff := cmp.Diff(want, events); diff != "" {
 		t.Errorf("events (-want +got):\n%s", diff)
 	}
@@ -1282,7 +1282,7 @@ func TestSequentialAgent_PauseInDescendantStopsSequence(t *testing.T) {
 			inner: func(t *testing.T, pRuns, otherRuns *atomic.Int32) agent.Agent {
 				return newSequentialAgent(t, []agent.Agent{pausingAgent(t, "p", pRuns), textAgent(t, "q", otherRuns)}, "inner")
 			},
-			wantEvents: []string{"p:FC(ask)"},
+			wantEvents: []string{"root:", "inner:", "p:FC(ask)"},
 		},
 		{
 			name: "loop",
@@ -1292,7 +1292,7 @@ func TestSequentialAgent_PauseInDescendantStopsSequence(t *testing.T) {
 					MaxIterations: 3,
 				}))
 			},
-			wantEvents: []string{"p:FC(ask)"},
+			wantEvents: []string{"root:", "inner:", "p:FC(ask)"},
 		},
 		{
 			name: "parallel",
@@ -1306,7 +1306,7 @@ func TestSequentialAgent_PauseInDescendantStopsSequence(t *testing.T) {
 				}))
 			},
 			// The sibling branch finishes before the outer sequence stops.
-			wantEvents: []string{"p:FC(ask)", "s:s text"},
+			wantEvents: []string{"root:", "inner:", "p:FC(ask)", "s:s text"},
 		},
 	}
 	for _, tc := range tests {
@@ -1365,7 +1365,7 @@ func TestSequentialAgent_ErrorAfterPausingEventIsYielded(t *testing.T) {
 
 	events, errs := runResumable(t, root)
 
-	if diff := cmp.Diff([]string{"b:FC(ask)"}, events); diff != "" {
+	if diff := cmp.Diff([]string{"root:", "b:FC(ask)"}, events); diff != "" {
 		t.Errorf("events (-want +got):\n%s", diff)
 	}
 	if diff := cmp.Diff([]string{"boom"}, errs); diff != "" {
@@ -1415,7 +1415,7 @@ func TestSequentialAgent_LongRunningIDOfAnotherCallDoesNotPause(t *testing.T) {
 
 	events, errs := runResumable(t, root)
 
-	if diff := cmp.Diff([]string{"b:FC(ask)", "c:c text"}, events); diff != "" {
+	if diff := cmp.Diff([]string{"root:", "b:FC(ask)", "root:", "c:c text", "root:END"}, events); diff != "" {
 		t.Errorf("events (-want +got):\n%s", diff)
 	}
 	if len(errs) != 0 {

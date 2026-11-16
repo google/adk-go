@@ -716,7 +716,7 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 		if resumable {
 			// adk-python resumes a sub-agent only for an agent with a state
 			// (agents/llm_agent.py, _run_async_impl).
-			if _, hasState := rc.AgentStates[a.Name()]; hasState {
+			if _, hasState := rc.AgentState(a.Name()); hasState {
 				sub, err := a.getSubAgentToResume(ctx)
 				if err != nil {
 					yield(nil, err)

@@ -220,12 +220,38 @@ func callIDsOnBranch(sess session.Session, branch string) map[string]bool {
 // Actions.EndOfAgent true. It ports adk-python's
 // BaseAgent._create_agent_state_event for an agent that ended
 // (agents/base_agent.py).
+//
+// It also records author's end in ctx's run config (RecordAgentEnd, which
+// does nothing outside a resumable run), as adk-python sets the end flag
+// before it builds the event (agents/llm_agent.py, _run_async_impl), so that a
+// resumable ParallelAgent above author learns that author ended.
 func NewEndOfAgentEvent(ctx agent.InvocationContext, author string) *session.Event {
 	ev := session.NewEvent(ctx, ctx.InvocationID())
 	ev.Author = author
 	ev.Branch = ctx.Branch()
 	ended := true
 	ev.Actions.EndOfAgent = &ended
+	if rc := runconfig.FromContext(ctx); rc != nil {
+		rc.RecordAgentEnd(author)
+	}
+	return ev
+}
+
+// NewAgentStateEvent returns the event that records state as author's
+// checkpoint in ctx's invocation: ctx's invocation ID and branch, no content,
+// and Actions.AgentState set to state as given. A nil state becomes an empty,
+// non-nil map, because a nil Actions.AgentState means the event carries no
+// state. It ports adk-python's BaseAgent._create_agent_state_event for an
+// agent with a state (agents/base_agent.py). It records nothing in ctx's run
+// config.
+func NewAgentStateEvent(ctx agent.InvocationContext, author string, state map[string]any) *session.Event {
+	ev := session.NewEvent(ctx, ctx.InvocationID())
+	ev.Author = author
+	ev.Branch = ctx.Branch()
+	if state == nil {
+		state = map[string]any{}
+	}
+	ev.Actions.AgentState = state
 	return ev
 }
 
