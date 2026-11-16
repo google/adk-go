@@ -507,6 +507,13 @@ func TestLiveConnectionSendHistoryAllFiltered(t *testing.T) {
 // setupComplete response has already been received.
 func connectFakeLiveServing(t *testing.T, messages ...string) *googlellm.LiveConnection {
 	t.Helper()
+	return connectFakeLiveServingWithSetupComplete(t, `{"setupComplete":{}}`, messages...)
+}
+
+// connectFakeLiveServingWithSetupComplete is connectFakeLiveServing with the
+// server's answer to the setup message given as setupComplete.
+func connectFakeLiveServingWithSetupComplete(t *testing.T, setupComplete string, messages ...string) *googlellm.LiveConnection {
+	t.Helper()
 	var upgrader websocket.Upgrader
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -517,7 +524,7 @@ func connectFakeLiveServing(t *testing.T, messages ...string) *googlellm.LiveCon
 		if _, _, err := conn.ReadMessage(); err != nil {
 			return
 		}
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`)); err != nil {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(setupComplete)); err != nil {
 			return
 		}
 		for _, m := range messages {
@@ -639,4 +646,63 @@ func TestLiveConnectionRecvKeepsUsageOnBufferedTurnComplete(t *testing.T) {
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("Recv sequence mismatch (-want +got):\n%s", diff)
 	}
+}
+
+// Recv stamps the identifier from the connection's setupComplete on every
+// response, including the ones it buffers when a turn ends. The test fails if
+// the stamp is dropped from Recv, or moved before the return of a buffered
+// response.
+func TestLiveConnectionRecvStampsLiveSessionID(t *testing.T) {
+	t.Run("session id from setupComplete stamped on every response kind", func(t *testing.T) {
+		conn := connectFakeLiveServingWithSetupComplete(t,
+			`{"setupComplete":{"sessionId":"live-sess-42"}}`,
+			`{"sessionResumptionUpdate":{"newHandle":"h-1","resumable":true}}`,
+			`{"toolCall":{"functionCalls":[{"id":"c-1","name":"fn","args":{}}]}}`,
+			`{"serverContent":{"inputTranscription":{"text":"in-txt"},"outputTranscription":{"text":"out-txt"}}}`,
+			`{"serverContent":{"turnComplete":true}}`,
+		)
+		var got []*model.LLMResponse
+		for range 6 {
+			resp, err := conn.Recv(t.Context())
+			if err != nil {
+				t.Fatalf("Recv failed: %v", err)
+			}
+			got = append(got, resp)
+		}
+		want := []*model.LLMResponse{
+			{SessionResumptionHandle: "h-1", LiveSessionID: "live-sess-42"},
+			{
+				Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: "c-1", Name: "fn", Args: map[string]any{}}},
+				}},
+				LiveSessionID: "live-sess-42",
+			},
+			{
+				InputTranscription:  &genai.Transcription{Text: "in-txt"},
+				OutputTranscription: &genai.Transcription{Text: "out-txt"},
+				Partial:             true,
+				LiveSessionID:       "live-sess-42",
+			},
+			{InputTranscription: &genai.Transcription{Text: "in-txt", Finished: true}, LiveSessionID: "live-sess-42"},
+			{OutputTranscription: &genai.Transcription{Text: "out-txt", Finished: true}, LiveSessionID: "live-sess-42"},
+			{TurnComplete: true, LiveSessionID: "live-sess-42"},
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("Recv sequence mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("empty setupComplete leaves LiveSessionID empty", func(t *testing.T) {
+		conn := connectFakeLiveServingWithSetupComplete(t,
+			`{"setupComplete":{}}`,
+			`{"serverContent":{"modelTurn":{"parts":[{"text":"hi"}],"role":"model"},"turnComplete":true}}`,
+		)
+		got, err := conn.Recv(t.Context())
+		if err != nil {
+			t.Fatalf("Recv failed: %v", err)
+		}
+		if got.LiveSessionID != "" {
+			t.Errorf("Recv LiveSessionID = %q, want \"\"", got.LiveSessionID)
+		}
+	})
 }

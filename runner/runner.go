@@ -723,6 +723,9 @@ func mergeLLMResponse(dst, src *model.LLMResponse) {
 	if src.SessionResumptionHandle != "" {
 		dst.SessionResumptionHandle = src.SessionResumptionHandle
 	}
+	if src.LiveSessionID != "" {
+		dst.LiveSessionID = src.LiveSessionID
+	}
 	if src.ErrorCode != "" {
 		dst.ErrorCode = src.ErrorCode
 	}

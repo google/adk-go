@@ -108,14 +108,15 @@ type storageEvent struct {
 	ErrorMessage *string
 	Interrupted  *bool
 
-	// The model's finish reason, model version, log probabilities and
-	// resumption handle. Rows written before these columns existed hold NULL
-	// and read back with the fields empty.
+	// The model's finish reason, model version, log probabilities,
+	// resumption handle and live session id. Rows written before these
+	// columns existed hold NULL and read back with the fields empty.
 	FinishReason            *string
 	ModelVersion            *string
 	AvgLogprobs             *float64
 	LogprobsResult          dynamicJSON
 	SessionResumptionHandle *string
+	LiveSessionID           *string
 
 	// Seq numbers a session's events in append order, from 1. Rows written
 	// before the column existed hold 0.
@@ -219,6 +220,9 @@ func createStorageEvent(session session.Session, event *session.Event) (*storage
 	}
 	if event.SessionResumptionHandle != "" {
 		storageEv.SessionResumptionHandle = &event.SessionResumptionHandle
+	}
+	if event.LiveSessionID != "" {
+		storageEv.LiveSessionID = &event.LiveSessionID
 	}
 
 	// For booleans, we can assign pointers directly.
@@ -437,6 +441,7 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 			LogprobsResult:      logprobsResult,
 
 			SessionResumptionHandle: derefOrZero(se.SessionResumptionHandle),
+			LiveSessionID:           derefOrZero(se.LiveSessionID),
 		},
 	}
 

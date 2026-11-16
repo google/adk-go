@@ -104,6 +104,68 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 	}
 }
 
+// A REST client reads an event's live session id under liveSessionId, which is
+// absent when the event has none, and an event it sends back keeps the id. The
+// test fails if FromSessionEvent or ToSessionEvent does not copy the field, or
+// if its tag loses omitempty.
+func TestEventRoundTripPreservesLiveSessionID(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		ev := session.Event{ID: "e1", Author: "agent", LLMResponse: model.LLMResponse{LiveSessionID: "live-rest-1"}}
+
+		restEvent := models.FromSessionEvent(ev)
+		if restEvent.LiveSessionID != "live-rest-1" {
+			t.Errorf("FromSessionEvent().LiveSessionID = %q, want \"live-rest-1\"", restEvent.LiveSessionID)
+		}
+		rawJSON, err := json.Marshal(restEvent)
+		if err != nil {
+			t.Fatalf("json.Marshal(restEvent) failed: %v", err)
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(rawJSON, &wire); err != nil {
+			t.Fatalf("json.Unmarshal(rawJSON) to map failed: %v", err)
+		}
+		if got := wire["liveSessionId"]; got != "live-rest-1" {
+			t.Errorf("wire[\"liveSessionId\"] = %v, want \"live-rest-1\"", got)
+		}
+		var decoded models.Event
+		if err := json.Unmarshal(rawJSON, &decoded); err != nil {
+			t.Fatalf("json.Unmarshal(rawJSON, &decoded) failed: %v", err)
+		}
+		back, err := models.ToSessionEvent(decoded)
+		if err != nil {
+			t.Fatalf("ToSessionEvent() failed: %v", err)
+		}
+		if back.LiveSessionID != "live-rest-1" {
+			t.Errorf("ToSessionEvent().LiveSessionID = %q, want \"live-rest-1\"", back.LiveSessionID)
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		rawJSON, err := json.Marshal(models.FromSessionEvent(session.Event{ID: "e2", Author: "agent"}))
+		if err != nil {
+			t.Fatalf("json.Marshal(FromSessionEvent()) failed: %v", err)
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(rawJSON, &wire); err != nil {
+			t.Fatalf("json.Unmarshal(rawJSON) to map failed: %v", err)
+		}
+		if got, hasKey := wire["liveSessionId"]; hasKey {
+			t.Errorf("wire[\"liveSessionId\"] = %v, want the key absent", got)
+		}
+		var decoded models.Event
+		if err := json.Unmarshal(rawJSON, &decoded); err != nil {
+			t.Fatalf("json.Unmarshal(rawJSON, &decoded) failed: %v", err)
+		}
+		back, err := models.ToSessionEvent(decoded)
+		if err != nil {
+			t.Fatalf("ToSessionEvent() failed: %v", err)
+		}
+		if back.LiveSessionID != "" {
+			t.Errorf("ToSessionEvent().LiveSessionID = %q, want \"\"", back.LiveSessionID)
+		}
+	})
+}
+
 // A REST client reads an event's UI widgets under actions.renderUiWidgets, and
 // an event it sends back with them keeps them.
 func TestEventRoundTripPreservesRenderUIWidgets(t *testing.T) {

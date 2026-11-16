@@ -40,6 +40,8 @@ func fullyPopulatedEvent() *session.Event {
 			ErrorCode:    "429",
 			ErrorMessage: "rate limited",
 			AvgLogprobs:  -0.25,
+
+			LiveSessionID: "live-sess-1",
 		},
 		ID:                 "evt-1",
 		Timestamp:          time.Unix(1733040000, 0).UTC(),
@@ -87,7 +89,7 @@ func TestEventJSONKeys(t *testing.T) {
 	want := []string{
 		"actions", "author", "avgLogprobs", "branch", "content", "errorCode",
 		"errorMessage", "id", "interrupted", "invocationId", "isolationScope",
-		"longRunningToolIds", "modelVersion", "nodeInfo", "output", "partial",
+		"liveSessionId", "longRunningToolIds", "modelVersion", "nodeInfo", "output", "partial",
 		"requestedInput", "routes", "timestamp", "turnComplete",
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
