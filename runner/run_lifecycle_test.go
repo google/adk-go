@@ -595,8 +595,10 @@ func TestRunner_ContextErrorWhileCallerContextAlive_IsARunError(t *testing.T) {
 }
 
 // A failing after-run on a completed run reaches a caller that still ranges,
-// unwrapped, ends the run, stops the after-run callbacks of later plugins and
-// is reported to every plugin once.
+// wrapped with the plugin and callback name by the plugin manager; the runner
+// adds no wrapper of its own, and the name predates the manager's wrapping. The
+// failure ends the run, stops the after-run callbacks of later plugins and is
+// reported to every plugin once.
 func TestRunner_AfterRunFailure_YieldedUnwrappedAndNotifiedOnce(t *testing.T) {
 	errAfter := errors.New("after-run failed")
 	roots := []struct {
@@ -625,15 +627,15 @@ func TestRunner_AfterRunFailure_YieldedUnwrappedAndNotifiedOnce(t *testing.T) {
 
 				yielded := l.consume(r.Run(t.Context(), "u", "s", userText("hi"), agent.RunConfig{}), caller.stop)
 
-				want := []string{"event:ok", "after_run:first", "after_run:failing", "err:after-run failed", "on_run_error:after-run failed", "range_done"}
+				want := []string{"event:ok", "after_run:first", "after_run:failing", "err:Error in plugin 'failing' during 'after_run_callback' callback: after-run failed", "on_run_error:Error in plugin 'failing' during 'after_run_callback' callback: after-run failed", "range_done"}
 				if diff := cmp.Diff(want, l.got()); diff != "" {
 					t.Errorf("log mismatch (-want +got):\n%s", diff)
 				}
-				if len(yielded) != 1 || yielded[0] != errAfter {
-					t.Errorf("caller received %v, want [errAfter] unwrapped", yielded)
+				if len(yielded) != 1 || !errors.Is(yielded[0], errAfter) {
+					t.Errorf("caller received %v, want one error that wraps errAfter", yielded)
 				}
-				if notified := l.runErrors(); len(notified) != 1 || notified[0] != errAfter {
-					t.Errorf("on-run-error received %v, want [errAfter]", notified)
+				if notified := l.runErrors(); len(notified) != 1 || !errors.Is(notified[0], errAfter) {
+					t.Errorf("on-run-error received %v, want one error that wraps errAfter", notified)
 				}
 			})
 		}
@@ -670,8 +672,8 @@ func TestRunner_AfterRunFailureAfterEarlyClose_NotifiedNotYielded(t *testing.T) 
 			if items != 1 {
 				t.Errorf("loop body ran %d times, want 1", items)
 			}
-			if notified := l.runErrors(); len(notified) != 1 || notified[0] != errAfter {
-				t.Errorf("on-run-error received %v, want [errAfter]", notified)
+			if notified := l.runErrors(); len(notified) != 1 || !errors.Is(notified[0], errAfter) {
+				t.Errorf("on-run-error received %v, want one error that wraps errAfter", notified)
 			}
 			if got := l.count("after_run:later"); got != 0 {
 				t.Errorf("later plugin's after-run calls = %d, want 0", got)
@@ -689,7 +691,7 @@ func TestRunner_AfterRunFailureAfterEarlyClose_NotifiedNotYielded(t *testing.T) 
 					}
 				}
 			}
-			if diff := cmp.Diff([]string{"after-run failed"}, recorded); diff != "" {
+			if diff := cmp.Diff([]string{"Error in plugin 'failing' during 'after_run_callback' callback: after-run failed"}, recorded); diff != "" {
 				t.Errorf("span exception events mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -772,7 +774,7 @@ func TestRunner_OnEventError_EndsRunNotifiesAndSkipsAfterRun(t *testing.T) {
 
 			l.consume(r.Run(t.Context(), "u", "s", userText("hi"), agent.RunConfig{}), rangeOn)
 
-			want := []string{"event:one", "err:on event failed", "on_run_error:on event failed", "range_done"}
+			want := []string{"event:one", "err:Error in plugin 'rejecter' during 'on_event_callback' callback: on event failed", "on_run_error:Error in plugin 'rejecter' during 'on_event_callback' callback: on event failed", "range_done"}
 			if diff := cmp.Diff(want, l.got()); diff != "" {
 				t.Errorf("log mismatch (-want +got):\n%s", diff)
 			}
@@ -820,11 +822,11 @@ func TestRunner_BeforeRunError_NotifiesOnRunErrorAndKeepsAfterRun(t *testing.T) 
 
 			yielded := l.consume(r.Run(t.Context(), "u", "s", userText("hi"), agent.RunConfig{}), rangeOn)
 
-			want := []string{"err:before failed", "on_run_error:before failed", "after_run", "range_done"}
+			want := []string{"err:Error in plugin 'before' during 'before_run_callback' callback: before failed", "on_run_error:Error in plugin 'before' during 'before_run_callback' callback: before failed", "after_run", "range_done"}
 			if diff := cmp.Diff(want, l.got()); diff != "" {
 				t.Errorf("log mismatch (-want +got):\n%s", diff)
 			}
-			if len(yielded) != 1 || yielded[0] != errBefore {
+			if len(yielded) != 1 || !errors.Is(yielded[0], errBefore) {
 				t.Errorf("caller received %v, want [errBefore]", yielded)
 			}
 			if got := bodyRuns.Load(); got != 0 {
@@ -877,8 +879,8 @@ func TestRunner_StageErrors_AreRunErrors(t *testing.T) {
 				OnUserMessageCallback: func(agent.InvocationContext, *genai.Content) (*genai.Content, error) { return nil, rejectUserMessage },
 			}),
 			msg:           userText("hi"),
-			wantErr:       "error running on run user message callback : user message rejected",
-			wantRunErrors: []string{"on_run_error:error running on run user message callback : user message rejected"},
+			wantErr:       "error running on run user message callback : Error in plugin 'reject' during 'on_user_message_callback' callback: user message rejected",
+			wantRunErrors: []string{"on_run_error:error running on run user message callback : Error in plugin 'reject' during 'on_user_message_callback' callback: user message rejected"},
 		},
 		{
 			name:          "user-event append failure on a node root",
@@ -913,8 +915,8 @@ func TestRunner_StageErrors_AreRunErrors(t *testing.T) {
 			}),
 			msg:           userText("hi"),
 			stopAtError:   true,
-			wantErr:       "error running on run user message callback : user message rejected",
-			wantRunErrors: []string{"on_run_error:error running on run user message callback : user message rejected"},
+			wantErr:       "error running on run user message callback : Error in plugin 'reject' during 'on_user_message_callback' callback: user message rejected",
+			wantRunErrors: []string{"on_run_error:error running on run user message callback : Error in plugin 'reject' during 'on_user_message_callback' callback: user message rejected"},
 		},
 		{
 			name: "user-event append failure on a classic root",
@@ -1147,7 +1149,7 @@ func TestRunner_RunLive_RunErrorNotifiesOnceAndSkipsAfterRun(t *testing.T) {
 				return []*plugin.Plugin{beforeRun(nil, errBefore), l.recorder(t)}
 			},
 			wantRunLive: errBefore,
-			wantLog:     []string{"on_run_error:before failed"},
+			wantLog:     []string{"on_run_error:Error in plugin 'before' during 'before_run_callback' callback: before failed"},
 		},
 		{
 			name:          "caller ranges past a stream error",
@@ -1171,7 +1173,7 @@ func TestRunner_RunLive_RunErrorNotifiesOnceAndSkipsAfterRun(t *testing.T) {
 				return []*plugin.Plugin{l.failingAfterRun(t, errAfter), l.laterRecorder(t)}
 			},
 			stop:    rangeOn,
-			wantLog: []string{"event:e1", "after_run:failing", "err:after-run failed", "on_run_error:after-run failed", "range_done"},
+			wantLog: []string{"event:e1", "after_run:failing", "err:Error in plugin 'failing' during 'after_run_callback' callback: after-run failed", "on_run_error:Error in plugin 'failing' during 'after_run_callback' callback: after-run failed", "range_done"},
 		},
 		{
 			name:    "after-run fails after a before-run reply",
@@ -1180,7 +1182,7 @@ func TestRunner_RunLive_RunErrorNotifiesOnceAndSkipsAfterRun(t *testing.T) {
 				return []*plugin.Plugin{beforeRun(genai.NewContentFromText("reply", genai.RoleModel), nil), l.failingAfterRun(t, errAfter), l.laterRecorder(t)}
 			},
 			stop:    rangeOn,
-			wantLog: []string{"event:reply", "after_run:failing", "err:after-run failed", "on_run_error:after-run failed", "range_done"},
+			wantLog: []string{"event:reply", "after_run:failing", "err:Error in plugin 'failing' during 'after_run_callback' callback: after-run failed", "on_run_error:Error in plugin 'failing' during 'after_run_callback' callback: after-run failed", "range_done"},
 		},
 		{
 			name: "caller ranges past an append failure",
@@ -1209,7 +1211,7 @@ func TestRunner_RunLive_RunErrorNotifiesOnceAndSkipsAfterRun(t *testing.T) {
 			r := newLiveLifecycleRunner(t, tt.svc, tt.runLive, tt.plugins(l)...)
 
 			_, events, err := r.RunLive(t.Context(), "u", "s", agent.LiveRunConfig{})
-			if err != tt.wantRunLive {
+			if !errors.Is(err, tt.wantRunLive) {
 				t.Fatalf("RunLive() error = %v, want %v", err, tt.wantRunLive)
 			}
 			if err == nil {
@@ -1220,7 +1222,7 @@ func TestRunner_RunLive_RunErrorNotifiesOnceAndSkipsAfterRun(t *testing.T) {
 				t.Errorf("log mismatch (-want +got):\n%s", diff)
 			}
 			for _, notified := range l.runErrors() {
-				if notified != tt.wantRunLive && notified != errStream && notified != errAfter && !strings.Contains(notified.Error(), "nil event") {
+				if !errors.Is(notified, tt.wantRunLive) && !errors.Is(notified, errStream) && !errors.Is(notified, errAfter) && !strings.Contains(notified.Error(), "nil event") {
 					t.Errorf("on-run-error received %v, not the error that ended the run", notified)
 				}
 			}
@@ -1250,7 +1252,7 @@ func TestRunner_RunLive_OnEventErrorEndsStream(t *testing.T) {
 	}
 	l.consume(events, rangeOn)
 
-	want := []string{"event:e1", "err:on event failed", "on_run_error:on event failed", "range_done"}
+	want := []string{"event:e1", "err:Error in plugin 'rejecter' during 'on_event_callback' callback: on event failed", "on_run_error:Error in plugin 'rejecter' during 'on_event_callback' callback: on event failed", "range_done"}
 	if diff := cmp.Diff(want, l.got()); diff != "" {
 		t.Errorf("log mismatch (-want +got):\n%s", diff)
 	}
@@ -1424,8 +1426,8 @@ func TestRunner_AfterRunRunsBeforePostInvocationCompaction(t *testing.T) {
 			if tt.wantLastErrNil && lastErr != nil {
 				t.Errorf("last item error = %v, want nil", lastErr)
 			}
-			if !tt.wantLastErrNil && lastErr != errAfter {
-				t.Errorf("last item error = %v, want errAfter", lastErr)
+			if !tt.wantLastErrNil && !errors.Is(lastErr, errAfter) {
+				t.Errorf("last item error = %v, want one that wraps errAfter", lastErr)
 			}
 		})
 	}

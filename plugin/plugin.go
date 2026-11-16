@@ -15,6 +15,15 @@
 // Package plugin provides lifecycle hooks that observe and intercept an agent
 // run, exposing Before*/After* callbacks for the run, agent, model, and tool
 // stages.
+//
+// An error a callback returns reaches the caller of the run wrapped as
+// `Error in plugin '<plugin name>' during '<callback name>' callback: <error text>`,
+// where the callback name is adk-python's (`before_run_callback`,
+// `on_event_callback`, ...). The wrapper unwraps to the callback's error, so
+// [errors.Is] and [errors.As] still find it; comparing with `==` does not.
+// The tool callbacks (`BeforeToolCallback`, `AfterToolCallback`,
+// `OnToolErrorCallback`) are not wrapped, and neither are the notification
+// callbacks, which return nothing.
 package plugin
 
 import (
@@ -54,6 +63,15 @@ type Config struct {
 	AfterToolCallback   llmagent.AfterToolCallback
 	OnToolErrorCallback llmagent.OnToolErrorCallback
 
+	// CloseFunc releases the plugin's resources. runner.Runner.Close calls
+	// it once per call, after the toolsets, and waits for it at most
+	// runner.PluginConfig.CloseTimeout. CloseFunc should return: a call
+	// that has not returned by then is abandoned, not canceled, and
+	// keeps running in the background. Every call of Runner.Close calls
+	// CloseFunc again, so an abandoned call may still be running when the
+	// next one starts, and CloseFunc must be safe to call concurrently with
+	// itself. A panic is recovered and reported as a failed close. A nil
+	// CloseFunc means nothing to release.
 	CloseFunc func() error
 }
 
@@ -217,6 +235,18 @@ type OnUserMessageCallback func(agent.InvocationContext, *genai.Content) (*genai
 
 // BeforeRunCallback is invoked before a run starts, and may return content that
 // short-circuits the run.
+//
+// The runner calls the plugins' BeforeRunCallback in registration order after
+// it has stored the run's user event and before any agent or node runs. The
+// first callback that returns non-nil content ends the chain: the runner runs
+// no agent or node, wraps the content in an event authored by the agent the
+// turn would have run (or "model" on a runner.Config.Node root), passes that
+// event through the OnEventCallback plugins, stamps the "adk:before_run_reply"
+// custom metadata key on it, appends it to the session unless it is partial,
+// and yields it; apart from the user event that runner.WithYieldUserMessage
+// yields, the run yields nothing else. A callback error, wrapped as described
+// in the package comment, ends the run. In runner.Runner.Run the after-run
+// callbacks run in either case.
 type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 
 // AfterRunCallback is invoked once at the end of a run that did not end
@@ -242,9 +272,9 @@ type AfterRunCallback func(agent.InvocationContext)
 // the two: [New] rejects a [Config] that sets both. A nil return means
 // success and changes nothing.
 //
-// A non-nil error is a run error and ends the run. The runner yields it
-// unchanged, not wrapped, to a caller that is still ranging, and calls every
-// plugin's [OnRunErrorCallback] with it once. When the caller has already
+// A non-nil error is a run error and ends the run. The runner yields it,
+// wrapped as described in the package comment, to a caller that is still
+// ranging, and calls every plugin's [OnRunErrorCallback] with it once. When the caller has already
 // stopped ranging the error cannot be yielded: it goes only to
 // OnRunErrorCallback, and is recorded as an exception event on the
 // invocation span when that span is recording. With no plugin implementing
