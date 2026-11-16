@@ -43,6 +43,9 @@ import (
 // databaseService is an database implementation of sessionService.Service.
 type databaseService struct {
 	db *gorm.DB
+	// sessionLocks serializes appends to one session, matching adk-python.
+	// See [databaseService.AppendEvent].
+	sessionLocks keyedMutex[sessionKey]
 }
 
 // NewSessionService creates a new [session.Service] implementation that uses a
@@ -434,20 +437,53 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	if !ok {
 		return fmt.Errorf("unexpected session type %T", sess)
 	}
-	// append it to session
-	if err := sess.appendEvent(event); err != nil {
+
+	// adk-python keeps one lock per session and holds it across the stale
+	// check, the commit and the update of the last update time. Without it
+	// two appends to one session race over the session row and over the
+	// in-memory event list: on SQLite one of them is aborted with a lock
+	// error, and the state of the two events can interleave.
+	unlock, err := s.sessionLocks.lock(ctx, sessionKey{
+		appName:   sess.AppName(),
+		userID:    sess.UserID(),
+		sessionID: sess.ID(),
+	})
+	if err != nil {
+		// The request was canceled while it waited for an append it shared
+		// the session with. It has touched nothing, so returning the
+		// context error is enough; the holder finishes on its own.
 		return err
 	}
+	defer unlock()
 
-	// Trim temp state before persisting
-	event = trimTempDeltaState(event)
+	// Trim temp state before persisting. The in-memory session below still
+	// receives the untrimmed event, which is what keeps temp: keys readable
+	// for the rest of the invocation, the way the in-memory and the Vertex
+	// AI session services do.
+	persisted := trimTempDeltaState(event)
 	// applyChanges and persist them
-	err := s.applyEvent(ctx, sess, event)
+	err = s.applyEvent(ctx, sess, persisted)
 	if err != nil {
 		return err
 	}
 
+	// Append to the in-memory session only after the commit, so that a
+	// failed append does not leave its event behind and the in-memory
+	// order matches the order the events were committed in.
+	if err := sess.appendEvent(event); err != nil {
+		return err
+	}
+
 	// update local session last update time
+	//
+	// The write is not guarded by the session's own lock, so it still
+	// races a reader of LastUpdateTime. #1244 tracks that race and is
+	// still open. Before this change the field was written twice, once
+	// inside the transaction and once after it, and both writes were
+	// unguarded; only the post-commit write is left, and the lock above
+	// is what keeps a concurrent append from seeing the window between
+	// the commit and this write, where the session holds an older update
+	// time than storage.
 	sess.updatedAt = event.Timestamp
 	return nil
 }
@@ -457,30 +493,8 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, event *session.Event) error {
 	// Wrap database operations in a single transaction.
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Fetch the session object from storage.
-		var storageSess storageSession
-		err := tx.Where(&storageSession{AppName: sess.AppName(), UserID: sess.UserID(), ID: sess.ID()}).
-			First(&storageSess).Error
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return fmt.Errorf("%w: %q, cannot apply event: %w", session.ErrNotFound, sess.ID(), err)
-			}
-			return fmt.Errorf("failed to get session: %w", err)
-		}
-
-		// Ensure the session object is not stale.
-		// We use UnixMicro() for microsecond-level precision, matching the Python code.
-		storageUpdateTime := storageSess.UpdateTime.UnixMicro()
-		sessionUpdateTime := sess.updatedAt.UnixMicro()
-		if storageUpdateTime > sessionUpdateTime {
-			return fmt.Errorf(
-				"stale session error: last update time from request (%s) is older than in database (%s)",
-				time.UnixMicro(sessionUpdateTime).Format(time.RFC3339Nano),
-				time.UnixMicro(storageUpdateTime).Format(time.RFC3339Nano),
-			)
-		}
-
 		appDelta, userDelta, sessionDelta := extractStateDeltas(event.Actions.StateDelta)
+		var err error
 
 		// App and user state are shared with other sessions and written back
 		// whole, so lock their rows before reading them when this event changes
@@ -488,10 +502,14 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 		// same row and the later write drops the earlier one's keys. This
 		// matches adk-python, which locks these rows FOR UPDATE.
 		//
-		// Lock and read the app row before touching the user row. Create
-		// writes app then user, and inserting the user row first would hold
-		// it while waiting for an app row lock that Create holds, so the two
-		// could deadlock.
+		// The order of the row locks is app, user, session, in this path and in
+		// Create. Create writes app then user and inserts the session row last,
+		// so a duplicate Create waits on the existing session row while holding
+		// the app and user rows. Taking the session row first here would invert
+		// that order, and a concurrent duplicate Create could then deadlock
+		// this append; MySQL aborts one of the two transactions, and the append
+		// loses its event when it is the victim. SQLite serializes writers, so
+		// it does not show the cycle at all.
 		appTx := tx
 		if len(appDelta) > 0 {
 			if appTx, err = lockStateRow(tx, &storageAppState{AppName: sess.AppName(), State: map[string]any{}, UpdateTime: event.Timestamp}); err != nil {
@@ -512,6 +530,39 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 		storageUser, err := fetchStorageUserState(userTx, sess.AppName(), sess.UserID())
 		if err != nil {
 			return err
+		}
+
+		// Fetch the session object from storage, locking the row for the
+		// rest of the transaction. The session row is written back by this
+		// transaction, so without the lock an append from another process
+		// can write it in between this read and the commit. This matches
+		// adk-python, which locks the session row FOR UPDATE. SQLite has
+		// no row-level locking and ignores the clause; it serializes
+		// writers anyway.
+		//
+		// The stale check runs under this lock, so no other process can move
+		// the session forward between the read and the commit.
+		var storageSess storageSession
+		err = tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).
+			Where(&storageSession{AppName: sess.AppName(), UserID: sess.UserID(), ID: sess.ID()}).
+			First(&storageSess).Error
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w: %q, cannot apply event: %w", session.ErrNotFound, sess.ID(), err)
+			}
+			return fmt.Errorf("failed to get session: %w", err)
+		}
+
+		// Ensure the session object is not stale.
+		// We use UnixMicro() for microsecond-level precision, matching the Python code.
+		storageUpdateTime := storageSess.UpdateTime.UnixMicro()
+		sessionUpdateTime := sess.updatedAt.UnixMicro()
+		if storageUpdateTime > sessionUpdateTime {
+			return fmt.Errorf(
+				"stale session error: last update time from request (%s) is older than in database (%s)",
+				time.UnixMicro(sessionUpdateTime).Format(time.RFC3339Nano),
+				time.UnixMicro(storageUpdateTime).Format(time.RFC3339Nano),
+			)
 		}
 
 		// Merge state deltas and update the storage objects.
@@ -551,8 +602,6 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 		if err := tx.Save(&storageSess).Error; err != nil {
 			return fmt.Errorf("failed to save session state: %w", err)
 		}
-
-		sess.updatedAt = storageSess.UpdateTime
 
 		return nil // Returning nil commits the transaction.
 	})

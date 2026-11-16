@@ -630,7 +630,7 @@ func TestDatabaseService_AppendEvent_LocksSharedStateRows(t *testing.T) {
 				t.Fatalf("Create: %v", err)
 			}
 
-			got := recordStateRowStatements(t, s)
+			got := recordStateRowStatements(t, s, "app_states", "user_states")
 
 			event := &session.Event{
 				ID:        "e1",
@@ -709,7 +709,7 @@ func TestDatabaseService_Create_LocksSharedStateRows(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := emptyService(t)
-			got := recordStateRowStatements(t, s)
+			got := recordStateRowStatements(t, s, "app_states", "user_states")
 
 			created, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", State: tc.state})
 			if err != nil {
@@ -761,16 +761,16 @@ func TestDatabaseService_Create_KeepsExistingSharedState(t *testing.T) {
 }
 
 // recordStateRowStatements records the inserts and selects s issues against
-// the app_states and user_states tables from now until the test ends, noting
-// the ON CONFLICT and FOR UPDATE clauses that make them safe to run
-// concurrently. Updates are not recorded.
-func recordStateRowStatements(t *testing.T, s *databaseService) *[]string {
+// the given tables from now until the test ends, noting the ON CONFLICT and
+// FOR UPDATE clauses that make them safe to run concurrently. Updates are not
+// recorded.
+func recordStateRowStatements(t *testing.T, s *databaseService, tables ...string) *[]string {
 	t.Helper()
 	var got []string
 	record := func(op string) func(*gorm.DB) {
 		return func(tx *gorm.DB) {
 			table := tx.Statement.Table
-			if table != "app_states" && table != "user_states" {
+			if !slices.Contains(tables, table) {
 				return
 			}
 			stmt := op + " " + table
