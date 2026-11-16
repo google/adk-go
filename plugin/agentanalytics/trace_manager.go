@@ -19,6 +19,7 @@ import (
 	"container/list"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -5368,7 +5369,11 @@ type toolCallIdentity struct {
 	actionsPtr  uintptr
 	actionsWeak weak.Pointer[session.EventActions]
 	hasWeakAct  bool
-	argsDigest  uint64
+	// pin keeps non-weak pointer targets (ctxPtr and actionsPtr) alive for the
+	// lifetime of this identity so GC cannot collect them and reuse their
+	// addresses while bare uintptrs remain comparable.
+	pin        any
+	argsDigest uint64
 	// argsTruncated reports that argsDigest covers only part of the
 	// arguments, so that equal digests do not prove equal arguments.
 	argsTruncated bool
@@ -5387,6 +5392,9 @@ func (id toolCallIdentity) hasAttemptIdentity() bool {
 }
 
 func (id toolCallIdentity) sameContext(other toolCallIdentity) bool {
+	if !id.hasAttemptIdentity() || !other.hasAttemptIdentity() {
+		return false
+	}
 	if id.ctxTyp != other.ctxTyp || id.ctxPtr != other.ctxPtr || id.hasWeakAct != other.hasWeakAct {
 		return false
 	}
@@ -5424,6 +5432,13 @@ func toolCallIdentityOf(ctx context.Context, args map[string]any) (toolCallIdent
 			id.actionsWeak = weak.Make(actions)
 		} else {
 			id.actionsPtr = actionsPtr
+			if id.ctxPtr != 0 || id.actionsPtr != 0 {
+				if pinnedCtx != nil {
+					id.pin = pinnedCtx
+				} else {
+					id.pin = ctx
+				}
+			}
 		}
 		if !d.empty() {
 			d.pinned = pinnedCtx
@@ -5470,6 +5485,11 @@ func safeCallActions(ctx context.Context) (actions *session.EventActions) {
 // Their fields are set when the context is made and never change. The fields
 // of any other type belong to its own code, which may guard them with
 // synchronization of its own, so unwrapToolContextActions reads none of them.
+//
+// commonContext owns its actions field directly (mirroring commonContext.Actions())
+// and returns no child fields: a commonContext whose own actions are nil (such
+// as one from agent.Promote or agent.NewContext) stops the search rather than
+// falling through to an ancestor's EventActions or StateDelta.
 func knownContextFields(typ reflect.Type) (fields []string, ok bool) {
 	switch typ.PkgPath() {
 	case agentPkgPath:
@@ -5477,7 +5497,7 @@ func knownContextFields(typ reflect.Type) (fields []string, ok bool) {
 		case "toolContextWrapper", "callbackContextWrapper":
 			return []string{"context"}, true
 		case "commonContext":
-			return []string{"Context", "invocationContext"}, true
+			return nil, true
 		}
 	case "context":
 		return []string{"Context", "c"}, true
@@ -5497,15 +5517,20 @@ func knownContextFields(typ reflect.Type) (fields []string, ok bool) {
 // ADK's contexts are inspected instead, without calling Actions() on
 // callbackContextWrapper (which logs a warning), and through a standard
 // library wrapper that hides Actions() (such as
-// context.WithoutCancel(toolCtx)). When the outermost ctx exposes Actions()
-// without crossing a callbackContextWrapper, the typed *session.EventActions
-// and StateDelta references are retained directly to avoid bare uintptr
-// identity retention; otherwise ctx is kept pinned while referenced. The
-// inspection follows only fields of the types that knownContextFields knows,
-// and stops at any other type, coupled to these unexported fields of
-// google.golang.org/adk/v2 v2.0.0 and the Go standard library:
+// context.WithoutCancel(toolCtx)). A commonContext whose own actions field is
+// nil stops the inspection rather than falling through to an ancestor's
+// EventActions or StateDelta, matching commonContext.Actions(). When the
+// outermost ctx exposes Actions() without crossing a callbackContextWrapper,
+// the typed *session.EventActions and StateDelta references are retained
+// directly to avoid bare uintptr identity retention; otherwise ctx is kept
+// pinned in pinnedCtx whenever an EventActions pointer is found (even when
+// StateDelta is nil) so the underlying EventActions cannot be collected while
+// referenced by pointer address. The inspection follows only fields of the
+// types that knownContextFields knows, and stops at any other type, coupled to
+// these unexported fields of google.golang.org/adk/v2 v2.0.0 and the Go
+// standard library:
 //   - agent.toolContextWrapper.context / agent.callbackContextWrapper.context
-//   - agent.commonContext.actions (*session.EventActions), .Context, .invocationContext
+//   - agent.commonContext.actions (*session.EventActions)
 //   - session.EventActions.StateDelta (exported)
 //   - the Context or c field of the context package's types, such as
 //     context.valueCtx.Context and context.withoutCancelCtx.c
@@ -5622,8 +5647,8 @@ func unwrapToolContextActions(ctx context.Context) (actionsPtr uintptr, actions 
 			}
 			if stateDeltaPtr != 0 {
 				delta = taskDeltaRef{ptr: stateDeltaPtr}
-				pinnedCtx = ctx
 			}
+			pinnedCtx = ctx
 			return actionsPtr, nil, delta, pinnedCtx
 		}
 		for _, field := range fields {
@@ -5635,13 +5660,13 @@ func unwrapToolContextActions(ctx context.Context) (actionsPtr uintptr, actions 
 	return 0, nil, taskDeltaRef{}, nil
 }
 
-// Bounds of boundedArgsDigest: each string or byte slice is hashed in full up
-// to maxDigestStringBytes, maps, slices, and arrays of JSON-shaped values are
-// hashed with up to maxDigestEntries entries and nesting depth maxDigestDepth,
-// and at most maxDigestNodes values and maxDigestBytes string bytes are hashed
-// in all. Pointers, structs, functions, channels, and unsafe pointers are
-// treated as opaque incomplete evidence (truncated == true) without
-// dereferencing pointers or reading struct fields.
+// Bounds of boundedArgsDigest: each string or byte slice/array is hashed in
+// full up to maxDigestStringBytes, maps, slices, and arrays of JSON-shaped
+// values are hashed with up to maxDigestEntries entries and nesting depth
+// maxDigestDepth, and at most maxDigestNodes values and maxDigestBytes string
+// bytes are hashed in all. Cycles, pointers, structs, functions, channels, and
+// unsafe pointers are treated as incomplete evidence (truncated == true)
+// without dereferencing pointers or reading struct fields.
 const (
 	maxDigestNodes       = 1024
 	maxDigestEntries     = 256
@@ -5650,7 +5675,7 @@ const (
 	maxDigestBytes       = 1 << 20
 )
 
-// argsDigestSeed seeds the string hashes of boundedArgsDigest. Digests are
+// argsDigestSeed seeds the maphash stream of boundedArgsDigest. Digests are
 // compared only within the process, so a per-process seed suffices.
 var argsDigestSeed = maphash.MakeSeed()
 
@@ -5659,50 +5684,92 @@ var argsDigestSeed = maphash.MakeSeed()
 // arguments get equal digests whatever the iteration order of their maps and
 // however their values share references, and a nil map gets the digest of an
 // empty one, as both pass no arguments. The cost stays within the bounds
-// above. A value past one of the bounds, or an opaque value such as a pointer
-// or struct, makes the digest truncated: a truncated digest never proves that
-// two sets of arguments are equal (see toolCallIdentity.sameArgs).
+// above. A value past one of the bounds, a cycle, or an opaque value such as a
+// pointer or struct, makes the digest truncated: a truncated digest never
+// proves that two sets of arguments are equal (see toolCallIdentity.sameArgs).
 func boundedArgsDigest(args map[string]any) (digest uint64, truncated bool) {
 	if args == nil {
 		args = map[string]any{}
 	}
 	d := argsDigester{nodes: maxDigestNodes, bytes: maxDigestBytes}
-	return d.hash(reflect.ValueOf(args)), d.truncated
+	d.hash(reflect.ValueOf(args))
+	return d.sum(), d.truncated
 }
 
-// argsDigester computes boundedArgsDigest. ancestors holds the addresses of
+type digestAncestor struct {
+	ptr    uintptr
+	length int
+	typ    reflect.Type
+}
+
+// argsDigester computes boundedArgsDigest. ancestors holds the identity of
 // the maps and slices that lead to the value being hashed, so that a reference
-// back to one of them hashes as a cycle while a value that is shared without a
-// cycle hashes as itself wherever it appears.
+// back to one of them hashes as a cycle (marking truncated) while a value that
+// is shared without a cycle hashes as itself wherever it appears.
 type argsDigester struct {
 	nodes, bytes int
 	depth        int
-	ancestors    []uintptr
+	ancestors    []digestAncestor
 	truncated    bool
+	h            maphash.Hash
+	seeded       bool
 }
 
 const (
-	digestTagNil    uint64 = 0x9e3779b97f4a7c15
-	digestTagBudget uint64 = 0xbf58476d1ce4e5b9
-	digestTagCycle  uint64 = 0x94d049bb133111eb
-	digestTagBool   uint64 = 0x517cc1b727220a95
-	digestTagInt    uint64 = 0x2545f4914f6cdd1d
-	digestTagUint   uint64 = 0x369dea0f31a53f85
-	digestTagFloat  uint64 = 0x735a2d977d76f2a3
-	digestTagStr    uint64 = 0x85ebca77c2b2ae63
-	digestTagSlice  uint64 = 0xc2b2ae3d27d4eb4f
-	digestTagMap    uint64 = 0x165667b19e3779f9
-	digestTagStruct uint64 = 0x27d4eb2f165667c5
-	digestTagPtr    uint64 = 0xd6e8feb86659fd93
+	digestTagNil        byte = 1
+	digestTagBudget     byte = 2
+	digestTagBool       byte = 3
+	digestTagInt        byte = 4
+	digestTagUint       byte = 5
+	digestTagFloat      byte = 6
+	digestTagComplex    byte = 7
+	digestTagStr        byte = 8
+	digestTagPtr        byte = 9
+	digestTagNilPtr     byte = 10
+	digestTagNilSlice   byte = 11
+	digestTagSlice      byte = 12
+	digestTagArray      byte = 13
+	digestTagBytes      byte = 14
+	digestTagNilMap     byte = 15
+	digestTagMap        byte = 16
+	digestTagMapEntry   byte = 17
+	digestTagStruct     byte = 18
+	digestTagOpaque     byte = 19
+	digestTagCycleSlice byte = 20
+	digestTagCycleMap   byte = 21
 )
 
-// enter reports whether ptr may be hashed below the current value, and if so
+func (d *argsDigester) ensureSeed() {
+	if !d.seeded {
+		d.h.SetSeed(argsDigestSeed)
+		d.seeded = true
+	}
+}
+
+func (d *argsDigester) sum() uint64 {
+	d.ensureSeed()
+	return d.h.Sum64()
+}
+
+func (d *argsDigester) writeTag(tag byte) {
+	d.ensureSeed()
+	_ = d.h.WriteByte(tag)
+}
+
+func (d *argsDigester) writeUint64(v uint64) {
+	d.ensureSeed()
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], v)
+	_, _ = d.h.Write(buf[:])
+}
+
+// enter reports whether anc may be hashed below the current value, and if so
 // records it as an ancestor until leave.
-func (d *argsDigester) enter(ptr uintptr) bool {
-	if slices.Contains(d.ancestors, ptr) {
+func (d *argsDigester) enter(anc digestAncestor) bool {
+	if slices.Contains(d.ancestors, anc) {
 		return false
 	}
-	d.ancestors = append(d.ancestors, ptr)
+	d.ancestors = append(d.ancestors, anc)
 	return true
 }
 
@@ -5712,42 +5779,185 @@ func (d *argsDigester) leave() {
 
 // hashString hashes s, or its first bytes when s is longer than the bounds
 // allow, together with its length.
-func (d *argsDigester) hashString(s string) uint64 {
+func (d *argsDigester) hashString(s string) {
 	n := d.takeBytes(len(s))
-	return splitMix64(maphash.String(argsDigestSeed, s[:n]) ^ splitMix64(uint64(len(s))^digestTagStr))
+	d.writeTag(digestTagStr)
+	d.writeUint64(uint64(len(s)))
+	if n > 0 {
+		_, _ = d.h.WriteString(s[:n])
+	}
 }
 
 // hashAdmittedString hashes a map key string whose byte length was already
 // verified and charged when sortedMapKeys admitted the enclosing map.
-func (d *argsDigester) hashAdmittedString(s string) uint64 {
-	return splitMix64(maphash.String(argsDigestSeed, s) ^ splitMix64(uint64(len(s))^digestTagStr))
+func (d *argsDigester) hashAdmittedString(s string) {
+	d.writeTag(digestTagStr)
+	d.writeUint64(uint64(len(s)))
+	if len(s) > 0 {
+		_, _ = d.h.WriteString(s)
+	}
 }
 
 // hashMapKey hashes an admitted map key k, charging one node without charging
 // string key bytes a second time.
-func (d *argsDigester) hashMapKey(k reflect.Value) uint64 {
+func (d *argsDigester) hashMapKey(k reflect.Value) {
 	if d.nodes <= 0 {
 		d.truncated = true
-		return digestTagBudget
+		d.writeTag(digestTagBudget)
+		return
 	}
 	for k.IsValid() && k.Kind() == reflect.Interface {
 		if k.IsNil() {
 			d.nodes--
-			return digestTagNil
+			d.writeTag(digestTagNil)
+			return
 		}
 		k = k.Elem()
 	}
 	if k.IsValid() && k.Kind() == reflect.String {
 		d.nodes--
-		return d.hashAdmittedString(k.String())
+		d.hashAdmittedString(k.String())
+		return
 	}
-	return d.hash(k)
+	d.hash(k)
 }
 
-// hashBytes is hashString for a byte slice; equal contents hash alike.
-func (d *argsDigester) hashBytes(b []byte) uint64 {
+// hashBytes hashes a byte slice under digestTagBytes; equal contents hash alike.
+func (d *argsDigester) hashBytes(b []byte) {
 	n := d.takeBytes(len(b))
-	return splitMix64(maphash.Bytes(argsDigestSeed, b[:n]) ^ splitMix64(uint64(len(b))^digestTagStr))
+	d.writeTag(digestTagBytes)
+	d.writeUint64(uint64(len(b)))
+	if n > 0 {
+		_, _ = d.h.Write(b[:n])
+	}
+}
+
+// hashByteArray reads at most takeBytes(v.Len()) bytes from a byte array v
+// without requiring v.CanAddr() so addressable and non-addressable [N]byte
+// values hash identically.
+func (d *argsDigester) hashByteArray(v reflect.Value, n int) {
+	take := d.takeBytes(n)
+	d.writeTag(digestTagBytes)
+	d.writeUint64(uint64(n))
+	var buf [256]byte
+	for i := 0; i < take; {
+		chunk := min(len(buf), take-i)
+		for j := range chunk {
+			buf[j] = byte(v.Index(i + j).Uint())
+		}
+		_, _ = d.h.Write(buf[:chunk])
+		i += chunk
+	}
+}
+
+// writeBoundedType writes a type tag and bounded Type().String() while charging
+// its length against d.bytes before hashing.
+func (d *argsDigester) writeBoundedType(tag byte, t reflect.Type) {
+	d.writeTag(tag)
+	if d.bytes <= 0 || typeStringExceeds(t, d.bytes, 0) {
+		d.bytes = 0
+		d.truncated = true
+		d.writeTag(digestTagBudget)
+		return
+	}
+	typStr := t.String()
+	n := d.takeBytes(len(typStr))
+	d.writeUint64(uint64(len(typStr)))
+	if n > 0 {
+		_, _ = d.h.WriteString(typStr[:n])
+	}
+}
+
+func typeStringExceeds(t reflect.Type, budget, depth int) bool {
+	if budget <= 0 || depth > 16 {
+		return true
+	}
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Chan {
+		if t.Name() != "" {
+			return false
+		}
+		depth++
+		if depth > 16 {
+			return true
+		}
+		t = t.Elem()
+	}
+	if t.Name() != "" {
+		return false
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		return t.NumField() > 64
+	case reflect.Func:
+		return t.NumIn()+t.NumOut() > 64
+	default:
+		return false
+	}
+}
+
+// isSupportedMapKeyType reports whether sortedMapKeys can accept keys of type t
+// without calling v.MapKeys() to copy unsupported inline keys such as arrays or
+// structs.
+func isSupportedMapKeyType(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Interface, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.String:
+		return true
+	default:
+		return false
+	}
+}
+
+// typeDigestCost inspects t without copying any value and reports whether
+// hashing a single value of type t would exceed the remaining digest budgets
+// (or require copying an oversized opaque array/struct), together with the
+// minimum node and byte counts hashing t consumes.
+func typeDigestCost(t reflect.Type, remNodes, remBytes, depth int) (exceeds bool, minNodes, minBytes int) {
+	switch t.Kind() {
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
+		return remNodes < 1, 1, 0
+	case reflect.Array:
+		if remNodes < 1 {
+			return true, 1, 0
+		}
+		n := t.Len()
+		if t.Elem().Kind() == reflect.Uint8 {
+			if n > min(maxDigestStringBytes, max(remBytes, 0)) {
+				return true, 1, n
+			}
+			return false, 1, n
+		}
+		if depth >= maxDigestDepth || n > maxDigestEntries {
+			return true, 1, 0
+		}
+		if n == 0 {
+			return false, 1, 0
+		}
+		elemExceeds, elemNodes, elemBytes := typeDigestCost(t.Elem(), remNodes-1, remBytes, depth+1)
+		if elemExceeds {
+			return true, 1, 0
+		}
+		if elemNodes > 0 && n > (remNodes-1)/elemNodes {
+			return true, 1, 0
+		}
+		if elemBytes > 0 && n > max(remBytes, 0)/elemBytes {
+			return true, 1, 0
+		}
+		return false, 1 + n*elemNodes, n * elemBytes
+	case reflect.Struct:
+		// Structs are opaque (always truncated), and copying a large struct
+		// out of a map or array only to read its type name allocates unboundedly.
+		if t.Size() > uintptr(max(remBytes, 0)) || t.Size() > maxDigestStringBytes {
+			return true, 1, 0
+		}
+		return false, 1, 0
+	default:
+		return remNodes < 1, 1, 0
+	}
 }
 
 // takeBytes returns how many of n string bytes the bounds let the digest
@@ -5761,65 +5971,79 @@ func (d *argsDigester) takeBytes(n int) int {
 	return take
 }
 
-func (d *argsDigester) hash(v reflect.Value) uint64 {
+func (d *argsDigester) hash(v reflect.Value) {
 	if d.nodes <= 0 {
 		d.truncated = true
-		return digestTagBudget
+		d.writeTag(digestTagBudget)
+		return
 	}
 	d.nodes--
 	for v.IsValid() && v.Kind() == reflect.Interface {
 		if v.IsNil() {
-			return digestTagNil
+			d.writeTag(digestTagNil)
+			return
 		}
 		v = v.Elem()
 	}
 	if !v.IsValid() {
-		return digestTagNil
+		d.writeTag(digestTagNil)
+		return
 	}
 	switch v.Kind() {
 	case reflect.Bool:
+		d.writeTag(digestTagBool)
 		if v.Bool() {
-			return digestTagBool ^ 1
+			_ = d.h.WriteByte(1)
+		} else {
+			_ = d.h.WriteByte(0)
 		}
-		return digestTagBool ^ 2
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return splitMix64(uint64(v.Int()) ^ digestTagInt)
+		d.writeTag(digestTagInt)
+		d.writeUint64(uint64(v.Int()))
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return splitMix64(v.Uint() ^ digestTagUint)
+		d.writeTag(digestTagUint)
+		d.writeUint64(v.Uint())
 	case reflect.Float32, reflect.Float64:
-		return splitMix64(floatBits(v.Float()) ^ digestTagFloat)
+		d.writeTag(digestTagFloat)
+		d.writeUint64(floatBits(v.Float()))
 	case reflect.Complex64, reflect.Complex128:
 		c := v.Complex()
-		return splitMix64(splitMix64(floatBits(real(c))^digestTagFloat) ^ floatBits(imag(c)))
+		d.writeTag(digestTagComplex)
+		d.writeUint64(floatBits(real(c)))
+		d.writeUint64(floatBits(imag(c)))
 	case reflect.String:
-		return d.hashString(v.String())
+		d.hashString(v.String())
 	case reflect.Pointer:
 		d.truncated = true
-		acc := splitMix64(maphash.String(argsDigestSeed, v.Type().String()) ^ digestTagPtr)
+		tag := digestTagPtr
 		if v.IsNil() {
-			return acc ^ digestTagNil
+			tag = digestTagNilPtr
 		}
-		return acc
-	case reflect.Slice, reflect.Array:
+		d.writeBoundedType(tag, v.Type())
+	case reflect.Slice:
+		if v.IsNil() {
+			d.writeTag(digestTagNilSlice)
+			return
+		}
 		n := v.Len()
-		if v.Kind() == reflect.Slice {
-			if v.IsNil() {
-				return digestTagNil ^ digestTagSlice
+		if n > 0 {
+			if !d.enter(digestAncestor{ptr: v.Pointer(), length: n, typ: v.Type()}) {
+				d.truncated = true
+				d.writeTag(digestTagCycleSlice)
+				return
 			}
-			if n > 0 {
-				if !d.enter(v.Pointer()) {
-					return digestTagCycle ^ digestTagSlice
-				}
-				defer d.leave()
-			}
+			defer d.leave()
 		}
-		acc := splitMix64(uint64(n) ^ digestTagSlice)
-		if v.Type().Elem().Kind() == reflect.Uint8 && (v.Kind() == reflect.Slice || v.CanAddr()) {
-			return splitMix64(acc ^ d.hashBytes(v.Bytes()))
+		d.writeTag(digestTagSlice)
+		d.writeUint64(uint64(n))
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			d.hashBytes(v.Bytes())
+			return
 		}
 		if d.depth >= maxDigestDepth {
 			d.truncated = true
-			return acc
+			d.writeTag(digestTagBudget)
+			return
 		}
 		d.depth++
 		if n > maxDigestEntries {
@@ -5827,46 +6051,106 @@ func (d *argsDigester) hash(v reflect.Value) uint64 {
 			n = maxDigestEntries
 		}
 		for i := range n {
-			acc = splitMix64(acc ^ d.hash(v.Index(i)))
+			d.hash(v.Index(i))
 		}
 		d.depth--
-		return acc
+	case reflect.Array:
+		n := v.Len()
+		d.writeTag(digestTagArray)
+		d.writeUint64(uint64(n))
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			d.hashByteArray(v, n)
+			return
+		}
+		if d.depth >= maxDigestDepth {
+			d.truncated = true
+			d.writeTag(digestTagBudget)
+			return
+		}
+		if n > 0 {
+			if exceeds, _, _ := typeDigestCost(v.Type().Elem(), d.nodes, d.bytes, d.depth+1); exceeds {
+				d.truncated = true
+				d.writeTag(digestTagBudget)
+				return
+			}
+		}
+		d.depth++
+		if n > maxDigestEntries {
+			d.truncated = true
+			n = maxDigestEntries
+		}
+		for i := range n {
+			d.hash(v.Index(i))
+		}
+		d.depth--
 	case reflect.Map:
 		if v.IsNil() {
-			return digestTagNil ^ digestTagMap
+			d.writeTag(digestTagNilMap)
+			return
 		}
 		n := v.Len()
-		acc := splitMix64(uint64(n) ^ digestTagMap)
+		d.writeTag(digestTagMap)
+		d.writeUint64(uint64(n))
+		if n == 0 {
+			return
+		}
 		if n > maxDigestEntries || d.depth >= maxDigestDepth {
 			d.truncated = true
-			return acc
+			d.writeTag(digestTagBudget)
+			return
 		}
-		if !d.enter(v.Pointer()) {
-			return digestTagCycle ^ digestTagMap
+		if !d.enter(digestAncestor{ptr: v.Pointer(), length: -1, typ: v.Type()}) {
+			d.truncated = true
+			d.writeTag(digestTagCycleMap)
+			return
 		}
 		defer d.leave()
+		if !isSupportedMapKeyType(v.Type().Key()) {
+			d.truncated = true
+			d.writeTag(digestTagBudget)
+			return
+		}
+		elemType := v.Type().Elem()
+		if elemType.Kind() == reflect.Array || elemType.Kind() == reflect.Struct {
+			if elemExceeds, elemNodes, elemBytes := typeDigestCost(elemType, d.nodes, d.bytes, d.depth+1); elemExceeds ||
+				n > d.nodes/(1+elemNodes) ||
+				(elemBytes > 0 && n > max(d.bytes, 0)/elemBytes) {
+				d.truncated = true
+				d.writeTag(digestTagBudget)
+				return
+			}
+		}
 		keys, keyBytes, ok := sortedMapKeys(v, d.bytes)
 		if !ok {
 			d.truncated = true
-			return acc
+			d.writeTag(digestTagBudget)
+			return
 		}
 		// Charge the admitted map's total string key bytes immediately so
 		// nested maps hashed under earlier keys cannot reuse outer key budget.
 		d.bytes -= keyBytes
+		if elemType.Kind() == reflect.Array || elemType.Kind() == reflect.Struct {
+			if elemExceeds, _, elemBytes := typeDigestCost(elemType, d.nodes, d.bytes, d.depth+1); elemExceeds ||
+				(elemBytes > 0 && n > max(d.bytes, 0)/elemBytes) {
+				d.truncated = true
+				d.writeTag(digestTagBudget)
+				return
+			}
+		}
 		d.depth++
 		for _, k := range keys {
-			kh := d.hashMapKey(k)
-			acc = splitMix64(acc ^ splitMix64(kh^digestTagMap) ^ d.hash(v.MapIndex(k)))
+			d.writeTag(digestTagMapEntry)
+			d.hashMapKey(k)
+			d.hash(v.MapIndex(k))
 		}
 		d.depth--
-		return acc
 	case reflect.Struct:
 		d.truncated = true
-		return splitMix64(maphash.String(argsDigestSeed, v.Type().String()) ^ digestTagStruct)
+		d.writeBoundedType(digestTagStruct, v.Type())
 	default:
 		// Functions, channels and unsafe pointers are opaque incomplete evidence.
 		d.truncated = true
-		return splitMix64(maphash.String(argsDigestSeed, v.Type().String()))
+		d.writeBoundedType(digestTagOpaque, v.Type())
 	}
 }
 
@@ -5910,9 +6194,6 @@ func sortedMapKeys(v reflect.Value, maxKeyBytes int) (keys []reflect.Value, keyB
 			k = k.Elem()
 		}
 		sk := sortKey{kind: k.Kind()}
-		if k.IsValid() {
-			sk.typ = k.Type().String()
-		}
 		switch k.Kind() {
 		case reflect.Interface:
 			// A nil interface key.
@@ -5938,6 +6219,9 @@ func sortedMapKeys(v reflect.Value, maxKeyBytes int) (keys []reflect.Value, keyB
 			keyBytes += len(sk.s)
 		default:
 			return nil, 0, false
+		}
+		if k.IsValid() {
+			sk.typ = k.Type().String()
 		}
 		sks[idx] = sk
 	}
@@ -5965,11 +6249,4 @@ func sortedMapKeys(v reflect.Value, maxKeyBytes int) (keys []reflect.Value, keyB
 		sorted[idx] = keys[o]
 	}
 	return sorted, keyBytes, true
-}
-
-func splitMix64(x uint64) uint64 {
-	x += 0x9e3779b97f4a7c15
-	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
-	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
-	return x ^ (x >> 31)
 }

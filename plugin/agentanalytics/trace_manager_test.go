@@ -22518,22 +22518,39 @@ func TestBoundedArgsDigest(t *testing.T) {
 		}
 	})
 
-	t.Run("cyclic maps are deterministic and distinct", func(t *testing.T) {
+	t.Run("cyclic maps are truncated and deterministic", func(t *testing.T) {
 		cyclic1 := map[string]any{"k": 1}
 		cyclic1["self"] = cyclic1
 		cyclic2 := map[string]any{"k": 2}
 		cyclic2["self"] = cyclic2
-		d1a, truncated := digest(cyclic1)
+		d1a, truncated1 := digest(cyclic1)
 		d1b, _ := digest(cyclic1)
-		d2, _ := digest(cyclic2)
-		if truncated {
-			t.Error("cyclic map digest is truncated, want full")
+		d2, truncated2 := digest(cyclic2)
+		if !truncated1 || !truncated2 {
+			t.Errorf("cyclic map digest truncated = (%v, %v), want (true, true)", truncated1, truncated2)
 		}
 		if d1a != d1b {
 			t.Errorf("cyclic map digest not deterministic: %d != %d", d1a, d1b)
 		}
 		if d1a == d2 {
 			t.Errorf("distinct cyclic maps produced identical digest %d", d1a)
+		}
+
+		// Two cyclic maps pointing to different ancestors must both be marked
+		// truncated so they never compare equal via sameArgs.
+		a1 := map[string]any{}
+		b1 := map[string]any{"inner": a1}
+		a1["back"] = a1
+		a2 := map[string]any{}
+		b2 := map[string]any{"inner": a2}
+		a2["back"] = b2
+		id1, _ := toolCallIdentityOf(context.Background(), b1)
+		id2, _ := toolCallIdentityOf(context.Background(), b2)
+		if !id1.argsTruncated || !id2.argsTruncated {
+			t.Fatalf("cyclic ancestor maps truncated = (%v, %v), want (true, true)", id1.argsTruncated, id2.argsTruncated)
+		}
+		if id1.sameArgs(id2) || id1.sameArgs(id1) {
+			t.Error("sameArgs() = true on cyclic maps, want false")
 		}
 	})
 
@@ -23147,11 +23164,35 @@ func TestToolCallIdentity(t *testing.T) {
 	if idZero.hasActions() || idZero.hasAttemptIdentity() {
 		t.Errorf("zero toolCallIdentity hasActions=%v hasAttemptIdentity=%v, want both false", idZero.hasActions(), idZero.hasAttemptIdentity())
 	}
+	if idZero.sameContext(idZero) {
+		t.Error("zero toolCallIdentity.sameContext(zero) = true, want false")
+	}
 
 	var nilCtx context.Context
 	nilID, nilDelta := toolCallIdentityOf(nilCtx, map[string]any{"a": 1})
+	nilID2, _ := toolCallIdentityOf(nilCtx, map[string]any{"a": 1})
 	if nilID.hasAttemptIdentity() || !nilDelta.empty() {
 		t.Errorf("toolCallIdentityOf(nil) = (%+v, %+v), want no attempt identity and empty delta", nilID, nilDelta)
+	}
+	if nilID.sameContext(nilID2) {
+		t.Error("sameContext(nilCtx, nilCtx) = true, want false")
+	}
+
+	// Same-type value contexts without EventActions have no attempt identity
+	// and must return false from sameContext.
+	type valueOnlyCtx struct {
+		context.Context
+		id int
+	}
+	vCtx1 := valueOnlyCtx{Context: context.Background(), id: 1}
+	vCtx2 := valueOnlyCtx{Context: context.Background(), id: 2}
+	vID1, _ := toolCallIdentityOf(vCtx1, nil)
+	vID2, _ := toolCallIdentityOf(vCtx2, nil)
+	if vID1.hasAttemptIdentity() || vID2.hasAttemptIdentity() {
+		t.Fatalf("valueOnlyCtx hasAttemptIdentity = (%v, %v), want (false, false)", vID1.hasAttemptIdentity(), vID2.hasAttemptIdentity())
+	}
+	if vID1.sameContext(vID2) || vID1.sameContext(vID1) {
+		t.Error("sameContext returned true for value-type contexts without EventActions")
 	}
 
 	ic := unwrapTestInvocationCtx{Context: context.Background()}
@@ -23202,6 +23243,59 @@ func TestToolCallIdentity(t *testing.T) {
 	if weakID.sameContext(weakID) {
 		t.Error("sameContext returned true after weak EventActions was collected")
 	}
+
+	// Non-weak wrapped EventActions with nil/cleared StateDelta must remain
+	// pinned by toolCallIdentity and unwrapToolContextActions so GC cannot
+	// collect the EventActions and reuse its address.
+	pinnedID, weakClearedActs := func() (toolCallIdentity, weak.Pointer[session.EventActions]) {
+		acts := &session.EventActions{StateDelta: map[string]any{"temp": 1}}
+		tctx := agent.NewToolContext(ic, "call-cleared", acts, nil)
+		// Clear StateDelta after construction, as a tool clearing its delta.
+		acts.StateDelta = nil
+		wrapped := context.WithoutCancel(tctx)
+		ap, directActs, delta, pinned := unwrapToolContextActions(wrapped)
+		if ap == 0 || directActs != nil || !delta.empty() || pinned == nil {
+			t.Fatalf("unwrapToolContextActions(wrapped nil StateDelta) = (%#x, %p, %+v, %v), want non-zero ap, nil directActs, empty delta, non-nil pinned", ap, directActs, delta, pinned)
+		}
+		id, idDelta := toolCallIdentityOf(wrapped, nil)
+		if id.hasWeakAct || id.actionsPtr == 0 || id.pin == nil || !idDelta.empty() {
+			t.Fatalf("wrapped cleared-StateDelta identity = (%+v, %+v), want non-weak actionsPtr with pin and empty delta", id, idDelta)
+		}
+		return id, weak.Make(acts)
+	}()
+	for range 5 {
+		runtime.GC()
+	}
+	if weakClearedActs.Value() == nil {
+		t.Fatal("wrapped EventActions with nil StateDelta was collected while toolCallIdentity remained live")
+	}
+	if !pinnedID.sameContext(pinnedID) {
+		t.Error("pinned non-weak toolCallIdentity did not match itself")
+	}
+	runtime.KeepAlive(pinnedID)
+
+	// Pointer context without EventActions (such as context.WithValue)
+	// also pins its ctxPtr target while the identity is live.
+	ptrOnlyID, weakWrappedCtx := func() (toolCallIdentity, weak.Pointer[int]) {
+		sentinel := new(int)
+		type ptrKey struct{}
+		ctx := context.WithValue(context.Background(), ptrKey{}, sentinel)
+		id, _ := toolCallIdentityOf(ctx, nil)
+		if !id.hasAttemptIdentity() || id.ctxPtr == 0 || id.pin == nil {
+			t.Fatalf("pointer-only context identity = %+v, want ctxPtr != 0 and pin != nil", id)
+		}
+		return id, weak.Make(sentinel)
+	}()
+	for range 5 {
+		runtime.GC()
+	}
+	if weakWrappedCtx.Value() == nil {
+		t.Fatal("pointer-only context target was collected while toolCallIdentity remained live")
+	}
+	if !ptrOnlyID.sameContext(ptrOnlyID) {
+		t.Error("pinned pointer-only toolCallIdentity did not match itself")
+	}
+	runtime.KeepAlive(ptrOnlyID)
 }
 
 func TestTraceManager_UnwrapContext_EdgeCases(t *testing.T) {
@@ -23236,6 +23330,34 @@ func TestTraceManager_UnwrapContext_EdgeCases(t *testing.T) {
 	if ap2, acts2, delta2, pinned2 := unwrapToolContextActions(tooDeep); ap2 != 0 || acts2 != nil || !delta2.empty() || pinned2 != nil {
 		t.Errorf("over-64-step unwrap = (%#x, %p, %+v, %v), want zeros", ap2, acts2, delta2, pinned2)
 	}
+
+	// A commonContext with nil EventActions (agent.Promote, agent.NewContext)
+	// owns no actions of its own and stops rather than falling through to an
+	// enclosing toolContext's EventActions or StateDelta, matching commonContext.Actions().
+	toolCtx := agent.NewToolContext(ic, "c-parent", acts, nil)
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{name: "Promote(toolCtx)", ctx: agent.Promote(toolCtx)},
+		{name: "NewContext(toolCtx)", ctx: agent.NewContext(toolCtx)},
+		{name: "WithoutCancel(Promote(toolCtx))", ctx: context.WithoutCancel(agent.Promote(toolCtx))},
+	} {
+		if ap, gotActs, delta, pinned := unwrapToolContextActions(tc.ctx); ap != 0 || gotActs != nil || !delta.empty() || pinned != nil {
+			t.Errorf("%s unwrap = (%#x, %p, %+v, %v), want zeros (no ancestor fallthrough)", tc.name, ap, gotActs, delta, pinned)
+		}
+		if d := toolContextTaskDeltaRef(tc.ctx, "c-child"); !d.empty() {
+			t.Errorf("%s toolContextTaskDeltaRef = %+v, want empty", tc.name, d)
+		}
+	}
+
+	// Contrast with WithAgentTimeout on toolCtx, which copies the commonContext
+	// and preserves its non-nil actions.
+	timedToolCtx, cancelTimed := toolCtx.WithAgentTimeout(time.Minute)
+	defer cancelTimed()
+	if ap, gotActs, delta, pinned := unwrapToolContextActions(timedToolCtx); ap == 0 || gotActs != acts || delta.empty() || pinned != nil {
+		t.Errorf("WithAgentTimeout(toolCtx) unwrap = (%#x, %p, %+v, %v), want parent acts and direct StateDelta", ap, gotActs, delta, pinned)
+	}
 }
 
 func TestBoundedArgsDigest_AdditionalTypesAndEdges(t *testing.T) {
@@ -23267,13 +23389,19 @@ func TestBoundedArgsDigest_AdditionalTypesAndEdges(t *testing.T) {
 		"nilSlice": nilSlice,
 		"nilMap":   nilMap,
 		"byteArr":  byteArr,
-		"cycSlice": cyclicSlice,
 		"nilIFKey": map[any]any{nil: 1, "s": 2},
 	}
 	dScalars1, truncScalars := boundedArgsDigest(scalars)
 	dScalars2, _ := boundedArgsDigest(scalars)
 	if truncScalars || dScalars1 != dScalars2 {
 		t.Errorf("scalars digest = (%d,%v) vs (%d), want untruncated and deterministic", dScalars1, truncScalars, dScalars2)
+	}
+
+	// Cyclic slice marks truncated and stays deterministic.
+	dCycSlice1, truncCycSlice1 := boundedArgsDigest(map[string]any{"cycSlice": cyclicSlice})
+	dCycSlice2, truncCycSlice2 := boundedArgsDigest(map[string]any{"cycSlice": cyclicSlice})
+	if !truncCycSlice1 || !truncCycSlice2 || dCycSlice1 != dCycSlice2 {
+		t.Errorf("cyclic slice digest = (%d,%v) vs (%d,%v), want truncated and deterministic", dCycSlice1, truncCycSlice1, dCycSlice2, truncCycSlice2)
 	}
 
 	// Nil typed pointer and channel trigger opaque truncation.
@@ -23304,8 +23432,9 @@ func TestBoundedArgsDigest_AdditionalTypesAndEdges(t *testing.T) {
 	}
 
 	dNilKeyExhaust := argsDigester{nodes: 1, bytes: maxDigestBytes}
-	if got := dNilKeyExhaust.hashMapKey(reflect.ValueOf(map[any]any{nil: 1}).MapKeys()[0]); got != digestTagNil {
-		t.Errorf("hashMapKey(nil interface) = %#x, want %#x", got, digestTagNil)
+	dNilKeyExhaust.hashMapKey(reflect.ValueOf(map[any]any{nil: 1}).MapKeys()[0])
+	if dNilKeyExhaust.truncated || dNilKeyExhaust.nodes != 0 {
+		t.Errorf("hashMapKey(nil interface) truncated=%v nodes=%d, want false and 0", dNilKeyExhaust.truncated, dNilKeyExhaust.nodes)
 	}
 
 	// Two distinct named types with the same local Type().String() in different scopes.
@@ -23322,4 +23451,170 @@ func TestBoundedArgsDigest_AdditionalTypesAndEdges(t *testing.T) {
 	if _, trunc := boundedArgsDigest(map[string]any{"m": dupTypeMap}); !trunc {
 		t.Error("distinct key types sharing Type().String() should fall back to truncated")
 	}
+}
+
+func TestBoundedArgsDigest_ReviewRegressions(t *testing.T) {
+	t.Run("type_tags_never_collide_across_distinct_values", func(t *testing.T) {
+		distinct := []struct {
+			name string
+			args map[string]any
+		}{
+			{"float_former_xor_collision", map[string]any{"x": -2.8415206140052242e-68}},
+			{"empty_any_slice", map[string]any{"x": []any{}}},
+			{"empty_byte_slice", map[string]any{"x": []byte{}}},
+			{"empty_byte_array", map[string]any{"x": [0]byte{}}},
+			{"empty_int_array", map[string]any{"x": [0]int{}}},
+			{"empty_string", map[string]any{"x": ""}},
+			{"empty_map", map[string]any{"x": map[string]any{}}},
+			{"nil_value", map[string]any{"x": nil}},
+			{"nil_slice", map[string]any{"x": []any(nil)}},
+			{"nil_map", map[string]any{"x": map[string]any(nil)}},
+			{"bool_false", map[string]any{"x": false}},
+			{"bool_true", map[string]any{"x": true}},
+			{"int_zero", map[string]any{"x": 0}},
+			{"uint_zero", map[string]any{"x": uint64(0)}},
+			{"float_zero", map[string]any{"x": 0.0}},
+			{"complex_zero", map[string]any{"x": complex128(0)}},
+			{"string_abc", map[string]any{"x": "abc"}},
+			{"byte_slice_abc", map[string]any{"x": []byte("abc")}},
+			{"byte_array_abc", map[string]any{"x": [3]byte{'a', 'b', 'c'}}},
+			{"nested_slice_1_2", map[string]any{"x": []any{1, 2}}},
+			{"nested_slice_sub_1_2", map[string]any{"x": []any{[]any{1}, 2}}},
+		}
+		seen := make(map[uint64]string, len(distinct))
+		for _, tc := range distinct {
+			d, trunc := boundedArgsDigest(tc.args)
+			if trunc {
+				t.Fatalf("%s: truncated = true, want false", tc.name)
+			}
+			if prev, exists := seen[d]; exists {
+				t.Errorf("%s collided with %s on digest %#x", tc.name, prev, d)
+			}
+			seen[d] = tc.name
+		}
+	})
+
+	t.Run("addressable_and_non_addressable_byte_arrays_match_and_differ_from_byte_slice", func(t *testing.T) {
+		arr := [3]byte{'a', 'b', 'c'}
+		// Element of [][3]byte is addressable (CanAddr() == true), while the value
+		// inside map[string]any is non-addressable (CanAddr() == false).
+		addrSlice := [][3]byte{arr}
+		if !reflect.ValueOf(addrSlice).Index(0).CanAddr() {
+			t.Fatal("expected slice element [3]byte to be addressable")
+		}
+		dFromSlice, t1 := boundedArgsDigest(map[string]any{"b": addrSlice})
+		dFromWrappedSlice, t2 := boundedArgsDigest(map[string]any{"b": []any{arr}})
+		if t1 || t2 || dFromSlice != dFromWrappedSlice {
+			t.Errorf("[][3]byte vs []any{[3]byte}: (%#x,%v) vs (%#x,%v), want equal and untruncated", dFromSlice, t1, dFromWrappedSlice, t2)
+		}
+
+		// Directly compare digesting an addressable [3]byte vs non-addressable [3]byte.
+		dAddr := argsDigester{nodes: maxDigestNodes, bytes: maxDigestBytes}
+		dAddr.hash(reflect.ValueOf(&arr).Elem())
+		dNonAddr := argsDigester{nodes: maxDigestNodes, bytes: maxDigestBytes}
+		dNonAddr.hash(reflect.ValueOf(map[string]any{"b": arr}).MapIndex(reflect.ValueOf("b")).Elem())
+		if dAddr.truncated || dNonAddr.truncated || dAddr.sum() != dNonAddr.sum() {
+			t.Errorf("addressable vs non-addressable [3]byte: (%#x,%v) vs (%#x,%v), want equal and untruncated", dAddr.sum(), dAddr.truncated, dNonAddr.sum(), dNonAddr.truncated)
+		}
+
+		dByteSlice, ts := boundedArgsDigest(map[string]any{"b": []any{[]byte("abc")}})
+		if ts || dByteSlice == dFromWrappedSlice {
+			t.Errorf("[]byte hashed equal to [3]byte (%#x, trunc=%v), want distinct", dByteSlice, ts)
+		}
+	})
+
+	t.Run("zero_offset_subslice_hashes_identically_while_true_cycle_truncates", func(t *testing.T) {
+		parent := make([]any, 2)
+		parent[0] = "hello"
+		parent[1] = parent[:1] // non-cyclic subslice sharing backing array at offset 0
+
+		independent := []any{"hello", []any{"hello"}}
+
+		dParent, truncParent := boundedArgsDigest(map[string]any{"s": parent})
+		dIndep, truncIndep := boundedArgsDigest(map[string]any{"s": independent})
+		if truncParent || truncIndep {
+			t.Fatalf("non-cyclic zero-offset subslice truncated = (%v, %v), want (false, false)", truncParent, truncIndep)
+		}
+		if dParent != dIndep {
+			t.Errorf("zero-offset subslice digest = %#x, want %#x (equal to independent slice)", dParent, dIndep)
+		}
+
+		// A true self-referential slice cycle (same length and backing pointer)
+		// must still terminate and mark truncated.
+		selfCyc := make([]any, 2)
+		selfCyc[0] = "hello"
+		selfCyc[1] = selfCyc[:2]
+		if _, trunc := boundedArgsDigest(map[string]any{"s": selfCyc}); !trunc {
+			t.Error("true self-referential slice cycle truncated = false, want true")
+		}
+
+		// A cycle routed through a zero-offset subslice must also terminate and truncate.
+		subCyc := make([]any, 2)
+		subCyc[0] = subCyc[:1]
+		subCyc[1] = "tail"
+		if _, trunc := boundedArgsDigest(map[string]any{"s": subCyc}); !trunc {
+			t.Error("cycle through zero-offset subslice truncated = false, want true")
+		}
+	})
+
+	t.Run("oversized_inline_arrays_in_maps_truncate_without_large_allocations", func(t *testing.T) {
+		bigValMap := map[string][16777216]byte{"a": {}}
+		bigKeyMap := map[[16777216]byte]int{{}: 1}
+		nestedArrMap := map[string][2][16777216]byte{"a": {}}
+		type bigStruct struct {
+			Buf [16777216]byte
+		}
+		bigStructMap := map[string]bigStruct{"a": {Buf: [16777216]byte{1}}}
+		nestedInAny := map[string]any{"a": [2][16777216]byte{}}
+
+		for name, args := range map[string]map[string]any{
+			"big_value_map":   {"m": bigValMap},
+			"big_key_map":     {"m": bigKeyMap},
+			"nested_arr_map":  {"m": nestedArrMap},
+			"big_struct_map":  {"m": bigStructMap},
+			"nested_arr_once": nestedInAny,
+		} {
+			var mBefore, mAfter runtime.MemStats
+			runtime.ReadMemStats(&mBefore)
+			d, trunc := boundedArgsDigest(args)
+			runtime.ReadMemStats(&mAfter)
+			if !trunc {
+				t.Errorf("%s: truncated = false, want true", name)
+			}
+			if d2, _ := boundedArgsDigest(args); d2 != d {
+				t.Errorf("%s: truncated digest not deterministic: %d != %d", name, d, d2)
+			}
+			if allocDelta := mAfter.TotalAlloc - mBefore.TotalAlloc; allocDelta > 1<<20 {
+				t.Errorf("%s: TotalAlloc delta = %d bytes, want < 1 MiB (must not copy inline array/struct)", name, allocDelta)
+			}
+		}
+
+		// Empty map with oversized inline value type has zero entries and is not truncated.
+		if _, trunc := boundedArgsDigest(map[string]any{"m": map[string][16777216]byte{}}); trunc {
+			t.Error("empty map[string][16777216]byte truncated = true, want false")
+		}
+	})
+
+	t.Run("type_string_charges_byte_budget", func(t *testing.T) {
+		type longNamedStructForBudget struct {
+			X int
+		}
+		d := argsDigester{nodes: 100, bytes: 4}
+		d.hash(reflect.ValueOf(longNamedStructForBudget{X: 1}))
+		if !d.truncated || d.bytes != 0 {
+			t.Errorf("type string past byte budget: truncated=%v bytes=%d, want true and 0", d.truncated, d.bytes)
+		}
+
+		// Huge unnamed struct (> 64 fields) skips computing full Type().String() and zeroes budget.
+		fields := make([]reflect.StructField, 80)
+		for i := range fields {
+			fields[i] = reflect.StructField{Name: fmt.Sprintf("F%d", i), Type: reflect.TypeFor[int]()}
+		}
+		hugeStruct := reflect.New(reflect.StructOf(fields)).Elem()
+		dHuge := argsDigester{nodes: 100, bytes: maxDigestBytes}
+		dHuge.hash(hugeStruct)
+		if !dHuge.truncated || dHuge.bytes != 0 {
+			t.Errorf("huge unnamed struct: truncated=%v bytes=%d, want true and 0", dHuge.truncated, dHuge.bytes)
+		}
+	})
 }
