@@ -77,7 +77,7 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 		}
 	}
 	if sessionID.ID == "" {
-		if err := validateBodySessionID(createSessionRequest.SessionID); err != nil {
+		if err := validateBodySessionID(sessionID.AppName, sessionID.UserID, createSessionRequest.SessionID); err != nil {
 			http.Error(rw, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -119,29 +119,44 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 //
 // The routes also carry the ID in the request line, which net/http refuses with
 // 431 Request Header Fields Too Large once the request line and headers exceed
-// the server's MaxHeaderBytes. The ID's percent-encoded form is therefore capped
-// at maxBodySessionIDPathBytes. The body itself may be far larger, and one byte
-// of the ID can take three in the URL.
+// the server's MaxHeaderBytes. The percent-encoded app name, user ID and session
+// ID are therefore capped together at maxSessionPathParamBytes. The app name and
+// user ID count because every later URL carries them too. The body itself may be
+// far larger than the cap, and one byte of the ID can take three in the URL.
+// The cap counts the lengths url.PathEscape produces; a client that also escapes
+// the sub-delimiters url.PathEscape leaves alone, such as ":" or "@", builds a
+// longer URL and has only the headroom above the cap to absorb it.
 //
 // Neither error echoes the ID back: it is client data, and the body limit lets
 // it run to megabytes.
-func validateBodySessionID(id string) error {
+func validateBodySessionID(appName, userID, id string) error {
+	if id == "" {
+		return nil
+	}
 	if strings.Contains(id, "/") || id == "." || id == ".." {
 		return errors.New(`sessionId in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`)
 	}
-	if n := len(url.PathEscape(id)); n > maxBodySessionIDPathBytes {
-		return fmt.Errorf("sessionId in request body cannot be used in a URL path: it is %d bytes percent-encoded, more than the limit of %d", n, maxBodySessionIDPathBytes)
+	prefix := len(url.PathEscape(appName)) + len(url.PathEscape(userID))
+	// Percent-encoding never shortens a string, so an ID already over the cap
+	// unencoded is refused without building its encoded copy, which can be
+	// three times its size.
+	if prefix+len(id) > maxSessionPathParamBytes || prefix+len(url.PathEscape(id)) > maxSessionPathParamBytes {
+		return fmt.Errorf("sessionId in request body cannot be used in a URL path: percent-encoded together with the app name and user ID, it is longer than the limit of %d bytes", maxSessionPathParamBytes)
 	}
 	return nil
 }
 
-// maxBodySessionIDPathBytes is the longest percent-encoded sessionId the create
-// session endpoint accepts in its request body.
+// maxSessionPathParamBytes is the longest the percent-encoded app name, user ID
+// and body sessionId may be together when the create session endpoint takes the
+// session ID from its request body.
 //
 // It is half of http.DefaultMaxHeaderBytes, the limit the web launcher's server
-// runs with. That leaves the other half for the method, the app name, the user
-// ID and the request headers of a later GET, PATCH or DELETE on the session.
-const maxBodySessionIDPathBytes = http.DefaultMaxHeaderBytes / 2
+// runs with. The other half is deliberate headroom for the method, the fixed
+// parts of the path, any prefix the server is mounted under and the request
+// headers of a later GET, PATCH or DELETE on the session. An ID somewhat over
+// the cap would still fit a default server's request line, but is refused all
+// the same.
+const maxSessionPathParamBytes = http.DefaultMaxHeaderBytes / 2
 
 func (c *SessionsAPIController) createSession(ctx context.Context, sessionID models.SessionID, state map[string]any, events []*session.Event) (models.Session, error) {
 	session, err := c.service.Create(ctx, &session.CreateRequest{

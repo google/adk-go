@@ -145,7 +145,7 @@ func TestGetSession(t *testing.T) {
 			if tt.wantErr != nil {
 				respErr := strings.Trim(rr.Body.String(), "\n")
 				if tt.wantErr.Error() != respErr {
-					t.Errorf("CreateSession() mismatch (-want +got):\n%v, %v", tt.wantErr.Error(), respErr)
+					t.Errorf("CreateSession() mismatch (-want +got):\n%v, %.200s", tt.wantErr.Error(), respErr)
 				}
 				return
 			}
@@ -161,9 +161,27 @@ func TestGetSession(t *testing.T) {
 	}
 }
 
-// maxBodySessionIDPathBytes mirrors the limit in sessions.go: the longest
-// percent-encoded sessionId the create endpoint accepts in its request body.
-const maxBodySessionIDPathBytes = http.DefaultMaxHeaderBytes / 2
+// maxSessionPathParamBytes mirrors the limit in sessions.go: the longest the
+// percent-encoded app name, user ID and body sessionId may be together.
+const maxSessionPathParamBytes = http.DefaultMaxHeaderBytes / 2
+
+// errTooLong is the 400 for a body sessionId that, percent-encoded with the
+// app name and user ID, is longer than maxSessionPathParamBytes.
+var errTooLong = fmt.Errorf("sessionId in request body cannot be used in a URL path: percent-encoded together with the app name and user ID, it is longer than the limit of %d bytes", maxSessionPathParamBytes)
+
+// testAppUserPathBytes is the percent-encoded length of "testApp" and
+// "testUser", which count against maxSessionPathParamBytes.
+const testAppUserPathBytes = len("testApp") + len("testUser")
+
+// escapedApp and escapedUser take three and six bytes per character once
+// percent-encoded, so cases using them fail if either is counted unencoded.
+// escapedAppUserPathBytes is their percent-encoded length together.
+var (
+	escapedApp  = strings.Repeat(" ", 1000)
+	escapedUser = strings.Repeat("ü", 1000)
+)
+
+const escapedAppUserPathBytes = 1000*3 + 1000*6
 
 // errNotAddressable is the 400 for a body sessionId that contains "/" or is "."
 // or "..". It names no ID, so the client's value is never echoed back.
@@ -362,7 +380,7 @@ func TestCreateSession(t *testing.T) {
 				UserID:  "testUser",
 			},
 			createRequestObj: models.CreateSessionRequest{
-				SessionID: "x/" + strings.Repeat("a", maxBodySessionIDPathBytes),
+				SessionID: "x/" + strings.Repeat("a", maxSessionPathParamBytes),
 			},
 			wantStatus: http.StatusBadRequest,
 			wantErr:    errNotAddressable,
@@ -375,16 +393,31 @@ func TestCreateSession(t *testing.T) {
 				UserID:  "testUser",
 			},
 			createRequestObj: models.CreateSessionRequest{
-				SessionID: strings.Repeat("a", maxBodySessionIDPathBytes),
+				SessionID: strings.Repeat("a", maxSessionPathParamBytes-testAppUserPathBytes),
 			},
 			wantSession: models.Session{
-				ID:      strings.Repeat("a", maxBodySessionIDPathBytes),
+				ID:      strings.Repeat("a", maxSessionPathParamBytes-testAppUserPathBytes),
 				AppName: "testApp",
 				UserID:  "testUser",
 				State:   map[string]any{},
 				Events:  []models.Event{},
 			},
 			wantStatus: http.StatusOK,
+		},
+		{
+			// The ID alone is under the limit; the app name and user ID push
+			// the URL of a later GET, PATCH or DELETE over it.
+			name:           "request body session id one byte over the length limit with the app name and user id",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: strings.Repeat("a", maxSessionPathParamBytes-testAppUserPathBytes+1),
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    errTooLong,
 		},
 		{
 			// Each "ü" is two bytes in the body and six once percent-encoded,
@@ -396,10 +429,63 @@ func TestCreateSession(t *testing.T) {
 				UserID:  "testUser",
 			},
 			createRequestObj: models.CreateSessionRequest{
-				SessionID: strings.Repeat("ü", maxBodySessionIDPathBytes/6+1),
+				SessionID: strings.Repeat("ü", (maxSessionPathParamBytes-testAppUserPathBytes)/6+1),
 			},
 			wantStatus: http.StatusBadRequest,
-			wantErr:    fmt.Errorf("sessionId in request body cannot be used in a URL path: it is %d bytes percent-encoded, more than the limit of %d", (maxBodySessionIDPathBytes/6+1)*6, maxBodySessionIDPathBytes),
+			wantErr:    errTooLong,
+		},
+		{
+			name:           "request body session id at the length limit with a percent-encoded app name and user id",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: escapedApp,
+				UserID:  escapedUser,
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: strings.Repeat("a", maxSessionPathParamBytes-escapedAppUserPathBytes),
+			},
+			wantSession: models.Session{
+				ID:      strings.Repeat("a", maxSessionPathParamBytes-escapedAppUserPathBytes),
+				AppName: escapedApp,
+				UserID:  escapedUser,
+				State:   map[string]any{},
+				Events:  []models.Event{},
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			// Fails if the app name or the user ID is counted unencoded.
+			name:           "request body session id one byte over the length limit with a percent-encoded app name and user id",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: escapedApp,
+				UserID:  escapedUser,
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: strings.Repeat("a", maxSessionPathParamBytes-escapedAppUserPathBytes+1),
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    errTooLong,
+		},
+		{
+			// With no body sessionId there is no ID to address yet, so a user
+			// ID past the cap on its own still gets a generated ID, as before
+			// the body sessionId was read.
+			name:           "no request body session id with a user id past the length limit",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  strings.Repeat("u", maxSessionPathParamBytes+1),
+			},
+			createRequestObj: models.CreateSessionRequest{},
+			wantSession: models.Session{
+				ID:      "testID",
+				AppName: "testApp",
+				UserID:  strings.Repeat("u", maxSessionPathParamBytes+1),
+				State:   map[string]any{},
+				Events:  []models.Event{},
+			},
+			wantStatus: http.StatusOK,
 		},
 		{
 			name:           "user id is missing",
@@ -447,7 +533,7 @@ func TestCreateSession(t *testing.T) {
 			if tt.wantErr != nil {
 				respErr := strings.Trim(rr.Body.String(), "\n")
 				if tt.wantErr.Error() != respErr {
-					t.Errorf("CreateSession() mismatch (-want +got):\n%v, %v", tt.wantErr.Error(), respErr)
+					t.Errorf("CreateSession() mismatch (-want +got):\n%v, %.200s", tt.wantErr.Error(), respErr)
 				}
 				// A handler that created the session and only then wrote the
 				// error would otherwise pass.
