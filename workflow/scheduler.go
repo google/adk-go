@@ -795,6 +795,14 @@ func (s *scheduler) finalize() error {
 		slices.Sort(producers)
 		return fmt.Errorf("%w: %s", ErrMultipleTerminalOutputs, strings.Join(producers, ", "))
 	}
+	// The workflow's output schema (WithOutputSchema) applies to its
+	// single terminal output. The conformed value is not emitted, as
+	// adk-python's _finalize emits none.
+	if len(producers) == 1 && s.graph.outputSchema != nil {
+		if _, err := strictValidateOutput(s.state.Nodes[producers[0]].Output, s.graph.outputSchema); err != nil {
+			return outputValidationError(s.workflowName, err)
+		}
+	}
 	return nil
 }
 

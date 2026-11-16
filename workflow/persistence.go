@@ -175,6 +175,18 @@ func (s *nodeScanState) addInterrupt(id string) {
 	s.interrupts = append(s.interrupts, id)
 }
 
+// hasResumableScan reports whether any node's scan raised an interrupt
+// or failed, the scans buildRunState turns into node states. Without one
+// there is nothing to reconstruct.
+func hasResumableScan(scans map[string]*nodeScanState) bool {
+	for _, scan := range scans {
+		if len(scan.interrupts) > 0 || scan.failed {
+			return true
+		}
+	}
+	return false
+}
+
 // ReconstructRunState rebuilds the paused RunState by scanning session
 // history instead of loading a persisted blob, mirroring adk-python's
 // rehydration (workflow/utils/_rehydration_utils.py:
@@ -196,6 +208,13 @@ func (s *nodeScanState) addInterrupt(id string) {
 // run's invocation ID for the resume turn, so the pause and its reply
 // share it. Empty invocationID disables the filter (scan all history).
 // Mirrors adk-python _reconstruct_node_states' invocation_id gate.
+//
+// When the workflow has an input schema (see WithInputSchema), the seed
+// rebuilt from the invocation's first user message is validated as
+// RunNode validates its input, so a node that re-enters on Start's input
+// receives the conformed value; a failure is returned wrapping
+// ErrInputValidation. A history with nothing to resume returns
+// (nil, nil) without validating, so a fresh run is not rejected here.
 func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string) (*RunState, error) {
 	return w.reconstructRunState(sess, invocationID, nil, false)
 }
@@ -210,14 +229,21 @@ func (w *Workflow) reconstructRunState(sess session.Session, invocationID string
 	// Stage 1: scan history into a per-node view of the pause
 	// (interrupts raised, responses that resolved them, schemas).
 	scans := scanHistory(events, nodesByName, invocationID, w.name)
+	if !hasResumableScan(scans) {
+		return nil, nil
+	}
 
 	// Stage 2: gather the inputs inferNodeState needs to rebuild a
 	// re-entry node's input: every node's cached output, the set of
 	// nodes that ran, and the workflow's seed input.
 	nodeOutputs, completed := collectNodeOutputs(events, nodesByName, invocationID, w.name)
-	workflowInput := seedOverride
+	rawSeed := seedOverride
 	if !hasSeedOverride {
-		workflowInput = firstUserSeed(events, invocationID)
+		rawSeed = firstUserSeed(events, invocationID)
+	}
+	workflowInput, err := w.validateRootInput(rawSeed)
+	if err != nil {
+		return nil, err
 	}
 
 	// Stage 3: turn each interrupted node's scan into a NodeState.

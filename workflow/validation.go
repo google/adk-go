@@ -403,44 +403,64 @@ func validateFanIn(workflow *graph) error {
 	return nil
 }
 
-// defaultValidateInput validates data against schema. When data is a
-// string and the schema expects a non-string shape, it first tries to
-// parse the string as JSON. If parsing or validation fails, it falls
-// back to validating the raw string (useful for enum/literal schemas).
-// If both attempts fail, it returns the error from standard schema
-// validation.
+// defaultValidateInput validates data against schema and returns the
+// value the node receives. A nil schema returns data unchanged. Otherwise
+// the user message of a startSeed, a *genai.Content and a genai.Content
+// are validated as their payload, by the rules of validateContentOutput;
+// when those rules keep the user message, the startSeed is returned, so
+// each successor of Start still receives the form it takes (see
+// graph.startSeedFor). A nil data returns nil. A string against a
+// string schema is validated as it is. A string against any other schema
+// is parsed as JSON and conformed; when parsing or validation fails it is
+// tried as the raw string (for an enum or literal schema). Any other value
+// is converted to its JSON form and conformed (see conform), so defaults
+// are filled and optional nulls dropped; an absent value (JSON null)
+// satisfies an object schema as {}. The result is never data itself
+// unless data is a string. On failure it returns nil and the schema
+// error.
 func defaultValidateInput(data any, schema *jsonschema.Resolved) (any, error) {
 	if schema == nil {
 		return data, nil
 	}
+	if seed, ok := data.(startSeed); ok {
+		validated, err := validateContentOutput(seed.content, schema)
+		if err != nil || validated != any(seed.content) {
+			return validated, err
+		}
+		return seed, nil
+	}
+	if c, ok := asContent(data); ok {
+		return validateContentOutput(c, schema)
+	}
 	if data == nil {
 		return nil, nil
 	}
-	// Bypasses ConvertToWithJSONSchema for all string inputs since ConvertToWithJSONSchema
-	// expects the value to marshal into map[string]any for validation, which fails for string types.
 	if text, ok := data.(string); ok {
-		if !schemaIsString(schema) {
-			// Step 1: try JSON parse
-			var parsed any
-			if err := json.Unmarshal([]byte(text), &parsed); err == nil {
-				if err := schema.Validate(parsed); err == nil {
-					return parsed, nil
-				}
-			}
-			// Step 2: raw string may match an enum/literal schema
-			if err := schema.Validate(text); err == nil {
-				return text, nil
-			}
-			// Step 3: fall through to standard validation (which will return an error)
-		} else {
-			// If schema expects string, validate the raw string directly.
+		if schemaIsString(schema) {
 			if err := schema.Validate(text); err != nil {
 				return nil, err
 			}
 			return text, nil
 		}
+		var parsed any
+		if err := json.Unmarshal([]byte(text), &parsed); err == nil {
+			if form, err := conformed(parsed, schema); err == nil {
+				return form, nil
+			}
+		}
+		if err := schema.Validate(text); err == nil {
+			return text, nil
+		}
+		// Fall through to standard validation, which returns the error.
 	}
-	return typeutil.ConvertToWithJSONSchema[any, any](data, schema)
+	form, err := typeutil.ConvertToWithJSONSchema[any, any](data, nil)
+	if err != nil {
+		return nil, err
+	}
+	if form == nil && schemaExpectsObject(schema) {
+		form = map[string]any{}
+	}
+	return conformed(form, schema)
 }
 
 // schemaIsString reports whether the resolved schema expects a JSON
