@@ -343,7 +343,8 @@ func TestContentsRequestProcessor_IncludeContentsNone_IgnoresSiblingBranchPivot(
 
 // An event with nothing for the model to read, such as another agent's reply
 // that carried only grounding metadata or an error, cannot start the current
-// turn: the user input before it must stay in the request.
+// turn: the user input before it must stay in the request, and the turn still
+// starts at that input rather than at the first event of the session.
 func TestContentsRequestProcessor_IncludeContentsNone_SkipsEmptyPivot(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -366,6 +367,14 @@ func TestContentsRequestProcessor_IncludeContentsNone_SkipsEmptyPivot(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			events := []*session.Event{
+				{
+					Author:      "user",
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Find W", genai.RoleUser)},
+				},
+				{
+					Author:      "summarizer",
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("W is found.", genai.RoleModel)},
+				},
 				{
 					Author:      "user",
 					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Find X", genai.RoleUser)},

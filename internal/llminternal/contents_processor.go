@@ -844,8 +844,10 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		}
 		// An event that gives the model nothing to read is left out of the
 		// contents, so it cannot start the turn either: it would slice out
-		// the input before it (matching adk-python's
-		// _should_include_event_in_context gate here).
+		// the input before it. This matches adk-python's
+		// _should_include_event_in_context gate for an event with no content,
+		// role or parts. An event whose parts are all empty still starts the
+		// turn here, because isEmptyEvent does not look inside the parts.
 		if isEmptyEvent(event) {
 			continue
 		}
