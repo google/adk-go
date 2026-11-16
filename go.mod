@@ -121,5 +121,3 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.46.1 // indirect
 )
-
-require go.opentelemetry.io/otel/sdk/log v0.22.0
