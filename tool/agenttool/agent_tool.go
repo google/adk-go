@@ -20,6 +20,8 @@ package agenttool
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -91,6 +93,21 @@ func (t *agentTool) DisplayResultOnSkipSummarization() bool {
 	return true
 }
 
+// inputSchema returns the input schema of an LLM agent, or of the first
+// sub-agent of any other agent, and nil when there is none.
+func inputSchema(cur agent.Agent) *genai.Schema {
+	if cur == nil {
+		return nil
+	}
+	if llmAgent, ok := cur.(llminternal.Agent); ok && llmAgent != nil {
+		return llminternal.Reveal(llmAgent).InputSchema
+	}
+	if len(cur.SubAgents()) > 0 {
+		return inputSchema(cur.SubAgents()[0])
+	}
+	return nil
+}
+
 // Declaration returns the function declaration for the wrapped agent.
 // It generates a function declaration based on the agent's input schema.
 // If the agent does not have an input schema, a default schema with a
@@ -101,18 +118,7 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 		Description: t.Description(),
 	}
 
-	var agentInputSchema *genai.Schema
-	llmAgent, ok := t.agent.(llminternal.Agent)
-	if ok && llmAgent != nil {
-		// TODO - understand what build_function_declaration does in python and apply if needed.
-		internalLlmAgent, ok := t.agent.(llminternal.Agent)
-		if !ok {
-			return nil
-		}
-		agentInputSchema = llminternal.Reveal(internalLlmAgent).InputSchema
-	}
-
-	if agentInputSchema != nil {
+	if agentInputSchema := inputSchema(t.agent); agentInputSchema != nil {
 		decl.Parameters = agentInputSchema
 	} else {
 		decl.Parameters = &genai.Schema{
@@ -136,22 +142,11 @@ func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, er
 		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
 	}
 
-	if t.skipSummarization {
-		if actions := toolCtx.Actions(); actions != nil {
-			actions.SkipSummarization = true
-		}
-	}
-
-	var agentInputSchema *genai.Schema
+	// The same lookup as Declaration, so that a workflow agent takes the
+	// arguments of its first sub-agent's input schema.
+	agentInputSchema := inputSchema(t.agent)
 	llmAgent, ok := t.agent.(llminternal.Agent)
 	isLllmAgent := (ok && llmAgent != nil)
-	if isLllmAgent {
-		internalLlmAgent, ok := t.agent.(llminternal.Agent)
-		if !ok {
-			return nil, fmt.Errorf("internal error: failed to convert to llm agent")
-		}
-		agentInputSchema = llminternal.Reveal(internalLlmAgent).InputSchema
-	}
 
 	var content *genai.Content
 	var err error
@@ -175,6 +170,14 @@ func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, er
 			inputText = fmt.Sprint(input)
 		}
 		content = genai.NewContentFromText(inputText, genai.RoleUser)
+	}
+
+	// Set only once the input is valid, so an argument error goes back to the
+	// parent model instead of ending its turn.
+	if t.skipSummarization {
+		if actions := toolCtx.Actions(); actions != nil {
+			actions.SkipSummarization = true
+		}
 	}
 
 	sessionService := session.InMemoryService()
@@ -216,6 +219,10 @@ func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, er
 	})
 
 	var lastEvent *session.Event
+	// Long-running calls that are never answered before the run ends (e.g. a
+	// tool confirmation) leave the sub-agent paused. Its session is discarded,
+	// so the pause can never be resumed.
+	pendingIDs := map[string]bool{}
 	for event, err := range eventCh {
 		if err != nil {
 			return nil, fmt.Errorf("error during execution of sub-agent %s: %w", t.agent.Name(), err)
@@ -223,26 +230,61 @@ func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, er
 		if event.ErrorCode != "" || event.ErrorMessage != "" {
 			return nil, fmt.Errorf("error from sub-agent %q (code: %q, message: %q)", t.agent.Name(), event.ErrorCode, event.ErrorMessage)
 		}
+		// Partial chunks carry IDs the flow never acts on; a streamed call
+		// gets its final ID only on the aggregated event.
+		if !event.Partial {
+			for _, id := range event.LongRunningToolIDs {
+				pendingIDs[id] = true
+			}
+			for _, fr := range utils.FunctionResponses(event.LLMResponse.Content) {
+				delete(pendingIDs, fr.ID)
+			}
+		}
 		if event.LLMResponse.Content != nil {
 			lastEvent = event
 		}
 	}
 
+	if len(pendingIDs) > 0 {
+		// The parent model must see this error, so don't end its turn here,
+		// whatever set SkipSummarization on this call.
+		if actions := toolCtx.Actions(); actions != nil {
+			actions.SkipSummarization = false
+		}
+		return nil, fmt.Errorf("sub-agent %q stopped waiting on unresolved long-running tool calls %v, which AgentTool cannot resume", t.agent.Name(), slices.Sorted(maps.Keys(pendingIDs)))
+	}
+
 	if lastEvent == nil {
-		return map[string]any{}, nil
+		return map[string]any{"result": ""}, nil
 	}
 
 	lastContent := lastEvent.LLMResponse.Content
 	var textParts []string
 	for _, part := range lastContent.Parts {
-		if part != nil && part.Text != "" && !part.Thought {
-			textParts = append(textParts, part.Text)
+		if part == nil || part.Thought {
+			continue
+		}
+		var text string
+		switch {
+		case part.Text != "":
+			text = part.Text
+		case part.CodeExecutionResult != nil && part.CodeExecutionResult.Output != "":
+			text = strings.TrimRight(part.CodeExecutionResult.Output, "\n")
+		case part.ExecutableCode != nil:
+			text = part.ExecutableCode.Code
+		}
+		if text != "" {
+			textParts = append(textParts, text)
 		}
 	}
 	outputText := strings.Join(textParts, "\n")
 
+	// A reply without text is an empty result even when the agent has an
+	// output schema, because there is nothing to validate. adk-python
+	// validates the empty text against the schema when the reply has parts,
+	// and raises.
 	if outputText == "" {
-		return map[string]any{}, nil
+		return map[string]any{"result": ""}, nil
 	}
 	if isLllmAgent {
 		internalLlmAgent, ok := t.agent.(llminternal.Agent)
