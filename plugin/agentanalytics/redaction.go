@@ -1200,9 +1200,9 @@ func isPositivelyHarmlessProse(raw, trimmed string) bool {
 // hasDirectCredentialPattern reports whether s, as written or as one of the
 // decodings that hasSteppedCredentialMarker steps through, holds a credential
 // that the scanners or the legacy expressions redact, a quoted sensitive key,
-// or an incomplete credential construct, also once its backslash escapes,
-// escaped backticks among them, are decoded (see
-// hasIncompleteCredentialConstruct).
+// or an incomplete credential construct, also once its backslash escapes
+// (first structurally with all six control letters b, f, n, r, t, v preserved,
+// then with all six decoded) are decoded (see hasIncompleteCredentialConstruct).
 func hasDirectCredentialPattern(s string, allowRedactedProse bool) bool {
 	return scrubErrorTokens(s) != s ||
 		legacyScrubChanges(s) ||
@@ -1243,10 +1243,13 @@ func hasSteppedCredentialMarker(raw string, allowRedactedProse bool) bool {
 	cur := raw
 	exceeded := true
 	for range 2 * maxCanonicalUnescapePasses {
-		next := unescapeCredentialStep(cur)
+		next := unescapeProseStructuralStep(cur)
 		if next == cur {
-			exceeded = false
-			break
+			next = unescapeProseCredentialStep(cur)
+			if next == cur {
+				exceeded = false
+				break
+			}
 		}
 		if hasCredentialPatternsAtStep(next, allowRedactedProse) {
 			return true
@@ -1420,19 +1423,23 @@ func parsePercentStatusAt(s string, i int) (kind percentKind, repl byte, seqLen 
 	}
 }
 
-// hasIncompleteCredentialConstruct reports whether s (or its backslash-decoded
-// form, see unescapeProseBackslashes) contains an incomplete or
-// separator-obfuscated credential construct that the complete-token scrubbers
-// miss: an auth scheme (Bearer/Basic) followed by an unterminated quote or
-// backtick, a zero-width/format separator, a JSON whitespace escape, an
-// invalid/overlong percent byte, or a placeholder or quoted value with text
-// glued after it; or a sensitive key that the scanners do not read before its
-// ":" or "=" (see hasObfuscatedKeyDelimiter).
+// hasIncompleteCredentialConstruct reports whether s, its structural
+// backslash-decoded form (unescapeProseStructural, preserving \b, \f, \n, \r,
+// \t, and \v), or its full backslash-decoded form (unescapeProseBackslashes)
+// contains an incomplete or separator-obfuscated credential construct that the
+// complete-token scrubbers miss: an auth scheme (Bearer/Basic) followed by an
+// unterminated quote or backtick, a zero-width/format separator, a JSON
+// whitespace escape, an invalid/overlong percent byte, or a placeholder or
+// quoted value with text glued after it; or a sensitive key that the scanners
+// do not read before its ":" or "=" (see hasObfuscatedKeyDelimiter).
 func hasIncompleteCredentialConstruct(s string) bool {
 	if hasIncompleteCredentialConstructOnce(s) {
 		return true
 	}
 	if strings.Contains(s, `\`) {
+		if unescaped := unescapeProseStructural(s); unescaped != s && hasIncompleteCredentialConstructOnce(unescaped) {
+			return true
+		}
 		if unescaped := unescapeProseBackslashes(s); unescaped != s {
 			return hasIncompleteCredentialConstructOnce(unescaped)
 		}
@@ -1652,31 +1659,56 @@ func isGluedPlaceholderAt(s string, i int) bool {
 	return false
 }
 
+// hasTruncatedBasicBase64At reports whether a Basic base64 candidate starting
+// at s[start] is truncated, carries malformed padding or glued base64 bytes
+// after its padding, or exceeds maxBasicCredentialBytes (which
+// redactBasicCredentials redacts unconditionally unless malformed trailing
+// padding causes the scanner to skip it). Scanning the contiguous isBase64Byte
+// run stops at maxBasicCredentialBytes+1 bytes so over-budget candidates fail
+// closed in O(1) without decoding the body.
 func hasTruncatedBasicBase64At(s string, start int) bool {
-	end := start
-	for end < len(s) && isBase64BodyByte(s[end]) {
-		end++
+	limit := min(len(s), start+maxBasicCredentialBytes+1)
+	tokenEnd := start
+	for tokenEnd < limit && isBase64Byte(s[tokenEnd]) {
+		tokenEnd++
 	}
-	body := s[start:end]
-	if len(body) < 4 || len(body) > maxBasicCredentialBytes {
+	if tokenEnd-start > maxBasicCredentialBytes {
+		return true
+	}
+	if tokenEnd-start < 4 {
 		return false
 	}
-	padEnd := end
-	for pad := 0; pad < 2 && padEnd < len(s) && s[padEnd] == '='; pad++ {
-		padEnd++
+	token := s[start:tokenEnd]
+	if !strings.Contains(token, "=") {
+		if len(token)%4 == 0 {
+			return false
+		}
+		return isLikelyBasicCredentialBytes(decodeBase64BodyPrefix(token))
 	}
-	hasTrailingPadOrGlue := padEnd > end || (padEnd < len(s) && isBase64Byte(s[padEnd]))
-	if len(body)%4 == 0 && !hasTrailingPadOrGlue {
-		return false
+	for segStart := 0; segStart < len(token); {
+		rel := strings.IndexByte(token[segStart:], '=')
+		segEnd := len(token)
+		if rel >= 0 {
+			segEnd = segStart + rel
+		}
+		if segEnd-segStart >= 4 && isLikelyBasicCredentialBytes(decodeBase64BodyPrefix(token[segStart:segEnd])) {
+			return true
+		}
+		segStart = segEnd + 1
 	}
-	var decoded []byte
+	stripped := strings.ReplaceAll(token, "=", "")
+	return len(stripped) >= 4 && isLikelyBasicCredentialBytes(decodeBase64BodyPrefix(stripped))
+}
+
+func decodeBase64BodyPrefix(body string) []byte {
 	switch len(body) % 4 {
 	case 2, 3:
-		decoded, _ = base64.RawStdEncoding.DecodeString(body)
+		decoded, _ := base64.RawStdEncoding.DecodeString(body)
+		return decoded
 	default:
-		decoded, _ = base64.StdEncoding.DecodeString(body[:len(body)&^3])
+		decoded, _ := base64.StdEncoding.DecodeString(body[:len(body)&^3])
+		return decoded
 	}
-	return isLikelyBasicCredentialBytes(decoded)
 }
 
 func isLikelyBasicCredentialBytes(decoded []byte) bool {
@@ -1777,25 +1809,34 @@ func keyDelimiterRunStart(s string, floor, delimPos int) (runStart, firstQuote i
 	return runStart, firstQuote
 }
 
-// percentRunKinds reports whether s[from:to], a run that keyDelimiterRunStart
-// stepped over, holds a "%" that hides what it stands for (an invalid or
-// overlong escape, or one of a space, a format rune or a control byte), and
-// whether it holds a valid escape of any other byte, which stands for a byte
-// of a key.
-func percentRunKinds(s string, from, to int) (obfuscated, keyByte bool) {
-	for k := from; k < to; {
-		i := strings.IndexByte(s[k:to], '%')
-		if i < 0 {
-			break
-		}
-		k += i
-		kind, _, seqLen := parsePercentStatusAt(s, k)
-		if kind == percentValidOther {
-			keyByte = true
-		} else {
+// delimiterRunKinds reports whether s[from:to], a run that
+// keyDelimiterRunStart stepped over, holds an escaped control or whitespace
+// separator (\b, \t, \n, \r, \f or \v), a non-ASCII space or format rune, or a
+// "%" that hides what it stands for (an invalid or overlong escape, or one of
+// a space, a format rune or a control byte), and whether it holds a valid
+// percent escape of any other byte, which stands for a byte of a key.
+func delimiterRunKinds(s string, from, to int) (obfuscated, keyByte bool) {
+	for k := from; k < to; k++ {
+		switch c := s[k]; {
+		case c == '\\':
+			for k+1 < to && s[k+1] == '\\' {
+				k++
+			}
+			if k+1 < to && strings.IndexByte("btnrfv", s[k+1]) >= 0 {
+				obfuscated = true
+				k++
+			}
+		case c >= utf8.RuneSelf:
 			obfuscated = true
+		case c == '%':
+			kind, _, seqLen := parsePercentStatusAt(s, k)
+			if kind == percentValidOther {
+				keyByte = true
+			} else {
+				obfuscated = true
+			}
+			k += max(1, seqLen) - 1
 		}
-		k += max(1, seqLen)
 	}
 	return obfuscated, keyByte
 }
@@ -1807,12 +1848,73 @@ func isTempPrefixColonAt(s string, i int) bool {
 	return start >= 0 && strings.EqualFold(s[start:i+1], session.KeyPrefixTemp) && (start == 0 || !isWordByte(s[start-1]))
 }
 
+func isQuotedKeyTrimRune(r rune) bool {
+	return r <= 0x20 || r == 0x7f || isInlineSpaceRune(r) || unicode.In(r, unicode.Cf)
+}
+
+func trailingEscapedControlLen(s string) int {
+	if len(s) < 2 || strings.IndexByte("btnrfv", s[len(s)-1]) < 0 {
+		return 0
+	}
+	j := len(s) - 1
+	for j > 0 && s[j-1] == '\\' {
+		j--
+	}
+	if j == len(s)-1 {
+		return 0
+	}
+	return len(s) - j
+}
+
+func leadingEscapedControlLen(s string) int {
+	if len(s) < 2 || s[0] != '\\' {
+		return 0
+	}
+	j := 1
+	for j < len(s) && s[j] == '\\' {
+		j++
+	}
+	if j >= len(s) || strings.IndexByte("btnrfv", s[j]) < 0 {
+		return 0
+	}
+	return j + 1
+}
+
+func trimQuotedKeyEdges(s string) string {
+	for s != "" {
+		trimmed := strings.TrimFunc(s, isQuotedKeyTrimRune)
+		if n := trailingEscapedControlLen(trimmed); n > 0 {
+			s = trimmed[:len(trimmed)-n]
+			continue
+		}
+		return trimmed
+	}
+	return ""
+}
+
+func trimLeadingQuotedKeyControls(s string) string {
+	for s != "" {
+		trimmed := strings.TrimLeftFunc(s, isQuotedKeyTrimRune)
+		if n := leadingEscapedControlLen(trimmed); n > 0 {
+			s = trimmed[n:]
+			continue
+		}
+		return trimmed
+	}
+	return ""
+}
+
+func isQuotedKeyInnerSensitive(inner string) bool {
+	return isValidJSONPatternKey(inner) || isSensitiveKey(inner) || findTextKeyStart(inner, 0, len(inner)) >= 0
+}
+
 // closesQuotedKey reports whether the quote or backtick at s[c], which no
 // backslash escapes, closes a quoted key: the last one of its kind before it
 // that no backslash escapes opens a sensitive key, or a phrase or path that
-// ends in a text key once the padding inside the quotes is trimmed, as
-// "msg: password " or "db/password ". It reads the text between c and that
-// quote of its kind, which no other c of the same kind reads.
+// ends in a text key once the padding and escaped control/whitespace suffixes
+// inside the quotes are trimmed, as "msg: password ", "db/password ", or
+// "C:\v_page_token\v". It reads the text between c and that quote of its kind,
+// which no other c of its kind reads.
 func closesQuotedKey(s string, c int) bool {
 	if !isUnescapedQuote(s, 0, c) {
 		return false
@@ -1823,8 +1925,14 @@ func closesQuotedKey(s string, c int) bool {
 			return false
 		}
 		if isUnescapedQuote(s, 0, open) {
-			inner := trimInlineSpaces(s[open+1 : c])
-			return isValidJSONPatternKey(inner) || isSensitiveKey(inner) || findTextKeyStart(inner, 0, len(inner)) >= 0
+			inner := trimQuotedKeyEdges(s[open+1 : c])
+			if isQuotedKeyInnerSensitive(inner) {
+				return true
+			}
+			if stripped := trimLeadingQuotedKeyControls(inner); stripped != inner {
+				return isQuotedKeyInnerSensitive(stripped)
+			}
+			return false
 		}
 		end = open
 	}
@@ -1834,17 +1942,18 @@ func closesQuotedKey(s string, c int) bool {
 // ":" or "=" that the scanners do not read as one, because what stands
 // between the key and its delimiter (see keyDelimiterRunStart) holds a quote
 // or a backtick, as in `password`: v, password "=v, "msg:\npassword "=v or
-// "a, password ": v, or a "%" that hides what it stands for (see
-// percentRunKinds), as in password'%ZZ=v or "client_secret"'%ZZ:v; or a
-// temp: key whose body is nothing but such bytes, or nothing at all, as in
-// temp: =v, temp:=v or temp:%xy %ZZ=v. The key is a text key that ends where
-// that run starts (see findTextKeyStart), a quoted key that the first quote
-// of the run closes (see closesQuotedKey), or such a temp: key. A run of
-// quotes and spaces, or an empty temp: key, before a whole placeholder of an
-// earlier pass, which leaves no secret, is let through (see
-// startsWithRedactedValue). Each delimiter steps back no further than the
-// one before it and the quotes of one kind that close keys read disjoint
-// text (see closesQuotedKey), so the scan is linear in s.
+// "a, password ": v, an escaped control or whitespace separator (\b, \t, \n,
+// \r, \f or \v), a non-ASCII space or format rune, or a "%" that hides what it
+// stands for (see delimiterRunKinds), as in password\v=v, password'%ZZ=v or
+// "client_secret"'%ZZ:v; or a temp: key whose body is nothing but such bytes,
+// or nothing at all, as in temp: =v, temp:=v or temp:%xy %ZZ=v. The key is a
+// text key that ends where that run starts (see findTextKeyStart), a quoted key
+// that the first quote of the run closes (see closesQuotedKey), or such a
+// temp: key. A run of quotes and spaces, or an empty temp: key, before a whole
+// placeholder of an earlier pass, which leaves no secret, is let through (see
+// startsWithRedactedValue). Each delimiter steps back no further than the one
+// before it and the quotes of one kind that close keys read disjoint text (see
+// closesQuotedKey), so the scan is linear in s.
 func hasObfuscatedKeyDelimiter(s string) bool {
 	floor := 0
 	for pos := 0; pos < len(s); {
@@ -1861,13 +1970,13 @@ func hasObfuscatedKeyDelimiter(s string) bool {
 			// of the run stands for a byte of a key. Then findTextKeyStart
 			// reads the key up to the first byte of the run, as the %41 of
 			// temp:%41 %ZZ=v, and the rest of the run is its separator.
-			obfuscated, keyByte := percentRunKinds(s, floor, delimPos)
+			obfuscated, keyByte := delimiterRunKinds(s, floor, delimPos)
 			if !keyByte && (obfuscated || !startsWithRedactedValue(s[delimPos+1:])) {
 				return true
 			}
 			keyEnd++
 		}
-		if obfuscated, _ := percentRunKinds(s, keyEnd, delimPos); obfuscated || (firstQuote >= 0 && !startsWithRedactedValue(s[delimPos+1:])) {
+		if obfuscated, _ := delimiterRunKinds(s, keyEnd, delimPos); obfuscated || (firstQuote >= 0 && !startsWithRedactedValue(s[delimPos+1:])) {
 			if findTextKeyStart(s, 0, keyEnd) >= 0 || (firstQuote >= 0 && closesQuotedKey(s, firstQuote)) {
 				return true
 			}
@@ -2876,6 +2985,24 @@ func unescapeCredentialStep(s string) string {
 	return unescapeCredentialStepWith(s, canonicalizeCredentialMarker)
 }
 
+func unescapeProseStructuralStep(s string) string {
+	return unescapeCredentialStepWithBackslash(s, unescapeProseStructural)
+}
+
+func unescapeProseCredentialStep(s string) string {
+	return unescapeCredentialStepWithBackslash(s, unescapeProseBackslashes)
+}
+
+func unescapeCredentialStepWithBackslash(s string, unescapeFn func(string) string) string {
+	if strings.Contains(s, `\`) {
+		s = unescapeFn(s)
+	}
+	if strings.ContainsAny(s, "%xXuU") {
+		s = canonicalizeCredentialMarker(s)
+	}
+	return s
+}
+
 func unescapeCredentialStepWith(s string, canonFn func(string) string) string {
 	if strings.Contains(s, `\`) {
 		s = unescapeBackslashControls(s)
@@ -2946,26 +3073,84 @@ func hasBackslashEscapedCredentialFull(raw, scrubbed string, scrub, canonFn func
 	return unescapeCredentialStepWith(curRaw, canonFn) != curRaw
 }
 
+type backslashUnescapeMode uint8
+
+const (
+	// backslashControlsLegacy decodes main's standard backslash escapes
+	// (\b, \f, \n, \r, \t, \/, \", \'), collapsing \\+ runs while keeping \v
+	// and \` intact.
+	backslashControlsLegacy backslashUnescapeMode = iota
+	// backslashProseStructural collapses \\+ runs and decodes structural
+	// escapes (\/, \", \', \`), while keeping \<c> intact for all six control
+	// letters (b, f, n, r, t, v) so path prefixes like C:\token or C:\t_page_token
+	// are inspected before control-escape folding erases their leading letter.
+	backslashProseStructural
+	// backslashProseAll decodes all six backslash control letters (\b, \f, \n,
+	// \r, \t, \v) and structural escapes (\/, \", \', \`) while collapsing \\+.
+	backslashProseAll
+)
+
+func controlEscapeByte(c byte, mode backslashUnescapeMode) byte {
+	if mode == backslashProseStructural {
+		return 0
+	}
+	switch c {
+	case 'b':
+		return '\b'
+	case 'f':
+		return '\f'
+	case 'n':
+		return '\n'
+	case 'r':
+		return '\r'
+	case 't':
+		return '\t'
+	case 'v':
+		if mode == backslashProseAll {
+			return '\v'
+		}
+	}
+	return 0
+}
+
 // unescapeBackslashControls decodes the standard backslash escapes in s, as
 // main does. A run of backslashes, which each level of nested escaping
 // doubles, is decoded in one step as the escape its last backslash starts, so
 // that the depth of the nesting does not set the number of passes.
 func unescapeBackslashControls(s string) string {
-	return unescapeBackslashes(s, false)
+	return unescapeBackslashes(s, backslashControlsLegacy)
 }
 
-// unescapeProseBackslashes is unescapeBackslashControls that also decodes an
-// escaped backtick (\`), for the checks of isPositivelyHarmlessProse, which
-// read a backtick as a quote (see quoteSlot). The scrub and its legacy
-// backstop, which check whether main's escapes hide a credential, keep main's
-// decoding (see hasBackslashEscapedCredentialFull).
+// unescapeProseStructural collapses \\+ runs and decodes \/, \", \', and \`
+// while preserving \b, \f, \n, \r, \t, and \v so C:\{b,f,n,r,t,v}... path
+// prefixes before credential or {b,f,n,r,t,v}-prefixed sensitive keys (such as
+// token, temp:, Bearer, Basic, and t_page_token) are checked alongside \u/\x/%
+// canonicalization before control escapes fold to control bytes.
+func unescapeProseStructural(s string) string {
+	return unescapeBackslashes(s, backslashProseStructural)
+}
+
+// unescapeProseBackslashes decodes all six control escapes (\b, \f, \n, \r, \t,
+// \v) along with \/, \", \', and \` for the checks of isPositivelyHarmlessProse
+// and hasAnyCredentialMarker, which fold vertical tabs as whitespace and read
+// backticks as quotes (see foldUnicodeSpaces, keyDelimiterRunStart and
+// quoteSlot). The scrub and its legacy backstop, which check whether main's
+// escapes hide a credential, keep main's decoding (see
+// hasBackslashEscapedCredentialFull).
 func unescapeProseBackslashes(s string) string {
-	return unescapeBackslashes(s, true)
+	return unescapeBackslashes(s, backslashProseAll)
 }
 
-func unescapeBackslashes(s string, backtick bool) string {
+func unescapeBackslashes(s string, mode backslashUnescapeMode) string {
 	var b strings.Builder
-	b.Grow(len(s))
+	changed := false
+	markChanged := func(at int) {
+		if !changed {
+			b.Grow(len(s))
+			b.WriteString(s[:at])
+			changed = true
+		}
+	}
 	for i := 0; i < len(s); i++ {
 		if s[i] != '\\' {
 			// Copy the run of bytes up to the next backslash at once.
@@ -2973,7 +3158,9 @@ func unescapeBackslashes(s string, backtick bool) string {
 			if n < 0 {
 				n = len(s) - i
 			}
-			b.WriteString(s[i : i+n])
+			if changed && n > 0 {
+				b.WriteString(s[i : i+n])
+			}
 			i += n - 1
 			continue
 		}
@@ -2982,32 +3169,34 @@ func unescapeBackslashes(s string, backtick bool) string {
 			j++
 		}
 		if j == len(s) {
-			b.WriteByte('\\')
-			break
-		}
-		switch c := s[j]; c {
-		case 'b':
-			b.WriteByte('\b')
-		case 'f':
-			b.WriteByte('\f')
-		case 'n':
-			b.WriteByte('\n')
-		case 'r':
-			b.WriteByte('\r')
-		case 't':
-			b.WriteByte('\t')
-		case '/', '"', '\'':
-			b.WriteByte(c)
-		case '`':
-			if !backtick {
+			if j > i+1 {
+				markChanged(i)
+			}
+			if changed {
 				b.WriteByte('\\')
 			}
+			break
+		}
+		c := s[j]
+		if ctrl := controlEscapeByte(c, mode); ctrl != 0 {
+			markChanged(i)
+			b.WriteByte(ctrl)
+		} else if c == '/' || c == '"' || c == '\'' || (c == '`' && mode != backslashControlsLegacy) {
+			markChanged(i)
 			b.WriteByte(c)
-		default:
-			b.WriteByte('\\')
-			b.WriteByte(c)
+		} else {
+			if j > i+1 {
+				markChanged(i)
+			}
+			if changed {
+				b.WriteByte('\\')
+				b.WriteByte(c)
+			}
 		}
 		i = j
+	}
+	if !changed {
+		return s
 	}
 	return b.String()
 }

@@ -15,6 +15,7 @@
 package agentanalytics
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -4350,9 +4351,78 @@ func TestHarmlessProseRejectsIncompleteAndObfuscatedCredentials(t *testing.T) {
 		"[INFO] it's `ok`: done",
 		`[INFO] "a, b ": ok`,
 		`[INFO] "password" is set`,
+		`{"log":"C:\\Users\\vera`,
+		`{"log":"C:\\Users\\vera=ok`,
+		`[INFO] C:\\Users\\vera=ok`,
+		`[INFO] status\v=ok`,
+		`[INFO] "status\v"=ok`,
+		`[INFO] "C:\\Users\\vera\v"=ok`,
+		`[INFO] "C:\\dev"=ok`,
+		`[INFO] "C:\\v"=ok`,
+		`[INFO] "\v"=ok`,
+		`[INFO] " \v "=ok`,
+		`[INFO] "next_token\v"=123`,
+		"[INFO] \\`status \\`=ok",
+		"[INFO] \\`C:\\Users\\vera \\`=ok",
+		`{"log":"\` + "`" + `C:\\Users\\vera \` + "`" + `=ok`,
+		`[INFO] Basic ` + strings.Repeat("a", maxBasicCredentialBytes),
+		`[INFO] Basic ` + strings.Repeat("A", maxBasicCredentialBytes-2) + `=A`,
+		`[INFO] Basic mode=fast`,
+		`[INFO] Basic a=b`,
+		`[INFO] Basic OmE`,
+		`{"log":"C:\\temp\\readme.txt`,
+		`{"log":"C:\\tests\\basic_guide.txt`,
+		`{"log":"C:\\t\\normal.txt`,
+		`{"log":"C:\\bin\\notes.txt`,
+		`{"log":"C:\\foo\\readme.txt`,
+		`{"log":"C:\\new\\file.txt`,
+		`{"log":"C:\\repo\\data.txt`,
+		`[INFO] C:\\temp\\readme.txt=ok`,
+		`[INFO] C:\\tests\\basic_guide.txt`,
+		`[INFO] status\t=ok`,
+		`[INFO] "next_token\t"=123`,
+		`{"log":"\` + "`" + `C:\\temp\\readme.txt \` + "`" + `=ok`,
 	}
-	if hasTruncatedBasicBase64At("Basic "+strings.Repeat("a", maxBasicCredentialBytes+1), len("Basic ")) {
-		t.Errorf("hasTruncatedBasicBase64At accepted overlong token")
+	if !hasTruncatedBasicBase64At("Basic "+strings.Repeat("a", maxBasicCredentialBytes+1), len("Basic ")) {
+		t.Errorf("hasTruncatedBasicBase64At rejected overlong token; want true")
+	}
+	if hasTruncatedBasicBase64At("Basic "+strings.Repeat("a", maxBasicCredentialBytes), len("Basic ")) {
+		t.Errorf("hasTruncatedBasicBase64At accepted exact-limit non-credential token; want false")
+	}
+	if !hasTruncatedBasicBase64At("Basic "+strings.Repeat("A", maxBasicCredentialBytes)+"===", len("Basic ")) {
+		t.Errorf("hasTruncatedBasicBase64At rejected exact-limit body with padding over budget; want true")
+	}
+	if !hasTruncatedBasicBase64At("Basic "+strings.Repeat("A", maxBasicCredentialBytes-1)+"=A", len("Basic ")) {
+		t.Errorf("hasTruncatedBasicBase64At rejected 16385-byte padded token; want true")
+	}
+	if hasTruncatedBasicBase64At("Basic "+strings.Repeat("A", maxBasicCredentialBytes-2)+"=A", len("Basic ")) {
+		t.Errorf("hasTruncatedBasicBase64At accepted in-budget 16384-byte padded non-credential token; want false")
+	}
+	if hasTruncatedBasicBase64At("Basic OmE", len("Basic ")) {
+		t.Errorf("hasTruncatedBasicBase64At accepted <4 byte body decoding with colon; want false")
+	}
+	if hasTruncatedBasicBase64At("Basic dXNlcjpwYXNz", len("Basic ")) {
+		t.Errorf("hasTruncatedBasicBase64At treated complete unpadded base64 as truncated; want false")
+	}
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"Basic dXNlcg==dXNlcjpTWU5TRUNSRVQ3MTkz", true},
+		{"Basic dXNlcg==OlNZTlNFQ1JFVDcxOTM=", true},
+		{"Basic dXNl=cjpTWU5TRUNSRVQ3MTkz", true},
+		{"Basic dXNlc=jpTWU5TRUNSRVQ3MTkz", true},
+		{"Basic mode=fast", false},
+		{"Basic key=val", false},
+		{"Basic foo=bar", false},
+		{"Basic a=b", false},
+	} {
+		if got := hasTruncatedBasicBase64At(tc.in, len("Basic ")); got != tc.want {
+			t.Errorf("hasTruncatedBasicBase64At(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+	if hasTruncatedBasicBase64At("Basic abc", len("Basic ")) {
+		t.Errorf("hasTruncatedBasicBase64At accepted <4 byte body; want false")
 	}
 	if got := decodeCredentialEscapes(`{"msg":"\ud83d\ude00Bearer SECRET`); got != `{"msg":"😀Bearer SECRET` {
 		t.Errorf("decodeCredentialEscapes surrogate pair = %q, want %q", got, `{"msg":"😀Bearer SECRET`)
@@ -4423,6 +4493,16 @@ func TestHarmlessProseRejectsIncompleteAndObfuscatedCredentials(t *testing.T) {
 		"temp: =SECRET123",
 		"[INFO] temp:%41 %ZZ=SECRET123",
 		`[INFO] 'temp:a,b\'x'%ZZ=SECRET123`,
+		`[INFO] password\v=SECRET123`,
+		`[INFO] password\\v=SECRET123`,
+		`[INFO] password\b=SECRET123`,
+		`[INFO] password\t=SECRET123`,
+		`[INFO] password\n:SECRET123`,
+		`[INFO] password\r=SECRET123`,
+		`[INFO] password\f=SECRET123`,
+		"[INFO] password\u200b=SECRET123",
+		"[INFO] password\u00a0=SECRET123",
+		`[INFO] temp:\v=[REDACTED]`,
 	} {
 		if !hasObfuscatedKeyDelimiter(s) {
 			t.Errorf("hasObfuscatedKeyDelimiter(%q) = false, want true", s)
@@ -4443,6 +4523,8 @@ func TestHarmlessProseRejectsIncompleteAndObfuscatedCredentials(t *testing.T) {
 		"a%::b",
 		"[INFO] temp: =[REDACTED]",
 		"[INFO] `password`: [REDACTED]",
+		`[INFO] password\'=[REDACTED]`,
+		`[INFO] status\v=ok`,
 		"[INFO] xtemp: =foo",
 		"[INFO] open /etc/ssl/private.key: no such file",
 		"[INFO] password:",
@@ -4473,6 +4555,12 @@ func TestHarmlessProseRejectsIncompleteAndObfuscatedCredentials(t *testing.T) {
 		{"[INFO] Basic \\`dXNlcjpwYXNz\\`", true},
 		{"[INFO] Basic \\`[REDACTED]\\`", false},
 		{"[INFO] \\`temp:a,b%\\`%ZZ=SECRET123", true},
+		{"[INFO] C:\\bearer \\\\\\`SECRET", true},
+		{"[INFO] C:\\basic \\\\\\`dXNlcjpwYXNz", true},
+		{"[INFO] \\`C:\\t_page_token \\`=SYNSECRET7193", true},
+		{"[INFO] \\`C:\\tPageToken \\`=SYNSECRET7193", true},
+		{"[INFO] \\`C:\\v_page_token \\`=SYNSECRET7193", true},
+		{"[INFO] \\`C:\\vPageToken \\`=SYNSECRET7193", true},
 		{`[INFO] 'temp:a,b\'%ZZ=x`, true},
 	} {
 		if got := hasIncompleteCredentialConstruct(tc.in); got != tc.want {
@@ -4496,13 +4584,62 @@ func TestHarmlessProseRejectsIncompleteAndObfuscatedCredentials(t *testing.T) {
 			t.Errorf("hasAuthSchemeIncompleteOrObfuscated(%q) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
-	// An escaped backtick is decoded for these checks only: the scrub and
+	// Deferred control-escape folding in prose inspection: structural
+	// unescaping preserves all six control letters (\b, \f, \n, \r, \t, \v)
+	// while full prose unescaping decodes all six plus backticks; the scrub and
 	// its legacy backstop keep main's decoding.
-	if got, want := unescapeProseBackslashes("a\\`b\\\\\\`c\\\"d"), "a`b`c\"d"; got != want {
+	if got, want := unescapeProseBackslashes("a\\`b\\\\\\`c\\\"d\\be\\fe\\ne\\re\\te\\ve\\\\vf"), "a`b`c\"d\be\fe\ne\re\te\ve\vf"; got != want {
 		t.Errorf("unescapeProseBackslashes = %q, want %q", got, want)
 	}
-	if got, want := unescapeBackslashControls("a\\`b\\\"c"), "a\\`b\"c"; got != want {
+	if got, want := unescapeProseStructural("a\\`b\\\\\\`c\\\"d\\/e\\'f\\be\\fe\\ne\\re\\te\\ve\\\\vf"), "a`b`c\"d/e'f\\be\\fe\\ne\\re\\te\\ve\\vf"; got != want {
+		t.Errorf("unescapeProseStructural = %q, want %q", got, want)
+	}
+	if got, want := unescapeProseStructural("a\\b\\f\\n\\r\\t\\vb\\\\"), "a\\b\\f\\n\\r\\t\\vb\\"; got != want {
+		t.Errorf("unescapeProseStructural(trailing) = %q, want %q", got, want)
+	}
+	if got, want := unescapeProseStructural("a\\b\\f\\n\\r\\t\\vb\\"), "a\\b\\f\\n\\r\\t\\vb\\"; got != want {
+		t.Errorf("unescapeProseStructural(unchanged) = %q, want %q", got, want)
+	}
+	if got, want := unescapeBackslashControls("a\\`b\\\\\\`c\\\"d\\be\\fe\\ne\\re\\te\\ve\\"), "a\\`b\\`c\"d\be\fe\ne\re\te\\ve\\"; got != want {
 		t.Errorf("unescapeBackslashControls = %q, want %q", got, want)
+	}
+	for _, in := range []string{
+		"[INFO] \\`C:\\b_page_token \\`=SYNSECRET7193",
+		"[INFO] \\`C:\\f_page_token \\`=SYNSECRET7193",
+		"[INFO] \\`C:\\n_page_token \\`=SYNSECRET7193",
+		"[INFO] \\`C:\\r_page_token \\`=SYNSECRET7193",
+		"[INFO] \\`C:\\t_page_token \\`=SYNSECRET7193",
+		"[INFO] \\`C:\\v_page_token \\`=SYNSECRET7193",
+		"[INFO] \\`C:\\vPageToken \\`=SYNSECRET7193",
+		"[INFO] \\`C:\\v_eos_token \\`=SYNSECRET7193",
+		"[INFO] \\`C:\\v_next_token \\`=SYNSECRET7193",
+		"[INFO] \\`C:\\vXToken \\`=SYNSECRET7193",
+		"[INFO] C:\\\\t\\\\u006fken=SYNSECRET7193",
+	} {
+		if !hasSteppedCredentialMarker(in, false) {
+			t.Errorf("hasSteppedCredentialMarker(%q) = false, want true", in)
+		}
+	}
+	for _, tc := range []struct {
+		in   string
+		c    int
+		want bool
+	}{
+		{`"C:\v_page_token\v":x`, len(`"C:\v_page_token\v"`), false},
+		{`"C:\v_page_token\v":x`, len(`"C:\v_page_token\v`), true},
+		{`"C:\v_page_token\\v":x`, len(`"C:\v_page_token\\v`), true},
+		{`"\vtemp:foo\v":x`, len(`"\vtemp:foo\v`), true},
+		{`"\\vtemp:foo":x`, len(`"\\vtemp:foo`), true},
+		{`"\vstatus\v":x`, len(`"\vstatus\v`), false},
+		{`"C:\dev":x`, len(`"C:\dev`), false},
+		{`"\v":x`, len(`"\v`), false},
+		{`"   ":x`, len(`"   `), false},
+		{`"\x":x`, len(`"\x`), false},
+		{"\"\\\\\":x", len("\"\\\\"), false},
+	} {
+		if got := closesQuotedKey(tc.in, tc.c); got != tc.want {
+			t.Errorf("closesQuotedKey(%q, %d) = %v, want %v", tc.in, tc.c, got, tc.want)
+		}
 	}
 	if isPercentSepByte('`') || isPercentSepByte('"') || !isPercentSepByte('Z') {
 		t.Errorf("isPercentSepByte must reject every quote and backtick and accept other bytes")
@@ -4572,6 +4709,12 @@ func TestIncompleteCredentialConstructLinearScaling(t *testing.T) {
 		{"escaped backticks before a backticked key", func(n int) string { return "[INFO] " + strings.Repeat("\\`", 2*n) + "a`=x" }},
 		{"glued empty temp key equals", func(n int) string { return "[INFO] " + strings.Repeat("xtemp: =", n) }},
 		{"Basic escaped backticked redacted", func(n int) string { return "[INFO] " + strings.Repeat("Basic \\`[REDACTED]\\` ", n) }},
+		{"non-sensitive escaped vtab equals", func(n int) string { return "[INFO] " + strings.Repeat(`a\v=`, n) }},
+		{"non-sensitive escaped tab equals", func(n int) string { return "[INFO] " + strings.Repeat(`a\t=`, n) }},
+		{"escaped backticked non-sensitive vtab equals", func(n int) string { return "[INFO] " + strings.Repeat("\\`a\\v\\`=", n) }},
+		{"escaped backticked non-sensitive tab equals", func(n int) string { return "[INFO] " + strings.Repeat("\\`a\\t\\`=", n) }},
+		{"oversized malformed Basic", func(n int) string { return "[INFO] Basic " + strings.Repeat("a", maxBasicCredentialBytes+16*n) + "===" }},
+		{"repeated glued Basic", func(n int) string { return "[INFO] " + strings.Repeat("Basic dXNlcg==dXNlcg== ", n) }},
 	}
 	for _, sc := range shapes {
 		t.Run(sc.name, func(t *testing.T) {
@@ -4620,6 +4763,12 @@ func TestIncompleteCredentialConstructLinearScaling(t *testing.T) {
 			{"200KB escaped backticks before a backticked key", "[INFO] " + strings.Repeat("\\`", 100000) + "a`=x"},
 			{"208KB glued empty temp key", "[INFO] " + strings.Repeat("xtemp: =", 26000)},
 			{"220KB Basic escaped backticked redacted", "[INFO] " + strings.Repeat("Basic \\`[REDACTED]\\` ", 11000)},
+			{"200KB non-sensitive escaped vtab equals", "[INFO] " + strings.Repeat(`a\v=`, 50000)},
+			{"200KB non-sensitive escaped tab equals", "[INFO] " + strings.Repeat(`a\t=`, 50000)},
+			{"210KB escaped backticked non-sensitive vtab equals", "[INFO] " + strings.Repeat("\\`a\\v\\`=", 30000)},
+			{"210KB escaped backticked non-sensitive tab equals", "[INFO] " + strings.Repeat("\\`a\\t\\`=", 30000)},
+			{"250KB oversized malformed Basic", "[INFO] Basic " + strings.Repeat("a", 250000) + "==="},
+			{"250KB repeated glued Basic", "[INFO] " + strings.Repeat("Basic dXNlcg==dXNlcg== ", 11000)},
 		} {
 			d1 := withinWallClock(100*time.Millisecond, func() {
 				_ = hasIncompleteCredentialConstruct(tc.in)
@@ -4635,5 +4784,228 @@ func TestIncompleteCredentialConstructLinearScaling(t *testing.T) {
 			}
 			t.Logf("%s (%d bytes): incomplete=%v prose=%v", tc.name, len(tc.in), d1, d2)
 		}
+	}
+}
+
+func TestEscapedControlKeyDelimitersAndOversizedBasicFailClosed(t *testing.T) {
+	runInParallel(t)
+	const secret = "SYNSECRET7193"
+
+	basicBody := func(extraX int) string {
+		raw := "user:" + secret + strings.Repeat("x", extraX)
+		return strings.TrimRight(base64.StdEncoding.EncodeToString([]byte(raw)), "=")
+	}
+	// len("user:SYNSECRET7193") == 18 bytes:
+	// - extraX = 12267 -> 12285 bytes -> 16380 base64 body chars (< maxBasicCredentialBytes)
+	// - extraX = 12268 -> 12286 bytes -> 16382 base64 body chars (+ "==" == 16384 == maxBasicCredentialBytes)
+	// - extraX = 12270 -> 12288 bytes -> 16384 base64 body chars (== maxBasicCredentialBytes; + "=" > maxBasicCredentialBytes)
+	// - extraX = 13000 -> 13018 bytes -> 17358 base64 body chars (> maxBasicCredentialBytes)
+	body16380 := basicBody(12267)
+	body16382 := basicBody(12268)
+	body16384 := basicBody(12270)
+	over13000Encoded := base64.StdEncoding.EncodeToString([]byte("user:" + secret + strings.Repeat("x", 13000)))
+	boundary16385Newline := base64.StdEncoding.EncodeToString([]byte("user:"+secret+"\n"+strings.Repeat("x", 12267))) + "="
+	gluedUserSecret := "dXNlcg==" + base64.StdEncoding.EncodeToString([]byte("user:"+secret))
+	gluedColonSecret := "dXNlcg==" + base64.StdEncoding.EncodeToString([]byte(":"+secret))
+	if len(body16380) != 16380 || len(body16382) != 16382 || len(body16384) != maxBasicCredentialBytes || len(over13000Encoded) <= maxBasicCredentialBytes || len(boundary16385Newline) != maxBasicCredentialBytes+1 {
+		t.Fatalf("unexpected basic body lengths: %d, %d, %d, %d, %d", len(body16380), len(body16382), len(body16384), len(over13000Encoded), len(boundary16385Newline))
+	}
+
+	cases := []struct {
+		name string
+		in   string
+	}{
+		// Escaped vertical tab and sibling escaped control separators before key delimiters.
+		{"bracketed password escaped vtab equals", `[INFO] password\v=` + secret},
+		{"bracketed password double-escaped vtab equals", `[INFO] password\\v=` + secret},
+		{"bracketed password triple-escaped vtab equals", `[INFO] password\\\v=` + secret},
+		{"truncated JSON password escaped vtab equals", `{"log":"password\v=` + secret},
+		{"truncated JSON password double-escaped vtab equals", `{"log":"password\\v=` + secret},
+		{"bracketed password escaped backspace equals", `[INFO] password\b=` + secret},
+		{"bracketed password double-escaped backspace equals", `[INFO] password\\b=` + secret},
+		{"bracketed password escaped tab equals", `[INFO] password\t=` + secret},
+		{"bracketed password double-escaped tab equals", `[INFO] password\\t=` + secret},
+		{"bracketed password escaped newline colon", `[INFO] password\n:` + secret},
+		{"bracketed password double-escaped newline colon", `[INFO] password\\n:` + secret},
+		{"bracketed password escaped cr equals", `[INFO] password\r=` + secret},
+		{"bracketed password double-escaped cr equals", `[INFO] password\\r=` + secret},
+		{"bracketed password escaped formfeed equals", `[INFO] password\f=` + secret},
+		{"bracketed password double-escaped formfeed equals", `[INFO] password\\f=` + secret},
+		{"quoted key escaped vtab inside key", `{"\vpassword":"` + secret + `"}`},
+		{"quoted key trailing escaped vtab inside key", `{"password\v":"` + secret + `"}`},
+		{"truncated JSON word-joined escaped vtab Bearer", `{"log":"foo\vBearer ` + secret},
+		{"truncated JSON word-joined escaped vtab password", `{"log":"foo\vpassword=` + secret},
+		{"truncated JSON percent-backslash vtab password", `{"log":"password%5Cv=` + secret},
+		{"truncated JSON unicode-backslash vtab password", `{"log":"password\u005cv=` + secret},
+		{"quote-led escaped vtab password", `"hello \vpassword=` + secret + `"`},
+
+		// Windows C:\v... path prefixes before sensitive v-prefixed keys (must not collapse \\v -> \v into exempt cursor/tokenizer keys).
+		{"windows backslash-v page_token unicode-o percent-ZZ", `{"log":"C:\\v_page_t\u006fken%ZZ=` + secret},
+		{"windows backslash-v page_token double-escaped unicode-o percent-ZZ", `{"log":"C:\\v_page_t\\u006fken%ZZ=` + secret},
+		{"windows backslash-v page_token unicode-o escaped-vtab", `{"log":"C:\\v_page_t\u006fken\v=` + secret},
+		{"windows backslash-v page_token double-escaped unicode-o escaped-vtab", `{"log":"C:\\v_page_t\\u006fken\v=` + secret},
+		{"windows backslash-v vPageToken unicode-o escaped-vtab", `{"log":"C:\\vPageT\u006fken\v=` + secret},
+		{"windows backslash-v vPageToken double-escaped unicode-o escaped-vtab", `{"log":"C:\\vPageT\\u006fken\v=` + secret},
+		{"windows backslash-v v_eos_token unicode-o percent-ZZ", `{"log":"C:\\v_eos_t\u006fken%ZZ=` + secret},
+		{"windows backslash-v v_eos_token double-escaped unicode-o percent-ZZ", `{"log":"C:\\v_eos_t\\u006fken%ZZ=` + secret},
+		{"windows quad-backslash-v v_page_token double-escaped unicode-o double-escaped-vtab", `{"log":"C:\\\\v_page_t\\u006fken\\v=` + secret},
+		{"windows backslash-v v_next_token unicode-o percent-ZZ", `{"log":"C:\\v_next_t\u006fken%ZZ=` + secret},
+		{"windows backslash-v v_next_token double-escaped unicode-o percent-ZZ", `{"log":"C:\\v_next_t\\u006fken%ZZ=` + secret},
+		{"windows backslash-v v_page_token double-escaped unicode-o direct", `{"log":"C:\\v_page_t\\u006fken=` + secret},
+		{"bracketed windows backslash-v v_page_token direct", `[INFO] C:\\v_page_token=` + secret},
+		{"windows backslash-v v_page_token unicode-o unicode-backslash-vtab", `{"log":"C:\\v_page_t\u006fken\u005cv=` + secret},
+		{"windows backslash-v v_page_token double-escaped unicode-o percent-backslash-vtab", `{"log":"C:\\v_page_t\\u006fken%5Cv=` + secret},
+		{"truncated quoted key unicode-backslash-vtab and unicode-o", `{"\u005cvpassw\u006frd":"` + secret},
+		{"quoted key literal-backslash-vtab and unicode-o", `{"\vpassw\u006frd":"` + secret + `"}`},
+		{"truncated JSON word-joined literal-vtab Bearer unicode-e", `{"log":"foo\vBear\u0065r ` + secret},
+		{"truncated JSON word-joined double-escaped-vtab Bearer unicode-e", `{"log":"foo\\vBear\u0065r ` + secret},
+
+		// Quoted path keys with trailing/leading \v inside quotes and escaped-backticked C:\v... path keys.
+		{"quoted windows backslash-v v_page_token trailing vtab", `{"C:\\v_page_token\v":"` + secret + `"}`},
+		{"quoted windows quad-backslash-v v_page_token trailing vtab", `{"C:\\\\v_page_token\v":"` + secret + `"}`},
+		{"bracketed quoted windows v_page_token trailing vtab", `[INFO] "C:\v_page_token\v"=` + secret},
+		{"truncated JSON single-quoted windows v_page_token trailing vtab", `{"log":"'C:\\v_page_token\v'=` + secret},
+		{"quoted windows v_page_token leading and trailing vtab", `{"\vC:\\v_page_token\v":"` + secret + `"}`},
+		{"bracketed quoted windows v_page_token leading vtab", `[INFO] "\vC:\v_page_token"=` + secret},
+		{"bracketed escaped-backticked windows v_page_token trailing vtab", "[INFO] \\`C:\\v_page_token\\v\\`=" + secret},
+		{"truncated quoted windows v_page_token double-escaped trailing vtab", `{"C:\\v_page_token\\v":"` + secret},
+		{"bracketed quoted windows v_page_token double-escaped trailing vtab", `[INFO] "C:\v_page_token\\v"=` + secret},
+		{"truncated quoted windows v_page_token trailing backspace", `{"C:\\v_page_token\b":"` + secret},
+		{"bracketed quoted windows v_page_token trailing backspace", `[INFO] "C:\v_page_token\b"=` + secret},
+		{"quoted leading and trailing vtab temp key", `{"\vtemp:foo\v":"` + secret + `"}`},
+		{"quoted leading vtab temp key", `{"\vtemp:foo":"` + secret + `"}`},
+		{"quoted windows vPageToken trailing vtab", `{"C:\\vPageToken\v":"` + secret + `"}`},
+		{"quoted windows v_eos_token trailing vtab", `{"C:\\v_eos_token\v":"` + secret + `"}`},
+		{"quoted windows v_next_token trailing vtab", `{"C:\\v_next_token\v":"` + secret + `"}`},
+		{"quoted windows vXToken trailing vtab", `{"C:\\vXToken\v":"` + secret + `"}`},
+		{"bracketed escaped-backticked padded windows v_page_token", "[INFO] \\`C:\\v_page_token \\`=" + secret},
+		{"truncated JSON escaped-backticked padded windows v_page_token", `{"log":"\` + "`" + `C:\\v_page_token \` + "`" + `=` + secret},
+		{"bracketed escaped-backticked phrase windows v_page_token", "[INFO] \\`a, C:\\v_page_token \\`=" + secret},
+		{"truncated JSON escaped-backticked padded windows v_page_token unicode-o", `{"log":"\` + "`" + `C:\\v_page_t\u006fken \` + "`" + `=` + secret},
+		{"truncated JSON escaped-backticked padded windows v_page_token double-escaped unicode-o", `{"log":"\` + "`" + `C:\\\\v_page_t\\u006fken \` + "`" + `=` + secret},
+		{"truncated JSON escaped-backticked unicode-backslash vtab password", `{"log":"\` + "`" + `\u005cvpassword\` + "`" + `=` + secret},
+		{"truncated JSON escaped-backticked unicode-backslash vtab temp key", `{"log":"\` + "`" + `\u005cvtemp:a\` + "`" + `=` + secret},
+		{"truncated JSON escaped-backticked percent space windows v_page_token", `{"log":"\` + "`" + `C:\\v_page_token%C2%A0\` + "`" + `=` + secret},
+		{"bracketed escaped-backticked padded windows vPageToken", "[INFO] \\`C:\\vPageToken \\`=" + secret},
+		{"bracketed escaped-backticked padded windows v_eos_token", "[INFO] \\`C:\\v_eos_token \\`=" + secret},
+		{"bracketed escaped-backticked padded windows v_next_token", "[INFO] \\`C:\\v_next_token \\`=" + secret},
+		{"bracketed escaped-backticked padded windows vXToken", "[INFO] \\`C:\\vXToken \\`=" + secret},
+		{"truncated JSON escaped-backticked padded windows vXToken", `{"log":"\` + "`" + `C:\\vXToken \` + "`" + `=` + secret},
+		{"windows backslash-v vXToken escaped-vtab", `{"log":"C:\\vXToken\v=` + secret},
+		{"windows backslash-v vXToken unicode-o percent-ZZ", `{"log":"C:\\vXT\u006fken%ZZ=` + secret},
+
+		// Windows C:\{b,f,n,r,t}... path prefixes before token, temp:, Bearer, Basic, and {b,f,n,r,t}-prefixed compound keys.
+		{"windows backslash-t token unicode-eq", `{"log":"C:\\token\\u003d` + secret},
+		{"windows backslash-t temp colon unicode-eq", `{"log":"C:\\temp:foo\\u003d` + secret},
+		{"bracketed windows backslash-t token unicode-o", `[INFO] C:\\t\\u006fken=` + secret},
+		{"windows backslash-t token unicode-o", `{"log":"C:\\t\\u006fken=` + secret},
+		{"windows backslash-b bearer unicode-space", `{"log":"C:\\bearer\\u0020` + secret},
+		{"windows backslash-b bearer triple-backslash-backtick", `[INFO] C:\bearer \\\` + "`" + secret},
+		{"windows backslash-b basic unicode-space", `{"log":"C:\\basic\\u0020dXNlcjpTWU5TRUNSRVQ3MTkz`},
+		{"windows backslash-b basic triple-backslash-backtick", `[INFO] C:\basic \\\` + "`" + `dXNlcjpTWU5TRUNSRVQ3MTkz`},
+		{"windows backslash-t page_token unicode-o", `{"log":"C:\\t_page_t\\u006fken=` + secret},
+		{"windows backslash-t page_token unicode-o percent-ZZ", `{"log":"C:\\t_page_t\\u006fken%ZZ=` + secret},
+		{"windows backslash-t page_token unicode-o escaped-vtab", `{"log":"C:\\t_page_t\\u006fken\v=` + secret},
+		{"windows backslash-t page_token escaped-backticked unicode-o", `{"log":"\` + "`" + `C:\\\\t_page_t\\u006fken \` + "`" + `=` + secret},
+		{"windows backslash-b page_token unicode-o", `{"log":"C:\\b_page_t\\u006fken=` + secret},
+		{"windows backslash-f page_token unicode-o", `{"log":"C:\\f_page_t\\u006fken=` + secret},
+		{"windows backslash-n page_token unicode-o", `{"log":"C:\\n_page_t\\u006fken=` + secret},
+		{"windows backslash-r page_token unicode-o", `{"log":"C:\\r_page_t\\u006fken=` + secret},
+		{"windows backslash-b page_token unicode-o percent-ZZ", `{"log":"C:\\b_page_t\\u006fken%ZZ=` + secret},
+		{"windows backslash-f page_token unicode-o escaped-vtab", `{"log":"C:\\f_page_t\\u006fken\v=` + secret},
+		{"windows backslash-n page_token escaped-backticked unicode-o", `{"log":"\` + "`" + `C:\\\\n_page_t\\u006fken \` + "`" + `=` + secret},
+		{"windows backslash-r page_token unicode-o percent-ZZ", `{"log":"C:\\r_page_t\\u006fken%ZZ=` + secret},
+		{"windows backslash-t tPageToken unicode-o", `{"log":"C:\\tPageT\\u006fken=` + secret},
+		{"windows backslash-b bPageToken unicode-o", `{"log":"C:\\bPageT\\u006fken=` + secret},
+		{"windows backslash-t t_eos_token unicode-o", `{"log":"C:\\t_eos_t\\u006fken=` + secret},
+		{"windows backslash-t t_next_token unicode-o", `{"log":"C:\\t_next_t\\u006fken=` + secret},
+		{"windows backslash-n n_sync_token unicode-o", `{"log":"C:\\n_sync_t\\u006fken=` + secret},
+		{"combined newline separator plus windows backslash-t token unicode-eq", `{"log":"foo\\nC:\\\\token\\u003d` + secret},
+		{"combined windows backslash-t token plus newline separator before equals", `{"log":"C:\\\\token\\n=` + secret},
+		{"combined newline separator plus bearer unicode-space", `{"log":"foo\\nbearer\\u0020` + secret},
+		{"combined windows backslash-b bearer plus escaped-tab separator", `{"log":"C:\\\\bearer\\t` + secret},
+		{"combined newline separator plus windows backslash-t page_token unicode-o", `{"log":"foo\\nC:\\\\t_page_t\\u006fken=` + secret},
+		{"combined windows backslash-t t_page_token plus escaped-tab in quotes", `{"C:\\t_page_token\t":"` + secret},
+
+		// Basic credentials just below, at, and above maxBasicCredentialBytes (valid and malformed padding) and glued tokens.
+		{"below-limit 16380 Basic valid", "[INFO] Basic " + body16380},
+		{"below-limit 16380 Basic triple-pad", "[INFO] Basic " + body16380 + "==="},
+		{"below-limit 16380 Basic pad-glue", "[INFO] Basic " + body16380 + "=A"},
+		{"at-limit 16382+2 Basic valid", "[INFO] Basic " + body16382 + "=="},
+		{"at-limit 16382 Basic triple-pad", "[INFO] Basic " + body16382 + "==="},
+		{"at-limit 16382 Basic pad-glue", "[INFO] Basic " + body16382 + "=A"},
+		{"body-at-limit 16384 Basic single-pad", "[INFO] Basic " + body16384 + "="},
+		{"body-at-limit 16384 Basic triple-pad", "[INFO] Basic " + body16384 + "==="},
+		{"body-at-limit 16384 Basic pad-glue", "[INFO] Basic " + body16384 + "=A"},
+		{"body-at-limit 16384 non-printable Basic triple-pad", "[INFO] Basic " + strings.Repeat("A", maxBasicCredentialBytes) + "==="},
+		{"over-limit 16385 non-printable Basic triple-pad", "[INFO] Basic " + strings.Repeat("A", maxBasicCredentialBytes+1) + "==="},
+		{"over-limit 16385 non-printable Basic pad-glue", "[INFO] Basic " + strings.Repeat("A", maxBasicCredentialBytes-1) + "=A"},
+		{"over-limit 16385 newline Basic triple-pad", "[INFO] Basic " + boundary16385Newline},
+		{"over-limit 13000x Basic valid", "[INFO] Basic " + over13000Encoded},
+		{"over-limit 13000x Basic triple-pad", "[INFO] Basic " + over13000Encoded + "==="},
+		{"over-limit 13000x Basic pad-glue", "[INFO] Basic " + over13000Encoded + "=A"},
+		{"glued over-limit Basic dXNlcg== plus 13000x", "[INFO] Basic dXNlcg==" + over13000Encoded},
+		{"glued in-budget Basic dXNlcg== user:secret", "[INFO] Basic " + gluedUserSecret},
+		{"glued in-budget Basic dXNlcg== :secret", "[INFO] Basic " + gluedColonSecret},
+		{"glued in-budget Basic mid-quantum = split", "[INFO] Basic dXNl=cjpTWU5TRUNSRVQ3MTkz"},
+		{"glued in-budget Basic mid-quantum 5-char = split", "[INFO] Basic dXNlc=jpTWU5TRUNSRVQ3MTkz"},
+		{"truncated JSON over-limit 13000x Basic triple-pad", `{"log":"Basic ` + over13000Encoded + "==="},
+		{"truncated JSON over-limit 13000x Basic pad-glue", `{"log":"Basic ` + over13000Encoded + "=A"},
+	}
+
+	secretB64Prefix := "dXNlcjpTWU5TRUNSRVQ3MTkz" // base64("user:SYNSECRET7193")
+	for _, limit := range []int{-1, 4096} {
+		for _, tc := range cases {
+			t.Run(fmt.Sprintf("limit=%d/%s", limit, tc.name), func(t *testing.T) {
+				directRaw, directLost, err := SmartTruncate(tc.in, limit)
+				if err != nil {
+					t.Fatalf("SmartTruncate(direct, %d) error: %v", limit, err)
+				}
+				wantDirect := `"` + unparseableJSONPlaceholder + `"`
+				if !directLost || string(directRaw) != wantDirect {
+					t.Errorf("SmartTruncate(direct, %d) = (%.120s, %v), want (%s, true)", limit, directRaw, directLost, wantDirect)
+				}
+				if strings.Contains(string(directRaw), secret) || strings.Contains(string(directRaw), secretB64Prefix) {
+					t.Errorf("SmartTruncate(direct, %d) leaked secret in %.120s", limit, directRaw)
+				}
+
+				mapRaw, mapLost, err := SmartTruncate(map[string]any{"log": tc.in}, limit)
+				if err != nil {
+					t.Fatalf("SmartTruncate(map, %d) error: %v", limit, err)
+				}
+				wantMap := `{"log":"` + unparseableJSONPlaceholder + `"}`
+				if !mapLost || string(mapRaw) != wantMap {
+					t.Errorf("SmartTruncate(map, %d) = (%.120s, %v), want (%s, true)", limit, mapRaw, mapLost, wantMap)
+				}
+
+				parts, partsLost := formatContentParts(&genai.Content{
+					Parts: []*genai.Part{{
+						FunctionResponse: &genai.FunctionResponse{
+							Name:     "fetch_log",
+							Response: map[string]any{"log": tc.in},
+						},
+					}},
+				}, limit, true)
+				if !partsLost || len(parts) != 1 {
+					t.Fatalf("formatContentParts(FunctionResponse, %d) = (%v, %v), want 1 part with lost=true", limit, parts, partsLost)
+				}
+				attrs, _ := parts[0]["part_attributes"].(string)
+				if strings.Contains(attrs, secret) || strings.Contains(attrs, secretB64Prefix) || !strings.Contains(attrs, unparseableJSONPlaceholder) {
+					t.Errorf("FunctionResponse part_attributes(limit=%d) = %.160s, want %q and no secret", limit, attrs, unparseableJSONPlaceholder)
+				}
+			})
+		}
+	}
+	for _, tc := range cases {
+		t.Run("raw_and_error/"+tc.name, func(t *testing.T) {
+			san, sanLost := sanitizeRawText(tc.in)
+			if !sanLost || san != unparseableJSONPlaceholder || strings.Contains(san, secret) || strings.Contains(san, secretB64Prefix) {
+				t.Errorf("sanitizeRawText = (%.120s, %v), want (%s, true) with no secret", san, sanLost, unparseableJSONPlaceholder)
+			}
+			rem := redactErrorMessage(tc.in)
+			if rem != unparseableJSONPlaceholder || strings.Contains(rem, secret) || strings.Contains(rem, secretB64Prefix) {
+				t.Errorf("redactErrorMessage = %.120s, want %s with no secret", rem, unparseableJSONPlaceholder)
+			}
+		})
 	}
 }
