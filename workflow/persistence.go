@@ -142,14 +142,14 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 
 	// Stage 2: gather the inputs inferNodeState needs to rebuild a
 	// re-entry node's input: every node's cached output, the set of
-	// nodes that ran, where each node last finished and how it routed,
-	// and the workflow's seed input.
+	// nodes that ran, the last edge that fired into each node, and the
+	// workflow's seed input.
 	nodeOutputs, completed := collectNodeOutputs(events, nodesByName, invocationID, w.name)
-	finishes := collectNodeFinishes(events, nodesByName, invocationID, w.name)
+	triggers := w.collectTriggers(events, nodesByName, invocationID)
 	workflowInput := firstUserInput(events, invocationID)
 
 	// Stage 3: turn each interrupted node's scan into a NodeState.
-	state, err := w.buildRunState(scans, nodesByName, nodeOutputs, finishes, workflowInput)
+	state, err := w.buildRunState(scans, nodesByName, nodeOutputs, triggers, workflowInput)
 	if err != nil {
 		return nil, err
 	}
@@ -361,20 +361,83 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 	return outputs, completed
 }
 
-// nodeFinish is what history says about the last time a node finished:
-// the position of the event that carried its result, and the routing
-// event it emitted, if any. Together they tell which of the node's
-// outgoing edges fired, and when.
-type nodeFinish struct {
-	index   int
-	routing *session.Event
+// nodeTrigger is the last edge that fired into a node according to
+// history: the predecessor it came from, the output that predecessor
+// passed along, and the position of the event that carried the output.
+type nodeTrigger struct {
+	from  string
+	input any
+	index int
 }
 
-// collectNodeFinishes walks history once and returns a nodeFinish for
-// every graph node that produced a result. It reads the same events as
+// nodeVisit collects the events of one activation of a node until
+// history shows how the activation ended.
+type nodeVisit struct {
+	// index is the position of the event that carried the result.
+	index   int
+	output  any
+	routing *session.Event
+	// hasResult is set once the visit recorded an output or a
+	// completion record.
+	hasResult bool
+	// paused is set when the visit raised an interrupt. The scheduler
+	// parks such a node as waiting and schedules no successors, whatever
+	// the visit emitted before or after the pause.
+	paused bool
+}
+
+// collectTriggers walks history once and returns, for every graph node,
+// the last edge that fired into it. It reads the same events as
 // collectNodeOutputs and applies the same invocation filter.
-func collectNodeFinishes(events session.Events, nodesByName map[string]Node, invocationID, workflowName string) map[string]nodeFinish {
-	finishes := map[string]nodeFinish{}
+//
+// Edges fire when a visit of their source completes, with the routing
+// event of that visit and no other. A node on a loop that routed on one
+// visit and not on the next is judged visit by visit, and a visit that
+// paused or failed fires nothing.
+//
+// History has no record for the end of a visit that produced output. A
+// later event of the node is read as the start of a new visit when the
+// visit cannot hold it (a second output or a second routing event) or
+// when a predecessor finished in between and could have triggered the
+// node again.
+func (w *Workflow) collectTriggers(events session.Events, nodesByName map[string]Node, invocationID string) map[string]nodeTrigger {
+	triggers := map[string]nodeTrigger{}
+	visits := map[string]*nodeVisit{}
+	// lastResult holds, per node, the position of the last event that
+	// could have fired its outgoing edges.
+	lastResult := map[string]int{}
+	interruptOwner := map[string]string{}
+	answered := map[string]bool{}
+
+	// end closes the node's open visit. A visit that produced a result
+	// without pausing completed, so its edges fired.
+	end := func(name string) {
+		v := visits[name]
+		delete(visits, name)
+		if v == nil || !v.hasResult || v.paused {
+			return
+		}
+		for _, e := range firedEdges(w.graph.successorsOf(nodesByName[name]), v.routing) {
+			to := e.To.Name()
+			if t, ok := triggers[to]; !ok || v.index > t.index {
+				triggers[to] = nodeTrigger{from: name, input: v.output, index: v.index}
+			}
+		}
+	}
+	// visitFor returns the visit an event of the node belongs to.
+	visitFor := func(name string) *nodeVisit {
+		v := visits[name]
+		if v != nil && v.hasResult && w.retriggered(nodesByName[name], v, lastResult) {
+			end(name)
+			v = nil
+		}
+		if v == nil {
+			v = &nodeVisit{}
+			visits[name] = v
+		}
+		return v
+	}
+
 	for i := 0; i < events.Len(); i++ {
 		ev := events.At(i)
 		if ev == nil || ev.Partial {
@@ -383,47 +446,102 @@ func collectNodeFinishes(events session.Events, nodesByName map[string]Node, inv
 		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
-		ev = graphHistoryEvent(ev, workflowName)
+		ev = graphHistoryEvent(ev, w.name)
+		if ev.Author == "user" && ev.Content != nil {
+			// The first answer to a pause reruns the node or completes
+			// it with the answer. The paused visit is over either way.
+			for _, part := range ev.Content.Parts {
+				fr := frPart(part)
+				if fr == nil {
+					continue
+				}
+				if owner, ok := interruptOwner[fr.ID]; ok && !answered[fr.ID] {
+					delete(visits, owner)
+					lastResult[owner] = i
+					answered[fr.ID] = true
+				}
+			}
+			continue
+		}
+		if owner := eventNodeName(ev, nodesByName); nodesByName[owner] != nil {
+			for _, id := range ev.LongRunningToolIDs {
+				if id != "" {
+					interruptOwner[id] = owner
+					visitFor(owner).paused = true
+				}
+			}
+		}
 		// Routes belong to the node that emitted them. A dynamic
 		// child's routing event does not route its static ancestor.
 		own := ownEventNodeName(ev, nodesByName)
-		if own != "" && ev.Routes != nil {
-			f := finishes[own]
-			f.routing = ev
-			finishes[own] = f
+		routes := own != "" && ev.Routes != nil
+		out, hasOutput := childEventOutput(ev)
+		for _, name := range eventOutputOwners(ev, nodesByName) {
+			v := visitFor(name)
+			if v.hasResult && v.index == i {
+				// OutputFor names the emitter as well.
+				continue
+			}
+			if v.hasResult {
+				end(name)
+				v = visitFor(name)
+			}
+			v.hasResult, v.index, v.output = true, i, out
+			if routes && name == own {
+				v.routing = ev
+				routes = false
+			}
+			lastResult[name] = i
 		}
-		owners := eventOutputOwners(ev, nodesByName)
-		if own != "" && ev.CustomMetadata[workflowNodeCompletedKey] == true {
-			owners = append(owners, own)
+		if routes {
+			v := visitFor(own)
+			if v.routing != nil {
+				end(own)
+				v = visitFor(own)
+			}
+			v.routing = ev
 		}
-		for _, name := range owners {
-			f := finishes[name]
-			f.index = i
-			finishes[name] = f
+		if own == "" {
+			continue
+		}
+		if ev.CustomMetadata[workflowNodeCompletedKey] == true {
+			v := visitFor(own)
+			value, delegated := completedDelegatedOutput(ev)
+			v.hasResult, v.index, v.output = true, i, value
+			lastResult[own] = i
+			if !delegated {
+				// The scheduler writes this record when the visit
+				// completes, so nothing more belongs to the visit.
+				end(own)
+			}
+		} else if !hasOutput && workflowNodeOutcome(ev) != "" {
+			// A failed or canceled attempt fired nothing, and a retry
+			// starts over without the route the attempt emitted.
+			visitFor(own)
+			delete(visits, own)
 		}
 	}
-	return finishes
+	for name := range visits {
+		end(name)
+	}
+	return triggers
 }
 
-// edgeFired reports whether e was taken when its source last finished,
-// given the routing event the source emitted (nil if none). It follows
-// the rules of findSuccessors.
-func (w *Workflow) edgeFired(e Edge, routing *session.Event) bool {
-	if e.Route == nil {
-		return true
-	}
-	if e.Route != Default {
-		return routing != nil && e.Route.Matches(routing)
-	}
-	if routing == nil {
-		return true
-	}
-	for _, sibling := range w.graph.successorsOf(e.From) {
-		if sibling.Route != nil && sibling.Route.Matches(routing) {
-			return false
+// retriggered reports whether node can have started a new visit after
+// the result of visit v: a predecessor recorded a result later than
+// that, or v fired an edge from the node to itself.
+func (w *Workflow) retriggered(node Node, v *nodeVisit, lastResult map[string]int) bool {
+	for _, e := range w.graph.predecessorsOf(node) {
+		if at, ok := lastResult[e.From.Name()]; ok && at > v.index {
+			return true
 		}
 	}
-	return true
+	for _, e := range firedEdges(w.graph.successorsOf(node), v.routing) {
+		if e.To == node {
+			return true
+		}
+	}
+	return false
 }
 
 // Workflows and graph nodes may share a name. Record the actual graph
@@ -454,13 +572,13 @@ func graphHistoryEvent(ev *session.Event, workflowName string) *session.Event {
 
 // buildRunState maps interrupted or failed nodes' scans to NodeStates.
 // Returns (nil, nil) when there is no interrupt or failure history.
-func (w *Workflow) buildRunState(scans map[string]*nodeScanState, nodesByName map[string]Node, nodeOutputs map[string]any, finishes map[string]nodeFinish, workflowInput any) (*RunState, error) {
+func (w *Workflow) buildRunState(scans map[string]*nodeScanState, nodesByName map[string]Node, nodeOutputs map[string]any, triggers map[string]nodeTrigger, workflowInput any) (*RunState, error) {
 	var state *RunState
 	for nodeName, scan := range scans {
 		if len(scan.interrupts) == 0 && !scan.failed {
 			continue
 		}
-		ns, err := w.inferNodeState(nodesByName[nodeName], scan, nodeOutputs, finishes, workflowInput)
+		ns, err := w.inferNodeState(nodesByName[nodeName], scan, nodeOutputs, triggers, workflowInput)
 		if err != nil {
 			return nil, err
 		}
@@ -528,7 +646,7 @@ func validateResolved(scan *nodeScanState) (map[string]any, error) {
 //   - all resolved, re-run                           -> NodePending (re-entry)
 //   - all resolved, handoff                          -> NodeCompleted
 //     with Output = the response (forwarded to successors by Resume)
-func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs map[string]any, finishes map[string]nodeFinish, workflowInput any) (*NodeState, error) {
+func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs map[string]any, triggers map[string]nodeTrigger, workflowInput any) (*NodeState, error) {
 	unresolved := unresolvedInterrupts(scan)
 	reenter := rerunsOnResume(node)
 
@@ -546,7 +664,7 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		ns.Status = NodePending
 		ns.ResumedInputs = resumed
 		ns.Interrupts = unresolved
-		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, finishes, workflowInput)
+		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, triggers, workflowInput)
 	case len(unresolved) > 0:
 		// Still waiting for the remaining interrupts.
 		ns.Status = NodeWaiting
@@ -557,7 +675,7 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 	case scan.failed:
 		ns.Status = NodeFailed
 		ns.ResumedInputs = resumed
-		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, finishes, workflowInput)
+		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, triggers, workflowInput)
 	case scan.finished:
 		// A re-entry node may have finished on an earlier resume turn.
 		// Its consumed interrupt must not turn it back into Pending.
@@ -567,7 +685,7 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		// All resolved, re-entry: re-run with the responses.
 		ns.Status = NodePending
 		ns.ResumedInputs = resumed
-		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, finishes, workflowInput)
+		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, triggers, workflowInput)
 	default:
 		// All resolved, handoff: the node is done; its output is the
 		// response, which Resume forwards to successors. Keep the
@@ -595,11 +713,16 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 // _find_predecessor_input.
 //
 // A node with several incoming edges gets the output of the predecessor
-// that triggered it, not of the first one declared. That is the
-// predecessor whose edge to the node fired most recently, which is also
-// the one the scheduler recorded as NodeState.TriggeredBy before the
-// pause. A predecessor that finished but routed elsewhere is skipped.
-func (w *Workflow) predecessorInput(node Node, nodeOutputs map[string]any, finishes map[string]nodeFinish, workflowInput any) (any, string) {
+// that triggered it, not of the first one declared. That is the source
+// of the last edge that fired into the node, see collectTriggers. A
+// predecessor that routed elsewhere, paused or failed fired no edge and
+// is not considered.
+//
+// "Last" goes by the position of the event that saved the output. The
+// scheduler sets NodeState.TriggeredBy in the order it handles
+// completions, which can differ for two predecessors that ran in
+// parallel.
+func (w *Workflow) predecessorInput(node Node, nodeOutputs map[string]any, triggers map[string]nodeTrigger, workflowInput any) (any, string) {
 	if node == nil {
 		return nil, ""
 	}
@@ -607,18 +730,8 @@ func (w *Workflow) predecessorInput(node Node, nodeOutputs map[string]any, finis
 	if len(incoming) == 0 {
 		return nil, ""
 	}
-	trigger, latest := "", -1
-	for _, e := range incoming {
-		from := e.From.Name()
-		if _, ok := nodeOutputs[from]; !ok {
-			continue
-		}
-		if f := finishes[from]; f.index > latest && w.edgeFired(e, f.routing) {
-			trigger, latest = from, f.index
-		}
-	}
-	if trigger != "" {
-		return nodeOutputs[trigger], trigger
+	if t, ok := triggers[node.Name()]; ok {
+		return t.input, t.from
 	}
 	for _, e := range incoming {
 		if e.From.Name() == Start.Name() {

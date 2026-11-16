@@ -1077,31 +1077,14 @@ func findSuccessors(g *graph, state *RunState, currentNode Node, input any, even
 		return nil
 	}
 	from := currentNode.Name()
-	concreteMatched := false // any concrete Route fired (controls Default)
 	out := []successor{}
 	added := map[Node]struct{}{}
-	var defaultRouteNode Node
-	for _, edge := range succs {
+	for _, edge := range firedEdges(succs, event) {
 		if _, ok := added[edge.To]; ok {
 			continue
 		}
-		if edge.Route == nil {
-			out = appendSuccessor(out, g, state, edge.To, input, from, parentBranch)
-			added[edge.To] = struct{}{}
-			continue
-		}
-		if edge.Route == Default {
-			defaultRouteNode = edge.To
-			continue
-		}
-		if event != nil && edge.Route.Matches(event) {
-			out = appendSuccessor(out, g, state, edge.To, input, from, parentBranch)
-			added[edge.To] = struct{}{}
-			concreteMatched = true
-		}
-	}
-	if !concreteMatched && defaultRouteNode != nil {
-		out = appendSuccessor(out, g, state, defaultRouteNode, input, from, parentBranch)
+		out = appendSuccessor(out, g, state, edge.To, input, from, parentBranch)
+		added[edge.To] = struct{}{}
 	}
 	// Second pass: if we fanned out to more than one successor,
 	// stamp a sub-branch onto each non-Join entry whose branch is
@@ -1120,6 +1103,32 @@ func findSuccessors(g *graph, state *RunState, currentNode Node, input any, even
 		}
 	}
 	return out
+}
+
+// firedEdges returns the edges among a node's outgoing edges that fire
+// for its routing event (nil when the node emitted none), in dispatch
+// order. findSuccessors documents the rules. Rehydration replays them
+// over history to find what triggered a node (see collectTriggers), so
+// the rules live here and are not repeated there.
+func firedEdges(outgoing []Edge, event *session.Event) []Edge {
+	var fired []Edge
+	var defaultEdge *Edge
+	concreteMatched := false // any concrete Route fired (controls Default)
+	for i, edge := range outgoing {
+		switch {
+		case edge.Route == nil:
+			fired = append(fired, edge)
+		case edge.Route == Default:
+			defaultEdge = &outgoing[i]
+		case event != nil && edge.Route.Matches(event):
+			fired = append(fired, edge)
+			concreteMatched = true
+		}
+	}
+	if !concreteMatched && defaultEdge != nil {
+		fired = append(fired, *defaultEdge)
+	}
+	return fired
 }
 
 // appendSuccessor records a routing match in the dispatch list.
