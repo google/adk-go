@@ -766,10 +766,15 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// when they go back to the calling agent, as adk-python does for a
 		// BaseAgent root of an app that is not resumable. A graph workflow
 		// resumes a paused run from its invocation's events, so it keeps the
-		// first call's invocation; adk-python raises for a Workflow root. So
-		// does an answer whose caller is not in the agent tree, since that
-		// caller can be a workflow node agent missing from the workflow's
-		// sub-agents; adk-python starts a new invocation there.
+		// first call's invocation; adk-python raises for a Workflow root. An
+		// answer whose caller is not in the agent tree also keeps the first
+		// call's invocation, since that caller can be a workflow node agent
+		// missing from the workflow's sub-agents; adk-python starts a new
+		// invocation there. The reset follows the route, and only the first
+		// response decides the route, so a message whose first response
+		// matches no call keeps the first matched call's invocation.
+		// adk-python starts a new invocation whenever any response matches
+		// no call.
 		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
 		if spansInvocations && routedToCaller {
 			invocationID = ""

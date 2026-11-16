@@ -1369,53 +1369,66 @@ func TestRunner_Node_ToleratesUnmatchedFunctionResponse(t *testing.T) {
 }
 
 // Answers resume the invocation of the calls they answer. On the node path
-// that also holds for calls of two invocations: the first call's invocation
-// is resumed, where adk-python raises for an LlmAgent root.
+// that also holds for calls of two invocations: the invocation of the first
+// answer in the message is resumed, where adk-python raises for an LlmAgent
+// root.
 func TestRunner_FunctionResponsesResumeTheirInvocation(t *testing.T) {
 	tests := []struct {
 		name string
 		root func(*testing.T) agent.Agent
 		ids  []string
+		want string
 	}{
-		{name: "agent path, calls of one invocation", root: newCallerRoot, ids: []string{"fc-1a", "fc-1b"}},
-		{name: "node path, calls of one invocation", root: newPermissiveAgent, ids: []string{"fc-1a", "fc-1b"}},
-		{name: "node path, calls of two invocations", root: newPermissiveAgent, ids: []string{"fc-1a", "fc-2"}},
+		{name: "agent path, calls of one invocation", root: newCallerRoot, ids: []string{"fc-1a", "fc-1b"}, want: "inv-1"},
+		{name: "node path, calls of one invocation", root: newPermissiveAgent, ids: []string{"fc-1a", "fc-1b"}, want: "inv-1"},
+		{name: "node path, calls of two invocations", root: newPermissiveAgent, ids: []string{"fc-1a", "fc-2"}, want: "inv-1"},
+		{name: "node path, newer call answered first", root: newPermissiveAgent, ids: []string{"fc-2", "fc-1a"}, want: "inv-2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := runFunctionResponses(t, tt.root(t), tt.ids...)
-			for _, id := range got {
-				if id != "inv-1" {
-					t.Errorf("event InvocationID = %q, want %q", id, "inv-1")
+			for _, ev := range runFunctionResponses(t, tt.root(t), tt.ids...) {
+				if ev.InvocationID != tt.want {
+					t.Errorf("event InvocationID = %q, want %q", ev.InvocationID, tt.want)
 				}
 			}
 		})
 	}
 }
 
-// On the agent path, answers to calls of two invocations go back to the
-// calling agent in a new invocation, as adk-python does for a BaseAgent root
-// of an app that is not resumable.
+// Answers run under a new invocation ID when their calls belong to two
+// invocations on the agent path, as adk-python does for a BaseAgent root of
+// an app that is not resumable, and on either path when a call ID matches no
+// call or the first matched call has no invocation ID. Where the answers go
+// back to the calling agent, the root must not run.
 func TestRunner_FunctionResponsesStartNewInvocation(t *testing.T) {
 	tests := []struct {
 		name string
 		root func(*testing.T) agent.Agent
 		ids  []string
+		// callerRuns is set when the answers go back to "approver", the agent
+		// that made the calls, and not to the root.
+		callerRuns bool
 	}{
-		{name: "agent path, calls of two invocations", root: newCallerRoot, ids: []string{"fc-1a", "fc-2"}},
+		{name: "agent path, calls of two invocations", root: newCallerRoot, ids: []string{"fc-1a", "fc-2"}, callerRuns: true},
 		{name: "agent path, unknown calls", root: newCallerRoot, ids: []string{"no-such-fc"}},
 		{name: "node path, unknown calls", root: newPermissiveAgent, ids: []string{"no-such-fc"}},
 		// fc-0's event has no invocation ID, and that counts as an invocation
 		// of its own, so the run gets a new ID as when fc-0 is answered alone.
-		{name: "agent path, call without an invocation ID first", root: newCallerRoot, ids: []string{"fc-0", "fc-2"}},
+		// Answered first, it is the first matched invocation on both paths.
+		// Answered after fc-2 on the agent path, it must still count as a
+		// second invocation.
+		{name: "agent path, call without an invocation ID first", root: newCallerRoot, ids: []string{"fc-0", "fc-2"}, callerRuns: true},
+		{name: "agent path, call without an invocation ID last", root: newCallerRoot, ids: []string{"fc-2", "fc-0"}, callerRuns: true},
 		{name: "node path, call without an invocation ID first", root: newPermissiveAgent, ids: []string{"fc-0", "fc-2"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := runFunctionResponses(t, tt.root(t), tt.ids...)
-			for _, id := range got {
-				if id == "" || id == "inv-1" || id == "inv-2" {
-					t.Errorf("event InvocationID = %q, want a new invocation ID", id)
+			for _, ev := range runFunctionResponses(t, tt.root(t), tt.ids...) {
+				if ev.InvocationID == "" || ev.InvocationID == "inv-1" || ev.InvocationID == "inv-2" {
+					t.Errorf("event InvocationID = %q, want a new invocation ID", ev.InvocationID)
+				}
+				if tt.callerRuns && ev.Author == "root" {
+					t.Errorf("event authored by root, want the calling agent to run")
 				}
 			}
 		})
@@ -1447,9 +1460,9 @@ func newCallerRoot(t *testing.T) agent.Agent {
 
 // runFunctionResponses seeds call fc-0 in an event without an invocation ID,
 // calls fc-1a and fc-1b from invocation inv-1 and fc-2 from inv-2, all made
-// by "approver", runs root on a message answering callIDs, and returns the
-// invocation ID of every event the run yields.
-func runFunctionResponses(t *testing.T, root agent.Agent, callIDs ...string) []string {
+// by "approver", runs root on a message answering callIDs, and returns every
+// event the run yields.
+func runFunctionResponses(t *testing.T, root agent.Agent, callIDs ...string) []*session.Event {
 	t.Helper()
 	ctx := t.Context()
 	svc := session.InMemoryService()
@@ -1463,12 +1476,12 @@ func runFunctionResponses(t *testing.T, root agent.Agent, callIDs ...string) []s
 	for _, id := range callIDs {
 		msg.Parts = append(msg.Parts, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: id, Name: "tool", Response: map[string]any{}}})
 	}
-	var got []string
+	var got []*session.Event
 	for ev, err := range r.Run(ctx, nodeTestUser, nodeTestSession, msg, agent.RunConfig{}) {
 		if err != nil {
 			t.Fatalf("Run() error = %v", err)
 		}
-		got = append(got, ev.InvocationID)
+		got = append(got, ev)
 	}
 	if len(got) == 0 {
 		t.Fatal("Run() yielded no events")

@@ -15,6 +15,7 @@
 package runner_test
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"slices"
@@ -27,6 +28,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagent"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
@@ -560,5 +562,64 @@ func TestRunner_WorkflowAgent_AnswersToTwoPausedRunsResumeTheFirst(t *testing.T)
 	}
 	if got := handlerInput.Load(); got != "first" {
 		t.Errorf("handler input = %v, want %q", got, "first")
+	}
+}
+
+// A workflow agent paused in two runs, whose node agent "b" is not listed
+// among its SubAgents, resumes the first run when one message answers both
+// interrupts. The runner cannot find the caller in the agent tree, and keeps
+// the first call's invocation instead of starting a new one.
+func TestRunner_WorkflowAgent_UnlistedNodeAgentAnswersResumeTheFirst(t *testing.T) {
+	ctx := t.Context()
+	b, err := agent.New(agent.Config{Name: "b", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			emit := func(ev *session.Event) error {
+				if !yield(ev, nil) {
+					return errors.New("consumer stopped")
+				}
+				return nil
+			}
+			if _, err := workflow.ResumeOrRequestInput(agent.Promote(ctx), emit, session.RequestInput{InterruptID: "b-" + ctx.InvocationID(), Message: "approve"}); err != nil {
+				return
+			}
+			yield(&session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("B", genai.RoleModel)}}, nil)
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := joinResumeAgent(t, "d", "D", false)
+	bn, dn := joinResumeAgentNode(t, b), joinResumeAgentNode(t, d)
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf",
+		Edges: []workflow.Edge{{From: workflow.Start, To: bn}, {From: bn, To: dn}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "repro", Agent: wf, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id1, name1 := findLongRunningInterrupt(drainRunner(t, r.Run(ctx, "u", "s", userText("start1"), agent.RunConfig{})))
+	id2, name2 := findLongRunningInterrupt(drainRunner(t, r.Run(ctx, "u", "s", userText("start2"), agent.RunConfig{})))
+	if id1 == "" || id2 == "" || id1 == id2 {
+		t.Fatalf("interrupt IDs = %q, %q, want two different IDs", id1, id2)
+	}
+
+	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{FunctionResponse: &genai.FunctionResponse{ID: id1, Name: name1, Response: map[string]any{"payload": "first"}}},
+		{FunctionResponse: &genai.FunctionResponse{ID: id2, Name: name2, Response: map[string]any{"payload": "second"}}},
+	}}
+	events := drainRunner(t, r.Run(ctx, "u", "s", msg, agent.RunConfig{}))
+	sawD := false
+	for _, ev := range events {
+		if ev.Author == "d" && ev.Content != nil {
+			sawD = true
+		}
+	}
+	newID, _ := findLongRunningInterrupt(events)
+	if !sawD || newID != "" {
+		t.Errorf("resume reached d = %v, new interrupt = %q; want d reached and no new interrupt", sawD, newID)
 	}
 }

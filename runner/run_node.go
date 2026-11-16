@@ -292,9 +292,9 @@ func (r *Runner) newNodeInvocationContext(
 	}
 
 	// Answers to calls from several invocations resume the first call's
-	// invocation here. adk-python raises for an LlmAgent or Workflow root
-	// in that case; adk-go accepts resume messages adk-python rejects, as it
-	// does for unmatched responses, so runs that resume today keep working.
+	// invocation here. adk-python raises for an LlmAgent root in that case;
+	// adk-go accepts resume messages adk-python rejects, as it does for
+	// unmatched responses, so runs that resume today keep working.
 	invocationID, _ := resolveInvocationID(storedSession, msg)
 	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 		Artifacts:    artifacts,
