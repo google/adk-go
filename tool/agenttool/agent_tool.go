@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/agent"
 	artifactinternal "google.golang.org/adk/internal/artifact"
 	"google.golang.org/adk/internal/llminternal"
+	"google.golang.org/adk/internal/plugininternal"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/internal/utils"
@@ -208,7 +209,9 @@ func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, er
 	}
 
 	// TODO(dpasiukevich): verify agent loop termination.
-	eventCh := r.Run(toolCtx, subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
+	// Only this sub-runner keeps the calling run's plugins, so they also see
+	// the sub-agent's agents, models and tools.
+	eventCh := r.Run(plugininternal.WithInheritedPlugins(toolCtx), subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
 		StreamingMode: agent.StreamingModeSSE,
 	})
 

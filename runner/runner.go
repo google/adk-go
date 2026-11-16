@@ -17,6 +17,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
@@ -38,6 +39,7 @@ import (
 	"google.golang.org/adk/internal/utils"
 	"google.golang.org/adk/memory"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/platform"
 	"google.golang.org/adk/plugin"
 	"google.golang.org/adk/session"
 )
@@ -55,7 +57,11 @@ type Config struct {
 	MemoryService memory.Service
 	// optional
 	PluginConfig PluginConfig
-	// optional
+	// optional. When true, Run and RunLive create the session if it does not
+	// exist. The session is created when the session ID is empty, so the
+	// service generates one, or when the session service's Get reports
+	// [session.ErrNotFound]. Any other Get error is returned as is, so a
+	// transient storage failure never replaces an existing session.
 	AutoCreateSession bool
 }
 
@@ -140,32 +146,18 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			opt(&options)
 		}
 
-		var storedSession session.Session
-		getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
-			AppName:   r.appName,
-			UserID:    userID,
-			SessionID: sessionID,
-		})
+		// The inbound message is always a user turn, whatever Role the caller
+		// set. Normalize it once here so that findAgentToRun, the invocation
+		// context and the stored event all see the same message.
+		msg = asUserContent(msg)
+
+		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
 		if err != nil {
-			if !r.autoCreateSession {
-				yield(nil, err)
-				return
-			}
-			createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
-				AppName:   r.appName,
-				UserID:    userID,
-				SessionID: sessionID,
-			})
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			storedSession = createResp.Session
-		} else {
-			storedSession = getResp.Session
+			yield(nil, err)
+			return
 		}
 
-		agentToRun, err := r.findAgentToRun(storedSession, msg)
+		agentToRun, branch, err := r.findAgentToRun(storedSession, msg)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -175,7 +167,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 		})
-		ctx = plugininternal.ToContext(ctx, r.pluginManager)
+		ctx = r.withPluginManager(ctx)
 
 		var artifacts agent.Artifacts
 		if r.artifactService != nil {
@@ -201,6 +193,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			Artifacts:   artifacts,
 			Memory:      memoryImpl,
 			Session:     storedSession,
+			Branch:      branch,
 			Agent:       agentToRun,
 			UserContent: msg,
 			RunConfig:   &cfg,
@@ -231,6 +224,14 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				continue
 			}
 
+			if event == nil {
+				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
+				log.Printf("%v", err)
+				yield(nil, err)
+				return
+			}
+			stampTimestamp(ctx, event)
+
 			if pluginManager != nil {
 				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
 				if err != nil {
@@ -239,16 +240,8 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 					}
 					continue
 				}
-				if modifiedEvent != nil {
-					event = modifiedEvent
-				}
-			}
-
-			if event == nil {
-				err := fmt.Errorf("adk: agent %q yielded a nil event", r.rootAgent.Name())
-				log.Printf("%v", err)
-				yield(nil, err)
-				return
+				event = fromPlugin(event, modifiedEvent)
+				stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
 			}
 
 			// only commit non-partial event to a session service
@@ -264,6 +257,31 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 	}
+}
+
+func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string) (session.Session, error) {
+	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
+		AppName:   r.appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err == nil {
+		return getResp.Session, nil
+	}
+	// Services reject an empty ID in Get with a validation error, not
+	// ErrNotFound. Create generates an ID for it.
+	if !r.autoCreateSession || (sessionID != "" && !errors.Is(err, session.ErrNotFound)) {
+		return nil, err
+	}
+	createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   r.appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return createResp.Session, nil
 }
 
 // runBeforeRunCallback processes and persists a plugin's replacement reply.
@@ -285,14 +303,13 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	}
 	// Stamp after OnEvent so a replacement keeps its BeforeRun origin, without
 	// changing plugin-owned metadata.
-	if modifiedEvent != nil {
-		event = modifiedEvent
-	}
+	event = fromPlugin(event, modifiedEvent)
 	reply := *event
 	reply.CustomMetadata = make(map[string]any, len(event.CustomMetadata)+1)
 	maps.Copy(reply.CustomMetadata, event.CustomMetadata)
 	reply.CustomMetadata[plugininternal.BeforeRunReplyKey] = true
 	event = &reply
+	stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
 	if !event.Partial {
 		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
 			return nil, fmt.Errorf("failed to add event to session: %w", err)
@@ -300,6 +317,11 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	}
 	return event, nil
 }
+
+// errUserFunctionCall rejects a user message that carries a function call.
+// Only a model makes function calls, so storing one would put a call no model
+// produced into the history.
+var errUserFunctionCall = errors.New("user message cannot contain function calls")
 
 type liveAgent interface {
 	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
@@ -322,6 +344,9 @@ func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
 			return p == nil
 		})
 		req.Content = &content
+	}
+	if len(utils.FunctionCalls(req.Content)) > 0 {
+		return errUserFunctionCall
 	}
 	err := s.sess.Send(req)
 	if err != nil {
@@ -374,31 +399,13 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		opt(&options)
 	}
 
-	var storedSession session.Session
-	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
-		AppName:   r.appName,
-		UserID:    userID,
-		SessionID: sessionID,
-	})
+	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
 	if err != nil {
-		if !r.autoCreateSession {
-			return nil, nil, err
-		}
-		createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
-			AppName:   r.appName,
-			UserID:    userID,
-			SessionID: sessionID,
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-		storedSession = createResp.Session
-	} else {
-		storedSession = getResp.Session
+		return nil, nil, err
 	}
 
 	// msg is nil for Live run as it's streaming
-	agentToRun, err := r.findAgentToRun(storedSession, nil)
+	agentToRun, _, err := r.findAgentToRun(storedSession, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -413,7 +420,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		StreamingMode: runconfig.StreamingModeBidi, // Live is always bidirectional streaming
 		Live:          &cfg,
 	})
-	ctx = plugininternal.ToContext(ctx, r.pluginManager)
+	ctx = r.withPluginManager(ctx)
 
 	var artifacts agent.Artifacts
 	if r.artifactService != nil {
@@ -444,21 +451,16 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	})
 
 	if r.pluginManager != nil {
-		earlyExitResult, err := r.pluginManager.RunBeforeRunCallback(iCtx)
+		// The reply goes through OnEvent and the run through AfterRun, as on
+		// Run. adk-python runs a live agent through the same
+		// Runner._exec_with_plugin as run_async (runners.py).
+		earlyExitEvent, err := r.runBeforeRunCallback(iCtx)
 		if err != nil {
 			return nil, nil, err
 		}
-		if earlyExitResult != nil {
-			earlyExitEvent := session.NewEventWithContext(iCtx, iCtx.InvocationID())
-			earlyExitEvent.Author = agentToRun.Name()
-			earlyExitEvent.LLMResponse = model.LLMResponse{
-				Content: earlyExitResult,
-			}
-			if err := r.sessionService.AppendEvent(iCtx, storedSession, earlyExitEvent); err != nil {
-				return nil, nil, fmt.Errorf("failed to add event to session: %w", err)
-			}
-
+		if earlyExitEvent != nil {
 			earlyExitIter := func(yield func(*session.Event, error) bool) {
+				defer r.pluginManager.RunAfterRunCallback(iCtx)
 				yield(earlyExitEvent, nil)
 			}
 			return &closedLiveSession{}, earlyExitIter, nil
@@ -486,19 +488,6 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				continue
 			}
 
-			if r.pluginManager != nil {
-				modifiedEvent, pluginErr := r.pluginManager.RunOnEventCallback(iCtx, event)
-				if pluginErr != nil {
-					if !yield(nil, pluginErr) {
-						return
-					}
-					continue
-				}
-				if modifiedEvent != nil {
-					event = modifiedEvent
-				}
-			}
-
 			if event == nil {
 				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
 				if len(bufferedEvents) > 0 {
@@ -511,6 +500,19 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				log.Printf("%v", err)
 				yield(nil, err)
 				return
+			}
+			stampTimestamp(iCtx, event)
+
+			if r.pluginManager != nil {
+				modifiedEvent, pluginErr := r.pluginManager.RunOnEventCallback(iCtx, event)
+				if pluginErr != nil {
+					if !yield(nil, pluginErr) {
+						return
+					}
+					continue
+				}
+				event = fromPlugin(event, modifiedEvent)
+				stampTimestamp(iCtx, event) // a plugin may have rewritten the event in place
 			}
 
 			// Chronological event buffering logic for Live streaming.
@@ -616,18 +618,26 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 			return ctx, fmt.Errorf("error running on run user message callback : %w", err)
 		}
 		if modifiedMsg != nil {
-			msg = modifiedMsg
+			// A plugin can return a message with any Role. Normalize it before
+			// it becomes the invocation context's UserContent: NewInvocationContext
+			// copies the struct value, so a later reassignment would not reach it.
+			msg = asUserContent(modifiedMsg)
 			// update ctx user message
 			ctx = icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 				Artifacts:    ctx.Artifacts(),
 				Memory:       ctx.Memory(),
 				Session:      ctx.Session(),
+				Branch:       ctx.Branch(),
 				Agent:        ctx.Agent(),
 				UserContent:  msg,
 				RunConfig:    ctx.RunConfig(),
 				InvocationID: ctx.InvocationID(),
 			})
 		}
+	}
+
+	if len(utils.FunctionCalls(msg)) > 0 {
+		return ctx, errUserFunctionCall
 	}
 
 	artifactsService := ctx.Artifacts()
@@ -664,12 +674,14 @@ func (r *Runner) appendMessageToSession(ctx agent.InvocationContext, storedSessi
 }
 
 // findAgentToRun returns the agent that should handle the next request based on
-// session history.
-func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (agent.Agent, error) {
+// session history, along with the branch it should run on when resuming a
+// sub-agent's function call (matching adk-python's find_agent_to_run and
+// restore_branch_from_history).
+func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (agent.Agent, string, error) {
 	if event := handleUserFunctionCallResponse(session.Events(), msg); event != nil {
 		subAgent := r.rootAgent.FindAgent(event.Author)
 		if subAgent != nil {
-			return subAgent, nil
+			return subAgent, event.Branch, nil
 		}
 		log.Printf("Function call from an unknown agent: %s, event id: %s", event.Author, event.ID)
 	}
@@ -690,12 +702,12 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 		}
 
 		if r.isTransferableAcrossAgentTree(subAgent) {
-			return subAgent, nil
+			return subAgent, "", nil
 		}
 	}
 
 	// Falls back to root agent if no suitable agents are found in the session.
-	return r.rootAgent, nil
+	return r.rootAgent, "", nil
 }
 
 // handleUserFunctionCallResponse finds the function call event that matches the function response id
@@ -751,4 +763,72 @@ func hasInlineData(event *session.Event) bool {
 		}
 	}
 	return false
+}
+
+// fromPlugin merges an OnEvent plugin's replacement onto the original event.
+// A replacement keeps the identity of the event it replaces: its ID,
+// invocation ID and timestamp, and its author when the replacement names none,
+// as adk-python's Runner._get_output_event does. adk-python keeps every other
+// field the replacement did not set too; a Go struct cannot tell an unset field
+// from a zero one, so here the replacement's other fields win as given.
+//
+// The replacement itself is not written to: the result is a copy, so a plugin
+// that returns one shared event for several originals leaves it as it built it.
+func fromPlugin(original, modified *session.Event) *session.Event {
+	if modified == nil {
+		return original
+	}
+	out := *modified
+	out.ID = original.ID
+	out.InvocationID = original.InvocationID
+	out.Timestamp = original.Timestamp
+	if out.Author == "" {
+		out.Author = original.Author
+	}
+	return &out
+}
+
+// stampTimestamp gives an event without a timestamp the time the runner
+// received it, as adk-python's Event does on construction. That is an event an
+// agent yielded without one, or one a plugin rewrote in place and left without
+// one. A replacement a plugin returns has already inherited the original's
+// timestamp through fromPlugin.
+//
+// An event built as a struct literal never passes through session.NewEvent.
+// Stored with a zero timestamp it moves the session's last update time back to
+// year 1, and a backend that orders events by time, such as session/database,
+// reads it back ahead of every message before it.
+func stampTimestamp(ctx context.Context, event *session.Event) {
+	if event.Timestamp.IsZero() {
+		event.Timestamp = platform.Now(ctx)
+	}
+}
+
+// withPluginManager puts this runner's plugin manager in ctx, which is where
+// tools and callbacks look it up. The one exception is a runner without plugins
+// that agenttool starts for a sub-agent: it keeps the plugin manager of the run
+// that called the tool, so that run's plugins also see the sub-agent. Any other
+// runner uses only its own plugins. Run-level callbacks always stay with
+// r.pluginManager.
+func (r *Runner) withPluginManager(ctx context.Context) context.Context {
+	ctx, inherited := plugininternal.TakeInheritedPlugins(ctx)
+	if !r.pluginManager.HasPlugins() && inherited.HasPlugins() {
+		return plugininternal.ToContext(ctx, inherited)
+	}
+	return plugininternal.ToContext(ctx, r.pluginManager)
+}
+
+// asUserContent returns a copy of msg with Role set to [genai.RoleUser] and its
+// own Parts slice, so the caller's struct is never modified. The inbound
+// message of a run is a user turn: an empty Role would be skipped when the
+// model request is built, and a "model" Role would present the caller's text
+// as the model's own earlier turn. A nil msg is returned as is.
+func asUserContent(msg *genai.Content) *genai.Content {
+	if msg == nil {
+		return nil
+	}
+	out := *msg
+	out.Role = genai.RoleUser
+	out.Parts = slices.Clone(msg.Parts)
+	return &out
 }
