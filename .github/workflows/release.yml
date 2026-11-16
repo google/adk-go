@@ -66,9 +66,44 @@ jobs:
         run: echo "::warning title=Release skipped::RELEASE_PAT is not configured, so no release PR was created or updated."
 
       - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071  # v4.4.1
+        id: release
         if: env.HAS_RELEASE_PAT == 'true'
         with:
           token: ${{ secrets.RELEASE_PAT }}
           config-file: ${{ steps.line.outputs.config }}
           manifest-file: ${{ steps.line.outputs.manifest }}
           target-branch: ${{ github.ref_name }}
+
+      # release-please builds its notes from commit subjects, which name no
+      # author. Append GitHub's generated notes, which credit each PR's author
+      # and list first-time contributors. Root module only: generated notes
+      # cover every PR in the tag range, which misdescribes a submodule release.
+      - name: Credit authors in the release notes
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+          MAJOR: ${{ steps.release.outputs.major }}
+        run: |
+          set -euo pipefail
+          marker='<summary>All changes</summary>'
+          body=$(gh release view "$TAG" -R "$REPO" --json body -q .body)
+          # A rerun of this job must not append the list twice.
+          if grep -qF "$marker" <<<"$body"; then
+            echo "Release $TAG already lists all changes."
+            exit 0
+          fi
+          # Compare with the previous release on the same major line, so a v1
+          # release is not diffed against the newest v2 tag.
+          prev=$( { echo "$TAG"
+                    gh api --paginate "repos/$REPO/git/matching-refs/tags/v$MAJOR." -q '.[].ref | ltrimstr("refs/tags/")' \
+                      | grep -E "^v$MAJOR\.[0-9]+\.[0-9]+$" || true
+                  } | sort -uV | grep -B1 -xF "$TAG" | grep -vxF "$TAG" || true)
+          args=(-f tag_name="$TAG")
+          if [ -n "$prev" ]; then
+            args+=(-f previous_tag_name="$prev")
+          fi
+          notes=$(gh api "repos/$REPO/releases/generate-notes" "${args[@]}" -q .body)
+          printf '%s\n\n<details>\n%s\n\n%s\n\n</details>\n' "$body" "$marker" "$notes" > "$RUNNER_TEMP/notes.md"
+          gh release edit "$TAG" -R "$REPO" --notes-file "$RUNNER_TEMP/notes.md"
