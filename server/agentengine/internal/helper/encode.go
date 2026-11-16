@@ -61,7 +61,7 @@ func convertSnake(path, indent string, o any) (any, error) {
 		// handle time.Time in a special way
 		if vt == reflect.TypeOf(time.Time{}) {
 			t := o.(time.Time)
-			return t.UnixMilli() / 1000.0, nil // returns a number of seconds "Unix-way"
+			return float64(t.UnixMicro()) / 1e6, nil // returns a number of seconds "Unix-way"
 		}
 
 		// this map will hold all the fields
