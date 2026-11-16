@@ -102,6 +102,9 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			yield(nil, err)
 			return
 		}
+		if !keepsClientFunctionCallIDs(processorModel(ctx, f)) {
+			removeClientFunctionCallIDs(contents)
+		}
 		req.Contents = append(req.Contents, contents...)
 		// If the conversation history concludes on a model turn, inject a synthetic user
 		// continuation turn so the model keeps producing output rather than returning an
@@ -112,6 +115,25 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 				req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
 			}
 		}
+	}
+}
+
+// keepsClientFunctionCallIDs reports whether m declares
+// [model.Capabilities.ClientFunctionCallIDs], so the adk- function call IDs ADK
+// generated stay in its requests. A nil model, or one that does not implement
+// [model.CapabilitiesProvider], does not.
+func keepsClientFunctionCallIDs(m model.LLM) bool {
+	cp, ok := m.(model.CapabilitiesProvider)
+	return ok && cp.Capabilities().ClientFunctionCallIDs
+}
+
+// removeClientFunctionCallIDs clears, in place, every function call and
+// function response ID in contents that ADK generated; IDs a provider issued
+// stay. contents must not share a Content or Part with a session event, which
+// holds for what the buildContents functions return.
+func removeClientFunctionCallIDs(contents []*genai.Content) {
+	for _, c := range contents {
+		utils.RemoveClientFunctionCallID(c)
 	}
 }
 
@@ -284,7 +306,6 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 			continue
 		}
 
-		utils.RemoveClientFunctionCallID(content)
 		contents = append(contents, content)
 	}
 

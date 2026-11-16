@@ -4110,3 +4110,45 @@ func TestNewModel_DeclaresNoOutputSchemaWithTools(t *testing.T) {
 		t.Error("Capabilities().OutputSchemaAndTools = true, want false")
 	}
 }
+
+// TestNewModel_DeclaresClientFunctionCallIDs checks that both backends declare
+// that the model pairs tool calls with their results by ID, so the flow keeps
+// ADK's adk- function call IDs in the request (adk-python
+// flows/llm_flows/context/_contents.py:94, AnthropicLlm), and declare nothing
+// else.
+func TestNewModel_DeclaresClientFunctionCallIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  anthropicmodel.ClientConfig
+	}{
+		{
+			name: "anthropic",
+			cfg:  anthropicmodel.ClientConfig{Backend: anthropicmodel.BackendAnthropic, APIKey: "test-anthropic-key"},
+		},
+		{
+			name: "vertex",
+			cfg: anthropicmodel.ClientConfig{
+				Backend:     anthropicmodel.BackendVertex,
+				Project:     "test-project",
+				Location:    "us-east5",
+				TokenSource: staticTokenSource{token: "test-vertex-oauth-token"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, err := anthropicmodel.NewModel(t.Context(), "claude-3-7-sonnet-latest", tt.cfg)
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			cp, ok := m.(model.CapabilitiesProvider)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement model.CapabilitiesProvider", m)
+			}
+			want := model.Capabilities{ClientFunctionCallIDs: true}
+			if got := cp.Capabilities(); got != want {
+				t.Errorf("Capabilities() = %+v, want %+v", got, want)
+			}
+		})
+	}
+}

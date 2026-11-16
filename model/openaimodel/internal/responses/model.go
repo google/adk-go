@@ -50,7 +50,15 @@ func (m *Model) Name() string { return m.name }
 // OutputSchemaAndTools is false, so an agent that has both an output schema
 // and tools gets the set_model_response tool instead of a native response
 // schema. An agent without tools still sends its output schema natively.
-func (m *Model) Capabilities() model.Capabilities { return model.Capabilities{} }
+//
+// ClientFunctionCallIDs is true: the Responses API pairs each
+// function_call_output with its function_call by call_id, so the flow keeps
+// the adk- function call IDs ADK generates. A wrapper around this model keeps
+// them only when its own Capabilities returns this value, as
+// [model.Capabilities] describes.
+func (m *Model) Capabilities() model.Capabilities {
+	return model.Capabilities{ClientFunctionCallIDs: true}
+}
 
 var _ model.CapabilitiesProvider = (*Model)(nil)
 

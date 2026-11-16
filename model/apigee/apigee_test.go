@@ -410,3 +410,30 @@ func TestApigeeModel_CapabilitiesFollowDelegateBackend(t *testing.T) {
 		})
 	}
 }
+
+// TestApigeeModel_DoesNotDeclareClientFunctionCallIDs checks that an Apigee
+// model declares no ID pairing, even for a Claude model ID, so the flow removes
+// the adk- function call IDs ADK generates from its requests. adk-python's
+// ApigeeLlm is not in the ID-pairing list
+// (flows/llm_flows/context/_contents.py:91-97).
+func TestApigeeModel_DoesNotDeclareClientFunctionCallIDs(t *testing.T) {
+	for _, modelName := range []string{
+		"apigee/vertex_ai/gemini-2.5-flash",
+		"apigee/gemini/gemini-2.5-flash",
+		"apigee/vertex_ai/claude-3-7-sonnet",
+	} {
+		t.Run(modelName, func(t *testing.T) {
+			t.Setenv("GOOGLE_API_KEY", "test-key")
+			t.Setenv(googleGenaiUseVertexAIEnvVar, "")
+			t.Setenv(projectEnvVar, "test-project")
+			t.Setenv(locationEnvVar, "test-location")
+			m, err := NewModel(t.Context(), modelName, WithProxyURL(proxyURL), WithHTTPClient(&http.Client{}))
+			if err != nil {
+				t.Fatalf("NewModel(%q) error = %v", modelName, err)
+			}
+			if m.Capabilities().ClientFunctionCallIDs {
+				t.Error("Capabilities().ClientFunctionCallIDs = true, want false")
+			}
+		})
+	}
+}
