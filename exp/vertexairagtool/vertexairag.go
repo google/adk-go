@@ -51,22 +51,27 @@ type Config struct {
 	RAGResources []*genai.VertexRAGStoreRAGResource
 
 	// RAGRetrievalConfig configures filtering, hybrid search, ranking and context
-	// count. Nil leaves the backend defaults in place. These options extend the
-	// configuration supported by the Python retrieval tool.
+	// count. It is sent as VertexRAGStore.RAGRetrievalConfig; nil omits it.
+	// TopK sets the same limit as SimilarityTopK, and Filter.VectorDistanceThreshold
+	// sets the same threshold as VectorDistanceThreshold. Setting both members
+	// of either pair is an error, even when their values are equal.
 	RAGRetrievalConfig *genai.RAGRetrievalConfig
 
-	// SimilarityTopK caps how many results retrieval returns. Nil leaves the
-	// backend default in place.
+	// SimilarityTopK caps how many results retrieval returns.
+	// RAGRetrievalConfig.TopK is an alternative; if neither is set, the backend
+	// default applies. Setting both fields is an error.
 	SimilarityTopK *int32
 
 	// VectorDistanceThreshold drops results whose vector distance exceeds it.
-	// Nil leaves the backend default in place.
+	// RAGRetrievalConfig.Filter.VectorDistanceThreshold is an alternative; if
+	// neither is set, the backend default applies. Setting both fields is an error.
 	VectorDistanceThreshold *float64
 }
 
 // New returns a tool that grounds a Gemini model's responses on the configured
 // Vertex AI RAG corpus. It returns an error when Description or RAGResources is
-// empty.
+// empty, a RAGResources entry is nil, or overlapping retrieval settings are set
+// in both RAGRetrievalConfig and the corresponding legacy field.
 func New(cfg Config) (tool.Tool, error) {
 	if cfg.Description == "" {
 		return nil, errors.New("vertexairag: Config.Description is required")
@@ -78,6 +83,15 @@ func New(cfg Config) (tool.Tool, error) {
 	for _, r := range cfg.RAGResources {
 		if r == nil {
 			return nil, errors.New("vertexairag: Config.RAGResources cannot be nil")
+		}
+	}
+
+	if retrieval := cfg.RAGRetrievalConfig; retrieval != nil {
+		if cfg.SimilarityTopK != nil && retrieval.TopK != nil {
+			return nil, errors.New("vertexairag: Config.SimilarityTopK and Config.RAGRetrievalConfig.TopK cannot both be set")
+		}
+		if cfg.VectorDistanceThreshold != nil && retrieval.Filter != nil && retrieval.Filter.VectorDistanceThreshold != nil {
+			return nil, errors.New("vertexairag: Config.VectorDistanceThreshold and Config.RAGRetrievalConfig.Filter.VectorDistanceThreshold cannot both be set")
 		}
 	}
 
