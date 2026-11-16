@@ -47,7 +47,8 @@ var toolsetCloseTimeout = 10 * time.Second
 // Each distinct toolset is closed once, one after another, and has ten
 // seconds to return. An agent's own toolsets are closed before those
 // of the agents it leads to; beyond that the order is unspecified. After the
-// last toolset, Close closes the runner's plugins.
+// last toolset, Close closes the runner's plugins; each plugin has
+// [PluginConfig].CloseTimeout to return (5 seconds when zero).
 //
 // Every toolset and plugin is attempted. A toolset whose Close fails, panics
 // or does not return in ten seconds never stops the next toolset or the
@@ -57,15 +58,24 @@ var toolsetCloseTimeout = 10 * time.Second
 // error reads `close toolset "<name>": <err>` and wraps err. A timeout
 // satisfies errors.Is(err, context.DeadlineExceeded). A panic is recovered
 // and reported as `close toolset "<name>": panic of type <T>`; the panic
-// value is not included.
+// value is not included. When plugins fail, the plugin manager's error reads
+// `Failed to close plugins: '<name>'[, '<name>'...]`, naming the failed
+// plugins, followed by one line `error closing plugin '<name>': <cause>` per
+// failed plugin in registration order. It wraps each cause, so errors.Is finds
+// a plugin's own error, and errors.Is(err, context.DeadlineExceeded) is true
+// for a plugin that timed out. A plugin's panic is reported as its type only,
+// as for a toolset.
 //
 // Close takes no context, so *Runner is an [io.Closer] and "defer r.Close()"
 // is the way to shut a runner down. Nothing Close calls can be canceled, so
 // a started close always finishes with the remaining toolsets and the
 // plugins. Close writes no field of the Runner and may be called more than
-// once and concurrently with itself, Run and RunLive. After Close, Run still
-// works; an operation on a toolset that was closed fails with that toolset's
-// own error (for the MCP toolset, mcp.ErrConnectionClosed).
+// once and concurrently with itself, Run and RunLive. Every call runs the
+// whole close sequence again, so a plugin whose Close timed out in an earlier
+// call has its CloseFunc called again while the abandoned call may still be
+// running. After Close, Run still works; an operation on a toolset that was
+// closed fails with that toolset's own error (for the MCP toolset,
+// mcp.ErrConnectionClosed).
 //
 // Toolsets that a workflow hides behind agent.New{Run: w.Run}, and agents a
 // dynamic node creates while it runs, are not reached.

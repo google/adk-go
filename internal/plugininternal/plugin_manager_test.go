@@ -127,6 +127,9 @@ func TestPluginManager_RunOnRunErrorCallback_PanicRecordedOnSpanLaterPluginsStil
 	}
 }
 
+// The name dates from the time the manager returned the callback's error as it
+// was. The test now requires the error to name the plugin and the callback and
+// to wrap the callback's error.
 func TestPluginManager_RunAfterRunCallback_StopsAtFirstErrorAndReturnsItUnwrapped(t *testing.T) {
 	errB := errors.New("p2 cleanup failed")
 	var log []string
@@ -144,6 +147,7 @@ func TestPluginManager_RunAfterRunCallback_StopsAtFirstErrorAndReturnsItUnwrappe
 		name    string
 		cfgs    []plugin.Config
 		wantErr error
+		wantMsg string
 		wantLog []string
 	}{
 		{
@@ -154,6 +158,7 @@ func TestPluginManager_RunAfterRunCallback_StopsAtFirstErrorAndReturnsItUnwrappe
 				{Name: "p3", AfterRunCallback: plain("p3")},
 			},
 			wantErr: errB,
+			wantMsg: "Error in plugin 'p2' during 'after_run_callback' callback: p2 cleanup failed",
 			wantLog: []string{"p1", "p2"},
 		},
 		{
@@ -173,8 +178,11 @@ func TestPluginManager_RunAfterRunCallback_StopsAtFirstErrorAndReturnsItUnwrappe
 
 			err := pm.RunAfterRunCallback(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}))
 
-			if err != tt.wantErr {
-				t.Errorf("RunAfterRunCallback() error = %v, want %v", err, tt.wantErr)
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("RunAfterRunCallback() error = %v, want one that wraps %v", err, tt.wantErr)
+			}
+			if err != nil && err.Error() != tt.wantMsg {
+				t.Errorf("RunAfterRunCallback() error text = %q, want %q", err.Error(), tt.wantMsg)
 			}
 			if !slices.Equal(log, tt.wantLog) {
 				t.Errorf("callbacks run = %v, want %v", log, tt.wantLog)

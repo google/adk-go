@@ -134,7 +134,18 @@ type Config struct {
 // PluginConfig configures the plugins a [Runner] applies and how long it waits
 // for them to close.
 type PluginConfig struct {
-	Plugins      []*plugin.Plugin
+	// Plugins are applied to every run, in order. [Runner.Close] closes them
+	// after the toolsets of the runner's agent tree.
+	Plugins []*plugin.Plugin
+	// CloseTimeout bounds how long [Runner.Close] waits for each plugin's
+	// Close to return. Zero, the default, means 5 seconds. A plugin whose
+	// Close has not returned by then is abandoned, because a plugin's
+	// CloseFunc takes no context and cannot be canceled: its call goes on in
+	// the background, Close reports it as a failed close that wraps
+	// [context.DeadlineExceeded], and the next plugin is closed. A later
+	// call of Close calls that plugin's CloseFunc again, even if the
+	// abandoned call is still running. A negative value is refused: [New]
+	// returns an error.
 	CloseTimeout time.Duration
 }
 

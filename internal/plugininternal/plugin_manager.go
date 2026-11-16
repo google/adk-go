@@ -16,7 +16,9 @@ package plugininternal
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
@@ -34,6 +36,10 @@ import (
 // BeforeRunReplyKey identifies persisted replies that bypassed agent execution.
 const BeforeRunReplyKey = eventmetadata.BeforeRunReplyKey
 
+// defaultCloseTimeout bounds one plugin's Close when PluginConfig.CloseTimeout
+// is zero. It is adk-python's default (runners.py:287, plugin_close_timeout).
+const defaultCloseTimeout = 5 * time.Second
+
 type PluginConfig struct {
 	Plugins      []*plugin.Plugin
 	CloseTimeout time.Duration
@@ -45,8 +51,15 @@ type PluginManager struct {
 	closeTimeout time.Duration
 }
 
-// NewPluginManager creates a new PluginManager.
+// NewPluginManager creates a new PluginManager. A zero cfg.CloseTimeout means
+// defaultCloseTimeout; a negative one is an error.
 func NewPluginManager(cfg PluginConfig) (*PluginManager, error) {
+	if cfg.CloseTimeout < 0 {
+		return nil, fmt.Errorf("plugin close timeout must not be negative, got %v", cfg.CloseTimeout)
+	}
+	if cfg.CloseTimeout == 0 {
+		cfg.CloseTimeout = defaultCloseTimeout
+	}
 	pm := &PluginManager{
 		closeTimeout: cfg.CloseTimeout,
 		plugins:      make([]*plugin.Plugin, 0, len(cfg.Plugins)),
@@ -93,7 +106,7 @@ func (pm *PluginManager) RunOnUserMessageCallback(cctx agent.InvocationContext, 
 		if callback != nil {
 			newContent, err := callback(cctx, userMessage)
 			if err != nil {
-				return nil, err
+				return nil, callbackError(plugin, "on_user_message_callback", err)
 			}
 			if newContent != nil {
 				return newContent, nil // Early exit
@@ -110,7 +123,7 @@ func (pm *PluginManager) RunBeforeRunCallback(cctx agent.InvocationContext) (*ge
 		if callback != nil {
 			newContent, err := callback(cctx)
 			if err != nil {
-				return nil, err
+				return nil, callbackError(plugin, "before_run_callback", err)
 			}
 			if newContent != nil {
 				return newContent, nil // Early exit
@@ -123,9 +136,9 @@ func (pm *PluginManager) RunBeforeRunCallback(cctx agent.InvocationContext) (*ge
 // RunAfterRunCallback runs the after-run callback of every plugin in
 // registration order: the AfterRunCallback or the FailableAfterRunCallback,
 // whichever the plugin sets. It stops at the first FailableAfterRunCallback
-// that returns an error and returns that error unwrapped, so the after-run
-// callbacks of later plugins do not run, as adk-python's _run_callbacks stops
-// at the first failure. A panic is not recovered.
+// that returns an error and returns that error wrapped by callbackError, so
+// the after-run callbacks of later plugins do not run, as adk-python's
+// _run_callbacks stops at the first failure. A panic is not recovered.
 func (pm *PluginManager) RunAfterRunCallback(cctx agent.InvocationContext) error {
 	for _, plugin := range pm.plugins {
 		if callback := plugin.AfterRunCallback(); callback != nil {
@@ -134,7 +147,7 @@ func (pm *PluginManager) RunAfterRunCallback(cctx agent.InvocationContext) error
 		}
 		if callback := plugin.FailableAfterRunCallback(); callback != nil {
 			if err := callback(cctx); err != nil {
-				return err
+				return callbackError(plugin, "after_run_callback", err)
 			}
 		}
 	}
@@ -195,7 +208,7 @@ func (pm *PluginManager) RunOnEventCallback(cctx agent.InvocationContext, event 
 		if callback != nil {
 			newEvent, err := callback(cctx, event)
 			if err != nil {
-				return nil, err
+				return nil, callbackError(plugin, "on_event_callback", err)
 			}
 			if newEvent != nil {
 				return newEvent, nil // Early exit
@@ -212,7 +225,7 @@ func (pm *PluginManager) RunBeforeAgentCallback(cctx agent.Context) (*genai.Cont
 		if callback != nil {
 			newContent, err := callback(cctx)
 			if err != nil {
-				return nil, err
+				return nil, callbackError(plugin, "before_agent_callback", err)
 			}
 			if newContent != nil {
 				return newContent, nil // Early exit
@@ -229,7 +242,7 @@ func (pm *PluginManager) RunAfterAgentCallback(cctx agent.Context) (*genai.Conte
 		if callback != nil {
 			newContent, err := callback(cctx)
 			if err != nil {
-				return nil, err
+				return nil, callbackError(plugin, "after_agent_callback", err)
 			}
 			if newContent != nil {
 				return newContent, nil // Early exit
@@ -311,7 +324,7 @@ func (pm *PluginManager) RunBeforeModelCallback(cctx agent.Context, llmRequest *
 		if callback != nil {
 			newResponse, err := callback(cctx, llmRequest)
 			if err != nil {
-				return nil, err
+				return nil, callbackError(plugin, "before_model_callback", err)
 			}
 			if newResponse != nil {
 				return newResponse, nil // Early exit
@@ -328,7 +341,7 @@ func (pm *PluginManager) RunAfterModelCallback(cctx agent.Context, llmResponse *
 		if callback != nil {
 			newResponse, err := callback(cctx, llmResponse, llmResponseError)
 			if err != nil {
-				return nil, err
+				return nil, callbackError(plugin, "after_model_callback", err)
 			}
 			if newResponse != nil {
 				return newResponse, nil // Early exit
@@ -345,7 +358,7 @@ func (pm *PluginManager) RunOnModelErrorCallback(cctx agent.Context, llmRequest 
 		if callback != nil {
 			newResponse, err := callback(cctx, llmRequest, llmResponseError)
 			if err != nil {
-				return nil, err
+				return nil, callbackError(plugin, "on_model_error_callback", err)
 			}
 			if newResponse != nil {
 				return newResponse, nil // Early exit
@@ -355,18 +368,67 @@ func (pm *PluginManager) RunOnModelErrorCallback(cctx agent.Context, llmRequest 
 	return nil, nil
 }
 
-// Close calls the CloseFunc on all registered plugins.
+// callbackError wraps err, which p's callback named callback returned, with
+// the plugin and callback names. The text is adk-python's
+// (plugins/plugin_manager.py:317-320); the cause stays reachable.
+func callbackError(p *plugin.Plugin, callback string, err error) error {
+	return fmt.Errorf("Error in plugin '%s' during '%s' callback: %w", p.Name(), callback, err) //nolint:staticcheck // ST1005: the text is adk-python's, and other features' tests match it
+}
+
+// Close closes every registered plugin once, in registration order and one at
+// a time, waiting for each at most the manager's close timeout. A plugin whose
+// Close fails, panics or times out never stops the next one. A timed-out Close
+// is abandoned and keeps running in its own goroutine, since a plugin's
+// CloseFunc takes no context. Close keeps no state between calls, so it may
+// be called again and concurrently with itself; every call closes every
+// plugin.
+//
+// Close returns nil when every plugin closed without error. Otherwise the
+// error reads "Failed to close plugins: '<name>'[, '<name>'...]" with the
+// failed plugins' names, then one line per failed plugin as closePlugin
+// reports it, and wraps every plugin's error.
 func (pm *PluginManager) Close() error {
-	var errors []error
-	for _, plugin := range pm.plugins {
-		if err := plugin.Close(); err != nil {
-			errors = append(errors, fmt.Errorf("error closing plugin '%s': %w", plugin.Name(), err))
+	var names []string
+	var errs []error
+	for _, p := range pm.plugins {
+		if err := pm.closePlugin(p); err != nil {
+			names = append(names, "'"+p.Name()+"'")
+			errs = append(errs, err)
 		}
 	}
-	if len(errors) > 0 {
-		return fmt.Errorf("failed to close plugins: %v", errors)
+	if len(errs) == 0 {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("Failed to close plugins: %s\n%w", strings.Join(names, ", "), errors.Join(errs...)) //nolint:staticcheck // ST1005: the summary text is adk-python's (plugins/plugin_manager.py:435), and u2326 compares it
+}
+
+// closePlugin calls p.Close in its own goroutine and waits for it at most
+// pm.closeTimeout. It returns nil on success; otherwise an error that starts
+// "error closing plugin '<name>': ".
+func (pm *PluginManager) closePlugin(p *plugin.Plugin) error {
+	// Buffered, so the goroutine ends when p.Close returns even after the
+	// timeout, when nobody receives any more.
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// The panic value may hold user data; report its type only.
+				done <- fmt.Errorf("panic of type %T", r)
+			}
+		}()
+		done <- p.Close()
+	}()
+	timer := time.NewTimer(pm.closeTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("error closing plugin '%s': %w", p.Name(), err)
+		}
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("error closing plugin '%s': no result after %v: %w", p.Name(), pm.closeTimeout, context.DeadlineExceeded)
+	}
 }
 
 func ToContext(ctx context.Context, cfg *PluginManager) context.Context {
