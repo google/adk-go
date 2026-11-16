@@ -1186,6 +1186,33 @@ func (p *analyticsPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[st
 	return nil, nil
 }
 
+const (
+	// reflectAndRetryResponseType matches the unexported response_type marker
+	// emitted by plugin/retryandreflect (and adk-python's ReflectAndRetryToolPlugin)
+	// when it recovers a tool error into retry guidance. Kept here because
+	// plugin/agentanalytics requires google.golang.org/adk/v2 v2.0.0.
+	reflectAndRetryResponseType         = "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN"
+	reflectAndRetryFallbackErrorMessage = "Tool raised an error that ReflectAndRetryToolPlugin handled."
+)
+
+// retryAnswerError reports whether result is a recovery payload produced by
+// plugin/retryandreflect, returning the extracted error message and true.
+// Only exact string values on "error_details" and "error_type" are accepted;
+// non-string values are ignored and fall back to
+// reflectAndRetryFallbackErrorMessage.
+func retryAnswerError(result map[string]any) (string, bool) {
+	rt, ok := result["response_type"].(string)
+	if !ok || rt != reflectAndRetryResponseType {
+		return "", false
+	}
+	for _, k := range []string{"error_details", "error_type"} {
+		if s, ok := result[k].(string); ok && s != "" {
+			return s, true
+		}
+	}
+	return reflectAndRetryFallbackErrorMessage, true
+}
+
 // isToolConfirmationOutcome reports whether err is a tool confirmation request
 // or rejection. Both outcomes complete the tool call in adk-python rather than
 // logging TOOL_ERROR.

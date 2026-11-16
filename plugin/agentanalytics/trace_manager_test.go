@@ -28,6 +28,7 @@ import (
 	"iter"
 	"log"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -22492,5 +22493,833 @@ func TestLateFailureCauseKeepsActivation(t *testing.T) {
 	defer late.mu.Unlock()
 	if got := late.agentStack[0].firstRetiredCause(); !errors.Is(got, siblingErr) {
 		t.Errorf("failure cause that reached the invocation span = %v, want %v", got, siblingErr)
+	}
+}
+
+func TestBoundedArgsDigest(t *testing.T) {
+	digest := boundedArgsDigest
+
+	t.Run("nil and empty args get the same complete digest", func(t *testing.T) {
+		dNil, truncNil := digest(nil)
+		dEmpty, truncEmpty := digest(map[string]any{})
+		if truncNil || truncEmpty {
+			t.Fatalf("truncated = (%v, %v) for nil and empty args, want (false, false)", truncNil, truncEmpty)
+		}
+		if dNil != dEmpty {
+			t.Errorf("digest(nil) = %d, digest(empty) = %d, want equal", dNil, dEmpty)
+		}
+		if d, _ := digest(map[string]any{"k": 1}); d == dNil {
+			t.Errorf("digest of non-empty args = %d, the digest of no args", d)
+		}
+		idNil, _ := toolCallIdentityOf(context.Background(), nil)
+		idEmpty, _ := toolCallIdentityOf(context.Background(), map[string]any{})
+		if !idNil.sameArgs(idEmpty) || !idEmpty.sameArgs(idNil) {
+			t.Error("sameArgs() = false for nil and empty args, want true")
+		}
+	})
+
+	t.Run("cyclic maps are deterministic and distinct", func(t *testing.T) {
+		cyclic1 := map[string]any{"k": 1}
+		cyclic1["self"] = cyclic1
+		cyclic2 := map[string]any{"k": 2}
+		cyclic2["self"] = cyclic2
+		d1a, truncated := digest(cyclic1)
+		d1b, _ := digest(cyclic1)
+		d2, _ := digest(cyclic2)
+		if truncated {
+			t.Error("cyclic map digest is truncated, want full")
+		}
+		if d1a != d1b {
+			t.Errorf("cyclic map digest not deterministic: %d != %d", d1a, d1b)
+		}
+		if d1a == d2 {
+			t.Errorf("distinct cyclic maps produced identical digest %d", d1a)
+		}
+	})
+
+	t.Run("map order does not matter", func(t *testing.T) {
+		mA := map[string]any{"a": "x", "b": 42, "nested": map[string]any{"p": true, "q": 3.5}}
+		mB := map[string]any{"nested": map[string]any{"q": 3.5, "p": true}, "b": 42, "a": "x"}
+		dA, _ := digest(mA)
+		dB, _ := digest(mB)
+		if dA != dB {
+			t.Errorf("equivalent maps produced different digests: %d != %d", dA, dB)
+		}
+	})
+
+	t.Run("shared values in non-string-keyed maps", func(t *testing.T) {
+		// A value shared by two entries hashes as itself in both, whatever
+		// order the map iterates in, rather than as a cycle the second time.
+		shared := []any{"x", map[string]any{"y": 1}}
+		sharedMap := map[string]any{"z": []int{1, 2}}
+		args := func() map[string]any {
+			m := map[int]any{}
+			for i := range 16 {
+				if i%2 == 0 {
+					m[i] = shared
+				} else {
+					m[i] = sharedMap
+				}
+			}
+			return map[string]any{"nested": m, "yaml": map[any]any{"a": shared, 2: shared, true: sharedMap}}
+		}
+		want, truncated := digest(args())
+		if truncated {
+			t.Fatal("digest of shared values is truncated, want full")
+		}
+		for i := range 64 {
+			if got, _ := digest(args()); got != want {
+				t.Fatalf("digest #%d = %d, want %d: shared values hash by iteration order", i, got, want)
+			}
+		}
+		other := args()
+		other["nested"].(map[int]any)[3] = shared
+		if got, _ := digest(other); got == want {
+			t.Error("digest unchanged after an entry of a non-string-keyed map changed")
+		}
+	})
+
+	t.Run("maps over 32 keys hash their contents", func(t *testing.T) {
+		big := make(map[string]any, 200)
+		for i := range 200 {
+			big[fmt.Sprintf("k%03d", i)] = i
+		}
+		twin := maps.Clone(big)
+		before, truncated := digest(big)
+		if truncated {
+			t.Fatal("digest of a 200-key map is truncated, want full")
+		}
+		if d, _ := digest(twin); d != before {
+			t.Errorf("equal maps in two allocations: digests %d and %d, want equal", d, before)
+		}
+		big["k150"] = "changed"
+		if after, _ := digest(big); after == before {
+			t.Error("digest unchanged after a 200-key map was changed in place")
+		}
+	})
+
+	t.Run("long strings hash their middle", func(t *testing.T) {
+		head, tail := strings.Repeat("a", 128), strings.Repeat("z", 128)
+		d1, truncated := digest(map[string]any{"s": head + strings.Repeat("m", 64) + tail})
+		d2, _ := digest(map[string]any{"s": head + strings.Repeat("n", 64) + tail})
+		if truncated {
+			t.Error("digest of a 320-byte string is truncated, want full")
+		}
+		if d1 == d2 {
+			t.Error("strings that differ only in the middle produced identical digests")
+		}
+		b1, _ := digest(map[string]any{"b": []byte("same bytes")})
+		b2, _ := digest(map[string]any{"b": []byte("same bytes")})
+		if b1 != b2 {
+			t.Errorf("equal byte slices in two allocations: digests %d and %d, want equal", b1, b2)
+		}
+	})
+
+	t.Run("past the bounds the digest is truncated", func(t *testing.T) {
+		huge := make(map[string]any, maxDigestEntries+1)
+		for i := range maxDigestEntries + 1 {
+			huge[fmt.Sprintf("k%d", i)] = i
+		}
+		dag := map[string]any{"leaf": 1}
+		for range 40 {
+			dag = map[string]any{"a": dag, "b": dag}
+		}
+		// The keys of keysPastBytes each fit maxDigestStringBytes, and share
+		// all but their last two bytes, but together they are four times
+		// maxDigestBytes. Those of keysPastBytesLeft fit maxDigestBytes, but
+		// not what is left of it once the string before them is hashed.
+		keysPastBytes := commonPrefixKeys(64, maxDigestStringBytes)
+		keysPastBytesLeft := map[string]any{
+			"a": slices.Repeat([]any{strings.Repeat("s", maxDigestStringBytes)}, 15),
+			"b": commonPrefixKeys(2, 40<<10),
+		}
+		for name, args := range map[string]map[string]any{
+			"long string":          {"s": strings.Repeat("x", maxDigestStringBytes+1)},
+			"long key":             {strings.Repeat("k", maxDigestStringBytes+1): 1},
+			"long nested key":      {"m": map[any]any{strings.Repeat("k", maxDigestStringBytes+1): 1}},
+			"keys past the bytes":  keysPastBytes,
+			"keys past bytes left": keysPastBytesLeft,
+			"large map":            huge,
+			"long slice":           {"s": make([]int, maxDigestEntries+1)},
+			"NaN key":              {"m": map[float64]any{math.NaN(): 1}},
+			"pointer key":          {"m": map[*int]any{new(int): 1}},
+			"shared subtree":       dag,
+		} {
+			d1, truncated := digest(args)
+			if !truncated {
+				t.Errorf("%s: digest is not truncated, want truncated", name)
+			}
+			if d2, _ := digest(args); d2 != d1 {
+				t.Errorf("%s: truncated digest not deterministic: %d != %d", name, d1, d2)
+			}
+		}
+	})
+
+	t.Run("keys that fill the byte bounds hash in full", func(t *testing.T) {
+		// 16 keys of maxDigestStringBytes each are maxDigestBytes in all.
+		keys := commonPrefixKeys(16, maxDigestStringBytes)
+		want, truncated := digest(keys)
+		if truncated {
+			t.Fatal("digest of keys that fill maxDigestBytes is truncated, want full")
+		}
+		if got, _ := digest(maps.Clone(keys)); got != want {
+			t.Errorf("equal maps in two allocations: digests %d and %d, want equal", got, want)
+		}
+	})
+
+	t.Run("truncated digests prove nothing", func(t *testing.T) {
+		args := map[string]any{"s": strings.Repeat("x", maxDigestStringBytes+1)}
+		a, _ := toolCallIdentityOf(context.Background(), args)
+		b, _ := toolCallIdentityOf(context.Background(), args)
+		if a.sameArgs(b) {
+			t.Error("sameArgs() = true for truncated digests, want false")
+		}
+		map300A := make(map[string]any, 300)
+		map300B := make(map[string]any, 300)
+		for i := range 300 {
+			map300A[fmt.Sprintf("k%03d", i)] = i
+			map300B[fmt.Sprintf("k%03d", i)] = i + 1000
+		}
+		idA, _ := toolCallIdentityOf(context.Background(), map300A)
+		idB, _ := toolCallIdentityOf(context.Background(), map300B)
+		if !idA.argsTruncated || !idB.argsTruncated || idA.sameArgs(idB) {
+			t.Errorf("300-key maps: truncated=(%v,%v) sameArgs=%v, want (true,true) and false", idA.argsTruncated, idB.argsTruncated, idA.sameArgs(idB))
+		}
+		full, _ := toolCallIdentityOf(context.Background(), map[string]any{"s": "x"})
+		if !full.sameArgs(full) {
+			t.Error("sameArgs() = false for equal full digests, want true")
+		}
+	})
+
+	t.Run("opaque structs pointers and functions set truncated without reading fields", func(t *testing.T) {
+		type opaqueState struct {
+			Public  string
+			counter atomic.Int64
+			mu      sync.Mutex
+			private map[string]int
+		}
+		st := &opaqueState{
+			Public:  "immutable",
+			private: map[string]int{"seed": 1},
+		}
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				st.counter.Add(1)
+				st.mu.Lock()
+				st.private[fmt.Sprintf("k%d", i%8)] = i
+				st.mu.Unlock()
+			}
+		})
+		defer func() {
+			close(stop)
+			wg.Wait()
+		}()
+
+		type plainStruct struct{ X int }
+		var nilPtr *opaqueState
+		for i := range 64 {
+			for name, args := range map[string]map[string]any{
+				"live_struct_ptr": {"p": st},
+				"nil_struct_ptr":  {"p": nilPtr},
+				"struct_value":    {"s": plainStruct{X: i}},
+				"struct_array":    {"a": [2]plainStruct{{X: 1}, {X: 2}}},
+				"closure":         {"fn": func() int { return i }},
+			} {
+				if _, truncated := boundedArgsDigest(args); !truncated {
+					t.Fatalf("%s: boundedArgsDigest() truncated = false, want true", name)
+				}
+				id1, _ := toolCallIdentityOf(context.Background(), args)
+				id2, _ := toolCallIdentityOf(context.Background(), args)
+				if id1.sameArgs(id2) {
+					t.Fatalf("%s: sameArgs() = true on opaque argument, want false", name)
+				}
+			}
+		}
+	})
+}
+
+// commonPrefixKeys returns a map of n keys of size bytes each that differ only
+// in their last two bytes.
+func commonPrefixKeys(n, size int) map[string]any {
+	prefix := strings.Repeat("p", size-2)
+	m := make(map[string]any, n)
+	for i := range n {
+		m[fmt.Sprintf("%s%02d", prefix, i)] = i
+	}
+	return m
+}
+
+func TestSortedMapKeysByteBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		m           any
+		maxKeyBytes int
+		wantOK      bool
+	}{
+		{name: "key at the string bound", m: commonPrefixKeys(1, maxDigestStringBytes), maxKeyBytes: maxDigestBytes, wantOK: true},
+		{name: "key past the string bound", m: commonPrefixKeys(1, maxDigestStringBytes+1), maxKeyBytes: maxDigestBytes},
+		{name: "keys that fill the bytes left", m: commonPrefixKeys(16, maxDigestStringBytes), maxKeyBytes: maxDigestBytes, wantOK: true},
+		{name: "keys past the bytes left", m: commonPrefixKeys(64, maxDigestStringBytes), maxKeyBytes: maxDigestBytes},
+		{name: "short keys within the bytes left", m: commonPrefixKeys(2, 1024), maxKeyBytes: 2048, wantOK: true},
+		{name: "short keys past the bytes left", m: commonPrefixKeys(2, 1024), maxKeyBytes: 2047},
+		{name: "string keys behind an interface within the bytes left", m: map[any]any{"ab": 1, "cd": 2, 3: 3}, maxKeyBytes: 4, wantOK: true},
+		{name: "string keys behind an interface past the bytes left", m: map[any]any{"ab": 1, "cd": 2, 3: 3}, maxKeyBytes: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := reflect.ValueOf(tc.m)
+			keys, _, ok := sortedMapKeys(v, tc.maxKeyBytes)
+			if ok != tc.wantOK {
+				t.Fatalf("sortedMapKeys() ok = %v, want %v", ok, tc.wantOK)
+			}
+			if ok && len(keys) != v.Len() {
+				t.Errorf("sortedMapKeys() returned %d keys, want %d", len(keys), v.Len())
+			}
+		})
+	}
+}
+
+// BenchmarkBoundedArgsDigest_CommonPrefixKeys digests 64 keys that share a
+// long prefix and do not fit the digest's byte bounds, together (64KiB) or
+// each (1MiB and 4MiB). Comparing such keys takes time in proportion to their
+// length, so the digest checks their lengths before it sorts them.
+func BenchmarkBoundedArgsDigest_CommonPrefixKeys(b *testing.B) {
+	for _, bc := range []struct {
+		name string
+		size int
+	}{
+		{name: "64KiB", size: maxDigestStringBytes - 64},
+		{name: "1MiB", size: 1 << 20},
+		{name: "4MiB", size: 4 << 20},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			// The keys are prefixes of one string, so they share its bytes.
+			s := strings.Repeat("k", bc.size+64)
+			args := make(map[string]any, 64)
+			for i := range 64 {
+				args[s[:bc.size+i]] = i
+			}
+			for b.Loop() {
+				if _, truncated := boundedArgsDigest(args); !truncated {
+					b.Fatal("boundedArgsDigest() truncated = false, want true")
+				}
+			}
+		})
+	}
+}
+
+type unwrapTestInvocationCtx struct {
+	agent.InvocationContext
+	context.Context
+	ag agent.Agent
+}
+
+func (c unwrapTestInvocationCtx) Deadline() (time.Time, bool) { return c.Context.Deadline() }
+func (c unwrapTestInvocationCtx) Done() <-chan struct{}       { return c.Context.Done() }
+func (c unwrapTestInvocationCtx) Err() error                  { return c.Context.Err() }
+func (c unwrapTestInvocationCtx) Value(key any) any           { return c.Context.Value(key) }
+func (c unwrapTestInvocationCtx) Agent() agent.Agent          { return c.ag }
+func (c unwrapTestInvocationCtx) Artifacts() agent.Artifacts  { return nil }
+func (c unwrapTestInvocationCtx) Memory() agent.Memory        { return nil }
+func (c unwrapTestInvocationCtx) Session() session.Session    { return nil }
+func (c unwrapTestInvocationCtx) InvocationID() string        { return "inv-unwrap" }
+func (c unwrapTestInvocationCtx) Branch() string              { return "" }
+func (c unwrapTestInvocationCtx) WithContext(ctx context.Context) agent.InvocationContext {
+	c.Context = ctx
+	return c
+}
+
+func (c unwrapTestInvocationCtx) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return c
+}
+
+func TestTraceManager_UnwrapContext_WithoutCancel(t *testing.T) {
+	ic := unwrapTestInvocationCtx{Context: context.Background()}
+	acts := &session.EventActions{StateDelta: map[string]any{"k": "v"}}
+	toolCtx := agent.NewToolContext(ic, "call-wc", acts, nil)
+	cbCtx := agent.NewCallbackContext(ic, acts)
+
+	var logBuf bytes.Buffer
+	origOut := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origOut)
+
+	// Unwrapping callbackContextWrapper must never call .Actions() (which logs
+	// a warning in adk/v2), even across WithoutCancel and WithTimeout wrappers.
+	for _, c := range []context.Context{cbCtx, context.WithoutCancel(cbCtx)} {
+		ap, gotActs, delta, pinned := unwrapToolContextActions(c)
+		if ap == 0 || delta.empty() {
+			t.Errorf("callback unwrap returned (%d, %+v), want non-zero actionsPtr and non-empty delta", ap, delta)
+		}
+		if gotActs != nil {
+			t.Errorf("callback unwrap returned non-nil *session.EventActions %p, want nil", gotActs)
+		}
+		if pinned == nil {
+			t.Errorf("callback unwrap returned nil pinnedCtx")
+		}
+	}
+	if logBuf.Len() != 0 {
+		t.Errorf("unexpected log output unwrapping callback contexts: %q", logBuf.String())
+	}
+
+	// Wrapping a ToolContext in context.WithoutCancel and context.WithTimeout
+	// exercises both the unexported "c" field (withoutCancelCtx) and the
+	// "Context" field that timerCtx promotes from its embedded cancelCtx in
+	// unwrapToolContextActions.
+	timedCtx, cancel := context.WithTimeout(context.WithoutCancel(toolCtx), time.Minute)
+	defer cancel()
+	for _, c := range []context.Context{context.WithoutCancel(toolCtx), timedCtx} {
+		ap, gotActs, delta, pinned := unwrapToolContextActions(c)
+		if ap == 0 || delta.empty() {
+			t.Errorf("withoutCancel tool unwrap returned (%d, %+v), want non-zero actionsPtr and delta", ap, delta)
+		}
+		if gotActs != nil {
+			t.Errorf("withoutCancel wrapper returned direct Actions pointer %p despite hiding Actions()", gotActs)
+		}
+		if pinned == nil {
+			t.Errorf("withoutCancel tool unwrap returned nil pinnedCtx")
+		}
+	}
+	if logBuf.Len() != 0 {
+		t.Errorf("unexpected log output unwrapping withoutCancel contexts: %q", logBuf.String())
+	}
+}
+
+// unwrapTestKey is a context key of TestTraceManager_UnwrapContext_CustomLayouts.
+type unwrapTestKey struct{}
+
+// TestTraceManager_UnwrapContext_CustomLayouts checks that the EventActions of
+// a custom context come from its Actions() method, never from a private field
+// that happens to be named actions, and that a standard-library wrapper around
+// a custom context reads none of the custom context's fields.
+func TestTraceManager_UnwrapContext_CustomLayouts(t *testing.T) {
+	stable := &session.EventActions{StateDelta: map[string]any{"stable": 1}}
+	custom := &privateActionsToolCtx{
+		mockInvocationContext: &mockInvocationContext{ctx: context.Background()},
+		stable:                stable,
+	}
+	custom.replaceActions(0)
+
+	ap, acts, delta, pinned := unwrapToolContextActions(custom)
+	if want := reflect.ValueOf(stable).Pointer(); acts != stable || ap != want {
+		t.Errorf("custom context unwrap = (%#x, %p), want Actions() = (%#x, %p)", ap, acts, want, stable)
+	}
+	if delta.m == nil || mapPtr(delta.m) != mapPtr(stable.StateDelta) || pinned != nil {
+		t.Errorf("custom context unwrap delta = %+v, pinned = %v, want Actions().StateDelta held directly without a pinned context", delta, pinned)
+	}
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{name: "WithValue", ctx: context.WithValue(custom, unwrapTestKey{}, 1)},
+		{name: "WithoutCancel", ctx: context.WithoutCancel(custom)},
+	} {
+		ap, acts, delta, pinned := unwrapToolContextActions(tc.ctx)
+		if ap != 0 || acts != nil || !delta.empty() || pinned != nil {
+			t.Errorf("%s(custom) unwrap = (%#x, %p, %+v, %v), want zero values: the custom context's fields are not read", tc.name, ap, acts, delta, pinned)
+		}
+	}
+}
+
+func TestBoundedArgsDigest_NestedMapsChargeKeysAtAdmissionAndBoundDepth(t *testing.T) {
+	t.Run("nested_map_under_early_sorted_key_cannot_reuse_outer_key_budget", func(t *testing.T) {
+		// Outer map has 15 keys of 64 KiB ("z_00".."z_14", 960 KiB total) plus
+		// key "a" (sorted first, 1 byte) holding an inner map with two 40 KiB
+		// keys (80 KiB). When node budget expires inside "a" before the outer
+		// loop reaches "z_00".."z_14", charging key bytes at map admission must
+		// already have deducted all 960 KiB + 1 bytes from d.bytes.
+		outer := make(map[string]any, 16)
+		prefix := strings.Repeat("z", maxDigestStringBytes-4)
+		wantOuterKeyBytes := 1 // "a"
+		for i := range 15 {
+			k := fmt.Sprintf("%s_%02d", prefix, i)
+			outer[k] = i
+			wantOuterKeyBytes += len(k)
+		}
+		outer["a"] = commonPrefixKeys(2, 40<<10)
+
+		d := argsDigester{nodes: 3, bytes: maxDigestBytes}
+		d.hash(reflect.ValueOf(outer))
+		if wantMaxLeft := maxDigestBytes - wantOuterKeyBytes; d.bytes > wantMaxLeft {
+			t.Errorf("d.bytes after admitting outer map keys = %d, want <= %d (outer key bytes were not charged at admission)", d.bytes, wantMaxLeft)
+		}
+
+		makeArgs := func(innerVal int) map[string]any {
+			m := maps.Clone(outer)
+			inner := commonPrefixKeys(2, 40<<10)
+			inner["v"] = innerVal
+			m["a"] = inner
+			return m
+		}
+		a1 := makeArgs(1)
+		a2 := makeArgs(2)
+		d1, trunc1 := boundedArgsDigest(a1)
+		_, trunc2 := boundedArgsDigest(a2)
+		if !trunc1 || !trunc2 {
+			t.Fatalf("nested maps exceeding combined key byte budget: truncated = (%v, %v), want (true, true)", trunc1, trunc2)
+		}
+		if dRepeat, _ := boundedArgsDigest(a1); dRepeat != d1 {
+			t.Errorf("truncated nested map digest not deterministic: %d != %d", dRepeat, d1)
+		}
+		id1, _ := toolCallIdentityOf(context.Background(), a1)
+		id2, _ := toolCallIdentityOf(context.Background(), a2)
+		if id1.sameArgs(id2) {
+			t.Error("sameArgs() = true on truncated nested maps with distinct inner values, want false")
+		}
+	})
+
+	t.Run("deeply_nested_maps_past_depth_bound_are_truncated", func(t *testing.T) {
+		buildDeep := func(depth, leaf int) map[string]any {
+			cur := map[string]any{"leaf": leaf}
+			for range depth {
+				cur = map[string]any{"next": cur}
+			}
+			return cur
+		}
+		// Exact 32-level container boundary (args + 31 nested maps = 32 levels) hashes in full.
+		atBound1 := buildDeep(31, 1)
+		atBound2 := buildDeep(31, 1)
+		db1, truncBound := boundedArgsDigest(atBound1)
+		db2, _ := boundedArgsDigest(atBound2)
+		if truncBound || db1 != db2 {
+			t.Fatalf("32-level map chain: truncated=%v digests=(%d,%d), want false and equal", truncBound, db1, db2)
+		}
+
+		// 33-level container chain (32 nested maps inside args) hits the documented 32-level depth cap.
+		pastBound1 := buildDeep(32, 1)
+		pastBound2 := buildDeep(32, 2)
+		dp1, truncPast1 := boundedArgsDigest(pastBound1)
+		_, truncPast2 := boundedArgsDigest(pastBound2)
+		if !truncPast1 || !truncPast2 {
+			t.Fatalf("33-level map chain: truncated = (%v, %v), want (true, true)", truncPast1, truncPast2)
+		}
+		if dpRepeat, _ := boundedArgsDigest(pastBound1); dpRepeat != dp1 {
+			t.Errorf("33-level map digest not deterministic: %d != %d", dpRepeat, dp1)
+		}
+		id1, _ := toolCallIdentityOf(context.Background(), pastBound1)
+		id2, _ := toolCallIdentityOf(context.Background(), pastBound2)
+		if id1.sameArgs(id2) {
+			t.Error("sameArgs() = true on depth-truncated maps with distinct leaves, want false")
+		}
+	})
+
+	t.Run("deeply_nested_slices_and_arrays_past_depth_bound_are_truncated", func(t *testing.T) {
+		buildDeepSlices := func(nestedSlices, leaf int) map[string]any {
+			var cur any = leaf
+			for range nestedSlices {
+				cur = []any{cur}
+			}
+			return map[string]any{"items": cur}
+		}
+		// Outer args map (1) + 31 nested slices = 32 container levels: hashed in full.
+		sBound1, sTruncBound := boundedArgsDigest(buildDeepSlices(31, 1))
+		sBound2, _ := boundedArgsDigest(buildDeepSlices(31, 1))
+		if sTruncBound || sBound1 != sBound2 {
+			t.Fatalf("32-level slice chain: truncated=%v digests=(%d,%d), want false and equal", sTruncBound, sBound1, sBound2)
+		}
+		// Outer args map (1) + 32 nested slices = 33 container levels: truncated at depth 32.
+		sp1 := buildDeepSlices(32, 1)
+		sp2 := buildDeepSlices(32, 2)
+		sd1, sTruncPast1 := boundedArgsDigest(sp1)
+		_, sTruncPast2 := boundedArgsDigest(sp2)
+		if !sTruncPast1 || !sTruncPast2 {
+			t.Fatalf("33-level slice chain: truncated = (%v, %v), want (true, true)", sTruncPast1, sTruncPast2)
+		}
+		if sdRepeat, _ := boundedArgsDigest(sp1); sdRepeat != sd1 {
+			t.Errorf("33-level slice digest not deterministic: %d != %d", sdRepeat, sd1)
+		}
+		sid1, _ := toolCallIdentityOf(context.Background(), sp1)
+		sid2, _ := toolCallIdentityOf(context.Background(), sp2)
+		if sid1.sameArgs(sid2) {
+			t.Error("sameArgs() = true on depth-truncated slices with distinct leaves, want false")
+		}
+
+		buildDeepArrays := func(nestedArrays, leaf int) map[string]any {
+			var cur any = leaf
+			for range nestedArrays {
+				cur = [1]any{cur}
+			}
+			return map[string]any{"arr": cur}
+		}
+		aBound1, aTruncBound := boundedArgsDigest(buildDeepArrays(31, 1))
+		aBound2, _ := boundedArgsDigest(buildDeepArrays(31, 1))
+		if aTruncBound || aBound1 != aBound2 {
+			t.Fatalf("32-level array chain: truncated=%v digests=(%d,%d), want false and equal", aTruncBound, aBound1, aBound2)
+		}
+		ap1 := buildDeepArrays(32, 1)
+		ap2 := buildDeepArrays(32, 2)
+		_, aTruncPast1 := boundedArgsDigest(ap1)
+		_, aTruncPast2 := boundedArgsDigest(ap2)
+		if !aTruncPast1 || !aTruncPast2 {
+			t.Fatalf("33-level array chain: truncated = (%v, %v), want (true, true)", aTruncPast1, aTruncPast2)
+		}
+		aid1, _ := toolCallIdentityOf(context.Background(), ap1)
+		aid2, _ := toolCallIdentityOf(context.Background(), ap2)
+		if aid1.sameArgs(aid2) {
+			t.Error("sameArgs() = true on depth-truncated arrays with distinct leaves, want false")
+		}
+	})
+}
+
+func TestTaskDeltaRef(t *testing.T) {
+	if !(taskDeltaRef{}).empty() {
+		t.Error("zero taskDeltaRef.empty() = false, want true")
+	}
+	if (taskDeltaRef{ptr: 1}).empty() {
+		t.Error("taskDeltaRef{ptr: 1}.empty() = true, want false")
+	}
+	if (taskDeltaRef{m: map[string]any{}}).empty() {
+		t.Error("taskDeltaRef{m: empty map}.empty() = true, want false")
+	}
+
+	m := map[string]any{"k": "v"}
+	wantPtr := mapPtr(m)
+	if wantPtr == 0 {
+		t.Fatal("mapPtr(non-nil) = 0, want non-zero")
+	}
+	if got := mapPtr(nil); got != 0 {
+		t.Errorf("mapPtr(nil) = %#x, want 0", got)
+	}
+
+	direct := taskDeltaRef{m: m, ptr: wantPtr + 1}
+	if direct.addr() != wantPtr {
+		t.Errorf("direct.addr() = %#x, want %#x from m", direct.addr(), wantPtr)
+	}
+	if !direct.matches(wantPtr) {
+		t.Errorf("direct.matches(%#x) = false, want true", wantPtr)
+	}
+	if direct.matches(0) || direct.matches(wantPtr+1) {
+		t.Error("direct.matches(0 or wrong ptr) = true, want false")
+	}
+
+	ptrOnly := taskDeltaRef{ptr: wantPtr}
+	if ptrOnly.addr() != wantPtr || !ptrOnly.matches(wantPtr) || ptrOnly.matches(0) {
+		t.Errorf("ptrOnly addr/matches failed: addr=%#x want=%#x", ptrOnly.addr(), wantPtr)
+	}
+	if (taskDeltaRef{}).matches(0) {
+		t.Error("empty taskDeltaRef.matches(0) = true, want false")
+	}
+
+	t.Run("toolContextTaskDeltaRef", func(t *testing.T) {
+		var nilCtx context.Context
+		if got := toolContextTaskDeltaRef(nilCtx, "c0"); !got.empty() {
+			t.Errorf("toolContextTaskDeltaRef(nil) = %+v, want empty", got)
+		}
+		noDeltaCustom := &privateActionsToolCtx{
+			mockInvocationContext: &mockInvocationContext{ctx: context.Background()},
+			stable:                &session.EventActions{},
+		}
+		if got := toolContextTaskDeltaRef(noDeltaCustom, "c1"); !got.empty() {
+			t.Errorf("toolContextTaskDeltaRef(nil StateDelta) = %+v, want empty", got)
+		}
+		ic := unwrapTestInvocationCtx{Context: context.Background()}
+		acts := &session.EventActions{StateDelta: map[string]any{"x": 1}}
+		toolCtx := agent.NewToolContext(ic, "c2", acts, nil)
+		directRef := toolContextTaskDeltaRef(toolCtx, "c2")
+		if directRef.empty() || directRef.call != "c2" || directRef.pinned != nil || !directRef.matches(mapPtr(acts.StateDelta)) {
+			t.Errorf("direct toolContextTaskDeltaRef = %+v, want call=c2, pinned=nil, matching StateDelta", directRef)
+		}
+		wrapped := context.WithoutCancel(toolCtx)
+		wrappedRef := toolContextTaskDeltaRef(wrapped, "c3")
+		if wrappedRef.empty() || wrappedRef.call != "c3" || wrappedRef.pinned == nil || !wrappedRef.matches(mapPtr(acts.StateDelta)) {
+			t.Errorf("wrapped toolContextTaskDeltaRef = %+v, want call=c3, pinned!=nil, matching StateDelta", wrappedRef)
+		}
+	})
+}
+
+type panicActionsToolCtx struct {
+	*mockInvocationContext
+}
+
+func (panicActionsToolCtx) Actions() *session.EventActions {
+	panic("boom")
+}
+
+func TestToolCallIdentity(t *testing.T) {
+	idZero := toolCallIdentity{}
+	if idZero.hasActions() || idZero.hasAttemptIdentity() {
+		t.Errorf("zero toolCallIdentity hasActions=%v hasAttemptIdentity=%v, want both false", idZero.hasActions(), idZero.hasAttemptIdentity())
+	}
+
+	var nilCtx context.Context
+	nilID, nilDelta := toolCallIdentityOf(nilCtx, map[string]any{"a": 1})
+	if nilID.hasAttemptIdentity() || !nilDelta.empty() {
+		t.Errorf("toolCallIdentityOf(nil) = (%+v, %+v), want no attempt identity and empty delta", nilID, nilDelta)
+	}
+
+	ic := unwrapTestInvocationCtx{Context: context.Background()}
+	acts1 := &session.EventActions{StateDelta: map[string]any{"k": 1}}
+	acts2 := &session.EventActions{StateDelta: map[string]any{"k": 2}}
+	tctx1 := agent.NewToolContext(ic, "call-1", acts1, nil)
+	tctx2 := agent.NewToolContext(ic, "call-2", acts2, nil)
+
+	id1, d1 := toolCallIdentityOf(tctx1, map[string]any{"q": "hi"})
+	id1Again, _ := toolCallIdentityOf(tctx1, map[string]any{"q": "hi"})
+	id2, _ := toolCallIdentityOf(tctx2, map[string]any{"q": "hi"})
+	if !id1.hasActions() || !id1.hasAttemptIdentity() || d1.empty() {
+		t.Fatalf("toolCallIdentityOf(toolCtx) = (%+v, %+v), want actions, attempt identity, and non-empty delta", id1, d1)
+	}
+	if !id1.sameContext(id1Again) || !id1.sameArgs(id1Again) {
+		t.Error("same toolContext and args should satisfy sameContext and sameArgs")
+	}
+	if id1.sameContext(id2) {
+		t.Error("distinct toolContext pointers with distinct EventActions should not match sameContext")
+	}
+
+	// Callback context wrapped in WithoutCancel uses actionsPtr + pinnedCtx instead of weak EventActions.
+	cbCtx := context.WithoutCancel(agent.NewCallbackContext(ic, acts1))
+	cbID1, cbDelta := toolCallIdentityOf(cbCtx, map[string]any{"q": "hi"})
+	cbID2, _ := toolCallIdentityOf(cbCtx, map[string]any{"q": "hi"})
+	if !cbID1.hasActions() || cbID1.hasWeakAct || cbDelta.empty() || cbDelta.pinned == nil {
+		t.Fatalf("wrapped callbackContext identity = (%+v, %+v), want actionsPtr without weak and pinned delta", cbID1, cbDelta)
+	}
+	if !cbID1.sameContext(cbID2) {
+		t.Error("same wrapped callbackContext should satisfy sameContext")
+	}
+	if id1.sameContext(cbID1) {
+		t.Error("toolContext and wrapped callbackContext should not match sameContext")
+	}
+
+	// Verify weak.Pointer eviction causes sameContext to return false once EventActions is collected.
+	weakID := func() toolCallIdentity {
+		ephemeral := &privateActionsToolCtx{
+			mockInvocationContext: &mockInvocationContext{ctx: context.Background()},
+			stable:                &session.EventActions{},
+		}
+		id, _ := toolCallIdentityOf(ephemeral, nil)
+		return id
+	}()
+	for range 5 {
+		runtime.GC()
+	}
+	if weakID.sameContext(weakID) {
+		t.Error("sameContext returned true after weak EventActions was collected")
+	}
+}
+
+func TestTraceManager_UnwrapContext_EdgeCases(t *testing.T) {
+	var nilCtx context.Context
+	if ap, acts, delta, pinned := unwrapToolContextActions(nilCtx); ap != 0 || acts != nil || !delta.empty() || pinned != nil {
+		t.Errorf("unwrapToolContextActions(nil) = (%#x, %p, %+v, %v), want zeros", ap, acts, delta, pinned)
+	}
+
+	pCtx := panicActionsToolCtx{mockInvocationContext: &mockInvocationContext{ctx: context.Background()}}
+	if ap, acts, delta, pinned := unwrapToolContextActions(pCtx); ap != 0 || acts != nil || !delta.empty() || pinned != nil {
+		t.Errorf("unwrapToolContextActions(panicActions) = (%#x, %p, %+v, %v), want zeros", ap, acts, delta, pinned)
+	}
+
+	// Build a standard-library context chain deeper than 8 wrappers to trigger
+	// stackSeen -> seen map promotion in unwrapToolContextActions.
+	ic := unwrapTestInvocationCtx{Context: context.Background()}
+	acts := &session.EventActions{StateDelta: map[string]any{"deep": true}}
+	var ctx context.Context = agent.NewToolContext(ic, "c-deep", acts, nil)
+	for i := range 12 {
+		ctx = context.WithValue(ctx, unwrapTestKey{}, i)
+	}
+	ap, gotActs, delta, pinned := unwrapToolContextActions(ctx)
+	if ap == 0 || gotActs != nil || delta.empty() || pinned == nil {
+		t.Errorf("deep WithValue unwrap = (%#x, %p, %+v, %v), want non-zero ap, nil acts, non-empty delta, pinnedCtx", ap, gotActs, delta, pinned)
+	}
+
+	// Exceeding the 64-step limit stops cleanly with zero values.
+	tooDeep := ctx
+	for i := range 70 {
+		tooDeep = context.WithValue(tooDeep, unwrapTestKey{}, i)
+	}
+	if ap2, acts2, delta2, pinned2 := unwrapToolContextActions(tooDeep); ap2 != 0 || acts2 != nil || !delta2.empty() || pinned2 != nil {
+		t.Errorf("over-64-step unwrap = (%#x, %p, %+v, %v), want zeros", ap2, acts2, delta2, pinned2)
+	}
+}
+
+func TestBoundedArgsDigest_AdditionalTypesAndEdges(t *testing.T) {
+	// Exercise scalar kinds, -0.0 normalization, nil containers, byte arrays,
+	// cyclic slices, node budget exhaustion in hashMapKey, and distinct types
+	// with identical Type().String() in sortedMapKeys.
+	dNegZero, t1 := boundedArgsDigest(map[string]any{"f": math.Copysign(0, -1)})
+	dPosZero, t2 := boundedArgsDigest(map[string]any{"f": 0.0})
+	if t1 || t2 || dNegZero != dPosZero {
+		t.Errorf("-0.0 vs +0.0: (%d,%v) vs (%d,%v), want equal untruncated", dNegZero, t1, dPosZero, t2)
+	}
+
+	var nilSlice []any
+	var nilMap map[string]any
+	var nilPtr *int
+	byteArr := [4]byte{'a', 'b', 'c', 'd'}
+	cyclicSlice := make([]any, 1)
+	cyclicSlice[0] = cyclicSlice
+
+	scalars := map[string]any{
+		"bt":       true,
+		"bf":       false,
+		"i8":       int8(-3),
+		"u64":      uint64(99),
+		"f32":      float32(1.5),
+		"c64":      complex64(1 + 2i),
+		"c128":     complex128(3 - 4i),
+		"nil":      nil,
+		"nilSlice": nilSlice,
+		"nilMap":   nilMap,
+		"byteArr":  byteArr,
+		"cycSlice": cyclicSlice,
+		"nilIFKey": map[any]any{nil: 1, "s": 2},
+	}
+	dScalars1, truncScalars := boundedArgsDigest(scalars)
+	dScalars2, _ := boundedArgsDigest(scalars)
+	if truncScalars || dScalars1 != dScalars2 {
+		t.Errorf("scalars digest = (%d,%v) vs (%d), want untruncated and deterministic", dScalars1, truncScalars, dScalars2)
+	}
+
+	// Nil typed pointer and channel trigger opaque truncation.
+	if _, trunc := boundedArgsDigest(map[string]any{"np": nilPtr}); !trunc {
+		t.Error("nil typed pointer should mark digest truncated")
+	}
+	if _, trunc := boundedArgsDigest(map[string]any{"ch": make(chan int)}); !trunc {
+		t.Error("channel should mark digest truncated")
+	}
+
+	// Exhaust node budget across >1024 small values (covering d.nodes <= 0 in hash and hashMapKey).
+	many := make(map[string]any, 16)
+	for i := range 16 {
+		sub := make(map[string]any, 100)
+		for j := range 100 {
+			sub[fmt.Sprintf("k%02d", j)] = j
+		}
+		many[fmt.Sprintf("g%02d", i)] = sub
+	}
+	if _, trunc := boundedArgsDigest(many); !trunc {
+		t.Error("map with >1024 scalar nodes should mark digest truncated")
+	}
+
+	dKeyExhaust := argsDigester{nodes: 2, bytes: maxDigestBytes}
+	dKeyExhaust.hash(reflect.ValueOf(map[string]any{"a": 1, "b": 2}))
+	if !dKeyExhaust.truncated {
+		t.Error("exhausted nodes in hashMapKey should mark digest truncated")
+	}
+
+	dNilKeyExhaust := argsDigester{nodes: 1, bytes: maxDigestBytes}
+	if got := dNilKeyExhaust.hashMapKey(reflect.ValueOf(map[any]any{nil: 1}).MapKeys()[0]); got != digestTagNil {
+		t.Errorf("hashMapKey(nil interface) = %#x, want %#x", got, digestTagNil)
+	}
+
+	// Two distinct named types with the same local Type().String() in different scopes.
+	makeScopedKey := func() any {
+		type sameName int
+		return sameName(1)
+	}
+	k1 := makeScopedKey()
+	k2 := func() any {
+		type sameName int
+		return sameName(1)
+	}()
+	dupTypeMap := map[any]any{k1: "one", k2: "two"}
+	if _, trunc := boundedArgsDigest(map[string]any{"m": dupTypeMap}); !trunc {
+		t.Error("distinct key types sharing Type().String() should fall back to truncated")
 	}
 }

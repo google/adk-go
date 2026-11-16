@@ -34,6 +34,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -5032,4 +5033,110 @@ func TestNewBigQueryAgentAnalyticsPluginWithConfig_BQClientLifecycle(t *testing.
 			t.Errorf("closeBQClient called %d times after closing WithClients plugin, want 2 (caller owns bqClient)", closeCount)
 		}
 	})
+}
+
+// privateActionsToolCtx is a custom tool context that keeps private
+// bookkeeping in a field named actions behind its own mutex, and returns a
+// separate, stable EventActions from Actions(), its interface contract.
+type privateActionsToolCtx struct {
+	*mockInvocationContext
+	mu      sync.Mutex
+	actions *session.EventActions
+	stable  *session.EventActions
+}
+
+func (c *privateActionsToolCtx) Actions() *session.EventActions { return c.stable }
+
+// replaceActions replaces the private bookkeeping under the context's mutex.
+func (c *privateActionsToolCtx) replaceActions(i int) {
+	c.mu.Lock()
+	c.actions = &session.EventActions{StateDelta: map[string]any{"private": i}}
+	c.mu.Unlock()
+}
+
+func TestRetryAnswerError(t *testing.T) {
+	tests := []struct {
+		name    string
+		result  map[string]any
+		wantMsg string
+		wantOK  bool
+	}{
+		{
+			name:   "nil map",
+			result: nil,
+		},
+		{
+			name:   "empty map",
+			result: map[string]any{},
+		},
+		{
+			name:   "missing response_type",
+			result: map[string]any{"error_details": "boom"},
+		},
+		{
+			name:   "non-string response_type",
+			result: map[string]any{"response_type": 42, "error_details": "boom"},
+		},
+		{
+			name:   "other response_type",
+			result: map[string]any{"response_type": "OK", "error_details": "boom"},
+		},
+		{
+			name: "matching response_type extracts error_details",
+			result: map[string]any{
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "connection reset by peer",
+				"error_type":    "NetworkError",
+			},
+			wantMsg: "connection reset by peer",
+			wantOK:  true,
+		},
+		{
+			name: "falls back to error_type when error_details empty or non-string",
+			result: map[string]any{
+				"response_type": reflectAndRetryResponseType,
+				"error_details": 123,
+				"error_type":    "ValueError",
+			},
+			wantMsg: "ValueError",
+			wantOK:  true,
+		},
+		{
+			name: "falls back to error_type when error_details empty string",
+			result: map[string]any{
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "",
+				"error_type":    "TimeoutError",
+			},
+			wantMsg: "TimeoutError",
+			wantOK:  true,
+		},
+		{
+			name: "falls back to default message when details and type missing or non-string",
+			result: map[string]any{
+				"response_type": reflectAndRetryResponseType,
+				"error_details": []string{"x"},
+				"error_type":    false,
+			},
+			wantMsg: reflectAndRetryFallbackErrorMessage,
+			wantOK:  true,
+		},
+		{
+			name: "falls back to default message when only response_type set",
+			result: map[string]any{
+				"response_type": reflectAndRetryResponseType,
+			},
+			wantMsg: reflectAndRetryFallbackErrorMessage,
+			wantOK:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, ok := retryAnswerError(tc.result)
+			if ok != tc.wantOK || msg != tc.wantMsg {
+				t.Errorf("retryAnswerError(%v) = (%q, %v), want (%q, %v)", tc.result, msg, ok, tc.wantMsg, tc.wantOK)
+			}
+		})
+	}
 }
