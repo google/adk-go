@@ -136,7 +136,7 @@ func Process10(ctx context.Context, projectID, location string) error {
 	startTime := time.Now()
 
 	partialRes := make(chan AvgTime)
-	for i := 0; i < nWorkers; i++ {
+	for i := range nWorkers {
 		go func(workerID int) {
 			// rampup
 			sd := time.Duration(i*rampUpDurationInMillisec/nWorkers) * time.Millisecond
@@ -148,10 +148,10 @@ func Process10(ctx context.Context, projectID, location string) error {
 				activate: true,
 			}
 
-			for gen := 0; gen < maxGen; gen++ {
+			for gen := range maxGen {
 				totalDuration := time.Duration(0)
 				maxDuration := time.Duration(0)
-				for i := 0; i < nRepInGen; i++ {
+				for range nRepInGen {
 					lastTime := time.Now()
 					_, err := cache.LoadInstructions("private-kdroste-dice-thrower-04")
 					// _, err := cache.LoadFrontmatter("private-kdroste-dice-thrower-04")
@@ -248,7 +248,7 @@ func Process9(ctx context.Context, projectID, location string) error {
 	startTime := time.Now()
 
 	partialRes := make(chan AvgTime)
-	for i := 0; i < nWorkers; i++ {
+	for i := range nWorkers {
 		go func(workerID int) {
 			// rampup
 			sd := time.Duration(i*rampUpDurationInMillisec/nWorkers) * time.Millisecond
@@ -260,10 +260,10 @@ func Process9(ctx context.Context, projectID, location string) error {
 				activate: true,
 			}
 
-			for gen := 0; gen < maxGen; gen++ {
+			for gen := range maxGen {
 				totalDuration := time.Duration(0)
 				maxDuration := time.Duration(0)
-				for i := 0; i < nRepInGen; i++ {
+				for range nRepInGen {
 					lastTime := time.Now()
 					_, err := cache.LoadInstructions("private-kdroste-dice-thrower-04")
 					// _, err := cache.LoadFrontmatter("private-kdroste-dice-thrower-04")
