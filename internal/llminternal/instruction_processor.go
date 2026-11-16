@@ -252,13 +252,17 @@ func hasTextFileExtension(name string) bool {
 	return false
 }
 
-// isIdentifier reports whether s is an identifier as Python's
-// str.isidentifier defines one, which adk-python's _is_valid_state_name
-// calls: an underscore or an ID_Start character, followed by ID_Continue
-// characters (Unicode UAX #31). ID_Continue adds combining marks, so names
-// written in scripts such as Devanagari or Thai qualify. Python uses the XID
-// variants, which differ from these only on a few compatibility characters
-// that are not stable under NFKC.
+// isIdentifier reports whether s is an identifier under the Unicode ID_Start
+// and ID_Continue properties (UAX #31): an underscore or an ID_Start
+// character, followed by ID_Continue characters. ID_Continue adds combining
+// marks, so names written in scripts such as Devanagari or Thai qualify.
+//
+// The one difference from ID_* is that U+309B and U+309C are rejected. They
+// are ID_Start only through Other_ID_Start and are not XID_Start or
+// XID_Continue, so str.isidentifier, which adk-python's _is_valid_state_name
+// calls and which uses the XID_* properties, rejects them as well. A few
+// other compatibility characters that are not stable under NFKC, such as
+// U+037A, are ID_* but not XID_* and are still accepted here.
 func isIdentifier(s string) bool {
 	if s == "" {
 		return false
@@ -276,6 +280,9 @@ func isIdentifier(s string) bool {
 }
 
 func isIDStart(r rune) bool {
+	if r == '\u309b' || r == '\u309c' {
+		return false
+	}
 	return unicode.In(r, unicode.L, unicode.Nl, unicode.Other_ID_Start) &&
 		!unicode.Is(unicode.Pattern_Syntax, r)
 }

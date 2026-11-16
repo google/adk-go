@@ -251,6 +251,43 @@ func TestInjectSessionState(t *testing.T) {
 			state:    map[string]any{"a\u2e2f": "Foo"},
 			want:     "Hello {a\u2e2f}!",
 		},
+		{
+			// U+309B and U+309C are Other_ID_Start but not XID_Continue, so
+			// str.isidentifier rejects them.
+			name:     "state name with a kana voiced sound mark is not replaced",
+			template: "Hello {a\u309b}!",
+			state:    map[string]any{"a\u309b": "Foo"},
+			want:     "Hello {a\u309b}!",
+		},
+		{
+			// U+203F UNDERTIE is connector punctuation (Pc).
+			name:     "state name with connector punctuation is replaced",
+			template: "Hello {a\u203fb}!",
+			state:    map[string]any{"a\u203fb": "Foo"},
+			want:     "Hello Foo!",
+		},
+		{
+			// U+00B7 MIDDLE DOT is Other_ID_Continue.
+			name:     "state name with an other ID_Continue character is replaced",
+			template: "Hello {a\u00b7b}!",
+			state:    map[string]any{"a\u00b7b": "Foo"},
+			want:     "Hello Foo!",
+		},
+		{
+			// U+2118 SCRIPT CAPITAL P is Other_ID_Start.
+			name:     "state name with an other ID_Start character is replaced",
+			template: "Hello {\u2118}!",
+			state:    map[string]any{"\u2118": "Foo"},
+			want:     "Hello Foo!",
+		},
+		{
+			// U+093E DEVANAGARI VOWEL SIGN AA is ID_Continue but not
+			// ID_Start, so it may not be the first character.
+			name:     "state name starting with a combining mark is not replaced",
+			template: "Hello {\u093eb}!",
+			state:    map[string]any{"\u093eb": "Foo"},
+			want:     "Hello {\u093eb}!",
+		},
 		// Corresponds to: test_inject_session_state_with_none_state_value_returns_empty
 		{
 			name:     "state value is nil",
