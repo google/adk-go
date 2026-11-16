@@ -46,6 +46,8 @@ func TestCompoundAndStatePrefixedSensitiveKeys(t *testing.T) {
 			"proxyAuthToken", "webhookSecret", "encryptionPassphrase", "sshPrivateKey", "awsSecretAccessKey",
 			"HTTP_AUTHORIZATION", "X-Amz-Security-Token", "secret_key", "SECRET_KEY", "signing_key", "fb_page_token",
 			"resync_token", "async_token", "app_sync_token",
+			"startToken", "start_token", "newStartToken", "restartPageToken", "resumePageToken", "presumeToken",
+			"beotToken", "app:user:token",
 			"temp:access_token", "temp:anything", "user:api_key", "app:client_secret", "USER:API_KEY",
 			"user:temp:refresh_token", "app:temp:scratch", " user: temp:x ", "user:db_password", "app:dbPassword",
 		}
@@ -73,6 +75,9 @@ func TestCompoundAndStatePrefixedSensitiveKeys(t *testing.T) {
 			"prev_sync_token", "prevSyncToken", "previous_sync_token", "previousSyncToken",
 			"prev_continuation_token", "prevContinuationToken", "previous_continuation_token", "previousContinuationToken",
 			"NextToken", "next_token", "nextToken", "prev_token", "PrevToken", "previous_token", "pad_token", "padToken",
+			"startPageToken", "newStartPageToken", "start_page_token", "new_start_page_token", "StartPageToken",
+			"NEWSTARTPAGETOKEN", "startSyncToken", "startContinuationToken", "resumeToken", "resume_token",
+			"ResumeToken", "RESUME_TOKEN", "nextResumeToken", "eot_token", "eotToken",
 			"exchangedAuthCredential", "rawAuthCredential", "method_signature", "request_sig", "Sec-WebSocket-Key",
 			"dbpassword", "xtoken", "user:name", "app:theme", "db/password", "db password", "",
 			// Uppercase and mixed-case variants of every benign exclusion.
@@ -197,6 +202,7 @@ func TestCompoundAndStatePrefixedSensitiveKeys(t *testing.T) {
 			{"Go struct print", "log: {DBPassword:hunter2 Count:1} done", "log: {DBPassword:[REDACTED] Count:1} done"},
 			{"struct print fails closed", "{DBPassword:hunter2 Count:1}", unparseableJSONPlaceholder},
 			{"page token kept", "next_page_token=abc nextPageToken=def sync_token=ghi syncToken=jkl continuation_token=mno continuationToken=pqr NextToken=stu nextSyncToken=vwx next_token=yz1 pad_token=pad0", "next_page_token=abc nextPageToken=def sync_token=ghi syncToken=jkl continuation_token=mno continuationToken=pqr NextToken=stu nextSyncToken=vwx next_token=yz1 pad_token=pad0"},
+			{"start, resume and eot token names kept", "startPageToken=abc newStartPageToken=def start_page_token=ghi resumeToken=jkl resume_token=mno eot_token=pqr eotToken=stu startToken=vwx", "startPageToken=abc newStartPageToken=def start_page_token=ghi resumeToken=jkl resume_token=mno eot_token=pqr eotToken=stu startToken=[REDACTED]"},
 			{"cursor URL query kept and fb_page_token redacted", "GET https://h/p?sync_token=s1&continuation_token=c1&syncToken=s2&continuationToken=c2&NextToken=n1&nextSyncToken=ns1&next_token=n2&pad_token=pd1&fb_page_token=fbsec", "GET https://h/p?sync_token=s1&continuation_token=c1&syncToken=s2&continuationToken=c2&NextToken=n1&nextSyncToken=ns1&next_token=n2&pad_token=pd1&fb_page_token=%5BREDACTED%5D"},
 			{"usage kept", "prompt_tokens=5 token_count=5 max_tokens=1024 author=bob", "prompt_tokens=5 token_count=5 max_tokens=1024 author=bob"},
 			{"no word boundary kept", "xtoken=5 dbpassword=plain", "xtoken=5 dbpassword=plain"},
@@ -697,7 +703,11 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			{"bare temp", "temp:secret: " + secret, "temp:secret:[REDACTED]"},
 			{"bare user compound", "user:dbPassword: " + secret, "user:dbPassword:[REDACTED]"},
 			{"quoted temp with slash", `"temp:cache/val": "` + secret + `"`, `"temp:cache/val":"[REDACTED]"`},
-			{"quoted temp with colon", `"temp:a:b": "` + secret + `"`, `"temp:a:[REDACTED]`},
+			// A quoted stacked temp: key, a segment of which may be a value,
+			// is redacted with the value of the outer key, as main read it
+			// (an empty wantLine).
+			{"quoted temp with colon", `"temp:a:b": "` + secret + `"`, ""},
+			{"quoted temp with value segment", `"temp:` + secret + `:x": "v"`, ""},
 			{"spaced quoted state temp", `" user:temp:secret ": "` + secret + `"`, `"user:temp:secret":"[REDACTED]"`},
 			{"container without space", `password:{"k": "` + secret + `"}`, "password:[REDACTED]"},
 		}
@@ -705,6 +715,9 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			for _, inner := range innerLines {
 				in := fmt.Sprintf("config:\n  %s:\n    %s\n    region: us", outer, inner.line)
 				want := fmt.Sprintf("config:\n  %s:\n    %s\n    region: us", outer, inner.wantLine)
+				if inner.wantLine == "" {
+					want = fmt.Sprintf("config:\n  %s:\"[REDACTED]\"\n    region: us", outer)
+				}
 				gotRaw, lost := sanitizeRawText(in)
 				if !lost || gotRaw != want || strings.Contains(gotRaw, secret) {
 					t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", in, gotRaw, lost, want)
@@ -1235,9 +1248,11 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			}
 		}
 
-		// Finding 7: bare stacked temp:a:b: and user:temp:a:b: keys (nested and standalone).
-		assertExactAllThree(t, "credentials:\n  temp:a:b: "+secret+"\n  region: us", "credentials:\n  temp:a:[REDACTED]\n  region: us")
-		assertExactAllThree(t, "credentials:\n  user:temp:a:b: "+secret+"\n  region: us", "credentials:\n  user:temp:a:[REDACTED]\n  region: us")
+		// Finding 7: bare stacked temp:a:b: and user:temp:a:b: keys (nested and
+		// standalone). A stacked key on the line after a sensitive key is
+		// redacted with the value of that key, as main redacted it.
+		assertExactAllThree(t, "credentials:\n  temp:a:b: "+secret+"\n  region: us", "credentials:[REDACTED]\n  region: us")
+		assertExactAllThree(t, "credentials:\n  user:temp:a:b: "+secret+"\n  region: us", "credentials:[REDACTED]\n  region: us")
 		assertExactAllThree(t, "credentials: temp:a:b: "+secret, "credentials:[REDACTED]")
 		assertExactAllThree(t, "temp:a:b: "+secret, "temp:a:[REDACTED]")
 

@@ -678,27 +678,30 @@ func splitCompoundKey(k string) (compact string, starts []bool) {
 
 // isPageTokenKey reports whether before, the words of a compound key before
 // its last word "token" (see splitCompoundKey), make the key a pagination,
-// sync or tokenizer token rather than a credential: "next", "prev" or
+// sync, resume or tokenizer token rather than a credential: "next", "prev" or
 // "previous" directly before "token" (as in next_token, NextToken or
 // prev_token), the name of a special token of a tokenizer, "pad", "eos",
-// "bos", "unk", "cls", "sep" or "mask" (as in pad_token, eos_token, bosToken
-// or mask-token), or "page", "sync" or "continuation" after no other word or
-// after "next", "prev" or "previous" (as in page_token, next_page_token,
-// nextPageToken, sync_token, syncToken, nextSyncToken, continuation_token or
-// continuationToken). A key whose other words differ, such as fb_page_token,
-// the access token of a Facebook Page, is not a cursor.
+// "eot", "bos", "unk", "cls", "sep" or "mask" (as in pad_token, eos_token,
+// eot_token, bosToken or mask-token), or a cursor word, "page", "sync",
+// "continuation" or "resume", after no other word or after "next", "prev",
+// "previous", "start" or "newstart" (as in page_token, next_page_token,
+// nextPageToken, startPageToken, newStartPageToken, sync_token, syncToken,
+// nextSyncToken, continuation_token, continuationToken, resumeToken or
+// resume_token). A key whose other words differ, such as fb_page_token, the
+// access token of a Facebook Page, start_token or resumePageToken, is not a
+// cursor.
 func isPageTokenKey(before string, starts []bool) bool {
 	switch before {
-	case "next", "prev", "previous", "pad", "eos", "bos", "unk", "cls", "sep", "mask":
+	case "next", "prev", "previous", "pad", "eos", "eot", "bos", "unk", "cls", "sep", "mask":
 		return true
 	}
-	for _, cursor := range []string{"page", "sync", "continuation"} {
+	for _, cursor := range []string{"page", "sync", "continuation", "resume"} {
 		i := len(before) - len(cursor)
 		if i < 0 || !starts[i] || before[i:] != cursor {
 			continue
 		}
 		switch before[:i] {
-		case "", "next", "prev", "previous":
+		case "", "next", "prev", "previous", "start", "newstart":
 			return true
 		}
 	}
@@ -738,14 +741,14 @@ func hasCanonicalizableEscape(s string) bool {
 // % escape: ASCII (<= 0x7F), one of the three non-ASCII runes that case-fold
 // to ASCII key letters (U+0130 'İ' -> 'i', U+017F 'ſ' -> 's', U+212A 'K' ->
 // 'k'), or, for a 4-hex \uXXXX escape (unicodeEscape), a Unicode whitespace,
-// separator, or BOM rune (such as \u00a0 or \ufeff) that trimBOMAndSpace,
-// trimInlineSpaces, and foldUnicodeSpaces skip or fold around keys and
-// delimiters.
+// separator, or format/zero-width rune (such as \u00a0, \u200b, or \ufeff)
+// that trimBOMAndSpace, trimInlineSpaces, and foldUnicodeSpaces skip or fold
+// around keys, auth schemes, and delimiters.
 func isFoldedEscapeRune(r rune, unicodeEscape bool) bool {
 	if r <= 0x7F || r == '\u0130' || r == '\u017f' || r == '\u212a' {
 		return true
 	}
-	return unicodeEscape && (unicode.IsSpace(r) || unicode.In(r, unicode.Z) || r == '\ufeff')
+	return unicodeEscape && (unicode.IsSpace(r) || unicode.In(r, unicode.Z, unicode.Cf))
 }
 
 func hasEscapePrefixInTail(out []byte) bool {

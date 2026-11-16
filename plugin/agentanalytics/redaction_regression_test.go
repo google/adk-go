@@ -1921,7 +1921,7 @@ func TestJSONDocumentValuesKeepNoSecret(t *testing.T) {
 // forms stay redacted as on main.
 func TestTokenizerSpecialTokenNames(t *testing.T) {
 	runInParallel(t)
-	for _, word := range []string{"eos", "bos", "pad", "unk", "cls", "sep", "mask"} {
+	for _, word := range []string{"eos", "eot", "bos", "pad", "unk", "cls", "sep", "mask"} {
 		for _, k := range []string{
 			word + "_token", word + "Token", strings.ToUpper(word) + "_TOKEN",
 			strings.ToUpper(word[:1]) + word[1:] + "Token",
@@ -2998,8 +2998,11 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 		}
 		return doc
 	}
-	eps := largeTextEntryPoints(t)
-	runAll := func(in string) func() {
+	// runAll and the subtests build the entry points with the t of the
+	// subtest, whose Fatalf the SmartTruncate and FormatContentParts entry
+	// points call.
+	runAll := func(t *testing.T, in string) func() {
+		eps := largeTextEntryPoints(t)
 		return func() {
 			for _, ep := range eps {
 				ep.f(in)
@@ -3050,6 +3053,7 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 	smallN, largeN := scalingUnits()
 	for _, sc := range shapes {
 		t.Run(sc.name, func(t *testing.T) {
+			eps := largeTextEntryPoints(t)
 			small, large := sc.mk(smallN), sc.mk(largeN)
 			got, again, elapsed := timeEntryPoints(maxWall, large, eps)
 			if elapsed > maxWall {
@@ -3071,7 +3075,7 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 					}
 				}
 			}
-			if ratio, tSmall, tLarge := linearRatio(64, runAll(small), runAll(large)); ratio > 64 {
+			if ratio, tSmall, tLarge := linearRatio(64, runAll(t, small), runAll(t, large)); ratio > 64 {
 				t.Errorf("entry points scale %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, tSmall, len(small), tLarge, len(large))
 			}
 		})
@@ -3089,6 +3093,7 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 		}
 	})
 	t.Run("large ampersand leaves 15 levels deep", func(t *testing.T) {
+		eps := largeTextEntryPoints(t)
 		n := 700_000
 		if raceEnabled {
 			n = 70_000
@@ -3115,11 +3120,12 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 			amp15 = encode(map[string]string{"k": amp15})
 		}
 		plain1 := encode(map[string]string{"a": strings.Repeat("a", len(amp15)), "password": "SECRET1"})
-		if ratio, t1, t15 := linearRatio(64, runAll(plain1), runAll(amp15)); ratio > 64 {
+		if ratio, t1, t15 := linearRatio(64, runAll(t, plain1), runAll(t, amp15)); ratio > 64 {
 			t.Errorf("15-level ampersand leaves vs equal-length 1-level document scale %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, t1, len(plain1), t15, len(amp15))
 		}
 	})
 	t.Run("large plain ASCII 12 levels deep", func(t *testing.T) {
+		eps := largeTextEntryPoints(t)
 		base := encode(map[string]string{"a": strings.Repeat("a", 8*largeN), "password": "SECRET1"})
 		for _, inLeaves := range []bool{false, true} {
 			doc := nest(base, inLeaves)
@@ -3134,12 +3140,13 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 				}
 			}
 			plain1 := encode(map[string]string{"a": strings.Repeat("a", len(doc)), "password": "SECRET1"})
-			if ratio, t1, t12 := linearRatio(64, runAll(plain1), runAll(doc)); ratio > 64 {
+			if ratio, t1, t12 := linearRatio(64, runAll(t, plain1), runAll(t, doc)); ratio > 64 {
 				t.Errorf("12-level plain ASCII (inLeaves=%v) vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", inLeaves, ratio, t1, len(plain1), t12, len(doc))
 			}
 		}
 	})
 	t.Run("large plain ASCII 15 levels all-levels key-redacted", func(t *testing.T) {
+		eps := largeTextEntryPoints(t)
 		mkAllLevels := func(levels, n int) string {
 			doc := encode(map[string]string{"a": strings.Repeat("a", n), "password": "SECRET1"})
 			for range levels - 1 {
@@ -3163,7 +3170,9 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 		}
 		// Keep keyRedactionHidesRunOn outer-only: nesting a 49k-int leaf 12
 		// levels deep repeats node decoding only once for redaction and once
-		// at depth 0, staying well below 24x of equal-length 1-level input.
+		// at depth 0, staying well below 64x of equal-length 1-level input
+		// (measures ~22-23x without -race, leaving headroom while still
+		// catching per-level exponential blowup).
 		nums := 49_000
 		if raceEnabled {
 			nums = 20_000
@@ -3173,8 +3182,8 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 			arrDoc12 = fmt.Sprintf(`{"z":%s,"password":"SECRET1"}`, encode(arrDoc12))
 		}
 		arrPlain1 := mkAllLevels(1, len(arrDoc12))
-		if ratio, t1, t12 := linearRatio(24, sanFn(arrPlain1), sanFn(arrDoc12)); ratio > 24 {
-			t.Errorf("sanitizeRawText 12-level array-leaf vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 24x", ratio, t1, len(arrPlain1), t12, len(arrDoc12))
+		if ratio, t1, t12 := linearRatio(64, sanFn(arrPlain1), sanFn(arrDoc12)); ratio > 64 {
+			t.Errorf("sanitizeRawText 12-level array-leaf vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, t1, len(arrPlain1), t12, len(arrDoc12))
 		}
 		san, _ := sanitizeRawText(doc15)
 		if strings.Contains(san, "SECRET") {
@@ -3195,7 +3204,7 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 				t.Errorf("%s second pass(%.80q) = %.80q, want unchanged", ep.name, got, again)
 			}
 		}
-		if ratio, t1, t15 := linearRatio(64, runAll(smallPlain1), runAll(smallDoc15)); ratio > 64 {
+		if ratio, t1, t15 := linearRatio(64, runAll(t, smallPlain1), runAll(t, smallDoc15)); ratio > 64 {
 			t.Errorf("15-level all-levels key-redacted vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, t1, len(smallPlain1), t15, len(smallDoc15))
 		}
 	})
@@ -3348,8 +3357,9 @@ func TestEscapedRunOnAcrossJSONStringsFailsClosed(t *testing.T) {
 // above, so it is redacted here too, with the value of the pair that it
 // starts, rather than kept as a nested key or failed closed, and the backstop
 // exempts no word before the key of such a name (see redactedKeyBytesWith).
-// A path before a key of main, as /etc/ssl/password, stays a nested key, as
-// on main.
+// So is a stacked bare temp: key, as temp:SECRET:x, a segment of which may be
+// a value. A path before a key of main, as /etc/ssl/password, stays a nested
+// key, as on main.
 func TestLineStartPathPrefixedKeysFollowMain(t *testing.T) {
 	runInParallel(t)
 	eps := largeTextEntryPoints(t)
@@ -3395,9 +3405,22 @@ func TestLineStartPathPrefixedKeysFollowMain(t *testing.T) {
 			}
 		}
 	}
+	// A stacked bare temp: key on a line of its own, a segment of which may
+	// be a value, is redacted with the value of the pair above, as main
+	// redacted it, and with its own value.
+	for _, head := range []string{"password:\n  ", "credentials:\n  ", "password:\r\n\t", "password: \n", "password:\n"} {
+		for _, key := range []string{"temp:SECRET:x", "TEMP:SECRET:x", "user:temp:SECRET:x", "app:temp:SECRET:x", "temp:SECRET:x:y", "temp:a:hunter2"} {
+			for _, value := range []string{": bar", ":bar", ": [REDACTED]"} {
+				check(head + key + value)
+			}
+		}
+	}
 	for _, tc := range []struct{ in, want string }{
 		{"credentials:\n  /etc/ssl/password: v", "credentials:\n  /etc/ssl/password:[REDACTED]"},
 		{"credentials:\n  C:/ssl/token: v", "credentials:\n  C:/ssl/token:[REDACTED]"},
+		{"password:\n  \"temp:SECRET:x\": bar", "password:\"[REDACTED]\""},
+		{"password:\n  'temp:SECRET:x': bar", "password:'[REDACTED]'"},
+		{"password:\n  \"user:temp:SECRET:x\": bar", "password:\"[REDACTED]\""},
 	} {
 		for _, ep := range eps {
 			if got := ep.f(tc.in); got != tc.want {
@@ -3480,9 +3503,9 @@ func TestEscapedReadingsMatchMain(t *testing.T) {
 // with a fresh pass budget.
 func TestOuterRunOnBudgetIdempotencyAndCandidateRecheck(t *testing.T) {
 	runInParallel(t)
-	eps := largeTextEntryPoints(t)
 
 	t.Run("outer mixed escape run-on across literals and single-leaf wrappers", func(t *testing.T) {
+		eps := largeTextEntryPoints(t)
 		marshal := func(v any) string {
 			b, err := json.Marshal(v)
 			if err != nil {
@@ -3687,4 +3710,930 @@ func TestOuterRunOnBudgetIdempotencyAndCandidateRecheck(t *testing.T) {
 			t.Errorf("sanitizeRawText(26k-arr literal+suffix) second pass changed=%v lost=%v", again != bigOut, againLost)
 		}
 	})
+}
+
+// TestOverlappingSensitiveURIPathSegments verifies that when a URI path segment
+// consumed as the value of an earlier sensitive segment is itself a sensitive
+// path segment name (such as /secret_key/password/SECRET, /signing_key/token/SECRET,
+// or /user:temp:a/password/SECRET), redactNext stays armed so the following
+// secret segment is still redacted across both direct sanitizeURI and the
+// FileData -> content_parts[].uri route.
+func TestOverlappingSensitiveURIPathSegments(t *testing.T) {
+	runInParallel(t)
+	cases := []struct {
+		name      string
+		uri       string
+		want      string
+		keepToken string
+	}{
+		{
+			name: "secret_key then password",
+			uri:  "https://h/secret_key/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			name: "signing_key then token",
+			uri:  "https://h/signing_key/token/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			name: "stacked state prefix then password",
+			uri:  "https://h/user:temp:a/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			name: "three adjacent sensitive segments",
+			uri:  "https://h/secret_key/signing_key/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			name: "percent-encoded adjacent sensitive segments",
+			uri:  "https://h/secret%5Fkey/pa%73sword/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			name: "four state-prefixed sensitive segments",
+			uri:  "https://h/user:api_key/app:secret_key/temp:x/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			name:      "non-sensitive value stops redactNext",
+			uri:       "https://h/secret_key/password/val/SAFE_TAIL",
+			want:      "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D/SAFE_TAIL",
+			keepToken: "SAFE_TAIL",
+		},
+		{
+			name:      "legacy pair boundary preserves trailing segment",
+			uri:       "https://example.com/v1/api_key/secret/items",
+			want:      "https://example.com/v1/%5BREDACTED%5D/%5BREDACTED%5D/items",
+			keepToken: "items",
+		},
+		{
+			name: "leading escaped NBSP api_key then password",
+			uri:  "https://h/%5Cu00a0api_key/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			name: "trailing escaped NBSP api_key then password",
+			uri:  "https://h/api_key%5Cu00a0/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			name: "kelvin-folded api_key then password",
+			uri:  "https://h/api_%5Cu212aey/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			name: "ideographic space api_key then password",
+			uri:  "https://h/api_key%5Cu3000/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			name: "zwsp api_key then password",
+			uri:  "https://h/api_key%5Cu200b/password/SECRET123",
+			want: "https://h/api_key%5Cu200b/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			name: "bom api_key then password",
+			uri:  "https://h/%5Cufeffapi_key/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, changed := sanitizeURI(tc.uri)
+			if !changed || got != tc.want {
+				t.Errorf("sanitizeURI(%q) = (%q, %v), want (%q, true)", tc.uri, got, changed, tc.want)
+			}
+			if tc.keepToken == "" && strings.Contains(got, "SECRET123") {
+				t.Errorf("sanitizeURI(%q) = %q exposed SECRET123", tc.uri, got)
+			}
+			if tc.keepToken != "" && !strings.Contains(got, tc.keepToken) {
+				t.Errorf("sanitizeURI(%q) = %q dropped %q", tc.uri, got, tc.keepToken)
+			}
+			if again, againChanged := sanitizeURI(got); againChanged || again != got {
+				t.Errorf("sanitizeURI second pass(%q) = (%q, %v), want (%q, false)", got, again, againChanged, got)
+			}
+
+			parts, lost := formatContentParts(&genai.Content{
+				Parts: []*genai.Part{{
+					FileData: &genai.FileData{MIMEType: "application/octet-stream", FileURI: tc.uri},
+				}},
+			}, -1, true)
+			if !lost || len(parts) != 1 {
+				t.Fatalf("formatContentParts(%q) = (%v, %v), want 1 part with lost=true", tc.uri, parts, lost)
+			}
+			gotURI, _ := parts[0]["uri"].(string)
+			if gotURI != tc.want {
+				t.Errorf("file-part content_parts[0].uri = %q, want %q", gotURI, tc.want)
+			}
+			if tc.keepToken == "" && strings.Contains(gotURI, "SECRET123") {
+				t.Errorf("file-part content_parts[0].uri = %q exposed SECRET123", gotURI)
+			}
+			exported := FormatContentParts(&genai.Content{Parts: []*genai.Part{{
+				FileData: &genai.FileData{MIMEType: "application/octet-stream", FileURI: tc.uri},
+			}}}, -1)
+			if len(exported) != 1 || exported[0]["uri"] != tc.want {
+				t.Errorf("FormatContentParts(FileData %q) = %v, want uri %q", tc.uri, exported, tc.want)
+			}
+		})
+	}
+}
+
+// TestHarmlessProseRejectsIncompleteAndObfuscatedCredentials verifies that
+// isPositivelyHarmlessProse (and hasAnyCredentialMarker) refuse incomplete
+// credential constructs such as a Bearer/Basic scheme followed by an
+// unterminated quote, zero-width/format separators, or invalid/overlong
+// percent bytes in credential positions across SmartTruncate, function-response
+// part_attributes, sanitizeRawText, and redactErrorMessage.
+func TestHarmlessProseRejectsIncompleteAndObfuscatedCredentials(t *testing.T) {
+	runInParallel(t)
+	failClosedCases := []struct {
+		name   string
+		in     string
+		secret string
+	}{
+		{"unterminated single-quoted Bearer", "[INFO] Bearer 'SECRET", "SECRET"},
+		{"unterminated double-quoted Bearer", `[INFO] Bearer "SECRET`, "SECRET"},
+		{"lowercase unterminated single-quoted Bearer", "[INFO] bearer 'SECRET", "SECRET"},
+		{"unterminated backtick Bearer", "[INFO] Bearer `SECRET", "SECRET"},
+		{"quote-led unterminated Bearer", `"Bearer 'SECRET`, "SECRET"},
+		{"truncated JSON unterminated single-quoted Bearer", `{"log":"Bearer 'SECRET`, "SECRET"},
+		{"truncated JSON unterminated double-quoted Bearer", `{"log":"Bearer \"SECRET`, "SECRET"},
+		{"truncated JSON tab-escaped Bearer", `{"log":"Bearer\tSECRET`, "SECRET"},
+		{"truncated JSON tab-escaped unterminated Bearer", `{"log":"Bearer\t'SECRET`, "SECRET"},
+		{"literal ZWSP after Bearer", "[INFO] Bearer\u200bSECRET", "SECRET"},
+		{"literal ZWSP + unterminated quote after Bearer", "[INFO] Bearer\u200b'SECRET", "SECRET"},
+		{"space + ZWSP after Bearer", "[INFO] Bearer \u200bSECRET", "SECRET"},
+		{"space + ZWSP + unterminated quote after Bearer", "[INFO] Bearer \u200b'SECRET", "SECRET"},
+		{"BOM after Bearer", "[INFO] Bearer\ufeffSECRET", "SECRET"},
+		{"ZWNJ after Bearer", "[INFO] Bearer\u200cSECRET", "SECRET"},
+		{"ZWJ after Bearer", "[INFO] Bearer\u200dSECRET", "SECRET"},
+		{"word joiner after Bearer", "[INFO] Bearer\u2060SECRET", "SECRET"},
+		{"percent-encoded ZWSP after Bearer", "[INFO] Bearer%E2%80%8BSECRET", "SECRET"},
+		{"percent-encoded ZWSP + unterminated quote", "[INFO] Bearer%E2%80%8B'SECRET", "SECRET"},
+		{"unicode-escaped ZWSP after Bearer", `[INFO] Bearer\u200bSECRET`, "SECRET"},
+		{"unicode-escaped ZWSP + unterminated quote", `[INFO] Bearer\u200b'SECRET`, "SECRET"},
+		{"invalid percent after Bearer", "[INFO] Bearer%ZZSECRET", "SECRET"},
+		{"truncated percent after Bearer", "[INFO] Bearer%2", "%2"},
+		{"invalid hex + unterminated quote after Bearer", "[INFO] Bearer%2g'SECRET", "SECRET"},
+		{"overlong 2-byte percent after Bearer", "[INFO] Bearer%c0%a0SECRET", "SECRET"},
+		{"overlong 2-byte percent + unterminated quote", "[INFO] Bearer%c0%a0'SECRET", "SECRET"},
+		{"overlong 3-byte percent after Bearer", "[INFO] Bearer%e0%80%a0SECRET", "SECRET"},
+		{"overlong 3-byte percent + unterminated quote", "[INFO] Bearer%e0%80%a0'SECRET", "SECRET"},
+		{"overlong 4-byte percent after Bearer", "[INFO] Bearer%f0%80%80%a0SECRET", "SECRET"},
+		{"stray continuation percent byte after Bearer", "[INFO] Bearer%80SECRET", "SECRET"},
+		{"truncated JSON ZWSP Bearer", `{"log":"Bearer\u200bSECRET`, "SECRET"},
+		{"truncated JSON invalid percent Bearer", `{"log":"Bearer%ZZSECRET`, "SECRET"},
+		{"truncated JSON overlong percent Bearer", `{"log":"Bearer%c0%a0SECRET`, "SECRET"},
+		{"quoted key percent-encoded ZWSP around colon", `{"password"%E2%80%8B:%E2%80%8B"SECRET"}`, "SECRET"},
+		{"quoted key literal ZWSP around colon", "{\"password\"\u200b:\u200b\"SECRET\"}", "SECRET"},
+		{"quoted key overlong percent around colon", `{"password"%c0%a0:%c0%a0"SECRET"}`, "SECRET"},
+		{"quoted key invalid percent around colon", `{"password"%ZZ:%ZZ"SECRET"}`, "SECRET"},
+		{"text key literal ZWSP around colon", "[INFO] password\u200b:\u200bSECRET", "SECRET"},
+		{"text key overlong percent around colon", "[INFO] password%c0%a0:%c0%a0SECRET", "SECRET"},
+		{"text key invalid percent around equals", "[INFO] password%ZZ=%ZZSECRET", "SECRET"},
+		{"unterminated single-quoted Basic", "[INFO] Basic 'dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"literal ZWSP after Basic", "[INFO] Basic\u200bdXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"invalid percent after Basic", "[INFO] Basic%ZZdXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"overlong percent after Basic", "[INFO] Basic%c0%a0dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"quoted key invalid percent + newline before colon", "{\"password\"%ZZ\n:\"SECRET\"}", "SECRET"},
+		{"quoted key overlong percent + newline before colon", "{\"password\"%c0%a0\n:\"SECRET\"}", "SECRET"},
+		{"quoted key invalid percent + cr before colon", "{\"password\"%ZZ\r:\"SECRET\"}", "SECRET"},
+		{"quoted key invalid percent + control bell before colon", "{\"password\"%ZZ\x07:\"SECRET\"}", "SECRET"},
+		{"text key invalid percent + newline before equals", "[INFO] password%ZZ\n=SECRET", "SECRET"},
+		{"text key overlong percent + cr before equals", "[INFO] password%c0%a0\r=SECRET", "SECRET"},
+		{"truncated JSON key invalid percent + tab escape before equals", `{"log":"password%ZZ\t=SECRET`, "SECRET"},
+		{"truncated JSON key invalid percent + newline escape before colon", `{"log":"password%ZZ\n:SECRET`, "SECRET"},
+		{"truncated JSON key overlong percent + formfeed escape before equals", `{"log":"password%c0%a0\f=SECRET`, "SECRET"},
+		{"truncated JSON key invalid percent + vtab escape before equals", `{"log":"password%ZZ\v=SECRET`, "SECRET"},
+		{"truncated JSON key invalid percent + double-escaped tab before equals", `{"log":"password%ZZ\\t=SECRET`, "SECRET"},
+		{"quoted temp key ending in percent + invalid percent", `{"temp:a:b%"%ZZ:"SECRET"}`, "SECRET"},
+		{"quoted temp key with space ending in percent + invalid percent", `{"temp:a: b%"%ZZ:"SECRET"}`, "SECRET"},
+		{"single-quoted temp key ending in percent + invalid percent", `{'temp:a:b%'%ZZ:'SECRET'}`, "SECRET"},
+		{"backticked temp key ending in percent + invalid percent", "{\"log\":`temp:a:b%`%ZZ:\"SECRET\"}", "SECRET"},
+		{"quoted temp key ending in percent-digit + invalid percent", `{"temp:a:b%2"%ZZ:"SECRET"}`, "SECRET"},
+		{"quoted key truncated percent before colon", `{"password"%2:"SECRET"}`, "SECRET"},
+		{"quoted key bare percent before colon", `{"password"%:"SECRET"}`, "SECRET"},
+		{"quoted key overlong percent + tab escape before colon", `{"password"%c0%a0\t:"SECRET"}`, "SECRET"},
+		{"quoted key newline + invalid percent before colon", "{\"password\"\n%ZZ:\"SECRET\"}", "SECRET"},
+		{"single-quoted key invalid percent + newline before equals", "[INFO] 'password'%ZZ\n=SECRET", "SECRET"},
+		{"backticked key invalid percent + newline before equals", "[INFO] `password`%ZZ\n=SECRET", "SECRET"},
+		{"bearer space percent + unterminated quote", "[INFO] Bearer%20'SECRET", "SECRET"},
+		{"bearer newline percent + unterminated quote", "[INFO] Bearer%0a'SECRET", "SECRET"},
+		{"quoted key space percent + invalid percent", `{"password"%20%ZZ:"SECRET"}`, "SECRET"},
+		{"even backslashes before Bearer + tab escape + unterminated quote", `{"log":"C:\\Bearer\t'SECRET`, "SECRET"},
+		{"even backslashes before Basic + tab escape + unterminated quote", `{"log":"C:\\Basic\t'SECRET`, "SECRET"},
+		{"double-escaped tab after Bearer + unterminated quote", `{"log":"Bearer\\t'SECRET`, "SECRET"},
+		{"double-escaped tab after Bearer + invalid percent", `{"log":"Bearer\\t%ZZSECRET`, "SECRET"},
+		{"triple-escaped tab after Bearer + unterminated quote", `{"log":"Bearer\\\t'SECRET`, "SECRET"},
+		{"four backslashes before Bearer + unterminated quote", `{"log":"C:\\\\Bearer 'SECRET`, "SECRET"},
+		{"raw even backslash before Bearer + unterminated quote", `[INFO] C:\Bearer 'SECRET`, "SECRET"},
+		{"raw even backslash before Basic + unterminated quote", `[INFO] C:\Basic 'dXNlcjpwYXNz`, "dXNlcjpwYXNz"},
+		// Double/triple-escaped \uXXXX / \xXX / %XX in truncated JSON.
+		{"truncated JSON double-escaped u200b Bearer", `{"log":"[INFO] Bearer\\u200bSECRET`, "SECRET"},
+		{"truncated JSON double-escaped u0020 unterminated Bearer", `{"log":"Bearer\\u0020'SECRET`, "SECRET"},
+		{"truncated JSON double-escaped u0072 Bearer", `{"log":"Bea\\u0072er 'SECRET`, "SECRET"},
+		{"truncated JSON double-escaped u00a0 Bearer", `{"log":"[INFO] Bearer\\u00a0SECRET`, "SECRET"},
+		{"truncated JSON double-escaped u00a0 password", `{"log":"[INFO] password\\u00a0=SECRET`, "SECRET"},
+		{"truncated JSON double-escaped u200b password", `{"log":"[INFO] password\\u200b=SECRET`, "SECRET"},
+		{"truncated JSON double-escaped x20 unterminated Bearer", `{"log":"[INFO] Bearer\\x20'SECRET`, "SECRET"},
+		{"truncated JSON double-escaped x07 password", `{"log":"[INFO] password\\x07=SECRET`, "SECRET"},
+		{"truncated JSON triple-escaped u200b Bearer", `{"log":"[INFO] Bearer\\\\u200bSECRET`, "SECRET"},
+		{"truncated JSON nested percent Bearer", `{"log":"[INFO] Bearer%2520'SECRET`, "SECRET"},
+		// Newline/CR-padded quoted keys before invalid/overlong percent delimiter.
+		{"literal newline-led quoted key invalid percent", "{\"\npassword\"%ZZ:\"SECRET\"}", "SECRET"},
+		{"literal newline-trailing quoted key overlong percent", "{\"password\n\"%c0%a0:\"SECRET\"}", "SECRET"},
+		{"json-escaped newline-led quoted key invalid percent", `{"\npassword"%ZZ:"SECRET"}`, "SECRET"},
+		{"literal cr-led quoted key invalid percent", "{\"\rpassword\"%ZZ:\"SECRET\"}", "SECRET"},
+		// Closed quoted/backticked Basic credentials.
+		{"closed single-quoted Basic", "[INFO] Basic 'dXNlcjpwYXNz'", "dXNlcjpwYXNz"},
+		{"closed double-quoted Basic", `[INFO] Basic "dXNlcjpwYXNz"`, "dXNlcjpwYXNz"},
+		{"closed backticked Basic", "[INFO] Basic `dXNlcjpwYXNz`", "dXNlcjpwYXNz"},
+		{"truncated JSON closed single-quoted Basic", `{"auth":"Basic 'dXNlcjpwYXNz'"`, "dXNlcjpwYXNz"},
+		{"closed escaped single-quoted Basic", `[INFO] Basic \'dXNlcjpwYXNz\'`, "dXNlcjpwYXNz"},
+		// Glued credentials immediately following closed empty or [REDACTED] quotes/backticks.
+		{"truncated JSON Basic empty single quotes glued", `{"log":"Basic ''dXNlcjpwYXNz`, "dXNlcjpwYXNz"},
+		{"Basic empty single quotes glued", "[INFO] Basic ''dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Basic empty backticks glued", "[INFO] Basic ``dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Basic empty double quotes plus glued", `[INFO] Basic ""+dXNlcjpwYXNz`, "dXNlcjpwYXNz"},
+		{"Basic redacted single quotes glued", "[INFO] Basic '[REDACTED]'dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Basic redacted backticks glued", "[INFO] Basic `[REDACTED]`dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Basic redacted double quotes plus glued", `[INFO] Basic "[REDACTED]"+dXNlcjpwYXNz`, "dXNlcjpwYXNz"},
+		{"Basic escaped empty single quotes glued", `[INFO] Basic \'\'dXNlcjpwYXNz`, "dXNlcjpwYXNz"},
+		{"Basic escaped redacted single quotes glued", `[INFO] Basic \'[REDACTED]\'dXNlcjpwYXNz`, "dXNlcjpwYXNz"},
+		{"Basic unicode-escaped quotes glued", `{"log":"Basic \u005c"\u005c"dXNlcjpwYXNz`, "dXNlcjpwYXNz"},
+		{"Basic unicode-escaped redacted quotes glued", `{"log":"Basic \u005c"[REDACTED]\u005c"dXNlcjpwYXNz`, "dXNlcjpwYXNz"},
+		{"Basic redacted dot glued", "[INFO] Basic '[REDACTED]'.dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"truncated JSON Bearer redacted single quotes glued", `{"log":"Bearer '[REDACTED]'SECRET`, "SECRET"},
+		{"Bearer redacted single quotes glued", "[INFO] Bearer '[REDACTED]'SECRET", "SECRET"},
+		{"Bearer redacted double quotes plus glued", `[INFO] Bearer "[REDACTED]"+SECRET`, "SECRET"},
+		{"Bearer redacted double quotes glued", `[INFO] Bearer "[REDACTED]"SECRET`, "SECRET"},
+		{"Bearer redacted dot glued", "[INFO] Bearer '[REDACTED]'.SECRET", "SECRET"},
+		{"Bearer redacted trailing punct single quotes glued", "[INFO] Bearer '[REDACTED].'SECRET", "SECRET"},
+		{"Bearer percent redacted single quotes glued", "[INFO] Bearer '%5BREDACTED%5D'SECRET", "SECRET"},
+		{"Bearer escaped redacted single quotes glued", `[INFO] Bearer \'[REDACTED]\'SECRET`, "SECRET"},
+		{"Bearer redacted backticks glued", "[INFO] Bearer `[REDACTED]`SECRET", "SECRET"},
+		{"Bearer empty single quotes glued", "[INFO] Bearer ''SECRET", "SECRET"},
+		{"Bearer empty double quotes plus glued", `[INFO] Bearer ""+SECRET`, "SECRET"},
+		{"Bearer empty backticks glued", "[INFO] Bearer ``SECRET", "SECRET"},
+		{"Bearer unicode-escaped empty quotes glued", `{"log":"Bearer \u005c"\u005c"SECRET`, "SECRET"},
+		{"Bearer unicode-escaped redacted quotes glued", `{"log":"Bearer \u005c"[REDACTED]\u005c"SECRET`, "SECRET"},
+		// Non-isRegexpSpace ASCII control separators after Bearer/Basic.
+		{"truncated JSON backspace escape Bearer", `{"log":"Bearer\bSECRET`, "SECRET"},
+		{"truncated JSON u0007 escape Bearer", `{"log":"Bearer\u0007SECRET`, "SECRET"},
+		{"hex bell control separator Bearer", `[INFO] Bearer\x07SECRET`, "SECRET"},
+		{"percent bell control separator Bearer", "[INFO] Bearer%07SECRET", "SECRET"},
+		{"hex nul control separator Bearer", `[INFO] Bearer\x00SECRET`, "SECRET"},
+		{"percent nul control separator Bearer", "[INFO] Bearer%00SECRET", "SECRET"},
+		{"percent unit-sep control separator Bearer", "[INFO] Bearer%1fSECRET", "SECRET"},
+		{"percent del control separator Bearer", "[INFO] Bearer%7fSECRET", "SECRET"},
+		{"truncated JSON backspace escape Basic", `{"log":"Basic\bdXNlcjpwYXNz`, "dXNlcjpwYXNz"},
+		{"percent bell control separator Basic", "[INFO] Basic%07dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		// Non-folded \uXXXX, surrogate-pair, \xXX, and %XX boundaries masking credential words.
+		{"truncated JSON em-dash u2014 Bearer", `{"log":"\u2014Bearer SECRET`, "SECRET"},
+		{"truncated JSON CJK bracket u3010 Bearer", `{"log":"\u3010Bearer SECRET\u3011`, "SECRET"},
+		{"truncated JSON em-dash u2014 unterminated Bearer", `{"log":"\u2014Bearer 'SECRET`, "SECRET"},
+		{"truncated JSON em-dash u2014 Basic", `{"log":"\u2014Basic dXNlcjpwYXNz`, "dXNlcjpwYXNz"},
+		{"truncated JSON em-dash u2014 password", `{"log":"\u2014password=SECRET`, "SECRET"},
+		{"truncated JSON em-dash u2014 Authorization", `{"log":"\u2014Authorization: SECRET`, "SECRET"},
+		{"malformed literal-newline JSON em-dash u2014 Bearer", "{\"log\":\"\\u2014Bearer SECRET\nnext line\"}", "SECRET"},
+		{"quote-led truncated JSON em-dash u2014 Bearer", `"\u2014Bearer SECRET`, "SECRET"},
+		{"truncated JSON double-escaped u2014 Bearer", `{"log":"\\u2014Bearer SECRET`, "SECRET"},
+		{"truncated JSON UTF-16 surrogate pair Bearer", `{"log":"\ud83d\ude00Bearer SECRET`, "SECRET"},
+		{"truncated JSON percent UTF-8 em-dash Bearer", `{"log":"%E2%80%94Bearer SECRET`, "SECRET"},
+		{"truncated JSON hex UTF-8 em-dash Bearer", `{"log":"\xe2\x80\x94Bearer SECRET`, "SECRET"},
+		{"truncated JSON hex non-ASCII byte Bearer", `{"log":"\x94Bearer SECRET`, "SECRET"},
+		{"truncated JSON accented u00e9 password", `{"log":"\u00e9password=SECRET`, "SECRET"},
+		{"truncated JSON em-dash u2014 temp key", `{"log":"\u2014temp:a=SECRET`, "SECRET"},
+		{"truncated JSON nested u005c u2014 Bearer", `{"log":"\u005cu2014Bearer SECRET`, "SECRET"},
+		// Truncated unpadded Basic base64 credentials (len % 4 != 0).
+		{"truncated JSON unpadded Basic len%4==2", `{"log":"Basic YWRtaW46c3VwZXJzZWNyZXRwYXNzd29yZDEyMw`, "YWRtaW46c3VwZXJzZWNyZXRwYXNzd29yZDEyMw"},
+		{"bracketed log unpadded Basic len%4==2", `[INFO] Basic YWRtaW46c3VwZXJzZWNyZXRwYXNzd29yZDEyMw`, "YWRtaW46c3VwZXJzZWNyZXRwYXNzd29yZDEyMw"},
+		{"truncated JSON unpadded Basic len%4==1", `{"log":"Basic YWRtaW46c3VwZXJzZWNyZXRwYXNzd29yZDEyM`, "YWRtaW46c3VwZXJzZWNyZXRwYXNzd29yZDEyM"},
+		{"truncated JSON single-pad Basic len%4==3", `{"log":"Basic YWRtaW46c3VwZXJzZWNyZXRwYXNzd29yZDEyMw=`, "YWRtaW46c3VwZXJzZWNyZXRwYXNzd29yZDEyMw="},
+		{"truncated JSON short unpadded Basic len%4==3", `{"log":"Basic dXNlcjpwYXN`, "dXNlcjpwYXN"},
+		{"truncated JSON short unpadded Basic len%4==2", `{"log":"Basic dXNlcjpwYX`, "dXNlcjpwYX"},
+		{"truncated JSON minimal colon Basic len%4==3", `{"log":"Basic dXNlcjp`, "dXNlcjp"},
+		// Non-isRegexpSpace ASCII control and Cf separators between quoted temp keys and delimiters without %.
+		{"quoted temp key escaped backspace before colon", `{"temp: a"\b:"SECRET"}`, "SECRET"},
+		{"quoted temp key raw backspace before colon", "{\"temp: a\"\b:\"SECRET\"}", "SECRET"},
+		{"quoted empty temp key raw bell before colon", "{\"temp:\"\x07:\"SECRET\"}", "SECRET"},
+		{"quoted empty temp key u0007 before colon", `{"temp:"\u0007:"SECRET"}`, "SECRET"},
+		{"quoted comma temp key raw bell before colon", "{\"temp:a,b\"\x07:\"SECRET\"}", "SECRET"},
+		{"quoted comma temp key u0007 before colon", `{"temp:a,b"\u0007:"SECRET"}`, "SECRET"},
+		{"quoted temp key u200b before colon", `{"temp: a"\u200b:"SECRET"}`, "SECRET"},
+		{"quoted temp key literal Cf before colon", "{\"temp: a\"\u200b:\"SECRET\"}", "SECRET"},
+		{"quoted temp key raw nul before equals", "{\"temp: a\"\x00=\"SECRET\"}", "SECRET"},
+		{"quoted temp key u0000 before equals", `{"temp: a"\u0000="SECRET"}`, "SECRET"},
+		// Additional boundary & composition cases.
+		{"truncated JSON double-escaped u0007 Bearer", `{"log":"[INFO] Bearer\\u0007SECRET`, "SECRET"},
+		{"truncated JSON double-escaped x07 Bearer", `{"log":"[INFO] Bearer\\x07SECRET`, "SECRET"},
+		{"truncated JSON double-escaped u002520 unterminated Bearer", `{"log":"[INFO] Bearer\\u002520'SECRET`, "SECRET"},
+		{"truncated JSON double-escaped u002507 Bearer", `{"log":"[INFO] Bearer\\u002507SECRET`, "SECRET"},
+		{"quoted key percent bell before colon", `{"password"%07:"SECRET"}`, "SECRET"},
+		{"text key percent bell before equals", "[INFO] password%07=SECRET", "SECRET"},
+		{"quoted key invalid percent + backspace escape before colon", `{"password"%ZZ\b:"SECRET"}`, "SECRET"},
+		{"truncated JSON backspace escape before Bearer of", `{"log":"Bearer\b of SECRET`, "SECRET"},
+		{"truncated JSON vtab escape before Bearer of", `{"log":"Bearer\v of SECRET`, "SECRET"},
+		{"percent vtab control separator Bearer", "[INFO] Bearer%0bSECRET", "SECRET"},
+		{"closed backticked Bearer with space", "[INFO] Bearer `my SECRET`", "SECRET"},
+		{"truncated JSON closed backticked Bearer", `{"auth":"Bearer ` + "`SECRET`" + `"`, "SECRET"},
+		{"truncated JSON double-escaped space closed quoted Basic", `{"log":"Basic\\u0020'dXNlcjpwYXNz'"`, "dXNlcjpwYXNz"},
+		{"truncated JSON double-escaped space closed backticked Basic", `{"log":"Basic\\u0020` + "`dXNlcjpwYXNz`" + `"`, "dXNlcjpwYXNz"},
+		{"truncated JSON double-escaped u2014 + vtab Bearer", "{\"log\":\"\\\\u2014Bearer\vSECRET", "SECRET"},
+		{"truncated JSON unpaired high surrogate before u0020 Bearer", `{"log":"\ud83d\u0020Bearer SECRET`, "SECRET"},
+		{"truncated JSON uppercase U2014 Bearer", `{"log":"\U2014Bearer SECRET`, "SECRET"},
+		{"truncated JSON Basic excessive equals padding", `{"log":"Basic YWRtaW46cGFzcw===`, "YWRtaW46cGFzcw==="},
+		{"truncated JSON Basic mid-UTF-8 rune truncation", `{"log":"Basic dXNlcjphw6`, "dXNlcjphw6"},
+		{"quote-led hidden brace redacted password", `"hello \u007b'password':'[REDACTED]'}`, "password"},
+		{"quote-led double-percent hidden brace redacted password", `"hello %257b'password':'[REDACTED]'}`, "password"},
+		{"truncated JSON unclosed brace redacted password", `{"password":"[REDACTED]"`, "[REDACTED]"},
+		{"truncated JSON hex line-separator token", `{"log":"token\xe2\x80\xa8=SECRET`, "SECRET"},
+		{"truncated JSON double-escaped hex line-separator token", `{"log":"token\\xe2\\x80\\xa8=SECRET`, "SECRET"},
+		{"quote-led control separator before redacted value", `"'temp: a'` + "\x07" + `:'[REDACTED]' "`, "temp: a"},
+		// Text glued after a bare placeholder of an earlier pass after Bearer/Basic.
+		{"Bearer bare redacted single quote glued", "[INFO] Bearer [REDACTED]'SECRET123", "SECRET123"},
+		{"Bearer bare redacted double quotes glued", `[INFO] Bearer [REDACTED]"SECRET123"`, "SECRET123"},
+		{"truncated JSON Bearer bare redacted single quote glued", `{"log":"Bearer [REDACTED]'SECRET123`, "SECRET123"},
+		{"Bearer bare redacted paren glued", "[INFO] Bearer [REDACTED])SECRET123", "SECRET123"},
+		{"Bearer bare redacted backtick glued", "[INFO] Bearer [REDACTED]`SECRET123", "SECRET123"},
+		{"Bearer bare redacted glued", "[INFO] Bearer [REDACTED]SECRET123", "SECRET123"},
+		{"Bearer bare redacted escaped quote glued", `[INFO] Bearer [REDACTED]\"SECRET123`, "SECRET123"},
+		{"Basic bare redacted glued", "[INFO] Basic [REDACTED]dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"truncated JSON Basic bare redacted glued", `{"log":"Basic [REDACTED]dXNlcjpwYXNz`, "dXNlcjpwYXNz"},
+		{"Bearer lowercase bare redacted single quote glued", "[INFO] Bearer [redacted]'SECRET123", "SECRET123"},
+		{"Basic lowercase bare redacted glued", "[INFO] Basic [redacted]dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Basic bare redacted single quote glued", "[INFO] Basic [REDACTED]'dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Basic mixed-case bare redacted glued", "[INFO] Basic [ReDaCtEd]dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Bearer bare sensitive-text placeholder single quote glued", "[INFO] Bearer [REDACTED_SENSITIVE_TEXT]'SECRET123", "SECRET123"},
+		{"Bearer bare unparseable placeholder single quote glued", "[INFO] Bearer [UNPARSEABLE_JSON_BLOB]'SECRET123", "SECRET123"},
+		{"Basic bare sensitive-text placeholder glued", "[INFO] Basic [REDACTED_SENSITIVE_TEXT]dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Bearer bare redacted dot single quote glued", "[INFO] Bearer [REDACTED].'SECRET123", "SECRET123"},
+		{"Bearer bare redacted paren single quote glued", "[INFO] Bearer [REDACTED])'SECRET123", "SECRET123"},
+		{"Bearer bare redacted bracket single quote glued", "[INFO] Bearer [REDACTED]]'SECRET123", "SECRET123"},
+		{"Bearer bare redacted two single quotes glued", "[INFO] Bearer [REDACTED]''SECRET123", "SECRET123"},
+		{"Bearer bare redacted double quote plus glued", `[INFO] Bearer [REDACTED]"+SECRET123`, "SECRET123"},
+		{"Bearer NBSP bare redacted single quote glued", "[INFO] Bearer\u00a0[REDACTED]'SECRET123", "SECRET123"},
+		{"Bearer bare redacted single quote ZWSP glued", "[INFO] Bearer [REDACTED]'\u200bSECRET123", "SECRET123"},
+		{"Bearer percent-encoded bare redacted single quote glued", "[INFO] Bearer %5BREDACTED%5D'SECRET123", "SECRET123"},
+		{"Basic percent-encoded bare redacted glued", "[INFO] Basic %5BREDACTED%5DdXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"truncated JSON Basic bare redacted unicode-escaped quote glued", `{"log":"Basic [REDACTED]\u0027dXNlcjpwYXNz`, "dXNlcjpwYXNz"},
+		{"Basic tab bare redacted glued", "[INFO] Basic\t[REDACTED]dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Basic bare redacted backtick glued", "[INFO] Basic [REDACTED]`dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Basic bare redacted paren glued", "[INFO] Basic [REDACTED])dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Basic bare redacted colon glued", "[INFO] Basic [REDACTED]:dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"quote-led Bearer bare redacted single quote glued", `"Bearer [REDACTED]'SECRET123`, "SECRET123"},
+		// Sensitive text keys with a stray, escaped or doubled quote before an obfuscated delimiter.
+		{"text key single quote invalid percent before equals", "[INFO] password'%ZZ=SECRET123", "SECRET123"},
+		{"truncated JSON text key single quote invalid percent", `{"log":"password'%ZZ=SECRET123`, "SECRET123"},
+		{"prose apostrophe text key single quote invalid percent", "[INFO] user's password'%ZZ=SECRET123", "SECRET123"},
+		{"quoted phrase ending in key invalid percent", `[INFO] "msg: password"%ZZ=SECRET123`, "SECRET123"},
+		{"quoted phrase ending in key overlong percent", `[INFO] "msg: password"%c0%a0=SECRET123`, "SECRET123"},
+		{"text key escaped double quote invalid percent", `[INFO] password\"%ZZ=SECRET123`, "SECRET123"},
+		{"text key escaped single quote invalid percent", `[INFO] password\'%ZZ=SECRET123`, "SECRET123"},
+		{"quoted phrase ending in api_key invalid percent before colon", `[INFO] "msg: api_key"%ZZ:SECRET123`, "SECRET123"},
+		{"text key backtick invalid percent", "[INFO] password`%ZZ=SECRET123", "SECRET123"},
+		{"backticked phrase ending in key invalid percent", "[INFO] `msg: password`%ZZ=SECRET123", "SECRET123"},
+		{"single-quoted phrase ending in key invalid percent", "[INFO] 'msg: password'%ZZ=SECRET123", "SECRET123"},
+		{"temp key single quote invalid percent", "[INFO] temp:a'%ZZ=SECRET123", "SECRET123"},
+		{"temp key escaped single quote invalid percent", `[INFO] temp:\'%ZZ=SECRET123`, "SECRET123"},
+		{"text key single quote space invalid percent", "[INFO] password' %ZZ=SECRET123", "SECRET123"},
+		{"text key single quote NBSP invalid percent", "[INFO] password'\u00a0%ZZ=SECRET123", "SECRET123"},
+		{"text key double quote invalid percent before colon", `[INFO] api_key"%ZZ:SECRET123`, "SECRET123"},
+		{"text key two single quotes invalid percent", "[INFO] password''%ZZ=SECRET123", "SECRET123"},
+		{"text key double then single quote invalid percent", `[INFO] password"'%ZZ=SECRET123`, "SECRET123"},
+		{"quoted key stray single quote invalid percent", `[INFO] "client_secret"'%ZZ:SECRET123`, "SECRET123"},
+		{"quoted key stray double quote invalid percent", `[INFO] "client_secret""%ZZ:SECRET123`, "SECRET123"},
+		{"padded quoted key stray double quote invalid percent", `[INFO] " client_secret ""%ZZ:SECRET123`, "SECRET123"},
+		{"truncated JSON text key unicode-escaped quote invalid percent", `{"log":"password\u0027%ZZ=SECRET123`, "SECRET123"},
+		{"truncated JSON text key single quote invalid percent + newline escape", `{"log":"password'%ZZ\n=SECRET123`, "SECRET123"},
+		{"quote-led text key single quote invalid percent", `"msg: password'%ZZ=SECRET123`, "SECRET123"},
+		// Quoted phrase or path keys padded before the closing quote, before
+		// an obfuscated delimiter.
+		{"padded quoted phrase ending in key invalid percent", `[INFO] "msg: password "%ZZ=SECRET123`, "SECRET123"},
+		{"padded quoted path key invalid percent before colon", `{"db/password "%ZZ:"SECRET123"}`, "SECRET123"},
+		{"padded apostrophe-paired key invalid percent", "[INFO] user's password '%ZZ=SECRET123", "SECRET123"},
+		{"padded quoted phrase stray quote invalid percent", `[INFO] "msg: password "'%ZZ=SECRET123`, "SECRET123"},
+		{"padded escaped-quoted phrase invalid percent", `[INFO] \'msg: password \'%ZZ=SECRET123`, "SECRET123"},
+		{"padded multiline quoted phrase invalid percent", "[INFO] \"msg:\npassword \"%ZZ=SECRET123", "SECRET123"},
+		{"padded tab quoted phrase invalid percent", "[INFO] \"msg:\tpassword \"%ZZ=SECRET123", "SECRET123"},
+		{"double-padded quoted path key invalid percent", `[INFO] "db/password  "%ZZ=SECRET123`, "SECRET123"},
+		{"NBSP-padded quoted phrase invalid percent", "[INFO] \"msg: password\u00a0\"%ZZ=SECRET123", "SECRET123"},
+		{"padded single-quoted api_key phrase invalid percent before colon", `[INFO] 'msg: api_key '%ZZ:SECRET123`, "SECRET123"},
+		{"padded quoted phrase overlong percent", `[INFO] "msg: password "%c0%a0=SECRET123`, "SECRET123"},
+		{"padded backticked phrase invalid percent", "[INFO] `msg: password `%ZZ=SECRET123", "SECRET123"},
+		{"padded quoted phrase ending in temp key invalid percent", `[INFO] "msg: temp:x "%ZZ=SECRET123`, "SECRET123"},
+		{"padded quoted phrase escaped stray quote invalid percent", `[INFO] "msg: password "\'%ZZ=SECRET123`, "SECRET123"},
+		{"padded quoted phrase invalid percent spaced equals", `[INFO] "msg: password "%ZZ = SECRET123`, "SECRET123"},
+		{"padded double-backslash-quoted phrase invalid percent", `[INFO] \\'msg: password \\'%ZZ=SECRET123`, "SECRET123"},
+		{"padded quoted phrase after a closed string invalid percent", `[INFO] "a" "msg: password "%ZZ=SECRET123`, "SECRET123"},
+		{"truncated JSON padded single-quoted phrase invalid percent", `{"log":"'msg: password '%ZZ=SECRET123`, "SECRET123"},
+		// temp: keys whose body holds only percent, space or control bytes,
+		// before an obfuscated delimiter.
+		{"temp key percent body space invalid percent", "[INFO] temp:%xy %ZZ=SECRET123", "SECRET123"},
+		{"temp key percent body newline invalid percent", "[INFO] temp:%xy\n%ZZ=SECRET123", "SECRET123"},
+		{"truncated JSON temp key percent body tab invalid percent", "{\"log\":\"temp:%xy\t%ZZ=SECRET123", "SECRET123"},
+		{"temp key percent NBSP body invalid percent", "[INFO] temp:%C2%A0 %ZZ=SECRET123", "SECRET123"},
+		{"upper-case temp key percent body invalid percent", "[INFO] TEMP:%xy %ZZ=SECRET123", "SECRET123"},
+		{"stacked temp key percent body invalid percent", "[INFO] user:temp:%xy %ZZ=SECRET123", "SECRET123"},
+		{"temp key percent body overlong percent", "[INFO] temp:%xy %c0%a0=SECRET123", "SECRET123"},
+		{"temp key percent body invalid percent before colon", "[INFO] temp:%xy %ZZ:SECRET123", "SECRET123"},
+		{"temp key percent ZWSP body invalid percent", "[INFO] temp:%E2%80%8B %ZZ=SECRET123", "SECRET123"},
+		{"temp key double percent body invalid percent", "[INFO] temp:%%xy %ZZ=SECRET123", "SECRET123"},
+		{"temp key percent comma body invalid percent", "[INFO] temp:%xy%,}%ZZ=SECRET123", "SECRET123"},
+		{"temp key short percent body invalid percent", "[INFO] temp:%x %ZZ=SECRET123", "SECRET123"},
+		{"temp key bare percent body invalid percent", "[INFO] temp:% %ZZ=SECRET123", "SECRET123"},
+		{"temp key vtab body invalid percent", "[INFO] temp:\v %ZZ=SECRET123", "SECRET123"},
+		{"temp key percent body invalid percent spaced equals", "[INFO] temp:%xy %ZZ = SECRET123", "SECRET123"},
+		{"temp key percent body escaped newline invalid percent", `[INFO] temp:%xy\n%ZZ=SECRET123`, "SECRET123"},
+		{"truncated JSON temp key percent body escaped tab invalid percent", `{"log":"temp:%xy\t%ZZ=SECRET123`, "SECRET123"},
+		// Backticked temp: keys whose body ends in a percent byte, before an
+		// obfuscated delimiter: the percent escape of the run does not take
+		// the closing backtick.
+		{"backticked spaced temp key ending in percent invalid percent", "[INFO] `temp: %`%ZZ=SECRET123", "SECRET123"},
+		{"backticked spaced temp key ending in short percent invalid percent", "[INFO] `temp: %2`%ZZ=SECRET123", "SECRET123"},
+		{"backticked comma temp key ending in percent invalid percent", "[INFO] `temp:a,b%`%ZZ=SECRET123", "SECRET123"},
+		{"JSON backticked comma temp key ending in percent invalid percent", "{\"log\":`temp:a,b%`%ZZ:'SECRET123'}", "SECRET123"},
+		{"truncated JSON backticked comma temp key ending in percent invalid percent", "{\"log\":\"`temp:a,b%`%ZZ=SECRET123", "SECRET123"},
+		// Backticked keys, and keys with a stray quote or backtick after a
+		// space, without a percent byte.
+		{"backticked key before colon", "[INFO] `password`: SECRET123", "SECRET123"},
+		{"backticked api_key before equals", "[INFO] `api_key`=SECRET123", "SECRET123"},
+		{"text key stray backtick before equals", "[INFO] password`=SECRET123", "SECRET123"},
+		{"truncated JSON backticked key before colon", "{\"log\":\"`password`: SECRET123", "SECRET123"},
+		{"truncated JSON backticked key before unterminated quoted value", "{\"log\":\"`password`: 'SECRET123", "SECRET123"},
+		{"brace backticked key before quoted value", "{`password`: 'SECRET123'}", "SECRET123"},
+		{"text key space stray double quote before equals", `[INFO] password "=SECRET123`, "SECRET123"},
+		{"text key space stray single quote before equals", "[INFO] password '=SECRET123", "SECRET123"},
+		{"text key space stray backtick before equals", "[INFO] password `=SECRET123", "SECRET123"},
+		{"text key space double then single stray quote before equals", `[INFO] password "'=SECRET123`, "SECRET123"},
+		{"quoted key space stray quote before equals", `[INFO] "client_secret" '=SECRET123`, "SECRET123"},
+		{"backticked comma temp key before colon", "[INFO] `temp:a,b`: SECRET123", "SECRET123"},
+		// Padded quoted phrase keys that hold a line break or a comma, without
+		// a percent byte.
+		{"padded multiline quoted phrase before equals", "[INFO] \"msg:\npassword \"=SECRET123", "SECRET123"},
+		{"padded comma quoted phrase before colon", `[INFO] "a, password ": SECRET123`, "SECRET123"},
+		{"padded multiline quoted phrase before colon", "[INFO] \"msg:\npassword \": SECRET123", "SECRET123"},
+		{"padded multiline single-quoted phrase before equals", "[INFO] 'msg:\npassword '=SECRET123", "SECRET123"},
+		{"padded comma single-quoted phrase before colon", "[INFO] 'a, password ': SECRET123", "SECRET123"},
+		{"padded multiline single-quoted phrase before colon", "[INFO] 'msg:\npassword ': SECRET123", "SECRET123"},
+		{"padded multiline backticked phrase before equals", "[INFO] `msg:\npassword `=SECRET123", "SECRET123"},
+		{"padded comma backticked phrase before colon", "[INFO] `a, password `: SECRET123", "SECRET123"},
+		{"padded multiline backticked phrase before colon", "[INFO] `msg:\npassword `: SECRET123", "SECRET123"},
+		{"padded backticked phrase before equals", "[INFO] `msg: password `=SECRET123", "SECRET123"},
+		// Escaped backticks.
+		{"closed escaped-backticked Basic", "[INFO] Basic \\`dXNlcjpwYXNz\\`", "dXNlcjpwYXNz"},
+		{"unterminated escaped-backticked Basic", "[INFO] Basic \\`dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Basic escaped-backticked redacted glued", "[INFO] Basic \\`[REDACTED]\\`dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"padded escaped-backticked phrase invalid percent", "[INFO] \\`msg: password \\`%ZZ=SECRET123", "SECRET123"},
+		{"escaped-backticked key before colon", "[INFO] \\`password\\`: SECRET123", "SECRET123"},
+		{"text key escaped backtick before equals", "[INFO] password\\`=SECRET123", "SECRET123"},
+		{"escaped-backticked comma temp key invalid percent", "[INFO] \\`temp:a,b%\\`%ZZ=SECRET123", "SECRET123"},
+		{"percent-encoded escaped-backticked comma temp key invalid percent", `{"log":"%5C%60temp:a,b%%5C%60%ZZ=SECRET123`, "SECRET123"},
+		// Quoted temp: keys with a percent body followed by more quotes.
+		{"quoted comma temp key two stray quotes invalid percent", `[INFO] "temp:a,b%"''%ZZ=SECRET123`, "SECRET123"},
+		{"backticked comma temp key two stray quotes invalid percent", "[INFO] `temp:a,b%`\"\"%ZZ=SECRET123", "SECRET123"},
+		{"quoted comma temp key two same stray quotes invalid percent", `[INFO] "temp:a,b%"""%ZZ=SECRET123`, "SECRET123"},
+		{"single-quoted comma temp key with an escaped quote invalid percent", `[INFO] 'temp:a,b\'x'%ZZ=SECRET123`, "SECRET123"},
+		{"temp key percent letter body invalid percent", "[INFO] temp:%41 %ZZ=SECRET123", "SECRET123"},
+		// temp: keys whose body is empty or holds only spaces, before a
+		// delimiter.
+		{"space-padded empty temp key before equals", "[INFO] temp: =SECRET123", "SECRET123"},
+		{"truncated JSON space-padded empty temp key before equals", `{"log":"temp: =SECRET123`, "SECRET123"},
+		{"empty temp key before equals", "[INFO] temp:=SECRET123", "SECRET123"},
+		{"empty temp key before colon", "[INFO] temp::SECRET123", "SECRET123"},
+		{"tab-padded empty temp key before equals", "[INFO] temp:\t=SECRET123", "SECRET123"},
+		{"stacked space-padded empty temp key before equals", "[INFO] user:temp: =SECRET123", "SECRET123"},
+		{"upper-case space-padded empty temp key before equals", "[INFO] TEMP: =SECRET123", "SECRET123"},
+		{"space-padded empty temp key invalid percent", "[INFO] temp: %ZZ=SECRET123", "SECRET123"},
+		{"tab-padded empty temp key invalid percent", "[INFO] temp:\t%ZZ=SECRET123", "SECRET123"},
+		{"truncated JSON empty temp key before equals", `{"log":"temp:=SECRET123`, "SECRET123"},
+		{"space-padded empty temp key before spaced colon", "[INFO] temp: : SECRET123", "SECRET123"},
+		{"backticked space-padded empty temp key before equals", "[INFO] `temp: `=SECRET123", "SECRET123"},
+	}
+
+	for _, tc := range failClosedCases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, lost, err := SmartTruncate(map[string]any{"log": tc.in}, -1)
+			if err != nil {
+				t.Fatalf("SmartTruncate error: %v", err)
+			}
+			wantJSON := `{"log":"[UNPARSEABLE_JSON_BLOB]"}`
+			if !lost || string(raw) != wantJSON {
+				t.Errorf("SmartTruncate(map{log:%q}) = (%s, %v), want (%s, true)", tc.in, raw, lost, wantJSON)
+			}
+			if strings.Contains(string(raw), tc.secret) {
+				t.Errorf("SmartTruncate(%q) = %s leaked %q", tc.in, raw, tc.secret)
+			}
+
+			parts, partsLost := formatContentParts(&genai.Content{
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						Name:     "fetch_log",
+						Response: map[string]any{"log": tc.in},
+					},
+				}},
+			}, -1, true)
+			if !partsLost || len(parts) != 1 {
+				t.Fatalf("formatContentParts(FunctionResponse, %q) = (%v, %v), want 1 part with lost=true", tc.in, parts, partsLost)
+			}
+			attrs, _ := parts[0]["part_attributes"].(string)
+			if strings.Contains(attrs, tc.secret) || !strings.Contains(attrs, unparseableJSONPlaceholder) {
+				t.Errorf("FunctionResponse part_attributes(%q) = %s, want %q and no %q", tc.in, attrs, unparseableJSONPlaceholder, tc.secret)
+			}
+			if text := formatContentTextPart(t, tc.in); strings.Contains(text, tc.secret) {
+				t.Errorf("FormatContentParts(text %q) = %q leaked %q", tc.in, text, tc.secret)
+			}
+
+			if san, sanLost := sanitizeRawText(tc.in); !sanLost || san != unparseableJSONPlaceholder {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tc.in, san, sanLost, unparseableJSONPlaceholder)
+			}
+			if rem := redactErrorMessage(tc.in); rem != unparseableJSONPlaceholder {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", tc.in, rem, unparseableJSONPlaceholder)
+			}
+		})
+	}
+
+	// Legitimate harmless prose must still pass through untouched.
+	benignCases := []string{
+		"[INFO] hello\u200bworld",
+		"[Basic usage](https://example.com/docs)",
+		"[INFO] Bearer of bad news",
+		"[INFO] Bearer [REDACTED]",
+		`{"msg":"hello%E2%80%8Bworld"`,
+		`[INFO] 100% ok %80 %C2 %C2%ZZ %E0%80%80 %`,
+		`{"msg":"100% ok %80 %C2 %C2%ZZ %E0%80%80 %`,
+		`{"log":"C:\\Users\\alice`,
+		`{"log":"C:\\Bearer of bad news`,
+		`{"log":"Bearer\t of`,
+		`{"log":"Bearer\t of bad news`,
+		"{\"msg\":\"100% ok:\nnext line",
+		"[INFO] Basic '[REDACTED]'",
+		`[INFO] Basic ""`,
+		"[INFO] Basic `[REDACTED]`",
+		`[INFO] Bearer '[REDACTED]'`,
+		`[INFO] Bearer "[REDACTED]" ok`,
+		`[INFO] Bearer '[REDACTED]' done`,
+		`[INFO] Basic "" done`,
+		`[INFO] Basic '' done`,
+		`[INFO] Basic '[REDACTED]' done`,
+		"[INFO] Basic `[REDACTED]` done",
+		`{"msg":"Use Basic '' or Bearer '[REDACTED]' in docs."}`,
+		`{"msg":"Use Basic '' or Bearer '[REDACTED]' in docs`,
+		`{"msg":"Use Basic '' or Bearer '[REDACTED]'."}`,
+		`{"log":"C:\\Users\\alice\\u0020ok`,
+		`{"msg":"\u2014 hello world"}`,
+		`{"msg":"\u3010status: ok\u3011"}`,
+		`{"msg":"\ud83d\ude00 hello world"}`,
+		`{"msg":"\\u2014 hello world"}`,
+		`{"msg":"\u20zz \xzz hello`,
+		`{"msg":"\u2014 hello`,
+		`[INFO] Basic usage`,
+		`[INFO] Basic health check`,
+		`[INFO] Basic authentication enabled`,
+		`[INFO] Basic Oracle setup`,
+		`[INFO] Basic Bjork mode`,
+		`[INFO] Basic auth`,
+		`[INFO] Basic API`,
+		`"password": "[REDACTED]" \u2014 hello`,
+		"[INFO] Bearer [REDACTED] ok",
+		`[INFO] said "Bearer [REDACTED]" ok`,
+		"[INFO] (Bearer [REDACTED]) ok",
+		"[INFO] said 'Bearer [REDACTED]' ok",
+		`{"msg":"Use Bearer [REDACTED] or Basic [REDACTED] in docs."}`,
+		"[INFO] Basic [step](https://example.com)",
+		"[INFO] Basic [REDACTED]",
+		"[INFO] (Basic [REDACTED]) ok",
+		"[INFO] Basic [redacted] ok",
+		"[INFO] Basic [REDACTED]...",
+		"[INFO] Basic [REDACTED]\tok",
+		"[INFO] Bearer [REDACTED], next",
+		"[INFO] Bearer [REDACTED].",
+		"[INFO] Bearer [REDACTED]; ok",
+		"[INFO] Bearer [UNPARSEABLE_JSON_BLOB] ok",
+		`"Bearer [REDACTED]" ok`,
+		`[INFO] said \'Basic [REDACTED]\' ok`,
+		`[INFO] "50"% done`,
+		"[INFO] it's 100% ok",
+		`[INFO] "user's name" %s`,
+		`[INFO] "status"%20: ok`,
+		"[INFO] it's 100%: ok",
+		"[INFO] user's name'%20= bob",
+		`[INFO] "50"%: done`,
+		"[INFO] the 'mode'%ZZ= fast",
+		`[INFO] "user's name" %s: ok`,
+		`[INFO] "50 "% done`,
+		`[INFO] "user's name "%s`,
+		`[INFO] "hello world "%ZZ=foo`,
+		`[INFO] "msg: hello "%ZZ=foo`,
+		`[INFO] "db/path "%ZZ:ok`,
+		`[INFO] "password reset "%ZZ=done`,
+		`[INFO] "status "%20: ok`,
+		"[INFO] temp:%xy ok",
+		"[INFO] xtemp:%xy %ZZ=foo",
+		"[INFO] temp:%xy %41=foo",
+		"[INFO] temp:%xy 50% done=ok",
+		"[INFO] `password` is required",
+		"[INFO] use the `api_key` header",
+		"[INFO] password:",
+		"[INFO] open /etc/ssl/private.key: no such file",
+		"[INFO] `status`: ok",
+		"[INFO] \"msg:\nhello \"=foo",
+		"[INFO] temp: 25C",
+		"[INFO] temp: =[REDACTED]",
+		"[INFO] `password`: [REDACTED]",
+		"[INFO] password \"=[REDACTED]",
+		"[INFO] Basic \\`[REDACTED]\\`",
+		"[INFO] xtemp: =foo",
+		"[INFO] it's `ok`: done",
+		`[INFO] "a, b ": ok`,
+		`[INFO] "password" is set`,
+	}
+	if hasTruncatedBasicBase64At("Basic "+strings.Repeat("a", maxBasicCredentialBytes+1), len("Basic ")) {
+		t.Errorf("hasTruncatedBasicBase64At accepted overlong token")
+	}
+	if got := decodeCredentialEscapes(`{"msg":"\ud83d\ude00Bearer SECRET`); got != `{"msg":"😀Bearer SECRET` {
+		t.Errorf("decodeCredentialEscapes surrogate pair = %q, want %q", got, `{"msg":"😀Bearer SECRET`)
+	}
+	if !hasIncompleteCredentialConstruct("[INFO] Bearer `SECRET") {
+		t.Errorf("hasIncompleteCredentialConstruct(%q) = false, want true", "[INFO] Bearer `SECRET")
+	}
+	if !hasIncompleteCredentialConstruct("[INFO] Bearer%07SECRET") {
+		t.Errorf("hasIncompleteCredentialConstruct(%q) = false, want true", "[INFO] Bearer%07SECRET")
+	}
+	if !hasIncompleteCredentialConstruct(`{"password"%07:"SECRET"}`) {
+		t.Errorf("hasIncompleteCredentialConstruct(%q) = false, want true", `{"password"%07:"SECRET"}`)
+	}
+	for _, s := range []string{
+		"[INFO] Bearer ''SECRET",
+		`[INFO] Bearer ""+SECRET`,
+		"[INFO] Bearer ``SECRET",
+		"[INFO] Bearer `[REDACTED]`SECRET",
+		`{"log":"Basic \"\"dXNlcjpwYXNz`,
+		`{"log":"Basic \"[REDACTED]\"dXNlcjpwYXNz`,
+		`{"log":"Bearer \"\"SECRET`,
+		`{"log":"Bearer \"[REDACTED]\"SECRET`,
+	} {
+		if !hasIncompleteCredentialConstruct(s) {
+			t.Errorf("hasIncompleteCredentialConstruct(%q) = false, want true", s)
+		}
+	}
+	if !followedByKeyDelimiterWithRedacted("\x07:[REDACTED]", true) {
+		t.Errorf("followedByKeyDelimiterWithRedacted(%q, true) = false, want true", "\x07:[REDACTED]")
+	}
+	if hasIncompleteCredentialConstruct("[INFO] bearerToken=1 Bearer%2fok Bearer é bearer") {
+		t.Errorf("hasIncompleteCredentialConstruct(%q) = true, want false", "[INFO] bearerToken=1 Bearer%2fok Bearer é bearer")
+	}
+	for _, s := range []string{
+		`{"temp:a:b%"%ZZ:"SECRET"}`,
+		`{"temp:a: b%"%ZZ:"SECRET"}`,
+		`{"temp:a:b%2"%ZZ:"SECRET"}`,
+		"[INFO] password'%ZZ=SECRET123",
+		`[INFO] "msg: password"%ZZ=SECRET123`,
+		`[INFO] password\"%ZZ=SECRET123`,
+		`[INFO] password\'%ZZ=SECRET123`,
+		`[INFO] temp:\'%ZZ=SECRET123`,
+		"[INFO] password''%ZZ=SECRET123",
+		`[INFO] "client_secret"'%ZZ:SECRET123`,
+		`[INFO] " client_secret ""%ZZ:SECRET123`,
+		`[INFO] "msg: password "%ZZ=SECRET123`,
+		`{"db/password "%ZZ:"SECRET123"}`,
+		"[INFO] user's password '%ZZ=SECRET123",
+		`[INFO] "msg: password "'%ZZ=SECRET123`,
+		"[INFO] \"msg:\npassword \"%ZZ=SECRET123",
+		"[INFO] temp:%xy %ZZ=SECRET123",
+		"[INFO] temp:%xy\n%ZZ=SECRET123",
+		"[INFO] temp:%C2%A0 %ZZ=SECRET123",
+		`[INFO] \'msg: password \'%ZZ=SECRET123`,
+		"[INFO] temp: %ZZ=SECRET123",
+		"[INFO] `temp: %`%ZZ=SECRET123",
+		"[INFO] `temp:a,b%`%ZZ=SECRET123",
+		"[INFO] `password`: SECRET123",
+		`[INFO] password "=SECRET123`,
+		"[INFO] password\\`=SECRET123",
+		"[INFO] \"msg:\npassword \"=SECRET123",
+		`[INFO] "a, password ": SECRET123`,
+		"[INFO] temp: =SECRET123",
+		"[INFO] temp:=SECRET123",
+		`[INFO] "temp:a,b%"""%ZZ=SECRET123`,
+		"[INFO] password'%ZZ=[REDACTED]",
+		"[INFO] temp:%xy %ZZ=[REDACTED]",
+		"temp: =SECRET123",
+		"[INFO] temp:%41 %ZZ=SECRET123",
+		`[INFO] 'temp:a,b\'x'%ZZ=SECRET123`,
+	} {
+		if !hasObfuscatedKeyDelimiter(s) {
+			t.Errorf("hasObfuscatedKeyDelimiter(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{
+		"'%ZZ=x",
+		`[INFO] "status"%20: ok`,
+		"[INFO] user's name'%20= bob",
+		`[INFO] name\'%ZZ= x`,
+		"[INFO] name''%ZZ= x",
+		`[INFO] "name"'%ZZ: x`,
+		`[INFO] " name ""%ZZ: x`,
+		`[INFO] "hello world "%ZZ=foo`,
+		`[INFO] "password reset "%ZZ=done`,
+		"[INFO] xtemp:%xy %ZZ=foo",
+		"[INFO] temp:%xy %41=foo",
+		"a%::b",
+		"[INFO] temp: =[REDACTED]",
+		"[INFO] `password`: [REDACTED]",
+		"[INFO] xtemp: =foo",
+		"[INFO] open /etc/ssl/private.key: no such file",
+		"[INFO] password:",
+		"[INFO] `status`: ok",
+		// A backslash-escaped quote closes no key as written; the decoded
+		// pass of hasIncompleteCredentialConstruct reads it (see below).
+		`[INFO] 'temp:a,b\'%ZZ=x`,
+	} {
+		if hasObfuscatedKeyDelimiter(s) {
+			t.Errorf("hasObfuscatedKeyDelimiter(%q) = true, want false", s)
+		}
+	}
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{`[INFO] Bearer [REDACTED]\"SECRET123`, true},
+		{"[INFO] Basic [ReDaCtEd]dXNlcjpwYXNz", true},
+		{"[INFO] Basic [REDACTED_SENSITIVE_TEXT]dXNlcjpwYXNz", true},
+		{"[INFO] Basic [REDACTED]", false},
+		{`[INFO] said \'Basic [REDACTED]\' ok`, false},
+		{"[INFO] Basic [step](https://example.com)", false},
+		{"[INFO] Bearer [UNPARSEABLE_JSON_BLOB] ok", false},
+		{`[INFO] \'msg: password \'%ZZ=SECRET123`, true},
+		{`[INFO] temp:%xy\n%ZZ=SECRET123`, true},
+		{`[INFO] "msg: hello "%ZZ=foo`, false},
+		{"[INFO] temp:\t%ZZ=SECRET123", true},
+		{"[INFO] Basic \\`dXNlcjpwYXNz\\`", true},
+		{"[INFO] Basic \\`[REDACTED]\\`", false},
+		{"[INFO] \\`temp:a,b%\\`%ZZ=SECRET123", true},
+		{`[INFO] 'temp:a,b\'%ZZ=x`, true},
+	} {
+		if got := hasIncompleteCredentialConstruct(tc.in); got != tc.want {
+			t.Errorf("hasIncompleteCredentialConstruct(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+	// The scan of an auth scheme reads an escaped backtick as it reads a
+	// backtick, without the decoding of hasIncompleteCredentialConstruct.
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"[INFO] Basic \\`dXNlcjpwYXNz\\`", true},
+		{"[INFO] Basic \\`dXNlcjpwYXNz", true},
+		{"[INFO] Bearer \\`[REDACTED]\\`SECRET123", true},
+		{"[INFO] Basic \\`[REDACTED]\\`", false},
+		{"[INFO] Bearer \\`[REDACTED]\\` ok", false},
+		{"[INFO] Basic \\x ok", false},
+	} {
+		if got := hasAuthSchemeIncompleteOrObfuscated(tc.in); got != tc.want {
+			t.Errorf("hasAuthSchemeIncompleteOrObfuscated(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+	// An escaped backtick is decoded for these checks only: the scrub and
+	// its legacy backstop keep main's decoding.
+	if got, want := unescapeProseBackslashes("a\\`b\\\\\\`c\\\"d"), "a`b`c\"d"; got != want {
+		t.Errorf("unescapeProseBackslashes = %q, want %q", got, want)
+	}
+	if got, want := unescapeBackslashControls("a\\`b\\\"c"), "a\\`b\"c"; got != want {
+		t.Errorf("unescapeBackslashControls = %q, want %q", got, want)
+	}
+	if isPercentSepByte('`') || isPercentSepByte('"') || !isPercentSepByte('Z') {
+		t.Errorf("isPercentSepByte must reject every quote and backtick and accept other bytes")
+	}
+	for _, prose := range benignCases {
+		t.Run("benign/"+prose, func(t *testing.T) {
+			raw, lost, err := SmartTruncate(map[string]any{"log": prose}, -1)
+			if err != nil || lost {
+				t.Fatalf("SmartTruncate(%q) = (%s, %v, %v), want lost=false", prose, raw, lost, err)
+			}
+			var decoded map[string]string
+			if err := json.Unmarshal(raw, &decoded); err != nil || decoded["log"] != prose {
+				t.Errorf("SmartTruncate(%q) decoded = %v (%v), want %q", prose, decoded, err, prose)
+			}
+			if san, sanLost := sanitizeRawText(prose); sanLost || san != prose {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", prose, san, sanLost, prose)
+			}
+			if rem := redactErrorMessage(prose); rem != prose {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", prose, rem, prose)
+			}
+		})
+	}
+}
+
+func TestIncompleteCredentialConstructLinearScaling(t *testing.T) {
+	runInParallel(t)
+	smallN, largeN := scalingUnits()
+	if !raceEnabled {
+		smallN, largeN = 1000, 16000
+	}
+	shapes := []struct {
+		name  string
+		build func(n int) string
+	}{
+		{"percent Z colon", func(n int) string { return "[INFO] " + strings.Repeat("%Z:", n) }},
+		{"percent a colon", func(n int) string { return "[INFO] " + strings.Repeat("%a:", n) }},
+		{"escaped quote percent ZZ colon", func(n int) string { return "[INFO] " + strings.Repeat(`\'%ZZ:`, n) }},
+		{"temp key percent ZZ colon", func(n int) string { return "[INFO] " + strings.Repeat("temp:a%ZZ:", n) }},
+		{"quoted key percent ZZ colon", func(n int) string { return "[INFO] " + strings.Repeat(`"a"%ZZ:`, n) }},
+		{"plain key percent ZZ colon", func(n int) string { return "[INFO] " + strings.Repeat("a%ZZ:", n) }},
+		{"repeated Bearer", func(n int) string { return "[INFO] " + strings.Repeat("Bearer ", n) }},
+		{"long backslash before Bearer", func(n int) string { return "[INFO] " + strings.Repeat(`\`, n) + "Bearer 'SECRET" }},
+		{"double-escaped u200b", func(n int) string { return `{"log":"` + strings.Repeat(`\\u200b`, n) }},
+		{"newline quoted key percent ZZ colon", func(n int) string { return "[INFO] " + strings.Repeat("\n\"a\"%ZZ:", n) }},
+		{"percent 07 colon", func(n int) string { return "[INFO] " + strings.Repeat("%07:", n) }},
+		{"Basic empty backticks", func(n int) string { return "[INFO] " + strings.Repeat("Basic `` ", n) }},
+		{"Basic empty single quotes", func(n int) string { return "[INFO] " + strings.Repeat("Basic '' ", n) }},
+		{"Bearer redacted single quotes", func(n int) string { return "[INFO] " + strings.Repeat("Bearer '[REDACTED]' ", n) }},
+		{"repeated u2014", func(n int) string { return `{"log":"` + strings.Repeat(`\u2014`, n) }},
+		{"repeated Basic base64", func(n int) string { return "[INFO] " + strings.Repeat("Basic aaaaaaaa ", n) }},
+		{"repeated quoted temp bell colon", func(n int) string { return "[INFO] " + strings.Repeat("\"temp: a\"\x07:", n) }},
+		{"Bearer bare redacted", func(n int) string { return "[INFO] " + strings.Repeat("Bearer [REDACTED] ", n) }},
+		{"Basic bare placeholder quote", func(n int) string { return "[INFO] " + strings.Repeat("Basic [UNPARSEABLE_JSON_BLOB]' ", n) }},
+		{"stray quote percent ZZ colon", func(n int) string { return "[INFO] " + strings.Repeat("a'%ZZ:", n) }},
+		{"escaped stray quote percent ZZ colon", func(n int) string { return "[INFO] " + strings.Repeat(`a\'%ZZ:`, n) }},
+		{"doubled stray quote percent ZZ colon", func(n int) string { return "[INFO] " + strings.Repeat("a''%ZZ:", n) }},
+		{"quoted key stray quote percent ZZ colon", func(n int) string { return "[INFO] " + strings.Repeat(`"a"'%ZZ:`, n) }},
+		{"padded quoted phrase percent ZZ colon", func(n int) string { return "[INFO] " + strings.Repeat(`"a: b "%ZZ:`, n) }},
+		{"long padded quoted key percent ZZ colon", func(n int) string { return "[INFO] \"" + strings.Repeat("ab", 8*n) + " \"%ZZ:" }},
+		{"spaced temp key percent ZZ equals", func(n int) string { return "[INFO] " + strings.Repeat("temp: %ZZ=", n) }},
+		{"glued temp key percent body percent ZZ equals", func(n int) string { return "[INFO] " + strings.Repeat("xtemp:%xy %ZZ=", n) }},
+		{"backticked key colon", func(n int) string { return "[INFO] " + strings.Repeat("`a`: ", n) }},
+		{"space stray quote equals", func(n int) string { return "[INFO] " + strings.Repeat(`a "=`, n) }},
+		{"doubled stray quotes equals", func(n int) string { return "[INFO] " + strings.Repeat(`a""=`, n) }},
+		{"padded multiline quoted phrase equals", func(n int) string { return "[INFO] " + strings.Repeat("\"a:\nb \"=", n) }},
+		{"long run of stray quotes", func(n int) string { return "[INFO] a" + strings.Repeat(`"`, 4*n) + "=x" }},
+		{"escaped backticks before a backticked key", func(n int) string { return "[INFO] " + strings.Repeat("\\`", 2*n) + "a`=x" }},
+		{"glued empty temp key equals", func(n int) string { return "[INFO] " + strings.Repeat("xtemp: =", n) }},
+		{"Basic escaped backticked redacted", func(n int) string { return "[INFO] " + strings.Repeat("Basic \\`[REDACTED]\\` ", n) }},
+	}
+	for _, sc := range shapes {
+		t.Run(sc.name, func(t *testing.T) {
+			small := sc.build(smallN)
+			large := sc.build(largeN)
+			if ratio, tSmall, tLarge := linearRatio(64, func() {
+				_ = hasIncompleteCredentialConstruct(small)
+				_ = isPositivelyHarmlessProse(small, small)
+			}, func() {
+				_ = hasIncompleteCredentialConstruct(large)
+				_ = isPositivelyHarmlessProse(large, large)
+			}); ratio > 64 {
+				t.Errorf("%s: small(%d)=%v, large(%d)=%v, ratio=%.1f > 64", sc.name, smallN, tSmall, largeN, tLarge, ratio)
+			}
+		})
+	}
+	if !raceEnabled && testing.CoverMode() == "" {
+		for _, tc := range []struct {
+			name string
+			in   string
+		}{
+			{"210KB %Z:", "[INFO] " + strings.Repeat("%Z:", 70000)},
+			{"200KB \\'%ZZ:", "[INFO] " + strings.Repeat(`\'%ZZ:`, 34000)},
+			{"250KB temp:a%ZZ:", "[INFO] " + strings.Repeat("temp:a%ZZ:", 25000)},
+			{"100KB backslash+Bearer", "[INFO] " + strings.Repeat(`\`, 100000) + "Bearer 'SECRET"},
+			{"210KB \\\\u200b", `{"log":"` + strings.Repeat(`\\u200b`, 30000)},
+			{"220KB newline quoted key %ZZ", "[INFO] " + strings.Repeat("\n\"a\"%ZZ:", 25000)},
+			{"280KB newline password %ZZ", "[INFO] " + strings.Repeat("\n\"password\"%ZZ:", 20000)},
+			{"210KB %07", "[INFO] " + strings.Repeat("%07", 70000)},
+			{"240KB %07:", "[INFO] " + strings.Repeat("%07:", 60000)},
+			{"218KB \\u2014", `{"log":"` + strings.Repeat(`\u2014`, 35000)},
+			{"225KB Basic aaaaaaaa", "[INFO] " + strings.Repeat("Basic aaaaaaaa ", 15000)},
+			{"220KB temp bell colon", "[INFO] " + strings.Repeat("\"temp: a\"\x07:", 20000)},
+			{"210KB Basic empty single quotes", "[INFO] " + strings.Repeat("Basic '' ", 23000)},
+			{"220KB Bearer redacted single quotes", "[INFO] " + strings.Repeat("Bearer '[REDACTED]' ", 11000)},
+			{"216KB Bearer bare redacted", "[INFO] " + strings.Repeat("Bearer [REDACTED] ", 12000)},
+			{"210KB stray quote %ZZ:", "[INFO] " + strings.Repeat("a'%ZZ:", 35000)},
+			{"210KB doubled stray quote %ZZ:", "[INFO] " + strings.Repeat("a''%ZZ:", 30000)},
+			{"220KB padded quoted phrase %ZZ:", "[INFO] " + strings.Repeat(`"a: b "%ZZ:`, 20000)},
+			{"200KB long padded quoted key %ZZ:", "[INFO] \"" + strings.Repeat("ab", 100000) + " \"%ZZ:"},
+			{"220KB spaced temp %ZZ=", "[INFO] " + strings.Repeat("temp: %ZZ=", 22000)},
+			{"224KB glued temp percent body %ZZ=", "[INFO] " + strings.Repeat("xtemp:%xy %ZZ=", 16000)},
+			{"220KB backticked key colon", "[INFO] " + strings.Repeat("`a`: ", 44000)},
+			{"200KB space stray quote equals", "[INFO] " + strings.Repeat(`a "=`, 50000)},
+			{"200KB long run of stray quotes", "[INFO] a" + strings.Repeat(`"`, 200000) + "=x"},
+			{"200KB escaped backticks before a backticked key", "[INFO] " + strings.Repeat("\\`", 100000) + "a`=x"},
+			{"208KB glued empty temp key", "[INFO] " + strings.Repeat("xtemp: =", 26000)},
+			{"220KB Basic escaped backticked redacted", "[INFO] " + strings.Repeat("Basic \\`[REDACTED]\\` ", 11000)},
+		} {
+			d1 := withinWallClock(100*time.Millisecond, func() {
+				_ = hasIncompleteCredentialConstruct(tc.in)
+			})
+			if d1 > 100*time.Millisecond {
+				t.Errorf("%s hasIncompleteCredentialConstruct (%d bytes) took %v, want <= 100ms", tc.name, len(tc.in), d1)
+			}
+			d2 := withinWallClock(500*time.Millisecond, func() {
+				_ = isPositivelyHarmlessProse(tc.in, tc.in)
+			})
+			if d2 > 500*time.Millisecond {
+				t.Errorf("%s isPositivelyHarmlessProse (%d bytes) took %v, want <= 500ms", tc.name, len(tc.in), d2)
+			}
+			t.Logf("%s (%d bytes): incomplete=%v prose=%v", tc.name, len(tc.in), d1, d2)
+		}
+	}
 }

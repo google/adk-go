@@ -803,10 +803,10 @@ func nestedKeyNameStrip(name string, at int, lineStart, stripQuotes bool) (neste
 	if kind, pair := trailingQuotedSensitiveKey(name, at); kind != notNestedKey {
 		return kind, pair
 	}
+	// A stacked bare temp: key, as temp:a:b, is read as a value that ends in a
+	// key name even on a line of its own, as main read it: a segment of it may
+	// be a value, as the SECRET of password:\n  temp:SECRET:x: v.
 	if isStackedBareTempKey(name[stateStart:]) && (stateStart == q || hasValidCompoundPrefix(name[q:stateStart])) {
-		if lineStart && (q == 0 || stateStart == q) && !strings.ContainsAny(name[:stateStart], "&;|") {
-			return nestedKey, at + stateStart
-		}
 		return valueEndingInKeyName, at + stateStart
 	}
 	endTrim := len(name)

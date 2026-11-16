@@ -131,6 +131,7 @@ func sanitizePathSegments(escapedPath string, scrub uriComponentScrub, keys uriK
 	segments := strings.Split(escapedPath, "/")
 	escapedRedacted := url.QueryEscape(redactedValue)
 	redactNext := false
+	fromLegacy := false
 	for i, rawSeg := range segments {
 		if rawSeg == "" {
 			continue
@@ -139,13 +140,24 @@ func sanitizePathSegments(escapedPath string, scrub uriComponentScrub, keys uriK
 		if redactNext {
 			segments[i] = escapedRedacted
 			changed = true
-			redactNext = false
+			// When a newly-sensitive segment (e.g. secret_key, signing_key,
+			// user:temp:a, or a Unicode/escape-padded name) consumes a sensitive
+			// segment, keep redactNext armed so the following value is still
+			// protected as on main, while preserving legacy pair boundaries
+			// such as /api_key/secret/items.
+			if !fromLegacy && keys.pathSegment(seg) {
+				fromLegacy = isLegacySensitiveKey(canonicalizeLegacyCredentialMarker(rawSeg))
+			} else {
+				redactNext = false
+				fromLegacy = false
+			}
 			continue
 		}
 		if keys.pathSegment(seg) {
 			segments[i] = escapedRedacted
 			changed = true
 			redactNext = true
+			fromLegacy = isLegacySensitiveKey(canonicalizeLegacyCredentialMarker(rawSeg))
 			continue
 		}
 		if rawKey, value, hasEq := strings.Cut(seg, "="); hasEq {
@@ -209,7 +221,7 @@ func redactPathComponent(raw string, scrub uriComponentScrub) (string, bool) {
 // prefixes), without matching hyphenated route slugs like "reset-password" or
 // dotted filenames like "private.key".
 func isSensitivePathSegment(k string) bool {
-	k = strings.TrimSpace(k)
+	k = trimBOMAndSpace(k)
 	if strings.IndexByte(k, ':') >= 0 {
 		for {
 			if hasFoldPrefix(k, session.KeyPrefixTemp) {
@@ -218,7 +230,7 @@ func isSensitivePathSegment(k string) bool {
 			if !hasFoldPrefix(k, session.KeyPrefixUser) && !hasFoldPrefix(k, session.KeyPrefixApp) {
 				break
 			}
-			k = strings.TrimSpace(k[strings.IndexByte(k, ':')+1:])
+			k = trimBOMAndSpace(k[strings.IndexByte(k, ':')+1:])
 		}
 	}
 	b0, b1, ok := last2FoldedKeyBytes(k)

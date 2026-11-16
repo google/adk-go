@@ -295,8 +295,19 @@ type Config struct {
 	// credentials in URIs, Authorization headers and Bearer or Basic
 	// credentials, sensitive keys in JSON embedded in text, and credentials in
 	// error_message are all written unredacted. When false, key names match
-	// regardless of case and of "_" or "-", so apiKey, APIKey and api-key are
-	// redacted like api_key.
+	// regardless of case and of "_", "-" or ".", so apiKey, APIKey, api-key and
+	// api.key are redacted like api_key. A compound name that ends in a
+	// credential name, such as DB_PASSWORD, dbPassword or
+	// spring.datasource.password, is redacted too, and so is a credential name
+	// or "temp:" key behind "user:" or "app:" state prefixes, stacked or not,
+	// such as user:api_key, app:user:token or user:temp:x. Cursor and
+	// tokenizer names that end in "token" are not redacted, in snake, camel or
+	// upper case: next_token, prev_token and previous_token; page_token,
+	// sync_token, continuation_token and resume_token, alone or after next,
+	// prev, previous, start or newStart, as nextPageToken, startPageToken or
+	// newStartPageToken; and pad_token, eos_token, eot_token, bos_token,
+	// unk_token, cls_token, sep_token and mask_token. The adk-python plugin
+	// matches exact key names only.
 	DisableSensitiveKeyRedaction bool
 
 	// ContentFormatter, if set, is applied to each event's raw payload before
