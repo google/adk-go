@@ -15065,3 +15065,112 @@ func TestRunner_RecoveredFinishTaskEndsWorkerSpanAndDelegator(t *testing.T) {
 		}
 	})
 }
+
+func TestRunner_DuplicateIDFinishTaskBatchOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		failTag             string
+		firstTag            string
+		secondTag           string
+		wantOutputResult    string
+		wantWorkerCompleted int
+	}{
+		{
+			name:                "first_rejected_second_clean_omits_worker_completed",
+			failTag:             "first",
+			firstTag:            "first",
+			secondTag:           "second",
+			wantOutputResult:    "first",
+			wantWorkerCompleted: 0,
+		},
+		{
+			name:                "first_clean_second_rejected_emits_worker_completed",
+			failTag:             "second",
+			firstTag:            "first",
+			secondTag:           "second",
+			wantOutputResult:    "first",
+			wantWorkerCompleted: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			recoverPlugin, err := baseplugin.New(baseplugin.Config{
+				Name: "fail_tag_and_recover",
+				BeforeToolCallback: func(_ agent.Context, tl tool.Tool, args map[string]any) (map[string]any, error) {
+					if tl.Name() == finishTaskToolName && args["result"] == tc.failTag {
+						return nil, errors.New("scripted finish_task failure")
+					}
+					return nil, nil
+				},
+				OnToolErrorCallback: func(_ agent.Context, tl tool.Tool, args map[string]any, _ error) (map[string]any, error) {
+					if tl.Name() == finishTaskToolName && args["result"] == tc.failTag {
+						return map[string]any{"result": "Task completed."}, nil
+					}
+					return nil, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("baseplugin.New: %v", err)
+			}
+
+			worker, err := llmagent.New(llmagent.Config{
+				Name: "task_worker", Description: "executes delegated tasks", Mode: llmagent.ModeTask,
+				Model: &scriptedLLM{responses: []*model.LLMResponse{
+					{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+						{FunctionCall: &genai.FunctionCall{ID: "c-dup", Name: finishTaskToolName, Args: map[string]any{"result": tc.firstTag}}},
+						{FunctionCall: &genai.FunctionCall{ID: "c-dup", Name: finishTaskToolName, Args: map[string]any{"result": tc.secondTag}}},
+					}}},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(worker): %v", err)
+			}
+			coordinator, err := llmagent.New(llmagent.Config{
+				Name: "coordinator", SubAgents: []agent.Agent{worker},
+				Model: &scriptedLLM{responses: []*model.LLMResponse{
+					{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+						ID: "call-worker", Name: "task_worker", Args: map[string]any{"request": "go"},
+					}}}}},
+					{Content: textContent("model", "all done"), TurnComplete: true},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(coordinator): %v", err)
+			}
+
+			var sawWorkerOutput any
+			for ev, err := range newTestRunner(t, coordinator, p, recoverPlugin).Run(t.Context(), "u1", "s1", textContent("user", "start"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("runner.Run error: %v", err)
+				}
+				if ev != nil && ev.Author == "task_worker" && ev.Output != nil {
+					sawWorkerOutput = ev.Output
+				}
+			}
+
+			gotOut, ok := sawWorkerOutput.(map[string]any)
+			if !ok || gotOut["result"] != tc.wantOutputResult {
+				t.Fatalf("worker Event.Output = %#v, want map[result:%q] (ADK settles on first finish_task call)",
+					sawWorkerOutput, tc.wantOutputResult)
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOK(t, rows)
+			if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != tc.wantWorkerCompleted {
+				t.Fatalf("task_worker AGENT_COMPLETED = %d, want %d; events=%v", got, tc.wantWorkerCompleted, eventTypes(rows))
+			}
+			if got := len(agentRowsOfType(rows, EventAgentError, "task_worker")); got != 0 {
+				t.Fatalf("task_worker AGENT_ERROR = %d, want 0", got)
+			}
+			if got := len(agentRowsOfType(rows, EventToolError, "task_worker")); got != 1 {
+				t.Fatalf("task_worker TOOL_ERROR = %d, want 1", got)
+			}
+			if got := len(agentRowsOfType(rows, EventToolCompleted, "task_worker")); got != 1 {
+				t.Fatalf("task_worker TOOL_COMPLETED = %d, want 1", got)
+			}
+			if got := len(agentRowsOfType(rows, EventAgentCompleted, "coordinator")); got != 2 {
+				t.Fatalf("coordinator AGENT_COMPLETED = %d, want 2; events=%v", got, eventTypes(rows))
+			}
+		})
+	}
+}

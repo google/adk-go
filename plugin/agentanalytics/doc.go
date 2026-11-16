@@ -123,7 +123,8 @@
 //     than 64 (maxTaskToolDeltas) unattributed finish_task failures or
 //     candidate slots overflow for a call ID within an invocation,
 //     attribution-based rejection cleanup is conservatively disabled for that
-//     call ID for the rest of that invocation.
+//     call ID (or across all call IDs once more than 64 distinct call IDs have
+//     overflowed) for the rest of that invocation.
 //
 // # Behavioral Differences from adk-python
 //
@@ -242,7 +243,10 @@
 //     runs no AfterAgentCallback when llmagent.ModeTask exits via finish_task,
 //     Go omits AGENT_COMPLETED when finish_task fails (recording
 //     [EventToolError]) and an agent or later plugin OnToolErrorCallback
-//     substitutes {"result": "Task completed."}. ADK's runTask still ends the
+//     substitutes {"result": "Task completed."} (including when a subsequent
+//     finish_task call in the same model batch, with a distinct or duplicate
+//     call ID, succeeds cleanly, because llmagent.runTask settles on the
+//     batch's first finish_task response). ADK's runTask still ends the
 //     task activation on that response; Go retires the activation's span then
 //     (or, when a nested workflow.NewWorkflowNode clears Event.Output, once its
 //     delegating parent re-enters BeforeAgentCallback) and marks its delegating

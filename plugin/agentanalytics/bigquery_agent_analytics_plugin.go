@@ -1034,7 +1034,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 				taskID := evID
 				taskID.agentName = ev.Author
 				taskID.branch = ev.Branch
-				p.traces.noteTaskFinishCalls(ctx, taskID, finishCalls, true)
+				p.traces.noteTaskFinishCallSpecs(ctx, taskID, finishCalls, true)
 			}
 			if calls := taskCompletedCalls(ev.Content); len(calls) > 0 {
 				taskID := evID
@@ -1137,19 +1137,35 @@ func hasTaskCompletedResponse(c *genai.Content) bool {
 	return len(taskCompletedCalls(c)) > 0
 }
 
-// finishTaskFunctionCalls returns the function call ID, or else
-// finishTaskToolName, of each finish_task FunctionCall part in c.
-func finishTaskFunctionCalls(c *genai.Content) []string {
+// finishTaskCallSpec describes one finish_task FunctionCall part in a model
+// response: its function call ID (or finishTaskToolName when empty) and a
+// bounded digest of its arguments so concurrent same-ID finish_task calls in a
+// batch bind back to their emitted part order regardless of goroutine start
+// order.
+type finishTaskCallSpec struct {
+	call          string
+	argsDigest    uint64
+	argsTruncated bool
+}
+
+// finishTaskFunctionCalls returns a finishTaskCallSpec for each finish_task
+// FunctionCall part in c in part order.
+func finishTaskFunctionCalls(c *genai.Content) []finishTaskCallSpec {
 	if c == nil {
 		return nil
 	}
-	var calls []string
+	var calls []finishTaskCallSpec
 	for _, part := range c.Parts {
 		if part == nil || part.FunctionCall == nil {
 			continue
 		}
 		if part.FunctionCall.Name == finishTaskToolName {
-			calls = append(calls, cmp.Or(part.FunctionCall.ID, finishTaskToolName))
+			digest, truncated := boundedArgsDigest(part.FunctionCall.Args)
+			calls = append(calls, finishTaskCallSpec{
+				call:          cmp.Or(part.FunctionCall.ID, finishTaskToolName),
+				argsDigest:    digest,
+				argsTruncated: truncated,
+			})
 		}
 	}
 	return calls
@@ -1314,7 +1330,7 @@ func (p *analyticsPlugin) afterModel(ctx agent.Context, res *model.LLMResponse, 
 	// turn that their finish_task calls carry (see taskFinishCall).
 	if err == nil && res != nil {
 		if finishCalls := finishTaskFunctionCalls(res.Content); len(finishCalls) > 0 {
-			p.traces.noteTaskFinishCalls(ctx, id, finishCalls, false)
+			p.traces.noteTaskFinishCallSpecs(ctx, id, finishCalls, false)
 		}
 	}
 	return nil, nil
@@ -1443,7 +1459,7 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		// onToolError already wrote TOOL_ERROR; even when an agent
 		// OnToolErrorCallback or a later plugin recovered or replaced the error,
 		// suppress TOOL_COMPLETED, noteTaskFinished, and AGENT_RESPONSE.
-		p.endUnfinishedFinishTask(ctx, id, name, callID, result, confirmationOutcome)
+		p.endUnfinishedFinishTask(ctx, id, name, callID, args, result, confirmationOutcome)
 		return nil, nil
 	}
 	// A tool that waits for or is rejected by the user's confirmation fails
@@ -1454,7 +1470,7 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	if err != nil && !confirmationOutcome {
 		// When an earlier plugin short-circuited OnToolErrorCallback before
 		// onToolError ran and passed the error through, emit TOOL_ERROR here.
-		p.endUnfinishedFinishTask(ctx, id, name, callID, result, false)
+		p.endUnfinishedFinishTask(ctx, id, name, callID, args, result, false)
 		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, err)
 		return nil, nil
 	}
@@ -1462,20 +1478,20 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		// plugin/retryandreflect registered before this plugin short-circuits
 		// OnToolErrorCallback and returns a recovery payload with err == nil.
 		// Log it as TOOL_ERROR and suppress TOOL_COMPLETED and AGENT_RESPONSE.
-		p.endUnfinishedFinishTask(ctx, id, name, callID, result, false)
+		p.endUnfinishedFinishTask(ctx, id, name, callID, args, result, false)
 		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(retryMsg))
 		return nil, nil
 	}
 	if confirmationOutcome {
-		p.endUnfinishedFinishTask(ctx, id, name, callID, result, true)
+		p.endUnfinishedFinishTask(ctx, id, name, callID, args, result, true)
 		result = map[string]any{"error": err.Error()}
 	} else if name == finishTaskToolName {
 		// The finish_task response event that follows reaches OnEventCallback
 		// without the context of the activation that made the call.
 		if isTaskCompletedResult(result) {
-			p.traces.noteTaskFinished(ctx, id, callID)
+			p.traces.noteTaskFinishedWithArgs(ctx, id, callID, args, true)
 		} else {
-			p.traces.noteTaskUnfinished(ctx, id, callID)
+			p.traces.noteTaskUnfinishedWithArgs(ctx, id, callID, args, true)
 		}
 	}
 	p.logEvent(ctx, id, EventToolCompleted, func() rowSpan { return span }, func(d *eventData) {
@@ -1510,15 +1526,15 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 // rejected or one that waits for confirmation, is unfinished, so that the
 // function call that the model made no longer counts as evidence that a later
 // response event answers it. Calls of other tools are left alone.
-func (p *analyticsPlugin) endUnfinishedFinishTask(ctx context.Context, id identity, name, callID string, result map[string]any, confirmationOutcome bool) {
+func (p *analyticsPlugin) endUnfinishedFinishTask(ctx context.Context, id identity, name, callID string, args, result map[string]any, confirmationOutcome bool) {
 	if name != finishTaskToolName {
 		return
 	}
 	if !confirmationOutcome && isTaskCompletedResult(result) {
-		p.traces.noteTaskRejected(ctx, id, callID)
+		p.traces.noteTaskRejectedWithArgs(ctx, id, callID, args, true)
 		return
 	}
-	p.traces.noteTaskUnfinished(ctx, id, callID)
+	p.traces.noteTaskUnfinishedWithArgs(ctx, id, callID, args, true)
 }
 
 func (p *analyticsPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {

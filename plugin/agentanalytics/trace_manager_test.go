@@ -34736,7 +34736,10 @@ func TestTraceManager_SupersededFinishedTaskAndSoleOwnerCrossTurn(t *testing.T) 
 		// Interleave concurrent execution: t1 starts first (taking firstInBatch=true), t2 starts and completes
 		// cleanly first (noteTaskFinished), then t1 fails+recovers last (noteTaskRejected keeps firstInBatch=true).
 		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
-		errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts("c-fin", "c-fin")}, nil))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-fin", map[string]any{"result": "one"}),
+			finishPart("c-fin", map[string]any{"result": "two"}),
+		}, genai.RoleModel)}, nil))
 		t1 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic}
 		t2 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic}
 		errs.add(p.beforeTool(t1, finishTool, map[string]any{"result": "one"}))
@@ -34745,18 +34748,109 @@ func TestTraceManager_SupersededFinishedTaskAndSoleOwnerCrossTurn(t *testing.T) 
 		errs.add(p.onToolError(t1, finishTool, map[string]any{"result": "one"}, errors.New("fail")))
 		errs.add(p.afterTool(t1, finishTool, map[string]any{"result": "one"}, taskCompleted(), nil))
 
-		// act1's merged [completed, completed] response pairs #2 in paired and must consume #1's rejection via calls[1]
-		// so act1 leaves nothing in endedRejectingFrames to block act2.
+		// Because ADK's runTask settles the batch on the first finish_task call (#1, which failed and was
+		// recovered), #2's clean sibling completion is superseded and must NOT emit AGENT_COMPLETED for act1,
+		// while act1's #1 rejection is consumed (and act1 retired on Output != nil) so nothing leaks into
+		// endedRejectingFrames to block act2.
 		errs.add(p.onEvent(act1, &session.Event{
 			Author: "task_worker",
+			Output: map[string]any{"result": "one"},
 			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
 				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
 				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
 			}, genai.RoleUser)},
 		}))
 
-		// act2 (hidden callbacks) completes with reused "c-fin": must emit its own AGENT_COMPLETED immediately (2 total),
+		// act2 (hidden callbacks) completes with reused "c-fin": must emit its own AGENT_COMPLETED immediately (1 total),
 		// without being deferred by act1 leaving #1 in endedRejectingFrames.
+		errs.add(p.beforeAgent(act2))
+		errs.add(p.beforeModel(act2, &model.LLMRequest{}))
+		errs.add(p.afterModel(act2, &model.LLMResponse{Content: fcParts("c-fin")}, nil))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.check(t)
+		rows := p.takeRows()
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(workerStarts) != 2 || len(workerEnds) != 1 {
+			t.Fatalf("task_worker starts=%d ends=%d, want 2 and 1 (act2 only); events=%v",
+				len(workerStarts), len(workerEnds), eventTypes(rows))
+		}
+		if workerEnds[0]["span_id"] != workerStarts[1]["span_id"] {
+			t.Fatalf("task_worker AGENT_COMPLETED span_id = %v, want act2 %v (not act1 %v)",
+				workerEnds[0]["span_id"], workerStarts[1]["span_id"], workerStarts[0]["span_id"])
+		}
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+	})
+
+	t.Run("same_batch_duplicate_id_first_clean_second_rejected_emits_completion", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task_worker",
+			Mode:  llmagent.ModeTask,
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		rootAgent, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			Model:     &scriptedLLM{},
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-same-batch-dup-id-first-clean", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		act2 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+
+		// Reverse goroutine callback arrival: t2 (#2, args "two") enters beforeTool BEFORE t1 (#1, args "one").
+		// argsDigest binding keeps t1 as firstInBatch=true (clean) and t2 as firstInBatch=false (rejected).
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-fin", map[string]any{"result": "one"}),
+			finishPart("c-fin", map[string]any{"result": "two"}),
+		}, genai.RoleModel)}, nil))
+		t1 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic}
+		t2 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic}
+		errs.add(p.beforeTool(t2, finishTool, map[string]any{"result": "two"}))
+		errs.add(p.beforeTool(t1, finishTool, map[string]any{"result": "one"}))
+		errs.add(p.onToolError(t2, finishTool, map[string]any{"result": "two"}, errors.New("fail")))
+		errs.add(p.afterTool(t2, finishTool, map[string]any{"result": "two"}, taskCompleted(), nil))
+		errs.add(p.afterTool(t1, finishTool, map[string]any{"result": "one"}, taskCompleted(), nil))
+
+		// #1 succeeded cleanly, so act1 pairs #1 in paired, cleans up #2's superseded rejection via calls[1],
+		// and emits AGENT_COMPLETED; act2 reusing "c-fin" also emits AGENT_COMPLETED (2 total).
+		errs.add(p.onEvent(act1, &session.Event{
+			Author: "task_worker",
+			Output: map[string]any{"result": "one"},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
 		errs.add(p.beforeAgent(act2))
 		errs.add(p.beforeModel(act2, &model.LLMRequest{}))
 		errs.add(p.afterModel(act2, &model.LLMResponse{Content: fcParts("c-fin")}, nil))
@@ -40569,4 +40663,1118 @@ func TestRunner_HiddenEarlierResponseAndCachedCompletionKeepsSupersededRejection
 			}
 		})
 	}
+}
+
+func TestTraceManager_EvictedFailureCallsSaturationAndRejOverflowBoundary(t *testing.T) {
+	finishPart := func(id string, args map[string]any) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: finishTaskToolName, Args: args}}
+	}
+	fcParts := func(ids ...string) *genai.Content {
+		parts := make([]*genai.Part, len(ids))
+		for i, id := range ids {
+			parts[i] = finishPart(id, map[string]any{"result": id})
+		}
+		return genai.NewContentFromParts(parts, genai.RoleModel)
+	}
+	newWorkers := func(t *testing.T) (agent.Agent, agent.Agent) {
+		t.Helper()
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task_worker",
+			Mode:  llmagent.ModeTask,
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		rootAgent, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			Model:     &scriptedLLM{},
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		return taskAgent, rootAgent
+	}
+
+	t.Run("evictedFailureCalls_saturates_at_64_distinct_ids_and_resets_on_teardown", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-evicted-saturate-512", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		act2 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeAgent(act2))
+
+		// Emit 512 ambiguous failures with distinct IDs across 2 open activations.
+		for i := range 512 {
+			cid := fmt.Sprintf("c-ambig-%d", i)
+			errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+			errs.add(p.afterModel(act1, &model.LLMResponse{Content: fcParts(cid)}, nil))
+			errs.add(p.beforeModel(act2, &model.LLMRequest{}))
+			errs.add(p.afterModel(act2, &model.LLMResponse{Content: fcParts(cid)}, nil))
+			errs.add(p.onEvent(rootCtx, &session.Event{
+				Author: "task_worker",
+				LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{ID: cid, Name: finishTaskToolName, Response: taskFailed()},
+				}}, genai.RoleUser)},
+			}))
+			_ = p.takeRows()
+		}
+		errs.check(t)
+
+		inv := p.traces.invocation(rootCtx, identityOf(rootCtx))
+		inv.mu.Lock()
+		gotQueue := len(inv.unattributedFinishFailures)
+		gotEvicted := len(inv.evictedFailureCalls)
+		gotSaturated := inv.evictedFailureCallsSaturated
+		gotUnseenBlocked := inv.hasEvictedFailureCallLocked("c-never-seen")
+		inv.mu.Unlock()
+
+		if gotQueue != maxTaskToolDeltas || gotEvicted != maxTaskToolDeltas || !gotSaturated || !gotUnseenBlocked {
+			t.Fatalf("after 512 distinct ambiguous failures: queue=%d evicted=%d saturated=%v unseenBlocked=%v, want %d, %d, true, true",
+				gotQueue, gotEvicted, gotSaturated, gotUnseenBlocked, maxTaskToolDeltas, maxTaskToolDeltas)
+		}
+
+		// Close act2 so act1 is the sole open activation, then record a non-first rejection on act1
+		// alongside an open sibling call with a brand-new unseen ID ("c-brand-new"): saturation must
+		// suppress open-span failure attribution from seeding otherCallSeqs and cleaning up the rejection.
+		errs.add(p.afterAgent(act2))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-brand-new", map[string]any{"result": "open"}),
+			finishPart("c-rej-keep", map[string]any{"result": "rej"}),
+		}, genai.RoleModel)}, nil))
+		tOpen := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-brand-new"), ic: act1.ic}
+		tRej := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-rej-keep"), ic: act1.ic}
+		errs.add(p.beforeTool(tOpen, finishTool, map[string]any{"result": "open"}))
+		errs.add(p.beforeTool(tRej, finishTool, map[string]any{"result": "rej"}))
+		errs.add(p.onToolError(tRej, finishTool, map[string]any{"result": "rej"}, errors.New("fail")))
+		errs.add(p.afterTool(tRej, finishTool, map[string]any{"result": "rej"}, taskCompleted(), nil))
+
+		// Deliver [c-brand-new(failed), c-rej-keep(superseded completed)] without StateDelta:
+		// because evictedFailureCallsSaturated is true, c-brand-new's open-span failure must NOT seed
+		// otherCallSeqs and must NOT delete c-rej-keep from act1.rejectedTasks.
+		errs.add(p.onEvent(act1, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-brand-new", Name: finishTaskToolName, Response: taskFailed()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-rej-keep", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+		errs.check(t)
+
+		inv.mu.Lock()
+		var keptRej int
+		for _, rec := range inv.agentStack {
+			if rec.name == "task_worker" {
+				keptRej = len(rec.rejectedTasks)
+			}
+		}
+		inv.mu.Unlock()
+		if keptRej != 1 {
+			t.Fatalf("act1.rejectedTasks len = %d after saturated open-span failure, want 1 (preserved)", keptRej)
+		}
+
+		errs.add(p.afterAgent(act1))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+
+		// Verify popUnclosedAgentSpans directly resets evictedFailureCallsSaturated even before afterRun.
+		if _, err := p.traces.popUnclosedAgentSpans(rootCtx, identityOf(rootCtx)); err != nil {
+			t.Fatalf("popUnclosedAgentSpans: %v", err)
+		}
+		inv.mu.Lock()
+		midSaturated := inv.evictedFailureCallsSaturated
+		inv.mu.Unlock()
+		if midSaturated {
+			t.Fatalf("after popUnclosedAgentSpans: saturated=true, want false")
+		}
+		p.afterRun(rootCtx)
+
+		inv.mu.Lock()
+		postEvicted := len(inv.evictedFailureCalls)
+		postSaturated := inv.evictedFailureCallsSaturated
+		inv.mu.Unlock()
+		if postEvicted != 0 || postSaturated {
+			t.Fatalf("after teardown: evicted=%d saturated=%v, want 0 and false", postEvicted, postSaturated)
+		}
+	})
+
+	t.Run("evictedFailureCalls_exact_64_re_eviction_does_not_saturate", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		_, rootAgent := newWorkers(t)
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-evicted-exact-64", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		if _, err := p.beforeRun(rootCtx); err != nil {
+			t.Fatalf("beforeRun: %v", err)
+		}
+
+		inv := p.traces.invocation(rootCtx, identityOf(rootCtx))
+		inv.mu.Lock()
+		for i := range maxTaskToolDeltas {
+			inv.noteEvictedFailureCallLocked(fmt.Sprintf("c-ev-%d", i))
+		}
+		lenAt64 := len(inv.evictedFailureCalls)
+		satAt64 := inv.evictedFailureCallsSaturated
+		freshBlockedAt64 := inv.hasEvictedFailureCallLocked("c-fresh")
+
+		// Re-evicting an already-recorded ID at exact 64 must NOT flip evictedFailureCallsSaturated.
+		inv.noteEvictedFailureCallLocked("c-ev-0")
+		satAfterDup := inv.evictedFailureCallsSaturated
+		freshBlockedAfterDup := inv.hasEvictedFailureCallLocked("c-fresh")
+
+		// Evicting a 65th distinct ID must flip evictedFailureCallsSaturated without growing the map.
+		inv.noteEvictedFailureCallLocked("c-ev-64")
+		lenAt65 := len(inv.evictedFailureCalls)
+		satAt65 := inv.evictedFailureCallsSaturated
+		freshBlockedAt65 := inv.hasEvictedFailureCallLocked("c-fresh")
+
+		// Further distinct IDs stay no-op at cap 64.
+		inv.noteEvictedFailureCallLocked("c-ev-65")
+		lenAt66 := len(inv.evictedFailureCalls)
+		inv.mu.Unlock()
+
+		if lenAt64 != maxTaskToolDeltas || satAt64 || freshBlockedAt64 {
+			t.Fatalf("at exact 64: len=%d sat=%v freshBlocked=%v, want %d, false, false",
+				lenAt64, satAt64, freshBlockedAt64, maxTaskToolDeltas)
+		}
+		if satAfterDup || freshBlockedAfterDup {
+			t.Fatalf("after duplicate eviction at 64: sat=%v freshBlocked=%v, want false, false",
+				satAfterDup, freshBlockedAfterDup)
+		}
+		if lenAt65 != maxTaskToolDeltas || !satAt65 || !freshBlockedAt65 || lenAt66 != maxTaskToolDeltas {
+			t.Fatalf("after 65th/66th distinct ID: len65=%d sat65=%v freshBlocked65=%v len66=%d, want %d, true, true, %d",
+				lenAt65, satAt65, freshBlockedAt65, lenAt66, maxTaskToolDeltas, maxTaskToolDeltas)
+		}
+		p.afterRun(rootCtx)
+	})
+
+	t.Run("rejectedTasksEvicted_exact_64_vs_65_in_rejected_and_deferred", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			viaDeferred bool
+			count       int
+			wantEvicted bool
+			wantKept    int
+		}{
+			{name: "rejected_exact_64_no_eviction", viaDeferred: false, count: maxTaskToolDeltas, wantEvicted: false, wantKept: 1},
+			{name: "rejected_65_evicts_and_allows_superseded_match", viaDeferred: false, count: maxTaskToolDeltas + 1, wantEvicted: true, wantKept: 0},
+			{name: "deferred_exact_64_no_eviction", viaDeferred: true, count: maxTaskToolDeltas, wantEvicted: false, wantKept: 1},
+			{name: "deferred_65_evicts_and_allows_superseded_match", viaDeferred: true, count: maxTaskToolDeltas + 1, wantEvicted: true, wantKept: 0},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p := newClockedPlugin(t)
+				p.config.DisableFlushOnRunEnd = true
+				taskAgent, rootAgent := newWorkers(t)
+				finishTool := &fakeTool{name: finishTaskToolName}
+				baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-rej-boundary-" + tc.name, agentName: "coordinator"}
+				rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+				actOther := &taskActivationContext{
+					mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+					ic:                    &runningInvocation{running: taskAgent},
+				}
+				actGuess := &taskActivationContext{
+					mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+					ic:                    &runningInvocation{running: taskAgent},
+				}
+
+				var errs callbackErrors
+				errs.add(p.beforeRun(rootCtx))
+				errs.add(p.beforeAgent(rootCtx))
+				errs.add(p.beforeAgent(actOther))
+				errs.add(p.beforeAgent(actGuess))
+
+				var parts []*genai.Part
+				for i := range tc.count {
+					parts = append(parts, finishPart(fmt.Sprintf("c-%d", i), map[string]any{"result": fmt.Sprintf("r-%d", i)}))
+				}
+				parts = append(parts, finishPart("c-keep", map[string]any{"result": "keep"}))
+
+				errs.add(p.beforeModel(actGuess, &model.LLMRequest{}))
+				errs.add(p.afterModel(actGuess, &model.LLMResponse{Content: genai.NewContentFromParts(parts, genai.RoleModel)}, nil))
+
+				lastRejID := fmt.Sprintf("c-%d", tc.count-1)
+				if !tc.viaDeferred {
+					for i := range tc.count {
+						cid := fmt.Sprintf("c-%d", i)
+						tRej := &taskActivationContext{mockInvocationContext: withFunctionCall(actGuess.mockInvocationContext, cid), ic: actGuess.ic}
+						errs.add(p.beforeTool(tRej, finishTool, map[string]any{"result": fmt.Sprintf("r-%d", i)}))
+						errs.add(p.onToolError(tRej, finishTool, map[string]any{"result": fmt.Sprintf("r-%d", i)}, errors.New("fail")))
+						errs.add(p.afterTool(tRej, finishTool, map[string]any{"result": fmt.Sprintf("r-%d", i)}, taskCompleted(), nil))
+						_ = p.takeRows()
+					}
+				}
+				tKeep := &taskActivationContext{mockInvocationContext: withFunctionCall(actGuess.mockInvocationContext, "c-keep"), ic: actGuess.ic}
+				errs.add(p.beforeTool(tKeep, finishTool, map[string]any{"result": "keep"}))
+				errs.add(p.afterTool(tKeep, finishTool, map[string]any{"result": "keep"}, taskCompleted(), nil))
+				errs.check(t)
+
+				inv := p.traces.invocation(rootCtx, identityOf(rootCtx))
+				inv.mu.Lock()
+				var guessRec *spanRecord
+				for _, rec := range inv.agentStack {
+					if rec.isActivationOf(actGuess) {
+						guessRec = rec
+						break
+					}
+				}
+				if tc.viaDeferred {
+					// Clear pending c-* slots and append tc.count entries via appendDeferredRejection.
+					guessRec.pendingFinishCalls = nil
+					for i := range tc.count {
+						guessRec.appendDeferredRejection(rejectedTaskCall{
+							call:         fmt.Sprintf("c-%d", i),
+							modelCallSeq: guessRec.modelCallSeq,
+						})
+					}
+				}
+				gotEvicted := guessRec.rejectedTasksEvicted
+				inv.mu.Unlock()
+
+				if gotEvicted != tc.wantEvicted {
+					t.Fatalf("guessRec.rejectedTasksEvicted = %v, want %v", gotEvicted, tc.wantEvicted)
+				}
+
+				// Deliver an unattributed event (rootCtx, nil StateDelta -> ownerKnown == false, guesses actGuess)
+				// needing TWO responses for lastRejID (want=2 while have=1) plus superseded c-keep:
+				// at exact 64 (0 evictions), ownerHasSupersededBatch must return false and preserve c-keep;
+				// at 65 (1 eviction), rejOverflowed is true so ownerHasSupersededBatch consumes c-keep.
+				evContent := genai.NewContentFromParts([]*genai.Part{
+					{FunctionResponse: &genai.FunctionResponse{ID: lastRejID, Name: finishTaskToolName, Response: taskFailed()}},
+					{FunctionResponse: &genai.FunctionResponse{ID: lastRejID, Name: finishTaskToolName, Response: taskFailed()}},
+					{FunctionResponse: &genai.FunctionResponse{ID: "c-keep", Name: finishTaskToolName, Response: taskCompleted()}},
+				}, genai.RoleUser)
+				p.traces.completeResponseEvent(rootCtx, identityOf(rootCtx), "task_worker", "", functionResponseCallSpecs(evContent), nil)
+
+				inv.mu.Lock()
+				gotKept := len(guessRec.finishedTasks)
+				// Also verify endTaskStateLocked preserves rejectedTasksEvicted onto endedRejectingFrames.
+				inv.endTaskStateLocked(guessRec)
+				preservedEvicted := guessRec.rejectedTasksEvicted
+				inv.mu.Unlock()
+
+				if gotKept != tc.wantKept {
+					t.Fatalf("guessRec.finishedTasks len = %d, want %d", gotKept, tc.wantKept)
+				}
+				if preservedEvicted != tc.wantEvicted {
+					t.Fatalf("endTaskStateLocked preserved rejectedTasksEvicted = %v, want %v", preservedEvicted, tc.wantEvicted)
+				}
+				p.afterRun(rootCtx)
+			})
+		}
+	})
+}
+
+func TestTraceManager_DuplicateIDFirstRejectedBranches(t *testing.T) {
+	finishPart := func(id string, args map[string]any) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: finishTaskToolName, Args: args}}
+	}
+	newWorkers := func(t *testing.T) (agent.Agent, agent.Agent) {
+		t.Helper()
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task_worker",
+			Mode:  llmagent.ModeTask,
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		rootAgent, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			Model:     &scriptedLLM{},
+			SubAgents: []agent.Agent{taskAgent},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		return taskAgent, rootAgent
+	}
+
+	t.Run("deltaOwner_and_deferred_rejection_branches", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-dup-delta-and-deferred", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		actPeer := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-fin", map[string]any{"result": "one"}),
+			finishPart("c-fin", map[string]any{"result": "two"}),
+		}, genai.RoleModel)}, nil))
+
+		// Hidden BeforeToolCallback + reverse AfterToolCallback arrival:
+		// #2 ("two") runs AfterToolCallback first (clean), then #1 ("one") runs OnToolError+AfterToolCallback with delta1.
+		delta1 := map[string]any{"batch": "b1"}
+		t1 := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: delta1},
+		}
+		t2 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic}
+		errs.add(p.afterTool(t2, finishTool, map[string]any{"result": "two"}, taskCompleted(), nil))
+		errs.add(p.onToolError(t1, finishTool, map[string]any{"result": "one"}, errors.New("fail")))
+		errs.add(p.afterTool(t1, finishTool, map[string]any{"result": "one"}, taskCompleted(), nil))
+
+		// actPeer (hidden tool callbacks) receives an unattributed completion for "c-fin":
+		// finishedCall(act1) must ignore #2 (superseded by #1's firstInBatch rejection), so actPeer defers
+		// on act1's #1 rejection (moving #1 into act1.deferredRejections!).
+		errs.add(p.beforeAgent(actPeer))
+		errs.add(p.beforeModel(actPeer, &model.LLMRequest{}))
+		errs.add(p.afterModel(actPeer, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-fin", map[string]any{"result": "peer"}),
+		}, genai.RoleModel)}, nil))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+
+		// Now act1's merged [completed, completed] response arrives carrying delta1:
+		// hasFirstInBatchRejection sees #1 in act1.deferredRejections, paired skips #2,
+		// matchedSuperseded consumes #2, and deltaOwner retires actPeer WITH AGENT_COMPLETED
+		// while retiring act1 WITHOUT AGENT_COMPLETED (1 worker AGENT_COMPLETED total, for actPeer).
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Output:  map[string]any{"result": "one"},
+			Actions: session.EventActions{StateDelta: delta1},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(workerStarts) != 2 || len(workerEnds) != 1 {
+			t.Fatalf("workerStarts=%d workerEnds=%d, want 2 and 1 (actPeer only); events=%v",
+				len(workerStarts), len(workerEnds), eventTypes(rows))
+		}
+		if workerEnds[0]["span_id"] != workerStarts[1]["span_id"] {
+			t.Fatalf("worker AGENT_COMPLETED span_id = %v, want actPeer %v", workerEnds[0]["span_id"], workerStarts[1]["span_id"])
+		}
+
+		// Also verify when the deferring peer has already ended before act1's delta-carrying response arrives
+		// (peerIdx < 0 while #1 sits in act1.deferredRejections): act1 must still omit AGENT_COMPLETED (0).
+		p2 := newClockedPlugin(t)
+		p2.config.DisableFlushOnRunEnd = true
+		base2 := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-dup-deferred-peer-ended", agentName: "coordinator"}
+		root2 := &taskActivationContext{mockInvocationContext: base2, ic: &runningInvocation{running: rootAgent}}
+		actA := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: base2.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		actP := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: base2.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		var e2 callbackErrors
+		e2.add(p2.beforeRun(root2))
+		e2.add(p2.beforeAgent(root2))
+		e2.add(p2.beforeAgent(actA))
+		e2.add(p2.beforeModel(actA, &model.LLMRequest{}))
+		e2.add(p2.afterModel(actA, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-fin", map[string]any{"result": "one"}),
+			finishPart("c-fin", map[string]any{"result": "two"}),
+		}, genai.RoleModel)}, nil))
+		deltaA := map[string]any{"batch": "bA"}
+		tA1 := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(actA.mockInvocationContext, "c-fin"), ic: actA.ic},
+			actions:               &session.EventActions{StateDelta: deltaA},
+		}
+		tA2 := &taskActivationContext{mockInvocationContext: withFunctionCall(actA.mockInvocationContext, "c-fin"), ic: actA.ic}
+		e2.add(p2.beforeTool(tA1, finishTool, map[string]any{"result": "one"}))
+		e2.add(p2.onToolError(tA1, finishTool, map[string]any{"result": "one"}, errors.New("fail")))
+		e2.add(p2.afterTool(tA1, finishTool, map[string]any{"result": "one"}, taskCompleted(), nil))
+		e2.add(p2.beforeTool(tA2, finishTool, map[string]any{"result": "two"}))
+		e2.add(p2.afterTool(tA2, finishTool, map[string]any{"result": "two"}, taskCompleted(), nil))
+
+		e2.add(p2.beforeAgent(actP))
+		e2.add(p2.beforeModel(actP, &model.LLMRequest{}))
+		e2.add(p2.afterModel(actP, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-fin", map[string]any{"result": "peer"}),
+		}, genai.RoleModel)}, nil))
+		e2.add(p2.onEvent(root2, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		// End actP so peerIdx < 0 while #1 remains in actA.deferredRejections.
+		e2.add(p2.afterAgent(actP))
+		_ = p2.takeRows()
+
+		e2.add(p2.onEvent(root2, &session.Event{
+			Author:  "task_worker",
+			Output:  map[string]any{"result": "one"},
+			Actions: session.EventActions{StateDelta: deltaA},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+		e2.add(p2.afterAgent(root2))
+		e2.check(t)
+		p2.afterRun(root2)
+		if got := len(agentRowsOfType(p2.takeRows(), EventAgentCompleted, "task_worker")); got != 0 {
+			t.Fatalf("after actP ended, actA worker AGENT_COMPLETED = %d, want 0", got)
+		}
+
+		// Also verify 3-call batch [#1 hidden-after clean, #2 rejected (!firstInBatch), #3 clean (!firstInBatch)]:
+		// #2's non-first rejection must NOT trigger hasFirstInBatchRejection or suppress #3.
+		p3 := newClockedPlugin(t)
+		p3.config.DisableFlushOnRunEnd = true
+		base3 := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-dup-three-calls-second-rej", agentName: "coordinator"}
+		root3 := &taskActivationContext{mockInvocationContext: base3, ic: &runningInvocation{running: rootAgent}}
+		act3 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: base3.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		var e3 callbackErrors
+		e3.add(p3.beforeRun(root3))
+		e3.add(p3.beforeAgent(root3))
+		e3.add(p3.beforeAgent(act3))
+		e3.add(p3.beforeModel(act3, &model.LLMRequest{}))
+		e3.add(p3.afterModel(act3, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-fin", map[string]any{"result": "one"}),
+			finishPart("c-fin", map[string]any{"result": "two"}),
+			finishPart("c-fin", map[string]any{"result": "three"}),
+		}, genai.RoleModel)}, nil))
+		// #1 has both tool callbacks hidden; #2 fails+recovers (!firstInBatch); #3 completes cleanly (!firstInBatch).
+		t3_2 := &taskActivationContext{mockInvocationContext: withFunctionCall(act3.mockInvocationContext, "c-fin"), ic: act3.ic}
+		t3_3 := &taskActivationContext{mockInvocationContext: withFunctionCall(act3.mockInvocationContext, "c-fin"), ic: act3.ic}
+		e3.add(p3.beforeTool(t3_2, finishTool, map[string]any{"result": "two"}))
+		e3.add(p3.onToolError(t3_2, finishTool, map[string]any{"result": "two"}, errors.New("fail")))
+		e3.add(p3.afterTool(t3_2, finishTool, map[string]any{"result": "two"}, taskCompleted(), nil))
+		e3.add(p3.beforeTool(t3_3, finishTool, map[string]any{"result": "three"}))
+		e3.add(p3.afterTool(t3_3, finishTool, map[string]any{"result": "three"}, taskCompleted(), nil))
+		e3.add(p3.onEvent(root3, &session.Event{
+			Author: "task_worker",
+			Output: map[string]any{"result": "one"},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+		e3.add(p3.afterAgent(root3))
+		e3.check(t)
+		p3.afterRun(root3)
+		if got := len(agentRowsOfType(p3.takeRows(), EventAgentCompleted, "task_worker")); got != 1 {
+			t.Fatalf("3-call batch (#1 clean hidden, #2 rejected, #3 clean) worker AGENT_COMPLETED = %d, want 1", got)
+		}
+	})
+
+	t.Run("open_span_second_call_branch", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-dup-open-span", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		workerID := identity{invocationID: baseCtx.invocationID, agentName: "task_worker"}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+
+		// #1 rejected (firstInBatch=true), #2 stays open in toolSpans (AfterToolCallback hidden on #2).
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-open", map[string]any{"result": "one"}),
+			finishPart("c-open", map[string]any{"result": "two"}),
+		}, genai.RoleModel)}, nil))
+		deltaOpen := map[string]any{"batch": "open"}
+		t1 := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-open"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: deltaOpen},
+		}
+		t2 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-open"), ic: act1.ic}
+		errs.add(p.beforeTool(t1, finishTool, map[string]any{"result": "one"}))
+		errs.add(p.onToolError(t1, finishTool, map[string]any{"result": "one"}, errors.New("fail")))
+		errs.add(p.afterTool(t1, finishTool, map[string]any{"result": "one"}, taskCompleted(), nil))
+		errs.add(p.beforeTool(t2, finishTool, map[string]any{"result": "two"}))
+		errs.check(t)
+
+		// Verify openFinishCallBy ignores t2 while t2 is still open in toolSpans, then restore #1's firstInBatch
+		// rejection so merged onEvent also exercises finishOpen closing t2 via fr.unfinished (not settledTaskCalls).
+		if _, ok := p.traces.popTaskAgentSpanWithEvent(rootCtx, workerID, []string{"c-open"}, nil, false); ok {
+			t.Fatalf("popTaskAgentSpanWithEvent emitted completion from superseded open span")
+		}
+		inv := p.traces.invocation(rootCtx, identityOf(rootCtx))
+		inv.mu.Lock()
+		for _, rec := range inv.agentStack {
+			if rec.isActivationOf(act1) {
+				rec.appendRejectedTask(rejectedTaskCall{
+					call:         "c-open",
+					delta:        toolContextTaskDeltaRef(t1, "c-open"),
+					modelCallSeq: rec.modelCallSeq,
+					firstInBatch: true,
+				})
+				rec.rejectedTasks[len(rec.rejectedTasks)-1].delta.modelCallSeq = rec.modelCallSeq
+			}
+		}
+		inv.mu.Unlock()
+
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Output:  map[string]any{"result": "one"},
+			Actions: session.EventActions{StateDelta: deltaOpen},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-open", Name: finishTaskToolName, Response: taskCompleted()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-open", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		rows := p.takeRows()
+		if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != 0 {
+			t.Fatalf("task_worker AGENT_COMPLETED = %d, want 0; events=%v", got, eventTypes(rows))
+		}
+	})
+
+	t.Run("settled_second_call_branch", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-dup-settled", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		workerID := identity{invocationID: baseCtx.invocationID, agentName: "task_worker"}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-settle", map[string]any{"result": "one"}),
+			finishPart("c-settle", map[string]any{"result": "two"}),
+		}, genai.RoleModel)}, nil))
+		tS1 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-settle"), ic: act1.ic}
+		tS2 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-settle"), ic: act1.ic}
+		errs.add(p.beforeTool(tS1, finishTool, map[string]any{"result": "one"}))
+		errs.add(p.beforeTool(tS2, finishTool, map[string]any{"result": "two"}))
+		errs.check(t)
+
+		// Close tS1 as unfinished so tS2 (!firstInBatch) settles into settledTaskCalls, then record #1's
+		// firstInBatch rejection in the same batch: finishEvidenceBy and settledIdx must ignore tS2!
+		_, _, _ = p.traces.popToolSpanWithKind(tS1, identityOf(tS1), "c-settle", false, false, false, false, nil)
+		p.traces.noteTaskUnfinished(tS1, identityOf(tS1), "c-settle")
+		settleEv := genai.NewContentFromParts([]*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{ID: "c-settle", Name: finishTaskToolName, Response: taskCompleted()}},
+			{FunctionResponse: &genai.FunctionResponse{ID: "c-settle", Name: finishTaskToolName, Response: taskFailed()}},
+		}, genai.RoleUser)
+		p.traces.completeResponseEvent(act1, identityOf(act1), "task_worker", "", functionResponseCallSpecs(settleEv), nil)
+
+		inv := p.traces.invocation(rootCtx, identityOf(rootCtx))
+		inv.mu.Lock()
+		var act1Rec *spanRecord
+		for _, rec := range inv.agentStack {
+			if rec.isActivationOf(act1) {
+				act1Rec = rec
+				break
+			}
+		}
+		if len(act1Rec.settledTaskCalls) != 1 || act1Rec.settledTaskCalls[0].firstInBatch {
+			inv.mu.Unlock()
+			t.Fatalf("act1Rec.settledTaskCalls = %+v, want 1 non-first entry", act1Rec.settledTaskCalls)
+		}
+		act1Rec.appendRejectedTask(rejectedTaskCall{
+			call:         "c-settle",
+			modelCallSeq: act1Rec.modelCallSeq,
+			firstInBatch: true,
+		})
+		inv.mu.Unlock()
+
+		if _, ok := p.traces.popTaskAgentSpanWithEvent(rootCtx, workerID, []string{"c-settle"}, nil, false); ok {
+			t.Fatalf("popTaskAgentSpanWithEvent emitted completion from superseded settledTaskCalls entry")
+		}
+		errs.add(p.afterAgent(act1))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+	})
+
+	t.Run("finishedTaskLocked_and_retry_consume_branches", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-dup-retry-consume", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		act2 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		workerID := identity{invocationID: baseCtx.invocationID, agentName: "task_worker"}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+
+		// Batch M1 on act1: #1 ("c-other", firstInBatch=true) rejected + #2 ("c-retry", firstInBatch=false) finished
+		// (whose FR event was suppressed).
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-other", map[string]any{"result": "rej"}),
+			finishPart("c-retry", map[string]any{"result": "sup"}),
+		}, genai.RoleModel)}, nil))
+		tM1a := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-other"), ic: act1.ic}
+		tM1b := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-retry"), ic: act1.ic}
+		errs.add(p.beforeTool(tM1a, finishTool, map[string]any{"result": "rej"}))
+		errs.add(p.onToolError(tM1a, finishTool, map[string]any{"result": "rej"}, errors.New("fail")))
+		errs.add(p.afterTool(tM1a, finishTool, map[string]any{"result": "rej"}, taskCompleted(), nil))
+		p.traces.noteTaskFinished(tM1b, identityOf(tM1b), "c-retry")
+
+		// Start act2 with a genuine "c-retry" completion: finishedTaskLocked must select act2 and ignore act1.
+		errs.add(p.beforeAgent(act2))
+		errs.add(p.beforeModel(act2, &model.LLMRequest{}))
+		errs.add(p.afterModel(act2, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-retry", map[string]any{"result": "act2-ok"}),
+		}, genai.RoleModel)}, nil))
+		tAct2 := &taskActivationContext{mockInvocationContext: withFunctionCall(act2.mockInvocationContext, "c-retry"), ic: act2.ic}
+		errs.add(p.beforeTool(tAct2, finishTool, map[string]any{"result": "act2-ok"}))
+		errs.add(p.afterTool(tAct2, finishTool, map[string]any{"result": "act2-ok"}, taskCompleted(), nil))
+		errs.check(t)
+
+		inv := p.traces.invocation(rootCtx, identityOf(rootCtx))
+		inv.mu.Lock()
+		var act1Rec *spanRecord
+		for _, rec := range inv.agentStack {
+			if rec.isActivationOf(act1) {
+				act1Rec = rec
+				break
+			}
+		}
+		gotFinishedIdx := inv.finishedTaskLocked(workerID, []string{"c-retry"})
+		wantAct2Idx := inv.findAgentForContext(act2, "", "task_worker", "")
+		inv.mu.Unlock()
+		if gotFinishedIdx != wantAct2Idx {
+			t.Fatalf("finishedTaskLocked = %d, want act2 index %d (ignoring act1 superseded entry)", gotFinishedIdx, wantAct2Idx)
+		}
+
+		// Retire act2 on its completion response.
+		errs.add(p.onEvent(act2, &session.Event{
+			Author: "task_worker",
+			Output: map[string]any{"result": "act2-ok"},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c-retry", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+
+		// With only act1 open (holding superseded "c-retry" in M1), finishedTaskLocked must return -1.
+		inv.mu.Lock()
+		gotOnlySupIdx := inv.finishedTaskLocked(workerID, []string{"c-retry"})
+		inv.mu.Unlock()
+		if gotOnlySupIdx != -1 {
+			t.Fatalf("finishedTaskLocked with only superseded entry = %d, want -1", gotOnlySupIdx)
+		}
+
+		// Now act1 retries "c-retry" cleanly in Batch M2, while M1's rejection has call "c-other" so M1's
+		// "c-retry" stays superseded in act1.finishedTasks alongside M2's "c-retry".
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-retry", map[string]any{"result": "m2-ok"}),
+		}, genai.RoleModel)}, nil))
+		tM2 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-retry"), ic: act1.ic}
+		errs.add(p.beforeTool(tM2, finishTool, map[string]any{"result": "m2-ok"}))
+		errs.add(p.afterTool(tM2, finishTool, map[string]any{"result": "m2-ok"}, taskCompleted(), nil))
+		inv.mu.Lock()
+		m2Seq := act1Rec.modelCallSeq
+		inv.mu.Unlock()
+
+		// Deliver M2's completion response via popTaskAgentSpanWithEvent directly (skipping completeResponseEvent
+		// so M1's superseded entry is still at index 0 of act1.finishedTasks): the consumption loop must skip M1's
+		// superseded entry and consume M2's entry!
+		if _, ok := p.traces.popTaskAgentSpanWithEvent(act1, workerID, []string{"c-retry"}, nil, true); !ok {
+			t.Fatalf("popTaskAgentSpanWithEvent failed to retire act1 on M2 retry")
+		}
+		inv.mu.Lock()
+		for _, rem := range act1Rec.finishedTasks {
+			if rem.modelCallSeq == m2Seq {
+				t.Fatalf("M2 retry entry was not consumed (superseded M1 entry stole consumption): %+v", act1Rec.finishedTasks)
+			}
+		}
+		inv.mu.Unlock()
+
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+	})
+
+	t.Run("deltaOwner_finishedInBatch_ignores_superseded", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-dup-finishedInBatch", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		workerID := identity{invocationID: baseCtx.invocationID, agentName: "task_worker"}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-fin", map[string]any{"result": "one"}),
+			finishPart("c-fin", map[string]any{"result": "two"}),
+		}, genai.RoleModel)}, nil))
+		delta1 := map[string]any{"batch": "fib"}
+		t1 := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: delta1},
+		}
+		t2 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic}
+		errs.add(p.beforeTool(t2, finishTool, map[string]any{"result": "two"}))
+		errs.add(p.afterTool(t2, finishTool, map[string]any{"result": "two"}, taskCompleted(), nil))
+		errs.add(p.beforeTool(t1, finishTool, map[string]any{"result": "one"}))
+		errs.add(p.onToolError(t1, finishTool, map[string]any{"result": "one"}, errors.New("fail")))
+		errs.add(p.afterTool(t1, finishTool, map[string]any{"result": "one"}, taskCompleted(), nil))
+		errs.check(t)
+
+		// Deliver an event carrying delta1 and only 1 completion FR (so #2 remains in act1.finishedTasks):
+		// finishedInBatch must ignore superseded #2 and let rejectionOf consume #1 without AGENT_COMPLETED.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Output:  map[string]any{"result": "one"},
+			Actions: session.EventActions{StateDelta: delta1},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		_ = workerID
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		if got := len(agentRowsOfType(p.takeRows(), EventAgentCompleted, "task_worker")); got != 0 {
+			t.Fatalf("task_worker AGENT_COMPLETED = %d, want 0 (finishedInBatch must ignore superseded #2)", got)
+		}
+	})
+
+	t.Run("settledIdx_ignores_superseded_entry", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-dup-settledIdx", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		actGenuine := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		actSup := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		workerID := identity{invocationID: baseCtx.invocationID, agentName: "task_worker"}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(actGenuine))
+		errs.add(p.beforeModel(actGenuine, &model.LLMRequest{}))
+		errs.add(p.afterModel(actGenuine, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-settle", map[string]any{"result": "genuine"}),
+		}, genai.RoleModel)}, nil))
+
+		// actSup is newest on agentStack: #1 ("c-other", firstInBatch=true) rejected, #2 ("c-settle") settled.
+		errs.add(p.beforeAgent(actSup))
+		errs.add(p.beforeModel(actSup, &model.LLMRequest{}))
+		errs.add(p.afterModel(actSup, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-other", map[string]any{"result": "one"}),
+			finishPart("c-settle", map[string]any{"result": "two"}),
+		}, genai.RoleModel)}, nil))
+		tS1 := &taskActivationContext{mockInvocationContext: withFunctionCall(actSup.mockInvocationContext, "c-other"), ic: actSup.ic}
+		tS2 := &taskActivationContext{mockInvocationContext: withFunctionCall(actSup.mockInvocationContext, "c-settle"), ic: actSup.ic}
+		errs.add(p.beforeTool(tS1, finishTool, map[string]any{"result": "one"}))
+		errs.add(p.beforeTool(tS2, finishTool, map[string]any{"result": "two"}))
+		errs.check(t)
+
+		_, _, _ = p.traces.popToolSpanWithKind(tS1, identityOf(tS1), "c-other", false, false, false, false, nil)
+		p.traces.noteTaskUnfinished(tS1, identityOf(tS1), "c-other")
+		settleEv := genai.NewContentFromParts([]*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{ID: "c-settle", Name: finishTaskToolName, Response: taskCompleted()}},
+			{FunctionResponse: &genai.FunctionResponse{ID: "c-other", Name: finishTaskToolName, Response: taskFailed()}},
+		}, genai.RoleUser)
+		p.traces.completeResponseEvent(actSup, identityOf(actSup), "task_worker", "", functionResponseCallSpecs(settleEv), nil)
+
+		inv := p.traces.invocation(rootCtx, identityOf(rootCtx))
+		inv.mu.Lock()
+		var genuineSpanID string
+		for _, rec := range inv.agentStack {
+			if rec.isActivationOf(actGenuine) {
+				genuineSpanID = rec.spanID
+			}
+			if rec.isActivationOf(actSup) {
+				rec.appendRejectedTask(rejectedTaskCall{
+					call:         "c-other",
+					modelCallSeq: rec.modelCallSeq,
+					firstInBatch: true,
+				})
+			}
+		}
+		inv.mu.Unlock()
+
+		// popTaskAgentSpanWithEvent for "c-settle": takeRejection sees only "c-other" (no match),
+		// so settledIdx must ignore actSup's superseded "c-settle" and select actGenuine via undeferredFinishIdx.
+		span, ok := p.traces.popTaskAgentSpanWithEvent(rootCtx, workerID, []string{"c-settle"}, nil, false)
+		if !ok || span.spanID != genuineSpanID {
+			t.Fatalf("popTaskAgentSpanWithEvent = (spanID=%q, ok=%v), want (spanID=%q, true)", span.spanID, ok, genuineSpanID)
+		}
+		errs.add(p.afterAgent(actSup))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+	})
+
+	t.Run("paired_ignores_superseded_when_nil_output_keeps_frame", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-dup-paired-nil-out", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		act2 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-fin", map[string]any{"result": "one"}),
+			finishPart("c-fin", map[string]any{"result": "two"}),
+		}, genai.RoleModel)}, nil))
+		t1 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic}
+		t2 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic}
+		errs.add(p.beforeTool(t1, finishTool, map[string]any{"result": "one"}))
+		errs.add(p.onToolError(t1, finishTool, map[string]any{"result": "one"}, errors.New("fail")))
+		errs.add(p.afterTool(t1, finishTool, map[string]any{"result": "one"}, taskCompleted(), nil))
+		errs.add(p.beforeTool(t2, finishTool, map[string]any{"result": "two"}))
+		errs.add(p.afterTool(t2, finishTool, map[string]any{"result": "two"}, taskCompleted(), nil))
+
+		// Same-ID [#1 c-fin rejected, #2 c-fin finished] with Output == nil keeps act1 on agentStack while
+		// consuming #1. paired must skip superseded #2 so matchedSuperseded removes #2 from act1.finishedTasks;
+		// otherwise paired matches #2 to calls[0] and keeps #2 in act1.finishedTasks to steal act2's completion!
+		errs.add(p.onEvent(act1, &session.Event{
+			Author: "task_worker",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
+		errs.add(p.beforeAgent(act2))
+		errs.add(p.beforeModel(act2, &model.LLMRequest{}))
+		errs.add(p.afterModel(act2, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-fin", map[string]any{"result": "act2"}),
+		}, genai.RoleModel)}, nil))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			Output: map[string]any{"result": "act2"},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.check(t)
+
+		rows := p.takeRows()
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(workerStarts) != 2 || len(workerEnds) != 1 || workerEnds[0]["span_id"] != workerStarts[1]["span_id"] {
+			t.Fatalf("workerStarts=%d workerEnds=%d ends=%v, want 1 end matching act2 %v",
+				len(workerStarts), len(workerEnds), workerEnds, workerStarts)
+		}
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+	})
+
+	t.Run("finishOpen_ignores_superseded_completed_when_nil_output_keeps_frame", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-dup-finishOpen-nil-out", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+		act2 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-open", map[string]any{"result": "one"}),
+			finishPart("c-open", map[string]any{"result": "two"}),
+		}, genai.RoleModel)}, nil))
+		deltaOpen := map[string]any{"batch": "open-nil"}
+		t1 := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-open"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: deltaOpen},
+		}
+		t2 := &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-open"), ic: act1.ic}
+		errs.add(p.beforeTool(t1, finishTool, map[string]any{"result": "one"}))
+		errs.add(p.onToolError(t1, finishTool, map[string]any{"result": "one"}, errors.New("fail")))
+		errs.add(p.afterTool(t1, finishTool, map[string]any{"result": "one"}, taskCompleted(), nil))
+		errs.add(p.beforeTool(t2, finishTool, map[string]any{"result": "two"}))
+		errs.check(t)
+
+		// Output == nil leaves act1 on agentStack while deltaOwner consumes #1's rejection:
+		// finishOpen must NOT settle superseded #2 into settledTaskCalls; otherwise act2's
+		// subsequent completion with "c-open" hits settledIdx on act1 and emits act1's AGENT_COMPLETED!
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Actions: session.EventActions{StateDelta: deltaOpen},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-open", Name: finishTaskToolName, Response: taskCompleted()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-open", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+
+		errs.add(p.beforeAgent(act2))
+		errs.add(p.beforeModel(act2, &model.LLMRequest{}))
+		errs.add(p.afterModel(act2, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-open", map[string]any{"result": "act2"}),
+		}, genai.RoleModel)}, nil))
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author: "task_worker",
+			Output: map[string]any{"result": "act2"},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: "c-open", Name: finishTaskToolName, Response: taskCompleted()},
+			}}, genai.RoleUser)},
+		}))
+		errs.check(t)
+
+		rows := p.takeRows()
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "task_worker")
+		workerEnds := agentRowsOfType(rows, EventAgentCompleted, "task_worker")
+		if len(workerStarts) != 2 || len(workerEnds) != 1 || workerEnds[0]["span_id"] != workerStarts[1]["span_id"] {
+			t.Fatalf("workerStarts=%d workerEnds=%d ends=%v, want 1 end matching act2 %v",
+				len(workerStarts), len(workerEnds), workerEnds, workerStarts)
+		}
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+	})
+
+	t.Run("matchesRej_preserves_firstInBatch_on_superseded_failure", func(t *testing.T) {
+		p := newClockedPlugin(t)
+		p.config.DisableFlushOnRunEnd = true
+		taskAgent, rootAgent := newWorkers(t)
+		finishTool := &fakeTool{name: finishTaskToolName}
+		baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-dup-matchesRej-first", agentName: "coordinator"}
+		rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+		act1 := &taskActivationContext{
+			mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+			ic:                    &runningInvocation{running: taskAgent},
+		}
+
+		var errs callbackErrors
+		errs.add(p.beforeRun(rootCtx))
+		errs.add(p.beforeAgent(rootCtx))
+		errs.add(p.beforeAgent(act1))
+		errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+		errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			finishPart("c-fin", map[string]any{"result": "one"}),
+		}, genai.RoleModel)}, nil))
+		delta1 := map[string]any{"batch": "matchesRej"}
+		t1 := &taskToolContext{
+			taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-fin"), ic: act1.ic},
+			actions:               &session.EventActions{StateDelta: delta1},
+		}
+		errs.add(p.beforeTool(t1, finishTool, map[string]any{"result": "one"}))
+		errs.add(p.onToolError(t1, finishTool, map[string]any{"result": "one"}, errors.New("fail")))
+		errs.add(p.afterTool(t1, finishTool, map[string]any{"result": "one"}, taskCompleted(), nil))
+
+		// Event carrying delta1 and an extra duplicate-ID superseded FR [c-fin (completed), c-fin (completed)]:
+		// calls[1] has fr.unfinished=true, fr.superseded=true, !taken[1], and no untaken slot in batch,
+		// so supersededCleanup[1]=true runs matchesRej; matchesRej must NOT delete #1's firstInBatch
+		// rejection, otherwise popTaskAgentSpanWithEvent falls through to deltaOwnerIdx and emits AGENT_COMPLETED.
+		errs.add(p.onEvent(rootCtx, &session.Event{
+			Author:  "task_worker",
+			Output:  map[string]any{"result": "one"},
+			Actions: session.EventActions{StateDelta: delta1},
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "c-fin", Name: finishTaskToolName, Response: taskCompleted()}},
+			}, genai.RoleUser)},
+		}))
+		errs.add(p.afterAgent(rootCtx))
+		errs.check(t)
+		p.afterRun(rootCtx)
+
+		if got := len(agentRowsOfType(p.takeRows(), EventAgentCompleted, "task_worker")); got != 0 {
+			t.Fatalf("task_worker AGENT_COMPLETED = %d, want 0 (matchesRej must preserve firstInBatch rejection)", got)
+		}
+	})
 }
