@@ -560,7 +560,7 @@ func TestRunPeriodicalReloads(t *testing.T) {
 		}()
 
 		// Two ticks despite every reload failing: the loop keeps going.
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			select {
 			case <-c.onList:
 			case <-time.After(2 * time.Second):
@@ -659,7 +659,7 @@ func TestCacheConcurrentReads(t *testing.T) {
 	const workers = 40
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

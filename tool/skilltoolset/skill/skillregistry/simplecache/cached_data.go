@@ -16,7 +16,6 @@ package simplecache
 
 import (
 	"fmt"
-	"log"
 	"time"
 
 	agentregistry "google.golang.org/api/agentregistry/v1alpha"
@@ -57,7 +56,6 @@ func newDataCache(client skillregistry.Client, skills []*agentregistry.Skill) *d
 // An error is returned when getting the list of skills fails.
 // No frontmatters are loaded. No zip files are loaded.
 func loadSkills(c skillregistry.Client) (*dataCache, error) {
-	log.Printf("loadSkills start")
 	start := time.Now()
 
 	skills, err := c.ListSkills()
@@ -69,7 +67,6 @@ func loadSkills(c skillregistry.Client) (*dataCache, error) {
 	dc.readingSkillsStart = start
 	dc.readingSkillsEnd = time.Now()
 
-	log.Printf("loadSkills done")
 	return dc, nil
 }
 
@@ -95,12 +92,11 @@ func loadFrontmatters(c skillregistry.Client, nWorkers int, dc *dataCache) error
 	if nWorkers <= 0 {
 		return fmt.Errorf("nWorkers must be > 0")
 	}
-	log.Printf("loadFrontmatters")
 
 	toProcess := make(chan *cachedSkill, len(dc.skills))
 	done := make(chan frontmatterReadDone, len(dc.skills))
 
-	for i := 0; i < nWorkers; i++ {
+	for i := range nWorkers {
 		go frontmatterWorker(i, c, toProcess, done)
 	}
 
@@ -120,7 +116,6 @@ func loadFrontmatters(c skillregistry.Client, nWorkers int, dc *dataCache) error
 			dc.nameToSkill[res.prefixedSkillName] = res.skill
 		}
 	}
-	log.Printf("loadFrontmatters done")
 	return nil
 }
 

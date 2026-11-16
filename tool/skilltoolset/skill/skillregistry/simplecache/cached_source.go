@@ -23,12 +23,15 @@ import (
 	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
 )
 
-// CachedSkillRegistrySource serves skills straight from the Skill Registry.
+// CachedSkillRegistrySource is a [skill.Source] that serves skills from an
+// in-memory [skillregistry.Cache] rather than calling the Skill Registry on
+// every read.
 type CachedSkillRegistrySource struct {
 	cache skillregistry.Cache
 }
 
-// NewCachedSkillRegistrySource creates a [skill.Source] backed by the Skill Registry
+// NewCachedSkillRegistrySource returns a [skill.Source] that reads through the
+// given cache, which the caller builds and owns (see [NewCache]).
 func NewCachedSkillRegistrySource(ctx context.Context, cache skillregistry.Cache) (*CachedSkillRegistrySource, error) {
 	return &CachedSkillRegistrySource{cache: cache}, nil
 }

@@ -17,7 +17,6 @@ package simplecache
 import (
 	"fmt"
 	"io"
-	"log"
 	"strings"
 	"sync"
 
@@ -48,7 +47,6 @@ func newResources(client skillregistry.Client) *resources {
 
 // loadResources cleans internal data and re-creates it using the provided rev
 func (r *resources) loadResources(rev string) error {
-	log.Printf("loadResources")
 	// clear first
 	r.loaded = false
 	r.res = make([]*resource, 0)
@@ -75,7 +73,6 @@ func (r *resources) loadResources(rev string) error {
 		r.pathToRes[f.Name] = newRes
 	}
 	r.loaded = true
-	log.Printf("loadResources done")
 	return nil
 }
 
@@ -117,7 +114,7 @@ func (r *resources) listResources(rev, subpath string) ([]string, error) {
 	for _, r := range r.res {
 		// we want to add either explicit file of subtree (if subpath looks like a folder)
 		if r.path == subpath {
-			// got an explict match
+			// got an explicit match
 			res = append(res, r.path)
 			continue
 		}
@@ -134,7 +131,6 @@ func (r *resources) listResources(rev, subpath string) ([]string, error) {
 }
 
 func (r *resources) getResource(rev, path string) (*resource, error) {
-	log.Printf("getResource %v", path)
 	r.mu.RLock()
 	if r.loaded {
 		defer r.mu.RUnlock()
@@ -157,6 +153,5 @@ func (r *resources) getResource(rev, path string) (*resource, error) {
 		return nil, fmt.Errorf("cannot find %v: %w", path, skill.ErrResourceNotFound)
 	}
 
-	log.Printf("getResource done")
 	return res, nil
 }

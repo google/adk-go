@@ -84,7 +84,9 @@ func (c *zipClientStub) ListSkills() ([]*agentregistry.Skill, error) { return ni
 func (c *zipClientStub) ListFrontmatters() ([]*agentregistry.Frontmatter, error) {
 	return nil, nil
 }
-func (c *zipClientStub) GetSkill(string) (*agentregistry.Skill, error)            { return nil, nil }
+
+func (c *zipClientStub) GetSkill(string) (*agentregistry.Skill, error) { return nil, nil }
+
 func (c *zipClientStub) GetRevision(string) (*agentregistry.SkillRevision, error) { return nil, nil }
 
 func (c *zipClientStub) FindFrontmatters(string) ([]*agentregistry.Frontmatter, error) {
@@ -416,7 +418,7 @@ func TestResourcesConcurrentAccess(t *testing.T) {
 	const workers = 32
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

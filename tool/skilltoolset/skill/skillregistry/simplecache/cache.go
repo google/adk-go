@@ -38,7 +38,6 @@ package simplecache
 
 import (
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -46,14 +45,15 @@ import (
 	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
 )
 
-// CacheConfig contains parametres for the cache layer
+// CacheConfig holds the parameters for [NewCache].
 type CacheConfig struct {
-	// the underlying client to Skill Registry
+	// Client is the Skill Registry client the cache reads through. Required.
 	Client skillregistry.Client
-	// UpdateInterval controlls how often the cache is refreshed.
-	// Defaults to 1h if set to 0
+	// UpdateInterval is how often the cache is refreshed in the background.
+	// A zero value defaults to one hour.
 	UpdateInterval time.Duration
-	// NewCache will do WarmUp iff SkipWarmUp is false
+	// SkipWarmUp, when true, returns from [NewCache] without the initial
+	// blocking load; the cache fills on the first background refresh instead.
 	SkipWarmUp bool
 }
 
@@ -62,13 +62,16 @@ type cache struct {
 	mu                      sync.RWMutex         // used to synch reada and writes to the cache.
 	preloadMutex            sync.Mutex           // for cache updates only - used to separate [preload]
 	data                    dataCache            // cache data
-	frontmattersParallelism int                  // controlls the amount of workers reading frontmatters in parallel
-	updateInterval          time.Duration        // controlls how often the cache is refreshed
+	frontmattersParallelism int                  // controls the number of workers reading frontmatters in parallel
+	updateInterval          time.Duration        // controls how often the cache is refreshed
 	stop                    chan struct{}        // stop is controlling go routine runPeriodicalReset, allowing to stop the ticker
 	stopOnce                sync.Once
 }
 
-// NewCache returns a top level cache.
+// NewCache returns a [skillregistry.Cache] backed by CacheConfig.Client. Unless
+// CacheConfig.SkipWarmUp is set it performs an initial blocking warm-up, then
+// starts a goroutine that refreshes the cache every CacheConfig.UpdateInterval.
+// Call StopAutorefresh on the returned cache to release that goroutine.
 func NewCache(cfg CacheConfig) (skillregistry.Cache, error) {
 	updateInterval := cfg.UpdateInterval
 	if updateInterval == 0 {
@@ -100,10 +103,10 @@ func (c *cache) runPeriodicalReloads() {
 	for {
 		select {
 		case <-ticker.C:
-			err := c.reset()
-			if err != nil {
-				log.Printf("runPeriodicalReset: cannot reset: %v", err)
-			}
+			// Best-effort background refresh; on failure keep serving the
+			// existing cache until the next tick. There is no library logger to
+			// report the error through.
+			_ = c.reset()
 		case <-c.stop:
 			ticker.Stop()
 			return

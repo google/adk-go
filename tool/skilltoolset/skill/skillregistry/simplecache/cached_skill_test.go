@@ -223,9 +223,7 @@ func TestCachedSkillGetInstructionConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			got, err := cs.getInstruction()
 			if err != nil {
 				errs <- err
@@ -234,7 +232,7 @@ func TestCachedSkillGetInstructionConcurrent(t *testing.T) {
 			if got != body {
 				errs <- fmt.Errorf("instruction = %q, want %q", got, body)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)

@@ -36,7 +36,7 @@ type cachedSkill struct {
 	resources *resources
 }
 
-// newCachedSkill returns a new cachedSkill containting the provided agentregistry.Skill
+// newCachedSkill returns a new cachedSkill containing the provided agentregistry.Skill
 func newCachedSkill(client skillregistry.Client, s *agentregistry.Skill) *cachedSkill {
 	return &cachedSkill{
 		client:    client,
