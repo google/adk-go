@@ -73,3 +73,31 @@ func ExampleCodeExecutor() {
 	// exit code: 0
 	// retry attempts: 2
 }
+
+// Settings leaves every field unset; WithDefaults fills in the defaults and
+// keeps every value that is set, a pointer to 0 included.
+func ExampleSettings_WithDefaults() {
+	d := codeexecutor.Settings{}.WithDefaults()
+	fmt.Printf("retry attempts: %d\n", *d.ErrorRetryAttempts)
+	fmt.Printf("code block delimiters: %q\n", d.CodeBlockDelimiters)
+	fmt.Printf("result delimiters: %q\n", *d.ExecutionResultDelimiters)
+	fmt.Printf("timeout set: %t\n", d.TimeoutSeconds != nil)
+
+	noRetry := 0
+	custom := codeexecutor.Settings{
+		ErrorRetryAttempts:  &noRetry,
+		CodeBlockDelimiters: [][2]string{{"<code>", "</code>"}},
+	}.WithDefaults()
+	fmt.Printf("custom retry attempts: %d\n", *custom.ErrorRetryAttempts)
+	fmt.Printf("custom code block delimiters: %q\n", custom.CodeBlockDelimiters)
+	fmt.Printf("custom result delimiters: %q\n", *custom.ExecutionResultDelimiters)
+
+	// Output:
+	// retry attempts: 2
+	// code block delimiters: [["```tool_code\n" "\n```"] ["```python\n" "\n```"]]
+	// result delimiters: ["```tool_output\n" "\n```"]
+	// timeout set: false
+	// custom retry attempts: 0
+	// custom code block delimiters: [["<code>" "</code>"]]
+	// custom result delimiters: ["```tool_output\n" "\n```"]
+}

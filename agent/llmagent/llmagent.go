@@ -525,13 +525,13 @@ type Config struct {
 	//
 	// The agent runs any other executor itself, in its own process. In each
 	// model response it looks for the first code block: the first
-	// executable-code part, or else the earliest block in the response's text
-	// fenced by one of the executor's Settings().CodeBlockDelimiters. When it
-	// finds one, it yields an event with the response's parts up to that
-	// block (a fenced block becomes an executable-code part), calls
-	// ExecuteCode with the code, yields an event with one code execution
-	// result part, and calls the model again instead of yielding the
-	// response. Output files of the result are saved as artifacts. A response
+	// executable-code part that no code execution result part follows, or else
+	// the earliest block in the response's text fenced by one of the executor's
+	// Settings().CodeBlockDelimiters. When it finds one, it yields an event
+	// with the response's parts up to that block (a fenced block becomes an
+	// executable-code part), calls ExecuteCode with the code, yields an event
+	// with one code execution result part, and calls the model again instead of
+	// yielding the response. Output files are saved as artifacts. A response
 	// without a code block is handled as it would be without an executor. In
 	// later requests the code is sent as text fenced by the first pair of
 	// CodeBlockDelimiters, and the result as user text fenced by
