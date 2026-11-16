@@ -53,10 +53,10 @@ type CodeExecutor interface {
 	// nil. A caller must still handle a nil Result with a nil error, which
 	// *BuiltInExecutor returns, and read it as "no result".
 	//
-	// The flow calls ExecuteCode with the code, the input files it extracted
-	// and, for a stateful executor, an execution ID. Skills calls it with
-	// only the code, passing the tool's agent.Context, which embeds
-	// agent.InvocationContext, as invocationCtx.
+	// The agent's flow never calls a BuiltIn. Other executors get the code,
+	// the input files and, for a stateful executor, an execution ID, and a nil
+	// Result with a nil error fails the run. A tool may pass only the code,
+	// with its agent.Context (which embeds agent.InvocationContext).
 	ExecuteCode(ctx context.Context, invocationCtx agent.InvocationContext, in *Input) (*Result, error)
 }
 
@@ -87,7 +87,7 @@ type Result struct {
 	OutputFiles []*File
 	// ExitCode is the status the executed process exited with. nil means the
 	// executor did not report one, which is different from a pointer to 0.
-	// Skills reads it, the flow does not. The Result owns the pointed-to int.
+	// The agent's flow does not read it. The Result owns the pointed-to int.
 	ExitCode *int
 }
 
@@ -141,8 +141,8 @@ type Settings struct {
 
 	// TimeoutSeconds is the number of seconds an executor that enforces a
 	// timeout allows one execution. nil means the settings set none (the
-	// default). Neither the flow nor Skills reads it; only a concrete
-	// executor does, and this package does not validate the value.
+	// default). The agent's flow does not read it; only a concrete executor
+	// does, and this package does not validate the value.
 	TimeoutSeconds *int
 }
 
