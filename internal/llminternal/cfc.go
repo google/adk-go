@@ -16,6 +16,8 @@ package llminternal
 
 import (
 	"context"
+	"iter"
+	"sync"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/utils"
@@ -64,18 +66,22 @@ func liveOptionsFrom(ctx context.Context, f *Flow) liveOptions {
 // again, and runs the response processors and the tools itself.
 //
 // It yields each live event, wrapped for runOneStep to pass on without
-// post-processing it again, after the after-model callbacks have seen it. An
-// event with Partial set is yielded only in SSE mode. The call ends after
-// the first event with TurnComplete set or with Actions.TransferToAgent set,
-// when the live events end (a task_completed function response ends them),
-// on a failure, or when yield returns false; the connection is closed
-// whichever way it ends.
+// post-processing it again. The after-model callbacks see every event except
+// the ones a request or response processor yields, which are yielded as the
+// processor made them: without CFC the callbacks never see a processor's
+// event either; adk-python runs them on those events too. An event with
+// Partial set is yielded only in SSE mode. The call ends after the first event
+// with TurnComplete set or with Actions.TransferToAgent set, when the live
+// events end (a task_completed function response ends them), on a failure, or
+// when yield returns false; the connection is closed whichever way it ends.
 //
 // Each yielded event is a copy of the live event with its own content, so an
 // after-model callback's edit of a function call changes the event the
 // consumer gets and not the call the live loop runs.
 func (f *Flow) callLLMOverLive(ctx agent.InvocationContext, req *model.LLMRequest, actions *session.EventActions, yield func(*responseWithEventID, error) bool) {
-	sess, events, err := f.RunLive(withLiveOptions(ctx, f, liveOptions{live: &agent.LiveRunConfig{}, dropEmptyResponses: true}))
+	marks := &processorEvents{set: make(map[*session.Event]struct{})}
+	lf := f.withMarkedProcessors(marks)
+	sess, events, err := lf.RunLive(withLiveOptions(ctx, lf, liveOptions{live: &agent.LiveRunConfig{}, dropEmptyResponses: true}))
 	if err != nil {
 		f.yieldLiveError(ctx, req, actions, err, yield)
 		return
@@ -93,13 +99,15 @@ func (f *Flow) callLLMOverLive(ctx agent.InvocationContext, req *model.LLMReques
 			continue
 		}
 		out := liveEventCopy(ctx, ev)
-		cbResp, cbErr := f.runAfterModelCallbacks(ctx, &out.LLMResponse, actions, nil)
-		if cbErr != nil {
-			yield(nil, cbErr)
-			return
-		}
-		if cbResp != nil {
-			out.LLMResponse = *inheritModelFields(&out.LLMResponse, cbResp)
+		if !marks.take(ev) {
+			cbResp, cbErr := f.runAfterModelCallbacks(ctx, &out.LLMResponse, actions, nil)
+			if cbErr != nil {
+				yield(nil, cbErr)
+				return
+			}
+			if cbResp != nil {
+				out.LLMResponse = *inheritModelFields(&out.LLMResponse, cbResp)
+			}
 		}
 		if sse || !out.Partial {
 			if !yield(&responseWithEventID{LLMResponse: &out.LLMResponse, eventID: out.ID, liveEvent: out}, nil) {
@@ -110,6 +118,58 @@ func (f *Flow) callLLMOverLive(ctx agent.InvocationContext, req *model.LLMReques
 			return
 		}
 	}
+}
+
+// processorEvents is the set of events that the request and response
+// processors of one CFC model call have yielded. RunLive's goroutine adds to
+// it and callLLMOverLive takes from it, so mu guards set.
+type processorEvents struct {
+	mu  sync.Mutex
+	set map[*session.Event]struct{}
+}
+
+// mark returns seq, adding each event to p before it is yielded.
+func (p *processorEvents) mark(seq iter.Seq2[*session.Event, error]) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		for ev, err := range seq {
+			p.mu.Lock()
+			p.set[ev] = struct{}{}
+			p.mu.Unlock()
+			if !yield(ev, err) {
+				return
+			}
+		}
+	}
+}
+
+// take reports whether ev is in p, and removes it.
+func (p *processorEvents) take(ev *session.Event) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.set[ev]
+	delete(p.set, ev)
+	return ok
+}
+
+// withMarkedProcessors returns a copy of f whose request and response
+// processors add each event they yield to marks, so that a CFC model call can
+// tell those events from the model's. RunLive pushes the processors' events
+// themselves, so the pointer identifies them. f is not changed.
+func (f *Flow) withMarkedProcessors(marks *processorEvents) *Flow {
+	lf := *f
+	lf.RequestProcessors = make([]func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error], len(f.RequestProcessors))
+	for i, p := range f.RequestProcessors {
+		lf.RequestProcessors[i] = func(ctx agent.InvocationContext, req *model.LLMRequest, pf *Flow) iter.Seq2[*session.Event, error] {
+			return marks.mark(p(ctx, req, pf))
+		}
+	}
+	lf.ResponseProcessors = make([]func(agent.InvocationContext, *model.LLMRequest, *model.LLMResponse) iter.Seq2[*session.Event, error], len(f.ResponseProcessors))
+	for i, p := range f.ResponseProcessors {
+		lf.ResponseProcessors[i] = func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error] {
+			return marks.mark(p(ctx, req, resp))
+		}
+	}
+	return &lf
 }
 
 // liveEventCopy returns a copy of ev that owns its content, with the branch
