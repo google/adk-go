@@ -30,6 +30,14 @@ import (
 // success so a later resume does not repeat the node's side effects.
 const workflowNodeCompletedKey = "adk.workflow.node_completed"
 
+// An output event does not show that the activation completed. The node
+// can still pause again or fail after it. An activation that was resumed
+// with user responses and completed with output gets this record, so
+// rehydration can tell that the responses were used up. It has its own
+// key because readers take workflowNodeCompletedKey to mean a completion
+// without output and set the node's output to nil.
+const workflowNodeResumeCompletedKey = "adk.workflow.node_resume_completed"
+
 const workflowBasePathPrefix = "adk.workflow.base_path."
 
 const workflowFailedChildPathsKey = "adk.workflow.failed_child_paths"
@@ -66,6 +74,21 @@ func workflowNodeOutcome(ev *session.Event) string {
 	return ""
 }
 
+// completionRecorded reports whether the scheduler recorded on ev that
+// an activation of the node completed. A dynamic node writes its
+// delegated output under workflowNodeCompletedKey before the scheduler
+// has seen the activation end, so that record alone is not one.
+func completionRecorded(ev *session.Event) bool {
+	if ev.CustomMetadata[workflowNodeResumeCompletedKey] == true {
+		return true
+	}
+	if ev.CustomMetadata[workflowNodeCompletedKey] != true {
+		return false
+	}
+	_, delegated := completedDelegatedOutput(ev)
+	return !delegated
+}
+
 func completedDelegatedOutput(ev *session.Event) (any, bool) {
 	if ev.CustomMetadata[workflowNodeCompletedKey] != true {
 		return nil, false
@@ -92,10 +115,11 @@ type nodeScanState struct {
 	// schemas maps an interrupt ID to its declared response schema,
 	// re-extracted from the pause FunctionCall args.
 	schemas map[string]*jsonschema.Schema
-	// consumed holds the answered interrupts of visits that have since
-	// finished. Their responses went to those visits and must not be
-	// handed to a later visit of the node (reached via loop-back
-	// routing), and a repeated answer to one of them resumes nothing.
+	// consumed holds the answered interrupts of activations that have
+	// since completed. Their responses went to those activations and
+	// must not be handed to a later visit of the node (reached via
+	// loop-back routing), and a repeated answer to one of them resumes
+	// nothing.
 	consumed map[string]struct{}
 	branch   string
 	finished bool
@@ -103,7 +127,9 @@ type nodeScanState struct {
 }
 
 // consumeResolved marks every answered interrupt as consumed. Called
-// when the node finishes a visit.
+// when history records that an activation of the node completed. Output
+// alone does not count: until the activation completes, a rerun after
+// its next pause or after a failure still needs the answers.
 func (s *nodeScanState) consumeResolved() {
 	for id := range s.resolved {
 		if s.consumed == nil {
@@ -113,14 +139,15 @@ func (s *nodeScanState) consumeResolved() {
 	}
 }
 
-// reopen forgets a consumed interrupt that a later visit raises again
-// under the same ID, so the new pause waits for its own answer.
+// reopen forgets the answer to an interrupt that the node raises again
+// under the same ID, so the new pause waits for its own answer. The
+// count goes too: the next answer is the first one for this pause.
+// Mirrors adk-python _reconstruct_node_states, which drops the resolved
+// response whenever an interrupt ID shows up again.
 func (s *nodeScanState) reopen(id string) {
-	if _, ok := s.consumed[id]; !ok {
-		return
-	}
 	delete(s.consumed, id)
 	delete(s.resolved, id)
+	delete(s.resolvedCount, id)
 }
 
 func (s *nodeScanState) addInterrupt(id string) {
@@ -281,7 +308,6 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			if hasOutput || ev.CustomMetadata[workflowNodeCompletedKey] == true {
 				sf.branch = ev.Branch
 				sf.finished, sf.failed = true, false
-				sf.consumeResolved()
 			} else if outcome := workflowNodeOutcome(ev); outcome != "" {
 				sf.branch = ev.Branch
 				sf.finished = false
@@ -289,6 +315,9 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 				// pause was persisted. Its interrupt still owns the resume;
 				// cancellation must not replace that pause with a failure.
 				sf.failed = outcome != workflowNodeCancelledOutcome || len(unresolvedInterrupts(sf)) == 0
+			}
+			if completionRecorded(ev) {
+				sf.consumeResolved()
 			}
 		}
 		for _, id := range ev.LongRunningToolIDs {
@@ -462,7 +491,8 @@ func rerunsOnResume(node Node) bool {
 // validateResolved validates each surviving (last-wins) response
 // against its declared schema and returns the responses keyed by
 // interrupt ID. A superseded invalid payload never reaches here, and
-// neither does a response an earlier visit of the node consumed.
+// neither does a response that a completed activation of the node
+// consumed.
 func validateResolved(scan *nodeScanState) (map[string]any, error) {
 	resumed := map[string]any{}
 	for id, resp := range scan.resolved {

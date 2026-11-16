@@ -63,6 +63,11 @@ var ErrNothingToResume = errors.New("workflow: no waiting node matched the suppl
 //     scheduled again with the response delivered via
 //     ctx.ResumedInput. Successful completion clears the consumed
 //     responses; reconstructed history retains the completed result.
+//     The completion is recorded in history, so a later visit of the
+//     node (via loop-back routing) does not get the responses again
+//     and a repeated answer to them yields ErrNothingToResume. Until
+//     the node completes, a rerun after a further pause or a failure
+//     still gets them.
 //     - A handoff node is set to NodeCompleted and its response is
 //     routed to its successors without re-running the asker; a
 //     duplicate Resume then matches no waiting node and yields
