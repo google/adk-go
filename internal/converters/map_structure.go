@@ -15,6 +15,7 @@
 package converters
 
 import (
+	"bytes"
 	"encoding/json"
 )
 
@@ -47,6 +48,27 @@ func FromMapStructure[T any](data map[string]any) (*T, error) {
 
 	var zero T
 	if err := json.Unmarshal(bytes, &zero); err != nil {
+		return nil, err
+	}
+	return &zero, nil
+}
+
+// FromMapStructureStrict is FromMapStructure that fails on a key T has no
+// field for. Like FromMapStructure, it also fails on a value of the wrong type
+// for its field, including a negative or fractional number for an unsigned
+// integer field. A shell agent decodes its stored agent state with it, as
+// adk-python validates a stored state against a model that forbids extra keys
+// (agents/base_agent.py, BaseAgentState).
+func FromMapStructureStrict[T any](data map[string]any) (*T, error) {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var zero T
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&zero); err != nil {
 		return nil, err
 	}
 	return &zero, nil

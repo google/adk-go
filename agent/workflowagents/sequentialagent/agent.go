@@ -19,11 +19,13 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"slices"
 	"sync"
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
+	"google.golang.org/adk/v2/internal/converters"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
@@ -59,6 +61,21 @@ func (s *seqAgent) FindAgent(name string) agent.Agent {
 // In a resumable run (runner.Config.Resumable), the agent stops after
 // the sub-agent whose event pauses the invocation, once that sub-agent's
 // events end.
+//
+// A resumable run also records its progress in the session. Before it starts
+// each sub-agent, the agent yields an event without content whose
+// Actions.AgentState is the checkpoint {"current_sub_agent": <sub-agent name>},
+// and after the last sub-agent it yields an event with Actions.EndOfAgent set.
+// It yields no end event when a sub-agent pauses the invocation or fails, or
+// when the caller stops early. Resuming the invocation (runner.WithInvocationID,
+// or a function response to a paused call) restarts at the sub-agent the last
+// checkpoint names, without writing that checkpoint again, so the sub-agents
+// before it do not run again; a checkpoint whose name is empty means every
+// sub-agent has run, and one whose name is no longer a sub-agent restarts at
+// the first sub-agent. A checkpoint with other keys or values of the wrong
+// type makes the run fail with an error. An agent with no sub-agents yields
+// nothing, not even the end event. A run that is not resumable yields neither
+// kind of event.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.AgentConfig.Run != nil {
 		return nil, fmt.Errorf("SequentialAgent doesn't allow custom Run implementations")
@@ -97,15 +114,65 @@ type liveRunner interface {
 	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
 }
 
+// sequentialState is the checkpoint a SequentialAgent writes in a resumable
+// run: the sub-agent it is about to start, or "" once every sub-agent has run.
+// It is adk-python's SequentialAgentState (agents/sequential_agent.py).
+type sequentialState struct {
+	CurrentSubAgent string `json:"current_sub_agent"`
+}
+
+// restartIndex returns where Run starts and whether the first sub-agent's
+// checkpoint is already in the session. Without a stored state it starts at
+// 0. A stored state restarts at the sub-agent it names, after the last
+// sub-agent when it names none, and at 0 when the name is no longer a
+// sub-agent (agents/sequential_agent.py, _get_start_index; adk-python also
+// logs a warning there). Graph narrowing (utils.GraphResumeIndexes) overrides
+// the stored state. A stored state of the wrong shape is an error.
+func restartIndex(ctx agent.InvocationContext, rc *runconfig.RunConfig, subAgents []agent.Agent) (start int, resuming bool, err error) {
+	name := ctx.Agent().Name()
+	if raw, ok := rc.AgentState(name); ok {
+		st, err := converters.FromMapStructureStrict[sequentialState](raw)
+		if err != nil {
+			return 0, false, fmt.Errorf("sequential agent %q: stored agent state: %w", name, err)
+		}
+		resuming = true
+		if st.CurrentSubAgent == "" {
+			start = len(subAgents)
+		} else if i := slices.IndexFunc(subAgents, func(a agent.Agent) bool { return a.Name() == st.CurrentSubAgent }); i >= 0 {
+			start = i
+		}
+	}
+	if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+		start, resuming = indexes[0], false
+	}
+	return start, resuming, nil
+}
+
 func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		subAgents := ctx.Agent().SubAgents()
-		if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
-			subAgents = subAgents[indexes[0]:]
+		if len(subAgents) == 0 {
+			return
 		}
+		name := ctx.Agent().Name()
 		rc := runconfig.FromContext(ctx)
 		resumable := rc != nil && rc.Resumable
-		for _, subAgent := range subAgents {
+		start, resuming, err := restartIndex(ctx, rc, subAgents)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		for i := start; i < len(subAgents); i++ {
+			subAgent := subAgents[i]
+			// On a resume the checkpoint naming the first sub-agent is already
+			// in the session (agents/sequential_agent.py).
+			if resumable && !resuming {
+				state := map[string]any{"current_sub_agent": subAgent.Name()}
+				if !yield(llminternal.NewAgentStateEvent(ctx, name, state), nil) {
+					return
+				}
+			}
+			resuming = false
 			paused := false
 			for event, err := range subAgent.Run(utils.PassErrRelay(ctx, subAgent)) {
 				// A failed sub-agent ends the sequence, as in adk-python: later
@@ -120,6 +187,9 @@ func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Ev
 			if paused {
 				return
 			}
+		}
+		if resumable {
+			yield(llminternal.NewEndOfAgentEvent(ctx, name), nil)
 		}
 	}
 }

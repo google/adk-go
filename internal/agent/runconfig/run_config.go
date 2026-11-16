@@ -35,7 +35,7 @@ const (
 // RunConfig carries the per-invocation runtime settings that the flow needs but
 // that are not part of any single agent's configuration. It is stored on the Go
 // context by the runner and must be used by pointer: it holds the invocation's
-// model-call counter.
+// model-call counter and its record of ended agents and agent states.
 type RunConfig struct {
 	StreamingMode StreamingMode
 	Live          *agent.LiveRunConfig
@@ -64,10 +64,10 @@ type RunConfig struct {
 	// resumable. A context without a RunConfig is not resumable.
 	Resumable bool
 
-	// AgentStates is the snapshot of agent states the runner rebuilt from the
-	// session when it resumed the invocation on the classic path, keyed by
-	// agent name. Nil otherwise. Read it, never write it.
-	AgentStates map[string]map[string]any
+	// runs records which agents ended in this invocation and which hold a
+	// restorable state. The runner seeds it with SeedAgentRuns when it resumes
+	// the invocation on the classic path; see agent_runs.go.
+	runs agentRuns
 
 	// NodePath reports whether the run entered through the runner's node
 	// path (an LlmAgent or node root). Only that entry sets it. On a

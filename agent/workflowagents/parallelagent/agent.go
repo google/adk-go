@@ -20,13 +20,18 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
+	"sync"
 	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/converters"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
@@ -47,12 +52,15 @@ type Config struct {
 // - Generating multiple responses for review by a subsequent evaluation agent.
 //
 // If a direct sub-agent yields an event with Actions.Escalate, the agent yields
-// that event, cancels the remaining branches and ends. If an error that counts
-// (see below) has already been recorded by then, the agent yields the first
-// such error instead of the event. If no direct sub-agent escalates and a
-// branch fails, the agent yields the error errgroup keeps, which is the first
-// one a branch returned. That can differ from the first one to count, because a
-// branch returns its error only after its sub-agent has finished cleaning up.
+// that event, asks that sub-agent for no further event, cancels the remaining
+// branches and waits for them to return. A sub-agent must return once its
+// context is canceled, or the ParallelAgent waits for it forever. If an error
+// that counts (see below) has already been recorded by then, the agent yields
+// the first such error instead of the event. If no direct sub-agent escalates
+// and a branch fails, the agent yields the error errgroup keeps, which is the
+// first one a branch returned. That can differ from the first one to count,
+// because a branch returns its error only after its sub-agent has finished
+// cleaning up.
 //
 // An error counts once a direct sub-agent yields it, including an error a
 // SequentialAgent or LoopAgent sub-agent passes up from its own sub-agents. An
@@ -68,6 +76,26 @@ type Config struct {
 // inside them, counts. Neither does the context error a branch ends with when
 // it is canceled while handing over an event. Escalations from deeper agents
 // are passed through and do not stop this agent.
+//
+// In a resumable run (runner.Config.Resumable), the ParallelAgent first
+// yields an agent-state event with an empty state, authored by itself, before
+// any sub-agent starts. It does not start a sub-agent that has already ended
+// in the invocation. It yields an end-of-agent event once every sub-agent has
+// ended, or after an escalation by a direct sub-agent. Agents built by
+// llmagent, sequentialagent, loopagent and parallelagent record their end
+// themselves; a sub-agent built with [agent.New] has to call
+// [agent.RecordEndOfAgent] when its Run is finished, or the ParallelAgent
+// yields no end-of-agent event. A graph workflow agent built by
+// workflowagent.New records no end, and its Run cannot be given the call: a
+// resumable ParallelAgent that contains one yields its end-of-agent event only
+// after an escalation by a direct sub-agent, and resuming the invocation runs
+// the workflow again, even when it finished in an earlier turn. No
+// end-of-agent event follows a sub-agent's error, a stop by the caller, or an
+// event that pauses the invocation (a long-running function call); after a
+// pause the other sub-agents still run to completion. Resuming the invocation
+// runs only the sub-agents whose end-of-agent event is not in the session, and
+// yields no second agent-state event; a record made by agent.RecordEndOfAgent
+// is not stored, so such a sub-agent runs again.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.AgentConfig.Run != nil {
 		return nil, fmt.Errorf("ParallelAgent doesn't allow custom Run implementations")
@@ -91,133 +119,193 @@ func New(cfg Config) (agent.Agent, error) {
 	return parallelAgent, nil
 }
 
+// parallelState is the stored state of a ParallelAgent. It is always empty, as
+// adk-python's BaseAgentState is; decoding into it rejects any key.
+type parallelState struct{}
+
+// asksParentToExit reports whether ev is an escalation by one of the direct
+// sub-agents named in direct. An escalation that a nested agent re-yields
+// keeps its deeper author and does not count (agents/parallel_agent.py).
+func asksParentToExit(ev *session.Event, direct map[string]bool) bool {
+	return ev.Actions.Escalate && direct[ev.Author]
+}
+
+// allEnded reports whether every agent in subAgents has ended in the run of
+// rc.
+func allEnded(rc *runconfig.RunConfig, subAgents []agent.Agent) bool {
+	return !slices.ContainsFunc(subAgents, func(a agent.Agent) bool { return !rc.AgentEnded(a.Name()) })
+}
+
 func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-	curAgent := ctx.Agent()
-
-	// Cancelable so an early consumer stop aborts each sub-agent's in-flight Run
-	// promptly. Teardown still runs to completion and the iterator waits for it
-	// (see the deferred cleanup), so a sub-agent that blocks in teardown blocks run.
-	subAgentsCtx, cancelSubAgents := context.WithCancel(ctx)
-
-	var (
-		errGroup, errGroupCtx = errgroup.WithContext(subAgentsCtx)
-		doneChan              = make(chan bool)
-		resultsChan           = make(chan result)
-		// The first error to count: one a sub-agent yielded, or one a
-		// ParallelAgent below reported through the relay. It is recorded
-		// before that sub-agent's Run unwinds. The escalation path
-		// seals it with errSealed, so errors from the branches it cancels are
-		// neither recorded nor reported.
-		firstErr atomic.Pointer[error]
-	)
-
-	subAgents := ctx.Agent().SubAgents()
-	if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
-		selected := make([]agent.Agent, 0, len(indexes))
-		for _, i := range indexes {
-			selected = append(selected, subAgents[i])
+	return func(yield func(*session.Event, error) bool) {
+		curAgent := ctx.Agent()
+		all := curAgent.SubAgents()
+		if len(all) == 0 {
+			return
 		}
-		subAgents = selected
-	}
-	subAgentNames := make(map[string]bool, len(subAgents))
-	for _, subAgent := range subAgents {
-		subAgentNames[subAgent.Name()] = true
-		branch := fmt.Sprintf("%s.%s", curAgent.Name(), subAgent.Name())
-		if ctx.Branch() != "" {
-			branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
-		}
-		errGroup.Go(func() error {
-			wrap := func(err error) error {
-				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)
+		rc := runconfig.FromContext(ctx)
+		resumable := rc != nil && rc.Resumable
+		if resumable {
+			if raw, ok := rc.AgentState(curAgent.Name()); ok {
+				if _, err := converters.FromMapStructureStrict[parallelState](raw); err != nil {
+					yield(nil, fmt.Errorf("parallel agent %q: stored agent state: %w", curAgent.Name(), err))
+					return
+				}
+			} else if !yield(llminternal.NewAgentStateEvent(ctx, curAgent.Name(), map[string]any{}), nil) {
+				return
 			}
-			onErr := func(err error) {
-				err = wrap(err)
-				// Once an error is recorded, this agent yields an error unless
-				// its caller stops reading first: this one in place of an
-				// escalation, or otherwise the one
-				// errGroup.Wait returns, which is the first a branch returns and
-				// may be a different one. An enclosing ParallelAgent would get
-				// an error only after that Wait, so report this one there now.
-				if firstErr.CompareAndSwap(nil, &err) {
-					utils.ReportErr(ctx, err)
+		}
+
+		// Cancelable so an early consumer stop aborts each sub-agent's in-flight Run
+		// promptly. Teardown still runs to completion and the iterator waits for it
+		// (see stop), so a sub-agent that blocks in teardown blocks run.
+		subAgentsCtx, cancelSubAgents := context.WithCancel(ctx)
+
+		var (
+			errGroup, errGroupCtx = errgroup.WithContext(subAgentsCtx)
+			doneChan              = make(chan bool)
+			resultsChan           = make(chan result)
+			// The first error to count: one a sub-agent yielded, or one a
+			// ParallelAgent below reported through the relay. It is recorded
+			// before that sub-agent's Run unwinds. The escalation path
+			// seals it with errSealed, so errors from the branches it cancels are
+			// neither recorded nor reported.
+			firstErr atomic.Pointer[error]
+		)
+
+		subAgents := all
+		if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+			selected := make([]agent.Agent, 0, len(indexes))
+			for _, i := range indexes {
+				selected = append(selected, all[i])
+			}
+			subAgents = selected
+		}
+		subAgents = slices.DeleteFunc(slices.Clone(subAgents), func(a agent.Agent) bool { return rc.AgentEnded(a.Name()) })
+		for _, sa := range subAgents {
+			branch := fmt.Sprintf("%s.%s", curAgent.Name(), sa.Name())
+			if ctx.Branch() != "" {
+				branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
+			}
+			subAgent := sa
+			errGroup.Go(func() error {
+				wrap := func(err error) error {
+					return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)
+				}
+				onErr := func(err error) {
+					err = wrap(err)
+					// Once an error is recorded, this agent yields an error unless
+					// its caller stops reading first: this one in place of an
+					// escalation, or otherwise the one errGroup.Wait returns,
+					// which is the first a branch returns and may be a different
+					// one. An enclosing ParallelAgent would get an error only
+					// after that Wait, so report this one there now.
+					if firstErr.CompareAndSwap(nil, &err) {
+						utils.ReportErr(ctx, err)
+					}
+				}
+				// A ParallelAgent below subAgent reports its error here as soon as
+				// it records it, if every agent in between passed the relay on.
+				relayCtx := utils.WithErrRelay(errGroupCtx, ctx.InvocationID(), subAgent, onErr)
+				// Keep the parent's isolation scope: a workflow node stamps it on
+				// every event the branches emit, and the LLM history filter matches
+				// it exactly, so an unscoped branch would lose its own turns.
+				subCtx := icontext.NewInvocationContext(relayCtx, icontext.InvocationContextParams{
+					Artifacts:      ctx.Artifacts(),
+					Memory:         ctx.Memory(),
+					Session:        ctx.Session(),
+					Branch:         branch,
+					IsolationScope: ctx.IsolationScope(),
+					Agent:          subAgent,
+					UserContent:    ctx.UserContent(),
+					RunConfig:      ctx.RunConfig(),
+					InvocationID:   ctx.InvocationID(),
+				})
+
+				if err := runSubAgent(subCtx, subAgent, resultsChan, doneChan, onErr); err != nil {
+					return wrap(err)
+				}
+
+				return nil
+			})
+		}
+
+		go func() {
+			if err := errGroup.Wait(); err != nil {
+				select {
+				case resultsChan <- result{err: err}:
+				case <-doneChan:
 				}
 			}
-			// A ParallelAgent below subAgent reports its error here as soon as
-			// it records it, if every agent in between passed the relay on.
-			relayCtx := utils.WithErrRelay(errGroupCtx, ctx.InvocationID(), subAgent, onErr)
-			// Keep the parent's isolation scope: a workflow node stamps it on
-			// every event the branches emit, and the LLM history filter matches
-			// it exactly, so an unscoped branch would lose its own turns.
-			subCtx := icontext.NewInvocationContext(relayCtx, icontext.InvocationContextParams{
-				Artifacts:      ctx.Artifacts(),
-				Memory:         ctx.Memory(),
-				Session:        ctx.Session(),
-				Branch:         branch,
-				IsolationScope: ctx.IsolationScope(),
-				Agent:          subAgent,
-				UserContent:    ctx.UserContent(),
-				RunConfig:      ctx.RunConfig(),
-				InvocationID:   ctx.InvocationID(),
-			})
+			close(resultsChan)
+		}()
 
-			if err := runSubAgent(subCtx, subAgent, resultsChan, doneChan, onErr); err != nil {
-				return wrap(err)
-			}
-
-			return nil
-		})
-	}
-
-	go func() {
-		if err := errGroup.Wait(); err != nil {
-			select {
-			case resultsChan <- result{err: err}:
-			case <-doneChan:
-			}
-		}
-		close(resultsChan)
-	}()
-
-	return func(yield func(*session.Event, error) bool) {
 		// Await sub-agent goroutines (incl. their deferred teardown) before
 		// returning, even on early stop: cancel them, then drain resultsChan, which
 		// the funnel closes only after errGroup.Wait(). Otherwise teardown can
 		// outlive the run and touch an already-ended context.
-		defer func() {
+		stop := sync.OnceFunc(func() {
 			cancelSubAgents()
 			close(doneChan)
 			for range resultsChan { // drain until the funnel closes resultsChan
 			}
-		}()
+		})
+		defer stop()
 
+		direct := make(map[string]bool, len(all))
+		for _, sa := range all {
+			direct[sa.Name()] = true
+		}
+		var escalated, paused, failed, stopped bool
 		for res := range resultsChan {
-			// An escalation from a direct sub-agent ends this agent, as in
-			// adk-python (_asks_this_agent_to_exit). Escalations from deeper agents
-			// are passed through and do not end this one. The deferred cleanup
-			// cancels the remaining branches.
-			if res.event != nil && res.event.Actions.Escalate && subAgentNames[res.event.Author] {
+			if res.event != nil && asksParentToExit(res.event, direct) {
 				// An error a sub-agent yielded before this point must still reach
 				// the caller, even if that sub-agent is still unwinding or the
 				// caller has canceled since. Sealing the record keeps errors from
 				// the branches canceled below out of it.
 				if !firstErr.CompareAndSwap(nil, &errSealed) {
+					failed = true
 					yield(nil, *firstErr.Load())
-					return
+					break
 				}
-				yield(res.event, nil)
-				return
+				if !yield(res.event, nil) {
+					stopped = true
+				}
+				if resumable && llminternal.ShouldPauseInvocation(ctx, res.event) {
+					paused = true
+				}
+				// The escalating branch's ack stays open, so it never asks its
+				// sub-agent for another event; stop cancels it.
+				escalated = true
+				break
 			}
-
-			shouldContinue := yield(res.event, res.err)
-
+			if res.err != nil {
+				failed = true
+			}
+			// Recorded before the escalation check: once yield has returned
+			// false, nothing may be yielded again, the end event included.
+			if !yield(res.event, res.err) {
+				stopped = true
+			}
+			if resumable && res.event != nil && llminternal.ShouldPauseInvocation(ctx, res.event) {
+				paused = true
+			}
 			// Signal sub-agent that event processing (including session append) is complete
 			if res.ackChan != nil {
 				close(res.ackChan)
 			}
-
-			if !shouldContinue {
+			if stopped {
 				break
 			}
+		}
+		// The end event is decided only after every branch has returned, so
+		// the ends they recorded are all visible.
+		stop()
+		if stopped || failed || paused || !resumable {
+			return
+		}
+		if escalated || allEnded(rc, all) {
+			yield(llminternal.NewEndOfAgentEvent(ctx, curAgent.Name()), nil)
 		}
 	}
 }

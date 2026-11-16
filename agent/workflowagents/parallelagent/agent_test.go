@@ -1787,7 +1787,7 @@ func TestParallelAgent_PausedBranchLeavesSiblingLlmAgentEnded(t *testing.T) {
 		got = append(got, describePauseEvent(ev))
 	}
 
-	want := []string{"pauser:FC(ask_human)", "sibling:sibling done", "sibling:END"}
+	want := []string{"root:", "pauser:FC(ask_human)", "sibling:sibling done", "sibling:END"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("events (-want +got):\n%s", diff)
 	}

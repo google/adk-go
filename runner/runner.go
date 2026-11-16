@@ -1129,15 +1129,16 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 
 		ctx = parentmap.ToContext(ctx, r.parents)
-		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
+		rc := &runconfig.RunConfig{
 			StreamingMode:  runconfig.StreamingMode(cfg.StreamingMode),
 			MaxLLMCalls:    runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 			HTTPOptions:    cfg.HTTPOptions,
 			Labels:         cfg.Labels,
 			CustomMetadata: runMetadata,
 			Resumable:      r.resumable,
-			AgentStates:    agentStates,
-		})
+		}
+		rc.SeedAgentRuns(agentStates, ended)
+		ctx = runconfig.ToContext(ctx, rc)
 		ctx = r.withPluginManager(ctx)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
 		ctx = r.withContextCache(ctx)
