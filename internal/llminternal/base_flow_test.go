@@ -30,6 +30,7 @@ import (
 	icontext "google.golang.org/adk/internal/context"
 	"google.golang.org/adk/internal/toolinternal"
 	"google.golang.org/adk/model"
+	"google.golang.org/adk/platform"
 	"google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
 )
@@ -870,6 +871,60 @@ func TestCallLLMStreamingModeWithoutContextRunConfig(t *testing.T) {
 	}
 }
 
+// A response without content is dropped unless it carries something the
+// caller needs, such as grounding metadata from a search tool.
+func TestRunKeepsGroundingOnlyResponse(t *testing.T) {
+	grounding := &genai.GroundingMetadata{WebSearchQueries: []string{"test query"}}
+	tests := []struct {
+		name string
+		resp *model.LLMResponse
+		want []*genai.GroundingMetadata
+	}{
+		{
+			name: "grounding metadata only",
+			resp: &model.LLMResponse{GroundingMetadata: grounding},
+			want: []*genai.GroundingMetadata{grounding},
+		},
+		{
+			name: "empty response",
+			resp: &model.LLMResponse{},
+			want: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						yield(tc.resp, nil)
+					}
+				},
+			}
+			f := &Flow{Model: m}
+			ctx := icontext.NewInvocationContext(
+				t.Context(),
+				icontext.InvocationContextParams{
+					InvocationID: "inv_1",
+					Agent:        &mockAgent{name: "agent_1"},
+					RunConfig:    &agent.RunConfig{},
+				},
+			)
+
+			var got []*genai.GroundingMetadata
+			for ev, err := range f.Run(ctx) {
+				if err != nil {
+					t.Fatalf("Run() yielded error: %v", err)
+				}
+				got = append(got, ev.GroundingMetadata)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("Run() event grounding metadata mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestFlowRunPartialLastEvent verifies that Flow.Run does not return an error
 // when the last event from runOneStep has Partial=true.
 // This is a regression test for https://github.com/google/adk-go/issues/600.
@@ -1133,6 +1188,118 @@ func TestCallLLMSkipsNilResponseAndContinues(t *testing.T) {
 			}
 			if gotResponses != tc.wantResponses {
 				t.Fatalf("callLLM() yielded %d responses, want %d", gotResponses, tc.wantResponses)
+			}
+		})
+	}
+}
+
+// A model response event's id comes from the UUID provider on the context.
+// generateContent draws an id when a response arrives, never ahead of one, and
+// draws one id for each distinct event id across the responses it yields.
+func TestGenerateContentDrawsOneIDPerEvent(t *testing.T) {
+	text := func(s string) *genai.Content { return genai.NewContentFromText(s, genai.RoleModel) }
+	type yielded struct {
+		resp *model.LLMResponse
+		err  error
+	}
+	boom := errors.New("boom")
+	for _, tc := range []struct {
+		name      string
+		responses []yielded
+		wantIDs   []string
+		wantErrs  []error
+		wantDraws int
+	}{
+		{
+			name:      "no responses draw no ids",
+			responses: nil,
+			wantIDs:   nil,
+			wantErrs:  nil,
+			wantDraws: 0,
+		},
+		{
+			name:      "an empty response draws no ids",
+			responses: []yielded{{}},
+			wantIDs:   nil,
+			wantErrs:  nil,
+			wantDraws: 0,
+		},
+		{
+			name:      "one complete response",
+			responses: []yielded{{resp: &model.LLMResponse{Content: text("done")}}},
+			wantIDs:   []string{"id-1"},
+			wantErrs:  []error{nil},
+			wantDraws: 1,
+		},
+		{
+			name: "partials share the id of the response that completes them",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("a"), Partial: true}},
+				{resp: &model.LLMResponse{Content: text("b"), Partial: true}},
+				{resp: &model.LLMResponse{Content: text("ab")}},
+			},
+			wantIDs:   []string{"id-1", "id-1", "id-1"},
+			wantErrs:  []error{nil, nil, nil},
+			wantDraws: 1,
+		},
+		{
+			name: "each complete response gets its own id",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("first")}},
+				{resp: &model.LLMResponse{Content: text("second")}},
+			},
+			wantIDs:   []string{"id-1", "id-2"},
+			wantErrs:  []error{nil, nil},
+			wantDraws: 2,
+		},
+		{
+			name: "an error ends the id",
+			responses: []yielded{
+				{resp: &model.LLMResponse{Content: text("a"), Partial: true}},
+				{resp: &model.LLMResponse{Content: text("b"), Partial: true}, err: boom},
+				{resp: &model.LLMResponse{Content: text("after")}},
+			},
+			wantIDs:   []string{"id-1", "id-1", "id-2"},
+			wantErrs:  []error{nil, boom, nil},
+			wantDraws: 2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			draws := 0
+			ctx := platform.WithUUIDProvider(t.Context(), func() string {
+				draws++
+				return fmt.Sprintf("id-%d", draws)
+			})
+			invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{InvocationID: "inv-1"})
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+					return func(yield func(*model.LLMResponse, error) bool) {
+						for _, r := range tc.responses {
+							if !yield(r.resp, r.err) {
+								return
+							}
+						}
+					}
+				},
+			}
+
+			var gotIDs []string
+			var gotErrs []error
+			for resp, err := range generateContent(invCtx, m, &model.LLMRequest{}, true) {
+				gotIDs = append(gotIDs, resp.eventID)
+				gotErrs = append(gotErrs, err)
+			}
+
+			if diff := cmp.Diff(tc.wantIDs, gotIDs); diff != "" {
+				t.Errorf("event ids mismatch (-want +got):\n%s", diff)
+			}
+			sameErr := cmp.Comparer(func(a, b error) bool { return a == b })
+			if diff := cmp.Diff(tc.wantErrs, gotErrs, sameErr); diff != "" {
+				t.Errorf("errors mismatch (-want +got):\n%s", diff)
+			}
+			if draws != tc.wantDraws {
+				t.Errorf("drew %d ids from the provider, want %d", draws, tc.wantDraws)
 			}
 		})
 	}

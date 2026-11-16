@@ -17,9 +17,11 @@ package llminternal_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
@@ -362,6 +364,114 @@ func TestProgressiveSSEPreservesThoughtSignature(t *testing.T) {
 	}
 }
 
+// TestTextThoughtSignatureSurvivesMerge checks that a thought signature
+// streamed on a text chunk stays on the part the chunks are merged into, as
+// adk-python's StreamingResponseAggregator keeps it.
+func TestTextThoughtSignatureSurvivesMerge(t *testing.T) {
+	textChunk := func(text string, thought bool, signature string, finishReason genai.FinishReason) *genai.GenerateContentResponse {
+		part := &genai.Part{Text: text, Thought: thought}
+		if signature != "" {
+			part.ThoughtSignature = []byte(signature)
+		}
+		return &genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{{
+				Content:      &genai.Content{Role: "model", Parts: []*genai.Part{part}},
+				FinishReason: finishReason,
+			}},
+		}
+	}
+	callChunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{Name: "lookup", Args: map[string]any{"q": "dog"}}},
+			}},
+			FinishReason: genai.FinishReasonStop,
+		}},
+	}
+	tests := []struct {
+		name   string
+		chunks []*genai.GenerateContentResponse
+		want   []*genai.Part
+	}{
+		{
+			name: "signature_on_first_chunk",
+			chunks: []*genai.GenerateContentResponse{
+				textChunk("At minute 5 ", false, "text-signature", ""),
+				textChunk("the presenter speaks.", false, "", genai.FinishReasonStop),
+			},
+			want: []*genai.Part{
+				{Text: "At minute 5 the presenter speaks.", ThoughtSignature: []byte("text-signature")},
+			},
+		},
+		{
+			name: "signature_on_later_chunk",
+			chunks: []*genai.GenerateContentResponse{
+				textChunk("At minute 5 ", false, "", ""),
+				textChunk("the presenter speaks.", false, "late-signature", genai.FinishReasonStop),
+			},
+			want: []*genai.Part{
+				{Text: "At minute 5 the presenter speaks.", ThoughtSignature: []byte("late-signature")},
+			},
+		},
+		{
+			name: "first_signature_of_a_run_wins",
+			chunks: []*genai.GenerateContentResponse{
+				textChunk("At minute 5 ", false, "first-signature", ""),
+				textChunk("the presenter speaks.", false, "second-signature", genai.FinishReasonStop),
+			},
+			want: []*genai.Part{
+				{Text: "At minute 5 the presenter speaks.", ThoughtSignature: []byte("first-signature")},
+			},
+		},
+		{
+			name: "thought_and_answer_keep_their_own_signatures",
+			chunks: []*genai.GenerateContentResponse{
+				textChunk("Let me check.", true, "thought-signature", ""),
+				textChunk("It is a dog.", false, "answer-signature", genai.FinishReasonStop),
+			},
+			want: []*genai.Part{
+				{Text: "Let me check.", Thought: true, ThoughtSignature: []byte("thought-signature")},
+				{Text: "It is a dog.", ThoughtSignature: []byte("answer-signature")},
+			},
+		},
+		{
+			// The function call still gets the signature too, as it did before
+			// the text part kept it.
+			name: "signed_text_then_unsigned_call",
+			chunks: []*genai.GenerateContentResponse{
+				textChunk("Let me look.", false, "text-signature", ""),
+				callChunk,
+			},
+			want: []*genai.Part{
+				{Text: "Let me look.", ThoughtSignature: []byte("text-signature")},
+				{
+					FunctionCall:     &genai.FunctionCall{Name: "lookup", Args: map[string]any{"q": "dog"}},
+					ThoughtSignature: []byte("text-signature"),
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aggregator := llminternal.NewStreamingResponseAggregator()
+			for _, chunk := range tt.chunks {
+				for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+					if err != nil {
+						t.Fatalf("unexpected error processing chunk: %v", err)
+					}
+				}
+			}
+			finalResponse := aggregator.Close()
+			if finalResponse == nil {
+				t.Fatal("expected a final aggregated response, got nil")
+			}
+			if diff := cmp.Diff(tt.want, finalResponse.Content.Parts); diff != "" {
+				t.Errorf("aggregated parts mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestProgressiveSSEHandlesEmptyFunctionCall(t *testing.T) {
 	aggregator := llminternal.NewStreamingResponseAggregator()
 	ctx := t.Context()
@@ -568,6 +678,77 @@ func TestStreamingFCChunkWithWillContinueButNoPartialArgs(t *testing.T) {
 	}
 }
 
+func TestStreamingFunctionCallContinuationCarriesCallID(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		closing *genai.FunctionCall
+	}{
+		{
+			name: "closing chunk with partial args",
+			closing: &genai.FunctionCall{
+				PartialArgs:  []*genai.PartialArg{{JsonPath: "$.y", StringValue: "val2"}},
+				WillContinue: new(false),
+			},
+		},
+		{
+			name:    "closing chunk that only ends the call",
+			closing: &genai.FunctionCall{WillContinue: new(false)},
+		},
+		{
+			name:    "empty closing chunk",
+			closing: &genai.FunctionCall{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			aggregator := llminternal.NewStreamingResponseAggregator()
+			chunks := []*genai.GenerateContentResponse{
+				{Candidates: []*genai.Candidate{{Content: &genai.Content{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+						Name:         "my_tool",
+						ID:           "explicit_fc_id_123",
+						PartialArgs:  []*genai.PartialArg{{JsonPath: "$.x", StringValue: "val1"}},
+						WillContinue: new(true),
+					}}},
+				}}}},
+				{Candidates: []*genai.Candidate{{
+					Content: &genai.Content{
+						Role:  genai.RoleModel,
+						Parts: []*genai.Part{{FunctionCall: tc.closing}},
+					},
+					FinishReason: genai.FinishReasonStop,
+				}}},
+			}
+
+			var partials []*model.LLMResponse
+			for _, chunk := range chunks {
+				for resp, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+					if err != nil {
+						t.Fatalf("ProcessResponse() error = %v", err)
+					}
+					partials = append(partials, resp)
+				}
+			}
+			final := aggregator.Close()
+
+			if len(partials) != 2 {
+				t.Fatalf("got %d partial responses, want 2", len(partials))
+			}
+			for i, resp := range partials {
+				if got := resp.Content.Parts[0].FunctionCall.ID; got != "explicit_fc_id_123" {
+					t.Errorf("partial response %d function call ID = %q, want %q", i, got, "explicit_fc_id_123")
+				}
+			}
+			if final == nil {
+				t.Fatal("Close() = nil, want the aggregated response")
+			}
+			if got := final.Content.Parts[0].FunctionCall.ID; got != "explicit_fc_id_123" {
+				t.Errorf("aggregated function call ID = %q, want %q", got, "explicit_fc_id_123")
+			}
+		})
+	}
+}
+
 type streamingMockModel struct {
 	streamChunks []*model.LLMResponse
 	callCount    int
@@ -730,6 +911,221 @@ func TestProgressiveSSEStreamingFunctionCalls(t *testing.T) {
 
 	if events[5].Partial || len(events[5].LLMResponse.Content.Parts) == 0 || events[5].LLMResponse.Content.Parts[0].Text != "Task completed." {
 		t.Errorf("expected task completed event 5")
+	}
+}
+
+func TestProgressiveSSEPartialsShareEventID(t *testing.T) {
+	mockModel := &streamingMockModel{
+		streamChunks: []*model.LLMResponse{
+			{Content: genai.NewContentFromText("Checking weather...", genai.RoleModel)},
+			{Content: genai.NewContentFromFunctionCall("get_weather", map[string]any{"location": "Tokyo"}, genai.RoleModel)},
+			{
+				Content:      genai.NewContentFromFunctionCall("get_weather", map[string]any{"location": "New York"}, genai.RoleModel),
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+	}
+	getWeatherTool, err := functiontool.New(functiontool.Config{
+		Name:        "get_weather",
+		Description: "get weather for location",
+	}, getWeather)
+	if err != nil {
+		t.Fatalf("functiontool.New() error = %v", err)
+	}
+	ag, err := llmagent.New(llmagent.Config{
+		Name:  "weather_agent",
+		Model: mockModel,
+		Tools: []tool.Tool{getWeatherTool},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	runner := testutil.NewTestAgentRunner(t, ag)
+	cfg := agent.RunConfig{StreamingMode: agent.StreamingModeSSE}
+
+	events, err := testutil.CollectEvents(runner.RunContentWithConfig(t, "session-1", genai.NewContentFromText("What is the weather?", "user"), cfg))
+	if err != nil {
+		t.Fatalf("CollectEvents() error = %v", err)
+	}
+
+	// Events 0-2 are the partial chunks of the first model call and event 3 is
+	// the aggregated response that completes them. Event 4 is the function
+	// response and event 5 comes from a second model call.
+	if len(events) != 6 {
+		t.Fatalf("got %d events, want 6", len(events))
+	}
+	for i := 1; i <= 3; i++ {
+		if events[i].ID != events[0].ID {
+			t.Errorf("events[%d].ID = %q, want %q (the id of the partial events[0])", i, events[i].ID, events[0].ID)
+		}
+	}
+	if events[4].ID == events[0].ID {
+		t.Errorf("function response events[4].ID = %q, want an id different from the model response", events[4].ID)
+	}
+	if events[5].ID == events[0].ID {
+		t.Errorf("second model call events[5].ID = %q, want an id different from the first call", events[5].ID)
+	}
+}
+
+func TestProgressiveSSETextStreamSharesEventID(t *testing.T) {
+	mockModel := &streamingMockModel{
+		streamChunks: []*model.LLMResponse{
+			{Content: genai.NewContentFromText("Hello ", genai.RoleModel)},
+			{Content: genai.NewContentFromText("world", genai.RoleModel)},
+			{Content: genai.NewContentFromText("!", genai.RoleModel), FinishReason: genai.FinishReasonStop},
+		},
+	}
+	ag, err := llmagent.New(llmagent.Config{Name: "text_stream_agent", Model: mockModel})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	runner := testutil.NewTestAgentRunner(t, ag)
+	cfg := agent.RunConfig{StreamingMode: agent.StreamingModeSSE}
+
+	events, err := testutil.CollectEvents(runner.RunContentWithConfig(t, "session-1", genai.NewContentFromText("Say hello.", "user"), cfg))
+	if err != nil {
+		t.Fatalf("CollectEvents() error = %v", err)
+	}
+
+	// Three partial chunks, then the aggregated "Hello world!".
+	if len(events) != 4 {
+		t.Fatalf("got %d events, want 4", len(events))
+	}
+	if events[3].Partial {
+		t.Fatalf("events[3].Partial = true, want the aggregated final response")
+	}
+	for i := 1; i <= 3; i++ {
+		if events[i].ID != events[0].ID {
+			t.Errorf("events[%d].ID = %q, want %q (the id of the partial events[0])", i, events[i].ID, events[0].ID)
+		}
+	}
+}
+
+// twoFinalResponsesModel yields two complete responses from its first call,
+// text and then a function call, and a closing text from any later call.
+type twoFinalResponsesModel struct{ calls int }
+
+func (m *twoFinalResponsesModel) Name() string { return "two-finals-mock" }
+
+func (m *twoFinalResponsesModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	m.calls++
+	responses := []*model.LLMResponse{{
+		Content:      genai.NewContentFromText("Done.", genai.RoleModel),
+		FinishReason: genai.FinishReasonStop,
+	}}
+	if m.calls == 1 {
+		responses = []*model.LLMResponse{
+			{Content: genai.NewContentFromText("Let me check the weather.", genai.RoleModel)},
+			{
+				Content:      genai.NewContentFromFunctionCall("get_weather", map[string]any{"location": "Tokyo"}, genai.RoleModel),
+				FinishReason: genai.FinishReasonStop,
+			},
+		}
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for _, resp := range responses {
+			if !yield(resp, nil) {
+				return
+			}
+		}
+	}
+}
+
+func TestCompleteResponsesOfOneModelCallGetDistinctEventIDs(t *testing.T) {
+	getWeatherTool, err := functiontool.New(functiontool.Config{
+		Name:        "get_weather",
+		Description: "get weather for location",
+	}, getWeather)
+	if err != nil {
+		t.Fatalf("functiontool.New() error = %v", err)
+	}
+	ag, err := llmagent.New(llmagent.Config{
+		Name:  "distinct_id_agent",
+		Model: &twoFinalResponsesModel{},
+		Tools: []tool.Tool{getWeatherTool},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	runner := testutil.NewTestAgentRunner(t, ag)
+	cfg := agent.RunConfig{StreamingMode: agent.StreamingModeSSE}
+
+	events, err := testutil.CollectEvents(runner.RunContentWithConfig(t, "session-1", genai.NewContentFromText("What is the weather?", "user"), cfg))
+	if err != nil {
+		t.Fatalf("CollectEvents() error = %v", err)
+	}
+
+	// The text, the function call, the function response and "Done.".
+	if len(events) != 4 {
+		t.Fatalf("got %d events, want 4", len(events))
+	}
+	if events[0].ID == events[1].ID {
+		t.Errorf("text and function call events share ID %q, want distinct ids", events[0].ID)
+	}
+}
+
+// errorMidStreamModel streams a partial response, then an error, given with
+// errResponse, and then a complete response.
+type errorMidStreamModel struct{ errResponse *model.LLMResponse }
+
+func (m *errorMidStreamModel) Name() string { return "error-mid-stream-mock" }
+
+func (m *errorMidStreamModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if !yield(&model.LLMResponse{Content: genai.NewContentFromText("par1", genai.RoleModel), Partial: true}, nil) {
+			return
+		}
+		if !yield(m.errResponse, errors.New("boom")) {
+			return
+		}
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("after error", genai.RoleModel), FinishReason: genai.FinishReasonStop}, nil)
+	}
+}
+
+func TestRecoveredModelErrorGetsItsOwnEventID(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		errResponse *model.LLMResponse
+	}{
+		{name: "error without a response"},
+		{
+			name:        "error with a partial response",
+			errResponse: &model.LLMResponse{Content: genai.NewContentFromText("par2", genai.RoleModel), Partial: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ag, err := llmagent.New(llmagent.Config{
+				Name:  "recovering_agent",
+				Model: &errorMidStreamModel{errResponse: tc.errResponse},
+				OnModelErrorCallbacks: []llmagent.OnModelErrorCallback{
+					func(agent.CallbackContext, *model.LLMRequest, error) (*model.LLMResponse, error) {
+						return &model.LLMResponse{Content: genai.NewContentFromText("recovered", genai.RoleModel)}, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New() error = %v", err)
+			}
+			runner := testutil.NewTestAgentRunner(t, ag)
+			cfg := agent.RunConfig{StreamingMode: agent.StreamingModeSSE}
+
+			events, err := testutil.CollectEvents(runner.RunContentWithConfig(t, "session-1", genai.NewContentFromText("Hi.", genai.RoleUser), cfg))
+			if err != nil {
+				t.Fatalf("CollectEvents() error = %v", err)
+			}
+
+			// The partial "par1", the recovered response, then "after error". The
+			// last two are saved, so their ids must differ.
+			if len(events) != 3 {
+				t.Fatalf("got %d events, want 3", len(events))
+			}
+			if got := events[1].Content.Parts[0].Text; got != "recovered" {
+				t.Fatalf("events[1] text = %q, want %q", got, "recovered")
+			}
+			if events[2].ID == events[1].ID {
+				t.Errorf("events[2].ID = %q, want an id different from the recovered events[1]", events[2].ID)
+			}
+		})
 	}
 }
 
@@ -1149,6 +1545,88 @@ func TestUsageMetadataRetainedWhenLaterChunkHasNoUsageMetadata(t *testing.T) {
 	}
 }
 
+// TestCloseKeepsModelVersion checks that the aggregated response reports the
+// model version of the stream's last chunk, as a non-streamed response does
+// and as adk-python's StreamingResponseAggregator.close does.
+func TestCloseKeepsModelVersion(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	const modelVersion = "gemini-2.5-flash-001"
+	chunks := []*genai.GenerateContentResponse{
+		{
+			Candidates: []*genai.Candidate{{Content: genai.NewContentFromText("Hello", "model")}},
+		},
+		{
+			Candidates: []*genai.Candidate{{
+				Content:      genai.NewContentFromText(" world", "model"),
+				FinishReason: genai.FinishReasonStop,
+			}},
+			ModelVersion: modelVersion,
+		},
+	}
+
+	for _, chunk := range chunks {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error processing chunk: %v", err)
+			}
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected a final aggregated response, got nil")
+	}
+	if finalResponse.ModelVersion != modelVersion {
+		t.Errorf("final response ModelVersion = %q, want %q", finalResponse.ModelVersion, modelVersion)
+	}
+}
+
+// Verify that a later chunk with non-nil UsageMetadata correctly overwrites an earlier one.
+func TestUsageMetadataUpdatedByLaterChunkWithValue(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	// Chunk 1: initial usage.
+	chunk1 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "Hello"}}}},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{TotalTokenCount: 100},
+	}
+
+	// Chunk 2: updated usage (cumulative), as typically sent by Gemini.
+	chunk2 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content:      &genai.Content{Role: "model", Parts: []*genai.Part{{Text: " world"}}},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{TotalTokenCount: 200},
+	}
+
+	for _, chunk := range []*genai.GenerateContentResponse{chunk1, chunk2} {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+	}
+
+	final := aggregator.Close()
+	if final == nil {
+		t.Fatal("expected a final aggregated response, got nil")
+	}
+	if final.UsageMetadata == nil {
+		t.Fatal("UsageMetadata should not be nil")
+	}
+	if final.UsageMetadata.TotalTokenCount != 200 {
+		t.Errorf("expected TotalTokenCount=200 (from last chunk), got %d", final.UsageMetadata.TotalTokenCount)
+	}
+}
+
 func TestFinishReasonUnexpectedToolCallPreservesErrorCode(t *testing.T) {
 	aggregator := llminternal.NewStreamingResponseAggregator()
 	ctx := t.Context()
@@ -1364,5 +1842,40 @@ func TestProcessResponseNilCandidate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProcessResponse yielded error: %v", err)
 		}
+	}
+}
+
+// TestProcessResponseNilPart is the part-level sibling of the nil-candidate
+// regression above: a nil part in a chunk must be skipped like the empty part
+// the filter already targets, not panic the reflect check — and skipping it
+// must leave the aggregation of the surrounding text parts undisturbed (a
+// guard that also flushed the text buffer would split "a", nil, "b" into two
+// parts instead of one).
+func TestProcessResponseNilPart(t *testing.T) {
+	tests := []struct {
+		name     string
+		parts    []*genai.Part
+		wantText string
+	}{
+		{"nil first", []*genai.Part{nil, genai.NewPartFromText("kept")}, "kept"},
+		{"nil last", []*genai.Part{genai.NewPartFromText("kept"), nil}, "kept"},
+		{"text on both sides aggregates across the nil", []*genai.Part{genai.NewPartFromText("a"), nil, genai.NewPartFromText("b")}, "ab"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aggregator := llminternal.NewStreamingResponseAggregator()
+			chunk := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+				Content: &genai.Content{Parts: tt.parts},
+			}}}
+			for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+				if err != nil {
+					t.Fatalf("ProcessResponse yielded error: %v", err)
+				}
+			}
+			response := aggregator.Close()
+			if response == nil || response.Content == nil || len(response.Content.Parts) != 1 || response.Content.Parts[0].Text != tt.wantText {
+				t.Fatalf("aggregated response = %+v, want the single text part %q", response, tt.wantText)
+			}
+		})
 	}
 }

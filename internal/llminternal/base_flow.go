@@ -346,6 +346,15 @@ func isResumable(err error) bool {
 		strings.Contains(errStr, "GoAway")
 }
 
+// isEmptyLiveResponse reports whether r carries nothing worth an event, as
+// the response built from the Live API's setupComplete does. adk-python's live
+// flow skips the same responses.
+func isEmptyLiveResponse(r *model.LLMResponse) bool {
+	return r.Content == nil && r.ErrorCode == "" && !r.Interrupted && !r.TurnComplete &&
+		r.InputTranscription == nil && r.OutputTranscription == nil && r.UsageMetadata == nil &&
+		r.SessionResumptionHandle == "" && r.GroundingMetadata == nil
+}
+
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	clientProvider, ok := f.Model.(interface {
 		Client() *genai.Client
@@ -539,6 +548,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 									sess.audioMgr.CacheOutput(ctx, part.InlineData.Data, part.InlineData.MIMEType)
 								}
 							}
+						}
+						if isEmptyLiveResponse(resp) {
+							continue
 						}
 						ev := session.NewEventWithContext(ctx, ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()
@@ -762,10 +774,11 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, err)
 				return
 			}
-			// Skip the model response event if there is no content and no error code.
+			// Skip the model response event if it carries no content, error code,
+			// interruption or grounding metadata.
 			// This is needed for the code executor to trigger another loop according to
 			// adk-python src/google/adk/flows/llm_flows/base_llm_flow.py BaseLlmFlow._postprocess_async.
-			if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted {
+			if resp.Content == nil && resp.ErrorCode == "" && !resp.Interrupted && resp.GroundingMetadata == nil {
 				continue
 			}
 
@@ -1040,12 +1053,21 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 		}
 		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
 		defer endSpanAndTrackResult()
+		// The partial chunks of a streamed response share one event id with
+		// the response that completes them. A complete response ends the id,
+		// and so does an error, because an on-model-error callback may turn
+		// it into a saved event. A new id is drawn when the next response
+		// arrives, never ahead of one.
+		var eventID string
 		for resp, err := range m.GenerateContent(ctx, req, useStream) {
 			if resp == nil && err == nil {
 				// Third-party model implementations may yield an empty response.
 				continue
 			}
-			response := newResponseWithEventID(ctx, resp)
+			if eventID == "" {
+				eventID = platform.NewUUID(ctx)
+			}
+			response := &responseWithEventID{resp, eventID}
 			lastResponse = *response
 			lastErr = err
 			// Complete the span immediately to avoid capturing the upstream yield processing time.
@@ -1058,6 +1080,10 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 			}
 			if !yield(response, err) {
 				return
+			}
+			// resp is non-nil whenever err is nil; the empty case is skipped above.
+			if err != nil || !resp.Partial {
+				eventID = ""
 			}
 		}
 	}

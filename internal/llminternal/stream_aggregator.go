@@ -41,6 +41,12 @@ type streamingResponseAggregator struct {
 	sequence             []*genai.Part
 	currentTextBuffer    string
 	currentTextIsThought bool
+	// currentTextSignature is the first thought signature streamed on a chunk
+	// of currentTextBuffer, for the part the buffer is flushed into. Unlike
+	// adk-python, the same signature is also still carried forward to the next
+	// function call that has none (currentThoughtSignature), which the turn
+	// history needs on Vertex AI.
+	currentTextSignature []byte
 	finishReason         genai.FinishReason
 
 	currentFunctionName             string
@@ -99,7 +105,8 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 
 	for _, part := range llmResponse.Content.Parts {
 		// gemini 3 in streaming returns a last response with an empty part. We will filter it out.
-		if reflect.ValueOf(*part).IsZero() {
+		// A nil part would panic the reflect check below, so skip it the same way.
+		if part == nil || reflect.ValueOf(*part).IsZero() {
 			continue
 		}
 		if len(part.ThoughtSignature) > 0 {
@@ -113,6 +120,9 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 				s.currentTextIsThought = part.Thought
 			}
 			s.currentTextBuffer += part.Text
+			if len(part.ThoughtSignature) > 0 && s.currentTextSignature == nil {
+				s.currentTextSignature = part.ThoughtSignature
+			}
 		} else if part.FunctionCall != nil {
 			// Process function call (handles both streaming Args and non-streaming Args
 			s.processFunctionCallPart(part)
@@ -143,6 +153,10 @@ func (s *streamingResponseAggregator) processFunctionCallPart(part *genai.Part) 
 			}
 			s.currentThoughtSignature = nil
 			s.sequence = append(s.sequence, part)
+		} else if part.FunctionCall.ID == "" {
+			// A nameless chunk continues the call being streamed, for example by
+			// only setting WillContinue to false, so it carries that call's id.
+			part.FunctionCall.ID = s.currentFunctionID
 		}
 	}
 }
@@ -154,6 +168,8 @@ func (s *streamingResponseAggregator) processStreamingFunctionCallPart(part *gen
 	}
 	if part.FunctionCall.ID != "" {
 		s.currentFunctionID = part.FunctionCall.ID
+	} else {
+		part.FunctionCall.ID = s.currentFunctionID
 	}
 	for _, arg := range part.FunctionCall.PartialArgs {
 		segments, ok := parseJSONPath(arg.JsonPath)
@@ -409,12 +425,14 @@ func (s *streamingResponseAggregator) flushTextBufferToSequence() {
 	// Check if buffer has content (strings.Builder.Len() is efficient)
 	if s.currentTextBuffer != "" {
 		s.sequence = append(s.sequence, &genai.Part{
-			Text:    s.currentTextBuffer,
-			Thought: s.currentTextIsThought,
+			Text:             s.currentTextBuffer,
+			Thought:          s.currentTextIsThought,
+			ThoughtSignature: s.currentTextSignature,
 		})
 		// Reset the buffer and the state
 		s.currentTextBuffer = ""
 		s.currentTextIsThought = false
+		s.currentTextSignature = nil
 	}
 }
 
@@ -466,6 +484,7 @@ func (s *streamingResponseAggregator) Close() *model.LLMResponse {
 			ErrorCode:         errorCode,
 			ErrorMessage:      errorMessage,
 			FinishReason:      s.finishReason,
+			ModelVersion:      s.response.ModelVersion,
 		}
 	}
 	return nil

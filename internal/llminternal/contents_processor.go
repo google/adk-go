@@ -73,11 +73,9 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch string, even
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
 	for _, ev := range events {
-		content := utils.Content(ev)
 		// Skip events without content or generated neither by user nor
 		// by model, UNLESS they have transcriptions.
-		if (content == nil || content.Role == "" || len(content.Parts) == 0) &&
-			ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil {
+		if isEmptyEvent(ev) {
 			// TODO: log a bad event with content but no Role is skipped
 			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
 			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
@@ -692,6 +690,13 @@ func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*ses
 		if !eventBelongsToBranch(branch, event) {
 			continue
 		}
+		// An event that gives the model nothing to read is left out of the
+		// contents, so it cannot start the turn either: it would slice out
+		// the input before it (matching adk-python's
+		// _should_include_event_in_context gate here).
+		if isEmptyEvent(event) {
+			continue
+		}
 		// An event discarded by foreign conversion cannot start a visible
 		// turn: keep searching so it does not slice out the preceding input.
 		if isOtherAgentReply(agentName, event) && ConvertForeignEvent(event) == nil {
@@ -704,6 +709,14 @@ func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*ses
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
 	// but that may be a bug.
 	return buildContentsDefault(agentName, branch, events)
+}
+
+// isEmptyEvent reports whether ev gives the model nothing to read: no content
+// with a role and parts and no transcription.
+func isEmptyEvent(ev *session.Event) bool {
+	content := utils.Content(ev)
+	return (content == nil || content.Role == "" || len(content.Parts) == 0) &&
+		ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil
 }
 
 func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
