@@ -206,14 +206,20 @@ func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext
 		return nil, err
 	}
 
+	// The key is read before converting. A keyed response that fails to convert
+	// can still be recovered by an AfterRequestCallback, and the run goes on
+	// with a remote agent that has marked itself as an ADK server.
+	if a2aEvent != nil {
+		if _, ok := a2aEvent.Meta()[adka2a.ADKExtensionURI]; ok {
+			p.adkExtension = true
+		}
+	}
+
 	event, err := adka2a.ToSessionEventWithParts(ctx, a2aEvent, p.partConverter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert a2aEvent: %w", err)
 	}
 
-	if _, ok := a2aEvent.Meta()[adka2a.ADKExtensionURI]; ok {
-		p.adkExtension = true
-	}
 	if event != nil {
 		p.updateCustomMetadata(event, a2aEvent)
 		if !p.adkExtension {
@@ -279,10 +285,13 @@ func (p *a2aAgentRunProcessor) updateCustomMetadata(event *session.Event, respon
 // carries parts that are not thoughts, so only the answer reaches the user.
 // An event made only of thoughts is kept as it is.
 //
-// Interim status updates are skipped. Their text parts are marked as thoughts
-// to report progress, while their function call and data parts are not, so
-// filtering them would drop that text. adk-python marks every part of an
-// interim update as a thought, so its filter keeps the whole update too.
+// Interim task snapshots and status updates are skipped: every state except the
+// terminal ones and input-required. adk-go marks the text parts of an interim
+// status update as thoughts to report progress, while its function call and
+// data parts are not, so filtering would drop that text. adk-python marks every
+// part of a submitted or working update or snapshot as a thought, so its filter
+// keeps them whole. It does filter auth-required and unspecified ones, which
+// adk-go skips because it marks their text parts the same way.
 //
 // Artifact chunks that aggregatePartial reassembles, appended chunks and chunks
 // before the last one, are skipped as well. adk-go stores the reassembled
@@ -297,7 +306,11 @@ func dropThoughtsBesideAnswer(a2aEvent a2a.Event, event *session.Event) {
 			return
 		}
 	case *a2a.TaskStatusUpdateEvent:
-		if !e.Status.State.Terminal() && e.Status.State != a2a.TaskStateInputRequired {
+		if isInterimState(e.Status.State) {
+			return
+		}
+	case *a2a.Task:
+		if isInterimState(e.Status.State) {
 			return
 		}
 	}
@@ -308,4 +321,11 @@ func dropThoughtsBesideAnswer(a2aEvent a2a.Event, event *session.Event) {
 	if len(answer) > 0 {
 		event.Content.Parts = answer
 	}
+}
+
+// isInterimState reports whether a task in the state is neither finished nor
+// waiting for input, the two cases where adka2a converts its message as the
+// final response.
+func isInterimState(state a2a.TaskState) bool {
+	return !state.Terminal() && state != a2a.TaskStateInputRequired
 }

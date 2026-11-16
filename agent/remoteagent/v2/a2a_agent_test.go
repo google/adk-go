@@ -284,6 +284,16 @@ func TestRemoteAgent_ADK2ADK(t *testing.T) {
 			},
 		},
 		{
+			name: "thoughts beside an answer are kept - no streaming mode",
+			remoteEvents: []*session.Event{
+				{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{Text: "plan", Thought: true}, {Text: "the answer"}}, Role: genai.RoleModel}}},
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: &genai.Content{Parts: []*genai.Part{{Text: "plan", Thought: true}, {Text: "the answer"}}, Role: genai.RoleModel}, TurnComplete: true},
+			},
+			noStreaming: true,
+		},
+		{
 			name: "code execution",
 			remoteEvents: []*session.Event{
 				{LLMResponse: model.LLMResponse{Content: genai.NewContentFromExecutableCode("print('hello')", genai.LanguagePython, genai.RoleModel)}},
@@ -664,6 +674,20 @@ func TestRemoteAgent_ADK2A2A(t *testing.T) {
 			},
 			wantResponses: []model.LLMResponse{
 				{Content: genai.NewContentFromText("the answer", genai.RoleModel), TurnComplete: true},
+			},
+		},
+		{
+			name: "working task snapshot keeps thoughts beside text",
+			remoteEvents: []a2a.Event{
+				&a2a.Task{Status: a2a.TaskStatus{
+					State:   a2a.TaskStateWorking,
+					Message: a2a.NewMessage(a2a.MessageRoleAgent, newThoughtPart("plan"), a2a.NewTextPart("draft")),
+				}},
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantResponses: []model.LLMResponse{
+				{Content: &genai.Content{Parts: []*genai.Part{{Text: "plan", Thought: true}, {Text: "draft"}}, Role: genai.RoleModel}},
+				{TurnComplete: true},
 			},
 		},
 		{
@@ -1520,6 +1544,53 @@ func TestRemoteAgent_AfterRequestCallbackGetsNilEventOnDefaultConverterError(t *
 				t.Errorf("callback calls = %d, want 1", calls)
 			}
 		})
+	}
+}
+
+func TestRemoteAgent_ADKExtensionKeyOnRecoveredConversionError(t *testing.T) {
+	task := &a2a.Task{ID: a2a.NewTaskID(), ContextID: a2a.NewContextID()}
+	keyedUpdate := a2a.NewStatusUpdateEvent(task, a2a.TaskStateWorking, a2a.NewMessageForTask(a2a.MessageRoleAgent, task, a2a.NewTextPart("rejected")))
+	keyedUpdate.Metadata = map[string]any{adka2a.ADKExtensionURI: true}
+	wholeArtifact := &a2a.TaskArtifactUpdateEvent{
+		TaskID:    task.ID,
+		ContextID: task.ContextID,
+		Artifact:  &a2a.Artifact{ID: a2a.NewArtifactID(), Parts: a2a.ContentParts{newThoughtPart("plan"), a2a.NewTextPart("the answer")}},
+		LastChunk: true,
+	}
+	executor := newA2AEventReplay(t, []a2a.Event{keyedUpdate, wholeArtifact, newFinalStatusUpdate(task, a2a.TaskStateCompleted)})
+	server := startA2AServer(executor)
+	card := &a2a.AgentCard{SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(server.URL, a2a.TransportProtocolJSONRPC)}, Capabilities: a2a.AgentCapabilities{Streaming: true}}
+	remoteAgent := utils.Must(NewA2A(A2AConfig{
+		Name:      "a2a",
+		AgentCard: card,
+		A2APartConverter: func(ctx context.Context, a2aEvent a2a.Event, part *a2a.Part) (*genai.Part, error) {
+			if part.Text() == "rejected" {
+				return nil, fmt.Errorf("unsupported part")
+			}
+			return adka2a.ToGenAIPart(part)
+		},
+		AfterRequestCallbacks: []AfterA2ARequestCallback{
+			func(ctx agent.Context, req *a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error) {
+				if err == nil {
+					return nil, nil
+				}
+				return &session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("recovered", genai.RoleModel), Partial: true}}, nil
+			},
+		},
+	}))
+
+	gotEvents, err := runAndCollect(newInvocationContext(t, []*session.Event{newUserHello()}), remoteAgent)
+	if err != nil {
+		t.Fatalf("agent.Run() error = %v", err)
+	}
+
+	wantResponses := []model.LLMResponse{
+		{Content: genai.NewContentFromText("recovered", genai.RoleModel), Partial: true},
+		{Content: &genai.Content{Parts: []*genai.Part{{Text: "plan", Thought: true}, {Text: "the answer"}}, Role: genai.RoleModel}},
+		{TurnComplete: true},
+	}
+	if diff := cmp.Diff(wantResponses, toLLMResponses(gotEvents), cmpopts.IgnoreFields(model.LLMResponse{}, "CustomMetadata")); diff != "" {
+		t.Fatalf("agent.Run() wrong result (+got,-want):\n%s", diff)
 	}
 }
 
