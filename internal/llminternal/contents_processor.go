@@ -73,24 +73,50 @@ func buildContentsDefault(agentName, invocationBranch string, events []*session.
 func buildContentsDefaultWithCallSource(agentName, invocationBranch string, events, allEvents []*session.Event) ([]*genai.Content, error) {
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
-	for _, ev := range events {
+	// visible reports whether the agent sees ev at all: it has content (or a
+	// transcription), and it is on the agent's branch and not excluded.
+	visible := func(ev *session.Event) bool {
 		// Skip events without content or generated neither by user nor
 		// by model, UNLESS they have transcriptions.
 		if isEmptyEvent(ev) {
 			// TODO: log a bad event with content but no Role is skipped
 			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
 			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
-			continue
+			return false
 		}
-		// Skip events that do not belong to the current branch.
 		// TODO: can we use a richer type for branch (e.g. []string) instead of using string prefix test?
-		if !eventBelongsToBranch(invocationBranch, ev) {
+		return eventBelongsToBranch(invocationBranch, ev) &&
+			!shouldExcludeEvent(ev)
+	}
+	// The author of the latest visible call with each id, filled in as the
+	// events are read so a response pairs with the call before it. When events
+	// is a suffix of allEvents, as in current-turn-only mode, the calls
+	// before the suffix are recorded first, so a response in the suffix pairs
+	// the same way it does when the whole session is built.
+	callAuthors := make(map[string]string)
+	if len(events) > 0 {
+		if start := slices.Index(allEvents, events[0]); start > 0 {
+			for _, ev := range allEvents[:start] {
+				if visible(ev) {
+					recordCallAuthors(callAuthors, ev)
+				}
+			}
+		}
+	}
+	for _, ev := range events {
+		if !visible(ev) {
 			continue
 		}
-		if shouldExcludeEvent(ev) {
-			continue
-		}
-		if isOtherAgentReply(agentName, ev) {
+		// A function response to a call another agent made is that agent's
+		// exchange, so it is presented as context like the call itself, as in
+		// adk-python's _get_contents. Left as a raw response, its call is
+		// missing from this agent's history. Unlike adk-python, which keeps the
+		// last author seen for an id anywhere in the history, a response pairs
+		// with the latest visible call before it, so a later call that reuses
+		// the id does not turn the agent's own finished exchange into context.
+		foreign := isOtherAgentReply(agentName, ev) || answersOtherAgentCall(agentName, ev, callAuthors)
+		recordCallAuthors(callAuthors, ev)
+		if foreign {
 			// ConvertForeignEvent returns nil to signal the foreign event
 			// should be dropped (e.g. a thought-only turn).
 			if converted := ConvertForeignEvent(ev); converted != nil {
@@ -687,14 +713,48 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 //	In multi-agent scenarios, the "current turn" for an agent starts from an
 //	actual user or from another agent.
 func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*session.Event) ([]*genai.Content, error) {
-	// Find the latest event that starts the current turn and process from there
+	// The IDs of every call in the session, an empty one included. Full-history
+	// mode pairs a result and a call that both lack an ID, so none mode tracks
+	// them too; skipping them, as adk-python does, would leave such a result
+	// with no call once a user turn sits between them.
+	callIDs := make(map[string]struct{})
+	for _, event := range events {
+		for _, call := range utils.FunctionCalls(utils.Content(event)) {
+			callIDs[call.ID] = struct{}{}
+		}
+	}
+	// Find the latest event that starts the current turn and process from there.
+	// A tool result the caller posted back (a long-running tool's, say) is not
+	// a turn start, and the turn has to reach back to the call it answers, past
+	// any user turn sent while the tool was pending. This follows adk-python's
+	// _get_current_turn_contents, in a different order: adk-python records a
+	// posted-back result before its _should_include_event_in_context check.
+	// Here a result counts only once it passes the branch check below, and call
+	// IDs come from every event.
+	unanswered := make(map[string]struct{})
+	// The latest hand-over skipped as a turn start below, if any.
+	handover := -1
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
+		for _, call := range utils.FunctionCalls(utils.Content(event)) {
+			delete(unanswered, call.ID)
+		}
 		// Events from a sibling branch are not part of this agent's
 		// current turn. In parallel delegations, a sibling may append its
 		// response after this agent's user input; treating that response as
 		// the pivot would slice the input out of the request.
 		if !eventBelongsToBranch(branch, event) {
+			continue
+		}
+		if isSubmittedToolResult(event) {
+			for _, response := range utils.FunctionResponses(utils.Content(event)) {
+				if _, ok := callIDs[response.ID]; ok {
+					unanswered[response.ID] = struct{}{}
+				}
+			}
+			continue
+		}
+		if len(unanswered) > 0 {
 			continue
 		}
 		// An event that gives the model nothing to read is left out of the
@@ -709,9 +769,27 @@ func buildContentsCurrentTurnContextOnly(agentName, branch string, events []*ses
 		if isOtherAgentReply(agentName, event) && ConvertForeignEvent(event) == nil {
 			continue
 		}
-		if event.Author == "user" || isOtherAgentReply(agentName, event) {
-			return buildContentsDefaultWithCallSource(agentName, branch, events[i:], events)
+		if event.Author != "user" && !isOtherAgentReply(agentName, event) {
+			continue
 		}
+		// A transfer_to_agent hand-over continues the turn of the request it
+		// hands over, so it stays in the prompt as context rather than
+		// starting the turn and slicing that request out. As in adk-python's
+		// _is_direct_transfer.
+		if isDirectTransfer(event) {
+			if handover < 0 {
+				handover = i
+			}
+			continue
+		}
+		return buildContentsDefaultWithCallSource(agentName, branch, events[i:], events)
+	}
+	// With no earlier turn start, the turn starts at the latest hand-over, the
+	// event it started at before hand-overs were skipped. Falling back to the
+	// whole session instead would show the agent its own earlier turns.
+	// adk-python returns [] here.
+	if handover >= 0 {
+		return buildContentsDefaultWithCallSource(agentName, branch, events[handover:], events)
 	}
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
 	// but that may be a bug.
@@ -726,8 +804,48 @@ func isEmptyEvent(ev *session.Event) bool {
 		ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil
 }
 
+// isSubmittedToolResult reports whether ev is a tool result the caller posted
+// back as a user-authored function response.
+func isSubmittedToolResult(ev *session.Event) bool {
+	return ev.Author == "user" && len(utils.FunctionResponses(utils.Content(ev))) > 0
+}
+
+// isDirectTransfer reports whether ev is a transfer_to_agent call or the
+// response that carries out the transfer.
+func isDirectTransfer(ev *session.Event) bool {
+	if ev.Actions.TransferToAgent != "" {
+		return true
+	}
+	return slices.ContainsFunc(utils.FunctionCalls(utils.Content(ev)), func(call *genai.FunctionCall) bool {
+		return call.Name == transferAgentName
+	})
+}
+
 func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 	return ev.Author != currentAgentName && ev.Author != "user"
+}
+
+// recordCallAuthors sets ev's author as the author of each function call with
+// an id in ev. A call without one is skipped, so a response without an id never
+// matches it.
+func recordCallAuthors(authors map[string]string, ev *session.Event) {
+	for _, call := range utils.FunctionCalls(utils.Content(ev)) {
+		if call.ID != "" {
+			authors[call.ID] = ev.Author
+		}
+	}
+}
+
+// answersOtherAgentCall reports whether ev holds a function response to a call
+// that an agent other than currentAgentName made.
+func answersOtherAgentCall(currentAgentName string, ev *session.Event, callAuthors map[string]string) bool {
+	for _, response := range utils.FunctionResponses(utils.Content(ev)) {
+		author, ok := callAuthors[response.ID]
+		if ok && author != currentAgentName && author != "user" {
+			return true
+		}
+	}
+	return false
 }
 
 // ConvertForeignEvent converts an event authored by another agent as
@@ -735,7 +853,8 @@ func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 // This is to provide another agent's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
 // the previous agent's reply, etc.
-// Thought parts are omitted; a non-empty event containing only thoughts returns nil.
+// Thought parts and standalone metadata are omitted. A non-empty event with no
+// remaining payload returns nil.
 func ConvertForeignEvent(ev *session.Event) *session.Event {
 	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {
@@ -775,7 +894,10 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 			converted.Parts = append(converted.Parts, &genai.Part{
 				Text: fmt.Sprintf("[%s] `%s` tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response)),
 			})
-		default: // fallback to the original part for non-text and non-functionCall parts.
+		case p.InlineData != nil || p.FileData != nil || p.ExecutableCode != nil || p.CodeExecutionResult != nil ||
+			p.ToolCall != nil || p.ToolResponse != nil:
+			// Keep Go's server-tool parts alongside Python's media/code
+			// payloads. Standalone metadata has no relay payload.
 			converted.Parts = append(converted.Parts, p)
 		}
 	}
