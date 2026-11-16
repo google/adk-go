@@ -92,7 +92,14 @@ func (c *ReadonlyContext) UserID() string {
 	return c.InvocationContext.Session().UserID()
 }
 
+// AgentName implements agent.ReadonlyContext. It asks the invocation context
+// for its own AgentName when it has one, so that an invocation context that
+// answers AgentName but returns nil from Agent still has a name; otherwise it
+// names the invocation's agent.
 func (c *ReadonlyContext) AgentName() string {
+	if n, ok := c.InvocationContext.(interface{ AgentName() string }); ok {
+		return n.AgentName()
+	}
 	return c.InvocationContext.Agent().Name()
 }
 
