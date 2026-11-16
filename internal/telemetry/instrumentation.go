@@ -20,9 +20,8 @@ import (
 	"iter"
 	"time"
 
-	"go.opentelemetry.io/otel/trace"
-
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -60,17 +59,23 @@ func InstrumentInvocation(ctx context.Context, root AgentLike, sessionID string,
 // partial instead.
 func InstrumentGenerateContent[T any](ctx context.Context, params GenerateContentParams, response func(T) (*model.LLMResponse, string), call func(context.Context) iter.Seq2[T, error]) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {
+		// The tracer chooses the span's times. When they cannot be read, the
+		// duration is timed on the context's clock instead.
+		fallbackStart := platform.Now(ctx)
+		ctx, span := startGenerateContentSpan(ctx, params)
+		// Chunks are timed on the wall clock, from the span's start when it
+		// can be read.
 		start := time.Now()
-		ctx, span := startGenerateContentSpan(ctx, params, trace.WithTimestamp(start))
+		if s, ok := span.(interface{ StartTime() time.Time }); ok {
+			start = s.StartTime()
+		}
 		logRequest(ctx, params.Request, params.Backend)
 		details := operationDetails{span: span}
 		details.noteLLMRequest(params.Request)
-		// Both span formats record the same metrics. adk-python's older schema
-		// records no inference token metrics; Go has no older metrics to keep.
 		metrics := newClientInference(params, start)
 
 		var result generateContentResult
-		var spanEnd time.Time
+		var duration time.Duration
 		ended := false
 		end := func() {
 			if ended {
@@ -80,8 +85,8 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 			traceGenerateContentResult(span, result)
 			details.noteLLMRequest(params.Request)
 			details.emit(ctx, params, result)
-			spanEnd = time.Now()
-			span.End(trace.WithTimestamp(spanEnd))
+			span.End()
+			duration = elapsed(span, fallbackStart, platform.Now(ctx))
 		}
 		// Set on every path that returns normally, so the deferred function
 		// can tell a panic apart.
@@ -94,7 +99,7 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 				metrics.observe(ctx, nil, errInferencePanicked, true)
 			}
 			end()
-			metrics.record(ctx, spanEnd)
+			metrics.record(ctx, duration)
 		}()
 		legacy := useLegacySchema()
 		for v, err := range call(ctx) {

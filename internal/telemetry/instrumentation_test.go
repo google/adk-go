@@ -29,11 +29,16 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/anthropicmodel"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -739,5 +744,140 @@ func TestInstrumentGenerateContent_MetricsFollowTheSpan(t *testing.T) {
 	}
 	if diff := cmp.Diff(shapes[otelSemconv136], shapes["otel_semconv_1_44"]); diff != "" {
 		t.Errorf("legacy metrics differ (-legacy +default):\n%s", diff)
+	}
+}
+
+// hostTracerProvider starts each span an hour before the context's platform
+// time unless the caller sets one. Unless unwrapped is set, it hides the SDK
+// span behind its own type, which ends at hostEnd unless the caller sets one.
+type hostTracerProvider struct {
+	trace.TracerProvider
+	unwrapped bool
+}
+
+func (p hostTracerProvider) Tracer(name string, opts ...trace.TracerOption) trace.Tracer {
+	return hostTracer{p.TracerProvider.Tracer(name, opts...), p.unwrapped}
+}
+
+type hostTracer struct {
+	trace.Tracer
+	unwrapped bool
+}
+
+func (t hostTracer) Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
+	opts = append([]trace.SpanStartOption{trace.WithTimestamp(platform.Now(ctx).Add(-time.Hour))}, opts...)
+	ctx, span := t.Tracer.Start(ctx, name, opts...)
+	if t.unwrapped {
+		return ctx, span
+	}
+	return ctx, hostSpan{span}
+}
+
+var hostEnd = time.Date(2000, 1, 2, 0, 0, 0, 0, time.UTC)
+
+type hostSpan struct{ trace.Span }
+
+func (s hostSpan) End(opts ...trace.SpanEndOption) {
+	s.Span.End(append([]trace.SpanEndOption{trace.WithTimestamp(hostEnd)}, opts...)...)
+}
+
+// When the span's times cannot be read, the tracer's times are left alone and
+// the duration is timed on the context's clock. Chunks stay on the wall clock.
+func TestInstrumentGenerateContent_TracerChoosesTimes(t *testing.T) {
+	t.Setenv(adkTelemetrySchemaVersionOptIn, "otel_semconv_1_44")
+	spans := tracetest.NewInMemoryExporter()
+	for _, tc := range []struct {
+		name    string
+		tp      trace.TracerProvider
+		wrapped bool
+	}{
+		{"wrapped span", hostTracerProvider{TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSyncer(spans))}, true},
+		{"sampled out", sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.NeverSample())), false},
+		{"no tracer", noop.NewTracerProvider(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := setupTestMeter(t)
+			OverrideTracerForTesting(t, tc.tp)
+			hostStart := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+			clock := hostStart
+			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return clock })
+			// The host's clock moves on while the model runs; the wall clock
+			// barely does.
+			call := func(context.Context) iter.Seq2[*model.LLMResponse, error] {
+				return func(yield func(*model.LLMResponse, error) bool) {
+					clock = clock.Add(time.Hour)
+					if !yield(&model.LLMResponse{Partial: true}, nil) {
+						return
+					}
+					clock = clock.Add(10 * time.Minute)
+					yield(&model.LLMResponse{Partial: true, FinishReason: genai.FinishReasonStop}, nil)
+				}
+			}
+			params := GenerateContentParams{ModelName: "m", Backend: genai.BackendGeminiAPI, Request: &model.LLMRequest{}, Stream: true}
+
+			for range InstrumentGenerateContent(ctx, params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) { //nolint:errcheck // the call yields no errors
+			}
+
+			got := collectMetrics(t, reader)
+			want := (time.Hour + 10*time.Minute).Seconds()
+			if p := got["gen_ai.client.inference.duration"]; len(p) != 1 || p[0].Value != want {
+				t.Errorf("duration = %+v, want one point of %vs", p, want)
+			}
+			// On the context's clock they would take an hour and ten minutes.
+			for _, name := range []string{"gen_ai.client.inference.time_to_first_chunk", "gen_ai.client.inference.time_per_output_chunk"} {
+				if p := got[name]; len(p) != 1 || p[0].Value >= time.Minute.Seconds() {
+					t.Errorf("%s = %+v, want one point of under a minute", name, p)
+				}
+			}
+			if !tc.wrapped {
+				return
+			}
+			ended := spans.GetSpans()
+			if len(ended) != 1 {
+				t.Fatalf("got %d ended spans, want 1", len(ended))
+			}
+			if want := hostStart.Add(-time.Hour); !ended[0].StartTime.Equal(want) {
+				t.Errorf("span start = %v, want the tracer's %v", ended[0].StartTime, want)
+			}
+			if !ended[0].EndTime.Equal(hostEnd) {
+				t.Errorf("span end = %v, want the tracer's %v", ended[0].EndTime, hostEnd)
+			}
+		})
+	}
+}
+
+// With a readable span, the duration is the span's own, whatever clock the
+// context carries.
+func TestInstrumentGenerateContent_ReadableSpanIgnoresContextClock(t *testing.T) {
+	t.Setenv(adkTelemetrySchemaVersionOptIn, "otel_semconv_1_44")
+	spans := setupTestTracer(t)
+	reader := setupTestMeter(t)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC) })
+	call := func(context.Context) iter.Seq2[*model.LLMResponse, error] {
+		return func(yield func(*model.LLMResponse, error) bool) { yield(&model.LLMResponse{}, nil) }
+	}
+	params := GenerateContentParams{ModelName: "m", Backend: genai.BackendGeminiAPI, Request: &model.LLMRequest{}}
+
+	for range InstrumentGenerateContent(ctx, params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) { //nolint:errcheck // the call yields no errors
+	}
+
+	span := spans.GetSpans()[0]
+	spanDuration := time.Duration(span.EndTime.UnixNano() - span.StartTime.UnixNano()).Seconds()
+	if d := collectMetrics(t, reader)["gen_ai.client.inference.duration"]; len(d) != 1 || d[0].Value != spanDuration {
+		t.Errorf("duration = %+v, want one point of the span's %vs", d, spanDuration)
+	}
+}
+
+// With a readable span start, the first chunk is timed from it.
+func TestInstrumentGenerateContent_FirstChunkFromSpanStart(t *testing.T) {
+	t.Setenv(adkTelemetrySchemaVersionOptIn, "otel_semconv_1_44")
+	reader := setupTestMeter(t)
+	OverrideTracerForTesting(t, hostTracerProvider{TracerProvider: sdktrace.NewTracerProvider(), unwrapped: true})
+	params := GenerateContentParams{ModelName: "m", Backend: genai.BackendGeminiAPI, Request: &model.LLMRequest{}, Stream: true}
+
+	generate(t, params, 0, modelStep{resp: &model.LLMResponse{Partial: true, FinishReason: genai.FinishReasonStop}})
+
+	if p := collectMetrics(t, reader)["gen_ai.client.inference.time_to_first_chunk"]; len(p) != 1 || p[0].Value < time.Hour.Seconds() {
+		t.Errorf("time_to_first_chunk = %+v, want one point of at least the hour since the span started", p)
 	}
 }

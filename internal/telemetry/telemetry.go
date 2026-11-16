@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -109,9 +110,23 @@ type GenerateContentParams struct {
 	Stream bool
 }
 
-// startGenerateContentSpan starts a new semconv generate_content span. Extra
-// start options apply after its attributes.
-func startGenerateContentSpan(ctx context.Context, params GenerateContentParams, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
+// elapsed is the ended span's duration from its own timestamps, or
+// fallbackEnd minus fallbackStart when the span does not expose them.
+func elapsed(span trace.Span, fallbackStart, fallbackEnd time.Time) time.Duration {
+	if s, ok := span.(interface {
+		StartTime() time.Time
+		EndTime() time.Time
+	}); ok {
+		// From wall-clock readings, without the monotonic one, so the result
+		// equals the duration exporters compute from the span's timestamps
+		// even when the system clock is adjusted while the span is open.
+		return s.EndTime().Round(0).Sub(s.StartTime().Round(0))
+	}
+	return fallbackEnd.Sub(fallbackStart)
+}
+
+// startGenerateContentSpan starts a new semconv generate_content span.
+func startGenerateContentSpan(ctx context.Context, params GenerateContentParams) (context.Context, trace.Span) {
 	modelName := params.ModelName
 	attrs := []attribute.KeyValue{
 		// Used by adk-web, can be removed once it reads the invocation id from invoke_agent span.
@@ -122,8 +137,7 @@ func startGenerateContentSpan(ctx context.Context, params GenerateContentParams,
 	if !useLegacySchema() {
 		attrs = append(attrs, providerName(params.ModelName, params.Backend))
 	}
-	opts = append([]trace.SpanStartOption{trace.WithAttributes(attrs...)}, opts...)
-	spanCtx, span := tracer().Start(ctx, fmt.Sprintf("generate_content %s", modelName), opts...)
+	spanCtx, span := tracer().Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(attrs...))
 	// After the sampling decision, not before: converting a whole conversation
 	// costs milliseconds, and on a span the sampler drops it buys nothing. The
 	// conventions list the attributes worth having at span creation for

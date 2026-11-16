@@ -36,7 +36,7 @@ var genAITokenModality = attribute.Key("gen_ai.token.modality")
 type clientInference struct {
 	params   GenerateContentParams
 	provider attribute.KeyValue
-	// start is when the call started, on the wall clock the span records.
+	// start is when the call started, which the first chunk is timed from.
 	start time.Time
 	// responses holds every response the call yielded, in order, including
 	// those yielded after the span ended.
@@ -92,10 +92,10 @@ func (c *clientInference) observe(ctx context.Context, resp *model.LLMResponse, 
 	c.lastChunk = now
 }
 
-// record records the duration and token usage of the whole call, given the
-// time its span ended. Every call records each of them once, failed calls
+// record records the duration and token usage of the whole call, given how
+// long it took. Every call records each of them once, failed calls
 // included; usage the call did not report counts as zero tokens.
-func (c *clientInference) record(ctx context.Context, end time.Time) {
+func (c *clientInference) record(ctx context.Context, elapsed time.Duration) {
 	var responseModel string
 	if len(c.responses) > 0 {
 		responseModel = cmp.Or(c.responses[len(c.responses)-1].ModelVersion, c.params.ModelName)
@@ -106,10 +106,7 @@ func (c *clientInference) record(ctx context.Context, end time.Time) {
 		histogramAttrs = append(slices.Clip(attrs), errorType(c.err))
 	}
 	histogram := metric.WithAttributes(histogramAttrs...)
-	// From wall-clock readings, without the monotonic one, so the metric equals
-	// the duration exporters compute from the span's timestamps even when the
-	// system clock is adjusted mid-call.
-	inst.inferenceDuration.Record(ctx, end.Round(0).Sub(c.start.Round(0)).Seconds(), histogram)
+	inst.inferenceDuration.Record(ctx, elapsed.Seconds(), histogram)
 
 	usage := usageFromResponses(c.responses)
 	inst.inferenceInputTokens.Record(ctx, usage.input, histogram)
