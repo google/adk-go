@@ -371,7 +371,7 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 			wantFirstArtifactParts: toA2AParts(t, []*genai.Part{
 				genai.NewPartFromText(modelTextRootTransfer),
 				genai.NewPartFromFunctionCall(transferToolName, map[string]any{"agent_name": remoteAgentName}),
-				genai.NewPartFromFunctionResponse(transferToolName, nil),
+				genai.NewPartFromFunctionResponse(transferToolName, map[string]any{"result": nil}),
 				genai.NewPartFromText(modelTextRequiresApproval),
 				genai.NewPartFromText(modelTextWaitingForApproval),
 			}, []string{}),
@@ -388,7 +388,7 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 			wantFirstArtifactParts: toA2AParts(t, []*genai.Part{
 				genai.NewPartFromText(modelTextRootTransfer),
 				genai.NewPartFromFunctionCall(transferToolName, map[string]any{"agent_name": remoteAgentName}),
-				genai.NewPartFromFunctionResponse(transferToolName, nil),
+				genai.NewPartFromFunctionResponse(transferToolName, map[string]any{"result": nil}),
 				genai.NewPartFromText(modelTextRequiresApproval),
 				genai.NewPartFromFunctionCall(approvalToolName, nil),
 				genai.NewPartFromFunctionResponse(approvalToolName, map[string]any{"status": string(approvalStatusPending)}),

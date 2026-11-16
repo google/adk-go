@@ -20,10 +20,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
+	"google.golang.org/adk/internal/testutil"
+	"google.golang.org/adk/internal/toolinternal/toolutils"
 	"google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
@@ -192,5 +195,212 @@ func TestHandleFunctionCallsAsync(t *testing.T) {
 
 	if elapsed > 1000*time.Millisecond {
 		t.Errorf("Elapsed time %v is greater than expected 1000ms for async execution", elapsed)
+	}
+}
+
+// noArgsCallModel calls toolName once with args (nil by default), then
+// answers "done".
+type noArgsCallModel struct {
+	toolName string
+	args     map[string]any
+	calls    int
+}
+
+func (m *noArgsCallModel) Name() string                       { return "gemini-2.5-flash" }
+func (m *noArgsCallModel) GetGoogleLLMVariant() genai.Backend { return genai.BackendGeminiAPI }
+
+func (m *noArgsCallModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	m.calls++
+	part := &genai.Part{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: m.toolName, Args: m.args}}
+	if m.calls > 1 {
+		part = genai.NewPartFromText("done")
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}}, nil)
+	}
+}
+
+// argsRecordingTool records the args it is run with and returns no result.
+type argsRecordingTool struct {
+	gotArgs any
+}
+
+func (t *argsRecordingTool) Name() string        { return "record" }
+func (t *argsRecordingTool) Description() string { return "records its args" }
+func (t *argsRecordingTool) IsLongRunning() bool { return false }
+
+func (t *argsRecordingTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.Name(), Description: t.Description()}
+}
+
+func (t *argsRecordingTool) Run(_ agent.ToolContext, args any) (map[string]any, error) {
+	t.gotArgs = args
+	return nil, nil
+}
+
+func (t *argsRecordingTool) ProcessRequest(_ agent.ToolContext, req *model.LLMRequest) error {
+	return toolutils.PackTool(req, t)
+}
+
+// A function call without args reaches the tool and its callbacks as an empty
+// map, so neither has to tell a nil map from an empty one.
+func TestHandleFunctionCalls_NoArgsReachToolAsEmptyMap(t *testing.T) {
+	rec := &argsRecordingTool{}
+	var beforeArgs, afterArgs map[string]any
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "tester",
+		Model: &noArgsCallModel{toolName: rec.Name()},
+		Tools: []tool.Tool{rec},
+		BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+			func(_ agent.ToolContext, _ tool.Tool, args map[string]any) (map[string]any, error) {
+				beforeArgs = args
+				return nil, nil
+			},
+		},
+		AfterToolCallbacks: []llmagent.AfterToolCallback{
+			func(_ agent.ToolContext, _ tool.Tool, args, _ map[string]any, _ error) (map[string]any, error) {
+				afterArgs = args
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, err := range testutil.NewTestAgentRunner(t, a).Run(t, "s", "go") {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if diff := cmp.Diff(any(map[string]any{}), rec.gotArgs); diff != "" {
+		t.Errorf("tool args mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]any{}, beforeArgs); diff != "" {
+		t.Errorf("before-tool callback args mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]any{}, afterArgs); diff != "" {
+		t.Errorf("after-tool callback args mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type argsRecordingStreamTool struct{ gotArgs any }
+
+func (t *argsRecordingStreamTool) Name() string        { return "stream_record" }
+func (t *argsRecordingStreamTool) Description() string { return "records its args" }
+func (t *argsRecordingStreamTool) IsLongRunning() bool { return false }
+
+func (t *argsRecordingStreamTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.Name(), Description: t.Description()}
+}
+
+func (t *argsRecordingStreamTool) RunStream(_ agent.ToolContext, args any) iter.Seq2[string, error] {
+	t.gotArgs = args
+	return func(yield func(string, error) bool) { yield("ok", nil) }
+}
+
+func (t *argsRecordingStreamTool) ProcessRequest(_ agent.ToolContext, req *model.LLMRequest) error {
+	return toolutils.PackTool(req, t)
+}
+
+func TestHandleFunctionCalls_NoArgsReachStreamingToolAsEmptyMap(t *testing.T) {
+	st := &argsRecordingStreamTool{}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "tester",
+		Model: &noArgsCallModel{toolName: st.Name()},
+		Tools: []tool.Tool{st},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range testutil.NewTestAgentRunner(t, a).Run(t, "s", "go") {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if diff := cmp.Diff(any(map[string]any{}), st.gotArgs); diff != "" {
+		t.Errorf("streaming tool args mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestHandleFunctionCalls_NoArgsReachOnToolErrorForUnknownTool(t *testing.T) {
+	var gotArgs map[string]any
+	called := false
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "tester",
+		Model: &noArgsCallModel{toolName: "missing"},
+		Tools: []tool.Tool{&argsRecordingTool{}},
+		OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+			func(_ agent.ToolContext, _ tool.Tool, args map[string]any, _ error) (map[string]any, error) {
+				called, gotArgs = true, args
+				return map[string]any{"handled": true}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range testutil.NewTestAgentRunner(t, a).Run(t, "s", "go") {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !called {
+		t.Fatal("on-tool-error callback not called")
+	}
+	if diff := cmp.Diff(map[string]any{}, gotArgs); diff != "" {
+		t.Errorf("on-tool-error args mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A set_model_response call without args gives the same structured output as a
+// call with empty args, the empty object, rather than the {"result": null}
+// sent for a tool that returns nothing.
+func TestHandleFunctionCalls_SetModelResponseWithoutArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "nil args", args: nil},
+		{name: "empty args", args: map[string]any{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := llmagent.New(llmagent.Config{
+				Name:      "tester",
+				Model:     &noArgsCallModel{toolName: "set_model_response", args: tc.args},
+				Tools:     []tool.Tool{&argsRecordingTool{}},
+				OutputKey: "out",
+				OutputSchema: &genai.Schema{
+					Type:       genai.TypeObject,
+					Properties: map[string]*genai.Schema{"note": {Type: genai.TypeString}},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var lastText string
+			var gotOut any
+			for ev, err := range testutil.NewTestAgentRunner(t, a).Run(t, "s", "go") {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].Text != "" {
+					lastText = ev.Content.Parts[0].Text
+				}
+				if v, ok := ev.Actions.StateDelta["out"]; ok {
+					gotOut = v
+				}
+			}
+
+			if lastText != "{}" {
+				t.Errorf("structured output = %q, want %q", lastText, "{}")
+			}
+			if gotOut != "{}" {
+				t.Errorf("state[out] = %v, want %q", gotOut, "{}")
+			}
+		})
 	}
 }
