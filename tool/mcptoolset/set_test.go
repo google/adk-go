@@ -1416,3 +1416,51 @@ func TestMetadataProviderConfirmation(t *testing.T) {
 		})
 	}
 }
+
+func TestSetTools_NilContext(t *testing.T) {
+	newToolset := func(t *testing.T) tool.Toolset {
+		ts, _ := newPrefixTestToolset(t, mcptoolset.Config{ToolFilter: tool.AllowedToolsPredicate([]string{"search"})}, "search")
+		return ts
+	}
+	toolNames := func(tools []tool.Tool) []string {
+		var names []string
+		for _, tl := range tools {
+			names = append(names, tl.Name())
+		}
+		return names
+	}
+
+	t.Run("Tools(nil)", func(t *testing.T) {
+		tools, err := newToolset(t).Tools(nil)
+		if err != nil {
+			t.Fatalf("Tools(nil) failed: %v", err)
+		}
+		if diff := cmp.Diff([]string{"search"}, toolNames(tools)); diff != "" {
+			t.Errorf("Tools(nil) names mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("CanonicalTools(nil)", func(t *testing.T) {
+		a, err := llmagent.New(llmagent.Config{Name: "agent", Toolsets: []tool.Toolset{newToolset(t)}})
+		if err != nil {
+			t.Fatalf("llmagent.New() failed: %v", err)
+		}
+		tools, err := llmagent.CanonicalTools(nil, a)
+		if err != nil {
+			t.Fatalf("CanonicalTools(nil) failed: %v", err)
+		}
+		if diff := cmp.Diff([]string{"search"}, toolNames(tools)); diff != "" {
+			t.Errorf("CanonicalTools(nil) names mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		ts := newToolset(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{})))
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Tools(canceled) error = %v, want an error wrapping context.Canceled", err)
+		}
+	})
+}
