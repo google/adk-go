@@ -671,7 +671,7 @@ func TestBatchProcessor_DropStats(t *testing.T) {
 		{"event_type": "fail_3"},
 	})
 
-	// 3. Trigger append failure drops from BigQuery RowErrors (batch of 2 rows).
+	// 3. Trigger row-error drops from BigQuery RowErrors (batch of 2 rows).
 	bp.streamWriter.stream = &mockStream{
 		recvRes: &storagepb.AppendRowsResponse{
 			RowErrors: []*storagepb.RowError{{Index: 0, Message: "bad row"}},
@@ -710,7 +710,8 @@ func TestBatchProcessor_DropStats(t *testing.T) {
 
 	want := DropStats{
 		QueueFullDrops:        2,
-		AppendFailureDrops:    9,
+		AppendFailureDrops:    7,
+		RowErrorDrops:         2,
 		FormatterFailureDrops: 1,
 		ShutdownDrops:         1,
 		TotalDrops:            12,
@@ -8245,4 +8246,1079 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
+	newProcessor := func(t *testing.T, srv storagepb.BigQueryWriteServer, exactlyOnce bool, logger Logger) *BatchProcessor {
+		t.Helper()
+		ctx := context.Background()
+		lis, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("write client: %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "agent_events"
+		cfg.ExactlyOnceDelivery = exactlyOnce
+		cfg.Logger = logger
+		cfg.RetryConfig = RetryConfig{
+			MaxRetries:   1,
+			InitialDelay: time.Millisecond,
+			MaxDelay:     5 * time.Millisecond,
+			Multiplier:   1.0,
+		}
+		streamName := "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default"
+		if exactlyOnce {
+			streamName = ""
+		}
+		bp, err := NewBatchProcessor(ctx, writeClient, streamName, cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(bp.Close)
+		return bp
+	}
+
+	t.Run("single bad row in multi-row batch isolates bad row and scrubs diagnostic", func(t *testing.T) {
+		var sentEventIDs [][]string
+		var mu sync.Mutex
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				rows := decodeArrowRows(t, req)
+				ids := make([]string, len(rows))
+				for i, r := range rows {
+					ids[i] = fmt.Sprint(r["event_id"])
+				}
+				mu.Lock()
+				sentEventIDs = append(sentEventIDs, ids)
+				mu.Unlock()
+				if attempt == 1 {
+					return &storagepb.AppendRowsResponse{
+						Response: &storagepb.AppendRowsResponse_Error{
+							Error: &statuspb.Status{
+								Code:    int32(codes.InvalidArgument),
+								Message: "row validation failed",
+							},
+						},
+						RowErrors: []*storagepb.RowError{
+							{
+								Index:   1,
+								Code:    storagepb.RowError_ROW_ERROR_CODE_UNSPECIFIED,
+								Message: "invalid field; Authorization: Bearer secret-row-token-123",
+							},
+						},
+					}, nil
+				}
+				return &storagepb.AppendRowsResponse{}, nil
+			},
+		}
+
+		logger := &recordingLogger{}
+		bp := newProcessor(t, srv, false, logger)
+		err := bp.writeBatch(context.Background(), []map[string]any{
+			{"event_id": "good-0", "event_type": "LLM_REQUEST", "content": "RAW_PAYLOAD_SECRET_ZERO"},
+			{"event_id": "bad-1", "event_type": "LLM_RESPONSE", "content": "RAW_PAYLOAD_SECRET_ONE"},
+			{"event_id": "good-2", "event_type": "TOOL_COMPLETED", "content": "RAW_PAYLOAD_SECRET_TWO"},
+		})
+		if err == nil {
+			t.Fatal("writeBatch() error = nil, want non-nil error reporting rejected row")
+		}
+
+		mu.Lock()
+		gotSent := slices.Clone(sentEventIDs)
+		mu.Unlock()
+		wantSent := [][]string{
+			{"good-0", "bad-1", "good-2"},
+			{"good-0", "good-2"},
+		}
+		if diff := cmp.Diff(wantSent, gotSent); diff != "" {
+			t.Errorf("sent batches mismatch (-want +got):\n%s", diff)
+		}
+
+		wantDrops := DropStats{
+			RowErrorDrops: 1,
+			TotalDrops:    1,
+		}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+
+		logged := logger.String()
+		wantLog := "WARNING: Dropping 1/3 row(s) rejected by BigQuery RowErrors (first index=1, code=ROW_ERROR_CODE_UNSPECIFIED, out_of_range=0): invalid field; Authorization: [REDACTED]"
+		if logged != wantLog {
+			t.Errorf("logger output mismatch:\ngot:  %q\nwant: %q", logged, wantLog)
+		}
+		for _, forbidden := range []string{"RAW_PAYLOAD_SECRET_ZERO", "RAW_PAYLOAD_SECRET_ONE", "RAW_PAYLOAD_SECRET_TWO", "secret-row-token-123"} {
+			if strings.Contains(logged, forbidden) {
+				t.Errorf("logger leaked sensitive content %q in:\n%s", forbidden, logged)
+			}
+		}
+	})
+
+	t.Run("multiple bad rows, duplicate indices, and second-pass RowErrors peel iteratively", func(t *testing.T) {
+		var sentEventIDs [][]string
+		var mu sync.Mutex
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				rows := decodeArrowRows(t, req)
+				ids := make([]string, len(rows))
+				for i, r := range rows {
+					ids[i] = fmt.Sprint(r["event_id"])
+				}
+				mu.Lock()
+				sentEventIDs = append(sentEventIDs, ids)
+				mu.Unlock()
+				switch attempt {
+				case 1:
+					return &storagepb.AppendRowsResponse{
+						RowErrors: []*storagepb.RowError{
+							{Index: 0, Message: "bad 0"},
+							{Index: 0, Message: "duplicate bad 0"},
+							{Index: 2, Message: "bad 2"},
+						},
+					}, nil
+				case 2:
+					// Remaining rows are [good-1, bad-3, good-4]; index 1 is bad-3.
+					return &storagepb.AppendRowsResponse{
+						RowErrors: []*storagepb.RowError{
+							{Index: 1, Message: "bad 3 on second pass"},
+						},
+					}, nil
+				default:
+					return &storagepb.AppendRowsResponse{}, nil
+				}
+			},
+		}
+
+		bp := newProcessor(t, srv, false, &recordingLogger{})
+		err := bp.writeBatch(context.Background(), []map[string]any{
+			{"event_id": "bad-0"},
+			{"event_id": "good-1"},
+			{"event_id": "bad-2"},
+			{"event_id": "bad-3"},
+			{"event_id": "good-4"},
+		})
+		if err == nil {
+			t.Fatal("writeBatch() error = nil, want non-nil error")
+		}
+
+		mu.Lock()
+		gotSent := slices.Clone(sentEventIDs)
+		mu.Unlock()
+		wantSent := [][]string{
+			{"bad-0", "good-1", "bad-2", "bad-3", "good-4"},
+			{"good-1", "bad-3", "good-4"},
+			{"good-1", "good-4"},
+		}
+		if diff := cmp.Diff(wantSent, gotSent); diff != "" {
+			t.Errorf("sent batches mismatch (-want +got):\n%s", diff)
+		}
+
+		wantDrops := DropStats{
+			RowErrorDrops: 3,
+			TotalDrops:    3,
+		}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("all rows bad drops all under RowErrorDrops without resending empty batch", func(t *testing.T) {
+		var calls atomic.Int32
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(_ int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				calls.Add(1)
+				return &storagepb.AppendRowsResponse{
+					RowErrors: []*storagepb.RowError{
+						{Index: 0, Message: "bad 0"},
+						{Index: 1, Message: "bad 1"},
+					},
+				}, nil
+			},
+		}
+
+		bp := newProcessor(t, srv, false, &recordingLogger{})
+		err := bp.writeBatch(context.Background(), []map[string]any{
+			{"event_id": "bad-0"},
+			{"event_id": "bad-1"},
+		})
+		if err == nil {
+			t.Fatal("writeBatch() error = nil, want non-nil error")
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("AppendRows calls = %d, want 1 (no empty resend)", got)
+		}
+		wantDrops := DropStats{
+			RowErrorDrops: 2,
+			TotalDrops:    2,
+		}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("out-of-bounds RowError index fails fast without infinite retry loop", func(t *testing.T) {
+		var calls atomic.Int32
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(_ int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				calls.Add(1)
+				return &storagepb.AppendRowsResponse{
+					RowErrors: []*storagepb.RowError{
+						{Index: 99, Message: "corrupt index"},
+					},
+				}, nil
+			},
+		}
+
+		bp := newProcessor(t, srv, false, &recordingLogger{})
+		err := bp.writeBatch(context.Background(), []map[string]any{
+			{"event_id": "r0"},
+			{"event_id": "r1"},
+		})
+		if err == nil {
+			t.Fatal("writeBatch() error = nil, want non-nil error")
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("AppendRows calls = %d, want 1 (must fail fast on out-of-bounds index)", got)
+		}
+		wantDrops := DropStats{
+			AppendFailureDrops: 2,
+			TotalDrops:         2,
+		}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("ExactlyOnceDelivery preserves uncommitted stream offset on resend and advances by valid row count", func(t *testing.T) {
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				if attempt == 2 {
+					// Batch 2 first attempt (3 rows at offset 2): row index 1 rejected.
+					return &storagepb.AppendRowsResponse{
+						Response: &storagepb.AppendRowsResponse_Error{
+							Error: &statuspb.Status{
+								Code:    int32(codes.InvalidArgument),
+								Message: "invalid row",
+							},
+						},
+						RowErrors: []*storagepb.RowError{
+							{Index: 1, Message: "bad middle row"},
+						},
+					}, nil
+				}
+				return &storagepb.AppendRowsResponse{}, nil
+			},
+		}
+
+		bp := newProcessor(t, srv, true, &recordingLogger{})
+		ctx := context.Background()
+
+		// Batch 1: 2 valid rows at offset 0 -> advances stream offset to 2.
+		if err := bp.writeBatch(ctx, []map[string]any{
+			{"event_id": "b1-0"},
+			{"event_id": "b1-1"},
+		}); err != nil {
+			t.Fatalf("Batch 1 writeBatch() error = %v", err)
+		}
+
+		// Batch 2: 3 rows sent at offset 2 -> row 1 rejected -> 2 valid rows resent at offset 2 -> advances offset to 4.
+		if err := bp.writeBatch(ctx, []map[string]any{
+			{"event_id": "b2-0"},
+			{"event_id": "b2-bad-1"},
+			{"event_id": "b2-2"},
+		}); err == nil {
+			t.Fatal("Batch 2 writeBatch() error = nil, want non-nil error")
+		}
+
+		// Batch 3: 1 valid row sent at offset 4 on the same committed stream (no stream rotation).
+		if err := bp.writeBatch(ctx, []map[string]any{
+			{"event_id": "b3-0"},
+		}); err != nil {
+			t.Fatalf("Batch 3 writeBatch() error = %v", err)
+		}
+
+		srv.mu.Lock()
+		gotOffsets := slices.Clone(srv.appendOffsets)
+		gotStreams := slices.Clone(srv.appendStreamNames)
+		srv.mu.Unlock()
+
+		wantOffsets := []int64{0, 2, 2, 4}
+		if diff := cmp.Diff(wantOffsets, gotOffsets); diff != "" {
+			t.Errorf("ExactlyOnceDelivery appendOffsets mismatch (-want +got):\n%s", diff)
+		}
+		wantStreams := slices.Repeat([]string{"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1"}, 4)
+		if diff := cmp.Diff(wantStreams, gotStreams); diff != "" {
+			t.Errorf("ExactlyOnceDelivery stream names mismatch (-want +got):\n%s", diff)
+		}
+
+		wantDrops := DropStats{
+			RowErrorDrops: 1,
+			TotalDrops:    1,
+		}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("ExactlyOnceDelivery preserves uncommitted stream offset when RowErrors arrives with nil Error", func(t *testing.T) {
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				if attempt == 2 {
+					// Batch 2 first attempt (3 rows at offset 2): RowErrors reported with Error == nil.
+					return &storagepb.AppendRowsResponse{
+						RowErrors: []*storagepb.RowError{
+							{Index: 0, Message: "bad first row with nil status"},
+						},
+					}, nil
+				}
+				return &storagepb.AppendRowsResponse{}, nil
+			},
+		}
+
+		bp := newProcessor(t, srv, true, &recordingLogger{})
+		ctx := context.Background()
+
+		// Batch 1: 2 valid rows at offset 0 -> advances stream offset to 2.
+		if err := bp.writeBatch(ctx, []map[string]any{
+			{"event_id": "b1-0"},
+			{"event_id": "b1-1"},
+		}); err != nil {
+			t.Fatalf("Batch 1 writeBatch() error = %v", err)
+		}
+
+		// Batch 2: 3 rows at offset 2 -> RowErrors (Error==nil) drops row 0 -> 2 valid rows resent at offset 2 -> advances offset to 4.
+		if err := bp.writeBatch(ctx, []map[string]any{
+			{"event_id": "b2-bad-0"},
+			{"event_id": "b2-1"},
+			{"event_id": "b2-2"},
+		}); err == nil {
+			t.Fatal("Batch 2 writeBatch() error = nil, want non-nil error")
+		}
+
+		// Batch 3: 1 valid row sent at offset 4 on the same committed stream.
+		if err := bp.writeBatch(ctx, []map[string]any{
+			{"event_id": "b3-0"},
+		}); err != nil {
+			t.Fatalf("Batch 3 writeBatch() error = %v", err)
+		}
+
+		srv.mu.Lock()
+		gotOffsets := slices.Clone(srv.appendOffsets)
+		gotStreams := slices.Clone(srv.appendStreamNames)
+		srv.mu.Unlock()
+
+		wantOffsets := []int64{0, 2, 2, 4}
+		if diff := cmp.Diff(wantOffsets, gotOffsets); diff != "" {
+			t.Errorf("ExactlyOnceDelivery appendOffsets mismatch (-want +got):\n%s", diff)
+		}
+		wantStreams := slices.Repeat([]string{"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1"}, 4)
+		if diff := cmp.Diff(wantStreams, gotStreams); diff != "" {
+			t.Errorf("ExactlyOnceDelivery stream names mismatch (-want +got):\n%s", diff)
+		}
+
+		wantDrops := DropStats{
+			RowErrorDrops: 1,
+			TotalDrops:    1,
+		}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	// recordingServer answers each AppendRows request with respond, given the
+	// event IDs of the request's rows, and records those IDs per request.
+	recordingServer := func(t *testing.T, respond func(ids []string) *storagepb.AppendRowsResponse) (*scriptedCommittedStreamServer, func() [][]string) {
+		t.Helper()
+		var mu sync.Mutex
+		var sent [][]string
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(_ int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				rows := decodeArrowRows(t, req)
+				ids := make([]string, len(rows))
+				for i, r := range rows {
+					ids[i] = fmt.Sprint(r["event_id"])
+				}
+				mu.Lock()
+				sent = append(sent, ids)
+				mu.Unlock()
+				return respond(ids), nil
+			},
+		}
+		return srv, func() [][]string {
+			mu.Lock()
+			defer mu.Unlock()
+			return slices.Clone(sent)
+		}
+	}
+	eventRows := func(ids ...string) []map[string]any {
+		rows := make([]map[string]any, len(ids))
+		for i, id := range ids {
+			rows[i] = map[string]any{"event_id": id}
+		}
+		return rows
+	}
+	rowErrors := func(indexes ...int64) *storagepb.AppendRowsResponse {
+		res := &storagepb.AppendRowsResponse{}
+		for _, idx := range indexes {
+			res.RowErrors = append(res.RowErrors, &storagepb.RowError{Index: idx, Message: fmt.Sprintf("bad row %d", idx)})
+		}
+		return res
+	}
+
+	t.Run("unsorted and repeated RowErrors indices drop each reported row once and keep survivor order", func(t *testing.T) {
+		srv, sent := recordingServer(t, func(ids []string) *storagepb.AppendRowsResponse {
+			if len(ids) == 5 {
+				// r0, r2 and r3 are bad; index 2 is reported twice.
+				return rowErrors(2, 0, 3, 2)
+			}
+			return &storagepb.AppendRowsResponse{}
+		})
+		bp := newProcessor(t, srv, false, &recordingLogger{})
+		err := bp.writeBatch(context.Background(), eventRows("r0", "r1", "r2", "r3", "r4"))
+		if err == nil || !strings.Contains(err.Error(), "3 row(s) rejected by RowErrors") {
+			t.Fatalf("writeBatch() error = %v, want an error reporting 3 rows rejected by RowErrors", err)
+		}
+		wantSent := [][]string{
+			{"r0", "r1", "r2", "r3", "r4"},
+			{"r1", "r4"},
+		}
+		if diff := cmp.Diff(wantSent, sent()); diff != "" {
+			t.Errorf("sent batches mismatch (-want +got):\n%s", diff)
+		}
+		wantDrops := DropStats{RowErrorDrops: 3, TotalDrops: 3}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("negative and past-the-end RowErrors indices next to a valid one drop only the valid row", func(t *testing.T) {
+		srv, sent := recordingServer(t, func(ids []string) *storagepb.AppendRowsResponse {
+			if len(ids) == 3 {
+				// Index 3 equals the row count, so only index 1 names a row.
+				return rowErrors(3, 1, -1)
+			}
+			return &storagepb.AppendRowsResponse{}
+		})
+		logger := &recordingLogger{}
+		bp := newProcessor(t, srv, false, logger)
+		err := bp.writeBatch(context.Background(), eventRows("r0", "r1", "r2"))
+		if err == nil || !strings.Contains(err.Error(), "1 row(s) rejected by RowErrors") {
+			t.Fatalf("writeBatch() error = %v, want an error reporting 1 row rejected by RowErrors", err)
+		}
+		wantSent := [][]string{
+			{"r0", "r1", "r2"},
+			{"r0", "r2"},
+		}
+		if diff := cmp.Diff(wantSent, sent()); diff != "" {
+			t.Errorf("sent batches mismatch (-want +got):\n%s", diff)
+		}
+		wantDrops := DropStats{RowErrorDrops: 1, TotalDrops: 1}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+		if logged := logger.String(); !strings.Contains(logged, "out_of_range=2") {
+			t.Errorf("log does not report the 2 out-of-range indices:\n%s", logged)
+		}
+	})
+
+	t.Run("negative or past-the-end RowErrors index alone fails the request without counting row drops", func(t *testing.T) {
+		for _, idx := range []int64{-1, 2} {
+			t.Run(fmt.Sprintf("index_%d", idx), func(t *testing.T) {
+				var calls atomic.Int32
+				srv := &scriptedCommittedStreamServer{
+					onAppend: func(_ int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+						calls.Add(1)
+						return rowErrors(idx), nil
+					},
+				}
+				logger := &recordingLogger{}
+				bp := newProcessor(t, srv, false, logger)
+				err := bp.writeBatch(context.Background(), eventRows("r0", "r1"))
+				if want := fmt.Sprintf("row error index %d out of range [0, 2)", idx); err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("writeBatch() error = %v, want an error containing %q", err, want)
+				}
+				if got := calls.Load(); got != 1 {
+					t.Errorf("AppendRows calls = %d, want 1", got)
+				}
+				wantDrops := DropStats{AppendFailureDrops: 2, TotalDrops: 2}
+				if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+					t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+				}
+				wantLog := fmt.Sprintf("WARNING: BigQuery RowErrors reported 1 out-of-range row index(es) (first index=%d, batch_size=2)", idx)
+				if logged := logger.String(); logged != wantLog {
+					t.Errorf("logger output mismatch:\ngot:  %q\nwant: %q", logged, wantLog)
+				}
+			})
+		}
+	})
+
+	t.Run("RowErrors in a split batch index into the rows of their own request", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			setup func(t *testing.T, bp *BatchProcessor, rows []map[string]any)
+		}{
+			{
+				// splitBatchByEstimatedBytes cuts the batch into [r0 r1] and
+				// [r2 r3]; the serialized limit stays out of the way.
+				name: "estimated_split",
+				setup: func(_ *testing.T, bp *BatchProcessor, rows []map[string]any) {
+					bp.maxAppendBytes = 2 * estimateRowBytes(rows[0])
+					bp.maxSerializedAppendBytes = 1 << 30
+				},
+			},
+			{
+				// The batch is one estimated chunk whose request is over the
+				// serialized limit, so it is halved into [r0 r1] and [r2 r3].
+				name: "serialized_halving",
+				setup: func(t *testing.T, bp *BatchProcessor, rows []map[string]any) {
+					size := func(rows []map[string]any) int {
+						rec := bp.buildRecordBatch(rows)
+						defer rec.Release()
+						return bp.streamWriter.serializedRequestSize(serializeRecord(rec, nil), rec.NumRows())
+					}
+					two, four := size(rows[:2]), size(rows)
+					if two >= four {
+						t.Fatalf("serialized request size of 2 rows = %d, want less than that of 4 rows (%d)", two, four)
+					}
+					bp.maxSerializedAppendBytes = (two + four) / 2
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				srv, sent := recordingServer(t, func(ids []string) *storagepb.AppendRowsResponse {
+					switch {
+					case slices.Equal(ids, []string{"r0", "r1"}):
+						return rowErrors(1) // r1
+					case slices.Equal(ids, []string{"r2", "r3"}):
+						return rowErrors(0) // r2, the first row of this request
+					}
+					return &storagepb.AppendRowsResponse{}
+				})
+				bp := newProcessor(t, srv, false, &recordingLogger{})
+				rows := eventRows("r0", "r1", "r2", "r3")
+				tc.setup(t, bp, rows)
+				err := bp.writeBatch(context.Background(), rows)
+				if err == nil || !strings.Contains(err.Error(), "2 row(s) rejected by RowErrors") {
+					t.Fatalf("writeBatch() error = %v, want an error reporting 2 rows rejected by RowErrors", err)
+				}
+				wantSent := [][]string{
+					{"r0", "r1"},
+					{"r0"},
+					{"r2", "r3"},
+					{"r3"},
+				}
+				if diff := cmp.Diff(wantSent, sent()); diff != "" {
+					t.Errorf("sent batches mismatch (-want +got):\n%s", diff)
+				}
+				wantDrops := DropStats{RowErrorDrops: 2, TotalDrops: 2}
+				if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+					t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+				}
+			})
+		}
+	})
+
+	t.Run("flushRunEnd logs RowErrors rejection and commits survivors", func(t *testing.T) {
+		srv, sent := recordingServer(t, func(ids []string) *storagepb.AppendRowsResponse {
+			if slices.Equal(ids, []string{"good-0", "bad-1", "good-2"}) {
+				return &storagepb.AppendRowsResponse{
+					RowErrors: []*storagepb.RowError{
+						{Index: 1, Message: "invalid row 1"},
+					},
+				}
+			}
+			return &storagepb.AppendRowsResponse{}
+		})
+
+		logger := &recordingLogger{}
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "agent_events"
+		cfg.BatchFlushIntv = time.Hour
+		cfg.ShutdownTimeout = 2 * time.Second
+		cfg.Logger = logger
+		cfg.RetryConfig = RetryConfig{
+			MaxRetries:   1,
+			InitialDelay: time.Millisecond,
+			MaxDelay:     5 * time.Millisecond,
+			Multiplier:   1.0,
+		}
+		bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "projects/test-proj/datasets/test-ds/tables/agent_events/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(bp.Close)
+
+		for _, row := range eventRows("good-0", "bad-1", "good-2") {
+			bp.queue <- row
+		}
+
+		bp.flushRunEnd()
+
+		if got := len(bp.deferredBatch); got != 0 {
+			t.Errorf("deferredBatch length = %d, want 0", got)
+		}
+		wantSent := [][]string{
+			{"good-0", "bad-1", "good-2"},
+			{"good-0", "good-2"},
+		}
+		if diff := cmp.Diff(wantSent, sent()); diff != "" {
+			t.Errorf("sent batches mismatch (-want +got):\n%s", diff)
+		}
+		wantDrops := DropStats{RowErrorDrops: 1, TotalDrops: 1}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+		logged := logger.String()
+		for _, wantSubstr := range []string{
+			"WARNING: Dropping 1/3 row(s) rejected by BigQuery RowErrors (first index=1, code=ROW_ERROR_CODE_UNSPECIFIED, out_of_range=0): invalid row 1",
+			"ERROR: Failed to write batch to BigQuery: batch append error from BigQuery: 1 row(s) rejected by RowErrors",
+		} {
+			if !strings.Contains(logged, wantSubstr) {
+				t.Errorf("logger missing %q in:\n%s", wantSubstr, logged)
+			}
+		}
+	})
+
+	t.Run("flushRunEnd defers only unconfirmed rows and requeues only their uploads after RowErrors isolation", func(t *testing.T) {
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseServer := func() { releaseOnce.Do(func() { close(release) }) }
+
+		var mu sync.Mutex
+		var sentEventIDs [][]string
+		var ackedEventIDs [][]string
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				rows := decodeArrowRows(t, req)
+				ids := make([]string, len(rows))
+				for i, r := range rows {
+					ids[i] = fmt.Sprint(r[eventIDField])
+				}
+				mu.Lock()
+				sentEventIDs = append(sentEventIDs, ids)
+				mu.Unlock()
+				switch attempt {
+				case 1:
+					return &storagepb.AppendRowsResponse{
+						RowErrors: []*storagepb.RowError{
+							{Index: 1, Message: "bad row 1"},
+						},
+					}, nil
+				case 2:
+					select {
+					case <-release:
+					case <-time.After(30 * time.Second):
+					}
+					return nil, status.Error(codes.Unavailable, "scripted: flush deadline expired")
+				default:
+					mu.Lock()
+					ackedEventIDs = append(ackedEventIDs, ids)
+					mu.Unlock()
+					return &storagepb.AppendRowsResponse{}, nil
+				}
+			},
+		}
+
+		var retrying atomic.Bool
+		off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
+			if retrying.Load() {
+				return nil
+			}
+			if strings.Contains(req.Path, "_good-0_") && strings.Contains(req.Path, "_c0_") {
+				select {
+				case <-time.After(400 * time.Millisecond):
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		}}
+
+		logger := &recordingLogger{}
+		cfg := exactlyOnceTestConfig()
+		cfg.BatchFlushIntv = time.Hour
+		cfg.ShutdownTimeout = 2 * time.Second
+		cfg.RetryConfig.MaxRetries = 0
+		cfg.GCSOffloader = off
+		cfg.GCSMaxConcurrentUploads = 1
+		cfg.Logger = logger
+
+		bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(bp.Close)
+		t.Cleanup(releaseServer)
+
+		opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+		good0 := queuedRow(opts, imageContent(1, 2), imageContent(3, 4, 5))
+		bad1 := queuedRow(opts, imageContent(1, 2, 3, 4, 5))
+		good2 := queuedRow(opts, imageContent(1, 2, 3, 4, 5, 6, 7))
+		for _, item := range []struct {
+			id  string
+			row map[string]any
+		}{
+			{id: "good-0", row: good0},
+			{id: "bad-1", row: bad1},
+			{id: "good-2", row: good2},
+		} {
+			item.row["event_type"] = EventLLMRequest
+			item.row[eventIDField] = item.id
+			bp.queue <- item.row
+		}
+
+		bp.flushRunEnd()
+
+		var gotDeferred []string
+		for _, row := range bp.deferredBatch {
+			gotDeferred = append(gotDeferred, fmt.Sprint(row[eventIDField]))
+		}
+		if diff := cmp.Diff([]string{"good-0", "good-2"}, gotDeferred); diff != "" {
+			t.Fatalf("deferredBatch event_ids after first flushRunEnd mismatch (-want +got):\n%s", diff)
+		}
+		if got := bp.uploadCooldownUntil.Load(); got != 0 {
+			t.Fatalf("uploadCooldownUntil after first flushRunEnd = %d, want 0", got)
+		}
+		if got, want := bp.pendingUploadBytes.Load(), int64(3+7); got != want {
+			t.Errorf("pendingUploadBytes after first flushRunEnd = %d, want %d (bad-1's 5-byte upload released, good-0 and good-2 retained)", got, want)
+		}
+		wantDrops := DropStats{RowErrorDrops: 1, TotalDrops: 1}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() after first flushRunEnd mismatch (-want +got):\n%s", diff)
+		}
+
+		logger.mu.Lock()
+		linesAfterFirst := slices.Clone(logger.lines)
+		logger.mu.Unlock()
+		var sawBadFinal, sawGood0Retry, sawGood2Retry bool
+		for _, line := range linesAfterFirst {
+			switch {
+			case strings.Contains(line, "event bad-1 part 0 (5 bytes)"):
+				if strings.Contains(line, "pending retry on next flush") {
+					t.Errorf("bad-1 upload unexpectedly marked for retry: %q", line)
+				}
+				if strings.Contains(line, "keeping the part inline") {
+					sawBadFinal = true
+				}
+			case strings.Contains(line, "event good-0 part 0 (3 bytes)") && strings.Contains(line, "pending retry on next flush"):
+				sawGood0Retry = true
+			case strings.Contains(line, "event good-2 part 0 (7 bytes)") && strings.Contains(line, "pending retry on next flush"):
+				sawGood2Retry = true
+			}
+		}
+		if !sawBadFinal || !sawGood0Retry || !sawGood2Retry {
+			t.Errorf("upload deferral logs mismatch (sawBadFinal=%v, sawGood0Retry=%v, sawGood2Retry=%v) in:\n%s",
+				sawBadFinal, sawGood0Retry, sawGood2Retry, strings.Join(linesAfterFirst, "\n"))
+		}
+
+		releaseServer()
+		retrying.Store(true)
+		callsBefore := len(off.uploads())
+		bp.flushRunEnd()
+
+		if got := len(bp.deferredBatch); got != 0 {
+			t.Errorf("deferredBatch length after retry flushRunEnd = %d, want 0", got)
+		}
+		if got := bp.pendingUploadBytes.Load(); got != 0 {
+			t.Errorf("pendingUploadBytes after retry flushRunEnd = %d, want 0", got)
+		}
+		if got := len(off.uploads()) - callsBefore; got != 2 {
+			t.Errorf("retry flushRunEnd offloader calls = %d, want 2 (only good-0 and good-2)", got)
+		}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() after retry flushRunEnd mismatch (-want +got):\n%s", diff)
+		}
+
+		mu.Lock()
+		gotSent := slices.Clone(sentEventIDs)
+		gotAcked := slices.Clone(ackedEventIDs)
+		mu.Unlock()
+		wantSent := [][]string{
+			{"good-0", "bad-1", "good-2"},
+			{"good-0", "good-2"},
+			{"good-0", "good-2"},
+		}
+		if diff := cmp.Diff(wantSent, gotSent); diff != "" {
+			t.Errorf("sent batches mismatch (-want +got):\n%s", diff)
+		}
+		wantAcked := [][]string{
+			{"good-0", "good-2"},
+		}
+		if diff := cmp.Diff(wantAcked, gotAcked); diff != "" {
+			t.Errorf("committed batches mismatch (-want +got):\n%s", diff)
+		}
+		srv.mu.Lock()
+		created := len(srv.createReqs)
+		offsets := slices.Clone(srv.appendOffsets)
+		srv.mu.Unlock()
+		if created != 2 {
+			t.Errorf("CreateWriteStream calls = %d, want 2", created)
+		}
+		if diff := cmp.Diff([]int64{0, 0, 0}, offsets); diff != "" {
+			t.Errorf("append offsets mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		attempt2Resp *storagepb.AppendRowsResponse
+	}{
+		{
+			name: "nil error status with RowErrors after ambiguous send fails without survivor replay",
+			attempt2Resp: &storagepb.AppendRowsResponse{
+				RowErrors: []*storagepb.RowError{{
+					Index:   0,
+					Message: "row 0 invalid",
+				}},
+			},
+		},
+		{
+			name: "InvalidArgument status with RowErrors after ambiguous send fails without survivor replay",
+			attempt2Resp: &storagepb.AppendRowsResponse{
+				Response: &storagepb.AppendRowsResponse_Error{
+					Error: &statuspb.Status{
+						Code:    int32(codes.InvalidArgument),
+						Message: "row 0 invalid",
+					},
+				},
+				RowErrors: []*storagepb.RowError{{
+					Index:   0,
+					Message: "row 0 invalid",
+				}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			var mu sync.Mutex
+			var appendRowCounts []int64
+			srv := &scriptedCommittedStreamServer{
+				onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+					mu.Lock()
+					appendRowCounts = append(appendRowCounts, req.GetArrowRows().GetRows().GetRowCount())
+					mu.Unlock()
+					switch attempt {
+					case 1:
+						return nil, status.Error(codes.Unavailable, "unknown outcome")
+					case 2:
+						return tc.attempt2Resp, nil
+					default:
+						return &storagepb.AppendRowsResponse{}, nil
+					}
+				},
+			}
+
+			lis, err := net.Listen("tcp", "localhost:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			gSrv := grpc.NewServer()
+			storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+			go func() { _ = gSrv.Serve(lis) }()
+			t.Cleanup(gSrv.Stop)
+
+			conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+
+			writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+			if err != nil {
+				t.Fatalf("write client: %v", err)
+			}
+			t.Cleanup(func() { _ = writeClient.Close() })
+
+			config := DefaultConfig()
+			config.ProjectID = "test-proj"
+			config.DatasetID = "test-ds"
+			config.TableName = "agent_events"
+			config.ExactlyOnceDelivery = true
+			config.RetryConfig = RetryConfig{
+				MaxRetries:   1,
+				InitialDelay: time.Millisecond,
+				MaxDelay:     5 * time.Millisecond,
+				Multiplier:   1.0,
+			}
+
+			bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+			if err != nil {
+				t.Fatalf("NewBatchProcessor() error = %v", err)
+			}
+			defer bp.Close()
+
+			batchA := []map[string]any{
+				{"event_type": "LLM_REQUEST"},
+				{"event_type": "LLM_RESPONSE"},
+			}
+			if err := bp.writeBatch(ctx, batchA); err == nil {
+				t.Fatal("writeBatch(Batch A) error = nil, want error")
+			}
+
+			wantDropsAfterA := DropStats{AppendFailureDrops: 2, TotalDrops: 2}
+			if diff := cmp.Diff(wantDropsAfterA, bp.DropStats()); diff != "" {
+				t.Errorf("DropStats() after Batch A mismatch (-want +got):\n%s", diff)
+			}
+
+			if err := bp.writeBatch(ctx, []map[string]any{{"event_type": "TOOL_STARTING"}}); err != nil {
+				t.Fatalf("writeBatch(Batch B) error = %v, want nil", err)
+			}
+
+			srv.mu.Lock()
+			defer srv.mu.Unlock()
+			wantStreams := []string{
+				"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+				"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+				"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-2",
+			}
+			if diff := cmp.Diff(wantStreams, srv.appendStreamNames); diff != "" {
+				t.Errorf("AppendRows stream names mismatch (-want +got):\n%s", diff)
+			}
+			wantOffsets := []int64{0, 0, 0}
+			if diff := cmp.Diff(wantOffsets, srv.appendOffsets); diff != "" {
+				t.Errorf("AppendRows offsets mismatch (-want +got):\n%s", diff)
+			}
+			mu.Lock()
+			gotCounts := slices.Clone(appendRowCounts)
+			mu.Unlock()
+			if diff := cmp.Diff([]int64{2, 2, 1}, gotCounts); diff != "" {
+				t.Errorf("AppendRows row counts mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+
+	t.Run("non-ambiguous in-band transient failure before RowErrors still isolates survivors without rotation", func(t *testing.T) {
+		ctx := context.Background()
+		var mu sync.Mutex
+		var appendRowCounts []int64
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				mu.Lock()
+				appendRowCounts = append(appendRowCounts, req.GetArrowRows().GetRows().GetRowCount())
+				mu.Unlock()
+				switch attempt {
+				case 1:
+					return &storagepb.AppendRowsResponse{
+						Response: &storagepb.AppendRowsResponse_Error{
+							Error: &statuspb.Status{
+								Code:    int32(codes.Unavailable),
+								Message: "in-band transient rejection (uncommitted)",
+							},
+						},
+					}, nil
+				case 2:
+					return &storagepb.AppendRowsResponse{
+						RowErrors: []*storagepb.RowError{{
+							Index:   0,
+							Message: "row 0 invalid",
+						}},
+					}, nil
+				default:
+					return &storagepb.AppendRowsResponse{}, nil
+				}
+			},
+		}
+
+		lis, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("write client: %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		config := DefaultConfig()
+		config.ProjectID = "test-proj"
+		config.DatasetID = "test-ds"
+		config.TableName = "agent_events"
+		config.ExactlyOnceDelivery = true
+		config.RetryConfig = RetryConfig{
+			MaxRetries:   1,
+			InitialDelay: time.Millisecond,
+			MaxDelay:     5 * time.Millisecond,
+			Multiplier:   1.0,
+		}
+
+		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		defer bp.Close()
+
+		batchA := []map[string]any{
+			{"event_type": "LLM_REQUEST"},
+			{"event_type": "LLM_RESPONSE"},
+		}
+		if err := bp.writeBatch(ctx, batchA); err == nil || !strings.Contains(err.Error(), "1 row(s) rejected by RowErrors") {
+			t.Fatalf("writeBatch(Batch A) error = %v, want 1 row(s) rejected by RowErrors", err)
+		}
+		wantDrops := DropStats{RowErrorDrops: 1, TotalDrops: 1}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+
+		if err := bp.writeBatch(ctx, []map[string]any{{"event_type": "TOOL_STARTING"}}); err != nil {
+			t.Fatalf("writeBatch(Batch B) error = %v, want nil", err)
+		}
+
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		wantStreams := []string{
+			"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+			"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+			"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+			"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+		}
+		if diff := cmp.Diff(wantStreams, srv.appendStreamNames); diff != "" {
+			t.Errorf("AppendRows stream names mismatch (-want +got):\n%s", diff)
+		}
+		wantOffsets := []int64{0, 0, 0, 1}
+		if diff := cmp.Diff(wantOffsets, srv.appendOffsets); diff != "" {
+			t.Errorf("AppendRows offsets mismatch (-want +got):\n%s", diff)
+		}
+		mu.Lock()
+		gotCounts := slices.Clone(appendRowCounts)
+		mu.Unlock()
+		if diff := cmp.Diff([]int64{2, 2, 1, 1}, gotCounts); diff != "" {
+			t.Errorf("AppendRows row counts mismatch (-want +got):\n%s", diff)
+		}
+	})
 }

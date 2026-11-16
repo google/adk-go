@@ -99,10 +99,10 @@ type ContentFormatter func(payload any, eventType string) (any, error)
 // DropStats reports cumulative event-drop and formatter-failure counts across
 // the plugin's event processing pipeline.
 // TotalDrops sums locally discarded events and writes whose success could not
-// be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops); it can
-// include rows committed before an acknowledgment was lost, so it is an upper
-// bound. FormatterFailureDrops separately counts payload replacement or
-// omission, which does not itself discard a row.
+// be confirmed (QueueFullDrops + AppendFailureDrops + RowErrorDrops +
+// ShutdownDrops); it can include rows committed before an acknowledgment was
+// lost, so it is an upper bound. FormatterFailureDrops separately counts
+// payload replacement or omission, which does not itself discard a row.
 type DropStats struct {
 	// QueueFullDrops counts events dropped because QueueMaxSize was reached.
 	QueueFullDrops int64 `json:"queue_full_drops"`
@@ -116,6 +116,10 @@ type DropStats struct {
 	// If the last attempt's outcome was unknown (sent, but no response), the
 	// rows may in fact have been written, so this is an upper bound.
 	AppendFailureDrops int64 `json:"append_failure_drops"`
+	// RowErrorDrops counts individual rows rejected by BigQuery Storage Write
+	// AppendRowsResponse.RowErrors and isolated from their batch so the
+	// remaining valid rows could still be written.
+	RowErrorDrops int64 `json:"row_error_drops"`
 	// FormatterFailureDrops counts events whose payload was replaced with
 	// "[FORMATTER_FAILED]" (or omitted from content_parts) because
 	// ContentFormatter returned an error or panicked; this does not itself
@@ -126,7 +130,8 @@ type DropStats struct {
 	// before their batch could be written.
 	ShutdownDrops int64 `json:"shutdown_drops"`
 	// TotalDrops sums locally discarded events and writes whose success could
-	// not be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops).
+	// not be confirmed (QueueFullDrops + AppendFailureDrops + RowErrorDrops +
+	// ShutdownDrops).
 	TotalDrops int64 `json:"total_drops"`
 }
 
@@ -180,29 +185,30 @@ type GCSContentOffloader interface {
 // was split into several requests; see below), with two exceptions: if the
 // stream was rotated by an earlier batch and has not committed yet, Go drops
 // the batch and pauses rotation; if an earlier attempt of the request had an
-// unknown outcome, OutOfRange or NotFound makes Go drop the batch, to prevent
-// duplicate delivery, and replace the stream before the next batch (pausing
-// rotation if the stream had not committed yet). adk-python drops the batch
-// after any of the three and replaces the stream before the next one. On an
-// RPC-level receive error after a successful Send (an AppendRowsResponse.Error
-// carrying one of these codes is a server rejection), Go treats Unavailable,
-// DeadlineExceeded, Canceled, Aborted, Internal, and Unknown as unknown
-// outcomes, whereas adk-python also treats ResourceExhausted (TooManyRequests)
-// as one. After an RPC-level InvalidArgument or FailedPrecondition, Go
-// replaces the stream only if an earlier attempt of the request had an unknown
-// outcome, whereas adk-python also replaces it when the error is not a schema
-// mismatch. DropStats has four counters, whereas adk-python's get_drop_stats()
-// returns ten per-reason counts. adk-python uploads while it parses an event,
-// before the row is queued, with a Cloud Storage client built from the
-// credentials of the plugin, a fixed 32 KiB inline text limit and the
-// parallelism of its thread pool. This plugin queues payloads with rows and
-// uploads them at batch flush time, bounds upload concurrency and memory,
-// supports customizable offloaders, exposes atomic DropStats counters, and
-// optionally writes through a COMMITTED stream with explicit offsets when
-// ExactlyOnceDelivery is enabled. ExactlyOnceDelivery handles offset
-// desynchronization (rotating to a fresh stream without consuming append retry
-// attempts) and distinguishes ambiguous transport errors from definite server
-// rejections.
+// unknown outcome, OutOfRange or NotFound, or a response that reports
+// RowErrors, makes Go drop the batch, to prevent duplicate delivery, and
+// replace the stream before the next batch (pausing rotation if the stream
+// had not committed yet). adk-python drops the batch after OutOfRange,
+// NotFound, or AlreadyExists and replaces the stream before the next one. On
+// an RPC-level receive error after a successful Send (an
+// AppendRowsResponse.Error carrying one of these codes is a server
+// rejection), Go treats Unavailable, DeadlineExceeded, Canceled, Aborted,
+// Internal, and Unknown as unknown outcomes, whereas adk-python also treats
+// ResourceExhausted (TooManyRequests) as one. After an RPC-level
+// InvalidArgument or FailedPrecondition, Go replaces the stream only if an
+// earlier attempt of the request had an unknown outcome, whereas adk-python
+// also replaces it when the error is not a schema mismatch. DropStats has five
+// per-reason counters, whereas adk-python's get_drop_stats() returns ten.
+// adk-python uploads while it parses an event, before the row is queued, with a
+// Cloud Storage client built from the credentials of the plugin, a fixed 32 KiB
+// inline text limit and the parallelism of its thread pool. This plugin queues
+// payloads with rows and uploads them at batch flush time, bounds upload
+// concurrency and memory, supports customizable offloaders, exposes atomic
+// DropStats counters, and optionally writes through a COMMITTED stream with
+// explicit offsets when ExactlyOnceDelivery is enabled. ExactlyOnceDelivery
+// handles offset desynchronization (rotating to a fresh stream without
+// consuming append retry attempts) and distinguishes ambiguous transport errors
+// from definite server rejections.
 //
 // Go splits a batch whose rows are estimated at more than 8 MiB into several
 // AppendRows requests, and halves a multi-row request that serializes to more

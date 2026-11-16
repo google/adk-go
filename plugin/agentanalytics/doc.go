@@ -273,8 +273,8 @@
 //     TestDocParity_DefaultConfigBatchSizeAndRetryDelay in doc_test.go and
 //     TestBatchProcessor_SplitsOversizedBatchAcrossRequests in
 //     batch_processor_test.go).
-//   - [DropStats] structure: Go exposes [DropStats] as a typed struct of four
-//     category counters (QueueFullDrops, AppendFailureDrops,
+//   - [DropStats] structure: Go exposes [DropStats] as a typed struct of five
+//     category counters (QueueFullDrops, AppendFailureDrops, RowErrorDrops,
 //     FormatterFailureDrops, ShutdownDrops) plus TotalDrops via
 //     [BigQueryAgentAnalyticsPlugin.DropStats], whereas adk-python's
 //     get_drop_stats() returns a dictionary of per-reason counts. (Pinned by
