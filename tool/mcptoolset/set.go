@@ -13,6 +13,22 @@
 // limitations under the License.
 
 // Package mcptoolset provides an MCP tool set.
+//
+// Tool descriptions and schemas come from the MCP server, which the agent's
+// developer may not control, so the model receives them fenced. For each model
+// request, an MCP tool puts a copy of its function declaration in the request
+// whose description and schema descriptions sit between the lines
+// <<<BEGIN_UNTRUSTED_TOOL_DESCRIPTION>>> and <<<END_UNTRUSTED_TOOL_DESCRIPTION>>>,
+// with any copy of those markers inside the server's text elided. It appends
+// one paragraph to the system instruction, once per request, telling the model
+// that fenced text is data and not instructions. When the system instruction
+// holds a part that is not text, the tool sends its declaration unfenced and
+// appends nothing. Fencing raises the bar for prompt injection; it does not
+// rule it out.
+//
+// The tool itself keeps the server's text: Description, the declaration that
+// Declaration returns, and the tool registered in the request's tool map are
+// never fenced, so tool listings and searches show what the server sent.
 package mcptoolset
 
 import (
@@ -509,8 +525,14 @@ func (*set) IsLongRunning() bool {
 }
 
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
+// ctx may be nil, as for llmagent.CanonicalTools(nil, a); the listing then runs
+// without an identity and cannot be canceled.
 func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
-	mcpTools, err := s.mcpClient.ListTools(ctx)
+	var listCtx context.Context = identityContext{}
+	if ctx != nil {
+		listCtx = ctx
+	}
+	mcpTools, err := s.mcpClient.ListTools(listCtx)
 	if err != nil {
 		return nil, err
 	}

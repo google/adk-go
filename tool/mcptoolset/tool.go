@@ -27,7 +27,9 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/fencing"
 	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/toolutils"
@@ -87,8 +89,29 @@ func (t *mcpTool) IsLongRunning() bool {
 	return false
 }
 
-func (t *mcpTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	return toolutils.PackTool(req, t)
+// ProcessRequest implements toolinternal.RequestProcessor. It packs a fenced
+// copy of the tool's declaration into req.Config.Tools and appends
+// fencing.ToolDescriptionPreamble to the system instruction once per request.
+// When the system instruction is not plain text (see plainTextInstruction), it
+// packs the stored declaration and appends nothing, because markers without the
+// preamble that explains them would only confuse the model
+// (tools/mcp_tool/mcp_tool.py:418-428). Either way req.Tools[t.Name()] holds t
+// itself, and t.Declaration() keeps the server's own text.
+//
+// The context is not read and may be nil. It returns the toolutils.PackTool
+// error unchanged when req.Tools already holds the name, leaving req as it was.
+func (t *mcpTool) ProcessRequest(_ agent.Context, req *model.LLMRequest) error {
+	if req.Config != nil && !plainTextInstruction(req.Config.SystemInstruction) {
+		return toolutils.PackTool(req, t)
+	}
+	if err := toolutils.PackTool(req, &fencedTool{mcpTool: t, decl: fencedDeclaration(t.funcDeclaration)}); err != nil {
+		return err
+	}
+	req.Tools[t.Name()] = t
+	if !hasPreamble(req.Config.SystemInstruction) {
+		utils.AppendInstructions(req, fencing.ToolDescriptionPreamble)
+	}
+	return nil
 }
 
 func (t *mcpTool) Declaration() *genai.FunctionDeclaration {
