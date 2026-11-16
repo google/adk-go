@@ -169,9 +169,11 @@ func TestRunner_RunLive_NilEventYieldedTerminatesRun(t *testing.T) {
 }
 
 // TestRunner_RunLive_StampsEventsYieldedWithoutTimestamp checks that RunLive
-// stores an event built as a struct literal, whether the live agent yielded it
-// or a plugin returned it in its place, with the run's current time, and that
-// an event that already carries a timestamp keeps it.
+// stores an event built as a struct literal with the run's current time. That
+// holds when the live agent yielded the event, when a plugin returned a copy of
+// it, which inherits the timestamp the runner stamped on the original before
+// the plugin ran, and when a plugin overwrote it in place. An event that
+// already carries a timestamp keeps it.
 func TestRunner_RunLive_StampsEventsYieldedWithoutTimestamp(t *testing.T) {
 	runTime := time.Date(2026, time.March, 2, 10, 0, 0, 0, time.UTC)
 	ownTime := time.Date(2026, time.March, 1, 9, 0, 0, 0, time.UTC)
@@ -180,7 +182,8 @@ func TestRunner_RunLive_StampsEventsYieldedWithoutTimestamp(t *testing.T) {
 		// own is the timestamp the live agent gives its event; zero means none.
 		own time.Time
 		// replace makes a plugin swap the agent's event for a struct literal
-		// copy, which has no timestamp whatever the original carried.
+		// copy with no timestamp of its own. The copy takes the original's,
+		// which the runner stamped before the plugin ran.
 		replace bool
 		// rewrite makes a plugin overwrite the event in place with such a
 		// copy and return nil.
@@ -1085,6 +1088,9 @@ func TestRunner_RunLive_SendDropsNilParts(t *testing.T) {
 	}
 }
 
+// TestRunner_RunLive_SendRejectsUserFunctionCall checks that Send refuses
+// content with a function call without forwarding it, the realtime input sent
+// with it, or storing an event, and that the session takes the next request.
 func TestRunner_RunLive_SendRejectsUserFunctionCall(t *testing.T) {
 	const sessionID = "testSessionUserFunctionCall"
 	sessionService := session.InMemoryService()
@@ -1118,7 +1124,8 @@ func TestRunner_RunLive_SendRejectsUserFunctionCall(t *testing.T) {
 		genai.NewPartFromText("hi"),
 		{FunctionCall: &genai.FunctionCall{Name: "some_tool"}},
 	}}
-	err = sess.Send(agent.LiveRequest{Content: content})
+	blob := &genai.Blob{MIMEType: "audio/pcm", Data: []byte{0x00, 0x01}}
+	err = sess.Send(agent.LiveRequest{Content: content, RealtimeInput: blob})
 
 	if err == nil || err.Error() != "user message cannot contain function calls" {
 		t.Errorf("Send() error = %v, want %q", err, "user message cannot contain function calls")
@@ -1128,5 +1135,19 @@ func TestRunner_RunLive_SendRejectsUserFunctionCall(t *testing.T) {
 	}
 	if n := getRunLiveTestEvents(t, sessionService, sessionID).Len(); n != 0 {
 		t.Errorf("saved events = %d, want 0", n)
+	}
+
+	next := genai.NewContentFromText("next", genai.RoleUser)
+	if err := sess.Send(agent.LiveRequest{Content: next}); err != nil {
+		t.Fatalf("Send() after the rejected request error = %v, want nil", err)
+	}
+	if len(agentSess.requests) != 1 {
+		t.Fatalf("forwarded requests after the next send = %d, want 1", len(agentSess.requests))
+	}
+	if got := agentSess.requests[0]; got.Content != next || got.RealtimeInput != nil {
+		t.Errorf("forwarded request = {Content: %v, RealtimeInput: %v}, want only the next content", got.Content, got.RealtimeInput)
+	}
+	if n := getRunLiveTestEvents(t, sessionService, sessionID).Len(); n != 1 {
+		t.Errorf("saved events after the next send = %d, want 1", n)
 	}
 }

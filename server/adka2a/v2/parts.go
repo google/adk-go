@@ -279,11 +279,11 @@ func toGenAIFilePart(part *a2a.Part) (*genai.Part, error) {
 			if err != nil {
 				return nil, fmt.Errorf("encode %s part metadata: %w", a2aPartMetaVideoMetadataKey, err)
 			}
-			// genai's offsets are durations, so an offset that does not parse is
-			// rejected rather than dropped; adk-python passes any string on. The
-			// decode error quotes the peer's value, so it is not wrapped.
+			// genai's offsets are durations and its fps is a number, so a value
+			// that does not fit is rejected rather than dropped. The decode
+			// error can quote the peer's value, so it is not wrapped.
 			if err := json.Unmarshal(vmJSON, &r.VideoMetadata); err != nil {
-				return nil, fmt.Errorf("decode %s part metadata: want an object whose offsets are durations such as \"1.5s\"", a2aPartMetaVideoMetadataKey)
+				return nil, fmt.Errorf("decode %s part metadata: want an object whose offsets are durations such as \"1.5s\" and whose fps is a number", a2aPartMetaVideoMetadataKey)
 			}
 		}
 		return r, nil
