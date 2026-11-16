@@ -1250,6 +1250,8 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 	artifactsService := ctx.Artifacts()
 	if artifactsService != nil && saveInputBlobsAsArtifacts {
 		for i, part := range msg.Parts {
+			// A nil part carries no content, so it is skipped; adk-python rejects
+			// the request instead.
 			if part == nil || part.InlineData == nil {
 				continue
 			}
