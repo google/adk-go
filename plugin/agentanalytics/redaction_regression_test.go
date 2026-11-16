@@ -2847,6 +2847,21 @@ func TestJSONDocumentsScrubbedAsText(t *testing.T) {
 		"[INFO] 'a\u2028db_password=' '[REDACTED]'",
 		"[INFO] \"a\u2029db_password=\" \"[REDACTED]\"",
 		`[INFO] 'a\u2028db_password=' '[REDACTED]'`,
+		"[INFO] Bearer\vSECRETZQ",
+		"{\"k\":\"Bearer\vSECRETZQ\"",
+		"[INFO] Bearer\fSECRETZQ",
+		"{\"k\":\"Bearer\fSECRETZQ\"",
+		`{"k":"Bearer\u000bSECRETZQ"`,
+		`{"password"%C2%A0:%C2%A0"SECRETZQ"}`,
+		`{"password"%c2%a0:%c2%a0"SECRETZQ"}`,
+		`[INFO] Bearer%C2%A0SECRETZQ`,
+		`{"token"%E2%80%80:%E2%80%80"SECRETZQ"}`,
+		`{"password"%EF%BB%BF:%EF%BB%BF"SECRETZQ"}`,
+		`{"note"%E2%80%A8Authorization:%C2%A0SECRETZQ}`,
+		`{"password\ufeff":"SECRETZQ"`,
+		"{\"password\"\ufeff:\ufeff",
+		"[INFO] \"password\"\ufeff:\ufeff",
+		"{\"password\"\ufeff:\ufeff[REDACTED]",
 	} {
 		for _, ep := range eps[1:] {
 			got := ep.f(in)
@@ -2866,13 +2881,72 @@ func TestJSONDocumentsScrubbedAsText(t *testing.T) {
 			t.Errorf("SmartTruncate(map{v:%q}) = (%s, %v, %v), want unparseable placeholder with truncated=true", in, raw, trunc1, err)
 		}
 	}
+	for _, in := range []string{
+		`{"k":"{\"password\"%C2%A0:%C2%A0\"SECRETZQ\"}"}`,
+		`{"k":"{\"k\":\"Bearer\u000bSECRETZQ\"}"}`,
+	} {
+		for _, ep := range eps[1:] {
+			got := ep.f(in)
+			if strings.Contains(got, "SECRETZQ") {
+				t.Errorf("%s(%q) = %q kept SECRETZQ", ep.name, in, got)
+			}
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+			}
+		}
+	}
+	// Escaped-scheme URIs keep merge-base fail-closed parity in the backstop
+	// without allowing BOM or Unicode escape folding to disable URI matching.
+	for _, esc := range []string{`\ufeff`, `\u00a0`, `\u212a`, `\u017f`, `\u0130`} {
+		in := fmt.Sprintf(`{"s":"https\%s://h/a;Bearer+SECRETZQ+token=x"}`, esc)
+		for _, ep := range eps {
+			got := ep.f(in)
+			if ep.name == "redactErrorMessage" {
+				want := fmt.Sprintf(`{"s":"https\%s://h/a%%3BBearer+SECRETZQ+token=%%5BREDACTED%%5D"}`, esc)
+				if got != want {
+					t.Errorf("%s(%q) = %q, want %q", ep.name, in, got, want)
+				}
+			} else if got != redactedSensitiveTextPlaceholder {
+				t.Errorf("%s(%q) = %q, want %q", ep.name, in, got, redactedSensitiveTextPlaceholder)
+			}
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+			}
+		}
+	}
+	// BOM-padded sensitive keys are recognized across structured and text paths.
+	for _, in := range []string{
+		"{\"password\ufeff\":\"SECRETZQ\"}",
+		"{\"\ufeffpassword\":\"SECRETZQ\"}",
+		"{\"\ufeffapi_key\ufeff\":\"SECRETZQ\"}",
+		"{\"user:\ufeffpassword\ufeff\":\"SECRETZQ\"}",
+		"{\"\ufeffuser:password\":\"SECRETZQ\"}",
+	} {
+		for _, ep := range eps {
+			got := ep.f(in)
+			if strings.Contains(got, "SECRETZQ") {
+				t.Errorf("%s(%q) = %q kept SECRETZQ", ep.name, in, got)
+			}
+			if again := ep.f(got); again != got {
+				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
+			}
+		}
+	}
 	for _, prose := range []string{
 		"[INFO] hello\u00a0world",
 		"[INFO] hello\ufeffworld",
+		"[INFO] hello\vworld",
 		"\ufeff[INFO] hello world",
 		"[INFO] café — ok",
 		"[Help] forgot my\u2000password\u3000again",
 		"\"Hello,\u00a0\" she said [laughing].",
+		`{"msg":"hello%C2%A0world"`,
+		`{"msg":"hello%E2%80%A8world"`,
+		`{"msg":"cafe%C3%A9%F0%9F%98%80"`,
+		`{"status": 500, "url": "https://example.com/a%20b"`,
+		`{"msg":"100% ok %80 %C2 %C2%ZZ %E0%80%80 %"`,
+		`{"msg":"100%`,
+		`{"msg":"a%C2`,
 	} {
 		for _, ep := range eps[1:] {
 			if got := ep.f(prose); got != prose {
@@ -3080,8 +3154,27 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 		doc15 := mkAllLevels(15, n)
 		plain1 := mkAllLevels(1, len(doc15))
 		sanFn := func(in string) func() { return func() { _, _ = sanitizeRawText(in) } }
-		if ratio, t1, t15 := linearRatio(8, sanFn(plain1), sanFn(doc15)); ratio > 8 {
-			t.Errorf("sanitizeRawText 15-level vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 8x", ratio, t1, len(plain1), t15, len(doc15))
+		if ratio, t1, t15 := linearRatio(64, sanFn(plain1), sanFn(doc15)); ratio > 64 {
+			t.Errorf("sanitizeRawText 15-level vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, t1, len(plain1), t15, len(doc15))
+		}
+		doc15Small := mkAllLevels(15, n/16)
+		if ratio, ts, tl := linearRatio(64, sanFn(doc15Small), sanFn(doc15)); ratio > 64 {
+			t.Errorf("sanitizeRawText 15-level growing payload scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 64x", ratio, ts, len(doc15Small), tl, len(doc15))
+		}
+		// Keep keyRedactionHidesRunOn outer-only: nesting a 49k-int leaf 12
+		// levels deep repeats node decoding only once for redaction and once
+		// at depth 0, staying well below 24x of equal-length 1-level input.
+		nums := 49_000
+		if raceEnabled {
+			nums = 20_000
+		}
+		arrDoc12 := fmt.Sprintf(`{"a":%s,"password":"SECRET1"}`, encode(make([]int, nums)))
+		for range 11 {
+			arrDoc12 = fmt.Sprintf(`{"z":%s,"password":"SECRET1"}`, encode(arrDoc12))
+		}
+		arrPlain1 := mkAllLevels(1, len(arrDoc12))
+		if ratio, t1, t12 := linearRatio(24, sanFn(arrPlain1), sanFn(arrDoc12)); ratio > 24 {
+			t.Errorf("sanitizeRawText 12-level array-leaf vs equal-length 1-level document scales %.1fx (%v for %d bytes, %v for %d bytes), want at most 24x", ratio, t1, len(arrPlain1), t12, len(arrDoc12))
 		}
 		san, _ := sanitizeRawText(doc15)
 		if strings.Contains(san, "SECRET") {
@@ -3382,7 +3475,7 @@ func TestEscapedReadingsMatchMain(t *testing.T) {
 // keyRedactionHidesRunOn at the outermost level so mixed %22/\" escapes cannot
 // leak sibling secrets; (2) maxSanitizeNodes truncation in redactJSONValueInner
 // shrinks containers strictly so Pass 2 is idempotent with contentLost=false
-// across the 49,995..50,005 boundary on maps and arrays across all five entry
+// across the 49,997..50,001 boundary on maps and arrays across all five entry
 // points; and (3) quote-led literal candidate re-checks run at the same depth
 // with a fresh pass budget.
 func TestOuterRunOnBudgetIdempotencyAndCandidateRecheck(t *testing.T) {

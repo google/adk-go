@@ -432,7 +432,7 @@ func hasCompoundWordBoundary(k string) bool {
 // as DB_PASSWORD, GITHUB_TOKEN, dbPassword or spring.datasource.password, is
 // sensitive too (see isCompoundSensitiveKey).
 func isSensitiveKey(k string) bool {
-	k = strings.TrimSpace(k)
+	k = trimBOMAndSpace(k)
 	if strings.IndexByte(k, ':') >= 0 {
 		for {
 			if hasFoldPrefix(k, session.KeyPrefixTemp) {
@@ -441,7 +441,7 @@ func isSensitiveKey(k string) bool {
 			if !hasFoldPrefix(k, session.KeyPrefixUser) && !hasFoldPrefix(k, session.KeyPrefixApp) {
 				break
 			}
-			k = strings.TrimSpace(k[strings.IndexByte(k, ':')+1:])
+			k = trimBOMAndSpace(k[strings.IndexByte(k, ':')+1:])
 		}
 	}
 	b0, b1, ok := last2FoldedKeyBytes(k)
@@ -757,12 +757,27 @@ func hasEscapePrefixInTail(out []byte) bool {
 	return false
 }
 
+func isLegacyFoldedEscapeRune(r rune, _ bool) bool {
+	return r <= 0x7F
+}
+
 // canonicalizeCredentialMarker decodes nested ASCII, case-folded (\u0130,
 // \u017f, \u212a) and \uXXXX whitespace \u, \x and percent escapes, and
 // escaped quotes (\" and \'), in one pass. The result is used for detection
 // only: callers keep the original text unless the canonical form exposes a
 // credential construct.
 func canonicalizeCredentialMarker(s string) string {
+	return canonicalizeCredentialMarkerWith(s, isFoldedEscapeRune)
+}
+
+// canonicalizeLegacyCredentialMarker decodes only ASCII escapes (r <= 0x7F) and
+// escaped quotes, matching the merge-base escape interpretation used by the
+// legacy parity backstop.
+func canonicalizeLegacyCredentialMarker(s string) string {
+	return canonicalizeCredentialMarkerWith(s, isLegacyFoldedEscapeRune)
+}
+
+func canonicalizeCredentialMarkerWith(s string, foldRune func(r rune, unicodeEscape bool) bool) string {
 	if !hasCanonicalizableEscape(s) {
 		return s
 	}
@@ -807,7 +822,7 @@ func canonicalizeCredentialMarker(s string) string {
 				break
 			}
 			decoded, err := strconv.ParseUint(string(digits), 16, 32)
-			if err != nil || !isFoldedEscapeRune(rune(decoded), escapeStart == n-6) {
+			if err != nil || !foldRune(rune(decoded), escapeStart == n-6) {
 				break
 			}
 			output = utf8.AppendRune(output[:escapeStart], rune(decoded))

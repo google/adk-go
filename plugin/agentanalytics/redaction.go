@@ -1189,26 +1189,49 @@ func isPositivelyHarmlessProse(raw, trimmed string) bool {
 		!hasJSONEscapedCredential(raw)
 }
 
-// foldUnicodeSpaces replaces non-ASCII Unicode whitespace, separator, and BOM
-// runes (such as U+00A0, U+2000..U+200A, U+202F, U+205F, U+3000, and U+FEFF)
-// with ASCII spaces, and Unicode line/paragraph separators (U+0085, U+2028,
-// U+2029) with '\n', for credential-marker detection in malformed JSON or
-// quote-led text.
+// foldUnicodeSpaces replaces ASCII vertical tab ('\v'), non-ASCII Unicode
+// whitespace, separator, and BOM runes (such as U+00A0, U+2000..U+200A,
+// U+202F, U+205F, U+3000, and U+FEFF), and percent-encoded UTF-8 sequences for
+// those runes (such as %C2%A0 or %EF%BB%BF) with ASCII spaces, and Unicode
+// line/paragraph separators (U+0085, U+2028, U+2029, literal or
+// percent-encoded) with '\n', for credential-marker detection in malformed JSON
+// or quote-led text.
 func foldUnicodeSpaces(s string) string {
-	hasNonASCII := false
+	hasFoldable := false
 	for i := 0; i < len(s); i++ {
-		if s[i] >= utf8.RuneSelf {
-			hasNonASCII = true
+		if s[i] == '\v' || s[i] == '%' || s[i] >= utf8.RuneSelf {
+			hasFoldable = true
 			break
 		}
 	}
-	if !hasNonASCII {
+	if !hasFoldable {
 		return s
 	}
 	var b strings.Builder
 	changed := false
 	for i := 0; i < len(s); {
 		if s[i] < utf8.RuneSelf {
+			var repl byte
+			step := 1
+			switch s[i] {
+			case '\v':
+				repl = ' '
+			case '%':
+				if pr, seqLen, ok := parsePercentUTF8SpaceAt(s, i); ok {
+					repl = pr
+					step = seqLen
+				}
+			}
+			if repl != 0 {
+				if !changed {
+					b.Grow(len(s))
+					b.WriteString(s[:i])
+					changed = true
+				}
+				b.WriteByte(repl)
+				i += step
+				continue
+			}
 			if changed {
 				b.WriteByte(s[i])
 			}
@@ -1239,6 +1262,73 @@ func foldUnicodeSpaces(s string) string {
 		return s
 	}
 	return b.String()
+}
+
+func parseHexDigit(c byte) (byte, bool) {
+	switch {
+	case '0' <= c && c <= '9':
+		return c - '0', true
+	case 'a' <= c && c <= 'f':
+		return c - 'a' + 10, true
+	case 'A' <= c && c <= 'F':
+		return c - 'A' + 10, true
+	default:
+		return 0, false
+	}
+}
+
+func parsePercentByteAt(s string, i int) (byte, bool) {
+	if i+2 >= len(s) || s[i] != '%' {
+		return 0, false
+	}
+	hi, ok1 := parseHexDigit(s[i+1])
+	lo, ok2 := parseHexDigit(s[i+2])
+	if !ok1 || !ok2 {
+		return 0, false
+	}
+	return hi<<4 | lo, true
+}
+
+func parsePercentUTF8SpaceAt(s string, i int) (repl byte, seqLen int, ok bool) {
+	b0, ok := parsePercentByteAt(s, i)
+	if !ok || b0 < utf8.RuneSelf {
+		return 0, 0, false
+	}
+	var expected int
+	switch {
+	case b0 >= 0xC2 && b0 <= 0xDF:
+		expected = 2
+	case b0 >= 0xE0 && b0 <= 0xEF:
+		expected = 3
+	case b0 >= 0xF0 && b0 <= 0xF4:
+		expected = 4
+	default:
+		return 0, 0, false
+	}
+	if i+3*expected > len(s) {
+		return 0, 0, false
+	}
+	var buf [utf8.UTFMax]byte
+	buf[0] = b0
+	for k := 1; k < expected; k++ {
+		bk, ok := parsePercentByteAt(s, i+3*k)
+		if !ok {
+			return 0, 0, false
+		}
+		buf[k] = bk
+	}
+	r, size := utf8.DecodeRune(buf[:expected])
+	if r == utf8.RuneError || size != expected {
+		return 0, 0, false
+	}
+	switch {
+	case r == '\u0085' || r == '\u2028' || r == '\u2029':
+		return '\n', 3 * expected, true
+	case isInlineSpaceRune(r) || r == '\ufeff':
+		return ' ', 3 * expected, true
+	default:
+		return 0, 0, false
+	}
 }
 
 // hasJSONEscapedCredential reports whether the text between two consecutive
@@ -2117,11 +2207,15 @@ func keptInOrder(parts []string, s string) bool {
 }
 
 func unescapeCredentialStep(s string) string {
+	return unescapeCredentialStepWith(s, canonicalizeCredentialMarker)
+}
+
+func unescapeCredentialStepWith(s string, canonFn func(string) string) string {
 	if strings.Contains(s, `\`) {
 		s = unescapeBackslashControls(s)
 	}
 	if strings.ContainsAny(s, "%xXuU") {
-		s = canonicalizeCredentialMarker(s)
+		s = canonFn(s)
 	}
 	return s
 }
@@ -2138,20 +2232,31 @@ func unescapeCredentialStep(s string) string {
 // inside each other; up to 2*maxCanonicalUnescapePasses are run, failing
 // closed if escapes still change past that depth.
 func hasBackslashEscapedCredentialWith(raw, scrubbed string, scrub func(string) string) bool {
+	return hasBackslashEscapedCredentialFull(raw, scrubbed, scrub, canonicalizeCredentialMarker)
+}
+
+// hasLegacyBackslashEscapedCredentialWith is hasBackslashEscapedCredentialWith
+// using the merge-base ASCII-only canonicalizer so the legacy parity backstop
+// preserves merge-base escape semantics.
+func hasLegacyBackslashEscapedCredentialWith(raw, scrubbed string, scrub func(string) string) bool {
+	return hasBackslashEscapedCredentialFull(raw, scrubbed, scrub, canonicalizeLegacyCredentialMarker)
+}
+
+func hasBackslashEscapedCredentialFull(raw, scrubbed string, scrub, canonFn func(string) string) bool {
 	var parts []string
 	curRaw, curScrubbed := raw, scrubbed
 	for range 2 * maxCanonicalUnescapePasses {
 		if !strings.ContainsAny(curRaw, `\%`) {
 			return false
 		}
-		nextRaw := unescapeCredentialStep(curRaw)
+		nextRaw := unescapeCredentialStepWith(curRaw, canonFn)
 		if nextRaw == curRaw {
 			return false
 		}
 		if curScrubbed == curRaw {
 			// Nothing was redacted, so the scrubbed text decodes to nextRaw
 			// too and one scrub of it answers both checks below.
-			if scrub(nextRaw) != nextRaw || exposesEncodedPattern(nextRaw, scrub) {
+			if scrub(nextRaw) != nextRaw || exposesEncodedPatternWith(nextRaw, scrub, canonFn) {
 				return true
 			}
 			curRaw, curScrubbed = nextRaw, nextRaw
@@ -2160,11 +2265,11 @@ func hasBackslashEscapedCredentialWith(raw, scrubbed string, scrub func(string) 
 		if parts == nil {
 			parts = keptLiterals(curScrubbed)
 		}
-		nextScrubbed := unescapeCredentialStep(curScrubbed)
+		nextScrubbed := unescapeCredentialStepWith(curScrubbed, canonFn)
 		for j, part := range parts {
-			parts[j] = unescapeCredentialStep(part)
+			parts[j] = unescapeCredentialStepWith(part, canonFn)
 		}
-		if scrub(nextScrubbed) != nextScrubbed || exposesEncodedPattern(nextScrubbed, scrub) {
+		if scrub(nextScrubbed) != nextScrubbed || exposesEncodedPatternWith(nextScrubbed, scrub, canonFn) {
 			return true
 		}
 		if !keptInOrder(parts, scrub(nextRaw)) {
@@ -2172,7 +2277,7 @@ func hasBackslashEscapedCredentialWith(raw, scrubbed string, scrub func(string) 
 		}
 		curRaw, curScrubbed = nextRaw, nextScrubbed
 	}
-	return unescapeCredentialStep(curRaw) != curRaw
+	return unescapeCredentialStepWith(curRaw, canonFn) != curRaw
 }
 
 // unescapeBackslashControls decodes the standard backslash escapes in s. A
@@ -2230,12 +2335,23 @@ func hasEncodedCredentialMarker(msg string) bool {
 // exposesEncodedPattern reports whether decoding the escapes in msg exposes a
 // pattern that scrub would redact.
 func exposesEncodedPattern(msg string, scrub func(string) string) bool {
+	return exposesEncodedPatternWith(msg, scrub, canonicalizeCredentialMarker)
+}
+
+// exposesLegacyEncodedPattern is exposesEncodedPattern using the merge-base
+// ASCII-only canonicalizer so the legacy parity backstop preserves merge-base
+// escape semantics.
+func exposesLegacyEncodedPattern(msg string, scrub func(string) string) bool {
+	return exposesEncodedPatternWith(msg, scrub, canonicalizeLegacyCredentialMarker)
+}
+
+func exposesEncodedPatternWith(msg string, scrub, canonFn func(string) string) bool {
 	if msg == "" || isKnownSentinel(msg) {
 		return false
 	}
 	cleaned := strings.ReplaceAll(msg, "%5BREDACTED%5D", redactedValue)
 	cleaned = strings.ReplaceAll(cleaned, "%5bredacted%5d", redactedValue)
-	canon := canonicalizeCredentialMarker(cleaned)
+	canon := canonFn(cleaned)
 	if canon == cleaned {
 		return false
 	}

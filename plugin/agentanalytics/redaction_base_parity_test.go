@@ -160,6 +160,7 @@ func TestRedactionBaseParity(t *testing.T) {
 		`{"k":"\"\\\"{\\\\\\\"DB_PASSWORD\\\\\\\":\\\\\\\"Bearer%20%22x\\\\\\\\\\\\\\\" tail\\\\\\\",\\\\\\\"b\\\\\\\":\\\\\\\"SECRETZQ\\\\\\\"}\\\"\""}`,
 		`"\"{\\\"DB_PASSWORD\\\":\\\"Bearer%20%22x\\\\\\\" tail\\\",\\\"b\\\":\\\"SECRETZQ\\\"}\"" ok`,
 		`"\"{\\\"DB_PASSWORD\\\":\\\"Bearer%20%22x\\\\\\\" tail\\\",\\\"b\\\":\\\"SECRETZQ\\\",\\\"c\\\":\\\"%22\\\"}\"" ok`,
+		`{"s":"https\\ufeff://h/a;Bearer+SECRETZQ+token=x"}`,
 	} {
 		found := false
 		for _, c := range corpus.Cases {

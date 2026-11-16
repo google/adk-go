@@ -82,7 +82,7 @@ func (m *scrubMemo) legacyRemoved(raw string, compound bool) (string, [][2]int) 
 		runs = &m.compoundRuns
 	}
 	e := runs.do(raw, m.legacyPass(compound))
-	if exposesEncodedPattern(e.out, scrub) || hasBackslashEscapedCredentialWith(raw, e.out, scrub) {
+	if exposesLegacyEncodedPattern(e.out, scrub) || hasLegacyBackslashEscapedCredentialWith(raw, e.out, scrub) {
 		return redactedSensitiveTextPlaceholder, [][2]int{{0, len(raw)}}
 	}
 	return e.out, e.trace.removed

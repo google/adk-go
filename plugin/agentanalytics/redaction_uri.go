@@ -52,23 +52,24 @@ func sanitizeURI(raw string) (string, bool) {
 // that is no sensitive key redacts, is redacted with it.
 type uriKeys struct {
 	pathSegment, key func(string) bool
+	canonicalize     func(string) string
 	decodeQueryKeys  bool
 	scrubKeys        bool
 }
 
 var (
 	// scannerURIKeys are the names that sanitizeURI reads as sensitive.
-	scannerURIKeys = uriKeys{isSensitivePathSegment, isSensitiveKey, true, true}
+	scannerURIKeys = uriKeys{isSensitivePathSegment, isSensitiveKey, canonicalizeCredentialMarker, true, true}
 	// legacyURIKeys are the names that the expressions on main read as
 	// sensitive in a URI, with a "+" in a key read as itself (see
 	// isLegacySensitiveKey), and whose own text main kept, so that the
 	// legacy scrub leaves for its text passes what main left (see
 	// legacyScrubTokensTraced).
-	legacyURIKeys = uriKeys{isLegacySensitiveKey, isLegacySensitiveKey, false, false}
+	legacyURIKeys = uriKeys{isLegacySensitiveKey, isLegacySensitiveKey, canonicalizeLegacyCredentialMarker, false, false}
 	// compoundLegacyURIKeys are scannerURIKeys with a "+" in a key read as
 	// itself and the text of a sensitive key kept, for
 	// compoundLegacyScrubErrorTokens.
-	compoundLegacyURIKeys = uriKeys{isSensitivePathSegment, isSensitiveKey, false, false}
+	compoundLegacyURIKeys = uriKeys{isSensitivePathSegment, isSensitiveKey, canonicalizeLegacyCredentialMarker, false, false}
 )
 
 // uriComponentScrub scrubs one decoded URI component (a path segment, a
@@ -134,7 +135,7 @@ func sanitizePathSegments(escapedPath string, scrub uriComponentScrub, keys uriK
 		if rawSeg == "" {
 			continue
 		}
-		seg := canonicalizeCredentialMarker(rawSeg)
+		seg := keys.canonicalize(rawSeg)
 		if redactNext {
 			segments[i] = escapedRedacted
 			changed = true
@@ -148,7 +149,7 @@ func sanitizePathSegments(escapedPath string, scrub uriComponentScrub, keys uriK
 			continue
 		}
 		if rawKey, value, hasEq := strings.Cut(seg, "="); hasEq {
-			canonKey := canonicalizeCredentialMarker(rawKey)
+			canonKey := keys.canonicalize(rawKey)
 			if keys.key(canonKey) || normalizeKey(canonKey) == "key" {
 				left, rawValue, hasRawEq := strings.Cut(rawSeg, "=")
 				if !hasRawEq {
@@ -261,7 +262,7 @@ func sanitizeQueryPairs(raw string, requireEquals bool, scrub uriComponentScrub,
 		if keys.decodeQueryKeys {
 			keyText = strings.ReplaceAll(rawKey, "+", " ")
 		}
-		key := canonicalizeCredentialMarker(keyText)
+		key := keys.canonicalize(keyText)
 		if keys.key(key) || normalizeKey(key) == "key" || (keys.decodeQueryKeys && endsInSensitiveTextKey(key)) {
 			safeKey, keyChanged := rawKey, false
 			if keys.scrubKeys {
@@ -366,7 +367,7 @@ func legacyRedactURIComponentWith(s string, scrub func(string) string) (string, 
 		return s, false
 	}
 	scrubbed := scrub(s)
-	if exposesEncodedPattern(scrubbed, scrub) {
+	if exposesLegacyEncodedPattern(scrubbed, scrub) {
 		return redactedSensitiveTextPlaceholder, true
 	}
 	return scrubbed, scrubbed != s
