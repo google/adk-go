@@ -38,8 +38,8 @@ import (
 const artifactServiceMissingText = "artifact service is not initialized"
 
 // codeExecutionPostProcess runs the first code block of resp through the
-// agent's code executor (adk-python flows/llm_flows/extensions/
-// _code_execution.py, _run_post_processor).
+// code executor resolveCodeExecutor returns (adk-python flows/llm_flows/
+// extensions/_code_execution.py, _run_post_processor).
 //
 // It yields nothing and leaves resp untouched for a nil or partial resp, a nil
 // resp.Content, an agent without an executor, a closed retry gate, and a
@@ -55,7 +55,7 @@ func codeExecutionPostProcess(ctx agent.InvocationContext, resp *model.LLMRespon
 		if resp == nil || resp.Partial || resp.Content == nil {
 			return
 		}
-		exec := getCodeExecutor(ctx)
+		exec := resolveCodeExecutor(ctx)
 		if exec == nil {
 			return
 		}
@@ -216,6 +216,11 @@ func runCode(ctx agent.InvocationContext, exec codeexecutor.CodeExecutor, settin
 	if err != nil {
 		return nil, fmt.Errorf("prepare code execution: %w", err)
 	}
+	return runCodeWithFiles(ctx, exec, settings, ec, code, files)
+}
+
+// runCodeWithFiles is runCode with files as the executor's input files.
+func runCodeWithFiles(ctx agent.InvocationContext, exec codeexecutor.CodeExecutor, settings codeexecutor.Settings, ec *codeExecutorContext, code string, files []*codeexecutor.File) (*codeexecutor.Result, error) {
 	id, err := ec.getOrSetExecutionID(ctx.Session().ID(), settings.Stateful)
 	if err != nil {
 		return nil, fmt.Errorf("prepare code execution: %w", err)
