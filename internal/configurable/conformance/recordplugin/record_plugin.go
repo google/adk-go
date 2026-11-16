@@ -128,7 +128,9 @@ func (p *recordPlugin) afterModel(ctx agent.Context, resp *model.LLMResponse, er
 }
 
 func (p *recordPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-	on, err := p.isRecordModeOn(ctx.State())
+	// ReadonlyState: State would make the call wait for the earlier calls of
+	// its model turn to return (see agent.Context.State).
+	on, err := p.isRecordModeOn(ctx.ReadonlyState())
 	if err != nil || !on {
 		return nil, nil
 	}
@@ -149,7 +151,7 @@ func (p *recordPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[strin
 }
 
 func (p *recordPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
-	on, recordErr := p.isRecordModeOn(ctx.State())
+	on, recordErr := p.isRecordModeOn(ctx.ReadonlyState())
 	if recordErr != nil || !on {
 		return nil, nil
 	}
@@ -203,7 +205,7 @@ func (p *recordPlugin) afterRun(ctx agent.InvocationContext) {
 	p.saveRecordings(state)
 }
 
-func (p *recordPlugin) parseRecordConfig(sessionState session.State) (string, int, string, error) {
+func (p *recordPlugin) parseRecordConfig(sessionState session.ReadonlyState) (string, int, string, error) {
 	if sessionState == nil {
 		return "", 0, "", nil
 	}
@@ -262,7 +264,7 @@ func (p *recordPlugin) parseRecordConfig(sessionState session.State) (string, in
 	return caseDir, msgIndex, streamingMode, nil
 }
 
-func (p *recordPlugin) isRecordModeOn(sessionState session.State) (bool, error) {
+func (p *recordPlugin) isRecordModeOn(sessionState session.ReadonlyState) (bool, error) {
 	caseDir, _, _, err := p.parseRecordConfig(sessionState)
 	if err != nil {
 		return false, err
