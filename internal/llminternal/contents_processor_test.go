@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"iter"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -28,11 +29,13 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -835,10 +838,7 @@ func TestContentsRequestProcessor_TaskInputFromOriginatingFC(t *testing.T) {
 		},
 	}
 
-	argsJSON, err := json.Marshal(args)
-	if err != nil {
-		t.Fatalf("marshal args: %v", err)
-	}
+	const argsJSON = `{"goal": "summarize"}`
 
 	t.Run("task mode prepends FC args without nudge", func(t *testing.T) {
 		taskAgent := utils.Must(llmagent.New(llmagent.Config{
@@ -858,7 +858,7 @@ func TestContentsRequestProcessor_TaskInputFromOriginatingFC(t *testing.T) {
 			}
 		}
 		want := []*genai.Content{
-			{Role: genai.RoleUser, Parts: []*genai.Part{{Text: string(argsJSON)}}},
+			{Role: genai.RoleUser, Parts: []*genai.Part{{Text: argsJSON}}},
 			genai.NewContentFromText("working on it", "model"),
 		}
 		if diff := cmp.Diff(wantWithContinuation(want), req.Contents); diff != "" {
@@ -887,7 +887,7 @@ func TestContentsRequestProcessor_TaskInputFromOriginatingFC(t *testing.T) {
 		wantLeading := &genai.Content{
 			Role: genai.RoleUser,
 			Parts: []*genai.Part{
-				{Text: string(argsJSON)},
+				{Text: argsJSON},
 				{Text: llminternal.SingleTurnNudge},
 			},
 		}
@@ -939,6 +939,628 @@ func TestContentsRequestProcessor_TaskInputFromUserContentFallback(t *testing.T)
 		genai.NewContentFromText("ack", "model"),
 	}
 	if diff := cmp.Diff(wantWithContinuation(want), req.Contents); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestContentsRequestProcessor_TaskInputArgsFallbacks pins what a scoped
+// agent receives when the delegating call's arguments do not give JSON text:
+// arguments neither encoding/json nor adk-python's json.dumps can encode are
+// written with fmt.Sprint and the request goes on, where adk-python writes
+// str(fc.args); non-finite floats are written as json.dumps writes them; and
+// empty arguments fall back to the invocation's user content, as adk-python
+// requires fc.args to be truthy.
+func TestContentsRequestProcessor_TaskInputArgsFallbacks(t *testing.T) {
+	t.Parallel()
+	const fcID = "fc-task"
+	userInput := genai.NewContentFromText("do the thing", genai.RoleUser)
+	testCases := []struct {
+		name string
+		args map[string]any
+		want []*genai.Content
+	}{
+		{
+			name: "arguments JSON cannot encode",
+			args: map[string]any{"c": complex(1, 2)},
+			want: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "map[c:(1+2i)]"}}}},
+		},
+		{
+			name: "non-finite floats",
+			args: map[string]any{"k": "v", "x": math.NaN(), "y": math.Inf(1), "z": math.Inf(-1)},
+			want: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: `{"k": "v", "x": NaN, "y": Infinity, "z": -Infinity}`}}}},
+		},
+		{
+			name: "empty arguments",
+			args: map[string]any{},
+			want: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "do the thing"}}}},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			events := []*session.Event{{
+				Author: "coord",
+				LLMResponse: model.LLMResponse{Content: &genai.Content{
+					Role:  genai.RoleModel,
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: fcID, Name: "taskAgent", Args: tc.args}}},
+				}},
+			}}
+			taskAgent := utils.Must(llmagent.New(llmagent.Config{
+				Name:  "taskAgent",
+				Model: &testModel{},
+				Mode:  llmagent.ModeTask,
+			}))
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Agent:          taskAgent,
+				IsolationScope: fcID,
+				UserContent:    userInput,
+				Session:        &fakeSession{events: events},
+			})
+			req := &model.LLMRequest{}
+			for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if err != nil {
+					t.Fatalf("ContentsRequestProcessor() error = %v", err)
+				}
+			}
+			if diff := cmp.Diff(tc.want, req.Contents); diff != "" {
+				t.Errorf("contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestContentsRequestProcessor_TaskInputPythonJSONFormat pins the text of a
+// scoped agent's task input: the delegating call's arguments as adk-python's
+// json.dumps(args, ensure_ascii=False) writes them, with ", " and ": "
+// separators, no HTML escaping, literal non-ASCII text, typed Go values
+// formatted like their generic JSON form, and keys in sorted order.
+func TestContentsRequestProcessor_TaskInputPythonJSONFormat(t *testing.T) {
+	t.Parallel()
+	const fcID = "fc-json"
+	events := []*session.Event{
+		{
+			Author: "coord",
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+						ID:   fcID,
+						Name: "taskAgent",
+						Args: map[string]any{
+							"b_html":   "a < b & c > d",
+							"a_utf8":   "שלום & 北京",
+							"c_nested": map[string]any{"z": 1, "a": []any{"x<y", true, nil, 2.5}},
+							"d_typed":  []string{"a < b", "c"},
+						},
+					}}},
+				},
+			},
+		},
+	}
+	taskAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:  "taskAgent",
+		Model: &testModel{},
+		Mode:  llmagent.ModeTask,
+	}))
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:          taskAgent,
+		IsolationScope: fcID,
+		Session:        &fakeSession{events: events},
+	})
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("ContentsRequestProcessor() error = %v", err)
+		}
+	}
+	want := []*genai.Content{{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{
+			Text: `{"a_utf8": "שלום & 北京", "b_html": "a < b & c > d", "c_nested": {"a": ["x<y", true, null, 2.5], "z": 1}, "d_typed": ["a < b", "c"]}`,
+		}},
+	}}
+	if diff := cmp.Diff(want, req.Contents); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestContentsRequestProcessor_ADKFrameworkEventsAreFiltered pins that a
+// function call or response named adk_framework is ADK bookkeeping and never
+// reaches the model, as in adk-python's _is_adk_framework_event.
+func TestContentsRequestProcessor_ADKFrameworkEventsAreFiltered(t *testing.T) {
+	t.Parallel()
+	before := genai.NewContentFromText("before", genai.RoleUser)
+	testCases := []struct {
+		name   string
+		events []*session.Event
+		want   []*genai.Content
+	}{
+		{
+			name: "call and user response",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: before}},
+				{Author: "testAgent", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{ID: "fw-1", Name: "adk_framework", Args: map[string]any{"k": "v"}},
+				}}}}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{ID: "fw-1", Name: "adk_framework", Response: map[string]any{"ok": true}},
+				}}}}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("after", genai.RoleUser)}},
+			},
+			want: []*genai.Content{before, genai.NewContentFromText("after", genai.RoleUser)},
+		},
+		{
+			// Another agent's response would otherwise reach the model as a
+			// "For context:" content.
+			name: "response from another agent",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: before}},
+				{Author: "otherAgent", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{ID: "fw-2", Name: "adk_framework", Response: map[string]any{"ok": true}},
+				}}}}},
+			},
+			want: []*genai.Content{before},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := utils.Must(llmagent.New(llmagent.Config{Name: "testAgent", Model: &testModel{}}))
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Agent:   a,
+				Session: &fakeSession{events: tc.events},
+			})
+			req := &model.LLMRequest{}
+			for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if err != nil {
+					t.Fatalf("ContentsRequestProcessor() error = %v", err)
+				}
+			}
+			if diff := cmp.Diff(tc.want, req.Contents); diff != "" {
+				t.Errorf("contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// noneModeContents returns the contents ContentsRequestProcessor builds for
+// an agent named "testAgent" with IncludeContents "none" over events.
+func noneModeContents(t *testing.T, events []*session.Event) []*genai.Content {
+	t.Helper()
+	return noneModeContentsIn(t, t.Context(), events)
+}
+
+// noneModeContentsIn is noneModeContents run under parent, which can carry
+// run-scoped configuration such as compaction.
+func noneModeContentsIn(t *testing.T, parent context.Context, events []*session.Event) []*genai.Content {
+	t.Helper()
+	a := utils.Must(llmagent.New(llmagent.Config{
+		Name:            "testAgent",
+		Model:           &testModel{},
+		IncludeContents: llmagent.IncludeContentsNone,
+	}))
+	ctx := icontext.NewInvocationContext(parent, icontext.InvocationContextParams{
+		Agent:   a,
+		Session: &fakeSession{events: events},
+	})
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("ContentsRequestProcessor() error = %v", err)
+		}
+	}
+	return req.Contents
+}
+
+// TestContentsRequestProcessor_IncludeContentsNone_SkipsDirectTransferPivot
+// pins that a transfer_to_agent exchange does not start the current turn, so
+// the turn reaches back to the user input that led to the transfer, and the
+// transfer stays in the request as context. Mirrors adk-python's
+// _is_direct_transfer in _get_current_turn_contents.
+func TestContentsRequestProcessor_IncludeContentsNone_SkipsDirectTransferPivot(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name   string
+		events []*session.Event
+		want   []*genai.Content
+	}{
+		{
+			name: "transfer call and response",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("earlier", genai.RoleUser)}},
+				{Author: "testAgent", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("earlier reply", genai.RoleModel)}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("First user message", genai.RoleUser)}},
+				{Author: "parent", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "transfer_to_agent", Args: map[string]any{"agent_name": "testAgent"}},
+				}}}}},
+				{
+					Author:  "parent",
+					Actions: session.EventActions{TransferToAgent: "testAgent"},
+					LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+						FunctionResponse: &genai.FunctionResponse{ID: "call_1", Name: "transfer_to_agent", Response: map[string]any{"result": nil}},
+					}}}},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("First user message", genai.RoleUser),
+				{Role: genai.RoleUser, Parts: []*genai.Part{
+					{Text: "For context:"},
+					{Text: "[parent] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"testAgent\"}"},
+				}},
+				{Role: genai.RoleUser, Parts: []*genai.Part{
+					{Text: "For context:"},
+					{Text: "[parent] `transfer_to_agent` tool returned result: {\"result\":null}"},
+				}},
+			},
+		},
+		{
+			name: "transfer action without a call",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("real question", genai.RoleUser)}},
+				{
+					Author:      "parent",
+					Actions:     session.EventActions{TransferToAgent: "testAgent"},
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("handoff", genai.RoleModel)},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("real question", genai.RoleUser),
+				{Role: genai.RoleUser, Parts: []*genai.Part{
+					{Text: "For context:"},
+					{Text: "[parent] said: handoff"},
+				}},
+			},
+		},
+		{
+			// Only the action or a call marks a transfer, as in adk-python's
+			// _is_direct_transfer, so a transfer response alone starts the turn.
+			name: "transfer response without the action",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Q", genai.RoleUser)}},
+				{Author: "parent", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{ID: "call_1", Name: "transfer_to_agent", Response: map[string]any{"result": nil}},
+				}}}}},
+			},
+			want: []*genai.Content{
+				{Role: genai.RoleUser, Parts: []*genai.Part{
+					{Text: "For context:"},
+					{Text: "[parent] `transfer_to_agent` tool returned result: {\"result\":null}"},
+				}},
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if diff := cmp.Diff(wantWithContinuation(tc.want), noneModeContents(t, tc.events)); diff != "" {
+				t.Errorf("contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestContentsRequestProcessor_IncludeContentsNone_SkipsInvisibleAndExcludedPivots
+// pins which event starts the current turn when the latest candidate is one
+// the history leaves out: an event with nothing to show, or an internal
+// credential, confirmation or adk_framework exchange. The turn then starts at
+// the latest candidate the history keeps, as in adk-python's
+// _get_current_turn_contents, which requires _should_include_event_in_context.
+func TestContentsRequestProcessor_IncludeContentsNone_SkipsInvisibleAndExcludedPivots(t *testing.T) {
+	t.Parallel()
+	text := func(author string, role genai.Role, s string) *session.Event {
+		return &session.Event{Author: author, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(s, role)}}
+	}
+	parts := func(author string, role genai.Role, p ...*genai.Part) *session.Event {
+		return &session.Event{Author: author, LLMResponse: model.LLMResponse{Content: &genai.Content{Role: string(role), Parts: p}}}
+	}
+	history := func(trailing *session.Event) []*session.Event {
+		return []*session.Event{
+			text("user", genai.RoleUser, "older"),
+			text("testAgent", genai.RoleModel, "older reply"),
+			text("user", genai.RoleUser, "current question"),
+			trailing,
+		}
+	}
+	current := []*genai.Content{genai.NewContentFromText("current question", genai.RoleUser)}
+	q := genai.NewContentFromText("Q", genai.RoleUser)
+	stillThere := genai.NewContentFromText("still there?", genai.RoleUser)
+	start := genai.NewContentFromText("start the job", genai.RoleUser)
+	call := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "long_job", Args: map[string]any{}},
+	}}}
+	result := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "long_job", Response: map[string]any{"status": "done"}},
+	}}}
+
+	testCases := []struct {
+		name   string
+		events []*session.Event
+		want   []*genai.Content
+	}{
+		{
+			name:   "state-only event",
+			events: history(&session.Event{Author: "user", Actions: session.EventActions{StateDelta: map[string]any{"k": "v"}}}),
+			want:   current,
+		},
+		{
+			name:   "empty text part",
+			events: history(parts("user", genai.RoleUser, &genai.Part{Text: ""})),
+			want:   current,
+		},
+		{
+			name:   "nil part",
+			events: history(parts("user", genai.RoleUser, nil)),
+			want:   current,
+		},
+		{
+			name: "internal live artifact part",
+			events: history(parts("user", genai.RoleUser, &genai.Part{
+				FileData: &genai.FileData{FileURI: "artifact://app/user/session/_adk_live/audio.pcm#1"},
+			})),
+			want: current,
+		},
+		{
+			name: "adk_framework call",
+			events: history(parts("user", genai.RoleUser, &genai.Part{
+				FunctionCall: &genai.FunctionCall{ID: "fw-1", Name: "adk_framework"},
+			})),
+			want: current,
+		},
+		{
+			name: "credential request",
+			events: history(parts("user", genai.RoleUser, &genai.Part{
+				FunctionCall: &genai.FunctionCall{ID: "auth-1", Name: "adk_request_credential"},
+			})),
+			want: current,
+		},
+		{
+			// A transcript part carries speech, so the event starts the turn.
+			name: "audio transcription from another agent",
+			events: history(parts("otherAgent", genai.RoleModel, &genai.Part{
+				AudioTranscription: &genai.Transcription{Text: "spoken"},
+			})),
+			want: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
+				{Text: "For context:"},
+				{AudioTranscription: &genai.Transcription{Text: "spoken"}},
+			}}},
+		},
+		{
+			name: "input transcription without content",
+			events: history(&session.Event{Author: "user", LLMResponse: model.LLMResponse{
+				InputTranscription: &genai.Transcription{Text: "spoken"},
+			}}),
+			want: []*genai.Content{genai.NewContentFromText("spoken", genai.RoleUser)},
+		},
+		{
+			name: "output transcription without content",
+			events: history(&session.Event{Author: "user", LLMResponse: model.LLMResponse{
+				OutputTranscription: &genai.Transcription{Text: "spoken"},
+			}}),
+			want: []*genai.Content{genai.NewContentFromText("spoken", genai.RoleModel)},
+		},
+		{
+			// A role-less content is not one the history keeps.
+			name:   "content without a role",
+			events: history(parts("user", "", &genai.Part{Text: "ghost"})),
+			want:   current,
+		},
+		{
+			// One visible part is enough, as in adk-python, where an event is
+			// empty only when all of its parts are invisible. The history then
+			// drops the empty part.
+			name:   "empty text part beside a text part",
+			events: history(parts("user", genai.RoleUser, &genai.Part{Text: ""}, &genai.Part{Text: "hi"})),
+			want:   []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+		},
+		{
+			name:   "inline data only",
+			events: history(parts("user", genai.RoleUser, &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("png")}})),
+			want: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
+				{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("png")}},
+			}}},
+		},
+		{
+			name:   "file data only",
+			events: history(parts("user", genai.RoleUser, &genai.Part{FileData: &genai.FileData{FileURI: "gs://bucket/doc.pdf", MIMEType: "application/pdf"}})),
+			want: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
+				{FileData: &genai.FileData{FileURI: "gs://bucket/doc.pdf", MIMEType: "application/pdf"}},
+			}}},
+		},
+		{
+			name:   "executable code only",
+			events: history(parts("user", genai.RoleUser, &genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)", Language: genai.LanguagePython}})),
+			want: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
+				{ExecutableCode: &genai.ExecutableCode{Code: "print(1)", Language: genai.LanguagePython}},
+			}}},
+		},
+		{
+			name:   "code execution result only",
+			events: history(parts("user", genai.RoleUser, &genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: genai.OutcomeOK, Output: "1"}})),
+			want: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
+				{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: genai.OutcomeOK, Output: "1"}},
+			}}},
+		},
+		{
+			name:   "thought signature only",
+			events: history(parts("user", genai.RoleUser, &genai.Part{ThoughtSignature: []byte("sig")})),
+			want:   []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{ThoughtSignature: []byte("sig")}}}},
+		},
+		{
+			// A user function response is a submitted tool result, which
+			// never starts a turn, so another agent's response stands in.
+			name: "function response from another agent",
+			events: history(parts("otherAgent", genai.RoleUser, &genai.Part{
+				FunctionResponse: &genai.FunctionResponse{ID: "other-1", Name: "lookup", Response: map[string]any{"ok": true}},
+			})),
+			want: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
+				{Text: "For context:"},
+				{Text: "[otherAgent] `lookup` tool returned result: {\"ok\":true}"},
+			}}},
+		},
+		{
+			name: "server-side tool call from another agent",
+			events: history(parts("otherAgent", genai.RoleModel, &genai.Part{
+				ToolCall: &genai.ToolCall{ID: "tc-1", Args: map[string]any{"q": "go"}},
+			})),
+			want: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
+				{Text: "For context:"},
+				{ToolCall: &genai.ToolCall{ID: "tc-1", Args: map[string]any{"q": "go"}}},
+			}}},
+		},
+		{
+			name: "server-side tool response from another agent",
+			events: history(parts("otherAgent", genai.RoleModel, &genai.Part{
+				ToolResponse: &genai.ToolResponse{ID: "tc-1", Response: map[string]any{"hits": "3"}},
+			})),
+			want: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
+				{Text: "For context:"},
+				{ToolResponse: &genai.ToolResponse{ID: "tc-1", Response: map[string]any{"hits": "3"}}},
+			}}},
+		},
+		{
+			// A thought part counts as content, so a thought-only user event
+			// starts its own turn. adk-python would skip it.
+			name:   "thought part without text",
+			events: history(parts("user", genai.RoleUser, &genai.Part{Thought: true})),
+			want:   []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Thought: true}}}},
+		},
+		{
+			// The confirmation reply is recorded as an answer before the
+			// inclusion check rejects it, so the turn reaches back past the
+			// user message sent while the confirmation was pending.
+			name: "confirmation reply after a pending user message",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: q}},
+				parts("testAgent", genai.RoleModel, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "T"}}),
+				parts("testAgent", genai.RoleModel, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "conf-1", Name: toolconfirmation.FunctionCallName}}),
+				{Author: "user", LLMResponse: model.LLMResponse{Content: stillThere}},
+				parts("user", genai.RoleUser, &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "conf-1", Name: toolconfirmation.FunctionCallName}}),
+			},
+			want: []*genai.Content{q, stillThere},
+		},
+		{
+			name: "tool resumed after a confirmation and a pending user message",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: start}},
+				{Author: "testAgent", LLMResponse: model.LLMResponse{Content: call}},
+				parts("testAgent", genai.RoleUser, &genai.Part{FunctionResponse: &genai.FunctionResponse{
+					ID: "call-1", Name: "long_job", Response: map[string]any{"error": "confirmation required"},
+				}}),
+				parts("testAgent", genai.RoleModel, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "confirm-1", Name: toolconfirmation.FunctionCallName}}),
+				text("user", genai.RoleUser, "why is confirmation needed?"),
+				parts("user", genai.RoleUser, &genai.Part{FunctionResponse: &genai.FunctionResponse{
+					ID: "confirm-1", Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": true},
+				}}),
+				{Author: "testAgent", LLMResponse: model.LLMResponse{Content: result}},
+			},
+			want: []*genai.Content{start, call, result},
+		},
+		{
+			// When candidates exist but none is one the history keeps, the
+			// request has no contents, as in adk-python.
+			name:   "only an empty text part after the agent's greeting",
+			events: []*session.Event{text("testAgent", genai.RoleModel, "Hi, how can I help?"), parts("user", genai.RoleUser, &genai.Part{Text: ""})},
+			want:   nil,
+		},
+		{
+			name: "only a state-only event after the agent's greeting",
+			events: []*session.Event{
+				text("testAgent", genai.RoleModel, "Hi, how can I help?"),
+				{Author: "user", Actions: session.EventActions{StateDelta: map[string]any{"k": "v"}}},
+			},
+			want: nil,
+		},
+		{
+			// The agent's own reply after the rejected candidate is not sent
+			// either: adk-python returns no contents when no event starts the
+			// turn.
+			name: "only a state-only event before the agent's reply",
+			events: []*session.Event{
+				{Author: "user", Actions: session.EventActions{StateDelta: map[string]any{"k": "v"}}},
+				text("testAgent", genai.RoleModel, "x"),
+			},
+			want: nil,
+		},
+		{
+			// Another agent's transfer is a candidate the turn cannot start
+			// at; with no other start, the turn starts at that hand-over.
+			name: "only another agent's transfer after the agent's greeting",
+			events: []*session.Event{
+				text("testAgent", genai.RoleModel, "Hi, how can I help?"),
+				parts("parent", genai.RoleModel, &genai.Part{
+					FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "transfer_to_agent", Args: map[string]any{"agent_name": "testAgent"}},
+				}),
+			},
+			want: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
+				{Text: "For context:"},
+				{Text: "[parent] called tool `transfer_to_agent` with parameters: {\"agent_name\":\"testAgent\"}"},
+			}}},
+		},
+		{
+			// Another agent's event that converts to nothing is no candidate,
+			// so with no candidate at all the whole history is sent.
+			name: "only another agent's thought after the agent's reply",
+			events: []*session.Event{
+				text("testAgent", genai.RoleModel, "hi"),
+				parts("otherAgent", genai.RoleModel, &genai.Part{Thought: true, Text: "thinking"}),
+			},
+			want: []*genai.Content{genai.NewContentFromText("hi", genai.RoleModel)},
+		},
+		{
+			// A submitted tool result is no candidate either.
+			name:   "only a submitted result to the agent's call",
+			events: []*session.Event{{Author: "testAgent", LLMResponse: model.LLMResponse{Content: call}}, {Author: "user", LLMResponse: model.LLMResponse{Content: result}}},
+			want:   []*genai.Content{call, result},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if diff := cmp.Diff(wantWithContinuation(tc.want), noneModeContents(t, tc.events)); diff != "" {
+				t.Errorf("contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestContentsRequestProcessor_IncludeContentsNone_CompactionSummaryStartsTurn
+// pins that a compaction summary, an event without content, starts the
+// current turn, as adk-python's _contains_empty_content counts an event with
+// a compaction as not empty.
+func TestContentsRequestProcessor_IncludeContentsNone_CompactionSummaryStartsTurn(t *testing.T) {
+	t.Parallel()
+	events := []*session.Event{
+		compactionTextEvent("user", 1, "older"),
+		compactionTextEvent("testAgent", 2, "older reply"),
+		compactionTextEvent("user", 3, "current question"),
+		compactionSummaryEvent(4, 1, 2, "Earlier: one exchange."),
+	}
+	ctx := compactionctx.ToContext(t.Context(), compactionctx.New(&compaction.Config{CompactionInterval: 1}, nil))
+	want := []*genai.Content{genai.NewContentFromText("Earlier: one exchange.", genai.RoleModel)}
+	if diff := cmp.Diff(wantWithContinuation(want), noneModeContentsIn(t, ctx, events)); diff != "" {
+		t.Errorf("contents mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestContentsRequestProcessor_NoneModeTrailingRewind pins that rewinds are
+// applied before the current turn is chosen: when a trailing rewind removes
+// the latest invocation, the turn starts at the user message before it. In
+// adk-python the turn is chosen first (_contents.py, _get_current_turn_contents)
+// and the rewind then removes the whole chosen slice, leaving no contents.
+func TestContentsRequestProcessor_NoneModeTrailingRewind(t *testing.T) {
+	t.Parallel()
+	events := []*session.Event{
+		{InvocationID: "inv1", Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("msg 1", genai.RoleUser)}},
+		{InvocationID: "inv1", Author: "testAgent", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("response 1", genai.RoleModel)}},
+		{InvocationID: "inv2", Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("msg 2", genai.RoleUser)}},
+		{InvocationID: "inv2", Author: "testAgent", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("response 2", genai.RoleModel)}},
+		{InvocationID: "rewind_inv", Author: "testAgent", Actions: session.EventActions{RewindBeforeInvocationID: "inv2"}},
+	}
+	want := []*genai.Content{
+		genai.NewContentFromText("msg 1", genai.RoleUser),
+		genai.NewContentFromText("response 1", genai.RoleModel),
+	}
+	if diff := cmp.Diff(wantWithContinuation(want), noneModeContents(t, events)); diff != "" {
 		t.Errorf("contents mismatch (-want +got):\n%s", diff)
 	}
 }

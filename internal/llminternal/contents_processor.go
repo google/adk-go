@@ -803,6 +803,9 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 	// Here a result counts only once it passes the branch and isolation-scope
 	// checks below, and call IDs come from every event.
 	unanswered := make(map[string]struct{})
+	// Whether an event by the user or another agent passed every check but
+	// canStartCurrentTurn.
+	sawCandidate := false
 	// The latest hand-over skipped as a turn start below, if any.
 	handover := -1
 	for i, event := range slices.Backward(events) {
@@ -839,15 +842,6 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		if len(unanswered) > 0 {
 			continue
 		}
-		// An event that gives the model nothing to read is left out of the
-		// contents, so it cannot start the turn either: it would slice out
-		// the input before it. This matches adk-python's
-		// _should_include_event_in_context gate for an event with no content,
-		// role or parts. An event whose parts are all empty still starts the
-		// turn here, because isEmptyEvent does not look inside the parts.
-		if isEmptyEvent(event) {
-			continue
-		}
 		// An event discarded by foreign conversion cannot start a visible
 		// turn: keep searching so it does not slice out the preceding input.
 		if isOtherAgentReply(agentName, event) && !compactioninternal.HasUsableSummary(event) && ConvertForeignEvent(event) == nil {
@@ -856,17 +850,13 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		if event.Author != "user" && !isOtherAgentReply(agentName, event) {
 			continue
 		}
-		// A transfer_to_agent hand-over continues the turn of the request it
-		// hands over, so it stays in the prompt as context rather than
-		// starting the turn and slicing that request out. As in adk-python's
-		// _is_direct_transfer.
-		if isDirectTransfer(event) {
-			if handover < 0 {
-				handover = i
-			}
-			continue
+		if canStartCurrentTurn(event) {
+			return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
 		}
-		return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
+		if handover < 0 && isDirectTransfer(event) {
+			handover = i
+		}
+		sawCandidate = true
 	}
 	// With no earlier turn start, the turn starts at the latest hand-over, the
 	// event it started at before hand-overs were skipped. Falling back to the
@@ -875,9 +865,70 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 	if handover >= 0 {
 		return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[handover:], events, isSingleTurn, userContent)
 	}
+	// When candidates exist but none can start the turn, the request has no
+	// contents, as adk-python's _get_current_turn_contents returns []. Falling
+	// through to the whole history below would send turns adk-python never
+	// sends.
+	if sawCandidate {
+		return nil, nil
+	}
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
 	// but that may be a bug.
 	return buildContentsDefault(agentName, branch, isolationScope, events, isSingleTurn, userContent)
+}
+
+// canStartCurrentTurn reports whether ev, an event by the user or another
+// agent that is on the agent's branch and in its isolation scope, can start
+// the current turn when IncludeContents is "none". It can when the history
+// keeps it and it is not a transfer_to_agent exchange, as in adk-python's
+// _get_current_turn_contents: an event with nothing to show, or an internal
+// credential, confirmation or adk_framework exchange, would start a turn the
+// model never sees, and a transfer would cut off the user input that led to
+// it. Every other rule on which event may start the turn belongs here.
+func canStartCurrentTurn(ev *session.Event) bool {
+	if shouldExcludeEvent(ev) || isDirectTransfer(ev) {
+		return false
+	}
+	if ev.LLMResponse.InputTranscription != nil || ev.LLMResponse.OutputTranscription != nil ||
+		compactioninternal.HasUsableSummary(ev) {
+		return true
+	}
+	content := utils.Content(ev)
+	if content == nil || content.Role == "" {
+		return false
+	}
+	return slices.ContainsFunc(content.Parts, func(p *genai.Part) bool { return !isPartInvisible(p) })
+}
+
+// isPartInvisible reports whether p carries nothing the model can see: no
+// text, media, code, function or server-side tool call or response, thought
+// signature or transcript. A nil part and an internal live artifact reference
+// carry nothing. A thought part counts as visible, so a thought-only event
+// starts a turn as it always has. adk-python's _is_part_invisible treats a
+// thought as invisible.
+func isPartInvisible(p *genai.Part) bool {
+	if p == nil || googlellm.IsInternalLiveArtifactPart(p) {
+		return true
+	}
+	if p.Thought {
+		return false
+	}
+	return p.Text == "" && p.InlineData == nil && p.FileData == nil &&
+		p.ExecutableCode == nil && p.CodeExecutionResult == nil &&
+		p.FunctionCall == nil && p.FunctionResponse == nil &&
+		p.ToolCall == nil && p.ToolResponse == nil &&
+		len(p.ThoughtSignature) == 0 && p.AudioTranscription == nil
+}
+
+// isDirectTransfer reports whether ev hands control to another agent: it sets
+// Actions.TransferToAgent or calls transfer_to_agent.
+func isDirectTransfer(ev *session.Event) bool {
+	if ev.Actions.TransferToAgent != "" {
+		return true
+	}
+	return slices.ContainsFunc(utils.FunctionCalls(utils.Content(ev)), func(fc *genai.FunctionCall) bool {
+		return fc.Name == transferAgentName
+	})
 }
 
 // isEmptyEvent reports whether ev gives the model nothing to read: no content
@@ -893,17 +944,6 @@ func isEmptyEvent(ev *session.Event) bool {
 // back as a user-authored function response.
 func isSubmittedToolResult(ev *session.Event) bool {
 	return ev.Author == "user" && len(utils.FunctionResponses(utils.Content(ev))) > 0
-}
-
-// isDirectTransfer reports whether ev is a transfer_to_agent call or the
-// response that carries out the transfer.
-func isDirectTransfer(ev *session.Event) bool {
-	if ev.Actions.TransferToAgent != "" {
-		return true
-	}
-	return slices.ContainsFunc(utils.FunctionCalls(utils.Content(ev)), func(call *genai.FunctionCall) bool {
-		return call.Name == transferAgentName
-	})
 }
 
 func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
@@ -1017,12 +1057,18 @@ func stringify(v any) string {
 	return string(s)
 }
 
-// requestEUCFunctionCallName is a special function to handle credential
-// request.
 const (
+	// requestEUCFunctionCallName is a special function to handle credential
+	// request.
 	requestEUCFunctionCallName = "adk_request_credential"
+	// adkFrameworkFunctionCallName names the function calls and responses
+	// ADK exchanges with itself, which the model never sees.
+	adkFrameworkFunctionCallName = "adk_framework"
 )
 
+// shouldExcludeEvent reports whether ev is an internal exchange left out of
+// the model's history: a credential request, a tool confirmation or an
+// adk_framework call, or the response to one.
 func shouldExcludeEvent(ev *session.Event) bool {
 	c := utils.Content(ev)
 	if c == nil {
@@ -1037,13 +1083,13 @@ func shouldExcludeEvent(ev *session.Event) bool {
 		}
 		if p.FunctionCall != nil {
 			switch p.FunctionCall.Name {
-			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
+			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName, adkFrameworkFunctionCallName:
 				return true
 			}
 		}
 		if p.FunctionResponse != nil {
 			switch p.FunctionResponse.Name {
-			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
+			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName, adkFrameworkFunctionCallName:
 				return true
 			}
 		}
@@ -1091,13 +1137,11 @@ func buildTaskInputUserContent(events []*session.Event, isolationScope string, i
 			if fc.ID != isolationScope || len(fc.Args) == 0 {
 				continue
 			}
-			// Render args as JSON — the same shape an LLM would emit.
-			text, err := json.Marshal(fc.Args)
-			var argText string
+			// Render args as the JSON text adk-python sends, so a task agent
+			// reads the same task in either implementation.
+			argText, err := encodePythonJSON(fc.Args)
 			if err != nil {
 				argText = fmt.Sprint(fc.Args)
-			} else {
-				argText = string(text)
 			}
 			parts := []*genai.Part{{Text: argText}}
 			if isSingleTurn {
