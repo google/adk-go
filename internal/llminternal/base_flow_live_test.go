@@ -40,6 +40,7 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/planner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 )
@@ -1351,5 +1352,78 @@ func TestLLMAgent_RunLiveRewritingPlannerStateEventBeforeModelEvent(t *testing.T
 	}
 	if diff := cmp.Diff(map[string]any{"live_key": "live_val"}, stateEv.Actions.StateDelta); diff != "" {
 		t.Errorf("state event StateDelta mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// configClearingLivePlanner is a planner.BuiltIn whose ApplyThinkingConfig
+// leaves the request with no Config.
+type configClearingLivePlanner struct {
+	*planner.BuiltInPlanner
+}
+
+func (configClearingLivePlanner) ApplyThinkingConfig(req *model.LLMRequest) {
+	req.Config = nil
+}
+
+// A built-in planner may leave the request with a nil Config. RunLive then
+// connects with no system instruction and no tools rather than failing, on
+// the request path an LLM agent's live run uses.
+func TestRunLiveBuiltInPlannerLeavesNilRequestConfig(t *testing.T) {
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+			t.Errorf("writing model turn failed: %v", err)
+			return
+		}
+		blockUntilClientCloses(conn)
+	})
+	baseAgent, err := agent.New(agent.Config{Name: "live_agent"})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+	liveAgent := &mockLLMAgent{Agent: baseAgent, s: &State{
+		Planner: configClearingLivePlanner{planner.NewBuiltInPlanner(nil)},
+	}}
+	created, err := session.InMemoryService().Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("session Create failed: %v", err)
+	}
+	baseCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(baseCtx, &runconfig.RunConfig{
+			StreamingMode: runconfig.StreamingModeBidi,
+			Live:          &agent.LiveRunConfig{},
+		}),
+		icontext.InvocationContextParams{Agent: liveAgent, Session: created.Session},
+	)
+	f := &Flow{
+		Model:              &fakeLiveModel{client: client},
+		RequestProcessors:  DefaultRequestProcessors,
+		ResponseProcessors: DefaultResponseProcessors,
+	}
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	next, stop := iter.Pull2(seq)
+	defer stop()
+
+	for {
+		ev, err, ok := next()
+		if !ok {
+			t.Fatal("iterator ended before the model event")
+		}
+		if err != nil {
+			t.Fatalf("RunLive yielded an error: %v", err)
+		}
+		if ev == nil || ev.LLMResponse.Content == nil {
+			continue
+		}
+		if diff := cmp.Diff([]*genai.Part{{Text: "pong"}}, ev.LLMResponse.Content.Parts); diff != "" {
+			t.Errorf("model event parts mismatch (-want +got):\n%s", diff)
+		}
+		return
 	}
 }

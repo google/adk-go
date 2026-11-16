@@ -274,7 +274,7 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 
 		content.Parts = slices.DeleteFunc(content.Parts, func(p *genai.Part) bool {
 			// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
-			if p == nil || reflect.ValueOf(*p).IsZero() {
+			if isEmptyPart(p) {
 				return true
 			}
 			// The live audio cache records its blobs as artifact:// refs that
@@ -303,6 +303,13 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 		}
 	}
 	return contents, nil
+}
+
+// isEmptyPart reports whether p carries nothing: it is nil or has every field
+// unset. genai sends such a part as {}, which the API rejects, so it is left
+// out of a request.
+func isEmptyPart(p *genai.Part) bool {
+	return p == nil || reflect.ValueOf(*p).IsZero()
 }
 
 func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {

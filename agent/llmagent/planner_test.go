@@ -31,6 +31,7 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/planner"
+	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -141,6 +142,13 @@ type plannerRun struct {
 // and collects the events until the first error.
 func runPlannerAgent(t *testing.T, a agent.Agent, history ...*session.Event) plannerRun {
 	t.Helper()
+	return runPlannerAgentWithPlugins(t, a, nil, history...)
+}
+
+// runPlannerAgentWithPlugins is runPlannerAgent with plugins installed on the
+// runner.
+func runPlannerAgentWithPlugins(t *testing.T, a agent.Agent, plugins []*plugin.Plugin, history ...*session.Event) plannerRun {
+	t.Helper()
 	ctx := t.Context()
 	svc := session.InMemoryService()
 	key := session.GetRequest{AppName: "test_app", UserID: "test_user", SessionID: "s1"}
@@ -153,7 +161,12 @@ func runPlannerAgent(t *testing.T, a agent.Agent, history ...*session.Event) pla
 			t.Fatalf("session AppendEvent: %v", err)
 		}
 	}
-	r, err := runner.New(runner.Config{AppName: key.AppName, Agent: a, SessionService: svc})
+	r, err := runner.New(runner.Config{
+		AppName:        key.AppName,
+		Agent:          a,
+		SessionService: svc,
+		PluginConfig:   runner.PluginConfig{Plugins: plugins},
+	})
 	if err != nil {
 		t.Fatalf("runner.New: %v", err)
 	}
@@ -323,6 +336,115 @@ func TestLLMAgent_PlannerRemovesRequestThoughtsPreservingSessionHistory(t *testi
 	if !stored.Thought {
 		t.Errorf("stored history part Thought = false, want true")
 	}
+}
+
+// A thought part with empty text becomes a zero genai.Part once its Thought
+// flag is cleared, and genai sends a zero part as {}, which the API rejects.
+// The request leaves such parts out, and a content left with no parts, while
+// the stored events keep them.
+func TestLLMAgent_PlannerDropsEmptyThoughtPartsFromRequest(t *testing.T) {
+	tests := []struct {
+		name       string
+		replyParts []*genai.Part
+		want       []*genai.Content
+	}{
+		{
+			name:       "thought_only_reply",
+			replyParts: []*genai.Part{{Text: "", Thought: true}},
+			want: []*genai.Content{
+				{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "earlier question"}}},
+				{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "go"}}},
+			},
+		},
+		{
+			name:       "empty_thought_beside_plain_part",
+			replyParts: []*genai.Part{{Text: "", Thought: true}, {Text: "stored plain"}},
+			want: []*genai.Content{
+				{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "earlier question"}}},
+				{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "stored plain"}}},
+				{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "go"}}},
+			},
+		},
+		{
+			name:       "empty_thought_with_signature_is_kept",
+			replyParts: []*genai.Part{{Text: "", Thought: true, ThoughtSignature: []byte("sig")}},
+			want: []*genai.Content{
+				{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "earlier question"}}},
+				{Role: genai.RoleModel, Parts: []*genai.Part{{ThoughtSignature: []byte("sig")}}},
+				{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "go"}}},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			llm := &scriptedModel{responses: []*model.LLMResponse{textResponse("done")}}
+			a := newPlannerAgent(t, llmagent.Config{
+				Name:    "test_agent",
+				Model:   llm,
+				Planner: &instructionPlanner{},
+			})
+			history := thoughtHistory(t)
+			history[1].LLMResponse.Content.Parts = tc.replyParts
+
+			run := runPlannerAgent(t, a, history...)
+
+			if run.err != nil {
+				t.Fatalf("run error: %v", run.err)
+			}
+			reqs := llm.recorded()
+			if len(reqs) != 1 {
+				t.Fatalf("model calls = %d, want 1", len(reqs))
+			}
+			if diff := cmp.Diff(tc.want, reqs[0].Contents); diff != "" {
+				t.Errorf("request contents mismatch (-want +got):\n%s", diff)
+			}
+			if stored := run.sess.Events().At(1).LLMResponse.Content.Parts[0]; !stored.Thought {
+				t.Errorf("stored history part Thought = false, want true")
+			}
+		})
+	}
+
+	// A PlanReActPlanner turns a bare planning tag into an empty thought
+	// part; the model call after the tool runs must not carry it.
+	t.Run("plan_re_act_bare_planning_tag_before_tool_call", func(t *testing.T) {
+		noop, err := functiontool.New(functiontool.Config{Name: "noop", Description: "does nothing"},
+			func(agent.Context, struct{}) (struct{}, error) { return struct{}{}, nil })
+		if err != nil {
+			t.Fatalf("functiontool.New: %v", err)
+		}
+		llm := &scriptedModel{responses: []*model.LLMResponse{
+			{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+				{Text: "/*PLANNING*/"},
+				{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "noop", Args: map[string]any{}}},
+			}}},
+			textResponse("done"),
+		}}
+		a := newPlannerAgent(t, llmagent.Config{
+			Name:    "test_agent",
+			Model:   llm,
+			Tools:   []tool.Tool{noop},
+			Planner: planner.NewPlanReActPlanner(),
+		})
+
+		run := runPlannerAgent(t, a)
+
+		if run.err != nil {
+			t.Fatalf("run error: %v", run.err)
+		}
+		reqs := llm.recorded()
+		if len(reqs) != 2 {
+			t.Fatalf("model calls = %d, want 2", len(reqs))
+		}
+		if len(reqs[1].Contents) != 3 {
+			t.Fatalf("second request has %d contents, want 3", len(reqs[1].Contents))
+		}
+		wantModelTurn := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "noop", Args: map[string]any{}}},
+		}}
+		if diff := cmp.Diff(wantModelTurn, reqs[1].Contents[1]); diff != "" {
+			t.Errorf("second request model turn mismatch (-want +got):\n%s", diff)
+		}
+	})
 }
 
 // A scoped agent run as a node gets its node input as the first request
@@ -817,6 +939,201 @@ func TestLLMAgent_RewritingPlannerEdgeCasesAndBuiltInOverride(t *testing.T) {
 			t.Errorf("model event parts mismatch (-want +got):\n%s", diff)
 		}
 	})
+}
+
+// cachedPlanResponse is a response a callback or plugin may keep, for example
+// in a cache, and return on every model call.
+func cachedPlanResponse() *model.LLMResponse {
+	return textResponse("/*PLANNING*/ make a plan")
+}
+
+// A response that a callback or plugin returned stays the callback's: the
+// planner rewrites the flow's copy, so a cached response still holds the
+// model's text after the run.
+func TestLLMAgent_RewritingPlannerLeavesCallbackResponseUnchanged(t *testing.T) {
+	tests := []struct {
+		name string
+		// responses is what the model returns; an empty script makes the
+		// model fail.
+		responses []*model.LLMResponse
+		// hook installs a callback or plugin that returns cached.
+		hook func(cfg *llmagent.Config, cached *model.LLMResponse) []*plugin.Plugin
+	}{
+		{
+			name: "before_model_callback",
+			hook: func(cfg *llmagent.Config, cached *model.LLMResponse) []*plugin.Plugin {
+				cfg.BeforeModelCallbacks = []llmagent.BeforeModelCallback{func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					return cached, nil
+				}}
+				return nil
+			},
+		},
+		{
+			name:      "after_model_callback",
+			responses: []*model.LLMResponse{textResponse("raw")},
+			hook: func(cfg *llmagent.Config, cached *model.LLMResponse) []*plugin.Plugin {
+				cfg.AfterModelCallbacks = []llmagent.AfterModelCallback{func(agent.Context, *model.LLMResponse, error) (*model.LLMResponse, error) {
+					return cached, nil
+				}}
+				return nil
+			},
+		},
+		{
+			name: "on_model_error_callback",
+			hook: func(cfg *llmagent.Config, cached *model.LLMResponse) []*plugin.Plugin {
+				cfg.OnModelErrorCallbacks = []llmagent.OnModelErrorCallback{func(agent.Context, *model.LLMRequest, error) (*model.LLMResponse, error) {
+					return cached, nil
+				}}
+				return nil
+			},
+		},
+		{
+			name: "plugin_before_model_callback",
+			hook: func(_ *llmagent.Config, cached *model.LLMResponse) []*plugin.Plugin {
+				p, err := plugin.New(plugin.Config{
+					Name: "cache",
+					BeforeModelCallback: func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+						return cached, nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("plugin.New: %v", err)
+				}
+				return []*plugin.Plugin{p}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cached := cachedPlanResponse()
+			cfg := llmagent.Config{
+				Name:    "test_agent",
+				Model:   &scriptedModel{responses: tc.responses},
+				Planner: planner.NewPlanReActPlanner(),
+			}
+			plugins := tc.hook(&cfg, cached)
+			a := newPlannerAgent(t, cfg)
+
+			run := runPlannerAgentWithPlugins(t, a, plugins)
+
+			if run.err != nil {
+				t.Fatalf("run error: %v", run.err)
+			}
+			if diff := cmp.Diff([]*genai.Part{{Text: " make a plan", Thought: true}}, modelEventParts(t, run.events)); diff != "" {
+				t.Errorf("model event parts mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(cachedPlanResponse(), cached); diff != "" {
+				t.Errorf("callback's response mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// Concurrent invocations that get the same cached response from a callback
+// each rewrite their own copy; run under -race, a shared write fails the test.
+func TestLLMAgent_RewritingPlannerConcurrentRunsShareCallbackResponse(t *testing.T) {
+	const runs = 4
+	cached := cachedPlanResponse()
+	a := newPlannerAgent(t, llmagent.Config{
+		Name:    "test_agent",
+		Model:   &scriptedModel{},
+		Planner: planner.NewPlanReActPlanner(),
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+			return cached, nil
+		}},
+	})
+	ctx := t.Context()
+	// Each run has its own session service, so no lock shared between the
+	// runs orders their accesses to the cached response.
+	svcs := make([]session.Service, runs)
+	for i := range svcs {
+		svcs[i] = session.InMemoryService()
+		if _, err := svcs[i].Create(ctx, &session.CreateRequest{AppName: "test_app", UserID: "test_user", SessionID: "s1"}); err != nil {
+			t.Fatalf("session Create %d: %v", i, err)
+		}
+	}
+
+	errs := make([]error, runs)
+	var wg sync.WaitGroup
+	for i := range runs {
+		wg.Go(func() { errs[i] = runInSession(ctx, svcs[i], a, "s1") })
+	}
+	wg.Wait()
+
+	if err := errors.Join(errs...); err != nil {
+		t.Fatalf("run errors: %v", err)
+	}
+	if diff := cmp.Diff(cachedPlanResponse(), cached); diff != "" {
+		t.Errorf("callback's response mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// streamingModel is a model.LLM double that yields all its responses from a
+// single GenerateContent call, as a streaming model yields partial responses
+// followed by the aggregated one.
+type streamingModel struct {
+	responses []*model.LLMResponse
+}
+
+func (m *streamingModel) Name() string { return "streaming" }
+
+func (m *streamingModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for _, resp := range m.responses {
+			if !yield(resp, nil) {
+				return
+			}
+		}
+	}
+}
+
+// With streaming, the planner rewrites each partial response on its own, so
+// text that continues a planning section in a later chunk stays plain text,
+// and the final, aggregated response is rewritten as a whole.
+func TestLLMAgent_PlanReActPlannerStreamingRewritesEachResponse(t *testing.T) {
+	partial := func(text string) *model.LLMResponse {
+		return &model.LLMResponse{Content: genai.NewContentFromText(text, genai.RoleModel), Partial: true}
+	}
+	llm := &streamingModel{responses: []*model.LLMResponse{
+		partial("/*PLANNING*/step"),
+		partial(" one"),
+		partial("/*FINAL_ANSWER*/done"),
+		textResponse("/*PLANNING*/step one/*FINAL_ANSWER*/done"),
+	}}
+	a := newPlannerAgent(t, llmagent.Config{
+		Name:    "test_agent",
+		Model:   llm,
+		Planner: planner.NewPlanReActPlanner(),
+	})
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "test_app", UserID: "test_user", SessionID: "s1"}); err != nil {
+		t.Fatalf("session Create: %v", err)
+	}
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: a, SessionService: svc})
+	if err != nil {
+		t.Fatalf("runner.New: %v", err)
+	}
+
+	var got [][]*genai.Part
+	for ev, err := range r.Run(ctx, "test_user", "s1", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
+		if err != nil {
+			t.Fatalf("run error: %v", err)
+		}
+		if ev.LLMResponse.Content != nil {
+			got = append(got, ev.LLMResponse.Content.Parts)
+		}
+	}
+
+	want := [][]*genai.Part{
+		{{Text: "step", Thought: true}},
+		{{Text: " one"}},
+		{{Text: "done"}},
+		{{Text: "step one", Thought: true}, {Text: "done"}},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("event parts mismatch (-want +got):\n%s", diff)
+	}
 }
 
 func TestLLMAgent_PlanReActThoughtOnlyTurnEndsStepWithFinishReasonStop(t *testing.T) {

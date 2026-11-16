@@ -17,6 +17,9 @@ package llminternal
 import (
 	"fmt"
 	"iter"
+	"slices"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -64,17 +67,25 @@ func nlPlanningRequestProcessor(ctx agent.InvocationContext, req *model.LLMReque
 // parts a planner marked as thoughts reach the model as ordinary history.
 // req.Contents holds copies of the session events, so stored history keeps
 // its flags.
+//
+// A thought part with empty text and no other field set is empty once its
+// flag is cleared, so it is removed, and so is a content left with no parts:
+// genai sends an empty part as {}, which the API rejects. adk-python keeps
+// such a part as {"text": ""}, which genai cannot express because it omits an
+// empty Text.
 func removeThoughtFromRequest(req *model.LLMRequest) {
-	for _, content := range req.Contents {
-		if content == nil {
-			continue
+	req.Contents = slices.DeleteFunc(req.Contents, func(content *genai.Content) bool {
+		if content == nil || len(content.Parts) == 0 {
+			return false
 		}
 		for _, part := range content.Parts {
 			if part != nil {
 				part.Thought = false
 			}
 		}
-	}
+		content.Parts = slices.DeleteFunc(content.Parts, isEmptyPart)
+		return len(content.Parts) == 0
+	})
 }
 
 func codeExecutionRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {

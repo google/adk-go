@@ -77,7 +77,10 @@ type RewritingPlanner interface {
 	// planning.
 	//
 	// During an agent run ctx is a non-nil callback context and responseParts
-	// is non-empty. Direct callers, such as unit tests or callers of
+	// is non-empty. The parts belong to the flow's own copy of the model
+	// response, so an implementation may modify them in place without
+	// changing a response that a callback or plugin returned and may still
+	// hold. Direct callers, such as unit tests or callers of
 	// PlanReActPlanner, may pass a nil ctx to an implementation that does not
 	// access session state or artifacts.
 	//

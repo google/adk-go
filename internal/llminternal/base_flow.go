@@ -508,11 +508,17 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			sessionResumption = &sessionResumptionCopy
 		}
 
+		// A built-in planner's ApplyThinkingConfig may leave the request
+		// with no Config, which carries no system instruction and no tools.
+		reqConfig := nreq.Config
+		if reqConfig == nil {
+			reqConfig = &genai.GenerateContentConfig{}
+		}
 		liveConnectConfig := &genai.LiveConnectConfig{
 			ResponseModalities:       runCfg.Live.ResponseModalities,
 			SpeechConfig:             runCfg.Live.SpeechConfig,
-			SystemInstruction:        nreq.Config.SystemInstruction,
-			Tools:                    nreq.Config.Tools,
+			SystemInstruction:        reqConfig.SystemInstruction,
+			Tools:                    reqConfig.Tools,
 			SessionResumption:        sessionResumption,
 			InputAudioTranscription:  runCfg.Live.InputAudioTranscription,
 			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
@@ -948,6 +954,14 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				yield(nil, err)
 				return
 			}
+			// A rewriting planner edits the response it is given, which may be
+			// one a callback or plugin returned and still holds, such as a
+			// cached response that concurrent invocations share. It rewrites
+			// a copy the flow owns instead, and the event is built from that
+			// copy.
+			if responseRewritingPlanner(ctx) != nil {
+				resp.LLMResponse = ownedResponse(resp.LLMResponse)
+			}
 			for ev, err := range f.postprocess(ctx, req, resp.LLMResponse) {
 				if err != nil {
 					yield(nil, err)
@@ -1259,6 +1273,18 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 type responseWithEventID struct {
 	*model.LLMResponse
 	eventID string
+}
+
+// ownedResponse returns a copy of resp with its own Content, parts included,
+// so the flow can rewrite the content without writing to resp. Other pointer
+// fields stay shared with resp.
+func ownedResponse(resp *model.LLMResponse) *model.LLMResponse {
+	if resp == nil {
+		return nil
+	}
+	owned := *resp
+	owned.Content = clone(resp.Content)
+	return &owned
 }
 
 // generateContent wraps the LLM call with tracing and logging.
