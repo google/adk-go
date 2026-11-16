@@ -231,6 +231,18 @@ type GCSContentOffloader interface {
 // upgraded tables carry label adk_schema_version="2" ([SchemaVersion]), while
 // attributes.adk.schema_version on each row is "1". Recursive payload
 // sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
+//
+// An agent that a parent agent runs on its own goroutine or on a goroutine
+// that it starts directly is placed under that activation's span
+// (parent_span_id). Because the runtime names only the goroutine that directly
+// started another, when concurrent activations of the same agent each launch a
+// child agent across an intermediate goroutine that runs no ADK callback (for
+// example, a custom agent's helper goroutine, workflow.ParallelWorker, or
+// workflow.NewWorkflowNode), the child agent is placed under the nearest open
+// span enclosing all concurrent activations of that agent (or the invocation
+// span if none encloses them). When per-activation parenting is required for
+// custom agents, run sub-agents on the agent's own goroutine or on a goroutine
+// that it starts directly.
 type Config struct {
 	Enabled        bool
 	ProjectID      string
