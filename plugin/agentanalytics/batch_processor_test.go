@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
 	storagepb "cloud.google.com/go/bigquery/storage/apiv1/storagepb"
@@ -9092,26 +9093,25 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		})
 
 		bp := newProcessor(t, srv, false, &recordingLogger{})
-		totalRows := maxRowErrorIsolationPasses + 2
-		ids := make([]string, totalRows)
+		ids := make([]string, 10)
 		for i := range ids {
 			ids[i] = fmt.Sprintf("r-%d", i)
 		}
 		err := bp.writeBatch(context.Background(), eventRows(ids...))
-		wantErrSubstr := fmt.Sprintf("exceeded max RowErrors isolation passes (%d) with 2 row(s) unconfirmed", maxRowErrorIsolationPasses)
+		wantErrSubstr := "exceeded max RowErrors isolation passes (8) with 2 row(s) unconfirmed"
 		if err == nil || !strings.Contains(err.Error(), wantErrSubstr) {
 			t.Fatalf("writeBatch() error = %v, want substring %q", err, wantErrSubstr)
 		}
-		if got := int(calls.Load()); got != maxRowErrorIsolationPasses {
-			t.Errorf("AppendRows calls = %d, want %d", got, maxRowErrorIsolationPasses)
+		if got := calls.Load(); got != 8 {
+			t.Errorf("AppendRows calls = %d, want 8", got)
 		}
-		if got := len(sent()); got != maxRowErrorIsolationPasses {
-			t.Errorf("sent batch count = %d, want %d", got, maxRowErrorIsolationPasses)
+		if got := len(sent()); got != 8 {
+			t.Errorf("sent batch count = %d, want 8", got)
 		}
 		wantDrops := DropStats{
-			RowErrorDrops:      int64(maxRowErrorIsolationPasses),
+			RowErrorDrops:      8,
 			AppendFailureDrops: 2,
-			TotalDrops:         int64(totalRows),
+			TotalDrops:         10,
 		}
 		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
@@ -9188,19 +9188,20 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("fallback branch redacts sensitive tokens and prevents log-framing injection", func(t *testing.T) {
+	t.Run("fallback branch logs only code/counts/length and sanitizes returned error", func(t *testing.T) {
+		statusMsg := "denied\r\n\u0085\u009b\u2028\u2029FAKE_STATUS_LOG; Authorization: Bearer fallback-secret-999"
 		srv := &scriptedCommittedStreamServer{
 			onAppend: func(_ int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
 				return &storagepb.AppendRowsResponse{
 					Response: &storagepb.AppendRowsResponse_Error{
 						Error: &statuspb.Status{
 							Code:    int32(codes.PermissionDenied),
-							Message: "denied\r\nFAKE_STATUS_LOG; Authorization: Bearer fallback-secret-999",
+							Message: statusMsg,
 						},
 					},
 					RowErrors: []*storagepb.RowError{{
 						Index:   0,
-						Message: "row detail\r\nFAKE_ROW_LOG; Authorization: Bearer row-secret-888",
+						Message: "row detail\r\n\u0085\u009b\u2028\u2029FAKE_ROW_LOG; Authorization: Bearer row-secret-888",
 					}},
 				}, nil
 			},
@@ -9212,7 +9213,7 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		if err == nil {
 			t.Fatal("writeBatch() error = nil, want non-nil error")
 		}
-		wantErr := "batch append error from BigQuery: denied  FAKE_STATUS_LOG; Authorization: [REDACTED]"
+		wantErr := "batch append error from BigQuery: denied      FAKE_STATUS_LOG; Authorization: [REDACTED]"
 		if err.Error() != wantErr {
 			t.Errorf("writeBatch() error = %q, want %q", err.Error(), wantErr)
 		}
@@ -9223,14 +9224,654 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		if len(lines) != 1 {
 			t.Fatalf("logger recorded %d lines, want 1: %q", len(lines), lines)
 		}
-		wantLog := "BigQuery response error (code=PermissionDenied, row_errors=1): denied  FAKE_STATUS_LOG; Authorization: [REDACTED]"
+		wantLog := fmt.Sprintf("BigQuery response error (code=PermissionDenied, row_errors=1, message_bytes=%d)", len(statusMsg))
 		if lines[0] != wantLog {
 			t.Errorf("logger line mismatch:\ngot:  %q\nwant: %q", lines[0], wantLog)
 		}
-		for _, forbidden := range []string{"fallback-secret-999", "row-secret-888", "FAKE_ROW_LOG", "\r", "\n"} {
-			if strings.Contains(lines[0], forbidden) || strings.Contains(err.Error(), forbidden) {
-				t.Errorf("fallback path leaked %q (log=%q, err=%q)", forbidden, lines[0], err.Error())
+		for _, forbidden := range []string{
+			"fallback-secret-999",
+			"row-secret-888",
+			"FAKE_ROW_LOG",
+			"FAKE_STATUS_LOG",
+			"denied",
+			"\r",
+			"\n",
+			"\u0085",
+			"\u009b",
+			"\u2028",
+			"\u2029",
+		} {
+			if strings.Contains(lines[0], forbidden) {
+				t.Errorf("fallback log leaked %q (log=%q)", forbidden, lines[0])
 			}
+		}
+		for _, forbidden := range []string{
+			"fallback-secret-999",
+			"row-secret-888",
+			"FAKE_ROW_LOG",
+			"\r",
+			"\n",
+			"\u0085",
+			"\u009b",
+			"\u2028",
+			"\u2029",
+		} {
+			if strings.Contains(err.Error(), forbidden) {
+				t.Errorf("fallback error leaked %q (err=%q)", forbidden, err.Error())
+			}
+		}
+	})
+
+	t.Run("fallback branch redacts JSON-escaped controls and C1 control-bearing URIs", func(t *testing.T) {
+		statusMsg := `{"msg":"Bearer\u0085fallback-tok-123","url":"https://host/cb?token\u009b=uri-secret-456"}`
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(_ int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				return &storagepb.AppendRowsResponse{
+					Response: &storagepb.AppendRowsResponse_Error{
+						Error: &statuspb.Status{
+							Code:    int32(codes.PermissionDenied),
+							Message: statusMsg,
+						},
+					},
+				}, nil
+			},
+		}
+
+		logger := &recordingLogger{}
+		bp := newProcessor(t, srv, false, logger)
+		err := bp.writeBatch(context.Background(), eventRows("r0"))
+		if err == nil {
+			t.Fatal("writeBatch() error = nil, want non-nil error")
+		}
+		wantErr := `batch append error from BigQuery: {"msg":"Bearer [REDACTED]","url":"[REDACTED_SENSITIVE_URI]"}`
+		if err.Error() != wantErr {
+			t.Errorf("writeBatch() error = %q, want %q", err.Error(), wantErr)
+		}
+		for _, forbidden := range []string{"fallback-tok-123", "uri-secret-456", `\u0085`, `\u009b`, "\u0085", "\u009b"} {
+			if strings.Contains(err.Error(), forbidden) {
+				t.Errorf("fallback error leaked %q (err=%q)", forbidden, err.Error())
+			}
+		}
+	})
+
+	t.Run("sanitizeErrorForLog replaces C0, DEL, C1 controls, and line separators", func(t *testing.T) {
+		for r := rune(0); r <= 0x9f; r++ {
+			if r >= 0x20 && r <= 0x7e {
+				continue
+			}
+			in := fmt.Sprintf("a%cb", r)
+			if got := sanitizeErrorForLog(in); got != "a b" {
+				t.Fatalf("sanitizeErrorForLog(%U) = %q, want %q", r, got, "a b")
+			}
+		}
+		for _, r := range []rune{'\u2028', '\u2029'} {
+			in := fmt.Sprintf("a%cb", r)
+			if got := sanitizeErrorForLog(in); got != "a b" {
+				t.Fatalf("sanitizeErrorForLog(%U) = %q, want %q", r, got, "a b")
+			}
+		}
+		if got := sanitizeErrorForLog("ok café 日 Authorization: Bearer tok-123"); got != "ok café 日 Authorization: [REDACTED]" {
+			t.Fatalf("sanitizeErrorForLog(printable+secret) = %q", got)
+		}
+		for _, tc := range []struct {
+			name string
+			in   string
+			want string
+		}{
+			{name: "bearer_nel", in: "Bearer\u0085tok-123", want: "Bearer [REDACTED]"},
+			{name: "bearer_ls", in: "Bearer\u2028tok-123", want: "Bearer [REDACTED]"},
+			{name: "bearer_ps", in: "Bearer\u2029tok-123", want: "Bearer [REDACTED]"},
+			{name: "bearer_vt", in: "Bearer\x0btok-123", want: "Bearer [REDACTED]"},
+			{name: "bearer_del", in: "Bearer\x7ftok-123", want: "Bearer [REDACTED]"},
+			{name: "basic_nel", in: "Basic\u0085dXNlcjpwYXNz", want: "Basic [REDACTED]"},
+			{name: "api_key_nel", in: "api_key\u0085=\u0085tok-123", want: "api_key=[REDACTED]"},
+			{name: "password_ls", in: "password\u2028:\u2028tok-123", want: "password:[REDACTED]"},
+			{name: "x_api_key_nel", in: "X-Api-Key\u0085: tok-123", want: "X-Api-Key: [REDACTED]"},
+			{name: "uri_embedded_nel", in: "https://host/cb?token=part1\u0085part2", want: "[REDACTED_SENSITIVE_URI]"},
+			{name: "uri_embedded_vt", in: "https://host/cb?token=part1\x0bpart2", want: "[REDACTED_SENSITIVE_URI]"},
+			{name: "uri_query_key_csi", in: "https://host/cb?token\u009b=secret123", want: "[REDACTED_SENSITIVE_URI]"},
+			{name: "uri_query_leading_csi_key", in: "https://googleapis.com/v1/models?\u009bkey=AIzaSecret123", want: "[REDACTED_SENSITIVE_URI]"},
+			{name: "uri_path_nel", in: "https://example.com/token\u0085/my-secret-value", want: "[REDACTED_SENSITIVE_URI]"},
+			{name: "uri_path_csi", in: "https://example.com/token\u009b/my-secret-value", want: "[REDACTED_SENSITIVE_URI]"},
+			{name: "uri_path_ls", in: "https://example.com/token\u2028/my-secret-value", want: "[REDACTED_SENSITIVE_URI]"},
+			{name: "uri_path_ps", in: "https://example.com/token\u2029/my-secret-value", want: "[REDACTED_SENSITIVE_URI]"},
+			{name: "uri_fragment_csi", in: "https://host/cb#token\u009b=secret123", want: "[REDACTED_SENSITIVE_URI]"},
+			{name: "uri_userinfo_csi", in: "https://user:pass\u009b@host/", want: "[REDACTED_SENSITIVE_URI]"},
+			{name: "uri_invalid_utf8", in: "https://host/cb?token\xff=secret123", want: "[REDACTED_SENSITIVE_URI]"},
+			{
+				name: "uri_control_followed_by_bearer",
+				in:   "failed https://example.com/ok\u0085Bearer tok-123",
+				want: "failed [REDACTED_SENSITIVE_URI] [REDACTED]",
+			},
+			{
+				name: "uri_control_followed_by_auth_header_then_clean_uri",
+				in:   "failed https://example.com/ok\u0085X-Api-Key: secret123\nand https://good.com/cb?token=secret456",
+				want: "failed [REDACTED_SENSITIVE_URI]: [REDACTED] and https://good.com/cb?token=%5BREDACTED%5D",
+			},
+			{
+				name: "uri_control_x_api_key_nel_separated_delimiter",
+				in:   "failed https://example.com/ok\u0085X-Api-Key\u0085: AIzaSyDaGmWKa4JsXZ",
+				want: "failed [REDACTED_SENSITIVE_URI]: [REDACTED]",
+			},
+			{
+				name: "json_uri_control_x_api_key_nel_separated_delimiter",
+				in:   `{"err":"failed https://example.com/ok\u0085X-Api-Key\u0085: AIzaSyDaGmWKa4JsXZ"}`,
+				want: `{"err":"failed [REDACTED_SENSITIVE_URI]: [REDACTED]"}`,
+			},
+			{
+				name: "uri_control_password_ls_separated_delimiter",
+				in:   "failed https://example.com/ok\u2028password\u2028= my-secret-pass-123",
+				want: "failed [REDACTED_SENSITIVE_URI][REDACTED]",
+			},
+			{
+				name: "uri_control_authorization_vt_separated_delimiter",
+				in:   "failed https://example.com/ok\x0bAuthorization\x0b: CustomScheme secret-tok-123",
+				want: "failed [REDACTED_SENSITIVE_URI]: [REDACTED]",
+			},
+			{
+				name: "uri_control_authorization_vt_and_nel_separated_delimiter",
+				in:   "https://example.com/ok\x0bAuthorization\u0085: CustomScheme secret-tok-123",
+				want: "[REDACTED_SENSITIVE_URI]: [REDACTED]",
+			},
+			{
+				name: "uri_control_invalid_utf8_x_api_key_separated_delimiter",
+				in:   "failed https://example.com/ok\xffX-Api-Key\xff: secret-tok-123",
+				want: "failed [REDACTED_SENSITIVE_URI]: [REDACTED]",
+			},
+			{
+				name: "plain_invalid_utf8_x_api_key_separated_delimiter",
+				in:   "X-Api-Key\xff: secret-tok-123",
+				want: "X-Api-Key: [REDACTED]",
+			},
+			{
+				name: "uri_control_immediately_after_scheme_bearer",
+				in:   "failed https://\u0085Bearer tok-123",
+				want: "failed [REDACTED_SENSITIVE_URI] [REDACTED]",
+			},
+			{
+				name: "uri_key_before_control_delimiter",
+				in:   "https://token\u0085= my-secret-tok-123",
+				want: "[REDACTED_SENSITIVE_URI][REDACTED]",
+			},
+			{
+				name: "uri_control_multi_uri_same_line_authorization_esc",
+				in:   "https://a.example/ok\x1bAuthorization: Custom https://b.example/ok\x1b SecretAfterSecondURI",
+				want: "[REDACTED_SENSITIVE_URI]: [REDACTED]",
+			},
+			{
+				name: "uri_control_multi_uri_same_line_authorization_csi",
+				in:   "https://a.example/ok\u009bAuthorization: Custom https://b.example/ok\u009b SecretAfterSecondURI",
+				want: "[REDACTED_SENSITIVE_URI]: [REDACTED]",
+			},
+			{
+				name: "uri_control_three_uris_same_line_authorization",
+				in:   "https://a\x1bAuthorization: Custom https://b\x1b foo https://c\x1b SecretAfterThird",
+				want: "[REDACTED_SENSITIVE_URI]: [REDACTED]",
+			},
+			{
+				name: "uri_control_multi_uri_newline_stops_authorization",
+				in:   "https://a\x1bAuthorization: Custom https://b\x1b\nbenign next line",
+				want: "[REDACTED_SENSITIVE_URI]: [REDACTED] benign next line",
+			},
+			{
+				name: "uri_control_second_uri_starts_new_crossing_credential",
+				in:   "https://a.example/ok\x1bfoo https://b.example/ok\u0085X-Api-Key\u0085: SecretB",
+				want: "[REDACTED_SENSITIVE_URI] [REDACTED_SENSITIVE_URI]: [REDACTED]",
+			},
+			{
+				name: "uri_control_bearer_into_second_control_uri_with_tail",
+				in:   "https://a\x1bBearer https://b\x1bsecret2",
+				want: "[REDACTED_SENSITIVE_URI] [REDACTED][REDACTED_SENSITIVE_URI]",
+			},
+			{
+				name: "uri_control_password_quoted_value_keeps_benign_trailing",
+				in:   "https://example.com/ok\u0085password\u0085= \"secret value\" benign trailing text",
+				want: "[REDACTED_SENSITIVE_URI]\"[REDACTED]\" benign trailing text",
+			},
+			{
+				name: "uri_control_benign_trailing_text_preserved",
+				in:   "failed https://example.com/ok\u0085foo benign trailing text",
+				want: "failed [REDACTED_SENSITIVE_URI] benign trailing text",
+			},
+			{
+				name: "uri_control_hybrid_raw_and_escaped_fails_closed",
+				in:   `failed https://example.com/ok` + "\u0085" + `X-Api-Key\u0085: AIzaSyDaGmWKa4JsXZ`,
+				want: `[REDACTED_SENSITIVE_TEXT]`,
+			},
+			{
+				name: "uri_control_authorization_with_clean_and_control_uri",
+				in:   "https://a\x1bAuthorization: Custom https://clean.example/cb?token=secret1 https://b\x1b SecretAfter",
+				want: "[REDACTED_SENSITIVE_URI]: [REDACTED]",
+			},
+			{
+				name: "json_standalone_escaped_nel",
+				in:   `{"msg":"Bearer\u0085tok-123"}`,
+				want: `{"msg":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_standalone_escaped_vt",
+				in:   `{"msg":"Bearer\u000btok-123"}`,
+				want: `{"msg":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_standalone_escaped_ls",
+				in:   `{"msg":"Bearer\u2028tok-123"}`,
+				want: `{"msg":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_standalone_escaped_ps",
+				in:   `{"msg":"Bearer\u2029tok-123"}`,
+				want: `{"msg":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_top_level_string_escaped_nel",
+				in:   `"Bearer\u0085tok-123"`,
+				want: `"Bearer [REDACTED]"`,
+			},
+			{
+				name: "json_top_level_string_escaped_ls",
+				in:   `"Bearer\u2028tok-123"`,
+				want: `"Bearer [REDACTED]"`,
+			},
+			{
+				name: "json_top_level_string_uri_csi",
+				in:   `"https://host/cb?token\u009b=secret123"`,
+				want: `"[REDACTED_SENSITIVE_URI]"`,
+			},
+			{
+				name: "json_raw_ls_with_sibling_redaction",
+				in:   "{\"msg\":\"Bearer\u2028tok-123\",\"other\":\"Bearer tok-456\"}",
+				want: `{"msg":"Bearer [REDACTED]","other":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_raw_ps_with_sibling_redaction",
+				in:   "{\"msg\":\"Bearer\u2029tok-123\",\"other\":\"Bearer tok-456\"}",
+				want: `{"msg":"Bearer [REDACTED]","other":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_escaped_vt_with_sibling_redaction",
+				in:   `{"msg":"Bearer\u000btok-123","other":"Bearer tok-456"}`,
+				want: `{"msg":"Bearer [REDACTED]","other":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_escaped_ls_with_sibling_redaction",
+				in:   `{"msg":"Bearer\u2028tok-123","other":"Bearer tok-456"}`,
+				want: `{"msg":"Bearer [REDACTED]","other":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_escaped_ps_with_sibling_redaction",
+				in:   `{"msg":"Bearer\u2029tok-123","other":"Bearer tok-456"}`,
+				want: `{"msg":"Bearer [REDACTED]","other":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_harmless_raw_ls_with_sibling_redaction",
+				in:   "{\"msg\":\"hello\u2028world\",\"other\":\"Bearer tok-456\"}",
+				want: `{"msg":"hello world","other":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_escaped_nel_with_sibling_redaction",
+				in:   `{"msg":"Bearer\u0085tok-123","other":"Bearer tok-456"}`,
+				want: `{"msg":"Bearer [REDACTED]","other":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_map_key_nel",
+				in:   `{"token\u0085":"secret"}`,
+				want: `{"token ":"[REDACTED]"}`,
+			},
+			{
+				name: "json_map_key_csi",
+				in:   `{"token\u009b":"secret"}`,
+				want: `{"token ":"[REDACTED]"}`,
+			},
+			{
+				name: "json_map_key_ls",
+				in:   `{"token\u2028":"secret"}`,
+				want: `{"token ":"[REDACTED]"}`,
+			},
+			{
+				name: "json_map_key_bearer",
+				in:   `{"Bearer\u0085tok-123":"ok"}`,
+				want: `{"Bearer [REDACTED]":"ok"}`,
+			},
+			{
+				name: "json_map_key_collision_after_normalization",
+				in:   `{"a\u0085":"Bearer tok-1","a\u009b":"Bearer tok-2"}`,
+				want: `{"a ":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_nested_array_and_json_string",
+				in:   `{"arr":["Bearer\u0085tok-123",{"nested":"{\"msg\":\"Bearer\\u0085tok-456\"}"}]}`,
+				want: `{"arr":["Bearer [REDACTED]",{"nested":"{\"msg\":\"Bearer [REDACTED]\"}"}]}`,
+			},
+			{
+				name: "json_uri_single_escaped_csi",
+				in:   `{"url":"https://host/cb?token\u009b=secret123"}`,
+				want: `{"url":"[REDACTED_SENSITIVE_URI]"}`,
+			},
+			{
+				name: "json_uri_double_escaped_csi",
+				in:   `{"url":"https://host/cb?token\\u009b=secret123"}`,
+				want: `{"url":"[REDACTED_SENSITIVE_TEXT]"}`,
+			},
+			{
+				name: "json_uri_leading_csi_key",
+				in:   `{"url":"https://googleapis.com/v1/models?\u009bkey=AIzaSecret123"}`,
+				want: `{"url":"[REDACTED_SENSITIVE_URI]"}`,
+			},
+			{
+				name: "json_uri_path_nel",
+				in:   `{"url":"https://example.com/token\u0085/my-secret-value"}`,
+				want: `{"url":"[REDACTED_SENSITIVE_URI]"}`,
+			},
+			{
+				name: "malformed_json_escaped_nel",
+				in:   `{"msg":"Bearer\u0085tok-123"`,
+				want: `[UNPARSEABLE_JSON_BLOB]`,
+			},
+			{
+				name: "malformed_json_escaped_ls",
+				in:   `{"msg":"Bearer\u2028tok-123"`,
+				want: `[UNPARSEABLE_JSON_BLOB]`,
+			},
+			{
+				name: "malformed_json_key_csi",
+				in:   `{"token\u009b":"secret"`,
+				want: `[UNPARSEABLE_JSON_BLOB]`,
+			},
+			{
+				name: "malformed_json_uri_csi",
+				in:   `{"url":"https://host/cb?token\u009b=secret123"`,
+				want: `[UNPARSEABLE_JSON_BLOB]`,
+			},
+			{
+				name: "leading_nul_then_json_escaped_nel_without_dup",
+				in:   "\x00" + `{"msg":"Bearer\u0085tok-123"}`,
+				want: `{"msg":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "leading_nul_then_json_string_escaped_nel",
+				in:   "\x00" + `"Bearer\u0085tok-123"`,
+				want: `"Bearer [REDACTED]"`,
+			},
+			{
+				name: "leading_nul_then_json_escaped_nel",
+				in:   "\x00" + `{"msg":"Bearer\u0085tok-123","a":"b","a":"c"}`,
+				want: `{"a":"c","msg":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "harmless_bracket_prose_preserved",
+				in:   `[INFO] user clicked "Submit"`,
+				want: `[INFO] user clicked "Submit"`,
+			},
+			{
+				name: "harmless_quote_prose_preserved",
+				in:   `"Hello," she said. "Bye."`,
+				want: `"Hello," she said. "Bye."`,
+			},
+			{
+				name: "harmless_json_literal_unicode_escape_preserved",
+				in:   `{"msg":"ok\\u0085fine"}`,
+				want: `{"msg":"ok\\u0085fine"}`,
+			},
+			{
+				name: "percent_utf8_nel_bearer",
+				in:   `Bearer%C2%85tok-123`,
+				want: `[REDACTED_SENSITIVE_TEXT]`,
+			},
+			{
+				name: "percent_utf8_ls_bearer",
+				in:   `Bearer%E2%80%A8tok-123`,
+				want: `[REDACTED_SENSITIVE_TEXT]`,
+			},
+			{
+				name: "percent_utf8_ps_bearer",
+				in:   `Bearer%E2%80%A9tok-123`,
+				want: `[REDACTED_SENSITIVE_TEXT]`,
+			},
+			{
+				name: "uri_percent_csi_query",
+				in:   `https://host/cb?token%9b=secret123`,
+				want: `[REDACTED_SENSITIVE_TEXT]`,
+			},
+			{
+				name: "uri_hex_escape_csi_query",
+				in:   `https://host/cb?token\x9b=secret123`,
+				want: `[REDACTED_SENSITIVE_TEXT]`,
+			},
+			{
+				name: "hex_escape_nel_bearer",
+				in:   `Bearer\x85tok-123`,
+				want: `[REDACTED_SENSITIVE_TEXT]`,
+			},
+			{
+				name: "redacted_prefix_then_escaped_nel_bearer",
+				in:   `Bearer tok-123 and Bearer\u0085tok-456`,
+				want: `[REDACTED_SENSITIVE_TEXT]`,
+			},
+			{
+				name: "redacted_prefix_then_harmless_escaped_nel",
+				in:   `Bearer tok-123 and ok\u0085fine`,
+				want: `Bearer [REDACTED] and ok\u0085fine`,
+			},
+			{
+				name: "nested_json_string_with_redacted_suffix_fails_closed",
+				in:   `{"msg":"\"Bearer\\u0085tok-123\" extra"}`,
+				want: `{"msg":"[UNPARSEABLE_JSON_BLOB]"}`,
+			},
+			{
+				name: "nested_json_string_harmless_multiple_quotes_preserved",
+				in:   `{"msg":"\"hello\" world"}`,
+				want: `{"msg":"\"hello\" world"}`,
+			},
+			{
+				name: "nested_json_malformed_bracket_fails_closed",
+				in:   `{"msg":"[INFO] ready"}`,
+				want: `{"msg":"[UNPARSEABLE_JSON_BLOB]"}`,
+			},
+			{
+				name: "nested_json_unclosed_quote_secret_fails_closed",
+				in:   `{"msg":"\"unclosed Bearer\\u0085tok-123"}`,
+				want: `{"msg":"[UNPARSEABLE_JSON_BLOB]"}`,
+			},
+			{
+				name: "clean_json_with_leading_nul_replaces_nul",
+				in:   "\x00" + `{"msg":"ok","n":1}`,
+				want: ` {"msg":"ok","n":1}`,
+			},
+			{
+				name: "json_invalid_utf8_bearer_fails_closed",
+				in:   "{\"msg\":\"Bearer\x85secret123\"}",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_string_invalid_utf8_bearer_fails_closed",
+				in:   "\"Bearer\x85secret123\"",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_invalid_utf8_x_api_key_fails_closed",
+				in:   "{\"msg\":\"X-Api-Key\xff: secret123\"}",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_invalid_utf8_map_key_fails_closed",
+				in:   "{\"token\xff\":\"secret123\"}",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_invalid_utf8_uri_fails_closed",
+				in:   "{\"url\":\"https://host/cb?token\xff=secret123\"}",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_invalid_utf8_uri_with_sibling_redaction_fails_closed",
+				in:   "{\"a\":\"Bearer tok1\",\"url\":\"https://host/cb?token\xff=secret123\"}",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_invalid_utf8_double_underscore_key_fails_closed",
+				in:   "{\"api__key\":\"secret\x85123\"}",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_invalid_utf8_kelvin_key_fails_closed",
+				in:   "{\"api_\\u212aey\":\"secret\x85123\"}",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_invalid_utf8_with_escaped_ls_fails_closed",
+				in:   "{\"msg\":\"hello\\u2028\x85world\"}",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_string_wrapped_json_raw_invalid_utf8_fails_closed",
+				in:   "\"{\\\"api__key\\\":\\\"secret\x85123\\\"}\"",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_string_wrapped_json_escaped_x85_fails_closed",
+				in:   `"{\"api__key\":\"secret\x85123\"}"`,
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_string_wrapped_json_leading_raw_x85_fails_closed",
+				in:   "\"\x85{\\\"api__key\\\":\\\"secret123\\\"}\"",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_string_wrapped_json_leading_escaped_x85_fails_closed",
+				in:   `"\x85{\"api__key\":\"secret123\"}"`,
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_string_invalid_utf8_uri_fails_closed",
+				in:   "\"https://host/cb?token\xff=secret123\"",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_string_invalid_utf8_x_api_key_fails_closed",
+				in:   "\"X-Api-Key\xff: secret123\"",
+				want: unparseableJSONPlaceholder,
+			},
+			{
+				name: "json_string_harmless_invalid_utf8_prose_preserved",
+				in:   "\"Hello,\xff\" she said.",
+				want: "\"Hello, \" she said.",
+			},
+			{
+				name: "json_valid_utf8_replacement_char_preserved",
+				in:   `{"msg":"ok` + "\ufffd" + `"}`,
+				want: `{"msg":"ok` + "\ufffd" + `"}`,
+			},
+			{
+				name: "json_valid_utf8_replacement_char_with_sibling_redaction",
+				in:   `{"msg":"ok` + "\ufffd" + `","other":"Bearer tok-1"}`,
+				want: `{"msg":"ok` + "\ufffd" + `","other":"Bearer [REDACTED]"}`,
+			},
+			{
+				name: "json_string_valid_utf8_replacement_char_preserved",
+				in:   `"ok` + "\ufffd" + `"`,
+				want: `"ok` + "\ufffd" + `"`,
+			},
+			{
+				name: "leading_invalid_utf8_then_json_double_underscore_key",
+				in:   "\x85" + `{"api__key":"secret-123"}`,
+				want: `{"api__key":"[REDACTED]"}`,
+			},
+			{
+				name: "leading_invalid_utf8_then_json_kelvin_key",
+				in:   "\x85" + `{"api_\u212aey":"secret-123"}`,
+				want: `{"api_` + "\u212a" + `ey":"[REDACTED]"}`,
+			},
+			{
+				name: "leading_invalid_utf8_then_json_escaped_ls",
+				in:   "\x85" + `{"msg":"hello\u2028world"}`,
+				want: `{"msg":"hello world"}`,
+			},
+			{
+				name: "leading_invalid_utf8_then_clean_json",
+				in:   "\x85" + `{"msg":"ok","n":1}`,
+				want: ` {"msg":"ok","n":1}`,
+			},
+			{
+				name: "quoted_leading_invalid_utf8_unclosed_json_object",
+				in:   "\"\x85{\"a\":1",
+				want: unparseableJSONPlaceholder,
+			},
+		} {
+			got := sanitizeErrorForLog(tc.in)
+			if got != tc.want {
+				t.Errorf("%s: sanitizeErrorForLog(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+			}
+		}
+		if gotTrim := trimLogSpace("\ufffdfoo\ufffd"); gotTrim != "\ufffdfoo\ufffd" {
+			t.Fatalf("trimLogSpace(valid U+FFFD) = %q, want %q", gotTrim, "\ufffdfoo\ufffd")
+		}
+		if gotTrim := trimLogSpace("\x85\x9b\xff\ufffdfoo\ufffd\x85\xff"); gotTrim != "\ufffdfoo\ufffd" {
+			t.Fatalf("trimLogSpace(invalid UTF-8 around U+FFFD) = %q, want %q", gotTrim, "\ufffdfoo\ufffd")
+		}
+		if gotTrim := trimLogSpace("\x85\xff"); gotTrim != "" {
+			t.Fatalf("trimLogSpace(only invalid UTF-8) = %q, want empty", gotTrim)
+		}
+		invalidUTF8 := "a\x85\x9b\xffb"
+		gotInvalid := sanitizeErrorForLog(invalidUTF8)
+		if !utf8.ValidString(gotInvalid) ||
+			strings.Contains(gotInvalid, "\x85") ||
+			strings.Contains(gotInvalid, "\x9b") ||
+			strings.Contains(gotInvalid, "\xff") {
+			t.Fatalf("sanitizeErrorForLog(invalid UTF-8) = %q, want valid UTF-8 without raw invalid bytes", gotInvalid)
+		}
+
+		// Depth and node-budget bounds fail closed without leaking nested secrets.
+		deep := `"Bearer\u0085tok-deep"`
+		for range maxSanitizeDepth + 2 {
+			deep = `{"a":` + deep + `}`
+		}
+		gotDeep := sanitizeErrorForLog(deep)
+		if strings.Contains(gotDeep, "tok-deep") || !strings.Contains(gotDeep, maxDepthPlaceholder) {
+			t.Fatalf("sanitizeErrorForLog(over-depth) = %q, want %q without secret", gotDeep, maxDepthPlaceholder)
+		}
+
+		var wideBuf strings.Builder
+		wideBuf.WriteByte('[')
+		for i := range maxSanitizeNodes + 10 {
+			if i > 0 {
+				wideBuf.WriteByte(',')
+			}
+			wideBuf.WriteString(`"x"`)
+		}
+		wideBuf.WriteByte(']')
+		if gotWide := sanitizeErrorForLog(wideBuf.String()); gotWide != sanitizeBudgetPlaceholder {
+			t.Fatalf("sanitizeErrorForLog(over-budget) = %q, want %q", gotWide, sanitizeBudgetPlaceholder)
+		}
+
+		// Linear scaling across many control-bearing URIs on a single line.
+		const manyURIRepeat = 200
+		maxElapsed := 500 * time.Millisecond
+		if raceEnabled {
+			maxElapsed = 2 * time.Second
+		}
+		manyURIInput := strings.Repeat("https://a.example/ok\x1bAuthorization: Custom ", manyURIRepeat) + "SecretTail"
+		startMany := time.Now()
+		gotMany := sanitizeErrorForLog(manyURIInput)
+		elapsedMany := time.Since(startMany)
+		if gotMany != "[REDACTED_SENSITIVE_URI]: [REDACTED]" {
+			t.Fatalf("sanitizeErrorForLog(manyURIs auth line) = %q, want %q", gotMany, "[REDACTED_SENSITIVE_URI]: [REDACTED]")
+		}
+		if elapsedMany > maxElapsed {
+			t.Fatalf("sanitizeErrorForLog(manyURIs auth line) took %v, want linear < %v", elapsedMany, maxElapsed)
+		}
+
+		manyBearerInput := strings.Repeat("https://a.example/ok\u0085Bearer tok-123 benign ", manyURIRepeat)
+		startBearer := time.Now()
+		gotBearer := sanitizeErrorForLog(manyBearerInput)
+		elapsedBearer := time.Since(startBearer)
+		wantBearer := strings.Repeat("[REDACTED_SENSITIVE_URI] [REDACTED] benign ", manyURIRepeat)
+		if gotBearer != wantBearer {
+			t.Fatalf("sanitizeErrorForLog(manyURIs bearer) mismatch (len got=%d want=%d)", len(gotBearer), len(wantBearer))
+		}
+		if elapsedBearer > maxElapsed {
+			t.Fatalf("sanitizeErrorForLog(manyURIs bearer) took %v, want linear < %v", elapsedBearer, maxElapsed)
 		}
 	})
 

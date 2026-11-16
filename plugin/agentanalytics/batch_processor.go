@@ -18,14 +18,20 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
 	storagepb "cloud.google.com/go/bigquery/storage/apiv1/storagepb"
@@ -777,17 +783,811 @@ func (b *BatchProcessor) appendChunkWithRotationBudget(writeCtx context.Context,
 // pathological input cannot monopolize flushMu and the write stream.
 const maxRowErrorIsolationPasses = 8
 
-// sanitizeErrorForLog redacts sensitive tokens from msg and replaces ASCII
-// control characters and Unicode line/paragraph separators with spaces so
-// backend error text cannot break single-line log framing.
-func sanitizeErrorForLog(msg string) string {
-	redacted := redactErrorMessage(msg)
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || r == '\u2028' || r == '\u2029' {
-			return ' '
+// isLogControlRune reports whether r is an ASCII/C1 control rune or a Unicode
+// line/paragraph separator that can break single-line log framing.
+func isLogControlRune(r rune) bool {
+	return r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == '\u2028' || r == '\u2029'
+}
+
+// replaceLogControlRunes replaces ASCII and C1 control characters
+// (U+0000–U+001F, U+007F–U+009F), Unicode line/paragraph separators
+// (U+2028, U+2029), and invalid UTF-8 bytes with spaces so backend error text
+// cannot break single-line log framing or split credential keys from delimiters.
+func replaceLogControlRunes(s string) string {
+	return replaceLogControlsToSpace(s, false)
+}
+
+func replaceLogControlsToSpace(s string, keepASCIILineBreaks bool) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	changed := false
+	for i := 0; i < len(s); {
+		if s[i] < utf8.RuneSelf {
+			c := s[i]
+			if c < 0x20 || c == 0x7f {
+				if keepASCIILineBreaks && (c == '\r' || c == '\n') {
+					b.WriteByte(c)
+				} else {
+					b.WriteByte(' ')
+					changed = true
+				}
+			} else {
+				b.WriteByte(c)
+			}
+			i++
+			continue
 		}
-		return r
-	}, redacted)
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if (r == utf8.RuneError && size == 1) || isLogControlRune(r) {
+			b.WriteByte(' ')
+			changed = true
+		} else {
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	if !changed {
+		return s
+	}
+	return b.String()
+}
+
+func firstLogControlOrInvalidUTF8(s string) int {
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if (r == utf8.RuneError && size == 1) || isLogControlRune(r) {
+			return i
+		}
+		i += size
+	}
+	return -1
+}
+
+func isTrimmedLogSpace(r rune, size int) bool {
+	return (r == utf8.RuneError && size == 1) || unicode.IsSpace(r) || r == '\ufeff' || isLogControlRune(r)
+}
+
+func trimLogSpace(s string) string {
+	start := 0
+	for start < len(s) {
+		r, size := utf8.DecodeRuneInString(s[start:])
+		if !isTrimmedLogSpace(r, size) {
+			break
+		}
+		start += size
+	}
+	end := len(s)
+	for end > start {
+		r, size := utf8.DecodeLastRuneInString(s[start:end])
+		if !isTrimmedLogSpace(r, size) {
+			break
+		}
+		end -= size
+	}
+	return s[start:end]
+}
+
+type ctrlSpan struct {
+	shStart int
+	shEnd   int
+	suffix  string
+}
+
+type shadowTextSeg struct {
+	text      string
+	origStart int
+	origEnd   int
+	replaced  bool
+}
+
+type shadowEdit struct {
+	start int
+	end   int
+	repl  string
+}
+
+// redactControlBearingURIs fails closed on any URI token containing log control
+// runes (C0, DEL/C1 U+007F–U+009F, U+2028, U+2029) or invalid UTF-8 bytes
+// before replaceLogControlRunes can turn those runes into spaces and split the
+// URI across Pass 1 -> Pass 2.
+func redactControlBearingURIs(s string) string {
+	if !strings.Contains(s, "://") {
+		return s
+	}
+	locs := uriTokenRe.FindAllStringIndex(s, -1)
+	if len(locs) == 0 {
+		return s
+	}
+	isCtrl := make([]bool, len(locs))
+	ctrlCount := 0
+	for i, loc := range locs {
+		if firstLogControlOrInvalidUTF8(s[loc[0]:loc[1]]) >= 0 {
+			isCtrl[i] = true
+			ctrlCount++
+		}
+	}
+	if ctrlCount == 0 {
+		return s
+	}
+
+	// Build one normalized shadow string where clean URIs are sanitized and
+	// log-control runes (excluding ASCII \r/\n in gaps so header matching stays
+	// line-bounded) and invalid UTF-8 bytes become spaces, while tracking the
+	// exact span of each control-bearing URI in shadow. Running scrubTextPatterns
+	// over the shadow in linear passes lets crossing credentials (including
+	// multi-URI Authorization lines and keys separated by C1/U+2028/U+2029/bad
+	// UTF-8) redact across the whole line without re-scanning tails per URI.
+	var shadow strings.Builder
+	shadow.Grow(len(s))
+	ctrlSpans := make([]ctrlSpan, 0, ctrlCount)
+	pos := 0
+	for i, loc := range locs {
+		if loc[0] < pos {
+			continue
+		}
+		shadow.WriteString(replaceLogControlsToSpace(s[pos:loc[0]], true))
+		token := s[loc[0]:loc[1]]
+		trimmed := trimTrailingPunctuation(token)
+		suffix := token[len(trimmed):]
+		if isCtrl[i] {
+			shStart := shadow.Len()
+			shadow.WriteString(replaceLogControlsToSpace(token, false))
+			ctrlSpans = append(ctrlSpans, ctrlSpan{
+				shStart: shStart,
+				shEnd:   shadow.Len(),
+				suffix:  suffix,
+			})
+		} else {
+			sanitized, changed := sanitizeURI(trimmed)
+			if !changed {
+				shadow.WriteString(token)
+			} else {
+				shadow.WriteString(sanitized)
+				shadow.WriteString(suffix)
+			}
+		}
+		pos = loc[1]
+	}
+	shadow.WriteString(replaceLogControlsToSpace(s[pos:], true))
+
+	shadowStr := shadow.String()
+	segs := scrubShadowWithSpans(shadowStr)
+	return renderRedactedShadow(shadowStr, segs, ctrlSpans)
+}
+
+func scrubShadowWithSpans(shadow string) []shadowTextSeg {
+	cur := shadow
+	segs := []shadowTextSeg{{text: shadow, origStart: 0, origEnd: len(shadow)}}
+	if !mayMatchTextPatterns(cur) {
+		return segs
+	}
+
+	collectEdits := func(find func(string) []int, handle func(s string, loc []int, emit func(shadowEdit)) int) {
+		var edits []shadowEdit
+		emit := func(e shadowEdit) {
+			if e.start < e.end {
+				edits = append(edits, e)
+			}
+		}
+		for pos := 0; pos < len(cur); {
+			loc := find(cur[pos:])
+			if loc == nil {
+				break
+			}
+			for i, v := range loc {
+				if v >= 0 {
+					loc[i] = v + pos
+				}
+			}
+			end := handle(cur, loc, emit)
+			pos = max(end, loc[0]+1)
+		}
+		if len(edits) > 0 {
+			cur, segs = applyShadowEdits(cur, segs, edits)
+		}
+	}
+
+	collectEdits(authHeaderRe.FindStringSubmatchIndex, func(_ string, loc []int, emit func(shadowEdit)) int {
+		emit(shadowEdit{start: loc[3], end: loc[1], repl: ": " + redactedValue})
+		return loc[1]
+	})
+	collectEdits(bearerTokenRe.FindStringSubmatchIndex, func(s string, loc []int, emit func(shadowEdit)) int {
+		repl, end := redactBearerToken(s, loc)
+		if repl != s[loc[0]:end] {
+			emit(shadowEdit{start: loc[3], end: end, repl: " " + redactedValue})
+		}
+		return end
+	})
+	collectEdits(basicTokenRe.FindStringSubmatchIndex, func(s string, loc []int, emit func(shadowEdit)) int {
+		repl, end := redactBasicCredential(s, loc)
+		if repl != s[loc[0]:end] {
+			emit(shadowEdit{start: loc[3], end: end, repl: " " + redactedValue})
+		}
+		return end
+	})
+	collectEdits(jsonKeyValTokenRe.FindStringSubmatchIndex, func(s string, loc []int, emit func(shadowEdit)) int {
+		repl, end := redactJSONKeyValue(s, loc)
+		if repl != s[loc[0]:end] {
+			emit(shadowEdit{start: loc[0], end: loc[2], repl: `"`})
+			emit(shadowEdit{start: loc[3], end: end, repl: `":"` + redactedValue + `"`})
+		}
+		return end
+	})
+	var brackets openBrackets
+	collectEdits(findKeyValToken, func(s string, loc []int, emit func(shadowEdit)) int {
+		repl, end := redactTextKeyValue(s, loc, &brackets)
+		if repl != s[loc[0]:end] {
+			prefixLen := (loc[5] - loc[2]) + (loc[7] - loc[6])
+			if loc[5] < loc[6] {
+				emit(shadowEdit{start: loc[5], end: loc[6], repl: ""})
+			}
+			emit(shadowEdit{start: loc[7], end: end, repl: repl[prefixLen:]})
+		}
+		return end
+	})
+	return segs
+}
+
+func applyShadowEdits(cur string, segs []shadowTextSeg, edits []shadowEdit) (string, []shadowTextSeg) {
+	outSegs := make([]shadowTextSeg, 0, len(segs)+len(edits))
+	var outBuf strings.Builder
+	outBuf.Grow(len(cur))
+	segIdx := 0
+	segOff := 0
+	curPos := 0
+
+	flushEmptySegs := func() {
+		for segIdx < len(segs) && len(segs[segIdx].text) == 0 {
+			outSegs = append(outSegs, segs[segIdx])
+			segIdx++
+		}
+	}
+
+	emitUntil := func(target int) {
+		for curPos < target {
+			flushEmptySegs()
+			seg := segs[segIdx]
+			avail := len(seg.text) - segOff
+			take := min(avail, target-curPos)
+			sub := seg.text[segOff : segOff+take]
+			origStart, origEnd := seg.origStart, seg.origEnd
+			if !seg.replaced {
+				origStart = seg.origStart + segOff
+				origEnd = origStart + take
+			} else if segOff > 0 {
+				origStart = seg.origEnd
+			}
+			outSegs = append(outSegs, shadowTextSeg{
+				text:      sub,
+				origStart: origStart,
+				origEnd:   origEnd,
+				replaced:  seg.replaced,
+			})
+			outBuf.WriteString(sub)
+			curPos += take
+			segOff += take
+			if segOff == len(seg.text) {
+				segIdx++
+				segOff = 0
+			}
+		}
+	}
+
+	for _, edit := range edits {
+		emitUntil(edit.start)
+		repOrigStart := -1
+		repOrigEnd := 0
+		for curPos < edit.end {
+			seg := segs[segIdx]
+			if len(seg.text) == 0 {
+				if repOrigStart < 0 {
+					repOrigStart = seg.origStart
+				}
+				repOrigEnd = max(repOrigEnd, seg.origEnd)
+				segIdx++
+				continue
+			}
+			avail := len(seg.text) - segOff
+			take := min(avail, edit.end-curPos)
+			var s0, s1 int
+			if !seg.replaced {
+				s0 = seg.origStart + segOff
+				s1 = s0 + take
+			} else {
+				if segOff == 0 {
+					s0 = seg.origStart
+				} else {
+					s0 = seg.origEnd
+				}
+				if segOff+take == len(seg.text) {
+					s1 = seg.origEnd
+				} else {
+					s1 = s0
+				}
+			}
+			if repOrigStart < 0 {
+				repOrigStart = s0
+			}
+			repOrigEnd = max(repOrigEnd, s1)
+			curPos += take
+			segOff += take
+			if segOff == len(seg.text) {
+				segIdx++
+				segOff = 0
+			}
+		}
+		outSegs = append(outSegs, shadowTextSeg{
+			text:      edit.repl,
+			origStart: repOrigStart,
+			origEnd:   repOrigEnd,
+			replaced:  true,
+		})
+		outBuf.WriteString(edit.repl)
+	}
+	emitUntil(len(cur))
+	flushEmptySegs()
+	return outBuf.String(), outSegs
+}
+
+func renderRedactedShadow(shadow string, segs []shadowTextSeg, ctrlSpans []ctrlSpan) string {
+	var out strings.Builder
+	out.Grow(len(shadow))
+	cIdx := 0
+	emittedPlaceholder := false
+
+	for _, seg := range segs {
+		s0, s1 := seg.origStart, seg.origEnd
+		for cIdx < len(ctrlSpans) && ctrlSpans[cIdx].shEnd <= s0 {
+			if !emittedPlaceholder {
+				out.WriteString(redactedURIPlaceholder)
+				out.WriteString(ctrlSpans[cIdx].suffix)
+			}
+			cIdx++
+			emittedPlaceholder = false
+		}
+		if cIdx >= len(ctrlSpans) || s1 <= ctrlSpans[cIdx].shStart {
+			out.WriteString(seg.text)
+			continue
+		}
+		if seg.replaced {
+			c := ctrlSpans[cIdx]
+			if s0 > c.shStart && s1 <= c.shEnd {
+				if !emittedPlaceholder {
+					out.WriteString(redactedURIPlaceholder)
+					emittedPlaceholder = true
+				}
+				if s1 == c.shEnd {
+					cIdx++
+					emittedPlaceholder = false
+				}
+				continue
+			}
+			out.WriteString(seg.text)
+			for cIdx < len(ctrlSpans) && ctrlSpans[cIdx].shEnd <= s1 {
+				cIdx++
+				emittedPlaceholder = false
+			}
+			continue
+		}
+
+		p := s0
+		for p < s1 {
+			if cIdx >= len(ctrlSpans) || s1 <= ctrlSpans[cIdx].shStart {
+				out.WriteString(shadow[p:s1])
+				break
+			}
+			c := ctrlSpans[cIdx]
+			if p < c.shStart {
+				out.WriteString(shadow[p:c.shStart])
+				p = c.shStart
+				continue
+			}
+			if !emittedPlaceholder {
+				out.WriteString(redactedURIPlaceholder)
+				emittedPlaceholder = true
+			}
+			nextP := min(s1, c.shEnd)
+			if nextP == c.shEnd {
+				if c.suffix != "" {
+					sufStart := c.shEnd - len(c.suffix)
+					if sufStart >= p {
+						out.WriteString(c.suffix)
+					} else if p < c.shEnd {
+						out.WriteString(shadow[p:c.shEnd])
+					}
+				}
+				cIdx++
+				emittedPlaceholder = false
+			}
+			p = nextP
+		}
+	}
+	for cIdx < len(ctrlSpans) {
+		if !emittedPlaceholder {
+			out.WriteString(redactedURIPlaceholder)
+			out.WriteString(ctrlSpans[cIdx].suffix)
+		}
+		cIdx++
+		emittedPlaceholder = false
+	}
+	return out.String()
+}
+
+func isUTF8PercentC1(s string) (byte, bool) {
+	if len(s) != 6 || s[0] != '%' || (s[1] != 'c' && s[1] != 'C') || s[2] != '2' ||
+		s[3] != '%' || (s[4] != '8' && s[4] != '9') || !isHexRune(rune(s[5])) {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(s[4:6], 16, 8)
+	if err != nil {
+		return 0, false
+	}
+	return byte(v), true
+}
+
+func isUTF8PercentLineSep(s string) (rune, bool) {
+	if len(s) != 9 || s[0] != '%' || (s[1] != 'e' && s[1] != 'E') || s[2] != '2' ||
+		s[3] != '%' || s[4] != '8' || s[5] != '0' || s[6] != '%' || (s[7] != 'a' && s[7] != 'A') {
+		return 0, false
+	}
+	switch s[8] {
+	case '8':
+		return '\u2028', true
+	case '9':
+		return '\u2029', true
+	default:
+		return 0, false
+	}
+}
+
+// decodeControlEscapesStep decodes standard backslash escapes, \uXXXX/\UXXXX/\xXX
+// escapes, and percent escapes (including UTF-8 percent-encoded C1 controls
+// and U+2028/U+2029) in one pass for detection of hidden controls or URIs.
+func decodeControlEscapesStep(s string) string {
+	if !strings.ContainsAny(s, `\%`) {
+		return s
+	}
+	if strings.Contains(s, `\`) {
+		s = unescapeBackslashControls(s)
+	}
+	if !strings.ContainsAny(s, `\%`) {
+		return s
+	}
+	var output []rune
+	for i := 0; i < len(s); {
+		if s[i] == '%' {
+			if i+9 <= len(s) {
+				if sep, ok := isUTF8PercentLineSep(s[i : i+9]); ok {
+					output = append(output, sep)
+					i += 9
+					continue
+				}
+			}
+			if i+6 <= len(s) {
+				if b, ok := isUTF8PercentC1(s[i : i+6]); ok {
+					output = append(output, rune(b))
+					i += 6
+					continue
+				}
+			}
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		output = append(output, r)
+		for {
+			escapeStart := -1
+			var digits string
+			n := len(output)
+			if n >= 6 && output[n-6] == '\\' && (output[n-5] == 'u' || output[n-5] == 'U') &&
+				isHexRune(output[n-4]) && isHexRune(output[n-3]) && isHexRune(output[n-2]) && isHexRune(output[n-1]) {
+				escapeStart = n - 6
+				digits = string(output[n-4:])
+			} else if n >= 4 && output[n-4] == '\\' && (output[n-3] == 'x' || output[n-3] == 'X') &&
+				isHexRune(output[n-2]) && isHexRune(output[n-1]) {
+				escapeStart = n - 4
+				digits = string(output[n-2:])
+			} else if n >= 3 && output[n-3] == '%' &&
+				isHexRune(output[n-2]) && isHexRune(output[n-1]) {
+				escapeStart = n - 3
+				digits = string(output[n-2:])
+			} else if n >= 2 && output[n-2] == '\\' && (output[n-1] == '"' || output[n-1] == '\'') {
+				output = append(output[:n-2], output[n-1])
+				continue
+			}
+			if escapeStart < 0 {
+				break
+			}
+			decoded, err := strconv.ParseUint(digits, 16, 32)
+			if err != nil || (decoded > 0x9F && decoded != '\u2028' && decoded != '\u2029') {
+				break
+			}
+			output = append(output[:escapeStart], rune(decoded))
+		}
+	}
+	return string(output)
+}
+
+func hasControlEscapedCredential(raw, scrubbed string) bool {
+	if !strings.ContainsAny(raw, `\%`) {
+		return false
+	}
+	var parts []string
+	curRaw, curScrubbed := raw, scrubbed
+	for range 2 * maxCanonicalUnescapePasses {
+		if !strings.ContainsAny(curRaw, `\%`) {
+			return false
+		}
+		nextRaw := decodeControlEscapesStep(curRaw)
+		if nextRaw == curRaw {
+			return false
+		}
+		if curScrubbed == curRaw {
+			uriSafe := redactControlBearingURIs(nextRaw)
+			if uriSafe != nextRaw {
+				return true
+			}
+			norm := replaceLogControlRunes(uriSafe)
+			if scrubErrorTokens(norm) != norm || hasEncodedCredentialMarker(norm) {
+				return true
+			}
+			curRaw, curScrubbed = nextRaw, nextRaw
+			continue
+		}
+		if parts == nil {
+			parts = keptLiterals(curScrubbed)
+		}
+		nextScrubbed := decodeControlEscapesStep(curScrubbed)
+		for j, part := range parts {
+			parts[j] = replaceLogControlRunes(decodeControlEscapesStep(part))
+		}
+		uriSafeScrubbed := redactControlBearingURIs(nextScrubbed)
+		if uriSafeScrubbed != nextScrubbed {
+			return true
+		}
+		normScrubbed := replaceLogControlRunes(uriSafeScrubbed)
+		if scrubErrorTokens(normScrubbed) != normScrubbed || hasEncodedCredentialMarker(normScrubbed) {
+			return true
+		}
+		normRaw := replaceLogControlRunes(scrubErrorTokens(replaceLogControlRunes(redactControlBearingURIs(nextRaw))))
+		if !keptInOrder(parts, normRaw) {
+			return true
+		}
+		curRaw, curScrubbed = nextRaw, nextScrubbed
+	}
+	return decodeControlEscapesStep(curRaw) != curRaw
+}
+
+func hasMalformedJSONCredential(trimmed string) bool {
+	if hasAnyCredentialMarker(trimmed) || hasEncodedCredentialMarker(trimmed) || hasCandidateQuotedSensitiveKey(trimmed, 0) {
+		return true
+	}
+	if redactControlBearingURIs(trimmed) != trimmed {
+		return true
+	}
+	if norm := replaceLogControlRunes(trimmed); norm != trimmed {
+		if hasAnyCredentialMarker(norm) || hasEncodedCredentialMarker(norm) || hasCandidateQuotedSensitiveKey(norm, 0) {
+			return true
+		}
+	}
+	cur := trimmed
+	for range 2 * maxCanonicalUnescapePasses {
+		if !strings.ContainsAny(cur, `\%`) {
+			return false
+		}
+		next := decodeControlEscapesStep(cur)
+		if next == cur {
+			return false
+		}
+		if redactControlBearingURIs(next) != next {
+			return true
+		}
+		norm := replaceLogControlRunes(next)
+		if hasAnyCredentialMarker(norm) || hasEncodedCredentialMarker(norm) || hasCandidateQuotedSensitiveKey(norm, 0) {
+			return true
+		}
+		cur = next
+	}
+	return decodeControlEscapesStep(cur) != cur
+}
+
+func sanitizePlainErrorText(s string) string {
+	if s == "" || isKnownSentinel(s) {
+		return s
+	}
+	cur := s
+	for range 2 {
+		uriSafe := redactControlBearingURIs(cur)
+		redacted := scrubErrorText(uriSafe)
+		sanitized := replaceLogControlRunes(redacted)
+		if sanitized == redacted && uriSafe == cur {
+			cur = sanitized
+			break
+		}
+		cur = sanitized
+	}
+	cur = replaceLogControlRunes(scrubErrorText(redactControlBearingURIs(cur)))
+	if hasControlEscapedCredential(s, cur) {
+		return redactedSensitiveTextPlaceholder
+	}
+	return cur
+}
+
+func sanitizeErrorJSONValue(v any, depth int, budget *nodeBudget) (out any, changed bool) {
+	if depth >= maxSanitizeDepth {
+		return maxDepthPlaceholder, true
+	}
+	if budget != nil && !budget.take() {
+		return sanitizeBudgetPlaceholder, true
+	}
+	switch x := v.(type) {
+	case map[string]any:
+		outMap := make(map[string]any, min(len(x), maxContainerAlloc))
+		keys := slices.Sorted(maps.Keys(x))
+		for _, k := range keys {
+			if budget != nil && budget.remaining <= 0 {
+				outMap[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
+				return outMap, true
+			}
+			val := x[k]
+			normKey := sanitizePlainErrorText(k)
+			if normKey != k {
+				changed = true
+			}
+			if isSensitiveKey(k) || isSensitiveKey(normKey) {
+				if budget != nil && !budget.take() {
+					outMap[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
+					return outMap, true
+				}
+				if str, ok := val.(string); !ok || str != redactedValue {
+					changed = true
+				}
+				outMap[normKey] = redactedValue
+				continue
+			}
+			newVal, c := sanitizeErrorJSONValue(val, depth+1, budget)
+			if str, ok := newVal.(string); ok && str == sanitizeBudgetPlaceholder && budget != nil && budget.remaining <= 0 {
+				outMap[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
+				return outMap, true
+			}
+			if _, exists := outMap[normKey]; exists {
+				changed = true
+			}
+			outMap[normKey] = newVal
+			changed = changed || c
+		}
+		return outMap, changed
+	case []any:
+		outSlice := make([]any, 0, min(len(x), maxContainerAlloc))
+		for _, val := range x {
+			if budget != nil && budget.remaining <= 0 {
+				outSlice = append(outSlice, sanitizeBudgetPlaceholder)
+				return outSlice, true
+			}
+			newVal, c := sanitizeErrorJSONValue(val, depth+1, budget)
+			outSlice = append(outSlice, newVal)
+			changed = changed || c
+			if str, ok := newVal.(string); ok && str == sanitizeBudgetPlaceholder && budget != nil && budget.remaining <= 0 {
+				return outSlice, true
+			}
+		}
+		return outSlice, changed
+	case string:
+		if isKnownSentinel(x) {
+			return x, false
+		}
+		trimmed := trimLogSpace(x)
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, `"`) {
+			return sanitizeJSONTextForLog(x, trimmed, depth+1, budget, false)
+		}
+		sanitized := sanitizePlainErrorText(x)
+		return sanitized, sanitized != x
+	default:
+		return v, false
+	}
+}
+
+func sanitizeMalformedQuotedTextForLog(raw, trimmed string) (string, bool) {
+	afterQuote := trimLogSpace(trimmed[1:])
+	if strings.HasPrefix(afterQuote, "{") || strings.HasPrefix(afterQuote, "[") ||
+		strings.HasPrefix(afterQuote, `\`) || strings.HasPrefix(afterQuote, `"`) ||
+		hasMalformedJSONCredential(trimmed) {
+		return unparseableJSONPlaceholder, true
+	}
+	sanitized := sanitizePlainErrorText(raw)
+	return sanitized, sanitized != raw
+}
+
+func sanitizeJSONTextForLog(raw, trimmed string, depth int, budget *nodeBudget, allowProseFallback bool) (string, bool) {
+	if depth >= maxSanitizeDepth {
+		return maxDepthPlaceholder, true
+	}
+	if budget != nil && !budget.take() {
+		return sanitizeBudgetPlaceholder, true
+	}
+	if len(trimmed) > maxInspectableJSONTextBytes {
+		return unparseableJSONPlaceholder, true
+	}
+	// RFC 8259 §8.1 forbids invalid UTF-8 in JSON. encoding/json replaces
+	// non-ASCII invalid bytes (>= 0x80) with U+FFFD rather than returning an
+	// error, which would let sanitizeErrorJSONValue miss credentials split by
+	// raw invalid UTF-8 bytes and then let replaceLogControlRunes(raw) turn
+	// them into ASCII spaces after redaction. Reject invalid UTF-8 before
+	// invoking encoding/json; containers never fall back to prose here.
+	if !utf8.ValidString(trimmed) {
+		if !allowProseFallback || !strings.HasPrefix(trimmed, `"`) {
+			return unparseableJSONPlaceholder, true
+		}
+		return sanitizeMalformedQuotedTextForLog(raw, trimmed)
+	}
+	if strings.HasPrefix(trimmed, `"`) {
+		dec := json.NewDecoder(strings.NewReader(trimmed))
+		var decoded string
+		if err := dec.Decode(&decoded); err != nil {
+			return sanitizeMalformedQuotedTextForLog(raw, trimmed)
+		}
+		suffix := trimmed[dec.InputOffset():]
+		trimmedSuffix := trimLogSpace(suffix)
+		innerSanitized, innerChanged := sanitizeErrorJSONValue(decoded, depth+1, budget)
+		if trimmedSuffix != "" {
+			if innerChanged || strings.ContainsAny(suffix, "{[") || strings.HasPrefix(trimmedSuffix, `\`) ||
+				hasMalformedJSONCredential(suffix) || inspectQuotedFragments(suffix, depth+1, budget) {
+				return unparseableJSONPlaceholder, true
+			}
+			sanitized := sanitizePlainErrorText(raw)
+			return sanitized, sanitized != raw
+		}
+		if !innerChanged {
+			sanitized := replaceLogControlRunes(raw)
+			return sanitized, sanitized != raw
+		}
+		b, err := json.Marshal(innerSanitized)
+		if err != nil {
+			return unparseableJSONPlaceholder, true
+		}
+		return replaceLogControlRunes(string(b)), true
+	}
+
+	decoded, sawDuplicateKey, exceeded, err := unmarshalJSONStrictWithBudget([]byte(trimmed), budget)
+	if exceeded {
+		return sanitizeBudgetPlaceholder, true
+	}
+	if err != nil {
+		if allowProseFallback && !hasMalformedJSONCredential(trimmed) {
+			sanitized := sanitizePlainErrorText(raw)
+			return sanitized, sanitized != raw
+		}
+		return unparseableJSONPlaceholder, true
+	}
+	sanitizedVal, valChanged := sanitizeErrorJSONValue(decoded, depth+1, budget)
+	if !valChanged && !sawDuplicateKey {
+		sanitized := replaceLogControlRunes(raw)
+		return sanitized, sanitized != raw
+	}
+	b, err := json.Marshal(sanitizedVal)
+	if err != nil {
+		return unparseableJSONPlaceholder, true
+	}
+	return replaceLogControlRunes(string(b)), true
+}
+
+// sanitizeErrorForLog redacts sensitive tokens from msg and replaces ASCII and
+// C1 control characters (U+0000–U+001F, U+007F–U+009F) and Unicode
+// line/paragraph separators (U+2028, U+2029) with spaces so backend error text
+// cannot break single-line log framing. Control-bearing URIs fail closed before
+// control replacement can split them, and JSON objects/arrays/strings normalize
+// decoded keys and string values before re-marshaling so json.Marshal never
+// emits unredacted \uXXXX / \u2028 / \u2029 payloads.
+func sanitizeErrorForLog(msg string) string {
+	if msg == "" || isKnownSentinel(msg) {
+		return msg
+	}
+	trimmed := trimLogSpace(msg)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, `"`) {
+		budget := &nodeBudget{remaining: maxSanitizeNodes}
+		sanitized, _ := sanitizeJSONTextForLog(msg, trimmed, 0, budget, true)
+		return sanitized
+	}
+	return sanitizePlainErrorText(msg)
 }
 
 // appendChunkRows writes batch with a shared rotation budget, isolating
@@ -918,14 +1718,12 @@ func (b *BatchProcessor) appendChunkRows(writeCtx context.Context, batch []map[s
 		}
 
 		if res.GetError() != nil {
-			redactedMsg := sanitizeErrorForLog(res.GetError().GetMessage())
-			if b.config.Logger != nil {
-				b.config.Logger.Printf(
-					"BigQuery response error (code=%s, row_errors=%d): %s",
-					codes.Code(res.GetError().GetCode()), len(rowErrs), redactedMsg,
-				)
-			}
-			return cur, settled, rowErrDrops, fmt.Errorf("batch append error from BigQuery: %s", redactedMsg)
+			rawMsg := res.GetError().GetMessage()
+			b.config.logf(
+				"BigQuery response error (code=%s, row_errors=%d, message_bytes=%d)",
+				codes.Code(res.GetError().GetCode()), len(rowErrs), len(rawMsg),
+			)
+			return cur, settled, rowErrDrops, fmt.Errorf("batch append error from BigQuery: %s", sanitizeErrorForLog(rawMsg))
 		}
 
 		settled = append(settled, cur...)
@@ -1590,7 +2388,7 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			}
 			// Not reachable today: every place that sets offsetDesynced also
 			// fails the chunk, and tryAppendBatch and the halving in
-			// appendChunkWithRotationBudget stop at the first error, so no
+			// appendChunkRows stop at the first error, so no
 			// later chunk of the batch enters append with it set. The check
 			// keeps a batch to one rotation if either is changed to go on
 			// after a failed chunk.
