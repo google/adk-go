@@ -398,6 +398,9 @@ type OnModelErrorCallback func(ctx agent.Context, llmRequest *model.LLMRequest, 
 //
 // To modify tool arguments and still run the tool,
 // update args in place and return (nil, nil).
+// The edits reach the tool and the callbacks that run after this one for the
+// same call. They do not reach the function call event, which keeps the
+// arguments the model sent in the session and in later model requests.
 type BeforeToolCallback func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
 // AfterToolCallback is a function type executed after a tool's Run method has completed,
