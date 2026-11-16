@@ -439,20 +439,10 @@ func verifyLLMRequestMatch(expectedLLMRequest, actualLLMRequest *model.LLMReques
 		}
 	}
 
-	if transferToolAny, ok := expectedLLMRequest.Tools["transfer_to_agent"]; ok {
-		transferTool := transferToolAny.(*genai.FunctionDeclaration)
-		transferTool.Description = `Transfer the question to another agent.
-This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
-	}
-
 	if expectedLLMRequest.Config != nil {
 		for _, tool := range expectedLLMRequest.Config.Tools {
 			for _, funcDecl := range tool.FunctionDeclarations {
 				funcDecl.Description = normalizeDescription(funcDecl.Description)
-				if funcDecl.Name == "transfer_to_agent" {
-					funcDecl.Description = `Transfer the question to another agent.
-This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
-				}
 			}
 		}
 	}

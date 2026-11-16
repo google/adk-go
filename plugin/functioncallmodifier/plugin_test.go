@@ -16,6 +16,7 @@ package functioncallmodifier_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -152,12 +154,9 @@ func TestBeforeModelCallback(t *testing.T) {
 					continue
 				}
 
-				if len(decl.Parameters.Properties) != len(tc.wantParams) {
-					t.Errorf("Tool %s: Expected %d parameters, got %d", toolName, len(tc.wantParams), len(decl.Parameters.Properties))
-				}
-				params := make(map[string]bool)
-				for k := range decl.Parameters.Properties {
-					params[k] = true
+				params := declaredProperties(t, decl)
+				if len(params) != len(tc.wantParams) {
+					t.Errorf("Tool %s: Expected %d parameters, got %d", toolName, len(tc.wantParams), len(params))
 				}
 				if diff := cmp.Diff(tc.wantParams, params); diff != "" {
 					t.Errorf("Tool %s: Parameter mismatch (-want +got):\n%s", toolName, diff)
@@ -584,6 +583,329 @@ func (c *cachedDeclarationTool) Declaration() *genai.FunctionDeclaration { retur
 
 func (c *cachedDeclarationTool) Run(agent.Context, any) (map[string]any, error) {
 	return nil, nil
+}
+
+// TestBeforeModelCallback_JSONSchemaDeclaration pins that the plugin adds its
+// arguments to a declaration in the form the declaration has. The built-in
+// transfer_to_agent tool and function tools declare a *jsonschema.Schema and
+// MCP tools a map[string]any; arguments written into Parameters beside either
+// would send the model both forms. A nil schema of either type means no
+// parameters, and a form the plugin cannot extend fails the request instead
+// of reaching the model. Every row runs two requests on one declaration, as a
+// tool that caches its declaration hands it out, and checks that the
+// declaration itself is unchanged afterwards.
+func TestBeforeModelCallback_JSONSchemaDeclaration(t *testing.T) {
+	const prefix = "Accepts skill_id and rationale. "
+	defaultArgs := map[string]*genai.Schema{
+		"skill_id":  {Type: genai.TypeString, Description: "The specific skill to be utilized by the agent."},
+		"rationale": {Type: genai.TypeString, Description: "The reasoning behind selecting this agent and skill."},
+	}
+	wantSkillID := &jsonschema.Schema{Type: "string", Description: "The specific skill to be utilized by the agent."}
+	wantRationale := &jsonschema.Schema{Type: "string", Description: "The reasoning behind selecting this agent and skill."}
+	wantSkillIDMap := map[string]any{"type": "string", "description": "The specific skill to be utilized by the agent."}
+	wantRationaleMap := map[string]any{"type": "string", "description": "The reasoning behind selecting this agent and skill."}
+	wantTypedParams := &genai.Schema{
+		Type: "OBJECT",
+		Properties: map[string]*genai.Schema{
+			"skill_id":  {Type: genai.TypeString, Description: "The specific skill to be utilized by the agent."},
+			"rationale": {Type: genai.TypeString, Description: "The reasoning behind selecting this agent and skill."},
+		},
+	}
+
+	for _, tc := range []struct {
+		name string
+		// decl builds the tool's declaration. It runs twice: once for the
+		// declaration the tool hands out, once for the value it must keep.
+		decl func() *genai.FunctionDeclaration
+		// args are the plugin's arguments; defaultArgs when nil.
+		args map[string]*genai.Schema
+		// want is the request's declaration, compared without its description.
+		want *genai.FunctionDeclaration
+		// wantErr is a substring of the callback's error; empty for success.
+		wantErr string
+	}{
+		{
+			name: "transfer_to_agent declaration",
+			decl: func() *genai.FunctionDeclaration { return (&llminternal.TransferToAgentTool{}).Declaration() },
+			want: &genai.FunctionDeclaration{
+				Name: "transfer_to_agent",
+				ParametersJsonSchema: &jsonschema.Schema{
+					Type: "object",
+					Properties: map[string]*jsonschema.Schema{
+						"agent_name": {Type: "string"},
+						"skill_id":   wantSkillID,
+						"rationale":  wantRationale,
+					},
+					Required: []string{"agent_name"},
+				},
+			},
+		},
+		{
+			name: "cached *jsonschema.Schema",
+			decl: func() *genai.FunctionDeclaration {
+				return &genai.FunctionDeclaration{
+					Name:        "search",
+					Description: "searches",
+					ParametersJsonSchema: &jsonschema.Schema{
+						Type:       "object",
+						Properties: map[string]*jsonschema.Schema{"q": {Type: "string"}},
+					},
+				}
+			},
+			want: &genai.FunctionDeclaration{
+				Name: "search",
+				ParametersJsonSchema: &jsonschema.Schema{
+					Type: "object",
+					Properties: map[string]*jsonschema.Schema{
+						"q":         {Type: "string"},
+						"skill_id":  wantSkillID,
+						"rationale": wantRationale,
+					},
+				},
+			},
+		},
+		{
+			name: "*jsonschema.Schema without properties",
+			decl: func() *genai.FunctionDeclaration {
+				return &genai.FunctionDeclaration{Name: "empty", ParametersJsonSchema: &jsonschema.Schema{Type: "object"}}
+			},
+			want: &genai.FunctionDeclaration{
+				Name: "empty",
+				ParametersJsonSchema: &jsonschema.Schema{
+					Type:       "object",
+					Properties: map[string]*jsonschema.Schema{"skill_id": wantSkillID, "rationale": wantRationale},
+				},
+			},
+		},
+		{
+			name: "*jsonschema.Schema property named like an argument",
+			decl: func() *genai.FunctionDeclaration {
+				return &genai.FunctionDeclaration{
+					Name: "collide",
+					ParametersJsonSchema: &jsonschema.Schema{
+						Type:       "object",
+						Properties: map[string]*jsonschema.Schema{"skill_id": {Type: "integer"}},
+					},
+				}
+			},
+			want: &genai.FunctionDeclaration{
+				Name: "collide",
+				ParametersJsonSchema: &jsonschema.Schema{
+					Type:       "object",
+					Properties: map[string]*jsonschema.Schema{"skill_id": wantSkillID, "rationale": wantRationale},
+				},
+			},
+		},
+		{
+			name: "map[string]any",
+			decl: func() *genai.FunctionDeclaration {
+				return &genai.FunctionDeclaration{
+					Name: "mcp_search",
+					ParametersJsonSchema: map[string]any{
+						"type":       "object",
+						"properties": map[string]any{"q": map[string]any{"type": "string"}},
+					},
+				}
+			},
+			want: &genai.FunctionDeclaration{
+				Name: "mcp_search",
+				ParametersJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"q":         map[string]any{"type": "string"},
+						"skill_id":  wantSkillIDMap,
+						"rationale": wantRationaleMap,
+					},
+				},
+			},
+		},
+		{
+			name: "map[string]any without properties",
+			decl: func() *genai.FunctionDeclaration {
+				return &genai.FunctionDeclaration{Name: "mcp_empty", ParametersJsonSchema: map[string]any{"type": "object"}}
+			},
+			want: &genai.FunctionDeclaration{
+				Name: "mcp_empty",
+				ParametersJsonSchema: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"skill_id": wantSkillIDMap, "rationale": wantRationaleMap},
+				},
+			},
+		},
+		{
+			name: "map[string]any property named like an argument",
+			decl: func() *genai.FunctionDeclaration {
+				return &genai.FunctionDeclaration{
+					Name: "mcp_collide",
+					ParametersJsonSchema: map[string]any{
+						"type":       "object",
+						"properties": map[string]any{"skill_id": map[string]any{"type": "integer"}},
+					},
+				}
+			},
+			want: &genai.FunctionDeclaration{
+				Name: "mcp_collide",
+				ParametersJsonSchema: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"skill_id": wantSkillIDMap, "rationale": wantRationaleMap},
+				},
+			},
+		},
+		{
+			name: "nil *jsonschema.Schema",
+			decl: func() *genai.FunctionDeclaration {
+				return &genai.FunctionDeclaration{Name: "nil_schema", ParametersJsonSchema: (*jsonschema.Schema)(nil)}
+			},
+			want: &genai.FunctionDeclaration{Name: "nil_schema", Parameters: wantTypedParams},
+		},
+		{
+			name: "nil map[string]any",
+			decl: func() *genai.FunctionDeclaration {
+				return &genai.FunctionDeclaration{Name: "nil_map", ParametersJsonSchema: map[string]any(nil)}
+			},
+			want: &genai.FunctionDeclaration{Name: "nil_map", Parameters: wantTypedParams},
+		},
+		{
+			name: "map[string]any with properties that are not a map",
+			decl: func() *genai.FunctionDeclaration {
+				return &genai.FunctionDeclaration{
+					Name:                 "bad_properties",
+					ParametersJsonSchema: map[string]any{"type": "object", "properties": "q"},
+				}
+			},
+			wantErr: `"properties" of type string`,
+		},
+		{
+			name: "*genai.Schema",
+			decl: func() *genai.FunctionDeclaration {
+				return &genai.FunctionDeclaration{Name: "genai_schema", ParametersJsonSchema: &genai.Schema{}}
+			},
+			wantErr: "*genai.Schema",
+		},
+		{
+			name: "argument that does not marshal",
+			decl: func() *genai.FunctionDeclaration {
+				return &genai.FunctionDeclaration{Name: "search", ParametersJsonSchema: &jsonschema.Schema{Type: "object"}}
+			},
+			args:    map[string]*genai.Schema{"bad": {Example: make(chan int)}},
+			wantErr: `argument "bad"`,
+		},
+		{
+			name: "argument that does not marshal, map[string]any",
+			decl: func() *genai.FunctionDeclaration {
+				return &genai.FunctionDeclaration{Name: "mcp_search", ParametersJsonSchema: map[string]any{"type": "object"}}
+			},
+			args:    map[string]*genai.Schema{"bad": {Example: make(chan int)}},
+			wantErr: `argument "bad"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := tc.args
+			if args == nil {
+				args = defaultArgs
+			}
+			p, err := functioncallmodifier.NewPlugin(functioncallmodifier.FunctionCallModifierConfig{
+				Predicate:           func(string) bool { return true },
+				Args:                args,
+				OverrideDescription: func(original string) string { return prefix + original },
+			})
+			if err != nil {
+				t.Fatalf("NewPlugin() error = %v", err)
+			}
+			original := tc.decl()
+			pristine := tc.decl()
+
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			ctx := icontext.NewCallbackContextWithDelta(invCtx, nil, nil)
+			for request := range 2 {
+				req := requestWithDeclaration(original)
+				resp, err := p.BeforeModelCallback()(ctx, req)
+				if resp != nil {
+					t.Errorf("request %d: BeforeModelCallback() response = %v, want nil", request, resp)
+				}
+				decl := findDeclaration(req, original.Name)
+				if tc.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+						t.Errorf("request %d: BeforeModelCallback() error = %v, want one containing %q", request, err, tc.wantErr)
+					}
+					if decl != original {
+						t.Errorf("request %d: request declaration was replaced after an error", request)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("request %d: BeforeModelCallback() error = %v", request, err)
+				}
+				if diff := cmp.Diff(tc.want, decl, cmpopts.IgnoreFields(genai.FunctionDeclaration{}, "Description")); diff != "" {
+					t.Errorf("request %d: request declaration mismatch (-want +got):\n%s", request, diff)
+				}
+				if want := prefix + pristine.Description; decl.Description != want {
+					t.Errorf("request %d: description = %q, want %q", request, decl.Description, want)
+				}
+			}
+			if diff := cmp.Diff(pristine, original); diff != "" {
+				t.Errorf("tool declaration changed (-before +after):\n%s", diff)
+			}
+		})
+	}
+
+	t.Run("wire form of the transfer_to_agent declaration", func(t *testing.T) {
+		p, err := functioncallmodifier.NewPlugin(functioncallmodifier.FunctionCallModifierConfig{
+			Predicate: func(string) bool { return true },
+			Args:      defaultArgs,
+		})
+		if err != nil {
+			t.Fatalf("NewPlugin() error = %v", err)
+		}
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+		ctx := icontext.NewCallbackContextWithDelta(invCtx, nil, nil)
+		req := requestWithDeclaration((&llminternal.TransferToAgentTool{}).Declaration())
+		if _, err := p.BeforeModelCallback()(ctx, req); err != nil {
+			t.Fatalf("BeforeModelCallback() error = %v", err)
+		}
+		body, err := json.Marshal(findDeclaration(req, "transfer_to_agent"))
+		if err != nil {
+			t.Fatalf("json.Marshal() error = %v", err)
+		}
+		if !strings.Contains(string(body), `"parametersJsonSchema":`) || strings.Contains(string(body), `"parameters":`) {
+			t.Errorf("declaration JSON = %s, want parametersJsonSchema and no parameters", body)
+		}
+	})
+}
+
+// requestWithDeclaration returns a request that offers one tool, whose
+// declaration is decl.
+func requestWithDeclaration(decl *genai.FunctionDeclaration) *model.LLMRequest {
+	return &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{decl}}},
+		},
+		Tools: map[string]any{decl.Name: &cachedDeclarationTool{decl: decl}},
+	}
+}
+
+// declaredProperties returns the names of decl's parameters, read from
+// whichever of Parameters and ParametersJsonSchema decl sets.
+func declaredProperties(t *testing.T, decl *genai.FunctionDeclaration) map[string]bool {
+	t.Helper()
+	if decl.Parameters != nil && decl.ParametersJsonSchema != nil {
+		t.Fatalf("Tool %s: declaration sets both Parameters and ParametersJsonSchema", decl.Name)
+	}
+	names := make(map[string]bool)
+	if decl.Parameters != nil {
+		for k := range decl.Parameters.Properties {
+			names[k] = true
+		}
+		return names
+	}
+	js, ok := decl.ParametersJsonSchema.(*jsonschema.Schema)
+	if !ok {
+		t.Fatalf("Tool %s: ParametersJsonSchema is %T, want *jsonschema.Schema", decl.Name, decl.ParametersJsonSchema)
+	}
+	for k := range js.Properties {
+		names[k] = true
+	}
+	return names
 }
 
 func propertyNames(decl *genai.FunctionDeclaration) []string {

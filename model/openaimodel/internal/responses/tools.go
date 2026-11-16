@@ -22,6 +22,7 @@ import (
 	"github.com/openai/openai-go/v3/shared/constant"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
@@ -65,7 +66,7 @@ func convertFunctionDeclaration(fn *genai.FunctionDeclaration) (*oairesponses.Fu
 		return nil, fmt.Errorf("openai: function declaration missing name")
 	}
 
-	paramsMap, err := shared.SchemaToMap(fn.Parameters)
+	paramsMap, err := typeutil.GenaiSchemaToJSONMap(fn.Parameters)
 	if err != nil {
 		return nil, err
 	}

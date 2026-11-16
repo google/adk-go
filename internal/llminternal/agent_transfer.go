@@ -23,11 +23,14 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/exp/feature"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
@@ -96,7 +99,7 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 			return
 		}
 		utils.AppendInstructions(req, transferToAgentTool.instructions)
-		err = appendTools(req, transferToAgentTool)
+		err = appendTools(req, transferToAgentTool.forRequest(ctx, processorModel(ctx, f)))
 		if err != nil {
 			yield(nil, err)
 		}
@@ -133,10 +136,20 @@ func parentOf(ctx context.Context, a agent.Agent) agent.Agent {
 
 const transferAgentName = "transfer_to_agent"
 
-// TransferToAgentTool is a tool that handles transferring control to another agent.
+// transferToAgentDescription is adk-python's description of the tool without
+// transfer_reason: the cleaned docstring of _transfer_to_agent_without_reason
+// (tools/transfer_to_agent_tool.py).
+const transferToAgentDescription = "Transfer the query to another agent.\n\nUse this tool to hand off control to another agent that is more suitable to\nanswer the user's query according to the agent's description.\n\nArgs:\n  agent_name: the agent name to transfer to."
+
+// TransferToAgentTool is a tool that handles transferring control to another
+// agent. Its zero value declares the JSON-schema form for the Gemini API.
 type TransferToAgentTool struct {
 	instructions    string
 	supportedAgents []agent.Agent
+	// typed makes Declaration return the typed Parameters form.
+	typed bool
+	// vertex makes Declaration add the null response schema Vertex AI gets.
+	vertex bool
 }
 
 // NewTransferToAgentTool creates a new TransferToAgentTool. ctx supplies the
@@ -154,10 +167,10 @@ func NewTransferToAgentTool(ctx agent.InvocationContext, curAgent, parent agent.
 	}, nil
 }
 
-// Description implements tool.Tool.
+// Description implements tool.Tool. It returns adk-python's description of
+// the tool, the same text Declaration carries.
 func (t *TransferToAgentTool) Description() string {
-	return `Transfer the question to another agent.
-This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
+	return transferToAgentDescription
 }
 
 // Name implements tool.Tool.
@@ -170,22 +183,79 @@ func (t *TransferToAgentTool) IsLongRunning() bool {
 	return false
 }
 
+// Declaration returns a new declaration of the tool on every call, which the
+// caller may modify. It declares one required string parameter, agent_name,
+// whose enum lists the transfer targets in order: as a JSON Schema in
+// ParametersJsonSchema, or as a genai.Schema in Parameters when the tool was
+// prepared for a request under feature.LegacyFunctionDeclarationSchema; the
+// other field is nil. For a Vertex AI request it adds a null response schema
+// in the same form, as adk-python does for a function that returns None.
+// Safe for concurrent use.
 func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{
+	if t.typed {
+		return t.typedDeclaration()
+	}
+	return t.jsonDeclaration()
+}
+
+// forRequest returns a copy of t that declares itself in the form of one
+// request: the typed form when ctx carries
+// feature.LegacyFunctionDeclarationSchema, and the null response schema when
+// llm is a Vertex AI model. llm may be nil. t is not modified, so one tool can
+// serve requests of different forms at the same time.
+func (t *TransferToAgentTool) forRequest(ctx context.Context, llm model.LLM) *TransferToAgentTool {
+	c := *t
+	c.typed = feature.LegacyFunctionDeclarationSchema(ctx)
+	c.vertex = googlellm.GetGoogleLLMVariant(llm) == genai.BackendVertexAI
+	return &c
+}
+
+// jsonDeclaration returns the declaration in the JSON-schema form.
+func (t *TransferToAgentTool) jsonDeclaration() *genai.FunctionDeclaration {
+	decl := &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		ParametersJsonSchema: &jsonschema.Schema{
+			Type: "object",
+			Properties: map[string]*jsonschema.Schema{
+				"agent_name": {Type: "string", Enum: t.jsonEnums()},
+			},
+			Required: []string{"agent_name"},
+		},
+	}
+	if t.vertex {
+		decl.ResponseJsonSchema = &jsonschema.Schema{Type: "null"}
+	}
+	return decl
+}
+
+// typedDeclaration returns the declaration in the typed genai.Schema form.
+func (t *TransferToAgentTool) typedDeclaration() *genai.FunctionDeclaration {
+	decl := &genai.FunctionDeclaration{
 		Name:        t.Name(),
 		Description: t.Description(),
 		Parameters: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
-				"agent_name": {
-					Type:        genai.TypeString,
-					Description: "the agent name to transfer to",
-					Enum:        t.enums(),
-				},
+				"agent_name": {Type: genai.TypeString, Enum: t.enums()},
 			},
 			Required: []string{"agent_name"},
 		},
 	}
+	if t.vertex {
+		decl.Response = &genai.Schema{Type: genai.TypeNULL}
+	}
+	return decl
+}
+
+// jsonEnums returns enums as JSON Schema enum values, or nil when there are
+// no targets, so an empty enum is omitted.
+func (t *TransferToAgentTool) jsonEnums() []any {
+	var values []any
+	for _, name := range t.enums() {
+		values = append(values, name)
+	}
+	return values
 }
 
 func (t *TransferToAgentTool) enums() []string {
