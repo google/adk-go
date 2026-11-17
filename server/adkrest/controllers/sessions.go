@@ -249,7 +249,7 @@ func (c *SessionsAPIController) UpdateSessionHandler(rw http.ResponseWriter, req
 	// dropEchoedKeys.
 	stateDelta, err := dropEchoedKeys(req.Context(), updateRequest.StateDelta, storedSession.Session.State())
 	if err != nil {
-		http.Error(rw, "cannot restore the credential secrets in the state delta", http.StatusInternalServerError)
+		http.Error(rw, "cannot merge the state delta", http.StatusInternalServerError)
 		return
 	}
 	if scoped := scopedStateKeys(stateDelta); len(scoped) > 0 {
@@ -378,7 +378,8 @@ func isScopedStateKey(key string) bool {
 // authType and principal and carries no secret of its own. A credential under
 // rawAuthCredential that has no authType is written as submitted.
 //
-// The error is the caller's context being canceled.
+// It returns an error when the merge cannot finish: the request context is
+// canceled, or a stored value cannot be encoded.
 func dropEchoedKeys(ctx context.Context, delta map[string]any, stored session.ReadonlyState) (map[string]any, error) {
 	read := models.RedactedState(stored)
 	kept := make(map[string]any, len(delta))
@@ -387,38 +388,32 @@ func dropEchoedKeys(ctx context.Context, delta map[string]any, stored session.Re
 			return nil, err
 		}
 		readValue, ok := read[key]
-		if ok && sameJSON(readValue, value) && (isScopedStateKey(key) || strippedOnRead(stored, key, readValue)) {
+		if !ok {
+			kept[key] = value
+			continue
+		}
+		storedValue, err := stored.Get(key)
+		if err != nil {
+			return nil, err
+		}
+		stripped := !sameJSON(readValue, storedValue)
+		if sameJSON(readValue, value) && (isScopedStateKey(key) || stripped) {
 			continue
 		}
 		// A value that a read returned with credential secrets stripped is not
 		// an echo: the client edited something in it and sent it back without
-		// the secrets it never saw. Restore those before writing it.
-		// The Get error below cannot happen with the built-in session services:
-		// strippedOnRead has just read the same key.
-		if ok && !isScopedStateKey(key) && strippedOnRead(stored, key, readValue) {
-			storedValue, err := stored.Get(key)
-			if err != nil {
-				kept[key] = value
-				continue
-			}
-			merged, restored, err := models.MergeRedactedValue(ctx, storedValue, value)
+		// the secrets it never saw. Restore those before writing it. A scoped
+		// key is refused below, so there is no point restoring into one.
+		if stripped && !isScopedStateKey(key) {
+			merged, _, err := models.MergeRedactedValue(ctx, storedValue, value)
 			if err != nil {
 				return nil, err
 			}
-			if restored {
-				value = merged
-			}
+			value = merged
 		}
 		kept[key] = value
 	}
 	return kept, nil
-}
-
-// strippedOnRead reports whether readValue, the value a read returns for key,
-// lacks credential secrets that the stored value holds.
-func strippedOnRead(stored session.ReadonlyState, key string, readValue json.RawMessage) bool {
-	value, err := stored.Get(key)
-	return err == nil && !sameJSON(readValue, value)
 }
 
 // sameJSON reports whether encoded and value are the same JSON value once both

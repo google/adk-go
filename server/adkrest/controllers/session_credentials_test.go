@@ -107,67 +107,33 @@ func TestEditingASiblingFieldKeepsTheCredentialTokens(t *testing.T) {
 	}
 }
 
-// TestClearingAuthTypeDoesNotRestoreSecrets covers the first review finding:
+// TestChangedAuthTypeDoesNotRestoreSecrets covers the first review finding:
 // restoring into an object whose authType no longer names a credential would
 // leave the secrets visible, because outbound redaction no longer strips them.
-func TestClearingAuthTypeDoesNotRestoreSecrets(t *testing.T) {
-	cred := toolauth.Credential{
-		AuthType: toolauth.CredentialTypeOAuth2,
-		OAuth2:   &toolauth.OAuth2Auth{ClientID: "app", AccessToken: "at", RefreshToken: "rt"},
-	}
-	service := session.InMemoryService()
-	created, err := service.Create(t.Context(), &session.CreateRequest{
-		AppName: "app",
-		UserID:  "user",
-		State:   map[string]any{"drive": cred},
-	})
-	if err != nil {
-		t.Fatalf("Create() failed: %v", err)
-	}
-	controller := controllers.NewSessionsAPIController(service)
-	ctx := authn.WithCaller(t.Context(), &authn.Caller{UserID: "user"})
-	vars := map[string]string{
-		"app_name":   "app",
-		"user_id":    "user",
-		"session_id": created.Session.ID(),
-	}
+// "oauth_2" normalizes onto the stored authType, so only the "still a
+// credential" check can refuse it.
+func TestChangedAuthTypeDoesNotRestoreSecrets(t *testing.T) {
+	for _, authType := range []string{"none", "oauth_2"} {
+		t.Run(authType, func(t *testing.T) {
+			f := newSessionFixture(t, map[string]any{
+				"drive": oauth2Credential("app", "AT-TYPE-CHANGE", "RT-TYPE-CHANGE"),
+			})
+			state := f.readState(t)
+			drive := state["drive"].(map[string]any)
+			drive["authType"] = authType
+			patch := f.patch(t, map[string]any{"drive": drive})
 
-	get := httptest.NewRecorder()
-	controller.GetSessionHandler(get, mux.SetURLVars(httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil), vars))
-	if get.Code != http.StatusOK {
-		t.Fatalf("GetSessionHandler() status = %d, want %d", get.Code, http.StatusOK)
-	}
-	var read struct {
-		State map[string]any `json:"state"`
-	}
-	if err := json.Unmarshal(get.Body.Bytes(), &read); err != nil {
-		t.Fatalf("Unmarshal(GET) failed: %v", err)
-	}
-	read.State["drive"].(map[string]any)["authType"] = "none"
-
-	body, err := json.Marshal(map[string]any{"stateDelta": map[string]any{"drive": read.State["drive"]}})
-	if err != nil {
-		t.Fatalf("Marshal(PATCH) failed: %v", err)
-	}
-	patch := httptest.NewRecorder()
-	controller.UpdateSessionHandler(patch, mux.SetURLVars(httptest.NewRequestWithContext(ctx, http.MethodPatch, "/", bytes.NewReader(body)), vars))
-	if patch.Code != http.StatusOK {
-		t.Fatalf("UpdateSessionHandler() status = %d, want %d", patch.Code, http.StatusOK)
-	}
-	if bytes.Contains(patch.Body.Bytes(), []byte(`"accessToken":"at"`)) {
-		t.Error("PATCH response exposed the stored access token after authType was cleared")
-	}
-	if bytes.Contains(patch.Body.Bytes(), []byte(`"refreshToken":"rt"`)) {
-		t.Error("PATCH response exposed the stored refresh token after authType was cleared")
-	}
-
-	later := httptest.NewRecorder()
-	controller.GetSessionHandler(later, mux.SetURLVars(httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil), vars))
-	if later.Code != http.StatusOK {
-		t.Fatalf("second GetSessionHandler() status = %d, want %d", later.Code, http.StatusOK)
-	}
-	if bytes.Contains(later.Body.Bytes(), []byte(`"accessToken":"at"`)) {
-		t.Error("a later GET exposed the stored access token after authType was cleared")
+			assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "AT-TYPE-CHANGE", "RT-TYPE-CHANGE")
+			stored := f.stored(t, "drive").(map[string]any)
+			if stored["authType"] != authType {
+				t.Error("the changed authType was not stored")
+			}
+			for _, key := range []string{"accessToken", "refreshToken"} {
+				if _, ok := stored[key]; ok {
+					t.Errorf("the stored credential kept %q after the authType changed", key)
+				}
+			}
+		})
 	}
 }
 
@@ -236,12 +202,12 @@ func TestReorderingArrayCredentialsKeepsTheirOwnTokens(t *testing.T) {
 		t.Fatalf("State().Get(creds) failed: %v", err)
 	}
 	want := map[string]string{"a": "at-a", "b": "at-b"}
-	for _, item := range stored.([]any) {
+	for i, item := range stored.([]any) {
 		cred := item.(map[string]any)
 		oauth := cred["oauth2"].(map[string]any)
 		clientID := oauth["clientId"].(string)
 		if got := oauth["accessToken"]; got != want[clientID] {
-			t.Errorf("credential %q got the wrong access token", clientID)
+			t.Errorf("credential %d got the wrong access token", i)
 		}
 	}
 }
@@ -340,10 +306,10 @@ func TestSwappingObjectCredentialsDoesNotRestoreSecrets(t *testing.T) {
 	for key, wantClientID := range map[string]string{"a": "b", "b": "a"} {
 		oauth := stored[key].(map[string]any)["oauth2"].(map[string]any)
 		if oauth["clientId"] != wantClientID {
-			t.Errorf("credential under %q has the wrong clientId", key)
+			t.Error("a swapped credential has the wrong clientId")
 		}
 		if _, ok := oauth["accessToken"]; ok {
-			t.Errorf("swapping credentials restored a token under %q", key)
+			t.Error("swapping credentials restored a token")
 		}
 	}
 }
@@ -447,14 +413,14 @@ func TestUnknownAuthTypeSpellingDoesNotRestoreSecrets(t *testing.T) {
 	patch := f.patch(t, map[string]any{"drive": drive})
 	for _, secret := range []string{`"accessToken":"at"`, `"refreshToken":"rt"`} {
 		if bytes.Contains(patch.Body.Bytes(), []byte(secret)) {
-			t.Errorf("PATCH response exposed %s after an unrecognized authType spelling", secret)
+			t.Error("PATCH response exposed a credential secret after an unrecognized authType spelling")
 		}
 	}
 
 	oauth := f.stored(t, "drive").(map[string]any)["oauth2"].(map[string]any)
 	for _, key := range []string{"accessToken", "refreshToken"} {
 		if _, ok := oauth[key]; ok {
-			t.Errorf("the stored credential kept %s after an unrecognized authType spelling", key)
+			t.Error("the stored credential kept a secret after an unrecognized authType spelling")
 		}
 	}
 }
@@ -560,7 +526,7 @@ func TestReorderingLookalikeCredentialsRestoresNothing(t *testing.T) {
 	for i, item := range stored {
 		oauth := item.(map[string]any)["oauth2"].(map[string]any)
 		if oauth["redirectUri"] != want[i] {
-			t.Errorf("credential %d has redirectUri %v, want %q", i, oauth["redirectUri"], want[i])
+			t.Errorf("credential %d has the wrong redirectUri after a reorder", i)
 		}
 		if _, ok := oauth["accessToken"]; ok {
 			t.Errorf("credential %d received an access token after a reorder", i)
@@ -716,10 +682,10 @@ func TestSwappingDuplicateIdentitiesUnderObjectKeysRestoresNothing(t *testing.T)
 	} {
 		oauth := stored[key].(map[string]any)["oauth2"].(map[string]any)
 		if oauth["redirectUri"] != wantRedirect {
-			t.Errorf("credential under %q has redirectUri %v, want %q", key, oauth["redirectUri"], wantRedirect)
+			t.Error("a swapped credential has the wrong redirectUri")
 		}
 		if _, ok := oauth["accessToken"]; ok {
-			t.Errorf("credential under %q received an access token", key)
+			t.Error("a swapped credential received an access token")
 		}
 	}
 	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "at-1", "rt-1", "at-2", "rt-2")
@@ -731,7 +697,7 @@ func assertNoSecrets(t *testing.T, what string, encoded []byte, secrets ...strin
 	t.Helper()
 	for _, secret := range secrets {
 		if bytes.Contains(encoded, []byte(secret)) {
-			t.Errorf("%s carries %q, want it hidden", what, secret)
+			t.Errorf("%s carries a secret, want it hidden", what)
 		}
 	}
 }

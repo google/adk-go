@@ -24,15 +24,15 @@ import (
 )
 
 // TestMergeRedactedValueCredentialIdentity checks that secrets are restored
-// only into the same credential: the same authType and the same visible
+// only inside the same credential: the same authType and the same visible
 // principal.
 func TestMergeRedactedValueCredentialIdentity(t *testing.T) {
 	tests := []struct {
-		name      string
-		stored    any
-		submitted any
-		want      []string
-		wantNone  []string
+		name       string
+		stored     any
+		submitted  any
+		wantSecret string
+		wantNone   bool
 	}{
 		{
 			name: "authType spelling still restores",
@@ -44,7 +44,7 @@ func TestMergeRedactedValueCredentialIdentity(t *testing.T) {
 				"authType": "OAUTH2",
 				"oauth2":   map[string]any{"clientId": "app"},
 			}},
-			want: []string{"AT-RESTORE"},
+			wantSecret: "AT-RESTORE",
 		},
 		{
 			name: "snake case client id change is a replacement",
@@ -56,7 +56,7 @@ func TestMergeRedactedValueCredentialIdentity(t *testing.T) {
 				"auth_type": "oauth2",
 				"oauth2":    map[string]any{"client_id": "other"},
 			},
-			wantNone: []string{"AT-SNAKE"},
+			wantNone: true,
 		},
 		{
 			name: "camel and snake client ids are the same principal",
@@ -68,7 +68,31 @@ func TestMergeRedactedValueCredentialIdentity(t *testing.T) {
 				"auth_type": "oauth2",
 				"oauth2":    map[string]any{"client_id": "app"},
 			},
-			want: []string{"AT-CAMEL"},
+			wantSecret: "AT-CAMEL",
+		},
+		{
+			name: "snake case stored secret still restores",
+			stored: map[string]any{
+				"auth_type": "oauth2",
+				"oauth2":    map[string]any{"client_id": "app", "access_token": "AT-SNAKE-POSITIVE"},
+			},
+			submitted: map[string]any{
+				"auth_type": "oauth2",
+				"oauth2":    map[string]any{"client_id": "app"},
+			},
+			wantSecret: "AT-SNAKE-POSITIVE",
+		},
+		{
+			name: "null secret counts as omitted",
+			stored: map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": "app", "accessToken": "AT-NULL"},
+			},
+			submitted: map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": "app", "accessToken": nil},
+			},
+			wantSecret: "AT-NULL",
 		},
 		{
 			name:   "http username change is a replacement",
@@ -77,7 +101,7 @@ func TestMergeRedactedValueCredentialIdentity(t *testing.T) {
 				"scheme":      "bearer",
 				"credentials": map[string]any{"username": "bob"},
 			}},
-			wantNone: []string{"HTTP-PASSWORD"},
+			wantNone: true,
 		},
 		{
 			name:   "http scheme change is a replacement",
@@ -86,7 +110,7 @@ func TestMergeRedactedValueCredentialIdentity(t *testing.T) {
 				"scheme":      "basic",
 				"credentials": map[string]any{"username": "alice"},
 			}},
-			wantNone: []string{"HTTP-PASSWORD"},
+			wantNone: true,
 		},
 		{
 			name:   "unchanged http principal restores",
@@ -95,7 +119,7 @@ func TestMergeRedactedValueCredentialIdentity(t *testing.T) {
 				"scheme":      "bearer",
 				"credentials": map[string]any{"username": "alice"},
 			}},
-			want: []string{"HTTP-PASSWORD"},
+			wantSecret: "HTTP-PASSWORD",
 		},
 		{
 			name:   "service account email change is a replacement",
@@ -106,7 +130,7 @@ func TestMergeRedactedValueCredentialIdentity(t *testing.T) {
 					"projectId":   "proj",
 				},
 			}},
-			wantNone: []string{"SA-PRIVATE-KEY"},
+			wantNone: true,
 		},
 		{
 			name:   "service account project id change is a replacement",
@@ -117,7 +141,33 @@ func TestMergeRedactedValueCredentialIdentity(t *testing.T) {
 					"projectId":   "other",
 				},
 			}},
-			wantNone: []string{"SA-PRIVATE-KEY"},
+			wantNone: true,
+		},
+		{
+			name: "resource ref change is a replacement",
+			stored: map[string]any{
+				"authType":    "oauth2",
+				"resourceRef": "projects/one",
+				"oauth2":      map[string]any{"clientId": "app", "accessToken": "AT-RESOURCE"},
+			},
+			submitted: map[string]any{
+				"authType":    "oauth2",
+				"resourceRef": "projects/two",
+				"oauth2":      map[string]any{"clientId": "app"},
+			},
+			wantNone: true,
+		},
+		{
+			name: "changed non-string client id is a replacement",
+			stored: map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": 123, "accessToken": "AT-NUMBER"},
+			},
+			submitted: map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": 456},
+			},
+			wantNone: true,
 		},
 	}
 	for _, tt := range tests {
@@ -130,20 +180,21 @@ func TestMergeRedactedValueCredentialIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Marshal() failed: %v", err)
 			}
-			if len(tt.want) > 0 && !restored {
-				t.Error("MergeRedactedValue() did not report a restore")
-			}
-			for _, secret := range tt.want {
-				if !bytes.Contains(encoded, []byte(secret)) {
-					t.Errorf("merged value does not carry %q, want it restored", secret)
+			if tt.wantSecret != "" {
+				if !restored {
+					t.Error("MergeRedactedValue() did not report a restore")
+				}
+				if !bytes.Contains(encoded, []byte(tt.wantSecret)) {
+					t.Error("merged value does not carry the restored secret")
 				}
 			}
-			for _, secret := range tt.wantNone {
+			if tt.wantNone {
 				if restored {
 					t.Error("MergeRedactedValue() reported a restore, want none")
 				}
-				if bytes.Contains(encoded, []byte(secret)) {
-					t.Errorf("merged value carries %q, want it not restored", secret)
+				if bytes.Contains(encoded, []byte("AT-")) || bytes.Contains(encoded, []byte("HTTP-PASSWORD")) ||
+					bytes.Contains(encoded, []byte("SA-PRIVATE-KEY")) {
+					t.Error("merged value carries a secret, want it not restored")
 				}
 			}
 		})
@@ -176,7 +227,7 @@ func TestMergeRedactedValueAmbiguousIdentities(t *testing.T) {
 			secrets:   []string{"API-KEY-ONE"},
 		},
 		{
-			name: "reordered lookalike OAuth2 credentials",
+			name: "reordered look-alike OAuth2 credentials",
 			stored: map[string]any{"creds": []any{
 				oauth2Credential("app", "https://one.example/cb", "AT-ONE"),
 				oauth2Credential("app", "https://two.example/cb", "AT-TWO"),
@@ -188,7 +239,7 @@ func TestMergeRedactedValueAmbiguousIdentities(t *testing.T) {
 			secrets: []string{"AT-ONE", "AT-TWO"},
 		},
 		{
-			name: "prepended lookalike OAuth2 credential",
+			name: "prepended look-alike OAuth2 credential",
 			stored: map[string]any{"creds": []any{
 				oauth2Credential("app", "https://one.example/cb", "AT-ONE"),
 				oauth2Credential("app", "https://two.example/cb", "AT-TWO"),
@@ -216,11 +267,78 @@ func TestMergeRedactedValueAmbiguousIdentities(t *testing.T) {
 			}
 			for _, secret := range tt.secrets {
 				if bytes.Contains(encoded, []byte(secret)) {
-					t.Errorf("merged value carries %q, want it not restored", secret)
+					t.Error("merged value carries a secret, want it not restored")
 				}
 			}
 		})
 	}
+}
+
+// TestMergeRedactedValueNestedCredentials checks credentials nested inside
+// another credential. They are matched on their own, so a look-alike pair stays
+// ambiguous, and a replaced credential blocks the restore inside it.
+func TestMergeRedactedValueNestedCredentials(t *testing.T) {
+	t.Run("nested look-alikes restore nothing", func(t *testing.T) {
+		stored := map[string]any{"outer": map[string]any{
+			"authType": "oauth2",
+			"oauth2":   map[string]any{"clientId": "app", "accessToken": "OUTER-TOKEN"},
+			"extras": []any{
+				apiKeyCredential("NESTED-ONE"),
+				apiKeyCredential("NESTED-TWO"),
+			},
+		}}
+		submitted := map[string]any{"outer": map[string]any{
+			"authType": "oauth2",
+			"oauth2":   map[string]any{"clientId": "app"},
+			"extras":   []any{redactedAPIKeyCredential(), redactedAPIKeyCredential()},
+		}}
+		merged, restored, err := MergeRedactedValue(context.Background(), stored, submitted)
+		if err != nil {
+			t.Fatalf("MergeRedactedValue() failed: %v", err)
+		}
+		if !restored {
+			t.Error("MergeRedactedValue() did not report the outer credential's restore")
+		}
+		encoded, err := json.Marshal(merged)
+		if err != nil {
+			t.Fatalf("Marshal() failed: %v", err)
+		}
+		if !bytes.Contains(encoded, []byte("OUTER-TOKEN")) {
+			t.Error("the outer credential's secret was not restored")
+		}
+		for _, secret := range []string{"NESTED-ONE", "NESTED-TWO"} {
+			if bytes.Contains(encoded, []byte(secret)) {
+				t.Error("a nested look-alike credential received a secret")
+			}
+		}
+	})
+
+	t.Run("replaced credential does not restore inside it", func(t *testing.T) {
+		stored := map[string]any{"outer": map[string]any{
+			"authType": "oauth2",
+			"oauth2":   map[string]any{"clientId": "app"},
+			"extra":    apiKeyCredential("NESTED-ONE"),
+		}}
+		submitted := map[string]any{"outer": map[string]any{
+			"authType": "oauth2",
+			"oauth2":   map[string]any{"clientId": "other"},
+			"extra":    redactedAPIKeyCredential(),
+		}}
+		merged, restored, err := MergeRedactedValue(context.Background(), stored, submitted)
+		if err != nil {
+			t.Fatalf("MergeRedactedValue() failed: %v", err)
+		}
+		if restored {
+			t.Error("MergeRedactedValue() reported a restore, want none")
+		}
+		encoded, err := json.Marshal(merged)
+		if err != nil {
+			t.Fatalf("Marshal() failed: %v", err)
+		}
+		if bytes.Contains(encoded, []byte("NESTED-ONE")) {
+			t.Error("a nested credential received its secret under a replaced credential")
+		}
+	})
 }
 
 // TestMergeRedactedValueUniqueArrayIdentities checks that an array of
@@ -243,13 +361,19 @@ func TestMergeRedactedValueUniqueArrayIdentities(t *testing.T) {
 	if !restored {
 		t.Fatal("MergeRedactedValue() did not report a restore")
 	}
-	encoded, err := json.Marshal(merged)
-	if err != nil {
-		t.Fatalf("Marshal() failed: %v", err)
+	creds, ok := merged.(map[string]any)["creds"].([]any)
+	if !ok {
+		t.Fatalf("merged creds has type %T, want []any", merged.(map[string]any)["creds"])
 	}
-	for _, want := range []string{`"clientId":"a"`, `"accessToken":"AT-A"`, `"clientId":"b"`, `"accessToken":"AT-B"`} {
-		if !bytes.Contains(encoded, []byte(want)) {
-			t.Errorf("merged value does not carry %s after a reorder", want)
+	want := []string{"b", "a"}
+	for i, item := range creds {
+		oauth := item.(map[string]any)["oauth2"].(map[string]any)
+		if oauth["clientId"] != want[i] {
+			t.Errorf("credential %d has the wrong clientId", i)
+		}
+		wantToken := map[string]string{"a": "AT-A", "b": "AT-B"}[want[i]]
+		if oauth["accessToken"] != wantToken {
+			t.Errorf("credential %d has the wrong access token", i)
 		}
 	}
 }
@@ -273,19 +397,27 @@ func TestMergeRedactedValueObjectArraySiblingEdit(t *testing.T) {
 	if !restored {
 		t.Fatal("MergeRedactedValue() did not report a restore")
 	}
-	encoded, err := json.Marshal(merged)
-	if err != nil {
-		t.Fatalf("Marshal() failed: %v", err)
+	creds, ok := merged.(map[string]any)["creds"].([]any)
+	if !ok {
+		t.Fatalf("merged creds has type %T, want []any", merged.(map[string]any)["creds"])
 	}
-	for _, want := range []string{`"name":"renamed"`, `"accessToken":"AT-A"`, `"accessToken":"AT-B"`} {
-		if !bytes.Contains(encoded, []byte(want)) {
-			t.Errorf("merged value does not carry %s", want)
+	wantNames := []string{"renamed", "two"}
+	wantTokens := []string{"AT-A", "AT-B"}
+	for i, item := range creds {
+		entry := item.(map[string]any)
+		if entry["name"] != wantNames[i] {
+			t.Errorf("entry %d has the wrong name", i)
+		}
+		oauth := entry["cred"].(map[string]any)["oauth2"].(map[string]any)
+		if oauth["accessToken"] != wantTokens[i] {
+			t.Errorf("entry %d has the wrong access token", i)
 		}
 	}
 }
 
 // TestCredentialIdentityOfSpellings checks that the visible principal matches
-// across the camelCase and snake_case spellings.
+// across the camelCase and snake_case spellings, and takes part in the identity
+// when it changes or is not a string.
 func TestCredentialIdentityOfSpellings(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -317,11 +449,28 @@ func TestCredentialIdentityOfSpellings(t *testing.T) {
 			submitted: apiKeyCredential("API-KEY-TWO"),
 			wantEqual: true,
 		},
+		{
+			name: "non-string principal takes part in the identity",
+			stored: map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": "123"},
+			},
+			submitted: map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": 123},
+			},
+			wantEqual: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			w := &restoreWalk{ctx: context.Background()}
-			if got := credentialIdentityOf(w, tt.stored) == credentialIdentityOf(w, tt.submitted); got != tt.wantEqual {
+			storedIdentity := credentialIdentityOf(w, tt.stored)
+			submittedIdentity := credentialIdentityOf(w, tt.submitted)
+			if storedIdentity == "" {
+				t.Fatal("credentialIdentityOf() = \"\", want an identity")
+			}
+			if got := storedIdentity == submittedIdentity; got != tt.wantEqual {
 				t.Errorf("credentialIdentityOf() equal = %v, want %v", got, tt.wantEqual)
 			}
 			if w.err != nil {
@@ -331,12 +480,44 @@ func TestCredentialIdentityOfSpellings(t *testing.T) {
 	}
 }
 
-// TestMergeRedactedValueCanceledContext checks that a canceled request stops
-// the merge instead of walking a large value to the end.
+// TestMergeRedactedValueCanceledContext checks a merge that starts with a
+// canceled context.
 func TestMergeRedactedValueCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, _, err := MergeRedactedValue(ctx, map[string]any{"creds": []any{apiKeyCredential("API-KEY")}}, map[string]any{"creds": []any{redactedAPIKeyCredential()}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("MergeRedactedValue() error = %v, want context.Canceled", err)
+	}
+}
+
+// secondErrContext reports a cancellation from its second Err call on, so a
+// merge can be canceled after it has started walking.
+type secondErrContext struct {
+	context.Context
+	calls int
+}
+
+func (c *secondErrContext) Err() error {
+	c.calls++
+	if c.calls > 1 {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestMergeRedactedValueCancellationDuringWalk checks that a merge notices a
+// cancellation after it has started, not only before it.
+func TestMergeRedactedValueCancellationDuringWalk(t *testing.T) {
+	ctx := &secondErrContext{Context: context.Background()}
+	stored := make([]any, 0, 2001)
+	for i := range 2000 {
+		stored = append(stored, map[string]any{"n": fmt.Sprint(i)})
+	}
+	stored = append(stored, apiKeyCredential("API-KEY"))
+	submitted := append([]any{}, stored[:len(stored)-1]...)
+	submitted = append(submitted, redactedAPIKeyCredential())
+	_, _, err := MergeRedactedValue(ctx, map[string]any{"creds": stored}, map[string]any{"creds": submitted})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("MergeRedactedValue() error = %v, want context.Canceled", err)
 	}
@@ -370,22 +551,26 @@ func BenchmarkMergeRedactedValueLookalikes(b *testing.B) {
 
 // BenchmarkMergeRedactedValueDeepNesting measures a value nested in
 // single-entry arrays around a wide array. Identity is only computed for array
-// entries that are themselves credentials, so the depth should not multiply
-// the work.
+// entries that are themselves credentials, so the depth should not multiply the
+// work.
 func BenchmarkMergeRedactedValueDeepNesting(b *testing.B) {
-	for _, depth := range []int{500, 2000} {
-		inner := make([]any, 0, 20000)
+	build := func(depth int) any {
+		wide := make([]any, 0, 20000)
 		for range 19999 {
-			inner = append(inner, map[string]any{"x": 1})
+			wide = append(wide, map[string]any{"x": 1})
 		}
 		// A credential without secrets: matching it changes nothing, so the
 		// benchmark measures the walk itself.
-		inner = append(inner, oauth2Credential("app", "", ""))
-		var storedValue, submittedValue any = inner, inner
+		wide = append(wide, oauth2Credential("app", "", ""))
+		var value any = wide
 		for range depth {
-			storedValue = []any{storedValue}
-			submittedValue = []any{submittedValue}
+			value = []any{value}
 		}
+		return value
+	}
+	for _, depth := range []int{500, 2000} {
+		storedValue := build(depth)
+		submittedValue := build(depth)
 		b.Run(fmt.Sprintf("depth=%d", depth), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
 	"google.golang.org/genai"
@@ -211,29 +212,37 @@ func dropSecretKeys(v any) {
 	}
 }
 
-// MergeRedactedValue returns submitted with the credential secrets that a read
-// strips from storedValue restored. A client that edits a field next to a
-// credential sends the credential back as the read returned it, without the
-// secrets; writing that value back unchanged would erase them.
+// MergeRedactedValue fills the credential secrets that a read strips from
+// storedValue into submitted, and returns submitted. A client that edits a
+// field next to a credential sends the credential back as the read returned it,
+// without the secrets; writing that value back unchanged would erase them.
 //
-// A secret is restored only into an object that outbound redaction still
-// treats as a credential, that carries no secret of its own, and that still
-// names the same credential as the stored one: the same authType and the same
-// visible principal. A credential the client re-points at another app, user or
+// Only omitted credential secret keys are filled in. submitted stays
+// authoritative for every other field. A secret key sent as JSON null counts as
+// omitted, because a read never returns a secret as null.
+//
+// A secret is restored only inside a credential that outbound redaction still
+// treats as a credential, that still has the same authType and visible
+// principal as the stored one, and that carries no secret of its own. Below
+// that credential the walk restores at any depth, as a read strips at any
+// depth. A credential the client re-points at another app, user, resource or
 // scheme is a replacement, and so is one that sends any secret, so to clear one
-// secret and keep the others, resend the others too.
+// secret and keep the others, resend the others too. A credential under a
+// credential field such as rawAuthCredential that has no authType is written as
+// submitted: a read strips it, but the merge has no authType to match it by.
 //
 // When the same credential identity appears more than once in storedValue or
 // more than once in submitted, the match would be a guess. Nothing is restored
-// into those credentials, which leaves them as submitted, the same as before
-// this function existed.
+// into those credentials, which leaves them as submitted. The check covers one
+// stored value and its submitted value: the same identity under two different
+// state keys is matched independently. Array entries that are not themselves
+// credentials pair by index, so an insert, remove or reorder among them keeps
+// the submitted value.
 //
-// Only omitted credential secret keys are restored. submitted stays
-// authoritative for every other field, including a secret the client did send.
-// It reports whether submitted was changed.
-//
-// It returns an error when storedValue cannot be encoded or when ctx is
-// canceled; the returned value is not meant to be used in that case.
+// It reports whether submitted was changed. submitted is changed in place; on
+// error the returned value must not be used and submitted may already be
+// partially restored. ctx must not be nil, and a cancellation is noticed at the
+// latest after restoreContextCheckEvery visited nodes.
 func MergeRedactedValue(ctx context.Context, storedValue, submitted any) (any, bool, error) {
 	stored, err := asJSONValue(storedValue)
 	if err != nil {
@@ -245,16 +254,16 @@ func MergeRedactedValue(ctx context.Context, storedValue, submitted any) (any, b
 	if w.err != nil {
 		return submitted, false, w.err
 	}
-	merged, restored := restoreCredentialSecrets(w, stored, submitted, false, ambiguous)
+	merged, restored := restoreCredentialSecrets(w, stored, submitted, true, ambiguous)
 	if w.err != nil {
 		return submitted, false, w.err
 	}
 	return merged, restored, nil
 }
 
-// restoreWalk bounds the work of one merge and stops it when the caller goes
-// away. Every visited node counts, and the context is rechecked once in a
-// while rather than on every node.
+// restoreWalk counts the nodes one merge visits and polls the context every
+// restoreContextCheckEvery nodes, so a large value cannot hold the request
+// longer than the client waits.
 type restoreWalk struct {
 	ctx     context.Context
 	visited int
@@ -262,7 +271,7 @@ type restoreWalk struct {
 }
 
 // restoreContextCheckEvery is how many visited nodes pass between two context
-// checks. A power of two keeps the check a bit test.
+// checks.
 const restoreContextCheckEvery = 1024
 
 // step counts one visited node and reports whether the walk should continue.
@@ -271,7 +280,7 @@ func (w *restoreWalk) step() bool {
 		return false
 	}
 	w.visited++
-	if w.visited&(restoreContextCheckEvery-1) == 0 {
+	if w.visited%restoreContextCheckEvery == 0 {
 		w.err = w.ctx.Err()
 	}
 	return w.err == nil
@@ -300,9 +309,9 @@ func ambiguousIdentities(w *restoreWalk, stored, submitted any) map[string]bool 
 	return ambiguous
 }
 
-// countCredentialIdentities counts the credentials in v by identity. It stops
-// at a credential: a credential nested inside another one is not matched on its
-// own.
+// countCredentialIdentities counts the credentials in v by identity. The walk
+// counts every credential at any depth, including one nested inside another,
+// because the restore walk matches those on their own too.
 func countCredentialIdentities(w *restoreWalk, v any, counts map[string]int) {
 	if !w.step() {
 		return
@@ -310,10 +319,7 @@ func countCredentialIdentities(w *restoreWalk, v any, counts map[string]int) {
 	switch v := v.(type) {
 	case map[string]any:
 		if isCredential(v) {
-			if id := credentialIdentityOf(w, v); id != "" {
-				counts[id]++
-			}
-			return
+			counts[credentialIdentityOf(w, v)]++
 		}
 		for _, val := range v {
 			countCredentialIdentities(w, val, counts)
@@ -343,13 +349,13 @@ func asJSONValue(v any) (any, error) {
 
 // restoreCredentialSecrets walks submitted next to the stored value and fills
 // in the credential secret keys the submitted value omits. A key is a secret
-// only inside an object whose authType marks it as a credential, and only the
-// same credential restores: one that still has that authType and principal,
-// that carries no secret of its own, and whose identity is not ambiguous. A
-// credential that carries any secret of its own is an intentional replacement,
-// so nothing is restored into it. Other omitted fields are left out, so the
-// submitted value remains a full replacement of the value outside credentials.
-func restoreCredentialSecrets(w *restoreWalk, stored, submitted any, restoreSecrets bool, ambiguous map[string]bool) (any, bool) {
+// only inside a credential that may restore: allow says whether the value
+// around it still belongs to the stored credential, and a credential narrows
+// that to one that still has the same authType and visible principal, carries
+// no secret of its own, and whose identity is not ambiguous. Other omitted
+// fields are left out, so the submitted value remains a full replacement of the
+// value outside credentials.
+func restoreCredentialSecrets(w *restoreWalk, stored, submitted any, allow bool, ambiguous map[string]bool) (any, bool) {
 	if !w.step() {
 		return submitted, false
 	}
@@ -363,14 +369,16 @@ func restoreCredentialSecrets(w *restoreWalk, stored, submitted any, restoreSecr
 			// A client that changes authType or a visible identifying field is
 			// replacing the credential; restoring secrets into it would attach
 			// them to a different credential and, for a changed authType, make
-			// the serializer leave them visible.
-			restoreSecrets = isCredential(s) && !hasSecretKey(w, s) &&
-				!ambiguous[credentialIdentityOf(w, st)] && sameCredential(w, st, s)
+			// the serializer leave them visible. Secrets inside a replaced
+			// credential are left as submitted too.
+			stIdent := credentialIdentityOf(w, st)
+			allow = allow && isCredential(s) && !ambiguous[stIdent] &&
+				stIdent == credentialIdentityOf(w, s) && !hasSecretKey(w, s)
 		}
 		restored := false
-		if restoreSecrets {
+		if allow {
 			for k, v := range st {
-				if _, ok := s[k]; !ok && credentialSecretKeys[k] {
+				if current, ok := s[k]; (!ok || current == nil) && credentialSecretKeys[k] {
 					s[k] = v
 					restored = true
 				}
@@ -381,7 +389,7 @@ func restoreCredentialSecrets(w *restoreWalk, stored, submitted any, restoreSecr
 			if !ok {
 				continue
 			}
-			if merged, changed := restoreCredentialSecrets(w, sv, sub, restoreSecrets, ambiguous); changed {
+			if merged, changed := restoreCredentialSecrets(w, sv, sub, allow, ambiguous); changed {
 				s[k] = merged
 				restored = true
 			}
@@ -396,13 +404,12 @@ func restoreCredentialSecrets(w *restoreWalk, stored, submitted any, restoreSecr
 		// credential, so a reorder, append or remove keeps each credential's
 		// own secrets. Only entries that are themselves credentials are matched
 		// this way: computing an identity for a whole subtree here would repeat
-		// the work at every level of nesting. Other entries pair by index,
-		// which is safe because the credential inside one still has to name the
-		// same credential as the stored one.
+		// the work at every level of nesting. Every other entry pairs by index,
+		// so an insert, remove or reorder among them keeps the submitted value
+		// instead of moving a secret to a neighbor.
 		//
 		// Matching by an ambiguous identity is harmless: the credential-level
-		// check above refuses to restore secrets into it, so no secret can
-		// reach the wrong entry.
+		// check above refuses to restore secrets into it.
 		storedByID := make(map[string]int, len(st))
 		for j, item := range st {
 			if !w.step() {
@@ -412,9 +419,7 @@ func restoreCredentialSecrets(w *restoreWalk, stored, submitted any, restoreSecr
 			if !ok || !isCredential(m) {
 				continue
 			}
-			if id := credentialIdentityOf(w, m); id != "" {
-				storedByID[id] = j
-			}
+			storedByID[credentialIdentityOf(w, m)] = j
 		}
 		restored := false
 		for i, item := range s {
@@ -422,15 +427,11 @@ func restoreCredentialSecrets(w *restoreWalk, stored, submitted any, restoreSecr
 				return s, restored
 			}
 			if m, ok := item.(map[string]any); ok && isCredential(m) {
-				id := credentialIdentityOf(w, m)
-				if id == "" {
-					continue
-				}
-				j, ok := storedByID[id]
+				j, ok := storedByID[credentialIdentityOf(w, m)]
 				if !ok {
 					continue
 				}
-				if merged, changed := restoreCredentialSecrets(w, st[j], item, restoreSecrets, ambiguous); changed {
+				if merged, changed := restoreCredentialSecrets(w, st[j], item, allow, ambiguous); changed {
 					s[i] = merged
 					restored = true
 				}
@@ -439,7 +440,7 @@ func restoreCredentialSecrets(w *restoreWalk, stored, submitted any, restoreSecr
 			if i >= len(st) {
 				continue
 			}
-			if merged, changed := restoreCredentialSecrets(w, st[i], item, restoreSecrets, ambiguous); changed {
+			if merged, changed := restoreCredentialSecrets(w, st[i], item, allow, ambiguous); changed {
 				s[i] = merged
 				restored = true
 			}
@@ -450,29 +451,33 @@ func restoreCredentialSecrets(w *restoreWalk, stored, submitted any, restoreSecr
 	}
 }
 
-// sameCredential reports whether stored and submitted still identify the same
-// credential: same authType and same visible principal. Secret fields are
-// ignored, and so are fields that do not identify the credential, such as
-// redirectUri.
-func sameCredential(w *restoreWalk, stored, submitted map[string]any) bool {
-	return credentialIdentityOf(w, stored) == credentialIdentityOf(w, submitted)
-}
-
 // credentialIdentityOf returns the authType and the visible principal of a
 // credential: the non-secret fields that name the account it is for. Two
 // credentials with different identities are not the same credential, so a
 // client that changes one of these fields is replacing the credential.
 //
-// The principal is every clientId, plus the fields each type shows in a read:
-// an HTTP credential's scheme and username, and a service account's clientEmail
-// and projectId. An API key shows no principal once redacted, so
-// two API keys cannot be told apart; see ambiguousIdentities.
+// The principal is every clientId and resourceRef, plus the fields each type
+// shows in a read: an HTTP credential's scheme and username, and a service
+// account's clientEmail and projectId. An API key shows no principal once
+// redacted, so two API keys cannot be told apart; see ambiguousIdentities.
 func credentialIdentityOf(w *restoreWalk, m map[string]any) string {
 	credType := normalizedCredentialType(m)
 	principal := make(map[string]bool)
 	collectPrincipalFields(w, m, credType, principal)
-	fields := slices.Sorted(maps.Keys(principal))
-	return credType + "\x00" + strings.Join(fields, "\x00")
+	var b strings.Builder
+	appendIdentityField(&b, credType)
+	for _, field := range slices.Sorted(maps.Keys(principal)) {
+		appendIdentityField(&b, field)
+	}
+	return b.String()
+}
+
+// appendIdentityField writes s with its length in front, so two different field
+// lists never encode the same way.
+func appendIdentityField(b *strings.Builder, s string) {
+	b.WriteString(strconv.Itoa(len(s)))
+	b.WriteByte(':')
+	b.WriteString(s)
 }
 
 // principalFieldName returns the canonical name of the visible field that
@@ -483,6 +488,8 @@ func principalFieldName(credType, key string) string {
 	switch key {
 	case "clientId", "client_id":
 		return "clientId"
+	case "resourceRef", "resource_ref":
+		return "resourceRef"
 	}
 	switch credType {
 	case "http":
@@ -502,8 +509,9 @@ func principalFieldName(credType, key string) string {
 }
 
 // collectPrincipalFields adds every visible identifying field in v to fields.
-// It walks the whole credential, so a spelling that arrives in Extra identifies
-// the same credential as the struct field does.
+// It walks the whole credential, so either spelling of a field anywhere in it
+// identifies the same credential. A field's value is kept as JSON, so a value
+// that is not a string still takes part in the identity.
 func collectPrincipalFields(w *restoreWalk, v any, credType string, fields map[string]bool) {
 	if !w.step() {
 		return
@@ -512,8 +520,8 @@ func collectPrincipalFields(w *restoreWalk, v any, credType string, fields map[s
 	case map[string]any:
 		for k, val := range v {
 			if name := principalFieldName(credType, k); name != "" {
-				if s, ok := val.(string); ok && s != "" {
-					fields[name+"\x01"+s] = true
+				if encoded, err := json.Marshal(val); err == nil {
+					fields[name+"\x01"+string(encoded)] = true
 				}
 			}
 			collectPrincipalFields(w, val, credType, fields)
@@ -536,7 +544,9 @@ func normalizedCredentialType(m map[string]any) string {
 	return ""
 }
 
-// hasSecretKey reports whether v carries a credential secret key at any depth.
+// hasSecretKey reports whether v carries a credential secret key with a value.
+// A secret key set to JSON null counts as omitted, so it does not make the
+// credential a replacement.
 func hasSecretKey(w *restoreWalk, v any) bool {
 	if !w.step() {
 		return false
@@ -544,7 +554,10 @@ func hasSecretKey(w *restoreWalk, v any) bool {
 	switch v := v.(type) {
 	case map[string]any:
 		for k, val := range v {
-			if credentialSecretKeys[k] || hasSecretKey(w, val) {
+			if credentialSecretKeys[k] && val != nil {
+				return true
+			}
+			if hasSecretKey(w, val) {
 				return true
 			}
 		}
