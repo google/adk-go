@@ -15,6 +15,7 @@
 package generatortool_test
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -183,7 +185,9 @@ func TestRun_ConfirmedCallPauses(t *testing.T) {
 // A28. Fails if the replayed call_1, which finished before its sibling
 // paused, is answered from the sub-scheduler's record: its body would run
 // once, its SkipSummarization would be lost and the model would be called
-// again.
+// again. The task runner runs the calls one after the other, so call_1 has
+// finished, output included, before call_2 pauses and cancels the calls still
+// running.
 func TestRun_FinishedSiblingRunsAgainAfterPause(t *testing.T) {
 	var runs1, runs2 atomic.Int32
 	analyze := mustNew(t, functiontool.Config{Name: "analyze"}, func(ctx agent.Context, _ queryArgs, emit func(*session.Event) error) (any, error) {
@@ -203,8 +207,18 @@ func TestRun_FinishedSiblingRunsAgainAfterPause(t *testing.T) {
 		call("call_2", "analyze", map[string]any{"query": "b"}),
 	)}})
 
-	h.mustRun(userText("go"))
-	h.mustRun(userResponse("region", workflow.WorkflowInputFunctionCallName, map[string]any{"result": "APAC"}))
+	inOrder := platform.WithTaskRunner(t.Context(), func(ctx context.Context, tasks []func(context.Context)) {
+		for _, task := range tasks {
+			task(ctx)
+		}
+	})
+
+	if _, err := h.runCtx(inOrder, userText("go")); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := h.runCtx(inOrder, userResponse("region", workflow.WorkflowInputFunctionCallName, map[string]any{"result": "APAC"})); err != nil {
+		t.Fatalf("Run() after the answer error = %v", err)
+	}
 
 	if runs1.Load() != 2 || runs2.Load() != 2 {
 		t.Errorf("handler runs of call_1, call_2 = %d, %d; want 2, 2", runs1.Load(), runs2.Load())
