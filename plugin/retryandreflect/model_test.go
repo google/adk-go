@@ -30,6 +30,8 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/plugin"
@@ -41,21 +43,36 @@ import (
 
 // modelTestContext is the callback context of one agent's model call in one
 // invocation. Value forwards to ctx so that platform.NewUUID can read a UUID
-// provider from it.
+// provider from it. Agent returns agent, which is nil unless set.
 type modelTestContext struct {
 	agent.Context
 	ctx          context.Context
 	invocationID string
 	agentName    string
+	agent        agent.Agent
 }
 
 func (c *modelTestContext) InvocationID() string { return c.invocationID }
 func (c *modelTestContext) AgentName() string    { return c.agentName }
 func (c *modelTestContext) Value(key any) any    { return c.ctx.Value(key) }
+func (c *modelTestContext) Agent() agent.Agent   { return c.agent }
 
 func newModelTestContext(t *testing.T, invocationID, agentName string) *modelTestContext {
 	t.Helper()
 	return &modelTestContext{ctx: t.Context(), invocationID: invocationID, agentName: agentName}
+}
+
+// withModel returns a copy of c whose agent is an LLM agent named c's agent
+// name, on a model named modelName.
+func (c *modelTestContext) withModel(t *testing.T, modelName string) *modelTestContext {
+	t.Helper()
+	a, err := llmagent.New(llmagent.Config{Name: c.agentName, Model: &modelTestLLM{name: modelName}})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	withAgent := *c
+	withAgent.agent = a
+	return &withAgent
 }
 
 // modelTestRunContext is the invocation context the run-end callbacks get.
@@ -127,6 +144,12 @@ func modelTestRun(t *testing.T, llm *modelTestLLM, tools []tool.Tool, plugins []
 	if err != nil {
 		t.Fatalf("llmagent.New() failed: %v", err)
 	}
+	return modelTestRunAgent(t, a, plugins, streaming)
+}
+
+// modelTestRunAgent is modelTestRun for the agent a.
+func modelTestRunAgent(t *testing.T, a agent.Agent, plugins []*plugin.Plugin, streaming agent.StreamingMode) ([]*session.Event, error) {
+	t.Helper()
 	sessions := session.InMemoryService()
 	created, err := sessions.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user"})
 	if err != nil {
@@ -167,11 +190,12 @@ type modelTestResult struct {
 	err  error
 }
 
-// modelTestCall runs p's before-model callback for a request to modelName,
-// then its after-model callback for resp, as the flow does for one model
-// call.
-func modelTestCall(t *testing.T, p *plugin.Plugin, ctx agent.Context, modelName string, resp *model.LLMResponse) modelTestResult {
+// modelTestCall runs p's before-model callback, then its after-model
+// callback for resp, as the flow does for one model call of ctx's agent on a
+// model named modelName.
+func modelTestCall(t *testing.T, p *plugin.Plugin, ctx *modelTestContext, modelName string, resp *model.LLMResponse) modelTestResult {
 	t.Helper()
+	ctx = ctx.withModel(t, modelName)
 	got, err := p.BeforeModelCallback()(ctx, &model.LLMRequest{Model: modelName})
 	if got != nil || err != nil {
 		t.Fatalf("BeforeModelCallback() = %v, %v; want nil, nil", got, err)
@@ -617,36 +641,54 @@ func TestAfterModel_UnconfiguredShapesResetCount(t *testing.T) {
 	}
 }
 
-func TestAfterModel_ModelNameNotRecorded(t *testing.T) {
+func TestAfterModel_AgentModelNotFound(t *testing.T) {
+	custom, err := agent.New(agent.Config{Name: "root", Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(func(*session.Event, error) bool) {}
+	}})
+	if err != nil {
+		t.Fatalf("agent.New() failed: %v", err)
+	}
+	unnamed, err := llmagent.New(llmagent.Config{Name: "root", Model: &modelTestLLM{name: ""}})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	success := &model.LLMResponse{Content: genai.NewContentFromText("ok", genai.RoleModel)}
 	tests := []struct {
-		name   string
-		before *model.LLMRequest // nil: no before-model call
-		resp   *model.LLMResponse
+		name    string
+		agent   agent.Agent
+		resp    *model.LLMResponse
+		wantErr string
+		// wantNotConfigured: the error wraps llminternal.ErrModelNotConfigured.
+		wantNotConfigured bool
 	}{
-		{name: "error response without record", resp: modelTestMalformed()},
-		{name: "success response without record", resp: &model.LLMResponse{Content: genai.NewContentFromText("ok", genai.RoleModel)}},
-		{name: "empty model name", before: &model.LLMRequest{Model: ""}, resp: modelTestMalformed()},
+		{name: "no agent", resp: modelTestMalformed(), wantErr: `model of agent "root" not found: resolve the model of a nil agent: not an LLM agent: model not configured; ensure Model is set in llmagent.Config`, wantNotConfigured: true},
+		{name: "error response of a non-LLM agent", agent: custom, resp: modelTestMalformed(), wantErr: `model of agent "root" not found: resolve the model of agent "root": not an LLM agent: model not configured; ensure Model is set in llmagent.Config`, wantNotConfigured: true},
+		{name: "success response of a non-LLM agent", agent: custom, resp: success, wantErr: `model of agent "root" not found: resolve the model of agent "root": not an LLM agent: model not configured; ensure Model is set in llmagent.Config`, wantNotConfigured: true},
+		{name: "reserved call on a model with an empty name", agent: unnamed, resp: modelTestReservedCall(), wantErr: `model of agent "root" not found`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			p := modelTestNewModel(t)
 			ctx := newModelTestContext(t, "I1", "root")
-			if tc.before != nil {
-				if _, err := p.BeforeModelCallback()(ctx, tc.before); err != nil {
-					t.Fatalf("BeforeModelCallback() failed: %v", err)
-				}
+			if got := modelTestRetryCount(t, modelTestCall(t, p, ctx, "m", modelTestMalformed())); got != 1 {
+				t.Errorf("retry_count of failure 1 = %d, want 1", got)
 			}
+			noModel := *ctx
+			noModel.agent = tc.agent
 
-			r := modelTestAfter(p, ctx, tc.resp)
+			r := modelTestAfter(p, &noModel, tc.resp)
 
 			if r.resp != nil {
 				t.Errorf("after-model callback response = %+v, want nil", r.resp)
 			}
-			if want := `model of agent "root" not found`; r.err == nil || r.err.Error() != want {
-				t.Fatalf("after-model callback error = %v, want %q", r.err, want)
+			if r.err == nil || r.err.Error() != tc.wantErr {
+				t.Fatalf("after-model callback error = %v, want %q", r.err, tc.wantErr)
 			}
-			if got := modelTestRetryCount(t, modelTestCall(t, p, ctx, "m", modelTestMalformed())); got != 1 {
-				t.Errorf("retry_count of the next failure = %d, want 1", got)
+			if got := errors.Is(r.err, llminternal.ErrModelNotConfigured); got != tc.wantNotConfigured {
+				t.Errorf("errors.Is(%v, ErrModelNotConfigured) = %t, want %t", r.err, got, tc.wantNotConfigured)
+			}
+			if got := modelTestRetryCount(t, modelTestCall(t, p, ctx, "m", modelTestMalformed())); got != 2 {
+				t.Errorf("retry_count of the next failure = %d, want 2", got)
 			}
 		})
 	}
@@ -672,8 +714,8 @@ func TestAfterModel_PartialChunkLeavesCountsAlone(t *testing.T) {
 			}
 
 			modelTestWantNil(t, modelTestCall(t, p, ctx, "m", tc.partial))
-			// An agent with no recorded model: a partial chunk needs no model name.
-			modelTestWantNil(t, modelTestAfter(p, newModelTestContext(t, "I1", "unrecorded"), tc.partial))
+			// A context without an agent: a partial chunk needs no model name.
+			modelTestWantNil(t, modelTestAfter(p, newModelTestContext(t, "I1", "no_agent"), tc.partial))
 
 			if got := modelTestRetryCount(t, modelTestCall(t, p, ctx, "m", modelTestMalformed())); got != 2 {
 				t.Errorf("retry_count after the %s chunk = %d, want 2", tc.name, got)
@@ -730,7 +772,7 @@ func TestAfterModel_AgentsOnOneModelShareCount(t *testing.T) {
 	}
 }
 
-func TestAfterModel_UsesModelOfLatestBeforeModelCall(t *testing.T) {
+func TestAfterModel_CountsUnderAgentModelOfEachCall(t *testing.T) {
 	p := modelTestNewModel(t)
 	ctx := newModelTestContext(t, "I1", "root")
 
@@ -740,6 +782,86 @@ func TestAfterModel_UsesModelOfLatestBeforeModelCall(t *testing.T) {
 
 	if first != 1 || second != 1 || third != 2 {
 		t.Errorf("retry_count on m1, m2, m1 = %d, %d, %d; want 1, 1, 2", first, second, third)
+	}
+}
+
+func TestModelRetry_CountsAgentModelNotRewrittenRequestModel(t *testing.T) {
+	var calls atomic.Int32
+	rewriter, err := plugin.New(plugin.Config{
+		Name: "rewriter",
+		BeforeModelCallback: func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+			req.Model = "m2"
+			if calls.Add(1)%2 == 1 {
+				req.Model = "m1"
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() failed: %v", err)
+	}
+	malformed := []*model.LLMResponse{modelTestMalformed()}
+	llm := &modelTestLLM{name: "base", turns: [][]*model.LLMResponse{malformed, malformed, malformed, malformed, malformed, malformed}}
+
+	events, err := modelTestRun(t, llm, nil, []*plugin.Plugin{rewriter, modelTestNewModel(t, WithModelMaxRetries(2))}, agent.StreamingModeNone)
+
+	want := "Error in plugin 'reflect_retry_model_plugin' during 'after_model_callback' callback: The model has failed consecutively 3 times and the retry limit has been exceeded"
+	if err == nil || err.Error() != want {
+		t.Errorf("run error = %v, want %q", err, want)
+	}
+	if got := llm.requestCount(); got != 3 {
+		t.Errorf("model requests = %d, want 3", got)
+	}
+	var counts []any
+	for _, call := range modelTestFunctionCalls(events, false) {
+		counts = append(counts, call.Args["retry_count"])
+	}
+	if want := []any{1, 2}; !reflect.DeepEqual(counts, want) {
+		t.Errorf("retry_count of the reflection calls = %v, want %v", counts, want)
+	}
+}
+
+// An agent without a model inherits its parent's. Listed under two parents,
+// it has the parent of the run's tree, not the one constructed last.
+func TestModelRetry_InheritedModelIsTheRunTreeParents(t *testing.T) {
+	p := modelTestNewModel(t, WithModelTrackingScope(Global), WithModelMaxRetries(1))
+	// The Global count of model "other_model" starts at 1, so one more failure
+	// counted against it exceeds the budget.
+	if got := modelTestRetryCount(t, modelTestCall(t, p, newModelTestContext(t, "I0", "other"), "other_model", modelTestMalformed())); got != 1 {
+		t.Fatalf("retry_count of the other model's failure = %d, want 1", got)
+	}
+	child, err := llmagent.New(llmagent.Config{Name: "child"})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	transfer := &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{Name: "transfer_to_agent", Args: map[string]any{"agent_name": "child"}}},
+	}}}
+	done := &model.LLMResponse{Content: genai.NewContentFromText("done", genai.RoleModel)}
+	llm := &modelTestLLM{name: "root_model", turns: [][]*model.LLMResponse{{transfer}, {modelTestMalformed()}, {done}}}
+	root, err := llmagent.New(llmagent.Config{Name: "root", Model: llm, SubAgents: []agent.Agent{child}})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	if _, err := llmagent.New(llmagent.Config{Name: "other", Model: &modelTestLLM{name: "other_model"}, SubAgents: []agent.Agent{child}}); err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+
+	events, err := modelTestRunAgent(t, root, []*plugin.Plugin{p}, agent.StreamingModeNone)
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+
+	var counts []any
+	for _, ev := range events {
+		for _, call := range ev.FunctionCalls() {
+			if call.Name == "adk_handle_model_error" {
+				counts = append(counts, ev.Author, call.Args["retry_count"])
+			}
+		}
+	}
+	if want := []any{"child", 1}; !reflect.DeepEqual(counts, want) {
+		t.Errorf("authors and retry_count of the reflection calls = %v, want %v", counts, want)
 	}
 }
 
@@ -872,59 +994,34 @@ func TestScope_GlobalStillSeparatesModels(t *testing.T) {
 	}
 }
 
-func TestRunEnd_DropsModelRecordsOfThatRun(t *testing.T) {
-	tests := []struct {
-		name   string
-		runEnd func(p *plugin.Plugin, ictx agent.InvocationContext)
-	}{
-		{name: "after run", runEnd: func(p *plugin.Plugin, ictx agent.InvocationContext) { p.AfterRunCallback()(ictx) }},
-		{name: "on run error", runEnd: func(p *plugin.Plugin, ictx agent.InvocationContext) {
-			p.OnRunErrorCallback()(ictx, errors.New("run failed"))
-		}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			p := modelTestNewModel(t)
-			ctx1 := newModelTestContext(t, "I1", "root")
-			ctx2 := newModelTestContext(t, "I2", "root")
-			for _, ctx := range []agent.Context{ctx1, ctx2} {
-				if _, err := p.BeforeModelCallback()(ctx, &model.LLMRequest{Model: "m"}); err != nil {
-					t.Fatalf("BeforeModelCallback() failed: %v", err)
-				}
-			}
-
-			tc.runEnd(p, &modelTestRunContext{invocationID: "I1"})
-
-			r1 := modelTestAfter(p, ctx1, modelTestMalformed())
-			if want := `model of agent "root" not found`; r1.err == nil || r1.err.Error() != want {
-				t.Errorf("after-model callback in I1 error = %v, want %q", r1.err, want)
-			}
-			if n := modelTestRetryCount(t, modelTestAfter(p, ctx2, modelTestMalformed())); n != 1 {
-				t.Errorf("retry_count in I2 = %d, want 1", n)
-			}
-		})
-	}
-}
-
 func TestRunEnd_KeepsCountsOnBothHooks(t *testing.T) {
 	tests := []struct {
 		name   string
-		runEnd func(p *plugin.Plugin, ictx agent.InvocationContext)
+		runEnd func(pm *plugininternal.PluginManager, ictx agent.InvocationContext) error
 	}{
-		{name: "after run", runEnd: func(p *plugin.Plugin, ictx agent.InvocationContext) { p.AfterRunCallback()(ictx) }},
-		{name: "on run error", runEnd: func(p *plugin.Plugin, ictx agent.InvocationContext) {
-			p.OnRunErrorCallback()(ictx, errors.New("run failed"))
+		{name: "after run", runEnd: func(pm *plugininternal.PluginManager, ictx agent.InvocationContext) error {
+			return pm.RunAfterRunCallback(ictx)
+		}},
+		{name: "on run error", runEnd: func(pm *plugininternal.PluginManager, ictx agent.InvocationContext) error {
+			pm.RunOnRunErrorCallback(ictx, errors.New("run failed"))
+			return nil
 		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			p := modelTestNewModel(t)
+			pm, err := plugininternal.NewPluginManager(plugininternal.PluginConfig{Plugins: []*plugin.Plugin{p}})
+			if err != nil {
+				t.Fatalf("NewPluginManager() failed: %v", err)
+			}
 			ctx := newModelTestContext(t, "I1", "root")
 			if got := modelTestRetryCount(t, modelTestCall(t, p, ctx, "m", modelTestMalformed())); got != 1 {
 				t.Errorf("retry_count before the run end = %d, want 1", got)
 			}
 
-			tc.runEnd(p, &modelTestRunContext{invocationID: "I1"})
+			if err := tc.runEnd(pm, &modelTestRunContext{invocationID: "I1"}); err != nil {
+				t.Fatalf("run end failed: %v", err)
+			}
 
 			if got := modelTestRetryCount(t, modelTestCall(t, p, ctx, "m", modelTestMalformed())); got != 2 {
 				t.Errorf("retry_count after the run end = %d, want 2", got)
@@ -936,10 +1033,7 @@ func TestRunEnd_KeepsCountsOnBothHooks(t *testing.T) {
 func TestAfterModel_ConcurrentFailuresLoseNoIncrement(t *testing.T) {
 	const goroutines = 64
 	p := modelTestNewModel(t, WithModelMaxRetries(1000))
-	ctx := newModelTestContext(t, "I1", "root")
-	if _, err := p.BeforeModelCallback()(ctx, &model.LLMRequest{Model: "m"}); err != nil {
-		t.Fatalf("BeforeModelCallback() failed: %v", err)
-	}
+	ctx := newModelTestContext(t, "I1", "root").withModel(t, "m")
 
 	results := make([]modelTestResult, goroutines)
 	var wg sync.WaitGroup
@@ -964,19 +1058,15 @@ func TestAfterModel_ConcurrentFailuresLoseNoIncrement(t *testing.T) {
 	}
 }
 
-func TestBeforeModel_ConcurrentRecordsAreRaceFree(t *testing.T) {
+func TestAfterModel_ConcurrentAgentsCountTheirOwnModels(t *testing.T) {
 	const goroutines = 32
 	p := modelTestNewModel(t)
 
 	results := make([]modelTestResult, goroutines)
 	var wg sync.WaitGroup
 	for i := range goroutines {
-		ctx := newModelTestContext(t, "I1", fmt.Sprintf("a%d", i))
+		ctx := newModelTestContext(t, "I1", fmt.Sprintf("a%d", i)).withModel(t, fmt.Sprintf("m%d", i))
 		wg.Go(func() {
-			if _, err := p.BeforeModelCallback()(ctx, &model.LLMRequest{Model: fmt.Sprintf("m%d", i)}); err != nil {
-				results[i] = modelTestResult{err: err}
-				return
-			}
 			results[i] = modelTestAfter(p, ctx, modelTestMalformed())
 		})
 	}

@@ -23,6 +23,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/plugin"
@@ -153,10 +154,18 @@ func WithModelErrorFinishReasons(reasons ...genai.FinishReason) ModelOption {
 // return an error past its budget by default.
 //
 // Counts of the [Invocation] scope outlive the run, so a later run of the
-// same invocation continues the count, as in adk-python. The plugin records
-// the model of each agent's latest model call in the invocation and drops
-// those records when the run ends. The after-model callback fails when no
-// model is recorded for the agent, or the recorded name is empty.
+// same invocation continues the count, as in adk-python.
+//
+// A failure counts against the model of the LLM agent whose model call the
+// callback surrounds, read from the callback context's agent when the
+// response arrives, as the agent's step resolves it: the agent's own model,
+// else the model of its nearest LLM-agent ancestor in the run's agent tree,
+// else the default model. Its name is the key, so two agents on models of one
+// name share a count, and a plugin earlier in the list that rewrites the
+// request's model name does not change the key. The after-model callback
+// fails before any count changes when the context's agent was not built by
+// llmagent.New, when its model cannot be resolved, or when the model's name
+// is empty.
 //
 // NewModel applies the options in order; the last one for a setting wins and
 // a nil option is skipped. It returns a nil plugin and an error when the
@@ -199,13 +208,11 @@ func NewModel(opts ...ModelOption) (*plugin.Plugin, error) {
 		Name:                p.name,
 		BeforeModelCallback: p.beforeModel,
 		AfterModelCallback:  p.afterModel,
-		AfterRunCallback:    p.afterRun,
-		OnRunErrorCallback:  p.onRunError,
 	})
 }
 
 // modelPlugin holds the settings of a model plugin, which are fixed once
-// NewModel returns, and its counts and records, which guard themselves.
+// NewModel returns, and its counts, which guard themselves.
 type modelPlugin struct {
 	name                 string
 	maxRetries           int
@@ -216,7 +223,6 @@ type modelPlugin struct {
 	reasons      []genai.FinishReason
 	reservedTool tool.Tool
 	failures     failureTracker
-	names        modelNames
 }
 
 // reflectArgs are the arguments of a reflection call. Pointer fields accept
@@ -238,15 +244,14 @@ func (p *modelPlugin) reflect(_ agent.Context, args reflectArgs) (reflectResult,
 	return reflectResult{ReflectionGuidance: fmt.Sprintf(modelReflectionGuidance, args.RetryCount, p.maxRetries)}, nil
 }
 
-// beforeModel offers the reserved tool to the step and records the step's
-// model. Writing req.Tools, not req.Config.Tools, lets the agent run the tool
-// without declaring it to the model.
-func (p *modelPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+// beforeModel offers the reserved tool to the step. Writing req.Tools, not
+// req.Config.Tools, lets the agent run the tool without declaring it to the
+// model.
+func (p *modelPlugin) beforeModel(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	if req.Tools == nil {
 		req.Tools = make(map[string]any)
 	}
 	req.Tools[reservedToolName] = p.reservedTool
-	p.names.record(modelKey{invocationID: ctx.InvocationID(), agentName: ctx.AgentName()}, req.Model)
 	return nil, nil
 }
 
@@ -269,9 +274,9 @@ func (p *modelPlugin) afterModel(ctx agent.Context, resp *model.LLMResponse, _ e
 	if resp.Partial {
 		return nil, nil
 	}
-	modelName, ok := p.names.lookup(modelKey{invocationID: ctx.InvocationID(), agentName: ctx.AgentName()})
-	if !ok {
-		return nil, fmt.Errorf("model of agent %q not found", ctx.AgentName())
+	modelName, err := agentModelName(ctx)
+	if err != nil {
+		return nil, err
 	}
 	scopeKey := p.scopeKey(ctx)
 
@@ -357,16 +362,18 @@ func (p *modelPlugin) scopeKey(ctx agent.Context) string {
 	return ctx.InvocationID()
 }
 
-// afterRun drops the model records of the run's invocation. Counts stay:
-// a later run of the invocation continues them, as in adk-python.
-func (p *modelPlugin) afterRun(ictx agent.InvocationContext) {
-	p.names.drop(ictx.InvocationID())
-}
-
-// onRunError drops the records of a run that a run error ended, for which the
-// runner calls no after-run callback.
-func (p *modelPlugin) onRunError(ictx agent.InvocationContext, _ error) {
-	p.names.drop(ictx.InvocationID())
+// agentModelName returns the name of the model of ctx's agent. ctx carries
+// the run's agent tree, so the model is the one the agent's step resolved,
+// also for an agent listed under two parents.
+func agentModelName(ctx agent.Context) (string, error) {
+	m, err := llminternal.ResolveModel(ctx, ctx.Agent())
+	if err != nil {
+		return "", fmt.Errorf("model of agent %q not found: %w", ctx.AgentName(), err)
+	}
+	if m.Name() == "" {
+		return "", fmt.Errorf("model of agent %q not found", ctx.AgentName())
+	}
+	return m.Name(), nil
 }
 
 // failureTracker counts consecutive failures per scope key and model name.
@@ -402,47 +409,5 @@ func (t *failureTracker) reset(scopeKey, modelName string) {
 	delete(scope, modelName)
 	if len(scope) == 0 {
 		delete(t.counts, scopeKey)
-	}
-}
-
-// modelKey identifies an agent within an invocation.
-type modelKey struct {
-	invocationID string
-	agentName    string
-}
-
-// modelNames records the model of each agent's latest model call, because
-// the after-model callback's context cannot reach the agent.
-type modelNames struct {
-	mu    sync.Mutex
-	byRun map[modelKey]string
-}
-
-func (n *modelNames) record(key modelKey, modelName string) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.byRun == nil {
-		n.byRun = make(map[modelKey]string)
-	}
-	n.byRun[key] = modelName
-}
-
-// lookup returns the recorded model name, and false when there is none or it
-// is empty.
-func (n *modelNames) lookup(key modelKey) (string, bool) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	name := n.byRun[key]
-	return name, name != ""
-}
-
-// drop deletes the records of every agent of invocationID.
-func (n *modelNames) drop(invocationID string) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	for key := range n.byRun {
-		if key.invocationID == invocationID {
-			delete(n.byRun, key)
-		}
 	}
 }
