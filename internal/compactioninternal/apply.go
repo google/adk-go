@@ -239,12 +239,12 @@ func coveredBy(i int, ev *session.Event, k keptRange) bool {
 // and it is left alone rather than guessed at. Recovering it would invent a call
 // that never happened, hiding the underlying bug instead of exposing it.
 //
-// Be aware of where such a response ends up:
-// rearrangeEventsForLatestFunctionResponse errors on it only when it is the
-// final event, while rearrangeEventsForFunctionResponsesInHistory drops any
-// response it cannot pair with a call. So a mid-history orphan disappears from
-// the prompt silently rather than loudly. If that ever needs to be made loud,
-// the fix belongs in those two functions, not here.
+// Be aware of where such a response ends up. Its call is still in the session,
+// so dropOrphanedFunctionResponses drops it without a log line when it is
+// mid-history, and rearrangeEventsForLatestFunctionResponse fails the request
+// when it is the final event. So a mid-history orphan disappears from the
+// prompt silently rather than loudly. If that ever needs to be made loud, the
+// fix belongs in those two functions, not here.
 func recoverCompactedFunctionCalls(events, sourceEvents []*session.Event) []*session.Event {
 	presentCalls := make(map[string]struct{})
 	presentResponses := make(map[string]struct{})
