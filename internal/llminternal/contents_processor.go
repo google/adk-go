@@ -380,46 +380,88 @@ func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
 	return utils.EventBelongsToBranch(invocationBranch, event.Branch)
 }
 
-// dropOrphanedFunctionResponses also identifies surviving events whose orphaned
-// responses were removed, so later rearrangement preserves their remaining content.
+// dropOrphanedFunctionResponses removes the function responses in events that
+// no earlier call answers, as adk-python's drop_orphaned_function_responses
+// (flows/llm_flows/tools/_rearranger.py:207-273) does. A response with an ID
+// needs a call with that ID in an earlier event of events; a response without
+// one needs an earlier call that has no ID either and the same name. A call in
+// the response's own event, in a later event, or only in allEvents does not
+// answer it.
+//
+// Two kinds of response without an earlier call are kept, and only in the
+// last event of events, because adk-go's own tests pin the request failing or
+// carrying them there; adk-python drops both. A response with an ID is kept
+// when a call with that ID is held by an event of allEvents that is not in
+// events, such as a call in another isolation scope or before the
+// include_contents "none" slice; rearrangeEventsForLatestFunctionResponse
+// then reports it. A response without an ID is kept when events holds only
+// that event. An event of allEvents is in events when an event there has the
+// same non-empty ID, or is the same pointer when either ID is empty: the
+// caller passes copies of some session events, so pointers alone would count
+// a copied event as outside.
+//
+// When a part carries text or data besides the orphaned response, only its
+// FunctionResponse is removed and the part stays, where adk-python removes the
+// whole part and loses the text. An event left with no part is removed.
+// Changed events are clones; neither slice nor the events in it are modified.
+// allEvents may be nil.
+//
+// It returns the remaining events and the set of returned events that lost a
+// response part but kept others, which rearrangeEventsForLatestFunctionResponse
+// keeps in the history. It logs one line listing the IDs of the dropped
+// responses, "<missing-id>" for one without an ID, leaving out a response whose
+// call is outside events.
 func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*session.Event, map[*session.Event]bool) {
-	callIDs := make(map[string]struct{})
+	inEvents := make(map[*session.Event]bool, len(events))
+	eventIDs := make(map[string]bool, len(events))
+	for _, event := range events {
+		inEvents[event] = true
+		if event != nil && event.ID != "" {
+			eventIDs[event.ID] = true
+		}
+	}
+	outside := newCallKeys()
 	for _, event := range allEvents {
-		for _, call := range utils.FunctionCalls(utils.Content(event)) {
-			if call.ID != "" {
-				callIDs[call.ID] = struct{}{}
-			}
+		if event != nil && !inEvents[event] && (event.ID == "" || !eventIDs[event.ID]) {
+			outside.record(event)
 		}
 	}
 
-	isOrphan := func(part *genai.Part) bool {
-		if part == nil || part.FunctionResponse == nil || part.FunctionResponse.ID == "" {
+	seen := newCallKeys()
+	isOrphan := func(part *genai.Part, inLastEvent bool) bool {
+		if part == nil || part.FunctionResponse == nil {
 			return false
 		}
-		_, found := callIDs[part.FunctionResponse.ID]
-		return !found
+		resp := part.FunctionResponse
+		if resp.ID != "" {
+			return !seen.hasID(resp.ID) && (!inLastEvent || !outside.hasID(resp.ID))
+		}
+		return !seen.hasIdlessName(resp.Name) && (!inLastEvent || len(events) > 1)
 	}
 
 	var orphanedIDs []string
 	result := make([]*session.Event, 0, len(events))
 	orphanRemnants := make(map[*session.Event]bool)
-	for _, event := range events {
+	for i, event := range events {
+		inLastEvent := i == len(events)-1
+		isOrphanHere := func(part *genai.Part) bool { return isOrphan(part, inLastEvent) }
 		content := utils.Content(event)
-		if content == nil {
+		if content == nil || !slices.ContainsFunc(content.Parts, isOrphanHere) {
 			result = append(result, event)
-			continue
-		}
-
-		if !slices.ContainsFunc(content.Parts, isOrphan) {
-			result = append(result, event)
+			seen.record(event)
 			continue
 		}
 
 		cloned := cloneEvent(event)
 		parts := cloned.LLMResponse.Content.Parts[:0]
 		for _, part := range content.Parts {
-			if isOrphan(part) {
-				orphanedIDs = append(orphanedIDs, part.FunctionResponse.ID)
+			if isOrphanHere(part) {
+				switch id := part.FunctionResponse.ID; {
+				case id == "":
+					orphanedIDs = append(orphanedIDs, "<missing-id>")
+				case !outside.hasID(id):
+					orphanedIDs = append(orphanedIDs, id)
+				}
 				cleaned := *part
 				cleaned.FunctionResponse = nil
 				if reflect.ValueOf(cleaned).IsZero() {
@@ -434,12 +476,52 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*sessi
 			result = append(result, cloned)
 			orphanRemnants[cloned] = true
 		}
+		// Recorded after the event's responses are judged: a call does not
+		// answer a response in its own event.
+		seen.record(event)
 	}
 
 	if len(orphanedIDs) > 0 {
 		log.Printf("adk: dropping function responses with no matching function call: %q", orphanedIDs) //nolint:forbidigo // pre-slog call site
 	}
 	return result, orphanRemnants
+}
+
+// callKeys holds the keys of the function calls recorded so far: the IDs of
+// the calls that have one, and the names of the calls that do not. The zero
+// value is not usable; newCallKeys makes one. It is not safe for concurrent
+// use.
+type callKeys struct{ ids, idlessNames map[string]struct{} }
+
+func newCallKeys() *callKeys {
+	return &callKeys{ids: make(map[string]struct{}), idlessNames: make(map[string]struct{})}
+}
+
+// record adds the function calls of ev. A call with neither an ID nor a name
+// is skipped.
+func (k *callKeys) record(ev *session.Event) {
+	for _, call := range utils.FunctionCalls(utils.Content(ev)) {
+		switch {
+		case call.ID != "":
+			k.ids[call.ID] = struct{}{}
+		case call.Name != "":
+			k.idlessNames[call.Name] = struct{}{}
+		}
+	}
+}
+
+// hasID reports whether a call with the ID id was recorded. An empty id never
+// matches.
+func (k *callKeys) hasID(id string) bool {
+	_, ok := k.ids[id]
+	return ok
+}
+
+// hasIdlessName reports whether a call without an ID and with the name name
+// was recorded. An empty name never matches.
+func (k *callKeys) hasIdlessName(name string) bool {
+	_, ok := k.idlessNames[name]
+	return ok
 }
 
 // dropOrphanedFunctionCalls removes function calls that no function response
@@ -505,270 +587,378 @@ func dropOrphanedFunctionCalls(events []*session.Event) []*session.Event {
 	return result
 }
 
-// rearrangeEventsForLatestFunctionResponse merges responses to the latest event's
-// matching call while preserving unrelated tool events and orphanRemnants.
-// Retaining orphanRemnants is an exception for content left by orphan pruning;
-// other intervening non-tool events, including ordinary user and model text,
-// are still dropped.
+// rearrangeEventsForLatestFunctionResponse moves the function responses of the
+// last event of events next to the calls they answer, as adk-python's
+// rearrange_events_for_latest_function_response
+// (flows/llm_flows/tools/_rearranger.py:378-486) does. events is the output of
+// dropOrphanedFunctionResponses and orphanRemnants its set of remnants, which
+// may be nil.
+//
+// Each response part of the last event is owned by the newest earlier event
+// with a call that answers it (owningCallEventIndex). Every owner is followed
+// by one response event: the responses to its calls from the events between it
+// and the last event, merged with its share of the last event, a later
+// response replacing an earlier one with the same ID. Parts of the last event
+// that are not responses go with the newest owner. Older owners keep their
+// place; the newest owner and its response come last. A merged response part
+// is removed from its earlier event, and an event left with no call and no
+// response is removed.
+//
+// After the newest owner, adk-python keeps no event. This keeps the events
+// that hold a call or a response that was not merged, and the orphan remnants
+// none of whose responses was merged, so that a completed tool exchange, or
+// text pruned from an orphaned response, does not disappear from the history
+// because a late response arrived.
+//
+// It returns events itself when it holds fewer than two events, when the last
+// event holds no response, or when the event just before the last owns all its
+// responses. Changed events are clones; the input is not modified.
+//
+// Two inputs fail where adk-python drops or splits, because adk-go's own tests
+// pin the error. When no response of the last event has an owner, which means
+// dropOrphanedFunctionResponses kept them because their calls are outside the
+// history, it reports that no function call event was found. When the owners
+// are two or more events and an event with no call, no response and no orphan
+// remnant follows the newest one (hasPlainEventAfter), it reports a validation
+// failure. A response with no owner beside one with an owner is removed from
+// the last event, as adk-python's first step would have removed it.
 func rearrangeEventsForLatestFunctionResponse(events []*session.Event, orphanRemnants map[*session.Event]bool) ([]*session.Event, error) {
 	if len(events) < 2 {
 		return events, nil
 	}
-
-	lastEvent := events[len(events)-1]
-	lastResponses := utils.FunctionResponses(lastEvent.Content)
-	// No need to process, since the latest event is not function_response.
-	if len(lastResponses) == 0 {
+	last := len(events) - 1
+	trailing := events[last]
+	responses := utils.FunctionResponses(utils.Content(trailing))
+	if len(responses) == 0 {
 		return events, nil
 	}
 
-	// Create response id set
-	responseIDs := make(map[string]struct{})
-	for _, res := range lastResponses {
-		responseIDs[res.ID] = struct{}{}
-	}
-
-	// Check if its already in the correct position
-	prevEvent := events[len(events)-2]
-	prevCalls := utils.FunctionCalls(prevEvent.Content)
-	if len(prevCalls) > 0 {
-		for _, call := range prevCalls {
-			if _, found := responseIDs[call.ID]; found {
-				// The latest response is already matched with the immediately
-				// preceding call event. The history is clean. Nothing to do.
-				return events, nil
+	// The response parts of the trailing event by owner, its other parts, and
+	// its parts without the responses that have no owner.
+	partsByOwner := make(map[int][]*genai.Part)
+	var otherParts, ownedParts []*genai.Part
+	latest := -1
+	trailingParts := trailing.LLMResponse.Content.Parts
+	for _, part := range trailingParts {
+		if part == nil || part.FunctionResponse == nil {
+			ownedParts = append(ownedParts, part)
+			if part != nil {
+				otherParts = append(otherParts, part)
 			}
+			continue
 		}
-	}
-
-	functionCallEventIdx := -1
-	var allCallIDsFromMatchingEvent map[string]struct{}
-
-SearchLoop: // A label to allow breaking out of the nested loop
-	for idx := len(events) - 2; idx >= 0; idx-- {
-		event := events[idx]
-		calls := utils.FunctionCalls(event.Content)
-
-		if len(calls) > 0 {
-			for _, call := range calls {
-				if _, found := responseIDs[call.ID]; found {
-					// Match found. This is the event we're looking for.
-					functionCallEventIdx = idx
-
-					// Create a new set of all call IDs from this specific event
-					allCallIDsFromMatchingEvent = make(map[string]struct{})
-					for _, c := range calls {
-						allCallIDsFromMatchingEvent[c.ID] = struct{}{}
-					}
-
-					// Validation check
-					// last response event should only contain the responses for the
-					// function calls in the same function call event
-					for respID := range responseIDs {
-						if _, exists := allCallIDsFromMatchingEvent[respID]; !exists {
-							return nil, fmt.Errorf(
-								"validation failed: last response event has IDs not in the matching call event. Call IDs: %v, Response IDs: %v",
-								allCallIDsFromMatchingEvent, responseIDs,
-							)
-						}
-					}
-
-					// Update the tracked IDs to be ALL IDs from the call event
-					responseIDs = allCallIDsFromMatchingEvent
-
-					// Exit the search loop
-					break SearchLoop
-				}
-			}
+		owner := owningCallEventIndex(events[:last], part.FunctionResponse)
+		if owner < 0 {
+			continue
 		}
+		partsByOwner[owner] = append(partsByOwner[owner], part)
+		ownedParts = append(ownedParts, part)
+		latest = max(latest, owner)
 	}
-
-	if functionCallEventIdx == -1 {
+	if latest < 0 {
+		return nil, fmt.Errorf("no function call event found for the %d function responses of the last event", len(responses))
+	}
+	if len(partsByOwner) > 1 && hasPlainEventAfter(events, latest, orphanRemnants) {
+		// The IDs come from the model, so the error gives counts only.
 		return nil, fmt.Errorf(
-			"no function call event found for function responses ids: %v",
-			responseIDs,
+			"validation failed: last response event has IDs not in the matching call event: %d function calls, %d function responses",
+			len(utils.FunctionCalls(utils.Content(events[latest]))), len(responses),
 		)
 	}
 
-	// Collect function response events related to the matching call while
-	// preserving unrelated tool events that happened in between.
-	var responseEventsToMerge []*session.Event
-	resultEvents := events[:functionCallEventIdx+1]
-	for i := functionCallEventIdx + 1; i < len(events)-1; i++ {
-		event := events[i]
-		calls := utils.FunctionCalls(event.Content)
-		if len(calls) > 0 {
-			resultEvents = append(resultEvents, event)
-			continue
+	withParts := func(ev *session.Event, parts []*genai.Part) *session.Event {
+		cloned := cloneEvent(ev)
+		cloned.LLMResponse.Content.Parts = parts
+		return cloned
+	}
+	if len(ownedParts) < len(trailingParts) {
+		trailing = withParts(trailing, ownedParts)
+	}
+	if len(partsByOwner) == 1 && latest == last-1 {
+		if trailing == events[last] {
+			return events, nil
 		}
+		return append(slices.Clip(events[:last]), trailing), nil
+	}
+	partsByOwner[latest] = append(partsByOwner[latest], otherParts...)
 
-		responses := utils.FunctionResponses(event.Content)
-		if len(responses) == 0 {
-			// Unlike Python's blanket intermediate-event removal, retain content
-			// deliberately preserved when pruning unrelated orphaned responses.
-			if orphanRemnants[event] {
-				resultEvents = append(resultEvents, event)
+	// ownerOf returns the owner of a response in events[j].
+	ownerOf := func(j int, resp *genai.FunctionResponse) int {
+		return owningCallEventIndex(events[:j], resp)
+	}
+	// mergedResponse returns the response event that follows the owner at
+	// index owner.
+	mergedResponse := func(owner int) (*session.Event, error) {
+		var group []*session.Event
+		for j := owner + 1; j < last; j++ {
+			content := utils.Content(events[j])
+			if len(utils.FunctionResponses(content)) == 0 {
+				continue
 			}
-			continue
-		}
-
-		// Check if this event contains any response relevant to our call.
-		isRelated := false
-		for _, res := range responses {
-			if _, exists := responseIDs[res.ID]; exists {
-				isRelated = true
-				break
+			// As in adk-python, the parts of a response event that are not
+			// responses are copied into the response of every owner it
+			// answers.
+			isCallEvent := len(utils.FunctionCalls(content)) > 0
+			var matched []*genai.Part
+			answers := false
+			for _, part := range content.Parts {
+				switch {
+				case part == nil:
+				case part.FunctionResponse != nil:
+					if ownerOf(j, part.FunctionResponse) == owner {
+						matched = append(matched, part)
+						answers = true
+					}
+				case !isCallEvent:
+					matched = append(matched, part)
+				}
 			}
+			if !answers {
+				continue
+			}
+			ev := events[j]
+			if len(matched) < len(content.Parts) {
+				ev = withParts(ev, matched)
+			}
+			group = append(group, ev)
 		}
-
-		if isRelated {
-			responseEventsToMerge = append(responseEventsToMerge, event)
-		} else {
-			resultEvents = append(resultEvents, event)
+		group = append(group, withParts(trailing, partsByOwner[owner]))
+		merged, err := mergeFunctionResponseEvents(group)
+		if err != nil {
+			return nil, fmt.Errorf("merge function responses for call event %d: %w", owner, err)
 		}
+		return merged, nil
+	}
+	// withoutMerged returns events[j] without the response parts merged into
+	// an owner's response, and whether it is still kept.
+	withoutMerged := func(j int) (*session.Event, bool) {
+		ev := events[j]
+		content := utils.Content(ev)
+		if len(utils.FunctionResponses(content)) == 0 {
+			return ev, j <= latest || len(utils.FunctionCalls(content)) > 0 || orphanRemnants[ev]
+		}
+		kept := slices.DeleteFunc(slices.Clone(content.Parts), func(part *genai.Part) bool {
+			if part == nil || part.FunctionResponse == nil {
+				return false
+			}
+			_, merged := partsByOwner[ownerOf(j, part.FunctionResponse)]
+			return merged
+		})
+		if len(kept) < len(content.Parts) {
+			ev = withParts(ev, kept)
+		}
+		// An event that had a response merged has its other parts in the
+		// merged response already, so it stays only for a call or a response.
+		live := slices.ContainsFunc(kept, func(part *genai.Part) bool {
+			return part != nil && (part.FunctionCall != nil || part.FunctionResponse != nil)
+		})
+		return ev, live
 	}
 
-	// Add the final response event itself to the list to be merged.
-	responseEventsToMerge = append(responseEventsToMerge, events[len(events)-1])
-
-	mergedEvent, err := mergeFunctionResponseEvents(responseEventsToMerge)
+	result := make([]*session.Event, 0, len(events))
+	var latestEvent *session.Event
+	for j := range last {
+		ev, keep := withoutMerged(j)
+		if !keep {
+			continue
+		}
+		if j == latest {
+			latestEvent = ev
+			continue
+		}
+		result = append(result, ev)
+		if _, owns := partsByOwner[j]; !owns {
+			continue
+		}
+		merged, err := mergedResponse(j)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, merged)
+	}
+	merged, err := mergedResponse(latest)
 	if err != nil {
 		return nil, err
 	}
-	resultEvents = append(resultEvents, mergedEvent)
-	return resultEvents, nil
+	return append(result, latestEvent, merged), nil
 }
 
-// rearrangeEventsForFunctionResponsesInHistory reorganizes an entire event history to ensure
-// every function call event is immediately followed by a single, consolidated
-// function response event.
+// owningCallEventIndex returns the index of the newest event in events with a
+// function call that resp answers, or -1 when there is none. A response with
+// an ID answers a call with the same ID; a response without one answers a
+// call without one that has the same non-empty name (adk-python's
+// _find_owning_call_event_index, flows/llm_flows/tools/_rearranger.py:359-375).
+// resp must not be nil.
+func owningCallEventIndex(events []*session.Event, resp *genai.FunctionResponse) int {
+	for i, event := range slices.Backward(events) {
+		for _, call := range utils.FunctionCalls(utils.Content(event)) {
+			if (resp.ID != "" && call.ID == resp.ID) ||
+				(resp.ID == "" && call.ID == "" && resp.Name != "" && call.Name == resp.Name) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// hasPlainEventAfter reports whether an event after events[idx] and before the
+// last event of events holds no function call and no function response and is
+// not in remnants.
+func hasPlainEventAfter(events []*session.Event, idx int, remnants map[*session.Event]bool) bool {
+	for _, ev := range events[idx+1 : max(idx+1, len(events)-1)] {
+		content := utils.Content(ev)
+		if len(utils.FunctionCalls(content)) == 0 && len(utils.FunctionResponses(content)) == 0 && !remnants[ev] {
+			return true
+		}
+	}
+	return false
+}
+
+// rearrangeEventsForFunctionResponsesInHistory follows every function call
+// event in events with one response event, as adk-python's
+// rearrange_events_for_async_function_responses_in_history
+// (flows/llm_flows/tools/_rearranger.py:110-204) does.
 //
-// This function processes the whole slice of events to clean up and correctly
-// pair function calls with their corresponding responses, which is especially
-// useful for histories involving long running tool calls where
-// responses may not have originally been consecutive. It preserves all
-// non-tool-call events (like user messages) in their original order relative
-// to one another. Their position relative to the surrounding tool exchanges
-// can change, because a pair routed to the tail moves past them.
+// Each response is attributed to the newest earlier event that holds a call
+// with its ID, or a call without an ID for a response without one, because a
+// model may hand out one call ID more than once. An event that holds a
+// response attributed to a call is one update of that call, however many of
+// its parts are attributed to it. Every call event is followed by the last
+// update of each of its calls, merged into one event when they come from
+// several events. Response events are not kept on their own; every other event
+// keeps its order.
 //
-// Adjacency alone is not enough. When the last event is a function response —
-// a long running tool completing after unrelated tool exchanges were already
-// recorded — pairing it with its much earlier call would bury it mid-history
-// and leave a stale exchange as the final content, which is what the model
-// answers. So the pair(s) answered by the last event are emitted last.
+// Model text replies between two consecutive updates of one call are dropped
+// as superseded when both updates are in the same invocation and by the same
+// author, the earlier one requested no tool confirmation and no credential,
+// and every event between them is such a reply (isStaleTextReply). As in
+// adk-python, the rule is positional: it does not check which call a reply is
+// about. Unlike adk-python, two updates with an empty invocation ID are never
+// in the same invocation, because an event without one belongs to no known
+// invocation.
 //
-// It returns a new, correctly ordered slice of events or an error if the
-// history is malformed (e.g., a response is found without a corresponding call).
+// It returns events itself when it holds fewer than two events or no
+// response. Merged events are new; the input is not modified. It fails only
+// when merging responses fails.
 func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*session.Event, error) {
 	if len(events) < 2 {
 		return events, nil
 	}
 
-	// Create a map to store the index of the event containing each function response.
-	callIDToResponseEventIndex := make(map[string]int)
-	for i, event := range events {
-		responses := utils.FunctionResponses(event.Content)
-
-		if len(responses) > 0 {
-			for _, res := range responses {
-				callIDToResponseEventIndex[res.ID] = i
+	// The indices of the call events holding a call with each ID, ascending.
+	// An event with a response is not a call event here.
+	callEventIndices := make(map[string][]int)
+	for i, ev := range events {
+		content := utils.Content(ev)
+		if len(utils.FunctionResponses(content)) > 0 {
+			continue
+		}
+		for _, call := range utils.FunctionCalls(content) {
+			if indices := callEventIndices[call.ID]; len(indices) == 0 || indices[len(indices)-1] != i {
+				callEventIndices[call.ID] = append(indices, i)
 			}
 		}
 	}
 
-	// Index of the last event when it is a function response, otherwise -1.
-	// Only a response event's index can appear in callIDToResponseEventIndex,
-	// so leaving this at -1 makes the relocation below a no-op for every
-	// history that does not end on a function response.
-	lastResponseEventIdx := -1
-	if len(utils.FunctionResponses(events[len(events)-1].Content)) > 0 {
-		lastResponseEventIdx = len(events) - 1
+	// A call is its ID and the index of the event that holds it.
+	type callKey struct {
+		id    string
+		event int
 	}
-
-	// Rebuild the event list. tailEvents holds the call/response pair(s)
-	// answered by the last event; it is appended after everything else.
-	var resultEvents, tailEvents []*session.Event
-
-	for _, event := range events {
-		// If the event contains responses, skip it. It will be handled
-		// when we process its corresponding call event.
-		if len(utils.FunctionResponses(event.Content)) > 0 {
-			continue
-		}
-
-		calls := utils.FunctionCalls(event.Content)
-		if len(calls) == 0 {
-			// This is a regular event (e.g., user message). Just append it.
-			resultEvents = append(resultEvents, event)
-			continue
-		}
-
-		// This is a function call event. The call and its consolidated
-		// response move together as one unit, so the pair holds at most two
-		// events.
-		pair := make([]*session.Event, 0, 2)
-		pair = append(pair, event)
-
-		// Find the unique indices of all corresponding response events.
-		// Using a map[int]struct{} as a set.
-		responseEventIndicesSet := make(map[int]struct{})
-		for _, call := range calls {
-			if index, found := callIDToResponseEventIndex[call.ID]; found {
-				responseEventIndicesSet[index] = struct{}{}
+	// The indices of the updates of each call, ascending, each event once.
+	updates := make(map[callKey][]int)
+	hasResponse := false
+	for i, ev := range events {
+		for _, resp := range utils.FunctionResponses(utils.Content(ev)) {
+			hasResponse = true
+			indices := callEventIndices[resp.ID]
+			if len(indices) == 0 {
+				continue
+			}
+			// A response before every call with its ID goes to the first, as
+			// in adk-python.
+			key := callKey{resp.ID, indices[max(sort.SearchInts(indices, i)-1, 0)]}
+			if u := updates[key]; len(u) == 0 || u[len(u)-1] != i {
+				updates[key] = append(u, i)
 			}
 		}
+	}
+	if !hasResponse {
+		return events, nil
+	}
 
-		switch len(responseEventIndicesSet) {
+	// supersedes reports whether the update at next makes the replies between
+	// it and the update at cur stale.
+	supersedes := func(cur, next int) bool {
+		from, to := events[cur], events[next]
+		if from.InvocationID == "" || from.InvocationID != to.InvocationID || from.Author != to.Author {
+			return false
+		}
+		if len(from.Actions.RequestedToolConfirmations) > 0 || len(from.Actions.RequestedAuthConfigs) > 0 {
+			return false
+		}
+		run := events[cur+1 : next]
+		return len(run) > 0 && !slices.ContainsFunc(run, func(ev *session.Event) bool {
+			return !isStaleTextReply(ev, from.InvocationID)
+		})
+	}
+	stale := make(map[int]bool)
+	for _, u := range updates {
+		for k := 1; k < len(u); k++ {
+			if !supersedes(u[k-1], u[k]) {
+				continue
+			}
+			for i := u[k-1] + 1; i < u[k]; i++ {
+				stale[i] = true
+			}
+		}
+	}
+
+	result := make([]*session.Event, 0, len(events))
+	for i, ev := range events {
+		content := utils.Content(ev)
+		if stale[i] || len(utils.FunctionResponses(content)) > 0 {
+			continue
+		}
+		result = append(result, ev)
+		var settled []int
+		for _, call := range utils.FunctionCalls(content) {
+			if u := updates[callKey{call.ID, i}]; len(u) > 0 {
+				settled = append(settled, u[len(u)-1])
+			}
+		}
+		sort.Ints(settled)
+		settled = slices.Compact(settled)
+		switch len(settled) {
 		case 0:
-			// No responses were found for any call in this event. This is
-			// reachable: a long running tool or a deferring ResponseDeferrer
-			// produces a call with no response event of its own.
 		case 1:
-			// A single unique response event, so use it directly.
-			for index := range responseEventIndicesSet { // A trick to get the single key
-				pair = append(pair, events[index])
-			}
+			result = append(result, events[settled[0]])
 		default:
-			// Multiple response events exist for that function call so we merge them.
-			//
-			// This branch does reach the tail routing below, on well-formed
-			// input. It needs one call event whose siblings are answered by two
-			// different response events, plus pass 1 leaving the history alone:
-			// rearrangeEventsForLatestFunctionResponse returns early when the
-			// event before the last one carries any call the last event
-			// answers, so it merges nothing. CALL(c1,c2) | RESP(c2) | CALL(c3)
-			// | RESP(c1,c3) does both, and CALL(c1,c2) merges here and then
-			// moves to the tail.
-			//
-			// Collect and sort the indices to process events in order.
-			var sortedIndices []int
-			for index := range responseEventIndicesSet {
-				sortedIndices = append(sortedIndices, index)
+			group := make([]*session.Event, len(settled))
+			for k, idx := range settled {
+				group[k] = events[idx]
 			}
-			sort.Ints(sortedIndices)
-
-			// Collect the actual event objects to be merged.
-			eventsToMerge := make([]*session.Event, len(sortedIndices))
-			for i, index := range sortedIndices {
-				eventsToMerge[i] = events[index]
-			}
-
-			// Merge the events into a single response.
-			mergedEvent, err := mergeFunctionResponseEvents(eventsToMerge)
+			merged, err := mergeFunctionResponseEvents(group)
 			if err != nil {
-				return nil, fmt.Errorf("failed to merge response events: %w", err)
+				return nil, fmt.Errorf("merge function responses for call event %d: %w", i, err)
 			}
-			pair = append(pair, mergedEvent)
-		}
-
-		if _, answeredByLastEvent := responseEventIndicesSet[lastResponseEventIdx]; answeredByLastEvent {
-			tailEvents = append(tailEvents, pair...)
-		} else {
-			resultEvents = append(resultEvents, pair...)
+			result = append(result, merged)
 		}
 	}
+	return result, nil
+}
 
-	return append(resultEvents, tailEvents...), nil
+// isStaleTextReply reports whether ev is a model text reply of the invocation
+// invocationID that a newer update of a tool call can supersede: it is not by
+// the user, its content has the model role and some text, it holds no function
+// call, and it is not a compaction summary (adk-python's _is_stale_text_reply,
+// flows/llm_flows/tools/_rearranger.py:98-107).
+func isStaleTextReply(ev *session.Event, invocationID string) bool {
+	content := utils.Content(ev)
+	return ev.InvocationID == invocationID && ev.Author != "user" &&
+		content != nil && content.Role == genai.RoleModel &&
+		len(utils.FunctionCalls(content)) == 0 && ev.Actions.Compaction == nil &&
+		slices.ContainsFunc(content.Parts, func(p *genai.Part) bool { return p != nil && p.Text != "" })
 }
 
 // mergeFunctionResponseEvents merges a list of function response events into one.
