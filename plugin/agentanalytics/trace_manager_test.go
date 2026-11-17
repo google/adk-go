@@ -6840,7 +6840,7 @@ func TestTraceManager_PopTaskAgentSpan_DoesNotMarkNonLLMParent(t *testing.T) {
 	}
 
 	// Pop the task span as popTaskAgentSpan does (finish_task completion).
-	tm.popTaskAgentSpan(ctx, taskID, nil)
+	tm.popTaskAgentSpan(ctx, taskID, nil, false)
 
 	// Verify seq was NOT marked taskDelegated (defensive guard).
 	inv.mu.Lock()
@@ -6912,7 +6912,7 @@ func TestTraceManager_PopTaskAgentSpan_MarksDirectLLMParent(t *testing.T) {
 		t.Fatalf("task parentSpanID = %q, want coordinator spanID %q", taskStart.parentSpanID, coordStart.spanID)
 	}
 
-	tm.popTaskAgentSpan(ctx, taskID, nil)
+	tm.popTaskAgentSpan(ctx, taskID, nil, false)
 
 	// Verify coordinator WAS marked taskDelegated.
 	inv.mu.Lock()
@@ -6972,7 +6972,7 @@ func TestTraceManager_PopTaskAgentSpan_IgnoresUnrelatedAncestor(t *testing.T) {
 		t.Fatalf("task parentSpanID = %q, want coordinator spanID %q", taskStart.parentSpanID, coordStart.spanID)
 	}
 
-	tm.popTaskAgentSpan(ctx, taskID, nil)
+	tm.popTaskAgentSpan(ctx, taskID, nil, false)
 
 	// Verify coordinator was NOT marked taskDelegated because task_worker is not in its children.
 	tm.mu.Lock()
@@ -7774,7 +7774,7 @@ func TestTraceManager_PurgedActivationLatencyFromLastActivity(t *testing.T) {
 				tm.popLLMSpan(ctx, child, true)
 			},
 			touchFunc: func(tm *traceManager) {
-				tm.popTaskAgentSpan(ctx, child, nil)
+				tm.popTaskAgentSpan(ctx, child, nil, false)
 			},
 		},
 		{
@@ -20290,7 +20290,7 @@ func TestTraceManager_PopTaskAgentSpanRejectsNonTaskAgent(t *testing.T) {
 	// Call popTaskAgentSpan on the non-task child at t2. It should return
 	// false and NOT advance parent.lastActivity.
 	clock = t2
-	_, ok := tm.popTaskAgentSpan(ctx, child, nil)
+	_, ok := tm.popTaskAgentSpan(ctx, child, nil, false)
 	if ok {
 		t.Fatal("popTaskAgentSpan returned ok=true for non-task child, want false")
 	}
@@ -21977,7 +21977,7 @@ func TestFinishedTaskLocked_RequiresOneRunOnTheEventPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &invocationTrace{agentStack: append([]*spanRecord{{kind: spanKindAgent, name: "root"}}, tc.stack...)}
 			id := identity{agentName: "task", branch: "b", path: tc.path}
-			if got := inv.finishedTaskLocked(id, []string{"call_0"}); got != tc.want {
+			if got := inv.finishedTaskLocked(id, []string{"call_0"}, false); got != tc.want {
 				t.Errorf("finishedTaskLocked = %d, want %d", got, tc.want)
 			}
 		})

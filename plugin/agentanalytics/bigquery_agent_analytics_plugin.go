@@ -647,8 +647,10 @@ type eventData struct {
 	// customMetadataScrubbed reports that customMetadata was already run
 	// through scrubA2ACustomMetadata.
 	customMetadataScrubbed bool
-	// customMetadataTruncated reports that scrubbing customMetadata hit a
-	// safety cap or placeholder.
+	// customMetadataTruncated reports that scrubbing hit a safety cap or
+	// placeholder in a key of customMetadata that the custom metadata
+	// allowlist projects into attributes.custom_metadata. Loss in a key that
+	// customMetadata keeps only for its "a2a:" prefix is not reported.
 	customMetadataTruncated bool
 	// timestamp overrides span.timestamp when non-zero. Live callbacks leave
 	// it zero and set span.timestamp from the trace manager's clock; a
@@ -931,12 +933,28 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 			p.traces.recordNodeCompletion(ctx, evID, workflowName, ev.NodeInfo.Path, ev.Branch, failed)
 		}
 		p.emitSessionEventSignals(ctx, ev)
-		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor && hasTaskCompletedResponse(ev.Content) {
-			taskID := evID
-			taskID.agentName = ev.Author
-			taskID.branch = ev.Branch
-			if span, ok := p.traces.popTaskAgentSpan(ctx, taskID, functionResponseCalls(ev.Content)); ok {
-				p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
+		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor {
+			// ADK ends a task-mode LLM agent on the completion sentinel alone,
+			// so a finish_task response that also reports a tool result error
+			// ends the activation too, and it gets AGENT_ERROR instead of
+			// AGENT_COMPLETED.
+			if ends, failed, errMsg := taskEndResponse(ev.Content); ends {
+				taskID := evID
+				taskID.agentName = ev.Author
+				taskID.branch = ev.Branch
+				if span, ok := p.traces.popTaskAgentSpan(ctx, taskID, functionResponseCalls(ev.Content), failed); ok {
+					if failed {
+						p.logAgentErrors(ctx, taskID, []unclosedAgentSpan{{
+							span:      span,
+							agentName: taskID.agentName,
+							branch:    taskID.branch,
+							path:      taskID.path,
+							err:       errors.New(taskFailedPrefix + errMsg),
+						}}, nil)
+					} else {
+						p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
+					}
+				}
 			}
 		}
 	}
@@ -986,18 +1004,49 @@ func nodeCompletion(ev *session.Event) (workflowName string, failed, ok bool) {
 // completes its task.
 const finishTaskToolName = "finish_task"
 
+// taskFailedPrefix starts the error message of the AGENT_ERROR row of a
+// task-mode LLM agent activation that a finish_task response with a classified
+// tool result error ended (see taskEndResult).
+const taskFailedPrefix = "finish_task ended the task with a tool result error: "
+
+// taskEndResult reports whether ADK ends a task-mode LLM agent on the
+// finish_task response map resp, which it does when resp carries the
+// completion sentinel ("result": "Task completed."), and whether resp also
+// carries a classified tool result error (such as top-level boolean isError or
+// is_error), with its diagnostic. A task that ends with such an error has
+// failed rather than completed.
+func taskEndResult(resp map[string]any) (ends, failed bool, errMsg string) {
+	if res, ok := resp["result"].(string); !ok || res != "Task completed." {
+		return false, false, ""
+	}
+	errMsg, failed = classifyToolResultError(resp)
+	return true, failed, errMsg
+}
+
 // isTaskCompletedResult reports whether a finish_task response map carries the
 // successful completion sentinel ("result": "Task completed.") without a
-// classified tool result error (such as top-level boolean isError or is_error).
+// classified tool result error (see taskEndResult).
 func isTaskCompletedResult(resp map[string]any) bool {
-	if len(resp) == 0 {
-		return false
+	ends, failed, _ := taskEndResult(resp)
+	return ends && !failed
+}
+
+// taskEndResponse applies taskEndResult to the first finish_task function
+// response in c, which is the one that decides whether ADK ends a task-mode
+// LLM agent.
+func taskEndResponse(c *genai.Content) (ends, failed bool, errMsg string) {
+	if c == nil {
+		return false, false, ""
 	}
-	if _, isErr := classifyToolResultError(resp); isErr {
-		return false
+	for _, part := range c.Parts {
+		if part == nil || part.FunctionResponse == nil {
+			continue
+		}
+		if part.FunctionResponse.Name == finishTaskToolName {
+			return taskEndResult(part.FunctionResponse.Response)
+		}
 	}
-	res, ok := resp["result"].(string)
-	return ok && res == "Task completed."
+	return false, false, ""
 }
 
 // hasTaskCompletedResponse reports whether c carries a successful
@@ -1005,18 +1054,8 @@ func isTaskCompletedResult(resp map[string]any) bool {
 // classified tool result error), which ends a task-mode LLM agent in ADK
 // without running its AfterAgentCallback.
 func hasTaskCompletedResponse(c *genai.Content) bool {
-	if c == nil {
-		return false
-	}
-	for _, part := range c.Parts {
-		if part == nil || part.FunctionResponse == nil {
-			continue
-		}
-		if part.FunctionResponse.Name == finishTaskToolName {
-			return isTaskCompletedResult(part.FunctionResponse.Response)
-		}
-	}
-	return false
+	ends, failed, _ := taskEndResponse(c)
+	return ends && !failed
 }
 
 // functionResponseCalls returns the function call ID, or else the tool name,
@@ -1233,16 +1272,22 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		return nil, nil
 	}
 	if !confirmationOutcome {
-		if msg, ok := classifyToolResultError(result); ok {
+		msg, failed := classifyToolResultError(result)
+		if name == finishTaskToolName {
+			if ends, _, _ := taskEndResult(result); ends {
+				// The finish_task response event that follows reaches
+				// OnEventCallback without the context of the activation that
+				// made the call. A failed call that does not end the task, such
+				// as one whose arguments failed validation, is not noted: the
+				// model can retry it.
+				p.traces.noteTaskFinished(ctx, id, callID, failed)
+			}
+		}
+		if failed {
 			if !closedByError {
 				p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
 			}
 			return nil, nil
-		}
-		if name == finishTaskToolName && isTaskCompletedResult(result) {
-			// The finish_task response event that follows reaches OnEventCallback
-			// without the context of the activation that made the call.
-			p.traces.noteTaskFinished(ctx, id, callID)
 		}
 	}
 	if confirmationOutcome {
@@ -1297,17 +1342,21 @@ func (p *analyticsPlugin) logToolError(ctx context.Context, id identity, t tool.
 		d.content = toolContent(name, "args", args, origin)
 		d.failed = true
 		if err != nil {
-			d.errMsg = cmp.Or(err.Error(), fmt.Sprintf("%T", err))
+			// An error whose Error method returns "" or panics, as a typed nil
+			// pointer to a type with a value receiver Error method does, is
+			// recorded by its type name.
+			d.errMsg = cmp.Or(orZero(err.Error), fmt.Sprintf("%T", err))
 		}
 		d.functionCallID = callID
 	})
 }
 
-// classifyToolResultError inspects a non-error tool result map for structured
-// failure indicators in adk-python precedence order.
+// classifyToolResultError reports whether a tool result map that came without
+// a Go error marks a failure, and if so the diagnostic to record for it. A
+// result fails when its top-level isError or is_error key is the boolean true,
+// as an MCP CallToolResult reports a failed tool call. The diagnostic is a
+// fixed message, so the result's payload is not copied into error_message.
 func classifyToolResultError(result map[string]any) (string, bool) {
-	// Reserved slots for retryandreflect recovery (#2046) and future
-	// Config.ToolResultClassifier (#2014) before built-in MCP isError.
 	return mcpResultError(result)
 }
 
