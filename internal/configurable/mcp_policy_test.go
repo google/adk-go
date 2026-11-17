@@ -526,9 +526,8 @@ func TestMCPPolicyErrorsOmitConfigContent(t *testing.T) {
 		if err == nil || strings.Contains(err.Error(), marker) {
 			t.Fatal("decoder error is missing or exposes config content")
 		}
-		var cause *json.SyntaxError
 		_, err = WithMCPPolicy(t.Context(), strings.NewReader(`{"allowed_servers":!}`))
-		if !errors.As(err, &cause) {
+		if _, ok := errors.AsType[*json.SyntaxError](err); !ok {
 			t.Fatal("decoder error cause was lost")
 		}
 	})

@@ -209,8 +209,7 @@ func TestLoadInvalidMCPPolicyErrorOmitsPath(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), marker) {
 		t.Fatal("invalid policy error is missing or exposes policy path")
 	}
-	var cause *json.SyntaxError
-	if !errors.As(err, &cause) {
+	if _, ok := errors.AsType[*json.SyntaxError](err); !ok {
 		t.Fatal("invalid policy error cause was lost")
 	}
 }
