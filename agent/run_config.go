@@ -203,4 +203,36 @@ type RunConfig struct {
 	// that agent. Labels other than "adk_agent_name" set on that agent's own
 	// GenerateContentConfig still make the connector return an error.
 	Labels *map[string]string
+
+	// ModelInputContext holds transient contents that every model request of
+	// the invocation receives besides the session history. The runner does not
+	// write them to the session: they are neither events nor part of the
+	// history a later invocation reads.
+	//
+	// A request gets them immediately before the last content of the request
+	// that equals the invocation's user content, so they stay before the user
+	// message on every later request of the invocation, after a tool call for
+	// example. When no content equals it, as in a run without a new message,
+	// they go first, before the history. A user message that carries an
+	// "adk-" function call ID is not found, because the history has the ID
+	// removed; the contents then go first.
+	//
+	// Every LLM agent of the run gets them, whatever its IncludeContents.
+	// Agents run through agenttool and live runs (RunLive) do not.
+	//
+	// Each request gets its own deep copy of every entry, so a request
+	// processor or BeforeModelCallback that edits req.Contents, at any depth,
+	// reaches neither the caller's contents nor the next request.
+	//
+	// A nil entry is an error: the run yields an error that names the index,
+	// before the first model call.
+	//
+	// ModelInputContext is a pointer so that RunConfig stays comparable and
+	// usable as a map key. Nil (the zero value) or a pointer to an empty slice
+	// adds nothing.
+	//
+	// Run does not copy ModelInputContext. ADK reads the slice and its contents
+	// each time it builds a model request, while the sequence returned by Run
+	// is iterated, so leave them unchanged until the iteration ends.
+	ModelInputContext *[]*genai.Content
 }
