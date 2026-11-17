@@ -1260,3 +1260,66 @@ func TestRequestConfirmationRepeatedApprovalResultSharesAnswerTimestamp(t *testi
 		}
 	}
 }
+
+func TestRequestConfirmationPendingAndResultClassification(t *testing.T) {
+	const callID = "call-1"
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	agentEvent := func(at time.Time, p *genai.Part) *session.Event {
+		return &session.Event{Author: "testAgent", Timestamp: at, LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{p}}}}
+	}
+	request := func() *session.Event {
+		return agentEvent(ts, &genai.Part{FunctionCall: &genai.FunctionCall{Name: toolconfirmation.FunctionCallName, ID: "conf-1", Args: map[string]any{
+			"originalFunctionCall": map[string]any{"name": mockToolName, "args": map[string]any{"param1": "test"}, "id": callID},
+			"toolConfirmation":     toolconfirmation.ToolConfirmation{Hint: "h"},
+		}}})
+	}
+	pending := func(resp map[string]any) *session.Event {
+		ev := agentEvent(ts, &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: mockToolName, ID: callID, Response: resp}})
+		ev.Actions.RequestedToolConfirmations = map[string]toolconfirmation.ToolConfirmation{callID: {Hint: "h"}}
+		return ev
+	}
+	answer := func(at time.Time) *session.Event {
+		return &session.Event{Author: "user", Timestamp: at, LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+			Name: toolconfirmation.FunctionCallName, ID: "conf-1", Response: map[string]any{"confirmed": true},
+		}}}}}}
+	}
+	tests := []struct {
+		name         string
+		events       []*session.Event
+		wantDispatch bool
+	}{
+		{
+			name:         "custom pending result sorted after request does not count",
+			events:       []*session.Event{request(), pending(map[string]any{"status": "pending"}), answer(ts.Add(time.Second))},
+			wantDispatch: true,
+		},
+		{
+			name: "real error result mentioning confirmation counts",
+			events: []*session.Event{request(), pending(map[string]any{"status": "pending"}), answer(ts.Add(time.Second)),
+				agentEvent(ts.Add(2*time.Second), &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: mockToolName, ID: callID, Response: map[string]any{"error": "upstream requires confirmation"}}}),
+				answer(ts.Add(3 * time.Second))},
+			wantDispatch: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agnt, tools, err := newMockLlmAgent()
+			if err != nil {
+				t.Fatalf("error creating mock llmagent: %v", err)
+			}
+			ictx := createInvocationContext(t, agnt, &fakeSession{events: tt.events})
+			dispatched := false
+			for ev, err := range llminternal.RequestConfirmationRequestProcessor(ictx, &model.LLMRequest{}, &llminternal.Flow{Tools: tools}) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if ev != nil {
+					dispatched = true
+				}
+			}
+			if dispatched != tt.wantDispatch {
+				t.Errorf("dispatched = %v, want %v", dispatched, tt.wantDispatch)
+			}
+		})
+	}
+}

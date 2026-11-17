@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,8 @@ import (
 	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
+
+var tieDBCounter atomic.Int64
 
 type tieTransferArgs struct {
 	Amount int `json:"amount"`
@@ -67,7 +70,7 @@ func (m *tieTransferModel) GenerateContent(ctx context.Context, req *model.LLMRe
 func TestRepeatedApprovalTimestampTie(t *testing.T) {
 	const sessions = 40
 	reran := 0
-	for i := 0; i < sessions; i++ {
+	for i := range sessions {
 		executed := 0
 		transfer, err := functiontool.New(functiontool.Config{Name: "transfer", Description: "sends money", RequireConfirmation: true},
 			func(ctx agent.Context, a tieTransferArgs) (map[string]any, error) {
@@ -81,8 +84,17 @@ func TestRepeatedApprovalTimestampTie(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		svc, err := database.NewSessionService(sqlite.Open(fmt.Sprintf("file:tie%d?mode=memory&cache=shared", i)),
+		db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:tie-%d?mode=memory&cache=shared", tieDBCounter.Add(1))),
 			&gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if sqlDB, err := db.DB(); err == nil {
+				_ = sqlDB.Close()
+			}
+		})
+		svc, err := database.NewSessionServiceFromDB(db)
 		if err != nil {
 			t.Fatal(err)
 		}
