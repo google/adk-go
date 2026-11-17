@@ -76,6 +76,11 @@ type Config struct {
 // event; a record made by agent.RecordEndOfAgent is not stored, so such a
 // sub-agent runs again.
 //
+// The resume behavior described above holds only when this agent is the run's
+// root or the root reaches it only through ParallelAgent, SequentialAgent or
+// LoopAgent agents; in every other tree, a resumed turn is handled by the
+// runner's rule for the agent that made the answered call (see
+// runner.WithInvocationID), which may leave this agent's remaining work undone.
 // Resuming an invocation (runner.WithInvocationID, or a function response to a
 // paused call or an input request) is not supported when a graph workflow
 // agent, made by workflowagent.New, runs below a ParallelAgent,
