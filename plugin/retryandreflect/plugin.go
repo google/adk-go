@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package retryandreflect provides a plugin that provides self-healing,
-// concurrent-safe error recovery for tool failures.
+// Package retryandreflect provides plugins that provide self-healing,
+// concurrent-safe error recovery: [New] for tool failures and [NewModel] for
+// model errors.
 //
 // A tool can also fail without returning an error, by returning a result that
 // describes the failure. A [ResultErrorExtractor], set with
