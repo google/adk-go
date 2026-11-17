@@ -17,6 +17,7 @@ package llminternal
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"slices"
@@ -141,6 +142,11 @@ const transferAgentName = "transfer_to_agent"
 // (tools/transfer_to_agent_tool.py).
 const transferToAgentDescription = "Transfer the query to another agent.\n\nUse this tool to hand off control to another agent that is more suitable to\nanswer the user's query according to the agent's description.\n\nArgs:\n  agent_name: the agent name to transfer to."
 
+// transferReasonDescriptionLine is the line adk-python's cleaned docstring of
+// transfer_to_agent adds to transferToAgentDescription for transfer_reason
+// (tools/transfer_to_agent_tool.py).
+const transferReasonDescriptionLine = "\n  transfer_reason: the reason for transferring to the target agent."
+
 // TransferToAgentTool is a tool that handles transferring control to another
 // agent. Its zero value declares the JSON-schema form for the Gemini API.
 type TransferToAgentTool struct {
@@ -150,6 +156,21 @@ type TransferToAgentTool struct {
 	typed bool
 	// vertex makes Declaration add the null response schema Vertex AI gets.
 	vertex bool
+	// agentNames is the target list of a tool built over names
+	// (NewNamedTransferToAgentTool); empty for a tool the flow builds.
+	agentNames []string
+	// includeReason makes Declaration offer transfer_reason and Run record it.
+	includeReason bool
+}
+
+// NewNamedTransferToAgentTool is the constructor of the public tool (package
+// transfertoagenttool): a tool over a fixed list of names, with no targets to
+// resolve and no instructions.
+func NewNamedTransferToAgentTool(names []string, includeReason bool) *TransferToAgentTool {
+	return &TransferToAgentTool{
+		agentNames:    slices.Clone(names),
+		includeReason: includeReason,
+	}
 }
 
 // NewTransferToAgentTool creates a new TransferToAgentTool. ctx supplies the
@@ -167,9 +188,16 @@ func NewTransferToAgentTool(ctx agent.InvocationContext, curAgent, parent agent.
 	}, nil
 }
 
-// Description implements tool.Tool. It returns adk-python's description of
-// the tool, the same text Declaration carries.
+// Description implements tool.Tool. It returns adk-python's cleaned
+// description of the tool, with the transfer_reason line when the tool offers
+// that parameter: the same text Declaration carries, in both forms.
+// adk-python sends the raw, indented docstring in the typed form with the
+// reason (tools/_automatic_function_calling_util.py); the tool sends the
+// cleaned text there too.
 func (t *TransferToAgentTool) Description() string {
+	if t.includeReason {
+		return transferToAgentDescription + transferReasonDescriptionLine
+	}
 	return transferToAgentDescription
 }
 
@@ -184,8 +212,10 @@ func (t *TransferToAgentTool) IsLongRunning() bool {
 }
 
 // Declaration returns a new declaration of the tool on every call, which the
-// caller may modify. It declares one required string parameter, agent_name,
-// whose enum lists the transfer targets in order: as a JSON Schema in
+// caller may modify without changing the tool. It declares one required
+// string parameter, agent_name, whose enum lists the transfer targets in order
+// (no enum when there are none), and, when the tool offers it, the optional
+// string parameter transfer_reason with default "": as a JSON Schema in
 // ParametersJsonSchema, or as a genai.Schema in Parameters when the tool was
 // prepared for a request under feature.LegacyFunctionDeclarationSchema; the
 // other field is nil. For a Vertex AI request it adds a null response schema
@@ -204,23 +234,40 @@ func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
 // llm is a Vertex AI model. llm may be nil. t is not modified, so one tool can
 // serve requests of different forms at the same time.
 func (t *TransferToAgentTool) forRequest(ctx context.Context, llm model.LLM) *TransferToAgentTool {
+	return t.forContext(googlellm.ContextWithBackend(ctx, googlellm.GetGoogleLLMVariant(llm)))
+}
+
+// forContext returns a copy of t that declares itself in the form ctx asks
+// for: the typed form when ctx carries feature.LegacyFunctionDeclarationSchema,
+// and the null response schema when ctx carries the Vertex AI backend
+// (googlellm.ContextWithBackend). For a nil ctx the copy keeps t's form. t is not
+// modified, and the copy shares t's read-only target lists, so one tool can
+// serve requests of different forms at the same time.
+func (t *TransferToAgentTool) forContext(ctx context.Context) *TransferToAgentTool {
 	c := *t
+	if ctx == nil {
+		return &c
+	}
 	c.typed = feature.LegacyFunctionDeclarationSchema(ctx)
-	c.vertex = googlellm.GetGoogleLLMVariant(llm) == genai.BackendVertexAI
+	c.vertex = googlellm.BackendFromContext(ctx) == genai.BackendVertexAI
 	return &c
 }
 
 // jsonDeclaration returns the declaration in the JSON-schema form.
 func (t *TransferToAgentTool) jsonDeclaration() *genai.FunctionDeclaration {
+	properties := map[string]*jsonschema.Schema{
+		"agent_name": {Type: "string", Enum: t.jsonEnums()},
+	}
+	if t.includeReason {
+		properties["transfer_reason"] = &jsonschema.Schema{Type: "string", Default: json.RawMessage(`""`)}
+	}
 	decl := &genai.FunctionDeclaration{
 		Name:        t.Name(),
 		Description: t.Description(),
 		ParametersJsonSchema: &jsonschema.Schema{
-			Type: "object",
-			Properties: map[string]*jsonschema.Schema{
-				"agent_name": {Type: "string", Enum: t.jsonEnums()},
-			},
-			Required: []string{"agent_name"},
+			Type:       "object",
+			Properties: properties,
+			Required:   []string{"agent_name"},
 		},
 	}
 	if t.vertex {
@@ -231,15 +278,19 @@ func (t *TransferToAgentTool) jsonDeclaration() *genai.FunctionDeclaration {
 
 // typedDeclaration returns the declaration in the typed genai.Schema form.
 func (t *TransferToAgentTool) typedDeclaration() *genai.FunctionDeclaration {
+	properties := map[string]*genai.Schema{
+		"agent_name": {Type: genai.TypeString, Enum: t.enums()},
+	}
+	if t.includeReason {
+		properties["transfer_reason"] = &genai.Schema{Type: genai.TypeString, Default: ""}
+	}
 	decl := &genai.FunctionDeclaration{
 		Name:        t.Name(),
 		Description: t.Description(),
 		Parameters: &genai.Schema{
-			Type: genai.TypeObject,
-			Properties: map[string]*genai.Schema{
-				"agent_name": {Type: genai.TypeString, Enum: t.enums()},
-			},
-			Required: []string{"agent_name"},
+			Type:       genai.TypeObject,
+			Properties: properties,
+			Required:   []string{"agent_name"},
 		},
 	}
 	if t.vertex {
@@ -258,7 +309,17 @@ func (t *TransferToAgentTool) jsonEnums() []any {
 	return values
 }
 
+// enums returns the target list in order, as a new slice on every call: the
+// names of the transfer targets of a tool the flow builds, else the names a
+// tool over names was built with. It returns nil when there are none, so that
+// neither declaration form has an enum.
 func (t *TransferToAgentTool) enums() []string {
+	if len(t.supportedAgents) == 0 {
+		if len(t.agentNames) == 0 {
+			return nil
+		}
+		return slices.Clone(t.agentNames)
+	}
 	var agentNames []string
 	for _, a := range t.supportedAgents {
 		agentNames = append(agentNames, a.Name())
@@ -266,9 +327,10 @@ func (t *TransferToAgentTool) enums() []string {
 	return agentNames
 }
 
-// ProcessRequest implements types.Tool.
+// ProcessRequest implements types.Tool. It registers a copy of t declared in
+// the form ctx asks for (forContext). ctx may be nil.
 func (t *TransferToAgentTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	return appendTools(req, t)
+	return appendTools(req, t.forContext(ctx))
 }
 
 // Run implements types.Tool.
@@ -293,6 +355,13 @@ func (t *TransferToAgentTool) Run(ctx agent.Context, args any) (map[string]any, 
 		return nil, fmt.Errorf("agent %q is not a valid transfer target; available agents: %s", agent, strings.Join(targets, ", "))
 	}
 	ctx.Actions().TransferToAgent = agent
+	// Only a tool that declares transfer_reason records it, and only as a
+	// string. adk-python records whatever the model sends under that key,
+	// declared or not (tools/transfer_to_agent_tool.py, tools/function_tool.py).
+	if t.includeReason {
+		reason, _ := m["transfer_reason"].(string)
+		ctx.Actions().TransferReason = reason
+	}
 	return nil, nil
 }
 

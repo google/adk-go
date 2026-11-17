@@ -661,6 +661,49 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			}
 		})
 
+		t.Run("transfer_reason_round_trips", func(t *testing.T) {
+			// The reason is stored with the transfer it explains. The state
+			// delta keeps the backends' own action columns non-empty too.
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+			event := &session.Event{
+				ID:           "transfer_event",
+				Author:       "agent",
+				InvocationID: "inv-transfer",
+				Actions: session.EventActions{
+					StateDelta:      map[string]any{"k": "v"},
+					TransferToAgent: "b",
+					TransferReason:  "r",
+				},
+			}
+			if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+
+			got, err := s.Get(ctx, &session.GetRequest{
+				AppName:   testAppName,
+				UserID:    "user1",
+				SessionID: created.Session.ID(),
+			})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+
+			snap := Snapshot(got.Session)
+			if len(snap.Events) != 1 {
+				t.Fatalf("Expected 1 event, got %d", len(snap.Events))
+			}
+			actions := snap.Events[0].Actions
+			if actions.TransferToAgent != "b" || actions.TransferReason != "r" {
+				t.Errorf("stored (TransferToAgent, TransferReason) = (%q, %q), want (\"b\", \"r\")", actions.TransferToAgent, actions.TransferReason)
+			}
+		})
+
 		t.Run("requested_auth_config_that_does_not_decode_is_refused", func(t *testing.T) {
 			// A toolauth.Config struct literal is not checked when it is
 			// built, and its encoder accepts configs its decoder refuses. A

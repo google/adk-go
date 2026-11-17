@@ -747,8 +747,14 @@ func mergeEventActions(dst, src *session.EventActions, record *session.EventComp
 	if src.SkipSummarization {
 		dst.SkipSummarization = true
 	}
+	// A reason travels with its target: a replacement that names a target
+	// replaces the original's reason, an empty one included, so a reason never
+	// stays beside a target it was not given for.
 	if src.TransferToAgent != "" {
 		dst.TransferToAgent = src.TransferToAgent
+		dst.TransferReason = src.TransferReason
+	} else if src.TransferReason != "" {
+		dst.TransferReason = src.TransferReason
 	}
 	if src.Escalate {
 		dst.Escalate = true

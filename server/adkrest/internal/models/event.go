@@ -34,6 +34,7 @@ type EventActions struct {
 	Escalate                   bool                                         `json:"escalate,omitempty"`
 	SkipSummarization          bool                                         `json:"skipSummarization,omitempty"`
 	TransferToAgent            string                                       `json:"transferToAgent,omitempty"`
+	TransferReason             string                                       `json:"transferReason,omitempty"`
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
 	RequestedAuthConfigs       authConfigs                                  `json:"requestedAuthConfigs,omitempty"`
 	Compaction                 *session.EventCompaction                     `json:"compaction,omitempty"`
@@ -145,6 +146,7 @@ func ToSessionEvent(event Event) (*session.Event, error) {
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,
 			TransferToAgent:            event.Actions.TransferToAgent,
+			TransferReason:             event.Actions.TransferReason,
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
 			SetModelResponse:           event.Actions.SetModelResponse,
 			RewindBeforeInvocationID:   event.Actions.RewindBeforeInvocationID,
@@ -203,6 +205,7 @@ func FromSessionEvent(event session.Event) Event {
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,
 			TransferToAgent:            event.Actions.TransferToAgent,
+			TransferReason:             event.Actions.TransferReason,
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
 			RequestedAuthConfigs:       event.Actions.RequestedAuthConfigs,
 			Compaction:                 event.Actions.Compaction,

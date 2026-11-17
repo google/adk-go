@@ -2265,6 +2265,9 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	if other.TransferToAgent != "" {
 		base.TransferToAgent = other.TransferToAgent
 	}
+	if other.TransferReason != "" {
+		base.TransferReason = other.TransferReason
+	}
 	if other.Escalate {
 		base.Escalate = true
 	}
