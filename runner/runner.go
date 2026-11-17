@@ -1026,6 +1026,25 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // left without a response when it is resumed with [WithInvocationID]. A
 // branch of a parallel agent (package parallelagent) may still start the
 // tool that the function call of the event it produced names.
+//
+// Run yields each event after the session service has stored it, except a
+// partial event, which is not stored. The state delta of a stored event has
+// no "temp:" keys: they reach the session's state, where the rest of the
+// invocation reads them, and the OnEvent plugin callbacks, which see the
+// event before it is stored, but the event Run yields is a copy without them,
+// as [session.Service.Get] returns it later. The same holds for the user
+// event [WithYieldUserMessage] yields. A partial event keeps its state delta,
+// "temp:" keys included.
+//
+// When Run drops a "temp:" key, the event it yields is a copy with its own
+// top-level fields and its own state delta map. The copy shares everything
+// else with the event the agent or node produced: the content, the artifact
+// delta, the other maps and slices, and the values in the state delta.
+// Without a "temp:" key, Run may yield the event the agent or node produced,
+// or a copy of it. Either way, do not edit the content or those maps of a
+// yielded event in place: the edit reaches the agent or node that produced
+// it. An agent or node that keeps the event it produced still sees its own
+// "temp:" keys.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// Copied now: the sequence below runs only when ranged, and later
 	// changes to the caller's map must not reach the invocation's events.
@@ -1355,6 +1374,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 					lc.stop()
 					return
 				}
+				event = withoutTempState(event)
 			}
 
 			if !yield(event, nil) {
@@ -1420,6 +1440,7 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext, isLive bool) 
 		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
 			return nil, fmt.Errorf("failed to add event to session: %w", err)
 		}
+		event = withoutTempState(event)
 	}
 	return event, nil
 }
@@ -1503,6 +1524,11 @@ func (s *closedLiveSession) Close() error {
 // and a stream of events from the agents. It returns an error, before the
 // session is read, when the runner's root is a node or when opts include
 // [WithInvocationID].
+//
+// RunLive yields events as [Runner.Run] does: an event it stores has no
+// "temp:" keys in its state delta. An event it does not store keeps its
+// delta: a partial event, and an event with inline audio, video or image
+// data.
 func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	if r.rootNode != nil {
 		return nil, nil, fmt.Errorf("runner root %q is a node, not an agent", r.rootNode.Name())
@@ -1681,6 +1707,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 							}
 							continue
 						}
+						event = withoutTempState(event)
 					}
 					if !yield(event, nil) {
 						return
@@ -1694,6 +1721,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 								}
 								continue
 							}
+							bufferedEvent = withoutTempState(bufferedEvent)
 						}
 						if !yield(bufferedEvent, nil) {
 							return
@@ -1711,6 +1739,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					}
 					continue
 				}
+				event = withoutTempState(event)
 			}
 
 			if !yield(event, nil) {
@@ -1733,6 +1762,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					}
 					continue
 				}
+				bufferedEvent = withoutTempState(bufferedEvent)
 			}
 			if !yield(bufferedEvent, nil) {
 				return
@@ -1836,8 +1866,8 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 }
 
 // appendUserEvent appends a user event with content msg, which may be nil,
-// and stateDelta to storedSession, and returns it. On the node path
-// (onNodePath) an append
+// and stateDelta to storedSession, and returns the event as the caller sees
+// it, without its "temp:" keys. On the node path (onNodePath) an append
 // failure is a run error (a *runStageError), as adk-python appends the user
 // event inside run_node_async's notified try (workflow/_node_runner_utils.py);
 // on the classic path it is a setup failure, as Runner.run_async appends it
@@ -1867,7 +1897,7 @@ func (r *Runner) appendUserEvent(ctx agent.Context, onNodePath bool, storedSessi
 		}
 		return nil, err
 	}
-	return event, nil
+	return withoutTempState(event), nil
 }
 
 // stampCallBranch gives ev, a user event not yet appended, the branch of the
@@ -2440,6 +2470,32 @@ func clearMessageAsOutput(event *session.Event) *session.Event {
 		return &clone
 	}
 	return event
+}
+
+// withoutTempState returns event as the runner yields it once the session
+// service has stored it: without the state delta keys that start with
+// session.KeyPrefixTemp, which no service stores. When the delta has no such
+// key, nil and empty included, it returns event itself. Otherwise it returns a
+// shallow copy whose Actions.StateDelta is a new map holding the other keys,
+// empty but non-nil when none is left. It never changes event, its delta or a
+// value in it. The copy is shallow, like the one clearMessageAsOutput makes,
+// so a yielded event costs one struct and one map rather than a clone of its
+// content: Content, the other maps and slices, and the kept values are shared
+// with event.
+func withoutTempState(event *session.Event) *session.Event {
+	delta := event.Actions.StateDelta
+	kept := make(map[string]any, len(delta))
+	for k, v := range delta {
+		if !strings.HasPrefix(k, session.KeyPrefixTemp) {
+			kept[k] = v
+		}
+	}
+	if len(kept) == len(delta) {
+		return event
+	}
+	clone := *event
+	clone.Actions.StateDelta = kept
+	return &clone
 }
 
 // withPluginManager puts this runner's plugin manager in ctx, which is where

@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1071,4 +1072,52 @@ func sessionFor(t *testing.T, r *testutil.TestAgentRunner, id string) session.Se
 		t.Fatalf("Get(session) failed: %v", err)
 	}
 	return resp.Session
+}
+
+// tempKeys returns the state delta keys of events that start with
+// session.KeyPrefixTemp, sorted within each event.
+func tempKeys(events []*session.Event) []string {
+	var keys []string
+	for _, ev := range events {
+		var own []string
+		for k := range ev.Actions.StateDelta {
+			if strings.HasPrefix(k, session.KeyPrefixTemp) {
+				own = append(own, k)
+			}
+		}
+		slices.Sort(own)
+		keys = append(keys, own...)
+	}
+	return keys
+}
+
+func TestSignInRoundTrip_ExchangedTokensStayOffYieldedEvents(t *testing.T) {
+	endpoint := newTokenEndpoint(t)
+	calendar, _ := newCalendarTool(t, calendarConfig(endpoint.URL))
+	llm := &testutil.MockModel{Responses: []*genai.Content{
+		calendarCall(),
+		genai.NewContentFromText("You have standup.", genai.RoleModel),
+	}}
+	r := newRunner(t, llm, calendar)
+	first, err := testutil.CollectEvents(r.Run(t, "s1", "what's on my calendar?"))
+	if err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	requests := credentialRequests(first)
+	if len(requests) != 1 {
+		t.Fatalf("first run sent %d credential requests, want 1", len(requests))
+	}
+
+	// The second run exchanges the code and writes the tokens to ctx's state
+	// under a "temp:" key.
+	second, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, requests[0], "c0de")))
+	if err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+	if n := len(endpoint.seen()); n != 1 {
+		t.Fatalf("token endpoint called %d times, want 1 code exchange", n)
+	}
+	if got := tempKeys(second); len(got) != 0 {
+		t.Errorf("second run yielded events with state delta keys %q, want no \"temp:\" key", got)
+	}
 }
