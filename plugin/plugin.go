@@ -203,9 +203,8 @@ type AfterRunCallback func(agent.InvocationContext)
 //
 // a is the agent that failed. It may be the embedded agent implementation
 // rather than the value returned by a constructor, so use a.Name() to identify
-// it. ctx is the callback context for the invocation; it does not expose the
-// agent (ctx.Agent() returns nil). State changes made through ctx are not
-// persisted. Artifact saves through ctx.Artifacts() are written to the artifact
+// it. ctx is the callback context for the invocation, and ctx.Agent() returns
+// a. State changes made through ctx are not persisted. Artifact saves through ctx.Artifacts() are written to the artifact
 // service, but no ArtifactDelta records them.
 //
 // A panicking callback is recovered so the remaining callbacks still run and

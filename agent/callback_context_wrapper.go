@@ -68,10 +68,16 @@ func (c *callbackContextWrapper) SubScheduler() DynamicSubScheduler {
 	return nil
 }
 
-// Agent implements [Context].
+// Agent implements [Context]. It returns the agent the callback belongs to,
+// which is the agent [ReadonlyContext.AgentName] names: the agent whose agent
+// callbacks or on-agent-error callbacks run, the LLM agent whose model call the
+// model callbacks surround, or the remote agent whose request callbacks run.
+// Plugin callbacks get the same agent as the agent's own callbacks. A callback
+// context made from a node context of a runner whose root is a node returns the
+// runner's stand-in agent for that node. Agent returns nil when the
+// invocation the context was made from has no agent.
 func (c *callbackContextWrapper) Agent() Agent {
-	log.Print("Agent() is not supported for callback context") //nolint:forbidigo // pre-slog call site
-	return nil
+	return c.context.Agent()
 }
 
 // EndInvocation implements [Context].
