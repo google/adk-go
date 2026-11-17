@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+
+	"google.golang.org/adk/v2/session"
 )
 
 // ErrEmptyRoutingMap is the error [EdgeBuilder.Err] reports after
@@ -131,6 +133,9 @@ func (b *EdgeBuilder) Build() []Edge {
 }
 
 // Chain generates a slice of Edges to form a chain of nodes.
+//
+// With fewer than two nodes it returns nil, which [New] accepts as the
+// empty workflow. A nil node gives an edge that New refuses.
 func Chain(nodes ...Node) []Edge {
 	if len(nodes) < 2 {
 		return nil
@@ -142,7 +147,13 @@ func Chain(nodes ...Node) []Edge {
 	return edges
 }
 
-// Concat combines Edges and []Edge slices into a single slice of edges.
+// Concat combines Edges and []Edge slices into a single slice of edges, in
+// the order of items.
+//
+// Each item must be an [Edge] or a []Edge. For any other item, Concat puts
+// an edge with no nodes at that item's position instead of dropping it, and
+// [New] refuses that edge with an error that matches [ErrGraphValidation]
+// and names the edge's index and the item's Go type.
 func Concat(items ...any) []Edge {
 	var edges []Edge
 	for _, item := range items {
@@ -151,7 +162,22 @@ func Concat(items ...any) []Edge {
 			edges = append(edges, v)
 		case []Edge:
 			edges = append(edges, v...)
+		default:
+			edges = append(edges, Edge{Route: concatForeignItem{typeName: fmt.Sprintf("%T", item)}})
 		}
 	}
 	return edges
+}
+
+// concatForeignItem is the route of the edge Concat puts in place of an
+// item that is neither an Edge nor a []Edge. Concat cannot return an error,
+// so New reports the edge instead (see validateEdgeShapes).
+type concatForeignItem struct {
+	typeName string // the item's Go type, as %T formats it
+}
+
+// Matches reports false. New refuses an edge with this route, so no run
+// evaluates it.
+func (concatForeignItem) Matches(*session.Event) bool {
+	return false
 }

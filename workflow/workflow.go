@@ -119,6 +119,9 @@ func (r BoolRoute) Matches(event *session.Event) bool {
 }
 
 // MultiRoute matches any value within a specified list of allowed routes.
+//
+// A MultiRoute must not contain [Default]: [New] refuses an edge whose
+// MultiRoute does. Write a separate edge with Route [Default] instead.
 type MultiRoute[T comparable] []T
 
 // Matches reports whether event was routed to any of the values in this list.
@@ -132,6 +135,9 @@ func (r MultiRoute[T]) Matches(event *session.Event) bool {
 }
 
 // Default is a special route that matches when no other concrete routes match.
+//
+// It is the Route of an edge of its own: [New] refuses it inside a
+// [MultiRoute] and on an edge from [Start].
 var Default Route = &defaultRoute{}
 
 type defaultRoute struct{}
@@ -148,6 +154,9 @@ type Edge struct {
 }
 
 // Start is a sentinel node used to indicate the entry point of the workflow.
+//
+// An edge from Start takes no route: [New] refuses one whose Route is not
+// nil, [Default] included. An edge into Start is refused too.
 var Start Node = &startNode{
 	BaseNode: NewBaseNode("START", "Start node", NodeConfig{}),
 }
@@ -350,13 +359,24 @@ func WithOutputSchema(s *jsonschema.Resolved) Option {
 // An empty name adds no prefix, so this workflow's nodes are recorded
 // under the bare node path.
 //
+// edges may be nil or empty. The result is then the empty workflow: its
+// Run yields no event and produces no output.
+//
+// New checks that edges describe a valid graph and returns the first
+// defect it finds as an error that matches [ErrGraphValidation], whose doc
+// lists the defects, and the defect's own sentinel where it has one, such
+// as [ErrNodesNotReachable]. The checks run in adk-python's order, followed
+// by the checks only adk-go makes, so a graph with several defects reports
+// the one adk-python reports. Within one check the first edge or node in
+// declaration order is reported, so the same edges always give the same
+// error. A node that reads a state field the [WithStateSchema] schema does
+// not declare, and a node's own validator of its outgoing edges, return
+// errors that do not match ErrGraphValidation.
+//
 // Optional Option values configure engine behavior
 // (concurrency cap, etc.); see WithMaxConcurrency.
 func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	if err := validateNodes(edges); err != nil {
-		return nil, err
-	}
-	if err := validateSubWorkflowNames(name, edges); err != nil {
 		return nil, err
 	}
 	// TODO(wolo): sanity-check name (reject whitespace-only,
@@ -378,6 +398,9 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	graph.outputSchema = o.outputSchema
 	if err := validateWorkflow(graph, o.stateSchema); err != nil {
 		return nil, err
+	}
+	if err := validateSubWorkflowNames(name, edges); err != nil {
+		return nil, invalidGraph(err)
 	}
 	return &Workflow{
 		graph:          graph,

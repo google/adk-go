@@ -64,6 +64,11 @@ type Config struct {
 // terminal output fails the output schema ends with an error wrapping
 // [workflow.ErrNodeFailed].
 //
+// cfg.Edges is passed to [workflow.New], which validates it: edges that do
+// not describe a valid graph return an error that matches
+// [workflow.ErrGraphValidation]. Empty cfg.Edges give an agent whose
+// workflow runs no node and yields no event of its own.
+//
 // In a resumable run (runner.Config.Resumable) the agent yields one
 // end-of-agent event, authored by itself, after the workflow has finished with
 // no node waiting for input. It yields none when the run is not resumable, a

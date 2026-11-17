@@ -32,7 +32,9 @@ type WorkflowNode struct {
 }
 
 // NewWorkflowNode creates a new node that runs a nested workflow.
-// It uses the same arguments as New to construct the inner workflow.
+// It uses the same arguments as New to construct the inner workflow, and
+// returns the errors New returns. An empty edge list gives a node that
+// runs nothing and produces no output.
 func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 	wf, err := New(name, edges)
 	if err != nil {
