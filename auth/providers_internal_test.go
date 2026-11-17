@@ -321,12 +321,13 @@ func TestProvidersMintTokensAfterInit(t *testing.T) {
 	}
 }
 
-// isolateADCEnv pins the rest of the environment the auth library reads. None of
-// the four changes what this package sends today: the token reaches the request
-// through OAuth2Credential.Apply rather than the library's transports, which is
-// where the universe domain, the client certificate and the trust boundary
-// lookup take effect, and nothing here asks for the quota project. They are
-// pinned so this copy and the gcp package's stay the same set.
+// isolateADCEnv pins the rest of the environment the auth library reads, the
+// same four variables the gcp package's copy pins. With the service-account-key
+// fixture these tests use none of them changes what is sent, since the token is
+// applied by OAuth2Credential rather than the library's transports. Other
+// credential sources do read them (an impersonated credential sends the quota
+// project and can start the trust boundary lookup), so a future fixture is
+// covered too.
 func isolateADCEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("GOOGLE_CLOUD_QUOTA_PROJECT", "")
