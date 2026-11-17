@@ -134,7 +134,9 @@ type Service interface {
 	// nothing and returns nil. session/vertexai rejects an empty or malformed
 	// session ID as invalid instead, as in Get.
 	Delete(context.Context, *DeleteRequest) error
-	// AppendEvent is used to append an event to a session, and remove temporary state keys from the event.
+	// AppendEvent appends an event to a session. It stores the event without
+	// its "temp:" state keys and leaves event.Actions.StateDelta as it was, so
+	// the caller's event keeps them.
 	//
 	// The session is identified by its AppName, UserID and ID, whatever the
 	// concrete type of the [Session] value: a value returned by Create or Get,

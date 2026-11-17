@@ -280,6 +280,7 @@ func (r *Runner) runNode(
 				lc.stop()
 				return
 			}
+			event = withoutTempState(event)
 		}
 
 		if !yield(event, nil) {
