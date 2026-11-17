@@ -53,7 +53,9 @@ type Config struct {
 	AfterRunCallback  AfterRunCallback
 	// At most one of AfterRunCallback and FailableAfterRunCallback is set.
 	FailableAfterRunCallback FailableAfterRunCallback
-	OnRunErrorCallback       OnRunErrorCallback
+	// OnRunErrorCallback is called when a run error ends a run; see
+	// [OnRunErrorCallback] for which errors do.
+	OnRunErrorCallback OnRunErrorCallback
 
 	BeforeAgentCallback  agent.BeforeAgentCallback
 	AfterAgentCallback   agent.AfterAgentCallback
