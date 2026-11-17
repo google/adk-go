@@ -31,6 +31,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/gorilla/mux"
 
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
@@ -162,6 +163,9 @@ func TestGetSession(t *testing.T) {
 }
 
 func TestCreateSession(t *testing.T) {
+	// The clock every request reads, so an event sent without a timestamp is
+	// stamped with a known time.
+	createTime := time.Date(2026, 11, 17, 10, 0, 0, 123456000, time.UTC)
 	id := fakes.SessionKey{
 		AppName:   "testApp",
 		UserID:    "testUser",
@@ -215,8 +219,11 @@ func TestCreateSession(t *testing.T) {
 				},
 				Events: []models.Event{
 					{
-						ID:     "eventID",
-						Author: "testUser",
+						ID: "eventID",
+						// Sent without a timestamp, so stamped with the time
+						// it was stored.
+						Timestamp: float64(createTime.UnixMicro()) / 1e6,
+						Author:    "testUser",
 					},
 				},
 			},
@@ -247,7 +254,8 @@ func TestCreateSession(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new request: %v", err)
 			}
-			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
+			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return createTime })
+			req = req.WithContext(authn.WithCaller(ctx, &authn.Caller{UserID: "testUser"}))
 
 			// Manually set the URL variables on the request using mux.SetURLVars.
 			req = mux.SetURLVars(req, sessionVars(tt.sessionID))
