@@ -194,12 +194,16 @@ type Event struct {
 // NodeInfo carries the per-event metadata identifying which node in
 // a workflow activation emitted it.
 type NodeInfo struct {
-	// Path is the composite path of the emitting node within its
-	// workflow activation. Empty for top-level static nodes;
-	// "<parent_path>/<child_name>@<run_id>" for dynamic children.
-	// The scheduler uses it to scope per-activation Output/Routes
-	// invariants to the emitter, allowing dynamic nodes to forward
-	// children's terminal events alongside their own.
+	// Path is the node's position in the workflow that ran it:
+	// "<parent_path>/<node_name>@<run_id>", one "<name>@<run_id>" segment per
+	// nesting level, for example "wf@1/loop@2/child@1". Every event a node
+	// yields carries its own full path; the scheduler stamps the path on events
+	// whose node left it empty. The run id counts the activations of that node
+	// name under the same parent path, starting at 1, and a retry of an
+	// activation keeps its run id. Under a root wrapper, a static node's path
+	// is its bare name. The scheduler also uses the path to scope per-activation
+	// Output and Routes invariants to the emitter, so a dynamic node can forward
+	// its children's terminal events alongside its own.
 	Path string `json:"path,omitempty"`
 
 	// MessageAsOutput marks that this event's content IS the node's

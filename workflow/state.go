@@ -156,6 +156,11 @@ type NodeState struct {
 	// for handoff-mode nodes (where successors receive the response
 	// as input and the asker never re-runs).
 	ResumedInputs map[string]any `json:"resumedInputs,omitempty"`
+
+	// runID is the run id of the node's latest activation in history, set by
+	// ReconstructRunState. Empty for a state built by hand or a node whose
+	// events carry no run id.
+	runID string
 }
 
 // RunState is the per-invocation lifecycle state for a workflow
@@ -173,6 +178,16 @@ type RunState struct {
 	// and used by Resume to avoid re-triggering a handoff successor
 	// that already ran on a prior turn (idempotency). Not persisted.
 	completed map[string]bool
+
+	// runCounts is the highest run id seen in history for each node name,
+	// set by ReconstructRunState. Resume seeds the run counters with it.
+	runCounts map[string]int
+
+	// queued holds, per node name, the triggers that history shows were
+	// produced but had not started, oldest first. Set by ReconstructRunState
+	// for nodes it rebuilds from interrupt or failure history; Resume
+	// returns them to the trigger buffer.
+	queued map[string][]pendingActivation
 }
 
 // NewRunState returns an empty state with the Nodes map

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"slices"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -90,6 +91,14 @@ var ErrNothingToResume = errors.New("workflow: no waiting node matched the suppl
 // caller can distinguish a successful resume from a stale or
 // mistargeted submission. An empty responses map (or nil state)
 // is treated as a clean no-op with no error.
+//
+// A node that Resume re-activates keeps the run id of the activation that
+// paused or failed, and the next new activation of that node continues the
+// count. Events carry the path "<ctx path>/<name>@<run id>", where ctx path
+// is the path of the context passed to Resume. The runner's resume turn
+// passes an empty path, so there a re-activated node's events carry
+// "loop@2", not "wf@1/loop@2". Triggers that the node's predecessors
+// produced while it was waiting run, in arrival order, once the node is free.
 func (w *Workflow) Resume(
 	ctx agent.Context,
 	state *RunState,
@@ -103,6 +112,9 @@ func (w *Workflow) Resume(
 		s := newScheduler(ctx, w.graph, w.maxConcurrency)
 		s.workflowName = w.name
 		s.state = state
+		for name, n := range state.runCounts {
+			s.counters.seed(ctx.Path(), name, n)
+		}
 		defer func() {
 			s.cancelAll()
 			if len(s.runsByName) > 0 {
@@ -119,6 +131,9 @@ func (w *Workflow) Resume(
 		type deferredHandoff struct {
 			node Node
 			resp any
+			// answeredEarlier: the asker's response was already in
+			// history before this turn.
+			answeredEarlier bool
 		}
 		var deferredHandoffs []deferredHandoff
 		scheduled := 0
@@ -194,7 +209,13 @@ func (w *Workflow) Resume(
 				}
 				maps.Copy(ns.ResumedInputs, freshMatched)
 				ns.Status = NodePending
-				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.Branch, ns.ResumedInputs)
+				s.enqueue(pendingActivation{
+					node: node, input: ns.Input, triggeredBy: ns.TriggeredBy,
+					branch: ns.Branch, runID: ns.runID, resumeInputs: ns.ResumedInputs,
+				})
+				// Start it now, so the node is NodeRunning while the
+				// rest of this pass looks at the other nodes.
+				s.scheduleReady()
 				scheduled++
 			} else {
 				// Handoff: the response is the asker's output for its
@@ -203,11 +224,12 @@ func (w *Workflow) Resume(
 				if len(freshMatched) > 0 {
 					out = resumeOutput(freshMatched)
 				}
+				answeredThisTurn := ns.answeredThisTurn || len(freshMatched) > 0
 				ns.Status = NodeCompleted
 				ns.Output = out
 				ns.Interrupts = nil
 				deferredHandoffs = append(deferredHandoffs, deferredHandoff{
-					node: node, resp: out,
+					node: node, resp: out, answeredEarlier: !answeredThisTurn,
 				})
 				// A matched asker is itself an effective resume even
 				// when terminal (no successors to count in Pass 2):
@@ -217,7 +239,7 @@ func (w *Workflow) Resume(
 				// from resolvedCount), so a duplicate resume stays a
 				// no-op. freshMatched covers the runner-direct path
 				// where the response is not yet in history.
-				if ns.answeredThisTurn || len(freshMatched) > 0 {
+				if answeredThisTurn {
 					scheduled++
 				}
 			}
@@ -225,7 +247,9 @@ func (w *Workflow) Resume(
 
 		// Pass 2: walk successors of the deferred handoffs.
 		// All matched askers are now NodeCompleted, so any
-		// downstream JoinNode sees a settled predecessor set.
+		// downstream JoinNode sees a settled predecessor set, and
+		// each JoinNode is buffered at most once.
+		joinsBuffered := map[string]bool{}
 		for _, h := range deferredHandoffs {
 			// findSuccessors is called with event=nil, so
 			// successors reached only via a concrete Route
@@ -240,15 +264,27 @@ func (w *Workflow) Resume(
 			if ns := s.state.Nodes[h.node.Name()]; ns != nil {
 				parentBranch = ns.Branch
 			}
-			for _, succ := range findSuccessors(s.graph, s.state, h.node, h.resp, nil, parentBranch) {
-				// Skip a successor that already produced output on a
-				// prior turn: re-triggering it would re-run completed
-				// work (a duplicate resume). Keeps Resume idempotent.
-				if state.completed[succ.node.Name()] {
-					continue
+			from := h.node.Name()
+			// Skip a successor of an asker answered on an earlier turn
+			// when that successor already produced output: the earlier
+			// turn ran it, and re-triggering it would re-run completed
+			// work (a duplicate resume). Keeps Resume idempotent. An
+			// asker answered this turn triggers every successor, even
+			// one another predecessor ran before. An earlier answer
+			// whose successor never ran (a rejected response) does not
+			// skip it.
+			succs := slices.DeleteFunc(findSuccessors(s.graph, h.node, h.resp, nil, parentBranch), func(sc successor) bool {
+				return h.answeredEarlier && state.completed[sc.node.Name()]
+			})
+			// Non-join triggers first, then the barriers, as
+			// bufferSuccessors orders them.
+			scheduled += s.bufferSuccessors(from, slices.DeleteFunc(slices.Clone(succs), func(sc successor) bool { return sc.join }))
+			for _, sc := range succs {
+				name := sc.node.Name()
+				if sc.join && !joinsBuffered[name] && s.bufferBarrier(from, sc.node) {
+					joinsBuffered[name] = true
+					scheduled++
 				}
-				s.scheduleNode(succ.node, succ.input, succ.triggeredBy, succ.branch)
-				scheduled++
 			}
 		}
 
@@ -264,9 +300,27 @@ func (w *Workflow) Resume(
 				continue
 			}
 			if node := s.nodesByName[name]; node != nil {
-				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.Branch, ns.ResumedInputs)
+				s.enqueue(pendingActivation{
+					node: node, input: ns.Input, triggeredBy: ns.TriggeredBy,
+					branch: ns.Branch, runID: ns.runID, resumeInputs: ns.ResumedInputs,
+				})
 			}
 		}
+		// Restore the triggers that history shows were produced but had
+		// not started, behind the re-activations, so each runs once its
+		// node is free. A map has no history order, so nodes are restored
+		// by name; each node's own triggers keep their order.
+		for _, name := range slices.Sorted(maps.Keys(state.queued)) {
+			node := s.nodesByName[name]
+			if node == nil || invalidResponses[name] {
+				continue
+			}
+			for _, t := range state.queued[name] {
+				t.node = node
+				s.enqueue(t)
+			}
+		}
+		s.scheduleReady()
 
 		s.run(yield, false)
 	}

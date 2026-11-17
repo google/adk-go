@@ -18776,24 +18776,18 @@ func TestConcurrencyRace_FinishTaskEndsTheRunThatMadeTheCall(t *testing.T) {
 }
 
 // TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_EmitsNoAgentError has
-// two join nodes route to the same agent node, as in
-// TestConcurrencyRace_ReportedNodeOutcomeDoesNotEndRunningRun, and the first
-// run of the node's agent writes the metadata of the completion event of a
-// failed node run on an event without content, so it has not responded yet,
-// and answers only after the second run started. The report shows neither
-// that the first run is over nor that it failed, so no AGENT_ERROR row is
-// written for either run, which both return without an error.
-//
-// The workflow keeps one output accumulator per node name, so the second run
-// returns without content once the first run's answer has been handled: an
-// answer from each run would fail the workflow with ErrMultipleOutputs, and a
-// second run that ended first would let the workflow return before the first
-// run's answer was handled.
+// the first run of a node's agent write the metadata of the completion event
+// of a failed node run on an event without content, so it has not responded
+// yet, and then fail, so that the node's RetryConfig starts the second run on
+// the same node path. The first run ends its InvocationContext, which counts
+// as its response, only after the second run started. The report shows
+// neither that the first run is over nor that it failed, so starting the
+// second run purges nothing; the workflow agent's end finds the first run's
+// InvocationContext ended, and no AGENT_ERROR row is written for either run.
 func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_EmitsNoAgentError(t *testing.T) {
 	p, requests, _ := setupTestPlugin(t)
-	reported := make(chan struct{})
 	secondStarted := make(chan struct{})
-	firstAnswered := make(chan struct{})
+	firstEnded := make(chan struct{})
 	var calls, runs atomic.Int32
 	child, err := agent.New(agent.Config{
 		Name: "child",
@@ -18809,12 +18803,18 @@ func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_EmitsNoAgentError(t *te
 			return func(yield func(*session.Event, error) bool) {
 				if runs.Add(1) != 1 {
 					select {
-					case <-firstAnswered:
+					case <-firstEnded:
 					case <-time.After(10 * time.Second):
 					}
+					// The second run answers for the node: the first run
+					// failed and gives the node no output.
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "child"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "answer")
+					yield(ev, nil)
 					return
 				}
-				defer close(firstAnswered)
 				path := contextPath(ctx)
 				report := session.NewEvent(ctx, ctx.InvocationID())
 				report.Author = "child"
@@ -18825,54 +18825,43 @@ func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_EmitsNoAgentError(t *te
 					workflowNodeOutcomeKey:          workflowNodeFailedOutcome,
 				}
 				if !yield(report, nil) {
+					close(firstEnded)
 					return
 				}
-				close(reported)
-				select {
-				case <-secondStarted:
-				case <-time.After(10 * time.Second):
-				}
-				ev := session.NewEvent(ctx, ctx.InvocationID())
-				ev.Author = "child"
-				ev.Branch = ctx.Branch()
-				ev.Content = textContent("model", "answer")
-				yield(ev, nil)
+				// The workflow runs one activation of a node at a time, so
+				// the second run of child is the RetryConfig retry of this
+				// one, and it starts only once this run has failed. A
+				// goroutine of this run ends its InvocationContext after the
+				// second run started; the second run waits for it.
+				go func() {
+					defer close(firstEnded)
+					select {
+					case <-secondStarted:
+					case <-time.After(10 * time.Second):
+					}
+					ctx.EndInvocation()
+				}()
+				yield(nil, errors.New("the first run of child failed"))
 			}
 		},
 	})
 	if err != nil {
 		t.Fatalf("agent.New(child): %v", err)
 	}
-	x, err := workflow.NewAgentNode(child, workflow.NodeConfig{})
+	x, err := workflow.NewAgentNode(child, workflow.NodeConfig{
+		RetryConfig: &workflow.RetryConfig{
+			MaxAttempts:   2,
+			InitialDelay:  time.Millisecond,
+			MaxDelay:      time.Millisecond,
+			BackoffFactor: 1.0,
+		},
+	})
 	if err != nil {
 		t.Fatalf("workflow.NewAgentNode: %v", err)
 	}
-	quick := func(name string) workflow.Node {
-		return workflow.NewFunctionNode(name, func(agent.Context, any) (string, error) { return name, nil }, workflow.NodeConfig{})
-	}
-	a, b := quick("a"), quick("b")
-	c := workflow.NewFunctionNode("c", func(agent.Context, any) (string, error) {
-		select {
-		case <-reported:
-			return "c", nil
-		case <-time.After(10 * time.Second):
-			return "", errors.New("the first run of child never reported")
-		}
-	}, workflow.NodeConfig{})
-	j1, j2 := workflow.NewJoinNode("j1"), workflow.NewJoinNode("j2")
 	root, err := workflowagent.New(workflowagent.Config{
-		Name: "root",
-		Edges: []workflow.Edge{
-			{From: workflow.Start, To: a},
-			{From: workflow.Start, To: b},
-			{From: workflow.Start, To: c},
-			{From: a, To: j1},
-			{From: b, To: j1},
-			{From: a, To: j2},
-			{From: c, To: j2},
-			{From: j1, To: x, Route: workflow.Default},
-			{From: j2, To: x, Route: workflow.Default},
-		},
+		Name:  "root",
+		Edges: []workflow.Edge{{From: workflow.Start, To: x}},
 	})
 	if err != nil {
 		t.Fatalf("workflowagent.New: %v", err)
@@ -21995,15 +21984,15 @@ func TestRunner_UnjoinedStoppedStreamLeavesNoLateState(t *testing.T) {
 }
 
 // TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_CallInFlight_EmitsNoAgentError
-// has the first run of the node's agent in
-// TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_EmitsNoAgentError write
-// the metadata of the completion event of a failed node run, and then run a
-// declared LLM helper whose model call, or whose tool call, stays in flight
-// until the second run started. Neither the report nor the open call shows
-// that the first run failed or is over, so starting the second run purges
-// nothing: both runs and the helper return without an error, and no
-// AGENT_ERROR row is written. The helper's call still ends on the span that
-// started it.
+// has the first run of a node's agent write the metadata of the completion
+// event of a failed node run, start a declared LLM helper on a goroutine of
+// its own, answer and fail, leaving the helper's model call, or its tool
+// call, in flight until the second run started. The second run is the node's
+// RetryConfig retry on the same node path, which starts once the span of
+// that call is open. Neither the report nor the open call shows that the
+// first run is over, so starting the second run does not count the open call
+// as a failure and purges nothing, and no AGENT_ERROR row is written. The
+// helper's call still ends on the span that started it.
 func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_CallInFlight_EmitsNoAgentError(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -22060,73 +22049,114 @@ func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_CallInFlight_EmitsNoAge
 				},
 				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 					return func(yield func(*session.Event, error) bool) {
+						event := func() *session.Event {
+							ev := session.NewEvent(ctx, ctx.InvocationID())
+							ev.Author = "child"
+							ev.Branch = ctx.Branch()
+							return ev
+						}
+						answer := func() *session.Event {
+							ev := event()
+							ev.Content = textContent("model", "answer")
+							return ev
+						}
 						if runs.Add(1) != 1 {
 							select {
 							case <-firstDone:
 							case <-time.After(10 * time.Second):
 							}
+							// Each run answers: the plugin does not tell
+							// two open runs of one agent on one node path
+							// apart, so a run without an answer would take
+							// the first run's.
+							yield(answer(), nil)
 							return
 						}
-						defer close(firstDone)
 						path := contextPath(ctx)
-						report := session.NewEvent(ctx, ctx.InvocationID())
-						report.Author = "child"
-						report.Branch = ctx.Branch()
+						report := event()
 						report.NodeInfo = &session.NodeInfo{Path: path}
 						report.CustomMetadata = map[string]any{
 							workflowBasePathPrefix + "root": path[:max(strings.LastIndexByte(path, '/'), 0)],
 							workflowNodeOutcomeKey:          workflowNodeFailedOutcome,
 						}
 						if !yield(report, nil) {
+							close(firstDone)
 							return
 						}
 						close(reported)
-						for ev, err := range helper.Run(ctx) {
-							if !yield(ev, err) {
-								return
+						// The workflow runs one activation of a node at a
+						// time, so the second run of child is the
+						// RetryConfig retry of this one, on the same node
+						// path. The helper runs on a goroutine of its own,
+						// so that its call is still in flight when this run
+						// fails; the retry waits for that call (see x).
+						go func() {
+							defer close(firstDone)
+							for range helper.Run(ctx) {
 							}
+						}()
+						if !yield(answer(), nil) {
+							return
 						}
+						yield(nil, errors.New("the first run of child failed"))
 					}
 				},
 			})
 			if err != nil {
 				t.Fatalf("agent.New(child): %v", err)
 			}
-			x, err := workflow.NewAgentNode(child, workflow.NodeConfig{})
+			// The gate runs after the analytics plugin, which has opened the
+			// span of the helper's model call, or of its tool call, by the
+			// time the gate's callback sees that call.
+			inFlight := make(chan struct{})
+			var inFlightOnce sync.Once
+			markInFlight := func(ctx agent.Context) {
+				if ctx.AgentName() == "helper" {
+					inFlightOnce.Do(func() { close(inFlight) })
+				}
+			}
+			gateConfig := baseplugin.Config{Name: "in_flight_gate"}
+			if tc.toolCall {
+				gateConfig.BeforeToolCallback = func(ctx agent.Context, _ tool.Tool, _ map[string]any) (map[string]any, error) {
+					markInFlight(ctx)
+					return nil, nil
+				}
+			} else {
+				gateConfig.BeforeModelCallback = func(ctx agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+					markInFlight(ctx)
+					return nil, nil
+				}
+			}
+			gate, err := baseplugin.New(gateConfig)
+			if err != nil {
+				t.Fatalf("baseplugin.New(in_flight_gate): %v", err)
+			}
+			x, err := workflow.NewAgentNode(child, workflow.NodeConfig{
+				RetryConfig: &workflow.RetryConfig{
+					MaxAttempts:   2,
+					InitialDelay:  time.Millisecond,
+					MaxDelay:      time.Millisecond,
+					BackoffFactor: 1.0,
+					ShouldRetry: func(error) bool {
+						select {
+						case <-inFlight:
+						case <-time.After(10 * time.Second):
+						}
+						return true
+					},
+				},
+			})
 			if err != nil {
 				t.Fatalf("workflow.NewAgentNode: %v", err)
 			}
-			quick := func(name string) workflow.Node {
-				return workflow.NewFunctionNode(name, func(agent.Context, any) (string, error) { return name, nil }, workflow.NodeConfig{})
-			}
-			a, b := quick("a"), quick("b")
-			c := workflow.NewFunctionNode("c", func(agent.Context, any) (string, error) {
-				select {
-				case <-reported:
-					return "c", nil
-				case <-time.After(10 * time.Second):
-					return "", errors.New("the first run of child never reported")
-				}
-			}, workflow.NodeConfig{})
-			j1, j2 := workflow.NewJoinNode("j1"), workflow.NewJoinNode("j2")
 			root, err := workflowagent.New(workflowagent.Config{
-				Name: "root",
-				Edges: []workflow.Edge{
-					{From: workflow.Start, To: a},
-					{From: workflow.Start, To: b},
-					{From: workflow.Start, To: c},
-					{From: a, To: j1},
-					{From: b, To: j1},
-					{From: a, To: j2},
-					{From: c, To: j2},
-					{From: j1, To: x, Route: workflow.Default},
-					{From: j2, To: x, Route: workflow.Default},
-				},
+				Name:  "root",
+				Edges: []workflow.Edge{{From: workflow.Start, To: x}},
 			})
 			if err != nil {
 				t.Fatalf("workflowagent.New: %v", err)
 			}
-			for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			for _, err := range newTestRunner(t, root, p, gate).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
 				if err != nil {
 					t.Errorf("runner.Run error: %v", err)
 				}

@@ -17,7 +17,9 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -200,6 +202,15 @@ func hasResumableScan(scans map[string]*nodeScanState) bool {
 // activations are reconstructed for retry on a valid resume. Returns
 // (nil, nil) when no node has interrupt or failure history.
 //
+// When the events carry run ids ("<name>@<run id>" paths), the returned
+// state also carries the run id of each rebuilt node's latest
+// activation, the highest run id of every node in history, and the
+// triggers history shows were produced for a rebuilt node but had not
+// started; Resume re-activates the node under that run id, continues
+// the count, and runs those triggers once the node is free. A RunState
+// built by hand (NewRunState) has none of these, and run ids then
+// restart at 1.
+//
 // invocationID scopes the scan to a single logical run: events from
 // other invocations are skipped, so a fresh run started in a session
 // that already holds a completed run does not collide with it (a stable
@@ -245,14 +256,20 @@ func (w *Workflow) reconstructRunState(sess session.Session, invocationID string
 	if err != nil {
 		return nil, err
 	}
+	// Dry-run the scheduler's trigger logic over the history: which
+	// trigger each activation consumed and which had not started.
+	replay := replayHistory(w.graph, events, nodesByName, invocationID, w.name, workflowInput)
 
 	// Stage 3: turn each interrupted node's scan into a NodeState.
-	state, err := w.buildRunState(scans, nodesByName, nodeOutputs, workflowInput)
+	state, err := w.buildRunState(scans, nodesByName, nodeOutputs, workflowInput, replay)
 	if err != nil {
 		return nil, err
 	}
 	if state == nil {
 		return nil, nil
+	}
+	if replay != nil {
+		state.runCounts = replay.maxRun
 	}
 	// Restore completed predecessors as well as interrupted nodes. Join
 	// barriers consult Nodes, not the completed set used to skip replayed
@@ -290,6 +307,7 @@ func (w *Workflow) reconstructRunState(sess session.Session, invocationID string
 func scanHistory(events session.Events, nodesByName map[string]Node, invocationID, workflowName string) map[string]*nodeScanState {
 	scans := map[string]*nodeScanState{}
 	interruptOwner := map[string]string{} // interrupt ID -> node name
+	latestRun := map[string]int{}         // node name -> highest run id seen
 	scanFor := func(name string) *nodeScanState {
 		s := scans[name]
 		if s == nil {
@@ -332,8 +350,13 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 				if sf.resolvedCount[fr.ID] == 0 || sf.failed {
 					sf.finished = false
 				}
-				sf.resolved[fr.ID] = unwrapResponse(fr.Response)
-				sf.resolvedCount[fr.ID]++
+				resp := unwrapResponse(fr.Response)
+				sf.resolved[fr.ID] = resp
+				// Only a response its schema accepts was consumed: one
+				// Resume rejected leaves the next valid answer the first.
+				if sc := sf.schemas[fr.ID]; sc == nil || validResumeResponse(resp, sc) {
+					sf.resolvedCount[fr.ID]++
+				}
 			}
 			continue
 		}
@@ -344,6 +367,16 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 		owner := eventNodeName(ev, nodesByName)
 		if _, ok := nodesByName[owner]; !ok {
 			continue
+		}
+		// A later activation of the node starts a fresh scan, so an
+		// earlier activation's interrupts and responses do not carry
+		// into it.
+		if key, ok := eventActivation(ev, nodesByName); ok && key.name == owner && key.run > latestRun[owner] {
+			if latestRun[owner] > 0 {
+				delete(scans, owner)
+				maps.DeleteFunc(interruptOwner, func(_, name string) bool { return name == owner })
+			}
+			latestRun[owner] = key.run
 		}
 		s := scanFor(owner)
 		for _, name := range eventOutputOwners(ev, nodesByName) {
@@ -514,14 +547,16 @@ func graphHistoryEvent(ev *session.Event, workflowName string) *session.Event {
 }
 
 // buildRunState maps interrupted or failed nodes' scans to NodeStates.
+// replay, when non-nil, supplies each rebuilt node's run id, the input of
+// its latest activation and its triggers that had not started.
 // Returns (nil, nil) when there is no interrupt or failure history.
-func (w *Workflow) buildRunState(scans map[string]*nodeScanState, nodesByName map[string]Node, nodeOutputs map[string]any, workflowInput any) (*RunState, error) {
+func (w *Workflow) buildRunState(scans map[string]*nodeScanState, nodesByName map[string]Node, nodeOutputs map[string]any, workflowInput any, replay *triggerReplay) (*RunState, error) {
 	var state *RunState
 	for nodeName, scan := range scans {
 		if len(scan.interrupts) == 0 && !scan.failed {
 			continue
 		}
-		ns, err := w.inferNodeState(nodesByName[nodeName], scan, nodeOutputs, workflowInput)
+		ns, err := w.inferNodeState(nodesByName[nodeName], scan, nodeOutputs, workflowInput, replay)
 		if err != nil {
 			return nil, err
 		}
@@ -532,6 +567,16 @@ func (w *Workflow) buildRunState(scans map[string]*nodeScanState, nodesByName ma
 			state = NewRunState()
 		}
 		state.Nodes[nodeName] = ns
+		if replay == nil || replay.maxRun[nodeName] == 0 {
+			continue
+		}
+		ns.runID = strconv.Itoa(replay.maxRun[nodeName])
+		if queued := replay.queued[nodeName]; len(queued) > 0 && !replay.bad[nodeName] {
+			if state.queued == nil {
+				state.queued = map[string][]pendingActivation{}
+			}
+			state.queued[nodeName] = queued
+		}
 	}
 	return state, nil
 }
@@ -586,6 +631,13 @@ func validateResolved(scan *nodeScanState) (map[string]any, error) {
 	return resumed, nil
 }
 
+// validResumeResponse reports whether resp passes schema, the check
+// Resume applies before it consumes a response.
+func validResumeResponse(resp any, schema *jsonschema.Schema) bool {
+	_, err := validateResumeResponse(resp, schema)
+	return err == nil
+}
+
 // inferNodeState maps a node's scan to a NodeState, mirroring
 // adk-python _infer_node_state.
 //
@@ -598,7 +650,7 @@ func validateResolved(scan *nodeScanState) (map[string]any, error) {
 //   - all resolved, re-run                           -> NodePending (re-entry)
 //   - all resolved, handoff                          -> NodeCompleted
 //     with Output = the response (forwarded to successors by Resume)
-func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs map[string]any, workflowInput any) (*NodeState, error) {
+func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs map[string]any, workflowInput any, replay *triggerReplay) (*NodeState, error) {
 	unresolved := unresolvedInterrupts(scan)
 	reenter := w.graph.rerunsOnResume(node)
 
@@ -616,18 +668,21 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		ns.Status = NodePending
 		ns.ResumedInputs = resumed
 		ns.Interrupts = unresolved
-		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, workflowInput)
+		ns.Input, ns.TriggeredBy = w.activationInput(node, nodeOutputs, workflowInput, replay)
 	case len(unresolved) > 0:
-		// Still waiting for the remaining interrupts.
+		// Still waiting for the remaining interrupts. A direct Resume
+		// may answer them without the response being in history, and
+		// then re-enters the node with this input.
 		ns.Status = NodeWaiting
 		ns.Interrupts = unresolved
+		ns.Input, ns.TriggeredBy = w.activationInput(node, nodeOutputs, workflowInput, replay)
 		if len(resumed) > 0 {
 			ns.ResumedInputs = resumed
 		}
 	case scan.failed:
 		ns.Status = NodeFailed
 		ns.ResumedInputs = resumed
-		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, workflowInput)
+		ns.Input, ns.TriggeredBy = w.activationInput(node, nodeOutputs, workflowInput, replay)
 	case scan.finished:
 		// A re-entry node may have finished on an earlier resume turn.
 		// Its consumed interrupt must not turn it back into Pending.
@@ -637,7 +692,7 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		// All resolved, re-entry: re-run with the responses.
 		ns.Status = NodePending
 		ns.ResumedInputs = resumed
-		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, workflowInput)
+		ns.Input, ns.TriggeredBy = w.activationInput(node, nodeOutputs, workflowInput, replay)
 	default:
 		// All resolved, handoff: the node is done; its output is the
 		// response, which Resume forwards to successors. Keep the
@@ -657,6 +712,19 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		}
 	}
 	return ns, nil
+}
+
+// activationInput returns the input and triggering node of node's latest
+// activation: the trigger that activation consumed in the history
+// replay, or predecessorInput's answer when the replay has none (no run
+// ids in history, or history that does not replay).
+func (w *Workflow) activationInput(node Node, nodeOutputs map[string]any, workflowInput any, replay *triggerReplay) (any, string) {
+	if replay != nil && node != nil && !replay.bad[node.Name()] {
+		if t, ok := replay.trigger[node.Name()][replay.maxRun[node.Name()]]; ok {
+			return t.input, t.triggeredBy
+		}
+	}
+	return w.predecessorInput(node, nodeOutputs, workflowInput)
 }
 
 // predecessorInput walks incoming edges backward to find a resuming
