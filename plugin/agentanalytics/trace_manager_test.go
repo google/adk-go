@@ -24125,12 +24125,14 @@ func TestRetiredCallerReadsCause(t *testing.T) {
 				tm.popAgentSpan(ctx, q) // q ends while call-q is open
 				_, p2, _ = tm.popToolSpan(ctx, q, cq, false)
 			}
-			for _, p := range append(p1, p2...) {
-				if p.agentName == "g" && errors.Is(p.err, siblingErr) {
-					return
-				}
+			if len(p1) != 0 {
+				t.Errorf("AGENT_ERROR rows on call-1 end = %d, want none: %v", len(p1), p1)
 			}
-			t.Error("no AGENT_ERROR row for g; main and the live state write one")
+			if len(p2) != 2 ||
+				p2[0].agentName != "g" || !errors.Is(p2[0].err, siblingErr) ||
+				p2[1].agentName != "o" || p2[1].err == nil || !strings.Contains(p2[1].err.Error(), `agent "o" execution failed before completion`) {
+				t.Errorf("AGENT_ERROR rows on call-q end = %v, want [g (%v), o (execution failed before completion)]", p2, siblingErr)
+			}
 		})
 	}
 }
