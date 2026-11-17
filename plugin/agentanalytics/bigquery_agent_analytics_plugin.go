@@ -1021,14 +1021,6 @@ func taskEndResult(resp map[string]any) (ends, failed bool, errMsg string) {
 	return true, failed, errMsg
 }
 
-// isTaskCompletedResult reports whether a finish_task response map carries the
-// successful completion sentinel ("result": "Task completed.") without a
-// classified tool result error (see taskEndResult).
-func isTaskCompletedResult(resp map[string]any) bool {
-	ends, failed, _ := taskEndResult(resp)
-	return ends && !failed
-}
-
 // taskEndResponse applies taskEndResult to the first finish_task function
 // response in c, which is the one that decides whether ADK ends a task-mode
 // LLM agent.
@@ -1045,15 +1037,6 @@ func taskEndResponse(c *genai.Content) (ends, failed bool, errMsg string) {
 		}
 	}
 	return false, false, ""
-}
-
-// hasTaskCompletedResponse reports whether c carries a successful
-// finish_task function response ("result": "Task completed." without a
-// classified tool result error), which ends a task-mode LLM agent in ADK
-// without running its AfterAgentCallback.
-func hasTaskCompletedResponse(c *genai.Content) bool {
-	ends, failed, _ := taskEndResponse(c)
-	return ends && !failed
 }
 
 // functionResponseCalls returns the function call ID, or else the tool name,

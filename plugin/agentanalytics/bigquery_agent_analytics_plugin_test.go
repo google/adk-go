@@ -5331,7 +5331,7 @@ func TestPlugin_ToolResultIsError(t *testing.T) {
 						return func(yield func(*session.Event, error) bool) {
 							var held []*session.Event
 							nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
-							for i := 0; i < 2; i++ {
+							for range 2 {
 								runCount.Add(1)
 								for ev, err := range llmagent.RunLLMAgentAsNode(taskAgent, nodeCtx, "work") {
 									if err != nil {
@@ -5538,6 +5538,23 @@ func TestPlugin_ToolErrorEmptyMessage(t *testing.T) {
 			})
 		})
 	}
+}
+
+// isTaskCompletedResult reports whether a finish_task response map carries the
+// successful completion sentinel ("result": "Task completed.") without a
+// classified tool result error (see taskEndResult).
+func isTaskCompletedResult(resp map[string]any) bool {
+	ends, failed, _ := taskEndResult(resp)
+	return ends && !failed
+}
+
+// hasTaskCompletedResponse reports whether c carries a successful
+// finish_task function response ("result": "Task completed." without a
+// classified tool result error), which ends a task-mode LLM agent in ADK
+// without running its AfterAgentCallback.
+func hasTaskCompletedResponse(c *genai.Content) bool {
+	ends, failed, _ := taskEndResponse(c)
+	return ends && !failed
 }
 
 // requireInvocationCompletedOKWithAgentErrors is requireInvocationCompletedOK
@@ -5800,7 +5817,7 @@ func TestMCPRecoverySingleToolError(t *testing.T) {
 						return func(yield func(*session.Event, error) bool) {
 							var held []*session.Event
 							nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
-							for i := 0; i < 2; i++ {
+							for range 2 {
 								runCount.Add(1)
 								for ev, err := range llmagent.RunLLMAgentAsNode(taskAgent, nodeCtx, "work") {
 									if err != nil {
