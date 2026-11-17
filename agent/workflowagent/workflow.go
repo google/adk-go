@@ -50,6 +50,23 @@ type Config struct {
 // workflow resumes on a follow-up turn when the user submits a
 // FunctionResponse targeting the InterruptID emitted by the
 // paused node.
+//
+// In a resumable run (runner.Config.Resumable) the agent yields one
+// end-of-agent event, authored by itself, after the workflow has finished with
+// no node waiting for input, so that a resumable ParallelAgent above it does
+// not run the workflow again on resume. It yields none when the run is not
+// resumable, a node failed, the caller stopped reading, or a node still waits
+// for a long-running call or an input request, including one that has waited
+// since an earlier turn.
+//
+// In a resumable ParallelAgent, a turn that answers another branch does not
+// resume a graph workflow agent branch that paused for input, because a graph
+// workflow agent resumes only when the turn answers its own pending request:
+// when the turn answers an input request of another branch (a
+// [session.RequestInput], also one raised by an agent nested in that branch),
+// the turn fails with an error that matches [workflow.ErrNothingToResume];
+// when it answers anything else, such as a long-running function call, the
+// paused workflow runs its nodes again from the start.
 func New(cfg Config) (agent.Agent, error) {
 	w, err := workflow.New(cfg.Name, cfg.Edges)
 	if err != nil {
