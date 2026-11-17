@@ -502,3 +502,67 @@ func TestAgentRunOnAgentErrorCallbackNotifiesEveryPlugin(t *testing.T) {
 		t.Errorf("notified plugins = %v, want [first second]", notified)
 	}
 }
+
+// pausedErr is an error that reports a pause, the way a tool's pause on its
+// way out of the flow does.
+type pausedErr struct{}
+
+func (pausedErr) Error() string { return "paused" }
+func (pausedErr) Paused() bool  { return true }
+
+// Fails if runOnAgentErrorCallbacks notifies plugins of a pause, which
+// adk-python's on_agent_error never sees (agents/base_agent.py:448-450 catch
+// only Exception, and a pause is a BaseException).
+func TestRunOnAgentError_PausedErrorSkipsPlugins(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantCalls int
+	}{
+		{name: "pause", err: pausedErr{}, wantCalls: 0},
+		{name: "wrapped pause", err: fmt.Errorf("x: %w", pausedErr{}), wantCalls: 0},
+		{name: "ordinary error", err: errors.New("run failed"), wantCalls: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var calls int
+			p, err := plugin.New(plugin.Config{
+				Name:                 "observer",
+				OnAgentErrorCallback: func(agent.Context, agent.Agent, error) { calls++ },
+			})
+			if err != nil {
+				t.Fatalf("plugin.New() error = %v", err)
+			}
+			pm, err := plugininternal.NewPluginManager(plugininternal.PluginConfig{Plugins: []*plugin.Plugin{p}})
+			if err != nil {
+				t.Fatalf("NewPluginManager() error = %v", err)
+			}
+			a, err := agent.New(agent.Config{
+				Name: "pausing",
+				Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						yield(nil, test.err)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New() error = %v", err)
+			}
+			ic := icontext.NewInvocationContext(plugininternal.ToContext(t.Context(), pm), icontext.InvocationContextParams{Agent: a})
+
+			var runErr error
+			for _, err := range a.Run(ic) {
+				if err != nil {
+					runErr = err
+				}
+			}
+
+			if runErr != test.err {
+				t.Errorf("Run() error = %v, want %v", runErr, test.err)
+			}
+			if calls != test.wantCalls {
+				t.Errorf("OnAgentErrorCallback calls = %d, want %d", calls, test.wantCalls)
+			}
+		})
+	}
+}

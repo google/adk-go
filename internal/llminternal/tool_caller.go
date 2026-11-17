@@ -45,6 +45,10 @@ type toolResult struct {
 	// raw is that value. Both are unset for a map result.
 	wrapper map[string]any
 	raw     any
+	// stop is a *toolinternal.PausedError, or the error that ends the run;
+	// nil for a normal answer. When it is set, nothing else in the result is
+	// read and no function response is written for the call.
+	stop error
 }
 
 // normalizeRawResult is _normalize_tool_result (_caller.py:66-70) for the

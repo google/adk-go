@@ -438,6 +438,13 @@ func runOnAgentErrorCallbacks(ctx InvocationContext, err error) {
 	if agentinternal.IsCallerCancellation(ctx, err) {
 		return
 	}
+	// A pause waits for the user and is not a failure: adk-python's
+	// on_agent_error handler catches only Exception, and its pause is a
+	// BaseException (agents/base_agent.py:448-450).
+	var paused interface{ Paused() bool }
+	if errors.As(err, &paused) && paused.Paused() {
+		return
+	}
 	pluginManager := pluginManagerFromContext(ctx)
 	if pluginManager == nil {
 		return
