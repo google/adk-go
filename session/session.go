@@ -227,6 +227,11 @@ func (e *Event) IsFinalResponse() bool {
 	if e.Actions.SkipSummarization || len(e.LongRunningToolIDs) > 0 {
 		return true
 	}
+	// A complete error event ends the turn even when it carries a function
+	// response or a code execution result; only a function call keeps it open.
+	if e.LLMResponse.ErrorCode != "" && !e.LLMResponse.Partial && !hasFunctionCalls(&e.LLMResponse) {
+		return true
+	}
 
 	return !hasFunctionCalls(&e.LLMResponse) && !hasFunctionResponses(&e.LLMResponse) && !e.LLMResponse.Partial && !hasTrailingCodeExecutionResult(&e.LLMResponse)
 }
@@ -405,8 +410,7 @@ func (c *EventCompaction) clone() *EventCompaction {
 			if p == nil {
 				continue
 			}
-			part := *p
-			content.Parts[i] = &part
+			content.Parts[i] = new(*p)
 		}
 		out.CompactedContent = &content
 	}

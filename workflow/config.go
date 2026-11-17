@@ -43,8 +43,7 @@ func defaultShouldRetry(err error) bool {
 //	rc.MaxAttempts = 10
 //	cfg := workflow.NodeConfig{RetryConfig: rc}
 func DefaultRetryConfig() *RetryConfig {
-	cfg := defaultRetryConfig
-	return &cfg
+	return new(defaultRetryConfig)
 }
 
 // NodeConfig defines the configuration for a node.

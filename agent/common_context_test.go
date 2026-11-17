@@ -64,8 +64,7 @@ func TestCommonContext_ContextFallbackDelegation(t *testing.T) {
 			name: "NewToolContext wrapping branchOverride adapter (delegates fallback to c.Context)",
 			buildWrapped: func(parent Context) Context {
 				tc := NewToolContext(parent, "call-id-1", nil, nil)
-				branch := "parallel-branch"
-				return tc.WithDelta(&CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: &branch}})
+				return tc.WithDelta(&CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: new("parallel-branch")}})
 			},
 		},
 	}
