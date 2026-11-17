@@ -19,6 +19,7 @@ package workflow
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -71,12 +72,7 @@ type Route interface {
 }
 
 func matchRoute(routeValue string, event *session.Event) bool {
-	for _, v := range event.Routes {
-		if v == routeValue {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(event.Routes, routeValue)
 }
 
 // StringRoute is a route defined by a string value.

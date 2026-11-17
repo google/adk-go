@@ -395,8 +395,7 @@ type hitlAskerNode struct {
 func newHitlAsker(name, interruptID string, rerunOnResume bool) *hitlAskerNode {
 	cfg := workflow.NodeConfig{}
 	if rerunOnResume {
-		t := true
-		cfg.RerunOnResume = &t
+		cfg.RerunOnResume = new(true)
 	}
 	return &hitlAskerNode{
 		BaseNode:    workflow.NewBaseNode(name, "", cfg),
@@ -514,4 +513,52 @@ func eventFields(ev *session.Event) []string {
 		}
 	}
 	return fields
+}
+
+// A workflow agent paused in two runs, then one message answering both
+// interrupts: the workflow resumes the first run instead of restarting the
+// graph, which would run finished nodes again and ask a new question.
+func TestRunner_WorkflowAgent_AnswersToTwoPausedRunsResumeTheFirst(t *testing.T) {
+	ctx := t.Context()
+	var prepareRuns atomic.Int32
+	prepare := workflow.NewFunctionNode(
+		"prepare",
+		func(ctx agent.Context, input string) (string, error) {
+			prepareRuns.Add(1)
+			return "prepared:" + input, nil
+		},
+		workflow.NodeConfig{},
+	)
+	asker := newHitlAsker("asker", "", false /*rerunOnResume*/)
+	var handlerInput atomic.Value
+	handler := workflow.NewFunctionNode(
+		"handler",
+		func(ctx agent.Context, input string) (string, error) {
+			handlerInput.Store(input)
+			return "handled:" + input, nil
+		},
+		workflow.NodeConfig{},
+	)
+	r := newWorkflowRunner(t, workflow.Chain(workflow.Start, prepare, asker, handler))
+	id1, name1 := findLongRunningInterrupt(drainRunner(t, r.Run(ctx, nodeTestUser, nodeTestSession, userText("draft1"), agent.RunConfig{})))
+	id2, name2 := findLongRunningInterrupt(drainRunner(t, r.Run(ctx, nodeTestUser, nodeTestSession, userText("draft2"), agent.RunConfig{})))
+	if id1 == "" || id2 == "" || id1 == id2 {
+		t.Fatalf("interrupt IDs = %q, %q, want two different IDs", id1, id2)
+	}
+
+	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{FunctionResponse: &genai.FunctionResponse{ID: id1, Name: name1, Response: map[string]any{"payload": "first"}}},
+		{FunctionResponse: &genai.FunctionResponse{ID: id2, Name: name2, Response: map[string]any{"payload": "second"}}},
+	}}
+	newID, _ := findLongRunningInterrupt(drainRunner(t, r.Run(ctx, nodeTestUser, nodeTestSession, msg, agent.RunConfig{})))
+
+	if got := prepareRuns.Load(); got != 2 {
+		t.Errorf("prepare ran %d times, want 2", got)
+	}
+	if newID != "" {
+		t.Errorf("the run raised a new interrupt %q, want the paused run resumed", newID)
+	}
+	if got := handlerInput.Load(); got != "first" {
+		t.Errorf("handler input = %v, want %q", got, "first")
+	}
 }

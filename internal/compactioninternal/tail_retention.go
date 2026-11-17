@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"unicode/utf8"
 
 	"google.golang.org/genai"
@@ -244,14 +245,14 @@ func jsonChars(v map[string]any) int {
 // The second result is false when no count could be determined, which callers
 // treat as "do not compact yet".
 func promptTokenCount(events []*session.Event, scope TurnScope, estimate TokenCounter) (int, bool) {
-	for i := len(events) - 1; i >= 0; i-- {
+	for i, event := range slices.Backward(events) {
 		// Only what this turn can see. The count is read to decide whether this
 		// turn's prompt is too large, and that prompt is assembled with the
 		// same branch and isolation-scope filtering, so a reading from a
 		// sibling branch describes a different conversation. A sub-agent whose
 		// own prompt is a couple of tokens read its parent's 200,000 and
 		// compacted history it had no business compacting.
-		if !scope.visible(events[i]) {
+		if !scope.visible(event) {
 			continue
 		}
 		// Skip compaction events. A summary carries the usage metadata of the
@@ -259,10 +260,10 @@ func promptTokenCount(events []*session.Event, scope TurnScope, estimate TokenCo
 		// rather than the agent's prompt. Reading it latches compaction on: the
 		// summarizer's count is typically far above the threshold, so every
 		// later turn sees the threshold crossed and compacts again.
-		if hasCompaction(events[i]) {
+		if hasCompaction(event) {
 			continue
 		}
-		if usage := events[i].UsageMetadata; usage != nil && usage.PromptTokenCount > 0 {
+		if usage := event.UsageMetadata; usage != nil && usage.PromptTokenCount > 0 {
 			// Add an estimate for everything appended since that count was
 			// reported. The reported number describes the prompt of an earlier
 			// call, so on its own it lags by however much the turn has grown:

@@ -238,7 +238,7 @@ func run() error {
 	}
 
 	want := map[string]bool{}
-	for _, n := range strings.Split(*armList, ",") {
+	for n := range strings.SplitSeq(*armList, ",") {
 		want[strings.TrimSpace(n)] = true
 	}
 	for n := range want {
@@ -441,8 +441,8 @@ func recalled(answer string, f fact) bool {
 // server-side debug detail, and printing it mid-batch buries the results.
 func firstLine(err error) string {
 	s := err.Error()
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
+	if before, _, ok := strings.Cut(s, "\n"); ok {
+		return before
 	}
 	return truncate(s, 160)
 }
@@ -477,13 +477,13 @@ func buriedFacts(ctx context.Context, svc session.Service, appName, userID, sess
 		covered = append(covered, span{c.StartTimestamp.UnixNano(), c.EndTimestamp.UnixNano()})
 		if verbose {
 			n++
-			var text string
+			var text strings.Builder
 			for _, p := range c.CompactedContent.Parts {
 				if p != nil {
-					text += p.Text
+					text.WriteString(p.Text)
 				}
 			}
-			fmt.Printf("  [%s] summary %d (%d chars):\n%s\n\n", arm, n, len(text), text)
+			fmt.Printf("  [%s] summary %d (%d chars):\n%s\n\n", arm, n, text.Len(), text.String())
 		}
 	}
 
@@ -492,10 +492,10 @@ func buriedFacts(ctx context.Context, svc session.Service, appName, userID, sess
 		if ev.Actions.Compaction != nil || ev.LLMResponse.Content == nil {
 			continue
 		}
-		var text string
+		var text strings.Builder
 		for _, p := range ev.LLMResponse.Content.Parts {
 			if p != nil {
-				text += p.Text
+				text.WriteString(p.Text)
 			}
 		}
 		at := ev.Timestamp.UnixNano()
@@ -504,7 +504,7 @@ func buriedFacts(ctx context.Context, svc session.Service, appName, userID, sess
 			// uses it: a plain substring test finds the label "7" inside
 			// INC-77312 and tarn-staging-91, which would mark that fact buried
 			// on the strength of unrelated events.
-			if !matchesAny(f.matchers, text) {
+			if !matchesAny(f.matchers, text.String()) {
 				continue
 			}
 			for _, s := range covered {

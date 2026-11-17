@@ -200,9 +200,7 @@ func TestLlmAgent_New_ConcurrentCoordinatorsOverOneSubAgent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for i := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if _, err := llmagent.New(llmagent.Config{
 				Name:      fmt.Sprintf("coordinator-%d", i),
 				Mode:      llmagent.ModeChat,
@@ -210,7 +208,7 @@ func TestLlmAgent_New_ConcurrentCoordinatorsOverOneSubAgent(t *testing.T) {
 			}); err != nil {
 				t.Errorf("llmagent.New(coordinator): %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -228,13 +226,11 @@ func TestNewAgentNode_ConcurrentWrappingIsRaceFree(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if _, err := workflow.NewAgentNode(a, workflow.NodeConfig{}); err != nil {
 				t.Errorf("NewAgentNode: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -304,16 +300,14 @@ func TestOneAgentInstance_ConcurrentInvocationsAreRaceFree(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for i, wf := range wfs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for _, err := range wf.Run(ctxs[i]) {
 				if err != nil {
 					t.Errorf("workflow.Run: %v", err)
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

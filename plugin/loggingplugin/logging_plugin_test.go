@@ -20,6 +20,40 @@ import (
 	"google.golang.org/genai"
 )
 
+func TestFormatContentTruncatesByCharacter(t *testing.T) {
+	p := &loggingPlugin{name: "test"}
+	tests := []struct {
+		name      string
+		text      string
+		maxLength int
+		want      string
+	}{
+		{name: "ascii", text: "hello world", maxLength: 5, want: "text: 'hello...'"},
+		{name: "multi-byte", text: "日本語のテキスト", maxLength: 4, want: "text: '日本語の...'"},
+		{name: "multi-byte fits", text: "日本語", maxLength: 3, want: "text: '日本語'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := p.formatContent(genai.NewContentFromText(tt.text, genai.RoleUser), tt.maxLength)
+			if got != tt.want {
+				t.Errorf("formatContent(%q, %d) = %q, want %q", tt.text, tt.maxLength, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatArgsTruncatesByCharacter(t *testing.T) {
+	p := &loggingPlugin{name: "test"}
+	got := p.formatArgs(map[string]any{"q": "日本語"}, 6)
+	if want := "map[q:...}"; got != want {
+		t.Errorf("formatArgs() = %q, want %q", got, want)
+	}
+	got = p.formatArgs(map[string]any{"q": "日本語"}, 7)
+	if want := "map[q:日...}"; got != want {
+		t.Errorf("formatArgs() = %q, want %q", got, want)
+	}
+}
+
 func TestFormatContentSkipsNilParts(t *testing.T) {
 	p := &loggingPlugin{}
 	for _, tc := range []struct {

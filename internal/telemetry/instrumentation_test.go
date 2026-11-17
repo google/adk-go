@@ -46,7 +46,7 @@ func TestInstrumentInvocation_FirstErrorAndEarlyStop(t *testing.T) {
 	}
 
 	seen := 0
-	for range InstrumentInvocation(t.Context(), testAgent{}, "s", run) {
+	for range InstrumentInvocation(t.Context(), testAgent{}, "s", run) { //nolint:errcheck // the run yields errors by design; the span status below carries the first one
 		if seen++; seen == 2 {
 			break
 		}
@@ -69,7 +69,10 @@ func TestInstrumentInvocation_NestedOpensNoSpan(t *testing.T) {
 	}
 
 	ctx, outer := startInvokeWorkflowSpan(t.Context(), "outer", "s")
-	for range InstrumentInvocation(ctx, testAgent{}, "s", run) {
+	for _, err := range InstrumentInvocation(ctx, testAgent{}, "s", run) {
+		if err != nil {
+			t.Fatalf("InstrumentInvocation() error = %v", err)
+		}
 	}
 	outer.End()
 
@@ -92,7 +95,10 @@ func TestInstrumentGenerateContent_EarlyStop(t *testing.T) {
 	}
 	params := GenerateContentParams{ModelName: "m", Request: &model.LLMRequest{}, Stream: true}
 
-	for range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+	for _, err := range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+		if err != nil {
+			t.Fatalf("InstrumentGenerateContent() error = %v", err)
+		}
 		break
 	}
 
@@ -135,7 +141,10 @@ func TestInstrumentGenerateContent_UsageFromLatestReport(t *testing.T) {
 		}
 	}
 	params := GenerateContentParams{ModelName: "m", Request: &model.LLMRequest{}, Stream: true}
-	for range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+	for _, err := range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+		if err != nil {
+			t.Fatalf("InstrumentGenerateContent() error = %v", err)
+		}
 	}
 
 	var got int64
