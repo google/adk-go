@@ -171,23 +171,22 @@ type Context interface {
 	// goes to this context's state delta and to the session's state.
 	//
 	// When a model turn holds several function calls, ADK runs the calls
-	// concurrently and orders their use of State by position in the model's
-	// response. The first time a call uses State (Get, Set or All), ADK waits
-	// until every earlier call has returned, or until the call's context is
-	// done. In that case Get and Set return an error that wraps the context's
-	// error, and All yields nothing. A call therefore sees every write of the
-	// calls before it, a read-modify-write in two calls (read n, write n+1)
-	// adds 2, and two calls' updates of one key apply in call order, even when
-	// a call blocks between its read and its write. A call that never uses
-	// State is never delayed, and ReadonlyState never waits: a call that only
-	// reads should use it, so that it does not wait for the calls before it.
+	// concurrently, and State does not order them: Get, Set and All never wait
+	// for another call, and a call reads what the calls that have already
+	// written put there. A tool that updates state that its sibling calls also
+	// update either guards the update with a lock of its own, which it may
+	// hold across State, or declares itself sequential (tool.SequentialRunner,
+	// functiontool.Config.Sequential). A call of a sequential tool starts only
+	// after every earlier call of the turn has returned, whether those calls
+	// are sequential or not, so it sees all of their writes.
 	//
-	// A call must not wait for something that a later call does with State:
-	// the later call is waiting for it, and both wait until the context is
-	// done. The guarantee covers this method only. ReadonlyState, every run
-	// that a tool starts with a runner (such as an agent tool's sub-agent),
-	// and use of State after the call has returned (a streaming tool's
-	// goroutine in live mode) are not ordered.
+	// When several calls write one key, the event that merges the turn's
+	// responses takes the value of the later call in the model's response. A
+	// lock alone therefore keeps each read-modify-write atomic but can leave a
+	// scalar one update short: two calls that each read n and write n+1 under
+	// the lock leave n+1 when the later call takes the lock first. A
+	// sequential tool's calls leave n+2. Use of State after the call has
+	// returned (a streaming tool's goroutine in live mode) is not ordered.
 	//
 	// The returned State, like the call's context, belongs to one call at a
 	// time: Set writes the call's state delta, a plain map, so a call must not

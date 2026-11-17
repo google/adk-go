@@ -1996,9 +1996,11 @@ func (f *Flow) handleFunctionCallsInOrder(ctx agent.InvocationContext, toolsDict
 	// Tool calls run via the context's task runner: concurrent goroutines by
 	// default, or a caller-installed runner (platform.WithTaskRunner).
 	tasks := make([]func(context.Context), len(fnCalls))
-	// Orders the calls' use of session state by call index (see
-	// agent.Context.State). A batch of one gets an order too, so that its call
-	// does not keep the place of an enclosing batch.
+	// Orders the calls by call index for the code that takes its turn: the
+	// calls of a sequential tool (see tool.SequentialRunner and callTool) and
+	// in-tree code that calls adkcontext.AwaitEarlierCalls. It does not order
+	// State. A batch of one gets an order too, so that its call does not keep
+	// the place of an enclosing batch.
 	order := adkcontext.NewCallOrder(len(fnCalls))
 	for i, fnCall := range fnCalls {
 		tasks[i] = func(taskCtx context.Context) {
@@ -2203,7 +2205,18 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fA
 // answer such a call, and the after-tool callbacks then run as for a tool;
 // otherwise the on-tool-error callbacks receive lookup.err and the after-tool
 // callbacks are skipped (_caller.py:529-554).
+//
+// When t is a tool.SequentialRunner that answers true, callTool first waits
+// until every earlier call of the batch has returned. If the call's context
+// ends first, the call is answered with the wait's error, and neither the
+// callbacks nor the tool run.
 func (f *Flow) callTool(toolCtx agent.Context, t tool.Tool, args map[string]any, lookup *toolLookupFailure) toolResult {
+	if s, ok := t.(tool.SequentialRunner); ok && s.RunsSequentially() {
+		if err := adkcontext.AwaitEarlierCalls(toolCtx); err != nil {
+			errText, _ := toolinternal.ModelErrorText(t.Name(), fmt.Errorf("wait for earlier function calls: %w", err))
+			return toolResult{m: map[string]any{"error": errText}}
+		}
+	}
 	var response map[string]any
 	var err error
 	pluginManager := pluginManagerFromContext(toolCtx)

@@ -776,9 +776,6 @@ type callbackContextState struct {
 }
 
 func (c *callbackContextState) Get(key string) (any, error) {
-	if err := adkcontext.AwaitEarlierCalls(c.ctx); err != nil {
-		return nil, fmt.Errorf("cannot get state: wait for earlier function calls: %w", err)
-	}
 	if c.ctx.actions != nil && c.ctx.actions.StateDelta != nil {
 		if val, ok := c.ctx.actions.StateDelta[key]; ok {
 			return val, nil
@@ -799,9 +796,6 @@ func (c *callbackContextState) Get(key string) (any, error) {
 }
 
 func (c *callbackContextState) Set(key string, val any) error {
-	if err := adkcontext.AwaitEarlierCalls(c.ctx); err != nil {
-		return fmt.Errorf("cannot set state: wait for earlier function calls: %w", err)
-	}
 	if c.ctx.actions != nil && c.ctx.actions.StateDelta != nil {
 		c.ctx.actions.StateDelta[key] = val
 	}
@@ -820,12 +814,7 @@ func (c *callbackContextState) Set(key string, val any) error {
 	return c.ctx.invocationContext.Session().State().Set(key, val)
 }
 
-// All yields nothing when the wait for the call's turn fails, because its
-// signature cannot report the error.
 func (c *callbackContextState) All() iter.Seq2[string, any] {
-	if adkcontext.AwaitEarlierCalls(c.ctx) != nil {
-		return func(func(string, any) bool) {}
-	}
 	return c.ctx.invocationContext.Session().State().All()
 }
 

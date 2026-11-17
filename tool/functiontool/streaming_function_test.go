@@ -330,3 +330,18 @@ func TestStreamingFunctionToolRecoversHandlerPanic(t *testing.T) {
 		})
 	}
 }
+
+func TestNewStreaming_RejectsSequential(t *testing.T) {
+	handler := func(agent.Context, streamingArgs) iter.Seq2[string, error] {
+		return func(func(string, error) bool) {}
+	}
+
+	got, err := functiontool.NewStreaming(functiontool.Config{Name: "s", Description: "s", Sequential: true}, handler)
+
+	if !errors.Is(err, functiontool.ErrInvalidArgument) {
+		t.Fatalf("NewStreaming(Sequential: true) error = %v, want one wrapping ErrInvalidArgument", err)
+	}
+	if got != nil {
+		t.Errorf("NewStreaming(Sequential: true) tool = %v, want nil", got)
+	}
+}

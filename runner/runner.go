@@ -1563,6 +1563,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		return nil, nil, fmt.Errorf("agent %s does not support Live Run", agentToRun.Name())
 	}
 
+	ctx = adkcontext.WithoutCallPlace(ctx)
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 		StreamingMode:  runconfig.StreamingModeBidi, // Live is always bidirectional streaming

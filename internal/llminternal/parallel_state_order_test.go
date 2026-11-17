@@ -28,7 +28,6 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
-	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
@@ -106,6 +105,16 @@ func psoTool[A any](t *testing.T, name string, fn func(agent.Context, A) (map[st
 	return tl
 }
 
+// psoSeqTool is psoTool with Config.Sequential set.
+func psoSeqTool[A any](t *testing.T, name string, fn func(agent.Context, A) (map[string]any, error)) tool.Tool {
+	t.Helper()
+	tl, err := functiontool.New(functiontool.Config{Name: name, Description: name, Sequential: true}, fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tl
+}
+
 func psoLongRunningTool(t *testing.T, name string, fn func(agent.Context, struct{}) (map[string]any, error)) tool.Tool {
 	t.Helper()
 	tl, err := functiontool.New(functiontool.Config{Name: name, Description: name, IsLongRunning: true}, fn)
@@ -165,7 +174,7 @@ func TestParallelCalls_LaterCallSeesEveryEarlierCallsWrite(t *testing.T) {
 	noop := psoTool(t, "noop", func(agent.Context, struct{}) (map[string]any, error) {
 		return map[string]any{}, nil
 	})
-	readK := psoTool(t, "read_k", func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+	readK := psoSeqTool(t, "read_k", func(ctx agent.Context, _ struct{}) (map[string]any, error) {
 		v, err := ctx.State().Get("k")
 		if err != nil {
 			return nil, err
@@ -182,7 +191,7 @@ func TestParallelCalls_LaterCallSeesEveryEarlierCallsWrite(t *testing.T) {
 }
 
 func TestParallelCalls_BlockingBetweenReadAndWriteLosesNoUpdate(t *testing.T) {
-	incSlowly := psoTool(t, "inc_slowly", func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+	incSlowly := psoSeqTool(t, "inc_slowly", func(ctx agent.Context, _ struct{}) (map[string]any, error) {
 		n, err := psoGet(ctx, "n", 0)
 		if err != nil {
 			return nil, err
@@ -223,7 +232,7 @@ func TestParallelCalls_StateFreeSiblingIsNotDelayedByStateUser(t *testing.T) {
 
 func TestParallelCalls_EarlyReturnAndFailureReleaseTheTurn(t *testing.T) {
 	readA := func(t *testing.T) tool.Tool {
-		return psoTool(t, "read_a", func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+		return psoSeqTool(t, "read_a", func(ctx agent.Context, _ struct{}) (map[string]any, error) {
 			v, err := ctx.State().Get("a")
 			if err != nil {
 				return nil, err
@@ -236,7 +245,7 @@ func TestParallelCalls_EarlyReturnAndFailureReleaseTheTurn(t *testing.T) {
 		pending := psoLongRunningTool(t, "pending", func(agent.Context, struct{}) (map[string]any, error) {
 			return nil, nil
 		})
-		inc := psoTool(t, "inc", func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+		inc := psoSeqTool(t, "inc", func(ctx agent.Context, _ struct{}) (map[string]any, error) {
 			n, err := psoGet(ctx, "counter", 0)
 			if err != nil {
 				return nil, err
@@ -300,7 +309,7 @@ func TestParallelCalls_EarlyReturnAndFailureReleaseTheTurn(t *testing.T) {
 }
 
 func TestParallelCalls_DictReadModifyWrite(t *testing.T) {
-	incDoc := psoTool(t, "inc_doc", func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+	incDoc := psoSeqTool(t, "inc_doc", func(ctx agent.Context, _ struct{}) (map[string]any, error) {
 		read, err := psoGet(ctx, "doc", map[string]any{})
 		if err != nil {
 			return nil, err
@@ -324,9 +333,8 @@ func TestParallelCalls_DictReadModifyWrite(t *testing.T) {
 // TestParallelCalls_OutOfOrderAppendKeepsEveryItem runs adk-python's
 // test_parallel_appends_finishing_out_of_order_keep_every_item and
 // test_parallel_snapshot_writes_keep_the_latest_nested_list
-// (tests/unittests/flows/llm_flows/tools/test_functions_parallel.py) through
-// tools that opt out of the call order, the only way a call can wait for a
-// later sibling's write.
+// (tests/unittests/flows/llm_flows/tools/test_functions_parallel.py): call 0
+// of a concurrent tool waits for call 1's write before it writes.
 func TestParallelCalls_OutOfOrderAppendKeepsEveryItem(t *testing.T) {
 	type itemArgs struct {
 		Item string `json:"item"`
@@ -338,7 +346,6 @@ func TestParallelCalls_OutOfOrderAppendKeepsEveryItem(t *testing.T) {
 	t.Run("appended list", func(t *testing.T) {
 		bWritten := make(chan struct{})
 		appendItem := psoTool(t, "append_item", func(ctx agent.Context, args itemArgs) (map[string]any, error) {
-			adkcontext.SkipCallOrder(ctx)
 			if args.Item == "a" {
 				if err := psoWait(bWritten); err != nil {
 					return nil, err
@@ -368,7 +375,6 @@ func TestParallelCalls_OutOfOrderAppendKeepsEveryItem(t *testing.T) {
 	t.Run("snapshot of a nested list", func(t *testing.T) {
 		bWritten := make(chan struct{})
 		addLabel := psoTool(t, "add_label", func(ctx agent.Context, args labelArgs) (map[string]any, error) {
-			adkcontext.SkipCallOrder(ctx)
 			if args.Label == "a" {
 				if err := psoWait(bWritten); err != nil {
 					return nil, err

@@ -354,7 +354,7 @@ func TestHandleFunctionCalls_WaitCycleEndsAtContextDeadline(t *testing.T) {
 			<-ctx.Done()
 			return nil, ctx.Err()
 		}))
-	setter := tcMust(t)(functiontool.New(functiontool.Config{Name: "setter", Description: "sets k"},
+	setter := tcMust(t)(functiontool.New(functiontool.Config{Name: "setter", Description: "sets k", Sequential: true},
 		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
 			if err := ctx.State().Set("k", 1); err != nil {
 				return nil, err
@@ -393,6 +393,74 @@ func TestHandleFunctionCalls_WaitCycleEndsAtContextDeadline(t *testing.T) {
 	}
 	if errText, _ := setterResp["error"].(string); !strings.Contains(errText, "context deadline exceeded") {
 		t.Errorf("setter response = %v, want an error containing %q", setterResp, "context deadline exceeded")
+	}
+	if v, err := sess.State().Get("k"); !errors.Is(err, session.ErrStateKeyNotExist) {
+		t.Errorf("session state k = %v, %v; want ErrStateKeyNotExist", v, err)
+	}
+}
+
+func TestHandleFunctionCalls_SequentialWaitFailureSkipsToolAndCallbacks(t *testing.T) {
+	dctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	ctx, sess := pcSessionContext(t, dctx)
+	waiter := tcMust(t)(functiontool.New(functiontool.Config{Name: "waiter", Description: "waits for the context"},
+		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}))
+	var ran atomic.Int32
+	setter := tcMust(t)(functiontool.New(functiontool.Config{Name: "setter", Description: "sets k", Sequential: true},
+		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			ran.Add(1)
+			return map[string]any{"ok": true}, ctx.State().Set("k", 1)
+		}))
+	// The blocked call 0 runs the callbacks too, so only the setter's count.
+	var before, after, onErr atomic.Int32
+	countSetter := func(c *atomic.Int32, t tool.Tool) {
+		if t.Name() == "setter" {
+			c.Add(1)
+		}
+	}
+	f := &Flow{
+		BeforeToolCallbacks: []BeforeToolCallback{func(_ agent.Context, t tool.Tool, _ map[string]any) (map[string]any, error) {
+			countSetter(&before, t)
+			return nil, nil
+		}},
+		AfterToolCallbacks: []AfterToolCallback{func(_ agent.Context, t tool.Tool, _, _ map[string]any, _ error) (map[string]any, error) {
+			countSetter(&after, t)
+			return nil, nil
+		}},
+		OnToolErrorCallbacks: []OnToolErrorCallback{func(_ agent.Context, t tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+			countSetter(&onErr, t)
+			return nil, nil
+		}},
+	}
+	tools := map[string]tool.Tool{"waiter": waiter, "setter": setter}
+	resp := pcCalls(
+		&genai.FunctionCall{ID: "c0", Name: "waiter", Args: map[string]any{}},
+		&genai.FunctionCall{ID: "c1", Name: "setter", Args: map[string]any{}},
+	)
+
+	ev, err := f.handleFunctionCalls(ctx, tools, resp, nil, nil)
+	if err != nil {
+		t.Fatalf("handleFunctionCalls() error = %v", err)
+	}
+
+	var got map[string]any
+	for _, p := range ev.LLMResponse.Content.Parts {
+		if p.FunctionResponse != nil && p.FunctionResponse.ID == "c1" {
+			got = p.FunctionResponse.Response
+		}
+	}
+	want := map[string]any{"error": "wait for earlier function calls: context deadline exceeded"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("setter response mismatch (-want +got):\n%s", diff)
+	}
+	if n := ran.Load(); n != 0 {
+		t.Errorf("setter ran %d times, want 0", n)
+	}
+	if b, a, e := before.Load(), after.Load(), onErr.Load(); b != 0 || a != 0 || e != 0 {
+		t.Errorf("setter callbacks ran: before=%d after=%d onError=%d, want 0 0 0", b, a, e)
 	}
 	if v, err := sess.State().Get("k"); !errors.Is(err, session.ErrStateKeyNotExist) {
 		t.Errorf("session state k = %v, %v; want ErrStateKeyNotExist", v, err)

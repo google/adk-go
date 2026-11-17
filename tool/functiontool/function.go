@@ -72,6 +72,12 @@ type Config struct {
 	// See tool.ResponseScheduler. The zero value sets none. It applies to tools
 	// built with New and with NewStreaming.
 	ResponseScheduling genai.FunctionResponseScheduling
+
+	// Sequential makes each call of the tool start after every earlier call of
+	// its model turn has returned. See tool.SequentialRunner. The zero value
+	// leaves the calls of one turn concurrent. NewStreaming returns an error
+	// that wraps ErrInvalidArgument when it is set.
+	Sequential bool
 }
 
 // Func represents a Go function that can be wrapped in a tool.
@@ -156,6 +162,11 @@ func (f *functionTool[TArgs, TResults]) Name() string {
 // IsLongRunning implements tool.Tool.
 func (f *functionTool[TArgs, TResults]) IsLongRunning() bool {
 	return f.cfg.IsLongRunning
+}
+
+// RunsSequentially implements tool.SequentialRunner.
+func (f *functionTool[TArgs, TResults]) RunsSequentially() bool {
+	return f.cfg.Sequential
 }
 
 // ResponseScheduling implements tool.ResponseScheduler.

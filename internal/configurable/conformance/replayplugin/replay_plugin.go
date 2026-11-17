@@ -139,8 +139,6 @@ func (p *replayPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*m
 
 // beforeTool intercepts tool calls, verifies them against the recording, and returns the recorded response.
 func (p *replayPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-	// ReadonlyState: State would make the call wait for the earlier calls of
-	// its model turn to return (see agent.Context.State).
 	on, err := p.isReplayModeOn(ctx.ReadonlyState())
 	if err != nil {
 		return nil, err

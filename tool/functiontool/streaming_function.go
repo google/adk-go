@@ -35,7 +35,8 @@ import (
 // StreamingFunc represents a Go function that streams results.
 type StreamingFunc[TArgs any] func(agent.Context, TArgs) iter.Seq2[string, error]
 
-// NewStreaming creates a new streaming tool.
+// NewStreaming creates a new streaming tool. It returns an error that wraps
+// [ErrInvalidArgument] when cfg.Sequential is set.
 func NewStreaming[TArgs any](cfg Config, handler StreamingFunc[TArgs]) (tool.Tool, error) {
 	var zeroArgs TArgs
 	argsType := reflect.TypeOf(zeroArgs)
@@ -44,6 +45,10 @@ func NewStreaming[TArgs any](cfg Config, handler StreamingFunc[TArgs]) (tool.Too
 	}
 	if argsType == nil || (argsType.Kind() != reflect.Struct && argsType.Kind() != reflect.Map) {
 		return nil, fmt.Errorf("input must be a struct or a map or a pointer to those types, but received: %v: %w", argsType, ErrInvalidArgument)
+	}
+
+	if cfg.Sequential {
+		return nil, fmt.Errorf("Config.Sequential is not supported by NewStreaming: the calls of a streaming tool are not sequenced: %w", ErrInvalidArgument)
 	}
 
 	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
