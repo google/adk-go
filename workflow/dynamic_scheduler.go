@@ -285,6 +285,13 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	}
 	childPath := s.parentPath + "/" + name + "@" + runID
 
+	// A child whose own state schema cannot be checked does not start:
+	// nothing is claimed and no event is sent.
+	own, err := nodeStateValidator(s.parentCtx, child)
+	if err != nil {
+		return nil, &NodeRunError{ChildName: name, Cause: err}
+	}
+
 	// Claim before child.Run so a sibling WithUseAsOutput fails fast
 	// rather than after the child finishes. The claim is not rolled back
 	// on interrupt/failure: the orchestrator body ends on the sentinel
@@ -391,7 +398,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	)
 	// The child is an activation of its own: its state writes are checked
 	// and carried on its own events, never on the orchestrator's.
-	childCtx, writes := beginActivation(childCtx, child)
+	childCtx, writes := beginActivation(childCtx, child, own)
 	// Registered after the completion defer, so the child's unsent writes
 	// go out before its failure record. A child that failed because one of
 	// its own children failed, or that was canceled, sends none.

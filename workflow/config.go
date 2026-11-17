@@ -17,6 +17,8 @@ package workflow
 import (
 	"errors"
 	"time"
+
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // defaultRetryConfig is the default retry configuration for a node.
@@ -111,6 +113,35 @@ type NodeConfig struct {
 	// receives the seed unchanged, and its inner [Start] applies this
 	// rule to its own successors.
 	ContentInput bool
+
+	// StateSchema, when non-nil, is the state schema of this node. While the node runs, a write through its
+	// context's State().Set and the state delta of each event the node yields are checked against this schema
+	// and no other: it replaces the schema of the enclosing workflow (see [WithStateSchema]) for this node,
+	// and the two are never merged. A key declared only by the enclosing workflow's schema is undeclared here.
+	// The checks are those of [WithStateSchema]: one entry at a time, a key that contains ':' is never
+	// refused, a missing required field is never refused, and a refused write returns a [*StateSchemaError]
+	// and writes nothing. Reads are never validated. An agent node's OutputKey is written on the node's event
+	// and checked like any other key, so a schema that does not declare it fails that node, where adk-python
+	// writes it unchecked.
+	//
+	// Every context derived from the node's context uses the same schema unless it belongs to a node that
+	// carries its own: the dynamic children the node starts with RunNode, the nodes of a nested workflow that
+	// has no schema of its own (a nested workflow with one, see [NewWorkflowNodeWithStateSchema], uses it), and
+	// the items of a [ParallelWorker] (whose wrapped node's own schema wins over the worker's). The nodes that
+	// follow this one in the graph are not derived from its context and are not affected. nil, the default,
+	// means the node uses the schema it inherits, and no check at all when nothing above it has one.
+	//
+	// The schema must be resolved, its references must stay inside its own document, and it must not be
+	// modified once any node uses it. One schema may be shared by any number of nodes and workflows. A zero
+	// [jsonschema.Resolved] is a schema that declares no field: it refuses every key without a colon. The
+	// node's Config must return the same StateSchema on every call. A schema that cannot be checked at run
+	// time is reported as an error that matches [ErrStateSchemaUnusable] with errors.Is, and it is never
+	// ignored or replaced by another schema: [New] returns it, naming the node, for a node of the graph;
+	// [NewParallelWorker] returns it for its wrapped node; a dynamic child with such a schema fails when it
+	// starts, with a [*NodeRunError] that wraps it; a node given to the runner as its root
+	// (runner.Config.Node) is built into its workflow when the runner runs, so the error is the first Run's,
+	// after the user message and before the node starts.
+	StateSchema *jsonschema.Resolved
 }
 
 // RetryConfig defines the parameters for retrying a failed node.

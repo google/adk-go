@@ -15,12 +15,16 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/google/jsonschema-go/jsonschema"
+
+	"google.golang.org/adk/v2/agent"
 )
 
 // StateSchemaReason says why a state write was refused.
@@ -127,10 +131,62 @@ func newStateValidator(schema *jsonschema.Resolved) (*stateValidator, error) {
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("workflow: state schema cannot be validated at run time: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrStateSchemaUnusable, err)
 	}
 	v.resolved = resolved
 	return v, nil
+}
+
+// stateValidators memoizes the validator derived from each state schema met
+// during one run. It is safe for concurrent use.
+type stateValidators struct {
+	derived sync.Map // *jsonschema.Resolved -> *stateValidator
+}
+
+// forSchema returns the validator of s, which must be non-nil, deriving it
+// with newStateValidator on the first request. An error is not memoized. A nil
+// receiver derives without memoizing.
+func (c *stateValidators) forSchema(s *jsonschema.Resolved) (*stateValidator, error) {
+	if c != nil {
+		if v, ok := c.derived.Load(s); ok {
+			return v.(*stateValidator), nil
+		}
+	}
+	v, err := newStateValidator(s)
+	if err != nil || c == nil {
+		return v, err
+	}
+	// Two goroutines that miss at once both derive; the first stored wins.
+	stored, _ := c.derived.LoadOrStore(s, v)
+	return stored.(*stateValidator), nil
+}
+
+// stateValidatorsKey is the context key of a run's stateValidators.
+type stateValidatorsKey struct{}
+
+// stateValidatorsFrom returns the memo ctx carries, or nil when it carries
+// none.
+func stateValidatorsFrom(ctx context.Context) *stateValidators {
+	c, _ := ctx.Value(stateValidatorsKey{}).(*stateValidators)
+	return c
+}
+
+// nodeStateValidator returns the validator of n's own state schema in the form
+// CommonContextDelta.StateValidator takes, using the memo ctx carries. It
+// returns nil, nil when n has no StateSchema, and an error that names n when
+// the schema cannot be checked at run time.
+func nodeStateValidator(ctx context.Context, n Node) (*agent.StateValidator, error) {
+	s := n.Config().StateSchema
+	if s == nil {
+		return nil, nil
+	}
+	v, err := stateValidatorsFrom(ctx).forSchema(s)
+	if err != nil {
+		return nil, fmt.Errorf("node %q: %w", n.Name(), err)
+	}
+	// A pointer to a non-nil validator replaces the one ctx carries.
+	var own agent.StateValidator = v
+	return &own, nil
 }
 
 // pointerToken escapes key as one JSON Pointer reference token inside a URI

@@ -37,7 +37,30 @@ type WorkflowNode struct {
 // returns the errors New returns. An empty edge list gives a node that
 // runs nothing and produces no output.
 func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
-	wf, err := New(name, edges)
+	return newWorkflowNode(name, edges, nil)
+}
+
+// NewWorkflowNodeWithStateSchema is NewWorkflowNode whose nested workflow has the state schema schema, as
+// if it were built with [WithStateSchema](schema): the nodes of the nested workflow, and the dynamic
+// children and parallel items below them, are checked against schema unless a node carries its own
+// [NodeConfig.StateSchema]. The enclosing node's schema is not consulted inside the nested workflow.
+//
+// It returns the errors of New(name, edges, WithStateSchema(schema)), unwrapped: a graph error, a
+// state-bound FunctionNode parameter that schema does not declare, and, matching [ErrStateSchemaUnusable],
+// a schema that cannot be checked at run time. A nil schema gives the node NewWorkflowNode returns.
+//
+// The node takes no input or output schema from this constructor. To give it both, set them on the node it
+// returns, as NewWorkflowNodeWithSchemas does for its own: n.BaseNode = NewBaseNodeWithSchemas(name, "",
+// NodeConfig{}, inputSchema, outputSchema). The state schema lives on the nested workflow and is not
+// touched by that assignment.
+func NewWorkflowNodeWithStateSchema(name string, edges []Edge, schema *jsonschema.Resolved) (*WorkflowNode, error) {
+	return newWorkflowNode(name, edges, schema)
+}
+
+// newWorkflowNode builds the nested workflow with stateSchema, which may be nil, and wraps it in a node
+// with an empty NodeConfig.
+func newWorkflowNode(name string, edges []Edge, stateSchema *jsonschema.Resolved) (*WorkflowNode, error) {
+	wf, err := New(name, edges, WithStateSchema(stateSchema))
 	if err != nil {
 		return nil, err
 	}

@@ -33,6 +33,7 @@
 package workflow
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"slices"
@@ -303,7 +304,8 @@ func WithMaxConcurrency(n int) Option {
 // [*StateSchemaError]. Writes a node made before it failed are still stored,
 // unless it was canceled or failed because a dynamic child failed. A
 // nested workflow without a state schema checks its nodes against the
-// enclosing workflow's.
+// enclosing workflow's. A node's own [NodeConfig.StateSchema] replaces this
+// schema for that node.
 //
 // s is shared by every run of the workflow and is never modified.
 func WithStateSchema(s *jsonschema.Resolved) Option {
@@ -426,6 +428,22 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	if err := validateSubWorkflowNames(name, edges); err != nil {
 		return nil, invalidGraph(err)
 	}
+	// A node's own schema that cannot be checked at run time is reported
+	// here rather than when the node starts. The validators are discarded:
+	// each run memoizes its own (withStateValidator).
+	var nodeSchemaErr error
+	walkNodes(edges, func(n Node) {
+		s := n.Config().StateSchema
+		if s == nil || nodeSchemaErr != nil {
+			return
+		}
+		if _, err := newStateValidator(s); err != nil {
+			nodeSchemaErr = fmt.Errorf("node %q: %w", n.Name(), err)
+		}
+	})
+	if nodeSchemaErr != nil {
+		return nil, nodeSchemaErr
+	}
 	w := &Workflow{
 		graph:          graph,
 		name:           name,
@@ -444,15 +462,26 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	return w, nil
 }
 
-// withStateValidator returns ctx carrying the workflow's state validator, or
-// ctx itself when the workflow has no state schema, so a nested workflow
-// without one keeps its parent's.
+// withStateValidator returns ctx carrying the workflow's state validator and
+// a memo of the validators derived from node schemas. The validator is set
+// only when the workflow has a state schema, so a nested workflow without one
+// keeps its parent's. The memo is a fresh one when ctx carries none, so each
+// run has its own and a nested workflow shares the outermost run's. When
+// neither applies, it returns ctx itself.
 func (w *Workflow) withStateValidator(ctx agent.Context) agent.Context {
-	if w.stateValidator == nil {
+	delta := &agent.CommonContextDelta{}
+	if stateValidatorsFrom(ctx) == nil {
+		base := context.WithValue(ctx, stateValidatorsKey{}, &stateValidators{})
+		delta.InvocationContextDelta = &agent.InvocationContextDelta{Context: &base}
+	}
+	if w.stateValidator != nil {
+		v := w.stateValidator
+		delta.StateValidator = &v
+	}
+	if delta.InvocationContextDelta == nil && delta.StateValidator == nil {
 		return ctx
 	}
-	v := w.stateValidator
-	return ctx.WithDelta(&agent.CommonContextDelta{StateValidator: &v})
+	return ctx.WithDelta(delta)
 }
 
 // Name returns the workflow's node-path namespacing name as set by

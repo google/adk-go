@@ -565,7 +565,8 @@ func runNode(
 	input any,
 ) {
 	defer wg.Done()
-	ctx, writes := beginActivation(ctx, n)
+	own, ownErr := nodeStateValidator(ctx, n)
+	ctx, writes := beginActivation(ctx, n, own)
 
 	span, ctx := startNodeSpan(ctx, n)
 	defer span.end()
@@ -591,6 +592,13 @@ func runNode(
 		}
 		out <- completion
 	}()
+
+	// The failure is reported here, once the completion is registered, so
+	// the scheduler still receives it; the node does not run.
+	if ownErr != nil {
+		completion.err = ownErr
+		return
+	}
 
 	validated, err := n.ValidateInput(input)
 	if err != nil {

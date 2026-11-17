@@ -51,6 +51,12 @@ var (
 	// ErrOutputAlreadyDelegated rejects a second WithUseAsOutput
 	// child in the same parent activation.
 	ErrOutputAlreadyDelegated = errors.New("workflow: parent already has a use_as_output delegate")
+
+	// ErrStateSchemaUnusable is returned, wrapped, for a state schema that ADK cannot check writes against at
+	// run time: one whose references leave its own document (a remote $ref that its author resolved with a
+	// loader). Match it with errors.Is; the wrapped cause is the schema library's text, which names the
+	// reference, and the wrapping adds the node.
+	ErrStateSchemaUnusable = errors.New("workflow: state schema cannot be validated at run time")
 )
 
 // NodeRunError wraps a sentinel with the failing child's identity.
