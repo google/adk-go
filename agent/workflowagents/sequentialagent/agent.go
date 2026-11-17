@@ -72,25 +72,19 @@ func (s *seqAgent) FindAgent(name string) agent.Agent {
 // checkpoint names, without writing that checkpoint again, so the sub-agents
 // before it do not run again; a checkpoint whose name is empty means every
 // sub-agent has run, and one whose name is no longer a sub-agent restarts at
-// the first sub-agent. When one of the turn's function responses answers a call
-// that a graph workflow agent below the SequentialAgent made, as it does an
-// input request raised by a function node, or that an agent reached through its
-// workflowagent.Config.SubAgents made, the agent instead restarts at the first
-// sub-agent that holds a caller of the turn's function responses and writes
-// that sub-agent's checkpoint again. A checkpoint with other keys or values of
-// the wrong type makes the run fail with an error. An agent with no sub-agents
-// yields nothing, not even the end event. A run that is not resumable yields
-// neither kind of event.
+// the first sub-agent. A checkpoint with other keys or values of the wrong type
+// makes the run fail with an error. An agent with no sub-agents yields nothing,
+// not even the end event. A run that is not resumable yields neither kind of
+// event.
 //
-// In a resumable run, resuming a graph workflow agent below a ParallelAgent,
-// SequentialAgent or LoopAgent is not safe: when a ParallelAgent has more than
-// one paused branch, a turn that answers one of them can run another paused
-// workflow's nodes again, fail, or let an enclosing agent end while a workflow
-// still waits; when an LLM agent node of the workflow paused on a long-running
-// call, the turn that answers the call fails; and when a LoopAgent runs the
-// workflow again in the turn that resumed it, that pass can run only the nodes
-// after the node that asked for input, run none of its nodes, or fail with an
-// error that matches workflow.ErrNothingToResume.
+// Resuming an invocation (runner.WithInvocationID, or a function response to a
+// paused call or an input request) is not supported when a graph workflow
+// agent, made by workflowagent.New, runs below a ParallelAgent,
+// SequentialAgent or LoopAgent, or when a graph workflow agent, ParallelAgent,
+// SequentialAgent or LoopAgent runs as an agent node (workflow.AgentNode) of a
+// graph workflow agent: in those trees the resume behavior described above
+// does not apply, and a resumed turn may, for example, fail, run nodes or
+// sub-agents again, or end before every branch has finished.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.AgentConfig.Run != nil {
 		return nil, fmt.Errorf("SequentialAgent doesn't allow custom Run implementations")

@@ -68,15 +68,19 @@ type Config struct {
 // invocation (runner.WithInvocationID, or a function response to a paused
 // call) keeps the checkpoint's pass count and restarts at the sub-agent it
 // names, without writing that checkpoint again; a name that is no longer a
-// sub-agent restarts the pass at its first sub-agent. When one of the turn's
-// function responses answers a call that a graph workflow agent below the
-// LoopAgent made, as it does an input request raised by a function node, or
-// that an agent reached through its workflowagent.Config.SubAgents made, the
-// agent keeps the pass count but restarts at the first sub-agent that holds a
-// caller of the turn's function responses and writes that sub-agent's
-// checkpoint again. A checkpoint with other keys or values of the wrong type,
-// such as a negative times_looped, makes the run fail with an error. A run that
-// is not resumable yields neither kind of event.
+// sub-agent restarts the pass at its first sub-agent. A checkpoint with other
+// keys or values of the wrong type, such as a negative times_looped, makes the
+// run fail with an error. A run that is not resumable yields neither kind of
+// event.
+//
+// Resuming an invocation (runner.WithInvocationID, or a function response to a
+// paused call or an input request) is not supported when a graph workflow
+// agent, made by workflowagent.New, runs below a ParallelAgent,
+// SequentialAgent or LoopAgent, or when a graph workflow agent, ParallelAgent,
+// SequentialAgent or LoopAgent runs as an agent node (workflow.AgentNode) of a
+// graph workflow agent: in those trees the resume behavior described above
+// does not apply, and a resumed turn may, for example, fail, run nodes or
+// sub-agents again, or end before every branch has finished.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.AgentConfig.Run != nil {
 		return nil, fmt.Errorf("LoopAgent doesn't allow custom Run implementations")

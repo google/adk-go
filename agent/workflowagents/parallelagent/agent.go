@@ -88,35 +88,22 @@ type Config struct {
 // their end themselves, a graph workflow agent only when it finishes with no
 // node waiting for input; a sub-agent built with [agent.New] has to call
 // [agent.RecordEndOfAgent] when its Run is finished, or the ParallelAgent
-// yields no end-of-agent event. In a resumable run, resuming a graph workflow
-// agent below a ParallelAgent, SequentialAgent or LoopAgent is not safe: when
-// a ParallelAgent has more than one paused branch, a turn that answers one of
-// them can run another paused workflow's nodes again, fail, or let an
-// enclosing agent end while a workflow still waits; when an LLM agent node of
-// the workflow paused on a long-running call, the turn that answers the call
-// fails; and when a LoopAgent runs the workflow again in the turn that resumed
-// it, that pass can run only the nodes after the node that asked for input,
-// run none of its nodes, or fail with an error that matches
-// workflow.ErrNothingToResume. In a resumable ParallelAgent, a
-// turn that answers a call made inside a graph workflow agent below the
-// ParallelAgent runs only the sub-agents that hold a caller of one of the
-// turn's function responses and have not ended; any other turn, and every
-// pass of an enclosing LoopAgent after the first, runs every sub-agent that
-// has not ended. A call is made inside a graph workflow agent when that agent
-// made it, as it does an input request raised by a function node, or when an
-// agent reached through its workflowagent.Config.SubAgents made it; a node
-// agent missing from SubAgents is not found, so its calls count as made
-// outside. A graph workflow agent that paused for input and runs in a turn that
-// does not answer its own request fails with an error that matches
-// workflow.ErrNothingToResume when the turn answers another input request (a
-// [session.RequestInput]), and otherwise runs its nodes again from the start.
-// A graph workflow agent branch that finished is not run again. No
-// end-of-agent event follows a sub-agent's error, a stop by the caller, or an
-// event that pauses the invocation (a long-running function call); after a
-// pause the other sub-agents still run to completion. Resuming the invocation
-// runs only the sub-agents whose end-of-agent event is not in the session, and
-// yields no second agent-state event; a record made by agent.RecordEndOfAgent
-// is not stored, so such a sub-agent runs again.
+// yields no end-of-agent event. No end-of-agent event follows a sub-agent's
+// error, a stop by the caller, or an event that pauses the invocation (a
+// long-running function call); after a pause the other sub-agents still run to
+// completion. Resuming the invocation runs only the sub-agents whose
+// end-of-agent event is not in the session, and yields no second agent-state
+// event; a record made by agent.RecordEndOfAgent is not stored, so such a
+// sub-agent runs again.
+//
+// Resuming an invocation (runner.WithInvocationID, or a function response to a
+// paused call or an input request) is not supported when a graph workflow
+// agent, made by workflowagent.New, runs below a ParallelAgent,
+// SequentialAgent or LoopAgent, or when a graph workflow agent, ParallelAgent,
+// SequentialAgent or LoopAgent runs as an agent node (workflow.AgentNode) of a
+// graph workflow agent: in those trees the resume behavior described above
+// does not apply, and a resumed turn may, for example, fail, run nodes or
+// sub-agents again, or end before every branch has finished.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.AgentConfig.Run != nil {
 		return nil, fmt.Errorf("ParallelAgent doesn't allow custom Run implementations")
