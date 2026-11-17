@@ -77,6 +77,11 @@ func (s *seqAgent) FindAgent(name string) agent.Agent {
 // not even the end event. A run that is not resumable yields neither kind of
 // event.
 //
+// The resume behavior described above holds only when this agent is the run's
+// root or the root reaches it only through ParallelAgent, SequentialAgent or
+// LoopAgent agents; in every other tree, a resumed turn is handled by the
+// runner's rule for the agent that made the answered call (see
+// runner.WithInvocationID), which may leave this agent's remaining work undone.
 // Resuming an invocation (runner.WithInvocationID, or a function response to a
 // paused call or an input request) is not supported when a graph workflow
 // agent, made by workflowagent.New, runs below a ParallelAgent,
@@ -251,9 +256,6 @@ func (s *sequentialLiveSession) setActiveSession(sess agent.LiveSession) bool {
 
 func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	subAgents := ctx.Agent().SubAgents()
-	if len(subAgents) == 0 {
-		return nil, nil, fmt.Errorf("sequential agent has no sub-agents")
-	}
 
 	// Inject task_completed tool into sub LLM agents
 	type taskCompletedArgs struct{}

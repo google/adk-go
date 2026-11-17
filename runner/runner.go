@@ -2289,19 +2289,25 @@ func (r *Runner) graphWorkflowEntrypoint(a agent.Agent) agent.Agent {
 	return entry
 }
 
-// checks if the agent and its parent chain allow transfer up the tree.
+// isTransferableAcrossAgentTree reports whether agentToRun and every agent
+// above it, up to the root of its tree, are LLM agents that allow transfer to
+// their parent. The walk reads the parents with llminternal.TreeAncestors, so
+// it goes past the runner's root, as adk-python's
+// is_transferable_across_agent_tree walks parent_agent to the root
+// (agents/_agent_router.py).
 func (r *Runner) isTransferableAcrossAgentTree(agentToRun agent.Agent) bool {
-	for curAgent := agentToRun; curAgent != nil; curAgent = r.parents[curAgent.Name()] {
-		llmAgent, ok := curAgent.(llminternal.Agent)
-		if !ok {
-			return false
-		}
-
-		if llminternal.Reveal(llmAgent).DisallowTransferToParent {
+	allowsTransfer := func(a agent.Agent) bool {
+		llmAgent, ok := a.(llminternal.Agent)
+		return ok && !llminternal.Reveal(llmAgent).DisallowTransferToParent
+	}
+	if !allowsTransfer(agentToRun) {
+		return false
+	}
+	for parent := range llminternal.TreeAncestors(r.parents, agentToRun) {
+		if !allowsTransfer(parent) {
 			return false
 		}
 	}
-
 	return true
 }
 
