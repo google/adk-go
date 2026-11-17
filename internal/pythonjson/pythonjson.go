@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package llminternal
+// Package pythonjson writes values as JSON text in the form adk-python's
+// json.dumps(v, ensure_ascii=False) writes. It is the one place adk-go writes
+// that form.
+package pythonjson
 
 import (
 	"bytes"
@@ -25,7 +28,7 @@ import (
 	"strings"
 )
 
-// encodePythonJSON returns v as JSON text in the form adk-python's
+// Encode returns v as JSON text in the form adk-python's
 // json.dumps(v, ensure_ascii=False) writes: ", " between items, ": " after
 // keys, non-ASCII characters (U+2028 and U+2029 included) and "<", ">", "&"
 // written literally, floats in Python's repr form (1e-05, 1e+16, -0.0), and
@@ -43,7 +46,7 @@ import (
 //
 // It returns json.Marshal's error for a value it cannot encode, such as a
 // channel or a complex number.
-func encodePythonJSON(v any) (string, error) {
+func Encode(v any) (string, error) {
 	generic, err := toGenericJSON(v)
 	if err != nil {
 		return "", err

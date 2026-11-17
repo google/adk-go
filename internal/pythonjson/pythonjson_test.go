@@ -12,16 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package llminternal
+package pythonjson_test
 
 import (
 	"math"
 	"testing"
+
+	"google.golang.org/adk/v2/internal/pythonjson"
 )
 
 // The want values are what adk-python's json.dumps(v, ensure_ascii=False)
 // writes for the same value, keys aside: Go writes them in sorted order.
-func TestEncodePythonJSON(t *testing.T) {
+func TestEncode(t *testing.T) {
 	t.Parallel()
 	type named struct {
 		Name string `json:"name"`
@@ -72,22 +74,22 @@ func TestEncodePythonJSON(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := encodePythonJSON(tc.v)
+			got, err := pythonjson.Encode(tc.v)
 			if err != nil {
-				t.Fatalf("encodePythonJSON() error = %v", err)
+				t.Fatalf("Encode() error = %v", err)
 			}
 			if got != tc.want {
-				t.Errorf("encodePythonJSON() = %s, want %s", got, tc.want)
+				t.Errorf("Encode() = %s, want %s", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestEncodePythonJSON_UnencodableValue(t *testing.T) {
+func TestEncode_UnencodableValue(t *testing.T) {
 	t.Parallel()
 	for _, v := range []any{complex(1, 2), map[string]any{"ch": make(chan int)}} {
-		if got, err := encodePythonJSON(v); err == nil {
-			t.Errorf("encodePythonJSON(%T) = %q, want an error", v, got)
+		if got, err := pythonjson.Encode(v); err == nil {
+			t.Errorf("Encode(%T) = %q, want an error", v, got)
 		}
 	}
 }
