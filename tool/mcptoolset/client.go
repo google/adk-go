@@ -100,7 +100,7 @@ func (c *connectionRefresher) Close() error {
 		c.unlock()
 
 		if session != nil {
-			c.closeErr = session.Close()
+			c.closeErr = redactRedirectTarget(session.Close())
 		}
 	})
 	return c.closeErr
@@ -247,7 +247,7 @@ func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.Clien
 			return c.session, nil
 		}
 		if err := c.session.Close(); err != nil {
-			log.Printf("failed to close MCP session: %v", err) //nolint:forbidigo // pre-slog call site
+			log.Printf("failed to close MCP session: %v", redactRedirectTarget(err)) //nolint:forbidigo // pre-slog call site
 		}
 		c.session = nil
 	}

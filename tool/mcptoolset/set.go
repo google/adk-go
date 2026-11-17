@@ -191,15 +191,16 @@ func authCheckRedirect(next func(*http.Request, []*http.Request) error) func(*ht
 }
 
 // refuseRedirect reports a hop the policy refused. On a GET chain it hands
-// net/http the 3xx unfollowed instead of an error. The SDK sends a GET only
-// for its optional server-to-client stream, on protocol versions before
-// 2026-07-28: an error from client.Do there is retried with growing delays
-// and then fails the session, while a 3xx that is not labeled
-// text/event-stream on the first stream request reads as a server without a
-// stream and the session goes on. A 3xx labeled text/event-stream, or any
-// 3xx on a reconnect, still fails the session, with the status text as the
-// reason. The JSON-RPC traffic is POST, where the error is the clearer
-// failure. Either way the next hop is not sent.
+// net/http the 3xx unfollowed instead of an error. The SDK sends a GET for
+// its optional server-to-client stream, on protocol versions before
+// 2026-07-28, and to resume a call's event stream with Last-Event-ID. An
+// error from client.Do on the stream GET is retried with growing delays and
+// then fails the session, while a 3xx that is not labeled text/event-stream
+// on the first stream request reads as a server without a stream and the
+// session goes on. A 3xx labeled text/event-stream, one on a stream
+// reconnect, or one on a resume fails the session or the call with the
+// status text as the reason. The JSON-RPC traffic is POST, where the error is
+// the clearer failure. Either way the next hop is not sent.
 func refuseRedirect(method string, err error) error {
 	if method == http.MethodGet {
 		return http.ErrUseLastResponse
@@ -235,9 +236,9 @@ func redactRedirectTarget(err error) error {
 }
 
 // replaceLeaf returns err with the wrapped error old replaced by new, keeping
-// the message of every layer above it. It follows fmt.Errorf's %w chains,
-// including one wrapping two errors, which the SDK uses between a request
-// and its transport error.
+// the message of every layer above it and every other error those layers
+// wrap. It follows fmt.Errorf's %w chains, including one wrapping two errors,
+// which the SDK uses between a request and its transport error.
 func replaceLeaf(err, old, new error) error {
 	if err == old {
 		return new
@@ -252,21 +253,33 @@ func replaceLeaf(err, old, new error) error {
 		}
 	}
 	msg := err.Error()
-	for _, e := range inner {
+	for i, e := range inner {
 		replaced := replaceLeaf(e, old, new)
 		if replaced == e {
 			continue
 		}
-		// Rebuild the layer with the replaced error in place of the old
-		// text, when the layer's message carries it; otherwise the layer
-		// added nothing worth keeping over the redacted error.
-		if before, after, ok := strings.Cut(msg, e.Error()); ok {
-			return fmt.Errorf("%s%w%s", before, replaced, after)
+		// Rebuild the layer around the replaced error when its message
+		// carries the old one; otherwise the layer added nothing worth
+		// keeping over the redacted error.
+		before, after, ok := strings.Cut(msg, e.Error())
+		if !ok {
+			return replaced
 		}
-		return replaced
+		errs := append(append(append([]error{}, inner[:i]...), replaced), inner[i+1:]...)
+		return &wrappedErrors{msg: before + replaced.Error() + after, errs: errs}
 	}
 	return err
 }
+
+// wrappedErrors is a rebuilt error layer: the layer's message with the
+// redacted error's text in place of the old, over the same wrapped errors.
+type wrappedErrors struct {
+	msg  string
+	errs []error
+}
+
+func (e *wrappedErrors) Error() string   { return e.msg }
+func (e *wrappedErrors) Unwrap() []error { return e.errs }
 
 // Config provides initial configuration for the MCP ToolSet.
 type Config struct {
@@ -319,13 +332,14 @@ type Config struct {
 	// CheckRedirect on the HTTPClient runs after that check, not instead of
 	// it, and may not point the request at another host through its Host
 	// header, path or opaque URL either. A refused redirect fails the call,
-	// except on a GET, which the SDK sends only for its optional
-	// server-to-client stream on protocol versions before 2026-07-28: there
-	// the unfollowed 3xx goes back to the SDK. With the SDK release in go.mod,
-	// a 3xx not labeled text/event-stream on the first stream request means
-	// no stream and the session goes on, while one labeled text/event-stream,
-	// or any 3xx on a reconnect, fails the session with the status text as
-	// the reason.
+	// except on a GET, where the unfollowed 3xx goes back to the SDK. The SDK
+	// sends a GET for its optional server-to-client stream, on protocol
+	// versions before 2026-07-28, and to resume a call's event stream. With
+	// the SDK release in go.mod, a 3xx not labeled text/event-stream on the
+	// first stream request means no stream and the session goes on, while
+	// one labeled text/event-stream, one on a stream reconnect, or one on a
+	// resume fails the session or the call with the status text as the
+	// reason.
 	//
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two

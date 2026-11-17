@@ -1722,6 +1722,105 @@ func TestAuthRedirectStandaloneStream(t *testing.T) {
 	}
 }
 
+// TestAuthRedirectLocationStaysOut covers the two exits from the toolset
+// other than a call's error: Close, which sends a DELETE through the same
+// client, and the log line a reconnect writes when the old session's Close
+// fails. A refused redirect on either must not carry the server's Location.
+func TestAuthRedirectLocationStaysOut(t *testing.T) {
+	const token = "user-tok"
+	var mu sync.Mutex
+	var otherHits int
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		otherHits++
+		mu.Unlock()
+		http.Error(w, "x", http.StatusTeapot)
+	}))
+	defer other.Close()
+	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	mcp.AddTool(mcpServer, &mcp.Tool{Name: "ping", Description: "ping"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{}, nil, nil
+	})
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil)
+	var deletes atomic.Int32
+	// While set, the server drops every connection on a POST. A call then
+	// fails with a connection error the toolset answers by reconnecting,
+	// and the reconnect first closes the dead session, which sends the
+	// DELETE. The flag clears on that DELETE so the new session can start.
+	var dropPosts atomic.Bool
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.Add(1)
+			dropPosts.Store(false)
+			http.Redirect(w, r, other.URL+"/sso?code=SECRET-CODE&state=xyz", http.StatusTemporaryRedirect)
+			return
+		}
+		if dropPosts.Load() && r.Method == http.MethodPost {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := conn.Close(); err != nil {
+				t.Error(err)
+			}
+			return
+		}
+		mcpHandler.ServeHTTP(w, r)
+	}))
+	defer endpoint.Close()
+
+	t.Run("Close", func(t *testing.T) {
+		ts, err := mcptoolset.New(mcptoolset.Config{Endpoint: endpoint.URL + "/mcp", Auth: auth.StaticToken(token)})
+		if err != nil {
+			t.Fatalf("mcptoolset.New() error = %v", err)
+		}
+		if _, err := ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}))); err != nil {
+			t.Fatalf("Tools() error = %v", err)
+		}
+		err = ts.(io.Closer).Close()
+		if err == nil || !strings.Contains(err.Error(), "refusing redirect") {
+			t.Errorf("Close() error = %v, want the refusal", err)
+		}
+		if err != nil && strings.Contains(err.Error(), "SECRET-CODE") {
+			t.Errorf("Close() error = %v, want it not to carry the Location's query string", err)
+		}
+	})
+
+	t.Run("reconnect log line", func(t *testing.T) {
+		var logged strings.Builder
+		prev := log.Writer()
+		log.SetOutput(&logged)
+		defer log.SetOutput(prev)
+		ts, err := mcptoolset.New(mcptoolset.Config{Endpoint: endpoint.URL + "/mcp", Auth: auth.StaticToken(token)})
+		if err != nil {
+			t.Fatalf("mcptoolset.New() error = %v", err)
+		}
+		defer func() { _ = ts.(io.Closer).Close() }()
+		inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+		if _, err := ts.Tools(icontext.NewReadonlyContext(inv)); err != nil {
+			t.Fatalf("Tools() error = %v", err)
+		}
+		dropPosts.Store(true)
+		if _, err := ts.Tools(icontext.NewReadonlyContext(inv)); err != nil {
+			t.Fatalf("Tools() across the dropped connection: error = %v", err)
+		}
+		if got := logged.String(); !strings.Contains(got, "failed to close MCP session") {
+			t.Fatalf("log = %q, want the reconnect's close failure, so the test exercised the line", got)
+		} else if strings.Contains(got, "SECRET-CODE") {
+			t.Errorf("log = %q, want it not to carry the Location's query string", got)
+		}
+	})
+	if deletes.Load() == 0 {
+		t.Error("no DELETE reached the endpoint, so the redirect under test never happened")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if otherHits != 0 {
+		t.Errorf("redirect target received %d requests, want none", otherHits)
+	}
+}
+
 // TestAuthRedirectHookRewritesTarget covers a caller CheckRedirect that
 // leaves the URL's host alone and points the request elsewhere another way:
 // through the Host header, an opaque URL or a path without a leading slash.
@@ -1743,6 +1842,9 @@ func TestAuthRedirectHookRewritesTarget(t *testing.T) {
 			req.URL.Path = strings.TrimPrefix(req.URL.Path, "/api")
 			return nil
 		}},
+		// net/http sends the Host header as given, so a respelling of the
+		// endpoint's own name reaches a front end as another name.
+		{"brackets the Host", "/mcp/", func(req *http.Request, _ []*http.Request) error { req.Host = "[endpoint.test]"; return nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			type seen struct{ target, host, authz string }
@@ -1788,7 +1890,7 @@ func TestAuthRedirectHookRewritesTarget(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			for _, s := range got {
-				if s.host != "endpoint.test" || strings.Contains(s.target, "evil.test") {
+				if s.host != "endpoint.test" || strings.Contains(s.target, "evil.test") || strings.Contains(s.target, "[") {
 					t.Errorf("proxy received target %q host %q with Authorization %q, want only endpoint.test", s.target, s.host, s.authz)
 				}
 			}

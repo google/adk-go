@@ -122,7 +122,7 @@ func TestRedactRedirectTarget(t *testing.T) {
 	}{
 		{name: "bare url.Error", err: leak, want: refused.Error()},
 		{name: "wrapped once", err: fmt.Errorf("sending: %w", leak), want: "sending: " + refused.Error()},
-		{name: "wrapped twice with another error beside it", err: fmt.Errorf("calling: %w", fmt.Errorf("sending: %w: %w", errors.New("rejected by transport"), leak)), want: "calling: sending: rejected by transport: " + refused.Error()},
+		{name: "wrapped twice with another error beside it", err: fmt.Errorf("calling: %w", fmt.Errorf("sending: %w: %w", sibling{"rejected by transport"}, leak)), want: "calling: sending: rejected by transport: " + refused.Error()},
 		// A layer whose message does not quote the inner error, such as a
 		// custom type, is dropped in favor of the redacted error.
 		{name: "opaque layer", err: opaqueErr{leak}, want: refused.Error()},
@@ -150,9 +150,19 @@ func TestRedactRedirectTarget(t *testing.T) {
 			if !errors.Is(got, refused) {
 				t.Errorf("redactRedirectTarget() lost the refusal from the chain")
 			}
+			// The SDK's typed error beside the transport error must stay
+			// reachable, as errors.As found it before the redaction.
+			var sib sibling
+			if errors.As(tc.err, &sib) && !errors.As(got, &sib) {
+				t.Errorf("redactRedirectTarget() lost the error wrapped beside the refusal")
+			}
 		})
 	}
 }
+
+type sibling struct{ msg string }
+
+func (e sibling) Error() string { return e.msg }
 
 type opaqueErr struct{ err error }
 

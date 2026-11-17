@@ -21,6 +21,7 @@ package credredirect
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -69,9 +70,38 @@ func addressesOwnHost(req *http.Request) bool {
 	if req.Host == "" {
 		return true
 	}
-	fromHeader := *req.URL
-	fromHeader.Host = req.Host
-	return sameTarget(req.URL, &fromHeader)
+	// net/http writes the Host header string as given, so it has to be the
+	// one it would write from the URL, byte for byte after punycode. Parsing
+	// it as a host would let a respelling through, brackets around a name
+	// or a port folded into an IPv6 literal, that reaches a front end or a
+	// proxy as another name.
+	want, ok := hostHeader(req.URL.Host)
+	if !ok {
+		return false
+	}
+	got, ok := hostHeader(req.Host)
+	return ok && got == want
+}
+
+// hostHeader returns the Host header net/http writes for a host[:port]
+// string, as httpguts.PunycodeHostPort derives it: ASCII as given, otherwise
+// the name's punycode with the port kept, and false when it has none.
+func hostHeader(hostport string) (string, bool) {
+	if isASCII(hostport) {
+		return hostport, true
+	}
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host, port = hostport, ""
+	}
+	ascii, err := idna.ToASCII(host)
+	if err != nil {
+		return "", false
+	}
+	if port == "" {
+		return ascii, true
+	}
+	return net.JoinHostPort(ascii, port), true
 }
 
 // sameTarget reports whether it is safe to replay the credential on a
