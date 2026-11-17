@@ -1943,6 +1943,9 @@ func (f *Flow) handleFunctionCallsInOrder(ctx agent.InvocationContext, toolsDict
 	}
 
 	fnResponseEvents := make([]*session.Event, len(fnCalls))
+	// stops[i] is the error that keeps call i from being answered: a pause,
+	// or an error that ends the run.
+	stops := make([]error, len(fnCalls))
 
 	// Tool calls run via the context's task runner: concurrent goroutines by
 	// default, or a caller-installed runner (platform.WithTaskRunner).
@@ -2056,6 +2059,11 @@ func (f *Flow) handleFunctionCallsInOrder(ctx agent.InvocationContext, toolsDict
 				}
 			}
 
+			if res.stop != nil {
+				stops[i] = res.stop
+				return
+			}
+
 			if isFalsyResult(res) {
 				if d, ok := curTool.(toolinternal.ResponseDeferrer); ok && d.DefersResponse() {
 					return
@@ -2131,6 +2139,13 @@ func (f *Flow) handleFunctionCallsInOrder(ctx agent.InvocationContext, toolsDict
 		}
 	}
 	platform.RunTasks(ctx, tasks)
+	// The first stop by call index ends the step with no response for any
+	// call, so a paused call and its siblings are replayed together on resume.
+	for _, stop := range stops {
+		if stop != nil {
+			return nil, stop
+		}
+	}
 	mergedEvent, err = mergeParallelResponses(ctx, fnResponseEvents)
 	if err != nil {
 		return mergedEvent, err
@@ -2150,7 +2165,12 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fA
 }
 
 // callTool runs one call of t: the before-tool callbacks, then the tool, the
-// on-tool-error callbacks on an error, and the after-tool callbacks. lookup is
+// on-tool-error callbacks on an error, and the after-tool callbacks. A tool
+// error of type *toolinternal.PausedError returns at once as the result's stop,
+// with no further callback. A *toolinternal.FailRunError goes to the
+// on-tool-error callbacks: a response answers the call as for any error, and
+// otherwise the result's stop is the callback's error or the FailRunError, with
+// no after-tool callback. lookup is
 // non-nil when no runnable tool has the called name; t is then the
 // placeholder, which only callbacks see. A before-tool callback can still
 // answer such a call, and the after-tool callbacks then run as for a tool;
@@ -2182,11 +2202,28 @@ func (f *Flow) callTool(toolCtx agent.Context, t tool.Tool, args map[string]any,
 	}
 
 	res := toolResult{m: response}
+	var failRun *toolinternal.FailRunError
 	if response == nil && err == nil {
 		res, err = runTool(toolCtx, t, args)
+		// A pause is not a tool error: no callback sees it, as adk-python's
+		// NodeInterruptedError, a BaseException, passes _caller.py:572's
+		// `except Exception`.
+		if _, ok := errors.AsType[*toolinternal.PausedError](err); ok {
+			return toolResult{stop: err}
+		}
+		errors.As(err, &failRun)
 	}
 
-	if err != nil {
+	if failRun != nil {
+		// The callbacks may answer a run-failing error; otherwise it, or a
+		// callback's own error, ends the run (_caller.py:580-585). cbErr is
+		// err itself when every callback declines.
+		errorResponse, cbErr := f.runOnToolErrorCallbacks(toolCtx, t, args, err)
+		if cbErr != nil {
+			return toolResult{stop: cbErr}
+		}
+		res, err = toolResult{m: errorResponse}, nil
+	} else if err != nil {
 		errorResponse, cbErr := f.runOnToolErrorCallbacks(toolCtx, t, args, err)
 		if errorResponse != nil || cbErr != nil {
 			res = toolResult{m: errorResponse}

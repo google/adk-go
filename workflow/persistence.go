@@ -92,10 +92,15 @@ type nodeScanState struct {
 	resolvedCount map[string]int
 	// schemas maps an interrupt ID to its declared response schema,
 	// re-extracted from the pause FunctionCall args.
-	schemas  map[string]*jsonschema.Schema
-	branch   string
-	finished bool
-	failed   bool
+	schemas map[string]*jsonschema.Schema
+	// branch is the node's branch on resume: that of its first own event
+	// of the invocation, then of its later own output or outcome events.
+	// A descendant's interrupt supplies it only while branchKnown is
+	// false, that is, for a node with no own event.
+	branch      string
+	branchKnown bool
+	finished    bool
+	failed      bool
 }
 
 func (s *nodeScanState) addInterrupt(id string) {
@@ -252,6 +257,9 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 		}
 		if own := ownEventNodeName(ev, nodesByName); own != "" {
 			sf := scanFor(own)
+			if !sf.branchKnown {
+				sf.branch, sf.branchKnown = ev.Branch, true
+			}
 			_, hasOutput := childEventOutput(ev)
 			if hasOutput || ev.CustomMetadata[workflowNodeCompletedKey] == true {
 				sf.branch = ev.Branch
@@ -271,7 +279,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			}
 			s.addInterrupt(id)
 			s.finished = false
-			if s.branch == "" {
+			if !s.branchKnown && s.branch == "" {
 				s.branch = ev.Branch
 			}
 			interruptOwner[id] = owner
