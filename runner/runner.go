@@ -924,6 +924,20 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // function response or a resume sends back to work continues on the branch
 // of its newest event in the invocation it continues that a rewind did not
 // remove and that is not on a tool's message branch.
+//
+// A caller that breaks from the range loop at a non-partial event leaves
+// that event stored in the session. The yield of the node that produced the
+// event returns false, so a node that returns when its yield returns false,
+// as every node and agent in adk-go does, does not go on: an LlmAgent, or an
+// LlmAgent in a graph workflow, does not start the tools that the event's
+// function call names. A custom node that ignores the result of its yield
+// goes on. Run returns after every node it started has ended. A partial
+// event is not stored and is not waited for, so the node that produced it
+// keeps going until its next event or until it sees that its context is
+// done. A resumable runner whose root is an LlmAgent runs a call that was
+// left without a response when it is resumed with [WithInvocationID]. A
+// branch of a parallel agent (package parallelagent) may still start the
+// tool that the function call of the event it produced names.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// Copied now: the sequence below runs only when ranged, and later
 	// changes to the caller's map must not reach the invocation's events.

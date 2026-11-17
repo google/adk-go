@@ -69,6 +69,12 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 // returns ctx.Err() and yields no output, even if every item succeeded. An
 // empty input starts no workers and always yields an empty list.
 //
+// A wrapped node whose context is done is not started again, and its yield
+// returns false at its next event. No item is started once ctx is done.
+// Without a concurrency cap every other item is started, even when a sibling
+// has already failed; a failed sibling stops the started items through their
+// canceled context.
+//
 // In case the wrapped node produces more then one output event, they will be
 // aggregated into a list, and the final result will be a multi dimensional list.
 //
@@ -142,13 +148,12 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 					continue
 				default:
 				}
-			} else {
-				select {
-				case <-workerCtx.Done():
-					wg.Done()
-					continue
-				default:
-				}
+			} else if ctx.Err() != nil {
+				// Check the run's own context, not workerCtx: a failed
+				// sibling cancels workerCtx, and without a cap the other
+				// items still start.
+				wg.Done()
+				continue
 			}
 
 			itemBranch := deriveSubBranch(parentBranch, wrappedName+"@"+strconv.Itoa(i+1))
@@ -223,8 +228,12 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 			delay := CalculateDelay(retryCfg, failedAttempts)
 			select {
 			case <-time.After(delay):
-				continue
 			case <-ctx.Done():
+			}
+			// A two-case select picks at random when the delay has elapsed and ctx
+			// is done, so decide on ctx itself: a canceled item must not start the
+			// wrapped node again.
+			if err := ctx.Err(); err != nil {
 				// Cancellation while parked in the retry delay is a real
 				// failure too: report it before releasing sem, exactly
 				// like the exhausted-attempts path below. Without this,
@@ -232,10 +241,11 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 				// report first, so a cancellation landing here can be
 				// silently dropped and the whole run yields success with
 				// a nil output for this item.
-				reportFailure(ctx.Err())
-				resCh <- workerResult{index: idx, err: ctx.Err()}
+				reportFailure(err)
+				resCh <- workerResult{index: idx, err: err}
 				return
 			}
+			continue
 		}
 
 		// Cannot retry or exhausted attempts: report before releasing sem.
@@ -263,6 +273,12 @@ func (n *ParallelWorker) runWrappedOnce(ctx agent.Context, item any) (outputs []
 		}
 		if out, ok := extractOutput(ev); ok {
 			outputs = append(outputs, out)
+		}
+		if ctx.Err() != nil {
+			// The wrapped node's yield returns false, so it does not go on.
+			// The item reports no error of its own: Run turns a done ctx
+			// into the error it yields.
+			break
 		}
 	}
 	return outputs, err
