@@ -487,6 +487,20 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 			wantInput:   "A",
 		},
 		{
+			// a keeps routing back to itself and never takes its Default
+			// edge into ask, so ask was triggered over its START edge.
+			name: "self_loop_never_taking_the_edge_to_node",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: Start, To: ask},
+				{From: a, To: a, Route: StringRoute("again")},
+				{From: a, To: ask, Route: Default},
+			},
+			history:     []*session.Event{finished("a", "A1", "again"), finished("a", "A2", "again")},
+			wantTrigger: Start.Name(),
+			wantInput:   "seed",
+		},
+		{
 			// A Default edge back to the node. The route and the output
 			// of the second visit sit on one event and stay together.
 			name: "self_loop_on_default_route",
@@ -662,6 +676,21 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 			},
 			wantTrigger: "b",
 			wantInput:   "B",
+		},
+		{
+			// a asks under the same ID on every visit, like a node that
+			// builds the ID from the invocation ID. The answer to the
+			// second pause ends that pause too, and the rerun that
+			// follows fires into ask.
+			name:  "same_interrupt_id_on_later_visit",
+			edges: secondVisit,
+			history: []*session.Event{
+				raised("a", "q"), answered("q"), finished("a", "A1"),
+				completed("c"),
+				raised("a", "q"), answered("q"), finished("a", "A2"),
+			},
+			wantTrigger: "a",
+			wantInput:   "A2",
 		},
 		{
 			// a triggered ask on its first visit. Its second visit paused

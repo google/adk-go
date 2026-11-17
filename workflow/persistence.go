@@ -17,6 +17,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -466,6 +467,10 @@ func (w *Workflow) collectTriggers(events session.Events, nodesByName map[string
 		if owner := eventNodeName(ev, nodesByName); nodesByName[owner] != nil {
 			for _, id := range ev.LongRunningToolIDs {
 				if id != "" {
+					// A node can ask again under an ID it got an answer
+					// for, on a later visit. That pause waits for its
+					// own first answer.
+					delete(answered, id)
 					interruptOwner[id] = owner
 					visitFor(owner).paused = true
 				}
@@ -476,12 +481,13 @@ func (w *Workflow) collectTriggers(events session.Events, nodesByName map[string
 		own := ownEventNodeName(ev, nodesByName)
 		routes := own != "" && ev.Routes != nil
 		out, hasOutput := childEventOutput(ev)
-		for _, name := range eventOutputOwners(ev, nodesByName) {
-			v := visitFor(name)
-			if v.hasResult && v.index == i {
+		owners := eventOutputOwners(ev, nodesByName)
+		for k, name := range owners {
+			if slices.Contains(owners[:k], name) {
 				// OutputFor names the emitter as well.
 				continue
 			}
+			v := visitFor(name)
 			if v.hasResult {
 				end(name)
 				v = visitFor(name)

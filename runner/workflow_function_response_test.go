@@ -16,6 +16,7 @@ package runner_test
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"slices"
 	"strings"
@@ -325,6 +326,58 @@ func TestRun_FunctionResponseRerunsNodeAfterLoop(t *testing.T) {
 	}
 	if want := []string{"valid", "valid"}; !slices.Equal(inputs, want) || answer != "yes" {
 		t.Errorf("ask ran with inputs %q and got the answer %v, want inputs %q and the answer yes", inputs, answer, want)
+	}
+}
+
+// TestRun_FunctionResponseRerunsNodeAfterRetry checks a predecessor that is
+// retried. Its first attempt routes "skip" and fails, and the retry succeeds
+// without a route and takes the Default edge into the re-entry node. The route
+// of the failed attempt must not count against that edge on resume.
+func TestRun_FunctionResponseRerunsNodeAfterRetry(t *testing.T) {
+	attempts := 0
+	check := workflow.NewEmittingFunctionNode("check", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		attempts++
+		if attempts == 1 {
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Routes = []string{"skip"}
+			if err := emit(ev); err != nil {
+				return nil, err
+			}
+			return nil, errors.New("scripted failure")
+		}
+		return "checked", nil
+	}, workflow.NodeConfig{RetryConfig: &workflow.RetryConfig{MaxAttempts: 2}})
+	skip := workflow.NewFunctionNode("skip", func(agent.Context, any) (string, error) { return "skipped", nil }, workflow.NodeConfig{})
+
+	var inputs []string
+	var answer any
+	ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, in string, emit func(*session.Event) error) (any, error) {
+		inputs = append(inputs, in)
+		reply, err := workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "ask-" + in})
+		if err != nil {
+			return nil, err
+		}
+		answer = reply
+		return reply, nil
+	}, workflow.NodeConfig{RerunOnResume: new(true)})
+
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name: "wf",
+		Edges: []workflow.Edge{
+			{From: workflow.Start, To: check},
+			{From: check, To: skip, Route: workflow.StringRoute("skip")},
+			{From: skip, To: ask},
+			{From: check, To: ask, Route: workflow.Default},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runResumeTurn(t, wf, resumeContent("ask-checked", workflow.WorkflowInputFunctionCallName, "yes"), nil); err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if want := []string{"checked", "checked"}; attempts != 2 || !slices.Equal(inputs, want) || answer != "yes" {
+		t.Errorf("check ran %d times, ask ran with inputs %q and got the answer %v, want 2 runs, inputs %q and the answer yes", attempts, inputs, answer, want)
 	}
 }
 
