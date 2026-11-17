@@ -78,12 +78,12 @@ func TestAuthCode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := authCode(&tt.o)
+			got, err := AuthCode(&tt.o)
 			if err != nil {
-				t.Fatalf("authCode() error = %v", err)
+				t.Fatalf("AuthCode() error = %v", err)
 			}
 			if got != tt.want {
-				t.Errorf("authCode() = %q, want %q", got, tt.want)
+				t.Errorf("AuthCode() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -118,9 +118,9 @@ func TestAuthCodeRejects(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := authCode(&tt.o)
+			_, err := AuthCode(&tt.o)
 			if err == nil {
-				t.Fatalf("authCode() error = nil, want an error")
+				t.Fatalf("AuthCode() error = nil, want an error")
 			}
 			for _, secret := range []string{"9-zzz", "Xy7", "Q2w"} {
 				if strings.Contains(err.Error(), secret) {
@@ -250,12 +250,12 @@ func TestTokenConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tokenConfig(&tt.scheme, &tt.o)
+			got, err := TokenConfig(&tt.scheme, &tt.o)
 			if err != nil {
-				t.Fatalf("tokenConfig() error = %v", err)
+				t.Fatalf("TokenConfig() error = %v", err)
 			}
 			if diff := cmp.Diff(tt.want, got, cmpopts.IgnoreUnexported(oauth2.Config{})); diff != "" {
-				t.Errorf("tokenConfig() mismatch (-want +got):\n%s", diff)
+				t.Errorf("TokenConfig() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -310,8 +310,8 @@ func TestTokenConfigRejects(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := tokenConfig(&tt.scheme, &tt.o); err == nil {
-				t.Errorf("tokenConfig() error = nil, want an error")
+			if _, err := TokenConfig(&tt.scheme, &tt.o); err == nil {
+				t.Errorf("TokenConfig() error = nil, want an error")
 			}
 		})
 	}
@@ -565,8 +565,8 @@ func TestExchangeCodeBoundsTheTokenRequest(t *testing.T) {
 		t.Fatalf("exchangeCode() error = %v", err)
 	}
 	after := time.Now()
-	if !rec.ok || rec.deadline.Before(before.Add(tokenRequestTimeout)) || rec.deadline.After(after.Add(tokenRequestTimeout)) {
+	if !rec.ok || rec.deadline.Before(before.Add(TokenRequestTimeout)) || rec.deadline.After(after.Add(TokenRequestTimeout)) {
 		t.Errorf("token request deadline = %v (set = %t), want between %v and %v",
-			rec.deadline, rec.ok, before.Add(tokenRequestTimeout), after.Add(tokenRequestTimeout))
+			rec.deadline, rec.ok, before.Add(TokenRequestTimeout), after.Add(TokenRequestTimeout))
 	}
 }
