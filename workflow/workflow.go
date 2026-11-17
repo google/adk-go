@@ -254,9 +254,11 @@ func WithNodeRootWrapper() Option {
 	}
 }
 
-// WithMaxConcurrency caps how many graph-scheduled nodes may run
-// concurrently in a single Workflow invocation; nodes beyond the
-// cap queue as NodePending. n <= 0 disables the cap (unlimited).
+// WithMaxConcurrency caps how many graph-scheduled nodes may run at once in a
+// single Workflow invocation. A node waiting for a retry backoff keeps its
+// slot. A trigger that finds the cap reached, or its node busy, waits in
+// arrival order and starts when a slot and the node are free; it takes no
+// slot while it waits. n <= 0 disables the cap (unlimited).
 //
 // Does NOT apply to dynamic sub-nodes invoked via workflow.RunNode
 // from inside a DynamicNode body — they are awaited inline by the

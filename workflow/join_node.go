@@ -24,11 +24,13 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
-// JoinNode is a fan-in barrier. It is activated exactly once,
-// after every predecessor declared by the graph edges has
-// completed, and receives those predecessors' outputs as a single
-// map[string]any keyed by predecessor name. Its own output is
-// that map, emitted verbatim.
+// JoinNode is a fan-in barrier. It runs when every predecessor declared by the
+// graph edges has completed and none of them has a trigger waiting, and it
+// receives those predecessors' outputs as a single map[string]any keyed by
+// predecessor name. Its own output is that map, emitted verbatim. The barrier
+// is checked each time a predecessor completes, so a predecessor that
+// completes again (a loop) runs the join again, under its next run id, with
+// the new value.
 //
 // All incoming edges feed the barrier. Routing into a JoinNode
 // conditionally is a configuration error that nothing validates:

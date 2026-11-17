@@ -61,9 +61,10 @@ var ErrUnconditionalCycle = errors.New("unconditional cycle detected")
 var ErrSubWorkflowNameCollision = errors.New("sub-workflow name collision")
 
 // ErrUnsupportedFanIn is returned when a non-JoinNode has two or more
-// unconditional incoming edges. Such a fan-in target would be activated
-// once per predecessor, which the scheduler does not yet serialize
-// safely. Use a JoinNode to converge multiple branches.
+// unconditional incoming edges. New refuses such a graph even though the
+// scheduler would run the target once per predecessor completion, one run at
+// a time, each with that predecessor's output. Use a JoinNode to converge
+// multiple branches into a single run.
 var ErrUnsupportedFanIn = errors.New("non-JoinNode fan-in is not yet supported")
 
 // validateNodes executes a set of edges validation checks.
@@ -378,8 +379,8 @@ func validateCycles(workflow *graph) error {
 
 // validateFanIn rejects a non-JoinNode target that has two or more
 // unconditional incoming edges. Such a node would be activated once per
-// completed predecessor, colliding the scheduler's per-name bookkeeping
-// (mixed outputs, lost cancel funcs). JoinNode handles fan-in via a
+// completed predecessor, and is refused until fan-in to a plain node is
+// supported (see ErrUnsupportedFanIn). JoinNode handles fan-in via a
 // barrier; everything else must converge through one. Only unconditional
 // (Route == nil) edges are counted so conditional fan-in and loop-back
 // back-edges — where the predecessors don't all fire together — are not

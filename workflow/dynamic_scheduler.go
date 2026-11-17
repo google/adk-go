@@ -17,7 +17,6 @@ package workflow
 import (
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -38,12 +37,15 @@ type dynamicSubScheduler struct {
 	// Context._output_for_ancestors.
 	outputForAncestors []string
 
+	// counters allocates auto run ids: the scheduler's table when the
+	// parent context carries one, so the ids keep counting across the
+	// attempts of one activation; a private table otherwise. Safe for
+	// concurrent use on its own.
+	counters *runCounters
+
 	// mu guards everything below. Never held across child.Run, nor
 	// across the wait in awaitOrLead.
 	mu sync.Mutex
-	// runCountByChild seeds the auto-counter per child name; the
-	// n-th invocation gets runID strconv.Itoa(n).
-	runCountByChild map[string]int
 	// resultByPath caches successful child outputs keyed by
 	// childPath ("<parentPath>/<name>@<runID>"). Failures and HITL
 	// interrupts are not cached.
@@ -160,15 +162,20 @@ func (d *outputDelegation) output() (any, bool) {
 
 func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func(*session.Event) error) agent.DynamicSubScheduler {
 	ancestors := []string{}
+	var counters *runCounters
 	if parent != nil {
 		ancestors = parent.OutputForAncestors()
+		counters = runCountersFrom(parent)
+	}
+	if counters == nil {
+		counters = &runCounters{}
 	}
 	s := &dynamicSubScheduler{
 		parentPath:         parentPath,
 		parentCtx:          parent,
 		emitUp:             emitUp,
 		outputForAncestors: ancestors,
-		runCountByChild:    map[string]int{},
+		counters:           counters,
 		resultByPath:       map[string]any{},
 		inflightByPath:     map[string]*inflightRun{},
 		failedPaths:        map[string]struct{}{},
@@ -625,7 +632,8 @@ func (s *dynamicSubScheduler) childFailures() failureInventory {
 		paths = append(paths, path)
 	}
 	// Preserve a known empty inventory so a body-only failure does not
-	// invalidate completed children on retry, as in adk-python's runs cache.
+	// invalidate completed children when the run is resumed; a retry
+	// inside the run starts its children under new run ids (runCounters).
 	return failureInventory{known: true, paths: paths}
 }
 
@@ -682,7 +690,7 @@ func (s *dynamicSubScheduler) delegatedOutput() (any, bool) {
 }
 
 // resolveRunID validates a user-supplied id, or returns the next
-// per-child-name counter value under lock.
+// auto run id of childName under this activation's path.
 func (s *dynamicSubScheduler) resolveRunID(childName, custom string) (string, error) {
 	if custom != "" {
 		if err := validateCustomRunID(custom); err != nil {
@@ -690,10 +698,7 @@ func (s *dynamicSubScheduler) resolveRunID(childName, custom string) (string, er
 		}
 		return custom, nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.runCountByChild[childName]++
-	return strconv.Itoa(s.runCountByChild[childName]), nil
+	return s.counters.next(s.parentPath, childName), nil
 }
 
 // validateCustomRunID rejects empty ids, purely-numeric ids (collide
