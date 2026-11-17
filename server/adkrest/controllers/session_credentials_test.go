@@ -405,9 +405,10 @@ func TestRemovingArrayCredentialKeepsRemainingTokens(t *testing.T) {
 	}
 }
 
-// TestDuplicatedArrayCredentialRestoresAtMostOne checks that one stored entry
-// cannot fill in the secrets of several submitted entries.
-func TestDuplicatedArrayCredentialRestoresAtMostOne(t *testing.T) {
+// TestDuplicatedArrayCredentialRestoresNothing checks that an identity that
+// appears more than once in the submitted array cannot be matched, so no entry
+// receives a secret.
+func TestDuplicatedArrayCredentialRestoresNothing(t *testing.T) {
 	f := newSessionFixture(t, map[string]any{"creds": []any{oauth2Credential("a", "at-a", "rt-a")}})
 	state := f.readState(t)
 	creds := state["creds"].([]any)
@@ -418,15 +419,17 @@ func TestDuplicatedArrayCredentialRestoresAtMostOne(t *testing.T) {
 	f.patch(t, map[string]any{"creds": creds})
 
 	stored := f.stored(t, "creds").([]any)
-	withToken := 0
-	for _, item := range stored {
+	if len(stored) != 2 {
+		t.Fatalf("stored %d credentials, want 2", len(stored))
+	}
+	for i, item := range stored {
 		oauth := item.(map[string]any)["oauth2"].(map[string]any)
 		if _, ok := oauth["accessToken"]; ok {
-			withToken++
+			t.Errorf("entry %d received an access token, want none", i)
 		}
-	}
-	if withToken != 1 {
-		t.Errorf("%d duplicated entries got a token, want 1", withToken)
+		if _, ok := oauth["refreshToken"]; ok {
+			t.Errorf("entry %d received a refresh token, want none", i)
+		}
 	}
 }
 
@@ -456,10 +459,10 @@ func TestUnknownAuthTypeSpellingDoesNotRestoreSecrets(t *testing.T) {
 	}
 }
 
-// TestReplacingOneDuplicateIdentityKeepsTheOther checks that a submitted entry
-// prefers the stored entry at the same index, so a duplicate identity elsewhere
-// does not make the match ambiguous.
-func TestReplacingOneDuplicateIdentityKeepsTheOther(t *testing.T) {
+// TestReplacingOneDuplicateIdentityRestoresNothing checks that replacing one of
+// two credentials that share an identity leaves the other one as submitted:
+// the identity is ambiguous, so nothing is restored, the same as on main.
+func TestReplacingOneDuplicateIdentityRestoresNothing(t *testing.T) {
 	f := newSessionFixture(t, map[string]any{"creds": []any{
 		oauth2Credential("a", "at-1", "rt-1"),
 		oauth2Credential("a", "at-2", "rt-2"),
@@ -484,11 +487,266 @@ func TestReplacingOneDuplicateIdentityKeepsTheOther(t *testing.T) {
 		t.Error("the replacement credential received a token")
 	}
 	kept := stored[1].(map[string]any)["oauth2"].(map[string]any)
-	if kept["accessToken"] != "at-2" {
-		t.Error("replacing a duplicate identity erased the other entry's access token")
+	if kept["clientId"] != "a" {
+		t.Error("the untouched credential has the wrong clientId")
 	}
-	if kept["refreshToken"] != "rt-2" {
-		t.Error("replacing a duplicate identity erased the other entry's refresh token")
+	if _, ok := kept["accessToken"]; ok {
+		t.Error("replacing a duplicate identity restored the other entry's access token")
+	}
+	if _, ok := kept["refreshToken"]; ok {
+		t.Error("replacing a duplicate identity restored the other entry's refresh token")
+	}
+}
+
+// TestRemovingFirstOfTwoLookalikeCredentialsRestoresNothing covers the case
+// where the client deletes one of two entries that look the same once their
+// secrets are hidden. Which stored entry the survivor is cannot be told from
+// the payload, so nothing is restored into it.
+func TestRemovingFirstOfTwoLookalikeCredentialsRestoresNothing(t *testing.T) {
+	f := newSessionFixture(t, map[string]any{"creds": []any{
+		oauth2CredentialWithRedirect("app", "https://one.example/cb", "at-1", "rt-1"),
+		oauth2CredentialWithRedirect("app", "https://two.example/cb", "at-2", "rt-2"),
+	}})
+	state := f.readState(t)
+	creds := state["creds"].([]any)
+	if len(creds) != 2 {
+		t.Fatalf("GET returned %d credentials, want 2", len(creds))
+	}
+	patch := f.patch(t, map[string]any{"creds": creds[1:]})
+
+	stored := f.stored(t, "creds").([]any)
+	if len(stored) != 1 {
+		t.Fatalf("stored %d credentials, want 1", len(stored))
+	}
+	oauth := stored[0].(map[string]any)["oauth2"].(map[string]any)
+	if oauth["redirectUri"] != "https://two.example/cb" {
+		t.Error("the wrong credential survived the removal")
+	}
+	if _, ok := oauth["accessToken"]; ok {
+		t.Error("the survivor received the removed entry's access token")
+	}
+	if _, ok := oauth["refreshToken"]; ok {
+		t.Error("the survivor received the removed entry's refresh token")
+	}
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("Marshal(stored) failed: %v", err)
+	}
+	assertNoSecrets(t, "stored credentials", encoded, "at-1", "rt-1", "at-2", "rt-2")
+	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "at-1", "rt-1", "at-2", "rt-2")
+}
+
+// TestReorderingLookalikeCredentialsRestoresNothing covers two entries that
+// share an identity: a reorder must not move either entry's secrets to the
+// other one.
+func TestReorderingLookalikeCredentialsRestoresNothing(t *testing.T) {
+	f := newSessionFixture(t, map[string]any{"creds": []any{
+		oauth2CredentialWithRedirect("app", "https://one.example/cb", "at-1", "rt-1"),
+		oauth2CredentialWithRedirect("app", "https://two.example/cb", "at-2", "rt-2"),
+	}})
+	state := f.readState(t)
+	creds := state["creds"].([]any)
+	if len(creds) != 2 {
+		t.Fatalf("GET returned %d credentials, want 2", len(creds))
+	}
+	creds[0], creds[1] = creds[1], creds[0]
+	patch := f.patch(t, map[string]any{"creds": creds})
+
+	stored := f.stored(t, "creds").([]any)
+	if len(stored) != 2 {
+		t.Fatalf("stored %d credentials, want 2", len(stored))
+	}
+	want := []string{"https://two.example/cb", "https://one.example/cb"}
+	for i, item := range stored {
+		oauth := item.(map[string]any)["oauth2"].(map[string]any)
+		if oauth["redirectUri"] != want[i] {
+			t.Errorf("credential %d has redirectUri %v, want %q", i, oauth["redirectUri"], want[i])
+		}
+		if _, ok := oauth["accessToken"]; ok {
+			t.Errorf("credential %d received an access token after a reorder", i)
+		}
+	}
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("Marshal(stored) failed: %v", err)
+	}
+	assertNoSecrets(t, "stored credentials", encoded, "at-1", "rt-1", "at-2", "rt-2")
+	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "at-1", "rt-1", "at-2", "rt-2")
+}
+
+// TestPrependingLookalikeCredentialRestoresNothing covers an entry inserted in
+// front of two entries that share an identity: the shift must not hand either
+// entry's secrets to its neighbor.
+func TestPrependingLookalikeCredentialRestoresNothing(t *testing.T) {
+	f := newSessionFixture(t, map[string]any{"creds": []any{
+		oauth2CredentialWithRedirect("app", "https://one.example/cb", "at-1", "rt-1"),
+		oauth2CredentialWithRedirect("app", "https://two.example/cb", "at-2", "rt-2"),
+	}})
+	state := f.readState(t)
+	creds := state["creds"].([]any)
+	if len(creds) != 2 {
+		t.Fatalf("GET returned %d credentials, want 2", len(creds))
+	}
+	prepended := append([]any{map[string]any{
+		"authType": "oauth2",
+		"oauth2":   map[string]any{"clientId": "app", "redirectUri": "https://new.example/cb"},
+	}}, creds...)
+	patch := f.patch(t, map[string]any{"creds": prepended})
+
+	stored := f.stored(t, "creds").([]any)
+	if len(stored) != 3 {
+		t.Fatalf("stored %d credentials, want 3", len(stored))
+	}
+	for i, item := range stored {
+		oauth := item.(map[string]any)["oauth2"].(map[string]any)
+		if _, ok := oauth["accessToken"]; ok {
+			t.Errorf("credential %d received an access token after a prepend", i)
+		}
+	}
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("Marshal(stored) failed: %v", err)
+	}
+	assertNoSecrets(t, "stored credentials", encoded, "at-1", "rt-1", "at-2", "rt-2")
+	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "at-1", "rt-1", "at-2", "rt-2")
+}
+
+// TestHTTPUsernameChangeDoesNotRestoreSecrets checks that changing the visible
+// username of an HTTP credential is a replacement: the password of the previous
+// user must not move to the new one.
+func TestHTTPUsernameChangeDoesNotRestoreSecrets(t *testing.T) {
+	f := newSessionFixture(t, map[string]any{"http": toolauth.Credential{
+		AuthType: toolauth.CredentialTypeHTTP,
+		HTTP: &toolauth.HTTPAuth{
+			Scheme:      "basic",
+			Credentials: toolauth.HTTPCredentials{Username: "alice", Password: "alice-password"},
+		},
+	}})
+	state := f.readState(t)
+	http := state["http"].(map[string]any)
+	credentials := http["http"].(map[string]any)["credentials"].(map[string]any)
+	credentials["username"] = "bob"
+	patch := f.patch(t, map[string]any{"http": http})
+
+	stored := f.stored(t, "http").(map[string]any)["http"].(map[string]any)["credentials"].(map[string]any)
+	if stored["username"] != "bob" {
+		t.Error("the changed username was not stored")
+	}
+	if _, ok := stored["password"]; ok {
+		t.Error("bob received alice's password")
+	}
+	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "alice-password")
+}
+
+// TestHTTPSchemeChangeDoesNotRestoreSecrets checks that changing the scheme of
+// an HTTP credential is a replacement: a bearer token must not move into a
+// basic credential.
+func TestHTTPSchemeChangeDoesNotRestoreSecrets(t *testing.T) {
+	f := newSessionFixture(t, map[string]any{"http": toolauth.Credential{
+		AuthType: toolauth.CredentialTypeHTTP,
+		HTTP: &toolauth.HTTPAuth{
+			Scheme:      "bearer",
+			Credentials: toolauth.HTTPCredentials{Username: "alice", Token: "bearer-token"},
+		},
+	}})
+	state := f.readState(t)
+	http := state["http"].(map[string]any)
+	http["http"].(map[string]any)["scheme"] = "basic"
+	patch := f.patch(t, map[string]any{"http": http})
+
+	stored := f.stored(t, "http").(map[string]any)["http"].(map[string]any)
+	if stored["scheme"] != "basic" {
+		t.Error("the changed scheme was not stored")
+	}
+	credentials := stored["credentials"].(map[string]any)
+	if _, ok := credentials["token"]; ok {
+		t.Error("the basic credential received the bearer token")
+	}
+	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "bearer-token")
+}
+
+// TestServiceAccountEmailChangeDoesNotRestoreSecrets checks that changing the
+// visible client email of a service account is a replacement: the private key
+// must not move to the new email.
+func TestServiceAccountEmailChangeDoesNotRestoreSecrets(t *testing.T) {
+	f := newSessionFixture(t, map[string]any{"sa": toolauth.Credential{
+		AuthType: toolauth.CredentialTypeServiceAccount,
+		ServiceAccount: &toolauth.ServiceAccount{
+			ServiceAccountCredential: &toolauth.ServiceAccountCredential{
+				ClientEmail: "alice@proj.iam.gserviceaccount.com",
+				ProjectID:   "proj",
+				PrivateKey:  "SA-PRIVATE-KEY",
+			},
+		},
+	}})
+	state := f.readState(t)
+	sa := state["sa"].(map[string]any)
+	credential := sa["serviceAccount"].(map[string]any)["serviceAccountCredential"].(map[string]any)
+	credential["clientEmail"] = "bob@proj.iam.gserviceaccount.com"
+	patch := f.patch(t, map[string]any{"sa": sa})
+
+	stored := f.stored(t, "sa").(map[string]any)
+	credential = stored["serviceAccount"].(map[string]any)["serviceAccountCredential"].(map[string]any)
+	if credential["clientEmail"] != "bob@proj.iam.gserviceaccount.com" {
+		t.Error("the changed client email was not stored")
+	}
+	if _, ok := credential["privateKey"]; ok {
+		t.Error("bob received alice's private key")
+	}
+	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "SA-PRIVATE-KEY")
+}
+
+// TestSwappingDuplicateIdentitiesUnderObjectKeysRestoresNothing checks that two
+// credentials with the same identity under different object keys do not receive
+// each other's secrets when they are swapped.
+func TestSwappingDuplicateIdentitiesUnderObjectKeysRestoresNothing(t *testing.T) {
+	f := newSessionFixture(t, map[string]any{"creds": map[string]any{
+		"one": oauth2CredentialWithRedirect("app", "https://one.example/cb", "at-1", "rt-1"),
+		"two": oauth2CredentialWithRedirect("app", "https://two.example/cb", "at-2", "rt-2"),
+	}})
+	state := f.readState(t)
+	creds := state["creds"].(map[string]any)
+	creds["one"], creds["two"] = creds["two"], creds["one"]
+	patch := f.patch(t, map[string]any{"creds": creds})
+
+	stored := f.stored(t, "creds").(map[string]any)
+	for key, wantRedirect := range map[string]string{
+		"one": "https://two.example/cb",
+		"two": "https://one.example/cb",
+	} {
+		oauth := stored[key].(map[string]any)["oauth2"].(map[string]any)
+		if oauth["redirectUri"] != wantRedirect {
+			t.Errorf("credential under %q has redirectUri %v, want %q", key, oauth["redirectUri"], wantRedirect)
+		}
+		if _, ok := oauth["accessToken"]; ok {
+			t.Errorf("credential under %q received an access token", key)
+		}
+	}
+	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "at-1", "rt-1", "at-2", "rt-2")
+}
+
+// assertNoSecrets checks that encoded, a JSON document, does not contain any of
+// secrets.
+func assertNoSecrets(t *testing.T, what string, encoded []byte, secrets ...string) {
+	t.Helper()
+	for _, secret := range secrets {
+		if bytes.Contains(encoded, []byte(secret)) {
+			t.Errorf("%s carries %q, want it hidden", what, secret)
+		}
+	}
+}
+
+// oauth2CredentialWithRedirect returns a credential that another one can share
+// an identity with while a visible field tells them apart.
+func oauth2CredentialWithRedirect(clientID, redirectURI, accessToken, refreshToken string) toolauth.Credential {
+	return toolauth.Credential{
+		AuthType: toolauth.CredentialTypeOAuth2,
+		OAuth2: &toolauth.OAuth2Auth{
+			ClientID:     clientID,
+			RedirectURI:  redirectURI,
+			AccessToken:  accessToken,
+			RefreshToken: refreshToken,
+		},
 	}
 }
 

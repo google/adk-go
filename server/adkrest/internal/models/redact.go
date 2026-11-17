@@ -16,11 +16,11 @@ package models
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
 	"strings"
 
 	"google.golang.org/genai"
@@ -216,18 +216,113 @@ func dropSecretKeys(v any) {
 // credential sends the credential back as the read returned it, without the
 // secrets; writing that value back unchanged would erase them.
 //
+// A secret is restored only into an object that outbound redaction still
+// treats as a credential, that carries no secret of its own, and that still
+// names the same credential as the stored one: the same authType and the same
+// visible principal. A credential the client re-points at another app, user or
+// scheme is a replacement, and so is one that sends any secret, so to clear one
+// secret and keep the others, resend the others too.
+//
+// When the same credential identity appears more than once in storedValue or
+// more than once in submitted, the match would be a guess. Nothing is restored
+// into those credentials, which leaves them as submitted, the same as before
+// this function existed.
+//
 // Only omitted credential secret keys are restored. submitted stays
 // authoritative for every other field, including a secret the client did send.
-// A credential that carries any secret of its own is written as submitted, so
-// to clear one secret and keep the others, resend the others too. It reports
-// whether submitted was changed.
-func MergeRedactedValue(storedValue, submitted any) (any, bool, error) {
+// It reports whether submitted was changed.
+//
+// It returns an error when storedValue cannot be encoded or when ctx is
+// canceled; the returned value is not meant to be used in that case.
+func MergeRedactedValue(ctx context.Context, storedValue, submitted any) (any, bool, error) {
 	stored, err := asJSONValue(storedValue)
 	if err != nil {
 		return submitted, false, err
 	}
-	merged, restored := restoreCredentialSecrets(stored, submitted, false)
+	w := &restoreWalk{ctx: ctx}
+	w.err = ctx.Err()
+	ambiguous := ambiguousIdentities(w, stored, submitted)
+	if w.err != nil {
+		return submitted, false, w.err
+	}
+	merged, restored := restoreCredentialSecrets(w, stored, submitted, false, ambiguous)
+	if w.err != nil {
+		return submitted, false, w.err
+	}
 	return merged, restored, nil
+}
+
+// restoreWalk bounds the work of one merge and stops it when the caller goes
+// away. Every visited node counts, and the context is rechecked once in a
+// while rather than on every node.
+type restoreWalk struct {
+	ctx     context.Context
+	visited int
+	err     error
+}
+
+// restoreContextCheckEvery is how many visited nodes pass between two context
+// checks. A power of two keeps the check a bit test.
+const restoreContextCheckEvery = 1024
+
+// step counts one visited node and reports whether the walk should continue.
+func (w *restoreWalk) step() bool {
+	if w.err != nil {
+		return false
+	}
+	w.visited++
+	if w.visited&(restoreContextCheckEvery-1) == 0 {
+		w.err = w.ctx.Err()
+	}
+	return w.err == nil
+}
+
+// ambiguousIdentities returns the credential identities that appear more than
+// once in stored or more than once in submitted. Restoring secrets for such an
+// identity would have to guess which stored credential the client meant, so
+// nothing is restored into them.
+func ambiguousIdentities(w *restoreWalk, stored, submitted any) map[string]bool {
+	storedCounts := make(map[string]int)
+	submittedCounts := make(map[string]int)
+	countCredentialIdentities(w, stored, storedCounts)
+	countCredentialIdentities(w, submitted, submittedCounts)
+	ambiguous := make(map[string]bool)
+	for id, n := range storedCounts {
+		if n > 1 {
+			ambiguous[id] = true
+		}
+	}
+	for id, n := range submittedCounts {
+		if n > 1 {
+			ambiguous[id] = true
+		}
+	}
+	return ambiguous
+}
+
+// countCredentialIdentities counts the credentials in v by identity. It stops
+// at a credential: a credential nested inside another one is not matched on its
+// own.
+func countCredentialIdentities(w *restoreWalk, v any, counts map[string]int) {
+	if !w.step() {
+		return
+	}
+	switch v := v.(type) {
+	case map[string]any:
+		if isCredential(v) {
+			if id := credentialIdentityOf(w, v); id != "" {
+				counts[id]++
+			}
+			return
+		}
+		for _, val := range v {
+			countCredentialIdentities(w, val, counts)
+		}
+	case []any:
+		for _, item := range v {
+			countCredentialIdentities(w, item, counts)
+		}
+	}
 }
 
 // asJSONValue encodes v and decodes it into generic JSON values, keeping
@@ -247,16 +342,17 @@ func asJSONValue(v any) (any, error) {
 }
 
 // restoreCredentialSecrets walks submitted next to the stored value and fills
-// in the credential secret keys the submitted value omits. A key is treated as
-// a secret once the walk is inside an object whose authType marks it as a
-// credential, and only while that object still has the same authType and
-// principal as the stored one. A credential that carries any secret of its own
-// is treated as an intentional replacement, so nothing is restored into it.
-// Other omitted fields are left out, so the submitted value remains a full
-// replacement of the value outside credentials. Since any secret of its own
-// makes the submitted credential a replacement, clearing one secret while
-// keeping the others means resending the others.
-func restoreCredentialSecrets(stored, submitted any, restoreSecrets bool) (any, bool) {
+// in the credential secret keys the submitted value omits. A key is a secret
+// only inside an object whose authType marks it as a credential, and only the
+// same credential restores: one that still has that authType and principal,
+// that carries no secret of its own, and whose identity is not ambiguous. A
+// credential that carries any secret of its own is an intentional replacement,
+// so nothing is restored into it. Other omitted fields are left out, so the
+// submitted value remains a full replacement of the value outside credentials.
+func restoreCredentialSecrets(w *restoreWalk, stored, submitted any, restoreSecrets bool, ambiguous map[string]bool) (any, bool) {
+	if !w.step() {
+		return submitted, false
+	}
 	switch s := submitted.(type) {
 	case map[string]any:
 		st, ok := stored.(map[string]any)
@@ -264,14 +360,12 @@ func restoreCredentialSecrets(stored, submitted any, restoreSecrets bool) (any, 
 			return submitted, false
 		}
 		if isCredential(st) {
-			// Restore only into the same credential: an object that outbound
-			// redaction still treats as a credential, whose authType and
-			// principal still match the stored one, and that carries no secret
-			// of its own. A client that changes authType or clientId is
+			// A client that changes authType or a visible identifying field is
 			// replacing the credential; restoring secrets into it would attach
 			// them to a different credential and, for a changed authType, make
 			// the serializer leave them visible.
-			restoreSecrets = isCredential(s) && !hasSecretKey(s) && sameCredential(st, s)
+			restoreSecrets = isCredential(s) && !hasSecretKey(w, s) &&
+				!ambiguous[credentialIdentityOf(w, st)] && sameCredential(w, st, s)
 		}
 		restored := false
 		if restoreSecrets {
@@ -287,7 +381,7 @@ func restoreCredentialSecrets(stored, submitted any, restoreSecrets bool) (any, 
 			if !ok {
 				continue
 			}
-			if merged, changed := restoreCredentialSecrets(sv, sub, restoreSecrets); changed {
+			if merged, changed := restoreCredentialSecrets(w, sv, sub, restoreSecrets, ambiguous); changed {
 				s[k] = merged
 				restored = true
 			}
@@ -298,51 +392,54 @@ func restoreCredentialSecrets(stored, submitted any, restoreSecrets bool) (any, 
 		if !ok {
 			return submitted, false
 		}
-		// Compute each stored identity once, so matching stays linear when the
-		// array grows.
-		identities := make([]string, len(st))
-		byIdentity := make(map[string][]int, len(st))
-		for i, item := range st {
-			id := credentialIdentity(item)
-			identities[i] = id
-			if id != "" {
-				byIdentity[id] = append(byIdentity[id], i)
+		// Match a submitted entry to the stored entry that holds the same
+		// credential, so a reorder, append or remove keeps each credential's
+		// own secrets. Only entries that are themselves credentials are matched
+		// this way: computing an identity for a whole subtree here would repeat
+		// the work at every level of nesting. Other entries pair by index,
+		// which is safe because the credential inside one still has to name the
+		// same credential as the stored one.
+		//
+		// Matching by an ambiguous identity is harmless: the credential-level
+		// check above refuses to restore secrets into it, so no secret can
+		// reach the wrong entry.
+		storedByID := make(map[string]int, len(st))
+		for j, item := range st {
+			if !w.step() {
+				return submitted, false
+			}
+			m, ok := item.(map[string]any)
+			if !ok || !isCredential(m) {
+				continue
+			}
+			if id := credentialIdentityOf(w, m); id != "" {
+				storedByID[id] = j
 			}
 		}
-		used := make([]bool, len(st))
 		restored := false
 		for i, item := range s {
-			id := credentialIdentity(item)
-			if id == "" {
+			if !w.step() {
+				return s, restored
+			}
+			if m, ok := item.(map[string]any); ok && isCredential(m) {
+				id := credentialIdentityOf(w, m)
+				if id == "" {
+					continue
+				}
+				j, ok := storedByID[id]
+				if !ok {
+					continue
+				}
+				if merged, changed := restoreCredentialSecrets(w, st[j], item, restoreSecrets, ambiguous); changed {
+					s[i] = merged
+					restored = true
+				}
 				continue
 			}
-			match := -1
-			// Prefer the same index. That keeps an unchanged array stable and
-			// lets an append or remove keep the entries around it.
-			if i < len(st) && !used[i] && identities[i] == id {
-				match = i
-			} else {
-				candidate := -1
-				ambiguous := false
-				for _, j := range byIdentity[id] {
-					if used[j] {
-						continue
-					}
-					if candidate >= 0 {
-						ambiguous = true
-						break
-					}
-					candidate = j
-				}
-				if !ambiguous {
-					match = candidate
-				}
-			}
-			if match < 0 {
+			if i >= len(st) {
 				continue
 			}
-			used[match] = true
-			if merged, changed := restoreCredentialSecrets(st[match], item, restoreSecrets); changed {
+			if merged, changed := restoreCredentialSecrets(w, st[i], item, restoreSecrets, ambiguous); changed {
 				s[i] = merged
 				restored = true
 			}
@@ -354,66 +451,78 @@ func restoreCredentialSecrets(stored, submitted any, restoreSecrets bool) (any, 
 }
 
 // sameCredential reports whether stored and submitted still identify the same
-// credential: same authType and same principal. Secret fields are ignored, and
-// so are fields that do not identify the credential, such as redirectUri.
-func sameCredential(stored, submitted map[string]any) bool {
-	return credentialIdentityOf(stored) == credentialIdentityOf(submitted)
+// credential: same authType and same visible principal. Secret fields are
+// ignored, and so are fields that do not identify the credential, such as
+// redirectUri.
+func sameCredential(w *restoreWalk, stored, submitted map[string]any) bool {
+	return credentialIdentityOf(w, stored) == credentialIdentityOf(w, submitted)
 }
 
-// credentialIdentity returns a stable identity for every credential in v, with
-// secrets and other non-identifying fields left out. It returns "" when v holds
-// no credential.
-func credentialIdentity(v any) string {
-	identities := findCredentialIdentities(v)
-	if len(identities) == 0 {
-		return ""
-	}
-	b, err := json.Marshal(identities)
-	if err != nil {
-		return ""
-	}
-	return string(b)
+// credentialIdentityOf returns the authType and the visible principal of a
+// credential: the non-secret fields that name the account it is for. Two
+// credentials with different identities are not the same credential, so a
+// client that changes one of these fields is replacing the credential.
+//
+// The principal is every clientId, plus the fields each type shows in a read:
+// an HTTP credential's scheme and username, and a service account's clientEmail
+// and projectId. An API key shows no principal once redacted, so
+// two API keys cannot be told apart; see ambiguousIdentities.
+func credentialIdentityOf(w *restoreWalk, m map[string]any) string {
+	credType := normalizedCredentialType(m)
+	principal := make(map[string]bool)
+	collectPrincipalFields(w, m, credType, principal)
+	fields := slices.Sorted(maps.Keys(principal))
+	return credType + "\x00" + strings.Join(fields, "\x00")
 }
 
-// findCredentialIdentities collects the identity of every credential in v,
-// sorted so an identity does not depend on map or slice order.
-func findCredentialIdentities(v any) []string {
-	var identities []string
-	var walk func(any)
-	walk = func(v any) {
-		switch v := v.(type) {
-		case map[string]any:
-			if isCredential(v) {
-				identities = append(identities, credentialIdentityOf(v))
-				return
-			}
-			for _, val := range v {
-				walk(val)
-			}
-		case []any:
-			for _, item := range v {
-				walk(item)
-			}
+// principalFieldName returns the canonical name of the visible field that
+// identifies a credential of type credType, or "" when key does not identify
+// one. Both spellings of a field map to the same name, so a camelCase and a
+// snake_case credential compare equal.
+func principalFieldName(credType, key string) string {
+	switch key {
+	case "clientId", "client_id":
+		return "clientId"
+	}
+	switch credType {
+	case "http":
+		switch key {
+		case "scheme", "username":
+			return key
+		}
+	case "serviceaccount":
+		switch key {
+		case "clientEmail", "client_email":
+			return "clientEmail"
+		case "projectId", "project_id":
+			return "projectId"
 		}
 	}
-	walk(v)
-	sort.Strings(identities)
-	return identities
+	return ""
 }
 
-// credentialIdentityOf returns the authType and principal of a credential.
-// The principal is the client ID, the non-secret field that names who the
-// credential is for. A credential without one is identified by authType alone;
-// two such credentials cannot be told apart once redacted.
-func credentialIdentityOf(m map[string]any) string {
-	clientIDs := map[string]bool{}
-	collectClientIDs(m, clientIDs)
-	ids := make([]string, 0, len(clientIDs))
-	for id := range clientIDs {
-		ids = append(ids, id)
+// collectPrincipalFields adds every visible identifying field in v to fields.
+// It walks the whole credential, so a spelling that arrives in Extra identifies
+// the same credential as the struct field does.
+func collectPrincipalFields(w *restoreWalk, v any, credType string, fields map[string]bool) {
+	if !w.step() {
+		return
 	}
-	sort.Strings(ids)
-	return normalizedCredentialType(m) + "\x00" + strings.Join(ids, "\x00")
+	switch v := v.(type) {
+	case map[string]any:
+		for k, val := range v {
+			if name := principalFieldName(credType, k); name != "" {
+				if s, ok := val.(string); ok && s != "" {
+					fields[name+"\x01"+s] = true
+				}
+			}
+			collectPrincipalFields(w, val, credType, fields)
+		}
+	case []any:
+		for _, item := range v {
+			collectPrincipalFields(w, item, credType, fields)
+		}
+	}
 }
 
 // normalizedCredentialType returns authType in one spelling, so the camelCase,
@@ -427,36 +536,20 @@ func normalizedCredentialType(m map[string]any) string {
 	return ""
 }
 
-// collectClientIDs adds every clientId or client_id string in v to ids.
-func collectClientIDs(v any, ids map[string]bool) {
-	switch v := v.(type) {
-	case map[string]any:
-		for k, val := range v {
-			if k == "clientId" || k == "client_id" {
-				if id, ok := val.(string); ok && id != "" {
-					ids[id] = true
-				}
-			}
-			collectClientIDs(val, ids)
-		}
-	case []any:
-		for _, item := range v {
-			collectClientIDs(item, ids)
-		}
-	}
-}
-
 // hasSecretKey reports whether v carries a credential secret key at any depth.
-func hasSecretKey(v any) bool {
+func hasSecretKey(w *restoreWalk, v any) bool {
+	if !w.step() {
+		return false
+	}
 	switch v := v.(type) {
 	case map[string]any:
 		for k, val := range v {
-			if credentialSecretKeys[k] || hasSecretKey(val) {
+			if credentialSecretKeys[k] || hasSecretKey(w, val) {
 				return true
 			}
 		}
 	case []any:
-		return slices.ContainsFunc(v, hasSecretKey)
+		return slices.ContainsFunc(v, func(item any) bool { return hasSecretKey(w, item) })
 	}
 	return false
 }

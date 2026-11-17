@@ -247,7 +247,11 @@ func (c *SessionsAPIController) UpdateSessionHandler(rw http.ResponseWriter, req
 	//
 	// What the client echoes back is not a write, so drop that first. See
 	// dropEchoedKeys.
-	stateDelta := dropEchoedKeys(updateRequest.StateDelta, storedSession.Session.State())
+	stateDelta, err := dropEchoedKeys(req.Context(), updateRequest.StateDelta, storedSession.Session.State())
+	if err != nil {
+		http.Error(rw, "cannot restore the credential secrets in the state delta", http.StatusInternalServerError)
+		return
+	}
 	if scoped := scopedStateKeys(stateDelta); len(scoped) > 0 {
 		http.Error(rw, fmt.Sprintf(
 			"stateDelta may only contain session-scoped keys; remove %v (the %q, %q and %q prefixes write outside this session)",
@@ -370,11 +374,18 @@ func isScopedStateKey(key string) bool {
 // different value is still a write outside this session, and is still
 // refused. Every other key is written as submitted, except that a value the
 // client sent back without the credential secrets a read stripped gets those
-// omitted secrets restored.
-func dropEchoedKeys(delta map[string]any, stored session.ReadonlyState) map[string]any {
+// omitted secrets restored, and only into a credential that still has the same
+// authType and principal and carries no secret of its own. A credential under
+// rawAuthCredential that has no authType is written as submitted.
+//
+// The error is the caller's context being canceled.
+func dropEchoedKeys(ctx context.Context, delta map[string]any, stored session.ReadonlyState) (map[string]any, error) {
 	read := models.RedactedState(stored)
 	kept := make(map[string]any, len(delta))
 	for key, value := range delta {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		readValue, ok := read[key]
 		if ok && sameJSON(readValue, value) && (isScopedStateKey(key) || strippedOnRead(stored, key, readValue)) {
 			continue
@@ -382,19 +393,25 @@ func dropEchoedKeys(delta map[string]any, stored session.ReadonlyState) map[stri
 		// A value that a read returned with credential secrets stripped is not
 		// an echo: the client edited something in it and sent it back without
 		// the secrets it never saw. Restore those before writing it.
-		// Neither error below can happen with the built-in session services:
-		// strippedOnRead has just read the same key, and RedactedState already
-		// encoded the whole state, so the value encodes the same way here.
+		// The Get error below cannot happen with the built-in session services:
+		// strippedOnRead has just read the same key.
 		if ok && !isScopedStateKey(key) && strippedOnRead(stored, key, readValue) {
-			if storedValue, err := stored.Get(key); err == nil {
-				if merged, restored, err := models.MergeRedactedValue(storedValue, value); err == nil && restored {
-					value = merged
-				}
+			storedValue, err := stored.Get(key)
+			if err != nil {
+				kept[key] = value
+				continue
+			}
+			merged, restored, err := models.MergeRedactedValue(ctx, storedValue, value)
+			if err != nil {
+				return nil, err
+			}
+			if restored {
+				value = merged
 			}
 		}
 		kept[key] = value
 	}
-	return kept
+	return kept, nil
 }
 
 // strippedOnRead reports whether readValue, the value a read returns for key,
