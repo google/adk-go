@@ -366,6 +366,17 @@ type liveSessionImpl struct {
 	finalErr error
 }
 
+// errSiblingCallStopped is the cancellation cause of the calls of one model
+// turn after one of them paused or failed the run: it tells a call canceled
+// for that reason from one that failed on its own or because the run ended.
+var errSiblingCallStopped = errors.New("a sibling function call stopped the step")
+
+// siblingCallStopped reports whether ctx was canceled because another call of
+// its model turn paused or failed the run.
+func siblingCallStopped(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), errSiblingCallStopped)
+}
+
 func (s *liveSessionImpl) setFinalError(err error) {
 	s.finalMu.Lock()
 	defer s.finalMu.Unlock()
@@ -1927,6 +1938,10 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 // response event. toolOrder is the names of toolsDict in registry order (see
 // registryOrder); a response to an unknown name lists them in that order.
 //
+// The first call to pause or fail the run, by time, stops the step: the calls
+// still running are canceled, handleFunctionCallsInOrder waits for them to
+// return, and it returns that call's error with no response event.
+//
 // TODO: accept filters to include/exclude function calls.
 // TODO: check feasibility of running tool.Run concurrently.
 func (f *Flow) handleFunctionCallsInOrder(ctx agent.InvocationContext, toolsDict map[string]tool.Tool, toolOrder []string, resp *model.LLMResponse, toolConfirmations map[string]*toolconfirmation.ToolConfirmation, liveSess agent.LiveSession) (mergedEvent *session.Event, err error) {
@@ -1943,9 +1958,26 @@ func (f *Flow) handleFunctionCallsInOrder(ctx agent.InvocationContext, toolsDict
 	}
 
 	fnResponseEvents := make([]*session.Event, len(fnCalls))
-	// stops[i] is the error that keeps call i from being answered: a pause,
-	// or an error that ends the run.
-	stops := make([]error, len(fnCalls))
+	// stop is the first error, by time, that keeps a call from being answered:
+	// a pause, or an error that ends the run. stopMu guards it. Like
+	// adk-python's _gather_or_cancel (_batch_executor.py:195-211), the first
+	// stop cancels the calls still running and is the step's error; what the
+	// canceled calls return is dropped. batchCtx is not canceled when no call
+	// stops: work a tool starts with its context, such as a live streaming
+	// tool, outlives the step.
+	var (
+		stopMu sync.Mutex
+		stop   error
+	)
+	batchCtx, cancelBatch := context.WithCancelCause(ctx)
+	stopBatch := func(err error) {
+		stopMu.Lock()
+		defer stopMu.Unlock()
+		if stop == nil {
+			stop = err
+			cancelBatch(errSiblingCallStopped)
+		}
+	}
 
 	// Tool calls run via the context's task runner: concurrent goroutines by
 	// default, or a caller-installed runner (platform.WithTaskRunner).
@@ -2060,7 +2092,9 @@ func (f *Flow) handleFunctionCallsInOrder(ctx agent.InvocationContext, toolsDict
 			}
 
 			if res.stop != nil {
-				stops[i] = res.stop
+				// Before the deferred order.Finish(i): a sequential call woken
+				// by it must find batchCtx canceled.
+				stopBatch(res.stop)
 				return
 			}
 
@@ -2138,13 +2172,11 @@ func (f *Flow) handleFunctionCallsInOrder(ctx agent.InvocationContext, toolsDict
 			fnResponseEvents[i] = ev
 		}
 	}
-	platform.RunTasks(ctx, tasks)
-	// The first stop by call index ends the step with no response for any
-	// call, so a paused call and its siblings are replayed together on resume.
-	for _, stop := range stops {
-		if stop != nil {
-			return nil, stop
-		}
+	platform.RunTasks(batchCtx, tasks)
+	// A stop ends the step with no response for any call, so a paused call
+	// and its siblings are replayed together on resume.
+	if stop != nil {
+		return nil, stop
 	}
 	mergedEvent, err = mergeParallelResponses(ctx, fnResponseEvents)
 	if err != nil {
@@ -2181,12 +2213,23 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fA
 // until every earlier call of the batch has returned. If the call's context
 // ends first, the call is answered with the wait's error, and neither the
 // callbacks nor the tool run.
+//
+// Once another call of the batch has stopped the step (toolCtx canceled with
+// errSiblingCallStopped), the result is a stop and nothing more of the call
+// runs: no before-tool callback when the call has not begun, no tool after the
+// before-tool callbacks, and no on-tool-error or after-tool callback after the
+// tool failed.
 func (f *Flow) callTool(toolCtx agent.Context, t tool.Tool, args map[string]any, lookup *toolLookupFailure) toolResult {
 	if s, ok := t.(tool.SequentialRunner); ok && s.RunsSequentially() {
 		if err := adkcontext.AwaitEarlierCalls(toolCtx); err != nil {
 			errText, _ := toolinternal.ModelErrorText(t.Name(), fmt.Errorf("wait for earlier function calls: %w", err))
 			return toolResult{m: map[string]any{"error": errText}}
 		}
+	}
+	// A call that has not begun when a sibling stops the step runs nothing:
+	// adk-python cancels its task before it starts (_batch_executor.py:188-192).
+	if siblingCallStopped(toolCtx) {
+		return toolResult{stop: context.Cause(toolCtx)}
 	}
 	var response map[string]any
 	var err error
@@ -2196,6 +2239,12 @@ func (f *Flow) callTool(toolCtx agent.Context, t tool.Tool, args map[string]any,
 	}
 	if response == nil && err == nil {
 		response, err = f.invokeBeforeToolCallbacks(toolCtx, t, args)
+	}
+	// Nor does a call go on past a before-tool callback that was running when
+	// a sibling stopped the step: the cancellation reaches a Python call at the
+	// callback's await, and nothing after it runs.
+	if siblingCallStopped(toolCtx) {
+		return toolResult{stop: context.Cause(toolCtx)}
 	}
 	if lookup != nil && response == nil && err == nil {
 		return f.answerLookupFailure(toolCtx, t, args, lookup)
@@ -2209,6 +2258,13 @@ func (f *Flow) callTool(toolCtx agent.Context, t tool.Tool, args map[string]any,
 		// NodeInterruptedError, a BaseException, passes _caller.py:572's
 		// `except Exception`.
 		if _, ok := errors.AsType[*toolinternal.PausedError](err); ok {
+			return toolResult{stop: err}
+		}
+		// Nor is a failure after a sibling call stopped the step, which
+		// canceled the tool: adk-python's CancelledError, a BaseException,
+		// skips the error and after-tool callbacks. As a stop it gets no
+		// response, and handleFunctionCallsInOrder ends the step without one.
+		if err != nil && siblingCallStopped(toolCtx) {
 			return toolResult{stop: err}
 		}
 		errors.As(err, &failRun)

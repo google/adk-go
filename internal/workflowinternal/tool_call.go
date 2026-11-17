@@ -114,9 +114,14 @@ func (c *toolCall) runAsNode(toolCtx agent.Context, branch string, body ToolBody
 	runID := runIDFor(c.callID, callSlot(toolCtx, c.toolName, c.nodeName, c.callID))
 	node := workflow.NewEmittingFunctionNode(c.nodeName,
 		func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+			// The node runs on the sub-scheduler's context; the call's own
+			// cancellation (a sibling call stopped the step) reaches it here.
+			nodeCtx, cancel := ctx.WithAgentCancel()
+			defer cancel()
+			defer context.AfterFunc(toolCtx, cancel)()
 			// The output goes out as an event of its own, so the node never
 			// emits a terminal event (which would turn a string into text).
-			return nil, c.run(ctx, resumeAnswers(ctx), emit, body)
+			return nil, c.run(nodeCtx, resumeAnswers(nodeCtx), emit, body)
 		},
 		workflow.NodeConfig{},
 	)
