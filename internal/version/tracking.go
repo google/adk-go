@@ -15,7 +15,10 @@
 package version
 
 import (
+	"maps"
+	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -29,3 +32,35 @@ func TrackingHeader() string {
 }
 
 var trackingHeader = "google-adk/" + Version + " gl-go/" + strings.TrimPrefix(runtime.Version(), "go")
+
+var trackingTokens = strings.Fields(trackingHeader)
+
+// WithTrackingHeaders returns a copy of h whose user-agent and
+// x-goog-api-client headers hold ADK's tracking labels followed by the tokens
+// h held under any casing of those names, without duplicates. It is the rule
+// adk-python's merge_tracking_headers applies. h is not modified.
+func WithTrackingHeaders(h http.Header) http.Header {
+	merged := h.Clone()
+	if merged == nil {
+		merged = make(http.Header)
+	}
+	for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
+		tokens := slices.Clone(trackingTokens)
+		// Sorted, so differently cased keys merge in the same order every time.
+		for _, key := range slices.Sorted(maps.Keys(merged)) {
+			if !strings.EqualFold(key, name) {
+				continue
+			}
+			for _, v := range merged[key] {
+				for tok := range strings.FieldsSeq(v) {
+					if !slices.Contains(tokens, tok) {
+						tokens = append(tokens, tok)
+					}
+				}
+			}
+			delete(merged, key)
+		}
+		merged.Set(name, strings.Join(tokens, " "))
+	}
+	return merged
+}

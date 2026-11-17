@@ -41,8 +41,7 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 		t.Fatal("loadArtifactsTool does not implement FunctionTool")
 	}
 
-	// Arguments the model can correct get adk-python's error result, not a Go
-	// error.
+	// Arguments the model can correct get an error result, not a Go error.
 	invalidArtifactNamesResult := map[string]any{
 		"error":      "'artifact_names' must be a list of strings.",
 		"error_code": "INVALID_ARGUMENTS",
@@ -125,6 +124,15 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 				"artifact_names": []any{"fileA", 123},
 			},
 			want: invalidArtifactNamesResult,
+		},
+		{
+			name: "any slice with empty string",
+			args: map[string]any{
+				"artifact_names": []any{"fileA", ""},
+			},
+			want: map[string]any{
+				"artifact_names": []string{"fileA", ""},
+			},
 		},
 		{
 			name: "any slice with null",
