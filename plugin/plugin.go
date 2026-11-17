@@ -248,31 +248,28 @@ type OnUserMessageCallback func(agent.InvocationContext, *genai.Content) (*genai
 // event through the OnEventCallback plugins, stamps the "adk:before_run_reply"
 // custom metadata key on it, appends it to the session unless it is partial,
 // and yields it; apart from the user event that runner.WithYieldUserMessage
-// yields, the run yields nothing else. A callback error, wrapped as described
-// in the package comment, ends the run. In runner.Runner.Run the after-run
-// callbacks run in either case.
+// yields and the error of a failing [FailableAfterRunCallback], the run
+// yields nothing else. A callback error, wrapped as described in the package
+// comment, ends the run. In runner.Runner.Run the after-run callbacks run in
+// either case.
 type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 
-// AfterRunCallback is invoked once at the end of a run that did not end
-// because of a run error: a completed run, a run whose caller kept ranging
-// past an error and that then ended without another, a run whose caller
-// stopped ranging at an event, and a run whose context was canceled. It is
-// not called when a run error ends the run (see [OnRunErrorCallback]), so
-// cleanup that must also happen on a failed run
-// belongs in OnRunErrorCallback too. The exception is a run that failed in
-// a BeforeRunCallback or while handling its reply: there OnRunErrorCallback
-// is called and the after-run callbacks still run.
+// AfterRunCallback is invoked once at the end of a run that started (see
+// [OnRunErrorCallback]) and did not end because of a run error: a completed
+// run, a run whose caller stopped ranging at an event, a run whose context
+// was canceled, and a run whose caller kept ranging past errors the runner
+// goes on from, such as a failed model call, and that then ended without
+// another. [OnRunErrorCallback] says which errors end a
+// run whatever the caller does and which leave it to the caller.
 //
-// When the agent or workflow node fails, for example because a model call
-// returns an error, the caller decides which of the two callbacks runs. A
-// caller that stops ranging at the error, such as the /run handler of the
-// REST server (package server/adkrest), ends the run with it: the runner
-// calls OnRunErrorCallback and not AfterRunCallback. A caller that keeps
-// ranging past the error, such as adk-go's console launcher (package
-// cmd/launcher/console) and the REST server's /run_sse handler, does not end
-// the run with it: the run ends without a run error, and the runner calls
-// AfterRunCallback and not OnRunErrorCallback, although the run failed.
-// [OnRunErrorCallback] says how a plugin can see every failed run.
+// AfterRunCallback is not called when a run error ends the run, so cleanup
+// that must also happen on a failed run belongs in OnRunErrorCallback too.
+// Three run errors come with an after-run call all the same: in
+// runner.Runner.Run, an error from a BeforeRunCallback or from handling its
+// reply, where OnRunErrorCallback is called first; a failing
+// [FailableAfterRunCallback], which is itself an after-run call and follows
+// those of the earlier plugins; and a failing post-invocation compaction,
+// which runs after the after-run callbacks.
 //
 // At the normal end of a run it is called after the last event and before
 // post-invocation compaction, so the compaction summary event is not yet in
@@ -289,12 +286,16 @@ type AfterRunCallback func(agent.InvocationContext)
 //
 // A non-nil error is a run error and ends the run. The runner yields it,
 // wrapped as described in the package comment, to a caller that is still
-// ranging, and calls every plugin's [OnRunErrorCallback] with it once. When the caller has already
+// ranging, and calls every plugin's [OnRunErrorCallback] with it once,
+// unless the run already ended because of an error from a BeforeRunCallback
+// or from handling its reply, which OnRunErrorCallback then received
+// instead. When the caller has already
 // stopped ranging the error cannot be yielded: it goes only to
-// OnRunErrorCallback, and is recorded as an exception event on the
-// invocation span when that span is recording. With no plugin implementing
-// OnRunErrorCallback and no recording span it is not reported anywhere, so a
-// plugin that must not lose its own failure handles it before returning.
+// OnRunErrorCallback, with the same exception, and is recorded as an
+// exception event on the invocation span when that span is recording.
+// Without an OnRunErrorCallback that receives it and without a recording
+// span it is not reported anywhere, so a plugin that must not lose its own
+// failure handles it before returning.
 //
 // Plugins are called in registration order, and after the first plugin
 // whose after-run callback fails, the after-run callbacks of later plugins
@@ -306,51 +307,71 @@ type FailableAfterRunCallback func(ctx agent.InvocationContext) error
 
 // OnRunErrorCallback is invoked when a run ends because of a run error, with
 // that error. It is notification-only, like [OnAgentErrorCallback]: it cannot
-// change the outcome, and the caller of the run receives err unchanged.
+// change the outcome or the error the caller receives.
 //
-// A run error is an error raised once the run has started: by the agent or
-// workflow node, by a run-level plugin callback (BeforeRunCallback,
-// OnEventCallback, OnUserMessageCallback, a failing
-// [FailableAfterRunCallback]), by appending an event to the session, or by
-// post-invocation compaction. A run ends because of a run error when the
-// caller stops ranging at a yielded run error, or when the runner itself
-// stops on one. The callback is then called at most once per run, for every
-// plugin in registration order, after the OnAgentErrorCallback calls for the
-// same error, and err is the value the caller received: the runner does not
-// wrap the agent's or node's error. For a caller that stops at the error, the
-// call happens after the caller's loop body has returned and before its range
-// statement completes. A caller that keeps ranging past an error at a place
-// where the run goes on does not end the run with it: the callback is not
-// called for that error, and if the run later ends because of another run
-// error, it is called once for that one.
+// A run starts once the runner has taken in the user message (in
+// runner.Runner.Run) and picked the agent or node to run, before it calls
+// the BeforeRunCallback plugins. A run error is an error raised after
+// that: by the agent or workflow node, by a run-level plugin callback
+// (BeforeRunCallback, OnEventCallback, a failing [FailableAfterRunCallback]),
+// by the runner itself, such as a failure to append an event to the session,
+// or by post-invocation compaction. Two errors raised before the start are
+// run errors too: a failing OnUserMessageCallback and, on the node path of
+// package runner, a failure to store the user event. Any other failure
+// before the start, such as a failed session lookup, a refused message or,
+// on the classic path, a failure to store the user event, reaches only the
+// caller: neither this callback nor the after-run callbacks are called.
 //
-// So for a failure of the agent or workflow node, for example a model call
-// that returns an error, the caller decides which callback runs. A caller
-// that stops ranging at the error, such as the /run handler of the REST
-// server (package server/adkrest), gets this callback and no
-// [AfterRunCallback]. A caller that keeps ranging past it, such as adk-go's
-// console launcher (package cmd/launcher/console) and the REST server's
-// /run_sse handler, gets AfterRunCallback and not this callback, although
-// the run failed. Other run errors, such as a failing OnEventCallback, end
-// the run whatever the caller does, and this callback is called for them.
+// A run ends because of a run error when the caller stops ranging at a
+// yielded run error, or when the runner stops on one whatever the caller
+// does. The runner stops on every run error except the errors that the
+// agent or workflow node yields (a failed model call, an error from a
+// plugin's agent or model callback, a failing sub-agent or node) and, in
+// Runner.RunLive, a failure to append an event to the session. Those it
+// yields and goes on from, so the caller decides which callback runs. A
+// caller that stops ranging at the error, such as the /run handler of the
+// REST server (package server/adkrest), ends the run with it and gets this
+// callback and no [AfterRunCallback]. A caller that keeps ranging past it,
+// such as adk-go's console launcher (package cmd/launcher/console) and the
+// REST server's /run_sse handler, does not end the run with it: this
+// callback is not called for that error, and the run gets AfterRunCallback,
+// although it failed, unless it later ends because of another run error,
+// which this callback then receives. The exception is an error matching
+// [agent.ErrLLMCallsLimitExceeded], from a spent agent.RunConfig.MaxLLMCalls
+// budget. In runner.Runner.Run, the runner stops on it when the runner's
+// root agent is not an LlmAgent (a sequential agent, for example), which
+// package runner runs on its classic path. With an LlmAgent or
+// runner.Config.Node root (the node path) the runner leaves it to the
+// caller like any other agent error.
+//
+// The callback runs for every plugin in registration order, after the
+// OnAgentErrorCallback calls for the same error. err is the error the caller
+// received; the runner does not wrap the agent's or node's error. Only a
+// failure after the caller stopped ranging, such as a post-invocation
+// compaction that fails after the caller stopped at the last event, is an
+// error the caller never received. For a caller that stops at the error,
+// the call happens after the caller's loop body has returned and before its
+// range statement completes.
 //
 // A plugin that must see every failed run implements this callback and also
 // notes the failures that reach a caller that keeps ranging. Outside
 // Runner.RunLive, an error that escapes an agent is reported to
-// [OnAgentErrorCallback] before the caller receives it, whatever the caller
-// then does, so the plugin can record ctx.InvocationID() there and read the
-// record in its after-run callback. A run that ends because of a run error
-// gets no after-run call, so the plugin clears the record in this callback
-// too. No plugin callback reports a failure of a workflow node root
-// (runner.Config.Node) that the caller ranges past.
+// [OnAgentErrorCallback], with the exceptions that callback names, before
+// the caller receives it, whatever the caller then does, so the plugin can
+// record ctx.InvocationID() there and read the record in its after-run
+// callback. A run that ends because of a run error gets no after-run call
+// apart from the three cases [AfterRunCallback] names, so the plugin clears
+// the record in this callback too. An error of a runner.Config.Node root
+// that escapes no agent, such as a failing function node, reaches no plugin
+// callback when the caller ranges past it.
 //
-// It is not called for a failure before the run starts (session lookup,
-// message checks), for the cancellation of the invocation's context, when
-// the caller stops ranging at an event, or for a panic.
-// [AfterRunCallback] is not called on a run that ended because of a run
-// error, except for an error from a BeforeRunCallback or from handling its
-// reply. On the live path, an error that Runner.RunLive returns is notified
-// before RunLive returns.
+// It is not called for the cancellation of the invocation's context, for a
+// panic, or when the caller stops ranging at an event,
+// though a failing after-run callback or post-invocation compaction after
+// that stop is reported. In Runner.RunLive, an error from a
+// BeforeRunCallback, from handling its reply or from starting the live
+// agent is not yielded: this callback receives it before RunLive returns
+// it, and the after-run callbacks are not called.
 //
 // A panicking callback is recovered, so the remaining plugins are still
 // notified and the caller still holds the original error. The panic is
@@ -359,10 +380,12 @@ type FailableAfterRunCallback func(ctx agent.InvocationContext) error
 // own failures recovers them itself.
 //
 // Within a run the runner calls it at most once, on the goroutine that
-// ranges the run. A plugin is shared by concurrent runs, so the function must
-// be safe for concurrent use. The runner does not serialize it against
-// OnAgentErrorCallback, which parallel sub-agents may call concurrently, so a
-// plugin whose two hooks share state guards that state with its own lock.
+// ranges the run, or for an error that RunLive returns, on the goroutine
+// that called RunLive. A plugin is shared by concurrent runs, so the
+// function must be safe for concurrent use. The runner does not serialize it
+// against OnAgentErrorCallback, which parallel sub-agents may call
+// concurrently, so a plugin whose two hooks share state guards that state
+// with its own lock.
 type OnRunErrorCallback func(ctx agent.InvocationContext, err error)
 
 // OnAgentErrorCallback is invoked when an error escapes an agent's run. It is
