@@ -1241,9 +1241,7 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // for, so the node that produced it keeps going until its next event or
 // until it sees that its context is done. A resumable runner whose root is
 // an LlmAgent runs a call that was left without a response when it is
-// resumed with [WithInvocationID]. A branch of a parallel agent (package
-// parallelagent) may still start the tool that the function call of the
-// event it produced names.
+// resumed with [WithInvocationID].
 //
 // Run yields each event after the session service has stored it, except a
 // partial event, which is not stored. The state delta of a stored event has
