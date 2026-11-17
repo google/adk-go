@@ -193,6 +193,7 @@ func TestWithCompletePreloadSource_ListResources_Filtering(t *testing.T) {
 		name      string
 		subpath   string
 		wantPaths []string
+		wantErr   error
 	}{
 		{
 			name:      "Folder match",
@@ -222,9 +223,9 @@ func TestWithCompletePreloadSource_ListResources_Filtering(t *testing.T) {
 			wantPaths: []string{"scripts/script/another_script", "scripts/script"},
 		},
 		{
-			name:      "No match",
-			subpath:   "nonexistent",
-			wantPaths: nil,
+			name:    "No match",
+			subpath: "nonexistent",
+			wantErr: ErrResourceNotFound,
 		},
 		{
 			name:      "Root match",
@@ -236,8 +237,8 @@ func TestWithCompletePreloadSource_ListResources_Filtering(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			paths, err := source.ListResources(t.Context(), "skill1", tc.subpath)
-			if err != nil {
-				t.Fatalf("ListResources failed: %v", err)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("ListResources error = %v, want %v", err, tc.wantErr)
 			}
 			if diff := cmp.Diff(tc.wantPaths, paths, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
 				t.Errorf("ListResources mismatch (-want +got):\n%s", diff)
