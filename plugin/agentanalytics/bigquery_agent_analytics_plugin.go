@@ -74,10 +74,14 @@ const (
 	// populated (or when session.Event.CustomMetadata carries "adk_compaction" on
 	// ADK versions prior to typed EventActions.Compaction).
 	EventEventCompaction = "EVENT_COMPACTION"
-	// EventAgentStateCheckpoint is emitted when session.Event.CustomMetadata
-	// carries "adk_agent_state" or "agent_state" (or terminal "end_of_agent" /
-	// "adk_end_of_agent" == true), mirroring adk-python's checkpoint rows while
-	// session.EventActions does not yet expose a typed agent-state field.
+	// EventAgentStateCheckpoint is emitted when session.EventActions.AgentState
+	// is non-nil (an empty map counts) or session.EventActions.EndOfAgent points
+	// to true. Its content is {"agent_state": AgentState or null,
+	// "end_of_agent": bool}, with strings in the state truncated to
+	// MaxContentLen like other content. An event that sets neither typed field
+	// is checked for the same checkpoint in session.Event.CustomMetadata
+	// instead: "adk_agent_state" or "agent_state", and "end_of_agent" or
+	// "adk_end_of_agent" == true.
 	EventAgentStateCheckpoint      = "AGENT_STATE_CHECKPOINT"
 	EventToolPaused                = "TOOL_PAUSED"
 	EventHITLCredentialRequest     = "HITL_CREDENTIAL_REQUEST"

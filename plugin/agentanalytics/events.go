@@ -449,11 +449,21 @@ func extractA2AMetadata(meta map[string]any) map[string]any {
 	return out
 }
 
-// extractAgentStateCheckpoint checks custom metadata for agent state checkpoint
-// fields ("adk_agent_state" or "agent_state", and "end_of_agent" or
-// "adk_end_of_agent"). Terminal checkpoints (end_of_agent == true) are retained
-// even when agent_state is nil, matching adk-python.
-func extractAgentStateCheckpoint(meta map[string]any) (any, bool, bool) {
+// extractAgentStateCheckpoint returns the agent state, the end-of-agent flag
+// and whether the event is a checkpoint. When either typed field of actions is
+// set, the typed fields decide, as in adk-python: the event is a checkpoint
+// when AgentState is non-nil (even empty) or EndOfAgent is true. Otherwise it
+// falls back to custom metadata ("adk_agent_state" or "agent_state", and
+// "end_of_agent" or "adk_end_of_agent"). Terminal checkpoints (end_of_agent ==
+// true) are retained even when agent_state is nil.
+func extractAgentStateCheckpoint(actions session.EventActions, meta map[string]any) (any, bool, bool) {
+	if actions.AgentState != nil || actions.EndOfAgent != nil {
+		endOfAgent := actions.EndOfAgent != nil && *actions.EndOfAgent
+		if actions.AgentState == nil {
+			return nil, endOfAgent, endOfAgent
+		}
+		return actions.AgentState, endOfAgent, true
+	}
 	if len(meta) == 0 {
 		return nil, false, false
 	}
@@ -1057,7 +1067,7 @@ func (p *analyticsPlugin) emitSessionEventSignals(ctx agent.InvocationContext, e
 
 	// 4. AGENT_STATE_CHECKPOINT.
 	if p.shouldLogSessionEvent(EventAgentStateCheckpoint) {
-		if stateVal, endOfAgent, ok := extractAgentStateCheckpoint(ev.CustomMetadata); ok {
+		if stateVal, endOfAgent, ok := extractAgentStateCheckpoint(ev.Actions, ev.CustomMetadata); ok {
 			var stateTrunc bool
 			if !isNil(stateVal) {
 				stateVal, stateTrunc = scrubCustomMetadataValue("agent_state", stateVal, p.config.redactSensitiveKeys())
