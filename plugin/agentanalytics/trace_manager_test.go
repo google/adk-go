@@ -23145,8 +23145,58 @@ func TestTaskDeltaRef(t *testing.T) {
 		}
 		wrapped := context.WithoutCancel(toolCtx)
 		wrappedRef := toolContextTaskDeltaRef(wrapped, "c3")
-		if wrappedRef.empty() || wrappedRef.call != "c3" || wrappedRef.pinned == nil || !wrappedRef.matches(mapPtr(acts.StateDelta)) {
-			t.Errorf("wrapped toolContextTaskDeltaRef = %+v, want call=c3, pinned!=nil, matching StateDelta", wrappedRef)
+		if wrappedRef.empty() || wrappedRef.call != "c3" || wrappedRef.pinned == nil || wrappedRef.m == nil || !wrappedRef.matches(mapPtr(acts.StateDelta)) {
+			t.Errorf("wrapped toolContextTaskDeltaRef = %+v, want call=c3, non-nil m and pinned, matching StateDelta", wrappedRef)
+		}
+
+		// Replacing StateDelta on a wrapped context (WithoutCancel or CallbackContext)
+		// must keep the captured map alive so GC cannot recycle its address.
+		for _, tc := range []struct {
+			name string
+			wrap func(*session.EventActions) context.Context
+		}{
+			{
+				name: "WithoutCancel",
+				wrap: func(a *session.EventActions) context.Context {
+					return context.WithoutCancel(agent.NewToolContext(ic, "c-gc", a, nil))
+				},
+			},
+			{
+				name: "CallbackContext",
+				wrap: func(a *session.EventActions) context.Context {
+					return agent.NewCallbackContext(ic, a)
+				},
+			},
+			{
+				name: "WithoutCancelCallbackContext",
+				wrap: func(a *session.EventActions) context.Context {
+					return context.WithoutCancel(agent.NewCallbackContext(ic, a))
+				},
+			},
+		} {
+			t.Run(tc.name+"_retains_replaced_StateDelta", func(t *testing.T) {
+				actsLocal := &session.EventActions{StateDelta: map[string]any{"orig": 1}}
+				origPtr := mapPtr(actsLocal.StateDelta)
+				ref := toolContextTaskDeltaRef(tc.wrap(actsLocal), "c-gc")
+				if ref.empty() || ref.m == nil || !ref.matches(origPtr) {
+					t.Fatalf("ref = %+v, want non-empty with retained map matching %#x", ref, origPtr)
+				}
+				// Overwrite StateDelta so only ref retains the original map.
+				actsLocal.StateDelta = map[string]any{"replaced": 2}
+				for range 5 {
+					runtime.GC()
+				}
+				for i := range 2000 {
+					fresh := map[string]any{"i": i}
+					if ref.matches(mapPtr(fresh)) {
+						t.Fatalf("new map at iteration %d recycled address %#x of replaced StateDelta", i, ref.addr())
+					}
+				}
+				if !ref.matches(origPtr) || ref.m["orig"] != 1 {
+					t.Errorf("retained map corrupted after StateDelta replacement and GC: matches=%v val=%v", ref.matches(origPtr), ref.m["orig"])
+				}
+				runtime.KeepAlive(actsLocal)
+			})
 		}
 	})
 }
@@ -23158,6 +23208,15 @@ type panicActionsToolCtx struct {
 func (panicActionsToolCtx) Actions() *session.EventActions {
 	panic("boom")
 }
+
+type zeroSizeTestCtx struct{}
+
+var _ context.Context = (*zeroSizeTestCtx)(nil)
+
+func (*zeroSizeTestCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (*zeroSizeTestCtx) Done() <-chan struct{}       { return nil }
+func (*zeroSizeTestCtx) Err() error                  { return nil }
+func (*zeroSizeTestCtx) Value(any) any               { return nil }
 
 func TestToolCallIdentity(t *testing.T) {
 	idZero := toolCallIdentity{}
@@ -23296,6 +23355,85 @@ func TestToolCallIdentity(t *testing.T) {
 		t.Error("pinned pointer-only toolCallIdentity did not match itself")
 	}
 	runtime.KeepAlive(ptrOnlyID)
+
+	// WithAgentTimeout copies commonContext while sharing its live EventActions;
+	// omitting ctxPtr/ctxTyp on the Actions()-bearing branch makes it match the
+	// underlying call's identity, while distinct EventActions still differ.
+	timedToolCtx, cancelTimed := tctx1.WithAgentTimeout(time.Minute)
+	defer cancelTimed()
+	timedID, _ := toolCallIdentityOf(timedToolCtx, map[string]any{"q": "hi"})
+	if id1.ctxPtr != 0 || id1.ctxTyp != nil || timedID.ctxPtr != 0 || timedID.ctxTyp != nil {
+		t.Errorf("Actions()-bearing identity recorded ctxPtr/ctxTyp: id1=(%#x,%v) timed=(%#x,%v)", id1.ctxPtr, id1.ctxTyp, timedID.ctxPtr, timedID.ctxTyp)
+	}
+	if !id1.sameContext(timedID) || !timedID.sameContext(id1) {
+		t.Error("WithAgentTimeout context sharing live EventActions should match sameContext")
+	}
+	if timedID.sameContext(id2) {
+		t.Error("WithAgentTimeout context should not match distinct EventActions")
+	}
+
+	// Zero-size pointer contexts without EventActions share runtime.zerobase, so
+	// they must not record a pointer identity or match via sameContext.
+	z1 := &zeroSizeTestCtx{}
+	z2 := &zeroSizeTestCtx{}
+	if reflect.ValueOf(z1).Pointer() != reflect.ValueOf(z2).Pointer() {
+		t.Fatalf("expected zero-size pointers to share runtime.zerobase")
+	}
+	zID1, _ := toolCallIdentityOf(z1, nil)
+	zID2, _ := toolCallIdentityOf(z2, nil)
+	if zID1.hasAttemptIdentity() || zID2.hasAttemptIdentity() || zID1.ctxPtr != 0 || zID2.ctxPtr != 0 {
+		t.Errorf("zero-size pointer contexts should have no attempt identity: z1=%+v z2=%+v", zID1, zID2)
+	}
+	if zID1.sameContext(zID2) || zID1.sameContext(zID1) {
+		t.Error("zero-size pointer contexts must not match via sameContext")
+	}
+
+	// Two pointer contexts of different types at the same address (&outer vs
+	// &outer.embedded at offset 0, without Actions()) must not match sameContext.
+	type embeddedCtx struct{ context.Context }
+	type outerCtx struct {
+		embeddedCtx
+		tag int
+	}
+	outer := outerCtx{embeddedCtx: embeddedCtx{Context: context.Background()}, tag: 1}
+	outerID, _ := toolCallIdentityOf(&outer, nil)
+	embID, _ := toolCallIdentityOf(&outer.embeddedCtx, nil)
+	if !outerID.hasAttemptIdentity() || !embID.hasAttemptIdentity() {
+		t.Fatalf("expected attempt identity for &outer and &outer.embeddedCtx")
+	}
+	if outerID.ctxPtr != embID.ctxPtr {
+		t.Fatalf("expected &outer (%#x) and &outer.embeddedCtx (%#x) to share address at offset 0", outerID.ctxPtr, embID.ctxPtr)
+	}
+	if outerID.sameContext(embID) || embID.sameContext(outerID) {
+		t.Error("&outer and &outer.embeddedCtx at same address must not match sameContext")
+	}
+
+	// Recycled context address with shared EventActions: because ctxPtr is not
+	// recorded on the Actions()-bearing branch, identity depends only on live
+	// EventActions equality, never on a recycled wrapper address.
+	sharedActs := &session.EventActions{StateDelta: map[string]any{"shared": true}}
+	recycledID1 := func() toolCallIdentity {
+		c := &privateActionsToolCtx{
+			mockInvocationContext: &mockInvocationContext{ctx: context.Background()},
+			stable:                sharedActs,
+		}
+		id, _ := toolCallIdentityOf(c, nil)
+		return id
+	}()
+	for range 5 {
+		runtime.GC()
+	}
+	otherActs := &session.EventActions{StateDelta: map[string]any{"other": true}}
+	for range 2000 {
+		c := &privateActionsToolCtx{
+			mockInvocationContext: &mockInvocationContext{ctx: context.Background()},
+			stable:                otherActs,
+		}
+		idOther, _ := toolCallIdentityOf(c, nil)
+		if recycledID1.sameContext(idOther) {
+			t.Fatal("recycled context address with distinct EventActions falsely matched sameContext")
+		}
+	}
 }
 
 func TestTraceManager_UnwrapContext_EdgeCases(t *testing.T) {
@@ -23521,6 +23659,21 @@ func TestBoundedArgsDigest_ReviewRegressions(t *testing.T) {
 		if ts || dByteSlice == dFromWrappedSlice {
 			t.Errorf("[]byte hashed equal to [3]byte (%#x, trunc=%v), want distinct", dByteSlice, ts)
 		}
+
+		// Distinct [N]byte contents must produce distinct untruncated digests in
+		// both addressable and non-addressable positions.
+		a1 := [4]byte{1, 2, 3, 4}
+		a2 := [4]byte{1, 2, 3, 5}
+		dNonAddr1, tn1 := boundedArgsDigest(map[string]any{"b": a1})
+		dNonAddr2, tn2 := boundedArgsDigest(map[string]any{"b": a2})
+		if tn1 || tn2 || dNonAddr1 == dNonAddr2 {
+			t.Errorf("distinct non-addressable [4]byte: (%#x,%v) vs (%#x,%v), want distinct untruncated digests", dNonAddr1, tn1, dNonAddr2, tn2)
+		}
+		dAddrSlice1, ta1 := boundedArgsDigest(map[string]any{"b": [][4]byte{a1}})
+		dAddrSlice2, ta2 := boundedArgsDigest(map[string]any{"b": [][4]byte{a2}})
+		if ta1 || ta2 || dAddrSlice1 == dAddrSlice2 {
+			t.Errorf("distinct addressable [4]byte: (%#x,%v) vs (%#x,%v), want distinct untruncated digests", dAddrSlice1, ta1, dAddrSlice2, ta2)
+		}
 	})
 
 	t.Run("zero_offset_subslice_hashes_identically_while_true_cycle_truncates", func(t *testing.T) {
@@ -23566,26 +23719,51 @@ func TestBoundedArgsDigest_ReviewRegressions(t *testing.T) {
 		}
 		bigStructMap := map[string]bigStruct{"a": {Buf: [16777216]byte{1}}}
 		nestedInAny := map[string]any{"a": [2][16777216]byte{}}
+		type midStruct struct {
+			Buf [65536]byte
+		}
+		arrOfMidStructMap := map[string][256]midStruct{"a": {}}
+		arrOfMidStructInAny := map[string]any{"a": &[256]midStruct{}}
+		arrOfMidStructInAnyVal := map[string]any{"a": [256]midStruct{}}
+		pairOfMidStructMap := map[string][2]midStruct{"a": {}}
+		manyMidStructMap := make(map[string]midStruct, 20)
+		for i := range 20 {
+			manyMidStructMap[fmt.Sprintf("k%02d", i)] = midStruct{}
+		}
+		siblingMidStructMaps := make(map[string]any, 32)
+		for i := range 32 {
+			siblingMidStructMaps[fmt.Sprintf("m%02d", i)] = map[string]midStruct{"a": {}}
+		}
 
-		for name, args := range map[string]map[string]any{
-			"big_value_map":   {"m": bigValMap},
-			"big_key_map":     {"m": bigKeyMap},
-			"nested_arr_map":  {"m": nestedArrMap},
-			"big_struct_map":  {"m": bigStructMap},
-			"nested_arr_once": nestedInAny,
+		for _, tc := range []struct {
+			name     string
+			args     map[string]any
+			maxAlloc uint64
+		}{
+			{"big_value_map", map[string]any{"m": bigValMap}, 64 << 10},
+			{"big_key_map", map[string]any{"m": bigKeyMap}, 64 << 10},
+			{"nested_arr_map", map[string]any{"m": nestedArrMap}, 64 << 10},
+			{"big_struct_map", map[string]any{"m": bigStructMap}, 64 << 10},
+			{"nested_arr_once", nestedInAny, 64 << 10},
+			{"arr_of_mid_struct_map", map[string]any{"m": arrOfMidStructMap}, 64 << 10},
+			{"arr_of_mid_struct_pair", map[string]any{"m": pairOfMidStructMap}, 64 << 10},
+			{"arr_of_mid_struct_ptr", arrOfMidStructInAny, 64 << 10},
+			{"arr_of_mid_struct_any", arrOfMidStructInAnyVal, 64 << 10},
+			{"many_mid_struct_map", map[string]any{"m": manyMidStructMap}, 64 << 10},
+			{"sibling_mid_struct_map", siblingMidStructMaps, maxDigestBytes},
 		} {
 			var mBefore, mAfter runtime.MemStats
 			runtime.ReadMemStats(&mBefore)
-			d, trunc := boundedArgsDigest(args)
+			d, trunc := boundedArgsDigest(tc.args)
 			runtime.ReadMemStats(&mAfter)
 			if !trunc {
-				t.Errorf("%s: truncated = false, want true", name)
+				t.Errorf("%s: truncated = false, want true", tc.name)
 			}
-			if d2, _ := boundedArgsDigest(args); d2 != d {
-				t.Errorf("%s: truncated digest not deterministic: %d != %d", name, d, d2)
+			if d2, _ := boundedArgsDigest(tc.args); d2 != d {
+				t.Errorf("%s: truncated digest not deterministic: %d != %d", tc.name, d, d2)
 			}
-			if allocDelta := mAfter.TotalAlloc - mBefore.TotalAlloc; allocDelta > 1<<20 {
-				t.Errorf("%s: TotalAlloc delta = %d bytes, want < 1 MiB (must not copy inline array/struct)", name, allocDelta)
+			if allocDelta := mAfter.TotalAlloc - mBefore.TotalAlloc; allocDelta > tc.maxAlloc {
+				t.Errorf("%s: TotalAlloc delta = %d bytes, want <= %d (must not copy inline array/struct)", tc.name, allocDelta, tc.maxAlloc)
 			}
 		}
 
