@@ -138,8 +138,7 @@ func hasErrorCode(err error, httpCode int, grpcCode codes.Code) bool {
 	if err == nil {
 		return false
 	}
-	var apiErr *googleapi.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*googleapi.Error](err); ok {
 		return apiErr.Code == httpCode
 	}
 	if st, ok := status.FromError(err); ok {

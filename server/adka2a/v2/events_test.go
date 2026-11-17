@@ -413,6 +413,18 @@ func TestToSessionEvent(t *testing.T) {
 			want:  nil,
 		},
 		{
+			name: "non-final task status update with an empty message is skipped",
+			input: &a2a.TaskStatusUpdateEvent{
+				TaskID:    taskID,
+				ContextID: contextID,
+				Status: a2a.TaskStatus{
+					State:   a2a.TaskStateWorking,
+					Message: a2a.NewMessage(a2a.MessageRoleAgent),
+				},
+			},
+			want: nil,
+		},
+		{
 			name: "task status failed with single-part message",
 			input: &a2a.TaskStatusUpdateEvent{
 				TaskID:    taskID,

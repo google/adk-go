@@ -169,16 +169,13 @@ func isRetryableTransportError(err error) bool {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
+	if dnsErr, ok := errors.AsType[*net.DNSError](err); ok {
 		return dnsErr.IsTimeout || dnsErr.IsTemporary
 	}
-	var addrErr *net.AddrError
-	if errors.As(err, &addrErr) {
+	if _, ok := errors.AsType[*net.AddrError](err); ok {
 		return false
 	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if opErr, ok := errors.AsType[*net.OpError](err); ok {
 		return opErr.Op != "proxyconnect"
 	}
 	var netErr net.Error

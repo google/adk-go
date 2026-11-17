@@ -35,7 +35,7 @@ func TestClone(t *testing.T) {
 			I:  123,
 			Sl: []string{"a", "b"},
 			M:  map[string]string{"k": "v"},
-			P:  func() *int { i := 456; return &i }(),
+			P:  func() *int { return new(456) }(),
 			N: &testStruct{
 				S: "nested",
 			},

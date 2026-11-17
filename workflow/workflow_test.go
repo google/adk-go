@@ -676,3 +676,34 @@ func TestWorkflowRunSkipsNilUserContentParts(t *testing.T) {
 		})
 	}
 }
+
+// A workflow with no edges builds, and running it ends without an
+// error or any event, matching adk-python's Workflow(edges=[]).
+func TestWorkflowWithNoEdgesRunsToCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		edges []Edge
+	}{
+		{"nil", nil},
+		{"empty", []Edge{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, err := New("wf", tc.edges)
+			if err != nil {
+				t.Fatalf("New() error = %v, want nil", err)
+			}
+
+			var events []*session.Event
+			for ev, err := range w.Run(newSeededMockCtx(t)) {
+				if err != nil {
+					t.Fatalf("Run() error = %v", err)
+				}
+				events = append(events, ev)
+			}
+
+			if len(events) != 0 {
+				t.Errorf("Run() yielded %d events, want none: %+v", len(events), events)
+			}
+		})
+	}
+}

@@ -682,7 +682,10 @@ func TestGenerateContentProviderName(t *testing.T) {
 				return func(yield func(*model.LLMResponse, error) bool) { yield(&model.LLMResponse{}, nil) }
 			}
 			params := GenerateContentParams{ModelName: "m", Request: &model.LLMRequest{}, Backend: tc.backend}
-			for range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+			for _, err := range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+				if err != nil {
+					t.Fatalf("InstrumentGenerateContent() error = %v", err)
+				}
 			}
 
 			if len(spans.GetSpans()) != 1 {

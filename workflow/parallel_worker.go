@@ -123,7 +123,7 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 		parentBranch := workerCtx.Branch()
 		wrappedName := n.wrapped.Name()
 
-		for i := 0; i < nItems; i++ {
+		for i := range nItems {
 			item := v.Index(i).Interface()
 
 			if sem != nil {
