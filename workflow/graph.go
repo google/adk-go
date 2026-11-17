@@ -14,12 +14,21 @@
 
 package workflow
 
-import "github.com/google/jsonschema-go/jsonschema"
+import (
+	"slices"
+
+	"github.com/google/jsonschema-go/jsonschema"
+)
 
 // graph is the precomputed structural view of a workflow's edges.
 // Built once at workflow construction; queried by the engine at
 // dispatch time.
 type graph struct {
+	// edges holds the edges in declaration order.
+	edges []Edge
+	// nodes holds each node once, in first-mention order: the edges in
+	// declaration order, and within an edge From before To.
+	nodes         []Node
 	successors    map[Node][]Edge
 	predecessors  map[Node][]Edge
 	isRootWrapper bool
@@ -38,13 +47,23 @@ type graph struct {
 // returned graph references the input edges by value; mutating the
 // input edge slice afterwards does not affect the graph.
 func newGraph(edges []Edge) *graph {
-	succ := make(map[Node][]Edge)
-	pred := make(map[Node][]Edge)
-	for _, edge := range edges {
-		succ[edge.From] = append(succ[edge.From], edge)
-		pred[edge.To] = append(pred[edge.To], edge)
+	g := &graph{
+		edges:        slices.Clone(edges),
+		successors:   make(map[Node][]Edge),
+		predecessors: make(map[Node][]Edge),
 	}
-	return &graph{successors: succ, predecessors: pred}
+	seen := make(map[Node]bool)
+	for _, edge := range g.edges {
+		g.successors[edge.From] = append(g.successors[edge.From], edge)
+		g.predecessors[edge.To] = append(g.predecessors[edge.To], edge)
+		for _, n := range [...]Node{edge.From, edge.To} {
+			if !seen[n] {
+				seen[n] = true
+				g.nodes = append(g.nodes, n)
+			}
+		}
+	}
+	return g
 }
 
 // allEdges returns all edges in the graph.
@@ -73,20 +92,10 @@ func (g *graph) predecessorsOf(n Node) []Edge {
 	return g.predecessors[n]
 }
 
-// allNodes returns all nodes in the graph.
+// allNodes returns all nodes in the graph, each once, in first-mention
+// order. The caller owns the returned slice.
 func (g *graph) allNodes() []Node {
-	nodes := make(map[Node]bool)
-	for n := range g.successors {
-		nodes[n] = true
-	}
-	for n := range g.predecessors {
-		nodes[n] = true
-	}
-	var res []Node
-	for n := range nodes {
-		res = append(res, n)
-	}
-	return res
+	return slices.Clone(g.nodes)
 }
 
 // terminalNodeNames returns the names of terminal nodes: those with no

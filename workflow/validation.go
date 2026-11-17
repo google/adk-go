@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,11 +33,51 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
+// ErrGraphValidation is matched, with [errors.Is], by every error [New],
+// [NewWorkflowNode] and [NewWorkflowNodeWithSchemas] return because the edges
+// do not describe a valid graph. workflowagent.New returns the same errors.
+// The message has the form "graph validation failed: <detail>", and where the
+// failed rule has its own sentinel, such as [ErrDuplicateNodeName] or
+// [ErrUnconditionalCycle], the error matches that sentinel as well.
+//
+// ErrGraphValidation matches when:
+//
+//   - an edge has a nil From or To node, including a nil pointer or func
+//     held in a non-nil [Node];
+//   - [Concat] was given an item that is neither an [Edge] nor a []Edge;
+//   - two distinct nodes share a name;
+//   - the edge list is not empty and no edge has [Start] at either end;
+//   - an edge from [Start] has a route;
+//   - a node cannot be reached from [Start];
+//   - an edge points to [Start];
+//   - two edges have the same From and To nodes;
+//   - a [MultiRoute] contains [Default];
+//   - the edges form a cycle in which no edge has a route;
+//   - the output schema of an edge's From node does not match the input
+//     schema of its To node, or the two schemas cannot be compared, in which
+//     case the error also wraps the cause;
+//   - a chat-mode agent node follows a node other than [Start];
+//   - an agent node runs in task mode;
+//   - a node has more than one [Default] edge;
+//   - a node other than a [JoinNode] has two or more incoming edges without
+//     a route;
+//   - a [WorkflowNode] has the same name as the workflow that contains it.
+//
+// It does not match a mismatch with the state schema given by
+// [WithStateSchema], an error returned by a node's own validator of its
+// outgoing edges, the error for edges that do not suit [WithNodeRootWrapper],
+// or an error that [EdgeBuilder.Err] reports.
+//
+// ErrGraphValidation is the counterpart of adk-python's GraphValidationError.
+var ErrGraphValidation = errors.New("graph validation failed")
+
 // ErrDuplicateNodeName is returned when an edge set contains two
 // distinct Node instances that share the same Name.
 var ErrDuplicateNodeName = errors.New("duplicate node name")
 
-// ErrNoStartNode is returned when no start node is found in the edge set.
+// ErrNoStartNode is returned when the edge list is not empty and no edge
+// has [Start] at either end. An empty edge list is the empty workflow and
+// does not return it.
 var ErrNoStartNode = errors.New("no start node found")
 
 // ErrNodePointsToStart is returned when a node points to the start node.
@@ -68,23 +109,66 @@ var ErrSubWorkflowNameCollision = errors.New("sub-workflow name collision")
 var ErrUnsupportedFanIn = errors.New("non-JoinNode fan-in is not yet supported")
 
 // validateNodes executes a set of edges validation checks.
+//
+// They are the rules that read only the edge list, run before any graph is
+// built from it. It returns the first failure as a graph validation error.
+// The order of the table is the rule order; it continues in
+// validateWorkflow.
 func validateNodes(edges []Edge) error {
-	if err := validateUniqueNames(edges); err != nil {
-		return err
+	rules := []func([]Edge) error{
+		validateEdgeShapes,       // first, so no later rule meets a nil node
+		validateUniqueNames,      // adk-python's _validate_duplicate_node_names
+		validateStartNodePresent, // _validate_start_node
+		validateStartEdges,       // _validate_start_edges
 	}
-	if err := validateStartNodePresent(edges); err != nil {
-		return err
-	}
-	if err := validateStartNodeNoIncoming(edges); err != nil {
-		return err
-	}
-	if err := validateNoTaskModeGraphNodes(edges); err != nil {
-		return err
-	}
-	if err := validateChatModeWiring(edges); err != nil {
-		return err
+	for _, rule := range rules {
+		if err := rule(edges); err != nil {
+			return invalidGraph(err)
+		}
 	}
 	return nil
+}
+
+// invalidGraph marks err as a graph validation error: the result matches
+// ErrGraphValidation and everything err matches.
+func invalidGraph(err error) error {
+	return fmt.Errorf("%w: %w", ErrGraphValidation, err)
+}
+
+// validateEdgeShapes checks that no edge is a placeholder Concat put in
+// place of a foreign item and that every edge has a From and a To node. It
+// reports the first defect by edge index, and runs before any rule that
+// calls a node's methods.
+func validateEdgeShapes(edges []Edge) error {
+	for i, e := range edges {
+		if item, ok := e.Route.(concatForeignItem); ok {
+			return fmt.Errorf("edges[%d]: Concat was given a value of type %s, which is neither an Edge nor a []Edge", i, item.typeName)
+		}
+		if isNilNode(e.From) {
+			return fmt.Errorf("edges[%d] has a nil From node", i)
+		}
+		if isNilNode(e.To) {
+			return fmt.Errorf("edges[%d] has a nil To node", i)
+		}
+	}
+	return nil
+}
+
+// isNilNode reports whether n is nil or holds a nil pointer or a nil func.
+// Only those two kinds are checked: a value of another nil-able kind (map,
+// slice, chan) can have methods that work when it is nil, and nothing about
+// the kind tells such a node apart from a broken one.
+func isNilNode(n Node) bool {
+	if n == nil {
+		return true
+	}
+	v := reflect.ValueOf(n)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Func:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // validateSubWorkflowNames checks that no sub-workflow has the same name as the parent workflow.
@@ -111,44 +195,55 @@ func checkSubWorkflowName(node Node, workflowName string) error {
 }
 
 // validateUniqueNames checks that all nodes in the edge set have unique names.
-// If duplicate node names are found, it returns an error. The equality between
-// nodes is checked by comparing the nodes directly.
+// If duplicate node names are found, it returns an error that lists each
+// such name once, sorted, as adk-python does. The equality between nodes is
+// checked by comparing the nodes directly.
 func validateUniqueNames(edges []Edge) error {
 	names := make(map[string]Node)
-	checkNode := func(node Node) error {
-		if storedNode, ok := names[node.Name()]; ok {
-			if storedNode != node {
-				return fmt.Errorf("%w: %s", ErrDuplicateNodeName, node.Name())
+	var duplicates []string
+	for _, edge := range edges {
+		for _, node := range [...]Node{edge.From, edge.To} {
+			storedNode, ok := names[node.Name()]
+			if !ok {
+				names[node.Name()] = node
+				continue
 			}
-		} else {
-			names[node.Name()] = node
+			if storedNode != node && !slices.Contains(duplicates, node.Name()) {
+				duplicates = append(duplicates, node.Name())
+			}
 		}
+	}
+	if len(duplicates) == 0 {
 		return nil
 	}
-	for _, edge := range edges {
-		if err := checkNode(edge.From); err != nil {
-			return err
-		}
-		if err := checkNode(edge.To); err != nil {
-			return err
-		}
-	}
-	return nil
+	slices.Sort(duplicates)
+	return fmt.Errorf("%w: %s", ErrDuplicateNodeName, strings.Join(duplicates, ", "))
 }
 
-// validateStartNodePresent checks that there is at least one edge starting
-// from the start node. An empty edge set is valid: the workflow runs and
-// produces no output.
+// validateStartNodePresent checks that some edge has the start node at
+// either end, as adk-python counts Start among the graph's nodes when any
+// edge names it. An empty edge list passes: it is the empty workflow.
 func validateStartNodePresent(edges []Edge) error {
 	if len(edges) == 0 {
 		return nil
 	}
 	for _, edge := range edges {
-		if edge.From == Start {
+		if edge.From == Start || edge.To == Start {
 			return nil
 		}
 	}
 	return ErrNoStartNode
+}
+
+// validateStartEdges checks that no edge from Start has a route, Default
+// included, as adk-python does. It reports the first such edge.
+func validateStartEdges(edges []Edge) error {
+	for _, e := range edges {
+		if e.From == Start && e.Route != nil {
+			return fmt.Errorf("edge from %q to %q has a route; edges from START take none", e.From.Name(), e.To.Name())
+		}
+	}
+	return nil
 }
 
 // validateStartNodeNoIncoming checks that no node points to the start node.
@@ -161,33 +256,53 @@ func validateStartNodeNoIncoming(edges []Edge) error {
 	return nil
 }
 
-// validateWorkflow executes a set of workflow validation checks.
+// validateWorkflow runs the rules that read the graph and returns the first
+// failure. The order of the table continues validateNodes: adk-python's
+// rules in the order of its validate_graph, then its state-schema check,
+// then the rules only adk-go has, so a graph with several defects reports
+// the defect adk-python reports. A graph rule's failure is a graph
+// validation error; the state-schema error and a node's own outgoing-edge
+// validator error are returned as they are.
 func validateWorkflow(workflow *graph, schema *jsonschema.Resolved) error {
-	if err := validateUniqueEdges(workflow); err != nil {
-		return err
+	rules := []func(*graph) error{
+		graphRule(validateConnectivity),                 // _validate_connectivity
+		graphRule(onEdges(validateStartNodeNoIncoming)), // _validate_connectivity, edge into START
+		graphRule(validateUniqueEdges),                  // _validate_duplicate_edges
+		graphRule(validateDefaultInList),                // _validate_default_routes
+		graphRule(validateCycles),                       // _detect_unconditional_cycles
+		graphRule(validateStaticSchemas),                // _validate_static_schemas
+		graphRule(onEdges(validateChatModeWiring)),      // _validate_chat_agent_wiring
+		func(g *graph) error { return validateStateSchemaConsistency(g, schema) },
+		graphRule(onEdges(validateNoTaskModeGraphNodes)), // adk-go only, from here on
+		graphRule(validateDefaultRoute),
+		graphRule(validateFanIn),
+		validateNodeOutgoingEdges,
 	}
-	if err := validateDefaultRoute(workflow); err != nil {
-		return err
-	}
-	if err := validateConnectivity(workflow); err != nil {
-		return err
-	}
-	if err := validateCycles(workflow); err != nil {
-		return err
-	}
-	if err := validateFanIn(workflow); err != nil {
-		return err
-	}
-	if err := validateStaticSchemas(workflow); err != nil {
-		return err
-	}
-	if err := validateStateSchemaConsistency(workflow, schema); err != nil {
-		return err
-	}
-	if err := validateNodeOutgoingEdges(workflow); err != nil {
-		return err
+	for _, rule := range rules {
+		if err := rule(workflow); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// graphRule returns rule with its failure marked as a graph validation
+// error.
+func graphRule(rule func(*graph) error) func(*graph) error {
+	return func(g *graph) error {
+		if err := rule(g); err != nil {
+			return invalidGraph(err)
+		}
+		return nil
+	}
+}
+
+// onEdges adapts a rule over the edge list to the graph's edges in
+// declaration order.
+func onEdges(rule func([]Edge) error) func(*graph) error {
+	return func(g *graph) error {
+		return rule(g.edges)
+	}
 }
 
 // validateNoTaskModeGraphNodes rejects task-mode LlmAgents that appear
@@ -205,23 +320,20 @@ func validateWorkflow(workflow *graph, schema *jsonschema.Resolved) error {
 //     workflowinternal.TaskAgentTool / dispatchTaskFC), or
 //   - dispatched dynamically via workflow.RunNode from a function/
 //     dynamic node — never as static graph nodes.
+//
+// It reports the first such node in first-mention order.
 func validateNoTaskModeGraphNodes(edges []Edge) error {
-	allNodes := make(map[Node]bool)
 	for _, e := range edges {
-		allNodes[e.From] = true
-		allNodes[e.To] = true
-	}
-
-	for node := range allNodes {
-		if mode, ok := agentNodeMode(node); ok && mode == llminternal.ModeTask {
-			return fmt.Errorf(
-				"Agent %q has mode='task' and cannot be used as a workflow graph node. Use a chat coordinator with task sub-agents, or "+
-					"dispatch dynamically via RunNode from a function node",
-				node.Name(),
-			)
+		for _, node := range [...]Node{e.From, e.To} {
+			if mode, ok := agentNodeMode(node); ok && mode == llminternal.ModeTask {
+				return fmt.Errorf(
+					"Agent %q has mode='task' and cannot be used as a workflow graph node. Use a chat coordinator with task sub-agents, or "+
+						"dispatch dynamically via RunNode from a function node",
+					node.Name(),
+				)
+			}
 		}
 	}
-
 	return nil
 }
 
@@ -269,23 +381,43 @@ func agentNodeMode(node Node) (llminternal.Mode, bool) {
 
 // validateUniqueEdges checks that there are no duplicate edges in the workflow.
 // Two edges with the same (From, To) are rejected regardless of Route; use
-// MultiRoute to express alternatives to the same target.
+// MultiRoute to express alternatives to the same target. It reports the
+// first edge, in declaration order, whose (From, To) an earlier edge already
+// has, as adk-python does.
 func validateUniqueEdges(workflow *graph) error {
-	for node, edges := range workflow.successors {
-		uniqueEdges := make(map[Node]struct{})
-		for _, edge := range edges {
-			if _, ok := uniqueEdges[edge.To]; ok {
-				return fmt.Errorf("%w: from %q to %q", ErrDuplicateEdge, node.Name(), edge.To.Name())
-			}
-			uniqueEdges[edge.To] = struct{}{}
+	seen := make(map[[2]Node]struct{}, len(workflow.edges))
+	for _, edge := range workflow.edges {
+		key := [2]Node{edge.From, edge.To}
+		if _, ok := seen[key]; ok {
+			return fmt.Errorf("%w: from %q to %q", ErrDuplicateEdge, edge.From.Name(), edge.To.Name())
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+// defaultHolder is implemented by a route that can contain Default.
+type defaultHolder interface {
+	hasDefault() bool
+}
+
+// validateDefaultInList checks that no edge's MultiRoute contains Default,
+// as adk-python does; a Default edge is written as an edge of its own. It
+// reports the first such edge in declaration order.
+func validateDefaultInList(workflow *graph) error {
+	for _, e := range workflow.edges {
+		if r, ok := e.Route.(defaultHolder); ok && r.hasDefault() {
+			return fmt.Errorf("edge from %q to %q: a MultiRoute must not contain Default", e.From.Name(), e.To.Name())
 		}
 	}
 	return nil
 }
 
 // validateDefaultRoute checks that there are no multiple default routes for one node.
+// It reports the first such node in first-mention order.
 func validateDefaultRoute(workflow *graph) error {
-	for node, edges := range workflow.successors {
+	for _, node := range workflow.allNodes() {
+		edges := workflow.successorsOf(node)
 		hasDefault := false
 		for _, edge := range edges {
 			if edge.Route == Default && !hasDefault {
@@ -337,44 +469,61 @@ func validateConnectivity(workflow *graph) error {
 // for cycles where all edges in the cycle have nil routes.
 // Default routes (where Route == Default) are treated as conditional edges
 // and are ignored during unconditional cycle detection.
+//
+// The search starts from the nodes in first-mention order and follows edges
+// in declaration order, so the same edges always report the same cycle. The
+// error names the cycle's nodes from the first one the search reached back
+// to, for example "A" -> "B" -> "A".
 func validateCycles(workflow *graph) error {
 	visited := make(map[Node]struct{})
+	var path []Node
+	onPath := make(map[Node]int) // index of a node in path
 
-	var traverse func(n Node, inStack map[Node]struct{}) error
-	traverse = func(n Node, inStack map[Node]struct{}) error {
-		if _, ok := inStack[n]; ok {
-			return fmt.Errorf("%w: %q", ErrUnconditionalCycle, n.Name())
+	var traverse func(n Node) error
+	traverse = func(n Node) error {
+		if i, ok := onPath[n]; ok {
+			return fmt.Errorf("%w: %s", ErrUnconditionalCycle, formatCycle(path[i:], n))
 		}
 
 		if _, ok := visited[n]; ok {
 			return nil
 		}
 
-		inStack[n] = struct{}{}
+		onPath[n] = len(path)
+		path = append(path, n)
 		visited[n] = struct{}{}
 
-		for _, edge := range workflow.successors[n] {
+		for _, edge := range workflow.successorsOf(n) {
 			if edge.Route == nil {
-				if err := traverse(edge.To, inStack); err != nil {
+				if err := traverse(edge.To); err != nil {
 					return err
 				}
 			}
 		}
 
-		delete(inStack, n)
+		path = path[:len(path)-1]
+		delete(onPath, n)
 		return nil
 	}
 
-	for node := range workflow.successors {
-		if _, ok := visited[node]; !ok {
-			inStack := make(map[Node]struct{})
-			if err := traverse(node, inStack); err != nil {
-				return err
-			}
+	for _, node := range workflow.allNodes() {
+		if err := traverse(node); err != nil {
+			return err
 		}
 	}
 
 	return nil
+}
+
+// formatCycle returns the quoted names of the cycle's nodes followed by
+// the name of closing, the node the cycle returns to, joined by " -> ".
+func formatCycle(cycle []Node, closing Node) string {
+	names := make([]string, 0, len(cycle)+1)
+	for _, n := range cycle {
+		names = append(names, strconv.Quote(n.Name()))
+	}
+	names = append(names, strconv.Quote(closing.Name()))
+	return strings.Join(names, " -> ")
 }
 
 // validateFanIn rejects a non-JoinNode target that has two or more
@@ -384,9 +533,10 @@ func validateCycles(workflow *graph) error {
 // barrier; everything else must converge through one. Only unconditional
 // (Route == nil) edges are counted so conditional fan-in and loop-back
 // back-edges — where the predecessors don't all fire together — are not
-// rejected.
+// rejected. It reports the first such node in first-mention order.
 func validateFanIn(workflow *graph) error {
-	for node, edges := range workflow.predecessors {
+	for _, node := range workflow.allNodes() {
+		edges := workflow.predecessorsOf(node)
 		if _, isJoin := node.(*JoinNode); isJoin {
 			continue
 		}
@@ -518,8 +668,12 @@ func extractFieldNames(schema *jsonschema.Resolved) []string {
 	return fields
 }
 
+// validateStaticSchemas checks, for each edge in declaration order whose
+// From node declares an output schema and whose To node declares an input
+// schema, that the two schemas are equal. It reports the first edge that
+// fails.
 func validateStaticSchemas(g *graph) error {
-	for _, edge := range g.allEdges() {
+	for _, edge := range g.edges {
 		outResolved := edge.From.OutputSchema()
 		inResolved := edge.To.InputSchema()
 		if outResolved == nil || inResolved == nil {
@@ -531,7 +685,7 @@ func validateStaticSchemas(g *graph) error {
 				edge.From.Name(), edge.To.Name(), err)
 		}
 		if !eq {
-			return fmt.Errorf("graph validation failed: schema mismatch on edge %s -> %s",
+			return fmt.Errorf("schema mismatch on edge %s -> %s",
 				edge.From.Name(), edge.To.Name())
 		}
 	}
@@ -569,6 +723,18 @@ func validateNodeOutgoingEdges(g *graph) error {
 
 type multiRouteSummarizer interface {
 	summarizeMultiRoute() []workflowroute.Value
+}
+
+// hasDefault reports whether r contains Default. An element of another
+// dynamic type compares unequal to Default without being compared, so an
+// uncomparable element cannot panic here.
+func (r MultiRoute[T]) hasDefault() bool {
+	for _, elem := range r {
+		if any(elem) == Default {
+			return true
+		}
+	}
+	return false
 }
 
 func (r MultiRoute[T]) summarizeMultiRoute() []workflowroute.Value {
