@@ -63,6 +63,11 @@ func lockExchange(key string, o *toolauth.OAuth2Auth) func() {
 
 // StoreAuthResponse stores the credential in resp, the client's answer to the
 // request ADK sent, under "temp:" plus that request's key, and returns the key.
+//
+// The stored credential carries the OAuth2 state ADK issued when ADK will
+// redeem a code from the answer (it holds no access token, and an
+// authorization code or a redirect URL), so that the redirect URL is checked
+// against that state. Any other answer keeps its own state, as in adk-python.
 func StoreAuthResponse(state session.State, requested *toolauth.Config, resp map[string]any) (string, error) {
 	answer, err := parseAuthResponse(resp)
 	if err != nil {

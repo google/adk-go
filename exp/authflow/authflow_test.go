@@ -34,6 +34,7 @@ import (
 	"google.golang.org/adk/v2/exp/authflow"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -1040,6 +1041,259 @@ func TestRerunThatNeedsAnotherCredentialAsksForIt(t *testing.T) {
 	if diff := cmp.Diff([]string{"c0de", "c0ntacts"}, codes); diff != "" {
 		t.Errorf("codes redeemed mismatch, want each once (-want +got):\n%s", diff)
 	}
+}
+
+// The preprocessor reads another author's events only on exactly the
+// invocation's branch, as adk-python's does, so a tool call whose response
+// asked for a credential on a sibling or an ancestor branch is not the running
+// agent's to resume, even when the answer reaches that agent. The same-branch
+// row shows that the other rows fail for the branch alone.
+func TestAnswerToARequestOnAnotherBranchRunsNothing(t *testing.T) {
+	tests := []struct {
+		name         string
+		toolBranch   string
+		wantRuns     int
+		wantRedeemed int
+	}{
+		{name: "tool call on a sibling branch", toolBranch: "assistant.other", wantRuns: 0, wantRedeemed: 0},
+		{name: "tool call on an ancestor branch", toolBranch: "assistant", wantRuns: 0, wantRedeemed: 0},
+		{name: "tool call on the agent's branch", toolBranch: "assistant.child", wantRuns: 1, wantRedeemed: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			endpoint := newTokenEndpoint(t)
+			cfg := calendarConfig(endpoint.URL)
+			sessions := session.InMemoryService()
+			request := seedRequestOnBranch(t, sessions, cfg, tt.toolBranch)
+			calendar, record := newCalendarTool(t, cfg)
+			r := newSubAgentRunner(t, sessions, calendar)
+
+			events, err := testutil.CollectEvents(r.Run(t.Context(), "test_user", "s1", answer(t, request, "c0de"), agent.RunConfig{}))
+
+			// Checked before the run's error: a call rerun on child's branch
+			// has its response there but its call on toolBranch, which ends
+			// the run with an error after the code was redeemed.
+			if runs, _ := record.record(); runs != tt.wantRuns {
+				t.Errorf("calendar ran %d times, want %d", runs, tt.wantRuns)
+			}
+			if n := len(endpoint.seen()); n != tt.wantRedeemed {
+				t.Errorf("token endpoint got %d requests, want %d", n, tt.wantRedeemed)
+			}
+			if err != nil {
+				t.Fatalf("run failed: %v", err)
+			}
+			last := events[len(events)-1]
+			if last.Author != "child" || last.Branch != "assistant.child" {
+				t.Fatalf("run ended on an event by %q on branch %q, want child on assistant.child", last.Author, last.Branch)
+			}
+		})
+	}
+}
+
+// The preprocessor reads a user event on the invocation's branch or on a
+// branch below it, as adk-python's does, and not one on an ancestor branch.
+// The runner puts a reply on the branch of the call its first response
+// answers, so a reply that answers a question child asked on another branch
+// before it answers the sign-in lands on that branch.
+func TestSignInAnswerIsReadOnlyOnTheAgentsBranchOrBelow(t *testing.T) {
+	tests := []struct {
+		name           string
+		questionBranch string
+		wantRuns       int
+		wantRedeemed   int
+	}{
+		{name: "answer on a descendant branch", questionBranch: "assistant.child.picker", wantRuns: 1, wantRedeemed: 1},
+		{name: "answer on an ancestor branch", questionBranch: "assistant", wantRuns: 0, wantRedeemed: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			endpoint := newTokenEndpoint(t)
+			cfg := calendarConfig(endpoint.URL)
+			sessions := session.InMemoryService()
+			request := seedRequestOnBranch(t, sessions, cfg, "assistant.child")
+			// child asks for a date on questionBranch, then waits on its own
+			// branch, where it runs when it resumes.
+			appendToS1(t, sessions, seedEvent(t, sessions, "child", tt.questionBranch, &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{ID: "pick-1", Name: "pick_date", Args: map[string]any{}}},
+			}}))
+			appendToS1(t, sessions, seedEvent(t, sessions, "child", "assistant.child", genai.NewContentFromText("Pick a date and sign in.", genai.RoleModel)))
+			calendar, record := newCalendarTool(t, cfg)
+			r := newSubAgentRunner(t, sessions, calendar)
+			reply := answer(t, request, "c0de")
+			reply.Parts = append([]*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				ID: "pick-1", Name: "pick_date", Response: map[string]any{"date": "today"},
+			}}}, reply.Parts...)
+
+			_, err := testutil.CollectEvents(r.Run(t.Context(), "test_user", "s1", reply, agent.RunConfig{}))
+
+			if runs, _ := record.record(); runs != tt.wantRuns {
+				t.Errorf("calendar ran %d times, want %d", runs, tt.wantRuns)
+			}
+			if n := len(endpoint.seen()); n != tt.wantRedeemed {
+				t.Errorf("token endpoint got %d requests, want %d", n, tt.wantRedeemed)
+			}
+			if err != nil {
+				t.Fatalf("run failed: %v", err)
+			}
+		})
+	}
+}
+
+// A user event whose function responses all answer calls made off the
+// invocation's branch and the branches below it is not the invocation's to
+// read, as in adk-python. So it does not hide an earlier answer to the agent's
+// sign-in request that no run has acted on: that answer is still the latest
+// event the preprocessor reads, and it resumes the call.
+func TestAnswerToACallOffTheBranchLeavesASignInAnswerOpen(t *testing.T) {
+	endpoint := newTokenEndpoint(t)
+	cfg := calendarConfig(endpoint.URL)
+	sessions := session.InMemoryService()
+	request := seedRequestOnBranch(t, sessions, cfg, "assistant.child")
+	appendToS1(t, sessions, seedEvent(t, sessions, "user", "assistant.child", answer(t, request, "c0de")))
+	// remote_peer asks the user something on the root branch, so the runner
+	// puts the reply there, a branch the preprocessor reads user events on.
+	appendToS1(t, sessions, seedEvent(t, sessions, "remote_peer", "", &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{ID: "peer-1", Name: "lookup", Args: map[string]any{}}},
+	}}))
+	calendar, record := newCalendarTool(t, cfg)
+	r := newSubAgentRunner(t, sessions, calendar)
+	reply := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+		ID: "peer-1", Name: "lookup", Response: map[string]any{"found": true},
+	}}}}
+
+	events, err := testutil.CollectEvents(r.Run(t.Context(), "test_user", "s1", reply, agent.RunConfig{}))
+
+	if runs, tokens := record.record(); runs != 1 || !cmp.Equal(tokens, []string{"at-1"}) {
+		t.Errorf("calendar ran %d times with tokens %q, want 1 run with at-1", runs, tokens)
+	}
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	last := events[len(events)-1]
+	if last.Author != "child" || last.Branch != "assistant.child" {
+		t.Fatalf("run ended on an event by %q on branch %q, want child on assistant.child", last.Author, last.Branch)
+	}
+}
+
+// newSubAgentRunner returns a runner over sessions whose root agent
+// "assistant" has one sub-agent "child" with tools, whose model answers
+// "Done.".
+func newSubAgentRunner(t *testing.T, sessions session.Service, tools ...tool.Tool) *runner.Runner {
+	t.Helper()
+	child, err := llmagent.New(llmagent.Config{
+		Name:  "child",
+		Model: &testutil.MockModel{Responses: []*genai.Content{genai.NewContentFromText("Done.", genai.RoleModel)}},
+		Tools: tools,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(child) failed: %v", err)
+	}
+	root, err := llmagent.New(llmagent.Config{Name: "assistant", Model: &testutil.MockModel{}, SubAgents: []agent.Agent{child}})
+	if err != nil {
+		t.Fatalf("llmagent.New(assistant) failed: %v", err)
+	}
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: root, SessionService: sessions})
+	if err != nil {
+		t.Fatalf("runner.New() failed: %v", err)
+	}
+	return r
+}
+
+// seedRequestOnBranch creates session "s1" in sessions holding a sign-in that
+// agent "child" started: a text event on "assistant.child", its calendar call
+// and the tool response that asks for a credential on toolBranch, then its
+// adk_request_credential call on "assistant.child". It returns that call. The
+// answer to it resumes child on the branch of child's first event of the
+// invocation, "assistant.child", and is stored on the branch of the call.
+func seedRequestOnBranch(t *testing.T, sessions session.Service, cfg *toolauth.Config, toolBranch string) *genai.FunctionCall {
+	t.Helper()
+	// The events come from a run of a stand-alone agent named child in
+	// session "seed", which puts them on the root branch.
+	calendar, _ := newCalendarTool(t, cfg)
+	asker, err := llmagent.New(llmagent.Config{
+		Name:  "child",
+		Model: &testutil.MockModel{Responses: []*genai.Content{calendarCall()}},
+		Tools: []tool.Tool{calendar},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(seed) failed: %v", err)
+	}
+	seeder, err := runner.New(runner.Config{AppName: "test_app", Agent: asker, SessionService: sessions})
+	if err != nil {
+		t.Fatalf("runner.New(seed) failed: %v", err)
+	}
+	ctx := t.Context()
+	if _, err := sessions.Create(ctx, &session.CreateRequest{AppName: "test_app", UserID: "test_user", SessionID: "seed"}); err != nil {
+		t.Fatalf("Create(seed) failed: %v", err)
+	}
+	seeded, err := testutil.CollectEvents(seeder.Run(ctx, "test_user", "seed", genai.NewContentFromText("what's on my calendar?", genai.RoleUser), agent.RunConfig{}))
+	if err != nil {
+		t.Fatalf("seed run failed: %v", err)
+	}
+	requests := credentialRequests(seeded)
+	if len(requests) != 1 {
+		t.Fatalf("seed run sent %d credential requests, want 1", len(requests))
+	}
+
+	created, err := sessions.Create(ctx, &session.CreateRequest{AppName: "test_app", UserID: "test_user", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Create(s1) failed: %v", err)
+	}
+	first := session.NewEvent(ctx, seeded[0].InvocationID)
+	first.Author = "child"
+	first.Branch = "assistant.child"
+	first.LLMResponse = model.LLMResponse{Content: genai.NewContentFromText("Let me look.", genai.RoleModel)}
+	if err := sessions.AppendEvent(ctx, created.Session, first); err != nil {
+		t.Fatalf("AppendEvent() failed: %v", err)
+	}
+	for _, src := range seeded {
+		if src.Author != "child" {
+			continue
+		}
+		ev := session.NewEvent(ctx, src.InvocationID)
+		ev.Author = src.Author
+		ev.Branch = toolBranch
+		if len(credentialRequests([]*session.Event{src})) > 0 {
+			ev.Branch = "assistant.child"
+		}
+		ev.LLMResponse = src.LLMResponse
+		ev.LongRunningToolIDs = src.LongRunningToolIDs
+		ev.Actions.RequestedAuthConfigs = src.Actions.RequestedAuthConfigs
+		if err := sessions.AppendEvent(ctx, created.Session, ev); err != nil {
+			t.Fatalf("AppendEvent() failed: %v", err)
+		}
+	}
+	return requests[0]
+}
+
+// seedEvent returns an event by author on branch with content, in the
+// invocation of the last event of session "s1" in sessions.
+func seedEvent(t *testing.T, sessions session.Service, author, branch string, content *genai.Content) *session.Event {
+	t.Helper()
+	events := s1(t, sessions).Events()
+	ev := session.NewEvent(t.Context(), events.At(events.Len()-1).InvocationID)
+	ev.Author = author
+	ev.Branch = branch
+	ev.LLMResponse = model.LLMResponse{Content: content}
+	return ev
+}
+
+// appendToS1 appends ev to session "s1" in sessions.
+func appendToS1(t *testing.T, sessions session.Service, ev *session.Event) {
+	t.Helper()
+	if err := sessions.AppendEvent(t.Context(), s1(t, sessions), ev); err != nil {
+		t.Fatalf("AppendEvent() failed: %v", err)
+	}
+}
+
+// s1 returns session "s1" as sessions stores it.
+func s1(t *testing.T, sessions session.Service) session.Session {
+	t.Helper()
+	resp, err := sessions.Get(t.Context(), &session.GetRequest{AppName: "test_app", UserID: "test_user", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Get(s1) failed: %v", err)
+	}
+	return resp.Session
 }
 
 func TestRequestCredentialNeedsAToolCall(t *testing.T) {
