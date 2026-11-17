@@ -17,6 +17,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -160,7 +161,8 @@ func adcTokenSource(scopes []string) (oauth2.TokenSource, error) {
 	if len(scopes) == 0 {
 		scopes = []string{scopeCloudPlatform}
 	}
-	creds, err := credentials.DetectDefault(&credentials.DetectOptions{Scopes: scopes})
+	// The compute credential keeps the slice and reads it on every refresh.
+	creds, err := credentials.DetectDefault(&credentials.DetectOptions{Scopes: slices.Clone(scopes)})
 	if err != nil {
 		return nil, fmt.Errorf("auth: find default credentials: %w", err)
 	}

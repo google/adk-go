@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -239,13 +240,21 @@ func TestLazyTokenSourceKeepsInitErrorTextPastTimeout(t *testing.T) {
 }
 
 // TestProvidersMintTokensAfterInit: ADC and ServiceAccount mint through a
-// service-account source, and keep minting once the first token has expired,
-// after the construction context has been released.
+// service-account source for the scopes they were given, and keep minting once
+// the first token has expired, with the context Credential was given canceled
+// before the first Apply.
 func TestProvidersMintTokensAfterInit(t *testing.T) {
 	const tokenTTL = time.Second
 	var hits atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var lastScope atomic.Value
+	lastScope.Store("")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := hits.Add(1)
+		if scope, err := assertionScope(r); err != nil {
+			t.Errorf("token request: %v", err)
+		} else {
+			lastScope.Store(scope)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"access_token":"tok%d","token_type":"Bearer","expires_in":%d}`, n, int(tokenTTL.Seconds()))
 	}))
@@ -256,18 +265,25 @@ func TestProvidersMintTokensAfterInit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
+	isolateADCEnv(t)
 
+	const emailScope = "https://www.googleapis.com/auth/userinfo.email"
 	tests := []struct {
-		name     string
-		provider CredentialProvider
+		name      string
+		provider  CredentialProvider
+		wantScope string
 	}{
-		{"ADC", ADC()},
-		{"ServiceAccountADCFallback", ServiceAccount(ServiceAccountConfig{})},
+		// The literal rather than scopeCloudPlatform, which would move with the
+		// constant it is meant to pin.
+		{"ADC", ADC(), "https://www.googleapis.com/auth/cloud-platform"},
+		{"ServiceAccountADCFallback", ServiceAccount(ServiceAccountConfig{Scopes: []string{emailScope}}), emailScope},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			before := hits.Load()
-			cred, err := tc.provider.Credential(t.Context())
+			ctx, cancel := context.WithCancel(t.Context())
+			cred, err := tc.provider.Credential(ctx)
+			cancel()
 			if err != nil {
 				t.Fatalf("Credential() error = %v", err)
 			}
@@ -294,8 +310,46 @@ func TestProvidersMintTokensAfterInit(t *testing.T) {
 			if got := hits.Load() - before; got != 2 {
 				t.Errorf("token endpoint hit %d times, want 2 (one mint per Apply)", got)
 			}
+			if got := lastScope.Load().(string); got != tc.wantScope {
+				t.Errorf("token request asked for scope %q, want %q", got, tc.wantScope)
+			}
 		})
 	}
+}
+
+// isolateADCEnv pins the rest of the environment credential discovery reads,
+// so the host's own Google Cloud setup (a quota project or universe domain in
+// the shell, a client certificate config, the trust boundary lookup) cannot
+// change what the tests observe or send.
+func isolateADCEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("GOOGLE_CLOUD_QUOTA_PROJECT", "")
+	t.Setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", "")
+	t.Setenv("GOOGLE_API_USE_CLIENT_CERTIFICATE", "false")
+	t.Setenv("GOOGLE_AUTH_TRUST_BOUNDARY_ENABLED", "")
+}
+
+// assertionScope reads the scope claim out of the signed JWT a service-account
+// token request carries as its assertion form field.
+func assertionScope(r *http.Request) (string, error) {
+	if err := r.ParseForm(); err != nil {
+		return "", err
+	}
+	parts := strings.Split(r.PostForm.Get("assertion"), ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("assertion is not a JWT: %d segments", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("decode assertion payload: %w", err)
+	}
+	var claims struct {
+		Scope string `json:"scope"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", fmt.Errorf("parse assertion payload: %w", err)
+	}
+	return claims.Scope, nil
 }
 
 // serviceAccountKey is a service-account key file whose token requests go to

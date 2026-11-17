@@ -244,24 +244,35 @@ type Config struct {
 	// It caps the retry loop, not an individual request; bound a single stalled
 	// request via ctx (or an HTTPClient with its own Timeout).
 	//
-	// To bound requests without giving up ADC, build the client with
-	// [httptransport.NewClient], set its Timeout, and pass it as HTTPClient.
+	// To bound requests without giving up ADC, build the client the way
+	// [NewClient] does and pass it as HTTPClient: [httptransport.NewClient] with
+	// DetectOpts naming the cloud-platform scope and a non-nil Headers map (a nil
+	// one silently drops the quota project header, see NewClient), CheckRedirect
+	// returning [http.ErrUseLastResponse], and then the Timeout.
 	PollTimeout time.Duration
 }
 
 // NewClient builds a Client from cfg; a nil cfg (or any zero field) uses
 // defaults. Unless cfg.HTTPClient is set, it discovers Application Default
 // Credentials (cloud-platform scope) to authenticate calls to the services,
-// through the same transport the Google Cloud client libraries use: it presents
-// the client certificate the environment configures, if any (a workload
-// certificate config, an enterprise certificate proxy, or SecureConnect, unless
-// GOOGLE_API_USE_CLIENT_CERTIFICATE=false opts out), and bills to the ADC quota
-// project when the credentials name one.
+// through the same transport the Google Cloud client libraries use: it bills to
+// the ADC quota project when the credentials name one, caches tokens and
+// refreshes them ahead of expiry, and is configured with the client certificate
+// the environment provides, if any (a workload certificate config, an enterprise
+// certificate proxy, or SecureConnect, unless GOOGLE_API_USE_CLIENT_CERTIFICATE=false
+// opts out). A certificate is only presented to an endpoint that requests one,
+// and the default endpoints do not. For now the services' mTLS endpoints have to
+// be set through [Config.AgentIdentityEndpoint] and [Config.ConnectorEndpoint].
+// A credentials file naming a universe domain other than the client's —
+// googleapis.com, or GOOGLE_CLOUD_UNIVERSE_DOMAIN when set — fails every request.
 //
-// ctx does not bound the returned Client: credential discovery reads the
-// environment, and tokens are minted as requests need them rather than on ctx,
-// so a Client built inside a request-scoped context keeps working after that
-// request ends.
+// ctx does not bound the returned Client and nothing is read from it:
+// credential discovery reads the environment, and tokens are minted as requests
+// need them rather than on ctx, so a Client built inside a request-scoped
+// context keeps working after that request ends. Through v2.8.0 the ADC-backed
+// client took its transport and Timeout from an [http.Client] stored in ctx under
+// oauth2.HTTPClient, as the PollTimeout doc then advised. That value is no longer
+// read, and such a client is passed as [Config.HTTPClient] instead.
 //
 // The ADC-backed client refuses redirects. A credentials:retrieve call has no
 // reason to redirect, and following one would re-sign the request and hand the
@@ -298,7 +309,9 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 			Headers: http.Header{},
 		})
 		if err != nil {
-			return nil, fmt.Errorf("gcp: find default credentials: %w", err)
+			// Not "find default credentials": the same call fails on a malformed
+			// client certificate config, before discovery runs.
+			return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
 		}
 		// The transport re-signs every hop, below the layer where net/http
 		// strips credentials on a cross-host redirect, so a redirect would leak
@@ -419,7 +432,10 @@ type Retrieval struct {
 // sentinels, or a bare type assertion to [*APIError], stops being true where it
 // was true in v2.3.0. A decode failure is now [ErrMalformedResponse] and no
 // longer carries the [encoding/json] error behind it, so [errors.As] against
-// *json.SyntaxError stops finding one.
+// *json.SyntaxError stops finding one. On the ADC-backed client a failure to mint
+// the cloud-platform token surfaces as the auth library's error type
+// (cloud.google.com/go/auth.Error) behind the request error, where releases
+// through v2.8.0 carried an *oauth2.RetrieveError.
 func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ *Retrieval, err error) {
 	if req.Resource == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a Resource")

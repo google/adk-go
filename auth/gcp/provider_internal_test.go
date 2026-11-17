@@ -332,67 +332,40 @@ func TestResolveClientRejectsNilClient(t *testing.T) {
 
 type wiringKey struct{}
 
-// TestNewProviderKeepsWiringContextValuesNotCancellation pins both halves of
-// what NewProvider promises about its ctx: values reach the builder, and
-// cancellation does not.
-//
+// TestResolveClientBuildsOnDetachedRequestContext pins what the builder is
+// handed: the first waiting request's context with its cancellation stripped.
 // Both halves, because either one alone is satisfied by the wrong
 // implementation. Asserting only that cancellation is stripped passes for
 // context.Background(), which strips it by having none — and that swap is the
 // mutation worth catching here, since adk-go is imported into a tree whose
 // presubmit rejects context.Background() outside main, tests and examples.
-func TestNewProviderKeepsWiringContextValuesNotCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.WithValue(t.Context(), wiringKey{}, "wired"))
-	p, err := NewProvider(ctx, ProviderConfig{Scheme: ProviderScheme{Name: authProviderResource}})
-	if err != nil {
-		t.Fatalf("NewProvider() error = %v", err)
-	}
-	cancel()
+//
+// The request is canceled from inside the builder, after runInit has derived
+// its context: canceling before the call would race the waiter's own ctx.Done
+// arm against the result.
+func TestResolveClientBuildsOnDetachedRequestContext(t *testing.T) {
+	p := newTestProvider(t)
+	reqCtx, cancel := context.WithCancel(context.WithValue(t.Context(), wiringKey{}, "wired"))
+	defer cancel()
 
 	built := &Client{httpClient: http.DefaultClient}
-	prov := p.(*provider)
 	var sawErr error
 	var sawValue any
-	prov.newClient = func(ctx context.Context) (*Client, error) {
+	p.newClient = func(ctx context.Context) (*Client, error) {
+		cancel()
 		sawErr = ctx.Err()
 		sawValue = ctx.Value(wiringKey{})
 		return built, nil
 	}
-	got, err := prov.resolveClient(t.Context())
+	got, err := p.resolveClient(reqCtx)
 	if err != nil || got != built {
-		t.Fatalf("resolveClient() = %v, %v; want the client despite the cancelled wiring context", got, err)
+		t.Fatalf("resolveClient() = %v, %v; want the client despite the canceled request", got, err)
 	}
 	if sawErr != nil {
-		t.Errorf("the builder saw ctx.Err() = %v, want the cancellation stripped", sawErr)
+		t.Errorf("the builder saw ctx.Err() = %v, want the request's cancellation stripped", sawErr)
 	}
 	if sawValue != "wired" {
-		t.Errorf("the builder saw the wiring value = %v, want %q kept", sawValue, "wired")
-	}
-}
-
-// TestNewProviderKeepsWiringContextOnlyWhenLazy pins that initCtx — the field
-// that retains the caller's context, and with it the caller's whole session and
-// event graph — is left nil when a Client is supplied.
-//
-// That is narrower than "a provider given a Client retains nothing". The
-// builder closure is installed unconditionally, so one that also closed over
-// NewProvider's ctx would retain the graph with this test still green, and
-// nothing else pins it either.
-func TestNewProviderKeepsWiringContextOnlyWhenLazy(t *testing.T) {
-	client, err := NewClient(t.Context(), &Config{HTTPClient: http.DefaultClient})
-	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
-	}
-	cfg := ProviderConfig{Scheme: ProviderScheme{Name: authProviderResource}, Client: client}
-	p, err := NewProvider(t.Context(), cfg)
-	if err != nil {
-		t.Fatalf("NewProvider() error = %v", err)
-	}
-	if got := p.(*provider).initCtx; got != nil {
-		t.Errorf("initCtx = %v, want nil when a Client is supplied", got)
-	}
-	if got := newTestProvider(t).initCtx; got == nil {
-		t.Error("initCtx = nil on the lazy path, want the wiring context")
+		t.Errorf("the builder saw the request value = %v, want %q kept", sawValue, "wired")
 	}
 }
 
@@ -510,10 +483,10 @@ func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 }
 
 // Two Clients left to Application Default Credentials are still two cache
-// dimensions. NewClient resolves ADC afresh on every call and the transport
-// underneath it can come from the context, so this package cannot know that two
-// of them authenticate as the same principal — and a false miss costs a round
-// trip where a false hit discloses one principal's token to another.
+// dimensions. NewClient resolves ADC afresh on every call, so this package
+// cannot know that two of them authenticate as the same principal — and a false
+// miss costs a round trip where a false hit discloses one principal's token to
+// another.
 func TestADCClientsDoNotShareACacheSlot(t *testing.T) {
 	fakeADC(t)
 	newADCClient := func() *Client {
