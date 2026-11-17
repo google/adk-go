@@ -895,7 +895,8 @@ func TestSequentialAgent_RunLive_CloseDuringSubAgentRunLive(t *testing.T) {
 	eventsDone := make(chan struct{})
 	go func() {
 		defer close(eventsDone)
-		for range events {
+		for _, err := range events {
+			_ = err
 		}
 	}()
 

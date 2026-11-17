@@ -1352,7 +1352,7 @@ func TestRunLiveHandler_FailedPingEndsHandlerWhileSendBlocks(t *testing.T) {
 					<-sess.closed
 				}, nil
 			}}
-			for i := 0; i < depth; i++ {
+			for i := range depth {
 				name := "inner"
 				if i == depth-1 {
 					name = testLiveAppName
