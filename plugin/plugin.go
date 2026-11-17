@@ -345,13 +345,13 @@ type FailableAfterRunCallback func(ctx agent.InvocationContext) error
 // caller like any other agent error.
 //
 // The callback runs for every plugin in registration order, after the
-// OnAgentErrorCallback calls for the same error. err is the error the caller
-// received; the runner does not wrap the agent's or node's error. Only a
-// failure after the caller stopped ranging, such as a post-invocation
-// compaction that fails after the caller stopped at the last event, is an
-// error the caller never received. For a caller that stops at the error,
-// the call happens after the caller's loop body has returned and before its
-// range statement completes.
+// OnAgentErrorCallback calls for the same error. When the runner yielded err,
+// err is the value the caller received; the runner does not wrap the agent's
+// or node's error. A failing post-invocation compaction can reach this
+// callback without being yielded, as after a BeforeRunCallback reply or after
+// the caller stopped ranging at the last event. For a caller that stops at
+// the error, the call happens after the caller's loop body has returned and
+// before its range statement completes.
 //
 // A plugin that must see every failed run implements this callback and also
 // notes the failures that reach a caller that keeps ranging. Outside
@@ -366,12 +366,13 @@ type FailableAfterRunCallback func(ctx agent.InvocationContext) error
 // callback when the caller ranges past it.
 //
 // It is not called for the cancellation of the invocation's context, for a
-// panic, or when the caller stops ranging at an event,
-// though a failing after-run callback or post-invocation compaction after
-// that stop is reported. In Runner.RunLive, an error from a
-// BeforeRunCallback, from handling its reply or from starting the live
-// agent is not yielded: this callback receives it before RunLive returns
-// it, and the after-run callbacks are not called.
+// panic that reaches the caller, or when the caller stops ranging at an
+// event, though a failing after-run callback or post-invocation compaction
+// after that stop is reported. A panic that the node path recovers into a node
+// error is a run error like any other node error. In Runner.RunLive, an error
+// from a BeforeRunCallback, from handling its reply or from starting the live
+// agent is not yielded: this callback receives it before RunLive returns it,
+// and the after-run callbacks are not called.
 //
 // A panicking callback is recovered, so the remaining plugins are still
 // notified and the caller still holds the original error. The panic is
