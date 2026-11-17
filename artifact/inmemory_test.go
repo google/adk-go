@@ -230,13 +230,12 @@ func TestInMemoryService_DoesNotAliasStoredParts(t *testing.T) {
 }
 
 func fullPart() *genai.Part {
-	fps := 24.0
 	return &genai.Part{
 		Text:                "x",
 		InlineData:          &genai.Blob{Data: []byte("abc"), MIMEType: "text/plain"},
 		FileData:            &genai.FileData{FileURI: "gs://b/o"},
 		ThoughtSignature:    []byte("sig"),
-		VideoMetadata:       &genai.VideoMetadata{FPS: &fps, StartOffset: time.Second},
+		VideoMetadata:       &genai.VideoMetadata{FPS: new(24.0), StartOffset: time.Second},
 		PartMetadata:        map[string]any{"src": map[string]any{"name": "a"}, "list": []any{map[string]any{"n": "1"}}},
 		MediaResolution:     &genai.PartMediaResolution{Level: genai.PartMediaResolutionLevelMediaResolutionLow},
 		FunctionCall:        &genai.FunctionCall{Name: "fn", Args: map[string]any{"a": map[string]any{"b": "c"}}},

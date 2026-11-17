@@ -134,12 +134,12 @@ func TestParallelWorker_Run(t *testing.T) {
 }
 
 func TestParallelWorker_Concurrency(t *testing.T) {
-	var counter int32
+	var counter atomic.Int32
 	blockCh := make(chan struct{})
 
 	startedCh := make(chan struct{}, 4)
 	wrapped := NewFunctionNode("blocking", func(ctx agent.Context, input int) (int, error) {
-		atomic.AddInt32(&counter, 1)
+		counter.Add(1)
 		startedCh <- struct{}{}
 		<-blockCh
 		return input, nil
@@ -156,7 +156,7 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		for range pw.Run(exCtx, input) {
+		for range pw.Run(exCtx, input) { //nolint:errcheck // this drain only releases the workers; concurrency is asserted through startedCh
 		}
 		close(done)
 	}()
@@ -166,7 +166,7 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 	<-startedCh
 	<-startedCh
 
-	c := atomic.LoadInt32(&counter)
+	c := counter.Load()
 	if c != 2 {
 		t.Errorf("expected counter to be 2, got %d", c)
 	}
@@ -189,7 +189,7 @@ func TestParallelWorker_Concurrency(t *testing.T) {
 	}
 
 	// After unblocking, all workers should have run
-	c = atomic.LoadInt32(&counter)
+	c = counter.Load()
 	if c != 4 {
 		t.Errorf("expected final counter to be 4, got %d", c)
 	}
@@ -373,7 +373,7 @@ func TestParallelWorker_Retry(t *testing.T) {
 }
 
 func TestParallelWorker_FailFast(t *testing.T) {
-	var workerCCancelled int32
+	var workerCCancelled atomic.Int32
 	cancelledCh := make(chan struct{})
 
 	wrapped := NewFunctionNode("fail_fast_node", func(ctx agent.Context, input string) (string, error) {
@@ -383,7 +383,7 @@ func TestParallelWorker_FailFast(t *testing.T) {
 		if input == "c" {
 			// Block until canceled
 			<-ctx.Done()
-			atomic.StoreInt32(&workerCCancelled, 1)
+			workerCCancelled.Store(1)
 			close(cancelledCh)
 			return "", ctx.Err()
 		}
@@ -424,7 +424,7 @@ func TestParallelWorker_FailFast(t *testing.T) {
 		t.Fatal("timeout waiting for worker C to be canceled")
 	}
 
-	if atomic.LoadInt32(&workerCCancelled) != 1 {
+	if workerCCancelled.Load() != 1 {
 		t.Error("expected worker c to be canceled")
 	}
 }
@@ -866,10 +866,10 @@ func (n *delayedMultiOutputTestNode) Description() string { return "" }
 func (n *delayedMultiOutputTestNode) Config() NodeConfig  { return defaultNodeConfig }
 
 func TestParallelWorker_SchedulerDoesNotRetryOnFailure(t *testing.T) {
-	var wrappedAttempts int32
+	var wrappedAttempts atomic.Int32
 
 	wrapped := NewFunctionNode("worker", func(ctx agent.Context, input string) (string, error) {
-		atomic.AddInt32(&wrappedAttempts, 1)
+		wrappedAttempts.Add(1)
 		return "", errors.New("persistent failure")
 	}, defaultNodeConfig)
 
@@ -915,8 +915,8 @@ func TestParallelWorker_SchedulerDoesNotRetryOnFailure(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 
-	if atomic.LoadInt32(&wrappedAttempts) != 2 {
-		t.Errorf("expected 2 attempts for wrapped node, got %d (scheduler likely retried the node)", atomic.LoadInt32(&wrappedAttempts))
+	if wrappedAttempts.Load() != 2 {
+		t.Errorf("expected 2 attempts for wrapped node, got %d (scheduler likely retried the node)", wrappedAttempts.Load())
 	}
 }
 
@@ -978,7 +978,7 @@ func TestParallelWorker_PerItemSpans(t *testing.T) {
 			}
 
 			// Drain; span outcomes asserted below.
-			for range pw.Run(agent.NewContext(newMockCtx(t)), tc.input) {
+			for range pw.Run(agent.NewContext(newMockCtx(t)), tc.input) { //nolint:errcheck // a case may fail by design; the spans carry the outcome
 			}
 
 			spans := spanExp.GetSpans()
@@ -1005,9 +1005,9 @@ func TestParallelWorker_RetryEmitsSpanPerAttempt(t *testing.T) {
 	spanExp := tracetest.NewInMemoryExporter()
 	telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp)))
 
-	var attempts int32
+	var attempts atomic.Int32
 	wrapped := NewFunctionNode("flaky", func(ctx agent.Context, in string) (string, error) {
-		if atomic.AddInt32(&attempts, 1) == 1 {
+		if attempts.Add(1) == 1 {
 			return "", errors.New("boom")
 		}
 		return in, nil
@@ -1024,7 +1024,7 @@ func TestParallelWorker_RetryEmitsSpanPerAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for range pw.Run(agent.NewContext(newMockCtx(t)), []any{"x"}) {
+	for range pw.Run(agent.NewContext(newMockCtx(t)), []any{"x"}) { //nolint:errcheck // the first attempt fails by design; the spans below carry each attempt's outcome
 	}
 
 	spans := spanExp.GetSpans()
@@ -1052,13 +1052,13 @@ func TestParallelWorker_RetryEmitsSpanPerAttempt(t *testing.T) {
 
 func TestParallelWorker_MaxConcurrencyFailFast(t *testing.T) {
 	const nItems = 5
-	var started int32
+	var started atomic.Int32
 
 	wrapped := NewFunctionNode("slow_or_fail", func(ctx agent.Context, input int) (int, error) {
 		if input == 0 {
 			return 0, errors.New("error 0")
 		}
-		atomic.AddInt32(&started, 1)
+		started.Add(1)
 		time.Sleep(50 * time.Millisecond)
 		return input, nil
 	}, defaultNodeConfig)
@@ -1103,7 +1103,7 @@ func TestParallelWorker_MaxConcurrencyFailFast(t *testing.T) {
 	// chance to run under maxConcurrency=1. Fail-fast cancellation should
 	// stop the remaining items from ever being dispatched, so well under
 	// nItems-1 of them should have started.
-	if got := atomic.LoadInt32(&started); got >= nItems-1 {
+	if got := started.Load(); got >= nItems-1 {
 		t.Errorf("started = %d, want well under %d (fail-fast should stop dispatch of items still waiting on the semaphore)", got, nItems-1)
 	}
 }

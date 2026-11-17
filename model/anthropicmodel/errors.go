@@ -124,13 +124,11 @@ func classifyError(err error) error {
 		return context.DeadlineExceeded
 	}
 
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*APIError](err); ok {
 		return apiErr
 	}
 
-	var sdkErr *anthropic.Error
-	if errors.As(err, &sdkErr) {
+	if sdkErr, ok := errors.AsType[*anthropic.Error](err); ok {
 		return classifySDKError(sdkErr)
 	}
 

@@ -591,7 +591,7 @@ func readerInterval(t *testing.T, r sdkmetric.Reader) time.Duration {
 	if !field.IsValid() {
 		t.Fatalf("MarshalLog() of %T has no Interval field", r)
 	}
-	interval, ok := field.Interface().(time.Duration)
+	interval, ok := reflect.TypeAssert[time.Duration](field)
 	if !ok {
 		t.Fatalf("MarshalLog() Interval of %T is %T, want time.Duration", r, field.Interface())
 	}

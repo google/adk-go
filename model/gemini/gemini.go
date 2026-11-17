@@ -51,8 +51,7 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 	if cfg != nil {
 		cfgCopy := *cfg
 		if cfg.HTTPClient != nil {
-			clientCopy := *cfg.HTTPClient
-			cfgCopy.HTTPClient = &clientCopy
+			cfgCopy.HTTPClient = new(*cfg.HTTPClient)
 		}
 		cfg = &cfgCopy
 	}

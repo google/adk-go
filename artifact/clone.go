@@ -127,8 +127,8 @@ func mayAlias(t reflect.Type) bool {
 	case reflect.Array:
 		return mayAlias(t.Elem())
 	case reflect.Struct:
-		for i := range t.NumField() {
-			if mayAlias(t.Field(i).Type) {
+		for field := range t.Fields() {
+			if mayAlias(field.Type) {
 				return true
 			}
 		}

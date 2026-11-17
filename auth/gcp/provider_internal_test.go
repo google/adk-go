@@ -81,11 +81,9 @@ func TestResolveClientSingleFlight(t *testing.T) {
 	got := make([]*Client, callers)
 	errs := make([]error, callers)
 	for i := range callers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			got[i], errs[i] = p.resolveClient(t.Context())
-		}()
+		})
 	}
 	time.Sleep(20 * time.Millisecond)
 	close(release)
@@ -689,16 +687,14 @@ func TestNewClientSlotsAreUniqueUnderConcurrency(t *testing.T) {
 	slots := make([]string, n)
 	var wg sync.WaitGroup
 	for i := range n {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			c, err := NewClient(t.Context(), &Config{HTTPClient: &http.Client{}})
 			if err != nil {
 				t.Errorf("NewClient() error = %v", err)
 				return
 			}
 			slots[i] = c.cacheSlot
-		}()
+		})
 	}
 	wg.Wait()
 
