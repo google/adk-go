@@ -639,10 +639,11 @@ func TestRunner_UserFunctionCallCheckedAfterPlugin(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
+			ran := false
 			testAgent := must(agent.New(agent.Config{
 				Name: "test_agent",
 				Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
-					return func(func(*session.Event, error) bool) {}
+					return func(func(*session.Event, error) bool) { ran = true }
 				},
 			}))
 			replacer, err := plugin.New(plugin.Config{
@@ -670,8 +671,11 @@ func TestRunner_UserFunctionCallCheckedAfterPlugin(t *testing.T) {
 				}
 			}
 
-			if gotErr := runErr != nil; gotErr != tc.wantErr {
-				t.Errorf("r.Run() error = %v, want error %t", runErr, tc.wantErr)
+			if gotErr := errors.Is(runErr, errUserFunctionCall); gotErr != tc.wantErr {
+				t.Errorf("r.Run() error = %v, want errUserFunctionCall %t", runErr, tc.wantErr)
+			}
+			if ran == tc.wantErr {
+				t.Errorf("agent ran = %t, want %t", ran, !tc.wantErr)
 			}
 		})
 	}
@@ -705,6 +709,56 @@ func TestRunner_UserMessageWithNilPartRuns(t *testing.T) {
 	}
 	if !ran {
 		t.Error("agent did not run")
+	}
+}
+
+// TestRunner_UserMessageWithNilPartAndArtifacts guards that saveInputBlobsAsArtifacts
+// skips a nil part instead of dereferencing its InlineData, and still saves subsequent
+// blob parts as artifacts.
+func TestRunner_UserMessageWithNilPartAndArtifacts(t *testing.T) {
+	ctx := t.Context()
+	ran := false
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) { ran = true }
+		},
+	}))
+	sessionService := session.InMemoryService()
+	artifactService := artifact.InMemoryService()
+	r, err := New(Config{
+		AppName:         "app",
+		Agent:           testAgent,
+		SessionService:  sessionService,
+		ArtifactService: artifactService,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+
+	blobPart := genai.NewPartFromBytes([]byte("test blob data"), "text/plain")
+	msg := &genai.Content{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{nil, blobPart, genai.NewPartFromText("hi")},
+	}
+	for _, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{SaveInputBlobsAsArtifacts: true}) {
+		if err != nil {
+			t.Fatalf("r.Run() returned an error: %v", err)
+		}
+	}
+	if !ran {
+		t.Error("agent did not run")
+	}
+
+	listResp, err := artifactService.List(ctx, &artifact.ListRequest{AppName: "app", UserID: "u", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("artifactService.List() error = %v", err)
+	}
+	if len(listResp.FileNames) != 1 {
+		t.Errorf("got %d artifacts, want 1", len(listResp.FileNames))
 	}
 }
 
