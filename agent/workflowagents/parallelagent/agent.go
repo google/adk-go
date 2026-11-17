@@ -54,13 +54,15 @@ type Config struct {
 // If a direct sub-agent yields an event with Actions.Escalate, the agent yields
 // that event, asks that sub-agent for no further event, cancels the remaining
 // branches and waits for them to return. A sub-agent must return once its
-// context is canceled, or the ParallelAgent waits for it forever. If an error
-// that counts (see below) has already been recorded by then, the agent yields
-// the first such error instead of the event. If no direct sub-agent escalates
-// and a branch fails, the agent yields the error errgroup keeps, which is the
-// first one a branch returned. That can differ from the first one to count,
-// because a branch returns its error only after its sub-agent has finished
-// cleaning up.
+// context is canceled, or the ParallelAgent waits for it forever. Once the
+// caller stops reading, the ParallelAgent releases no sub-agent: it cancels
+// them and waits for them to return, so no sub-agent runs past the event the
+// caller did not take. If an error that counts (see below) has already been
+// recorded by then, the agent yields the first such error instead of the event.
+// If no direct sub-agent escalates and a branch fails, the agent yields the
+// error errgroup keeps, which is the first one a branch returned. That can
+// differ from the first one to count, because a branch returns its error only
+// after its sub-agent has finished cleaning up.
 //
 // An error counts once a direct sub-agent yields it, including an error a
 // SequentialAgent or LoopAgent sub-agent passes up from its own sub-agents. An
@@ -82,14 +84,19 @@ type Config struct {
 // any sub-agent starts. It does not start a sub-agent that has already ended
 // in the invocation. It yields an end-of-agent event once every sub-agent has
 // ended, or after an escalation by a direct sub-agent. Agents built by
-// llmagent, sequentialagent, loopagent and parallelagent record their end
-// themselves; a sub-agent built with [agent.New] has to call
+// llmagent, sequentialagent, loopagent, parallelagent and workflowagent record
+// their end themselves, a graph workflow agent only when it finishes with no
+// node waiting for input; a sub-agent built with [agent.New] has to call
 // [agent.RecordEndOfAgent] when its Run is finished, or the ParallelAgent
-// yields no end-of-agent event. A graph workflow agent built by
-// workflowagent.New records no end, and its Run cannot be given the call: a
-// resumable ParallelAgent that contains one yields its end-of-agent event only
-// after an escalation by a direct sub-agent, and resuming the invocation runs
-// the workflow again, even when it finished in an earlier turn. No
+// yields no end-of-agent event. In a resumable ParallelAgent, a turn that
+// answers another branch does not resume a graph workflow agent branch that
+// paused for input, because a graph workflow agent resumes only when the turn
+// answers its own pending request: when the turn answers an input request of
+// another branch (a [session.RequestInput], also one raised by an agent nested
+// in that branch), the turn fails with an error that matches
+// workflow.ErrNothingToResume; when it answers anything else, such as a
+// long-running function call, the paused workflow runs its nodes again from
+// the start. A graph workflow agent branch that finished is not run again. No
 // end-of-agent event follows a sub-agent's error, a stop by the caller, or an
 // event that pauses the invocation (a long-running function call); after a
 // pause the other sub-agents still run to completion. Resuming the invocation
@@ -290,12 +297,15 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			if resumable && res.event != nil && llminternal.ShouldPauseInvocation(ctx, res.event) {
 				paused = true
 			}
+			// Checked before the release: once the caller stopped, no branch may
+			// run past the yield of an event the caller did not take; stop
+			// cancels the branch instead.
+			if stopped {
+				break
+			}
 			// Signal sub-agent that event processing (including session append) is complete
 			if res.ackChan != nil {
 				close(res.ackChan)
-			}
-			if stopped {
-				break
 			}
 		}
 		// The end event is decided only after every branch has returned, so
