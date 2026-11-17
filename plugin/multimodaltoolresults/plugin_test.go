@@ -1136,9 +1136,9 @@ func TestSessionRetentionNonListStoredValue(t *testing.T) {
 // Two function calls of one model response whose tools both return parts end
 // the run, and the next model request carries both parts, when the later call
 // reaches the plugin while the earlier call's tool still runs. Fails if an
-// after-tool callback holds the plugin's lock while its State() use waits for
-// the earlier calls of the response: the earlier call then waits for the lock
-// and the run hangs until its context is done.
+// after-tool callback holds the plugin's lock while it waits for the earlier
+// calls of the response: the earlier call then waits for the lock and the run
+// hangs until its context is done.
 func TestParallelCallsThatSavePartsEndTheRun(t *testing.T) {
 	// runLimit bounds the run, so that a hang fails the test in seconds.
 	// headStart is how long the earlier call's tool keeps running after the
@@ -1235,12 +1235,10 @@ func TestParallelCallsThatSavePartsEndTheRun(t *testing.T) {
 	}
 }
 
-// A call whose context ends while an earlier call of its model response still
-// runs gets an error that wraps the context's error, and the plugin saves
-// nothing for it and stays usable. The callback's State does not wait for the
-// call order, so the test fails if the callback saves the parts without its
-// turn, or keeps the plugin's lock after the failed wait.
-func TestAfterToolWithoutItsTurnSavesNothing(t *testing.T) {
+// A call's after-tool callback saves its parts at once while an earlier call
+// of its model response still runs. Fails if the callback waits for the
+// earlier calls of its model response before it saves.
+func TestAfterToolSavesWhileAnEarlierCallRuns(t *testing.T) {
 	for _, tc := range []struct {
 		retention multimodaltoolresults.Retention
 		key       string
@@ -1250,41 +1248,34 @@ func TestAfterToolWithoutItsTurnSavesNothing(t *testing.T) {
 	} {
 		t.Run(string(tc.retention), func(t *testing.T) {
 			p := newPlugin(t, tc.retention)
-			sess := newSession(t)
 			// Call 1 of 2; call 0 never returns.
 			callCtx, cancel := context.WithCancel(adkcontext.WithCallPlace(t.Context(), adkcontext.NewCallOrder(2), 1))
-			cancel()
-			toolCtx := func(ctx context.Context, id string) agent.Context {
-				invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Session: sess})
-				return stateContext{agent.NewToolContext(invCtx, id, &session.EventActions{StateDelta: map[string]any{}}, nil), sess.State()}
+			defer cancel()
+			invCtx := icontext.NewInvocationContext(callCtx, icontext.InvocationContextParams{Session: newSession(t)})
+			toolCtx := agent.NewToolContext(invCtx, "1", &session.EventActions{StateDelta: map[string]any{}}, nil)
+			type callbackResult struct {
+				got map[string]any
+				err error
 			}
-			result := map[string]any{"result": []*genai.Part{{Text: "a"}}}
+			returned := make(chan callbackResult, 1)
 
-			got, err := p.AfterToolCallback()(toolCtx(callCtx, "1"), nil, map[string]any{}, result, nil)
-
-			if got != nil || !errors.Is(err, context.Canceled) {
-				t.Errorf("AfterToolCallback() = (%v, %v), want (nil, an error wrapping context.Canceled)", got, err)
-			}
-			if v, err := sess.State().Get(tc.key); !errors.Is(err, session.ErrStateKeyNotExist) {
-				t.Errorf("State().Get(%q) = (%v, %v), want ErrStateKeyNotExist", tc.key, v, err)
-			}
-			saved := make(chan struct{})
 			go func() {
-				defer close(saved)
-				if got, err := p.AfterToolCallback()(toolCtx(t.Context(), "2"), nil, map[string]any{}, result, nil); got != nil || err != nil {
-					t.Errorf("AfterToolCallback() of a later call = (%v, %v), want (nil, nil)", got, err)
-				}
+				got, err := p.AfterToolCallback()(toolCtx, nil, map[string]any{}, map[string]any{"result": []*genai.Part{{Text: "a"}}}, nil)
+				returned <- callbackResult{got, err}
 			}()
+
+			var r callbackResult
 			select {
-			case <-saved:
+			case r = <-returned:
 			case <-time.After(2 * time.Second):
-				t.Fatal("AfterToolCallback() of a later call did not return within 2s")
+				cancel()
+				r = <-returned
+				t.Fatalf("AfterToolCallback() did not return within 2s; after its context was canceled it returned (%v, %v)", r.got, r.err)
 			}
-			v, err := sess.State().Get(tc.key)
-			if err != nil {
-				t.Fatalf("State().Get(%q) failed: %v", tc.key, err)
+			if r.got != nil || r.err != nil {
+				t.Errorf("AfterToolCallback() = (%v, %v), want (nil, nil)", r.got, r.err)
 			}
-			if diff := cmp.Diff([]any{&genai.Part{Text: "a"}}, v); diff != "" {
+			if diff := cmp.Diff([]any{&genai.Part{Text: "a"}}, getState(t, toolCtx, tc.key)); diff != "" {
 				t.Errorf("saved parts mismatch (-want +got):\n%s", diff)
 			}
 		})
