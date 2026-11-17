@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"net/http"
 	"os"
 	"strings"
@@ -192,9 +193,7 @@ func generateHTTPOptions(proxyURL, apiVersion string, customHeaders http.Header)
 	}
 	if customHeaders != nil {
 		httpOptions.Headers = make(http.Header)
-		for k, v := range customHeaders {
-			httpOptions.Headers[k] = v
-		}
+		maps.Copy(httpOptions.Headers, customHeaders)
 	}
 	if apiVersion != "" {
 		httpOptions.APIVersion = apiVersion

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -186,9 +187,7 @@ func (w *Workflow) Resume(
 				if ns.ResumedInputs == nil {
 					ns.ResumedInputs = map[string]any{}
 				}
-				for id, resp := range freshMatched {
-					ns.ResumedInputs[id] = resp
-				}
+				maps.Copy(ns.ResumedInputs, freshMatched)
 				ns.Status = NodePending
 				s.scheduleResumedNode(node, ns.Input, ns.TriggeredBy, ns.Branch, ns.ResumedInputs)
 				scheduled++

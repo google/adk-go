@@ -398,6 +398,9 @@ type OnModelErrorCallback func(ctx agent.Context, llmRequest *model.LLMRequest, 
 //
 // To modify tool arguments and still run the tool,
 // update args in place and return (nil, nil).
+// The edits reach the tool and the callbacks that run after this one for the
+// same call. They do not reach the function call event, which keeps the
+// arguments the model sent in the session and in later model requests.
 type BeforeToolCallback func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
 // AfterToolCallback is a function type executed after a tool's Run method has completed,
@@ -528,6 +531,16 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 	}
 	if event.Author != a.Name() {
 		// TODO: log "Skipping output save for agent %s: event authored by %s"
+		return
+	}
+	// A task agent delivers its result through finish_task, which runTask writes
+	// to OutputKey. Its text turns (a clarification question, a greeting) are
+	// not the result. runTask runs only when the task agent is entered as a node
+	// (its RunNode method or RunLLMAgentAsNode), whichever agent sits above it.
+	// When it is run through Run (as SequentialAgent, LoopAgent and
+	// ParallelAgent do) or RunLive, nothing writes the finish_task output, so
+	// OutputKey stays unset. Matches adk-python's __maybe_save_output_to_state.
+	if llminternal.Reveal(a).Mode == llminternal.ModeTask {
 		return
 	}
 	if a.OutputKey != "" && event.IsFinalResponse() && event.Content != nil && len(event.Content.Parts) > 0 {

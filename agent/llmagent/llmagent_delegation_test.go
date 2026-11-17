@@ -46,6 +46,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1724,14 +1725,7 @@ yourself; always transfer.`,
 		t.Errorf("turn 2: expected at least one transfer_to_agent(agent_name=support); events=%v",
 			eventSummaries(events2))
 	} else {
-		var sawBilling bool
-		for _, a := range transferAuthors {
-			if a == "billing" {
-				sawBilling = true
-				break
-			}
-		}
-		if !sawBilling {
+		if !slices.Contains(transferAuthors, "billing") {
 			t.Errorf("turn 2: peer transfer to support should be authored by `billing` "+
 				"(adk-go re-picks the last-active agent on resume); got authors=%v",
 				transferAuthors)
@@ -1755,14 +1749,7 @@ yourself; always transfer.`,
 		t.Errorf("turn 3: expected at least one transfer_to_agent(agent_name=billing); events=%v",
 			eventSummaries(events3))
 	} else {
-		var sawSupport bool
-		for _, a := range transferAuthorsToBilling {
-			if a == "support" {
-				sawSupport = true
-				break
-			}
-		}
-		if !sawSupport {
+		if !slices.Contains(transferAuthorsToBilling, "support") {
 			t.Errorf("turn 3: peer transfer back to billing should be authored by `support` "+
 				"(last-active agent from turn 2); got authors=%v",
 				transferAuthorsToBilling)
@@ -2087,8 +2074,7 @@ func successFinishFRs(events []*session.Event) []*genai.FunctionResponse {
 // content is a non-empty model text part (i.e. the final
 // user-facing message produced in the stream). Returns "" if none.
 func finalModelTextAuthor(events []*session.Event) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
+	for _, ev := range slices.Backward(events) {
 		if ev == nil || ev.LLMResponse.Content == nil {
 			continue
 		}
@@ -2109,8 +2095,7 @@ func finalModelTextAuthor(events []*session.Event) string {
 // turn-2 assertions to verify the coordinator's reply mentions
 // expected substrings (basic conversational-memory check).
 func finalModelText(events []*session.Event) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
+	for _, ev := range slices.Backward(events) {
 		if ev == nil || ev.LLMResponse.Content == nil {
 			continue
 		}

@@ -87,11 +87,9 @@ func TestSubScheduler_Counter_ConcurrentSafe(t *testing.T) {
 	const goroutines = 64
 
 	var wg sync.WaitGroup
-	wg.Add(goroutines)
 	seen := sync.Map{}
-	for i := 0; i < goroutines; i++ {
-		go func() {
-			defer wg.Done()
+	for range goroutines {
+		wg.Go(func() {
 			id, err := sub.ResolveByRunID("worker", "")
 			if err != nil {
 				t.Errorf("resolveRunID: %v", err)
@@ -100,7 +98,7 @@ func TestSubScheduler_Counter_ConcurrentSafe(t *testing.T) {
 			if _, dup := seen.LoadOrStore(id, struct{}{}); dup {
 				t.Errorf("duplicate run id %q", id)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

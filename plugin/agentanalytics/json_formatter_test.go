@@ -16,20 +16,29 @@ package agentanalytics
 
 import (
 	"bytes"
+	"context"
+	"encoding"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
+	"unsafe"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestFormatContentParts(t *testing.T) {
@@ -3282,6 +3291,539 @@ func TestContentSummaries(t *testing.T) {
 	}
 }
 
+// responseTextParts returns n text parts whose text is r repeated size times.
+func responseTextParts(n, size int, r string) []*genai.Part {
+	parts := make([]*genai.Part, 0, n)
+	for range n {
+		parts = append(parts, &genai.Part{Text: strings.Repeat(r, size)})
+	}
+	return parts
+}
+
+// responseTextPiece is how a response summary shows a text part.
+func responseTextPiece(text string) string { return "text: '" + text + "'" }
+
+// joinedResponsePieces joins n copies of piece as a response summary does.
+func joinedResponsePieces(piece string, n int) string {
+	pieces := make([]string, n)
+	for i := range pieces {
+		pieces[i] = piece
+	}
+	return strings.Join(pieces, " | ")
+}
+
+// responseRowsOf writes content as an LLM_RESPONSE and as an AGENT_RESPONSE
+// through a plugin whose MaxContentLen is maxLength, and returns the two
+// rows by event type.
+func responseRowsOf(t *testing.T, content *genai.Content, maxLength int) map[string]map[string]any {
+	t.Helper()
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.MaxContentLen = maxLength })
+	var errs callbackErrors
+	errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: content}, nil))
+	errs.add(p.OnEventCallback()(mCtx, &session.Event{
+		Author:      "test-agent",
+		LLMResponse: model.LLMResponse{Content: content},
+	}))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	return map[string]map[string]any{
+		EventLLMResponse:   onlyRowOfType(t, rows, EventLLMResponse),
+		EventAgentResponse: onlyRowOfType(t, rows, EventAgentResponse),
+	}
+}
+
+func TestResponseMessageSummaryLengthCap(t *testing.T) {
+	// Two text parts of fullLength runes, neither cut by the per-part limit
+	// when it is fullLength, join to a summary of exactly
+	// fullLength + responseSummarySlack runes.
+	const fullLength = 4096 - 2*len("text: ''") - len(" | ")
+	fullPiece := responseTextPiece(strings.Repeat("a", fullLength))
+	twoFull := joinedResponsePieces(fullPiece, 2)
+	fullParts := responseTextParts(2, fullLength, "a")
+
+	smallPiece := responseTextPiece(strings.Repeat("a", 100))
+	fortySmall := joinedResponsePieces(smallPiece, 40)
+
+	hugePiece := responseTextPiece(strings.Repeat("a", 5000))
+
+	const wideLength = 4000
+	widePiece := responseTextPiece(strings.Repeat("é", wideLength))
+	threeWide := joinedResponsePieces(widePiece, 3)
+
+	tests := []struct {
+		name      string
+		parts     []*genai.Part
+		maxLength int
+		want      string
+		wantTrunc bool
+	}{
+		{
+			name:      "a part cut by the part limit is not cut again",
+			parts:     responseTextParts(1, 30, "a"),
+			maxLength: 10,
+			want:      responseTextPiece(strings.Repeat("a", 10) + truncationSuffix),
+			wantTrunc: true,
+		},
+		{
+			name:      "parts that fill the cap exactly are kept whole",
+			parts:     fullParts,
+			maxLength: fullLength,
+			want:      twoFull,
+		},
+		{
+			name:      "a part beyond the cap is cut away",
+			parts:     append(responseTextParts(2, fullLength, "a"), &genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}}),
+			maxLength: fullLength,
+			want:      twoFull + truncationSuffix,
+			wantTrunc: true,
+		},
+		{
+			name:      "many small parts are cut at the cap",
+			parts:     responseTextParts(40, 100, "a"),
+			maxLength: 100,
+			want:      string([]rune(fortySmall)[:100+4096]) + truncationSuffix,
+			wantTrunc: true,
+		},
+		{
+			name:      "multi-byte runes are cut on a rune boundary",
+			parts:     responseTextParts(3, wideLength, "é"),
+			maxLength: wideLength,
+			want:      string([]rune(threeWide)[:wideLength+responseSummarySlack]) + truncationSuffix,
+			wantTrunc: true,
+		},
+		{
+			name:      "a negative maxLength leaves the summary uncapped",
+			parts:     responseTextParts(2, 5000, "a"),
+			maxLength: -1,
+			want:      joinedResponsePieces(hugePiece, 2),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated := formatResponseContent(&genai.Content{Parts: tt.parts}, tt.maxLength, true)
+			if got != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("formatResponseContent(%d parts, %d) = (%d runes, %v), want (%d runes, %v)\ngot:  %.80q...\nwant: %.80q...",
+					len(tt.parts), tt.maxLength, utf8.RuneCountInString(got), truncated, utf8.RuneCountInString(tt.want), tt.wantTrunc, got, tt.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("formatResponseContent returned invalid UTF-8")
+			}
+		})
+	}
+
+	t.Run("a summary never exceeds maxLength plus the slack", func(t *testing.T) {
+		for _, maxLength := range []int{0, 1, 7, 100, responseSummarySlack, 5000} {
+			for _, n := range []int{1, 2, 3, 10, 50} {
+				for _, size := range []int{max(1, maxLength/2), max(1, maxLength), 3*maxLength + 1} {
+					got, truncated := formatResponseContent(&genai.Content{Parts: responseTextParts(n, size, "a")}, maxLength, true)
+					pieceRunes := len("text: ''") + min(size, maxLength)
+					if size > maxLength {
+						pieceRunes += len(truncationSuffix)
+					}
+					wantRunes := n*pieceRunes + (n-1)*len(" | ")
+					wantTrunc := size > maxLength
+					if limit := maxLength + responseSummarySlack; wantRunes > limit {
+						wantRunes = limit + len(truncationSuffix)
+						wantTrunc = true
+					}
+					if gotRunes := utf8.RuneCountInString(got); gotRunes != wantRunes || truncated != wantTrunc {
+						t.Errorf("maxLength %d, %d parts of %d runes: got (%d runes, %v), want (%d runes, %v)",
+							maxLength, n, size, gotRunes, truncated, wantRunes, wantTrunc)
+					}
+				}
+			}
+		}
+	})
+
+	// The LLM_RESPONSE row writes the rendered summary as it is, so the cap
+	// is what bounds it. The AGENT_RESPONSE row carries the same summary
+	// inside a content map that the content column's sanitizer cuts to
+	// maxLength, as it cuts every string, which is tighter than the cap.
+	t.Run("LLM_RESPONSE and AGENT_RESPONSE rows beyond the cap are cut", func(t *testing.T) {
+		rows := responseRowsOf(t, &genai.Content{Role: "model", Parts: responseTextParts(40, 100, "a")}, 100)
+		wants := map[string]string{
+			EventLLMResponse:   string([]rune(fortySmall)[:100+responseSummarySlack]) + truncationSuffix,
+			EventAgentResponse: string([]rune(fortySmall)[:100]) + truncationSuffix,
+		}
+		for eventType, want := range wants {
+			row := rows[eventType]
+			if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != want {
+				t.Errorf("%s content.response has %d runes, want %d:\n%.80q...", eventType, utf8.RuneCountInString(got), utf8.RuneCountInString(want), got)
+			}
+			if got := row["is_truncated"]; got != true {
+				t.Errorf("%s is_truncated = %v, want true", eventType, got)
+			}
+		}
+	})
+
+	t.Run("LLM_RESPONSE row within the cap is kept whole", func(t *testing.T) {
+		rows := responseRowsOf(t, &genai.Content{Role: "model", Parts: responseTextParts(3, 100, "a")}, 100)
+		row := rows[EventLLMResponse]
+		want := joinedResponsePieces(smallPiece, 3)
+		if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != want {
+			t.Errorf("LLM_RESPONSE content.response = %q, want %q", got, want)
+		}
+		if got := row["is_truncated"]; got != false {
+			t.Errorf("LLM_RESPONSE is_truncated = %v, want false", got)
+		}
+		row = rows[EventAgentResponse]
+		want = string([]rune(want)[:100]) + truncationSuffix
+		if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != want {
+			t.Errorf("AGENT_RESPONSE content.response = %q, want %q", got, want)
+		}
+		if got := row["is_truncated"]; got != true {
+			t.Errorf("AGENT_RESPONSE is_truncated = %v, want true", got)
+		}
+	})
+
+	t.Run("small MaxContentLen still gets the full 4096-rune slack", func(t *testing.T) {
+		const smallMaxLen = 50
+		tinyPiece := responseTextPiece(strings.Repeat("a", smallMaxLen))
+		eightyTiny := joinedResponsePieces(tinyPiece, 80)
+
+		rows := responseRowsOf(t, &genai.Content{Role: "model", Parts: responseTextParts(80, smallMaxLen, "a")}, smallMaxLen)
+		llmRow := rows[EventLLMResponse]
+		gotLLM, _ := jsonObjectColumn(t, llmRow, columnContent)["response"].(string)
+		wantLLM := string([]rune(eightyTiny)[:smallMaxLen+4096]) + truncationSuffix
+		const wantLLMRunes = smallMaxLen + 4096 + len(truncationSuffix) // 50 + 4096 + 14 = 4160
+		if utf8.RuneCountInString(gotLLM) != wantLLMRunes || gotLLM != wantLLM {
+			t.Errorf("LLM_RESPONSE content.response = %d runes, want %d runes ending in %q",
+				utf8.RuneCountInString(gotLLM), wantLLMRunes, truncationSuffix)
+		}
+		if got := llmRow["is_truncated"]; got != true {
+			t.Errorf("LLM_RESPONSE is_truncated = %v, want true", got)
+		}
+
+		agentRow := rows[EventAgentResponse]
+		gotAgent, _ := jsonObjectColumn(t, agentRow, columnContent)["response"].(string)
+		wantAgent := string([]rune(eightyTiny)[:smallMaxLen]) + truncationSuffix
+		if gotAgent != wantAgent {
+			t.Errorf("AGENT_RESPONSE content.response = %q, want %q", gotAgent, wantAgent)
+		}
+		if got := agentRow["is_truncated"]; got != true {
+			t.Errorf("AGENT_RESPONSE is_truncated = %v, want true", got)
+		}
+	})
+
+	t.Run("rebuilt LLM_RESPONSE summary after failed upload is capped", func(t *testing.T) {
+		const maxLen = 100
+		parts := responseTextParts(40, maxLen, "a")
+		b := &contentSummaryBuilder{
+			isLLMResponse: true,
+			maxLen:        maxLen,
+			redact:        true,
+			messages:      []*messageSummary{newResponseMessageSummary(&genai.Content{Parts: parts}, 0, maxLen, true)},
+		}
+		for i := range 39 {
+			b.omitTextFromSummary(0, i)
+		}
+		initial, initialTrunc := b.buildContent()
+		b.needsRebuild = false
+		if got, _ := initial["response"].(string); got != smallPiece || initialTrunc {
+			t.Fatalf("initial buildContent() = (%q, %v), want (%q, false)", got, initialTrunc, smallPiece)
+		}
+		fallback := strings.Repeat("a", maxLen)
+		for i := range 39 {
+			b.retainInlineSummary(0, i, fallback, false)
+		}
+		row := map[string]any{"is_truncated": false}
+		b.applyToRow(row)
+		want := string([]rune(fortySmall)[:maxLen+4096]) + truncationSuffix
+		if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != want {
+			t.Errorf("rebuilt content.response has %d runes, want %d:\n%.80q...", utf8.RuneCountInString(got), utf8.RuneCountInString(want), got)
+		}
+		if got := row["is_truncated"]; got != true {
+			t.Errorf("rebuilt is_truncated = %v, want true", got)
+		}
+	})
+}
+
+func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
+	atCap := strings.Repeat("n", 256)
+	overCap := strings.Repeat("n", 257)
+	overCapCall := strings.Repeat("c", 257)
+	overCapResp := strings.Repeat("r", 257)
+	wideAtCap := strings.Repeat("ñ", 256)
+	const secret = "SYNTHETIC_SECRET_0123456789"
+	credential := "lookup api_key=" + secret
+	overCapCredential := overCap + " api_key=" + secret
+	boundaryCredential := strings.Repeat("n", 245) + " api_key=" + secret
+	call := func(name string) []*genai.Part {
+		return []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: name}}}
+	}
+	resp := func(name string) []*genai.Part {
+		return []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: name}}}
+	}
+
+	tests := []struct {
+		name      string
+		parts     []*genai.Part
+		maxLength int
+		noRedact  bool
+		want      string
+		wantTrunc bool
+	}{
+		{name: "call name at the cap is kept", parts: call(atCap), maxLength: 100000, want: "call: " + atCap},
+		{name: "response name at the cap is kept", parts: resp(atCap), maxLength: 100000, want: "resp: " + atCap},
+		{name: "call name over the cap is cut", parts: call(overCap), maxLength: 100000, want: "call: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "response name over the cap is cut", parts: resp(overCap), maxLength: 100000, want: "resp: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "multi-byte call name is cut by runes", parts: call(wideAtCap + "ñ"), maxLength: 100000, want: "call: " + wideAtCap + truncationSuffix, wantTrunc: true},
+		{name: "call name cap does not follow a smaller maxLength", parts: call(overCap), maxLength: 10, want: "call: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "response name cap does not follow a smaller maxLength", parts: resp(overCap), maxLength: 10, want: "resp: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "call name cap holds at zero maxLength", parts: call(overCap), maxLength: 0, want: "call: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "response name cap holds at zero maxLength", parts: resp(overCap), maxLength: 0, want: "resp: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "call name is kept whole under an unlimited maxLength", parts: call(overCap), maxLength: -1, want: "call: " + overCap},
+		{name: "response name is kept whole under an unlimited maxLength", parts: resp(overCap), maxLength: -1, want: "resp: " + overCap},
+		{name: "credential in a long call name is redacted under an unlimited maxLength", parts: call(overCapCredential), maxLength: -1, want: "call: " + overCap + " api_key=" + redactedValue, wantTrunc: true},
+		{name: "credential in a long response name is redacted under an unlimited maxLength", parts: resp(overCapCredential), maxLength: -1, want: "resp: " + overCap + " api_key=" + redactedValue, wantTrunc: true},
+		{name: "credential in a long call name is kept under an unlimited maxLength when redaction is off", parts: call(overCapCredential), maxLength: -1, noRedact: true, want: "call: " + overCapCredential},
+		{name: "credential in a long response name is kept under an unlimited maxLength when redaction is off", parts: resp(overCapCredential), maxLength: -1, noRedact: true, want: "resp: " + overCapCredential},
+		{name: "credential in a call name is redacted", parts: call(credential), maxLength: 100000, want: "call: lookup api_key=" + redactedValue, wantTrunc: true},
+		{name: "credential in a response name is redacted", parts: resp(credential), maxLength: 100000, want: "resp: lookup api_key=" + redactedValue, wantTrunc: true},
+		{name: "credential crossing the call name cap is redacted before cutting", parts: call(boundaryCredential), maxLength: 100000, want: "call: " + (strings.Repeat("n", 245) + " api_key=" + redactedValue)[:256] + truncationSuffix, wantTrunc: true},
+		{name: "credential in a call name is kept when redaction is off", parts: call(credential), maxLength: 100000, noRedact: true, want: "call: " + credential},
+		{name: "credential in a response name is kept when redaction is off", parts: resp(credential), maxLength: 100000, noRedact: true, want: "resp: " + credential},
+		{
+			name:      "cut names keep their place among the other parts",
+			parts:     []*genai.Part{{Text: "hi"}, {FunctionCall: &genai.FunctionCall{Name: overCap}}, {FunctionResponse: &genai.FunctionResponse{Name: overCap}}},
+			maxLength: 100000,
+			want:      "text: 'hi' | call: " + atCap + truncationSuffix + " | resp: " + atCap + truncationSuffix,
+			wantTrunc: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated := formatResponseContent(&genai.Content{Parts: tt.parts}, tt.maxLength, !tt.noRedact)
+			if got != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("got (%q, %v), want (%q, %v)", got, truncated, tt.want, tt.wantTrunc)
+			}
+			if !tt.noRedact && strings.Contains(got, "SYNTHETIC") {
+				t.Errorf("summary %q leaked the secret", got)
+			}
+			if tt.maxLength < 0 && strings.Contains(got, truncationSuffix) {
+				t.Errorf("unlimited summary %q unexpectedly contains %q", got, truncationSuffix)
+			}
+		})
+	}
+
+	t.Run("LLM_RESPONSE row cuts a long call name", func(t *testing.T) {
+		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.MaxContentLen = 100000 })
+		content := &genai.Content{Role: "model", Parts: append(call(overCap), &genai.Part{Text: "done"})}
+		if _, err := p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: content}, nil); err != nil {
+			t.Fatalf("AfterModelCallback error: %v", err)
+		}
+		p.AfterRunCallback()(mCtx)
+		row := onlyRowOfType(t, collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventLLMResponse)
+		want := "call: " + atCap + truncationSuffix + " | text: 'done'"
+		if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != want {
+			t.Errorf("LLM_RESPONSE content.response = %q, want %q", got, want)
+		}
+		if got := row["is_truncated"]; got != true {
+			t.Errorf("LLM_RESPONSE is_truncated = %v, want true", got)
+		}
+	})
+
+	t.Run("CaptureFullMessageContent keeps long function names and summaries whole", func(t *testing.T) {
+		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+			c.MaxContentLen = 1
+			c.CaptureFullMessageContent = true
+		})
+		var errs callbackErrors
+		errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: overCapCall}},
+					{FunctionResponse: &genai.FunctionResponse{Name: overCapResp}},
+				},
+			},
+		}, nil))
+		// OnEventCallback skips events carrying FunctionCall and filters
+		// AGENT_RESPONSE to visible Text parts (e.g. a SkipSummarization answer
+		// paired with a FunctionResponse), so CaptureFullMessageContent keeps
+		// the full text summary untruncated despite MaxContentLen: 1.
+		errs.add(p.OnEventCallback()(mCtx, &session.Event{
+			ID:      "ev-full-agent-resp",
+			Author:  "test-agent",
+			Actions: session.EventActions{SkipSummarization: true},
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{FunctionResponse: &genai.FunctionResponse{Name: overCapResp, Response: map[string]any{"ok": true}}},
+						{Text: overCap},
+					},
+				},
+			},
+		}))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+		llmRow := onlyRowOfType(t, rows, EventLLMResponse)
+		gotLLM, _ := jsonObjectColumn(t, llmRow, columnContent)["response"].(string)
+		wantLLM := "call: " + overCapCall + " | resp: " + overCapResp
+		if gotLLM != wantLLM {
+			t.Errorf("LLM_RESPONSE content.response = %q, want %q", gotLLM, wantLLM)
+		}
+		if strings.Contains(gotLLM, truncationSuffix) {
+			t.Errorf("LLM_RESPONSE content.response unexpectedly truncated: %q", gotLLM)
+		}
+		if got := llmRow["is_truncated"]; got != false {
+			t.Errorf("LLM_RESPONSE is_truncated = %v, want false", got)
+		}
+
+		agentRow := onlyRowOfType(t, rows, EventAgentResponse)
+		gotAgent, _ := jsonObjectColumn(t, agentRow, columnContent)["response"].(string)
+		wantAgent := "text: '" + overCap + "'"
+		if gotAgent != wantAgent {
+			t.Errorf("AGENT_RESPONSE content.response = %q, want %q", gotAgent, wantAgent)
+		}
+		if strings.Contains(gotAgent, truncationSuffix) {
+			t.Errorf("AGENT_RESPONSE content.response unexpectedly truncated: %q", gotAgent)
+		}
+		if got := agentRow["is_truncated"]; got != false {
+			t.Errorf("AGENT_RESPONSE is_truncated = %v, want false", got)
+		}
+	})
+
+	t.Run("MaxContentLen -1 without CaptureFullMessageContent keeps long function names and summaries whole", func(t *testing.T) {
+		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+			c.MaxContentLen = -1
+			c.CaptureFullMessageContent = false
+		})
+		callName300 := strings.Repeat("f", 300)
+		parts := append([]*genai.Part{{FunctionCall: &genai.FunctionCall{Name: callName300}}}, responseTextParts(40, 5000, "a")...)
+		if _, err := p.AfterModelCallback()(mCtx, &model.LLMResponse{
+			Content: &genai.Content{Role: "model", Parts: parts},
+		}, nil); err != nil {
+			t.Fatalf("AfterModelCallback error: %v", err)
+		}
+		p.AfterRunCallback()(mCtx)
+
+		row := onlyRowOfType(t, collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventLLMResponse)
+		got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string)
+		want := "call: " + callName300 + " | " + joinedResponsePieces(responseTextPiece(strings.Repeat("a", 5000)), 40)
+		if got != want {
+			t.Errorf("LLM_RESPONSE content.response = %d runes, want %d runes", utf8.RuneCountInString(got), utf8.RuneCountInString(want))
+		}
+		if strings.Contains(got, truncationSuffix) {
+			t.Errorf("LLM_RESPONSE content.response unexpectedly contains %q", truncationSuffix)
+		}
+		if row["is_truncated"] != false {
+			t.Errorf("LLM_RESPONSE is_truncated = %v, want false", row["is_truncated"])
+		}
+	})
+
+	t.Run("failed text upload with content denied ignores summary-only function-name cap", func(t *testing.T) {
+		callName300 := strings.Repeat("c", 300)
+		respName300 := strings.Repeat("r", 300)
+		text50 := strings.Repeat("t", 50)
+		text400 := strings.Repeat("t", 400)
+
+		cases := []struct {
+			name            string
+			denylist        []string
+			maxContentLen   int
+			parts           []*genai.Part
+			wantContent     string
+			wantPartsText   []string
+			wantIsTruncated bool
+		}{
+			{
+				name:          "content denied with 300-rune names and uncut fallback keeps is_truncated false",
+				denylist:      []string{columnContent},
+				maxContentLen: 500,
+				parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: callName300}},
+					{FunctionResponse: &genai.FunctionResponse{Name: respName300}},
+					{Text: text50},
+				},
+				wantPartsText:   []string{"Function: " + callName300, "Function response: " + respName300, text50},
+				wantIsTruncated: false,
+			},
+			{
+				name:          "content denied with uncut 300-rune call name and cut text fallback sets is_truncated true",
+				denylist:      []string{columnContent},
+				maxContentLen: 350,
+				parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: callName300}},
+					{Text: text400},
+				},
+				wantPartsText:   []string{"Function: " + callName300, text400[:350] + truncationSuffix},
+				wantIsTruncated: true,
+			},
+			{
+				name:          "content denied with MaxContentLen 30 cuts fallback and sets is_truncated true",
+				denylist:      []string{columnContent},
+				maxContentLen: 30,
+				parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: callName300}},
+					{Text: text50},
+				},
+				wantPartsText:   []string{"Function: " + callName300[:30] + truncationSuffix, text50[:30] + truncationSuffix},
+				wantIsTruncated: true,
+			},
+			{
+				name:          "content written with 300-rune call name and uncut fallback sets is_truncated true",
+				denylist:      nil,
+				maxContentLen: 500,
+				parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: callName300}},
+					{Text: text50},
+				},
+				wantContent:     "call: " + callName300[:256] + truncationSuffix + " | text: '" + text50 + "'",
+				wantPartsText:   []string{"Function: " + callName300, text50},
+				wantIsTruncated: true,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				failingOff := &fakeOffloader{
+					hook: func(context.Context, GCSUploadRequest) error {
+						return errors.New("upload failed")
+					},
+				}
+				p, requests, mCtx := offloadingPlugin(t, failingOff, func(c *Config) {
+					c.PayloadColumnDenylist = tc.denylist
+					c.MaxContentLen = tc.maxContentLen
+					c.MaxInlineTextSize = 20
+				})
+				if _, err := p.AfterModelCallback()(mCtx, &model.LLMResponse{
+					Content: &genai.Content{Role: "model", Parts: tc.parts},
+				}, nil); err != nil {
+					t.Fatalf("AfterModelCallback error: %v", err)
+				}
+				p.AfterRunCallback()(mCtx)
+
+				row := onlyRowOfType(t, collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventLLMResponse)
+				if tc.wantContent == "" {
+					if v, ok := row[columnContent]; ok && v != nil {
+						t.Errorf("row[%q] = %v, want omitted when content is denied", columnContent, v)
+					}
+				} else if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != tc.wantContent {
+					t.Errorf("LLM_RESPONSE content.response = %q, want %q", got, tc.wantContent)
+				}
+
+				gotParts := contentPartsOf(t, row)
+				if len(gotParts) != len(tc.wantPartsText) {
+					t.Fatalf("got %d content_parts, want %d", len(gotParts), len(tc.wantPartsText))
+				}
+				for i, wantText := range tc.wantPartsText {
+					if gotText, _ := gotParts[i]["text"].(string); gotText != wantText {
+						t.Errorf("content_parts[%d].text = %q, want %q", i, gotText, wantText)
+					}
+				}
+				if got := row["is_truncated"]; got != tc.wantIsTruncated {
+					t.Errorf("LLM_RESPONSE is_truncated = %v, want %v", got, tc.wantIsTruncated)
+				}
+			})
+		}
+	})
+}
+
 func TestFormatContentParts_RedactionAndPreservation(t *testing.T) {
 	t.Run("function response with URL and query parameter preserves trailing query params", func(t *testing.T) {
 		content := &genai.Content{
@@ -3751,6 +4293,10 @@ func TestPartsCollector_FileDataObjectRefs(t *testing.T) {
 			name: "Cloud Storage file with user information", offload: true, connectionID: "us.conn",
 			uri: "gs://user:pw@bucket/doc.pdf", wantURI: redactedURIPlaceholder, wantTruncated: true,
 		},
+		{
+			name: "Cloud Storage file with invalid UTF-8 in the URI", offload: true, connectionID: "us.conn",
+			uri: "gs://bucket/a\xff\xfeb", wantURI: "gs://bucket/a\uFFFDb",
+		},
 		{name: "no URI", offload: true, connectionID: "us.conn"},
 	}
 	for _, tt := range tests {
@@ -3870,11 +4416,10 @@ func TestPartsCollector_TextAndStructuredRedaction(t *testing.T) {
 }
 
 func TestNormalizeFunctionResponse_PythonSnakeCaseParity(t *testing.T) {
-	willCont := true
 	fr := &genai.FunctionResponse{
 		ID:           "call-1",
 		Name:         "lookup_doc",
-		WillContinue: &willCont,
+		WillContinue: new(true),
 		Scheduling:   genai.FunctionResponseSchedulingWhenIdle,
 		Response: map[string]any{
 			"CallerCamelKey": "untouched",
@@ -4120,5 +4665,2156 @@ func TestContentSummary_ContentDeniedFailedUploadTruncatedPinsIsTruncated(t *tes
 	}
 	if got, _ := row["is_truncated"].(bool); !got {
 		t.Errorf("row[is_truncated] = %v, want true (pinned by hasFailedUploadTruncated)", row["is_truncated"])
+	}
+}
+
+// TestJSONFormatter_InvalidUTF8 checks that every string that the formatter
+// writes is valid UTF-8, with each run of invalid bytes replaced with one
+// U+FFFD, whether the string is shorter than the limit, longer, or not
+// limited at all: invalid UTF-8 must not reach a BigQuery string column, and
+// in a JSON document encoding/json would replace it byte by byte instead.
+func TestJSONFormatter_InvalidUTF8(t *testing.T) {
+	// The two invalid bytes are one run.
+	const in, want = "ok\xff\xfe tail", "ok\uFFFD tail"
+	// cut is want cut to its first four runes.
+	const cut = "ok\uFFFD " + truncationSuffix
+
+	t.Run("truncateString", func(t *testing.T) {
+		for _, tt := range []struct {
+			name      string
+			in        string
+			maxLength int
+			want      string
+			wantTrunc bool
+		}{
+			{"shorter than the limit", in, 100, want, false},
+			// The limit counts the runes of the text once it is replaced.
+			{"as long as the limit", in, utf8.RuneCountInString(want), want, false},
+			{"longer than the limit", in, 4, cut, true},
+			{"no limit", in, -1, want, false},
+			{"lone continuation byte", "\x80", 10, "\uFFFD", false},
+			{"cut multi-byte sequence at the end", "end\xe6\x97", -1, "end\uFFFD", false},
+			{"valid text", "héllo 日本 \uFFFD", 100, "héllo 日本 \uFFFD", false},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				got, truncated := truncateString(tt.in, tt.maxLength)
+				if got != tt.want || truncated != tt.wantTrunc {
+					t.Errorf("truncateString(%q, %d) = (%q, %v), want (%q, %v)", tt.in, tt.maxLength, got, truncated, tt.want, tt.wantTrunc)
+				}
+				if !utf8.ValidString(got) {
+					t.Errorf("truncateString(%q, %d) = %q, which is not valid UTF-8", tt.in, tt.maxLength, got)
+				}
+			})
+		}
+	})
+
+	limits := []struct {
+		name      string
+		maxLength int
+		want      string
+	}{
+		{"shorter than the limit", 100, want},
+		{"longer than the limit", 4, cut},
+		{"no limit", -1, want},
+	}
+
+	t.Run("structs, maps and slices", func(t *testing.T) {
+		type payload struct {
+			Note string            `json:"note"`
+			Tags []string          `json:"tags"`
+			Meta map[string]string `json:"meta"`
+			Any  any               `json:"any"`
+		}
+		value := payload{Note: in, Tags: []string{in}, Meta: map[string]string{"k": in}, Any: []any{map[string]any{"v": in}}}
+		for _, tt := range limits {
+			w := tt.want
+			wantJSON := `{"any":[{"v":"` + w + `"}],"meta":{"k":"` + w + `"},"note":"` + w + `","tags":["` + w + `"]}`
+			for _, redact := range []bool{true, false} {
+				got, _, err := smartTruncate(value, tt.maxLength, redact)
+				if err != nil || string(got) != wantJSON {
+					t.Errorf("%s: smartTruncate(redact=%v) = (%q, %v), want %q", tt.name, redact, got, err, wantJSON)
+				}
+			}
+		}
+
+		badTagType := reflect.StructOf([]reflect.StructField{{
+			Name: "Bad",
+			Type: reflect.TypeFor[string](),
+			Tag:  reflect.StructTag(`json:"bad\xff\xfetag"`),
+		}})
+		badTagIn := reflect.New(badTagType).Elem()
+		badTagIn.Field(0).SetString(in)
+		badTagV := reflect.New(badTagType).Elem()
+		badTagV.Field(0).SetString("v")
+		for _, redact := range []bool{true, false} {
+			got, truncated, err := smartTruncate(badTagIn.Interface(), 100, redact)
+			if wantTag := `{"bad` + "\uFFFD" + `tag":"` + want + `"}`; err != nil || string(got) != wantTag || truncated {
+				t.Errorf("smartTruncate(badTag, redact=%v) = (%q, %v, %v), want (%q, false, nil)", redact, got, truncated, err, wantTag)
+			}
+			sanitized, truncated := sanitizeValue(badTagV.Interface(), 100, redact)
+			sanitizedMap, _ := sanitized.(map[string]any)
+			if _, ok := sanitizedMap["bad\uFFFDtag"]; !ok || truncated {
+				t.Errorf("sanitizeValue(badTag, redact=%v) = (%#v, %v), want key %q and truncated=false", redact, sanitized, truncated, "bad\uFFFDtag")
+			}
+		}
+	})
+
+	t.Run("map keys", func(t *testing.T) {
+		checkCredentialNamed(t, false, reflect.TypeFor[labelText](), reflect.TypeFor[labelTextStruct]())
+		for _, redact := range []bool{true, false} {
+			got, truncated, err := smartTruncate(map[string]any{"bad\xff\xfekey": in}, 100, redact)
+			if wantMap := `{"bad` + "\uFFFD" + `key":"` + want + `"}`; err != nil || string(got) != wantMap || truncated {
+				t.Errorf("smartTruncate(bad map key, redact=%v) = (%q, %v, %v), want (%q, false, nil)", redact, got, truncated, err, wantMap)
+			}
+
+			got, truncated, err = smartTruncate(map[labelText]string{labelText("bad\xff\xfekey"): "v"}, 100, redact)
+			if wantMap := `{"bad` + "\uFFFD" + `key":"v"}`; err != nil || string(got) != wantMap || truncated {
+				t.Errorf("smartTruncate(labelText bad map key, redact=%v) = (%q, %v, %v), want (%q, false, nil)", redact, got, truncated, err, wantMap)
+			}
+
+			var textCalled atomic.Bool
+			got, truncated, err = smartTruncate(map[labelTextStruct]string{{called: &textCalled, raw: "bad\xff\xfekey"}: "v"}, 100, redact)
+			if !textCalled.Load() {
+				t.Errorf("smartTruncate(TextMarshaler struct bad map key, redact=%v) did not call MarshalText", redact)
+			}
+			if wantMap := `{"bad` + "\uFFFD" + `key":"v"}`; err != nil || !utf8.Valid(got) || string(got) != wantMap || truncated {
+				t.Errorf("smartTruncate(TextMarshaler struct bad map key, redact=%v) = (%q, %v, %v), want (%q, false, nil)", redact, got, truncated, err, wantMap)
+			}
+
+			textCalled.Store(false)
+			sanitizedTextKey, truncated := sanitizeValue(map[labelTextStruct]string{{called: &textCalled, raw: "bad\xff\xfekey"}: "v"}, 100, redact)
+			if !textCalled.Load() {
+				t.Errorf("sanitizeValue(TextMarshaler struct bad map key, redact=%v) did not call MarshalText", redact)
+			}
+			sanitizedTextMap, _ := sanitizedTextKey.(map[string]any)
+			for k := range sanitizedTextMap {
+				if !utf8.ValidString(k) {
+					t.Errorf("sanitizeValue(TextMarshaler struct bad map key, redact=%v) key %q is not valid UTF-8", redact, k)
+				}
+			}
+			if v, ok := sanitizedTextMap["bad\uFFFDkey"]; !ok || v != "v" || len(sanitizedTextMap) != 1 || truncated {
+				t.Errorf("sanitizeValue(TextMarshaler struct bad map key, redact=%v) = (%#v, %v), want single key %q -> %q and truncated=false", redact, sanitizedTextKey, truncated, "bad\uFFFDkey", "v")
+			}
+
+			sanitized, truncated := sanitizeValue(map[string]any{"bad\xff\xfekey": "v"}, 100, redact)
+			sanitizedMap, _ := sanitized.(map[string]any)
+			if _, ok := sanitizedMap["bad\uFFFDkey"]; !ok || truncated {
+				t.Errorf("sanitizeValue(bad map key, redact=%v) = (%#v, %v), want key %q and truncated=false", redact, sanitized, truncated, "bad\uFFFDkey")
+			}
+
+			got, truncated, err = smartTruncate(map[string]string{"bad\xffkey": "a", "bad\xfekey": "a"}, 100, redact)
+			if wantAgree := `{"bad` + "\uFFFD" + `key":"a"}`; err != nil || string(got) != wantAgree || truncated {
+				t.Errorf("smartTruncate(agreeing bad map keys, redact=%v) = (%q, %v, %v), want (%q, false, nil)", redact, got, truncated, err, wantAgree)
+			}
+
+			got, truncated, err = smartTruncate(map[string]string{"bad\xffkey": "a", "bad\xfekey": "b"}, 100, redact)
+			wantCollisionVal := redactedValue
+			if !redact {
+				wantCollisionVal = "[COLLIDING_KEY]"
+			}
+			if wantCollision := `{"bad` + "\uFFFD" + `key":"` + wantCollisionVal + `"}`; err != nil || string(got) != wantCollision || !truncated {
+				t.Errorf("smartTruncate(colliding bad map keys, redact=%v) = (%q, %v, %v), want (%q, true, nil)", redact, got, truncated, err, wantCollision)
+			}
+		}
+	})
+
+	t.Run("FormatContentParts", func(t *testing.T) {
+		content := &genai.Content{Parts: []*genai.Part{
+			{Text: in},
+			{FunctionCall: &genai.FunctionCall{Name: "find\xff", Args: map[string]any{"q": in}}},
+			{InlineData: &genai.Blob{MIMEType: "image/\xff\xfepng", Data: []byte{1, 2}}},
+			{FileData: &genai.FileData{MIMEType: "text/\xff\xfeplain", FileURI: "https://example.com/a\xff\xfeb"}},
+		}}
+		for _, tt := range limits {
+			for _, redact := range []bool{true, false} {
+				var parts []map[string]any
+				if redact {
+					parts = FormatContentParts(content, tt.maxLength)
+				} else {
+					parts, _ = formatContentParts(content, tt.maxLength, false)
+				}
+				if len(parts) != 4 {
+					t.Fatalf("%s: formatContentParts(redact=%v) returned %d parts, want 4", tt.name, redact, len(parts))
+				}
+				if got := parts[0]["text"]; got != tt.want {
+					t.Errorf("%s: formatContentParts(redact=%v) text = %q, want %q", tt.name, redact, got, tt.want)
+				}
+				if attrs, _ := parts[1]["part_attributes"].(string); !strings.Contains(attrs, `"q":"`+tt.want+`"`) {
+					t.Errorf("%s: formatContentParts(redact=%v) part_attributes = %q, want them to hold %q", tt.name, redact, attrs, tt.want)
+				}
+				if got := parts[2]["mime_type"]; got != "image/\uFFFDpng" {
+					t.Errorf("%s: formatContentParts(redact=%v) inline mime_type = %q, want %q", tt.name, redact, got, "image/\uFFFDpng")
+				}
+				if got := parts[3]["mime_type"]; got != "text/\uFFFDplain" {
+					t.Errorf("%s: formatContentParts(redact=%v) file mime_type = %q, want %q", tt.name, redact, got, "text/\uFFFDplain")
+				}
+				if got := parts[3]["uri"]; got != "https://example.com/a\uFFFDb" {
+					t.Errorf("%s: formatContentParts(redact=%v) file uri = %q, want %q", tt.name, redact, got, "https://example.com/a\uFFFDb")
+				}
+				for i, part := range parts {
+					for k, v := range part {
+						if s, ok := v.(string); ok && (!utf8.ValidString(s) || strings.Contains(s, `\ufffd`)) {
+							t.Errorf("%s: formatContentParts(redact=%v) part %d %s = %q, which held invalid UTF-8", tt.name, redact, i, k, s)
+						}
+					}
+				}
+			}
+		}
+
+		// Response summary also normalizes invalid UTF-8 in function call/response names.
+		respContent := &genai.Content{Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: "find\xff\xfe"}},
+			{FunctionResponse: &genai.FunctionResponse{Name: "resp\xff\xfe"}},
+		}}
+		if got, _ := formatResponseContent(respContent, 100, true); got != "call: find\uFFFD | resp: resp\uFFFD" {
+			t.Errorf("formatResponseContent(invalid UTF-8 names) = %q, want %q", got, "call: find\uFFFD | resp: resp\uFFFD")
+		}
+
+		// Offloading preserves normalized MIME types and GCS URIs on queued uploads,
+		// while omitting object_ref on GCS URIs whose invalid UTF-8 had to be replaced.
+		offloaded := collectParts(partsOptions{
+			maxLen:  100,
+			redact:  true,
+			offload: true,
+		}, &genai.Content{Parts: []*genai.Part{
+			{InlineData: &genai.Blob{MIMEType: "image/\xff\xfepng", Data: []byte{1, 2}}},
+			{FileData: &genai.FileData{MIMEType: "text/\xff\xfeplain", FileURI: "gs://bucket/a\xff\xfeb"}},
+		}})
+		if got := offloaded.parts[0]["mime_type"]; got != "image/\uFFFDpng" {
+			t.Errorf("offloaded inline mime_type = %q, want %q", got, "image/\uFFFDpng")
+		}
+		if len(offloaded.pending) != 1 || offloaded.pending[0].mimeType != "image/\uFFFDpng" {
+			t.Errorf("pending uploads = %#v, want 1 item with mimeType %q", offloaded.pending, "image/\uFFFDpng")
+		}
+		if got := offloaded.parts[1]["mime_type"]; got != "text/\uFFFDplain" {
+			t.Errorf("offloaded file mime_type = %q, want %q", got, "text/\uFFFDplain")
+		}
+		if got := offloaded.parts[1]["uri"]; got != "gs://bucket/a\uFFFDb" {
+			t.Errorf("offloaded file uri = %q, want %q", got, "gs://bucket/a\uFFFDb")
+		}
+		if _, hasRef := offloaded.parts[1]["object_ref"]; hasRef {
+			t.Errorf("offloaded file with invalid UTF-8 URI got object_ref = %v, want none", offloaded.parts[1]["object_ref"])
+		}
+	})
+
+	// A response summary goes through truncateString whether it is capped at
+	// maxLength + responseSummarySlack runes or not limited at all, so invalid
+	// UTF-8 that no piece replaces on its own, as in the language or outcome
+	// of a code part, is replaced too, and the cap counts each run of invalid
+	// bytes as the one U+FFFD that replaces it. A credential in a function
+	// name is redacted before the name is replaced.
+	t.Run("response summaries", func(t *testing.T) {
+		const secret = "SYNTHETIC_SECRET_0123456789"
+		parts := []*genai.Part{
+			{ExecutableCode: &genai.ExecutableCode{Language: "py\xff\xfe", Code: in}},
+			{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: "out\xff\xfe", Output: in}},
+			{FunctionCall: &genai.FunctionCall{Name: "find\xff\xfe api_key=" + secret}},
+		}
+		pieces := "Executable code (py\uFFFD): " + want + " | Code execution result (out\uFFFD): " + want + " | call: find\uFFFD api_key="
+		for _, maxLength := range []int{100, -1} {
+			got, truncated := formatResponseContent(&genai.Content{Parts: parts}, maxLength, true)
+			if wantRedacted := pieces + redactedValue; got != wantRedacted || !truncated {
+				t.Errorf("formatResponseContent(maxLength=%d, redact=true) = (%q, %v), want (%q, true)", maxLength, got, truncated, wantRedacted)
+			}
+			got, truncated = formatResponseContent(&genai.Content{Parts: parts}, maxLength, false)
+			if wantRaw := pieces + secret; got != wantRaw || truncated {
+				t.Errorf("formatResponseContent(maxLength=%d, redact=false) = (%q, %v), want (%q, false)", maxLength, got, truncated, wantRaw)
+			}
+		}
+
+		const maxLength = 10
+		many := append([]*genai.Part{{ExecutableCode: &genai.ExecutableCode{Language: "py\xff\xfe", Code: "x"}}}, responseTextParts(217, 1, in)...)
+		joined := "Executable code (py\uFFFD): x | " + joinedResponsePieces(responseTextPiece(want), 217)
+		if n := utf8.RuneCountInString(joined); n <= maxLength+responseSummarySlack {
+			t.Fatalf("joined summary has %d runes, want more than the cap of %d", n, maxLength+responseSummarySlack)
+		}
+		got, truncated := formatResponseContent(&genai.Content{Parts: many}, maxLength, true)
+		if wantCut := string([]rune(joined)[:maxLength+responseSummarySlack]) + truncationSuffix; got != wantCut || !truncated {
+			t.Errorf("formatResponseContent(%d parts, %d) = (%d runes, %v), want (%d runes, true)\ngot:  %.40q...\nwant: %.40q...",
+				len(many), maxLength, utf8.RuneCountInString(got), truncated, utf8.RuneCountInString(wantCut), got, wantCut)
+		}
+		got, truncated = formatResponseContent(&genai.Content{Parts: many}, -1, true)
+		if got != joined || truncated {
+			t.Errorf("formatResponseContent(%d parts, -1) = (%d runes, %v), want (%d runes, false)\ngot:  %.40q...\nwant: %.40q...",
+				len(many), utf8.RuneCountInString(got), truncated, utf8.RuneCountInString(joined), got, joined)
+		}
+	})
+}
+
+// checkCredentialNamed fails the test unless isSensitiveKey reports want for
+// the base name (without any generic type-argument list) of each of the types:
+// the tests need types that are named for credentials and types that are not.
+func checkCredentialNamed(t *testing.T, want bool, types ...reflect.Type) {
+	t.Helper()
+	for _, typ := range types {
+		name, _, _ := strings.Cut(typ.Name(), "[")
+		if got := name != "" && isSensitiveKey(name); got != want {
+			t.Fatalf("isSensitiveKey(%q) for %s = %v, want %v", name, typ, got, want)
+		}
+	}
+}
+
+// runWhileUpdating calls f while another goroutine calls update over and over.
+func runWhileUpdating(update, f func()) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			update()
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	f()
+}
+
+// credentialJSON writes raw with a MarshalJSON method. The tests embed it in
+// types named for credentials, which, being declared inside the tests, cannot
+// have methods of their own.
+type credentialJSON struct{ raw string }
+
+func (c credentialJSON) MarshalJSON() ([]byte, error) { return json.Marshal(c.raw) }
+
+// credentialText writes raw with a MarshalText method.
+type credentialText struct{ raw string }
+
+func (c credentialText) MarshalText() ([]byte, error) { return []byte(c.raw), nil }
+
+// credentialTextKey writes secret with a MarshalText method of its pointer
+// type, and records that the method was called.
+type credentialTextKey struct {
+	called *atomic.Bool
+	secret string
+}
+
+func (c *credentialTextKey) MarshalText() ([]byte, error) {
+	c.called.Store(true)
+	return []byte(c.secret), nil
+}
+
+// credentialTextValueKey is credentialTextKey with the method on its value.
+type credentialTextValueKey struct {
+	called *atomic.Bool
+	secret string
+}
+
+func (c credentialTextValueKey) MarshalText() ([]byte, error) {
+	c.called.Store(true)
+	return []byte(c.secret), nil
+}
+
+// credentialPtrJSON writes secret with a MarshalJSON method on its pointer
+// type, and records that the method was called.
+type credentialPtrJSON struct {
+	called *atomic.Bool
+	secret string
+}
+
+func (c *credentialPtrJSON) MarshalJSON() ([]byte, error) {
+	c.called.Store(true)
+	return json.Marshal(c.secret)
+}
+
+// labelValueProbe is a neutral-named type that records whether its MarshalJSON
+// method was called while formatting a map value.
+type labelValueProbe struct {
+	called *atomic.Bool
+	raw    string
+}
+
+func (p labelValueProbe) MarshalJSON() ([]byte, error) {
+	p.called.Store(true)
+	return json.Marshal(p.raw)
+}
+
+// Generic test types whose base names are credential-named (api_key_string,
+// api_key_secret, auth_code, code_verifier) or neutral (neutralGeneric); Go
+// requires parameterized type declarations at package scope.
+type apiKeyString[T any] string
+
+type apiKeySecret[T any] struct {
+	Raw T
+	credentialTextValueKey
+}
+
+type authCode[T any] struct {
+	Raw T
+	credentialTextKey
+}
+
+type codeVerifier[T any] struct {
+	ID  string `json:"id"`
+	raw T
+}
+
+type neutralGeneric[T any] string
+
+// labelText implements encoding.TextMarshaler with a non-credential type name.
+type labelText string
+
+func (l labelText) MarshalText() ([]byte, error) { return []byte(l), nil }
+
+// labelTextStruct is a comparable struct key with a non-credential type name
+// whose MarshalText returns raw bytes so mapKeyString exercises its
+// encoding.TextMarshaler path rather than its reflect.String path.
+type labelTextStruct struct {
+	called *atomic.Bool
+	raw    string
+}
+
+func (l labelTextStruct) MarshalText() ([]byte, error) {
+	l.called.Store(true)
+	return []byte(l.raw), nil
+}
+
+// labelStruct embeds labelText alongside an exported field so its promoted
+// MarshalText sits at the same depth as RefreshToken's credentialTextKey,
+// making MarshalText ambiguous when both are embedded in an outer struct.
+type labelStruct struct {
+	Label string
+	labelText
+}
+
+// Recursive pointer test types (mutually recursive forward references require
+// package scope in Go).
+type (
+	selfPtr *selfPtr
+	mutPtrA *mutPtrB
+	mutPtrB *mutPtrA
+)
+
+// countingMarshaler has a count that another goroutine may update atomically,
+// and a MarshalJSON method on its value, so that boxing the value itself
+// would copy it and read the count.
+type countingMarshaler struct{ n uint64 }
+
+func (countingMarshaler) MarshalJSON() ([]byte, error) { return []byte(`"counting"`), nil }
+
+var credsUserinfoMarshalCalled atomic.Bool
+
+// CredsUserinfo is a defined type over url.Userinfo whose MarshalJSON method
+// records that it was called and formats the userinfo including any password.
+type CredsUserinfo url.Userinfo
+
+// MarshalJSON implements json.Marshaler for CredsUserinfo.
+func (c CredsUserinfo) MarshalJSON() ([]byte, error) {
+	credsUserinfoMarshalCalled.Store(true)
+	return json.Marshal((*url.Userinfo)(&c).String())
+}
+
+// TestJSONFormatter_CredentialNamedTypes checks that, under redaction, a value
+// of url.Userinfo (or a pointer to it) or of a type named for a credential is
+// written as [REDACTED] whatever its kind, whether it is a value, a field, an
+// element, a map value or a map key, without reading it or calling its
+// methods, and so is a struct that promotes the marshaler of such a type; and
+// that a struct of a credential-named type without a marshaler is written by
+// its exported fields.
+func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET_8642"
+	type (
+		Token        string
+		Secret       int64
+		Passphrase   []byte
+		Signature    [4]byte
+		Credentials  map[string]string
+		APIKey       *string
+		Credential   any
+		AccessToken  struct{ credentialJSON }
+		RefreshToken struct {
+			Raw string
+			credentialTextKey
+		}
+		Bearer struct {
+			Raw string
+			credentialPtrJSON
+		}
+		ClientSecret struct {
+			ID  string `json:"id"`
+			raw string
+		}
+		Middle      struct{ AccessToken }
+		MiddleText  struct{ RefreshToken }
+		MiddleIface struct{ json.Marshaler }
+		Label       string
+		Pointer     *string
+		Value       any
+	)
+	checkCredentialNamed(t, true,
+		reflect.TypeFor[Token](), reflect.TypeFor[Secret](), reflect.TypeFor[Passphrase](),
+		reflect.TypeFor[Signature](), reflect.TypeFor[Credentials](), reflect.TypeFor[APIKey](),
+		reflect.TypeFor[Credential](), reflect.TypeFor[AccessToken](), reflect.TypeFor[RefreshToken](),
+		reflect.TypeFor[Bearer](), reflect.TypeFor[ClientSecret](),
+		reflect.TypeFor[apiKeyString[int]](), reflect.TypeFor[apiKeySecret[string]](),
+		reflect.TypeFor[authCode[string]](), reflect.TypeFor[codeVerifier[string]]())
+	checkCredentialNamed(t, false,
+		reflect.TypeFor[Middle](), reflect.TypeFor[MiddleText](), reflect.TypeFor[MiddleIface](),
+		reflect.TypeFor[Label](), reflect.TypeFor[Pointer](), reflect.TypeFor[Value](),
+		reflect.TypeFor[neutralGeneric[int]]())
+	s, label := secret, "kept"
+	tok := Token(secret)
+	key := APIKey(&s)
+
+	t.Run("values", func(t *testing.T) {
+		var marshalerCalled atomic.Bool
+		ptrTextCred := credentialTextKey{&marshalerCalled, secret}
+		valTextCred := credentialTextValueKey{&marshalerCalled, secret}
+		ptrJSONCred := credentialPtrJSON{&marshalerCalled, secret}
+		for _, tt := range []struct {
+			name      string
+			in        any
+			want      string
+			wantTrunc bool
+		}{
+			{"string", Token(secret), `"[REDACTED]"`, true},
+			{"empty string", Token(""), `"[REDACTED]"`, true},
+			{"integer", Secret(8642), `"[REDACTED]"`, true},
+			{"zero integer", Secret(0), `"[REDACTED]"`, true},
+			{"slice", Passphrase(secret), `"[REDACTED]"`, true},
+			{"nil slice", Passphrase(nil), `"[REDACTED]"`, true},
+			{"array", Signature{8, 6, 4, 2}, `"[REDACTED]"`, true},
+			{"map", Credentials{"user": secret}, `"[REDACTED]"`, true},
+			{"pointer", key, `"[REDACTED]"`, true},
+			{"pointer to the pointer", &key, `"[REDACTED]"`, true},
+			{"nil pointer", APIKey(nil), `"[REDACTED]"`, true},
+			{"nil pointer field", struct{ K APIKey }{}, `{"K":"[REDACTED]"}`, true},
+			{"nil pointer slice element", []APIKey{nil}, `["[REDACTED]"]`, true},
+			{"unnamed pointer to credential", &tok, `"[REDACTED]"`, true},
+			{"nil unnamed pointer to credential", (*Token)(nil), `"[REDACTED]"`, true},
+			{"nil unnamed pointer to credential field", struct{ P *Token }{}, `{"P":"[REDACTED]"}`, true},
+			{"nil unnamed pointer to credential slice element", []*Token{nil}, `["[REDACTED]"]`, true},
+			{"interface field", struct{ C Credential }{secret}, `{"C":"[REDACTED]"}`, true},
+			{"nil interface field", struct{ C Credential }{}, `{"C":"[REDACTED]"}`, true},
+			{"interface slice", []Credential{secret}, `["[REDACTED]"]`, true},
+			{"nil interface slice element", []Credential{nil}, `["[REDACTED]"]`, true},
+			{"interface array", [1]Credential{secret}, `["[REDACTED]"]`, true},
+			{"interface map value", map[string]Credential{"c": secret}, `{"c":"[REDACTED]"}`, true},
+			{"nil interface map value", map[string]Credential{"c": nil}, `{"c":"[REDACTED]"}`, true},
+			{"struct with MarshalJSON", AccessToken{credentialJSON{secret}}, `"[REDACTED]"`, true},
+			{"zero struct with MarshalJSON", AccessToken{}, `"[REDACTED]"`, true},
+			{"struct with pointer MarshalText by pointer", &RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}, `"[REDACTED]"`, true},
+			{"struct with pointer MarshalText by value", RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}, `"[REDACTED]"`, true},
+			{"struct with pointer MarshalText as map value", map[string]RefreshToken{"r": {Raw: secret, credentialTextKey: ptrTextCred}}, `{"r":"[REDACTED]"}`, true},
+			{"struct with pointer MarshalText as field of value struct", struct{ R RefreshToken }{RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}}, `{"R":"[REDACTED]"}`, true},
+			{"struct with pointer MarshalText as array element", [1]RefreshToken{{Raw: secret, credentialTextKey: ptrTextCred}}, `["[REDACTED]"]`, true},
+			{"struct with pointer MarshalJSON by value", Bearer{Raw: secret, credentialPtrJSON: ptrJSONCred}, `"[REDACTED]"`, true},
+			{"field", struct{ T Token }{secret}, `{"T":"[REDACTED]"}`, true},
+			{"field with credential name and credential type", struct{ Token Token }{secret}, `{"Token":"[REDACTED]"}`, true},
+			{"field with credential name and credential type omitempty", struct {
+				Token Token `json:",omitempty"`
+			}{secret}, `{"Token":"[REDACTED]"}`, true},
+			{"zero field with credential name and credential type omitempty", struct {
+				Token Token `json:",omitempty"`
+			}{}, `{"Token":"[REDACTED]"}`, true},
+			{"field with renamed json tag and credential type", struct {
+				Password Token `json:"pwd"`
+			}{secret}, `{"pwd":"[REDACTED]"}`, true},
+			{"field with renamed json tag and credential type omitempty", struct {
+				Password Token `json:"pwd,omitempty"`
+			}{secret}, `{"pwd":"[REDACTED]"}`, true},
+			{"field named for credential of neutral type", struct{ Token string }{secret}, `{"Token":"[REDACTED]"}`, false},
+			{"slice element", []Token{secret}, `["[REDACTED]"]`, true},
+			{"map value", map[string]any{"t": Token(secret)}, `{"t":"[REDACTED]"}`, true},
+			// Instantiated generic credential types are redacted from their
+			// base type name, whatever their type arguments.
+			{"generic string", apiKeyString[int](secret), `"[REDACTED]"`, true},
+			{"generic field", struct{ K apiKeyString[int] }{secret}, `{"K":"[REDACTED]"}`, true},
+			{"generic slice element", []apiKeyString[int]{secret}, `["[REDACTED]"]`, true},
+			{"generic struct with value MarshalText", apiKeySecret[string]{Raw: secret, credentialTextValueKey: valTextCred}, `"[REDACTED]"`, true},
+			{"generic struct with pointer MarshalText by value", authCode[string]{Raw: secret, credentialTextKey: ptrTextCred}, `"[REDACTED]"`, true},
+			{"generic struct with pointer MarshalText by pointer", &authCode[string]{Raw: secret, credentialTextKey: ptrTextCred}, `"[REDACTED]"`, true},
+			// A struct without a marshaler is written by its exported
+			// fields, each redacted by its own name.
+			{"struct without a marshaler", ClientSecret{ID: "id-1", raw: secret}, `{"id":"id-1"}`, false},
+			{"generic struct without a marshaler", codeVerifier[string]{ID: "id-1", raw: secret}, `{"id":"id-1"}`, false},
+			// A struct that promotes the marshaler of an embedded credential
+			// writes the credential, whatever the struct is named and whether
+			// the outer struct is addressable or not.
+			{"promoted MarshalJSON", struct {
+				AccessToken
+				Note string
+			}{AccessToken{credentialJSON{secret}}, "n"}, `"[REDACTED]"`, true},
+			{"promoted MarshalJSON through two levels", struct{ Middle }{Middle{AccessToken{credentialJSON{secret}}}}, `"[REDACTED]"`, true},
+			{"promoted pointer MarshalText by value", struct {
+				RefreshToken
+				Note string
+			}{RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}, "n"}, `"[REDACTED]"`, true},
+			{"promoted pointer MarshalText through two levels by value", struct {
+				MiddleText
+				Note string
+			}{MiddleText{RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}}, "n"}, `"[REDACTED]"`, true},
+			{"promoted pointer MarshalJSON by value", struct {
+				Bearer
+				Note string
+			}{Bearer{Raw: secret, credentialPtrJSON: ptrJSONCred}, "n"}, `"[REDACTED]"`, true},
+			{"promoted MarshalText through a pointer", struct{ *RefreshToken }{&RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}}, `"[REDACTED]"`, true},
+			{"promoted MarshalText through two levels via pointer", struct{ *MiddleText }{&MiddleText{RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}}}, `"[REDACTED]"`, true},
+			{"promoted generic value MarshalText", struct {
+				apiKeySecret[string]
+				Note string
+			}{apiKeySecret[string]{Raw: secret, credentialTextValueKey: valTextCred}, "n"}, `"[REDACTED]"`, true},
+			{"promoted generic pointer MarshalText by value", struct {
+				authCode[string]
+				Note string
+			}{authCode[string]{Raw: secret, credentialTextKey: ptrTextCred}, "n"}, `"[REDACTED]"`, true},
+			{"embedded json.Marshaler", struct{ json.Marshaler }{AccessToken{credentialJSON{secret}}}, `"[REDACTED]"`, true},
+			{"embedded json.Marshaler through two levels", struct{ MiddleIface }{MiddleIface{AccessToken{credentialJSON{secret}}}}, `"[REDACTED]"`, true},
+			{"nil embedded encoding.TextMarshaler", struct{ encoding.TextMarshaler }{}, `"[REDACTED]"`, true},
+			// An embedded credential struct whose marshaler is shadowed or
+			// ambiguous on the outer struct must not promote its exported
+			// fields when walkStruct falls back to field walking.
+			{"embedded credential marshaler shadowed by field", struct {
+				RefreshToken
+				MarshalText int
+			}{RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}, 1}, `{"MarshalText":1,"RefreshToken":"[REDACTED]"}`, true},
+			{"embedded pointer credential marshaler ambiguous with sibling", struct {
+				*RefreshToken
+				labelStruct
+			}{&RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}, labelStruct{Label: "kept"}}, `{"Label":"kept","RefreshToken":"[REDACTED]"}`, true},
+			{"nil embedded pointer credential marshaler ambiguous with sibling", struct {
+				*RefreshToken
+				labelStruct
+			}{nil, labelStruct{Label: "kept"}}, `{"Label":"kept","RefreshToken":"[REDACTED]"}`, true},
+			{"unexported embedded credential marshaler shadowed by field", struct {
+				authCode[string]
+				MarshalText int
+			}{authCode[string]{Raw: secret, credentialTextKey: ptrTextCred}, 1}, `{"MarshalText":1}`, true},
+			// Values of types with neutral names are written as before.
+			{"neutral string", Label("kept"), `"kept"`, false},
+			{"neutral generic string", neutralGeneric[int]("kept"), `"kept"`, false},
+			{"neutral pointer", Pointer(&label), `"kept"`, false},
+			{"neutral interface", struct{ V Value }{"kept"}, `{"V":"kept"}`, false},
+			{"embedded neutral marshaler", struct{ time.Time }{time.Unix(0, 0).UTC()}, `"1970-01-01T00:00:00Z"`, false},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				got, truncated, err := SmartTruncate(tt.in, 1000)
+				if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
+					t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+				}
+				if marshalerCalled.Load() {
+					t.Errorf("SmartTruncate(%T) called a credential marshaler", tt.in)
+				}
+			})
+		}
+	})
+
+	t.Run("values with redaction off", func(t *testing.T) {
+		var offCalled atomic.Bool
+		for _, in := range []any{
+			Token(secret),
+			apiKeyString[int](secret),
+			key,
+			struct{ C Credential }{secret},
+			[]Credential{secret},
+			AccessToken{credentialJSON{secret}},
+			&RefreshToken{Raw: "id", credentialTextKey: credentialTextKey{&offCalled, secret}},
+			apiKeySecret[string]{Raw: "id", credentialTextValueKey: credentialTextValueKey{&offCalled, secret}},
+			struct{ AccessToken }{AccessToken{credentialJSON{secret}}},
+			struct{ Middle }{Middle{AccessToken{credentialJSON{secret}}}},
+			struct {
+				RefreshToken
+				MarshalText int
+			}{RefreshToken{Raw: secret, credentialTextKey: credentialTextKey{&offCalled, secret}}, 1},
+		} {
+			if got, _, err := smartTruncate(in, 1000, false); err != nil || !strings.Contains(string(got), secret) {
+				t.Errorf("smartTruncate(%T, redact off) = (%s, %v), want it to hold %q", in, got, err, secret)
+			}
+		}
+		for _, tt := range []struct {
+			in   any
+			want string
+		}{
+			{APIKey(nil), `null`},
+			{(*Token)(nil), `null`},
+			{struct{ P *Token }{}, `{"P":null}`},
+			{struct{ C Credential }{}, `{"C":null}`},
+			{[]Credential{nil}, `[null]`},
+		} {
+			if got, truncated, err := smartTruncate(tt.in, 1000, false); err != nil || string(got) != tt.want || truncated {
+				t.Errorf("smartTruncate(%T, redact off) = (%s, %v, %v), want (%s, false, nil)", tt.in, got, truncated, err, tt.want)
+			}
+		}
+	})
+
+	t.Run("redacted values count against the node budget", func(t *testing.T) {
+		userinfo := url.UserPassword("user", secret)
+		fillAPIKeys := func(n int) any {
+			s := make([]APIKey, n)
+			for i := range s {
+				s[i] = key
+			}
+			return s
+		}
+		fillTokens := func(n int) any {
+			s := make([]Token, n)
+			for i := range s {
+				s[i] = Token(secret)
+			}
+			return s
+		}
+		fillAccessTokens := func(n int) any {
+			s := make([]AccessToken, n)
+			for i := range s {
+				s[i] = AccessToken{credentialJSON{secret}}
+			}
+			return s
+		}
+		fillUserinfos := func(n int) any {
+			s := make([]*url.Userinfo, n)
+			for i := range s {
+				s[i] = userinfo
+			}
+			return s
+		}
+
+		for _, tt := range []struct {
+			name string
+			make func(int) any
+		}{
+			{"[]APIKey", fillAPIKeys},
+			{"[]Token", fillTokens},
+			{"[]AccessToken", fillAccessTokens},
+			{"[]*url.Userinfo", fillUserinfos},
+		} {
+			t.Run(tt.name+"/over_budget", func(t *testing.T) {
+				got, truncated, err := SmartTruncate(tt.make(maxSanitizeNodes+10), 100)
+				if err != nil || !truncated {
+					t.Fatalf("SmartTruncate(%s over budget) = (truncated %v, %v), want truncated", tt.name, truncated, err)
+				}
+				var parsed []any
+				if err := json.Unmarshal(got, &parsed); err != nil {
+					t.Fatalf("json.Unmarshal(%s over budget) error: %v", tt.name, err)
+				}
+				if len(parsed) != maxSanitizeNodes || parsed[len(parsed)-1] != sanitizeBudgetPlaceholder {
+					t.Errorf("SmartTruncate(%s over budget) wrote %d items ending in %v, want %d ending in %s", tt.name, len(parsed), parsed[len(parsed)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
+				}
+			})
+
+			t.Run(tt.name+"/exact_budget", func(t *testing.T) {
+				const wantLen = maxSanitizeNodes - 1
+				got, truncated, err := SmartTruncate(tt.make(wantLen), 100)
+				if err != nil || !truncated {
+					t.Fatalf("SmartTruncate(%s exact budget) = (truncated %v, %v), want truncated", tt.name, truncated, err)
+				}
+				var parsed []any
+				if err := json.Unmarshal(got, &parsed); err != nil {
+					t.Fatalf("json.Unmarshal(%s exact budget) error: %v", tt.name, err)
+				}
+				if len(parsed) != wantLen || parsed[len(parsed)-1] != redactedValue {
+					t.Errorf("SmartTruncate(%s exact budget) wrote %d items ending in %v, want %d ending in %s", tt.name, len(parsed), parsed[len(parsed)-1], wantLen, redactedValue)
+				}
+			})
+		}
+
+		t.Run("map[Token]string/over_budget", func(t *testing.T) {
+			m := make(map[Token]string, maxSanitizeNodes+10)
+			for i := range maxSanitizeNodes + 10 {
+				m[Token(fmt.Sprintf("%s_%d", secret, i))] = "v"
+			}
+			got, truncated, err := SmartTruncate(m, 100)
+			if err != nil || !truncated {
+				t.Fatalf("SmartTruncate(map[Token]string) = (truncated %v, %v), want truncated", truncated, err)
+			}
+			var parsed map[string]any
+			if err := json.Unmarshal(got, &parsed); err != nil {
+				t.Fatalf("json.Unmarshal(map[Token]string) error: %v", err)
+			}
+			if parsed[sanitizeBudgetPlaceholder] != sanitizeBudgetPlaceholder {
+				t.Errorf("SmartTruncate(map[Token]string) = %v, want %s entry", parsed, sanitizeBudgetPlaceholder)
+			}
+		})
+
+		t.Run("map[Token]*self/over_budget", func(t *testing.T) {
+			// Values are skipped without walking when the credential key
+			// redacts whole; charging both key and skipped value stops the loop
+			// at maxSanitizeNodes.
+			type selfHolder struct {
+				M map[Token]*selfHolder
+			}
+			h := &selfHolder{M: make(map[Token]*selfHolder, maxSanitizeNodes+10)}
+			for i := range maxSanitizeNodes + 10 {
+				h.M[Token(fmt.Sprintf("%s_%d", secret, i))] = h
+			}
+			got, truncated, err := SmartTruncate(h, 100)
+			if err != nil || !truncated {
+				t.Fatalf("SmartTruncate(self-referential map over budget) = (truncated %v, %v), want truncated", truncated, err)
+			}
+			var parsed struct {
+				M map[string]any
+			}
+			if err := json.Unmarshal(got, &parsed); err != nil {
+				t.Fatalf("json.Unmarshal(self-referential map over budget) error: %v", err)
+			}
+			if parsed.M[sanitizeBudgetPlaceholder] != sanitizeBudgetPlaceholder || parsed.M[redactedValue] != redactedValue {
+				t.Errorf("SmartTruncate(self-referential map over budget) M = %v, want %s and %s entries", parsed.M, redactedValue, sanitizeBudgetPlaceholder)
+			}
+		})
+
+		t.Run("map[Token]*self/exact_budget", func(t *testing.T) {
+			type selfHolder struct {
+				M map[Token]*selfHolder
+			}
+			// 1 node for selfHolder + 1 node for M + 2 nodes per whole-redacted entry (key + skipped value).
+			const wantKeys = (maxSanitizeNodes - 2) / 2
+			h := &selfHolder{M: make(map[Token]*selfHolder, wantKeys)}
+			for i := range wantKeys {
+				h.M[Token(fmt.Sprintf("%s_%d", secret, i))] = h
+			}
+			got, truncated, err := SmartTruncate(h, 100)
+			if err != nil || !truncated {
+				t.Fatalf("SmartTruncate(self-referential map exact budget) = (truncated %v, %v), want truncated", truncated, err)
+			}
+			var parsed struct {
+				M map[string]any
+			}
+			if err := json.Unmarshal(got, &parsed); err != nil {
+				t.Fatalf("json.Unmarshal(self-referential map exact budget) error: %v", err)
+			}
+			if len(parsed.M) != 1 || parsed.M[redactedValue] != redactedValue {
+				t.Errorf("SmartTruncate(self-referential map exact budget) M = %v, want only %s", parsed.M, redactedValue)
+			}
+
+			// One extra entry pushes the walk past maxSanitizeNodes.
+			h.M[Token(fmt.Sprintf("%s_%d", secret, wantKeys))] = h
+			gotOver, truncatedOver, err := SmartTruncate(h, 100)
+			if err != nil || !truncatedOver {
+				t.Fatalf("SmartTruncate(self-referential map exact+1 budget) = (truncated %v, %v), want truncated", truncatedOver, err)
+			}
+			parsed.M = nil
+			if err := json.Unmarshal(gotOver, &parsed); err != nil {
+				t.Fatalf("json.Unmarshal(self-referential map exact+1 budget) error: %v", err)
+			}
+			if parsed.M[sanitizeBudgetPlaceholder] != sanitizeBudgetPlaceholder || parsed.M[redactedValue] != redactedValue {
+				t.Errorf("SmartTruncate(self-referential map exact+1 budget) M = %v, want %s and %s entries", parsed.M, redactedValue, sanitizeBudgetPlaceholder)
+			}
+		})
+
+		t.Run("map[Token]string/two_node_budget", func(t *testing.T) {
+			// With 2 nodes total, node 1 is the map and node 2 is the whole-redacted
+			// key, so the skipped value exhausts the budget and writes the budget
+			// placeholder instead of [REDACTED].
+			s2 := sanitizer{
+				maxLength: 100,
+				redact:    true,
+				budget:    &nodeBudget{remaining: 2},
+				visiting:  make(map[visitKey]struct{}),
+			}
+			out2, truncated2 := s2.walk(reflect.ValueOf(map[Token]string{"key": "value"}), 0)
+			got2, err := json.Marshal(out2)
+			if want2 := `{"` + sanitizeBudgetPlaceholder + `":"` + sanitizeBudgetPlaceholder + `"}`; err != nil || string(got2) != want2 || !truncated2 || s2.budget.remaining != 0 {
+				t.Errorf("walk(map[Token]string, budget=2) = (%s, truncated=%v, remaining=%d, err=%v), want (%s, true, 0, nil)", got2, truncated2, s2.budget.remaining, err, want2)
+			}
+
+			// With 3 nodes total, the map, key and skipped value fit exactly.
+			s3 := sanitizer{
+				maxLength: 100,
+				redact:    true,
+				budget:    &nodeBudget{remaining: 3},
+				visiting:  make(map[visitKey]struct{}),
+			}
+			out3, truncated3 := s3.walk(reflect.ValueOf(map[Token]string{"key": "value"}), 0)
+			got3, err := json.Marshal(out3)
+			if want3 := `{"[REDACTED]":"[REDACTED]"}`; err != nil || string(got3) != want3 || !truncated3 || s3.budget.remaining != 0 {
+				t.Errorf("walk(map[Token]string, budget=3) = (%s, truncated=%v, remaining=%d, err=%v), want (%s, true, 0, nil)", got3, truncated3, s3.budget.remaining, err, want3)
+			}
+		})
+
+		t.Run("pointers_at_max_depth/over_budget", func(t *testing.T) {
+			n := 1
+			ptrs := make([]*int, maxSanitizeNodes+10)
+			for i := range ptrs {
+				ptrs[i] = &n
+			}
+			var nested any = ptrs
+			for range maxSanitizeDepth - 1 {
+				nested = []any{nested}
+			}
+			got, truncated, err := SmartTruncate(nested, 100)
+			if err != nil || !truncated {
+				t.Fatalf("SmartTruncate(pointers at max depth) = (truncated %v, %v), want truncated", truncated, err)
+			}
+			var cur any
+			if err := json.Unmarshal(got, &cur); err != nil {
+				t.Fatalf("json.Unmarshal(pointers at max depth) error: %v", err)
+			}
+			for range maxSanitizeDepth - 1 {
+				wrapper, ok := cur.([]any)
+				if !ok || len(wrapper) != 1 {
+					t.Fatalf("unexpected wrapper shape: %T", cur)
+				}
+				cur = wrapper[0]
+			}
+			inner, ok := cur.([]any)
+			if !ok {
+				t.Fatalf("innermost value = %T, want []any", cur)
+			}
+			const wantInnerLen = maxSanitizeNodes - maxSanitizeDepth + 1
+			if len(inner) != wantInnerLen || inner[len(inner)-1] != sanitizeBudgetPlaceholder {
+				t.Errorf("SmartTruncate(pointers at max depth) wrote %d items ending in %v, want %d ending in %s", len(inner), inner[len(inner)-1], wantInnerLen, sanitizeBudgetPlaceholder)
+			}
+		})
+
+		t.Run("nil_pointer_at_max_depth", func(t *testing.T) {
+			nestAtMaxDepth := func(leaf any) any {
+				cur := leaf
+				for range maxSanitizeDepth {
+					cur = []any{cur}
+				}
+				return cur
+			}
+			unwrap := func(t *testing.T, raw []byte) any {
+				t.Helper()
+				var cur any
+				if err := json.Unmarshal(raw, &cur); err != nil {
+					t.Fatalf("json.Unmarshal error: %v", err)
+				}
+				for range maxSanitizeDepth {
+					wrapper, ok := cur.([]any)
+					if !ok || len(wrapper) != 1 {
+						t.Fatalf("unexpected wrapper shape: %T", cur)
+					}
+					cur = wrapper[0]
+				}
+				return cur
+			}
+			// A nil neutral pointer at max depth writes null without marking
+			// the row truncated, matching a nil interface at the same depth.
+			got, truncated, err := SmartTruncate(nestAtMaxDepth((*int)(nil)), 100)
+			if err != nil || truncated {
+				t.Fatalf("SmartTruncate(nil *int at max depth) = (truncated %v, %v), want (false, nil)", truncated, err)
+			}
+			if leaf := unwrap(t, got); leaf != nil {
+				t.Errorf("SmartTruncate(nil *int at max depth) leaf = %v, want nil", leaf)
+			}
+			// Credential pointers at max depth still redact from their static
+			// type without calling IsNil.
+			for _, credNil := range []any{APIKey(nil), (*Token)(nil), (*url.Userinfo)(nil)} {
+				got, truncated, err = SmartTruncate(nestAtMaxDepth(credNil), 100)
+				if err != nil || !truncated {
+					t.Fatalf("SmartTruncate(%T at max depth) = (truncated %v, %v), want (true, nil)", credNil, truncated, err)
+				}
+				if leaf := unwrap(t, got); leaf != redactedValue {
+					t.Errorf("SmartTruncate(%T at max depth) leaf = %v, want %s", credNil, leaf, redactedValue)
+				}
+			}
+		})
+	})
+
+	t.Run("map keys", func(t *testing.T) {
+		type (
+			SessionToken struct{ credentialTextKey }
+			IDToken      struct{ credentialTextValueKey }
+		)
+		checkCredentialNamed(t, true, reflect.TypeFor[SessionToken](), reflect.TypeFor[IDToken]())
+		checkCredentialNamed(t, false, reflect.TypeFor[selfPtr](), reflect.TypeFor[mutPtrA](), reflect.TypeFor[mutPtrB]())
+		var keyCalled, valCalled atomic.Bool
+		ptrKey := credentialTextKey{&keyCalled, secret}
+		valueKey := credentialTextValueKey{&keyCalled, secret}
+		pwdValueKey := credentialTextValueKey{&keyCalled, "password"}
+		valProbe := labelValueProbe{&valCalled, secret}
+		tokPtr := &tok
+		for _, tt := range []struct {
+			name      string
+			in        any
+			want      string
+			wantTrunc bool
+		}{
+			{"string key", map[Token]string{secret: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"credential-named key holding sensitive key text", map[Token]string{"password": secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"defined credential interface key holding neutral string", map[Credential]string{"kept": secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"defined credential interface key holding neutral defined string", map[Credential]string{Label("kept"): secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"nil defined credential interface key", map[Credential]string{nil: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"key in an interface", map[any]string{Token("access_token"): secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"pointer key", map[*SessionToken]string{{ptrKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"nil pointer key", map[*SessionToken]string{nil: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"double pointer to credential key", map[**Token]string{&tokPtr: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"nil double pointer to credential key", map[**Token]string{nil: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"struct key", map[IDToken]string{{valueKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"struct key whose MarshalText returns sensitive key text", map[IDToken]string{{pwdValueKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"struct key in an interface", map[any]string{IDToken{valueKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			// A key whose method is on its pointer type, which a map key is
+			// not written with, is redacted rather than left unsupported.
+			{"struct key with a pointer method", map[SessionToken]string{{ptrKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			// Neither the key's nor the value's marshaler is invoked when the
+			// key is redacted whole from its type.
+			{"string key with marshaler value", map[Token]labelValueProbe{"password": valProbe}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"struct key with marshaler value", map[IDToken]labelValueProbe{{valueKey}: valProbe}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"generic string key", map[apiKeyString[int]]string{secret: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"generic struct key", map[apiKeySecret[int]]string{{Raw: 1, credentialTextValueKey: valueKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"generic struct key with a pointer method", map[authCode[int]]string{{Raw: 1, credentialTextKey: ptrKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"multiple credential keys", map[Token]string{"a": "v1", "b": "v2"}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			// Recursive pointer map-key types terminate and format as
+			// unsupported keys rather than spinning in static pointer peeling.
+			{"recursive pointer key", map[selfPtr]string{nil: "v"}, `{"[UNSUPPORTED_KEY]":"v"}`, true},
+			{"recursive pointer key in an interface", map[any]string{selfPtr(nil): "v"}, `{"[UNSUPPORTED_KEY]":"v"}`, true},
+			{"mutually recursive pointer key", map[mutPtrA]string{nil: "v"}, `{"[UNSUPPORTED_KEY]":"v"}`, true},
+			{"mutually recursive pointer key in an interface", map[any]string{mutPtrA(nil): "v"}, `{"[UNSUPPORTED_KEY]":"v"}`, true},
+			// Neutral keys that format to the same string keep their value
+			// only if they agree on it, whatever the order of the map.
+			{"colliding neutral keys that agree", map[Label]string{"a\xff": "v", "a\xfe": "v"}, "{\"a\uFFFD\":\"v\"}", false},
+			{"colliding neutral keys that disagree", map[Label]string{"a\xff": "v1", "a\xfe": "v2"}, "{\"a\uFFFD\":\"[REDACTED]\"}", true},
+			{"neutral key", map[Label]string{"kept": "v"}, `{"kept":"v"}`, false},
+			{"nil key in an interface", map[any]string{nil: "v"}, `{"null":"v"}`, false},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				got, truncated, err := SmartTruncate(tt.in, 1000)
+				if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
+					t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+				}
+				if keyCalled.Load() {
+					t.Errorf("SmartTruncate(%T) called the MarshalText method of a key", tt.in)
+				}
+				if valCalled.Load() {
+					t.Errorf("SmartTruncate(%T) called the MarshalJSON method of a redacted key's value", tt.in)
+				}
+			})
+		}
+		// Redaction off writes a key with its method or dynamic interface value.
+		got, _, err := smartTruncate(map[*SessionToken]string{{ptrKey}: "v"}, 1000, false)
+		if want := `{"` + secret + `":"v"}`; err != nil || string(got) != want {
+			t.Errorf("smartTruncate(map[*SessionToken]string, redact off) = (%s, %v), want %s", got, err, want)
+		}
+		got, _, err = smartTruncate(map[Credential]string{"kept": "v"}, 1000, false)
+		if want := `{"kept":"v"}`; err != nil || string(got) != want {
+			t.Errorf("smartTruncate(map[Credential]string, redact off) = (%s, %v), want %s", got, err, want)
+		}
+		got, _, err = smartTruncate(map[Credential]string{nil: "v"}, 1000, false)
+		if want := `{"null":"v"}`; err != nil || string(got) != want {
+			t.Errorf("smartTruncate(map[Credential]string nil key, redact off) = (%s, %v), want %s", got, err, want)
+		}
+	})
+
+	t.Run("plain credential struct without marshaler", func(t *testing.T) {
+		// A credential-named struct without a MarshalJSON or MarshalText method is
+		// walked field by field rather than redacted whole: an exported field with
+		// a neutral name and type is emitted unless its own field name, static
+		// type, or string content pattern triggers redaction.
+		type outerToken = Token
+		type (
+			Token struct {
+				Value     string
+				ExpiresIn int
+			}
+			PrivateKey struct {
+				AccessToken string
+				ExpiresIn   int
+			}
+			Signature struct {
+				Value     outerToken
+				ExpiresIn int
+			}
+		)
+		checkCredentialNamed(t, true,
+			reflect.TypeFor[Token](), reflect.TypeFor[PrivateKey](), reflect.TypeFor[Signature]())
+		for _, tt := range []struct {
+			name      string
+			in        any
+			want      string
+			wantTrunc bool
+		}{
+			{
+				name:      "neutral exported field with neutral value is emitted",
+				in:        Token{Value: "opaque-handle", ExpiresIn: 3600},
+				want:      `{"ExpiresIn":3600,"Value":"opaque-handle"}`,
+				wantTrunc: false,
+			},
+			{
+				name:      "neutral exported field matching content pattern is scrubbed",
+				in:        Token{Value: "Bearer " + secret, ExpiresIn: 3600},
+				want:      `{"ExpiresIn":3600,"Value":"Bearer [REDACTED]"}`,
+				wantTrunc: true,
+			},
+			{
+				name:      "sensitively named exported field is redacted by name",
+				in:        PrivateKey{AccessToken: secret, ExpiresIn: 3600},
+				want:      `{"AccessToken":"[REDACTED]","ExpiresIn":3600}`,
+				wantTrunc: false,
+			},
+			{
+				name:      "credential-typed exported field is redacted by static type",
+				in:        Signature{Value: outerToken(secret), ExpiresIn: 3600},
+				want:      `{"ExpiresIn":3600,"Value":"[REDACTED]"}`,
+				wantTrunc: true,
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				got, truncated, err := SmartTruncate(tt.in, 1000)
+				if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
+					t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+				}
+			})
+		}
+	})
+
+	t.Run("url.Userinfo", func(t *testing.T) {
+		type definedUserinfo url.Userinfo
+		checkCredentialNamed(t, false, reflect.TypeFor[url.Userinfo](), reflect.TypeFor[definedUserinfo]())
+		u := url.UserPassword("alice", secret)
+		uPtr := u
+		for _, tt := range []struct {
+			name         string
+			in           any
+			want         string // with redaction on
+			wantTrunc    bool
+			wantOff      string // with redaction off
+			wantOffTrunc bool
+		}{
+			{"with a password", u, `"[REDACTED]"`, true, `{}`, false},
+			{"with a password only", url.UserPassword("", secret), `"[REDACTED]"`, true, `{}`, false},
+			{"with an empty password set", url.UserPassword("", ""), `"[REDACTED]"`, true, `{}`, false},
+			{"with a user name only", url.User(secret), `"[REDACTED]"`, true, `{}`, false},
+			{"empty", url.User(""), `"[REDACTED]"`, true, `{}`, false},
+			{"zero value", url.Userinfo{}, `"[REDACTED]"`, true, `{}`, false},
+			{"nil pointer", (*url.Userinfo)(nil), `"[REDACTED]"`, true, `null`, false},
+			{"double pointer", &uPtr, `"[REDACTED]"`, true, `{}`, false},
+			{"value in a field", struct{ U url.Userinfo }{*u}, `{"U":"[REDACTED]"}`, true, `{"U":{}}`, false},
+			{"zero value in an omitzero field", struct {
+				U url.Userinfo `json:"u,omitzero"`
+			}{}, `{"u":"[REDACTED]"}`, true, `{}`, false},
+			{"nil pointer in an omitempty field", struct {
+				U *url.Userinfo `json:"u,omitempty"`
+			}{}, `{"u":"[REDACTED]"}`, true, `{}`, false},
+			{"embedded value", struct {
+				url.Userinfo
+				Host string
+			}{*u, "example.com"}, `{"Host":"example.com","Userinfo":"[REDACTED]"}`, true, `{"Host":"example.com"}`, false},
+			{"nil embedded pointer", struct {
+				*url.Userinfo
+				Host string
+			}{nil, "example.com"}, `{"Host":"example.com","Userinfo":"[REDACTED]"}`, true, `{"Host":"example.com"}`, false},
+			{"map key", map[url.Userinfo]string{*u: secret}, `{"[REDACTED]":"[REDACTED]"}`, true, `{"[UNSUPPORTED_KEY]":"` + secret + `"}`, true},
+			{"nil pointer map key", map[*url.Userinfo]string{nil: secret}, `{"[REDACTED]":"[REDACTED]"}`, true, `{"[UNSUPPORTED_KEY]":"` + secret + `"}`, true},
+			{"defined type over url.Userinfo", definedUserinfo(*u), `"[REDACTED]"`, true, `{}`, false},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				got, truncated, err := SmartTruncate(tt.in, 1000)
+				if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
+					t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+				}
+				got, truncated, err = smartTruncate(tt.in, 1000, false)
+				if err != nil || string(got) != tt.wantOff || truncated != tt.wantOffTrunc {
+					t.Errorf("smartTruncate(%T, redact off) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.wantOff, tt.wantOffTrunc)
+				}
+			})
+		}
+
+		// A url.URL holds User *url.Userinfo, which redacts whole whether nil
+		// or populated while keeping the non-sensitive URL fields intact.
+		for _, in := range []*url.URL{
+			{Scheme: "https", Host: "example.com", Path: "/v1"},
+			{Scheme: "https", User: u, Host: "example.com", Path: "/v1"},
+		} {
+			got, truncated, err := SmartTruncate(in, 1000)
+			if err != nil || !truncated {
+				t.Fatalf("SmartTruncate(*url.URL) = (%s, %v, %v), want truncated", got, truncated, err)
+			}
+			var parsed map[string]any
+			if err := json.Unmarshal(got, &parsed); err != nil {
+				t.Fatalf("json.Unmarshal(%s) error: %v", got, err)
+			}
+			if parsed["User"] != redactedValue || parsed["Host"] != "example.com" || parsed["Path"] != "/v1" {
+				t.Errorf("SmartTruncate(*url.URL) = %v, want User=%q, Host=example.com, Path=/v1", parsed, redactedValue)
+			}
+		}
+	})
+
+	t.Run("opaque errors stay empty objects", func(t *testing.T) {
+		for _, redact := range []bool{true, false} {
+			got, truncated, err := smartTruncate(errors.New(secret), 1000, redact)
+			if err != nil || string(got) != `{}` || truncated {
+				t.Errorf("smartTruncate(errors.New, redact=%v) = (%s, %v, %v), want ({}, false, nil)", redact, got, truncated, err)
+			}
+		}
+	})
+
+	t.Run("implementer boxes the address of an addressable value", func(t *testing.T) {
+		// Boxing the value itself would copy it, which reads its count
+		// while another goroutine may update it.
+		h := &struct{ M countingMarshaler }{}
+		runWhileUpdating(func() {
+			atomic.AddUint64(&h.M.n, 1)
+		}, func() {
+			for range 200 {
+				m, ok := implementer(reflect.ValueOf(h).Elem().Field(0), jsonMarshalerType)
+				if _, isPointer := m.(*countingMarshaler); !ok || !isPointer {
+					t.Fatalf("implementer(countingMarshaler field, json.Marshaler) = (%T, %v), want (*countingMarshaler, true)", m, ok)
+				}
+			}
+		})
+	})
+}
+
+// TestJSONFormatter_OmitEmptyAndOmitZeroGuards checks that, under redaction,
+// omitempty and omitzero do not read a credential to tell whether it is
+// empty: a field of url.Userinfo (or a pointer to it) or of a type named for
+// a credential, or a field that is not a string and whose Go name or json
+// name is named for one, is written as [REDACTED], empty or not, and an
+// omitzero field that holds such a value in an array element or a struct
+// field at any depth is written, zero or not. Empty string fields named for
+// credentials, fields that hold no credential, and every field with redaction
+// off keep their omit options.
+func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET_9753"
+	type (
+		Token        uint64
+		APIKey       *string
+		Credentials  map[string]string
+		Credential   any
+		AccessToken  struct{ credentialJSON }
+		ClientSecret struct {
+			ID  string `json:"id"`
+			raw uint64
+		}
+	)
+	checkCredentialNamed(t, true,
+		reflect.TypeFor[Token](), reflect.TypeFor[APIKey](), reflect.TypeFor[Credentials](),
+		reflect.TypeFor[Credential](), reflect.TypeFor[AccessToken](), reflect.TypeFor[ClientSecret]())
+	s := secret
+
+	t.Run("types named for credentials", func(t *testing.T) {
+		var called atomic.Bool
+		type tagged struct {
+			T  Token                            `json:"t,omitempty"`
+			K  APIKey                           `json:"k,omitempty"`
+			M  Credentials                      `json:"m,omitzero"`
+			C  Credential                       `json:"c,omitempty,omitzero"`
+			A  AccessToken                      `json:"a,omitzero"`
+			G  apiKeyString[int]                `json:"g,omitzero"`
+			GA authCode[int]                    `json:"ga,omitzero"`
+			E  struct{ encoding.TextMarshaler } `json:"e,omitzero"`
+			// Fields that hold no credential keep their omit options.
+			N uint64 `json:"n,omitempty"`
+			S string `json:"s,omitzero"`
+		}
+		const want = `{"a":"[REDACTED]","c":"[REDACTED]","e":"[REDACTED]","g":"[REDACTED]","ga":"[REDACTED]","k":"[REDACTED]","m":"[REDACTED]","t":"[REDACTED]"}`
+		for _, in := range []any{
+			tagged{},
+			&tagged{},
+			tagged{
+				T:  7,
+				K:  &s,
+				M:  Credentials{"user": secret},
+				C:  secret,
+				A:  AccessToken{credentialJSON{secret}},
+				G:  apiKeyString[int](secret),
+				GA: authCode[int]{Raw: 1, credentialTextKey: credentialTextKey{&called, secret}},
+				E:  struct{ encoding.TextMarshaler }{credentialText{secret}},
+			},
+		} {
+			got, truncated, err := SmartTruncate(in, 1000)
+			if err != nil || string(got) != want || !truncated {
+				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, true, nil)", in, got, truncated, err, want)
+			}
+			if called.Load() {
+				t.Errorf("SmartTruncate(%T) called generic credential marshaler", in)
+			}
+		}
+		// Redaction off omits the empty fields as encoding/json does.
+		if got, _, err := smartTruncate(tagged{}, 1000, false); err != nil || string(got) != `{}` {
+			t.Errorf("smartTruncate(tagged{}, redact off) = (%s, %v), want {}", got, err)
+		}
+	})
+
+	t.Run("fields named for credentials", func(t *testing.T) {
+		// The Go name of a field names a credential even when its json tag
+		// names a counter or a cursor.
+		type cursors struct {
+			Password string `json:"next_page_token"`
+			APIKey   string `json:"prompt_token_count,omitempty"`
+			Token    uint64 `json:"token_count,omitempty"`
+			Secret   uint64 `json:"secret_count,omitzero"`
+		}
+		type metadata struct {
+			NextPageToken    string `json:"next_page_token"`
+			PromptTokenCount uint64 `json:"prompt_token_count,omitempty"`
+			TokenCount       uint64 `json:"token_count,omitzero"`
+		}
+		// A string field keeps its omit options, as in encoding/json: only
+		// its length is read.
+		type texts struct {
+			Token    string `json:"token,omitempty"`
+			Password string `json:",omitzero"`
+			Note     string `json:"note,omitempty"`
+		}
+		for _, tt := range []struct {
+			name string
+			in   any
+			want string
+		}{
+			{"credential fields with metadata tags", cursors{Password: secret, APIKey: secret, Token: 7, Secret: 8}, `{"next_page_token":"[REDACTED]","prompt_token_count":"[REDACTED]","secret_count":"[REDACTED]","token_count":"[REDACTED]"}`},
+			{"zero credential fields with metadata tags", cursors{}, `{"next_page_token":"[REDACTED]","secret_count":"[REDACTED]","token_count":"[REDACTED]"}`},
+			{"nested credential fields", []struct{ Inner cursors }{{cursors{Password: secret}}}, `[{"Inner":{"next_page_token":"[REDACTED]","secret_count":"[REDACTED]","token_count":"[REDACTED]"}}]`},
+			{"metadata fields", metadata{NextPageToken: "c1", PromptTokenCount: 10, TokenCount: 3}, `{"next_page_token":"c1","prompt_token_count":10,"token_count":3}`},
+			{"zero metadata fields", metadata{}, `{"next_page_token":""}`},
+			{"string fields", texts{Token: "a", Password: "b", Note: "n"}, `{"Password":"[REDACTED]","note":"n","token":"[REDACTED]"}`},
+			{"empty string fields", texts{}, `{}`},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				got, _, err := SmartTruncate(tt.in, 1000)
+				if err != nil || string(got) != tt.want {
+					t.Errorf("SmartTruncate(%T) = (%s, %v), want %s", tt.in, got, err, tt.want)
+				}
+			})
+		}
+	})
+
+	t.Run("omitzero fields that hold credentials", func(t *testing.T) {
+		type holder struct {
+			Keys    [2]Token                      `json:"keys,omitzero"`
+			Inner   struct{ T Token }             `json:"inner,omitzero"`
+			Big     struct{ Password [2048]byte } `json:"big,omitzero"`
+			Nested  [1]struct{ Token uint64 }     `json:"nested,omitzero"`
+			Ifaces  [1]struct{ json.Marshaler }   `json:"ifaces,omitzero"`
+			Locked  ClientSecret                  `json:"locked,omitzero"`
+			Guarded struct {
+				mu     sync.Mutex
+				Secret string
+				Note   string
+			} `json:"guarded,omitzero"`
+			GenKeys   [2]apiKeyString[int]      `json:"gen_keys,omitzero"`
+			GenLocked codeVerifier[uint64]      `json:"gen_locked,omitzero"`
+			UserPtr   struct{ U *url.Userinfo } `json:"user_ptr,omitzero"`
+			// Fields that hold no credential keep omitzero.
+			Meta struct{ N uint64 } `json:"meta,omitzero"`
+			When time.Time          `json:"when,omitzero"`
+		}
+		// Over 1024 bytes, IsZero would read the array with code that the
+		// race detector sees, rather than with memequal.
+		if size := reflect.TypeFor[holder]().Field(2).Type.Size(); size <= 1024 {
+			t.Fatalf("size of holder.Big = %d, want more than 1024", size)
+		}
+		set := &holder{
+			Keys:      [2]Token{1, 2},
+			Locked:    ClientSecret{ID: "id-1", raw: 1},
+			GenKeys:   [2]apiKeyString[int]{secret, secret},
+			GenLocked: codeVerifier[uint64]{ID: "id-2", raw: 1},
+			When:      time.Unix(0, 0).UTC(),
+		}
+		set.Inner.T = 1
+		set.Big.Password[0] = 1
+		set.Nested[0].Token = 1
+		set.Guarded.Secret = secret
+		set.Guarded.Note = "n"
+		set.UserPtr.U = url.UserPassword("alice", secret)
+		set.Meta.N = 3
+		for _, tt := range []struct {
+			name string
+			in   *holder
+			want string
+		}{
+			{"zero", &holder{}, `{"big":{"Password":"[REDACTED]"},"gen_keys":["[REDACTED]","[REDACTED]"],"gen_locked":{"id":""},"guarded":{"Note":"","Secret":"[REDACTED]"},"ifaces":["[REDACTED]"],"inner":{"T":"[REDACTED]"},"keys":["[REDACTED]","[REDACTED]"],"locked":{"id":""},"nested":[{"Token":"[REDACTED]"}],"user_ptr":{"U":"[REDACTED]"}}`},
+			{"set", set, `{"big":{"Password":"[REDACTED]"},"gen_keys":["[REDACTED]","[REDACTED]"],"gen_locked":{"id":"id-2"},"guarded":{"Note":"n","Secret":"[REDACTED]"},"ifaces":["[REDACTED]"],"inner":{"T":"[REDACTED]"},"keys":["[REDACTED]","[REDACTED]"],"locked":{"id":"id-1"},"meta":{"N":3},"nested":[{"Token":"[REDACTED]"}],"user_ptr":{"U":"[REDACTED]"},"when":"1970-01-01T00:00:00Z"}`},
+		} {
+			if got, _, err := SmartTruncate(tt.in, 10000); err != nil || string(got) != tt.want {
+				t.Errorf("%s: SmartTruncate(*holder) = (%s, %v), want %s", tt.name, got, err, tt.want)
+			}
+		}
+		// Redaction off omits the zero fields as encoding/json does.
+		want, err := json.Marshal(&holder{})
+		if err != nil {
+			t.Fatalf("json.Marshal(*holder) error: %v", err)
+		}
+		if got, _, err := smartTruncate(&holder{}, 10000, false); err != nil || string(got) != string(want) {
+			t.Errorf("smartTruncate(*holder, redact off) = (%s, %v), want %s", got, err, want)
+		}
+	})
+}
+
+// TestJSONFormatter_ConcurrentCredentialStructNoRace checks that, under
+// redaction, SmartTruncate reads none of the credentials of a struct while
+// another goroutine updates them atomically or under a lock: neither a field
+// of url.Userinfo or of a type named for a credential (including untagged
+// named or unnamed pointer fields and pointer slice elements rotated via
+// atomic.StorePointer) nor a field named for one, whatever its omit option,
+// nor what an omitzero field holds in an array over 1024 bytes, in a
+// credential-named struct or url.Userinfo struct guarded by a mutex, or in a
+// credential-named string field inside an omitzero composite struct guarded
+// by a mutex. Run it with -race, which reports such a read; the values are
+// never zero or nil, so that the output is the same whether or not they are
+// read.
+func TestJSONFormatter_ConcurrentCredentialStructNoRace(t *testing.T) {
+	type (
+		Token        uint64
+		APIKey       *string
+		Passphrase   string
+		SessionToken struct {
+			// IsZero reads raw first. The slice makes the struct
+			// incomparable, so that IsZero reads the fields one by one,
+			// with code that the race detector sees, rather than with
+			// memequal.
+			raw    uint64
+			mu     sync.Mutex
+			scopes []string
+			ID     string `json:"id"`
+		}
+	)
+	checkCredentialNamed(t, true,
+		reflect.TypeFor[Token](), reflect.TypeFor[APIKey](),
+		reflect.TypeFor[Passphrase](), reflect.TypeFor[SessionToken]())
+	checkCredentialNamed(t, false, reflect.TypeFor[url.Userinfo]())
+	// The fields that are updated atomically come first, so that they are
+	// aligned to 64 bits on every platform.
+	type holder struct {
+		T         Token  `json:"t,omitempty"`
+		Secret    uint64 `json:"secret_count,omitzero"`
+		K         APIKey
+		P         *Passphrase
+		U         *url.Userinfo
+		Keys      []APIKey
+		Ptrs      []*Passphrase
+		Users     []*url.Userinfo
+		InnerPtr  struct{ P *Passphrase }       `json:"inner_ptr,omitzero"`
+		InnerUser struct{ U *url.Userinfo }     `json:"inner_user,omitzero"`
+		Big       struct{ Password [2048]byte } `json:"big,omitzero"`
+		Locked    SessionToken                  `json:"locked,omitzero"`
+		Guarded   struct {
+			mu     sync.Mutex
+			Secret string
+			Note   string
+		} `json:"guarded,omitzero"`
+		GuardedUser struct {
+			mu sync.Mutex
+			U  url.Userinfo
+		} `json:"guarded_user,omitzero"`
+		userMu  sync.Mutex
+		UserArr [1]url.Userinfo `json:"user_arr,omitzero"`
+	}
+	k1, k2 := "k1", "k2"
+	p1, p2 := Passphrase("p1"), Passphrase("p2")
+	u1, u2 := url.UserPassword("alice", "s1"), url.UserPassword("bob", "s2")
+	h := &holder{
+		T:      1,
+		Secret: 1,
+		K:      APIKey(&k1),
+		P:      &p1,
+		U:      u1,
+		Keys:   []APIKey{APIKey(&k1)},
+		Ptrs:   []*Passphrase{&p1},
+		Users:  []*url.Userinfo{u1},
+		Locked: SessionToken{raw: 1, scopes: []string{"read"}, ID: "id-1"},
+	}
+	h.InnerPtr.P = &p1
+	h.InnerUser.U = u1
+	h.Big.Password[0] = 1
+	h.Guarded.Secret = "s1"
+	h.Guarded.Note = "n"
+	h.GuardedUser.U = *url.UserPassword("alice", "s1")
+	h.UserArr[0] = *url.UserPassword("alice", "s1")
+	var bigMu sync.Mutex
+	var flip bool
+	const want = `{"K":"[REDACTED]","Keys":["[REDACTED]"],"P":"[REDACTED]","Ptrs":["[REDACTED]"],"U":"[REDACTED]","Users":["[REDACTED]"],"big":{"Password":"[REDACTED]"},"guarded":{"Note":"n","Secret":"[REDACTED]"},"guarded_user":{"U":"[REDACTED]"},"inner_ptr":{"P":"[REDACTED]"},"inner_user":{"U":"[REDACTED]"},"locked":{"id":"id-1"},"secret_count":"[REDACTED]","t":"[REDACTED]","user_arr":["[REDACTED]"]}`
+	runWhileUpdating(func() {
+		atomic.AddUint64((*uint64)(&h.T), 1)
+		atomic.AddUint64(&h.Secret, 1)
+		flip = !flip
+		next := &k1
+		nextPass := &p1
+		nextUser := u1
+		nextSecret := "s1"
+		if flip {
+			next = &k2
+			nextPass = &p2
+			nextUser = u2
+			nextSecret = "s2"
+		}
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.K)), unsafe.Pointer(next))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.P)), unsafe.Pointer(nextPass))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.U)), unsafe.Pointer(nextUser))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.Keys[0])), unsafe.Pointer(next))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.Ptrs[0])), unsafe.Pointer(nextPass))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.Users[0])), unsafe.Pointer(nextUser))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.InnerPtr.P)), unsafe.Pointer(nextPass))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.InnerUser.U)), unsafe.Pointer(nextUser))
+		bigMu.Lock()
+		h.Big.Password[0] = h.Big.Password[0]%255 + 1
+		bigMu.Unlock()
+		h.Locked.mu.Lock()
+		h.Locked.raw++
+		h.Locked.mu.Unlock()
+		h.Guarded.mu.Lock()
+		if h.Guarded.Secret == "s1" {
+			h.Guarded.Secret = "s2"
+		} else {
+			h.Guarded.Secret = "s1"
+		}
+		h.Guarded.mu.Unlock()
+		h.GuardedUser.mu.Lock()
+		h.GuardedUser.U = *url.UserPassword("alice", nextSecret)
+		h.GuardedUser.mu.Unlock()
+		h.userMu.Lock()
+		h.UserArr[0] = *url.UserPassword("alice", nextSecret)
+		h.userMu.Unlock()
+	}, func() {
+		for range 1000 {
+			if got, _, err := SmartTruncate(h, 10000); err != nil || string(got) != want {
+				t.Fatalf("SmartTruncate(*holder) = (%s, %v), want %s", got, err, want)
+			}
+		}
+	})
+}
+
+func TestJSONFormatter_EmbeddedRedactsWholeNoShadow(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET_4321"
+	u := url.UserPassword("alice", secret)
+	var marshalerCalled atomic.Bool
+	type RefreshToken struct {
+		Raw string
+		credentialTextKey
+	}
+	type MiddleText struct {
+		RefreshToken
+	}
+	type InnerUser struct {
+		url.Userinfo
+	}
+	type SiblingDisplay struct {
+		Display string `json:"Userinfo"`
+	}
+	mt := MiddleText{RefreshToken: RefreshToken{Raw: secret, credentialTextKey: credentialTextKey{&marshalerCalled, secret}}}
+
+	for _, tt := range []struct {
+		name         string
+		in           any
+		want         string
+		wantTrunc    bool
+		wantOff      string
+		wantOffTrunc bool
+	}{
+		{
+			name: "embedded Userinfo before explicit json Userinfo",
+			in: struct {
+				url.Userinfo
+				Display string `json:"Userinfo"`
+			}{*u, "public-label"},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "explicit json Userinfo before embedded Userinfo",
+			in: struct {
+				Display string `json:"Userinfo"`
+				url.Userinfo
+			}{"public-label", *u},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "embedded pointer Userinfo before explicit json Userinfo",
+			in: struct {
+				*url.Userinfo
+				Display string `json:"Userinfo"`
+			}{nil, "public-label"},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "non-colliding embedded Userinfo emits redacted sentinel",
+			in: struct {
+				url.Userinfo
+				Name string
+			}{*u, "alice"},
+			want:      `{"Name":"alice","Userinfo":"[REDACTED]"}`,
+			wantTrunc: true,
+			wantOff:   `{"Name":"alice"}`,
+		},
+		{
+			name: "embedded Userinfo before empty omitempty json Userinfo",
+			in: struct {
+				url.Userinfo
+				Display string `json:"Userinfo,omitempty"`
+			}{*u, ""},
+			want:      `{}`,
+			wantTrunc: true,
+			wantOff:   `{}`,
+		},
+		{
+			name: "empty omitempty json Userinfo before embedded Userinfo",
+			in: struct {
+				Display string `json:"Userinfo,omitempty"`
+				url.Userinfo
+			}{"", *u},
+			want:      `{}`,
+			wantTrunc: true,
+			wantOff:   `{}`,
+		},
+		{
+			name: "deeper embedded Userinfo before shallower explicit json Userinfo",
+			in: struct {
+				InnerUser
+				Display string `json:"Userinfo"`
+			}{InnerUser{*u}, "public-label"},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "shallower explicit json Userinfo before deeper embedded Userinfo",
+			in: struct {
+				Display string `json:"Userinfo"`
+				InnerUser
+			}{"public-label", InnerUser{*u}},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "shallower embedded Userinfo before deeper promoted json Userinfo",
+			in: struct {
+				url.Userinfo
+				SiblingDisplay
+			}{*u, SiblingDisplay{Display: "public-label"}},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "deeper promoted json Userinfo before shallower embedded Userinfo",
+			in: struct {
+				SiblingDisplay
+				url.Userinfo
+			}{SiblingDisplay{Display: "public-label"}, *u},
+			want:      `{"Userinfo":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"Userinfo":"public-label"}`,
+		},
+		{
+			name: "embedded shadowed credential marshaler before explicit colliding field",
+			in: struct {
+				MiddleText
+				MarshalText int
+				Display     string `json:"MiddleText"`
+			}{mt, 1, "public-label"},
+			want:      `{"MarshalText":1,"MiddleText":"public-label"}`,
+			wantTrunc: true,
+			wantOff:   `{"MarshalText":1,"MiddleText":"public-label","Raw":"` + secret + `"}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+			}
+			if marshalerCalled.Load() {
+				t.Errorf("SmartTruncate(%T) called embedded credential marshaler", tt.in)
+			}
+			gotOff, truncOff, err := smartTruncate(tt.in, 1000, false)
+			if err != nil || string(gotOff) != tt.wantOff || truncOff != tt.wantOffTrunc {
+				t.Errorf("smartTruncate(%T, redact off) = (%s, %v, %v), want (%s, %v, nil)", tt.in, gotOff, truncOff, err, tt.wantOff, tt.wantOffTrunc)
+			}
+		})
+	}
+
+	// An embedded redactsWhole field still charges one node immediately.
+	s := sanitizer{
+		maxLength: 100,
+		redact:    true,
+		budget:    &nodeBudget{remaining: 1},
+		visiting:  make(map[visitKey]struct{}),
+	}
+	out, truncated := s.walk(reflect.ValueOf(struct {
+		url.Userinfo
+		Display string `json:"Userinfo"`
+	}{*u, "public-label"}), 0)
+	got, err := json.Marshal(out)
+	if want := `{"[SANITIZE_BUDGET_EXCEEDED]":"[SANITIZE_BUDGET_EXCEEDED]"}`; err != nil || string(got) != want || !truncated {
+		t.Errorf("walk(embedded Userinfo with budget=1) = (%s, %v, %v), want (%s, true, nil)", got, truncated, err, want)
+	}
+}
+
+func TestJSONFormatter_CredentialByteSlice(t *testing.T) {
+	type (
+		Token      byte
+		Passphrase []byte
+		MyByte     byte
+	)
+	checkCredentialNamed(t, true, reflect.TypeFor[Token](), reflect.TypeFor[Passphrase]())
+	checkCredentialNamed(t, false, reflect.TypeFor[MyByte]())
+
+	for _, tt := range []struct {
+		name         string
+		in           any
+		want         string
+		wantTrunc    bool
+		wantOff      string
+		wantOffTrunc bool
+	}{
+		{
+			name:      "slice of credential-named byte type redacts elements",
+			in:        []Token("jwt"),
+			want:      `["[REDACTED]","[REDACTED]","[REDACTED]"]`,
+			wantTrunc: true,
+			wantOff:   `"jwt"`,
+		},
+		{
+			name:      "array of credential-named byte type matches slice",
+			in:        [3]Token{'j', 'w', 't'},
+			want:      `["[REDACTED]","[REDACTED]","[REDACTED]"]`,
+			wantTrunc: true,
+			wantOff:   `[106,119,116]`,
+		},
+		{
+			name:    "empty slice of credential-named byte type",
+			in:      []Token{},
+			want:    `[]`,
+			wantOff: `""`,
+		},
+		{
+			name:    "nil slice of credential-named byte type",
+			in:      []Token(nil),
+			want:    `null`,
+			wantOff: `null`,
+		},
+		{
+			name:      "credential-named byte slice type redacts whole",
+			in:        Passphrase("jwt"),
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `"jwt"`,
+		},
+		{
+			name:    "plain byte slice uses bytes shortcut",
+			in:      []byte("kept"),
+			want:    `"kept"`,
+			wantOff: `"kept"`,
+		},
+		{
+			name:    "neutral defined byte slice uses bytes shortcut",
+			in:      []MyByte("kept"),
+			want:    `"kept"`,
+			wantOff: `"kept"`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+			}
+			gotOff, truncOff, err := smartTruncate(tt.in, 1000, false)
+			if err != nil || string(gotOff) != tt.wantOff || truncOff != tt.wantOffTrunc {
+				t.Errorf("smartTruncate(%T, redact off) = (%s, %v, %v), want (%s, %v, nil)", tt.in, gotOff, truncOff, err, tt.wantOff, tt.wantOffTrunc)
+			}
+		})
+	}
+
+	gotBudget, truncBudget, err := SmartTruncate(make([]Token, maxSanitizeNodes+10), 100)
+	if err != nil || !truncBudget {
+		t.Fatalf("SmartTruncate([]Token over budget) = (truncated %v, %v), want truncated", truncBudget, err)
+	}
+	var parsed []any
+	if err := json.Unmarshal(gotBudget, &parsed); err != nil {
+		t.Fatalf("json.Unmarshal([]Token over budget) error: %v", err)
+	}
+	if len(parsed) != maxSanitizeNodes || parsed[len(parsed)-1] != sanitizeBudgetPlaceholder {
+		t.Errorf("SmartTruncate([]Token over budget) wrote %d items ending in %v, want %d ending in %s", len(parsed), parsed[len(parsed)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
+	}
+}
+
+func TestJSONFormatter_PlainCredentialStructMapKeys(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET_7531"
+	type (
+		Secret struct {
+			ID string
+		}
+		LabelStruct struct {
+			ID string
+		}
+	)
+	checkCredentialNamed(t, true, reflect.TypeFor[Secret](), reflect.TypeFor[codeVerifier[int]]())
+	checkCredentialNamed(t, false, reflect.TypeFor[LabelStruct](), reflect.TypeFor[selfPtr](), reflect.TypeFor[mutPtrA]())
+
+	var valCalled atomic.Bool
+	valProbe := labelValueProbe{called: &valCalled, raw: secret}
+	sec := Secret{ID: "key-id"}
+	secPtr := &sec
+
+	for _, tt := range []struct {
+		name string
+		in   any
+	}{
+		{"plain credential struct key", map[Secret]labelValueProbe{sec: valProbe}},
+		{"pointer to plain credential struct key", map[*Secret]labelValueProbe{&sec: valProbe}},
+		{"nil pointer to plain credential struct key", map[*Secret]labelValueProbe{nil: valProbe}},
+		{"double pointer to plain credential struct key", map[**Secret]labelValueProbe{&secPtr: valProbe}},
+		{"nil double pointer to plain credential struct key", map[**Secret]labelValueProbe{nil: valProbe}},
+		{"plain credential struct key in interface", map[any]labelValueProbe{sec: valProbe}},
+		{"nil pointer to plain credential struct key in interface", map[any]labelValueProbe{(*Secret)(nil): valProbe}},
+		{"generic plain credential struct key", map[codeVerifier[int]]labelValueProbe{{ID: "k", raw: 1}: valProbe}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			valCalled.Store(false)
+			got, truncated, err := SmartTruncate(tt.in, 1000)
+			if want := `{"[REDACTED]":"[REDACTED]"}`; err != nil || string(got) != want || !truncated {
+				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, true, nil)", tt.in, got, truncated, err, want)
+			}
+			if valCalled.Load() {
+				t.Errorf("SmartTruncate(%T) called MarshalJSON on map value under plain credential struct key", tt.in)
+			}
+		})
+	}
+
+	// Budget accounting charges 2 nodes (key + skipped value) for a plain credential struct map key.
+	s2 := sanitizer{
+		maxLength: 100,
+		redact:    true,
+		budget:    &nodeBudget{remaining: 2},
+		visiting:  make(map[visitKey]struct{}),
+	}
+	out2, trunc2 := s2.walk(reflect.ValueOf(map[Secret]string{sec: "v"}), 0)
+	got2, err := json.Marshal(out2)
+	if want2 := `{"[SANITIZE_BUDGET_EXCEEDED]":"[SANITIZE_BUDGET_EXCEEDED]"}`; err != nil || string(got2) != want2 || !trunc2 || s2.budget.remaining != 0 {
+		t.Errorf("walk(map[Secret]string, budget=2) = (%s, %v, remaining=%d, %v), want (%s, true, 0, nil)", got2, trunc2, s2.budget.remaining, err, want2)
+	}
+	s3 := sanitizer{
+		maxLength: 100,
+		redact:    true,
+		budget:    &nodeBudget{remaining: 3},
+		visiting:  make(map[visitKey]struct{}),
+	}
+	out3, trunc3 := s3.walk(reflect.ValueOf(map[Secret]string{sec: "v"}), 0)
+	got3, err := json.Marshal(out3)
+	if want3 := `{"[REDACTED]":"[REDACTED]"}`; err != nil || string(got3) != want3 || !trunc3 || s3.budget.remaining != 0 {
+		t.Errorf("walk(map[Secret]string, budget=3) = (%s, %v, remaining=%d, %v), want (%s, true, 0, nil)", got3, trunc3, s3.budget.remaining, err, want3)
+	}
+
+	// Non-credential plain struct keys and recursive pointer keys remain [UNSUPPORTED_KEY] and walk values.
+	var neutralCalled atomic.Bool
+	neutralProbe := labelValueProbe{called: &neutralCalled, raw: "kept"}
+	gotNeutral, truncNeutral, err := SmartTruncate(map[LabelStruct]labelValueProbe{{ID: "k"}: neutralProbe}, 1000)
+	if want := `{"[UNSUPPORTED_KEY]":"kept"}`; err != nil || string(gotNeutral) != want || !truncNeutral || !neutralCalled.Load() {
+		t.Errorf("SmartTruncate(map[LabelStruct]labelValueProbe) = (%s, %v, called=%v, %v), want (%s, true, true, nil)", gotNeutral, truncNeutral, neutralCalled.Load(), err, want)
+	}
+	gotRec, truncRec, err := SmartTruncate(map[selfPtr]string{nil: "kept"}, 1000)
+	if want := `{"[UNSUPPORTED_KEY]":"kept"}`; err != nil || string(gotRec) != want || !truncRec {
+		t.Errorf("SmartTruncate(map[selfPtr]string) = (%s, %v, %v), want (%s, true, nil)", gotRec, truncRec, err, want)
+	}
+	neutralCalled.Store(false)
+	gotOff, truncOff, err := smartTruncate(map[Secret]labelValueProbe{sec: neutralProbe}, 1000, false)
+	if want := `{"[UNSUPPORTED_KEY]":"kept"}`; err != nil || string(gotOff) != want || !truncOff || !neutralCalled.Load() {
+		t.Errorf("smartTruncate(map[Secret]labelValueProbe, redact off) = (%s, %v, called=%v, %v), want (%s, true, true, nil)", gotOff, truncOff, neutralCalled.Load(), err, want)
+	}
+}
+
+func TestJSONFormatter_DefinedUserinfoTypes(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET_6420"
+	type NotUserinfo struct {
+		username    string
+		password    string
+		passwordSet bool
+	}
+	type OuterPromoted struct {
+		CredsUserinfo
+	}
+	checkCredentialNamed(t, false, reflect.TypeFor[CredsUserinfo](), reflect.TypeFor[NotUserinfo](), reflect.TypeFor[OuterPromoted]())
+
+	if redactsWhole(reflect.TypeFor[NotUserinfo]()) {
+		t.Fatalf("redactsWhole(NotUserinfo) = true, want false")
+	}
+	notU := NotUserinfo{username: "alice", password: secret, passwordSet: true}
+	if notU.username != "alice" || notU.password != secret || !notU.passwordSet {
+		t.Fatalf("unexpected NotUserinfo fixture: %+v", notU)
+	}
+	if got, truncated, err := SmartTruncate(notU, 1000); err != nil || string(got) != `{}` || truncated {
+		t.Errorf("SmartTruncate(NotUserinfo) = (%s, %v, %v), want ({}, false, nil)", got, truncated, err)
+	}
+
+	u := url.UserPassword("alice", secret)
+	cu := CredsUserinfo(*u)
+	cuPtr := &cu
+	var valCalled atomic.Bool
+	valProbe := labelValueProbe{called: &valCalled, raw: secret}
+
+	for _, tt := range []struct {
+		name         string
+		in           any
+		want         string
+		wantTrunc    bool
+		wantOff      string
+		wantOffTrunc bool
+	}{
+		{
+			name:      "value with MarshalJSON",
+			in:        cu,
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `"alice:` + secret + `"`,
+		},
+		{
+			name:      "pointer to defined Userinfo",
+			in:        cuPtr,
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `"alice:` + secret + `"`,
+		},
+		{
+			name:      "nil pointer to defined Userinfo",
+			in:        (*CredsUserinfo)(nil),
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `null`,
+		},
+		{
+			name:      "embedded defined Userinfo promoting MarshalJSON",
+			in:        struct{ CredsUserinfo }{cu},
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `"alice:` + secret + `"`,
+		},
+		{
+			name:      "embedded defined Userinfo promoting MarshalJSON through two levels",
+			in:        struct{ OuterPromoted }{OuterPromoted{cu}},
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `"alice:` + secret + `"`,
+		},
+		{
+			name:      "embedded pointer to defined Userinfo promoting MarshalJSON",
+			in:        struct{ *CredsUserinfo }{cuPtr},
+			want:      `"[REDACTED]"`,
+			wantTrunc: true,
+			wantOff:   `"alice:` + secret + `"`,
+		},
+		{
+			name:         "nil embedded pointer to defined Userinfo promoting MarshalJSON",
+			in:           struct{ *CredsUserinfo }{nil},
+			want:         `"[REDACTED]"`,
+			wantTrunc:    true,
+			wantOff:      `"[UNSUPPORTED_OBJECT]"`,
+			wantOffTrunc: true,
+		},
+		{
+			name: "embedded defined Userinfo with shadowed MarshalJSON",
+			in: struct {
+				CredsUserinfo
+				MarshalJSON int
+			}{cu, 1},
+			want:      `{"CredsUserinfo":"[REDACTED]","MarshalJSON":1}`,
+			wantTrunc: true,
+			wantOff:   `{"MarshalJSON":1}`,
+		},
+		{
+			name:         "defined Userinfo map key",
+			in:           map[CredsUserinfo]labelValueProbe{cu: valProbe},
+			want:         `{"[REDACTED]":"[REDACTED]"}`,
+			wantTrunc:    true,
+			wantOff:      `{"[UNSUPPORTED_KEY]":"` + secret + `"}`,
+			wantOffTrunc: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			credsUserinfoMarshalCalled.Store(false)
+			valCalled.Store(false)
+			got, truncated, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+			}
+			if credsUserinfoMarshalCalled.Load() {
+				t.Errorf("SmartTruncate(%T) called CredsUserinfo.MarshalJSON", tt.in)
+			}
+			if valCalled.Load() {
+				t.Errorf("SmartTruncate(%T) called value MarshalJSON under CredsUserinfo map key", tt.in)
+			}
+			gotOff, truncOff, err := smartTruncate(tt.in, 1000, false)
+			if err != nil || string(gotOff) != tt.wantOff || truncOff != tt.wantOffTrunc {
+				t.Errorf("smartTruncate(%T, redact off) = (%s, %v, %v), want (%s, %v, nil)", tt.in, gotOff, truncOff, err, tt.wantOff, tt.wantOffTrunc)
+			}
+		})
+	}
+
+	// omitzero on a struct containing CredsUserinfo does not call IsZero, and
+	// concurrent pointer/mutex updates do not race or invoke MarshalJSON.
+	type omitZeroHolder struct {
+		Ptr   *CredsUserinfo
+		Inner struct {
+			mu sync.Mutex
+			C  CredsUserinfo
+		} `json:"inner,omitzero"`
+	}
+	zeroHolder := &omitZeroHolder{}
+	credsUserinfoMarshalCalled.Store(false)
+	gotZero, truncZero, err := SmartTruncate(zeroHolder, 1000)
+	if want := `{"Ptr":"[REDACTED]","inner":{"C":"[REDACTED]"}}`; err != nil || string(gotZero) != want || !truncZero {
+		t.Errorf("SmartTruncate(zero omitZeroHolder) = (%s, %v, %v), want (%s, true, nil)", gotZero, truncZero, err, want)
+	}
+	if credsUserinfoMarshalCalled.Load() {
+		t.Errorf("SmartTruncate(zero omitZeroHolder) called CredsUserinfo.MarshalJSON")
+	}
+	if gotOff, _, err := smartTruncate(zeroHolder, 1000, false); err != nil || string(gotOff) != `{"Ptr":null}` {
+		t.Errorf("smartTruncate(zero omitZeroHolder, redact off) = (%s, %v), want {\"Ptr\":null}", gotOff, err)
+	}
+
+	c1 := CredsUserinfo(*url.UserPassword("alice", "s1"))
+	c2 := CredsUserinfo(*url.UserPassword("bob", "s2"))
+	live := &omitZeroHolder{Ptr: &c1}
+	live.Inner.C = c1
+	var flip bool
+	const wantLive = `{"Ptr":"[REDACTED]","inner":{"C":"[REDACTED]"}}`
+	runWhileUpdating(func() {
+		flip = !flip
+		next := &c1
+		if flip {
+			next = &c2
+		}
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&live.Ptr)), unsafe.Pointer(next))
+		live.Inner.mu.Lock()
+		live.Inner.C = *next
+		live.Inner.mu.Unlock()
+	}, func() {
+		for range 300 {
+			if got, _, err := SmartTruncate(live, 1000); err != nil || string(got) != wantLive {
+				t.Fatalf("SmartTruncate(live omitZeroHolder) = (%s, %v), want %s", got, err, wantLive)
+			}
+		}
+	})
+	if credsUserinfoMarshalCalled.Load() {
+		t.Errorf("SmartTruncate(live omitZeroHolder) called CredsUserinfo.MarshalJSON")
+	}
+}
+
+func TestJSONFormatter_CircularReferenceBudget(t *testing.T) {
+	// A small circular pointer still emits [CIRCULAR_REFERENCE] with truncated=false.
+	node := &cyclicNode{Name: "a"}
+	node.Next = node
+	gotSingle, truncSingle, err := SmartTruncate(node, 1000)
+	if want := `{"Name":"a","Next":"[CIRCULAR_REFERENCE]"}`; err != nil || string(gotSingle) != want || truncSingle {
+		t.Fatalf("SmartTruncate(single pointer cycle) = (%s, %v, %v), want (%s, false, nil)", gotSingle, truncSingle, err, want)
+	}
+
+	type selfPtrList struct {
+		Ptrs []*selfPtrList
+	}
+
+	// Exact budget: 1 node for selfPtrList + 1 node for Ptrs + (maxSanitizeNodes - 2) circular pointers.
+	const exactRefs = maxSanitizeNodes - 2
+	exact := &selfPtrList{Ptrs: make([]*selfPtrList, exactRefs)}
+	for i := range exact.Ptrs {
+		exact.Ptrs[i] = exact
+	}
+	gotExact, truncExact, err := SmartTruncate(exact, 100)
+	if err != nil || truncExact {
+		t.Fatalf("SmartTruncate(exact circular pointers) = (truncated %v, %v), want (false, nil)", truncExact, err)
+	}
+	var parsedExact struct {
+		Ptrs []any
+	}
+	if err := json.Unmarshal(gotExact, &parsedExact); err != nil {
+		t.Fatalf("json.Unmarshal(exact circular pointers) error: %v", err)
+	}
+	if len(parsedExact.Ptrs) != exactRefs || parsedExact.Ptrs[len(parsedExact.Ptrs)-1] != circularRefPlaceholder {
+		t.Errorf("SmartTruncate(exact circular pointers) wrote %d items ending in %v, want %d ending in %s", len(parsedExact.Ptrs), parsedExact.Ptrs[len(parsedExact.Ptrs)-1], exactRefs, circularRefPlaceholder)
+	}
+
+	// Over budget: a slice of maxSanitizeNodes + 10 self-pointers stops at maxSanitizeNodes.
+	over := &selfPtrList{Ptrs: make([]*selfPtrList, maxSanitizeNodes+10)}
+	for i := range over.Ptrs {
+		over.Ptrs[i] = over
+	}
+	gotOver, truncOver, err := SmartTruncate(over, 100)
+	if err != nil || !truncOver {
+		t.Fatalf("SmartTruncate(over-budget circular pointers) = (truncated %v, %v), want (true, nil)", truncOver, err)
+	}
+	var parsedOver struct {
+		Ptrs []any
+	}
+	if err := json.Unmarshal(gotOver, &parsedOver); err != nil {
+		t.Fatalf("json.Unmarshal(over-budget circular pointers) error: %v", err)
+	}
+	const wantOverLen = maxSanitizeNodes - 1
+	if len(parsedOver.Ptrs) != wantOverLen || parsedOver.Ptrs[0] != circularRefPlaceholder || parsedOver.Ptrs[len(parsedOver.Ptrs)-1] != sanitizeBudgetPlaceholder {
+		t.Errorf("SmartTruncate(over-budget circular pointers) wrote %d items (first=%v, last=%v), want %d (first=%s, last=%s)", len(parsedOver.Ptrs), parsedOver.Ptrs[0], parsedOver.Ptrs[len(parsedOver.Ptrs)-1], wantOverLen, circularRefPlaceholder, sanitizeBudgetPlaceholder)
+	}
+
+	// Slice and map cycles are likewise bounded by maxSanitizeNodes.
+	cyclicSlices := make([]any, maxSanitizeNodes+10)
+	for i := range cyclicSlices {
+		cyclicSlices[i] = cyclicSlices
+	}
+	gotSliceCycle, truncSliceCycle, err := SmartTruncate(cyclicSlices, 100)
+	if err != nil || !truncSliceCycle {
+		t.Fatalf("SmartTruncate(over-budget slice cycles) = (truncated %v, %v), want (true, nil)", truncSliceCycle, err)
+	}
+	var parsedSlices []any
+	if err := json.Unmarshal(gotSliceCycle, &parsedSlices); err != nil {
+		t.Fatalf("json.Unmarshal(over-budget slice cycles) error: %v", err)
+	}
+	if len(parsedSlices) != maxSanitizeNodes || parsedSlices[0] != circularRefPlaceholder || parsedSlices[len(parsedSlices)-1] != sanitizeBudgetPlaceholder {
+		t.Errorf("SmartTruncate(over-budget slice cycles) wrote %d items ending in %v, want %d ending in %s", len(parsedSlices), parsedSlices[len(parsedSlices)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
+	}
+
+	cyclicMaps := make([]any, maxSanitizeNodes+10)
+	rootMap := map[string]any{"items": cyclicMaps}
+	for i := range cyclicMaps {
+		cyclicMaps[i] = rootMap
+	}
+	gotMapCycle, truncMapCycle, err := SmartTruncate(rootMap, 100)
+	if err != nil || !truncMapCycle {
+		t.Fatalf("SmartTruncate(over-budget map cycles) = (truncated %v, %v), want (true, nil)", truncMapCycle, err)
+	}
+	var parsedMap map[string][]any
+	if err := json.Unmarshal(gotMapCycle, &parsedMap); err != nil {
+		t.Fatalf("json.Unmarshal(over-budget map cycles) error: %v", err)
+	}
+	items := parsedMap["items"]
+	if len(items) != maxSanitizeNodes-1 || items[0] != circularRefPlaceholder || items[len(items)-1] != sanitizeBudgetPlaceholder {
+		t.Errorf("SmartTruncate(over-budget map cycles) wrote %d items ending in %v, want %d ending in %s", len(items), items[len(items)-1], maxSanitizeNodes-1, sanitizeBudgetPlaceholder)
+	}
+}
+
+func TestJSONFormatter_CollidingMapKeys(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		in        any
+		wantOn    string
+		wantOff   string
+		wantTrunc bool
+	}{
+		{
+			name:      "int and string keys disagreeing",
+			in:        map[any]any{1: "a", "1": "b"},
+			wantOn:    `{"1":"[REDACTED]"}`,
+			wantOff:   `{"1":"[COLLIDING_KEY]"}`,
+			wantTrunc: true,
+		},
+		{
+			name:      "int and string keys agreeing",
+			in:        map[any]any{1: "a", "1": "a"},
+			wantOn:    `{"1":"a"}`,
+			wantOff:   `{"1":"a"}`,
+			wantTrunc: false,
+		},
+		{
+			name:      "invalid UTF-8 keys disagreeing",
+			in:        map[string]string{"bad\xffkey": "a", "bad\xfekey": "b"},
+			wantOn:    "{\"bad\uFFFDkey\":\"[REDACTED]\"}",
+			wantOff:   "{\"bad\uFFFDkey\":\"[COLLIDING_KEY]\"}",
+			wantTrunc: true,
+		},
+		{
+			name:      "colliding key where one value equals placeholder",
+			in:        map[any]any{1: "[COLLIDING_KEY]", "1": "a"},
+			wantOn:    `{"1":"[REDACTED]"}`,
+			wantOff:   `{"1":"[COLLIDING_KEY]"}`,
+			wantTrunc: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gotOn, truncOn, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(gotOn) != tt.wantOn || truncOn != tt.wantTrunc {
+				t.Errorf("SmartTruncate(%s) = (%s, %v, %v), want (%s, %v, nil)", tt.name, gotOn, truncOn, err, tt.wantOn, tt.wantTrunc)
+			}
+			gotOff, truncOff, err := smartTruncate(tt.in, 1000, false)
+			if err != nil || string(gotOff) != tt.wantOff || truncOff != tt.wantTrunc {
+				t.Errorf("smartTruncate(%s, redact off) = (%s, %v, %v), want (%s, %v, nil)", tt.name, gotOff, truncOff, err, tt.wantOff, tt.wantTrunc)
+			}
+		})
 	}
 }
