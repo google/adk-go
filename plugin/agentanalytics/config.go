@@ -240,9 +240,15 @@ type GCSContentOffloader interface {
 // example, a custom agent's helper goroutine, workflow.ParallelWorker, or
 // workflow.NewWorkflowNode), the child agent is placed under the nearest open
 // span enclosing all concurrent activations of that agent (or the invocation
-// span if none encloses them). When per-activation parenting is required for
-// custom agents, run sub-agents on the agent's own goroutine or on a goroutine
-// that it starts directly.
+// span if none encloses them). Similarly, if an earlier activation of an agent
+// on a different goroutine ended without running AfterAgentCallback (for
+// example, after failing or short-circuiting in BeforeAgentCallback) and
+// remains open when a later activation of the same agent launches a child across
+// an intermediate goroutine, the plugin cannot distinguish the unclosed prior
+// span from a live concurrent peer without an end-of-run signal and places the
+// child under the nearest enclosing span. When per-activation parenting is
+// required for custom agents, run sub-agents on the agent's own goroutine or on
+// a goroutine that it starts directly.
 type Config struct {
 	Enabled        bool
 	ProjectID      string

@@ -1150,20 +1150,21 @@ type lookalikeKey struct {
 //   - open activations of id's agent, branch and node path that the scheduler
 //     of their workflow agent (or of any open lookalike workflow activation
 //     sharing its name, branch and node path) started on other goroutines,
-//     together with the agents under them (see subtreeLocked); and
-//   - peer lookalike subtrees when multiple open activations share
+//     together with the agents under them; and
+//   - peer lookalike subtrees when multiple concurrent open activations share
 //     (name, branch, path) and one member (or a non-excluded open span in its
 //     subtree) runs on goid or, failing that, started goid (origin.parent),
-//     keeping the winning member and its ancestors unexcluded.
+//     keeping the winning member, its ancestors, and any earlier activations on
+//     its goroutine unexcluded.
 //
-// Of open activations that share the agent, branch and node path of the
-// resolved parent, it returns the innermost one on goroutine goid or starter
-// goroutine origin.parent, or their nearest enclosing open span when multiple
-// lookalikes exist and none matches (see runningLookalikeLocked). When the
-// resolved parent itself (or any ancestor of it) belongs to an unmatched
-// multi-member lookalike group, it demotes to enclosingOpenSpanLocked so a
+// When the resolved parent itself (or any ancestor of it) belongs to an
+// unmatched multi-member concurrent lookalike group (no member or descendant
+// matches goid or origin.parent), it demotes to enclosingOpenSpanLocked so a
 // helper-goroutine activation cannot land inside one peer lookalike's open
-// child span.
+// child span. Non-concurrent lookalike chains (nested re-entry, same-goroutine
+// stale spans, or suspended iterators) are left to parentFor without exclusion
+// or ambiguity demotion unless a cross-goroutine nested ancestor directly
+// matches goid or origin.parent.
 func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]bool, goid uint64, origin goroutineOrigin) *spanRecord {
 	callerExcluded := exclude
 	var clonedExclude bool
@@ -1177,97 +1178,612 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 		}
 		clonedExclude = true
 	}
-	startedByWorkflowLookalike := func(wf *spanRecord) bool {
-		if origin.startedBy(schedulerCreator, wf) {
-			return true
-		}
+	if origin.creator == schedulerCreator && origin.parent != 0 {
+		var wfStarterKeys map[lookalikeKey]bool
 		for _, candidate := range inv.agentStack[1:] {
 			if candidate.kind == spanKindAgent && candidate.isWorkflow && !callerExcluded[candidate.spanID] &&
-				candidate.name == wf.name && candidate.branch == wf.branch && candidate.path == wf.path &&
 				origin.startedBy(schedulerCreator, candidate) {
-				return true
+				if wfStarterKeys == nil {
+					wfStarterKeys = make(map[lookalikeKey]bool)
+				}
+				wfStarterKeys[lookalikeKey{name: candidate.name, branch: candidate.branch, path: candidate.path}] = true
 			}
 		}
-		return false
-	}
-	for i := 1; i < len(inv.agentStack); i++ {
-		other := inv.agentStack[i]
-		if exclude[other.spanID] || other.kind != spanKindAgent ||
-			other.name != id.agentName || other.branch != id.branch || other.path != id.path ||
-			other.goroutineID == goid || other.parent == nil || !other.parent.isWorkflow ||
-			!other.origin.startedBy(schedulerCreator, other.parent) || !startedByWorkflowLookalike(other.parent) {
-			continue
+		var addedWfExclusion bool
+		for i := 1; i < len(inv.agentStack); i++ {
+			other := inv.agentStack[i]
+			if exclude[other.spanID] || other.kind != spanKindAgent ||
+				other.name != id.agentName || other.branch != id.branch || other.path != id.path ||
+				other.goroutineID == goid || other.parent == nil || !other.parent.isWorkflow ||
+				!other.origin.startedBy(schedulerCreator, other.parent) {
+				continue
+			}
+			if !origin.startedBy(schedulerCreator, other.parent) &&
+				!wfStarterKeys[lookalikeKey{name: other.parent.name, branch: other.parent.branch, path: other.parent.path}] {
+				continue
+			}
+			ensureExcludeMutable()
+			exclude[other.spanID] = true
+			addedWfExclusion = true
 		}
-		ensureExcludeMutable()
-		maps.Copy(exclude, inv.subtreeLocked(i))
+		if addedWfExclusion {
+			inv.propagateExcludedLocked(exclude)
+		}
 	}
 	var unmatched map[lookalikeKey][]*spanRecord
+	var unmatchedByRec map[*spanRecord][]*spanRecord
+	var tree *openSpanTree
 	if goid != 0 {
-		exclude, unmatched = inv.excludePeerLookalikesLocked(exclude, &clonedExclude, goid, origin)
+		exclude, unmatched, unmatchedByRec, tree = inv.excludePeerLookalikesLocked(exclude, &clonedExclude, goid, origin)
 	}
-	parent := inv.parentFor(id)
+	var parent *spanRecord
 	if len(exclude) > 0 {
 		parent = inv.parentOutsideLocked(id, exclude)
+	} else {
+		parent = inv.parentFor(id)
 	}
-	parent = inv.runningLookalikeLocked(parent, exclude, goid, origin)
+	var seenAmbiguous map[*spanRecord]bool
+	var ambiguous []*spanRecord
 	for parent != nil && parent.kind == spanKindAgent && len(unmatched) > 0 {
-		var ambiguous []*spanRecord
+		ambiguous = ambiguous[:0]
 		for cur := parent; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
-			if recs := unmatched[lookalikeKey{name: cur.name, branch: cur.branch, path: cur.path}]; len(recs) > 1 && slices.Contains(recs, cur) {
-				ambiguous = recs
+			if recs := unmatchedByRec[cur]; len(recs) > 1 && !seenAmbiguous[recs[0]] {
+				if seenAmbiguous == nil {
+					seenAmbiguous = make(map[*spanRecord]bool)
+				}
+				seenAmbiguous[recs[0]] = true
+				ambiguous = append(ambiguous, recs...)
 			}
 		}
-		if ambiguous == nil {
+		if len(ambiguous) == 0 {
 			break
 		}
-		parent = inv.enclosingOpenSpanLocked(ambiguous)
+		parent = tree.enclosing(inv, ambiguous)
 	}
 	return parent
 }
 
-// excludePeerLookalikesLocked inspects non-excluded open agent activations on
-// inv.agentStack[1:] grouped by lookalikeKey. For each multi-member group (in
-// outer-to-inner stack order) where a member or an open non-excluded span in
-// its subtree matches goid (preferred) or origin.parent (preferring the
-// innermost match on agentStack), it excludes every peer member that is
-// neither the winner nor an ancestor of the winner, along with its subtree.
-// Multi-member groups with no goroutine match in any member's subtree are
-// returned in unmatched (filtered against the final exclude set).
-// inv.mu must be held.
-func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool, clonedExclude *bool, goid uint64, origin goroutineOrigin) (map[string]bool, map[lookalikeKey][]*spanRecord) {
-	if goid == 0 || len(inv.agentStack) <= 2 {
-		return exclude, nil
-	}
-	hasLookalikes := false
-	for i := 1; i < len(inv.agentStack) && !hasLookalikes; i++ {
-		a := inv.agentStack[i]
-		if exclude[a.spanID] || a.kind != spanKindAgent {
+// propagateExcludedLocked marks every open agent span in inv.agentStack[1:]
+// whose ancestor along spanRecord.parent is in exclude. It runs in O(N) time
+// using memoized ancestor states. inv.mu must be held and exclude must be
+// mutable.
+func (inv *invocationTrace) propagateExcludedLocked(exclude map[string]bool) {
+	ancState := make(map[*spanRecord]uint8, len(inv.agentStack))
+	var chain []*spanRecord
+	for i := 1; i < len(inv.agentStack); i++ {
+		rec := inv.agentStack[i]
+		if rec.kind != spanKindAgent {
 			continue
 		}
-		for j := i + 1; j < len(inv.agentStack); j++ {
-			b := inv.agentStack[j]
-			if !exclude[b.spanID] && b.kind == spanKindAgent &&
-				b.name == a.name && b.branch == a.branch && b.path == a.path {
-				hasLookalikes = true
+		if exclude[rec.spanID] {
+			ancState[rec] = 2
+			continue
+		}
+		chain = chain[:0]
+		var state uint8 = 1
+		for cur := rec.parent; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
+			if exclude[cur.spanID] || ancState[cur] == 2 {
+				state = 2
+				break
+			}
+			if ancState[cur] == 1 {
+				state = 1
+				break
+			}
+			chain = append(chain, cur)
+		}
+		ancState[rec] = state
+		for _, c := range chain {
+			ancState[c] = state
+		}
+		if state == 2 {
+			exclude[rec.spanID] = true
+		}
+	}
+}
+
+// openSpanTree indexes inv.agentStack by pointer and open-parent Euler-tour
+// intervals in O(N) time so ancestor, enclosing-span, and subtree-exclusion
+// queries avoid repeated parent-chain scans.
+type openSpanTree struct {
+	stackIdx    map[*spanRecord]int
+	openParent  []int
+	childrenOf  [][]int
+	tin         []int
+	tout        []int
+	depth       []int
+	dfsSeq      []int
+	preExcluded []bool
+}
+
+func (inv *invocationTrace) buildOpenSpanTreeLocked(exclude map[string]bool) *openSpanTree {
+	n := len(inv.agentStack)
+	stackIdx := make(map[*spanRecord]int, n)
+	for i, rec := range inv.agentStack {
+		stackIdx[rec] = i
+	}
+	openParent := make([]int, n)
+	childrenOf := make([][]int, n)
+	var preExcluded []bool
+	if len(exclude) > 0 {
+		preExcluded = make([]bool, n)
+	}
+	var retiredAnc map[*spanRecord]int
+	var retiredExcl map[*spanRecord]bool
+
+	for i := 1; i < n; i++ {
+		rec := inv.agentStack[i]
+		if preExcluded != nil && exclude[rec.spanID] {
+			preExcluded[i] = true
+		}
+		p := rec.parent
+		if p == nil || p.kind != spanKindAgent {
+			openParent[i] = 0
+			childrenOf[0] = append(childrenOf[0], i)
+			continue
+		}
+		if pIdx, ok := stackIdx[p]; ok {
+			openParent[i] = pIdx
+			childrenOf[pIdx] = append(childrenOf[pIdx], i)
+			continue
+		}
+		var path []*spanRecord
+		ancIdx := 0
+		baseExcl := false
+		for cur := p; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
+			if idx, ok := stackIdx[cur]; ok {
+				ancIdx = idx
+				break
+			}
+			if idx, ok := retiredAnc[cur]; ok {
+				ancIdx = idx
+				baseExcl = retiredExcl[cur]
+				break
+			}
+			path = append(path, cur)
+		}
+		curExcl := baseExcl
+		if len(path) > 0 {
+			if retiredAnc == nil {
+				retiredAnc = make(map[*spanRecord]int, len(path))
+			}
+			for _, node := range slices.Backward(path) {
+				retiredAnc[node] = ancIdx
+				if len(exclude) > 0 && exclude[node.spanID] {
+					curExcl = true
+				}
+				if curExcl {
+					if retiredExcl == nil {
+						retiredExcl = make(map[*spanRecord]bool)
+					}
+					retiredExcl[node] = true
+				}
+			}
+		}
+		openParent[i] = ancIdx
+		childrenOf[ancIdx] = append(childrenOf[ancIdx], i)
+		if curExcl && preExcluded != nil {
+			preExcluded[i] = true
+		}
+	}
+
+	type dfsFrame struct {
+		u       int
+		entered bool
+	}
+	stack := make([]dfsFrame, 1, n)
+	stack[0] = dfsFrame{u: 0}
+	tin := make([]int, n)
+	tout := make([]int, n)
+	depth := make([]int, n)
+	dfsSeq := make([]int, 0, n)
+	timer := 0
+	for len(stack) > 0 {
+		top := &stack[len(stack)-1]
+		u := top.u
+		if !top.entered {
+			top.entered = true
+			timer++
+			tin[u] = timer
+			dfsSeq = append(dfsSeq, u)
+			for _, v := range slices.Backward(childrenOf[u]) {
+				depth[v] = depth[u] + 1
+				stack = append(stack, dfsFrame{u: v})
+			}
+		} else {
+			tout[u] = timer
+			stack = stack[:len(stack)-1]
+		}
+	}
+
+	return &openSpanTree{
+		stackIdx:    stackIdx,
+		openParent:  openParent,
+		childrenOf:  childrenOf,
+		tin:         tin,
+		tout:        tout,
+		depth:       depth,
+		dfsSeq:      dfsSeq,
+		preExcluded: preExcluded,
+	}
+}
+
+func (t *openSpanTree) isOpenAncestor(ancIdx, descIdx int) bool {
+	return ancIdx > 0 && descIdx > 0 && ancIdx != descIdx && t.tin[ancIdx] < t.tin[descIdx] && t.tout[descIdx] <= t.tout[ancIdx]
+}
+
+func (t *openSpanTree) enclosing(inv *invocationTrace, recs []*spanRecord) *spanRecord {
+	if len(recs) == 0 || len(inv.agentStack) == 0 {
+		if len(inv.agentStack) == 0 {
+			return nil
+		}
+		return inv.agentStack[0]
+	}
+	n := len(inv.agentStack)
+	minStrictTin := n + 1
+	minAncTin := n + 1
+	maxTout := 0
+	for _, rec := range recs {
+		if idx, ok := t.stackIdx[rec]; ok {
+			if t.tin[idx] < minStrictTin {
+				minStrictTin = t.tin[idx]
+			}
+			if t.tout[idx] > maxTout {
+				maxTout = t.tout[idx]
+			}
+			continue
+		}
+		var ancIdx int
+		for cur := rec.parent; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
+			if idx, ok := t.stackIdx[cur]; ok {
+				ancIdx = idx
+				break
+			}
+		}
+		if ancIdx == 0 {
+			return inv.agentStack[0]
+		}
+		if t.tin[ancIdx] < minAncTin {
+			minAncTin = t.tin[ancIdx]
+		}
+		if t.tout[ancIdx] > maxTout {
+			maxTout = t.tout[ancIdx]
+		}
+	}
+	var startAnc int
+	if idx, ok := t.stackIdx[recs[0]]; ok {
+		startAnc = t.openParent[idx]
+	} else {
+		for cur := recs[0].parent; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
+			if idx, ok := t.stackIdx[cur]; ok {
+				startAnc = idx
 				break
 			}
 		}
 	}
-	if !hasLookalikes {
-		return exclude, nil
+	for u := startAnc; u > 0; u = t.openParent[u] {
+		if t.tin[u] < minStrictTin && t.tin[u] <= minAncTin && t.tout[u] >= maxTout {
+			return inv.agentStack[u]
+		}
 	}
-	var keysOrder []lookalikeKey
-	seenKey := make(map[lookalikeKey]bool)
-	for _, rec := range inv.agentStack[1:] {
+	return inv.agentStack[0]
+}
+
+// pushIntMinHeap pushes v onto a binary min-heap stored in h.
+func pushIntMinHeap(h []int, v int) []int {
+	h = append(h, v)
+	i := len(h) - 1
+	for i > 0 {
+		p := (i - 1) / 2
+		if h[p] <= h[i] {
+			break
+		}
+		h[p], h[i] = h[i], h[p]
+		i = p
+	}
+	return h
+}
+
+// popIntMinHeap pops the smallest element from a non-empty binary min-heap.
+func popIntMinHeap(h []int) ([]int, int) {
+	top := h[0]
+	last := h[len(h)-1]
+	h = h[:len(h)-1]
+	if len(h) > 0 {
+		h[0] = last
+		i := 0
+		for {
+			l := 2*i + 1
+			if l >= len(h) {
+				break
+			}
+			small := l
+			if r := l + 1; r < len(h) && h[r] < h[l] {
+				small = r
+			}
+			if h[i] <= h[small] {
+				break
+			}
+			h[i], h[small] = h[small], h[i]
+			i = small
+		}
+	}
+	return h, top
+}
+
+// maxSegTree is a bottom-up iterative binary segment tree over [0, n) storing
+// maximum values for O(log N) range-max subtree queries and point updates.
+type maxSegTree struct {
+	n    int
+	tree []int
+}
+
+func newMaxSegTree(n int) maxSegTree {
+	return maxSegTree{n: n, tree: make([]int, 2*n)}
+}
+
+func (s maxSegTree) build() {
+	for i := s.n - 1; i >= 1; i-- {
+		s.tree[i] = max(s.tree[2*i], s.tree[2*i+1])
+	}
+}
+
+func (s maxSegTree) set(pos, val int) {
+	i := pos + s.n
+	s.tree[i] = val
+	for i > 1 {
+		i >>= 1
+		s.tree[i] = max(s.tree[2*i], s.tree[2*i+1])
+	}
+}
+
+func (s maxSegTree) query(l, r int) int {
+	res := 0
+	l += s.n
+	r += s.n
+	for l <= r {
+		if l&1 == 1 {
+			res = max(res, s.tree[l])
+			l++
+		}
+		if r&1 == 0 {
+			res = max(res, s.tree[r])
+			r--
+		}
+		l >>= 1
+		r >>= 1
+	}
+	return res
+}
+
+// excludePeerLookalikesLocked inspects non-excluded open agent activations on
+// inv.agentStack[1:] grouped by lookalikeKey in O(N log N) worst-case time
+// (O(N + G log G) when no witness node is excluded mid-pass). Groups with a
+// live goroutine match (goid in Pass 1, then origin.parent in Pass 2) are
+// resolved in outer-to-inner topological order over the SCC condensation DAG of
+// group dependencies, excluding losing peers (while keeping the winner, its
+// ancestors, and earlier activations on the winner's non-zero goroutine
+// unexcluded, and scoping any unresolved inner peers to the matched subtree
+// below ancestor lookalikes). Groups with no goroutine match filter out
+// superseded same-goroutine activations and then collapse nested ancestor chains
+// (countEffectivePeers); when at least two effective concurrent peers remain,
+// all live members within the group's matched scope are returned in unmatched
+// (re-filtered and re-collapsed against final exclusions). inv.mu must be held.
+func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool, clonedExclude *bool, goid uint64, origin goroutineOrigin) (map[string]bool, map[lookalikeKey][]*spanRecord, map[*spanRecord][]*spanRecord, *openSpanTree) {
+	if goid == 0 || len(inv.agentStack) <= 2 {
+		return exclude, nil, nil, nil
+	}
+	n := len(inv.agentStack)
+	firstIdx := make(map[lookalikeKey]int, n-1)
+	var multiKeys []lookalikeKey
+	var groups map[lookalikeKey][]int
+	for i := 1; i < n; i++ {
+		rec := inv.agentStack[i]
 		if exclude[rec.spanID] || rec.kind != spanKindAgent {
 			continue
 		}
 		k := lookalikeKey{name: rec.name, branch: rec.branch, path: rec.path}
-		if !seenKey[k] {
-			seenKey[k] = true
-			keysOrder = append(keysOrder, k)
+		if first, ok := firstIdx[k]; !ok {
+			firstIdx[k] = i
+		} else {
+			if groups == nil {
+				groups = make(map[lookalikeKey][]int)
+			}
+			if len(groups[k]) == 0 {
+				multiKeys = append(multiKeys, k)
+				groups[k] = []int{first, i}
+			} else {
+				groups[k] = append(groups[k], i)
+			}
 		}
 	}
+	if len(multiKeys) == 0 {
+		return exclude, nil, nil, nil
+	}
+
+	slices.SortFunc(multiKeys, func(a, b lookalikeKey) int {
+		return cmp.Compare(firstIdx[a], firstIdx[b])
+	})
+	numGroups := len(multiKeys)
+	nodeGroupID := make([]int, n)
+	for i := range nodeGroupID {
+		nodeGroupID[i] = -1
+	}
+	for id, k := range multiKeys {
+		for _, mIdx := range groups[k] {
+			nodeGroupID[mIdx] = id
+		}
+	}
+
+	tree := inv.buildOpenSpanTreeLocked(exclude)
+	excluded := make([]bool, n)
+	if tree.preExcluded != nil {
+		for _, u := range tree.dfsSeq[1:] {
+			if tree.preExcluded[u] || excluded[tree.openParent[u]] {
+				excluded[u] = true
+			}
+		}
+	}
+
+	groupsByTin := make([][]int, numGroups)
+	for _, u := range tree.dfsSeq[1:] {
+		if excluded[u] {
+			continue
+		}
+		if id := nodeGroupID[u]; id >= 0 {
+			groupsByTin[id] = append(groupsByTin[id], u)
+		}
+	}
+
+	var topoIDs []int
+	if numGroups == 1 {
+		topoIDs = []int{0}
+	} else {
+		adj := make([][]int, numGroups)
+		type groupEdge struct{ from, to int }
+		seenEdges := make(map[groupEdge]bool)
+		type ancFrame struct {
+			u       int
+			ancGrp  int
+			childAt int
+		}
+		dfsStack := make([]ancFrame, 1, n)
+		dfsStack[0] = ancFrame{u: 0, ancGrp: -1}
+		for len(dfsStack) > 0 {
+			top := &dfsStack[len(dfsStack)-1]
+			if top.childAt < len(tree.childrenOf[top.u]) {
+				v := tree.childrenOf[top.u][top.childAt]
+				top.childAt++
+				if excluded[v] {
+					continue
+				}
+				nextAnc := top.ancGrp
+				if ku := nodeGroupID[v]; ku >= 0 {
+					if top.ancGrp >= 0 && top.ancGrp != ku {
+						e := groupEdge{from: top.ancGrp, to: ku}
+						if !seenEdges[e] {
+							seenEdges[e] = true
+							adj[top.ancGrp] = append(adj[top.ancGrp], ku)
+						}
+					}
+					nextAnc = ku
+				}
+				dfsStack = append(dfsStack, ancFrame{u: v, ancGrp: nextAnc})
+			} else {
+				dfsStack = dfsStack[:len(dfsStack)-1]
+			}
+		}
+
+		// Condense cycles via iterative Tarjan SCC so every outer ancestor SCC
+		// resolves strictly before any downstream inner group SCC.
+		index := make([]int, numGroups)
+		lowlink := make([]int, numGroups)
+		onStack := make([]bool, numGroups)
+		tarjanStack := make([]int, 0, numGroups)
+		sccID := make([]int, numGroups)
+		var sccs [][]int
+		nextIndex := 1
+		type tarjanFrame struct {
+			u      int
+			edgeAt int
+		}
+		callStack := make([]tarjanFrame, 0, numGroups)
+		for start := range numGroups {
+			if index[start] != 0 {
+				continue
+			}
+			index[start] = nextIndex
+			lowlink[start] = nextIndex
+			nextIndex++
+			onStack[start] = true
+			tarjanStack = append(tarjanStack, start)
+			callStack = append(callStack, tarjanFrame{u: start})
+			for len(callStack) > 0 {
+				top := &callStack[len(callStack)-1]
+				u := top.u
+				if top.edgeAt < len(adj[u]) {
+					v := adj[u][top.edgeAt]
+					top.edgeAt++
+					if index[v] == 0 {
+						index[v] = nextIndex
+						lowlink[v] = nextIndex
+						nextIndex++
+						onStack[v] = true
+						tarjanStack = append(tarjanStack, v)
+						callStack = append(callStack, tarjanFrame{u: v})
+					} else if onStack[v] && index[v] < lowlink[u] {
+						lowlink[u] = index[v]
+					}
+					continue
+				}
+				callStack = callStack[:len(callStack)-1]
+				if len(callStack) > 0 {
+					p := callStack[len(callStack)-1].u
+					if lowlink[u] < lowlink[p] {
+						lowlink[p] = lowlink[u]
+					}
+				}
+				if lowlink[u] == index[u] {
+					cid := len(sccs)
+					var comp []int
+					for {
+						w := tarjanStack[len(tarjanStack)-1]
+						tarjanStack = tarjanStack[:len(tarjanStack)-1]
+						onStack[w] = false
+						sccID[w] = cid
+						comp = append(comp, w)
+						if w == u {
+							break
+						}
+					}
+					slices.Sort(comp)
+					sccs = append(sccs, comp)
+				}
+			}
+		}
+
+		numSCC := len(sccs)
+		sccAdj := make([][]int, numSCC)
+		sccIndeg := make([]int, numSCC)
+		seenSCCEdges := make(map[groupEdge]bool, len(seenEdges))
+		for u := range numGroups {
+			su := sccID[u]
+			for _, v := range adj[u] {
+				sv := sccID[v]
+				if su == sv {
+					continue
+				}
+				e := groupEdge{from: su, to: sv}
+				if !seenSCCEdges[e] {
+					seenSCCEdges[e] = true
+					sccAdj[su] = append(sccAdj[su], sv)
+					sccIndeg[sv]++
+				}
+			}
+		}
+
+		topoIDs = make([]int, 0, numGroups)
+		var heap []int
+		for cid := range numSCC {
+			if sccIndeg[cid] == 0 {
+				// sccs[cid][0] is unique across SCCs and maps back via sccID[minID] == cid.
+				heap = pushIntMinHeap(heap, sccs[cid][0])
+			}
+		}
+		for len(heap) > 0 {
+			var minID int
+			heap, minID = popIntMinHeap(heap)
+			cid := sccID[minID]
+			topoIDs = append(topoIDs, sccs[cid]...)
+			for _, dst := range sccAdj[cid] {
+				sccIndeg[dst]--
+				if sccIndeg[dst] == 0 {
+					heap = pushIntMinHeap(heap, sccs[dst][0])
+				}
+			}
+		}
+	}
+
 	ensureExcludeMutable := func() {
 		if *clonedExclude {
 			return
@@ -1278,158 +1794,374 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool,
 		}
 		*clonedExclude = true
 	}
-	var unmatched map[lookalikeKey][]*spanRecord
-	for _, k := range keysOrder {
-		var memberIdxs []int
-		for i := 1; i < len(inv.agentStack); i++ {
-			rec := inv.agentStack[i]
-			if !exclude[rec.spanID] && rec.kind == spanKindAgent &&
-				rec.name == k.name && rec.branch == k.branch && rec.path == k.path {
-				memberIdxs = append(memberIdxs, i)
+
+	var seg maxSegTree
+	var segActive bool
+	var segTargetGoid uint64
+	activateSeg := func(target uint64) {
+		segTargetGoid = target
+		if cap(seg.tree) < 2*n {
+			seg = newMaxSegTree(n)
+		} else {
+			seg.n = n
+			seg.tree = seg.tree[:2*n]
+			clear(seg.tree)
+		}
+		for u := 1; u < n; u++ {
+			if !excluded[u] && inv.agentStack[u].goroutineID == target {
+				seg.tree[n+tree.tin[u]-1] = u
 			}
 		}
-		if len(memberIdxs) <= 1 {
-			continue
+		seg.build()
+		segActive = true
+	}
+
+	var excludeQueue []int
+	propagateExclude := func(u int) {
+		if excluded[u] {
+			return
 		}
-		var runningWinner, starterWinner *spanRecord
-		for j := memberIdxs[0]; j < len(inv.agentStack); j++ {
-			rec := inv.agentStack[j]
-			if exclude[rec.spanID] || rec.kind != spanKindAgent || rec.goroutineID == 0 {
-				continue
-			}
-			if rec.goroutineID != goid && rec.goroutineID != origin.parent {
-				continue
-			}
-			var matchedMember *spanRecord
-			for cur := rec; cur != nil && cur.kind == spanKindAgent && !exclude[cur.spanID]; cur = cur.parent {
-				if slices.ContainsFunc(memberIdxs, func(mIdx int) bool { return inv.agentStack[mIdx] == cur }) {
-					matchedMember = cur
-					break
+		ensureExcludeMutable()
+		excluded[u] = true
+		exclude[inv.agentStack[u].spanID] = true
+		if segActive && inv.agentStack[u].goroutineID == segTargetGoid {
+			seg.set(tree.tin[u]-1, 0)
+		}
+		excludeQueue = append(excludeQueue[:0], u)
+		for len(excludeQueue) > 0 {
+			cur := excludeQueue[len(excludeQueue)-1]
+			excludeQueue = excludeQueue[:len(excludeQueue)-1]
+			for _, ch := range tree.childrenOf[cur] {
+				if !excluded[ch] {
+					excluded[ch] = true
+					exclude[inv.agentStack[ch].spanID] = true
+					if segActive && inv.agentStack[ch].goroutineID == segTargetGoid {
+						seg.set(tree.tin[ch]-1, 0)
+					}
+					excludeQueue = append(excludeQueue, ch)
 				}
 			}
-			if matchedMember == nil {
+		}
+	}
+
+	computeBestMatch := func(targetGoid uint64, dst []int) {
+		clear(dst)
+		if targetGoid == 0 {
+			return
+		}
+		for _, u := range tree.dfsSeq[1:] {
+			if !excluded[u] && inv.agentStack[u].goroutineID == targetGoid {
+				dst[u] = u
+			}
+		}
+		for idx := len(tree.dfsSeq) - 1; idx >= 1; idx-- {
+			u := tree.dfsSeq[idx]
+			if excluded[u] || dst[u] == 0 {
 				continue
 			}
-			if rec.goroutineID == goid {
-				runningWinner = matchedMember
-			} else {
-				starterWinner = matchedMember
+			p := tree.openParent[u]
+			if p > 0 && !excluded[p] && dst[u] > dst[p] {
+				dst[p] = dst[u]
 			}
 		}
-		winner := runningWinner
-		if winner == nil {
-			winner = starterWinner
+	}
+
+	pickWinner := func(liveIdxs, best []int, useSeg bool, scopeIdx int) (int, int) {
+		winnerIdx := 0
+		bestMatch := 0
+		bestDepth := -1
+		for _, mIdx := range liveIdxs {
+			if scopeIdx != 0 && mIdx != scopeIdx && !tree.isOpenAncestor(scopeIdx, mIdx) {
+				continue
+			}
+			var bm int
+			if useSeg {
+				bm = seg.query(tree.tin[mIdx]-1, tree.tout[mIdx]-1)
+			} else {
+				bm = best[mIdx]
+			}
+			if bm == 0 {
+				continue
+			}
+			if bm > bestMatch || (bm == bestMatch && tree.depth[mIdx] > bestDepth) {
+				bestMatch = bm
+				bestDepth = tree.depth[mIdx]
+				winnerIdx = mIdx
+			}
 		}
-		if winner == nil {
+		return winnerIdx, bestMatch
+	}
+
+	var effectiveScratch []int
+	countEffectivePeers := func(liveByTin []int) int {
+		if len(liveByTin) <= 1 {
+			return len(liveByTin)
+		}
+		var lastForGoid map[uint64]int
+		for _, u := range liveByTin {
+			if g := inv.agentStack[u].goroutineID; g != 0 {
+				if lastForGoid == nil {
+					lastForGoid = make(map[uint64]int, len(liveByTin))
+				}
+				if prev, ok := lastForGoid[g]; !ok || u > prev {
+					lastForGoid[g] = u
+				}
+			}
+		}
+		compacted := effectiveScratch[:0]
+		for _, u := range liveByTin {
+			if g := inv.agentStack[u].goroutineID; g != 0 && lastForGoid[g] != u {
+				continue
+			}
+			compacted = append(compacted, u)
+		}
+		effectiveScratch = compacted
+		if len(compacted) <= 1 {
+			return len(compacted)
+		}
+		effective := 0
+		for i, u := range compacted {
+			if i+1 < len(compacted) && tree.tout[compacted[i+1]] <= tree.tout[u] {
+				continue
+			}
+			effective++
+		}
+		return effective
+	}
+
+	excludeLosers := func(liveIdxs []int, winnerIdx, bm int, matchGoid uint64) bool {
+		winner := inv.agentStack[winnerIdx]
+		var keptInsideBm bool
+		for _, mIdx := range liveIdxs {
+			if mIdx == winnerIdx || tree.isOpenAncestor(mIdx, winnerIdx) {
+				continue
+			}
+			// Only keep inner peers inside a descendant witness bm when the winner
+			// itself is on a different goroutine from matchGoid; a direct
+			// matchGoid winner must still exclude cross-goroutine inner peers even
+			// if an inline child frame shares winner's goroutine.
+			if bm != winnerIdx && winner.goroutineID != matchGoid && tree.isOpenAncestor(bm, mIdx) {
+				keptInsideBm = true
+				continue
+			}
+			other := inv.agentStack[mIdx]
+			if other.goroutineID != 0 && other.goroutineID == winner.goroutineID && mIdx < winnerIdx {
+				continue
+			}
+			propagateExclude(mIdx)
+		}
+		return keptInsideBm
+	}
+
+	// Pass 1: resolve groups with a live goid match before starter-only groups.
+	bestGoid := make([]int, n)
+	computeBestMatch(goid, bestGoid)
+	resolved := make([]bool, numGroups)
+	matchedScope := make([]int, numGroups)
+	var hasUnresolved bool
+	for _, id := range topoIDs {
+		k := multiKeys[id]
+		rawIdxs := groups[k]
+		liveIdxs := rawIdxs[:0]
+		var needRecompute bool
+		for _, mIdx := range rawIdxs {
+			if !excluded[mIdx] {
+				liveIdxs = append(liveIdxs, mIdx)
+				if !segActive {
+					if bm := bestGoid[mIdx]; bm != 0 && excluded[bm] {
+						needRecompute = true
+					}
+				}
+			}
+		}
+		groups[k] = liveIdxs
+		if len(liveIdxs) <= 1 {
+			resolved[id] = true
+			continue
+		}
+		if !segActive && needRecompute {
+			activateSeg(goid)
+		}
+		winnerIdx, bm := pickWinner(liveIdxs, bestGoid, segActive, 0)
+		if winnerIdx == 0 {
+			hasUnresolved = true
+			continue
+		}
+		if excludeLosers(liveIdxs, winnerIdx, bm, goid) {
+			matchedScope[id] = bm
+			hasUnresolved = true
+		} else {
+			resolved[id] = true
+		}
+	}
+
+	var unmatched map[lookalikeKey][]*spanRecord
+	var unmatchedRecKey map[int]lookalikeKey
+	if hasUnresolved {
+		bestStarter := make([]int, n)
+		computeBestMatch(origin.parent, bestStarter)
+		segActive = false
+
+		deepestGoidAnc := make([]int, n)
+		var deepestStarterAnc []int
+		if origin.parent != 0 {
+			deepestStarterAnc = make([]int, n)
+		}
+		for _, u := range tree.dfsSeq[1:] {
+			if excluded[u] {
+				continue
+			}
+			p := tree.openParent[u]
+			g := inv.agentStack[u].goroutineID
+			if g == goid {
+				deepestGoidAnc[u] = u
+			} else {
+				deepestGoidAnc[u] = deepestGoidAnc[p]
+			}
+			if deepestStarterAnc != nil {
+				if g == origin.parent {
+					deepestStarterAnc[u] = u
+				} else {
+					deepestStarterAnc[u] = deepestStarterAnc[p]
+				}
+			}
+		}
+
+		for _, id := range topoIDs {
+			if resolved[id] {
+				continue
+			}
+			k := multiKeys[id]
+			rawIdxs := groups[k]
+			liveIdxs := rawIdxs[:0]
+			var needRecompute bool
+			for _, mIdx := range rawIdxs {
+				if !excluded[mIdx] {
+					liveIdxs = append(liveIdxs, mIdx)
+					if !segActive {
+						if bm := bestStarter[mIdx]; bm != 0 && excluded[bm] {
+							needRecompute = true
+						}
+					}
+				}
+			}
+			groups[k] = liveIdxs
+			if len(liveIdxs) <= 1 {
+				continue
+			}
+			effScope := matchedScope[id]
+			goidScope := 0
+			for _, mIdx := range liveIdxs {
+				if effScope != 0 && mIdx != effScope && !tree.isOpenAncestor(effScope, mIdx) {
+					continue
+				}
+				if anc := deepestGoidAnc[mIdx]; anc > goidScope {
+					goidScope = anc
+				}
+			}
+			if goidScope != 0 && (effScope == 0 || tree.isOpenAncestor(effScope, goidScope)) {
+				effScope = goidScope
+			}
+			if !segActive && needRecompute {
+				activateSeg(origin.parent)
+			}
+			winnerIdx, bm := pickWinner(liveIdxs, bestStarter, segActive, effScope)
+			if winnerIdx != 0 {
+				if !excludeLosers(liveIdxs, winnerIdx, bm, origin.parent) {
+					continue
+				}
+				matchedScope[id] = bm
+			}
+
+			if matchedScope[id] == 0 {
+				ancM := effScope
+				if ancM == 0 && deepestStarterAnc != nil {
+					for _, mIdx := range liveIdxs {
+						if anc := deepestStarterAnc[mIdx]; anc > ancM {
+							ancM = anc
+						}
+					}
+				}
+				if ancM != 0 {
+					var hasInside, hasSiblingOutside bool
+					for _, mIdx := range liveIdxs {
+						if tree.isOpenAncestor(ancM, mIdx) {
+							hasInside = true
+						} else {
+							hasSiblingOutside = true
+						}
+					}
+					if hasInside && hasSiblingOutside {
+						kept := liveIdxs[:0]
+						for _, mIdx := range liveIdxs {
+							if tree.isOpenAncestor(ancM, mIdx) {
+								kept = append(kept, mIdx)
+							} else {
+								propagateExclude(mIdx)
+							}
+						}
+						liveIdxs = kept
+						groups[k] = liveIdxs
+						if len(liveIdxs) <= 1 {
+							continue
+						}
+						matchedScope[id] = ancM
+					}
+				}
+			}
+
+			scope := matchedScope[id]
+			rawTin := groupsByTin[id]
+			liveByTin := rawTin[:0]
+			for _, u := range rawTin {
+				if !excluded[u] && (scope == 0 || u == scope || tree.isOpenAncestor(scope, u)) {
+					liveByTin = append(liveByTin, u)
+				}
+			}
+			groupsByTin[id] = liveByTin
+			if countEffectivePeers(liveByTin) <= 1 {
+				continue
+			}
 			if unmatched == nil {
 				unmatched = make(map[lookalikeKey][]*spanRecord)
+				unmatchedRecKey = make(map[int]lookalikeKey, len(liveByTin))
 			}
-			recs := make([]*spanRecord, len(memberIdxs))
-			for i, mIdx := range memberIdxs {
-				recs[i] = inv.agentStack[mIdx]
+			unmatched[k] = nil
+			for _, u := range liveByTin {
+				unmatchedRecKey[u] = k
 			}
-			unmatched[k] = recs
-			continue
 		}
-		for _, mIdx := range memberIdxs {
-			other := inv.agentStack[mIdx]
-			if other == winner || isAgentAncestor(other, winner) {
+	}
+
+	var unmatchedByRec map[*spanRecord][]*spanRecord
+	if len(unmatched) > 0 {
+		keptByTin := make(map[lookalikeKey][]int, len(unmatched))
+		for _, u := range tree.dfsSeq[1:] {
+			if excluded[u] {
 				continue
 			}
-			ensureExcludeMutable()
-			maps.Copy(exclude, inv.subtreeLocked(mIdx))
-		}
-	}
-	for k, recs := range unmatched {
-		kept := recs[:0]
-		for _, r := range recs {
-			if !exclude[r.spanID] {
-				kept = append(kept, r)
+			if k, ok := unmatchedRecKey[u]; ok {
+				keptByTin[k] = append(keptByTin[k], u)
 			}
 		}
-		if len(kept) > 1 {
-			unmatched[k] = kept
-		} else {
-			delete(unmatched, k)
+		unmatchedByRec = make(map[*spanRecord][]*spanRecord, len(unmatchedRecKey))
+		for k := range unmatched {
+			keptIdxs := keptByTin[k]
+			if countEffectivePeers(keptIdxs) <= 1 {
+				delete(unmatched, k)
+				continue
+			}
+			recs := make([]*spanRecord, len(keptIdxs))
+			for i, u := range keptIdxs {
+				recs[i] = inv.agentStack[u]
+			}
+			unmatched[k] = recs
+			for _, r := range recs {
+				unmatchedByRec[r] = recs
+			}
 		}
 	}
-	return exclude, unmatched
-}
-
-// isAgentAncestor reports whether anc is a strict agent-span ancestor of desc
-// along spanRecord.parent links.
-func isAgentAncestor(anc, desc *spanRecord) bool {
-	for p := desc.parent; p != nil && p.kind == spanKindAgent; p = p.parent {
-		if p == anc {
-			return true
-		}
-	}
-	return false
-}
-
-// runningLookalikeLocked returns, of p and the other open activations of p's
-// agent, branch and node path not in exclude, the last-started (innermost) one
-// that runs on goroutine goid, whose origin is origin, or, when none does, the
-// last-started one whose goroutine started goid. parentFor tells such
-// lookalikes apart only by which started last, but an agent that starts on a
-// goroutine runs under the activation whose Run that goroutine iterates, as
-// when a custom agent runs a sub-agent inside its loop over its own events, or
-// under the one that started the goroutine, as a ParallelAgent does for each
-// branch. So when a custom agent runs the same agent on goroutines of its own,
-// each of the agents under them runs under its own run, not the one that
-// started last. Goroutine IDs are never reused within a process.
-//
-// The runtime names only the goroutine that started goid, so an agent that
-// starts on a goroutine that a helper goroutine of a lookalike started, which
-// runs no callback of this plugin, matches none of them. When more than one
-// lookalike exists and none runs on goid or started it, it runs under the
-// nearest open span that encloses every lookalike (see
-// enclosingOpenSpanLocked), rather than under the lookalike that started last.
-// When more than one lookalike runs on goid or, with none running on it,
-// started it, the one that started last runs innermost on that goroutine and
-// is returned. Lookalikes whose goroutine is unknown (goroutineID == 0) do not
-// match goid or origin.parent (even when origin.parent == 0), while remaining
-// in the lookalike set considered by enclosingOpenSpanLocked. When there is
-// only p, p == nil, p.kind != spanKindAgent, or goid == 0, p is returned.
-// inv.mu must be held.
-func (inv *invocationTrace) runningLookalikeLocked(p *spanRecord, exclude map[string]bool, goid uint64, origin goroutineOrigin) *spanRecord {
-	if p == nil || p.kind != spanKindAgent || goid == 0 {
-		return p
-	}
-	var running, starter *spanRecord
-	var lookalikes []*spanRecord
-	for _, rec := range inv.agentStack[1:] {
-		if rec.kind != spanKindAgent || exclude[rec.spanID] ||
-			rec.name != p.name || rec.branch != p.branch || rec.path != p.path {
-			continue
-		}
-		lookalikes = append(lookalikes, rec)
-		if rec.goroutineID == 0 {
-			continue
-		}
-		switch rec.goroutineID {
-		case goid:
-			running = rec
-		case origin.parent:
-			starter = rec
-		}
-	}
-	// An activation that runs on goid itself is the one whose Run the
-	// goroutine iterates, even when a later lookalike runs on the goroutine
-	// that started goid, as when a custom agent runs one activation of an
-	// agent on a goroutine of its own and the next one inline. Because
-	// agentStack[1:] is ordered by start time, running and starter hold the
-	// innermost open match on goid and origin.parent respectively.
-	switch {
-	case running != nil:
-		return running
-	case starter != nil:
-		return starter
-	case len(lookalikes) > 1:
-		return inv.enclosingOpenSpanLocked(lookalikes)
-	default:
-		return p
-	}
+	return exclude, unmatched, unmatchedByRec, tree
 }
 
 // enclosingOpenSpanLocked returns the nearest span on agentStack that each of
@@ -1439,23 +2171,7 @@ func (inv *invocationTrace) enclosingOpenSpanLocked(recs []*spanRecord) *spanRec
 	if len(recs) == 0 {
 		return inv.agentStack[0]
 	}
-	runsUnder := func(rec, anc *spanRecord) bool {
-		for p := rec.parent; p != nil; p = p.parent {
-			if p == anc {
-				return true
-			}
-		}
-		return false
-	}
-	for anc := recs[0].parent; anc != nil; anc = anc.parent {
-		if anc == inv.agentStack[0] || !slices.Contains(inv.agentStack, anc) {
-			continue
-		}
-		if !slices.ContainsFunc(recs[1:], func(rec *spanRecord) bool { return !runsUnder(rec, anc) }) {
-			return anc
-		}
-	}
-	return inv.agentStack[0]
+	return inv.buildOpenSpanTreeLocked(nil).enclosing(inv, recs)
 }
 
 // ownerOf returns the span that the model and tool calls of id run under:
@@ -2299,24 +3015,26 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	// laterAttempt reports whether the activation of id is a later attempt
 	// of the workflow node that other ran as its agent (see attemptSite), so
 	// that other's failure is handled: other runs, with another activation,
-	// under a workflow agent whose node path lies above id.path, and either
+	// under a parent span whose node path lies above id.path, and either
 	//
 	//   - both are the agent of a workflow.ParallelWorker item that ran on
 	//     this goroutine, as when RetryConfig runs the item's node again on
-	//     the worker's goroutine. The stack of this callback shows no other
+	//     the worker's goroutine (even when concurrent lookalike WorkflowAgents
+	//     caused enclosingOpenSpanLocked to demote other.parent to a
+	//     non-workflow span). The stack of this callback shows no other
 	//     agent run (see attemptSiteOfTrace), so other's run, and every run
 	//     that started on this goroutine before, has returned, and synced
 	//     reports that other's InvocationContext can be read; or
-	//   - both are the agent of a node attempt that the workflow agent's
-	//     scheduler started on a goroutine of its own (see startedBy), and a
-	//     node completion event reported that the node run that ran other
-	//     ended (see spanRecord.nodeRunEnded). A node can write the same
-	//     metadata on an event of its own while it still runs, so the report
-	//     does not show that other's run is over: synced is false, other's
-	//     InvocationContext is not read, and other is purged now only for a
-	//     failure that was recorded for it, not for having no response yet
-	//     or for a model or tool call that it or a run under it still has
-	//     open.
+	//   - both are the agent of a node attempt under a workflow agent
+	//     (other.parent.isWorkflow) whose scheduler started both attempts on
+	//     goroutines of their own (see startedBy), and a node completion event
+	//     reported that the node run that ran other ended (see
+	//     spanRecord.nodeRunEnded). A node can write the same metadata on an
+	//     event of its own while it still runs, so the report does not show
+	//     that other's run is over: synced is false, other's InvocationContext
+	//     is not read, and other is purged now only for a failure that was
+	//     recorded for it, not for having no response yet or for a model or
+	//     tool call that it or a run under it still has open.
 	//
 	// Nothing else shows that other is an earlier attempt: the agent runs
 	// that a function node or a custom agent makes, one after another or one
@@ -2367,6 +3085,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	}
 	// Workflow-retry completion-inference loop.
 	var purged []unclosedAgentSpan
+	var didPurge bool
 	for i := len(inv.agentStack) - 1; i > 0; i-- {
 		rec := inv.agentStack[i]
 		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch || rec.path != id.path {
@@ -2413,12 +3132,15 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 				failures = inv.failuresLocked(i, false, inv.reportedOverLocked(i), false)
 			}
 			purged = inv.purgeActivationLocked(i, failures, now, ambient)
+			didPurge = true
 			break
 		}
 	}
 	// Mark concurrent peers on any remaining matching spans (workflow
 	// children that did not fail and were not purged by the retry loop).
-	parent = inv.parentForRunLocked(id, nil, goid, origin)
+	if didPurge {
+		parent = inv.parentForRunLocked(id, nil, goid, origin)
+	}
 	for _, other := range inv.agentStack[1:] {
 		if other.kind == spanKindAgent &&
 			other.parent == parent && other.name == id.agentName && other.branch == id.branch && other.path == id.path {

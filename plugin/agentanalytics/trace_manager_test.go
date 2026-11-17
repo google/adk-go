@@ -22495,12 +22495,12 @@ func TestLateFailureCauseKeepsActivation(t *testing.T) {
 	}
 }
 
-// TestRunningLookalikeLocked pins the order in which runningLookalikeLocked
-// tells concurrent activations of one agent apart: the innermost one running
-// on the goroutine first, then the innermost one running on the goroutine that
-// started it, then the nearest open enclosing span when multiple lookalikes
-// exist, and otherwise p.
-func TestRunningLookalikeLocked(t *testing.T) {
+// TestParentForRunLocked_LookalikeGoroutineResolution pins the order in which
+// parentForRunLocked tells concurrent activations of one agent apart: the
+// innermost one running on the goroutine first, then the innermost one running
+// on the goroutine that started it, then the nearest open enclosing span when
+// multiple concurrent lookalikes exist, and otherwise p.
+func TestParentForRunLocked_LookalikeGoroutineResolution(t *testing.T) {
 	const g0, g2, g3, g4 = 100, 200, 300, 400
 	setup := func(goroutines ...uint64) (*invocationTrace, *spanRecord, []*spanRecord) {
 		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-lookalike", time.Unix(1_700_000_000, 0))
@@ -22520,6 +22520,7 @@ func TestRunningLookalikeLocked(t *testing.T) {
 		// wantEnclosing expects root, which every record runs under.
 		wantEnclosing = -2
 	)
+	childID := identity{agentName: "leaf"}
 	for _, tc := range []struct {
 		name       string
 		goroutines []uint64
@@ -22549,8 +22550,8 @@ func TestRunningLookalikeLocked(t *testing.T) {
 			default:
 				want = recs[tc.want]
 			}
-			if got := inv.runningLookalikeLocked(p, nil, g2, tc.origin); got != want {
-				t.Fatalf("runningLookalikeLocked = %s, want %s", got.spanID, want.spanID)
+			if got := inv.parentForRunLocked(childID, nil, g2, tc.origin); got != want {
+				t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, want.spanID)
 			}
 		})
 	}
@@ -22561,20 +22562,20 @@ func TestRunningLookalikeLocked(t *testing.T) {
 		for _, rec := range recs {
 			rec.parent = mid
 		}
-		if got := inv.runningLookalikeLocked(recs[1], nil, g2, goroutineOrigin{parent: g0}); got != mid {
-			t.Fatalf("runningLookalikeLocked = %s, want %s", got.spanID, mid.spanID)
+		if got := inv.parentForRunLocked(childID, nil, g2, goroutineOrigin{parent: g0}); got != mid {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, mid.spanID)
 		}
 	})
 	t.Run("an excluded lookalike leaves only p", func(t *testing.T) {
 		inv, _, recs := setup(g3, g4)
-		if got := inv.runningLookalikeLocked(recs[1], map[string]bool{recs[0].spanID: true}, g2, goroutineOrigin{parent: g0}); got != recs[1] {
-			t.Fatalf("runningLookalikeLocked = %s, want %s", got.spanID, recs[1].spanID)
+		if got := inv.parentForRunLocked(childID, map[string]bool{recs[0].spanID: true}, g2, goroutineOrigin{parent: g0}); got != recs[1] {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, recs[1].spanID)
 		}
 	})
 	t.Run("an unknown goroutine leaves p", func(t *testing.T) {
 		inv, _, recs := setup(g3, g4)
-		if got := inv.runningLookalikeLocked(recs[1], nil, 0, goroutineOrigin{}); got != recs[1] {
-			t.Fatalf("runningLookalikeLocked = %s, want %s", got.spanID, recs[1].spanID)
+		if got := inv.parentForRunLocked(childID, nil, 0, goroutineOrigin{}); got != recs[1] {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, recs[1].spanID)
 		}
 	})
 	t.Run("enclosingOpenSpanLocked skips retired spans and falls back to invocation", func(t *testing.T) {
@@ -23525,9 +23526,9 @@ func TestRunner_ConcurrentLookalikeCustomAgent_SubAgentParentSpanID(t *testing.T
 // end to end through runner.Run that when two concurrent lookalike WorkflowAgent
 // activations ("wf") are open — W1 running a retrying flaky_node and W2 open in
 // other_node — pushAgentSpan filters the retry purge parent check through
-// runningLookalikeLocked so W1's failed attempt is purged (emitting AGENT_ERROR
-// before attempt 2's AGENT_STARTING under W1's span_id) instead of skipping the
-// purge against W2.
+// excludePeerLookalikesLocked so W1's failed attempt is purged (emitting
+// AGENT_ERROR before attempt 2's AGENT_STARTING under W1's span_id) instead of
+// skipping the purge against W2.
 func TestRunner_ConcurrentLookalikeWorkflowRetry_PurgesOwnFailedAttempt(t *testing.T) {
 	requireADKNodeCompletionEvents(t)
 	ctx := t.Context()
@@ -24190,8 +24191,29 @@ func TestRunner_ConcurrentLookalikeWorkflowParallelWorkerRetry_PurgesOwnFailedAt
 						t.Errorf("item_agent[%d] parent_span_id = %q, want %q (root while both wf peers open)", i, got, rootSpan)
 					}
 				}
-				if got, _ := itemStarts[2]["parent_span_id"].(string); got != w1Span && got != w2Span {
-					t.Errorf("item_agent[2] parent_span_id = %q, want remaining wf span (%q or %q) after peer exited", got, w1Span, w2Span)
+				retryStartIdx := slices.IndexFunc(rows, func(r map[string]any) bool {
+					return r["span_id"] == itemStarts[2]["span_id"] && r["event_type"] == EventAgentStarting
+				})
+				var closedWfSpan, activeWfSpan string
+				for idx, r := range rows {
+					if r["agent"] != "wf" || r["event_type"] != EventAgentCompleted {
+						continue
+					}
+					sid, _ := r["span_id"].(string)
+					if idx < retryStartIdx {
+						closedWfSpan = sid
+					} else {
+						activeWfSpan = sid
+					}
+				}
+				if closedWfSpan == "" || activeWfSpan == "" || closedWfSpan == activeWfSpan {
+					t.Fatalf("expected distinct closed (%q) and active (%q) wf spans around retry start idx %d", closedWfSpan, activeWfSpan, retryStartIdx)
+				}
+				if (closedWfSpan != w1Span && closedWfSpan != w2Span) || (activeWfSpan != w1Span && activeWfSpan != w2Span) {
+					t.Fatalf("closed/active wf spans (%q, %q) do not match starts (%q, %q)", closedWfSpan, activeWfSpan, w1Span, w2Span)
+				}
+				if got, _ := itemStarts[2]["parent_span_id"].(string); got != activeWfSpan {
+					t.Errorf("item_agent[2] parent_span_id = %q, want active retry wf span %q (not closed peer %q)", got, activeWfSpan, closedWfSpan)
 				}
 			}
 		})
@@ -24655,5 +24677,1298 @@ func TestParentForRunLocked_PreservesCallerExclude(t *testing.T) {
 	}
 	if !maps.Equal(callerExcludeOuter, wantCallerOuter) {
 		t.Fatalf("callerExcludeOuter mutated: got %v, want %v", callerExcludeOuter, wantCallerOuter)
+	}
+}
+
+// TestRunner_NonConcurrentLookalike_NestedTransferChain verifies that
+// sequential nested lookalikes (e.g. planner -> helper -> planner via transfer
+// back) followed by a WorkflowAgent with a ParallelWorker or NewWorkflowNode
+// still parent the child under wf and propagate AGENT_ERROR up the full chain.
+func TestRunner_NonConcurrentLookalike_NestedTransferChain(t *testing.T) {
+	transferTo := func(target string) *model.LLMResponse {
+		return &model.LLMResponse{
+			Content: genai.NewContentFromParts([]*genai.Part{
+				genai.NewPartFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": target}),
+			}, genai.RoleModel),
+		}
+	}
+
+	t.Run("succeeding ParallelWorker item", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		itemAgent, err := llmagent.New(llmagent.Config{
+			Name: "item_agent",
+			Mode: llmagent.ModeSingleTurn,
+			Model: &callbackLLM{
+				name: "item-ok",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					return &model.LLMResponse{Content: textContent("model", "item ok"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(item_agent): %v", err)
+		}
+		itemNode, err := workflow.NewAgentNode(itemAgent, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode: %v", err)
+		}
+		itemsFn := workflow.NewFunctionNode("items", func(agent.Context, any) ([]string, error) {
+			return []string{"a"}, nil
+		}, workflow.NodeConfig{})
+		pw, err := workflow.NewParallelWorker("pw", itemNode, 0, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewParallelWorker: %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf",
+			Edges: workflow.Chain(workflow.Start, itemsFn, pw),
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New: %v", err)
+		}
+		helper, err := llmagent.New(llmagent.Config{
+			Name:  "helper",
+			Model: &transferModel{script: []string{"planner"}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(helper): %v", err)
+		}
+		planner, err := llmagent.New(llmagent.Config{
+			Name:      "planner",
+			Model:     &transferModel{script: []string{"helper", "wf"}},
+			SubAgents: []agent.Agent{helper, wf},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(planner): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, planner, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+		assertAgentSpansClosed(t, rows)
+
+		wfStarts := agentRowsOfType(rows, EventAgentStarting, "wf")
+		if len(wfStarts) != 1 {
+			t.Fatalf("wf AGENT_STARTING count = %d, want 1", len(wfStarts))
+		}
+		wfSpan, _ := wfStarts[0]["span_id"].(string)
+		itemStarts := agentRowsOfType(rows, EventAgentStarting, "item_agent")
+		if len(itemStarts) != 1 {
+			t.Fatalf("item_agent AGENT_STARTING count = %d, want 1", len(itemStarts))
+		}
+		if got, _ := itemStarts[0]["parent_span_id"].(string); got != wfSpan {
+			t.Errorf("item_agent parent_span_id = %q, want %q (wf span)", got, wfSpan)
+		}
+	})
+
+	t.Run("failing ParallelWorker item propagates AGENT_ERROR", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		errBoom := errors.New("item boom")
+		itemAgent, err := llmagent.New(llmagent.Config{
+			Name: "item_agent",
+			Mode: llmagent.ModeSingleTurn,
+			Model: &callbackLLM{
+				name: "item-fail",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					return nil, errBoom
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(item_agent): %v", err)
+		}
+		itemNode, err := workflow.NewAgentNode(itemAgent, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode: %v", err)
+		}
+		itemsFn := workflow.NewFunctionNode("items", func(agent.Context, any) ([]string, error) {
+			return []string{"a"}, nil
+		}, workflow.NodeConfig{})
+		pw, err := workflow.NewParallelWorker("pw", itemNode, 0, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewParallelWorker: %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf",
+			Edges: workflow.Chain(workflow.Start, itemsFn, pw),
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New: %v", err)
+		}
+		helper, err := llmagent.New(llmagent.Config{
+			Name:  "helper",
+			Model: &transferModel{script: []string{"planner"}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(helper): %v", err)
+		}
+		planner, err := llmagent.New(llmagent.Config{
+			Name:      "planner",
+			Model:     &transferModel{script: []string{"helper", "wf"}},
+			SubAgents: []agent.Agent{helper, wf},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(planner): %v", err)
+		}
+
+		var gotRunErr error
+		for _, runErr := range newTestRunner(t, planner, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				gotRunErr = runErr
+			}
+		}
+		if gotRunErr == nil {
+			t.Fatal("expected runner.Run error from failing item_agent")
+		}
+		rows := collectRows(t, requests, untilEventType(EventInvocationError))
+
+		wfStarts := agentRowsOfType(rows, EventAgentStarting, "wf")
+		if len(wfStarts) != 1 {
+			t.Fatalf("wf AGENT_STARTING count = %d, want 1", len(wfStarts))
+		}
+		wfSpan, _ := wfStarts[0]["span_id"].(string)
+		itemStarts := agentRowsOfType(rows, EventAgentStarting, "item_agent")
+		if len(itemStarts) != 1 {
+			t.Fatalf("item_agent AGENT_STARTING count = %d, want 1", len(itemStarts))
+		}
+		if got, _ := itemStarts[0]["parent_span_id"].(string); got != wfSpan {
+			t.Errorf("item_agent parent_span_id = %q, want %q (wf span)", got, wfSpan)
+		}
+		errCounts := agentErrorCounts(rows)
+		for name, want := range map[string]int{
+			"item_agent": 1,
+			"wf":         1,
+			"helper":     1,
+			"planner":    2,
+		} {
+			if errCounts[name] != want {
+				t.Errorf("%s AGENT_ERROR count = %d, want %d (all counts: %v)", name, errCounts[name], want, errCounts)
+			}
+			if gotComp := len(agentRowsOfType(rows, EventAgentCompleted, name)); gotComp != 0 {
+				t.Errorf("%s AGENT_COMPLETED count = %d, want 0", name, gotComp)
+			}
+		}
+	})
+
+	t.Run("NewWorkflowNode under nested transfer chain", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		itemAgent, err := llmagent.New(llmagent.Config{
+			Name: "item_agent",
+			Mode: llmagent.ModeSingleTurn,
+			Model: &callbackLLM{
+				name: "wf-node-item",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					return &model.LLMResponse{Content: textContent("model", "nested node ok"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(item_agent): %v", err)
+		}
+		itemNode, err := workflow.NewAgentNode(itemAgent, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode: %v", err)
+		}
+		wfNode, err := workflow.NewWorkflowNode("sub_wf", []workflow.Edge{{From: workflow.Start, To: itemNode}})
+		if err != nil {
+			t.Fatalf("workflow.NewWorkflowNode: %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf",
+			Edges: []workflow.Edge{{From: workflow.Start, To: wfNode}},
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New: %v", err)
+		}
+		var helperCalls atomic.Int32
+		helper, err := llmagent.New(llmagent.Config{
+			Name: "helper",
+			Model: &callbackLLM{
+				name: "helper-transfer",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					if helperCalls.Add(1) == 1 {
+						return transferTo("planner"), nil
+					}
+					return &model.LLMResponse{Content: textContent("model", "done"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(helper): %v", err)
+		}
+		var plannerCalls atomic.Int32
+		planner, err := llmagent.New(llmagent.Config{
+			Name:      "planner",
+			SubAgents: []agent.Agent{helper, wf},
+			Model: &callbackLLM{
+				name: "planner-transfer",
+				fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+					if plannerCalls.Add(1) == 1 {
+						return transferTo("helper"), nil
+					}
+					return transferTo("wf"), nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(planner): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, planner, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+		assertAgentSpansClosed(t, rows)
+
+		wfStarts := agentRowsOfType(rows, EventAgentStarting, "wf")
+		if len(wfStarts) != 1 {
+			t.Fatalf("wf AGENT_STARTING count = %d, want 1", len(wfStarts))
+		}
+		wfSpan, _ := wfStarts[0]["span_id"].(string)
+		itemStarts := agentRowsOfType(rows, EventAgentStarting, "item_agent")
+		if len(itemStarts) != 1 {
+			t.Fatalf("item_agent AGENT_STARTING count = %d, want 1", len(itemStarts))
+		}
+		if got, _ := itemStarts[0]["parent_span_id"].(string); got != wfSpan {
+			t.Errorf("item_agent parent_span_id = %q, want %q (wf span)", got, wfSpan)
+		}
+	})
+}
+
+// TestRunner_NonConcurrentLookalike_SameGoroutineStaleWorkflow verifies that
+// when an earlier run of a WorkflowAgent on the same goroutine exits without
+// an AfterAgentCallback (e.g. BeforeAgentCallback short-circuit or failure) and
+// a fresh run of the same agent runs sequentially on that goroutine, its
+// ParallelWorker item still parents under the fresh WorkflowAgent span.
+func TestRunner_NonConcurrentLookalike_SameGoroutineStaleWorkflow(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		shortCircuit bool
+	}{
+		{name: "after BeforeAgentCallback short-circuit", shortCircuit: true},
+		{name: "after failed earlier run", shortCircuit: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			var wfRun, itemCalls atomic.Int32
+			itemAgent, err := llmagent.New(llmagent.Config{
+				Name: "item_agent",
+				Mode: llmagent.ModeSingleTurn,
+				Model: &callbackLLM{
+					name: "stale-seq-item",
+					fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+						if !tc.shortCircuit && itemCalls.Add(1) == 1 {
+							return nil, errors.New("run 1 transient item failure")
+						}
+						return &model.LLMResponse{Content: textContent("model", "item ok"), TurnComplete: true}, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(item_agent): %v", err)
+			}
+			itemNode, err := workflow.NewAgentNode(itemAgent, workflow.NodeConfig{})
+			if err != nil {
+				t.Fatalf("workflow.NewAgentNode: %v", err)
+			}
+			itemsFn := workflow.NewFunctionNode("items", func(agent.Context, any) ([]string, error) {
+				return []string{"x"}, nil
+			}, workflow.NodeConfig{})
+			pw, err := workflow.NewParallelWorker("pw", itemNode, 0, workflow.NodeConfig{})
+			if err != nil {
+				t.Fatalf("workflow.NewParallelWorker: %v", err)
+			}
+			wf, err := workflowagent.New(workflowagent.Config{
+				Name:  "wf",
+				Edges: workflow.Chain(workflow.Start, itemsFn, pw),
+				BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+					func(agent.Context) (*genai.Content, error) {
+						if tc.shortCircuit && wfRun.Add(1) == 1 {
+							return textContent("model", "cached wf"), nil
+						}
+						return nil, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("workflowagent.New: %v", err)
+			}
+
+			root, err := agent.New(agent.Config{
+				Name:      "root",
+				SubAgents: []agent.Agent{wf},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						// Run 1: either short-circuits in BeforeAgentCallback or fails without AfterAgentCallback.
+						for ev, runErr := range wf.Run(ctx) {
+							if runErr != nil {
+								break
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+						// Run 2 on the exact same goroutine.
+						for ev, runErr := range wf.Run(ctx) {
+							if !yield(ev, runErr) || runErr != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+
+			for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if tc.shortCircuit {
+				onlyRowOfType(t, rows, EventInvocationCompleted)
+			} else {
+				onlyRowOfType(t, rows, EventInvocationError)
+			}
+
+			wfStarts := agentRowsOfType(rows, EventAgentStarting, "wf")
+			if len(wfStarts) != 2 {
+				t.Fatalf("wf AGENT_STARTING count = %d, want 2", len(wfStarts))
+			}
+			wf2Span, _ := wfStarts[1]["span_id"].(string)
+
+			itemStarts := agentRowsOfType(rows, EventAgentStarting, "item_agent")
+			var lastItem map[string]any
+			if tc.shortCircuit {
+				if len(itemStarts) != 1 {
+					t.Fatalf("item_agent AGENT_STARTING count = %d, want 1", len(itemStarts))
+				}
+				lastItem = itemStarts[0]
+			} else {
+				if len(itemStarts) != 2 {
+					t.Fatalf("item_agent AGENT_STARTING count = %d, want 2", len(itemStarts))
+				}
+				lastItem = itemStarts[1]
+			}
+			if got, _ := lastItem["parent_span_id"].(string); got != wf2Span {
+				t.Errorf("fresh item_agent parent_span_id = %q, want %q (second wf span)", got, wf2Span)
+			}
+		})
+	}
+}
+
+// TestRunner_NonConcurrentLookalike_SuspendedIterator verifies that when an
+// outer custom agent ("worker") declaring sub-agent "sub" iterates an inner
+// custom agent also named "worker" (not declaring "sub") on the same goroutine
+// and invokes "sub" from inside the loop body while inner sits suspended in
+// yield, "sub" is parented to outer (the declaring activation), both alone and
+// alongside a concurrent peer "worker" on another goroutine.
+func TestRunner_NonConcurrentLookalike_SuspendedIterator(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		concurrentPeer bool
+	}{
+		{name: "sequential suspended iterator"},
+		{name: "suspended iterator with concurrent peer", concurrentPeer: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			sub, err := agent.New(agent.Config{
+				Name: "sub",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "sub"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "sub ok")
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(sub): %v", err)
+			}
+
+			innerWorker, err := agent.New(agent.Config{
+				Name: "worker",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "worker"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "inner step")
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(innerWorker): %v", err)
+			}
+
+			outerInLoop := make(chan struct{})
+			peerOpened := make(chan struct{})
+			subDone := make(chan struct{})
+			var outerEntered bool
+
+			outerWorker, err := agent.New(agent.Config{
+				Name:      "worker",
+				SubAgents: []agent.Agent{sub},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						for ev, runErr := range innerWorker.Run(ctx) {
+							if !yield(ev, runErr) || runErr != nil {
+								return
+							}
+							if !outerEntered {
+								outerEntered = true
+								if tc.concurrentPeer {
+									close(outerInLoop)
+									select {
+									case <-peerOpened:
+									case <-ctx.Done():
+										yield(nil, ctx.Err())
+										return
+									}
+								}
+								for subEv, subErr := range sub.Run(ctx) {
+									if !yield(subEv, subErr) || subErr != nil {
+										return
+									}
+								}
+								if tc.concurrentPeer {
+									close(subDone)
+								}
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(outerWorker): %v", err)
+			}
+
+			peerWorker, err := agent.New(agent.Config{
+				Name: "worker",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						close(peerOpened)
+						select {
+						case <-subDone:
+						case <-ctx.Done():
+							yield(nil, ctx.Err())
+							return
+						}
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "worker"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "peer ok")
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(peerWorker): %v", err)
+			}
+
+			root, err := agent.New(agent.Config{
+				Name:      "root",
+				SubAgents: []agent.Agent{outerWorker},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						if !tc.concurrentPeer {
+							for ev, runErr := range outerWorker.Run(ctx) {
+								if !yield(ev, runErr) || runErr != nil {
+									return
+								}
+							}
+							return
+						}
+						type item struct {
+							ev  *session.Event
+							err error
+						}
+						ch := make(chan item, 16)
+						var wg sync.WaitGroup
+						wg.Go(func() {
+							for ev, runErr := range outerWorker.Run(ctx) {
+								ch <- item{ev: ev, err: runErr}
+							}
+						})
+						<-outerInLoop
+						wg.Go(func() {
+							for ev, runErr := range peerWorker.Run(ctx) {
+								ch <- item{ev: ev, err: runErr}
+							}
+						})
+						go func() {
+							wg.Wait()
+							close(ch)
+						}()
+						for it := range ch {
+							if !yield(it.ev, it.err) || it.err != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+
+			for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+			rows := collectRows(t, requests, untilInvocationEnd)
+			onlyRowOfType(t, rows, EventInvocationCompleted)
+			assertAgentSpansClosed(t, rows)
+
+			workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+			wantWorkers := 2
+			if tc.concurrentPeer {
+				wantWorkers = 3
+			}
+			if len(workerStarts) != wantWorkers {
+				t.Fatalf("worker AGENT_STARTING count = %d, want %d", len(workerStarts), wantWorkers)
+			}
+			outerSpan, _ := workerStarts[0]["span_id"].(string)
+			subStarts := agentRowsOfType(rows, EventAgentStarting, "sub")
+			if len(subStarts) != 1 {
+				t.Fatalf("sub AGENT_STARTING count = %d, want 1", len(subStarts))
+			}
+			if got, _ := subStarts[0]["parent_span_id"].(string); got != outerSpan {
+				t.Errorf("sub parent_span_id = %q, want %q (declaring outer worker, not suspended inner)", got, outerSpan)
+			}
+		})
+	}
+}
+
+// TestParentForRunLocked_LookalikeInvariants pins invariants in
+// excludePeerLookalikesLocked and parentForRunLocked:
+//   - keeping an outer cross-goroutine ancestor of the winner unexcluded
+//     alongside a concurrent peer;
+//   - matching a descendant in a lookalike member's subtree when no member runs
+//     directly on goid or origin.parent;
+//   - filtering unmatched groups against final exclusions (including
+//     re-collapsing surviving non-concurrent pairs);
+//   - storing all live group members in unmatched for parent-chain ambiguity
+//     detection and enclosingOpenSpanLocked scoping;
+//   - resolving outer ancestor groups before inner descendant groups; and
+//   - preserving direct goroutine matches on cross-goroutine nested ancestors.
+func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
+	t.Run("keeps cross-goroutine nested ancestor of winner", func(t *testing.T) {
+		const gOuter, gInner, gPeer = 101, 102, 103
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-ancestor-keep", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		outer := &spanRecord{spanID: "planner-outer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: gOuter}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: outer, goroutineID: gInner}
+		inner := &spanRecord{spanID: "planner-inner", kind: spanKindAgent, name: "planner", parent: mid, goroutineID: gInner}
+		peer := &spanRecord{spanID: "planner-peer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: gPeer}
+		inv.agentStack = append(inv.agentStack, root, outer, mid, inner, peer)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, gInner, goroutineOrigin{parent: gInner})
+		if got != inner {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner.spanID)
+		}
+	})
+
+	t.Run("matches descendant inside lookalike member subtree", func(t *testing.T) {
+		const g1, g2, gSub1, gSub2 = 201, 202, 211, 212
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-subtree-match", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 200}
+		w1 := &spanRecord{spanID: "w1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: g1}
+		w2 := &spanRecord{spanID: "w2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: g2}
+		sub1 := &spanRecord{spanID: "sub1", kind: spanKindAgent, name: "sub_a", parent: w1, goroutineID: gSub1}
+		sub2 := &spanRecord{spanID: "sub2", kind: spanKindAgent, name: "sub_b", parent: w2, goroutineID: gSub2}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, sub1, sub2)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, gSub1, goroutineOrigin{parent: 999})
+		if got != sub1 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, sub1.spanID)
+		}
+	})
+
+	t.Run("filters unmatched groups against final exclusions", func(t *testing.T) {
+		const gInner1, gInner2, gOuter1, gOuter2, gInner3 = 301, 302, 303, 304, 305
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unmatched-filter", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 300}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: root, goroutineID: 300}
+		inner1 := &spanRecord{spanID: "inner-1", kind: spanKindAgent, name: "inner", parent: mid, goroutineID: gInner1}
+		inner2 := &spanRecord{
+			spanID: "inner-2", kind: spanKindAgent, name: "inner",
+			nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: gInner2,
+		}
+		outer1 := &spanRecord{spanID: "outer-1", kind: spanKindAgent, name: "outer", parent: root, goroutineID: gOuter1}
+		outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: root, goroutineID: gOuter2}
+		inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", parent: outer2, goroutineID: gInner3}
+		inv.agentStack = append(inv.agentStack, root, mid, inner1, inner2, outer1, outer2, inner3)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, gOuter1, goroutineOrigin{parent: 300})
+		if got != mid {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, mid.spanID, root.spanID)
+		}
+	})
+
+	t.Run("collapses cross-goroutine nested lookalikes without concurrent peer", func(t *testing.T) {
+		const gOuter, gInner, gWorker = 401, 402, 403
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-cross-goid-nested", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 400}
+		outer := &spanRecord{spanID: "planner-outer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: gOuter}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: outer, goroutineID: gInner}
+		inner := &spanRecord{spanID: "planner-inner", kind: spanKindAgent, name: "planner", parent: mid, goroutineID: gInner}
+		wf := &spanRecord{spanID: "wf", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, parent: inner, goroutineID: gInner}
+		inv.agentStack = append(inv.agentStack, root, outer, mid, inner, wf)
+
+		got := inv.parentForRunLocked(identity{agentName: "item"}, nil, gWorker, goroutineOrigin{parent: 999})
+		if got != wf {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wf.spanID)
+		}
+	})
+
+	t.Run("unmatched includes collapsed suspended iterator members", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unmatched-collapsed-iter", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		peerWorker := &spanRecord{spanID: "peer-worker", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: root, goroutineID: 102}
+		outerWorker := &spanRecord{spanID: "outer-worker", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: root, goroutineID: 101}
+		innerWorker := &spanRecord{spanID: "inner-worker", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		inv.agentStack = append(inv.agentStack, root, peerWorker, outerWorker, innerWorker)
+
+		got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 499})
+		if got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
+		}
+	})
+
+	t.Run("unmatched includes collapsed nested ancestor members", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unmatched-collapsed-nested", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		planner1 := &spanRecord{spanID: "planner-1", kind: spanKindAgent, name: "planner", parent: root, goroutineID: 101}
+		seq := &spanRecord{spanID: "seq", kind: spanKindAgent, name: "seq", nonLLM: true, children: []string{"planner", "item_agent"}, parent: planner1, goroutineID: 101}
+		plannerSub := &spanRecord{spanID: "planner-sub", kind: spanKindAgent, name: "planner", parent: seq, goroutineID: 101}
+		plannerPeer := &spanRecord{spanID: "planner-peer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: 102}
+		inv.agentStack = append(inv.agentStack, root, planner1, seq, plannerSub, plannerPeer)
+
+		got := inv.parentForRunLocked(identity{agentName: "item_agent"}, nil, 500, goroutineOrigin{parent: 499})
+		if got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
+		}
+	})
+
+	t.Run("unmatched enclosingOpenSpanLocked includes collapsed members", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unmatched-enclosing-scope", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		midA := &spanRecord{spanID: "mid-a", kind: spanKindAgent, name: "mid_a", parent: root, goroutineID: 101}
+		w1 := &spanRecord{spanID: "w1", kind: spanKindAgent, name: "w", parent: midA, goroutineID: 101}
+		midB := &spanRecord{spanID: "mid-b", kind: spanKindAgent, name: "mid_b", parent: root, goroutineID: 102}
+		w2 := &spanRecord{spanID: "w2", kind: spanKindAgent, name: "w", nonLLM: true, children: []string{"sub"}, parent: midB, goroutineID: 101}
+		w3 := &spanRecord{spanID: "w3", kind: spanKindAgent, name: "w", nonLLM: true, children: []string{"sub"}, parent: midB, goroutineID: 102}
+		inv.agentStack = append(inv.agentStack, root, midA, w1, midB, w2, w3)
+
+		got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 499})
+		if got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, root.spanID, midB.spanID)
+		}
+		if enc := inv.enclosingOpenSpanLocked([]*spanRecord{w1, w2, w3}); enc != root {
+			t.Fatalf("enclosingOpenSpanLocked = %s, want %s", enc.spanID, root.spanID)
+		}
+	})
+
+	t.Run("post-exclusion filter re-collapses surviving non-concurrent pair", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-post-exclusion-collapse", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "w1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: root, goroutineID: 103}
+		outer1 := &spanRecord{spanID: "outer-1", kind: spanKindAgent, name: "outer", parent: w1, goroutineID: 201}
+		wPeer := &spanRecord{spanID: "w-peer", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: outer1, goroutineID: 104}
+		w2 := &spanRecord{spanID: "w2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 103}
+		outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 101}
+		inv.agentStack = append(inv.agentStack, root, w1, outer1, wPeer, w2, outer2)
+
+		got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 101})
+		if got != w1 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, w1.spanID)
+		}
+	})
+
+	t.Run("outer group resolves before inner group regardless of second-occurrence order", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-outer-before-inner-2nd", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		outer1 := &spanRecord{spanID: "outer-1", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 100}
+		inner1 := &spanRecord{spanID: "inner-1", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer1, goroutineID: 100}
+		inner2 := &spanRecord{spanID: "inner-2", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer1, goroutineID: 200}
+		outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 300, origin: goroutineOrigin{parent: 100}}
+		inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer2, goroutineID: 400, origin: goroutineOrigin{parent: 300}}
+		inv.agentStack = append(inv.agentStack, root, outer1, inner1, inner2, outer2, inner3)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 100})
+		if got != inner3 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner3.spanID)
+		}
+	})
+
+	t.Run("outer group resolves before inner group even with earlier unrelated inner", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-outer-before-inner-unrelated", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		inner0 := &spanRecord{spanID: "inner-0", kind: spanKindAgent, name: "inner", parent: root, goroutineID: 50}
+		outer1 := &spanRecord{spanID: "outer-1", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 100}
+		inner1 := &spanRecord{spanID: "inner-1", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer1, goroutineID: 100}
+		inner2 := &spanRecord{spanID: "inner-2", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer1, goroutineID: 200}
+		outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 300, origin: goroutineOrigin{parent: 100}}
+		inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer2, goroutineID: 400, origin: goroutineOrigin{parent: 300}}
+		inv.agentStack = append(inv.agentStack, root, inner0, outer1, inner1, inner2, outer2, inner3)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 100})
+		if got != inner3 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner3.spanID)
+		}
+	})
+
+	t.Run("outer group resolves before inner group in same starter tier", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-outer-before-inner-starter", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 50}
+		inner0 := &spanRecord{spanID: "inner-0", kind: spanKindAgent, name: "inner", parent: root, goroutineID: 50}
+		outer1 := &spanRecord{spanID: "outer-1", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 100}
+		inner1 := &spanRecord{spanID: "inner-1", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer1, goroutineID: 300}
+		inner2 := &spanRecord{spanID: "inner-2", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer1, goroutineID: 200}
+		outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 300}
+		inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer2, goroutineID: 400}
+		inv.agentStack = append(inv.agentStack, root, inner0, outer1, inner1, inner2, outer2, inner3)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 500, goroutineOrigin{parent: 300})
+		if got != inner3 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner3.spanID)
+		}
+	})
+
+	t.Run("cross-goroutine nested ancestor keeps direct goroutine match", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-cross-goid-direct-match", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		coordOuter := &spanRecord{spanID: "coord-outer", kind: spanKindAgent, name: "coord", nonLLM: true, children: []string{"sub_a", "mid"}, parent: root, goroutineID: 101}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: coordOuter, goroutineID: 102}
+		coordInner := &spanRecord{spanID: "coord-inner", kind: spanKindAgent, name: "coord", nonLLM: true, children: []string{"sub_a", "mid"}, parent: mid, goroutineID: 102}
+		inv.agentStack = append(inv.agentStack, root, coordOuter, mid, coordInner)
+
+		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 101, goroutineOrigin{parent: 100}); got != coordOuter {
+			t.Fatalf("goid=101 parentForRunLocked = %s, want %s", got.spanID, coordOuter.spanID)
+		}
+		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 103, goroutineOrigin{parent: 101}); got != coordOuter {
+			t.Fatalf("starter=101 parentForRunLocked = %s, want %s", got.spanID, coordOuter.spanID)
+		}
+		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 102, goroutineOrigin{parent: 101}); got != coordInner {
+			t.Fatalf("goid=102 parentForRunLocked = %s, want %s", got.spanID, coordInner.spanID)
+		}
+		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 500, goroutineOrigin{parent: 499}); got != coordInner {
+			t.Fatalf("helper goid=500 parentForRunLocked = %s, want %s", got.spanID, coordInner.spanID)
+		}
+	})
+
+	t.Run("goid tier resolves before starter tier in mutually recursive groups", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-goid-before-starter-cycle", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		a1 := &spanRecord{spanID: "a1", kind: spanKindAgent, name: "a", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 101}
+		b1 := &spanRecord{spanID: "b1", kind: spanKindAgent, name: "b", nonLLM: true, parent: a1, goroutineID: 100}
+		a2 := &spanRecord{spanID: "a2", kind: spanKindAgent, name: "a", nonLLM: true, children: []string{"leaf"}, parent: b1, goroutineID: 102}
+		b2 := &spanRecord{spanID: "b2", kind: spanKindAgent, name: "b", nonLLM: true, parent: root, goroutineID: 300}
+		a3 := &spanRecord{spanID: "a3", kind: spanKindAgent, name: "a", nonLLM: true, children: []string{"leaf"}, parent: b2, goroutineID: 400}
+		inv.agentStack = append(inv.agentStack, root, a1, b1, a2, b2, a3)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 100})
+		if got != a3 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, a3.spanID)
+		}
+	})
+
+	t.Run("Pass 1 matchedScope preserves group ancestor of matching scope", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-ancm-keeps-ancestor", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		pOuter := &spanRecord{spanID: "p-outer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: 101}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: pOuter, goroutineID: 300}
+		pInner := &spanRecord{spanID: "p-inner", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 400}
+		pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 500}
+		inv.agentStack = append(inv.agentStack, root, pOuter, mid, pInner, pSibling)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 101})
+		if got != pInner {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, pInner.spanID)
+		}
+	})
+
+	t.Run("ancM fallback narrows unmatched scope without outer group ancestor", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			twoInner bool
+			goid     uint64
+			parent   uint64
+			wantID   string
+		}{
+			{name: "single inner under goid mid", twoInner: false, goid: 300, parent: 100, wantID: "p-inner-1"},
+			{name: "single inner under starter mid", twoInner: false, goid: 999, parent: 300, wantID: "p-inner-1"},
+			{name: "two inner peers under goid mid", twoInner: true, goid: 300, parent: 100, wantID: "mid"},
+			{name: "two inner peers under starter mid", twoInner: true, goid: 999, parent: 300, wantID: "mid"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-ancm-fallback", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+				mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: root, goroutineID: 300}
+				pInner1 := &spanRecord{spanID: "p-inner-1", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 401}
+				inv.agentStack = append(inv.agentStack, root, mid, pInner1)
+				if tc.twoInner {
+					pInner2 := &spanRecord{spanID: "p-inner-2", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 402}
+					inv.agentStack = append(inv.agentStack, pInner2)
+				}
+				pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 500}
+				inv.agentStack = append(inv.agentStack, pSibling)
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				if got.spanID != tc.wantID {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, tc.wantID)
+				}
+			})
+		}
+	})
+
+	t.Run("excludes workflow-lookalike scheduler peers and propagates to subtree", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-wf-lookalike-subtree", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		wf2 := &spanRecord{spanID: "wf-2", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, children: []string{"node"}, parent: root, goroutineID: 102}
+		wf1 := &spanRecord{spanID: "wf-1", kind: spanKindAgent, name: "wf", isWorkflow: true, parent: root, goroutineID: 101}
+		node1 := &spanRecord{spanID: "node-1", kind: spanKindAgent, name: "node", parent: wf1, goroutineID: 201, origin: goroutineOrigin{creator: schedulerCreator, parent: 101}}
+		sub1 := &spanRecord{spanID: "sub-1", kind: spanKindAgent, name: "sub", nonLLM: true, children: []string{"node"}, parent: node1, goroutineID: 202}
+		inv.agentStack = append(inv.agentStack, root, wf2, wf1, node1, sub1)
+
+		got := inv.parentForRunLocked(identity{agentName: "node"}, nil, 0, goroutineOrigin{creator: schedulerCreator, parent: 102})
+		if got != wf2 {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, wf2.spanID, sub1.spanID)
+		}
+	})
+
+	t.Run("keptInsideBm scopes unmatched to matched subtree so ancestor lookalike does not demote mid", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			midG   uint64
+			goid   uint64
+			parent uint64
+		}{
+			{name: "mid on own goroutine matching pOuter", midG: 100, goid: 100, parent: 99},
+			{name: "mid on distinct goroutine", midG: 200, goid: 200, parent: 99},
+			{name: "child started by mid goroutine", midG: 200, goid: 500, parent: 200},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-kept-inside-bm-mid", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+				pOuter := &spanRecord{spanID: "p-outer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: 100}
+				mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", nonLLM: true, children: []string{"planner", "leaf"}, parent: pOuter, goroutineID: tc.midG}
+				pInner1 := &spanRecord{spanID: "p-inner-1", kind: spanKindAgent, name: "planner", parent: mid, goroutineID: 301}
+				pInner2 := &spanRecord{spanID: "p-inner-2", kind: spanKindAgent, name: "planner", parent: mid, goroutineID: 302}
+				pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 400}
+				inv.agentStack = append(inv.agentStack, root, pOuter, mid, pInner1, pInner2, pSibling)
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				if got != mid {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, mid.spanID)
+				}
+			})
+		}
+	})
+
+	t.Run("keptInsideBm demotes unresolved inner peers to matched mid rather than root", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			goid        uint64
+			parent      uint64
+			outerNonLLM bool
+		}{
+			{name: "goid matches mid", goid: 200, parent: 99},
+			{name: "starter matches mid", goid: 500, parent: 200},
+			{name: "goid matches mid while starter matches pOuter and outside branch shares goid", goid: 200, parent: 100, outerNonLLM: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-kept-inside-bm-enclosing", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 50}
+				pOuter := &spanRecord{spanID: "p-outer", kind: spanKindAgent, name: "planner", nonLLM: tc.outerNonLLM, parent: root, goroutineID: 100}
+				if tc.outerNonLLM {
+					pOuter.children = []string{"leaf"}
+				}
+				mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: pOuter, goroutineID: 200}
+				pInner1 := &spanRecord{spanID: "p-inner-1", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 301}
+				pInner2 := &spanRecord{spanID: "p-inner-2", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 302}
+				pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 400}
+				other := &spanRecord{spanID: "other", kind: spanKindAgent, name: "other", branch: "other_branch", parent: root, goroutineID: 200}
+				inv.agentStack = append(inv.agentStack, root, pOuter, mid, pInner1, pInner2, pSibling, other)
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				if got != mid {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, mid.spanID)
+				}
+			})
+		}
+	})
+
+	t.Run("countEffectivePeers keeps two live concurrent peers when superseded child shares goroutine with sibling", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			vG   uint64
+		}{
+			{name: "v shares goroutine with sibling w", vG: 102},
+			{name: "v has zero goroutine", vG: 0},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-effective-peers-superseded", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+				u := &spanRecord{spanID: "u", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: root, goroutineID: 101}
+				v := &spanRecord{spanID: "v", kind: spanKindAgent, name: "worker", parent: u, goroutineID: tc.vG}
+				w := &spanRecord{spanID: "w", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: root, goroutineID: 102}
+				inv.agentStack = append(inv.agentStack, root, u, v, w)
+
+				got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 499})
+				if got != root {
+					t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, root.spanID, w.spanID)
+				}
+			})
+		}
+	})
+
+	t.Run("SCC condensation resolves cyclic outer groups before downstream inner group", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			goid   uint64
+			parent uint64
+		}{
+			{name: "starter match on outer branch", goid: 500, parent: 300},
+			{name: "goid match on outer branch", goid: 300, parent: 50},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-scc-outer-before-inner", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 50}
+				inner0 := &spanRecord{spanID: "inner-0", kind: spanKindAgent, name: "inner", parent: root, goroutineID: 50}
+				a1 := &spanRecord{spanID: "a1", kind: spanKindAgent, name: "a", parent: root, goroutineID: 100}
+				b1 := &spanRecord{spanID: "b1", kind: spanKindAgent, name: "b", parent: a1, goroutineID: 100}
+				a2 := &spanRecord{spanID: "a2", kind: spanKindAgent, name: "a", parent: b1, goroutineID: 100}
+				inner1 := &spanRecord{spanID: "inner-1", kind: spanKindAgent, name: "inner", parent: a2, goroutineID: 300}
+				inner2 := &spanRecord{spanID: "inner-2", kind: spanKindAgent, name: "inner", parent: a2, goroutineID: 200}
+				a3 := &spanRecord{spanID: "a3", kind: spanKindAgent, name: "a", parent: root, goroutineID: 300}
+				b2 := &spanRecord{spanID: "b2", kind: spanKindAgent, name: "b", parent: a3, goroutineID: 400}
+				inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", nonLLM: true, children: []string{"leaf"}, parent: b2, goroutineID: 400}
+				inv.agentStack = append(inv.agentStack, root, inner0, a1, b1, a2, inner1, inner2, a3, b2, inner3)
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				if got != inner3 {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner3.spanID)
+				}
+			})
+		}
+	})
+
+	t.Run("recomputes subtree witness after earlier group excludes prior witness", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			goid   uint64
+			parent uint64
+		}{
+			{name: "Pass 1 goid tier", goid: 777, parent: 1},
+			{name: "Pass 2 starter tier", goid: 888, parent: 777},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				const witnessG = 777
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-witness-recompute", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+				m0 := &spanRecord{spanID: "m0", kind: spanKindAgent, name: "g0", parent: root, goroutineID: witnessG}
+				m1 := &spanRecord{spanID: "m1", kind: spanKindAgent, name: "g1", nonLLM: true, children: []string{"leaf"}, parent: m0, goroutineID: witnessG}
+				l0 := &spanRecord{spanID: "l0", kind: spanKindAgent, name: "g0", parent: m1, goroutineID: 200}
+				w1 := &spanRecord{spanID: "w1", kind: spanKindAgent, name: "g1", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 300}
+				v1 := &spanRecord{spanID: "v1", kind: spanKindAgent, name: "v1", parent: w1, goroutineID: witnessG}
+				u0 := &spanRecord{spanID: "u0", kind: spanKindAgent, name: "u0", parent: l0, goroutineID: witnessG}
+				w0 := &spanRecord{spanID: "w0", kind: spanKindAgent, name: "g0", parent: root, goroutineID: witnessG}
+				inv.agentStack = append(inv.agentStack, root, m0, m1, l0, w1, v1, u0, w0)
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				if got != w1 {
+					t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, w1.spanID, m1.spanID)
+				}
+			})
+		}
+	})
+
+	t.Run("enclosing demotion does not drop wider inner unmatched group beneath narrower outer unmatched ancestor", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			withSubChild bool
+		}{
+			{name: "direct leaf under inner2"},
+			{name: "indirect subChild under inner2", withSubChild: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-wider-inner-unmatched", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+				midA := &spanRecord{spanID: "mid-a", kind: spanKindAgent, name: "mid_a", parent: root, goroutineID: 101}
+				inner1 := &spanRecord{spanID: "inner-1", kind: spanKindAgent, name: "inner", nonLLM: true, children: []string{"leaf"}, parent: midA, goroutineID: 201}
+				midB := &spanRecord{spanID: "mid-b", kind: spanKindAgent, name: "mid_b", parent: root, goroutineID: 102}
+				outer1 := &spanRecord{spanID: "outer-1", kind: spanKindAgent, name: "outer", parent: midB, goroutineID: 301}
+				outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: midB, goroutineID: 302}
+				inner2 := &spanRecord{spanID: "inner-2", kind: spanKindAgent, name: "inner", nonLLM: true, children: []string{"leaf"}, parent: outer2, goroutineID: 202}
+				inv.agentStack = append(inv.agentStack, root, midA, inner1, midB, outer1, outer2, inner2)
+				if tc.withSubChild {
+					subChild := &spanRecord{spanID: "sub-child", kind: spanKindAgent, name: "sub_child", nonLLM: true, children: []string{"leaf"}, parent: inner2, goroutineID: 202}
+					inv.agentStack = append(inv.agentStack, subChild)
+				}
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 999, goroutineOrigin{parent: 998})
+				if got != root {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
+				}
+			})
+		}
+	})
+
+	t.Run("Pass 2 enclosing goroutine scope ignores later sibling sharing mid goroutine", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			midLists  bool
+			siblingG  uint64
+			goid      uint64
+			parent    uint64
+			wantMidID string
+		}{
+			{name: "inline goid=200 with unrelated pSibling", midLists: true, siblingG: 400, goid: 200, parent: 100, wantMidID: "mid"},
+			{name: "starter parent=200 with unrelated pSibling", midLists: true, siblingG: 400, goid: 500, parent: 200, wantMidID: "mid"},
+			{name: "inline goid=200 blocks starter-matching pSibling", midLists: false, siblingG: 100, goid: 200, parent: 100, wantMidID: "mid"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-enclosing-goid-sibling", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+				midChildren := []string{"planner", "step1"}
+				if tc.midLists {
+					midChildren = append(midChildren, "leaf")
+				}
+				mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", nonLLM: true, children: midChildren, parent: root, goroutineID: 200}
+				pInner1 := &spanRecord{spanID: "p-inner-1", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 301}
+				pInner2 := &spanRecord{spanID: "p-inner-2", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 302}
+				step1 := &spanRecord{spanID: "step1", kind: spanKindAgent, name: "step1", parent: mid, goroutineID: 200}
+				pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: tc.siblingG}
+				inv.agentStack = append(inv.agentStack, root, mid, pInner1, pInner2, step1, pSibling)
+
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				if got.spanID != tc.wantMidID {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, tc.wantMidID)
+				}
+			})
+		}
+	})
+
+	t.Run("Pass 2 enclosing goroutine scope ignores unrelated branch sharing goid", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unrelated-branch-goid", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 50}
+		outer := &spanRecord{spanID: "outer", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 100}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: outer, goroutineID: 200}
+		pInner1 := &spanRecord{spanID: "p-inner-1", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 301}
+		pInner2 := &spanRecord{spanID: "p-inner-2", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 302}
+		pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 100}
+		other := &spanRecord{spanID: "other", kind: spanKindAgent, name: "other", branch: "other_branch", parent: root, goroutineID: 200}
+		inv.agentStack = append(inv.agentStack, root, outer, mid, pInner1, pInner2, pSibling, other)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 200, goroutineOrigin{parent: 100})
+		if got != mid {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, mid.spanID)
+		}
+	})
+
+	t.Run("Pass 2 pickWinner scopes starter candidates to matchedScope so outer witness does not shadow inner match", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-in-scope-pickwinner", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 50}
+		pOuter := &spanRecord{spanID: "p-outer", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 100}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: pOuter, goroutineID: 200}
+		pInner1 := &spanRecord{spanID: "p-inner-1", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 301}
+		s1 := &spanRecord{spanID: "s1", kind: spanKindAgent, name: "s1", parent: pInner1, goroutineID: 100}
+		pInner2 := &spanRecord{spanID: "p-inner-2", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: mid, goroutineID: 302}
+		s2 := &spanRecord{spanID: "s2", kind: spanKindAgent, name: "s2", parent: pOuter, goroutineID: 100}
+		inv.agentStack = append(inv.agentStack, root, pOuter, mid, pInner1, s1, pInner2, s2)
+
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 200, goroutineOrigin{parent: 100})
+		if got != pInner1 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, pInner1.spanID)
+		}
+	})
+
+	t.Run("direct winner match excludes cross-goroutine inner lookalike despite inline mid sharing winner goroutine", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			twoInner bool
+			goid     uint64
+			parent   uint64
+		}{
+			{name: "Pass 1 direct goid match with single inner", twoInner: false, goid: 101, parent: 100},
+			{name: "Pass 2 direct starter match with single inner", twoInner: false, goid: 103, parent: 101},
+			{name: "Pass 1 direct goid match with two inner peers", twoInner: true, goid: 101, parent: 100},
+			{name: "Pass 2 direct starter match with two inner peers", twoInner: true, goid: 103, parent: 101},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-direct-winner-inline-mid", time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+				coordOuter := &spanRecord{spanID: "coord-outer", kind: spanKindAgent, name: "coord", nonLLM: true, children: []string{"sub_a", "mid"}, parent: root, goroutineID: 101}
+				mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: coordOuter, goroutineID: 101}
+				coordInner1 := &spanRecord{spanID: "coord-inner-1", kind: spanKindAgent, name: "coord", nonLLM: true, children: []string{"sub_a", "mid"}, parent: mid, goroutineID: 102}
+				inv.agentStack = append(inv.agentStack, root, coordOuter, mid, coordInner1)
+				if tc.twoInner {
+					coordInner2 := &spanRecord{spanID: "coord-inner-2", kind: spanKindAgent, name: "coord", nonLLM: true, children: []string{"sub_a", "mid"}, parent: mid, goroutineID: 104}
+					inv.agentStack = append(inv.agentStack, coordInner2)
+				}
+
+				got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				if got != coordOuter {
+					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, coordOuter.spanID)
+				}
+			})
+		}
+	})
+}
+
+func BenchmarkParentForRunLocked_DistinctOpenSpans(b *testing.B) {
+	for _, n := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			inv := newInvocationTraceWithSpan(trace.SpanContext{}, "bench-distinct", time.Unix(1_700_000_000, 0))
+			root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+			inv.agentStack = append(inv.agentStack, root)
+			for i := range n {
+				inv.agentStack = append(inv.agentStack, &spanRecord{
+					spanID:      fmt.Sprintf("item-%d", i),
+					kind:        spanKindAgent,
+					name:        "item",
+					path:        fmt.Sprintf("pw[%d]", i),
+					parent:      root,
+					goroutineID: uint64(i + 2),
+				})
+			}
+			id := identity{agentName: "leaf", path: fmt.Sprintf("pw[%d]", n-1)}
+			origin := goroutineOrigin{parent: 1}
+			b.ResetTimer()
+			for b.Loop() {
+				if got := inv.parentForRunLocked(id, nil, 99999, origin); got == nil {
+					b.Fatal("got nil parent")
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkParentForRunLocked_LookalikesDeepAncestors(b *testing.B) {
+	for _, n := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			inv := newInvocationTraceWithSpan(trace.SpanContext{}, "bench-lookalikes-deep", time.Unix(1_700_000_000, 0))
+			parent := inv.agentStack[0]
+			ancCount := n / 2
+			for i := range ancCount {
+				anc := &spanRecord{
+					spanID:      fmt.Sprintf("anc-%d", i),
+					kind:        spanKindAgent,
+					name:        fmt.Sprintf("anc_%d", i),
+					parent:      parent,
+					goroutineID: uint64(i + 1),
+				}
+				inv.agentStack = append(inv.agentStack, anc)
+				parent = anc
+			}
+			for i := range n - ancCount {
+				inv.agentStack = append(inv.agentStack, &spanRecord{
+					spanID:      fmt.Sprintf("worker-%d", i),
+					kind:        spanKindAgent,
+					name:        "worker",
+					nonLLM:      true,
+					children:    []string{"leaf"},
+					parent:      parent,
+					goroutineID: uint64(ancCount + i + 2),
+				})
+			}
+			id := identity{agentName: "leaf"}
+			origin := goroutineOrigin{parent: 999998}
+			b.ResetTimer()
+			for b.Loop() {
+				if got := inv.parentForRunLocked(id, nil, 999999, origin); got != parent {
+					b.Fatalf("parentForRunLocked = %s, want %s", got.spanID, parent.spanID)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkLookalikeParentScaling(b *testing.B) {
+	for _, n := range []int{100, 1_000, 10_000} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			const targetGoid = 999999
+			k := max(n/4, 2)
+			inv := newInvocationTraceWithSpan(trace.SpanContext{}, "bench-cyclic-scaling", time.Unix(1_700_000_000, 0))
+			root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+			inv.agentStack = append(inv.agentStack, root)
+
+			// Build nested chain m_{0,1} -> m_{1,1} -> ... -> m_{k-1,1}.
+			curParent := root
+			for i := range k {
+				rec := &spanRecord{
+					spanID:      fmt.Sprintf("m-%d-1", i),
+					kind:        spanKindAgent,
+					name:        fmt.Sprintf("grp_%d", i),
+					parent:      curParent,
+					goroutineID: targetGoid,
+				}
+				inv.agentStack = append(inv.agentStack, rec)
+				curParent = rec
+			}
+			// Under m_{k-1,1}, attach m_{k-1-j, loser} -> u_j(targetGoid) in
+			// ascending stack order so resolving grp_i excludes the highest
+			// remaining u on every group step.
+			for j := range k {
+				grpIdx := k - 1 - j
+				loser := &spanRecord{
+					spanID:      fmt.Sprintf("loser-%d", grpIdx),
+					kind:        spanKindAgent,
+					name:        fmt.Sprintf("grp_%d", grpIdx),
+					parent:      curParent,
+					goroutineID: 200,
+				}
+				u := &spanRecord{
+					spanID:      fmt.Sprintf("u-%d", j),
+					kind:        spanKindAgent,
+					name:        "tag",
+					parent:      loser,
+					goroutineID: targetGoid,
+				}
+				inv.agentStack = append(inv.agentStack, loser, u)
+			}
+			// Under root, attach winners w_0..w_{k-1} on targetGoid.
+			var lastWinner *spanRecord
+			for i := range k {
+				w := &spanRecord{
+					spanID:      fmt.Sprintf("w-%d", i),
+					kind:        spanKindAgent,
+					name:        fmt.Sprintf("grp_%d", i),
+					nonLLM:      true,
+					children:    []string{"leaf"},
+					parent:      root,
+					goroutineID: targetGoid,
+				}
+				inv.agentStack = append(inv.agentStack, w)
+				lastWinner = w
+			}
+
+			id := identity{agentName: "leaf"}
+			origin := goroutineOrigin{parent: 1}
+			b.ResetTimer()
+			for b.Loop() {
+				if got := inv.parentForRunLocked(id, nil, targetGoid, origin); got != lastWinner {
+					b.Fatalf("parentForRunLocked = %s, want %s", got.spanID, lastWinner.spanID)
+				}
+			}
+		})
 	}
 }
