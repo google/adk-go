@@ -22,8 +22,9 @@
 // normally and reports such failures. The plugin counts, answers and limits a
 // failure it reports like an error the tool returned.
 //
-// This is the Go version of the Python plugin.
-// See https://github.com/google/adk-py/blob/main/google/adk/plugins/retry_and_reflect_plugin.py
+// [New] is the Go version of adk-python's ReflectAndRetryToolPlugin
+// (src/google/adk/plugins/reflect_retry_tool_plugin.py), and [NewModel] of its
+// model plugin (src/google/adk/plugins/_reflect_retry_model_plugin.py).
 package retryandreflect
 
 import (
@@ -105,23 +106,39 @@ type ResultErrorExtractor func(ctx agent.Context, t tool.Tool, args, result map[
 // PluginOption is an option for configuring the ReflectAndRetryToolPlugin.
 type PluginOption func(*retryAndReflect)
 
-// WithMaxRetries sets the maximum number of retries for a tool.
+// WithMaxRetries sets how many consecutive failures of one tool, counted
+// within the tracking scope, the plugin answers with reflection guidance. The
+// next failure exceeds the limit (see [WithErrorIfRetryExceeded]); a call of
+// the tool that succeeds resets its count. Zero means that every failure
+// exceeds the limit. The default is 3. [New] returns an error for a negative
+// value.
 func WithMaxRetries(maxRetries int) PluginOption {
 	return func(r *retryAndReflect) {
 		r.maxRetries = maxRetries
 	}
 }
 
-// WithErrorIfRetryExceeded sets whether to return an error if the retry limit is exceeded.
-// If set to true, then the original error is returned, otherwise instead of the original error,
-// the plugin will return a new instruction "createToolRetryExceedMsg" telling LLM to stop using this tool for the current task.
+// WithErrorIfRetryExceeded sets what the plugin does with a failure that
+// exceeds the retry limit set by [WithMaxRetries].
+//
+// With false, the default, the plugin answers the call with a final guidance
+// response that tells the model not to use the tool again for the current
+// task, and the run goes on.
+//
+// With true, the plugin's callback returns the failure's error: the error the
+// tool returned, or the error a [ResultErrorExtractor] reported. The agent's
+// flow handles that error as it handles a tool error that no callback
+// answered: it becomes the call's function response, {"error": "..."}, which
+// the model reads, and the run goes on. The run does not end with the error,
+// as it does in adk-python, whose default is true.
 func WithErrorIfRetryExceeded(errorIfRetryExceeded bool) PluginOption {
 	return func(r *retryAndReflect) {
 		r.errorIfRetryExceeded = errorIfRetryExceeded
 	}
 }
 
-// WithTrackingScope sets the tracking scope for tool failures.
+// WithTrackingScope sets the scope in which the plugin counts the failures of
+// each tool. The default is [Invocation].
 func WithTrackingScope(scope TrackingScope) PluginOption {
 	return func(r *retryAndReflect) {
 		r.scope = scope
@@ -140,7 +157,10 @@ func WithResultErrorExtractor(extract ResultErrorExtractor) PluginOption {
 
 // New creates a new reflect and retry tool plugin. By default only an error
 // the tool returns is a failure; [WithResultErrorExtractor] makes some results
-// failures too.
+// failures too. The other defaults are 3 retries per tool, counted per
+// invocation, and the final guidance past the limit. The plugin's name is
+// "RetryAndReflectPlugin", so a runner takes at most one plugin that New
+// returns. New returns an error when the retry limit is negative.
 func New(opts ...PluginOption) (*plugin.Plugin, error) {
 	r := &retryAndReflect{
 		maxRetries:            3, // A sensible default
