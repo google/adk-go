@@ -229,8 +229,7 @@ func resolveClientConfig() (anthropicmodel.ClientConfig, error) {
 }
 
 func explain(err error) string {
-	var apiErr *anthropicmodel.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*anthropicmodel.APIError](err); ok {
 		return fmt.Sprintf("Claude API error (status %d, type %s): %s", apiErr.StatusCode, apiErr.Type, apiErr.Message)
 	}
 	return err.Error()

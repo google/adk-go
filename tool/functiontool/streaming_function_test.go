@@ -179,7 +179,10 @@ func TestStreamingFunctionToolStopsHandlerWhenConsumerStops(t *testing.T) {
 	})
 
 	ctx := newStreamingToolContext(t, &session.EventActions{}, nil)
-	for range streamingTool.RunStream(ctx, map[string]any{"value": "request"}) {
+	for _, err := range streamingTool.RunStream(ctx, map[string]any{"value": "request"}) {
+		if err != nil {
+			t.Fatalf("RunStream() error = %v", err)
+		}
 		break
 	}
 
@@ -266,7 +269,10 @@ func TestStreamingFunctionToolPropagatesCleanupPanicAfterStop(t *testing.T) {
 	})
 	ctx := newStreamingToolContext(t, &session.EventActions{}, nil)
 	got := captureStreamingPanic(func() {
-		for range streamingTool.RunStream(ctx, map[string]any{"value": "request"}) {
+		for _, err := range streamingTool.RunStream(ctx, map[string]any{"value": "request"}) {
+			if err != nil {
+				t.Errorf("RunStream() error = %v", err)
+			}
 			break
 		}
 	})

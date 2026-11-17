@@ -1892,9 +1892,7 @@ func TestUnwrapToolValue_ConcurrentUserWrapperNoRace(t *testing.T) {
 
 		done := make(chan struct{})
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := 0; ; i++ {
 				select {
 				case <-done:
@@ -1916,7 +1914,7 @@ func TestUnwrapToolValue_ConcurrentUserWrapperNoRace(t *testing.T) {
 				transferSwap.supportedAgents = nextAgents
 				transferSwap.mu.Unlock()
 			}
-		}()
+		})
 
 		var errs callbackErrors
 		for i := range 25 {
@@ -1959,9 +1957,7 @@ func TestUnwrapToolValue_ConcurrentUserWrapperNoRace(t *testing.T) {
 
 		done := make(chan struct{})
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := 0; ; i++ {
 				select {
 				case <-done:
@@ -1976,7 +1972,7 @@ func TestUnwrapToolValue_ConcurrentUserWrapperNoRace(t *testing.T) {
 				unwrapSwap.innerTool = nextTool
 				unwrapSwap.mu.Unlock()
 			}
-		}()
+		})
 
 		var errs callbackErrors
 		for i := range 25 {
