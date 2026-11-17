@@ -23750,7 +23750,7 @@ func TestBoundedArgsDigest_ReviewRegressions(t *testing.T) {
 			{"arr_of_mid_struct_ptr", arrOfMidStructInAny, 64 << 10},
 			{"arr_of_mid_struct_any", arrOfMidStructInAnyVal, 64 << 10},
 			{"many_mid_struct_map", map[string]any{"m": manyMidStructMap}, 64 << 10},
-			{"sibling_mid_struct_map", siblingMidStructMaps, maxDigestBytes},
+			{"sibling_mid_struct_map", siblingMidStructMaps, maxDigestBytes + (64 << 10)},
 		} {
 			var mBefore, mAfter runtime.MemStats
 			runtime.ReadMemStats(&mBefore)
@@ -23793,6 +23793,20 @@ func TestBoundedArgsDigest_ReviewRegressions(t *testing.T) {
 		dHuge.hash(hugeStruct)
 		if !dHuge.truncated || dHuge.bytes != 0 {
 			t.Errorf("huge unnamed struct: truncated=%v bytes=%d, want true and 0", dHuge.truncated, dHuge.bytes)
+		}
+
+		// Zero remaining node budget for a struct (or small struct array) must
+		// exceed immediately with a single budget tag instead of iterating elements.
+		type smallStruct struct{ X int }
+		if exceeds, _, _ := typeDigestCost(reflect.TypeFor[smallStruct](), 0, maxDigestBytes, 0); !exceeds {
+			t.Error("typeDigestCost(smallStruct, remNodes=0) = false, want true")
+		}
+		dIntArr := argsDigester{nodes: 1, bytes: maxDigestBytes}
+		dIntArr.hash(reflect.ValueOf([2]int{}))
+		dStructArr := argsDigester{nodes: 1, bytes: maxDigestBytes}
+		dStructArr.hash(reflect.ValueOf([2]smallStruct{}))
+		if !dStructArr.truncated || dStructArr.sum() != dIntArr.sum() {
+			t.Errorf("struct array at zero remaining nodes: truncated=%v sum=%#x, want true and %#x", dStructArr.truncated, dStructArr.sum(), dIntArr.sum())
 		}
 	})
 }

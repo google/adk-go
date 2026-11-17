@@ -5978,7 +5978,7 @@ func typeDigestCostDetail(t reflect.Type, remNodes, remBytes, depth int) (exceed
 		// Structs are opaque (always truncated), and copying a large struct
 		// out of a map or array only to read its type name allocates unboundedly.
 		sz := t.Size()
-		if sz > uintptr(maxDigestStringBytes) || sz > uintptr(max(remBytes, 0)) {
+		if remNodes < 1 || sz > uintptr(maxDigestStringBytes) || sz > uintptr(max(remBytes, 0)) {
 			return true, 1, 0, true
 		}
 		return false, 1, int(sz), true
