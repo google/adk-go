@@ -43,7 +43,9 @@ type field struct {
 // "2024-01-02 03:04:05.123456+00:00". Where adk-python returns the string form
 // of a Python object instead, the cell stays the string the REST API sent:
 // BYTES (base64), INTERVAL and RANGE cells, and FLOAT64 NaN and infinities,
-// which JSON cannot carry. adk-python also turns a whole STRUCT or ARRAY into
+// which JSON cannot carry. INT64 cells and integers in JSON cells beyond
+// 2^53 in magnitude become decimal strings, since the tool result reaches the
+// model as float64 numbers. adk-python also turns a whole STRUCT or ARRAY into
 // one Python string when any value inside it is not JSON; here each value
 // inside converts on its own.
 func rowValues(fields []field, row map[string]any) (map[string]any, error) {
@@ -105,7 +107,7 @@ func scalarValue(f field, v any) (any, error) {
 		if err != nil {
 			return nil, invalidValue(f)
 		}
-		return n, nil
+		return exactInt(n), nil
 	case "FLOAT", "FLOAT64":
 		x, err := strconv.ParseFloat(s, 64)
 		if err != nil {
@@ -140,9 +142,47 @@ func scalarValue(f field, v any) (any, error) {
 		if err := d.Decode(&val); err != nil {
 			return nil, invalidValue(f)
 		}
-		return val, nil
+		return exactJSON(val), nil
 	}
 	return s, nil
+}
+
+// maxExactInt is 2^53. The function tool sends its result through JSON
+// decoded into float64, which cannot hold every integer beyond it.
+const maxExactInt = 1 << 53
+
+// exactInt returns n, or its decimal string when float64 cannot hold it.
+func exactInt(n int64) any {
+	if n > maxExactInt || n < -maxExactInt {
+		return strconv.FormatInt(n, 10)
+	}
+	return n
+}
+
+// exactJSON replaces the integers in v, a value decoded with UseNumber, that
+// float64 cannot hold with their decimal strings.
+func exactJSON(v any) any {
+	switch v := v.(type) {
+	case json.Number:
+		s := v.String()
+		if strings.ContainsAny(s, ".eE") {
+			return v
+		}
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return s
+		}
+		return exactInt(n)
+	case map[string]any:
+		for k, x := range v {
+			v[k] = exactJSON(x)
+		}
+	case []any:
+		for i, x := range v {
+			v[i] = exactJSON(x)
+		}
+	}
+	return v
 }
 
 // invalidValue reports a cell that does not parse as its column type. The

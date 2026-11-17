@@ -26,8 +26,10 @@
 // values adk-python turns into Python strings as the REST API sends them,
 // converts each value inside a STRUCT or ARRAY on its own, where adk-python
 // returns the whole STRUCT or ARRAY as one string when any value inside is
-// not JSON, and sets result_is_likely_truncated only when rows were left out
-// (see [Config.MaxQueryResultRows]). When
+// not JSON, returns INT64 values and integers inside JSON values beyond 2^53
+// in magnitude as decimal strings, where adk-python returns numbers, and sets
+// result_is_likely_truncated only when rows were left out (see
+// [Config.MaxQueryResultRows]). When
 // BigQuery rejects a call, for example because a dataset does not exist, or
 // an id argument is empty, the tool returns
 // {"status": "ERROR", "error_details": "..."} to the model so it can correct

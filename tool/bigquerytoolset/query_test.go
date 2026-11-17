@@ -447,6 +447,38 @@ func TestExecuteSQL_WaitsForQuery(t *testing.T) {
 	}
 }
 
+// TestExecuteSQL_LocationFallback checks that fetching results falls back to
+// Config.Location when BigQuery leaves the location out of the job reference.
+func TestExecuteSQL_LocationFallback(t *testing.T) {
+	f, _ := runSQL(t, Config{Location: "EU"}, map[string]fakeResponse{
+		dryRunPath:  {body: selectDryRun},
+		queryPath:   {body: `{"jobComplete":false,"jobReference":{"projectId":"p","jobId":"job1"}}`},
+		resultsPath: {body: page(oneColumn("7"), "")},
+	}, map[string]any{"project_id": "p", "query": "SELECT 7 AS n"})
+
+	if got := f.lastRequest().URL.Query().Get("location"); got != "EU" {
+		t.Errorf("results request location = %q, want EU", got)
+	}
+}
+
+// TestExecuteSQL_LargeIntegers checks that integers float64 cannot hold reach
+// the model exact, through the function tool's JSON round trip.
+func TestExecuteSQL_LargeIntegers(t *testing.T) {
+	_, got := runSQL(t, Config{}, map[string]fakeResponse{
+		dryRunPath: {body: selectDryRun},
+		queryPath: {body: `{"jobComplete":true,"schema":{"fields":[{"name":"id","type":"INT64"},{"name":"j","type":"JSON"}]},` +
+			`"rows":[{"f":[{"v":"9007199254740993"},{"v":"{\"big\":12345678901234567891,\"small\":7}"}]}]}`},
+	}, map[string]any{"project_id": "p", "query": "SELECT id, j FROM t"})
+
+	want := map[string]any{"status": "SUCCESS", "rows": []any{map[string]any{
+		"id": "9007199254740993",
+		"j":  map[string]any{"big": "12345678901234567891", "small": float64(7)},
+	}}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestExecuteSQL_ResultErrors(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -468,6 +500,13 @@ func TestExecuteSQL_ResultErrors(t *testing.T) {
 				resultsPath: {status: http.StatusNotFound, body: `{"error":{"code":404,"message":"Not found: Job p:job1"}}`},
 			},
 			want: "Not found: Job p:job1",
+		},
+		{
+			name: "query request fails",
+			responses: map[string]fakeResponse{
+				queryPath: {status: http.StatusBadRequest, body: `{"error":{"code":400,"message":"Query exceeded limit for bytes billed: 10485760.","errors":[{"reason":"bytesBilledLimitExceeded"}]}}`},
+			},
+			want: "Query exceeded limit for bytes billed: 10485760.",
 		},
 		{
 			name:      "unfinished query without a job",
@@ -512,7 +551,12 @@ func TestRowValues(t *testing.T) {
 		{name: "bool false", field: `{"type":"BOOL"}`, cell: `"false"`, want: `false`},
 		{name: "bool t", field: `{"type":"BOOL"}`, cell: `"T"`, want: `true`},
 		{name: "bool 1", field: `{"type":"BOOL"}`, cell: `"1"`, want: `true`},
-		{name: "int64", field: `{"type":"INT64"}`, cell: `"-9223372036854775808"`, want: `-9223372036854775808`},
+		{name: "int64", field: `{"type":"INT64"}`, cell: `"-42"`, want: `-42`},
+		{name: "int64 at 2^53", field: `{"type":"INT64"}`, cell: `"9007199254740992"`, want: `9007199254740992`},
+		{name: "int64 at -2^53", field: `{"type":"INT64"}`, cell: `"-9007199254740992"`, want: `-9007199254740992`},
+		{name: "int64 above 2^53", field: `{"type":"INT64"}`, cell: `"9007199254740993"`, want: `"9007199254740993"`},
+		{name: "int64 below -2^53", field: `{"type":"INT64"}`, cell: `"-9007199254740993"`, want: `"-9007199254740993"`},
+		{name: "int64 min", field: `{"type":"INT64"}`, cell: `"-9223372036854775808"`, want: `"-9223372036854775808"`},
 		{name: "float", field: `{"type":"FLOAT"}`, cell: `"1.5"`, want: `1.5`},
 		{name: "float NaN", field: `{"type":"FLOAT64"}`, cell: `"NaN"`, want: `"NaN"`},
 		{name: "float infinity", field: `{"type":"FLOAT64"}`, cell: `"-Infinity"`, want: `"-Infinity"`},
@@ -528,7 +572,8 @@ func TestRowValues(t *testing.T) {
 		{name: "datetime with zero fraction", field: `{"type":"DATETIME"}`, cell: `"2024-01-02T03:04:05.000000"`, want: `"2024-01-02 03:04:05"`},
 		{name: "time", field: `{"type":"TIME"}`, cell: `"03:04:05"`, want: `"03:04:05"`},
 		{name: "time with micros", field: `{"type":"TIME"}`, cell: `"03:04:05.000001"`, want: `"03:04:05.000001"`},
-		{name: "json", field: `{"type":"JSON"}`, cell: `"{\"a\":[1,true,null],\"big\":12345678901234567890}"`, want: `{"a":[1,true,null],"big":12345678901234567890}`},
+		{name: "json", field: `{"type":"JSON"}`, cell: `"{\"a\":[1,true,null],\"f\":1.5}"`, want: `{"a":[1,true,null],"f":1.5}`},
+		{name: "repeated int64 above 2^53", field: `{"type":"INT64","mode":"REPEATED"}`, cell: `[{"v":"1"},{"v":"9007199254740993"}]`, want: `[1,"9007199254740993"]`},
 		{name: "interval", field: `{"type":"INTERVAL"}`, cell: `"1-2 3 4:5:6"`, want: `"1-2 3 4:5:6"`},
 		{name: "range", field: `{"type":"RANGE"}`, cell: `"[2024-01-01, UNBOUNDED)"`, want: `"[2024-01-01, UNBOUNDED)"`},
 		{name: "geography", field: `{"type":"GEOGRAPHY"}`, cell: `"POINT(1 2)"`, want: `"POINT(1 2)"`},
@@ -569,10 +614,12 @@ func TestRowValues(t *testing.T) {
 	}
 }
 
-// TestRowValues_JSONKeepsLargeIntegers checks that an integer in a JSON
-// cell keeps every digit, as Python's json.loads keeps it.
-func TestRowValues_JSONKeepsLargeIntegers(t *testing.T) {
-	row := decodeJSON(t, `{"f":[{"v":"{\"big\":12345678901234567891}"}]}`).(map[string]any)
+// TestRowValues_JSONLargeIntegers checks that the integers in a JSON cell
+// that float64 cannot hold become strings, and other numbers keep every
+// digit.
+func TestRowValues_JSONLargeIntegers(t *testing.T) {
+	cell := `{"big":12345678901234567891,"id":9007199254740993,"max":9007199254740992,"f":0.1234567890123456789,"e":1e300,"a":[-9007199254740993,{"n":-9007199254740992}]}`
+	row := map[string]any{"f": []any{map[string]any{"v": cell}}}
 
 	got, err := rowValues([]field{{Name: "c", Type: "JSON"}}, row)
 	if err != nil {
@@ -582,7 +629,8 @@ func TestRowValues_JSONKeepsLargeIntegers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if want := `{"c":{"big":12345678901234567891}}`; string(raw) != want {
+	want := `{"c":{"a":["-9007199254740993",{"n":-9007199254740992}],"big":"12345678901234567891","e":1e300,"f":0.1234567890123456789,"id":"9007199254740993","max":9007199254740992}}`
+	if string(raw) != want {
 		t.Errorf("rowValues() = %s, want %s", raw, want)
 	}
 }
@@ -641,6 +689,12 @@ func TestNew_RejectsInvalidQueryConfig(t *testing.T) {
 		{name: "too many labels", cfg: Config{JobLabels: tooMany}, wantErr: "JobLabels"},
 		{name: "empty label key", cfg: Config{JobLabels: map[string]string{"": "v"}}, wantErr: "JobLabels"},
 		{name: "reserved label key", cfg: Config{JobLabels: map[string]string{"adk-bigquery-tool": "v"}}, wantErr: "reserved"},
+		{name: "uppercase label key", cfg: Config{JobLabels: map[string]string{"Team": "v"}}, wantErr: `key "Team"`},
+		{name: "label key starting with a digit", cfg: Config{JobLabels: map[string]string{"1team": "v"}}, wantErr: `key "1team"`},
+		{name: "label key with a colon", cfg: Config{JobLabels: map[string]string{"team:": "v"}}, wantErr: `key "team:"`},
+		{name: "label key too long", cfg: Config{JobLabels: map[string]string{"k" + strings.Repeat("a", 63): "v"}}, wantErr: "at most 63"},
+		{name: "invalid label value", cfg: Config{JobLabels: map[string]string{"team": "Data/Eng"}}, wantErr: `value "Data/Eng"`},
+		{name: "label value too long", cfg: Config{JobLabels: map[string]string{"team": strings.Repeat("a", 64)}}, wantErr: "at most 63"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -653,8 +707,12 @@ func TestNew_RejectsInvalidQueryConfig(t *testing.T) {
 }
 
 func TestNew_AcceptsQueryConfigLimits(t *testing.T) {
-	labels := map[string]string{}
-	for i := range 20 {
+	labels := map[string]string{
+		"k" + strings.Repeat("a", 62): strings.Repeat("a", 63),
+		"équipe":                      "données_1-x",
+		"empty":                       "",
+	}
+	for i := range 17 {
 		labels[string(rune('a'+i))] = "v"
 	}
 	f := newFakeBigQuery(t, nil)

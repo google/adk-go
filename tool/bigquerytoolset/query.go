@@ -83,9 +83,6 @@ func (b *bigQuery) jobLabels(toolName string) map[string]string {
 	return labels
 }
 
-// maxLabelValueLen is the longest value a BigQuery job label can have.
-const maxLabelValueLen = 63
-
 // labelValue turns s, which Config validation keeps to ASCII, into a valid
 // job label value: lowercase letters, digits, '_' and '-', at most 63
 // characters. Other characters become '_'. BigQuery rejects the whole job
@@ -98,8 +95,8 @@ func labelValue(s string) string {
 			b[i] = '_'
 		}
 	}
-	if len(b) > maxLabelValueLen {
-		b = b[:maxLabelValueLen]
+	if len(b) > maxLabelLen {
+		b = b[:maxLabelLen]
 	}
 	return string(b)
 }
@@ -218,8 +215,12 @@ func (b *bigQuery) queryResults(ctx agent.Context, project string, prev queryRes
 		"maxResults":                      {strconv.Itoa(maxRows)},
 		"formatOptions.useInt64Timestamp": {"true"},
 	}
-	if prev.JobReference.Location != "" {
-		params.Set("location", prev.JobReference.Location)
+	location := prev.JobReference.Location
+	if location == "" {
+		location = b.location
+	}
+	if location != "" {
+		params.Set("location", location)
 	}
 	if prev.JobComplete {
 		params.Set("pageToken", prev.PageToken)
