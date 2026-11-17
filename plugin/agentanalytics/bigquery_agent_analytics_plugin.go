@@ -1041,9 +1041,9 @@ func (p *analyticsPlugin) beforeAgent(ctx agent.Context) (*genai.Content, error)
 	p.logEvent(ctx, id, EventAgentStarting, func() rowSpan {
 		return span
 	}, func(d *eventData) {
-		// The context that ADK gives agent callbacks logs a warning and
-		// returns nil from Agent, so the agent is looked up by name in the
-		// tree of the agent that the runner runs.
+		// ADK releases this module supports (go.mod requires v2.0.0) give
+		// agent callbacks a context whose Agent returns nil, so the agent is
+		// looked up by name in the tree of the agent that the runner runs.
 		d.content, d.attributes = agentStartingData(p.traces.agentNamed(ctx, id))
 	})
 	return nil, nil
