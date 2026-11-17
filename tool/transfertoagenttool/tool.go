@@ -13,16 +13,26 @@
 // limitations under the License.
 
 // Package transfertoagenttool provides the transfer_to_agent tool over a list
-// of agent names, the tool an LLM agent's model calls to hand the conversation
-// to another agent of the same agent tree.
+// of agent names. An LLM agent's model calls it to name the agent of the same
+// agent tree that the conversation should go to.
 //
-// The flow already gives an agent with transfer targets (sub-agents, or a
-// parent or peers it may transfer to) a transfer_to_agent tool of its own,
-// built from those targets. This package is for an agent that should offer a
-// transfer the flow does not compute, or a transfer reason: list the tool New
-// returns in the agent's tools. When the model calls it, the tool sets the
-// event's session.EventActions.TransferToAgent, and the flow then runs that
-// agent, as it does for the flow's own tool.
+// The tool records the name in the event's
+// session.EventActions.TransferToAgent, and the flow handles that transfer as
+// it handles one made through the transfer_to_agent tool it builds itself:
+//
+//   - For one of the caller's transfer targets, it runs that agent. The
+//     targets are the caller's sub-agents and, when its parent is an LLM
+//     agent, the parent and the parent's other sub-agents, less those that
+//     llmagent.Config.DisallowTransferToParent and DisallowTransferToPeers
+//     exclude. A sub-agent or peer whose llmagent.Config.Mode is
+//     llmagent.ModeTask or llmagent.ModeSingleTurn is not a target.
+//   - For any other name, the calling agent's own included, it fails the run.
+//
+// The flow adds its own transfer_to_agent tool to the model requests of an
+// agent with transfer targets, unless it leaves the tool out because the agent
+// has a built-in search tool its model cannot combine with function calling.
+// Listing this tool in an agent whose requests carry the flow's tool fails the
+// run with a duplicate tool error when the request is built.
 //
 // It is the Go counterpart of adk-python's TransferToAgentTool
 // (google.adk.tools.TransferToAgentTool).
@@ -66,13 +76,14 @@ type Config struct {
 // session.EventActions.TransferReason to the transfer_reason the model sent,
 // when that is a string; without it, a transfer_reason the model sends is
 // ignored. The call fails, and sets nothing, when agent_name is missing or
-// not a non-empty string, and when it is not in cfg.AgentNames. A listed
-// name no agent of the tree has is accepted by the tool and then fails the
-// run in the flow.
+// not a non-empty string, and when it is not in cfg.AgentNames. A name the
+// tool accepts goes to the flow, which runs only one of the calling agent's
+// transfer targets and fails the run for any other name, a listed name no
+// agent of the tree has included (see the package documentation).
 //
-// An agent with transfer targets already carries the flow's transfer_to_agent
-// tool. Listing this tool in such an agent fails each model request with a
-// duplicate tool error.
+// Listing this tool in an agent whose model requests carry the flow's own
+// transfer_to_agent tool fails the run with a duplicate tool error when the
+// request is built (see the package documentation for when the flow adds it).
 func New(cfg Config) tool.Tool {
 	return llminternal.NewNamedTransferToAgentTool(cfg.AgentNames, cfg.IncludeTransferReason)
 }
