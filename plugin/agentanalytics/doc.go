@@ -276,11 +276,16 @@
 //   - [DropStats] structure: Go exposes [DropStats] as a typed struct of five
 //     category counters (QueueFullDrops, AppendFailureDrops, RowErrorDrops,
 //     FormatterFailureDrops, ShutdownDrops) plus TotalDrops via
-//     [BigQueryAgentAnalyticsPlugin.DropStats], and isolates per-row
-//     AppendRowsResponse.RowErrors rejections (up to 8 passes per chunk) under
-//     RowErrorDrops instead of dropping the whole batch, whereas adk-python's
-//     get_drop_stats() returns a dictionary of per-reason counts. (Pinned by
-//     TestBigQueryAgentAnalyticsPlugin_DropStats in
+//     [BigQueryAgentAnalyticsPlugin.DropStats], and isolates in-range
+//     AppendRowsResponse.RowErrors rejections under RowErrorDrops (up to 8
+//     passes per chunk) when the response status is nil or InvalidArgument
+//     (and not after an ambiguous send under ExactlyOnceDelivery), whereas a
+//     batch-level non-InvalidArgument failure such as PermissionDenied or
+//     exhausted Unavailable still sends the batch to AppendFailureDrops, and
+//     adk-python's get_drop_stats() returns a dictionary of per-reason
+//     counts (dropping the batch when an error status is set and treating a
+//     response with no status set as committed without inspecting
+//     row_errors). (Pinned by TestBigQueryAgentAnalyticsPlugin_DropStats in
 //     bigquery_agent_analytics_plugin_test.go, and TestBatchProcessor_DropStats,
 //     TestBatchProcessor_RowErrorsIsolation, and
 //     TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats in

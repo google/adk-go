@@ -58,12 +58,16 @@ type Logger interface {
 // enabled), and the requests that BigQuery already confirmed are not resent. A
 // status that a retry cannot fix, such as PermissionDenied or InvalidArgument,
 // ends the write of the batch without further retries when opening the stream
-// fails with it or BigQuery reports it in an AppendRowsResponse. When it
-// instead ends the stream, the server may not have read the request, so while
-// retries remain the request is resent on a fresh stream: always if an earlier
-// request opened that stream, and once per request if it was opened for the
-// request, after which the status ends the write. Each such resend uses up one
-// retry and its backoff.
+// fails with it or BigQuery reports it in an AppendRowsResponse, except that
+// when an InvalidArgument (or nil) response carries valid in-range
+// AppendRowsResponse.RowErrors (and not after an ambiguous send under
+// ExactlyOnceDelivery), the rejected rows are dropped under
+// DropStats.RowErrorDrops and the surviving rows are resent up to 8 passes
+// per chunk. When a non-retryable status instead ends the stream, the server
+// may not have read the request, so while retries remain the request is resent
+// on a fresh stream: always if an earlier request opened that stream, and once
+// per request if it was opened for the request, after which the status ends the
+// write. Each such resend uses up one retry and its backoff.
 //
 // Retries never extend a write beyond Config.ShutdownTimeout. Each batch
 // write made by a background flush, including its retries and the backoff
@@ -189,7 +193,9 @@ type GCSContentOffloader interface {
 // RowErrors, makes Go drop the batch, to prevent duplicate delivery, and
 // replace the stream before the next batch (pausing rotation if the stream
 // had not committed yet). adk-python drops the batch after OutOfRange,
-// NotFound, or AlreadyExists and replaces the stream before the next one. On
+// NotFound, or an unexpected AlreadyExists (treating AlreadyExists after an
+// attempt with an unknown outcome as confirmation) and replaces the stream
+// before the next one. On
 // an RPC-level receive error after a successful Send (an
 // AppendRowsResponse.Error carrying one of these codes is a server
 // rejection), Go treats Unavailable, DeadlineExceeded, Canceled, Aborted,
@@ -227,7 +233,9 @@ type GCSContentOffloader interface {
 // ambiguous send under ExactlyOnceDelivery), Go isolates the rejected rows
 // under DropStats.RowErrorDrops and resends surviving rows up to 8 passes
 // per chunk, counting any remaining unconfirmed rows under AppendFailureDrops,
-// whereas adk-python drops the entire batch.
+// whereas adk-python drops the entire batch when the response carries an error
+// status and treats a response with no status set as committed without
+// inspecting row_errors.
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
