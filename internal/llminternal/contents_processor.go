@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/compactioninternal"
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
+	"google.golang.org/adk/v2/internal/pythonjson"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -1160,7 +1161,7 @@ func buildTaskInputUserContent(events []*session.Event, isolationScope string, i
 			}
 			// Render args as the JSON text adk-python sends, so a task agent
 			// reads the same task in either implementation.
-			argText, err := encodePythonJSON(fc.Args)
+			argText, err := pythonjson.Encode(fc.Args)
 			if err != nil {
 				argText = fmt.Sprint(fc.Args)
 			}
