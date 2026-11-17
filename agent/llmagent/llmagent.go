@@ -400,11 +400,11 @@ type Config struct {
 	// DisallowTransferToPeers prevents transferring to peer agents.
 	DisallowTransferToPeers bool
 
-	// Whether to include contents (conversation history) in the model request.
-	//
+	// IncludeContents selects how much session history the agent's model
+	// requests carry: the whole visible history (IncludeContentsDefault, also
+	// what an unset field means) or only the current turn (IncludeContentsNone).
 	// Left unset, an agent placed as a single_turn workflow node sees only the
-	// current turn. Setting IncludeContentsDefault explicitly keeps the history
-	// even there.
+	// current turn; IncludeContentsDefault set explicitly keeps the history.
 	IncludeContents IncludeContents
 
 	// TODO(ngeorgy): consider to switch to jsonschema for input and output schema.
@@ -577,17 +577,41 @@ type AfterToolCallback func(ctx agent.Context, tool tool.Tool, args, result map[
 // is replaced with the returned response/error.
 type OnToolErrorCallback func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error)
 
-// IncludeContents controls what parts of prior conversation history is received by llmagent.
+// IncludeContents controls how much of the session history an llmagent's model requests carry.
 type IncludeContents string
 
 const (
-	// IncludeContentsNone makes the llmagent operate solely on its current turn (latest user input + any following agent events).
+	// IncludeContentsNone makes each model request carry only the agent's
+	// current turn: the newest event by the user or by another agent that can
+	// start a turn, and every event after it, such as the agent's own tool
+	// calls, their results and its replies. Earlier turns are left out.
+	//
+	// These events do not start a turn:
+	//   - a function response the user posts back, such as a long-running
+	//     tool's result: the turn reaches back to the call it answers, past
+	//     any message the user sent while the tool was pending;
+	//   - a transfer_to_agent exchange, so an agent reached by transfer still
+	//     sees the message that led to the transfer;
+	//   - an event the history leaves out: one with nothing visible to the
+	//     model, an ADK-internal credential, confirmation or adk_framework
+	//     exchange, or an event of another branch or isolation scope.
+	//
+	// When events by the user or other agents exist on the agent's branch and
+	// in its isolation scope but none of them can start a turn, the request
+	// carries no session contents. When there is no such event at all, for
+	// example when every event is the agent's own, the request carries the
+	// whole history. agent.RunConfig.ModelInputContext is added in either mode.
 	IncludeContentsNone IncludeContents = "none"
 	// IncludeContentsDefault is what an unset IncludeContents behaves as for a
 	// plain conversational agent: the llmagent receives the relevant
 	// conversation history. Setting it explicitly is not the same as leaving
 	// the field unset — it also keeps the history for an agent placed as a
 	// single_turn workflow node, which otherwise sees only the current turn.
+	//
+	// IncludeContents is not validated: any value other than
+	// IncludeContentsNone behaves as IncludeContentsDefault, except in a
+	// single_turn placement, where any value other than IncludeContentsDefault
+	// hides the history as IncludeContentsNone does.
 	IncludeContentsDefault IncludeContents = "default"
 )
 
