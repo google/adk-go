@@ -15,6 +15,12 @@
 // Package retryandreflect provides a plugin that provides self-healing,
 // concurrent-safe error recovery for tool failures.
 //
+// A tool can also fail without returning an error, by returning a result that
+// describes the failure. A [ResultErrorExtractor], set with
+// [WithResultErrorExtractor], reads the result of each call that returned
+// normally and reports such failures. The plugin counts, answers and limits a
+// failure it reports like an error the tool returned.
+//
 // This is the Go version of the Python plugin.
 // See https://github.com/google/adk-py/blob/main/google/adk/plugins/retry_and_reflect_plugin.py
 package retryandreflect
@@ -51,6 +57,10 @@ const (
 	// panicErrorType stands in for the Go type of a recovered tool panic, which
 	// names an internal package the model has no use for.
 	panicErrorType = "panic"
+	// resultErrorType is the error_type of a failure a ResultErrorExtractor
+	// reported, as adk-python names an extracted error that is not an
+	// exception.
+	resultErrorType = "ToolError"
 )
 
 // TrackingScope defines the lifecycle scope for tracking tool failure counts.
@@ -69,7 +79,27 @@ type retryAndReflect struct {
 	errorIfRetryExceeded  bool
 	scope                 TrackingScope
 	scopedFailureCounters map[string]map[string]int
+	// extractError is set at construction and only read afterwards; nil means
+	// no result is a failure.
+	extractError ResultErrorExtractor
 }
+
+// ResultErrorExtractor reports whether a tool call that returned normally
+// failed.
+//
+// The plugin calls it from its AfterToolCallback, once for each call that
+// returned without an error, with the call's tool, arguments and result.
+// result is nil when the tool returned nothing. The plugin never passes it one
+// of its own reflection responses. Return nil when the result is a success.
+// Return a non-nil error when it is a failure; the plugin then handles the
+// call as if the tool had returned that error. The failure counts even when
+// the error's text is empty. The model sees error_type "ToolError" and the
+// error's text as error_details, so the text must be fit for the model to read.
+//
+// The plugin does not lock while it calls the function, and it may call it
+// from several goroutines at once, so it must be safe for concurrent use. It
+// must not modify args or result. The plugin does not recover a panic in it.
+type ResultErrorExtractor func(ctx agent.Context, t tool.Tool, args, result map[string]any) error
 
 // PluginOption is an option for configuring the ReflectAndRetryToolPlugin.
 type PluginOption func(*retryAndReflect)
@@ -97,7 +127,19 @@ func WithTrackingScope(scope TrackingScope) PluginOption {
 	}
 }
 
-// New creates a new reflect and retry tool plugin.
+// WithResultErrorExtractor makes the plugin treat as failures the results that
+// extract reports as failures. A nil extract, the default, treats no result as
+// a failure. Options are read when New runs; the last of two
+// WithResultErrorExtractor options wins.
+func WithResultErrorExtractor(extract ResultErrorExtractor) PluginOption {
+	return func(r *retryAndReflect) {
+		r.extractError = extract
+	}
+}
+
+// New creates a new reflect and retry tool plugin. By default only an error
+// the tool returns is a failure; [WithResultErrorExtractor] makes some results
+// failures too.
 func New(opts ...PluginOption) (*plugin.Plugin, error) {
 	r := &retryAndReflect{
 		maxRetries:            3, // A sensible default
@@ -132,19 +174,34 @@ func MustNew(opts ...PluginOption) *plugin.Plugin {
 	return p
 }
 
-func (r *retryAndReflect) afterTool(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
-	if err == nil {
-		isReflectResponse := false
-		if rt, ok := result["response_type"].(string); ok && rt == reflectAndRetryResponseType {
-			isReflectResponse = true
-		}
-		// On success, reset the failure count for this specific tool within its scope.
-		// But do not reset if OnToolErrorCallback just produced a reflection response.
-		if !isReflectResponse {
-			r.resetFailuresForTool(ctx, tool.Name())
+// resultError is a failure a ResultErrorExtractor reported for a result.
+type resultError struct{ cause error }
+
+func (e *resultError) Error() string { return e.cause.Error() }
+
+func (e *resultError) Unwrap() error { return e.cause }
+
+func (r *retryAndReflect) afterTool(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+	// A reflection response here is the one OnToolErrorCallback just produced:
+	// it is neither a success that resets the count nor a result to extract
+	// an error from.
+	if err != nil || isReflectionResponse(result) {
+		return nil, nil
+	}
+	if r.extractError != nil {
+		if xerr := r.extractError(ctx, t, args, result); xerr != nil {
+			return r.handleToolError(ctx, t, args, &resultError{xerr})
 		}
 	}
+	r.resetFailuresForTool(ctx, t.Name())
 	return nil, nil
+}
+
+// isReflectionResponse reports whether result is a response this plugin
+// answered a failure with.
+func isReflectionResponse(result map[string]any) bool {
+	rt, ok := result["response_type"].(string)
+	return ok && rt == reflectAndRetryResponseType
 }
 
 // afterRun drops the failure counts of an invocation once its run has ended.
@@ -211,16 +268,17 @@ func hasOpenLongRunningCall(sess session.Session, invocationID string) bool {
 	return len(open) > 0
 }
 
-func (r *retryAndReflect) onToolError(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
-	return r.handleToolError(ctx, tool, args, err)
-}
-
-func (r *retryAndReflect) handleToolError(ctx agent.Context, failedTool tool.Tool, args map[string]any, err error) (map[string]any, error) {
-	// skip if the error is tool.ErrConfirmationRequired.
+func (r *retryAndReflect) onToolError(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
+	// A tool that asks for or was refused confirmation has not failed. The
+	// check stays out of handleToolError so that an extracted error, which
+	// counts whatever it wraps, never meets it.
 	if errors.Is(err, tool.ErrConfirmationRequired) || errors.Is(err, tool.ErrConfirmationRejected) {
 		return nil, nil
 	}
+	return r.handleToolError(ctx, t, args, err)
+}
 
+func (r *retryAndReflect) handleToolError(ctx agent.Context, failedTool tool.Tool, args map[string]any, err error) (map[string]any, error) {
 	if r.maxRetries == 0 {
 		if r.errorIfRetryExceeded {
 			return nil, err
@@ -273,15 +331,22 @@ func (r *retryAndReflect) resetFailuresForTool(ctx agent.Context, toolName strin
 
 // modelError is the type and text of a failed call of the tool named toolName
 // that the plugin may put in the response it answers with, which the model,
-// the session and REST clients all see. A panic recovered from the tool's
-// handler, at any wrapping depth, becomes an opaque type and a generic
-// message, because the panic error's own text carries the panic value and the
-// goroutine stack.
-func modelError(toolName string, err error) (errType, details string) {
+// the session and REST clients all see, and summary, the error as the
+// guidance text shows it. A panic recovered from the tool's handler, at any
+// wrapping depth, becomes an opaque type and a generic message, because the
+// panic error's own text carries the panic value and the goroutine stack.
+// The summary of an extracted error is its text alone, as adk-python shows an
+// extracted error that is not an exception; every other summary is
+// "<type>: <text>".
+func modelError(toolName string, err error) (errType, details, summary string) {
 	if text, panicked := toolinternal.ModelErrorText(toolName, err); panicked {
-		return panicErrorType, text
+		return panicErrorType, text, panicErrorType + ": " + text
 	}
-	return fmt.Sprintf("%T", err), err.Error()
+	if _, ok := errors.AsType[*resultError](err); ok {
+		return resultErrorType, err.Error(), err.Error()
+	}
+	errType = fmt.Sprintf("%T", err)
+	return errType, err.Error(), errType + ": " + err.Error()
 }
 
 func (r *retryAndReflect) formatToolArgs(toolArgs map[string]any) string {
@@ -303,11 +368,11 @@ type templateData struct {
 
 func (r *retryAndReflect) createToolReflectionResponse(tool tool.Tool, toolArgs map[string]any, toolErr error, retryCount int) map[string]any {
 	argsSummary := r.formatToolArgs(toolArgs)
-	errType, errDetails := modelError(tool.Name(), toolErr)
+	errType, errDetails, errSummary := modelError(tool.Name(), toolErr)
 
 	d := templateData{
 		ToolName:     tool.Name(),
-		ErrorDetails: errType + ": " + errDetails,
+		ErrorDetails: errSummary,
 		ArgsSummary:  argsSummary,
 		RetryCount:   retryCount,
 		MaxRetries:   r.maxRetries,
@@ -330,11 +395,11 @@ func (r *retryAndReflect) createToolReflectionResponse(tool tool.Tool, toolArgs 
 
 func (r *retryAndReflect) createToolRetryExceedMsg(tool tool.Tool, toolArgs map[string]any, toolErr error) map[string]any {
 	argsSummary := r.formatToolArgs(toolArgs)
-	errType, errDetails := modelError(tool.Name(), toolErr)
+	errType, errDetails, errSummary := modelError(tool.Name(), toolErr)
 
 	d := templateData{
 		ToolName:     tool.Name(),
-		ErrorDetails: errType + ": " + errDetails,
+		ErrorDetails: errSummary,
 		ArgsSummary:  argsSummary,
 		RetryCount:   r.maxRetries,
 		MaxRetries:   r.maxRetries,
