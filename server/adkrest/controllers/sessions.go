@@ -124,8 +124,8 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 // user ID count because every later URL carries them too. The body itself may be
 // far larger than the cap, and one byte of the ID can take three in the URL.
 // The cap counts the lengths url.PathEscape produces; a client that also escapes
-// the sub-delimiters url.PathEscape leaves alone, such as ":" or "@", builds a
-// longer URL and has only the headroom above the cap to absorb it.
+// the reserved characters url.PathEscape leaves alone, such as ":" or "@",
+// builds a longer URL and has only the headroom above the cap to absorb it.
 //
 // Neither error echoes the ID back: it is client data, and the body limit lets
 // it run to megabytes.
@@ -136,11 +136,11 @@ func validateBodySessionID(appName, userID, id string) error {
 	if strings.Contains(id, "/") || id == "." || id == ".." {
 		return errors.New(`sessionId in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`)
 	}
-	prefix := len(url.PathEscape(appName)) + len(url.PathEscape(userID))
-	// Percent-encoding never shortens a string, so an ID already over the cap
-	// unencoded is refused without building its encoded copy, which can be
-	// three times its size.
-	if prefix+len(id) > maxSessionPathParamBytes || prefix+len(url.PathEscape(id)) > maxSessionPathParamBytes {
+	// Percent-encoding never shortens a string, so parameters already over the
+	// cap unencoded are refused without building their encoded copies, which
+	// can be three times their size.
+	if len(appName)+len(userID)+len(id) > maxSessionPathParamBytes ||
+		len(url.PathEscape(appName))+len(url.PathEscape(userID))+len(url.PathEscape(id)) > maxSessionPathParamBytes {
 		return fmt.Errorf("sessionId in request body cannot be used in a URL path: percent-encoded together with the app name and user ID, it is longer than the limit of %d bytes", maxSessionPathParamBytes)
 	}
 	return nil
