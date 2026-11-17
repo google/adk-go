@@ -68,7 +68,7 @@ func pinAuthResponse(requested *toolauth.Config, answer *toolauth.Credential) *t
 // comes from source, so the redirect URL is checked against the state ADK
 // issued rather than one the client names. Any other answer keeps its own
 // state, as in adk-python, since no code of it is redeemed. The condition
-// lists the code sources exchangeCode reads through authCode (AuthCode and
+// lists the code sources exchangeCode reads through [AuthCode] (AuthCode and
 // AuthResponseURI), so the two change together.
 func mergeOAuth2(target, source *toolauth.OAuth2Auth) *toolauth.OAuth2Auth {
 	if target == nil {

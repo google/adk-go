@@ -26,6 +26,9 @@
 //     sublauncher that serves it
 //   - [google.golang.org/adk/v2/exp/authflow]: lets a tool ask the end user
 //     for a credential, such as an OAuth2 sign-in, and read the answer
+//   - [google.golang.org/adk/v2/exp/authtool]: tools that get a credential,
+//     such as an OAuth2 token, before they run, and the credential manager
+//     that loads, exchanges, refreshes and saves it
 //   - [google.golang.org/adk/v2/exp/classifier]: decision models that answer
 //     typed questions with probability distributions
 //   - [google.golang.org/adk/v2/exp/classifier/typesafe]: a classifier backed
