@@ -25,6 +25,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -42,6 +43,9 @@ const (
 	cloudPlatformScope      = "https://www.googleapis.com/auth/cloud-platform"
 	defaultAgentIdentityURL = "https://agentidentitycredentials.googleapis.com"
 	defaultConnectorURL     = "https://iamconnectorcredentials.googleapis.com"
+	// Unlike the two above, these request a client certificate.
+	defaultAgentIdentityMTLSURL = "https://agentidentitycredentials.mtls.googleapis.com"
+	defaultConnectorMTLSURL     = "https://iamconnectorcredentials.mtls.googleapis.com"
 
 	defaultPollTimeout = 10 * time.Second
 	// The credentials service documents an exponential polling backoff
@@ -266,11 +270,17 @@ type Config struct {
 // the environment provides, if any (a workload certificate config, an enterprise
 // certificate proxy, or SecureConnect, unless GOOGLE_API_USE_CLIENT_CERTIFICATE=false
 // opts out). A certificate is only presented to an endpoint that requests one,
-// and the default endpoints do not. For now the services' mTLS endpoints have to
-// be set through [Config.AgentIdentityEndpoint] and [Config.ConnectorEndpoint].
-// The token request is the exception: with a certificate, gcloud user
-// credentials fetch their tokens from oauth2.mtls.googleapis.com, which requests
-// it. A service-account key keeps its token_uri.
+// so when the transport has one the default endpoints become the services' mTLS
+// hosts, agentidentitycredentials.mtls.googleapis.com and
+// iamconnectorcredentials.mtls.googleapis.com. GOOGLE_API_USE_MTLS_ENDPOINT
+// overrides that choice with the values the client libraries take: auto (the
+// default) as described, always for the mTLS hosts with or without a
+// certificate, and never for the plain hosts. Any other value fails NewClient.
+// [Config.AgentIdentityEndpoint] and [Config.ConnectorEndpoint] each win over
+// the choice, and with [Config.HTTPClient] set none is made.
+// With a certificate, gcloud user credentials also fetch their tokens from
+// oauth2.mtls.googleapis.com, which requests it. A service-account key keeps
+// its token_uri.
 // A credentials file naming a universe domain other than the client's —
 // googleapis.com, or GOOGLE_CLOUD_UNIVERSE_DOMAIN when set — fails every request.
 //
@@ -304,20 +314,18 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		pollTimeout:      defaultPollTimeout,
 		initialBackoff:   defaultInitialBackoff,
 	}
-	if cfg.AgentIdentityEndpoint != "" {
-		c.agentIdentityURL = strings.TrimRight(cfg.AgentIdentityEndpoint, "/")
-	}
-	if cfg.ConnectorEndpoint != "" {
-		c.connectorURL = strings.TrimRight(cfg.ConnectorEndpoint, "/")
-	}
 	if cfg.PollTimeout > 0 {
 		c.pollTimeout = cfg.PollTimeout
 	}
 	if c.httpClient == nil {
+		mtlsMode, err := mtlsEndpointMode()
+		if err != nil {
+			return nil, err
+		}
 		// The auth library's transport rather than a hand-written bearer header,
 		// so client certificates, the quota project header and token caching
 		// come from it. See the NewClient doc.
-		hc, err := httptransport.NewClient(&httptransport.Options{
+		opts := &httptransport.Options{
 			DetectOpts: &credentials.DetectOptions{Scopes: []string{cloudPlatformScope}},
 			// Non-nil on purpose: the transport adds the quota project header to
 			// this map, and with a nil map it allocates a private one that its
@@ -333,7 +341,8 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 			// on it the service's error message, which APIError.Body carries only
 			// scrubbed.
 			DisableTelemetry: true,
-		})
+		}
+		hc, err := httptransport.NewClient(opts)
 		if err != nil {
 			// Not "find default credentials": the same call fails on a malformed
 			// client certificate config, before discovery runs. The library
@@ -349,9 +358,44 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 			return http.ErrUseLastResponse
 		}
 		c.httpClient = hc
+		// httptransport.NewClient returns no endpoint, but it writes the
+		// certificate provider it gave the transport back into opts (nil when
+		// there is none). One decision serves both services, since its inputs
+		// are environment variables and certificate files, not the host.
+		if mtlsMode == mtlsAlways || (mtlsMode == mtlsAuto && opts.ClientCertProvider != nil) {
+			c.agentIdentityURL = defaultAgentIdentityMTLSURL
+			c.connectorURL = defaultConnectorMTLSURL
+		}
+	}
+	if cfg.AgentIdentityEndpoint != "" {
+		c.agentIdentityURL = strings.TrimRight(cfg.AgentIdentityEndpoint, "/")
+	}
+	if cfg.ConnectorEndpoint != "" {
+		c.connectorURL = strings.TrimRight(cfg.ConnectorEndpoint, "/")
 	}
 	c.cacheSlot = joinFields(clientNonce, strconv.FormatUint(clientSeq.Add(1), 10))
 	return c, nil
+}
+
+const (
+	mtlsAuto   = "auto"
+	mtlsAlways = "always"
+	mtlsNever  = "never"
+)
+
+// mtlsEndpointMode reads GOOGLE_API_USE_MTLS_ENDPOINT. An unknown value is an
+// error, as in the generated Python client adk-python uses. The Go client
+// libraries fall back to the plain endpoint without saying so.
+func mtlsEndpointMode() (string, error) {
+	v := os.Getenv("GOOGLE_API_USE_MTLS_ENDPOINT")
+	switch m := strings.ToLower(v); m {
+	case "", mtlsAuto:
+		return mtlsAuto, nil
+	case mtlsAlways, mtlsNever:
+		return m, nil
+	default:
+		return "", fmt.Errorf("gcp: GOOGLE_API_USE_MTLS_ENDPOINT is %q, want auto, always or never", v)
+	}
 }
 
 // CacheKey returns the key a credential for scheme, retrieved through c on
