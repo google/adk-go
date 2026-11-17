@@ -212,10 +212,17 @@ type RunConfig struct {
 	// A request gets them immediately before the last content of the request
 	// that equals the invocation's user content, so they stay before the user
 	// message on every later request of the invocation, after a tool call for
-	// example. When no content equals it, as in a run without a new message,
-	// they go first, before the history. A user message that carries an
-	// "adk-" function call ID is not found, because the history has the ID
-	// removed; the contents then go first.
+	// example. When a run resumes an invocation through the node path (an LLM
+	// agent root, or a root set in runner.Config.Node), the user content is
+	// the stored message that started that invocation, not the run's message,
+	// so a posted-back function response gets the contents before that
+	// message.
+	// When no content equals the user content, the contents go first, before
+	// the history. That happens, for example, in a run that has no message and
+	// resumes no invocation, and when a function response with an "adk-" call
+	// ID is posted back to any other root for a model that does not keep such
+	// IDs (model.Capabilities.ClientFunctionCallIDs false): the history copy
+	// of that message has the ID removed, so it differs from the posted one.
 	//
 	// Every LLM agent of the run gets them, whatever its IncludeContents.
 	// Agents run through agenttool and live runs (RunLive) do not.
