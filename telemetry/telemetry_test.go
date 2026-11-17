@@ -30,8 +30,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -377,29 +379,52 @@ func TestTelemetryShutdownReturnsReaderErrors(t *testing.T) {
 	}
 }
 
-func TestNewErrorLeavesNoReaderRunning(t *testing.T) {
-	// The log exporter rejects a certificate for a plain HTTP endpoint, after
-	// the metric exporter for the same endpoint was built.
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
-	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE", writeTestCertificate(t))
-	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "1")
-	var orphanTicks atomic.Int32
-	original := otel.GetErrorHandler()
-	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
-		if errors.Is(err, sdkmetric.ErrReaderNotRegistered) {
-			orphanTicks.Add(1)
-		}
-	}))
-	t.Cleanup(func() { otel.SetErrorHandler(original) })
+func TestNewErrorLeavesNothingRunning(t *testing.T) {
+	// The named exporter rejects a certificate for a plain HTTP endpoint; those
+	// built before it succeed.
+	testCases := []struct {
+		name string
+		env  string
+	}{
+		{name: "metric exporter fails", env: "OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE"},
+		{name: "log exporter fails", env: "OTEL_EXPORTER_OTLP_LOGS_CERTIFICATE"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+			t.Setenv(tc.env, writeTestCertificate(t))
+			t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "1")
+			var orphanTicks atomic.Int32
+			original := otel.GetErrorHandler()
+			otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+				if errors.Is(err, sdkmetric.ErrReaderNotRegistered) {
+					orphanTicks.Add(1)
+				}
+			}))
+			t.Cleanup(func() { otel.SetErrorHandler(original) })
+			before := batchProcessorGoroutines()
 
-	if _, err := New(t.Context()); err == nil {
-		t.Fatal("New() succeeded, want the log exporter's error")
+			if _, err := New(t.Context()); err == nil {
+				t.Fatal("New() succeeded, want the exporter's error")
+			}
+			// An orphaned reader reports ErrReaderNotRegistered on every tick.
+			time.Sleep(100 * time.Millisecond)
+			if got := orphanTicks.Load(); got != 0 {
+				t.Errorf("got %d ticks of a metric reader New left running, want 0", got)
+			}
+			if got := batchProcessorGoroutines(); got > before {
+				t.Errorf("got %d batch processor goroutines after a failed New, want at most %d", got, before)
+			}
+		})
 	}
-	// An orphaned reader reports ErrReaderNotRegistered on every tick.
-	time.Sleep(100 * time.Millisecond)
-	if got := orphanTicks.Load(); got != 0 {
-		t.Errorf("got %d ticks of a metric reader New left running, want 0", got)
-	}
+}
+
+// batchProcessorGoroutines counts the running goroutines of span and log
+// batch processors.
+func batchProcessorGoroutines() int {
+	buf := make([]byte, 1<<20)
+	stacks := string(buf[:runtime.Stack(buf, true)])
+	return strings.Count(stacks, "trace.(*batchSpanProcessor).processQueue") + strings.Count(stacks, "log.(*BatchProcessor).process.func")
 }
 
 // writeTestCertificate writes a self-signed PEM certificate and returns its path.
@@ -439,7 +464,7 @@ func TestTelemetryNoReadersNoMeterProvider(t *testing.T) {
 	}
 }
 
-func TestOtlpEnvMetricShutdownDoesNotExport(t *testing.T) {
+func TestOtlpEnvMetricExport(t *testing.T) {
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -461,11 +486,20 @@ func TestOtlpEnvMetricShutdownDoesNotExport(t *testing.T) {
 		t.Fatalf("failed to create counter: %v", err)
 	}
 	counter.Add(ctx, 1)
+	if err := providers.MeterProvider.ForceFlush(ctx); err != nil {
+		t.Fatalf("failed to flush metrics: %v", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("got %d export requests on ForceFlush, want 1", got)
+	}
+
+	// Shutdown exports no further metrics.
+	counter.Add(ctx, 1)
 	if err := providers.Shutdown(ctx); err != nil {
 		t.Fatalf("telemetry.Shutdown() failed: %v", err)
 	}
-	if got := requests.Load(); got != 0 {
-		t.Errorf("got %d export requests on Shutdown, want 0", got)
+	if got := requests.Load(); got != 1 {
+		t.Errorf("got %d export requests after Shutdown, want still 1", got)
 	}
 }
 
@@ -947,52 +981,52 @@ func TestConfigureExporters(t *testing.T) {
 		opts    []Option
 		// The client address is nested deep inside the http client of the exporter, which is nested in a processor.
 		// Accessing it via reflection is too brittle. The best thing we can do is a smoke test, which checks the number of created processors.
-		wantSpanProcessors  int
-		wantLogProcessors   int
-		wantMetricExporters int
+		wantSpanProcessors int
+		wantLogProcessors  int
+		wantMetricReaders  int
 	}{
 		{
-			name:                "no processors",
-			envVars:             envVars{},
-			wantSpanProcessors:  0,
-			wantLogProcessors:   0,
-			wantMetricExporters: 0,
+			name:               "no processors",
+			envVars:            envVars{},
+			wantSpanProcessors: 0,
+			wantLogProcessors:  0,
+			wantMetricReaders:  0,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_ENDPOINT",
 			envVars: envVars{
 				OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318",
 			},
-			wantSpanProcessors:  1,
-			wantLogProcessors:   1,
-			wantMetricExporters: 1,
+			wantSpanProcessors: 1,
+			wantLogProcessors:  1,
+			wantMetricReaders:  1,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 			envVars: envVars{
 				OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://localhost:4318/v1/traces",
 			},
-			wantSpanProcessors:  1,
-			wantLogProcessors:   0,
-			wantMetricExporters: 0,
+			wantSpanProcessors: 1,
+			wantLogProcessors:  0,
+			wantMetricReaders:  0,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
 			envVars: envVars{
 				OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://localhost:4318/v1/metrics",
 			},
-			wantSpanProcessors:  0,
-			wantLogProcessors:   0,
-			wantMetricExporters: 1,
+			wantSpanProcessors: 0,
+			wantLogProcessors:  0,
+			wantMetricReaders:  1,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
 			envVars: envVars{
 				OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://localhost:4318/v1/logs",
 			},
-			wantSpanProcessors:  0,
-			wantLogProcessors:   1,
-			wantMetricExporters: 0,
+			wantSpanProcessors: 0,
+			wantLogProcessors:  1,
+			wantMetricReaders:  0,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_ENDPOINT and otel_to_cloud",
@@ -1003,9 +1037,9 @@ func TestConfigureExporters(t *testing.T) {
 				WithOtelToCloud(true),
 				WithGoogleCredentials(&google.Credentials{ProjectID: "test-project"}),
 			},
-			wantSpanProcessors:  2,
-			wantLogProcessors:   1,
-			wantMetricExporters: 2,
+			wantSpanProcessors: 2,
+			wantLogProcessors:  1,
+			wantMetricReaders:  2,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and otel_to_cloud",
@@ -1016,9 +1050,9 @@ func TestConfigureExporters(t *testing.T) {
 				WithOtelToCloud(true),
 				WithGoogleCredentials(&google.Credentials{ProjectID: "test-project"}),
 			},
-			wantSpanProcessors:  2,
-			wantLogProcessors:   0,
-			wantMetricExporters: 1,
+			wantSpanProcessors: 2,
+			wantLogProcessors:  0,
+			wantMetricReaders:  1,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT and otel_to_cloud",
@@ -1029,9 +1063,9 @@ func TestConfigureExporters(t *testing.T) {
 				WithOtelToCloud(true),
 				WithGoogleCredentials(&google.Credentials{ProjectID: "test-project"}),
 			},
-			wantSpanProcessors:  1,
-			wantLogProcessors:   1,
-			wantMetricExporters: 1,
+			wantSpanProcessors: 1,
+			wantLogProcessors:  1,
+			wantMetricReaders:  1,
 		},
 		// Nothing is built for a supplied provider: it would ignore it, and an
 		// unregistered periodic reader reports an error on every tick.
@@ -1045,9 +1079,9 @@ func TestConfigureExporters(t *testing.T) {
 				WithGoogleCredentials(&google.Credentials{ProjectID: "test-project"}),
 				WithTracerProvider(sdktrace.NewTracerProvider()),
 			},
-			wantSpanProcessors:  0,
-			wantLogProcessors:   1,
-			wantMetricExporters: 2,
+			wantSpanProcessors: 0,
+			wantLogProcessors:  1,
+			wantMetricReaders:  2,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_ENDPOINT, otel_to_cloud and WithLoggerProvider",
@@ -1059,9 +1093,9 @@ func TestConfigureExporters(t *testing.T) {
 				WithGoogleCredentials(&google.Credentials{ProjectID: "test-project"}),
 				WithLoggerProvider(sdklog.NewLoggerProvider()),
 			},
-			wantSpanProcessors:  2,
-			wantLogProcessors:   0,
-			wantMetricExporters: 2,
+			wantSpanProcessors: 2,
+			wantLogProcessors:  0,
+			wantMetricReaders:  2,
 		},
 		{
 			name: "OTEL_EXPORTER_OTLP_ENDPOINT, otel_to_cloud and WithMeterProvider",
@@ -1073,9 +1107,9 @@ func TestConfigureExporters(t *testing.T) {
 				WithGoogleCredentials(&google.Credentials{ProjectID: "test-project"}),
 				WithMeterProvider(sdkmetric.NewMeterProvider()),
 			},
-			wantSpanProcessors:  2,
-			wantLogProcessors:   1,
-			wantMetricExporters: 0,
+			wantSpanProcessors: 2,
+			wantLogProcessors:  1,
+			wantMetricReaders:  0,
 		},
 	}
 
@@ -1092,31 +1126,38 @@ func TestConfigureExporters(t *testing.T) {
 			if err != nil {
 				t.Fatalf("configure() unexpected error: %v", err)
 			}
-			shutdownReaders(t, cfg.metricReaders)
-			got, err := configureExporters(ctx, cfg)
-			if err != nil {
-				t.Fatalf("configureExporters() unexpected error: %v", err)
+			shutdownBuilt(t, cfg)
+			if len(cfg.spanProcessors) != tc.wantSpanProcessors {
+				t.Errorf("got %d span processors, want %d", len(cfg.spanProcessors), tc.wantSpanProcessors)
 			}
-			if len(got.spanProcessors) != tc.wantSpanProcessors {
-				t.Errorf("got %d span processors, want %d", len(got.spanProcessors), tc.wantSpanProcessors)
+			if len(cfg.logProcessors) != tc.wantLogProcessors {
+				t.Errorf("got %d log processors, want %d", len(cfg.logProcessors), tc.wantLogProcessors)
 			}
-			if len(got.logProcessors) != tc.wantLogProcessors {
-				t.Errorf("got %d log processors, want %d", len(got.logProcessors), tc.wantLogProcessors)
-			}
-			if len(got.metricExporters) != tc.wantMetricExporters {
-				t.Errorf("got %d metric exporters, want %d", len(got.metricExporters), tc.wantMetricExporters)
+			if len(cfg.metricReaders) != tc.wantMetricReaders {
+				t.Errorf("got %d metric readers, want %d", len(cfg.metricReaders), tc.wantMetricReaders)
 			}
 		})
 	}
 }
 
-// shutdownReaders stops the goroutines of periodic readers the test created
-// but never registered with a provider.
-func shutdownReaders(t *testing.T, readers []sdkmetric.Reader) {
+// shutdownBuilt stops the goroutines of the processors and readers the test
+// built but never registered with a provider.
+func shutdownBuilt(t *testing.T, cfg *config) {
 	t.Helper()
 	t.Cleanup(func() {
-		for _, r := range readers {
-			if err := r.Shutdown(context.WithoutCancel(t.Context())); err != nil {
+		ctx := context.WithoutCancel(t.Context())
+		for _, p := range cfg.spanProcessors {
+			if err := p.Shutdown(ctx); err != nil {
+				t.Errorf("span processor Shutdown() failed: %v", err)
+			}
+		}
+		for _, p := range cfg.logProcessors {
+			if err := p.Shutdown(ctx); err != nil {
+				t.Errorf("log processor Shutdown() failed: %v", err)
+			}
+		}
+		for _, r := range cfg.metricReaders {
+			if err := r.Shutdown(ctx); err != nil {
 				t.Errorf("reader Shutdown() failed: %v", err)
 			}
 		}
