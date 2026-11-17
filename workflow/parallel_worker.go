@@ -40,6 +40,11 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 	if wrapped.Config().RetryConfig != nil {
 		return nil, fmt.Errorf("ParallelWorker %s: wrapped node %s cannot have RetryConfig", name, wrapped.Name())
 	}
+	if s := wrapped.Config().StateSchema; s != nil {
+		if _, err := newStateValidator(s); err != nil {
+			return nil, fmt.Errorf("ParallelWorker %s: wrapped node %s: %w", name, wrapped.Name(), err)
+		}
+	}
 	retryCfg := cfg.RetryConfig
 	cfg.RetryConfig = nil // Hide from scheduler, so it does not try to retry the node itself.
 
@@ -298,7 +303,11 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 // the writes the attempt has not put on an event; a canceled attempt keeps
 // only the deltas of its events.
 func (n *ParallelWorker) runWrappedOnce(ctx agent.Context, item any) (outputs []any, delta *session.EventActions, err error) {
-	ctx, writes := beginActivation(ctx, n.wrapped)
+	own, ownErr := nodeStateValidator(ctx, n.wrapped)
+	if ownErr != nil {
+		return nil, nil, ownErr
+	}
+	ctx, writes := beginActivation(ctx, n.wrapped, own)
 	span, ctx := startNodeSpan(ctx, n.wrapped)
 	defer func() {
 		span.recordError(err, nil)

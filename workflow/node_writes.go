@@ -57,13 +57,17 @@ type forwardedKey struct{}
 // actions and a fresh registry of forwarded events, and returns the
 // activation's nodeWrites. A context that ignores the delta yields a
 // nodeWrites that checks and merges nothing.
-func beginActivation(ctx agent.Context, n Node) (agent.Context, *nodeWrites) {
+//
+// own is the node's own validator from nodeStateValidator; nil keeps the
+// validator ctx already carries.
+func beginActivation(ctx agent.Context, n Node, own *agent.StateValidator) (agent.Context, *nodeWrites) {
 	w := &nodeWrites{up: forwardedFrom(ctx), mine: &forwardedEvents{}}
 	_, w.validatesPending = n.(*FunctionNode)
 	base := context.WithValue(ctx, forwardedKey{}, w.mine)
 	derived := ctx.WithDelta(&agent.CommonContextDelta{
 		EventActions:           &session.EventActions{},
 		InvocationContextDelta: &agent.InvocationContextDelta{Context: &base},
+		StateValidator:         own,
 	})
 	w.actions = derived.Actions()
 	if sv, ok := derived.(interface{ StateValidator() agent.StateValidator }); ok {
