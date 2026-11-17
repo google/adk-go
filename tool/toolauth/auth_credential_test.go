@@ -17,6 +17,7 @@ package toolauth_test
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -452,4 +453,70 @@ func TestCredentialUnmarshalRejects(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCredentialClone(t *testing.T) {
+	t.Run("nil", func(t *testing.T) {
+		var c *toolauth.Credential
+		if got := c.Clone(); got != nil {
+			t.Errorf("Clone() of a nil credential = %+v, want nil", got)
+		}
+	})
+
+	t.Run("copy equals the original and keeps nil maps nil", func(t *testing.T) {
+		orig := &toolauth.Credential{
+			AuthType: toolauth.CredentialTypeOAuth2,
+			OAuth2:   &toolauth.OAuth2Auth{ClientID: "client-a", ClientSecret: "secret-a"},
+		}
+		got := orig.Clone()
+		if got == orig || got.OAuth2 == orig.OAuth2 {
+			t.Fatal("Clone() shares the credential or its OAuth2 field with the original")
+		}
+		if !reflect.DeepEqual(got, orig) {
+			t.Errorf("Clone() = %+v, want it reflect.DeepEqual to %+v", got, orig)
+		}
+	})
+
+	t.Run("Extra objects and arrays are copied", func(t *testing.T) {
+		orig := &toolauth.Credential{
+			AuthType: toolauth.CredentialTypeAPIKey,
+			Extra:    map[string]any{"n": map[string]any{"k": "v"}, "l": []any{"x"}},
+		}
+		got := orig.Clone()
+		got.Extra["n"].(map[string]any)["k"] = "changed"
+		got.Extra["l"].([]any)[0] = "changed"
+		if v := orig.Extra["n"].(map[string]any)["k"]; v != "v" {
+			t.Errorf("original Extra[n][k] = %v after changing the copy, want v", v)
+		}
+		if v := orig.Extra["l"].([]any)[0]; v != "x" {
+			t.Errorf("original Extra[l][0] = %v after changing the copy, want x", v)
+		}
+	})
+
+	t.Run("HTTP additional headers are copied", func(t *testing.T) {
+		orig := &toolauth.Credential{
+			AuthType: toolauth.CredentialTypeHTTP,
+			HTTP: &toolauth.HTTPAuth{
+				Scheme:            "bearer",
+				AdditionalHeaders: map[string]string{"X-Org": "a"},
+			},
+		}
+		got := orig.Clone()
+		got.HTTP.AdditionalHeaders["X-Org"] = "b"
+		if v := orig.HTTP.AdditionalHeaders["X-Org"]; v != "a" {
+			t.Errorf("original AdditionalHeaders[X-Org] = %q after changing the copy, want %q", v, "a")
+		}
+	})
+
+	t.Run("service account scopes are copied", func(t *testing.T) {
+		orig := &toolauth.Credential{
+			AuthType:       toolauth.CredentialTypeServiceAccount,
+			ServiceAccount: &toolauth.ServiceAccount{UseDefaultCredential: true, Scopes: []string{"s1"}},
+		}
+		got := orig.Clone()
+		got.ServiceAccount.Scopes[0] = "changed"
+		if v := orig.ServiceAccount.Scopes[0]; v != "s1" {
+			t.Errorf("original Scopes[0] = %q after changing the copy, want %q", v, "s1")
+		}
+	})
 }

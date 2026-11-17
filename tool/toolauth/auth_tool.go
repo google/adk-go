@@ -187,8 +187,8 @@ func (c *Config) WithoutSecrets() (*Config, error) {
 	}
 	out := *c
 	out.AuthScheme = c.AuthScheme.clone()
-	out.RawAuthCredential = c.RawAuthCredential.clone()
-	out.ExchangedAuthCredential = c.ExchangedAuthCredential.clone()
+	out.RawAuthCredential = c.RawAuthCredential.Clone()
+	out.ExchangedAuthCredential = c.ExchangedAuthCredential.Clone()
 	out.CredentialKey = key
 	out.Extra = cloneExtra(c.Extra)
 	for _, cred := range []*Credential{out.RawAuthCredential, out.ExchangedAuthCredential} {
@@ -212,8 +212,9 @@ func (c *Config) WithoutSecrets() (*Config, error) {
 	return &out, nil
 }
 
-// The clone methods return deep copies for [Config.WithoutSecrets]. Each
-// pointer receiver may be nil, and then the copy is nil too.
+// The clone methods return deep copies for [Config.WithoutSecrets] and
+// [Credential.Clone]. Each pointer receiver may be nil, and then the copy is
+// nil too.
 
 func (s Scheme) clone() Scheme {
 	s.Flows = s.Flows.clone()
@@ -247,24 +248,12 @@ func (f *OAuthFlow) clone() *OAuthFlow {
 	return &out
 }
 
-func (c *Credential) clone() *Credential {
-	if c == nil {
-		return nil
-	}
-	out := *c
-	out.HTTP = c.HTTP.clone()
-	out.OAuth2 = c.OAuth2.clone()
-	out.ServiceAccount = c.ServiceAccount.clone()
-	out.Extra = cloneExtra(c.Extra)
-	return &out
-}
-
-// clone leaves AdditionalHeaders shared, since WithoutSecrets drops it.
 func (h *HTTPAuth) clone() *HTTPAuth {
 	if h == nil {
 		return nil
 	}
 	out := *h
+	out.AdditionalHeaders = maps.Clone(h.AdditionalHeaders)
 	out.Credentials.Extra = cloneExtra(h.Credentials.Extra)
 	out.Extra = cloneExtra(h.Extra)
 	return &out
