@@ -25,8 +25,6 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/genai"
-
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/memory"
@@ -73,7 +71,18 @@ func (t *preloadMemoryTool) IsLongRunning() bool {
 // ProcessRequest processes the LLM request by searching memory using the user's
 // current query and injecting relevant past conversations into system instructions.
 func (t *preloadMemoryTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	userQuery := extractText(ctx.UserContent())
+	userContent := ctx.UserContent()
+	if userContent == nil {
+		return nil
+	}
+	var queryParts []string
+	for _, part := range userContent.Parts {
+		if part == nil || part.Text == "" || part.Thought {
+			continue
+		}
+		queryParts = append(queryParts, part.Text)
+	}
+	userQuery := strings.Join(queryParts, " ")
 	if userQuery == "" {
 		return nil
 	}
@@ -99,7 +108,7 @@ func (t *preloadMemoryTool) ProcessRequest(ctx agent.Context, req *model.LLMRequ
 func formatMemories(memories []memory.Entry) string {
 	var lines []string
 	for _, mem := range memories {
-		memText := extractText(mem.Content)
+		memText := extractText(mem)
 		if memText == "" {
 			continue
 		}
@@ -115,13 +124,13 @@ func formatMemories(memories []memory.Entry) string {
 	return strings.Join(lines, "\n")
 }
 
-func extractText(content *genai.Content) string {
-	if content == nil || len(content.Parts) == 0 {
+func extractText(mem memory.Entry) string {
+	if mem.Content == nil || len(mem.Content.Parts) == 0 {
 		return ""
 	}
 
 	var b strings.Builder
-	for _, part := range content.Parts {
+	for _, part := range mem.Content.Parts {
 		if part == nil || part.Text == "" || part.Thought {
 			continue
 		}
