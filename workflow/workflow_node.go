@@ -174,6 +174,11 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 				meta[workflowSubNodeOutputPrefix+n.subWorkflow.Name()] = ev.Output
 				evCopy.CustomMetadata = meta
 			}
+			// The inner runner checked ev; the copy carries that over, so the
+			// enclosing runner does not check it against its own schema.
+			if f := forwardedFrom(ctx); f != nil && f.take(ev) {
+				f.mark(&evCopy)
+			}
 			if !yield(&evCopy, nil) {
 				consumerGone = true
 				cancel()

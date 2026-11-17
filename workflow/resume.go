@@ -109,6 +109,7 @@ func (w *Workflow) Resume(
 			return
 		}
 
+		ctx := w.withStateValidator(ctx)
 		s := newScheduler(ctx, w.graph, w.maxConcurrency)
 		s.workflowName = w.name
 		s.state = state

@@ -194,6 +194,10 @@ type Workflow struct {
 
 	// stateSchema holds the state schema for the workflow.
 	stateSchema *jsonschema.Resolved
+	// stateValidator checks node-context state writes and node event state
+	// deltas against stateSchema. Nil when the workflow has no state schema,
+	// so a nested workflow without one keeps its parent's validator.
+	stateValidator agent.StateValidator
 
 	// inputSchema validates the input of every RunNode call and the seed
 	// ReconstructRunState rebuilds. Nil means no validation. Set via
@@ -282,6 +286,26 @@ func WithMaxConcurrency(n int) Option {
 }
 
 // WithStateSchema sets the state schema for the workflow.
+//
+// s must already be resolved; nil, the default, means no state is checked.
+// The properties of s's root name the state keys the workflow's nodes may
+// write, and each property constrains its key's value. Every write is checked
+// on its own against its key's property, so a write that leaves a required key
+// unset is accepted, and no other root keyword takes part. A key that contains
+// a colon (app:, user:, temp:, or a component's own "<owner>:<key>") is never
+// checked. References in s must stay inside the schema document: [New] returns
+// an error for a property that reaches a document s's own loader supplied.
+//
+// Two writes are checked: a call of Set on a node context's State, which
+// returns the error and writes nothing, and the state delta of every event a
+// node yields, which is checked before the event leaves the node; a refused
+// event is not emitted and fails the node. A refused write is reported as a
+// [*StateSchemaError]. Writes a node made before it failed are still stored,
+// unless it was canceled or failed because a dynamic child failed. A
+// nested workflow without a state schema checks its nodes against the
+// enclosing workflow's.
+//
+// s is shared by every run of the workflow and is never modified.
 func WithStateSchema(s *jsonschema.Resolved) Option {
 	return func(o *workflowOptions) {
 		o.stateSchema = s
@@ -402,14 +426,33 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	if err := validateSubWorkflowNames(name, edges); err != nil {
 		return nil, invalidGraph(err)
 	}
-	return &Workflow{
+	w := &Workflow{
 		graph:          graph,
 		name:           name,
 		maxConcurrency: o.maxConcurrency,
 		stateSchema:    o.stateSchema,
 		inputSchema:    o.inputSchema,
 		isRootWrapper:  o.isRootWrapper,
-	}, nil
+	}
+	if o.stateSchema != nil {
+		v, err := newStateValidator(o.stateSchema)
+		if err != nil {
+			return nil, err
+		}
+		w.stateValidator = v
+	}
+	return w, nil
+}
+
+// withStateValidator returns ctx carrying the workflow's state validator, or
+// ctx itself when the workflow has no state schema, so a nested workflow
+// without one keeps its parent's.
+func (w *Workflow) withStateValidator(ctx agent.Context) agent.Context {
+	if w.stateValidator == nil {
+		return ctx
+	}
+	v := w.stateValidator
+	return ctx.WithDelta(&agent.CommonContextDelta{StateValidator: &v})
 }
 
 // Name returns the workflow's node-path namespacing name as set by
@@ -481,6 +524,7 @@ func (w *Workflow) RunNode(ctx agent.Context, input any) iter.Seq2[*session.Even
 			yield(nil, err)
 			return
 		}
+		ctx := w.withStateValidator(ctx)
 		s := newScheduler(ctx, w.graph, w.maxConcurrency)
 		s.workflowName = w.name
 		// Seed: schedule START with the supplied input.

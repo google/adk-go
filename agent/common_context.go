@@ -336,13 +336,18 @@ func NewCallbackContextWithArtifactTracking(ic InvocationContext, actions *sessi
 // allocated; missing sub-maps are populated. The returned context is
 // backed by the same *commonContext implementation used for a callback context,
 // so all callback-context semantics (state delta tracking, artifact delta
-// tracking, etc.) apply, plus the tool-specific extensions.
+// tracking, etc.) apply, plus the tool-specific extensions. Its State().Set
+// writes are checked by no [StateValidator], even when ic is the context of a
+// workflow node.
 func NewToolContext(ic InvocationContext, functionCallID string, actions *session.EventActions, confirmation *toolconfirmation.ToolConfirmation) Context {
 	var res commonContext
 	ctx, ok := ic.(*commonContext)
 	if ok {
 		// copy fields
 		res = *ctx
+		// A tool's writes are not checked when made, as in adk-python, whose
+		// tool context carries no state schema.
+		res.stateValidator = nil
 	} else {
 		res = commonContext{
 			Context:           ic,
@@ -412,6 +417,10 @@ type commonContext struct {
 	// into this activation when it runs as a WithUseAsOutput child;
 	// its dynamic sub-scheduler reads them to stamp OutputFor.
 	outputForAncestors []string
+
+	// stateValidator checks each State().Set write; nil checks nothing.
+	// NewToolContext clears it, and the callback constructors never set it.
+	stateValidator StateValidator
 }
 
 // SubScheduler returns the sub-scheduler RunNode uses to schedule
@@ -430,6 +439,14 @@ func (c *commonContext) Path() string {
 // RunID implements [Context].
 func (c *commonContext) RunID() string {
 	return c.runID
+}
+
+// StateValidator returns the validator that checks this context's
+// State().Set writes, or nil when writes are not checked. Package workflow
+// reads it through an interface assertion; the tool and callback context
+// wrappers do not forward it.
+func (c *commonContext) StateValidator() StateValidator {
+	return c.stateValidator
 }
 
 // Agent implements [InvocationContext].
@@ -769,6 +786,22 @@ func (c *commonContext) InvocationContext() InvocationContext {
 	return c.invocationContext
 }
 
+// StateValidator decides whether a context may write one state entry.
+//
+// A context's State().Set calls it before it writes anything and returns its
+// error unchanged. A nil StateValidator checks nothing. Package workflow
+// installs one derived from the workflow's state schema on the contexts of
+// its nodes; a tool or callback context has none.
+//
+// An implementation must not modify or keep value, must not put value in the
+// error text, must answer the same for the same arguments, and must be safe
+// for concurrent use: one validator serves every node of a workflow.
+type StateValidator interface {
+	// ValidateStateEntry returns nil when key may be set to value, and an error that
+	// describes the refusal otherwise.
+	ValidateStateEntry(key string, value any) error
+}
+
 // callbackContextState is a session.State implementation backed by the
 // callback context's EventActions.StateDelta and the underlying session state.
 type callbackContextState struct {
@@ -796,6 +829,13 @@ func (c *callbackContextState) Get(key string) (any, error) {
 }
 
 func (c *callbackContextState) Set(key string, val any) error {
+	// The validator's error is returned unwrapped, so == matches a sentinel
+	// as well as errors.As matching a typed error.
+	if v := c.ctx.stateValidator; v != nil {
+		if err := v.ValidateStateEntry(key, val); err != nil {
+			return err
+		}
+	}
 	if c.ctx.actions != nil && c.ctx.actions.StateDelta != nil {
 		c.ctx.actions.StateDelta[key] = val
 	}

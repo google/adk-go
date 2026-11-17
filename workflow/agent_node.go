@@ -185,6 +185,13 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		}
 		agentCtx := internalcontext.NewInvocationContext(bound, params)
 		exCtx := agent.NewContext(agentCtx)
+		// The agent checks its state writes against the activation's state
+		// schema, as a nested workflow without a schema of its own does.
+		if sv, ok := ctx.(interface{ StateValidator() agent.StateValidator }); ok {
+			if v := sv.StateValidator(); v != nil {
+				exCtx = exCtx.WithDelta(&agent.CommonContextDelta{StateValidator: &v})
+			}
+		}
 
 		type NodeRunner interface {
 			RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
