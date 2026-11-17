@@ -59,9 +59,9 @@ func TestSameTarget(t *testing.T) {
 		{name: "different port", from: "https://h:8443/rpc", to: "https://h:9443/rpc", want: false},
 		// net/http writes the Host header and a proxy's request target from the
 		// punycode form of the name as written, and dials the IDNA lookup
-		// form, which maps characters first. Two names are the same only
-		// when the written form agrees, so a spelling that only dials the
-		// same address is refused, and a Unicode name equals its punycode.
+		// form, which maps characters first. Each of the next seven pairs
+		// sends a different Host header and is refused for that, whichever
+		// name the mapping tables of the Go release in use make it dial.
 		{name: "sharp s and capital sharp s", from: "https://fa\u00df.example/rpc", to: "https://fa\u1e9e.example/rpc", want: false},
 		{name: "ss and capital sharp s", from: "https://fass.example/rpc", to: "https://fa\u1e9e.example/rpc", want: false},
 		{name: "final sigma and sigma", from: "https://\u03b5\u03bb\u03bb\u03ac\u03c2.example/rpc", to: "https://\u03b5\u03bb\u03bb\u03ac\u03c3.example/rpc", want: false},
@@ -69,14 +69,15 @@ func TestSameTarget(t *testing.T) {
 		{name: "fullwidth letter", from: "https://fass.example/rpc", to: "https://\uff46ass.example/rpc", want: false},
 		{name: "long s", from: "https://fass.example/rpc", to: "https://fa\u017fs.example/rpc", want: false},
 		{name: "kelvin sign", from: "https://fak.example/rpc", to: "https://fa\u212a.example/rpc", want: false},
+		// A Unicode name already in the form the mapping produces is the
+		// same target as its punycode form.
 		{name: "unicode host to its punycode form", from: "https://fa\u00df.example/rpc", to: "https://xn--fa-hia.example/rpc", want: true},
 		{name: "punycode host to its unicode form", from: "https://xn--fa-hia.example/rpc", to: "https://fa\u00df.example/rpc", want: true},
-		// Same Host header, but net/http dials fass.example for the first
-		// and, with the lookup profile rejecting the decoded label, the
-		// written name for the second.
+		// Same Host header, but the first is dialed as the name its mapping
+		// produces and the second as written.
 		{name: "capital sharp s to its punycode form", from: "https://fa\u1e9e.example/rpc", to: "https://xn--fa-64s.example/rpc", want: false},
 		{name: "ascii case differs in a unicode host", from: "https://M\u00fcnchen.example/rpc", to: "https://m\u00fcnchen.example/rpc", want: true},
-		// Both dial one address, but the Host headers differ.
+		// The Host headers differ: punycode keeps the case as written.
 		{name: "unicode case differs", from: "https://M\u00dcNCHEN.example/rpc", to: "https://m\u00fcnchen.example/rpc", want: false},
 		// An ASCII name is taken as written, so the empty punycode label the
 		// IDNA profiles would drop still tells the two apart.
@@ -169,34 +170,28 @@ func TestCheck(t *testing.T) {
 	}
 }
 
-// TestHostNames pins the two names net/http derives from a host, each on its
-// own, since sameTarget only shows whether they agree.
-func TestHostNames(t *testing.T) {
+// TestHostName pins the Host header name. The dial name has no literals here:
+// it follows the IDNA mapping tables, which change between Go releases, so
+// TestHostNamesMatchNetHTTP checks it against net/http instead.
+func TestHostName(t *testing.T) {
 	tests := []struct {
-		host     string
-		wantDial string
-		wantHost string
+		host string
+		want string
 	}{
-		{host: "api.example", wantDial: "api.example", wantHost: "api.example"},
+		{host: "api.example", want: "api.example"},
 		// ASCII is taken as written: the IDNA profiles would drop the label.
-		{host: "mcp.example.com.xn--", wantDial: "mcp.example.com.xn--", wantHost: "mcp.example.com.xn--"},
-		{host: "fa\u00df.example", wantDial: "xn--fa-hia.example", wantHost: "xn--fa-hia.example"},
-		// Mapped before encoding for the dial, encoded as written for Host.
-		{host: "fa\u1e9e.example", wantDial: "fass.example", wantHost: "xn--fa-64s.example"},
-		{host: "ap\u00adi.example", wantDial: "api.example", wantHost: "xn--api-hfa.example"},
-		// The lookup profile rejects the underscore, so the dial falls back
-		// to the written name, as net/http's does.
-		{host: "fa\u00df_x.example", wantDial: "fa\u00df_x.example", wantHost: "xn--fa_x-wna.example"},
+		{host: "mcp.example.com.xn--", want: "mcp.example.com.xn--"},
+		{host: "fa\u00df.example", want: "xn--fa-hia.example"},
+		// Encoded as written, with no mapping first.
+		{host: "fa\u1e9e.example", want: "xn--fa-64s.example"},
+		{host: "ap\u00adi.example", want: "xn--api-hfa.example"},
+		{host: "fa\u00df_x.example", want: "xn--fa_x-wna.example"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.host, func(t *testing.T) {
-			u := &url.URL{Host: tc.host}
-			if got := dialName(u); got != tc.wantDial {
-				t.Errorf("dialName(%q) = %q, want %q", tc.host, got, tc.wantDial)
-			}
-			got, ok := hostName(u)
-			if !ok || got != tc.wantHost {
-				t.Errorf("hostName(%q) = %q, %v, want %q, true", tc.host, got, ok, tc.wantHost)
+			got, ok := hostName(&url.URL{Host: tc.host})
+			if !ok || got != tc.want {
+				t.Errorf("hostName(%q) = %q, %v, want %q, true", tc.host, got, ok, tc.want)
 			}
 		})
 	}
@@ -205,6 +200,9 @@ func TestHostNames(t *testing.T) {
 // TestHostNamesMatchNetHTTP checks dialName and hostName against net/http
 // itself rather than against literals: a client whose dialer records the
 // address it is given and a server that records the Host header it receives.
+// dialName reads the IDNA tables of golang.org/x/net in go.mod and net/http
+// reads the copy it vendors, so for the names listed a difference between the
+// two fails here.
 func TestHostNamesMatchNetHTTP(t *testing.T) {
 	var mu sync.Mutex
 	var dialed, hostHeader string

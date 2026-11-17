@@ -140,11 +140,13 @@ func sameTarget(from, to *url.URL) bool {
 // target only when both agree. It dials the IDNA lookup form, which maps
 // characters before encoding, and it writes the Host header and a forward
 // proxy's request target from the punycode form of the name as written. So
-// a soft hyphen, a fullwidth letter, a long s or ẞ against ss share a dial
-// address and still carry another Host header, and a name the lookup profile
-// rejects is dialed as written while its Host header is still encoded. An
-// ASCII name is taken as written by both, so a Unicode name and its punycode
-// form compare equal, and an empty punycode label is not dropped.
+// two spellings can share a dial address and still carry different Host
+// headers, as a name with a soft hyphen or a fullwidth letter does against
+// the plain one. Which spellings map together follows the IDNA tables of the
+// Go release in use. A name the lookup profile rejects is dialed as written
+// while its Host header is still encoded. An ASCII name is taken as written
+// by both, so an empty punycode label is not dropped, and a Unicode name
+// that is already in its mapped form compares equal to its punycode form.
 func dialName(u *url.URL) string {
 	host := u.Hostname()
 	if isASCII(host) {

@@ -619,10 +619,10 @@ func TestCheckRedirect(t *testing.T) {
 		},
 		// The rule is shared with mcptoolset through internal/credredirect.
 		// These are the decisions that differ from comparing the hostnames
-		// as written: a name and its punycode form are one target, two
-		// spellings net/http would dial or send as Host differently are not,
-		// a port written out on one side is the port implied on the other,
-		// and a Host header has to name the URL's host.
+		// as written: a name in its mapped form and its punycode are one
+		// target, two spellings net/http would send as Host differently are
+		// not, a port written out on one side is the port implied on the
+		// other, and a Host header has to name the URL's host.
 		{name: "unicode host to its punycode form", urls: []string{"https://fa\u00df.example/a", "https://xn--fa-hia.example/a"}},
 		{name: "sharp s to capital sharp s", urls: []string{"https://fa\u00df.example/a", "https://fa\u1e9e.example/a"}, wantErr: "refusing redirect"},
 		{name: "unicode case differs", urls: []string{"https://M\u00dcNCHEN.example/a", "https://m\u00fcnchen.example/a"}, wantErr: "refusing redirect"},
