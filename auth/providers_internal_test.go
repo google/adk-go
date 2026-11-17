@@ -27,7 +27,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -170,7 +172,8 @@ func TestLazyTokenSourceBoundsHungInit(t *testing.T) {
 }
 
 // TestLazyTokenSourceInitContextOutlivesInit: the context init receives stays
-// live after init returns, since the token source refreshes on it.
+// live after init returns, since the source may keep it, as the explicit-key
+// one does for the HTTP client it carries.
 func TestLazyTokenSourceInitContextOutlivesInit(t *testing.T) {
 	defer func(d time.Duration) { initTimeout = d }(initTimeout)
 	initTimeout = 100 * time.Millisecond
@@ -276,6 +279,7 @@ func TestProvidersMintTokensAfterInit(t *testing.T) {
 		// The literal rather than scopeCloudPlatform, which would move with the
 		// constant it is meant to pin.
 		{"ADC", ADC(), "https://www.googleapis.com/auth/cloud-platform"},
+		{"ADCExplicitScope", ADC(emailScope), emailScope},
 		// Empty Scopes on the ADC fallback default to cloud-platform, as the
 		// ServiceAccountConfig.Scopes doc promises. Only the explicit JSONKey
 		// path rejects them.
@@ -318,6 +322,131 @@ func TestProvidersMintTokensAfterInit(t *testing.T) {
 				t.Errorf("token request asked for scope %q, want %q", got, tc.wantScope)
 			}
 		})
+	}
+}
+
+// TestADCKeepsTheTokenExchangeOutOfDebugLogs: GOOGLE_SDK_GO_LOGGING_LEVEL is
+// shared with the other Google client libraries in the process, so turning it
+// on to debug one of them must not put the ADC provider's signed assertion and
+// minted token on stderr.
+func TestADCKeepsTheTokenExchangeOutOfDebugLogs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"access_token":"tok","token_type":"Bearer","expires_in":3600}`)
+	}))
+	defer srv.Close()
+	credsFile := filepath.Join(t.TempDir(), "adc.json")
+	if err := os.WriteFile(credsFile, serviceAccountKey(t, srv.URL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
+	isolateADCEnv(t)
+	t.Setenv("GOOGLE_SDK_GO_LOGGING_LEVEL", "debug")
+
+	for _, tc := range []struct {
+		name     string
+		provider CredentialProvider
+	}{
+		{"ADC", ADC()},
+		{"ServiceAccountADCFallback", ServiceAccount(ServiceAccountConfig{})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := os.CreateTemp(t.TempDir(), "stderr")
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved := os.Stderr
+			os.Stderr = f
+			cred, err := tc.provider.Credential(t.Context())
+			if err == nil {
+				err = cred.Apply(http.Header{})
+			}
+			os.Stderr = saved
+			if err != nil {
+				t.Fatalf("minting a token: %v", err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+			out, err := os.ReadFile(f.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(out) != 0 {
+				t.Errorf("stderr with debug logging on = %q, want nothing from the auth library", out)
+			}
+		})
+	}
+}
+
+// adcScopesChildEnv marks the child process TestADCDoesNotAliasCallerScopes
+// re-executes itself in.
+const adcScopesChildEnv = "ADK_AUTH_ADC_SCOPES_CHILD"
+
+// TestADCDoesNotAliasCallerScopes pins the clone in adcTokenSource: the
+// metadata-server credential keeps the scopes slice it is given and reads it on
+// every refresh, so a caller reusing its slice must not change what later
+// tokens are requested for.
+//
+// It runs in a child process because the metadata-server probe is memoized for
+// the life of the process, and this test needs it to answer yes.
+func TestADCDoesNotAliasCallerScopes(t *testing.T) {
+	if os.Getenv(adcScopesChildEnv) != "1" {
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestADCDoesNotAliasCallerScopes$", "-test.v", "-test.count=1")
+		cmd.Env = append(os.Environ(), adcScopesChildEnv+"=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("child process: %v\n%s", err, out)
+		}
+		// A child that ran nothing exits 0 too.
+		if !strings.Contains(string(out), "--- PASS: TestADCDoesNotAliasCallerScopes") {
+			t.Fatalf("child process did not run the test:\n%s", out)
+		}
+		return
+	}
+
+	var mu sync.Mutex
+	var asked []string
+	md := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/token") {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		asked = append(asked, r.URL.Query().Get("scopes"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"access_token":"tok","token_type":"Bearer","expires_in":1}`)
+	}))
+	defer md.Close()
+	isolateADCEnv(t)
+	// No credentials file anywhere discovery looks, so it falls through to the
+	// metadata server, which GCE_METADATA_HOST points at the fake.
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+	t.Setenv("GCE_METADATA_HOST", strings.TrimPrefix(md.URL, "http://"))
+
+	const emailScope = "https://www.googleapis.com/auth/userinfo.email"
+	scopes := []string{emailScope}
+	cred, err := ADC(scopes...).Credential(t.Context())
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if err := cred.Apply(http.Header{}); err != nil {
+		t.Fatalf("Apply() #1 error = %v", err)
+	}
+	scopes[0] = "https://example.test/reused-by-the-caller"
+	// Past the first token's one-second life, so the second Apply refreshes.
+	time.Sleep(1100 * time.Millisecond)
+	if err := cred.Apply(http.Header{}); err != nil {
+		t.Fatalf("Apply() #2 error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{emailScope, emailScope}; !slices.Equal(asked, want) {
+		t.Errorf("token requests asked for scopes %q, want %q", asked, want)
 	}
 }
 

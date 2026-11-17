@@ -35,6 +35,10 @@ import (
 	"testing"
 	"time"
 
+	cloudauth "cloud.google.com/go/auth"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
 	"google.golang.org/adk/v2/auth"
 )
 
@@ -721,10 +725,11 @@ func TestNewClientOutlivesConstructionCtx(t *testing.T) {
 // client libraries do. A hand-written bearer header drops the quota project.
 func TestNewClientForwardsQuotaProject(t *testing.T) {
 	requestedScope := fakeADCWithQuotaProject(t, "quota-p")
-	var quota, authz string
+	// Written on the handler's goroutine and read on the test's.
+	var quota, authz atomic.Value
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		quota = r.Header.Get("X-Goog-User-Project")
-		authz = r.Header.Get("Authorization")
+		quota.Store(r.Header.Get("X-Goog-User-Project"))
+		authz.Store(r.Header.Get("Authorization"))
 		_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
 	}))
 	defer srv.Close()
@@ -736,16 +741,115 @@ func TestNewClientForwardsQuotaProject(t *testing.T) {
 	if _, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"}); err != nil {
 		t.Fatalf("RetrieveCredential() error = %v", err)
 	}
-	if authz != "Bearer ADC-TOKEN" {
-		t.Errorf("Authorization = %q, want the minted ADC token as a bearer", authz)
+	if got := authz.Load(); got != "Bearer ADC-TOKEN" {
+		t.Errorf("Authorization = %q, want the minted ADC token as a bearer", got)
 	}
 	// The literal rather than cloudPlatformScope: a test that compares the
 	// constant with itself cannot see it change.
 	if got, want := requestedScope(), "https://www.googleapis.com/auth/cloud-platform"; got != want {
 		t.Errorf("token request asked for scope %q, want %q", got, want)
 	}
-	if quota != "quota-p" {
-		t.Errorf("X-Goog-User-Project = %q, want the ADC quota project %q", quota, "quota-p")
+	if got := quota.Load(); got != "quota-p" {
+		t.Errorf("X-Goog-User-Project = %q, want the ADC quota project %q", got, "quota-p")
+	}
+}
+
+// TestNewClientKeepsTheTokenExchangeOutOfDebugLogs: GOOGLE_SDK_GO_LOGGING_LEVEL
+// is shared with the other Google client libraries in the process, so turning
+// it on to debug one of them must not put this client's signed assertion and
+// minted token on stderr.
+func TestNewClientKeepsTheTokenExchangeOutOfDebugLogs(t *testing.T) {
+	fakeADC(t)
+	t.Setenv("GOOGLE_SDK_GO_LOGGING_LEVEL", "debug")
+	srv, _ := sequenceServer(`{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
+	defer srv.Close()
+
+	out := captureStderr(t, func() {
+		c, err := NewClient(t.Context(), &Config{AgentIdentityEndpoint: srv.URL, ConnectorEndpoint: srv.URL})
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		if _, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"}); err != nil {
+			t.Fatalf("RetrieveCredential() error = %v", err)
+		}
+	})
+	if out != "" {
+		t.Errorf("stderr with debug logging on = %q, want nothing from the auth library", out)
+	}
+}
+
+// captureStderr returns what fn writes to os.Stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = f
+	func() {
+		defer func() { os.Stderr = saved }()
+		fn()
+	}()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// TestNewClientOpensNoSpans pins DisableTelemetry: through v2.8.0 a call opened
+// no span. The caller's span is what makes the library's instrumentation, when
+// it is on, record into exp.
+func TestNewClientOpensNoSpans(t *testing.T) {
+	fakeADC(t)
+	srv, _ := sequenceServer(`{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
+	defer srv.Close()
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	ctx, caller := tp.Tracer("test").Start(t.Context(), "caller")
+
+	c, err := NewClient(t.Context(), &Config{AgentIdentityEndpoint: srv.URL, ConnectorEndpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	if _, err := c.RetrieveCredential(ctx, Request{Resource: authProviderResource, UserID: "u"}); err != nil {
+		t.Fatalf("RetrieveCredential() error = %v", err)
+	}
+	caller.End()
+	var names []string
+	for _, s := range exp.GetSpans() {
+		names = append(names, s.Name)
+	}
+	if !slices.Equal(names, []string{"caller"}) {
+		t.Errorf("spans = %q, want only the caller's own", names)
+	}
+}
+
+// TestRetrieveCredentialTokenErrorType pins the type the RetrieveCredential doc
+// names for a service-account key whose token request is rejected.
+func TestRetrieveCredentialTokenErrorType(t *testing.T) {
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"invalid_grant"}`)
+	}))
+	defer tokenSrv.Close()
+	isolateADCEnv(t)
+	writeFakeADC(t, tokenSrv.URL, "")
+	srv, _ := sequenceServer(`{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
+	defer srv.Close()
+
+	c, err := NewClient(t.Context(), &Config{AgentIdentityEndpoint: srv.URL, ConnectorEndpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"})
+	if _, ok := errors.AsType[*cloudauth.Error](err); !ok {
+		t.Fatalf("RetrieveCredential() error = %v, want a *cloud.google.com/go/auth.Error in its chain", err)
 	}
 }
 
@@ -782,7 +886,14 @@ func fakeADCWithQuotaProject(t *testing.T, quotaProject string) (requestedScope 
 	}))
 	t.Cleanup(tokenSrv.Close)
 	isolateADCEnv(t)
+	writeFakeADC(t, tokenSrv.URL, quotaProject)
+	return func() string { return scope.Load().(string) }
+}
 
+// writeFakeADC points GOOGLE_APPLICATION_CREDENTIALS at a service-account key
+// whose token requests go to tokenURI.
+func writeFakeADC(t *testing.T, tokenURI, quotaProject string) {
+	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -798,7 +909,7 @@ func fakeADCWithQuotaProject(t *testing.T, quotaProject string) (requestedScope 
 		"private_key":    string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
 		"client_email":   "sa@p.iam.gserviceaccount.com",
 		"client_id":      "1",
-		"token_uri":      tokenSrv.URL,
+		"token_uri":      tokenURI,
 	}
 	if quotaProject != "" {
 		file["quota_project_id"] = quotaProject
@@ -812,7 +923,6 @@ func fakeADCWithQuotaProject(t *testing.T, quotaProject string) (requestedScope 
 		t.Fatalf("write fake ADC: %v", err)
 	}
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adc)
-	return func() string { return scope.Load().(string) }
 }
 
 // isolateADCEnv pins the rest of the environment the auth library reads, which

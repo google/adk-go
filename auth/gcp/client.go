@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -249,24 +250,34 @@ type Config struct {
 	// DetectOpts naming the cloud-platform scope and a fresh, non-nil Headers map
 	// per client (the transport writes the quota project into the map it is
 	// given and drops it with a nil one, so a shared map carries the first
-	// client's quota project to the next), CheckRedirect returning
-	// [http.ErrUseLastResponse], and then the Timeout.
+	// client's quota project to the next), a Logger that discards (the default
+	// one writes token requests and responses to stderr when
+	// GOOGLE_SDK_GO_LOGGING_LEVEL=debug), DisableTelemetry, CheckRedirect
+	// returning [http.ErrUseLastResponse], and then the Timeout.
 	PollTimeout time.Duration
 }
 
 // NewClient builds a Client from cfg; a nil cfg (or any zero field) uses
 // defaults. Unless cfg.HTTPClient is set, it discovers Application Default
 // Credentials (cloud-platform scope) to authenticate calls to the services,
-// through the same transport the Google Cloud client libraries use: it bills to
-// the ADC quota project when the credentials name one, caches tokens and
+// through the same transport the Google Cloud client libraries use: it sends the
+// quota project, when there is one, as X-Goog-User-Project, caches tokens and
 // refreshes them ahead of expiry, and is configured with the client certificate
 // the environment provides, if any (a workload certificate config, an enterprise
 // certificate proxy, or SecureConnect, unless GOOGLE_API_USE_CLIENT_CERTIFICATE=false
 // opts out). A certificate is only presented to an endpoint that requests one,
 // and the default endpoints do not. For now the services' mTLS endpoints have to
 // be set through [Config.AgentIdentityEndpoint] and [Config.ConnectorEndpoint].
+// The token request is the exception: with a certificate, gcloud user
+// credentials fetch their tokens from oauth2.mtls.googleapis.com, which requests
+// it. A service-account key keeps its token_uri.
 // A credentials file naming a universe domain other than the client's —
 // googleapis.com, or GOOGLE_CLOUD_UNIVERSE_DOMAIN when set — fails every request.
+//
+// The quota project is GOOGLE_CLOUD_QUOTA_PROJECT when set, and otherwise the
+// credentials file's quota_project_id. The variable is not tied to the
+// credentials, so the header can name a project they do not, as it does for
+// metadata-server credentials, which name none.
 //
 // ctx does not bound the returned Client and nothing is read from it:
 // credential discovery reads the environment, and tokens are minted as requests
@@ -312,10 +323,23 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 			// this map, and with a nil map it allocates a private one that its
 			// round-tripper never sees (cloud.google.com/go/auth through v0.24.4).
 			Headers: http.Header{},
+			// Discarded: the library's default logger answers
+			// GOOGLE_SDK_GO_LOGGING_LEVEL=debug by writing each token request and
+			// response to stderr, signed assertion and minted token included.
+			// Credential detection inherits this logger.
+			Logger: slog.New(slog.DiscardHandler),
+			// Off, as through v2.8.0. Left on, the library opens a client span for
+			// every call, and with GOOGLE_SDK_GO_EXPERIMENTAL_TRACING=true records
+			// on it the service's error message, which APIError.Body carries only
+			// scrubbed.
+			DisableTelemetry: true,
 		})
 		if err != nil {
 			// Not "find default credentials": the same call fails on a malformed
-			// client certificate config, before discovery runs.
+			// client certificate config, before discovery runs. The library
+			// resolves the certificate source once per process and keeps the
+			// outcome, so fixing the file does not clear that failure for a
+			// process that already hit it.
 			return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
 		}
 		// The transport re-signs every hop, below the layer where net/http

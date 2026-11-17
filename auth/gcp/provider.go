@@ -124,8 +124,10 @@ var ErrNoActingUser = errors.New("gcp: no acting user")
 // defaultInitTimeout bounds how long a caller waits for the default client. The
 // build itself cannot be bounded by a context — credential discovery reads the
 // credentials file with os.ReadFile and probes with the context-free
-// metadata.OnGCE(), neither of which observes cancellation — so the bound lives
-// on the waiting side.
+// metadata.OnGCE(), and where SecureConnect is configured the client
+// certificate lookup runs its cert_provider_command with no context or timeout.
+// None of the three observes cancellation, so the bound lives on the waiting
+// side.
 const defaultInitTimeout = 30 * time.Second
 
 // defaultEvictTimeout bounds a store delete that no longer has a caller waiting
