@@ -15,8 +15,6 @@
 package agentanalytics
 
 import (
-	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,8 +26,6 @@ import (
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
-
-	"google.golang.org/adk/v2/session"
 )
 
 const (
@@ -123,14 +119,14 @@ func isKnownSentinel(s string) bool {
 // text "{{template}} rendered") when it is not valid JSON and contains no
 // raw or encoded credential markers.
 func sanitizeRawText(raw string) (string, bool) {
-	out, lost, settled := sanitizeRawTextOnce(raw)
+	out, lost, settled := sanitizeRawTextOnce(raw, false)
 	for cur, pass := raw, 1; !settled && out != cur && !isScrubbedPlainText(out); pass++ {
 		if pass == maxRedactionPasses {
 			return redactedSensitiveTextPlaceholder, true
 		}
 		var next string
 		var nextLost bool
-		next, nextLost, settled = sanitizeRawTextOnce(out)
+		next, nextLost, settled = sanitizeRawTextOnce(out, true)
 		if next == out {
 			break
 		}
@@ -216,8 +212,9 @@ func expressionsKeepStringsApart(doc string) bool {
 // end of the source of its last byte: end+1, or, for a closing quote that the
 // outermost text spells as an escape, as the \" that closes a string of a
 // document in a JSON string literal, the end of that escape. redacted
-// reports that redactJSONValue replaces the value: it is the string, number,
-// true, false or null value of a sensitive key.
+// reports that redactJSONValue replaces the value: it is the value of a
+// sensitive key, which, when it is an object or an array, is one value from
+// its first byte to the "}" or "]" that closes it.
 type jsonValueSpan struct {
 	start, end, closeEnd int
 	redacted             bool
@@ -502,10 +499,16 @@ func unescapeBackslashControlsMapped(s string) (string, []int) {
 // opening and the closing quote of a string, however escaped, or the first
 // and the last byte of a number, true, false or null, with the end of the
 // source of that last byte, and whether the redaction of sensitive keys
-// replaces it (see jsonValueSpan). pos maps each byte of text, and its end,
-// to the byte of the outermost text that it is decoded from, or is nil when
-// text is the outermost text. It reports false when depth runs out or text
-// holds a string that does not end or decode.
+// replaces it (see jsonValueSpan). The object or array of a sensitive key,
+// which the redaction replaces as a whole, is one value, and the values
+// inside it are not read: in
+// {"Credentials":{"AccessKeyId":"a","SecretAccessKey":"b"},"Message":"ok"}
+// the expressions remove a part of the object that holds the start of the
+// strings inside it, none of which the redaction keeps. pos maps each byte
+// of text, and its end, to the byte of the outermost text that it is decoded
+// from, or is nil when text is the outermost text. It reports false when
+// depth runs out or text holds a string, or the object or array of a
+// sensitive key, that does not end or decode.
 func appendValueSpans(text string, pos []int, values *[]jsonValueSpan, depth int) bool {
 	if depth >= maxSanitizeDepth {
 		return false
@@ -518,7 +521,7 @@ func appendValueSpans(text string, pos []int, values *[]jsonValueSpan, depth int
 	}
 	const structural = " \t\r\n,:[]{}\""
 	// sensitiveKey reports that the last string was a sensitive key, whose
-	// value redactJSONValue replaces when it is no object or array.
+	// value redactJSONValue replaces.
 	sensitiveKey := false
 	for i := 0; i < len(text); i++ {
 		if c := text[i]; c != '"' {
@@ -530,6 +533,16 @@ func appendValueSpans(text string, pos []int, values *[]jsonValueSpan, depth int
 				*values = append(*values, jsonValueSpan{at(start), at(i), at(i + 1), sensitiveKey})
 				sensitiveKey = false
 			} else if c == '{' || c == '[' {
+				if sensitiveKey {
+					// The object or array of a sensitive key is one value,
+					// which the redaction replaces as a whole.
+					end := jsonContainerEnd(text, i)
+					if end < 0 {
+						return false
+					}
+					*values = append(*values, jsonValueSpan{at(i), at(end), at(end + 1), true})
+					i = end
+				}
 				sensitiveKey = false
 			}
 			continue
@@ -586,6 +599,29 @@ func skipJSONSpace(text string, i int) int {
 		i++
 	}
 	return i
+}
+
+// jsonContainerEnd returns the offset of the "}" or "]" that closes the
+// object or array that text[open] opens, or -1 when none does.
+func jsonContainerEnd(text string, open int) int {
+	depth := 0
+	for i := open; i < len(text); i++ {
+		switch text[i] {
+		case '"':
+			for i++; i < len(text) && text[i] != '"'; i++ {
+				if text[i] == '\\' {
+					i++
+				}
+			}
+		case '{', '[':
+			depth++
+		case '}', ']':
+			if depth--; depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // decodeJSONStringMapped decodes raw, the text between the quotes of a JSON
@@ -762,26 +798,32 @@ func isScrubbedPlainText(out string) bool {
 // over the output of the last one, to reach text that a further pass leaves
 // unchanged. A pass that redacts one value may only expose another to the
 // next, as when a key whose value an earlier pass replaced reads as a nested
-// key; running the pass again until nothing changes makes redacting redacted
-// text change nothing. Text that still changes after maxRedactionPasses
-// passes fails closed.
+// key. Text that still changes after maxRedactionPasses passes fails closed.
+// A pass after the first reads the result of the pass before it, and keeps
+// what that pass left malformed (see redactJSONTextPass). A new call reads
+// the same text as it reads any other, and fails it closed where main does:
+// redacting redacted text changes nothing unless that text is JSON-like and
+// no longer parses.
 const maxRedactionPasses = 4
 
 // redactStringValue redacts str, a string value that SmartTruncate sanitizes
-// at depth, with redactJSONTextWithBudget and scrubErrorText, and reports
-// whether content was lost. As in sanitizeRawText, the pass is run again over
-// its result until that no longer changes (see maxRedactionPasses), each
-// further pass with a budget of its own, so that sanitizing a sanitized value
-// changes nothing.
+// at depth, with redactJSONTextPass and scrubErrorText, and reports
+// whether content was lost. A value that starts with "{" or "[" and is no
+// JSON document fails closed whatever it holds, as on main: sanitizeRawText
+// and redactErrorMessage keep such text when it is prose (see
+// isPositivelyHarmlessProse), and SmartTruncate keeps none. As in
+// sanitizeRawText, the pass is run again over its result until that no
+// longer changes (see maxRedactionPasses), each further pass with a budget of
+// its own.
 func redactStringValue(str string, depth int, budget *nodeBudget) (string, bool) {
-	out, lost, settled := redactStringValueOnce(str, depth, budget)
+	out, lost, settled := redactStringValueOnce(str, depth, false, budget)
 	for cur, pass := str, 1; !settled && out != cur && !isScrubbedPlainText(out); pass++ {
 		if pass == maxRedactionPasses {
 			return redactedSensitiveTextPlaceholder, true
 		}
 		var next string
 		var nextLost bool
-		next, nextLost, settled = redactStringValueOnce(out, depth, &nodeBudget{remaining: maxSanitizeNodes})
+		next, nextLost, settled = redactStringValueOnce(out, depth, true, &nodeBudget{remaining: maxSanitizeNodes})
 		if next == out {
 			break
 		}
@@ -790,19 +832,20 @@ func redactStringValue(str string, depth int, budget *nodeBudget) (string, bool)
 	return out, lost
 }
 
-// redactStringValueOnce is one pass of redactStringValue. As in
-// sanitizeRawTextOnce, malformed JSON text that is positively harmless prose
-// (see isPositivelyHarmlessProse) is kept rather than failed closed: the scrub
-// of a JSON document as text may take the closing quote of a value with a
-// credential that it redacts, as the header value of
-// {"log": "x-api-key: SECRET\nrequest id: 42"}, which the text spells with
-// the escape \n, runs on to the end of the text. The next pass reads what is
-// left as malformed JSON, and keeps it, as main and sanitizeRawText keep it,
-// rather than failing the whole value closed. settled reports that the result
-// is already a fixed point of redactStringValueOnce and needs no further pass.
-func redactStringValueOnce(str string, depth int, budget *nodeBudget) (out string, lost, settled bool) {
-	redacted, changed, lost := redactJSONTextWithBudget(str, depth, budget)
-	if changed && redacted == unparseableJSONPlaceholder && isPositivelyHarmlessProse(str, trimBOMAndSpace(str)) {
+// redactStringValueOnce is one pass of redactStringValue. laterPass reports
+// that str is the result of an earlier pass (see redactJSONTextPass), which
+// is kept rather than failed closed when it reads as malformed JSON and is
+// prose (see isPositivelyHarmlessProse): the scrub of a JSON document as text
+// may take the closing quote of a value with a credential that it redacts, as
+// the header value of {"log": "x-api-key: SECRET\nrequest id: 42"}, which the
+// text spells with the escape \n, runs on to the end of the text. The next
+// pass reads what is left as malformed JSON, and keeps it, as main returns
+// it, rather than failing the whole value closed. settled reports that the
+// result is already a fixed point of redactStringValueOnce and needs no
+// further pass.
+func redactStringValueOnce(str string, depth int, laterPass bool, budget *nodeBudget) (out string, lost, settled bool) {
+	redacted, changed, lost := redactJSONTextPass(str, depth, laterPass, budget)
+	if laterPass && changed && redacted == unparseableJSONPlaceholder && isPositivelyHarmlessProse(str, trimBOMAndSpace(str), true) {
 		return str, false, true
 	}
 	if scrubbed := scrubErrorText(redacted); scrubbed != redacted {
@@ -811,10 +854,11 @@ func redactStringValueOnce(str string, depth int, budget *nodeBudget) (out strin
 	return redacted, lost, !lost
 }
 
-// sanitizeRawTextOnce is one pass of sanitizeRawText.
-func sanitizeRawTextOnce(raw string) (out string, lost, settled bool) {
+// sanitizeRawTextOnce is one pass of sanitizeRawText. laterPass reports that
+// raw is the result of an earlier pass (see redactJSONTextPass).
+func sanitizeRawTextOnce(raw string, laterPass bool) (out string, lost, settled bool) {
 	budget := &nodeBudget{remaining: maxSanitizeNodes}
-	sanitized, changed, lost := redactJSONTextWithBudget(raw, 0, budget)
+	sanitized, changed, lost := redactJSONTextPass(raw, 0, laterPass, budget)
 	if !changed {
 		scrubbed := scrubErrorText(raw)
 		if scrubbed != raw {
@@ -830,7 +874,7 @@ func sanitizeRawTextOnce(raw string) (out string, lost, settled bool) {
 		return sanitized, lost, !lost
 	}
 	trimmed := trimBOMAndSpace(raw)
-	if isPositivelyHarmlessProse(raw, trimmed) {
+	if isPositivelyHarmlessProse(raw, trimmed, laterPass) {
 		return raw, false, true
 	}
 	return sanitized, lost, true
@@ -1162,11 +1206,21 @@ func isMalformedAfterString(raw string, open, end int) bool {
 	return true
 }
 
-func isPositivelyHarmlessProse(raw, trimmed string) bool {
+// isPositivelyHarmlessProse reports whether raw, text that starts with "{",
+// "[" or a quote once its padding is trimmed (see trimmed) and that fails
+// closed as malformed JSON, is prose that sanitizeRawText and
+// redactErrorMessage keep, as on main: it holds no escaped quote, nothing
+// that the scrub or the legacy expressions redact, as written or with its
+// escapes decoded, and no quoted sensitive key before a delimiter. laterPass
+// reports that raw is the result of an earlier pass (see
+// redactJSONTextPass). Only then is quote-led text whose quoted sensitive
+// keys all hold a "[REDACTED]" placeholder read as redacted text and kept,
+// and quote-led text that starts like an encoded container failed closed.
+func isPositivelyHarmlessProse(raw, trimmed string, laterPass bool) bool {
 	if len(raw) > maxInspectableJSONTextBytes {
 		return false
 	}
-	if strings.HasPrefix(trimmed, `"`) && startsLikeEncodedContainer(trimmed) {
+	if laterPass && strings.HasPrefix(trimmed, `"`) && startsLikeEncodedContainer(trimmed) {
 		return false
 	}
 	// An escaped quote can hide a quoted credential key from the pattern
@@ -1174,18 +1228,23 @@ func isPositivelyHarmlessProse(raw, trimmed string) bool {
 	if strings.Contains(raw, `\"`) {
 		return false
 	}
-	if scrubErrorText(raw) != raw || legacyScrubChanges(raw) || hasEncodedCredentialMarker(raw) || hasIncompleteCredentialConstruct(raw) {
+	if scrubErrorText(raw) != raw || legacyScrubChanges(raw) || hasEncodedCredentialMarker(raw) {
 		return false
 	}
 	// Malformed "{" / "[" JSON containers must always check quoted sensitive
 	// keys strictly without skipping "[REDACTED]" values, whereas quote-led
-	// prose with balanced double quotes and no JSON container openers may be
-	// already-redacted output (e.g. `"api_key":"[REDACTED]" other=ok`).
-	allowRedactedProse := strings.HasPrefix(trimmed, `"`) && isBalancedAlreadyRedactedProse(raw)
+	// prose with balanced double quotes and no JSON container openers that
+	// an earlier pass returned may be redacted output (e.g.
+	// `"api_key":"[REDACTED]" other=ok`).
+	allowRedactedProse := laterPass && strings.HasPrefix(trimmed, `"`) && isBalancedAlreadyRedactedProse(raw)
 	if hasCandidateQuotedSensitiveKeyWithRedacted(raw, 0, allowRedactedProse) {
 		return false
 	}
-	if hasSteppedCredentialMarker(raw, allowRedactedProse) {
+	canon := canonicalizeCredentialMarker(raw)
+	if canon != raw && strings.ContainsAny(canon, "{[") {
+		allowRedactedProse = false
+	}
+	if hasQuotedSensitiveKeyWithRedacted(canon, allowRedactedProse) {
 		return false
 	}
 	// Bracket-, brace- or quote-led text that failed JSON parsing and
@@ -1195,911 +1254,6 @@ func isPositivelyHarmlessProse(raw, trimmed string) bool {
 	// hold a JSON string whose escapes the checks above do not all decode.
 	return (strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, `"`)) &&
 		!hasJSONEscapedCredential(raw)
-}
-
-// hasDirectCredentialPattern reports whether s, as written or as one of the
-// decodings that hasSteppedCredentialMarker steps through, holds a credential
-// that the scanners or the legacy expressions redact, a quoted sensitive key,
-// or an incomplete credential construct, also once its backslash escapes
-// (first structurally with all six control letters b, f, n, r, t, v preserved,
-// then with all six decoded) are decoded (see hasIncompleteCredentialConstruct).
-func hasDirectCredentialPattern(s string, allowRedactedProse bool) bool {
-	return scrubErrorTokens(s) != s ||
-		legacyScrubChanges(s) ||
-		hasCandidateQuotedSensitiveKeyWithRedacted(s, 0, allowRedactedProse) ||
-		hasIncompleteCredentialConstruct(s) ||
-		(strings.Contains(s, "://") && scrubErrorText(s) != s)
-}
-
-func hasCredentialPatternsAtStep(s string, allowRedactedProse bool) bool {
-	if hasDirectCredentialPattern(s, allowRedactedProse) {
-		return true
-	}
-	if spaceFolded := foldUnicodeSpaces(s); spaceFolded != s && hasDirectCredentialPattern(spaceFolded, allowRedactedProse) {
-		return true
-	}
-	if decoded := decodeCredentialEscapes(s); decoded != s {
-		if hasDirectCredentialPattern(decoded, allowRedactedProse) {
-			return true
-		}
-		if spaceFolded := foldUnicodeSpaces(decoded); spaceFolded != decoded && hasDirectCredentialPattern(spaceFolded, allowRedactedProse) {
-			return true
-		}
-	}
-	return false
-}
-
-func hasSteppedCredentialMarker(raw string, allowRedactedProse bool) bool {
-	if spaceFolded := foldUnicodeSpaces(raw); spaceFolded != raw {
-		if hasCredentialPatternsAtStep(spaceFolded, allowRedactedProse) {
-			return true
-		}
-	}
-	if decoded := decodeCredentialEscapes(raw); decoded != raw {
-		if hasCredentialPatternsAtStep(decoded, allowRedactedProse) {
-			return true
-		}
-	}
-	cur := raw
-	exceeded := true
-	for range 2 * maxCanonicalUnescapePasses {
-		next := unescapeProseStructuralStep(cur)
-		if next == cur {
-			next = unescapeProseCredentialStep(cur)
-			if next == cur {
-				exceeded = false
-				break
-			}
-		}
-		if hasCredentialPatternsAtStep(next, allowRedactedProse) {
-			return true
-		}
-		cur = next
-	}
-	return exceeded
-}
-
-func parseHex4(s string) (uint16, bool) {
-	var v uint16
-	for i := range 4 {
-		d, ok := parseHexDigit(s[i])
-		if !ok {
-			return 0, false
-		}
-		v = v<<4 | uint16(d)
-	}
-	return v, true
-}
-
-// decodeCredentialEscapes decodes \uXXXX (including UTF-16 surrogate pairs),
-// \xXX, and %XX escape sequences in a single O(N) pass so non-ASCII
-// punctuation, brackets, and emojis restore true word boundaries around
-// credential markers in malformed or truncated JSON prose.
-func decodeCredentialEscapes(s string) string {
-	if !strings.ContainsAny(s, `\%`) {
-		return s
-	}
-	var b strings.Builder
-	changed := false
-	for i := 0; i < len(s); {
-		if s[i] != '\\' && s[i] != '%' {
-			n := strings.IndexAny(s[i:], `\%`)
-			if n < 0 {
-				if changed {
-					b.WriteString(s[i:])
-				}
-				break
-			}
-			if changed {
-				b.WriteString(s[i : i+n])
-			}
-			i += n
-			continue
-		}
-		if s[i] == '\\' && i+5 < len(s) && (s[i+1] == 'u' || s[i+1] == 'U') {
-			if r1, ok := parseHex4(s[i+2 : i+6]); ok {
-				step := 6
-				r := rune(r1)
-				if 0xD800 <= r1 && r1 <= 0xDBFF && i+11 < len(s) && s[i+6] == '\\' && (s[i+7] == 'u' || s[i+7] == 'U') {
-					if r2, ok2 := parseHex4(s[i+8 : i+12]); ok2 && 0xDC00 <= r2 && r2 <= 0xDFFF {
-						r = utf16.DecodeRune(rune(r1), rune(r2))
-						step = 12
-					}
-				}
-				if !changed {
-					b.Grow(len(s))
-					b.WriteString(s[:i])
-					changed = true
-				}
-				b.WriteRune(r)
-				i += step
-				continue
-			}
-		}
-		if s[i] == '\\' && i+3 < len(s) && (s[i+1] == 'x' || s[i+1] == 'X') {
-			if hi, ok1 := parseHexDigit(s[i+2]); ok1 {
-				if lo, ok2 := parseHexDigit(s[i+3]); ok2 {
-					if !changed {
-						b.Grow(len(s))
-						b.WriteString(s[:i])
-						changed = true
-					}
-					b.WriteByte(hi<<4 | lo)
-					i += 4
-					continue
-				}
-			}
-		}
-		if s[i] == '%' {
-			if byt, ok := parsePercentByteAt(s, i); ok {
-				if !changed {
-					b.Grow(len(s))
-					b.WriteString(s[:i])
-					changed = true
-				}
-				b.WriteByte(byt)
-				i += 3
-				continue
-			}
-		}
-		if changed {
-			b.WriteByte(s[i])
-		}
-		i++
-	}
-	if !changed {
-		return s
-	}
-	return b.String()
-}
-
-type percentKind uint8
-
-const (
-	percentValidSpace percentKind = iota
-	percentValidFormat
-	percentValidControl
-	percentValidOther
-	percentInvalidOrOverlong
-)
-
-// parsePercentStatusAt classifies a "%" escape at s[i] (s[i] == '%') and
-// returns its byte length: valid ASCII/UTF-8 whitespace, valid Unicode Cf format
-// runes, non-regexp-whitespace ASCII control bytes, other valid percent-encoded
-// bytes, or invalid/truncated/overlong UTF-8 percent sequences.
-func parsePercentStatusAt(s string, i int) (kind percentKind, repl byte, seqLen int) {
-	b0, ok := parsePercentByteAt(s, i)
-	if !ok {
-		return percentInvalidOrOverlong, 0, 1
-	}
-	if b0 < utf8.RuneSelf {
-		if b0 == '\n' || b0 == '\r' {
-			return percentValidSpace, b0, 3
-		}
-		if isRegexpSpace(b0) {
-			return percentValidSpace, ' ', 3
-		}
-		if isDelimSpace(b0) {
-			return percentValidControl, ' ', 3
-		}
-		return percentValidOther, b0, 3
-	}
-	var expected int
-	switch {
-	case b0 >= 0xC2 && b0 <= 0xDF:
-		expected = 2
-	case b0 >= 0xE0 && b0 <= 0xEF:
-		expected = 3
-	case b0 >= 0xF0 && b0 <= 0xF4:
-		expected = 4
-	default:
-		return percentInvalidOrOverlong, 0, 3
-	}
-	if i+3*expected > len(s) {
-		return percentInvalidOrOverlong, 0, 3
-	}
-	var buf [utf8.UTFMax]byte
-	buf[0] = b0
-	for k := 1; k < expected; k++ {
-		bk, ok := parsePercentByteAt(s, i+3*k)
-		if !ok {
-			return percentInvalidOrOverlong, 0, 3
-		}
-		buf[k] = bk
-	}
-	r, size := utf8.DecodeRune(buf[:expected])
-	if r == utf8.RuneError || size != expected {
-		return percentInvalidOrOverlong, 0, 3 * expected
-	}
-	switch {
-	case r == '\u0085' || r == '\u2028' || r == '\u2029':
-		return percentValidSpace, '\n', 3 * expected
-	case isInlineSpaceRune(r):
-		return percentValidSpace, ' ', 3 * expected
-	case unicode.In(r, unicode.Cf):
-		return percentValidFormat, ' ', 3 * expected
-	default:
-		return percentValidOther, 0, 3 * expected
-	}
-}
-
-// hasIncompleteCredentialConstruct reports whether s, its structural
-// backslash-decoded form (unescapeProseStructural, preserving \b, \f, \n, \r,
-// \t, and \v), or its full backslash-decoded form (unescapeProseBackslashes)
-// contains an incomplete or separator-obfuscated credential construct that the
-// complete-token scrubbers miss: an auth scheme (Bearer/Basic) followed by an
-// unterminated quote or backtick, a zero-width/format separator, a JSON
-// whitespace escape, an invalid/overlong percent byte, or a placeholder or
-// quoted value with text glued after it; or a sensitive key that the scanners
-// do not read before its ":" or "=" (see hasObfuscatedKeyDelimiter).
-func hasIncompleteCredentialConstruct(s string) bool {
-	if hasIncompleteCredentialConstructOnce(s) {
-		return true
-	}
-	if strings.Contains(s, `\`) {
-		if unescaped := unescapeProseStructural(s); unescaped != s && hasIncompleteCredentialConstructOnce(unescaped) {
-			return true
-		}
-		if unescaped := unescapeProseBackslashes(s); unescaped != s {
-			return hasIncompleteCredentialConstructOnce(unescaped)
-		}
-	}
-	return false
-}
-
-func hasIncompleteCredentialConstructOnce(s string) bool {
-	if hasAuthSchemeIncompleteOrObfuscated(s) {
-		return true
-	}
-	return hasObfuscatedKeyDelimiter(s)
-}
-
-func isBearerOfProseAt(s string, valStart int) bool {
-	rest := s[valStart:]
-	if len(rest) < 2 || !strings.EqualFold(rest[:2], "of") {
-		return false
-	}
-	if len(rest) == 2 {
-		return true
-	}
-	r, _ := utf8.DecodeRuneInString(rest[2:])
-	return unicode.IsSpace(r)
-}
-
-func hasAuthSchemeIncompleteOrObfuscated(s string) bool {
-	if !strings.ContainsAny(s, "bB") {
-		return false
-	}
-	var qState *quoteScanState
-	for pos := 0; pos < len(s); {
-		rel := strings.IndexAny(s[pos:], "bB")
-		if rel < 0 {
-			return false
-		}
-		i := pos + rel
-		var afterWord int
-		var isBearer bool
-		switch {
-		case matchWordFoldASCII(s, i, "bearer"):
-			afterWord = i + len("bearer")
-			isBearer = true
-		default:
-			var ok bool
-			afterWord, ok = matchBasicPrefix(s, i)
-			if !ok {
-				pos = i + 1
-				continue
-			}
-		}
-		if afterWord >= len(s) || isWordByte(s[afterWord]) {
-			pos = i + 1
-			continue
-		}
-		j := afterWord
-		sawSep := false
-		sawFormatSep := false
-		sawJSONSpaceEsc := false
-		for j < len(s) {
-			c := s[j]
-			if c < utf8.RuneSelf {
-				if isDelimSpace(c) {
-					sawSep = true
-					if !isRegexpSpace(c) {
-						sawFormatSep = true
-					}
-					j++
-					continue
-				}
-				if c == '%' {
-					kind, _, seqLen := parsePercentStatusAt(s, j)
-					switch kind {
-					case percentInvalidOrOverlong:
-						return true
-					case percentValidSpace:
-						sawSep = true
-						j += seqLen
-						continue
-					case percentValidFormat, percentValidControl:
-						sawSep = true
-						sawFormatSep = true
-						j += seqLen
-						continue
-					}
-					break
-				}
-				if c == '\\' {
-					k := j + 1
-					for k < len(s) && s[k] == '\\' {
-						k++
-					}
-					if k < len(s) && strings.IndexByte("btnrfv", s[k]) >= 0 {
-						sawSep = true
-						sawJSONSpaceEsc = true
-						if s[k] == 'b' || s[k] == 'v' {
-							sawFormatSep = true
-						}
-						j = k + 1
-						continue
-					}
-					break
-				}
-				break
-			}
-			r, size := utf8.DecodeRuneInString(s[j:])
-			if unicode.In(r, unicode.Cf) {
-				sawSep = true
-				sawFormatSep = true
-				j += size
-				continue
-			}
-			if isInlineSpaceRune(r) {
-				sawSep = true
-				j += size
-				continue
-			}
-			break
-		}
-		if !sawSep {
-			pos = afterWord
-			continue
-		}
-		if j < len(s) {
-			if sawFormatSep {
-				return true
-			}
-			if sawJSONSpaceEsc && (!isBearer || !isBearerOfProseAt(s, j)) {
-				return true
-			}
-			switch s[j] {
-			case '\'', '"', '\\':
-				if s[j] == '\\' {
-					if j+1 >= len(s) || quoteSlot(s[j+1]) < 0 {
-						break
-					}
-					if s[j+1] == '`' {
-						// An escaped backtick, which scanQuotedAt does not
-						// read, opens a value as a backtick does.
-						if isIncompleteBacktickAuthValue(isBearer, s, j+2, true) {
-							return true
-						}
-						break
-					}
-				}
-				if qState == nil {
-					qs := newQuoteScanState(len(s))
-					qState = &qs
-				}
-				end, closed := scanQuotedAt(s, j, qState)
-				if !closed {
-					return true
-				}
-				inner, _ := unquoteValue(s[j:end])
-				if isIncompleteClosedQuotedAuthScheme(isBearer, inner, s[end:]) {
-					return true
-				}
-			case '`':
-				if isIncompleteBacktickAuthValue(isBearer, s, j+1, false) {
-					return true
-				}
-			case '[':
-				if isGluedPlaceholderAt(s, j) {
-					return true
-				}
-			default:
-				if !isBearer && isBase64BodyByte(s[j]) && hasTruncatedBasicBase64At(s, j) {
-					return true
-				}
-			}
-		}
-		pos = afterWord
-	}
-	return false
-}
-
-func isIncompleteClosedQuotedAuthScheme(isBearer bool, inner, tail string) bool {
-	if !isRedactedPlaceholderBoundary(tail) {
-		return true
-	}
-	if !isBearer {
-		inner = trimInlineSpaces(inner)
-		return inner != "" && !isRedactedValue(inner)
-	}
-	return false
-}
-
-// isIncompleteBacktickAuthValue reports whether the value of an auth scheme
-// that a backtick opens, whose text starts at s[open], is incomplete: no
-// backtick closes it, or isIncompleteClosedQuotedAuthScheme rejects it. When
-// escaped is set the opening backtick is escaped (\`), and the backslash of an
-// escaped closing one is not part of the value.
-func isIncompleteBacktickAuthValue(isBearer bool, s string, open int, escaped bool) bool {
-	closeIdx := strings.IndexByte(s[open:], '`')
-	if closeIdx < 0 {
-		return true
-	}
-	inner := s[open : open+closeIdx]
-	if escaped {
-		inner = strings.TrimSuffix(inner, `\`)
-	}
-	return isIncompleteClosedQuotedAuthScheme(isBearer, inner, s[open+closeIdx+1:])
-}
-
-// isGluedPlaceholderAt reports whether a placeholder of an earlier pass (see
-// knownSentinels), in any letter case, starts at s[i] with text glued after
-// it or after its closing quotes, as in Bearer [REDACTED]'SECRET or
-// Basic [REDACTED]dXNlcjpwYXNz: the Bearer scanner reads such a value up to a
-// quote or parenthesis as one already redacted, and the Basic scanner reads
-// no value that starts with "[", so neither redacts the glued text.
-func isGluedPlaceholderAt(s string, i int) bool {
-	for _, k := range knownSentinels {
-		if end := i + len(k); end <= len(s) && strings.EqualFold(s[i:end], k) {
-			return !endsAtPlaceholderBoundary(s[end:])
-		}
-	}
-	return false
-}
-
-// hasTruncatedBasicBase64At reports whether a Basic base64 candidate starting
-// at s[start] is truncated, carries malformed padding or glued base64 bytes
-// after its padding, or exceeds maxBasicCredentialBytes (which
-// redactBasicCredentials redacts unconditionally unless malformed trailing
-// padding causes the scanner to skip it). Scanning the contiguous isBase64Byte
-// run stops at maxBasicCredentialBytes+1 bytes so over-budget candidates fail
-// closed in O(1) without decoding the body.
-func hasTruncatedBasicBase64At(s string, start int) bool {
-	limit := min(len(s), start+maxBasicCredentialBytes+1)
-	tokenEnd := start
-	for tokenEnd < limit && isBase64Byte(s[tokenEnd]) {
-		tokenEnd++
-	}
-	if tokenEnd-start > maxBasicCredentialBytes {
-		return true
-	}
-	if tokenEnd-start < 4 {
-		return false
-	}
-	token := s[start:tokenEnd]
-	if !strings.Contains(token, "=") {
-		if len(token)%4 == 0 {
-			return false
-		}
-		return isLikelyBasicCredentialBytes(decodeBase64BodyPrefix(token))
-	}
-	for segStart := 0; segStart < len(token); {
-		rel := strings.IndexByte(token[segStart:], '=')
-		segEnd := len(token)
-		if rel >= 0 {
-			segEnd = segStart + rel
-		}
-		if segEnd-segStart >= 4 && isLikelyBasicCredentialBytes(decodeBase64BodyPrefix(token[segStart:segEnd])) {
-			return true
-		}
-		segStart = segEnd + 1
-	}
-	stripped := strings.ReplaceAll(token, "=", "")
-	return len(stripped) >= 4 && isLikelyBasicCredentialBytes(decodeBase64BodyPrefix(stripped))
-}
-
-func decodeBase64BodyPrefix(body string) []byte {
-	switch len(body) % 4 {
-	case 2, 3:
-		decoded, _ := base64.RawStdEncoding.DecodeString(body)
-		return decoded
-	default:
-		decoded, _ := base64.StdEncoding.DecodeString(body[:len(body)&^3])
-		return decoded
-	}
-}
-
-func isLikelyBasicCredentialBytes(decoded []byte) bool {
-	if !bytes.Contains(decoded, []byte(":")) {
-		return false
-	}
-	for _, b := range decoded {
-		if b < 0x20 || b == 0x7f {
-			return false
-		}
-	}
-	if utf8.Valid(decoded) {
-		return true
-	}
-	// Allow truncation inside a trailing multi-byte UTF-8 rune (1..3 bytes).
-	for trim := 1; trim <= 3 && trim < len(decoded); trim++ {
-		tail := decoded[len(decoded)-trim:]
-		if utf8.RuneStart(tail[0]) && !utf8.FullRune(tail) {
-			return utf8.Valid(decoded[:len(decoded)-trim])
-		}
-	}
-	return false
-}
-
-func quoteSlot(c byte) int {
-	switch c {
-	case '"':
-		return 0
-	case '\'':
-		return 1
-	case '`':
-		return 2
-	default:
-		return -1
-	}
-}
-
-// isPercentSepByte reports whether c may follow a "%" in a percent escape, or
-// in the junk of a stray "%", that keyDelimiterRunStart steps over: any byte
-// but a delimiter, a backslash, a quote or a backtick, which the run reads
-// as tokens of their own.
-func isPercentSepByte(c byte) bool {
-	return c != ':' && c != '=' && c != '\\' && quoteSlot(c) < 0
-}
-
-// keyDelimiterRunStart steps back from the key delimiter at s[delimPos], no
-// further than floor, over the bytes that may stand between a key and its
-// delimiter: spaces and other ASCII controls, JSON whitespace escapes (\t, \n
-// and the like, however many backslashes escape them), Unicode spaces and
-// format runes, percent escapes and stray "%" bytes (see isPercentSepByte),
-// and quotes and backticks with the backslashes before them. It returns where
-// that run starts, and where its first quote or backtick stands, or -1 when
-// it holds none.
-func keyDelimiterRunStart(s string, floor, delimPos int) (runStart, firstQuote int) {
-	runStart, firstQuote = delimPos, -1
-	for runStart > floor {
-		b := s[runStart-1]
-		if isDelimSpace(b) {
-			runStart--
-			continue
-		}
-		if quoteSlot(b) >= 0 {
-			runStart--
-			firstQuote = runStart
-			for runStart > floor && s[runStart-1] == '\\' {
-				runStart--
-			}
-			continue
-		}
-		if runStart-2 >= floor && s[runStart-2] == '\\' && strings.IndexByte("btnrfv", b) >= 0 {
-			runStart -= 2
-			for runStart > floor && s[runStart-1] == '\\' {
-				runStart--
-			}
-			continue
-		}
-		if b >= utf8.RuneSelf {
-			r, size := utf8.DecodeLastRuneInString(s[floor:runStart])
-			if r != utf8.RuneError && size > 0 && (isInlineSpaceRune(r) || unicode.In(r, unicode.Cf)) {
-				runStart -= size
-				continue
-			}
-		}
-		if runStart-3 >= floor && s[runStart-3] == '%' && isPercentSepByte(s[runStart-2]) && isPercentSepByte(b) {
-			runStart -= 3
-			continue
-		}
-		if runStart-2 >= floor && s[runStart-2] == '%' && isPercentSepByte(b) {
-			runStart -= 2
-			continue
-		}
-		if b == '%' {
-			runStart--
-			continue
-		}
-		break
-	}
-	return runStart, firstQuote
-}
-
-// delimiterRunKinds reports whether s[from:to], a run that
-// keyDelimiterRunStart stepped over, holds an escaped control or whitespace
-// separator (\b, \t, \n, \r, \f or \v), a non-ASCII space or format rune, or a
-// "%" that hides what it stands for (an invalid or overlong escape, or one of
-// a space, a format rune or a control byte), and whether it holds a valid
-// percent escape of any other byte, which stands for a byte of a key.
-func delimiterRunKinds(s string, from, to int) (obfuscated, keyByte bool) {
-	for k := from; k < to; k++ {
-		switch c := s[k]; {
-		case c == '\\':
-			for k+1 < to && s[k+1] == '\\' {
-				k++
-			}
-			if k+1 < to && strings.IndexByte("btnrfv", s[k+1]) >= 0 {
-				obfuscated = true
-				k++
-			}
-		case c >= utf8.RuneSelf:
-			obfuscated = true
-		case c == '%':
-			kind, _, seqLen := parsePercentStatusAt(s, k)
-			if kind == percentValidOther {
-				keyByte = true
-			} else {
-				obfuscated = true
-			}
-			k += max(1, seqLen) - 1
-		}
-	}
-	return obfuscated, keyByte
-}
-
-// isTempPrefixColonAt reports whether s[i] is the ":" of a temp: prefix that
-// starts at a word boundary, as in temp: or user:temp: (see findTextKeyStart).
-func isTempPrefixColonAt(s string, i int) bool {
-	start := i + 1 - len(session.KeyPrefixTemp)
-	return start >= 0 && strings.EqualFold(s[start:i+1], session.KeyPrefixTemp) && (start == 0 || !isWordByte(s[start-1]))
-}
-
-func isQuotedKeyTrimRune(r rune) bool {
-	return r <= 0x20 || r == 0x7f || isInlineSpaceRune(r) || unicode.In(r, unicode.Cf)
-}
-
-func trailingEscapedControlLen(s string) int {
-	if len(s) < 2 || strings.IndexByte("btnrfv", s[len(s)-1]) < 0 {
-		return 0
-	}
-	j := len(s) - 1
-	for j > 0 && s[j-1] == '\\' {
-		j--
-	}
-	if j == len(s)-1 {
-		return 0
-	}
-	return len(s) - j
-}
-
-func leadingEscapedControlLen(s string) int {
-	if len(s) < 2 || s[0] != '\\' {
-		return 0
-	}
-	j := 1
-	for j < len(s) && s[j] == '\\' {
-		j++
-	}
-	if j >= len(s) || strings.IndexByte("btnrfv", s[j]) < 0 {
-		return 0
-	}
-	return j + 1
-}
-
-func trimQuotedKeyEdges(s string) string {
-	for s != "" {
-		trimmed := strings.TrimFunc(s, isQuotedKeyTrimRune)
-		if n := trailingEscapedControlLen(trimmed); n > 0 {
-			s = trimmed[:len(trimmed)-n]
-			continue
-		}
-		return trimmed
-	}
-	return ""
-}
-
-func trimLeadingQuotedKeyControls(s string) string {
-	for s != "" {
-		trimmed := strings.TrimLeftFunc(s, isQuotedKeyTrimRune)
-		if n := leadingEscapedControlLen(trimmed); n > 0 {
-			s = trimmed[n:]
-			continue
-		}
-		return trimmed
-	}
-	return ""
-}
-
-func isQuotedKeyInnerSensitive(inner string) bool {
-	return isValidJSONPatternKey(inner) || isSensitiveKey(inner) || findTextKeyStart(inner, 0, len(inner)) >= 0
-}
-
-// closesQuotedKey reports whether the quote or backtick at s[c], which no
-// backslash escapes, closes a quoted key: the last one of its kind before it
-// that no backslash escapes opens a sensitive key, or a phrase or path that
-// ends in a text key once the padding and escaped control/whitespace suffixes
-// inside the quotes are trimmed, as "msg: password ", "db/password ", or
-// "C:\v_page_token\v". It reads the text between c and that quote of its kind,
-// which no other c of its kind reads.
-func closesQuotedKey(s string, c int) bool {
-	if !isUnescapedQuote(s, 0, c) {
-		return false
-	}
-	for end := c; ; {
-		open := strings.LastIndexByte(s[:end], s[c])
-		if open < 0 {
-			return false
-		}
-		if isUnescapedQuote(s, 0, open) {
-			inner := trimQuotedKeyEdges(s[open+1 : c])
-			if isQuotedKeyInnerSensitive(inner) {
-				return true
-			}
-			if stripped := trimLeadingQuotedKeyControls(inner); stripped != inner {
-				return isQuotedKeyInnerSensitive(stripped)
-			}
-			return false
-		}
-		end = open
-	}
-}
-
-// hasObfuscatedKeyDelimiter reports whether s holds a sensitive key before a
-// ":" or "=" that the scanners do not read as one, because what stands
-// between the key and its delimiter (see keyDelimiterRunStart) holds a quote
-// or a backtick, as in `password`: v, password "=v, "msg:\npassword "=v or
-// "a, password ": v, an escaped control or whitespace separator (\b, \t, \n,
-// \r, \f or \v), a non-ASCII space or format rune, or a "%" that hides what it
-// stands for (see delimiterRunKinds), as in password\v=v, password'%ZZ=v or
-// "client_secret"'%ZZ:v; or a temp: key whose body is nothing but such bytes,
-// or nothing at all, as in temp: =v, temp:=v or temp:%xy %ZZ=v. The key is a
-// text key that ends where that run starts (see findTextKeyStart), a quoted key
-// that the first quote of the run closes (see closesQuotedKey), or such a
-// temp: key. A run of quotes and spaces, or an empty temp: key, before a whole
-// placeholder of an earlier pass, which leaves no secret, is let through (see
-// startsWithRedactedValue). Each delimiter steps back no further than the one
-// before it and the quotes of one kind that close keys read disjoint text (see
-// closesQuotedKey), so the scan is linear in s.
-func hasObfuscatedKeyDelimiter(s string) bool {
-	floor := 0
-	for pos := 0; pos < len(s); {
-		rel := strings.IndexAny(s[pos:], ":=")
-		if rel < 0 {
-			return false
-		}
-		delimPos := pos + rel
-		runStart, firstQuote := keyDelimiterRunStart(s, floor, delimPos)
-		keyEnd := runStart
-		if runStart == floor && isTempPrefixColonAt(s, floor-1) {
-			// The run reaches back to the ":" of a temp: prefix, so the key
-			// is a temp: key whose body is the run, unless a percent escape
-			// of the run stands for a byte of a key. Then findTextKeyStart
-			// reads the key up to the first byte of the run, as the %41 of
-			// temp:%41 %ZZ=v, and the rest of the run is its separator.
-			obfuscated, keyByte := delimiterRunKinds(s, floor, delimPos)
-			if !keyByte && (obfuscated || !startsWithRedactedValue(s[delimPos+1:])) {
-				return true
-			}
-			keyEnd++
-		}
-		if obfuscated, _ := delimiterRunKinds(s, keyEnd, delimPos); obfuscated || (firstQuote >= 0 && !startsWithRedactedValue(s[delimPos+1:])) {
-			if findTextKeyStart(s, 0, keyEnd) >= 0 || (firstQuote >= 0 && closesQuotedKey(s, firstQuote)) {
-				return true
-			}
-		}
-		floor = delimPos + 1
-		pos = delimPos + 1
-	}
-	return false
-}
-
-// foldUnicodeSpaces replaces ASCII vertical tab ('\v'), non-ASCII Unicode
-// whitespace, separator, and format/zero-width runes (such as U+00A0,
-// U+2000..U+200A, U+200B, U+202F, U+205F, U+3000, and U+FEFF), and
-// percent-encoded UTF-8 sequences for those runes (such as %C2%A0, %E2%80%8B,
-// or %EF%BB%BF) with ASCII spaces, and Unicode line/paragraph separators
-// (U+0085, U+2028, U+2029, literal or percent-encoded) with '\n', for
-// credential-marker detection in malformed JSON or quote-led text.
-func foldUnicodeSpaces(s string) string {
-	hasFoldable := false
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\v' || s[i] == '%' || s[i] >= utf8.RuneSelf {
-			hasFoldable = true
-			break
-		}
-	}
-	if !hasFoldable {
-		return s
-	}
-	var b strings.Builder
-	changed := false
-	for i := 0; i < len(s); {
-		if s[i] < utf8.RuneSelf {
-			var repl byte
-			step := 1
-			switch s[i] {
-			case '\v':
-				repl = ' '
-			case '%':
-				if pr, seqLen, ok := parsePercentUTF8SpaceAt(s, i); ok {
-					repl = pr
-					step = seqLen
-				}
-			}
-			if repl != 0 {
-				if !changed {
-					b.Grow(len(s))
-					b.WriteString(s[:i])
-					changed = true
-				}
-				b.WriteByte(repl)
-				i += step
-				continue
-			}
-			if changed {
-				b.WriteByte(s[i])
-			}
-			i++
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		var repl byte
-		switch {
-		case r == '\u0085' || r == '\u2028' || r == '\u2029':
-			repl = '\n'
-		case isInlineSpaceRune(r) || unicode.In(r, unicode.Cf):
-			repl = ' '
-		}
-		if repl != 0 {
-			if !changed {
-				b.Grow(len(s))
-				b.WriteString(s[:i])
-				changed = true
-			}
-			b.WriteByte(repl)
-		} else if changed {
-			b.WriteString(s[i : i+size])
-		}
-		i += size
-	}
-	if !changed {
-		return s
-	}
-	return b.String()
-}
-
-func parseHexDigit(c byte) (byte, bool) {
-	switch {
-	case '0' <= c && c <= '9':
-		return c - '0', true
-	case 'a' <= c && c <= 'f':
-		return c - 'a' + 10, true
-	case 'A' <= c && c <= 'F':
-		return c - 'A' + 10, true
-	default:
-		return 0, false
-	}
-}
-
-func parsePercentByteAt(s string, i int) (byte, bool) {
-	if i+2 >= len(s) || s[i] != '%' {
-		return 0, false
-	}
-	hi, ok1 := parseHexDigit(s[i+1])
-	lo, ok2 := parseHexDigit(s[i+2])
-	if !ok1 || !ok2 {
-		return 0, false
-	}
-	return hi<<4 | lo, true
-}
-
-func parsePercentUTF8SpaceAt(s string, i int) (repl byte, seqLen int, ok bool) {
-	if i+2 >= len(s) || s[i] != '%' {
-		return 0, 0, false
-	}
-	b0, ok := parsePercentByteAt(s, i)
-	if !ok || b0 < utf8.RuneSelf {
-		return 0, 0, false
-	}
-	kind, repl, seqLen := parsePercentStatusAt(s, i)
-	if kind == percentValidSpace || kind == percentValidFormat {
-		return repl, seqLen, true
-	}
-	return 0, 0, false
 }
 
 // hasJSONEscapedCredential reports whether the text between two consecutive
@@ -2131,7 +1285,7 @@ func hasJSONEscapedCredential(s string) bool {
 }
 
 // maxRewriteGrowth and maxRewriteSlack bound how much longer than the text
-// that it replaces redactJSONTextWithBudget writes a JSON value again (see
+// that it replaces redactJSONTextPass writes a JSON value again (see
 // rewritesTooLong). json.Marshal writes "<", ">" and "&" as six bytes each, and
 // each level of JSON string encoding around a document, as a JSON string
 // literal or a string leaf of another document that holds it, escapes the
@@ -2152,13 +1306,27 @@ func rewritesTooLong(in string, out []byte) bool {
 	return len(out) > maxInspectableJSONTextBytes || len(out) > maxRewriteGrowth*len(in)+maxRewriteSlack
 }
 
-// redactJSONTextWithBudget inspects s if it is a JSON object, array, or
+// redactJSONTextPass inspects s if it is a JSON object, array, or
 // JSON-encoded string literal, recursively redacting values under sensitive
 // keys. When a JSON-like blob cannot be parsed or exceeds maxSanitizeDepth or
 // budget, it fails closed and reports contentLost = true, as it does when the
 // redaction would write it again too long (see rewritesTooLong).
-func redactJSONTextWithBudget(s string, depth int, budget *nodeBudget) (sanitized string, changed, contentLost bool) {
-	sanitized, changed, contentLost, _ = redactJSONTextInner(s, depth, false, true, budget)
+//
+// It is one pass of redactErrorMessage, sanitizeRawText or redactStringValue
+// over s (see maxRedactionPasses). laterPass reports that s is the result of
+// an earlier pass of the same call rather than text as it was received. Text
+// as it was received fails closed wherever it does on main: no part of it is
+// read as text that is redacted already, however much it looks like the
+// result of a redaction, since a credential that the scrub does not read may
+// stand next to a placeholder that the text came with. Only the result of an
+// earlier pass, which that pass scrubbed and main returns as it is, is read
+// as redacted text: a "[REDACTED_SENSITIVE_URI]" placeholder that it starts
+// with (see startsWithRedactedURI), a "[REDACTED]" placeholder in the text
+// after or inside a JSON string literal (see hasRedactableContainerText and
+// startsLikeEncodedContainer), and quote-led text whose quoted sensitive keys
+// all hold one (see isPositivelyHarmlessProse).
+func redactJSONTextPass(s string, depth int, laterPass bool, budget *nodeBudget) (sanitized string, changed, contentLost bool) {
+	sanitized, changed, contentLost, _ = redactJSONTextInner(s, depth, false, true, laterPass, budget)
 	return sanitized, changed, contentLost
 }
 
@@ -2189,7 +1357,7 @@ func literalRunsIntoSuffix(doc string, litEnd int) bool {
 	return false
 }
 
-func redactJSONTextInner(s string, depth int, inContainer, allowCandidateRecheck bool, budget *nodeBudget) (sanitized string, changed, contentLost, rewriteExceeded bool) {
+func redactJSONTextInner(s string, depth int, inContainer, allowCandidateRecheck, laterPass bool, budget *nodeBudget) (sanitized string, changed, contentLost, rewriteExceeded bool) {
 	trimmed := trimBOMAndSpace(s)
 	if trimmed == "" || isKnownSentinel(trimmed) {
 		return s, false, false, false
@@ -2219,10 +1387,10 @@ func redactJSONTextInner(s string, depth int, inContainer, allowCandidateRecheck
 		suffix := trimmed[litEnd:]
 		trimmedSuffix := trimBOMAndSpace(suffix)
 		if trimmedSuffix != "" {
-			if hasRedactableContainerText(suffix, trimmed) || strings.HasPrefix(trimmedSuffix, `\`) ||
+			if hasRedactableContainerText(suffix, trimmed, laterPass) || strings.HasPrefix(trimmedSuffix, `\`) ||
 				isUnbalancedQuotedKeyText(trimmed, decoded, suffix) ||
 				(hasMalformedQuotedMembers(trimmed) && hasCandidateQuotedSensitiveKey(trimmed, 0)) ||
-				hasAnyCredentialMarker(suffix) || inspectQuotedFragments(suffix, depth+1, budget) {
+				hasAnyCredentialMarker(suffix) || inspectQuotedFragments(suffix, depth+1, laterPass, budget) {
 				return unparseableJSONPlaceholder, true, true, false
 			}
 			// Scrubbing the text may leave it malformed, as when a redacted
@@ -2232,7 +1400,7 @@ func redactJSONTextInner(s string, depth int, inContainer, allowCandidateRecheck
 			// inspecting decoded below so malformed/credential-bearing literals
 			// still return unparseableJSONPlaceholder.
 			if scrubbed := scrubErrorText(trimmed); scrubbed != trimmed && strings.HasPrefix(scrubbed, `"`) {
-				if again, _, _ := redactJSONTextWithBudget(scrubbed, depth+1, budget); again == unparseableJSONPlaceholder {
+				if again, _, _ := redactJSONTextPass(scrubbed, depth+1, true, budget); again == unparseableJSONPlaceholder {
 					return unparseableJSONPlaceholder, true, true, false
 				}
 			}
@@ -2242,8 +1410,8 @@ func redactJSONTextInner(s string, depth int, inContainer, allowCandidateRecheck
 		var innerChanged, innerLost, innerExceeded bool
 		switch {
 		case strings.HasPrefix(trimmedInner, "{") || strings.HasPrefix(trimmedInner, "[") || strings.HasPrefix(trimmedInner, `"`):
-			innerSanitized, innerChanged, innerLost, innerExceeded = redactJSONTextInner(decoded, depth+1, true, true, budget)
-		case hasRedactableContainerText(decoded, decoded) || hasAnyCredentialMarker(decoded) || inspectQuotedFragments(decoded, depth+1, budget):
+			innerSanitized, innerChanged, innerLost, innerExceeded = redactJSONTextInner(decoded, depth+1, true, true, laterPass, budget)
+		case hasRedactableContainerText(decoded, decoded, laterPass) || hasAnyCredentialMarker(decoded) || inspectQuotedFragments(decoded, depth+1, laterPass, budget):
 			return unparseableJSONPlaceholder, true, true, false
 		}
 		// A document in the literal that fails closed, as one whose redaction
@@ -2277,9 +1445,12 @@ func redactJSONTextInner(s string, depth int, inContainer, allowCandidateRecheck
 				return redactedSensitiveTextPlaceholder, true, true, false
 			}
 			candidate := string(b) + suffix
+			// The candidate, and its scrub below, are read as the pass
+			// after this one reads them (see redactJSONTextPass), so that
+			// what that pass would change or fail closed is returned here.
 			if allowCandidateRecheck {
 				freshBudget := &nodeBudget{remaining: maxSanitizeNodes}
-				if again, againChanged, againLost, _ := redactJSONTextInner(candidate, depth, true, false, freshBudget); againChanged || againLost {
+				if again, againChanged, againLost, _ := redactJSONTextInner(candidate, depth, true, false, true, freshBudget); againChanged || againLost {
 					return again, true, true, false
 				}
 			}
@@ -2288,7 +1459,7 @@ func redactJSONTextInner(s string, depth int, inContainer, allowCandidateRecheck
 					return redactedSensitiveTextPlaceholder, true, true, false
 				}
 				freshBudget := &nodeBudget{remaining: maxSanitizeNodes}
-				if again, _, _, _ := redactJSONTextInner(scrubbed, depth, true, false, freshBudget); again == unparseableJSONPlaceholder {
+				if again, _, _, _ := redactJSONTextInner(scrubbed, depth, true, false, true, freshBudget); again == unparseableJSONPlaceholder {
 					return unparseableJSONPlaceholder, true, true, false
 				}
 			}
@@ -2303,14 +1474,16 @@ func redactJSONTextInner(s string, depth int, inContainer, allowCandidateRecheck
 	if !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
 		return s, false, false, false
 	}
-	if startsWithRedactedURI(trimmed) {
+	if laterPass && startsWithRedactedURI(trimmed) {
 		// Text that an earlier pass left starting with a redacted URI is not
 		// a JSON array but text, which is kept when redactErrorMessage and
 		// sanitizeRawText would both keep it as malformed JSON (see
 		// redactErrorMessageOnce and isPositivelyHarmlessProse), so that a
-		// pass over it changes nothing.
+		// later pass over it changes nothing. Text that starts so as it is
+		// received fails closed like any other "["-led text that does not
+		// parse.
 		if hasAnyCredentialMarker(trimmed) || hasEncodedCredentialMarker(trimmed) || hasCandidateQuotedSensitiveKey(trimmed, 0) ||
-			!isPositivelyHarmlessProse(s, trimmed) {
+			!isPositivelyHarmlessProse(s, trimmed, true) {
 			return unparseableJSONPlaceholder, true, true, false
 		}
 		return s, false, false, false
@@ -2331,7 +1504,7 @@ func redactJSONTextInner(s string, depth int, inContainer, allowCandidateRecheck
 	if err != nil {
 		return unparseableJSONPlaceholder, true, true, false
 	}
-	redacted, valChanged, valLost, valExceeded := redactJSONValueInner(decoded, depth+1, true, budget)
+	redacted, valChanged, valLost, valExceeded := redactJSONValueInner(decoded, depth+1, true, laterPass, budget)
 	if str, ok := redacted.(string); ok && str == sanitizeBudgetPlaceholder {
 		return sanitizeBudgetPlaceholder, true, true, false
 	}
@@ -2383,20 +1556,21 @@ func isUnbalancedQuotedKeyText(trimmed, decoded, suffix string) bool {
 }
 
 // hasRedactableContainerText reports whether s, part of the text whole, holds
-// a "{" or "[" that may open a JSON container, which fails the text closed.
-// The "[" of a complete "[REDACTED]" placeholder does not count when whole is
-// balanced already-redacted prose (see isBalancedAlreadyRedactedProse) whose
-// quoted sensitive keys all have redacted values, as in
-// "api.key":"[REDACTED]", so that a second pass over redacted text changes
-// nothing, while truncated or suffixed text, as in
-// "token": "[REDACTED]", "note": "v, or text with a quoted sensitive key whose
-// value the passes do not read, as in "user:token"<U+00A0>:v [REDACTED],
-// still fails closed.
-func hasRedactableContainerText(s, whole string) bool {
+// a "{" or "[" that may open a JSON container, which fails the text closed:
+// any "{" or "[" does, as on main, unless laterPass reports that whole is the
+// result of an earlier pass (see redactJSONTextPass). Then the "[" of a
+// complete "[REDACTED]" placeholder does not count when whole is balanced
+// already-redacted prose (see isBalancedAlreadyRedactedProse) whose quoted
+// sensitive keys all have redacted values, as in "api.key":"[REDACTED]", so
+// that a later pass over it changes nothing, while truncated or suffixed
+// text, as in "token": "[REDACTED]", "note": "v, or text with a quoted
+// sensitive key whose value the passes do not read, as in
+// "user:token"<U+00A0>:v [REDACTED], still fails closed.
+func hasRedactableContainerText(s, whole string, laterPass bool) bool {
 	if !strings.ContainsAny(s, "{[") {
 		return false
 	}
-	return hasContainerOpener(s) || !isBalancedAlreadyRedactedProse(whole) || hasCandidateQuotedSensitiveKeyWithRedacted(whole, 0, true)
+	return !laterPass || hasContainerOpener(s) || !isBalancedAlreadyRedactedProse(whole) || hasCandidateQuotedSensitiveKeyWithRedacted(whole, 0, true)
 }
 
 // hasContainerOpener reports whether s holds a "{" or a "[" that may open a
@@ -2449,7 +1623,7 @@ func endsAtPlaceholderBoundary(tail string) bool {
 // text that needs redaction, or could not be decoded and starts like an
 // encoded container. The callers have already scanned all of s for
 // credential markers, so the work here stays linear in len(s).
-func inspectQuotedFragments(s string, depth int, budget *nodeBudget) bool {
+func inspectQuotedFragments(s string, depth int, laterPass bool, budget *nodeBudget) bool {
 	if depth >= maxSanitizeDepth {
 		return true
 	}
@@ -2493,7 +1667,7 @@ func inspectQuotedFragments(s string, depth int, budget *nodeBudget) bool {
 			}
 			continue
 		}
-		if _, changed, lost := redactJSONTextWithBudget(sub[:dec.InputOffset()], depth+1, budget); changed || lost {
+		if _, changed, lost := redactJSONTextPass(sub[:dec.InputOffset()], depth+1, laterPass, budget); changed || lost {
 			return true
 		}
 		if int(dec.InputOffset()) > 1 {
@@ -2505,7 +1679,10 @@ func inspectQuotedFragments(s string, depth int, budget *nodeBudget) bool {
 
 // startsLikeEncodedContainer reports whether s, a quoted fragment that could
 // not be decoded, starts like an encoded JSON container. Like adk-python, it
-// looks only at the first character after the quote.
+// looks only at the first character after the quote. A "[REDACTED]"
+// placeholder starts none: only the result of an earlier pass gets here with
+// one (see redactJSONTextPass), since text as it was received fails closed
+// on any "[" before its fragments are read (see hasRedactableContainerText).
 func startsLikeEncodedContainer(s string) bool {
 	afterQuote := strings.TrimLeftFunc(s[1:], func(r rune) bool {
 		return unicode.IsSpace(r) || r == '\ufeff'
@@ -2519,7 +1696,13 @@ func startsLikeEncodedContainer(s string) bool {
 }
 
 func redactJSONValue(v any, depth int, budget *nodeBudget) (out any, changed, contentLost bool) {
-	out, changed, contentLost, _ = redactJSONValueInner(v, depth, false, budget)
+	return redactJSONValuePass(v, depth, false, budget)
+}
+
+// redactJSONValuePass is redactJSONValue for one pass over v (see
+// redactJSONTextPass).
+func redactJSONValuePass(v any, depth int, laterPass bool, budget *nodeBudget) (out any, changed, contentLost bool) {
+	out, changed, contentLost, _ = redactJSONValueInner(v, depth, false, laterPass, budget)
 	return out, changed, contentLost
 }
 
@@ -2534,7 +1717,7 @@ func budgetTruncatedMap(outMap map[string]any, lastKey string, hasLastKey, rewri
 	return outMap, true, true, rewriteExceeded
 }
 
-func redactJSONValueInner(v any, depth int, inContainer bool, budget *nodeBudget) (out any, changed, contentLost, rewriteExceeded bool) {
+func redactJSONValueInner(v any, depth int, inContainer, laterPass bool, budget *nodeBudget) (out any, changed, contentLost, rewriteExceeded bool) {
 	if depth >= maxSanitizeDepth {
 		return maxDepthPlaceholder, true, true, false
 	}
@@ -2561,7 +1744,7 @@ func redactJSONValueInner(v any, depth int, inContainer bool, budget *nodeBudget
 				lastKey, hasLastKey = k, true
 				continue
 			}
-			newVal, c, lost, exc := redactJSONValueInner(val, depth+1, inContainer, budget)
+			newVal, c, lost, exc := redactJSONValueInner(val, depth+1, inContainer, laterPass, budget)
 			if str, ok := newVal.(string); ok && str == sanitizeBudgetPlaceholder && budget != nil && budget.remaining <= 0 {
 				return budgetTruncatedMap(outMap, lastKey, hasLastKey, rewriteExceeded || exc)
 			}
@@ -2582,7 +1765,7 @@ func redactJSONValueInner(v any, depth int, inContainer bool, budget *nodeBudget
 				outSlice[len(outSlice)-1] = sanitizeBudgetPlaceholder
 				return outSlice, true, true, rewriteExceeded
 			}
-			newVal, c, lost, exc := redactJSONValueInner(val, depth+1, inContainer, budget)
+			newVal, c, lost, exc := redactJSONValueInner(val, depth+1, inContainer, laterPass, budget)
 			outSlice = append(outSlice, newVal)
 			changed = changed || c
 			contentLost = contentLost || lost
@@ -2597,7 +1780,7 @@ func redactJSONValueInner(v any, depth int, inContainer bool, budget *nodeBudget
 		}
 		return outSlice, changed, contentLost, rewriteExceeded
 	case string:
-		san, c, lost, exc := redactJSONTextInner(x, depth+1, inContainer, true, budget)
+		san, c, lost, exc := redactJSONTextInner(x, depth+1, inContainer, true, laterPass, budget)
 		return san, c, lost, exc
 	default:
 		return v, false, false, false
@@ -2689,13 +1872,13 @@ func decodeJSONValue(dec *json.Decoder, depth int, budget *nodeBudget) (any, boo
 // path or userinfo credentials, Authorization/API-key headers, Bearer/Basic
 // authorization tokens, and sensitive key=value or key: value pairs.
 func redactErrorMessage(msg string) string {
-	out, settled := redactErrorMessageOnce(msg)
+	out, settled := redactErrorMessageOnce(msg, false)
 	for cur, pass := msg, 1; !settled && out != cur && !isScrubbedPlainText(out); pass++ {
 		if pass == maxRedactionPasses {
 			return redactedSensitiveTextPlaceholder
 		}
 		var next string
-		next, settled = redactErrorMessageOnce(out)
+		next, settled = redactErrorMessageOnce(out, true)
 		if next == out {
 			break
 		}
@@ -2705,8 +1888,9 @@ func redactErrorMessage(msg string) string {
 }
 
 // redactErrorMessageOnce is one pass of redactErrorMessage (see
-// maxRedactionPasses).
-func redactErrorMessageOnce(msg string) (out string, settled bool) {
+// maxRedactionPasses). laterPass reports that msg is the result of an earlier
+// pass (see redactJSONTextPass).
+func redactErrorMessageOnce(msg string, laterPass bool) (out string, settled bool) {
 	if msg == "" || isKnownSentinel(msg) {
 		return msg, true
 	}
@@ -2714,7 +1898,7 @@ func redactErrorMessageOnce(msg string) (out string, settled bool) {
 	trimmed := trimBOMAndSpace(msg)
 	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
 		if decoded, sawDuplicateKey, exceeded, err := unmarshalJSONStrictWithBudget(trimmed, budget); err == nil && !exceeded {
-			redacted, valChanged, valLost := redactJSONValue(decoded, 1, budget)
+			redacted, valChanged, valLost := redactJSONValuePass(decoded, 1, laterPass, budget)
 			scrubbed, strChanged := scrubErrorJSONStrings(redacted, 1)
 			if valChanged || sawDuplicateKey || valLost || strChanged {
 				if b, err := json.Marshal(scrubbed); err == nil {
@@ -2732,10 +1916,10 @@ func redactErrorMessageOnce(msg string) (out string, settled bool) {
 		return scrubbed, scrubbed == msg
 	}
 	if strings.HasPrefix(trimmed, `"`) {
-		if redacted, ok, _ := redactJSONTextWithBudget(msg, 0, budget); ok {
+		if redacted, ok, _ := redactJSONTextPass(msg, 0, laterPass, budget); ok {
 			// As in sanitizeRawText, quote-led prose that only failed JSON
 			// parsing is kept.
-			if redacted == unparseableJSONPlaceholder && isPositivelyHarmlessProse(msg, trimmed) {
+			if redacted == unparseableJSONPlaceholder && isPositivelyHarmlessProse(msg, trimmed, laterPass) {
 				return msg, true
 			}
 			scrubbed := scrubErrorText(redacted)
@@ -2985,24 +2169,6 @@ func unescapeCredentialStep(s string) string {
 	return unescapeCredentialStepWith(s, canonicalizeCredentialMarker)
 }
 
-func unescapeProseStructuralStep(s string) string {
-	return unescapeCredentialStepWithBackslash(s, unescapeProseStructural)
-}
-
-func unescapeProseCredentialStep(s string) string {
-	return unescapeCredentialStepWithBackslash(s, unescapeProseBackslashes)
-}
-
-func unescapeCredentialStepWithBackslash(s string, unescapeFn func(string) string) string {
-	if strings.Contains(s, `\`) {
-		s = unescapeFn(s)
-	}
-	if strings.ContainsAny(s, "%xXuU") {
-		s = canonicalizeCredentialMarker(s)
-	}
-	return s
-}
-
 func unescapeCredentialStepWith(s string, canonFn func(string) string) string {
 	if strings.Contains(s, `\`) {
 		s = unescapeBackslashControls(s)
@@ -3073,84 +2239,13 @@ func hasBackslashEscapedCredentialFull(raw, scrubbed string, scrub, canonFn func
 	return unescapeCredentialStepWith(curRaw, canonFn) != curRaw
 }
 
-type backslashUnescapeMode uint8
-
-const (
-	// backslashControlsLegacy decodes main's standard backslash escapes
-	// (\b, \f, \n, \r, \t, \/, \", \'), collapsing \\+ runs while keeping \v
-	// and \` intact.
-	backslashControlsLegacy backslashUnescapeMode = iota
-	// backslashProseStructural collapses \\+ runs and decodes structural
-	// escapes (\/, \", \', \`), while keeping \<c> intact for all six control
-	// letters (b, f, n, r, t, v) so path prefixes like C:\token or C:\t_page_token
-	// are inspected before control-escape folding erases their leading letter.
-	backslashProseStructural
-	// backslashProseAll decodes all six backslash control letters (\b, \f, \n,
-	// \r, \t, \v) and structural escapes (\/, \", \', \`) while collapsing \\+.
-	backslashProseAll
-)
-
-func controlEscapeByte(c byte, mode backslashUnescapeMode) byte {
-	if mode == backslashProseStructural {
-		return 0
-	}
-	switch c {
-	case 'b':
-		return '\b'
-	case 'f':
-		return '\f'
-	case 'n':
-		return '\n'
-	case 'r':
-		return '\r'
-	case 't':
-		return '\t'
-	case 'v':
-		if mode == backslashProseAll {
-			return '\v'
-		}
-	}
-	return 0
-}
-
-// unescapeBackslashControls decodes the standard backslash escapes in s, as
-// main does. A run of backslashes, which each level of nested escaping
-// doubles, is decoded in one step as the escape its last backslash starts, so
-// that the depth of the nesting does not set the number of passes.
+// unescapeBackslashControls decodes the standard backslash escapes in s. A
+// run of backslashes, which each level of nested escaping doubles, is decoded
+// in one step as the escape its last backslash starts, so that the depth of
+// the nesting does not set the number of passes.
 func unescapeBackslashControls(s string) string {
-	return unescapeBackslashes(s, backslashControlsLegacy)
-}
-
-// unescapeProseStructural collapses \\+ runs and decodes \/, \", \', and \`
-// while preserving \b, \f, \n, \r, \t, and \v so C:\{b,f,n,r,t,v}... path
-// prefixes before credential or {b,f,n,r,t,v}-prefixed sensitive keys (such as
-// token, temp:, Bearer, Basic, and t_page_token) are checked alongside \u/\x/%
-// canonicalization before control escapes fold to control bytes.
-func unescapeProseStructural(s string) string {
-	return unescapeBackslashes(s, backslashProseStructural)
-}
-
-// unescapeProseBackslashes decodes all six control escapes (\b, \f, \n, \r, \t,
-// \v) along with \/, \", \', and \` for the checks of isPositivelyHarmlessProse
-// and hasAnyCredentialMarker, which fold vertical tabs as whitespace and read
-// backticks as quotes (see foldUnicodeSpaces, keyDelimiterRunStart and
-// quoteSlot). The scrub and its legacy backstop, which check whether main's
-// escapes hide a credential, keep main's decoding (see
-// hasBackslashEscapedCredentialFull).
-func unescapeProseBackslashes(s string) string {
-	return unescapeBackslashes(s, backslashProseAll)
-}
-
-func unescapeBackslashes(s string, mode backslashUnescapeMode) string {
 	var b strings.Builder
-	changed := false
-	markChanged := func(at int) {
-		if !changed {
-			b.Grow(len(s))
-			b.WriteString(s[:at])
-			changed = true
-		}
-	}
+	b.Grow(len(s))
 	for i := 0; i < len(s); i++ {
 		if s[i] != '\\' {
 			// Copy the run of bytes up to the next backslash at once.
@@ -3158,9 +2253,7 @@ func unescapeBackslashes(s string, mode backslashUnescapeMode) string {
 			if n < 0 {
 				n = len(s) - i
 			}
-			if changed && n > 0 {
-				b.WriteString(s[i : i+n])
-			}
+			b.WriteString(s[i : i+n])
 			i += n - 1
 			continue
 		}
@@ -3169,34 +2262,27 @@ func unescapeBackslashes(s string, mode backslashUnescapeMode) string {
 			j++
 		}
 		if j == len(s) {
-			if j > i+1 {
-				markChanged(i)
-			}
-			if changed {
-				b.WriteByte('\\')
-			}
+			b.WriteByte('\\')
 			break
 		}
-		c := s[j]
-		if ctrl := controlEscapeByte(c, mode); ctrl != 0 {
-			markChanged(i)
-			b.WriteByte(ctrl)
-		} else if c == '/' || c == '"' || c == '\'' || (c == '`' && mode != backslashControlsLegacy) {
-			markChanged(i)
+		switch c := s[j]; c {
+		case 'b':
+			b.WriteByte('\b')
+		case 'f':
+			b.WriteByte('\f')
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case '/', '"', '\'':
 			b.WriteByte(c)
-		} else {
-			if j > i+1 {
-				markChanged(i)
-			}
-			if changed {
-				b.WriteByte('\\')
-				b.WriteByte(c)
-			}
+		default:
+			b.WriteByte('\\')
+			b.WriteByte(c)
 		}
 		i = j
-	}
-	if !changed {
-		return s
 	}
 	return b.String()
 }
@@ -3238,13 +2324,17 @@ func hasAnyCredentialMarker(s string) bool {
 	if s == "" {
 		return false
 	}
-	if scrubErrorText(s) != s || legacyScrubChanges(s) || hasEncodedCredentialMarker(s) || hasIncompleteCredentialConstruct(s) {
+	if scrubErrorText(s) != s || legacyScrubChanges(s) {
 		return true
 	}
 	if hasCandidateQuotedSensitiveKey(s, 0) {
 		return true
 	}
-	return hasSteppedCredentialMarker(s, false)
+	canon := canonicalizeCredentialMarker(s)
+	if hasQuotedSensitiveKey(canon) {
+		return true
+	}
+	return canon != s && scrubErrorTokens(canon) != canon
 }
 
 // applyContentFormatter runs formatter on payload. It fails closed: if the

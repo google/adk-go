@@ -399,7 +399,7 @@ func scrubURITokens(msg string, scrub uriComponentScrub, keys uriKeys, tr *passT
 		return w.done(0)
 	}
 	last := 0
-	for _, loc := range uriTokenRe.FindAllStringIndex(msg, -1) {
+	for _, loc := range uriTokenSpans(msg) {
 		trimmed := trimTrailingPunctuation(msg[loc[0]:loc[1]])
 		sanitized, changed := sanitizeURIWith(trimmed, scrub, keys)
 		if !changed {
@@ -410,6 +410,47 @@ func scrubURITokens(msg string, scrub uriComponentScrub, keys uriKeys, tr *passT
 		last = loc[0] + len(trimmed)
 	}
 	return w.done(last)
+}
+
+// uriTokenSpans returns the spans of the URIs in msg, as
+// uriTokenRe.FindAllStringIndex(msg, -1) does, by looking for each "://"
+// rather than trying the expression from every letter of msg, which is slow
+// on large text. A URI starts at the first letter among the letters, digits,
+// "+", "." and "-" before a "://" and runs on after it, by one byte or more,
+// to the next ASCII whitespace, quote, "<" or ">".
+func uriTokenSpans(msg string) [][]int {
+	var spans [][]int
+	for from := 0; from < len(msg); {
+		rel := strings.Index(msg[from:], "://")
+		if rel < 0 {
+			break
+		}
+		sep := from + rel
+		start := -1
+		for i := sep; i > from && isURISchemeByte(msg[i-1]); i-- {
+			if c := msg[i-1]; 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' {
+				start = i - 1
+			}
+		}
+		end := sep + len("://")
+		for end < len(msg) && !isRegexpSpace(msg[end]) && strings.IndexByte(`"'<>`, msg[end]) < 0 {
+			end++
+		}
+		if start < 0 || end == sep+len("://") {
+			// No scheme stands before the "://", or nothing after it.
+			from = sep + 1
+			continue
+		}
+		spans = append(spans, []int{start, end})
+		from = end
+	}
+	return spans
+}
+
+// isURISchemeByte reports whether c may stand in the scheme of a URI: an
+// ASCII letter or digit, "+", "." or "-".
+func isURISchemeByte(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '+' || c == '.' || c == '-'
 }
 
 // trimTrailingPunctuation strips the punctuation that may follow a URI or a

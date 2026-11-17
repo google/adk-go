@@ -902,7 +902,14 @@ func redactJSONKeyValues(s string, tr *passTrace) string {
 		end := scanValueEnd(s, valStart, isJSONValueStop, &qState)
 		open := brackets.before(s, openQuote)
 		openQ := quotes.before(s, colonPos)
-		kind, pair := nestsSensitiveKey(s, valStart, end, startsLine(s, colonPos+1, valStart), openQ, &qState)
+		// The expression on main redacted the value of a quoted key that it
+		// read whatever that value spelled. After such a key, a value on the
+		// next line that only ends in a sensitive key name, as the
+		// QZX7193-authorization of "authorization":\nQZX7193-authorization =8,
+		// is no nested key, whose name is kept: it is redacted together with
+		// the value of the pair that it starts.
+		lineStart := startsLine(s, colonPos+1, valStart) && !isLegacySensitiveKey(s[keyStart:keyEnd])
+		kind, pair := nestsSensitiveKey(s, valStart, end, lineStart, openQ, &qState)
 		if qState.openerBudgetExhausted {
 			return w.failClosed()
 		}

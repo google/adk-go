@@ -742,8 +742,9 @@ func hasCanonicalizableEscape(s string) bool {
 // to ASCII key letters (U+0130 'İ' -> 'i', U+017F 'ſ' -> 's', U+212A 'K' ->
 // 'k'), or, for a 4-hex \uXXXX escape (unicodeEscape), a Unicode whitespace,
 // separator, or format/zero-width rune (such as \u00a0, \u200b, or \ufeff)
-// that trimBOMAndSpace, trimInlineSpaces, and foldUnicodeSpaces skip or fold
-// around keys, auth schemes, and delimiters.
+// that trimBOMAndSpace and trimInlineSpaces skip around keys, and that
+// followedByKeyDelimiterWithRedacted skips between a quoted key and its
+// delimiter.
 func isFoldedEscapeRune(r rune, unicodeEscape bool) bool {
 	if r <= 0x7F || r == '\u0130' || r == '\u017f' || r == '\u212a' {
 		return true

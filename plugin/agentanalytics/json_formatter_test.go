@@ -2863,19 +2863,24 @@ func TestSanitizeRawText(t *testing.T) {
 			t.Errorf("scrubErrorText unescaped JSON pair = %q, want %q", got, want)
 		}
 		// Scrubbing the text of the valid JSON value takes its closing quote
-		// with the redacted value. sanitizeRawText and SmartTruncate keep
-		// that malformed text, which reads as redacted prose, as main did,
-		// and a second pass of either changes nothing.
+		// with the redacted value. sanitizeRawText and SmartTruncate return
+		// that malformed text, as main did. A second call reads it as any
+		// other malformed JSON text: sanitizeRawText keeps it as prose, and
+		// SmartTruncate, which keeps none, fails it closed, as on main.
 		const scrubbedPair = `{"msg":"password=[REDACTED]}`
 		if got, lost := sanitizeRawText(`{"msg":"password=SECRET123"}`); got != scrubbedPair || !lost {
 			t.Errorf("sanitizeRawText(unescaped JSON pair) = (%q, %v), want (%q, true)", got, lost, scrubbedPair)
+		}
+		if got, lost := sanitizeRawText(scrubbedPair); got != scrubbedPair || lost {
+			t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", scrubbedPair, got, lost)
 		}
 		wantPair := `"{\"msg\":\"password=[REDACTED]}"`
 		if raw, truncated, err := SmartTruncate(`{"msg":"password=SECRET123"}`, 4096); err != nil || !truncated || string(raw) != wantPair {
 			t.Errorf("SmartTruncate(unescaped JSON pair) = (%s, %v, %v), want (%s, true, nil)", raw, truncated, err, wantPair)
 		}
-		if raw, truncated, err := SmartTruncate(scrubbedPair, 4096); err != nil || truncated || string(raw) != wantPair {
-			t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want unchanged", scrubbedPair, raw, truncated, err)
+		wantClosed := `"` + unparseableJSONPlaceholder + `"`
+		if raw, truncated, err := SmartTruncate(scrubbedPair, 4096); err != nil || !truncated || string(raw) != wantClosed {
+			t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want (%s, true, nil)", scrubbedPair, raw, truncated, err, wantClosed)
 		}
 		for _, harmless := range []string{
 			`C:\new\file.txt`,

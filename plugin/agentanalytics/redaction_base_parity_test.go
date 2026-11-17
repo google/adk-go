@@ -63,8 +63,12 @@ func changedByBase(c baseParityCase) bool {
 // expressions read otherwise than their strings decoded, as a header that an
 // escaped line break ends, a quote that a later string closes, or a document
 // that the redaction writes again with its keys sorted, the reproducers of
-// earlier reviews, shapes left for later work, prose, and seeded random
-// combinations. Each output is also checked to be unchanged by a second pass.
+// earlier reviews, malformed JSON text that SmartTruncate fails closed, with
+// or without a placeholder in it, sensitive keys that hold an object or an
+// array, shapes left for later work, prose, and seeded random
+// combinations. Each output is also run through a second call, which may
+// change it only by failing closed what main fails closed in it (see
+// assertSecondCall).
 // A case whose text the base changes on some entry point, other than by
 // whitespace or a placeholder for the whole text, must list a secret that
 // marks what the base removed, such as the punctuation-only value of
@@ -99,13 +103,11 @@ func TestRedactionBaseParity(t *testing.T) {
 					t.Errorf("%s(%q) = %q keeps %q, which the base removed: %q", ep.name, c.In, got, s, c.Base[k])
 				}
 			}
-			if again := ep.f(got); again != got {
-				t.Errorf("%s second pass(%q) = %q, want unchanged", ep.name, got, again)
-			}
+			assertSecondCall(t, ep.name, ep.f, got)
 		}
 		if san, _ := sanitizeRawText(c.In); san != "" {
-			if _, againLost := sanitizeRawText(san); againLost {
-				t.Errorf("sanitizeRawText second pass(%q) reported contentLost", san)
+			if again, againLost := sanitizeRawText(san); againLost != (again != san) {
+				t.Errorf("sanitizeRawText second call(%q) = (%q, %v), want a loss reported exactly when the text changes", san, again, againLost)
 			}
 		}
 		for _, s := range c.Secrets {
@@ -423,6 +425,35 @@ func TestRedactionBaseParity(t *testing.T) {
 		"password:\n  user:temp:SECRETZQ:x: bar",
 		"password:\n  app:temp:SECRETZQ:x: bar",
 		`{"startPageToken": "p1", "newStartPageToken": "p2", "resumeToken": "r1", "eot_token": "e1"}`,
+		`[INFO] Bearer'SECRET`,
+		`[INFO] Basic'dXNlcjpwYXNzZQ`,
+		`[INFO] Bearer '[REDACTED]'&SECRET`,
+		"[INFO] password\ufe0f=SECRET",
+		"[INFO] password\u034f=SECRET",
+		"[INFO] password\u3164=SECRET",
+		`{"log":"[INFO] 'temp:a\\'x'=SECRET`,
+		"{\"log\":\"[INFO] `temp:a,b\\\\`x`=SECRET",
+		`[INFO] Basic mode=Okta`,
+		`[CONFIG] Basic mode=Only over TLS`,
+		`[INFO] password\t=[REDACTED]`,
+		`[INFO] api_key\n: [REDACTED]`,
+		`{"log":"Enter your password\n:`,
+		"[INFO] Saisissez le token\u00a0:",
+		`[INFO] Plan: Basic 'monthly'`,
+		"[Basic `curl` usage](https://example.com/docs)",
+		`[INFO] opened C:\Tools\Basic\bin\app.exe`,
+		"[INFO] `password`: must be at least 8 characters",
+		`{"Credentials":{"AccessKeyId":"EXAMPLEKEYID","SecretAccessKey":"SECRET123","SessionToken":"SECRET123"},"Message":"ok"}`,
+		`{"token":{"value":"x"},"status":"ok"}`,
+		`{"error":"unexpected token \":\" at line 3"}`,
+		`"[object Object]" is not valid JSON`,
+		"\"authorization\":\nQZX7193-authorization =8",
+		"log: \"authorization\":\nQZX7193-authorization =8",
+		`{"a":"[REDACTED_SENSITIVE_URI] Bearer'SECRET"}`,
+		"\"api_key\":\"[REDACTED]\" password\ufe0f=SECRET",
+		`"hello" "\u005bREDACTED_SENSITIVE_URI\u005d Bearer'SECRETZQ"`,
+		`"password=[REDACTED]" hunter2ZQ`,
+		`{"a":"\"note\" [REDACTED] hunter2ZQ"}`,
 	} {
 		found := false
 		for _, c := range corpus.Cases {

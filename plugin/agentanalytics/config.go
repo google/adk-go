@@ -300,14 +300,22 @@ type Config struct {
 	// credential name, such as DB_PASSWORD, dbPassword or
 	// spring.datasource.password, is redacted too, and so is a credential name
 	// or "temp:" key behind "user:" or "app:" state prefixes, stacked or not,
-	// such as user:api_key, app:user:token or user:temp:x. Cursor and
-	// tokenizer names that end in "token" are not redacted, in snake, camel or
-	// upper case: next_token, prev_token and previous_token; page_token,
-	// sync_token, continuation_token and resume_token, alone or after next,
-	// prev, previous, start or newStart, as nextPageToken, startPageToken or
-	// newStartPageToken; and pad_token, eos_token, eot_token, bos_token,
-	// unk_token, cls_token, sep_token and mask_token. The adk-python plugin
-	// matches exact key names only.
+	// such as user:api_key, app:user:token or user:temp:x. The "." and
+	// compound-name matching apply to map keys, to the keys of query,
+	// fragment and ";" parameter pairs of a URI, and to keys in text. They do
+	// not apply to URI path segments: only a segment that is a credential
+	// name itself, whatever its case and "_" or "-", or a "temp:" key, alone
+	// or behind "user:" or "app:" prefixes, redacts the segment after it, as
+	// in https://h/api_key/abc123, while https://h/api.key/abc123 and
+	// https://h/DB_PASSWORD/abc123 keep abc123, as file names and route slugs
+	// such as /private.key/download or /reset-password/confirm stay as they
+	// are. Cursor and tokenizer names that end in "token" are not redacted,
+	// in snake, camel or upper case: next_token, prev_token and
+	// previous_token; page_token, sync_token, continuation_token and
+	// resume_token, alone or after next, prev, previous, start or newStart,
+	// as nextPageToken, startPageToken or newStartPageToken; and pad_token,
+	// eos_token, eot_token, bos_token, unk_token, cls_token, sep_token and
+	// mask_token. The adk-python plugin matches exact key names only.
 	DisableSensitiveKeyRedaction bool
 
 	// ContentFormatter, if set, is applied to each event's raw payload before

@@ -677,46 +677,56 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 
 	t.Run("quoted compound and state outer keys redact nested keys without leaking", func(t *testing.T) {
 		const secret = "SYNTHETIC_NESTED_99"
-		outerKeys := []string{
-			`"app:temp:connection"`,
-			`"temp:conn"`,
-			`"user:api_key"`,
-			`"user:temp:conn"`,
-			`"my_api_key"`,
-			`"DB_PASSWORD"`,
-			`'app:temp:connection'`,
-			`'my_api_key'`,
+		// readOnMain marks the double-quoted keys that the expression on
+		// main read: it redacted their value whatever that value spelled.
+		outerKeys := []struct {
+			key        string
+			readOnMain bool
+		}{
+			{`"app:temp:connection"`, false},
+			{`"temp:conn"`, true},
+			{`"user:api_key"`, true},
+			{`"user:temp:conn"`, false},
+			{`"my_api_key"`, false},
+			{`"DB_PASSWORD"`, false},
+			{`'app:temp:connection'`, false},
+			{`'my_api_key'`, false},
 		}
+		// compound marks the names that only end in a sensitive key name.
+		// After a key that main read, such a name on the next line is no
+		// nested key, whose name is kept: it is redacted with the value of
+		// the outer key, together with the value of the pair that it starts.
 		innerLines := []struct {
 			name, line, wantLine string
+			compound             bool
 		}{
-			{"bare fixed", "password: " + secret, "password:[REDACTED]"},
-			{"bare dotted", "api.key: " + secret, "api.key:[REDACTED]"},
-			{"bare auth header", "api_key: " + secret, "api_key: [REDACTED]"},
-			{"quoted fixed", `"password": "` + secret + `"`, `"password":"[REDACTED]"`},
-			{"single-quoted fixed", `'password': '` + secret + `'`, `'password':'[REDACTED]'`},
-			{"bare compound", "db_password: " + secret, "db_password:[REDACTED]"},
-			{"bare camelCase", "dbPassword: " + secret, "dbPassword:[REDACTED]"},
-			{"bare unicode folded", "db_pa\u017f\u017fword: " + secret, "db_pa\u017f\u017fword:[REDACTED]"},
-			{"quoted compound", `"db_password": "` + secret + `"`, `"db_password":"[REDACTED]"`},
-			{"spaced quoted compound", `" db_password ": "` + secret + `"`, `"db_password":"[REDACTED]"`},
-			{"bare temp", "temp:secret: " + secret, "temp:secret:[REDACTED]"},
-			{"bare user compound", "user:dbPassword: " + secret, "user:dbPassword:[REDACTED]"},
-			{"quoted temp with slash", `"temp:cache/val": "` + secret + `"`, `"temp:cache/val":"[REDACTED]"`},
+			{"bare fixed", "password: " + secret, "password:[REDACTED]", false},
+			{"bare dotted", "api.key: " + secret, "api.key:[REDACTED]", false},
+			{"bare auth header", "api_key: " + secret, "api_key: [REDACTED]", false},
+			{"quoted fixed", `"password": "` + secret + `"`, `"password":"[REDACTED]"`, false},
+			{"single-quoted fixed", `'password': '` + secret + `'`, `'password':'[REDACTED]'`, false},
+			{"bare compound", "db_password: " + secret, "db_password:[REDACTED]", true},
+			{"bare camelCase", "dbPassword: " + secret, "dbPassword:[REDACTED]", true},
+			{"bare unicode folded", "db_pa\u017f\u017fword: " + secret, "db_pa\u017f\u017fword:[REDACTED]", true},
+			{"quoted compound", `"db_password": "` + secret + `"`, `"db_password":"[REDACTED]"`, true},
+			{"spaced quoted compound", `" db_password ": "` + secret + `"`, `"db_password":"[REDACTED]"`, true},
+			{"bare temp", "temp:secret: " + secret, "temp:secret:[REDACTED]", true},
+			{"bare user compound", "user:dbPassword: " + secret, "user:dbPassword:[REDACTED]", true},
+			{"quoted temp with slash", `"temp:cache/val": "` + secret + `"`, `"temp:cache/val":"[REDACTED]"`, true},
 			// A quoted stacked temp: key, a segment of which may be a value,
 			// is redacted with the value of the outer key, as main read it
 			// (an empty wantLine).
-			{"quoted temp with colon", `"temp:a:b": "` + secret + `"`, ""},
-			{"quoted temp with value segment", `"temp:` + secret + `:x": "v"`, ""},
-			{"spaced quoted state temp", `" user:temp:secret ": "` + secret + `"`, `"user:temp:secret":"[REDACTED]"`},
-			{"container without space", `password:{"k": "` + secret + `"}`, "password:[REDACTED]"},
+			{"quoted temp with colon", `"temp:a:b": "` + secret + `"`, "", true},
+			{"quoted temp with value segment", `"temp:` + secret + `:x": "v"`, "", true},
+			{"spaced quoted state temp", `" user:temp:secret ": "` + secret + `"`, `"user:temp:secret":"[REDACTED]"`, true},
+			{"container without space", `password:{"k": "` + secret + `"}`, "password:[REDACTED]", false},
 		}
 		for _, outer := range outerKeys {
 			for _, inner := range innerLines {
-				in := fmt.Sprintf("config:\n  %s:\n    %s\n    region: us", outer, inner.line)
-				want := fmt.Sprintf("config:\n  %s:\n    %s\n    region: us", outer, inner.wantLine)
-				if inner.wantLine == "" {
-					want = fmt.Sprintf("config:\n  %s:\"[REDACTED]\"\n    region: us", outer)
+				in := fmt.Sprintf("config:\n  %s:\n    %s\n    region: us", outer.key, inner.line)
+				want := fmt.Sprintf("config:\n  %s:\n    %s\n    region: us", outer.key, inner.wantLine)
+				if inner.wantLine == "" || (outer.readOnMain && inner.compound) {
+					want = fmt.Sprintf("config:\n  %s:\"[REDACTED]\"\n    region: us", outer.key)
 				}
 				gotRaw, lost := sanitizeRawText(in)
 				if !lost || gotRaw != want || strings.Contains(gotRaw, secret) {
@@ -759,8 +769,29 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 		}
 	})
 
-	t.Run("quoted compound and state key redaction is idempotent on second pass", func(t *testing.T) {
-		alreadyRedacted := []string{
+	t.Run("quote-led text with quoted compound and state keys fails closed as on main", func(t *testing.T) {
+		wantTruncJSON := `"` + unparseableJSONPlaceholder + `"`
+		assertFailsClosed := func(label, in string) {
+			t.Helper()
+			if got := redactErrorMessage(in); got != unparseableJSONPlaceholder {
+				t.Errorf("%s: redactErrorMessage(%q) = %q, want %q", label, in, got, unparseableJSONPlaceholder)
+			}
+			if got, lost := sanitizeRawText(in); !lost || got != unparseableJSONPlaceholder {
+				t.Errorf("%s: sanitizeRawText(%q) = (%q, %v), want (%q, true)", label, in, got, lost, unparseableJSONPlaceholder)
+			}
+			if truncBytes, truncated, err := SmartTruncate(in, 1<<20); err != nil || !truncated || string(truncBytes) != wantTruncJSON {
+				t.Errorf("%s: SmartTruncate(%q) = (%s, %v, %v), want (%s, true, <nil>)", label, in, truncBytes, truncated, err, wantTruncJSON)
+			}
+		}
+
+		// Text that starts with a quote and holds a quoted sensitive key
+		// before a delimiter is no JSON and fails closed, whatever the value
+		// of that key reads as: a "[REDACTED]" placeholder that the text came
+		// with says nothing about the text around it. Main fails such text
+		// closed for the keys that it reads, as "password", and compound and
+		// state-prefixed keys now follow the same rule.
+		for _, in := range []string{
+			`"password":"[REDACTED]" other=ok`,
 			`"X-Amz-Security-Token":"[REDACTED]" other=ok`,
 			`"X-Amz-Security-Token": "[REDACTED]" other=ok`,
 			`"X-Amz-Security-Token": '[REDACTED]' other=ok`,
@@ -768,17 +799,13 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			`"user:temp:api_key":"[REDACTED]" other=ok`,
 			"\"X-Amz-Security-Token\":\"[REDACTED]\"\nother: ok",
 			`"api.key":"[REDACTED]" other=ok`,
-		}
-		for _, in := range alreadyRedacted {
-			if got := redactErrorMessage(in); got != in {
-				t.Errorf("redactErrorMessage(%q) = %q, want unchanged", in, got)
-			}
-			if got, lost := sanitizeRawText(in); got != in || lost {
-				t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", in, got, lost)
-			}
+		} {
+			assertFailsClosed("text received", in)
 		}
 
-		twoPassCases := []struct {
+		// A call redacts the value and returns the text. A second call reads
+		// that result as it reads the text above.
+		twoCallCases := []struct {
 			in, want string
 		}{
 			{"\"X-Amz-Security-Token\": \"a b\"\nother: ok", "\"X-Amz-Security-Token\":\"[REDACTED]\"\nother: ok"},
@@ -786,21 +813,14 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			{"\"user:temp:api_key\": \"secret val\"\nother: ok", "\"user:temp:api_key\":\"[REDACTED]\"\nother: ok"},
 			{"\"api.key\": \"secret val\"\nother: ok", "\"api.key\":\"[REDACTED]\"\nother: ok"},
 		}
-		for _, tc := range twoPassCases {
-			gotErr := redactErrorMessage(tc.in)
-			if gotErr != tc.want {
+		for _, tc := range twoCallCases {
+			if gotErr := redactErrorMessage(tc.in); gotErr != tc.want {
 				t.Errorf("redactErrorMessage(%q) = %q, want %q", tc.in, gotErr, tc.want)
 			}
-			if twice := redactErrorMessage(gotErr); twice != gotErr {
-				t.Errorf("redactErrorMessage second pass(%q) = %q, want %q", gotErr, twice, gotErr)
-			}
-			gotRaw, lost := sanitizeRawText(tc.in)
-			if !lost || gotRaw != tc.want {
+			if gotRaw, lost := sanitizeRawText(tc.in); !lost || gotRaw != tc.want {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tc.in, gotRaw, lost, tc.want)
 			}
-			if twiceRaw, lost2 := sanitizeRawText(gotRaw); twiceRaw != gotRaw || lost2 {
-				t.Errorf("sanitizeRawText second pass(%q) = (%q, %v), want (%q, false)", gotRaw, twiceRaw, lost2, gotRaw)
-			}
+			assertFailsClosed("result of a first call", tc.want)
 		}
 
 		failClosedInputs := []string{
@@ -832,17 +852,8 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			`{"X-Amz-Security-Token":`,
 			`"X-Amz-Security-Token":"[REDACTED]" dbPassword=SECRET123`,
 		}
-		wantTruncJSON := `"` + unparseableJSONPlaceholder + `"`
 		for _, in := range failClosedInputs {
-			if got := redactErrorMessage(in); got != unparseableJSONPlaceholder || strings.Contains(got, "SECRET123") {
-				t.Errorf("redactErrorMessage(%q) = %q, want %q", in, got, unparseableJSONPlaceholder)
-			}
-			if got, lost := sanitizeRawText(in); !lost || got != unparseableJSONPlaceholder || strings.Contains(got, "SECRET123") {
-				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", in, got, lost, unparseableJSONPlaceholder)
-			}
-			if truncRaw, truncated, err := SmartTruncate(in, 1<<20); err != nil || !truncated || string(truncRaw) != wantTruncJSON || strings.Contains(string(truncRaw), "SECRET123") {
-				t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want (%s, true, nil)", in, truncRaw, truncated, err, wantTruncJSON)
-			}
+			assertFailsClosed("malformed text", in)
 		}
 	})
 
@@ -1786,8 +1797,9 @@ func TestLegacyRegexScannerDifferential(t *testing.T) {
 
 // assertRedactedIdempotent checks that redactErrorMessage, sanitizeRawText and
 // SmartTruncate keep none of forbidden in their output for in, that
-// sanitizeRawText reports the change, and that each of them leaves its own
-// output unchanged on a second pass.
+// sanitizeRawText reports the change, and that a second call of each returns
+// its own output unchanged, or fails closed what main fails closed in it (see
+// failsClosedAsOnMain).
 func assertRedactedIdempotent(t *testing.T, label, in string, forbidden ...string) {
 	t.Helper()
 	gotErr := redactErrorMessage(in)
@@ -1814,14 +1826,72 @@ func assertRedactedIdempotent(t *testing.T, label, in string, forbidden ...strin
 	if len(forbidden) > 0 && !lost {
 		t.Errorf("[%s] sanitizeRawText(%q) = (%q, false), want lost=true", label, in, gotSan)
 	}
-	if got2 := redactErrorMessage(gotErr); got2 != gotErr {
-		t.Errorf("[%s] redactErrorMessage second pass(%q) = %q, want unchanged", label, gotErr, got2)
+	if got2 := redactErrorMessage(gotErr); got2 != gotErr && !failsClosedAsOnMain(gotErr, got2) {
+		t.Errorf("[%s] redactErrorMessage second call(%q) = %q, want unchanged or failed closed as on main", label, gotErr, got2)
 	}
-	if got2, lost2 := sanitizeRawText(gotSan); got2 != gotSan || lost2 {
-		t.Errorf("[%s] sanitizeRawText second pass(%q) = (%q, %v), want unchanged and lost=false", label, gotSan, got2, lost2)
+	if got2, lost2 := sanitizeRawText(gotSan); lost2 != (got2 != gotSan) || (got2 != gotSan && !failsClosedAsOnMain(gotSan, got2)) {
+		t.Errorf("[%s] sanitizeRawText second call(%q) = (%q, %v), want unchanged and lost=false, or failed closed as on main and lost=true", label, gotSan, got2, lost2)
 	}
-	if trunc2, _, err := SmartTruncate(gotTrunc, -1); err != nil || string(trunc2) != string(truncRaw) {
-		t.Errorf("[%s] SmartTruncate second pass(%q) = (%s, %v), want %s", label, gotTrunc, trunc2, err, truncRaw)
+	trunc2, truncated2, err := SmartTruncate(gotTrunc, -1)
+	var gotTrunc2 string
+	if err != nil || json.Unmarshal(trunc2, &gotTrunc2) != nil {
+		t.Fatalf("[%s] SmartTruncate second call(%q) = (%s, %v), want a JSON string", label, gotTrunc, trunc2, err)
+	}
+	if truncated2 != (gotTrunc2 != gotTrunc) || (gotTrunc2 != gotTrunc && !failsClosedAsOnMain(gotTrunc, gotTrunc2)) {
+		t.Errorf("[%s] SmartTruncate second call(%q) = (%q, %v), want unchanged and truncated=false, or failed closed as on main and truncated=true", label, gotTrunc, gotTrunc2, truncated2)
+	}
+}
+
+// failsClosedAsOnMain reports whether again, which a new call returns for
+// got, the result of an earlier call, is got with the text that main fails
+// closed in it replaced by the placeholder for unparseable JSON. A new call
+// reads redacted text as it reads any other text (see redactJSONTextPass):
+// text that starts with "{", "[" or a quote and is no JSON fails closed, as a
+// whole or as a string of the JSON document that got is, whatever
+// placeholders it holds. Nothing else may change.
+func failsClosedAsOnMain(got, again string) bool {
+	trimmed := trimBOMAndSpace(got)
+	if trimmed == "" || !strings.Contains(`{["`, trimmed[:1]) {
+		return false
+	}
+	var gotDoc, againDoc any
+	if json.Unmarshal([]byte(got), &gotDoc) != nil {
+		return again == unparseableJSONPlaceholder
+	}
+	return json.Unmarshal([]byte(again), &againDoc) == nil && failsStringsClosedAsOnMain(gotDoc, againDoc)
+}
+
+// failsStringsClosedAsOnMain reports whether again is the JSON value got
+// with strings in it failed closed (see failsClosedAsOnMain).
+func failsStringsClosedAsOnMain(got, again any) bool {
+	switch g := got.(type) {
+	case map[string]any:
+		a, ok := again.(map[string]any)
+		if !ok || len(a) != len(g) {
+			return false
+		}
+		for k, v := range g {
+			if av, ok := a[k]; !ok || !failsStringsClosedAsOnMain(v, av) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		a, ok := again.([]any)
+		if !ok || len(a) != len(g) {
+			return false
+		}
+		for i, v := range g {
+			if !failsStringsClosedAsOnMain(v, a[i]) {
+				return false
+			}
+		}
+		return true
+	case string:
+		a, ok := again.(string)
+		return ok && (a == g || failsClosedAsOnMain(g, a))
+	default:
+		return got == again
 	}
 }
 
@@ -1915,8 +1985,10 @@ func TestCompoundKeyDifferentialAndIdempotencyRegressions(t *testing.T) {
 		assertAllEntryPoints(t, tc.in, tc.in, tc.want, a130)
 	}
 
-	// Go *os.PathError text, already-redacted text and prose controls stay
-	// byte-identical.
+	// Go *os.PathError text, redacted text that does not start with a quote
+	// and prose controls stay byte-identical. Redacted text that starts with
+	// a quote, as "api.key":"[REDACTED]" other=ok, fails closed (see
+	// TestCompoundKeyEdgeCasesAndLinearBackslashRegression).
 	for _, in := range []string{
 		"open private.key: no such file or directory",
 		"read /etc/ssl/private.key: permission denied",
@@ -1924,7 +1996,6 @@ func TestCompoundKeyDifferentialAndIdempotencyRegressions(t *testing.T) {
 		"api_key:\n  [REDACTED] other=ok",
 		`msg: "password="[REDACTED]"`,
 		`msg: "password=" "[REDACTED]"`,
-		`"api.key":"[REDACTED]" other=ok`,
 		`parsing "password='[REDACTED]'": invalid syntax`,
 	} {
 		if got := redactErrorMessage(in); got != in {
@@ -1948,8 +2019,8 @@ func TestCompoundKeyDifferentialAndIdempotencyRegressions(t *testing.T) {
 // container value, an assignment before a redacted over-budget tail,
 // multiline headers, a key that ends one string with its value in the next,
 // and quote-led text with an unbalanced quote. No entry point may keep a
-// secret that the legacy expressions remove, and each must leave its own
-// output unchanged on a second pass.
+// secret that the legacy expressions remove, and a second call of each must
+// return its own output as assertRedactedIdempotent requires.
 func TestLegacyRegexCompositeParity(t *testing.T) {
 	runInParallel(t)
 	refScrub, _ := legacyReferenceScrub()
@@ -2128,6 +2199,18 @@ func TestCompoundKeyReviewLeakRegressions(t *testing.T) {
 		{"escaped_tab_hides_delimiter", `x "client_secret"': user:temp:refresh_token\t:'` + s0 + `/private.key = '` + s1 + `'-"secret"' = ` + s2 + " " + s3, redactedSensitiveTextPlaceholder, []string{s0, s1, s2, s3}},
 		{"escaped_quotes_hide_quoted_key", "'app:password:\t[a " + s0 + `]/\"monkey\" = monkey:  '` + s1 + ": invalid syntax", redactedSensitiveTextPlaceholder, []string{s0, s1}},
 		{"escaped_newline_splits_compound_key", "user:temp:session = Bearer S0+apiKey=\n'secret':  " + s1 + " " + s2 + `\naccess_token="` + s3 + `\nS4`, redactedSensitiveTextPlaceholder, []string{s1, s2, s3}},
+
+		// A value on the line after a double-quoted key that main read,
+		// spelled like a compound key name, is redacted with the value of
+		// that key, as main removed it, together with the value of the pair
+		// that it starts. A fixed key name there is a nested key, whose own
+		// value is redacted, and after a quoted compound key, which main
+		// did not read, a compound name stays a nested key too.
+		{"compound_name_on_line_after_quoted_key", "log: \"authorization\":\nQZX7193-authorization =8", `log: "authorization":"[REDACTED]"`, []string{"QZX7193"}},
+		{"compound_name_on_indented_line_after_quoted_key", "x \"token\":\n  sk-QZX7193-token: " + s1 + " next=1", `x "token":"[REDACTED]" next=1`, []string{"QZX7193", s1}},
+		{"quoted_compound_name_on_line_after_quoted_key", "log: \"authorization\":\n  \"db_password\": \"" + s1 + "\" next=1", `log: "authorization":"[REDACTED]" next=1`, []string{s1}},
+		{"fixed_name_on_line_after_quoted_key", "log: \"authorization\":\n  token: " + s1 + " next=1", "log: \"authorization\":\n  token:[REDACTED] next=1", []string{s1}},
+		{"compound_name_on_line_after_quoted_compound_key", "log: \"db_authorization\":\nQZX7193-authorization =" + s1, "log: \"db_authorization\":\nQZX7193-authorization=[REDACTED]", []string{s1}},
 	} {
 		assertRedactedIdempotent(t, tc.label, tc.in, tc.forbidden...)
 		if tc.want == "" {
@@ -2146,11 +2229,10 @@ func TestCompoundKeyReviewLeakRegressions(t *testing.T) {
 		}
 	}
 
-	// Text that an earlier pass redacted, Go path errors and prose stay
-	// byte-identical.
+	// Redacted text that does not start with a quote, Go path errors and
+	// prose stay byte-identical.
 	for _, in := range []string{
 		"api_key: [REDACTED] x-api-key:\n  [REDACTED]",
-		`"client_secret=" "[REDACTED]"`,
 		`failed: \"password='[REDACTED]'\"\nretry`,
 		"credentials:[REDACTED]\n  region: us",
 		`log: "dbPassword":"[REDACTED]"`,
@@ -2170,6 +2252,11 @@ func TestCompoundKeyReviewLeakRegressions(t *testing.T) {
 			t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want unchanged and truncated=false", in, raw, truncated, err)
 		}
 	}
+
+	// Redacted text that starts with a quote is read as any other text that
+	// does: two strings that follow each other are no JSON, and fail closed
+	// as on main, whatever the second one holds.
+	assertAllEntryPoints(t, "quote_led_redacted_strings", `"client_secret=" "[REDACTED]"`, unparseableJSONPlaceholder)
 }
 
 // TestLegacyPatternBackstop checks legacyScrubTextPatterns, the linear-time
