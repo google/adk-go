@@ -45,6 +45,10 @@ const (
 	WorkflowPrefix = "adk.workflow."
 )
 
+// RestoredEventKey marks an event that was restored into a session from
+// outside it, matching adk-python's RESTORED_EVENT_KEY.
+const RestoredEventKey = InternalPrefix + "restored_event"
+
 // IsInternalKey reports whether key is reserved for ADK's own event metadata
 // and therefore must be stripped from caller-supplied RunConfig.CustomMetadata.
 //
@@ -142,4 +146,24 @@ func MergeIntoEvent(event *session.Event, runMetadata map[string]any) {
 	// neither runMetadata nor the map the event held before.
 	maps.Copy(merged, event.CustomMetadata)
 	event.CustomMetadata = merged
+}
+
+// MarkRestored marks event as restored from outside its session, in place:
+// it replaces event.CustomMetadata with a new map holding every entry whose
+// key does not start with InternalPrefix, plus RestoredEventKey: true. Keys
+// that IsInternalKey reports for other reasons (BeforeRunReplyKey,
+// WorkflowPrefix) are kept, as adk-python strips its prefix alone. A nil
+// event is a no-op. The caller must own event.
+func MarkRestored(event *session.Event) {
+	if event == nil {
+		return
+	}
+	marked := make(map[string]any, len(event.CustomMetadata)+1)
+	for k, v := range event.CustomMetadata {
+		if !strings.HasPrefix(k, InternalPrefix) {
+			marked[k] = v
+		}
+	}
+	marked[RestoredEventKey] = true
+	event.CustomMetadata = marked
 }
