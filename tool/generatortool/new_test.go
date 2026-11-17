@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
@@ -187,9 +188,9 @@ func TestNew_PassesConfigThrough(t *testing.T) {
 	})
 }
 
-// A23. Fails if the handler runs without a workflow node, or if the error does
-// not say why.
-func TestRun_NoNodeContextFails(t *testing.T) {
+// A23. Fails if a call with no workflow node and no session does not run the
+// handler, refuses its emitted event, or loses its result.
+func TestRun_NoNodeContextRunsBody(t *testing.T) {
 	var runs atomic.Int32
 	emitted := false
 	tl := mustNew(t, functiontool.Config{Name: "analyze"}, func(_ agent.Context, _ queryArgs, emit func(*session.Event) error) (any, error) {
@@ -205,12 +206,66 @@ func TestRun_NoNodeContextFails(t *testing.T) {
 	}
 	ctx := agent.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "call_1", nil, nil)
 
-	_, err := runner.Run(ctx, map[string]any{"query": "sales"})
-
-	if !errors.Is(err, workflow.ErrInvalidRunNodeContext) {
-		t.Errorf("Run() error = %v, want an error wrapping workflow.ErrInvalidRunNodeContext", err)
+	got, err := runner.Run(ctx, map[string]any{"query": "sales"})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
 	}
-	if got := runs.Load(); got != 0 || emitted {
-		t.Errorf("handler runs = %d, emitted = %v, want 0 runs and nothing emitted", got, emitted)
+	if diff := cmp.Diff(map[string]any{"result": "ok"}, got); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+	if got := runs.Load(); got != 1 || !emitted {
+		t.Errorf("handler runs = %d, emitted = %v, want 1 run and the emit accepted", got, emitted)
+	}
+}
+
+// Fails if a call with no workflow node answers a second output, or changes
+// the error a handler returns.
+func TestRun_NoNodeContextErrors(t *testing.T) {
+	boom := errors.New("boom")
+	tests := []struct {
+		name     string
+		handler  generatortool.Func[queryArgs, any]
+		wantText string
+		wantIs   error
+	}{
+		{
+			name: "second output",
+			handler: func(_ agent.Context, _ queryArgs, emit func(*session.Event) error) (any, error) {
+				if err := emit(&session.Event{Output: "v1"}); err != nil {
+					return nil, err
+				}
+				return "v2", nil
+			},
+			wantText: "Output already set. A node can produce at most one output.",
+			wantIs:   workflow.ErrMultipleOutputs,
+		},
+		{
+			name: "handler error",
+			handler: func(agent.Context, queryArgs, func(*session.Event) error) (any, error) {
+				return nil, boom
+			},
+			wantText: "boom",
+			wantIs:   boom,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runner, ok := mustNew(t, functiontool.Config{Name: "analyze"}, tc.handler).(interface {
+				Run(ctx agent.Context, args any) (map[string]any, error)
+			})
+			if !ok {
+				t.Fatal("tool has no Run method")
+			}
+			ctx := agent.NewToolContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}), "call_1", nil, nil)
+
+			got, err := runner.Run(ctx, map[string]any{"query": "sales"})
+
+			if err == nil || err.Error() != tc.wantText || !errors.Is(err, tc.wantIs) {
+				t.Errorf("Run() error = %v, want %q matching %v", err, tc.wantText, tc.wantIs)
+			}
+			if got != nil {
+				t.Errorf("Run() = %v, want nil", got)
+			}
+		})
 	}
 }
