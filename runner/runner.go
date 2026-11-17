@@ -60,6 +60,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/credentialservice"
 	"google.golang.org/adk/v2/internal/abortevents"
 	"google.golang.org/adk/v2/internal/adkcontext"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
@@ -69,6 +70,7 @@ import (
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	"google.golang.org/adk/v2/internal/compactioninternal"
 	icontext "google.golang.org/adk/v2/internal/context"
+	icredentialservice "google.golang.org/adk/v2/internal/credentialservice"
 	"google.golang.org/adk/v2/internal/eventmetadata"
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
@@ -117,6 +119,19 @@ type Config struct {
 	ArtifactService artifact.Service
 	// optional
 	MemoryService memory.Service
+	// CredentialService stores the credentials that tools and callbacks of
+	// the runner's invocations save and load with [agent.SaveCredential] and
+	// [agent.LoadCredential], under the invocation's app name and user ID.
+	// Runners that share one service share its credentials, still kept apart
+	// by app name and user ID.
+	//
+	// Nil, the default, means the invocations have no credential service:
+	// those calls return the error "credential service is not initialized",
+	// whatever service the context passed to Run or RunLive carries.
+	// [NewInMemory] sets none either.
+	//
+	// optional
+	CredentialService credentialservice.Service
 	// optional
 	PluginConfig PluginConfig
 	// optional. When true, Run and RunLive create the session if it does not
@@ -416,6 +431,7 @@ func New(cfg Config) (*Runner, error) {
 		sessionService:    cfg.SessionService,
 		artifactService:   cfg.ArtifactService,
 		memoryService:     cfg.MemoryService,
+		credentialService: cfg.CredentialService,
 		parents:           parents,
 		pluginManager:     pluginManager,
 		autoCreateSession: cfg.AutoCreateSession,
@@ -512,6 +528,8 @@ type Runner struct {
 	sessionService  session.Service
 	artifactService artifact.Service
 	memoryService   memory.Service
+	// credentialService is Config.CredentialService; nil means none.
+	credentialService credentialservice.Service
 
 	parents           parentmap.Map
 	pluginManager     *plugininternal.PluginManager
@@ -1238,6 +1256,8 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// context of the run, on both paths, reaches the run's abort state.
 		ctx = icontext.WithAbortState(ctx, icontext.NewAbortState(ctx, options.abort))
 		ctx = adkcontext.WithoutCallPlace(ctx)
+		// Before the node branch, so that node roots reach it too.
+		ctx = r.withCredentialService(ctx)
 
 		// The inbound message is always a user turn, whatever Role the caller
 		// set. Normalize it once here so that findAgentToRun, the invocation
@@ -1755,6 +1775,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		Resumable:      r.resumable,
 	})
 	ctx = r.withPluginManager(ctx)
+	ctx = r.withCredentialService(ctx)
 	// Deliberately no compactionctx here: context compaction does not apply to
 	// live runs. A live session streams over a persistent connection instead of
 	// re-sending assembled history each turn, so replacing older events with a
@@ -2714,4 +2735,13 @@ func (r *Runner) withPluginManager(ctx context.Context) context.Context {
 		return plugininternal.ToContext(ctx, inherited)
 	}
 	return plugininternal.ToContext(ctx, r.pluginManager)
+}
+
+// withCredentialService puts this runner's credential service in ctx, where
+// agent.LoadCredential and agent.SaveCredential look it up. A nil service is
+// put there too, so a service that ctx already carries, such as the one of a
+// run that started this runner from a tool, does not reach this runner's
+// invocations: adk-python's Runner(credential_service=None) has none.
+func (r *Runner) withCredentialService(ctx context.Context) context.Context {
+	return icredentialservice.WithService(ctx, r.credentialService)
 }

@@ -324,3 +324,24 @@ func (c Credential) MarshalJSON() ([]byte, error) {
 	type plain Credential
 	return encodeModel(plain(c), c.Extra)
 }
+
+// Clone returns a copy of c that a caller can change without changing c, or
+// nil when c is nil. Every struct, slice and map it reaches is copied,
+// HTTP.AdditionalHeaders included. Values in an Extra map are copied deeply
+// when they are JSON objects or arrays as encoding/json decodes them,
+// map[string]any and []any; any other value is shared with c. A nil map or
+// slice stays nil, so the copy equals c under [reflect.DeepEqual].
+//
+// Clone only reads c: it may run concurrently with other reads of c, but not
+// with a change to it.
+func (c *Credential) Clone() *Credential {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	out.HTTP = c.HTTP.clone()
+	out.OAuth2 = c.OAuth2.clone()
+	out.ServiceAccount = c.ServiceAccount.clone()
+	out.Extra = cloneExtra(c.Extra)
+	return &out
+}
