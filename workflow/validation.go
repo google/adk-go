@@ -135,8 +135,13 @@ func validateUniqueNames(edges []Edge) error {
 	return nil
 }
 
-// validateStartNodePresent checks that there is at least one edge starting from the start node.
+// validateStartNodePresent checks that there is at least one edge starting
+// from the start node. An empty edge set is valid: the workflow runs and
+// produces no output.
 func validateStartNodePresent(edges []Edge) error {
+	if len(edges) == 0 {
+		return nil
+	}
 	for _, edge := range edges {
 		if edge.From == Start {
 			return nil
@@ -451,12 +456,7 @@ func schemaIsString(s *jsonschema.Resolved) bool {
 	if schema.Type == "string" {
 		return true
 	}
-	for _, t := range schema.Types {
-		if t == "string" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(schema.Types, "string")
 }
 
 // validateStateSchemaConsistency checks that all nodes in the graph that reference state fields

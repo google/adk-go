@@ -16,10 +16,14 @@ package database
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -501,6 +505,269 @@ func TestDatabaseService_AppendEvent_PreservesInputEventTempState(t *testing.T) 
 	}
 	if storedEvent.Actions.StateDelta["sk"] != "v2" {
 		t.Errorf("expected non-temp key sk on stored event, got: %v", storedEvent.Actions.StateDelta)
+	}
+}
+
+func TestDatabaseService_AppendEvent_FailurePreservesSession(t *testing.T) {
+	for _, failure := range []string{"canceled", "insert", "commit", "stale", "deleted"} {
+		t.Run(failure, func(t *testing.T) {
+			s := emptyService(t)
+			start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return start })
+			created, err := s.Create(ctx, &session.CreateRequest{
+				AppName: "app", UserID: "user",
+				State: map[string]any{"key": "before", "app:key": "before", "user:key": "before"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sess := created.Session
+			accepted := &session.Event{ID: "accepted", Timestamp: start.Add(time.Second)}
+			if err := s.AppendEvent(ctx, sess, accepted); err != nil {
+				t.Fatal(err)
+			}
+			wantTime := sess.LastUpdateTime()
+			wantState := maps.Collect(sess.State().All())
+			// Temporary state remains local even on failure, matching adk-python.
+			wantState["temp:scratch"] = "local"
+			event := &session.Event{
+				ID: "rejected", Timestamp: start.Add(3 * time.Second),
+				Actions: session.EventActions{StateDelta: map[string]any{
+					"key": "after", "new": true, "app:key": "after", "user:key": "after", "temp:scratch": "local",
+				}},
+			}
+			read := func() session.Session {
+				t.Helper()
+				got, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: sess.ID()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return got.Session
+			}
+			var wantErr error
+			switch failure {
+			case "canceled":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+				wantErr = context.Canceled
+			case "insert":
+				wantErr = errors.New("injected append failure")
+				callback := s.db.Callback().Create()
+				if err := callback.Before("*").Register("test:fail_append", func(tx *gorm.DB) {
+					if tx.Statement.Table == "events" {
+						_ = tx.AddError(wantErr)
+					}
+				}); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = callback.Remove("test:fail_append") })
+			case "commit":
+				wantErr = errors.New("injected commit failure")
+				db, err := s.db.DB()
+				if err != nil {
+					t.Fatal(err)
+				}
+				pool := s.db.Statement.ConnPool
+				s.db.Statement.ConnPool = appendTestPool{DB: db, commit: func(*sql.Tx) error { return wantErr }}
+				t.Cleanup(func() { s.db.Statement.ConnPool = pool })
+			case "stale":
+				if err := s.AppendEvent(ctx, read(), &session.Event{ID: "newer", Timestamp: start.Add(2 * time.Second)}); err != nil {
+					t.Fatal(err)
+				}
+			case "deleted":
+				if err := s.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "user", SessionID: sess.ID()}); err != nil {
+					t.Fatal(err)
+				}
+				wantErr = session.ErrNotFound
+			}
+			var before session.Session
+			if failure != "deleted" {
+				before = read()
+			}
+			err = s.AppendEvent(ctx, sess, event)
+			if err == nil || (wantErr != nil && !errors.Is(err, wantErr)) {
+				t.Fatalf("AppendEvent did not preserve the failure: %v", err)
+			}
+			if sess.Events().Len() != 1 || sess.Events().At(0) != accepted {
+				t.Error("failed append changed local history")
+			}
+			if !cmp.Equal(wantState, maps.Collect(sess.State().All())) {
+				t.Error("failed append changed persistent local state or lost temporary state")
+			}
+			if !sess.LastUpdateTime().Equal(wantTime) {
+				t.Error("failed append changed the local update time")
+			}
+			if failure == "deleted" {
+				_, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: sess.ID()})
+				if !errors.Is(err, session.ErrNotFound) {
+					t.Fatalf("Get after failed append did not preserve deletion: %v", err)
+				}
+				return
+			}
+			after := read()
+			if after.Events().Len() != before.Events().Len() ||
+				!cmp.Equal(maps.Collect(before.State().All()), maps.Collect(after.State().All())) ||
+				!after.LastUpdateTime().Equal(before.LastUpdateTime()) {
+				t.Error("failed append changed the stored session")
+			}
+			if failure == "canceled" {
+				if err := s.AppendEvent(t.Context(), sess, event); err != nil {
+					t.Fatal(err)
+				}
+				stored := read()
+				state := maps.Collect(sess.State().All())
+				delete(state, "temp:scratch")
+				if sess.Events().Len() != 2 || stored.Events().Len() != 2 || sess.Events().At(1).ID != event.ID {
+					t.Error("retry left failed or duplicate events in local history")
+				}
+				if !cmp.Equal(state, maps.Collect(stored.State().All())) || !sess.LastUpdateTime().Equal(stored.LastUpdateTime()) {
+					t.Error("local session differs from storage after a successful retry")
+				}
+			}
+		})
+	}
+}
+
+// appendTestPool lets tests fail or pause Commit while executing real SQL.
+type appendTestPool struct {
+	*sql.DB
+	commit func(*sql.Tx) error
+}
+
+func (p appendTestPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (gorm.ConnPool, error) {
+	tx, err := p.DB.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &appendTestTx{Tx: tx, commit: p.commit}, nil
+}
+
+type appendTestTx struct {
+	*sql.Tx
+	commit func(*sql.Tx) error
+}
+
+func (tx appendTestTx) Commit() error { return tx.commit(tx.Tx) }
+
+func TestDatabaseService_AppendEvent_CommitOrder(t *testing.T) {
+	s := emptyService(t)
+	created, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := created.Session
+	timestamp := sess.LastUpdateTime().Add(time.Second)
+	db, err := s.db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	committed := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	pool := s.db.Statement.ConnPool
+	var commits int
+	s.db.Statement.ConnPool = appendTestPool{DB: db, commit: func(tx *sql.Tx) error {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		commits++
+		if commits == 1 {
+			close(committed)
+			<-release
+		}
+		return nil
+	}}
+	t.Cleanup(func() { s.db.Statement.ConnPool = pool })
+	appendEvent := func(id string) error {
+		delta := map[string]any{"last": id}
+		if id == "first" {
+			delta["temp:scratch"] = "first"
+		}
+		return s.AppendEvent(t.Context(), sess, &session.Event{
+			ID: id, Timestamp: timestamp,
+			Actions: session.EventActions{StateDelta: delta},
+		})
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- appendEvent("first") }()
+	select {
+	case <-committed:
+	case err := <-firstDone:
+		t.Fatalf("first append returned before Commit: %v", err)
+	}
+	if err := sess.State().Set("temp:scratch", "newer"); err != nil {
+		t.Fatal(err)
+	}
+	// A queued append must observe its deadline while the first Commit waits.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	defer cancel()
+	canceledDone := make(chan error, 1)
+	go func() {
+		canceledDone <- s.AppendEvent(ctx, sess, &session.Event{ID: "canceled", Timestamp: timestamp})
+	}()
+	<-ctx.Done()
+	select {
+	case err := <-canceledDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("queued append did not return its deadline error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		unblock()
+		if err := <-canceledDone; !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("queued append returned an unexpected error: %v", err)
+		}
+		if err := <-firstDone; err != nil {
+			t.Error(err)
+		}
+		t.Fatal("queued append waited for another append after its deadline")
+	}
+	// The first event is committed, but its local update is still pending.
+	// Another append must wait so it cannot publish ahead of the first.
+	secondStarted := make(chan struct{})
+	secondDone := make(chan struct{})
+	var secondErr error
+	go func() {
+		close(secondStarted)
+		secondErr = appendEvent("second")
+		close(secondDone)
+	}()
+	<-secondStarted
+	select {
+	case <-secondDone:
+		t.Error("second append finished before the first local update")
+	case <-time.After(100 * time.Millisecond):
+	}
+	unblock()
+	// Read concurrently with publication to exercise timestamp synchronization.
+	for firstDone != nil || secondDone != nil {
+		select {
+		case err := <-firstDone:
+			firstDone = nil
+			if err != nil {
+				t.Error(err)
+			}
+		case <-secondDone:
+			secondDone = nil
+			if secondErr != nil {
+				t.Error(secondErr)
+			}
+		default:
+			sess.LastUpdateTime()
+		}
+	}
+	if sess.Events().Len() != 2 || sess.Events().At(0).ID != "first" || sess.Events().At(1).ID != "second" {
+		t.Error("local history does not follow database commit order")
+	}
+	last, err := sess.State().Get("last")
+	if err != nil || last != "second" {
+		t.Error("local state does not follow database commit order")
+	}
+	if value, err := sess.State().Get("temp:scratch"); err != nil || value != "newer" {
+		t.Error("committing an event reapplied its temporary state")
 	}
 }
 

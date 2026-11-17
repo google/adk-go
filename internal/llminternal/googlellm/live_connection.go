@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"reflect"
 	"strings"
 
 	"google.golang.org/genai"
@@ -70,7 +71,11 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 			if IsInternalLiveArtifactPart(part) {
 				continue
 			}
-			filteredParts = append(filteredParts, part)
+			sendPart, ok := withoutThoughtSignature(part)
+			if !ok {
+				continue
+			}
+			filteredParts = append(filteredParts, sendPart)
 		}
 		if len(filteredParts) > 0 {
 			filteredHistory = append(filteredHistory, &genai.Content{
@@ -94,6 +99,40 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 	return nil
 }
 
+// withoutThoughtSignature returns part without its thought signature, and
+// false when nothing is left to send once the signature is gone.
+//
+// A thought signature is an opaque token that only the model which produced
+// it can read back. History seeded from a text session carries the text
+// model's signatures, and the Live API closes the connection with 1007
+// ("PassbackContext should be decrypted before reaching here") when it is
+// sent one. The part is copied so the session event keeps its signature for
+// later text turns.
+func withoutThoughtSignature(part *genai.Part) (*genai.Part, bool) {
+	if len(part.ThoughtSignature) == 0 {
+		return part, true
+	}
+	stripped := *part
+	stripped.ThoughtSignature = nil
+	// A signature can arrive on a part of its own, possibly marked as a
+	// thought; without the signature such a part says nothing. Fields that
+	// only describe other content do not keep the part alive either:
+	// PartMetadata is the caller's bookkeeping (an empty map is not zero to
+	// reflect, yet it encodes to nothing), and the media and speech settings
+	// apply to text or media that the part does not carry.
+	rest := stripped
+	rest.Thought = false
+	rest.PartMetadata = nil
+	rest.VideoMetadata = nil
+	rest.MediaResolution = nil
+	rest.MediaProcessing = ""
+	rest.SpeechMetadata = nil
+	if reflect.ValueOf(rest).IsZero() {
+		return nil, false
+	}
+	return &stripped, true
+}
+
 // SendContent sends unary content or function responses to the model.
 func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content) error {
 	if content == nil || len(content.Parts) == 0 {
@@ -115,7 +154,7 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 		}
 		log.Printf("sending tool response\n") //nolint:forbidigo // pre-slog call site
 	} else {
-		if isGemini3xLive(c.modelName) && len(content.Parts) == 1 && content.Parts[0].Text != "" {
+		if IsGemini3xLive(c.modelName) && len(content.Parts) == 1 && content.Parts[0].Text != "" {
 			log.Printf("Attempting to send text via SendRealtimeInput\n") //nolint:forbidigo // pre-slog call site
 			err := c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 				Text: content.Parts[0].Text,
@@ -126,10 +165,9 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 			return nil
 		}
 
-		turnComplete := true
 		err := c.sdkSession.SendClientContent(genai.LiveClientContentInput{
 			Turns:        []*genai.Content{content},
-			TurnComplete: &turnComplete,
+			TurnComplete: new(true),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to send content: %w", err)
@@ -156,7 +194,7 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 			}
 		}
 
-		if isGemini3xLive(c.modelName) || isGemini35LiveTranslate(c.modelName) {
+		if IsGemini3xLive(c.modelName) || isGemini35LiveTranslate(c.modelName) {
 			if strings.HasPrefix(v.MIMEType, "image/") {
 				return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 					Video: v,

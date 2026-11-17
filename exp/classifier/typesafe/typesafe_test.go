@@ -257,15 +257,13 @@ func TestSendsEveryQuestionTypeInOneRequest(t *testing.T) {
 		t.Errorf("request body mismatch (-want +got):\n%s", diff)
 	}
 
-	confRoute := 0.8
-	confScore := 0.92
 	wantResp := &classifier.Response{
 		ModelVersion: "jev-1.13.0",
 		Answers: map[string]classifier.Answer{
 			"route": classifier.ChoiceAnswer{
 				Choice:        "billing",
 				Probabilities: map[string]float64{"billing": 0.9, "technical": 0.1},
-				Confidence:    &confRoute,
+				Confidence:    new(0.8),
 			},
 			"urgent": classifier.BinaryAnswer{
 				Probability: 0.95,
@@ -273,7 +271,7 @@ func TestSendsEveryQuestionTypeInOneRequest(t *testing.T) {
 			"frustration": classifier.ScoreAnswer{
 				Score:         1.05,
 				Probabilities: map[int]float64{0: 0.0, 1: 0.95, 2: 0.05},
-				Confidence:    &confScore,
+				Confidence:    new(0.92),
 			},
 		},
 	}
@@ -1091,8 +1089,6 @@ func TestRetriesAndFailureClassification(t *testing.T) {
 
 func TestProbabilityClampingAndResponseValidation(t *testing.T) {
 	t.Run("clamps_rounding_drift_within_tolerance", func(t *testing.T) {
-		confZero := 0.0
-		confOne := 1.0
 		cases := []struct {
 			name string
 			q    classifier.Question
@@ -1103,7 +1099,7 @@ func TestProbabilityClampingAndResponseValidation(t *testing.T) {
 				name: "binary",
 				q:    urgentQuestion,
 				raw:  map[string]any{"type": "noul", "noul": 1.0000001, "confidence": -1e-9},
-				want: classifier.BinaryAnswer{Probability: 1.0, Confidence: &confZero},
+				want: classifier.BinaryAnswer{Probability: 1.0, Confidence: new(0.0)},
 			},
 			{
 				name: "choice",
@@ -1117,7 +1113,7 @@ func TestProbabilityClampingAndResponseValidation(t *testing.T) {
 				want: classifier.ChoiceAnswer{
 					Choice:        "billing",
 					Probabilities: map[string]float64{"billing": 1.0, "technical": 0.0},
-					Confidence:    &confOne,
+					Confidence:    new(1.0),
 				},
 			},
 			{

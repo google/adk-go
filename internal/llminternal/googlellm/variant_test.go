@@ -116,9 +116,9 @@ func TestIsGemini3xLive(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		got := isGemini3xLive(tc.model)
+		got := IsGemini3xLive(tc.model)
 		if got != tc.want {
-			t.Errorf("isGemini3xLive(%q) = %v, want %v", tc.model, got, tc.want)
+			t.Errorf("IsGemini3xLive(%q) = %v, want %v", tc.model, got, tc.want)
 		}
 	}
 }

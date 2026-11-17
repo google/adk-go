@@ -364,12 +364,10 @@ func optionKeys(question Question) []string {
 func probabilitySchema(keys []string) *genai.Schema {
 	props := make(map[string]*genai.Schema, len(keys))
 	for _, k := range keys {
-		minVal := 0.0
-		maxVal := 1.0
 		props[k] = &genai.Schema{
 			Type:    genai.TypeNumber,
-			Minimum: &minVal,
-			Maximum: &maxVal,
+			Minimum: new(0.0),
+			Maximum: new(1.0),
 		}
 	}
 	return &genai.Schema{

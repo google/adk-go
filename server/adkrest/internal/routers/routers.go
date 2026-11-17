@@ -17,6 +17,7 @@ package routers
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/gorilla/mux"
@@ -114,15 +115,11 @@ func SetupSubRouters(router *mux.Router, authenticator authn.Authenticator, subr
 // caches all see 405. Doing it here rather than in each Routes() literal means
 // a new route cannot forget.
 func withHead(methods []string) []string {
-	for _, m := range methods {
-		if m == http.MethodHead {
-			return methods
-		}
+	if slices.Contains(methods, http.MethodHead) {
+		return methods
 	}
-	for _, m := range methods {
-		if m == http.MethodGet {
-			return append(append([]string{}, methods...), http.MethodHead)
-		}
+	if slices.Contains(methods, http.MethodGet) {
+		return append(append([]string{}, methods...), http.MethodHead)
 	}
 	return methods
 }
