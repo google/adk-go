@@ -3539,6 +3539,91 @@ func TestResponseMessageSummaryLengthCap(t *testing.T) {
 	})
 }
 
+// The language of an executable code part and the outcome of a code execution
+// result part are plain strings, so a summary redacts and bounds them like a
+// function name instead of printing them as they came.
+func TestMessageSummaryCodeLabel(t *testing.T) {
+	atCap := strings.Repeat("n", 256)
+	overCap := strings.Repeat("n", 257)
+	wideAtCap := strings.Repeat("ñ", 256)
+	const secret = "SYNTHETIC_SECRET_0123456789"
+	credential := "py api_key=" + secret
+	redacted := "py api_key=" + redactedValue
+
+	kinds := []struct {
+		name   string
+		prefix string
+		part   func(label string) *genai.Part
+	}{
+		{
+			name:   "language",
+			prefix: "Executable code (",
+			part: func(label string) *genai.Part {
+				return &genai.Part{ExecutableCode: &genai.ExecutableCode{Language: genai.Language(label), Code: "x"}}
+			},
+		},
+		{
+			name:   "outcome",
+			prefix: "Code execution result (",
+			part: func(label string) *genai.Part {
+				return &genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: genai.Outcome(label), Output: "x"}}
+			},
+		},
+	}
+	builders := []struct {
+		name   string
+		render func(*genai.Content, int, bool) (string, bool)
+	}{
+		{name: "response summary", render: formatResponseContent},
+		{name: "text summary", render: contentSummary},
+	}
+	tests := []struct {
+		name      string
+		label     string
+		maxLength int
+		noRedact  bool
+		want      string
+		wantTrunc bool
+	}{
+		{name: "documented value is kept", label: "PYTHON", maxLength: 100, want: "PYTHON"},
+		{name: "empty is unknown", label: "", maxLength: 100, want: "unknown"},
+		{name: "credential is redacted", label: credential, maxLength: 100, want: redacted, wantTrunc: true},
+		{name: "credential is redacted under an unlimited maxLength", label: credential, maxLength: -1, want: redacted, wantTrunc: true},
+		{name: "credential is kept when redaction is off", label: credential, maxLength: 100, noRedact: true, want: credential},
+		{name: "at the cap is kept", label: atCap, maxLength: 100000, want: atCap},
+		{name: "over the cap is cut", label: overCap, maxLength: 100000, want: atCap + truncationSuffix, wantTrunc: true},
+		{name: "over the cap is cut when redaction is off", label: overCap, maxLength: 100000, noRedact: true, want: atCap + truncationSuffix, wantTrunc: true},
+		{name: "multi-byte is cut by runes", label: wideAtCap + "ñ", maxLength: 100000, want: wideAtCap + truncationSuffix, wantTrunc: true},
+		{name: "over the cap is kept whole under an unlimited maxLength", label: overCap, maxLength: -1, want: overCap},
+	}
+	for _, b := range builders {
+		for _, k := range kinds {
+			for _, tt := range tests {
+				t.Run(b.name+"/"+k.name+"/"+tt.name, func(t *testing.T) {
+					got, truncated := b.render(&genai.Content{Parts: []*genai.Part{k.part(tt.label)}}, tt.maxLength, !tt.noRedact)
+					if want := k.prefix + tt.want + "): x"; got != want || truncated != tt.wantTrunc {
+						t.Errorf("got (%q, %v), want (%q, %v)", got, truncated, want, tt.wantTrunc)
+					}
+				})
+			}
+		}
+	}
+
+	t.Run("LLM_RESPONSE row redacts a credential in both labels", func(t *testing.T) {
+		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.MaxContentLen = 100000 })
+		content := &genai.Content{Role: "model", Parts: []*genai.Part{kinds[0].part(credential), kinds[1].part(credential)}}
+		if _, err := p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: content}, nil); err != nil {
+			t.Fatalf("AfterModelCallback error: %v", err)
+		}
+		p.AfterRunCallback()(mCtx)
+		row := onlyRowOfType(t, collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventLLMResponse)
+		want := "Executable code (" + redacted + "): x | Code execution result (" + redacted + "): x"
+		if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != want {
+			t.Errorf("LLM_RESPONSE content.response = %q, want %q", got, want)
+		}
+	})
+}
+
 func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
 	atCap := strings.Repeat("n", 256)
 	overCap := strings.Repeat("n", 257)
