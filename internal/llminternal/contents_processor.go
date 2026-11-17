@@ -106,6 +106,10 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		if !keepsClientFunctionCallIDs(processorModel(ctx, f)) {
 			removeClientFunctionCallIDs(contents)
 		}
+		if contents, err = insertModelInputContext(ctx, contents); err != nil {
+			yield(nil, err)
+			return
+		}
 		req.Contents = append(req.Contents, contents...)
 		// If the conversation history concludes on a model turn, inject a synthetic user
 		// continuation turn so the model keeps producing output rather than returning an
@@ -324,6 +328,13 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 		}
 	}
 	return contents, nil
+}
+
+// isEmptyPart reports whether p carries nothing: it is nil or has every field
+// unset. genai sends such a part as {}, which the API rejects, so it is left
+// out of a request.
+func isEmptyPart(p *genai.Part) bool {
+	return p == nil || reflect.ValueOf(*p).IsZero()
 }
 
 func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
