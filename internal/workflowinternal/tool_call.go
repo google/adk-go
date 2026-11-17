@@ -40,11 +40,11 @@ type ToolBody func(ctx agent.Context, emit func(*session.Event) error) (result a
 
 // RunToolCall runs body as a child node of toolCtx's node named after toolName,
 // on the tool branch and under the call run id of toolCtx.FunctionCallID(), and
-// returns its output.
+// returns its output. When toolCtx has no sub-scheduler, body runs outside any
+// node instead (see below).
 //
-// toolCtx must be a tool context made by agent.NewToolContext inside a
-// dynamic node activation (it carries the sub-scheduler), and body must be
-// non-nil. The child node's name is toolName with every character outside
+// toolCtx must be a tool context made by agent.NewToolContext, and body must
+// be non-nil. The child node's name is toolName with every character outside
 // [a-zA-Z0-9_] replaced by '_' (and a leading '_' when that is empty or starts
 // with a digit); its events carry that name as their author. Its branch is
 // "<toolCtx.Branch()>.<toolName>@<call id>", or "<toolName>@<call id>" when
@@ -54,12 +54,21 @@ type ToolBody func(ctx agent.Context, emit func(*session.Event) error) (result a
 // its response reaching the model, runs under a run id of its own, so its body
 // runs again.
 //
+// A toolCtx with no sub-scheduler (the tool runs in a workflow's agent node,
+// in an agent run as single_turn, or in an agent off the runner's node path)
+// has no node to run body under and no way to send an event to the user. Body
+// then runs on every call, on the tool branch, with no answers to resume
+// with, and emit keeps of each non-partial event what the function response
+// event can carry: its Output becomes the call's output, and its state and
+// artifact deltas move onto toolCtx.Actions(). A partial event changes
+// nothing, and the rest of an event is dropped. Emitting a request for input
+// (an event with RequestedInput) moves its deltas and then returns an error
+// wrapping workflow.ErrInvalidRunNodeContext, since nothing could answer it.
+//
 // On success RunToolCall returns the output (nil for none) after the child's
 // events were emitted in order. The SkipSummarization flag the body sets on
 // its context is copied to toolCtx.Actions() on every return, including a
 // pause and a failure. Errors:
-//   - no sub-scheduler on toolCtx: an error wrapping
-//     workflow.ErrInvalidRunNodeContext; body does not run.
 //   - a second output: a *toolinternal.FailRunError whose text is
 //     "Output already set. A node can produce at most one output." and which
 //     matches workflow.ErrMultipleOutputs.
@@ -73,16 +82,12 @@ type ToolBody func(ctx agent.Context, emit func(*session.Event) error) (result a
 //
 // RunToolCall is safe for concurrent use; two calls share only the session.
 func RunToolCall(toolCtx agent.Context, toolName string, body ToolBody) (any, error) {
-	if toolCtx.SubScheduler() == nil {
-		return nil, fmt.Errorf("generator tool %q: %w", toolName, workflow.ErrInvalidRunNodeContext)
-	}
 	nodeName := toolNodeName(toolName)
 	callID := toolCtx.FunctionCallID()
 	branch := toolName + "@" + callID
 	if base := toolCtx.Branch(); base != "" {
 		branch = base + "." + branch
 	}
-	runID := runIDFor(callID, callSlot(toolCtx, toolName, nodeName, callID))
 
 	call := &toolCall{
 		toolName: toolName,
@@ -90,19 +95,82 @@ func RunToolCall(toolCtx agent.Context, toolName string, body ToolBody) (any, er
 		callID:   callID,
 		actions:  &session.EventActions{StateDelta: map[string]any{}, ArtifactDelta: map[string]int64{}},
 	}
-	node := workflow.NewEmittingFunctionNode(nodeName,
-		func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
-			// The output goes out as an event of its own, so the node never
-			// emits a terminal event (which would turn a string into text).
-			return nil, call.run(ctx, emit, body)
-		},
-		workflow.NodeConfig{},
-	)
-	out, err := workflow.RunNode[any](toolCtx, node, nil, workflow.WithOverrideBranch(branch), workflow.WithRunID(runID))
+	var out any
+	var err error
+	if toolCtx.SubScheduler() == nil {
+		out, err = call.runStandalone(toolCtx, branch, body)
+	} else {
+		out, err = call.runAsNode(toolCtx, branch, body)
+	}
 	if call.actions.SkipSummarization {
 		toolCtx.Actions().SkipSummarization = true
 	}
 	return call.result(out, err)
+}
+
+// runAsNode runs body as a child node of toolCtx's node and returns what
+// workflow.RunNode returns.
+func (c *toolCall) runAsNode(toolCtx agent.Context, branch string, body ToolBody) (any, error) {
+	runID := runIDFor(c.callID, callSlot(toolCtx, c.toolName, c.nodeName, c.callID))
+	node := workflow.NewEmittingFunctionNode(c.nodeName,
+		func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+			// The output goes out as an event of its own, so the node never
+			// emits a terminal event (which would turn a string into text).
+			return nil, c.run(ctx, resumeAnswers(ctx), emit, body)
+		},
+		workflow.NodeConfig{},
+	)
+	return workflow.RunNode[any](toolCtx, node, nil, workflow.WithOverrideBranch(branch), workflow.WithRunID(runID))
+}
+
+// runStandalone runs body for a toolCtx with no sub-scheduler and returns the
+// call's output and the error of the run.
+//
+// It is adk-python's run of a node with no workflow scheduler installed
+// (workflow/_dynamic_node_scheduler.py:722-736 and :593-605): no replay, so
+// the body runs on every call, and nothing to pause.
+func (c *toolCall) runStandalone(toolCtx agent.Context, branch string, body ToolBody) (any, error) {
+	sink := &standaloneSink{toolName: c.toolName, actions: toolCtx.Actions()}
+	// WithDelta returns the unwrapped context, on which Session works.
+	nodeCtx := toolCtx.WithDelta(&agent.CommonContextDelta{
+		InvocationContextDelta: &agent.InvocationContextDelta{Branch: &branch},
+	})
+	err := c.run(nodeCtx, map[string]any{}, sink.deliver, body)
+	if errors.Is(err, workflow.ErrNodeInterrupted) {
+		// Nothing can pause here, so result reports the body's sentinel as
+		// the error of a pause that nothing could answer.
+		err = nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return sink.output, err
+}
+
+// standaloneSink is the emit target of a call run by runStandalone. Its
+// fields are guarded by the mu of the toolCall whose send calls deliver.
+type standaloneSink struct {
+	toolName string
+	// actions are the tool context's; the flow puts them on the function
+	// response event.
+	actions *session.EventActions
+	output  any
+}
+
+// deliver keeps of ev what the function response event can carry, as
+// RunToolCall's doc states.
+func (s *standaloneSink) deliver(ev *session.Event) error {
+	if ev.Partial {
+		return nil
+	}
+	maps.Copy(s.actions.StateDelta, ev.Actions.StateDelta)
+	maps.Copy(s.actions.ArtifactDelta, ev.Actions.ArtifactDelta)
+	if ev.RequestedInput != nil {
+		return fmt.Errorf("generator tool %q: cannot request input outside a workflow node: %w", s.toolName, workflow.ErrInvalidRunNodeContext)
+	}
+	if ev.Output != nil {
+		s.output = ev.Output
+	}
+	return nil
 }
 
 // toolCall is the state of one RunToolCall. mu guards every field below it.
@@ -123,21 +191,15 @@ type toolCall struct {
 	bodyErr   error
 }
 
-// run is the node's body: it runs body with the call's context and emits
-// the result as the call's output event.
-func (c *toolCall) run(nodeCtx agent.Context, emit func(*session.Event) error, body ToolBody) error {
+// run is the node's body: it runs body with the call's context, whose
+// resumed inputs are answers, and emits the result as the call's output event.
+func (c *toolCall) run(nodeCtx agent.Context, answers map[string]any, emit func(*session.Event) error, body ToolBody) error {
 	base, cancel := nodeCtx.WithAgentCancel()
 	defer cancel()
 	c.mu.Lock()
 	c.base, c.cancel, c.emit = base, cancel, emit
 	c.mu.Unlock()
 
-	answers := map[string]any{}
-	for id := range interruptIDs(base) {
-		if v, ok := base.ResumedInput(id); ok {
-			answers[id] = v
-		}
-	}
 	// WithDelta returns the unwrapped context, on which Session, Path and
 	// ResumedInput work, unlike on the tool context wrapper.
 	callCtx := agent.NewToolContext(base, c.callID, c.actions, nil).
@@ -247,6 +309,18 @@ func (c *toolCall) result(out any, err error) (any, error) {
 		return nil, fmt.Errorf("generator tool %q: %w", c.toolName, err)
 	}
 	return out, nil
+}
+
+// resumeAnswers returns the answers addressed to the node of ctx: the resumed
+// input of every interrupt id that interruptIDs returns for ctx.
+func resumeAnswers(ctx agent.Context) map[string]any {
+	answers := map[string]any{}
+	for id := range interruptIDs(ctx) {
+		if v, ok := ctx.ResumedInput(id); ok {
+			answers[id] = v
+		}
+	}
+	return answers
 }
 
 // interruptIDs returns every interrupt id raised in this invocation by the
