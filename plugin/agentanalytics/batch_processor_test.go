@@ -9294,6 +9294,31 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		if gotInvalid != "a   b" || !utf8.ValidString(gotInvalid) {
 			t.Fatalf("sanitizeErrorForLog(invalid UTF-8) = %q, want %q", gotInvalid, "a   b")
 		}
+		for _, tc := range []struct {
+			name string
+			in   string
+			want string
+		}{
+			{name: "Bearer glued by U+0085", in: "Bearer\u0085secret", want: "Bearer [REDACTED]"},
+			{name: "token delimiter followed by U+0085 and space", in: "token=\u0085 secret", want: "token=[REDACTED]"},
+			{name: "Bearer glued by U+2028", in: "Bearer\u2028secret", want: "Bearer [REDACTED]"},
+			{name: "Bearer glued by U+2029", in: "Bearer\u2029secret", want: "Bearer [REDACTED]"},
+			{name: "Bearer glued by invalid UTF-8 0xff", in: "Bearer\xffsecret", want: "Bearer [REDACTED]"},
+			{name: "Bearer glued by invalid UTF-8 0x85", in: "Bearer\x85secret", want: "Bearer [REDACTED]"},
+			{name: "token delimiter followed by invalid UTF-8 and space", in: "token=\xff secret", want: "token=[REDACTED]"},
+			{name: "Bearer space U+0085 space secret", in: "Bearer \u0085 secret", want: "Bearer [REDACTED]"},
+			{name: "token delimiter followed by U+0085 and tab", in: "token=\u0085\tsecret", want: "token=[REDACTED]"},
+			{name: "Bearer tab U+0085 space secret", in: "Bearer\t\u0085 secret", want: "Bearer [REDACTED]"},
+			{name: "token delimiter followed by U+0085 and quoted secret", in: "token=\u0085\"my secret\"", want: "token=\"[REDACTED]\""},
+			{name: "token delimiter followed by U+0085 and escaped-quoted secret", in: `token=` + "\u0085" + `\"my secret\"`, want: `token=\"[REDACTED]\"`},
+			{name: "token delimiter followed by U+0085 and JSON object", in: "token=\u0085{\"nested\":\"secret\"}", want: "token=[REDACTED]"},
+			{name: "leading U+0085 before JSON object", in: "\u0085{\"token\":\"secret\"}", want: "{\"token\":\"[REDACTED]\"}"},
+			{name: "control rune embedded inside secret value", in: "password=sec\x07ret", want: "password=[REDACTED]"},
+		} {
+			if got := sanitizeErrorForLog(tc.in); got != tc.want || !utf8.ValidString(got) {
+				t.Errorf("sanitizeErrorForLog(%s: %q) = %q, want %q", tc.name, tc.in, got, tc.want)
+			}
+		}
 	})
 
 	t.Run("later resend or chunk failure includes prior RowErrors count and preserves Unwrap", func(t *testing.T) {
@@ -9525,9 +9550,62 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
-		wantLog := "WARNING: BigQuery RowErrors contained 2 nil entry(ies) with no valid row error (batch_size=2)"
-		if logged := logger.String(); logged != wantLog {
-			t.Errorf("logger output mismatch:\ngot:  %q\nwant: %q", logged, wantLog)
+		if logged := logger.String(); logged != "" {
+			t.Errorf("logger output = %q, want empty", logged)
+		}
+	})
+
+	t.Run("contradictory AppendResult and RowErrors does not isolate or replay survivors", func(t *testing.T) {
+		contradictoryResp := &storagepb.AppendRowsResponse{
+			Response: &storagepb.AppendRowsResponse_AppendResult_{
+				AppendResult: &storagepb.AppendRowsResponse_AppendResult{
+					Offset: wrapperspb.Int64(0),
+				},
+			},
+			RowErrors: []*storagepb.RowError{{
+				Index:   0,
+				Message: "bad row 0",
+			}},
+		}
+
+		srvChunk, sentChunk := recordingServer(t, func(_ []string) *storagepb.AppendRowsResponse {
+			return contradictoryResp
+		})
+		chunkLogger := &recordingLogger{}
+		bpChunk := newProcessor(t, srvChunk, false, chunkLogger)
+		unconfirmed, settled, rowErrDrops, err := bpChunk.appendChunkRows(context.Background(), eventRows("bad-0", "good-1"), nil)
+		if err == nil || !strings.Contains(err.Error(), "contradictory response with AppendResult and 1 RowErrors") {
+			t.Fatalf("appendChunkRows() error = %v, want contradictory response error", err)
+		}
+		if len(unconfirmed) != 2 || len(settled) != 0 || rowErrDrops != 0 {
+			t.Errorf("appendChunkRows() = (unconfirmed=%d, settled=%d, rowErrDrops=%d), want (2, 0, 0)", len(unconfirmed), len(settled), rowErrDrops)
+		}
+		if diff := cmp.Diff([][]string{{"bad-0", "good-1"}}, sentChunk()); diff != "" {
+			t.Errorf("appendChunkRows() sent batches mismatch (-want +got):\n%s", diff)
+		}
+
+		srvBatch, sentBatch := recordingServer(t, func(_ []string) *storagepb.AppendRowsResponse {
+			return contradictoryResp
+		})
+		batchLogger := &recordingLogger{}
+		bpBatch := newProcessor(t, srvBatch, false, batchLogger)
+		err = bpBatch.writeBatch(context.Background(), eventRows("bad-0", "good-1"))
+		if err == nil || !strings.Contains(err.Error(), "contradictory response with AppendResult and 1 RowErrors") {
+			t.Fatalf("writeBatch() error = %v, want contradictory response error", err)
+		}
+		if diff := cmp.Diff([][]string{{"bad-0", "good-1"}}, sentBatch()); diff != "" {
+			t.Errorf("writeBatch() sent batches mismatch (-want +got):\n%s", diff)
+		}
+		wantBatchDrops := DropStats{
+			AppendFailureDrops: 2,
+			TotalDrops:         2,
+		}
+		if diff := cmp.Diff(wantBatchDrops, bpBatch.DropStats()); diff != "" {
+			t.Errorf("writeBatch() DropStats() mismatch (-want +got):\n%s", diff)
+		}
+		wantWarn := "WARNING: BigQuery response carried both AppendResult (has_offset=true) and 1 RowErrors (batch_size=2); treating rows as unconfirmed without replay"
+		if gotLog := batchLogger.String(); gotLog != wantWarn {
+			t.Errorf("logger output = %q, want %q", gotLog, wantWarn)
 		}
 	})
 
@@ -9611,6 +9689,20 @@ func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.
 					Error: &statuspb.Status{
 						Code:    int32(codes.AlreadyExists),
 						Message: "already exists",
+					},
+				},
+				RowErrors: []*storagepb.RowError{{
+					Index:   0,
+					Message: "row 0 invalid",
+				}},
+			},
+		},
+		{
+			name: "AppendResult with Offset and RowErrors after ambiguous send fails without advancing offset or replaying survivors",
+			attempt2Resp: &storagepb.AppendRowsResponse{
+				Response: &storagepb.AppendRowsResponse_AppendResult_{
+					AppendResult: &storagepb.AppendRowsResponse_AppendResult{
+						Offset: wrapperspb.Int64(0),
 					},
 				},
 				RowErrors: []*storagepb.RowError{{
@@ -9825,6 +9917,128 @@ func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.
 		gotCounts := slices.Clone(appendRowCounts)
 		mu.Unlock()
 		if diff := cmp.Diff([]int64{2, 2, 1, 1}, gotCounts); diff != "" {
+			t.Errorf("AppendRows row counts mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("contradictory AppendResult with Offset and RowErrors marks offsetDesynced without survivor replay and rotates on next batch", func(t *testing.T) {
+		ctx := context.Background()
+		var mu sync.Mutex
+		var appendRowCounts []int64
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				mu.Lock()
+				appendRowCounts = append(appendRowCounts, req.GetArrowRows().GetRows().GetRowCount())
+				mu.Unlock()
+				if attempt == 1 {
+					return &storagepb.AppendRowsResponse{
+						Response: &storagepb.AppendRowsResponse_AppendResult_{
+							AppendResult: &storagepb.AppendRowsResponse_AppendResult{
+								Offset: wrapperspb.Int64(0),
+							},
+						},
+						RowErrors: []*storagepb.RowError{{
+							Index:   0,
+							Message: "row 0 invalid",
+						}},
+					}, nil
+				}
+				return &storagepb.AppendRowsResponse{
+					Response: &storagepb.AppendRowsResponse_AppendResult_{
+						AppendResult: &storagepb.AppendRowsResponse_AppendResult{
+							Offset: wrapperspb.Int64(req.GetOffset().GetValue()),
+						},
+					},
+				}, nil
+			},
+		}
+
+		writeClient := newScriptedWriteClient(t, srv)
+		logger := &recordingLogger{}
+		config := DefaultConfig()
+		config.ProjectID = "test-proj"
+		config.DatasetID = "test-ds"
+		config.TableName = "agent_events"
+		config.ExactlyOnceDelivery = true
+		config.Logger = logger
+		config.RetryConfig = RetryConfig{
+			MaxRetries:   1,
+			InitialDelay: time.Millisecond,
+			MaxDelay:     5 * time.Millisecond,
+			Multiplier:   1.0,
+		}
+
+		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		defer bp.Close()
+
+		batchA := []map[string]any{
+			{"event_type": "LLM_REQUEST"},
+			{"event_type": "LLM_RESPONSE"},
+		}
+		err = bp.writeBatch(ctx, batchA)
+		if err == nil || !strings.Contains(err.Error(), "contradictory response with AppendResult and 1 RowErrors") {
+			t.Fatalf("writeBatch(Batch A) error = %v, want contradictory response error", err)
+		}
+
+		wantDropsAfterA := DropStats{
+			AppendFailureDrops: 2,
+			TotalDrops:         2,
+		}
+		if diff := cmp.Diff(wantDropsAfterA, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() after Batch A mismatch (-want +got):\n%s", diff)
+		}
+
+		bp.streamWriter.mu.Lock()
+		desynced := bp.streamWriter.offsetDesynced
+		bp.streamWriter.mu.Unlock()
+		if !desynced {
+			t.Error("offsetDesynced = false after contradictory AppendResult+RowErrors response, want true")
+		}
+		if gotOffset := bp.streamWriter.streamOffset.Load(); gotOffset != 0 {
+			t.Errorf("streamOffset after contradictory response = %d, want 0", gotOffset)
+		}
+		wantWarn := "WARNING: BigQuery response carried both AppendResult (has_offset=true) and 1 RowErrors (batch_size=2); treating rows as unconfirmed without replay"
+		if gotLog := logger.String(); gotLog != wantWarn {
+			t.Errorf("logger output = %q, want %q", gotLog, wantWarn)
+		}
+
+		if err := bp.writeBatch(ctx, []map[string]any{{"event_type": "TOOL_STARTING"}}); err != nil {
+			t.Fatalf("writeBatch(Batch B) error = %v, want nil", err)
+		}
+
+		bp.streamWriter.mu.Lock()
+		desyncedAfter := bp.streamWriter.offsetDesynced
+		bp.streamWriter.mu.Unlock()
+		if desyncedAfter {
+			t.Error("offsetDesynced = true after rotating on Batch B, want false")
+		}
+		if gotOffset := bp.streamWriter.streamOffset.Load(); gotOffset != 1 {
+			t.Errorf("streamOffset after Batch B = %d, want 1", gotOffset)
+		}
+		if diff := cmp.Diff(wantDropsAfterA, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() after Batch B mismatch (-want +got):\n%s", diff)
+		}
+
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		wantStreams := []string{
+			"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+			"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-2",
+		}
+		if diff := cmp.Diff(wantStreams, srv.appendStreamNames); diff != "" {
+			t.Errorf("AppendRows stream names mismatch (-want +got):\n%s", diff)
+		}
+		wantOffsets := []int64{0, 0}
+		if diff := cmp.Diff(wantOffsets, srv.appendOffsets); diff != "" {
+			t.Errorf("AppendRows offsets mismatch (-want +got):\n%s", diff)
+		}
+		mu.Lock()
+		gotCounts := slices.Clone(appendRowCounts)
+		mu.Unlock()
+		if diff := cmp.Diff([]int64{2, 1}, gotCounts); diff != "" {
 			t.Errorf("AppendRows row counts mismatch (-want +got):\n%s", diff)
 		}
 	})

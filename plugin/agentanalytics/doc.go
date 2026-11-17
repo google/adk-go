@@ -278,8 +278,9 @@
 //     FormatterFailureDrops, ShutdownDrops) plus TotalDrops via
 //     [BigQueryAgentAnalyticsPlugin.DropStats], and isolates in-range
 //     AppendRowsResponse.RowErrors rejections under RowErrorDrops (up to 8
-//     passes per chunk) when the response status is nil or InvalidArgument
-//     (and not after an ambiguous send under ExactlyOnceDelivery), whereas a
+//     passes per chunk) when AppendResult is unset and the response status is
+//     nil or InvalidArgument (and not after an ambiguous send under
+//     ExactlyOnceDelivery), whereas a
 //     batch-level non-InvalidArgument failure such as PermissionDenied or
 //     exhausted Unavailable still sends the batch to AppendFailureDrops, and
 //     adk-python's get_drop_stats() returns a dictionary of per-reason

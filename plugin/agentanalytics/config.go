@@ -59,9 +59,9 @@ type Logger interface {
 // status that a retry cannot fix, such as PermissionDenied or InvalidArgument,
 // ends the write of the batch without further retries when opening the stream
 // fails with it or BigQuery reports it in an AppendRowsResponse, except that
-// when an InvalidArgument (or nil) response carries valid in-range
-// AppendRowsResponse.RowErrors (and not after an ambiguous send under
-// ExactlyOnceDelivery), the rejected rows are dropped under
+// when a response without AppendResult carries a nil or InvalidArgument status
+// and valid in-range AppendRowsResponse.RowErrors (and not after an ambiguous
+// send under ExactlyOnceDelivery), the rejected rows are dropped under
 // DropStats.RowErrorDrops and the surviving rows are resent up to 8 passes
 // per chunk. When a non-retryable status instead ends the stream, the server
 // may not have read the request, so while retries remain the request is resent
@@ -229,10 +229,11 @@ type GCSContentOffloader interface {
 // DeadlineExceeded, or Aborted, whereas adk-python resends it only for
 // DeadlineExceeded, Internal, or Unavailable, and drops the batch for any
 // other code. When AppendRowsResponse.RowErrors reports valid in-range row
-// indices alongside a nil or InvalidArgument status (and not after an
-// ambiguous send under ExactlyOnceDelivery), Go isolates the rejected rows
-// under DropStats.RowErrorDrops and resends surviving rows up to 8 passes
-// per chunk, counting any remaining unconfirmed rows under AppendFailureDrops,
+// indices without AppendResult alongside a nil or InvalidArgument status (and
+// not after an ambiguous send under ExactlyOnceDelivery), Go isolates the
+// rejected rows under DropStats.RowErrorDrops and resends surviving rows up to
+// 8 passes per chunk, counting any remaining unconfirmed rows under
+// AppendFailureDrops,
 // whereas adk-python drops the entire batch when the response carries an error
 // status and treats a response with no status set as committed without
 // inspecting row_errors.

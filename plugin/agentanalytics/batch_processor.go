@@ -762,6 +762,16 @@ func isLogControlRune(r rune) bool {
 	return r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == '\u2028' || r == '\u2029'
 }
 
+// isLogControlOrInvalidStep decodes the leading byte or rune of non-empty s and
+// reports its byte width and whether replaceLogControlRunes maps it to a space.
+func isLogControlOrInvalidStep(s string) (size int, isControl bool) {
+	if s[0] < utf8.RuneSelf {
+		return 1, isLogControlRune(rune(s[0]))
+	}
+	r, n := utf8.DecodeRuneInString(s)
+	return n, (r == utf8.RuneError && n == 1) || isLogControlRune(r)
+}
+
 // replaceLogControlRunes replaces ASCII and C1 control characters
 // (U+0000-U+001F, U+007F-U+009F), Unicode line/paragraph separators
 // (U+2028, U+2029), and invalid UTF-8 bytes with spaces while preserving
@@ -771,19 +781,8 @@ func replaceLogControlRunes(s string) string {
 	b.Grow(len(s))
 	changed := false
 	for i := 0; i < len(s); {
-		if s[i] < utf8.RuneSelf {
-			c := s[i]
-			if isLogControlRune(rune(c)) {
-				b.WriteByte(' ')
-				changed = true
-			} else {
-				b.WriteByte(c)
-			}
-			i++
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		if (r == utf8.RuneError && size == 1) || isLogControlRune(r) {
+		size, isControl := isLogControlOrInvalidStep(s[i:])
+		if isControl {
 			b.WriteByte(' ')
 			changed = true
 		} else {
@@ -797,17 +796,104 @@ func replaceLogControlRunes(s string) string {
 	return b.String()
 }
 
-// sanitizeErrorForLog redacts sensitive tokens from msg and replaces ASCII and
-// C1 control characters (U+0000-U+001F, U+007F-U+009F), Unicode
-// line/paragraph separators (U+2028, U+2029), and invalid UTF-8 bytes with
-// spaces so backend error text cannot break single-line log framing.
+func isRegexSpaceControlByte(b byte) bool {
+	switch b {
+	case '\t', '\n', '\f', '\r':
+		return true
+	default:
+		return false
+	}
+}
+
+func isDelimiterOrSpaceByte(b byte) bool {
+	switch b {
+	case '=', ':', ' ':
+		return true
+	default:
+		return false
+	}
+}
+
+func isValueBoundaryByte(b byte) bool {
+	switch b {
+	case ' ', '"', '\'', '\\', '{', '[':
+		return true
+	default:
+		return false
+	}
+}
+
+// replaceDelimiterControlRuns normalizes runs of log-control runes or invalid
+// UTF-8 bytes that follow a key-value delimiter or ASCII whitespace and precede
+// ASCII whitespace, a quote, an escaped quote, or an opening JSON bracket.
+// Without this pre-pass, unquoted value patterns (such as textKeyValTokenRe on
+// "token=\u0085 secret" or "token=\u0085\tsecret") match the control run itself
+// as "[REDACTED]" and leave the real secret after the space unredacted.
+func replaceDelimiterControlRuns(s string) string {
+	var b strings.Builder
+	changed := false
+	for i := 0; i < len(s); {
+		size, isControl := isLogControlOrInvalidStep(s[i:])
+		if !isControl {
+			if changed {
+				b.WriteString(s[i : i+size])
+			}
+			i += size
+			continue
+		}
+		start := i
+		count := 0
+		hasNonRegexSpace := false
+		for i < len(s) {
+			sz, ctrl := isLogControlOrInvalidStep(s[i:])
+			if !ctrl {
+				break
+			}
+			if sz != 1 || !isRegexSpaceControlByte(s[i]) {
+				hasNonRegexSpace = true
+			}
+			i += sz
+			count++
+		}
+		afterDelim := start == 0 ||
+			isDelimiterOrSpaceByte(s[start-1]) ||
+			(hasNonRegexSpace && isRegexSpaceControlByte(s[start]))
+		beforeSpaceOrQuote := (i < len(s) && isValueBoundaryByte(s[i])) ||
+			(hasNonRegexSpace && isRegexSpaceControlByte(s[i-1]))
+		if afterDelim && beforeSpaceOrQuote {
+			if !changed {
+				b.Grow(len(s))
+				b.WriteString(s[:start])
+				changed = true
+			}
+			for range count {
+				b.WriteByte(' ')
+			}
+		} else if changed {
+			b.WriteString(s[start:i])
+		}
+	}
+	if !changed {
+		return s
+	}
+	return b.String()
+}
+
+// sanitizeErrorForLog redacts sensitive tokens from msg both before and after
+// replacing ASCII and C1 control characters (U+0000-U+001F, U+007F-U+009F),
+// Unicode line/paragraph separators (U+2028, U+2029), and invalid UTF-8 bytes
+// with spaces so neither control-embedded secrets nor secrets glued to keywords
+// by non-ASCII controls or invalid UTF-8 bytes can evade redaction or break
+// single-line log framing.
 func sanitizeErrorForLog(msg string) string {
-	return replaceLogControlRunes(redactErrorMessage(msg))
+	scrubbed := redactErrorMessage(replaceDelimiterControlRuns(msg))
+	return redactErrorMessage(replaceLogControlRunes(scrubbed))
 }
 
 // appendChunkRows writes batch with a shared rotation budget, isolating
-// row-level RowErrors failures and resending the remaining valid rows. If a
-// multi-row batch serializes to an AppendRowsRequest larger than
+// row-level RowErrors failures (when AppendResult is unset and Error is nil or
+// InvalidArgument) and resending the remaining valid rows. If a multi-row batch
+// serializes to an AppendRowsRequest larger than
 // b.serializedAppendRequestByteLimit(), appendChunkRows halves the batch and
 // appends each half in order; a singleton row is sent as-is so splitting
 // always terminates. Per-row RowErrors isolation is a deliberate divergence
@@ -870,7 +956,7 @@ func (b *BatchProcessor) appendChunkRows(writeCtx context.Context, batch []map[s
 		}
 
 		rowErrs := res.GetRowErrors()
-		if len(rowErrs) > 0 && (res.GetError() == nil || codes.Code(res.GetError().GetCode()) == codes.InvalidArgument) {
+		if len(rowErrs) > 0 && res.GetAppendResult() == nil && (res.GetError() == nil || codes.Code(res.GetError().GetCode()) == codes.InvalidArgument) {
 			badSet := make(map[int]struct{}, len(rowErrs))
 			var firstBad *storagepb.RowError
 			var outOfRangeCount int
@@ -894,10 +980,8 @@ func (b *BatchProcessor) appendChunkRows(writeCtx context.Context, batch []map[s
 			}
 			if len(badSet) == 0 {
 				if outOfRangeCount == 0 {
-					b.config.logf(
-						"WARNING: BigQuery RowErrors contained %d nil entry(ies) with no valid row error (batch_size=%d)",
-						len(rowErrs), len(cur),
-					)
+					// Wire-decoded protobuf repeated message fields never contain nil
+					// elements; this guards hand-built RowErrors slices in Go fakes.
 					return cur, settled, rowErrDrops, fmt.Errorf("batch append error from BigQuery: RowErrors contained only nil entries")
 				}
 				b.config.logf(
@@ -944,6 +1028,18 @@ func (b *BatchProcessor) appendChunkRows(writeCtx context.Context, batch []map[s
 				codes.Code(res.GetError().GetCode()), len(rowErrs), len(rawMsg),
 			)
 			return cur, settled, rowErrDrops, fmt.Errorf("batch append error from BigQuery: %s", sanitizeErrorForLog(rawMsg))
+		}
+
+		if len(rowErrs) > 0 {
+			hasOffset := res.GetAppendResult().GetOffset() != nil
+			b.config.logf(
+				"WARNING: BigQuery response carried both AppendResult (has_offset=%t) and %d RowErrors (batch_size=%d); treating rows as unconfirmed without replay",
+				hasOffset, len(rowErrs), len(cur),
+			)
+			return cur, settled, rowErrDrops, fmt.Errorf(
+				"batch append error from BigQuery: contradictory response with AppendResult and %d RowErrors",
+				len(rowErrs),
+			)
 		}
 
 		settled = append(settled, cur...)
@@ -1622,7 +1718,8 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			s.offsetDesynced = false
 		}
 		defer func() {
-			if hadAmbiguousSend && (err != nil || res.GetError() != nil || len(res.GetRowErrors()) > 0) {
+			contradictoryResult := res.GetAppendResult() != nil && len(res.GetRowErrors()) > 0
+			if contradictoryResult || (hadAmbiguousSend && (err != nil || res.GetError() != nil || len(res.GetRowErrors()) > 0)) {
 				s.offsetDesynced = true
 				if s.freshlyRotated {
 					s.rotateRetryAt = s.nowOrDefault().Add(s.rotateTimeoutOrDefault())
