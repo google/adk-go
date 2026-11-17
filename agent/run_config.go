@@ -210,19 +210,28 @@ type RunConfig struct {
 	// history a later invocation reads.
 	//
 	// A request gets them immediately before the last content of the request
-	// that equals the invocation's user content, so they stay before the user
-	// message on every later request of the invocation, after a tool call for
-	// example. When a run resumes an invocation through the node path (an LLM
-	// agent root, or a root set in runner.Config.Node), the user content is
-	// the stored message that started that invocation, not the run's message,
-	// so a posted-back function response gets the contents before that
-	// message.
-	// When no content equals the user content, the contents go first, before
-	// the history. That happens, for example, in a run that has no message and
-	// resumes no invocation, and when a function response with an "adk-" call
-	// ID is posted back to any other root for a model that does not keep such
-	// IDs (model.Capabilities.ClientFunctionCallIDs false): the history copy
-	// of that message has the ID removed, so it differs from the posted one.
+	// that equals the user content the LLM agent sees (the UserContent of its
+	// context), so they stay before the user message on every later request
+	// of the invocation, after a tool call for example. When no content
+	// equals it, the contents go first, before the history; a run that has no
+	// message and resumes no invocation is one such case. An LLM agent that
+	// runs as a workflow graph node sees its node input as its user content.
+	//
+	// When a run posts back a long-running tool's result, the root decides
+	// where they go:
+	//   - An LLM agent root: the user content is the stored message that
+	//     started the resumed invocation, so they go before that message.
+	//   - A root set in runner.Config.Node: the run resumes the LLM agent node
+	//     with the input it had when it made the call, and they go before
+	//     that input.
+	//   - A workflowagent root: the graph runs again from Start, which passes
+	//     a node, by default, the text of the posted message. That text is
+	//     empty, so an LLM agent node that Start feeds gets them first.
+	//   - Any other root, a sequential agent for example: the user content is
+	//     the posted message. Its copy in the history equals it only for a
+	//     model that keeps "adk-" call IDs
+	//     (model.Capabilities.ClientFunctionCallIDs), so they go just before
+	//     the response for such a model and first for any other.
 	//
 	// Every LLM agent of the run gets them, whatever its IncludeContents.
 	// Agents run through agenttool and live runs (RunLive) do not.

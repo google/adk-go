@@ -25,12 +25,14 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/workflow"
 )
 
 // approvalModel answers its first request with "hello", its second with a
@@ -90,7 +92,10 @@ func contentLabels(contents []*genai.Content) []string {
 // invocation that made the call, whose user content is the message that
 // started it ("start"). On a sequential agent root the user content is the
 // posted response, which the history matches only when the model keeps the
-// IDs.
+// IDs. On a graph root the user content is the input of the LLM agent node:
+// the stored "start" for a graph set in runner.Config.Node, and the posted
+// message's empty text for a workflowagent root, so the context goes first
+// there whatever the model does.
 func TestRun_ModelInputContext_PostedBackFunctionResponse(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -134,6 +139,42 @@ func TestRun_ModelInputContext_PostedBackFunctionResponse(t *testing.T) {
 				"model <call approve>", "user CTX", "user <response approve>",
 			},
 		},
+		{
+			name:     "workflowagent graph root, model strips IDs",
+			root:     "workflowagent",
+			keepsIDs: false,
+			wantLabel: []string{
+				"user CTX", "user earlier", "model hello", "user start",
+				"model <call approve>", "user <response approve>",
+			},
+		},
+		{
+			name:     "workflowagent graph root, model keeps IDs",
+			root:     "workflowagent",
+			keepsIDs: true,
+			wantLabel: []string{
+				"user CTX", "user earlier", "model hello", "user start",
+				"model <call approve>", "user <response approve>",
+			},
+		},
+		{
+			name:     "runner.Config.Node graph root, model strips IDs",
+			root:     "node graph",
+			keepsIDs: false,
+			wantLabel: []string{
+				"user earlier", "model hello", "user CTX", "user start",
+				"model <call approve>", "user <response approve>",
+			},
+		},
+		{
+			name:     "runner.Config.Node graph root, model keeps IDs",
+			root:     "node graph",
+			keepsIDs: true,
+			wantLabel: []string{
+				"user earlier", "model hello", "user CTX", "user start",
+				"model <call approve>", "user <response approve>",
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -147,18 +188,40 @@ func TestRun_ModelInputContext_PostedBackFunctionResponse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("functiontool.New: %v", err)
 			}
-			var root agent.Agent
-			root, err = llmagent.New(llmagent.Config{Name: "assistant", Model: llm, Tools: []tool.Tool{approve}})
+			// A graph node runs single_turn by default, which sees no history
+			// before its own input; chat mode shows the whole conversation.
+			var mode llmagent.Mode
+			if tt.root == "workflowagent" || tt.root == "node graph" {
+				mode = llmagent.ModeChat
+			}
+			assistant, err := llmagent.New(llmagent.Config{Name: "assistant", Model: llm, Tools: []tool.Tool{approve}, Mode: mode})
 			if err != nil {
 				t.Fatalf("llmagent.New: %v", err)
 			}
-			if tt.root == "sequential" {
-				root, err = sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "seq", SubAgents: []agent.Agent{root}}})
+			cfg := runner.Config{AppName: "app", Agent: assistant, SessionService: session.InMemoryService(), AutoCreateSession: true}
+			switch tt.root {
+			case "sequential":
+				cfg.Agent, err = sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "seq", SubAgents: []agent.Agent{assistant}}})
 				if err != nil {
 					t.Fatalf("sequentialagent.New: %v", err)
 				}
+			case "workflowagent", "node graph":
+				node, err := workflow.NewAgentNode(assistant, workflow.NodeConfig{})
+				if err != nil {
+					t.Fatalf("workflow.NewAgentNode: %v", err)
+				}
+				edges := workflow.Chain(workflow.Start, node)
+				if tt.root == "workflowagent" {
+					cfg.Agent, err = workflowagent.New(workflowagent.Config{Name: "wf", Edges: edges})
+				} else {
+					cfg.Agent = nil
+					cfg.Node, err = workflow.NewWorkflowNode("wf", edges)
+				}
+				if err != nil {
+					t.Fatalf("building the %s root: %v", tt.root, err)
+				}
 			}
-			r, err := runner.New(runner.Config{AppName: "app", Agent: root, SessionService: session.InMemoryService(), AutoCreateSession: true})
+			r, err := runner.New(cfg)
 			if err != nil {
 				t.Fatalf("runner.New: %v", err)
 			}
