@@ -553,6 +553,7 @@ func runNode(
 	input any,
 ) {
 	defer wg.Done()
+	ctx, writes := beginActivation(ctx, n)
 
 	span, ctx := startNodeSpan(ctx, n)
 	defer span.end()
@@ -567,6 +568,15 @@ func runNode(
 			completion.inventory = failureInventory{}
 		}
 		span.recordError(completion.err, nil)
+		// State writes the activation has not sent yet go out on one
+		// state-only event before the completion, with a plain send like
+		// the completion's: the consumer reads until every node completes.
+		if flushesPending(completion.err) {
+			if ev := writes.pending(ctx); ev != nil {
+				writes.forwardUp(ev)
+				out <- eventItem{nodeName: name, ev: ev}
+			}
+		}
 		out <- completion
 	}()
 
@@ -583,6 +593,14 @@ func runNode(
 			completion.inventory = inventoryRecorder.snapshot()
 			return
 		}
+		// An event whose state delta the schema refuses is not sent; its
+		// error fails the node unwrapped, so errors.As reaches it.
+		if aerr := writes.admit(ev); aerr != nil {
+			completion.err = aerr
+			completion.inventory = inventoryRecorder.snapshot()
+			return
+		}
+		writes.forwardUp(ev)
 		// Block on non-partial events until the consumer has persisted
 		// them (see eventItem.processed). Partial events are
 		// fire-and-forget.

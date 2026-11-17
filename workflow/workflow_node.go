@@ -148,6 +148,11 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 			// Forward with Output stripped (see the doc comment).
 			evCopy := *ev
 			evCopy.Output = nil
+			// The inner runner checked ev; the copy carries that over, so the
+			// enclosing runner does not check it against its own schema.
+			if f := forwardedFrom(ctx); f != nil && f.take(ev) {
+				f.mark(&evCopy)
+			}
 			if !yield(&evCopy, nil) {
 				consumerGone = true
 				cancel()

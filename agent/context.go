@@ -194,6 +194,13 @@ type Context interface {
 	// The returned State, like the call's context, belongs to one call at a
 	// time: Set writes the call's state delta, a plain map, so a call must not
 	// use it from several goroutines at once.
+	//
+	// On the context of a workflow node, Set checks each write against the
+	// workflow's state schema (workflow.WithStateSchema) before it writes
+	// anything, and returns the schema's error when the write is refused. The
+	// refused write is not made, so the node must not ignore the error. The
+	// same rule applies there: one node context's Set is not safe for use from
+	// several goroutines at once.
 	State() session.State
 
 	// Tool context section
@@ -205,6 +212,12 @@ type Context interface {
 	// Actions returns the EventActions for the current event. This can be
 	// used by the tool to modify the agent's state, transfer to another
 	// agent, or perform other actions.
+	//
+	// On the context of a workflow node, Actions returns the pending actions
+	// of the node's activation. ADK puts only their StateDelta and
+	// ArtifactDelta on the node's next event; SkipSummarization, Escalate,
+	// TransferToAgent, RequestedAuthConfigs, RenderUIWidgets and Compaction
+	// are not used in a node.
 	Actions() *session.EventActions
 
 	// SearchMemory performs a semantic search on the agent's memory.

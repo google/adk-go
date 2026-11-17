@@ -53,7 +53,10 @@ func (e *unsupportedError) Unwrap() error { return errors.ErrUnsupported }
 // the model response event. Within a before- or after-agent callback, it is the
 // callback's event, which is emitted only when the callback returns content or
 // changes state or artifacts; otherwise the widget is dropped, as in
-// adk-python. Widgets keep the order in which they are rendered.
+// adk-python. Within a workflow node, the widget is accepted and does not
+// reach the caller, also as in adk-python: a node's events carry only the
+// state and artifact deltas of its actions. Widgets keep the order in which
+// they are rendered.
 //
 // It returns an error whose text is "UI widget with ID '<id>' already exists in
 // the current event actions." when a widget with the same ID is already in those

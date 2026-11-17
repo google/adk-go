@@ -369,7 +369,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			ev.NodeInfo = &session.NodeInfo{Path: childPath}
 			ev.CustomMetadata = map[string]any{workflowNodeOutcomeKey: workflowNodeFailureOutcome}
 			recordFailedChildPaths(ev.CustomMetadata, inventory)
-			failureRecorded = s.emitUp(ev) == nil
+			failureRecorded = s.forward(ev) == nil
 		}
 		s.finishRun(childPath, res, failureRecorded, inventory)
 	}()
@@ -388,6 +388,32 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		// cleanly with no output".
 		pendingLongRunningIDs map[string]struct{}
 	)
+	// The child is an activation of its own: its state writes are checked
+	// and carried on its own events, never on the orchestrator's.
+	childCtx, writes := beginActivation(childCtx, child)
+	// Registered after the completion defer, so the child's unsent writes
+	// go out before its failure record. A child that failed because one of
+	// its own children failed, or that was canceled, sends none.
+	defer func() {
+		cause := childFailure
+		if cause == nil {
+			cause = childCtx.Err()
+		}
+		if !flushesPending(cause) {
+			return
+		}
+		ev := writes.pending(childCtx)
+		if ev == nil {
+			return
+		}
+		ev.NodeInfo = &session.NodeInfo{Path: childPath}
+		if childScope != "" {
+			ev.IsolationScope = childScope
+		}
+		if emitErr := s.forward(ev); emitErr != nil && rawErr == nil {
+			rawErr = emitErr
+		}
+	}()
 	for ev, evErr := range child.Run(childCtx, input) {
 		if evErr != nil {
 			// Child error wins over any prior interrupt.
@@ -397,6 +423,13 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		}
 		if ev == nil {
 			continue
+		}
+		// An event whose state delta the schema refuses is not emitted;
+		// the child fails with the refusal.
+		if vErr := writes.admit(ev); vErr != nil {
+			rawErr = vErr
+			childFailure = vErr
+			break
 		}
 		// Stamp NodeInfo.Path so the top scheduler scopes the
 		// child's Output/Routes to the child (not the parent's
@@ -484,7 +517,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 				ev.NodeInfo.OutputFor = outputFor
 			}
 		}
-		if emitErr := s.emitUp(ev); emitErr != nil {
+		if emitErr := s.forward(ev); emitErr != nil {
 			rawErr = emitErr
 			return nil, &NodeRunError{
 				ChildName: name, ChildPath: childPath, RunID: runID,
@@ -525,6 +558,14 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	s.commitDelegation(childPath, out) // no-op unless this child claimed the delegation
 	completed = true
 	return out, nil
+}
+
+// forward registers ev as checked in the orchestrator activation's registry,
+// so the orchestrator's runner neither checks it again nor puts its own
+// pending writes on it, and emits it.
+func (s *dynamicSubScheduler) forward(ev *session.Event) error {
+	forwardedFrom(s.parentCtx).mark(ev)
+	return s.emitUp(ev)
 }
 
 // pause reports that a child did not finish this turn so the parent must
