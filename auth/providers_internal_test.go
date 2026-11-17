@@ -276,6 +276,10 @@ func TestProvidersMintTokensAfterInit(t *testing.T) {
 		// The literal rather than scopeCloudPlatform, which would move with the
 		// constant it is meant to pin.
 		{"ADC", ADC(), "https://www.googleapis.com/auth/cloud-platform"},
+		// Empty Scopes on the ADC fallback default to cloud-platform, as the
+		// ServiceAccountConfig.Scopes doc promises. Only the explicit JSONKey
+		// path rejects them.
+		{"ServiceAccountADCFallbackDefaultScope", ServiceAccount(ServiceAccountConfig{}), "https://www.googleapis.com/auth/cloud-platform"},
 		{"ServiceAccountADCFallback", ServiceAccount(ServiceAccountConfig{Scopes: []string{emailScope}}), emailScope},
 	}
 	for _, tc := range tests {
@@ -317,10 +321,12 @@ func TestProvidersMintTokensAfterInit(t *testing.T) {
 	}
 }
 
-// isolateADCEnv pins the rest of the environment credential discovery reads,
-// so the host's own Google Cloud setup (a quota project or universe domain in
-// the shell, a client certificate config, the trust boundary lookup) cannot
-// change what the tests observe or send.
+// isolateADCEnv pins the rest of the environment the auth library reads. On this
+// package's path only GOOGLE_AUTH_TRUST_BOUNDARY_ENABLED changes what the tests
+// send (it would send the token to iamcredentials.googleapis.com). The universe
+// domain and client certificate variables are read by the library's transports,
+// which this package does not use, and nothing here asks for the quota project.
+// They are pinned anyway so this copy and the gcp package's stay the same set.
 func isolateADCEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("GOOGLE_CLOUD_QUOTA_PROJECT", "")

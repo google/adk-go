@@ -246,9 +246,11 @@ type Config struct {
 	//
 	// To bound requests without giving up ADC, build the client the way
 	// [NewClient] does and pass it as HTTPClient: [httptransport.NewClient] with
-	// DetectOpts naming the cloud-platform scope and a non-nil Headers map (a nil
-	// one silently drops the quota project header, see NewClient), CheckRedirect
-	// returning [http.ErrUseLastResponse], and then the Timeout.
+	// DetectOpts naming the cloud-platform scope and a fresh, non-nil Headers map
+	// per client (the transport writes the quota project into the map it is
+	// given and drops it with a nil one, so a shared map carries the first
+	// client's quota project to the next), CheckRedirect returning
+	// [http.ErrUseLastResponse], and then the Timeout.
 	PollTimeout time.Duration
 }
 
@@ -272,7 +274,10 @@ type Config struct {
 // context keeps working after that request ends. Through v2.8.0 the ADC-backed
 // client took its transport and Timeout from an [http.Client] stored in ctx under
 // oauth2.HTTPClient, as the PollTimeout doc then advised. That value is no longer
-// read, and such a client is passed as [Config.HTTPClient] instead.
+// read. Passing that same plain client as [Config.HTTPClient] is not the
+// replacement: HTTPClient is used as given, so it would send no credentials.
+// To keep a Timeout together with ADC, build the client the [Config.PollTimeout]
+// doc describes.
 //
 // The ADC-backed client refuses redirects. A credentials:retrieve call has no
 // reason to redirect, and following one would re-sign the request and hand the
@@ -432,10 +437,11 @@ type Retrieval struct {
 // sentinels, or a bare type assertion to [*APIError], stops being true where it
 // was true in v2.3.0. A decode failure is now [ErrMalformedResponse] and no
 // longer carries the [encoding/json] error behind it, so [errors.As] against
-// *json.SyntaxError stops finding one. On the ADC-backed client a failure to mint
-// the cloud-platform token surfaces as the auth library's error type
-// (cloud.google.com/go/auth.Error) behind the request error, where releases
-// through v2.8.0 carried an *oauth2.RetrieveError.
+// *json.SyntaxError stops finding one. On the ADC-backed client a token endpoint
+// rejecting the cloud-platform token request surfaces as the auth library's
+// *cloud.google.com/go/auth.Error behind the request error, where releases
+// through v2.8.0 carried an *oauth2.RetrieveError. A transport failure on the
+// way to the token endpoint is a plain wrapped error on both.
 func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ *Retrieval, err error) {
 	if req.Resource == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a Resource")

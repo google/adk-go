@@ -330,7 +330,7 @@ func TestResolveClientRejectsNilClient(t *testing.T) {
 	}
 }
 
-type wiringKey struct{}
+type requestKey struct{}
 
 // TestResolveClientBuildsOnDetachedRequestContext pins what the builder is
 // handed: the first waiting request's context with its cancellation stripped.
@@ -341,11 +341,13 @@ type wiringKey struct{}
 // presubmit rejects context.Background() outside main, tests and examples.
 //
 // The request is canceled from inside the builder, after runInit has derived
-// its context: canceling before the call would race the waiter's own ctx.Done
-// arm against the result.
+// its context. That request may then come back with either the client or its
+// own context error: its ctx.Done arm and the published result race, and both
+// outcomes are correct for a waiter that gave up. What must hold is that the
+// build completed and was cached, which the second call checks.
 func TestResolveClientBuildsOnDetachedRequestContext(t *testing.T) {
 	p := newTestProvider(t)
-	reqCtx, cancel := context.WithCancel(context.WithValue(t.Context(), wiringKey{}, "wired"))
+	reqCtx, cancel := context.WithCancel(context.WithValue(t.Context(), requestKey{}, "request"))
 	defer cancel()
 
 	built := &Client{httpClient: http.DefaultClient}
@@ -354,18 +356,20 @@ func TestResolveClientBuildsOnDetachedRequestContext(t *testing.T) {
 	p.newClient = func(ctx context.Context) (*Client, error) {
 		cancel()
 		sawErr = ctx.Err()
-		sawValue = ctx.Value(wiringKey{})
+		sawValue = ctx.Value(requestKey{})
 		return built, nil
 	}
-	got, err := p.resolveClient(reqCtx)
-	if err != nil || got != built {
-		t.Fatalf("resolveClient() = %v, %v; want the client despite the canceled request", got, err)
+	if got, err := p.resolveClient(reqCtx); !(err == nil && got == built) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolveClient(canceled request) = %v, %v; want the client or context.Canceled", got, err)
+	}
+	if got, err := p.resolveClient(t.Context()); err != nil || got != built {
+		t.Fatalf("resolveClient() after the canceled request = %v, %v; want the client the build produced", got, err)
 	}
 	if sawErr != nil {
 		t.Errorf("the builder saw ctx.Err() = %v, want the request's cancellation stripped", sawErr)
 	}
-	if sawValue != "wired" {
-		t.Errorf("the builder saw the request value = %v, want %q kept", sawValue, "wired")
+	if sawValue != "request" {
+		t.Errorf("the builder saw the request value = %v, want %q kept", sawValue, "request")
 	}
 }
 
