@@ -128,11 +128,13 @@
 //     model batch emits multiple finish_task calls with the same call ID,
 //     concurrent tool callbacks bind to their emitted batch position by unique
 //     emitted argument-map identity first (surviving identical, >64 KiB
-//     truncated, and in-place-mutated arguments under stock ADK dispatch), then
-//     by unique complete argument digest; when a custom runner clones identical
-//     or digest-truncated argument maps (or two parts alias the same map
-//     pointer) and dispatches callbacks out of order, batch position is
-//     ambiguous and the plugin does not treat an arbitrary pending slot as
+//     truncated, and in-place-mutated arguments on non-cloning runners), then
+//     by unique complete argument digest (binding cloning runners such as stock
+//     ADK dispatch when duplicate-ID calls have distinct, untruncated,
+//     unmutated arguments); when a cloning runner clones identical, >64 KiB
+//     digest-truncated, or pre-mutated argument maps (or two parts alias the
+//     same map pointer) and dispatches callbacks out of order, batch position
+//     is ambiguous and the plugin does not treat an arbitrary pending slot as
 //     proven first in the batch (so a clean survivor's [EventAgentCompleted]
 //     row is not dropped based on callback start order).
 //
@@ -257,7 +259,10 @@
 //     finish_task call in the same model batch, with a distinct ID or a
 //     duplicate ID distinguishable by emitted argument-map identity or complete
 //     argument digest, succeeds cleanly, because llmagent.runTask settles on
-//     the batch's first finish_task response). ADK's runTask still ends the
+//     the batch's first finish_task response; when cloned duplicate-ID calls
+//     have identical, >64 KiB digest-truncated, or pre-mutated arguments and
+//     run out of order, batch position is ambiguous and clean completion is
+//     preserved). ADK's runTask still ends the
 //     task activation on that response; Go retires the activation's span then
 //     (or, when a nested workflow.NewWorkflowNode clears Event.Output, once its
 //     delegating parent re-enters BeforeAgentCallback) and marks its delegating

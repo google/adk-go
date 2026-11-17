@@ -1139,10 +1139,13 @@ func hasTaskCompletedResponse(c *genai.Content) bool {
 
 // finishTaskCallSpec describes one finish_task FunctionCall part in a model
 // response: its function call ID (or finishTaskToolName when empty), the
-// emitted Args map (retained only while the slot is pending so stock ADK
-// dispatch keeps exact map-pointer identity across identical, digest-truncated,
-// or in-place-mutated arguments), and a bounded digest fallback for custom
-// runners that clone argument maps before dispatching tool callbacks.
+// emitted Args map (retained only while the slot is pending so non-cloning
+// runners preserve exact map-pointer identity across identical,
+// digest-truncated, or in-place-mutated arguments), and a bounded digest used
+// when a runner clones FunctionCall.Args before dispatching tool callbacks (as
+// stock ADK dispatch does, where each call's BeforeToolCallback,
+// OnToolErrorCallback, and AfterToolCallback share a per-call clone rather than
+// the FunctionCall part's map).
 type finishTaskCallSpec struct {
 	call          string
 	argsMap       map[string]any

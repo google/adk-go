@@ -4132,15 +4132,15 @@ func (inv *invocationTrace) endingFinishCallLocked(rec *spanRecord, call string,
 
 // idlePendingFinishCallLocked returns the pending finish_task call with ID
 // call that rec made in turn epoch, preferring a unique match on the emitted
-// arguments map identity (curID.argsPtr) first and then a unique complete
-// argument digest (curID.argsDigest) so concurrent same-ID calls bind to their
-// emitted part order even when arguments are identical, >64 KiB truncated, or
-// mutated in place. When multiple idle slots remain indistinguishable (e.g., a
-// custom runner cloned identical or digest-truncated argument maps, or two
-// parts aliased the same map pointer), firstInBatch is cleared so callback
-// start order never claims a superseded rejection as first in the batch. Calls
-// already settled, open in toolSpans, or ended in ranFinishCalls are skipped.
-// inv.mu must be held.
+// arguments map identity (curID.argsPtr) first (for non-cloning runners) and
+// then a unique complete argument digest (curID.argsDigest, for cloning runners
+// such as stock ADK dispatch) so concurrent same-ID calls bind to their
+// emitted part order whenever distinguishable. When multiple idle slots remain
+// indistinguishable (e.g., a runner cloned identical, >64 KiB digest-truncated,
+// or pre-mutated argument maps, or two parts aliased the same map pointer),
+// firstInBatch is cleared so callback start order never claims a superseded
+// rejection as first in the batch. Calls already settled, open in toolSpans,
+// or ended in ranFinishCalls are skipped. inv.mu must be held.
 func (inv *invocationTrace) idlePendingFinishCallLocked(rec *spanRecord, call string, epoch uint64, curID toolCallIdentity) (taskFinishCall, bool) {
 	var idle []taskFinishCall
 	for _, c := range rec.pendingFinishCalls {

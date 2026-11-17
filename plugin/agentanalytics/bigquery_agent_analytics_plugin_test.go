@@ -15069,86 +15069,120 @@ func TestRunner_RecoveredFinishTaskEndsWorkerSpanAndDelegator(t *testing.T) {
 func TestRunner_DuplicateIDFinishTaskBatchOrder(t *testing.T) {
 	oversized := strings.Repeat("x", maxDigestBytes+1024)
 	for _, tc := range []struct {
-		name                string
-		failFirst           bool
-		firstArgs           func() map[string]any
-		secondArgs          func() map[string]any
-		reversedDispatch    bool
-		mutateInPlace       bool
-		wantOutputResult    string
-		wantWorkerCompleted int
+		name                      string
+		failFirst                 bool
+		firstArgs                 func() map[string]any
+		secondArgs                func() map[string]any
+		reversedDispatch          bool
+		mutateInPlace             bool
+		indistinguishable         bool
+		wantOutputResult          string
+		wantWorkerCompleted       int
+		clonedWantWorkerCompleted int
 	}{
 		{
-			name:                "first_rejected_second_clean_omits_worker_completed",
-			failFirst:           true,
-			firstArgs:           func() map[string]any { return map[string]any{"result": "first"} },
-			secondArgs:          func() map[string]any { return map[string]any{"result": "second"} },
-			wantOutputResult:    "first",
-			wantWorkerCompleted: 0,
+			name:                      "first_rejected_second_clean_omits_worker_completed",
+			failFirst:                 true,
+			firstArgs:                 func() map[string]any { return map[string]any{"result": "first"} },
+			secondArgs:                func() map[string]any { return map[string]any{"result": "second"} },
+			wantOutputResult:          "first",
+			wantWorkerCompleted:       0,
+			clonedWantWorkerCompleted: -1,
 		},
 		{
-			name:                "first_clean_second_rejected_emits_worker_completed",
-			failFirst:           false,
-			firstArgs:           func() map[string]any { return map[string]any{"result": "first"} },
-			secondArgs:          func() map[string]any { return map[string]any{"result": "second"} },
-			wantOutputResult:    "first",
-			wantWorkerCompleted: 1,
+			name:                      "first_clean_second_rejected_emits_worker_completed",
+			failFirst:                 false,
+			firstArgs:                 func() map[string]any { return map[string]any{"result": "first"} },
+			secondArgs:                func() map[string]any { return map[string]any{"result": "second"} },
+			wantOutputResult:          "first",
+			wantWorkerCompleted:       1,
+			clonedWantWorkerCompleted: -1,
 		},
 		{
-			name:                "reversed_dispatch_identical_args_first_rejected",
-			failFirst:           true,
-			firstArgs:           func() map[string]any { return map[string]any{"result": "same"} },
-			secondArgs:          func() map[string]any { return map[string]any{"result": "same"} },
-			reversedDispatch:    true,
-			wantOutputResult:    "same",
-			wantWorkerCompleted: 0,
+			name:                      "reversed_dispatch_distinct_args_first_rejected",
+			failFirst:                 true,
+			firstArgs:                 func() map[string]any { return map[string]any{"result": "first"} },
+			secondArgs:                func() map[string]any { return map[string]any{"result": "second"} },
+			reversedDispatch:          true,
+			wantOutputResult:          "first",
+			wantWorkerCompleted:       0,
+			clonedWantWorkerCompleted: -1,
 		},
 		{
-			name:                "reversed_dispatch_identical_args_second_rejected",
-			failFirst:           false,
-			firstArgs:           func() map[string]any { return map[string]any{"result": "same"} },
-			secondArgs:          func() map[string]any { return map[string]any{"result": "same"} },
-			reversedDispatch:    true,
-			wantOutputResult:    "same",
-			wantWorkerCompleted: 1,
+			name:                      "reversed_dispatch_distinct_args_second_rejected",
+			failFirst:                 false,
+			firstArgs:                 func() map[string]any { return map[string]any{"result": "first"} },
+			secondArgs:                func() map[string]any { return map[string]any{"result": "second"} },
+			reversedDispatch:          true,
+			wantOutputResult:          "first",
+			wantWorkerCompleted:       1,
+			clonedWantWorkerCompleted: -1,
 		},
 		{
-			name:                "reversed_dispatch_oversized_args_first_rejected",
-			failFirst:           true,
-			firstArgs:           func() map[string]any { return map[string]any{"result": oversized} },
-			secondArgs:          func() map[string]any { return map[string]any{"result": oversized} },
-			reversedDispatch:    true,
-			wantOutputResult:    oversized,
-			wantWorkerCompleted: 0,
+			name:                      "reversed_dispatch_identical_args_first_rejected",
+			failFirst:                 true,
+			firstArgs:                 func() map[string]any { return map[string]any{"result": "same"} },
+			secondArgs:                func() map[string]any { return map[string]any{"result": "same"} },
+			reversedDispatch:          true,
+			indistinguishable:         true,
+			wantOutputResult:          "same",
+			wantWorkerCompleted:       0,
+			clonedWantWorkerCompleted: 1,
 		},
 		{
-			name:                "reversed_dispatch_oversized_args_second_rejected",
-			failFirst:           false,
-			firstArgs:           func() map[string]any { return map[string]any{"result": oversized} },
-			secondArgs:          func() map[string]any { return map[string]any{"result": oversized} },
-			reversedDispatch:    true,
-			wantOutputResult:    oversized,
-			wantWorkerCompleted: 1,
+			name:                      "reversed_dispatch_identical_args_second_rejected",
+			failFirst:                 false,
+			firstArgs:                 func() map[string]any { return map[string]any{"result": "same"} },
+			secondArgs:                func() map[string]any { return map[string]any{"result": "same"} },
+			reversedDispatch:          true,
+			indistinguishable:         true,
+			wantOutputResult:          "same",
+			wantWorkerCompleted:       1,
+			clonedWantWorkerCompleted: 1,
 		},
 		{
-			name:                "reversed_dispatch_mutated_args_first_rejected",
-			failFirst:           true,
-			firstArgs:           func() map[string]any { return map[string]any{"result": "first"} },
-			secondArgs:          func() map[string]any { return map[string]any{"result": "second"} },
-			reversedDispatch:    true,
-			mutateInPlace:       true,
-			wantOutputResult:    "first",
-			wantWorkerCompleted: 0,
+			name:                      "reversed_dispatch_oversized_args_first_rejected",
+			failFirst:                 true,
+			firstArgs:                 func() map[string]any { return map[string]any{"result": oversized} },
+			secondArgs:                func() map[string]any { return map[string]any{"result": oversized} },
+			reversedDispatch:          true,
+			indistinguishable:         true,
+			wantOutputResult:          oversized,
+			wantWorkerCompleted:       0,
+			clonedWantWorkerCompleted: 1,
 		},
 		{
-			name:                "reversed_dispatch_mutated_args_second_rejected",
-			failFirst:           false,
-			firstArgs:           func() map[string]any { return map[string]any{"result": "first"} },
-			secondArgs:          func() map[string]any { return map[string]any{"result": "second"} },
-			reversedDispatch:    true,
-			mutateInPlace:       true,
-			wantOutputResult:    "first",
-			wantWorkerCompleted: 1,
+			name:                      "reversed_dispatch_oversized_args_second_rejected",
+			failFirst:                 false,
+			firstArgs:                 func() map[string]any { return map[string]any{"result": oversized} },
+			secondArgs:                func() map[string]any { return map[string]any{"result": oversized} },
+			reversedDispatch:          true,
+			indistinguishable:         true,
+			wantOutputResult:          oversized,
+			wantWorkerCompleted:       1,
+			clonedWantWorkerCompleted: 1,
+		},
+		{
+			name:                      "reversed_dispatch_mutated_args_first_rejected",
+			failFirst:                 true,
+			firstArgs:                 func() map[string]any { return map[string]any{"result": "first"} },
+			secondArgs:                func() map[string]any { return map[string]any{"result": "second"} },
+			reversedDispatch:          true,
+			mutateInPlace:             true,
+			wantOutputResult:          "first",
+			wantWorkerCompleted:       0,
+			clonedWantWorkerCompleted: 1,
+		},
+		{
+			name:                      "reversed_dispatch_mutated_args_second_rejected",
+			failFirst:                 false,
+			firstArgs:                 func() map[string]any { return map[string]any{"result": "first"} },
+			secondArgs:                func() map[string]any { return map[string]any{"result": "second"} },
+			reversedDispatch:          true,
+			mutateInPlace:             true,
+			wantOutputResult:          "first",
+			wantWorkerCompleted:       1,
+			clonedWantWorkerCompleted: 1,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -15157,13 +15191,11 @@ func TestRunner_DuplicateIDFinishTaskBatchOrder(t *testing.T) {
 			secondMap := tc.secondArgs()
 			firstPtr := mapPtr(firstMap)
 			secondPtr := mapPtr(secondMap)
-			failPtr := secondPtr
-			if tc.failFirst {
-				failPtr = firstPtr
-			}
 
 			part2Done := make(chan struct{})
 			var part2Once sync.Once
+			var secondCallPtr, failCallPtr atomic.Uint64
+			var sawClonedArgs, claimedSecond atomic.Bool
 			var mu sync.Mutex
 			var seenOrder []string
 
@@ -15176,21 +15208,48 @@ func TestRunner_DuplicateIDFinishTaskBatchOrder(t *testing.T) {
 							return nil, nil
 						}
 						ptr := mapPtr(args)
-						if tc.reversedDispatch && ptr == firstPtr {
-							select {
-							case <-part2Done:
-							case <-ctx.Done():
-								return nil, ctx.Err()
+						var isFirst bool
+						switch ptr {
+						case firstPtr:
+							isFirst = true
+						case secondPtr:
+							isFirst = false
+						default:
+							sawClonedArgs.Store(true)
+							if !tc.indistinguishable {
+								isFirst = args["result"] == "first"
+							} else {
+								// When ADK clones identical/oversized maps per call, callbacks
+								// cannot distinguish part 0 from part 1; assign the first
+								// arriver as "second" and hold the other as "first" so reversed
+								// dispatch stays deterministic.
+								isFirst = !claimedSecond.CompareAndSwap(false, true)
+							}
+						}
+						if isFirst {
+							if tc.failFirst {
+								failCallPtr.Store(uint64(ptr))
+							}
+							if tc.reversedDispatch {
+								select {
+								case <-part2Done:
+								case <-ctx.Done():
+									return nil, ctx.Err()
+								}
+							}
+						} else {
+							secondCallPtr.Store(uint64(ptr))
+							if !tc.failFirst {
+								failCallPtr.Store(uint64(ptr))
 							}
 						}
 						if tc.mutateInPlace {
 							args["result"] = "mutated-by-earlier-plugin"
 						}
 						mu.Lock()
-						switch ptr {
-						case firstPtr:
+						if isFirst {
 							seenOrder = append(seenOrder, "first")
-						case secondPtr:
+						} else {
 							seenOrder = append(seenOrder, "second")
 						}
 						mu.Unlock()
@@ -15206,19 +15265,36 @@ func TestRunner_DuplicateIDFinishTaskBatchOrder(t *testing.T) {
 			recoverPlugin, err := baseplugin.New(baseplugin.Config{
 				Name: "fail_tag_and_recover",
 				BeforeToolCallback: func(_ agent.Context, tl tool.Tool, args map[string]any) (map[string]any, error) {
-					if tl.Name() == finishTaskToolName && mapPtr(args) == failPtr {
+					if tl.Name() != finishTaskToolName {
+						return nil, nil
+					}
+					ptr := uint64(mapPtr(args))
+					var shouldFail bool
+					if tc.reversedDispatch || tc.mutateInPlace {
+						shouldFail = ptr == failCallPtr.Load()
+					} else {
+						wantFail := "second"
+						if tc.failFirst {
+							wantFail = "first"
+						}
+						if args["result"] == wantFail {
+							failCallPtr.Store(ptr)
+							shouldFail = true
+						}
+					}
+					if shouldFail {
 						return nil, errors.New("scripted finish_task failure")
 					}
 					return nil, nil
 				},
 				OnToolErrorCallback: func(_ agent.Context, tl tool.Tool, args map[string]any, _ error) (map[string]any, error) {
-					if tl.Name() == finishTaskToolName && mapPtr(args) == failPtr {
+					if tl.Name() == finishTaskToolName && failCallPtr.Load() != 0 && uint64(mapPtr(args)) == failCallPtr.Load() {
 						return map[string]any{"result": "Task completed."}, nil
 					}
 					return nil, nil
 				},
 				AfterToolCallback: func(_ agent.Context, tl tool.Tool, args, _ map[string]any, _ error) (map[string]any, error) {
-					if tl.Name() == finishTaskToolName && mapPtr(args) == secondPtr {
+					if tl.Name() == finishTaskToolName && secondCallPtr.Load() != 0 && uint64(mapPtr(args)) == secondCallPtr.Load() {
 						part2Once.Do(func() { close(part2Done) })
 					}
 					return nil, nil
@@ -15274,10 +15350,16 @@ func TestRunner_DuplicateIDFinishTaskBatchOrder(t *testing.T) {
 					sawWorkerOutput, len(tc.wantOutputResult))
 			}
 
+			wantWorkerCompleted := tc.wantWorkerCompleted
+			if sawClonedArgs.Load() && tc.clonedWantWorkerCompleted >= 0 {
+				wantWorkerCompleted = tc.clonedWantWorkerCompleted
+			}
+
 			rows := collectRows(t, requests, untilInvocationEnd)
 			requireInvocationCompletedOK(t, rows)
-			if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != tc.wantWorkerCompleted {
-				t.Fatalf("task_worker AGENT_COMPLETED = %d, want %d; events=%v", got, tc.wantWorkerCompleted, eventTypes(rows))
+			if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != wantWorkerCompleted {
+				t.Fatalf("task_worker AGENT_COMPLETED = %d, want %d (cloned=%v); events=%v",
+					got, wantWorkerCompleted, sawClonedArgs.Load(), eventTypes(rows))
 			}
 			if got := len(agentRowsOfType(rows, EventAgentError, "task_worker")); got != 0 {
 				t.Fatalf("task_worker AGENT_ERROR = %d, want 0", got)

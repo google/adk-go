@@ -42354,3 +42354,245 @@ func TestTraceManager_FinishedTasksCappedAtMaxTaskToolDeltas(t *testing.T) {
 	errs.check(t)
 	p.afterRun(act)
 }
+
+func TestTraceManager_DuplicateIDFinishTaskCloningVsDirectArgsBinding(t *testing.T) {
+	oversized := strings.Repeat("x", maxDigestBytes+1024)
+	taskCompleted := func() map[string]any { return map[string]any{"result": "Task completed."} }
+	finishPart := func(id string, args map[string]any) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: finishTaskToolName, Args: args}}
+	}
+
+	for _, tc := range []struct {
+		name             string
+		makeArgs         func() (m1, m2, cb1, cb2 map[string]any)
+		preMutate        bool
+		failFirst        bool
+		wantFirstInBatch bool
+		wantCompleted    int
+	}{
+		// Non-cloning runner (cb1 == m1, cb2 == m2): argsPtr binds exact part order even for identical, oversized, or mutated maps.
+		{
+			name: "direct_identical_args_first_rejected",
+			makeArgs: func() (map[string]any, map[string]any, map[string]any, map[string]any) {
+				m1 := map[string]any{"result": "same"}
+				m2 := map[string]any{"result": "same"}
+				return m1, m2, m1, m2
+			},
+			failFirst:        true,
+			wantFirstInBatch: true,
+			wantCompleted:    0,
+		},
+		{
+			name: "direct_identical_args_second_rejected",
+			makeArgs: func() (map[string]any, map[string]any, map[string]any, map[string]any) {
+				m1 := map[string]any{"result": "same"}
+				m2 := map[string]any{"result": "same"}
+				return m1, m2, m1, m2
+			},
+			failFirst:        false,
+			wantFirstInBatch: false,
+			wantCompleted:    1,
+		},
+		{
+			name: "direct_oversized_args_first_rejected",
+			makeArgs: func() (map[string]any, map[string]any, map[string]any, map[string]any) {
+				m1 := map[string]any{"result": oversized}
+				m2 := map[string]any{"result": oversized}
+				return m1, m2, m1, m2
+			},
+			failFirst:        true,
+			wantFirstInBatch: true,
+			wantCompleted:    0,
+		},
+		{
+			name: "direct_oversized_args_second_rejected",
+			makeArgs: func() (map[string]any, map[string]any, map[string]any, map[string]any) {
+				m1 := map[string]any{"result": oversized}
+				m2 := map[string]any{"result": oversized}
+				return m1, m2, m1, m2
+			},
+			failFirst:        false,
+			wantFirstInBatch: false,
+			wantCompleted:    1,
+		},
+		{
+			name: "direct_mutated_args_first_rejected",
+			makeArgs: func() (map[string]any, map[string]any, map[string]any, map[string]any) {
+				m1 := map[string]any{"result": "first"}
+				m2 := map[string]any{"result": "second"}
+				return m1, m2, m1, m2
+			},
+			preMutate:        true,
+			failFirst:        true,
+			wantFirstInBatch: true,
+			wantCompleted:    0,
+		},
+		{
+			name: "direct_mutated_args_second_rejected",
+			makeArgs: func() (map[string]any, map[string]any, map[string]any, map[string]any) {
+				m1 := map[string]any{"result": "first"}
+				m2 := map[string]any{"result": "second"}
+				return m1, m2, m1, m2
+			},
+			preMutate:        true,
+			failFirst:        false,
+			wantFirstInBatch: false,
+			wantCompleted:    1,
+		},
+		// Cloning runner (cb1 != m1, cb2 != m2, matching stock ADK cloneArgs): distinct unmutated args bind by boundedArgsDigest;
+		// identical, oversized, and pre-mutated cloned maps safely clear firstInBatch and preserve clean completion.
+		{
+			name: "cloned_distinct_args_first_rejected",
+			makeArgs: func() (map[string]any, map[string]any, map[string]any, map[string]any) {
+				return map[string]any{"result": "first"}, map[string]any{"result": "second"},
+					map[string]any{"result": "first"}, map[string]any{"result": "second"}
+			},
+			failFirst:        true,
+			wantFirstInBatch: true,
+			wantCompleted:    0,
+		},
+		{
+			name: "cloned_distinct_args_second_rejected",
+			makeArgs: func() (map[string]any, map[string]any, map[string]any, map[string]any) {
+				return map[string]any{"result": "first"}, map[string]any{"result": "second"},
+					map[string]any{"result": "first"}, map[string]any{"result": "second"}
+			},
+			failFirst:        false,
+			wantFirstInBatch: false,
+			wantCompleted:    1,
+		},
+		{
+			name: "cloned_identical_args_first_rejected_ambiguous_fallback",
+			makeArgs: func() (map[string]any, map[string]any, map[string]any, map[string]any) {
+				return map[string]any{"result": "same"}, map[string]any{"result": "same"},
+					map[string]any{"result": "same"}, map[string]any{"result": "same"}
+			},
+			failFirst:        true,
+			wantFirstInBatch: false,
+			wantCompleted:    1,
+		},
+		{
+			name: "cloned_oversized_args_first_rejected_ambiguous_fallback",
+			makeArgs: func() (map[string]any, map[string]any, map[string]any, map[string]any) {
+				return map[string]any{"result": oversized}, map[string]any{"result": oversized},
+					map[string]any{"result": oversized}, map[string]any{"result": oversized}
+			},
+			failFirst:        true,
+			wantFirstInBatch: false,
+			wantCompleted:    1,
+		},
+		{
+			name: "cloned_pre_mutated_args_first_rejected_ambiguous_fallback",
+			makeArgs: func() (map[string]any, map[string]any, map[string]any, map[string]any) {
+				return map[string]any{"result": "first"}, map[string]any{"result": "second"},
+					map[string]any{"result": "first"}, map[string]any{"result": "second"}
+			},
+			preMutate:        true,
+			failFirst:        true,
+			wantFirstInBatch: false,
+			wantCompleted:    1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newClockedPlugin(t)
+			p.config.DisableFlushOnRunEnd = true
+			taskAgent, err := llmagent.New(llmagent.Config{Name: "task_worker", Mode: llmagent.ModeTask, Model: &scriptedLLM{}})
+			if err != nil {
+				t.Fatalf("llmagent.New(task): %v", err)
+			}
+			rootAgent, err := llmagent.New(llmagent.Config{Name: "coordinator", SubAgents: []agent.Agent{taskAgent}, Model: &scriptedLLM{}})
+			if err != nil {
+				t.Fatalf("llmagent.New(root): %v", err)
+			}
+			finishTool := &fakeTool{name: finishTaskToolName}
+			baseCtx := &mockInvocationContext{ctx: t.Context(), invocationID: "inv-clone-direct-" + tc.name, agentName: "coordinator"}
+			rootCtx := &taskActivationContext{mockInvocationContext: baseCtx, ic: &runningInvocation{running: rootAgent}}
+			act1 := &taskActivationContext{
+				mockInvocationContext: &mockInvocationContext{ctx: t.Context(), invocationID: baseCtx.invocationID, agentName: "task_worker"},
+				ic:                    &runningInvocation{running: taskAgent},
+			}
+
+			var errs callbackErrors
+			errs.add(p.beforeRun(rootCtx))
+			errs.add(p.beforeAgent(rootCtx))
+			errs.add(p.beforeAgent(act1))
+			errs.add(p.beforeModel(act1, &model.LLMRequest{}))
+			m1, m2, cb1, cb2 := tc.makeArgs()
+			errs.add(p.afterModel(act1, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				finishPart("c-dup", m1),
+				finishPart("c-dup", m2),
+			}, genai.RoleModel)}, nil))
+
+			if tc.preMutate {
+				cb1["result"] = "mutated-before-plugin"
+				cb2["result"] = "mutated-before-plugin"
+			}
+
+			t1 := &taskToolContext{
+				taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-dup"), ic: act1.ic},
+				actions:               &session.EventActions{StateDelta: map[string]any{}},
+			}
+			t2 := &taskToolContext{
+				taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(act1.mockInvocationContext, "c-dup"), ic: act1.ic},
+				actions:               &session.EventActions{StateDelta: map[string]any{}},
+			}
+
+			// Reversed dispatch: part #2 runs and completes before part #1 starts.
+			if tc.failFirst {
+				errs.add(p.beforeTool(t2, finishTool, cb2))
+				errs.add(p.afterTool(t2, finishTool, cb2, taskCompleted(), nil))
+				errs.add(p.beforeTool(t1, finishTool, cb1))
+				errs.add(p.onToolError(t1, finishTool, cb1, errors.New("scripted error")))
+				errs.add(p.afterTool(t1, finishTool, cb1, taskCompleted(), nil))
+			} else {
+				errs.add(p.beforeTool(t2, finishTool, cb2))
+				errs.add(p.onToolError(t2, finishTool, cb2, errors.New("scripted error")))
+				errs.add(p.afterTool(t2, finishTool, cb2, taskCompleted(), nil))
+				errs.add(p.beforeTool(t1, finishTool, cb1))
+				errs.add(p.afterTool(t1, finishTool, cb1, taskCompleted(), nil))
+			}
+			errs.check(t)
+
+			inv := p.traces.invocation(act1, identityOf(act1))
+			inv.mu.Lock()
+			var rejCount int
+			var firstInBatch bool
+			for _, rec := range inv.agentStack {
+				if rec.name == "task_worker" {
+					rejCount = len(rec.rejectedTasks)
+					if rejCount == 1 {
+						firstInBatch = rec.rejectedTasks[0].firstInBatch
+					}
+				}
+			}
+			inv.mu.Unlock()
+			if rejCount != 1 || firstInBatch != tc.wantFirstInBatch {
+				t.Fatalf("rejectedTasks count=%d firstInBatch=%v, want 1 and %v", rejCount, firstInBatch, tc.wantFirstInBatch)
+			}
+
+			errs.add(p.onEvent(rootCtx, &session.Event{
+				Author:  "task_worker",
+				Output:  map[string]any{"result": "done"},
+				Actions: session.EventActions{StateDelta: t1.actions.StateDelta},
+				LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+					{FunctionResponse: &genai.FunctionResponse{ID: "c-dup", Name: finishTaskToolName, Response: taskCompleted()}},
+					{FunctionResponse: &genai.FunctionResponse{ID: "c-dup", Name: finishTaskToolName, Response: taskCompleted()}},
+				}, genai.RoleUser)},
+			}))
+			errs.add(p.afterAgent(rootCtx))
+			errs.check(t)
+			p.afterRun(rootCtx)
+
+			rows := p.takeRows()
+			if got := len(agentRowsOfType(rows, EventToolError, "task_worker")); got != 1 {
+				t.Fatalf("task_worker TOOL_ERROR = %d, want 1", got)
+			}
+			if got := len(agentRowsOfType(rows, EventToolCompleted, "task_worker")); got != 1 {
+				t.Fatalf("task_worker TOOL_COMPLETED = %d, want 1", got)
+			}
+			if got := len(agentRowsOfType(rows, EventAgentCompleted, "task_worker")); got != tc.wantCompleted {
+				t.Fatalf("task_worker AGENT_COMPLETED = %d, want %d; events=%v", got, tc.wantCompleted, eventTypes(rows))
+			}
+		})
+	}
+}
