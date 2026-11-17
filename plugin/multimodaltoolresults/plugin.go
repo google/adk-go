@@ -12,8 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package multimodaltoolresults provides a plugin that attaches GenAI parts
-// returned by tools to the model request.
+// Package multimodaltoolresults provides a plugin that lets a function tool
+// return GenAI parts, such as text, file references or images, for the model to
+// read: the plugin appends them to the contents of later model requests.
+//
+// A tool returns parts by returning a *genai.Part or a genai.Part, or a slice
+// or array whose first element is one; the plugin uses the parts among its
+// elements. The flow wraps such a value as the result {"result": value}, and a
+// tool that returns that one-key map itself is treated the same. The plugin
+// saves nothing for any other result, or for a call that returned an error.
+//
+// The plugin's after-tool callback saves the parts in session state, and its
+// before-model callback appends them to the last content of a model request,
+// which after a tool call is the content holding the function response.
+// [Config].Retention decides which requests get them:
+// [RetentionNextModelCall], the default, attaches them to the next model
+// request once, except the parts the function response already carries;
+// [RetentionSession] attaches them to the next model request, and also
+// attaches the latest saved parts that are not inline data to every later
+// model request of the session.
+//
+// Register the plugin with a runner:
+//
+//	p, err := multimodaltoolresults.New(multimodaltoolresults.Config{})
+//	if err != nil {
+//		return err
+//	}
+//	r, err := runner.New(runner.Config{
+//		AppName:        "app",
+//		Agent:          rootAgent,
+//		SessionService: session.InMemoryService(),
+//		PluginConfig:   runner.PluginConfig{Plugins: []*plugin.Plugin{p}},
+//	})
+//
+// The plugin is the counterpart of adk-python's MultimodalToolResultsPlugin.
 package multimodaltoolresults
 
 import (
@@ -86,22 +118,21 @@ type Config struct {
 	Retention Retention
 }
 
-// New creates a multimodal tool results plugin from cfg.
+// New returns a multimodal tool results plugin configured by cfg. The plugin
+// sets only AfterToolCallback, which saves the parts of a tool's result as the
+// package comment describes, and BeforeModelCallback, which attaches them to
+// the model request. Its after-tool callback returns a nil result, so later
+// plugins' and the agent's after-tool callbacks still run. It returns an error
+// only when it cannot save the parts in session state, for example when a
+// state key of the plugin holds a value that is not a list.
 //
-// Preconditions: cfg.Retention is "", [RetentionNextModelCall], or
-// [RetentionSession].
+// New returns a nil plugin and an error whose message contains
+// "retention must be 'next_model_call' or 'session', got <value>" when
+// cfg.Retention is not "", [RetentionNextModelCall] or [RetentionSession].
+// cfg is read once and not retained.
 //
-// Postconditions: Returns a non-nil *plugin.Plugin with AfterToolCallback and
-// BeforeModelCallback configured for cfg.Retention, and a nil error. cfg is
-// read once and not retained.
-//
-// Failure: If cfg.Retention is not "", [RetentionNextModelCall], or
-// [RetentionSession], New returns (nil, err) where err is a non-nil error
-// whose message contains "retention must be 'next_model_call' or 'session', got <value>".
-//
-// Concurrency: New is pure and safe for concurrent use. The returned
-// *plugin.Plugin is safe for concurrent use across parallel tool calls and
-// concurrent runner invocations.
+// New is safe for concurrent use. The returned plugin is safe for concurrent
+// use across parallel tool calls and concurrent runner invocations.
 func New(cfg Config) (*plugin.Plugin, error) {
 	retention := cfg.Retention
 	switch retention {
