@@ -69,22 +69,33 @@ type ResponseScheduler interface {
 // SequentialRunner is implemented by a tool that wants each of its calls to
 // start only after the calls before it in the same model turn have returned.
 // ADK runs the calls of one model turn concurrently, and State has no
-// ordering; a tool that reads and then writes state that its sibling calls
-// also write, with no lock of its own, declares itself sequential to get
-// the writes of the earlier calls.
+// ordering. A tool whose calls must see the writes of the earlier calls of
+// their turn, such as one that reads a key and writes a value computed from
+// it while its sibling calls write the same key, declares itself sequential,
+// whether or not it guards the update with a lock of its own. A lock keeps
+// each read-modify-write atomic but does not order the calls: the later call
+// in the model's response can take the lock first, and the event that merges
+// the turn's responses then stores that call's value, so two calls that each
+// add one to a counter leave it one higher, not two.
 //
 // Before a sequential call's callbacks and the tool run, the flow waits until
 // every earlier call of the turn has returned, whether those calls are
-// sequential or not. If the call's context is done first, the call is answered
-// with the error "wait for earlier function calls: context deadline exceeded"
-// (or "... context canceled"), and neither its callbacks nor the tool run. The
-// wait happens before any code of the tool, so a lock the tool takes cannot be
-// held across it.
+// sequential or not. The wait happens before any code of the tool, so a lock
+// the tool takes cannot be held across it. If the call's context is done
+// first, the call is answered with the error "wait for earlier function
+// calls: context deadline exceeded" (or "... context canceled"), and neither
+// its callbacks nor the tool run. With the default task runner (see
+// platform.TaskRunner) the call's context is the run's context, so when the
+// run's context ends during the wait, that answer reaches neither the model
+// nor the session: the run ends with the context's error, and the session
+// keeps the model's function calls without their responses. A wait under a
+// context that never ends does not end.
 //
-// A sequential tool must not wait for something that a later call of the
-// same turn does: the later call is waiting for it. Only calls of a tool run
-// through ADK's function-call path are sequenced; the calls of a streaming
-// tool are not.
+// No call of a turn, sequential or not, may wait for something that a later
+// sequential call of the same turn does: the sequential call waits for the
+// earlier call first, so both wait until the context ends. Only calls of a
+// tool run through ADK's function-call path are sequenced; the calls of a
+// streaming tool are not.
 //
 // tool.WithConfirmation and tool.WithToolNamePrefix keep the value of the
 // tools they wrap.
