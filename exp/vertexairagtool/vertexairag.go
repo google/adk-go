@@ -38,6 +38,10 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
+// ErrConflictingRetrievalConfig indicates that both a legacy field and its
+// RAGRetrievalConfig alternative are set for the same retrieval setting.
+var ErrConflictingRetrievalConfig = errors.New("vertexairag: conflicting retrieval configuration")
+
 // Config configures a Vertex AI RAG retrieval tool. Description and at least one
 // RAGResources entry are required.
 type Config struct {
@@ -72,6 +76,7 @@ type Config struct {
 // Vertex AI RAG corpus. It returns an error when Description or RAGResources is
 // empty, a RAGResources entry is nil, or overlapping retrieval settings are set
 // in both RAGRetrievalConfig and the corresponding legacy field.
+// Overlapping settings return an error wrapping [ErrConflictingRetrievalConfig].
 func New(cfg Config) (tool.Tool, error) {
 	if cfg.Description == "" {
 		return nil, errors.New("vertexairag: Config.Description is required")
@@ -88,10 +93,10 @@ func New(cfg Config) (tool.Tool, error) {
 
 	if retrieval := cfg.RAGRetrievalConfig; retrieval != nil {
 		if cfg.SimilarityTopK != nil && retrieval.TopK != nil {
-			return nil, errors.New("vertexairag: Config.SimilarityTopK and Config.RAGRetrievalConfig.TopK cannot both be set")
+			return nil, fmt.Errorf("%w: Config.SimilarityTopK and Config.RAGRetrievalConfig.TopK cannot both be set", ErrConflictingRetrievalConfig)
 		}
 		if cfg.VectorDistanceThreshold != nil && retrieval.Filter != nil && retrieval.Filter.VectorDistanceThreshold != nil {
-			return nil, errors.New("vertexairag: Config.VectorDistanceThreshold and Config.RAGRetrievalConfig.Filter.VectorDistanceThreshold cannot both be set")
+			return nil, fmt.Errorf("%w: Config.VectorDistanceThreshold and Config.RAGRetrievalConfig.Filter.VectorDistanceThreshold cannot both be set", ErrConflictingRetrievalConfig)
 		}
 	}
 

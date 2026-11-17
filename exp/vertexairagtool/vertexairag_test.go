@@ -15,6 +15,7 @@
 package vertexairagtool_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -111,11 +112,11 @@ func TestNew(t *testing.T) {
 
 func TestNew_RetrievalConfigConflicts(t *testing.T) {
 	testCases := []struct {
-		name        string
-		topK        *int32
-		threshold   *float64
-		retrieval   *genai.RAGRetrievalConfig
-		wantErrText string
+		name      string
+		topK      *int32
+		threshold *float64
+		retrieval *genai.RAGRetrievalConfig
+		wantErr   error
 	}{
 		{
 			name:      "legacy settings only",
@@ -153,40 +154,40 @@ func TestNew_RetrievalConfigConflicts(t *testing.T) {
 			retrieval: &genai.RAGRetrievalConfig{Filter: &genai.RAGRetrievalConfigFilter{MetadataFilter: `category == "docs"`}},
 		},
 		{
-			name:        "different top k values",
-			topK:        new(int32(3)),
-			retrieval:   &genai.RAGRetrievalConfig{TopK: new(int32(5))},
-			wantErrText: "Config.SimilarityTopK and Config.RAGRetrievalConfig.TopK cannot both be set",
+			name:      "different top k values",
+			topK:      new(int32(3)),
+			retrieval: &genai.RAGRetrievalConfig{TopK: new(int32(5))},
+			wantErr:   vertexairagtool.ErrConflictingRetrievalConfig,
 		},
 		{
-			name:        "equal top k values",
-			topK:        new(int32(5)),
-			retrieval:   &genai.RAGRetrievalConfig{TopK: new(int32(5))},
-			wantErrText: "Config.SimilarityTopK and Config.RAGRetrievalConfig.TopK cannot both be set",
+			name:      "equal top k values",
+			topK:      new(int32(5)),
+			retrieval: &genai.RAGRetrievalConfig{TopK: new(int32(5))},
+			wantErr:   vertexairagtool.ErrConflictingRetrievalConfig,
 		},
 		{
-			name:        "zero top k values",
-			topK:        new(int32(0)),
-			retrieval:   &genai.RAGRetrievalConfig{TopK: new(int32(0))},
-			wantErrText: "Config.SimilarityTopK and Config.RAGRetrievalConfig.TopK cannot both be set",
+			name:      "zero top k values",
+			topK:      new(int32(0)),
+			retrieval: &genai.RAGRetrievalConfig{TopK: new(int32(0))},
+			wantErr:   vertexairagtool.ErrConflictingRetrievalConfig,
 		},
 		{
-			name:        "different distance thresholds",
-			threshold:   new(0.5),
-			retrieval:   &genai.RAGRetrievalConfig{Filter: &genai.RAGRetrievalConfigFilter{VectorDistanceThreshold: new(0.4)}},
-			wantErrText: "Config.VectorDistanceThreshold and Config.RAGRetrievalConfig.Filter.VectorDistanceThreshold cannot both be set",
+			name:      "different distance thresholds",
+			threshold: new(0.5),
+			retrieval: &genai.RAGRetrievalConfig{Filter: &genai.RAGRetrievalConfigFilter{VectorDistanceThreshold: new(0.4)}},
+			wantErr:   vertexairagtool.ErrConflictingRetrievalConfig,
 		},
 		{
-			name:        "equal distance thresholds",
-			threshold:   new(0.5),
-			retrieval:   &genai.RAGRetrievalConfig{Filter: &genai.RAGRetrievalConfigFilter{VectorDistanceThreshold: new(0.5)}},
-			wantErrText: "Config.VectorDistanceThreshold and Config.RAGRetrievalConfig.Filter.VectorDistanceThreshold cannot both be set",
+			name:      "equal distance thresholds",
+			threshold: new(0.5),
+			retrieval: &genai.RAGRetrievalConfig{Filter: &genai.RAGRetrievalConfigFilter{VectorDistanceThreshold: new(0.5)}},
+			wantErr:   vertexairagtool.ErrConflictingRetrievalConfig,
 		},
 		{
-			name:        "zero distance thresholds",
-			threshold:   new(float64(0)),
-			retrieval:   &genai.RAGRetrievalConfig{Filter: &genai.RAGRetrievalConfigFilter{VectorDistanceThreshold: new(float64(0))}},
-			wantErrText: "Config.VectorDistanceThreshold and Config.RAGRetrievalConfig.Filter.VectorDistanceThreshold cannot both be set",
+			name:      "zero distance thresholds",
+			threshold: new(float64(0)),
+			retrieval: &genai.RAGRetrievalConfig{Filter: &genai.RAGRetrievalConfigFilter{VectorDistanceThreshold: new(float64(0))}},
+			wantErr:   vertexairagtool.ErrConflictingRetrievalConfig,
 		},
 	}
 	for _, tt := range testCases {
@@ -198,17 +199,14 @@ func TestNew_RetrievalConfigConflicts(t *testing.T) {
 				VectorDistanceThreshold: tt.threshold,
 				RAGRetrievalConfig:      tt.retrieval,
 			})
-			if tt.wantErrText != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
-					t.Fatalf("New() error = %v, want error containing %q", err, tt.wantErrText)
-				}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("New() error = %v, want errors.Is(%v)", err, tt.wantErr)
+			}
+			if err != nil {
 				if tl != nil {
 					t.Error("New() returned a tool on error")
 				}
 				return
-			}
-			if err != nil {
-				t.Fatalf("New() error = %v", err)
 			}
 			want := &genai.VertexRAGStore{
 				RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus}},
