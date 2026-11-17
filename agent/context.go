@@ -173,12 +173,15 @@ type Context interface {
 	// When a model turn holds several function calls, ADK runs the calls
 	// concurrently, and State does not order them: Get, Set and All never wait
 	// for another call, and a call reads what the calls that have already
-	// written put there. A tool that updates state that its sibling calls also
-	// update either guards the update with a lock of its own, which it may
-	// hold across State, or declares itself sequential (tool.SequentialRunner,
-	// functiontool.Config.Sequential). A call of a sequential tool starts only
-	// after every earlier call of the turn has returned, whether those calls
-	// are sequential or not, so it sees all of their writes.
+	// written put there. A tool whose calls must see the writes of the earlier
+	// calls of their turn, such as one that reads a key and writes a value
+	// computed from it while its sibling calls write the same key, declares
+	// itself sequential (tool.SequentialRunner, functiontool.Config.Sequential),
+	// whether or not it also takes a lock of its own. A call of a sequential
+	// tool starts only after every earlier call of the turn has returned,
+	// whether those calls are sequential or not, so it sees all of their
+	// writes. A lock of the tool's own, which it may hold across State, does
+	// not order the calls.
 	//
 	// When several calls write one key, the event that merges the turn's
 	// responses takes the value of the later call in the model's response. A

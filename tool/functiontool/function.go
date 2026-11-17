@@ -74,9 +74,12 @@ type Config struct {
 	ResponseScheduling genai.FunctionResponseScheduling
 
 	// Sequential makes each call of the tool start after every earlier call of
-	// its model turn has returned. See tool.SequentialRunner. The zero value
-	// leaves the calls of one turn concurrent. NewStreaming returns an error
-	// that wraps ErrInvalidArgument when it is set.
+	// its model turn has returned. Set it when the tool's calls must see the
+	// writes of the earlier calls of their turn, whether or not the tool also
+	// takes a lock of its own; see tool.SequentialRunner, which also says what
+	// a user sees when a call's wait outlives the run's context. The zero
+	// value leaves the calls of one turn concurrent. NewStreaming returns an
+	// error that wraps ErrInvalidArgument when it is set.
 	Sequential bool
 }
 
