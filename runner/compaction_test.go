@@ -1853,8 +1853,7 @@ func TestBeforeRunPluginCannotPlantACompactionRecord(t *testing.T) {
 						}
 						target := ev
 						if mode == "copy" {
-							out := *ev
-							target = &out
+							target = new(*ev)
 						}
 						target.Actions.Compaction = &session.EventCompaction{
 							StartTimestamp: time.Unix(0, 0), EndTimestamp: ev.Timestamp,

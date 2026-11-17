@@ -20,10 +20,12 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -32,6 +34,7 @@ import (
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -650,6 +653,119 @@ func TestModel_NoSideEffects(t *testing.T) {
 
 	if httpClient.Transport != originalTransport {
 		t.Errorf("NewModel modified the passed http.Client.Transport; got %v, want %v", httpClient.Transport, originalTransport)
+	}
+}
+
+func TestModel_LiveTrackingHeaders(t *testing.T) {
+	adk := version.TrackingHeader()
+	tests := []struct {
+		name          string
+		clientHeaders http.Header
+		wantUA        string
+		wantAPIClient string
+	}{
+		{
+			name:          "no_client_headers",
+			wantUA:        adk,
+			wantAPIClient: adk,
+		},
+		{
+			name:          "client_headers_follow_adk_labels",
+			clientHeaders: http.Header{"User-Agent": {"my-app/1.0"}, "X-Goog-Api-Client": {"my-lib/2.0"}},
+			wantUA:        adk + " my-app/1.0",
+			wantAPIClient: adk + " my-lib/2.0",
+		},
+		{
+			name:          "lowercase_client_header_keys",
+			clientHeaders: http.Header{"user-agent": {"my-app/1.0"}, "x-goog-api-client": {"my-lib/2.0"}},
+			wantUA:        adk + " my-app/1.0",
+			wantAPIClient: adk + " my-lib/2.0",
+		},
+		{
+			name:          "client_header_with_stale_adk_label",
+			clientHeaders: http.Header{"X-Goog-Api-Client": {"my-lib/2.0 google-adk/0.0.1"}},
+			wantUA:        adk,
+			wantAPIClient: adk + " my-lib/2.0 google-adk/0.0.1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handshakes := make(chan http.Header, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handshakes <- r.Header.Clone()
+				http.Error(w, "no upgrade", http.StatusBadRequest)
+			}))
+			defer server.Close()
+
+			var clientHeaders http.Header
+			if tt.clientHeaders != nil {
+				clientHeaders = tt.clientHeaders.Clone()
+			}
+			cfg := &genai.ClientConfig{
+				Backend: genai.BackendGeminiAPI,
+				APIKey:  "fakekey",
+				HTTPOptions: genai.HTTPOptions{
+					BaseURL:    "ws://" + strings.TrimPrefix(server.URL, "http://"),
+					APIVersion: "v1beta",
+					Headers:    clientHeaders,
+				},
+			}
+			llm, err := NewModel(t.Context(), "gemini-live-test", cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := llm.(*geminiModel).Client().Live.Connect(t.Context(), "gemini-live-test", &genai.LiveConnectConfig{}); err == nil {
+				t.Fatal("Live.Connect() succeeded against a server that rejects the upgrade")
+			}
+
+			checkLiveHandshake(t, handshakes, tt.wantUA, tt.wantAPIClient)
+			if diff := cmp.Diff(tt.clientHeaders, cfg.HTTPOptions.Headers); diff != "" {
+				t.Errorf("NewModel modified the caller's headers (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A nil config is filled from the environment by genai, and still gets the
+// tracking headers.
+func TestModel_LiveTrackingHeaders_NilConfig(t *testing.T) {
+	handshakes := make(chan http.Header, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handshakes <- r.Header.Clone()
+		http.Error(w, "no upgrade", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
+	t.Setenv("GOOGLE_API_KEY", "fakekey")
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", "ws://"+strings.TrimPrefix(server.URL, "http://"))
+
+	llm, err := NewModel(t.Context(), "gemini-live-test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := llm.(*geminiModel).Client().Live.Connect(t.Context(), "gemini-live-test", &genai.LiveConnectConfig{}); err == nil {
+		t.Fatal("Live.Connect() succeeded against a server that rejects the upgrade")
+	}
+	adk := version.TrackingHeader()
+	checkLiveHandshake(t, handshakes, adk, adk)
+}
+
+// checkLiveHandshake checks the headers of the one handshake a test server
+// recorded on handshakes.
+func checkLiveHandshake(t *testing.T, handshakes <-chan http.Header, wantUA, wantAPIClient string) {
+	t.Helper()
+	var handshake http.Header
+	select {
+	case handshake = <-handshakes:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Live.Connect() never reached the test server")
+	}
+	if got := handshake.Values("User-Agent"); len(got) != 1 || got[0] != wantUA {
+		t.Errorf("handshake User-Agent = %q, want [%q]", got, wantUA)
+	}
+	if got := handshake.Values("X-Goog-Api-Client"); len(got) != 1 || got[0] != wantAPIClient {
+		t.Errorf("handshake X-Goog-Api-Client = %q, want [%q]", got, wantAPIClient)
 	}
 }
 

@@ -38,6 +38,10 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
+// ErrConflictingRetrievalConfig indicates that both a legacy field and its
+// RAGRetrievalConfig alternative are set for the same retrieval setting.
+var ErrConflictingRetrievalConfig = errors.New("vertexairag: conflicting retrieval configuration")
+
 // Config configures a Vertex AI RAG retrieval tool. Description and at least one
 // RAGResources entry are required.
 type Config struct {
@@ -50,18 +54,29 @@ type Config struct {
 	// Format for RAGCorpus: "projects/{project}/locations/{location}/ragCorpora/{corpus}".
 	RAGResources []*genai.VertexRAGStoreRAGResource
 
-	// SimilarityTopK caps how many results retrieval returns. Nil leaves the
-	// backend default in place.
+	// RAGRetrievalConfig configures filtering, hybrid search, ranking and context
+	// count. It is sent as VertexRAGStore.RAGRetrievalConfig; nil omits it.
+	// TopK sets the same limit as SimilarityTopK, and Filter.VectorDistanceThreshold
+	// sets the same threshold as VectorDistanceThreshold. Setting both members
+	// of either pair is an error, even when their values are equal.
+	RAGRetrievalConfig *genai.RAGRetrievalConfig
+
+	// SimilarityTopK caps how many results retrieval returns.
+	// RAGRetrievalConfig.TopK is an alternative; if neither is set, the backend
+	// default applies. Setting both fields is an error.
 	SimilarityTopK *int32
 
 	// VectorDistanceThreshold drops results whose vector distance exceeds it.
-	// Nil leaves the backend default in place.
+	// RAGRetrievalConfig.Filter.VectorDistanceThreshold is an alternative; if
+	// neither is set, the backend default applies. Setting both fields is an error.
 	VectorDistanceThreshold *float64
 }
 
 // New returns a tool that grounds a Gemini model's responses on the configured
 // Vertex AI RAG corpus. It returns an error when Description or RAGResources is
-// empty.
+// empty, a RAGResources entry is nil, or overlapping retrieval settings are set
+// in both RAGRetrievalConfig and the corresponding legacy field.
+// Overlapping settings return an error wrapping [ErrConflictingRetrievalConfig].
 func New(cfg Config) (tool.Tool, error) {
 	if cfg.Description == "" {
 		return nil, errors.New("vertexairag: Config.Description is required")
@@ -76,9 +91,19 @@ func New(cfg Config) (tool.Tool, error) {
 		}
 	}
 
+	if retrieval := cfg.RAGRetrievalConfig; retrieval != nil {
+		if cfg.SimilarityTopK != nil && retrieval.TopK != nil {
+			return nil, fmt.Errorf("%w: Config.SimilarityTopK and Config.RAGRetrievalConfig.TopK cannot both be set", ErrConflictingRetrievalConfig)
+		}
+		if cfg.VectorDistanceThreshold != nil && retrieval.Filter != nil && retrieval.Filter.VectorDistanceThreshold != nil {
+			return nil, fmt.Errorf("%w: Config.VectorDistanceThreshold and Config.RAGRetrievalConfig.Filter.VectorDistanceThreshold cannot both be set", ErrConflictingRetrievalConfig)
+		}
+	}
+
 	// Copy so that later changes to cfg do not reach the tool.
 	store := cloneStore(&genai.VertexRAGStore{
 		RAGResources:            cfg.RAGResources,
+		RAGRetrievalConfig:      cfg.RAGRetrievalConfig,
 		SimilarityTopK:          cfg.SimilarityTopK,
 		VectorDistanceThreshold: cfg.VectorDistanceThreshold,
 	})
@@ -132,8 +157,8 @@ func (r *ragRetrieval) ProcessRequest(ctx agent.Context, req *model.LLMRequest) 
 }
 
 // cloneStore returns a deep copy of the fields of s that New sets:
-// RAGResources, SimilarityTopK and VectorDistanceThreshold. Other fields are
-// not copied. Every element of s.RAGResources must be non-nil.
+// RAGResources, RAGRetrievalConfig, SimilarityTopK and VectorDistanceThreshold.
+// Other fields are not copied. Every element of s.RAGResources must be non-nil.
 func cloneStore(s *genai.VertexRAGStore) *genai.VertexRAGStore {
 	res := make([]*genai.VertexRAGStoreRAGResource, len(s.RAGResources))
 	for i, r := range s.RAGResources {
@@ -142,8 +167,27 @@ func cloneStore(s *genai.VertexRAGStore) *genai.VertexRAGStore {
 			RAGFileIDs: slices.Clone(r.RAGFileIDs),
 		}
 	}
+	cfg := clonePtr(s.RAGRetrievalConfig)
+	if cfg != nil {
+		cfg.TopK = clonePtr(cfg.TopK)
+		cfg.Filter = clonePtr(cfg.Filter)
+		if cfg.Filter != nil {
+			cfg.Filter.VectorDistanceThreshold = clonePtr(cfg.Filter.VectorDistanceThreshold)
+			cfg.Filter.VectorSimilarityThreshold = clonePtr(cfg.Filter.VectorSimilarityThreshold)
+		}
+		cfg.HybridSearch = clonePtr(cfg.HybridSearch)
+		if cfg.HybridSearch != nil {
+			cfg.HybridSearch.Alpha = clonePtr(cfg.HybridSearch.Alpha)
+		}
+		cfg.Ranking = clonePtr(cfg.Ranking)
+		if cfg.Ranking != nil {
+			cfg.Ranking.LlmRanker = clonePtr(cfg.Ranking.LlmRanker)
+			cfg.Ranking.RankService = clonePtr(cfg.Ranking.RankService)
+		}
+	}
 	return &genai.VertexRAGStore{
 		RAGResources:            res,
+		RAGRetrievalConfig:      cfg,
 		SimilarityTopK:          clonePtr(s.SimilarityTopK),
 		VectorDistanceThreshold: clonePtr(s.VectorDistanceThreshold),
 	}
@@ -154,6 +198,5 @@ func clonePtr[T any](p *T) *T {
 	if p == nil {
 		return nil
 	}
-	v := *p
-	return &v
+	return new(*p)
 }

@@ -155,7 +155,7 @@ func TestRunLiveSendsLiveRunConfigFields(t *testing.T) {
 				AutomaticActivityDetection: &genai.AutomaticActivityDetection{
 					Disabled:               true,
 					EndOfSpeechSensitivity: genai.EndSensitivityHigh,
-					SilenceDurationMs:      genai.Ptr[int32](300),
+					SilenceDurationMs:      new(int32(300)),
 				},
 			},
 			EnableAffectiveDialog: true,

@@ -295,12 +295,11 @@ func TestBinaryRoutesOnThreshold(t *testing.T) {
 
 func TestAnswerKeyStoresAnswerInStateAndLeavesStateUntouchedWhenUnset(t *testing.T) {
 	t.Run("stores_choice_and_binary_answers_in_session_state", func(t *testing.T) {
-		conf := 0.85
 		triageClf := &fixedClassifier{
 			answer: &classifier.ChoiceAnswer{
 				Choice:        "technical",
 				Probabilities: map[string]float64{"billing": 0.1, "technical": 0.9},
-				Confidence:    &conf,
+				Confidence:    new(0.85),
 			},
 		}
 		triage, err := classifier.NewNode(classifier.NodeConfig{
