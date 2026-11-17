@@ -85,11 +85,15 @@ type ResponseScheduler interface {
 // first, the call is answered with the error "wait for earlier function
 // calls: context deadline exceeded" (or "... context canceled"), and neither
 // its callbacks nor the tool run. With the default task runner (see
-// platform.TaskRunner) the call's context is the run's context, so when the
-// run's context ends during the wait, that answer reaches neither the model
-// nor the session: the run ends with the context's error, and the session
-// keeps the model's function calls without their responses. A wait under a
-// context that never ends does not end.
+// platform.TaskRunner) the call's context is the context of its model turn,
+// which the flow derives from the run's context. So when the run's context
+// ends during the wait, that answer reaches neither the model nor the
+// session: the run ends with the context's error, and the session keeps the
+// model's function calls without their responses. The turn's context also
+// ends when another call of the turn pauses or fails the run; the waiting
+// call then runs nothing, and the step ends with that pause or failure and
+// no function response for any call of the turn. Otherwise, under a run
+// context that never ends, the wait ends only when the earlier calls return.
 //
 // No call of a turn, sequential or not, may wait for something that a later
 // sequential call of the same turn does: the sequential call waits for the

@@ -96,11 +96,14 @@ type Func[TArgs, TResult any] func(ctx agent.Context, args TArgs, emit func(*ses
 //
 // cfg is functiontool.Config with the same meaning as for functiontool.New:
 // InputSchema, OutputSchema, IsLongRunning, RequireConfirmation,
-// RequireConfirmationProvider and ResponseScheduling apply to the tool
-// unchanged. cfg.Name must be non-empty. The declaration's response schema is
-// the one functiontool.New gives for TResult (or cfg.OutputSchema): for any it
-// is the schema true, which accepts every value. TArgs must be a struct, a map,
-// or a pointer to one, as for functiontool.New.
+// RequireConfirmationProvider, ResponseScheduling, Sequential and
+// CustomMetadata apply to the tool unchanged. With Sequential, a call's
+// callbacks and handler start only after every earlier call of its model
+// turn has returned (see tool.SequentialRunner). cfg.Name must be non-empty.
+// The declaration's response schema is the one functiontool.New gives for
+// TResult (or cfg.OutputSchema): for any it is the schema true, which accepts
+// every value. TArgs must be a struct, a map, or a pointer to one, as for
+// functiontool.New.
 //
 // New returns an error wrapping functiontool.ErrInvalidArgument for an empty
 // cfg.Name, a bad TArgs or a nil handler, and the errors functiontool.New
