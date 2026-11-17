@@ -79,6 +79,14 @@ func TestBuildParams_MediaOnTheWire(t *testing.T) {
 			want:  `[{"text":"look","type":"text"},` + image + `]`,
 		},
 		{
+			name: "executable code before an inline image keeps its order",
+			parts: []*genai.Part{
+				{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+				{InlineData: &genai.Blob{MIMEType: "image/png", Data: png}},
+			},
+			want: "[{\"text\":\"Code:```python\\nprint(1)\\n```\",\"type\":\"text\"}," + image + "]",
+		},
+		{
 			name:  "image by url",
 			parts: []*genai.Part{{FileData: &genai.FileData{MIMEType: "image/jpeg", FileURI: "https://example.com/a.jpg"}}},
 			want:  `[{"image_url":{"detail":"auto","url":"https://example.com/a.jpg"},"type":"image_url"}]`,
@@ -114,6 +122,99 @@ func TestBuildParams_MediaOnTheWire(t *testing.T) {
 				t.Fatalf("content =\n%s\nwant\n%s", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBuildParams_ToolResponseBeforeMedia(t *testing.T) {
+	response := &genai.Part{FunctionResponse: &genai.FunctionResponse{
+		ID: "c1", Name: "f", Response: map[string]any{"ok": true},
+	}}
+	image := &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}}
+	for _, tt := range []struct {
+		name  string
+		parts []*genai.Part
+	}{
+		{name: "response part first", parts: []*genai.Part{response, image}},
+		{name: "media part first", parts: []*genai.Part{image, response}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &model.LLMRequest{Contents: []*genai.Content{
+				{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "f"}}}},
+				{Role: "user", Parts: tt.parts},
+			}}
+			msgs := wireMessages(t, requestWire(t, req))
+			if len(msgs) != 3 {
+				t.Fatalf("got %d messages, want 3", len(msgs))
+			}
+			// All tool calls must be answered before another user message.
+			for i, role := range []string{"assistant", "tool", "user"} {
+				if got := msgs[i]["role"]; got != role {
+					t.Fatalf("message %d: role = %v, want %s", i, got, role)
+				}
+			}
+			if got := msgs[1]["tool_call_id"]; got != "c1" {
+				t.Errorf("tool_call_id = %v, want c1", got)
+			}
+			// Report payload sizes so failures do not echo tool results or media.
+			toolContent, ok := msgs[1]["content"].(string)
+			if !ok {
+				t.Fatalf("tool content type = %T, want string", msgs[1]["content"])
+			}
+			if want := `{"ok":true}`; toolContent != want {
+				t.Errorf("tool content differs from expected JSON: got %d bytes, want %d", len(toolContent), len(want))
+			}
+			content, ok := msgs[2]["content"].([]any)
+			if !ok {
+				t.Fatalf("media content type = %T, want []any", msgs[2]["content"])
+			}
+			if len(content) != 1 {
+				t.Fatalf("got %d media content parts, want 1", len(content))
+			}
+			part, ok := content[0].(map[string]any)
+			if !ok {
+				t.Fatalf("media part type = %T, want map[string]any", content[0])
+			}
+			if got := part["type"]; got != "image_url" {
+				t.Fatalf("media part type = %v, want image_url", got)
+			}
+			imageURL, ok := part["image_url"].(map[string]any)
+			if !ok {
+				t.Fatalf("image_url type = %T, want map[string]any", part["image_url"])
+			}
+			url, ok := imageURL["url"].(string)
+			if !ok {
+				t.Fatalf("image URL type = %T, want string", imageURL["url"])
+			}
+			if want := "data:image/png;base64,AQ=="; url != want {
+				t.Errorf("image URL differs from expected data URL: got %d bytes, want %d", len(url), len(want))
+			}
+		})
+	}
+}
+
+func TestBuildParams_FunctionCallBeforeMediaRoleError(t *testing.T) {
+	call := &genai.FunctionCall{ID: "c1", Name: "f"}
+	image := &genai.Blob{MIMEType: "image/png", Data: []byte{1}}
+	for _, role := range []string{"system", "developer"} {
+		for _, tt := range []struct {
+			name  string
+			parts []*genai.Part
+		}{
+			{name: "call part first", parts: []*genai.Part{{FunctionCall: call}, {InlineData: image}}},
+			{name: "media part first", parts: []*genai.Part{{InlineData: image}, {FunctionCall: call}}},
+			{name: "same part", parts: []*genai.Part{{FunctionCall: call, InlineData: image}}},
+		} {
+			t.Run(role+"/"+tt.name, func(t *testing.T) {
+				req := &model.LLMRequest{Contents: []*genai.Content{{Role: role, Parts: tt.parts}}}
+				_, err := buildParams("m", req)
+				if err == nil {
+					t.Fatal("buildParams() err = nil, want function call refusal")
+				}
+				if want := "function call in a " + role + " turn"; !strings.Contains(err.Error(), want) {
+					t.Errorf("buildParams() err = %q, want it to contain %q", err, want)
+				}
+			})
+		}
 	}
 }
 
@@ -171,6 +272,28 @@ func TestBuildParams_MediaRefused(t *testing.T) {
 			name:    "media in a developer turn",
 			req:     &model.LLMRequest{Contents: []*genai.Content{{Role: "developer", Parts: []*genai.Part{png}}}},
 			wantMsg: "media in a developer message is not supported: image/png",
+		},
+		{
+			// The system instruction becomes a text-only system message, so
+			// the image would be dropped while its text goes out.
+			name: "text and inline data on one system instruction part",
+			req: &model.LLMRequest{
+				Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
+				Config: &genai.GenerateContentConfig{SystemInstruction: &genai.Content{Parts: []*genai.Part{
+					{Text: "describe it", InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+				}}},
+			},
+			wantMsg: "system instruction part: InlineData",
+		},
+		{
+			name: "text and file data on one system instruction part",
+			req: &model.LLMRequest{
+				Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
+				Config: &genai.GenerateContentConfig{SystemInstruction: &genai.Content{Parts: []*genai.Part{
+					{Text: "describe it", FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: secretURL}},
+				}}},
+			},
+			wantMsg: "system instruction part: FileData",
 		},
 		{
 			name: "media beside a function response",

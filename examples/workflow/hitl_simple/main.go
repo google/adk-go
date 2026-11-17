@@ -37,12 +37,11 @@ import (
 	"log"
 	"os"
 
-	"github.com/google/uuid"
-
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/cmd/launcher/full"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
@@ -57,7 +56,7 @@ func main() {
 			// Mirrors adk-python (RequestInput.interrupt_id defaults to
 			// a fresh UUID).
 			if err := emit(workflow.NewRequestInputEvent(ctx, session.RequestInput{
-				InterruptID: "ask_name-" + uuid.NewString(),
+				InterruptID: "ask_name-" + platform.NewUUID(ctx),
 				Message:     "What's your name?",
 			})); err != nil {
 				return nil, err

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package agentanalytics implements the BigQuery Agent Analytics Plugin.
 package agentanalytics
 
 import (
@@ -647,9 +646,10 @@ type eventData struct {
 	// customMetadataScrubbed reports that customMetadata was already run
 	// through scrubA2ACustomMetadata.
 	customMetadataScrubbed bool
-	// customMetadataTruncated reports that scrubbing customMetadata hit a
-	// safety cap or placeholder.
-	customMetadataTruncated bool
+	// customMetadataLost holds the keys of customMetadata whose values lost
+	// content to a safety cap or placeholder when scrubbed (see
+	// scrubA2ACustomMetadata).
+	customMetadataLost map[string]bool
 	// timestamp overrides span.timestamp when non-zero. Live callbacks leave
 	// it zero and set span.timestamp from the trace manager's clock; a
 	// mid-run purged activation (see purgeActivationLocked) sets it to
@@ -1582,8 +1582,9 @@ func cacheType(u *genai.GenerateContentResponseUsageMetadata) string {
 // agent a, matching adk-python: the static instruction of an LLM agent as
 // content, and its description, model, sub-agent names and, when an
 // instruction provider builds the instruction, instruction_source ("provider",
-// with nil content). An agent that inherits its model from an ancestor has no
-// model attribute, because ADK Go exposes no parent link on agent.Agent.
+// with nil content). ADK Go neither inherits models from ancestor agents nor
+// exposes a parent link on agent.Agent, so only a's own configured Model is
+// recorded.
 func agentStartingData(a agent.Agent) (content any, attrs map[string]any) {
 	attrs = map[string]any{}
 	if a == nil {
@@ -1645,7 +1646,7 @@ func agentConfig(a agent.Agent) any {
 		if !inner.IsValid() || !inner.CanInterface() {
 			return nil
 		}
-		next, ok := inner.Interface().(agent.Agent)
+		next, ok := reflect.TypeAssert[agent.Agent](inner)
 		if !ok {
 			return nil
 		}
@@ -2047,8 +2048,9 @@ func (p *analyticsPlugin) jsonColumn(v any) (string, bool) {
 }
 
 // attributes assembles the attributes column: the event-specific attributes
-// followed by the common ones, plus whether scrubbing custom_metadata lost
-// content to a safety cap.
+// followed by the common ones, plus whether scrubbing lost content of an
+// entry that custom_metadata keeps to a safety cap or placeholder (see
+// eventData.customMetadataLost).
 func (p *analyticsPlugin) attributes(eventID string, id identity, agentName string, span trace.SpanContext, d *eventData) (map[string]any, bool) {
 	attrs := make(map[string]any, len(d.attributes)+6)
 	maps.Copy(attrs, d.attributes)
@@ -2069,6 +2071,12 @@ func (p *analyticsPlugin) attributes(eventID string, id identity, agentName stri
 	metaTrunc := false
 	if md := p.customMetadata.apply(d.customMetadata); md != nil {
 		attrs["custom_metadata"] = md
+		for k := range d.customMetadataLost {
+			if _, ok := md[k]; ok {
+				metaTrunc = true
+				break
+			}
+		}
 	}
 	return attrs, metaTrunc
 }
@@ -2202,11 +2210,7 @@ func stateSnapshot(s session.ReadonlyState) map[string]any {
 	if s == nil {
 		return nil
 	}
-	state := map[string]any{}
-	for k, v := range s.All() {
-		state[k] = v
-	}
-	return state
+	return maps.Collect(s.All())
 }
 
 // adkVersion returns the version of the ADK module linked into the binary,

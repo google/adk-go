@@ -239,8 +239,7 @@ func writeArtifact(ctx context.Context, obj gcsObject, part *genai.Part, metadat
 // 412 (*googleapi.Error) on the JSON API, or codes.FailedPrecondition on the
 // gRPC transport. Both status.FromError and errors.As unwrap wrapped errors.
 func isPreconditionFailed(err error) bool {
-	var apiErr *googleapi.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*googleapi.Error](err); ok {
 		return apiErr.Code == http.StatusPreconditionFailed
 	}
 	return status.Code(err) == codes.FailedPrecondition

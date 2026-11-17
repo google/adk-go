@@ -20,6 +20,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -50,8 +51,10 @@ const WorkflowInputFunctionCallName = "adk_request_input"
 // back to the workflow agent that issued the request.
 //
 // Prefer a unique InterruptID per request. If req.InterruptID is
-// empty, a UUID is generated so the downstream contract (a non-empty
-// correlation key in NodeState.Interrupts) is always satisfied.
+// empty, [platform.NewUUID] generates one using the provider on ctx,
+// so hosts can control the correlation key in NodeState.Interrupts.
+// If the provider returns an empty string, a random UUID is used, so
+// the key is never empty.
 // You may also build a readable-but-unique ID (a stable prefix plus a
 // UUID). Avoid a fixed literal that recurs across separate runs in the
 // same session: clients such as the Dev UI track answered requests by
@@ -63,7 +66,7 @@ const WorkflowInputFunctionCallName = "adk_request_input"
 //	func (n *MyNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 //	    return func(yield func(*session.Event, error) bool) {
 //	        yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
-//	            InterruptID: "human_review-" + uuid.NewString(),
+//	            InterruptID: "human_review-" + platform.NewUUID(ctx),
 //	            Message:     "Please review this draft.",
 //	            Payload:     draft,
 //	        }), nil)
@@ -71,7 +74,12 @@ const WorkflowInputFunctionCallName = "adk_request_input"
 //	}
 func NewRequestInputEvent(ctx agent.InvocationContext, req session.RequestInput) *session.Event {
 	if req.InterruptID == "" {
-		req.InterruptID = uuid.NewString()
+		req.InterruptID = platform.NewUUID(ctx)
+		if req.InterruptID == "" {
+			// The scheduler ignores an empty ID, so the node would
+			// not pause for input.
+			req.InterruptID = uuid.NewString()
+		}
 	}
 
 	ev := session.NewEvent(ctx, ctx.InvocationID())
