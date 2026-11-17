@@ -135,7 +135,9 @@ type Config struct {
 // for them to close.
 type PluginConfig struct {
 	// Plugins are applied to every run, in order. [Runner.Close] closes them
-	// after the toolsets of the runner's agent tree.
+	// after the toolsets of the runner's agent tree. Every plugin must be
+	// non-nil, and no two may have the same name ([plugin.Config.Name]);
+	// otherwise [New] returns an error.
 	Plugins []*plugin.Plugin
 	// CloseTimeout bounds how long [Runner.Close] waits for each plugin's
 	// Close to return. Zero, the default, means 5 seconds. A plugin whose
@@ -210,7 +212,9 @@ func WithInvocationID(id string) RunOption {
 //
 // Exactly one of cfg.Agent or cfg.Node must be non-nil, and
 // cfg.SessionService must be non-nil. When cfg.Node is set, its name must
-// not be empty, and an empty cfg.AppName defaults to cfg.Node.Name(). When
+// not be empty, and an empty cfg.AppName defaults to cfg.Node.Name().
+// The plugins in cfg.PluginConfig.Plugins must be non-nil and have distinct
+// names, and cfg.PluginConfig.CloseTimeout must not be negative. When
 // cfg.Compaction is set, it must be valid, and either name a Summarizer or
 // have an LLM agent with a model as the root. New returns an error
 // describing the first precondition that does not hold. It does not modify

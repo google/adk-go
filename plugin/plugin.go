@@ -39,6 +39,10 @@ import (
 // Config configures a [Plugin], supplying its name and the lifecycle callbacks
 // it registers for the run, agent, model, and tool stages.
 type Config struct {
+	// Name identifies the plugin in a runner and in the error text of its
+	// failing callbacks. It must be unique among the plugins of one runner:
+	// runner.New refuses a second plugin with the same name, including a
+	// second empty name.
 	Name string
 
 	OnUserMessageCallback OnUserMessageCallback
@@ -259,6 +263,17 @@ type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 // a BeforeRunCallback or while handling its reply: there OnRunErrorCallback
 // is called and the after-run callbacks still run.
 //
+// When the agent or workflow node fails, for example because a model call
+// returns an error, the caller decides which of the two callbacks runs. A
+// caller that stops ranging at the error, such as the /run handler of the
+// REST server (package server/adkrest), ends the run with it: the runner
+// calls OnRunErrorCallback and not AfterRunCallback. A caller that keeps
+// ranging past the error, such as adk-go's console launcher (package
+// cmd/launcher/console) and the REST server's /run_sse handler, does not end
+// the run with it: the run ends without a run error, and the runner calls
+// AfterRunCallback and not OnRunErrorCallback, although the run failed.
+// [OnRunErrorCallback] says how a plugin can see every failed run.
+//
 // At the normal end of a run it is called after the last event and before
 // post-invocation compaction, so the compaction summary event is not yet in
 // the session. Plugins are called in registration order. A panic is not
@@ -308,6 +323,26 @@ type FailableAfterRunCallback func(ctx agent.InvocationContext) error
 // where the run goes on does not end the run with it: the callback is not
 // called for that error, and if the run later ends because of another run
 // error, it is called once for that one.
+//
+// So for a failure of the agent or workflow node, for example a model call
+// that returns an error, the caller decides which callback runs. A caller
+// that stops ranging at the error, such as the /run handler of the REST
+// server (package server/adkrest), gets this callback and no
+// [AfterRunCallback]. A caller that keeps ranging past it, such as adk-go's
+// console launcher (package cmd/launcher/console) and the REST server's
+// /run_sse handler, gets AfterRunCallback and not this callback, although
+// the run failed. Other run errors, such as a failing OnEventCallback, end
+// the run whatever the caller does, and this callback is called for them.
+//
+// A plugin that must see every failed run implements this callback and also
+// notes the failures that reach a caller that keeps ranging. Outside
+// Runner.RunLive, an error that escapes an agent is reported to
+// [OnAgentErrorCallback] before the caller receives it, whatever the caller
+// then does, so the plugin can record ctx.InvocationID() there and read the
+// record in its after-run callback. A run that ends because of a run error
+// gets no after-run call, so the plugin clears the record in this callback
+// too. No plugin callback reports a failure of a workflow node root
+// (runner.Config.Node) that the caller ranges past.
 //
 // It is not called for a failure before the run starts (session lookup,
 // message checks), for the cancellation of the invocation's context, when
