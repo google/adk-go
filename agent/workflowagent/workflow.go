@@ -59,14 +59,28 @@ type Config struct {
 // for a long-running call or an input request, including one that has waited
 // since an earlier turn.
 //
-// In a resumable ParallelAgent, a turn that answers another branch does not
-// resume a graph workflow agent branch that paused for input, because a graph
-// workflow agent resumes only when the turn answers its own pending request:
-// when the turn answers an input request of another branch (a
-// [session.RequestInput], also one raised by an agent nested in that branch),
-// the turn fails with an error that matches [workflow.ErrNothingToResume];
-// when it answers anything else, such as a long-running function call, the
-// paused workflow runs its nodes again from the start.
+// In a resumable run, resuming a graph workflow agent below a ParallelAgent,
+// SequentialAgent or LoopAgent is not safe: when a ParallelAgent has more than
+// one paused branch, a turn that answers one of them can run another paused
+// workflow's nodes again, fail, or let an enclosing agent end while a workflow
+// still waits; when an LLM agent node of the workflow paused on a long-running
+// call, the turn that answers the call fails; and when a LoopAgent runs the
+// workflow again in the turn that resumed it, that pass can run only the nodes
+// after the node that asked for input, run none of its nodes, or fail with an
+// error that matches workflow.ErrNothingToResume.
+//
+// In a resumable ParallelAgent, a turn that answers a call made inside a graph
+// workflow agent below the ParallelAgent runs only the sub-agents that hold a
+// caller of one of the turn's function responses and have not ended; any other
+// turn, and every pass of an enclosing LoopAgent after the first, runs every
+// sub-agent that has not ended. A call is made inside a graph workflow agent
+// when that agent made it, as it does an input request raised by a function
+// node, or when an agent reached through its [Config.SubAgents] made it; a
+// node agent missing from SubAgents is not found, so its calls count as made
+// outside. A graph workflow agent that paused for input and runs in a turn
+// that does not answer its own request fails with an error that matches
+// [workflow.ErrNothingToResume] when the turn answers another input request (a
+// [session.RequestInput]), and otherwise runs its nodes again from the start.
 func New(cfg Config) (agent.Agent, error) {
 	w, err := workflow.New(cfg.Name, cfg.Edges)
 	if err != nil {
