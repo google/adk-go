@@ -14,488 +14,431 @@
 
 package skillregistry
 
-// import (
-// 	"archive/zip"
-// 	"bytes"
-// 	"encoding/json"
-// 	"errors"
-// 	"io"
-// 	"maps"
-// 	"net/http"
-// 	"slices"
-// 	"strings"
-// 	"testing"
+import (
+	"archive/zip"
+	"bytes"
+	"errors"
+	"io"
+	"strings"
+	"testing"
 
-// 	"github.com/google/go-cmp/cmp"
-// 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
-// 	"google.golang.org/api/option"
-// )
+	"github.com/google/go-cmp/cmp"
+	agentregistry "google.golang.org/api/agentregistry/v1alpha"
 
-// const testSkillMD = `---
-// name: cymbal_skill
-// description: A skill for managing Cymbal projects.
-// metadata:
-//   version: "1.2"
-// ---
-// # Cymbal
+	"google.golang.org/adk/v2/tool/skilltoolset/skill"
+)
 
-// Run the deploy script.
-// `
+const (
+	nameCymbal = "projects/p/locations/global/skills/cymbal"
+	revCymbal  = "rev-cymbal"
+)
 
-// // zipSkill builds a skill payload from a map of path to file content.
-// func zipSkill(t *testing.T, files map[string]string) []byte {
-// 	t.Helper()
+// zipEntry is one file placed into the archive served by fakeClient.GetZip.
+type zipEntry struct {
+	name    string
+	content []byte
+}
 
-// 	var buf bytes.Buffer
-// 	w := zip.NewWriter(&buf)
-// 	// Write in a stable order so archive order never depends on map iteration.
-// 	for _, name := range slices.Sorted(maps.Keys(files)) {
-// 		f, err := w.Create(name)
-// 		if err != nil {
-// 			t.Fatalf("creating zip entry %q: %v", name, err)
-// 		}
-// 		if _, err := io.WriteString(f, files[name]); err != nil {
-// 			t.Fatalf("writing zip entry %q: %v", name, err)
-// 		}
-// 	}
-// 	if err := w.Close(); err != nil {
-// 		t.Fatalf("closing zip: %v", err)
-// 	}
-// 	return buf.Bytes()
-// }
+// buildZip returns a *zip.Reader over entries, preserving their order.
+func buildZip(t *testing.T, entries []zipEntry) *zip.Reader {
+	t.Helper()
+	b := zipBytes(t, entries)
+	r, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
+	if err != nil {
+		t.Fatalf("opening zip: %v", err)
+	}
+	return r
+}
 
-// // testSkillFiles is the payload of the "cymbal-skill" fixture.
-// func testSkillFiles() map[string]string {
-// 	return map[string]string{
-// 		"SKILL.md":              testSkillMD,
-// 		"scripts/deploy.sh":     "#!/bin/sh\necho deploy\n",
-// 		"scripts/lib/util.sh":   "true\n",
-// 		"references/api.md":     "# API\n",
-// 		"assets/logo.svg":       "<svg/>",
-// 		"notes.txt":             "not a resource",
-// 		"../escape/evil.sh":     "pwned",
-// 		"assets/nested/pic.png": "png",
-// 	}
-// }
+// fakeClient is an in-memory [Client]. It serves the source's three access
+// paths — ListFrontmatters, GetSkill (resolving the revision) and GetZip
+// (keyed by revision) — and records nothing beyond its configured data.
+type fakeClient struct {
+	t *testing.T
 
-// // newTestSource starts a fake Skill Registry and returns a Source bound to it.
-// // getSkill serves GET on a single skill; list serves the collection.
-// func newTestSource(t *testing.T, list string, getSkill func(skillID string) (int, string)) skill.Source {
-// 	t.Helper()
+	frontmatters []*agentregistry.Frontmatter    // ListFrontmatters result
+	listFMErr    error                           // ListFrontmatters error
+	byName       map[string]*agentregistry.Skill // GetSkill result, by resource name
+	getErr       map[string]error                // GetSkill error, by resource name
+	zips         map[string][]zipEntry           // GetZip archives, by revision
+	zipErr       map[string]error                // GetZip error, by revision
+}
 
-// 	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-// 		urlPath := r.URL.Path
-// 		if strings.HasSuffix(urlPath, "/skills") {
-// 			_, _ = w.Write([]byte(list))
-// 			return
-// 		}
-// 		status, body := getSkill(urlPath[strings.LastIndex(urlPath, "/")+1:])
-// 		w.WriteHeader(status)
-// 		_, _ = w.Write([]byte(body))
-// 	})
+var _ Client = (*fakeClient)(nil)
 
-// 	src, err := NewSkillRegistrySource(t.Context(), SkillRegistrySourceConfig{Client: c})
-// 	if err != nil {
-// 		t.Fatalf("NewSkillRegistrySource() error = %v", err)
-// 	}
-// 	return src
-// }
+func (c *fakeClient) ListFrontmatters() ([]*agentregistry.Frontmatter, error) {
+	if c.listFMErr != nil {
+		return nil, c.listFMErr
+	}
+	return c.frontmatters, nil
+}
 
-// // skillJSON renders a skill resource carrying the standard test payload.
-// func skillJSON(t *testing.T, id string, files map[string]string) string {
-// 	t.Helper()
+func (c *fakeClient) GetSkill(name string) (*agentregistry.Skill, error) {
+	if err := c.getErr[name]; err != nil {
+		return nil, err
+	}
+	s, ok := c.byName[name]
+	if !ok {
+		return nil, errors.New("fakeClient: no skill for the given name")
+	}
+	return s, nil
+}
 
-// 	body, err := json.Marshal(map[string]any{
-// 		"name":             "projects/1234/locations/us-central1/skills/" + id,
-// 		"displayName":      "cymbal_skill",
-// 		"description":      "A skill for managing Cymbal projects.",
-// 		"license":          "Apache-2.0",
-// 		"compatibility":    "needs bash",
-// 		"state":            SkillStateActive,
-// 		"zippedFilesystem": zipSkill(t, files),
-// 	})
-// 	if err != nil {
-// 		t.Fatalf("marshaling skill: %v", err)
-// 	}
-// 	return string(body)
-// }
+func (c *fakeClient) GetZip(rev string) (*zip.Reader, error) {
+	if err := c.zipErr[rev]; err != nil {
+		return nil, err
+	}
+	entries, ok := c.zips[rev]
+	if !ok {
+		return nil, errors.New("fakeClient: no zip for the given revision")
+	}
+	return buildZip(c.t, entries), nil
+}
 
-// func TestNewSkillRegistrySource_Config(t *testing.T) {
-// 	if _, err := NewSkillRegistrySource(t.Context(), SkillRegistrySourceConfig{Location: "us-central1"},
-// 		option.WithHTTPClient(http.DefaultClient)); err == nil {
-// 		t.Error("NewSkillRegistrySource() with no project = nil error, want error")
-// 	}
-// }
+// ResourceID mirrors the real client: it wraps a short name as a full resource
+// name, so the test can assert the source reports the resource name rather than
+// whatever the frontmatter carried.
+func (c *fakeClient) ResourceID(name string) string {
+	return "projects/p/locations/global/skills/" + name
+}
 
-// func TestSkillRegistrySource_ListFrontmatters(t *testing.T) {
-// 	// Only ACTIVE skills, and skills whose state the API left unset, are usable.
-// 	list := `{"skills":[
-// 	  {"name":"projects/1234/locations/us-central1/skills/zebra-skill","description":"Zebras.","state":"ACTIVE"},
-// 	  {"name":"projects/1234/locations/us-central1/skills/cymbal-skill","displayName":"cymbal_skill","description":"Cymbal.","license":"Apache-2.0","compatibility":"needs bash","state":"ACTIVE"},
-// 	  {"name":"projects/1234/locations/us-central1/skills/half-built","description":"Nope.","state":"CREATING"},
-// 	  {"name":"projects/1234/locations/us-central1/skills/broken","description":"Nope.","state":"FAILED"},
-// 	  {"name":"projects/1234/locations/us-central1/skills/stateless","description":"Fine."}
-// 	]}`
-// 	src := newTestSource(t, list, nil)
+// The methods below are not exercised by the source paths.
+func (c *fakeClient) ListSkills() ([]*agentregistry.Skill, error) { return nil, nil }
 
-// 	got, err := src.ListFrontmatters(t.Context())
-// 	if err != nil {
-// 		t.Fatalf("ListFrontmatters() error = %v", err)
-// 	}
+func (c *fakeClient) GetRevision(string) (*agentregistry.SkillRevision, error) { return nil, nil }
 
-// 	// Names come from the skill ID, not the display name, and are sorted.
-// 	want := []*skill.Frontmatter{
-// 		{Name: "cymbal-skill", Description: "Cymbal.", License: "Apache-2.0", Compatibility: "needs bash"},
-// 		{Name: "stateless", Description: "Fine."},
-// 		{Name: "zebra-skill", Description: "Zebras."},
-// 	}
-// 	if diff := cmp.Diff(want, got); diff != "" {
-// 		t.Errorf("ListFrontmatters() diff (-want +got):\n%s", diff)
-// 	}
-// }
+func (c *fakeClient) FindFrontmatters(string) ([]*agentregistry.Frontmatter, error) {
+	return nil, nil
+}
 
-// func TestSkillRegistrySource_LoadFrontmatter(t *testing.T) {
-// 	src := newTestSource(t, "", func(string) (int, string) {
-// 		return http.StatusOK, skillJSON(t, "cymbal-skill", testSkillFiles())
-// 	})
+func (c *fakeClient) ParseSkillName(string) (projectID, location, skillName string, resErr error) {
+	return "", "", "", nil
+}
 
-// 	got, err := src.LoadFrontmatter(t.Context(), "cymbal-skill")
-// 	if err != nil {
-// 		t.Fatalf("LoadFrontmatter() error = %v", err)
-// 	}
+// newCymbalClient serves a single skill with a SKILL.md and a few resources.
+func newCymbalClient(t *testing.T) *fakeClient {
+	t.Helper()
+	md, err := skill.Build(&skill.Frontmatter{Name: "cymbal", Description: "Cymbal."}, "# Cymbal\n\nRun it.\n")
+	if err != nil {
+		t.Fatalf("skill.Build() error = %v", err)
+	}
+	return &fakeClient{
+		t: t,
+		byName: map[string]*agentregistry.Skill{
+			nameCymbal: {
+				Name:            nameCymbal,
+				DefaultRevision: revCymbal,
+				Frontmatter: &agentregistry.Frontmatter{
+					Name:          "fm-name",
+					Description:   "Cymbal.",
+					License:       "Apache-2.0",
+					Compatibility: "needs bash",
+					Metadata:      map[string]string{"version": "1.2"},
+				},
+			},
+		},
+		zips: map[string][]zipEntry{
+			revCymbal: {
+				{name: "SKILL.md", content: md},
+				{name: "assets/logo.svg", content: []byte("<svg/>")},
+				{name: "assets/nested/pic.png", content: []byte("png")},
+				{name: "scripts/run.sh", content: []byte("echo hi")},
+			},
+		},
+		getErr: map[string]error{},
+		zipErr: map[string]error{},
+	}
+}
 
-// 	// The registered metadata wins over the SKILL.md frontmatter, so the name
-// 	// is the skill ID rather than the "cymbal_skill" in the file.
-// 	want := &skill.Frontmatter{
-// 		Name:          "cymbal-skill",
-// 		Description:   "A skill for managing Cymbal projects.",
-// 		License:       "Apache-2.0",
-// 		Compatibility: "needs bash",
-// 	}
-// 	if diff := cmp.Diff(want, got); diff != "" {
-// 		t.Errorf("LoadFrontmatter() diff (-want +got):\n%s", diff)
-// 	}
-// }
+func newSource(t *testing.T, c Client) *SkillRegistrySource {
+	t.Helper()
+	src, err := NewSkillRegistrySource(t.Context(), SkillRegistrySourceConfig{Client: c})
+	if err != nil {
+		t.Fatalf("NewSkillRegistrySource() error = %v", err)
+	}
+	return src
+}
 
-// func TestSkillRegistrySource_LoadInstructions(t *testing.T) {
-// 	tests := []struct {
-// 		name     string
-// 		skillMD  string
-// 		want     string
-// 		wantErr  error
-// 		skipFile bool
-// 	}{
-// 		{
-// 			name:    "strips frontmatter",
-// 			skillMD: testSkillMD,
-// 			want:    "# Cymbal\n\nRun the deploy script.\n",
-// 		},
-// 		{
-// 			name:    "windows line endings",
-// 			skillMD: "---\r\nname: x\r\n---\r\n# Body\r\n",
-// 			want:    "# Body\r\n",
-// 		},
-// 		{
-// 			name:    "empty body",
-// 			skillMD: "---\nname: x\n---\n",
-// 			want:    "",
-// 		},
-// 		{
-// 			// Frontmatter this package cannot model must not hide the body:
-// 			// unlike ParseBytes, the source never decodes the YAML.
-// 			name:    "unknown frontmatter fields",
-// 			skillMD: "---\nname: cymbal_skill\nunknown-field: [1, 2]\n---\nBody\n",
-// 			want:    "Body\n",
-// 		},
-// 		{
-// 			name:    "no opening separator",
-// 			skillMD: "# Just markdown\n",
-// 			wantErr: skill.ErrInvalidFrontmatter,
-// 		},
-// 		{
-// 			name:    "no closing separator",
-// 			skillMD: "---\nname: x\n",
-// 			wantErr: skill.ErrInvalidFrontmatter,
-// 		},
-// 		{
-// 			name:     "no SKILL.md in payload",
-// 			skipFile: true,
-// 			wantErr:  skill.ErrSkillNotFound,
-// 		},
-// 	}
-// 	for _, tt := range tests {
-// 		t.Run(tt.name, func(t *testing.T) {
-// 			files := map[string]string{"assets/logo.svg": "<svg/>"}
-// 			if !tt.skipFile {
-// 				files["SKILL.md"] = tt.skillMD
-// 			}
-// 			src := newTestSource(t, "", func(string) (int, string) {
-// 				return http.StatusOK, skillJSON(t, "cymbal-skill", files)
-// 			})
+func TestSkillRegistrySource_ListFrontmatters(t *testing.T) {
+	c := &fakeClient{
+		t: t,
+		frontmatters: []*agentregistry.Frontmatter{
+			{Name: "alpha", Description: "Alpha.", License: "Apache-2.0"},
+			nil, // a nil frontmatter from the client is skipped, not returned
+			{Name: "beta", Description: "Beta."},
+		},
+	}
+	src := newSource(t, c)
 
-// 			got, err := src.LoadInstructions(t.Context(), "cymbal-skill")
-// 			if tt.wantErr != nil {
-// 				if !errors.Is(err, tt.wantErr) {
-// 					t.Fatalf("LoadInstructions() error = %v, want %v", err, tt.wantErr)
-// 				}
-// 				return
-// 			}
-// 			if err != nil {
-// 				t.Fatalf("LoadInstructions() error = %v", err)
-// 			}
-// 			if got != tt.want {
-// 				t.Errorf("LoadInstructions() = %q, want %q", got, tt.want)
-// 			}
-// 		})
-// 	}
-// }
+	got, err := src.ListFrontmatters(t.Context())
+	if err != nil {
+		t.Fatalf("ListFrontmatters() error = %v", err)
+	}
+	// The name is the full resource name (via ResourceID), not the raw field.
+	want := []*skill.Frontmatter{
+		{Name: "projects/p/locations/global/skills/alpha", Description: "Alpha.", License: "Apache-2.0"},
+		{Name: "projects/p/locations/global/skills/beta", Description: "Beta."},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("ListFrontmatters() diff (-want +got):\n%s", diff)
+	}
+}
 
-// func TestSkillRegistrySource_ListResources(t *testing.T) {
-// 	src := newTestSource(t, "", func(string) (int, string) {
-// 		return http.StatusOK, skillJSON(t, "cymbal-skill", testSkillFiles())
-// 	})
+func TestSkillRegistrySource_ListFrontmatters_Error(t *testing.T) {
+	boom := errors.New("registry down")
+	src := newSource(t, &fakeClient{t: t, listFMErr: boom})
+	if _, err := src.ListFrontmatters(t.Context()); !errors.Is(err, boom) {
+		t.Fatalf("ListFrontmatters() error = %v, want errors.Is %v", err, boom)
+	}
+}
 
-// 	tests := []struct {
-// 		name    string
-// 		subpath string
-// 		want    []string
-// 		wantErr error
-// 	}{
-// 		{
-// 			// SKILL.md, the stray root file and the traversal entry are all
-// 			// excluded; only the three resource directories are listed.
-// 			name:    "root",
-// 			subpath: ".",
-// 			want: []string{
-// 				"assets/logo.svg",
-// 				"assets/nested/pic.png",
-// 				"references/api.md",
-// 				"scripts/deploy.sh",
-// 				"scripts/lib/util.sh",
-// 			},
-// 		},
-// 		{
-// 			name:    "empty subpath lists root",
-// 			subpath: "",
-// 			want: []string{
-// 				"assets/logo.svg",
-// 				"assets/nested/pic.png",
-// 				"references/api.md",
-// 				"scripts/deploy.sh",
-// 				"scripts/lib/util.sh",
-// 			},
-// 		},
-// 		{
-// 			name:    "top level resource directory",
-// 			subpath: "scripts",
-// 			want:    []string{"scripts/deploy.sh", "scripts/lib/util.sh"},
-// 		},
-// 		{
-// 			name:    "nested directory",
-// 			subpath: "assets/nested",
-// 			want:    []string{"assets/nested/pic.png"},
-// 		},
-// 		{
-// 			name:    "single file",
-// 			subpath: "references/api.md",
-// 			want:    []string{"references/api.md"},
-// 		},
-// 		{
-// 			name:    "unknown directory",
-// 			subpath: "scripts/missing",
-// 			wantErr: skill.ErrResourceNotFound,
-// 		},
-// 		{
-// 			name:    "outside the resource directories",
-// 			subpath: "notes.txt",
-// 			wantErr: skill.ErrInvalidResourcePath,
-// 		},
-// 		{
-// 			name:    "traversal",
-// 			subpath: "../escape",
-// 			wantErr: skill.ErrInvalidResourcePath,
-// 		},
-// 	}
-// 	for _, tt := range tests {
-// 		t.Run(tt.name, func(t *testing.T) {
-// 			got, err := src.ListResources(t.Context(), "cymbal-skill", tt.subpath)
-// 			if tt.wantErr != nil {
-// 				if !errors.Is(err, tt.wantErr) {
-// 					t.Fatalf("ListResources() error = %v, want %v", err, tt.wantErr)
-// 				}
-// 				return
-// 			}
-// 			if err != nil {
-// 				t.Fatalf("ListResources() error = %v", err)
-// 			}
-// 			if diff := cmp.Diff(tt.want, got); diff != "" {
-// 				t.Errorf("ListResources() diff (-want +got):\n%s", diff)
-// 			}
-// 		})
-// 	}
-// }
+func TestSkillRegistrySource_LoadFrontmatter(t *testing.T) {
+	t.Run("returns the registered metadata", func(t *testing.T) {
+		src := newSource(t, newCymbalClient(t))
+		got, err := src.LoadFrontmatter(t.Context(), nameCymbal)
+		if err != nil {
+			t.Fatalf("LoadFrontmatter() error = %v", err)
+		}
+		want := &skill.Frontmatter{
+			// The reported name is the registry frontmatter name wrapped by
+			// ResourceID into a full resource name.
+			Name:          "projects/p/locations/global/skills/fm-name",
+			Description:   "Cymbal.",
+			License:       "Apache-2.0",
+			Compatibility: "needs bash",
+			Metadata:      map[string]string{"version": "1.2"},
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("LoadFrontmatter() diff (-want +got):\n%s", diff)
+		}
+	})
 
-// func TestSkillRegistrySource_LoadResource(t *testing.T) {
-// 	src := newTestSource(t, "", func(string) (int, string) {
-// 		return http.StatusOK, skillJSON(t, "cymbal-skill", testSkillFiles())
-// 	})
+	t.Run("GetSkill error is propagated", func(t *testing.T) {
+		boom := errors.New("boom")
+		c := newCymbalClient(t)
+		c.getErr[nameCymbal] = boom
+		src := newSource(t, c)
+		if _, err := src.LoadFrontmatter(t.Context(), nameCymbal); !errors.Is(err, boom) {
+			t.Fatalf("LoadFrontmatter() error = %v, want errors.Is %v", err, boom)
+		}
+	})
 
-// 	tests := []struct {
-// 		name         string
-// 		resourcePath string
-// 		want         string
-// 		wantErr      error
-// 	}{
-// 		{name: "script", resourcePath: "scripts/deploy.sh", want: "#!/bin/sh\necho deploy\n"},
-// 		{name: "nested asset", resourcePath: "assets/nested/pic.png", want: "png"},
-// 		{name: "cleaned path", resourcePath: "references/../references/api.md", want: "# API\n"},
-// 		{name: "missing", resourcePath: "scripts/absent.sh", wantErr: skill.ErrResourceNotFound},
-// 		{name: "skill file", resourcePath: "SKILL.md", wantErr: skill.ErrInvalidResourcePath},
-// 		{name: "root file", resourcePath: "notes.txt", wantErr: skill.ErrInvalidResourcePath},
-// 		{name: "directory", resourcePath: "scripts", wantErr: skill.ErrInvalidResourcePath},
-// 		{name: "traversal", resourcePath: "../escape/evil.sh", wantErr: skill.ErrInvalidResourcePath},
-// 		{name: "traversal through a resource dir", resourcePath: "scripts/../../escape/evil.sh", wantErr: skill.ErrInvalidResourcePath},
-// 	}
-// 	for _, tt := range tests {
-// 		t.Run(tt.name, func(t *testing.T) {
-// 			rc, err := src.LoadResource(t.Context(), "cymbal-skill", tt.resourcePath)
-// 			if tt.wantErr != nil {
-// 				if !errors.Is(err, tt.wantErr) {
-// 					t.Fatalf("LoadResource() error = %v, want %v", err, tt.wantErr)
-// 				}
-// 				return
-// 			}
-// 			if err != nil {
-// 				t.Fatalf("LoadResource() error = %v", err)
-// 			}
-// 			defer func() { _ = rc.Close() }()
+	t.Run("a skill without frontmatter is an error", func(t *testing.T) {
+		c := newCymbalClient(t)
+		c.byName[nameCymbal].Frontmatter = nil
+		src := newSource(t, c)
+		if _, err := src.LoadFrontmatter(t.Context(), nameCymbal); err == nil {
+			t.Fatal("LoadFrontmatter() error = nil, want an error for a skill with no frontmatter")
+		}
+	})
+}
 
-// 			got, err := io.ReadAll(rc)
-// 			if err != nil {
-// 				t.Fatalf("reading resource: %v", err)
-// 			}
-// 			if string(got) != tt.want {
-// 				t.Errorf("LoadResource() = %q, want %q", got, tt.want)
-// 			}
-// 		})
-// 	}
-// }
+func TestSkillRegistrySource_LoadInstructions(t *testing.T) {
+	t.Run("returns the SKILL.md body", func(t *testing.T) {
+		src := newSource(t, newCymbalClient(t))
+		got, err := src.LoadInstructions(t.Context(), nameCymbal)
+		if err != nil {
+			t.Fatalf("LoadInstructions() error = %v", err)
+		}
+		if want := "# Cymbal\n\nRun it.\n"; got != want {
+			t.Errorf("LoadInstructions() = %q, want %q", got, want)
+		}
+	})
 
-// func TestNewSkillArchive(t *testing.T) {
-// 	// A skill payload is untrusted input: entries that would escape the skill
-// 	// root are dropped, and the survivors are indexed under cleaned paths.
-// 	files := map[string]string{
-// 		"SKILL.md":            "body",
-// 		"./scripts/deploy.sh": "deploy",
-// 		"assets/nested/a.png": "a",
-// 		"../escape.sh":        "escape",
-// 		"..":                  "dots",
-// 		"/etc/passwd":         "absolute",
-// 	}
-// 	archive, err := newSkillArchive(zipSkill(t, files))
-// 	if err != nil {
-// 		t.Fatalf("newSkillArchive() error = %v", err)
-// 	}
+	t.Run("no SKILL.md returns ErrResourceNotFound", func(t *testing.T) {
+		c := newCymbalClient(t)
+		c.zips[revCymbal] = []zipEntry{{name: "assets/logo.svg", content: []byte("<svg/>")}}
+		src := newSource(t, c)
+		if _, err := src.LoadInstructions(t.Context(), nameCymbal); !errors.Is(err, skill.ErrResourceNotFound) {
+			t.Fatalf("LoadInstructions() error = %v, want errors.Is %v", err, skill.ErrResourceNotFound)
+		}
+	})
 
-// 	// "../escape.sh", ".." and "/etc/passwd" are all gone; "./scripts/deploy.sh"
-// 	// survives under its cleaned name.
-// 	want := []string{"SKILL.md", "assets/nested/a.png", "scripts/deploy.sh"}
-// 	if diff := cmp.Diff(want, archive.paths); diff != "" {
-// 		t.Errorf("archive paths diff (-want +got):\n%s", diff)
-// 	}
-// 	if len(archive.files) != len(want) {
-// 		t.Errorf("archive indexed %d files, want %d", len(archive.files), len(want))
-// 	}
+	t.Run("invalid frontmatter in SKILL.md is a parse error", func(t *testing.T) {
+		c := newCymbalClient(t)
+		c.zips[revCymbal] = []zipEntry{{name: "SKILL.md", content: []byte("no frontmatter here")}}
+		src := newSource(t, c)
+		_, err := src.LoadInstructions(t.Context(), nameCymbal)
+		if err == nil {
+			t.Fatal("LoadInstructions() error = nil, want a parse error")
+		}
+		if !strings.Contains(err.Error(), "parse") {
+			t.Errorf("LoadInstructions() error = %v, want it to mention a parse failure", err)
+		}
+	})
 
-// 	t.Run("empty payload", func(t *testing.T) {
-// 		if _, err := newSkillArchive(nil); !errors.Is(err, skill.ErrSkillNotFound) {
-// 			t.Errorf("newSkillArchive(nil) error = %v, want ErrSkillNotFound", err)
-// 		}
-// 	})
-// }
+	t.Run("download failure is propagated", func(t *testing.T) {
+		boom := errors.New("registry down")
+		c := newCymbalClient(t)
+		c.zipErr[revCymbal] = boom
+		src := newSource(t, c)
+		if _, err := src.LoadInstructions(t.Context(), nameCymbal); !errors.Is(err, boom) {
+			t.Fatalf("LoadInstructions() error = %v, want errors.Is %v", err, boom)
+		}
+	})
+}
 
-// func TestSkillRegistrySource_Errors(t *testing.T) {
-// 	t.Run("missing skill", func(t *testing.T) {
-// 		src := newTestSource(t, "", func(string) (int, string) {
-// 			return http.StatusNotFound, `{"error":{"status":"NOT_FOUND","message":"nope"}}`
-// 		})
-// 		if _, err := src.LoadFrontmatter(t.Context(), "gone"); !errors.Is(err, skill.ErrSkillNotFound) {
-// 			t.Errorf("LoadFrontmatter() error = %v, want ErrSkillNotFound", err)
-// 		}
-// 		if _, err := src.LoadInstructions(t.Context(), "gone"); !errors.Is(err, skill.ErrSkillNotFound) {
-// 			t.Errorf("LoadInstructions() error = %v, want ErrSkillNotFound", err)
-// 		}
-// 	})
+func TestSkillRegistrySource_ListResources(t *testing.T) {
+	src := newSource(t, newCymbalClient(t))
 
-// 	t.Run("empty payload", func(t *testing.T) {
-// 		src := newTestSource(t, "", func(string) (int, string) {
-// 			return http.StatusOK, `{"name":"projects/1234/locations/us-central1/skills/hollow"}`
-// 		})
-// 		if _, err := src.LoadInstructions(t.Context(), "hollow"); !errors.Is(err, skill.ErrSkillNotFound) {
-// 			t.Errorf("LoadInstructions() error = %v, want ErrSkillNotFound", err)
-// 		}
-// 	})
+	tests := []struct {
+		name    string
+		subpath string
+		want    []string
+		wantErr error
+	}{
+		{
+			name:    "root lists every file including SKILL.md",
+			subpath: ".",
+			want:    []string{"SKILL.md", "assets/logo.svg", "assets/nested/pic.png", "scripts/run.sh"},
+		},
+		{
+			name:    "empty subpath also lists root",
+			subpath: "",
+			want:    []string{"SKILL.md", "assets/logo.svg", "assets/nested/pic.png", "scripts/run.sh"},
+		},
+		{
+			name:    "directory lists its subtree",
+			subpath: "assets",
+			want:    []string{"assets/logo.svg", "assets/nested/pic.png"},
+		},
+		{
+			name:    "trailing slash is accepted",
+			subpath: "assets/",
+			want:    []string{"assets/logo.svg", "assets/nested/pic.png"},
+		},
+		{
+			name:    "single file matches itself",
+			subpath: "scripts/run.sh",
+			want:    []string{"scripts/run.sh"},
+		},
+		{
+			// "script" is not a path segment of "scripts/..." and must not match.
+			name:    "partial segment does not match",
+			subpath: "script",
+			want:    []string{},
+		},
+		{name: "traversal is rejected", subpath: "../other", wantErr: skill.ErrInvalidResourcePath},
+		{name: "absolute is rejected", subpath: "/assets", wantErr: skill.ErrInvalidResourcePath},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := src.ListResources(t.Context(), nameCymbal, tt.subpath)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("ListResources() error = %v, want errors.Is %v", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ListResources() error = %v", err)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("ListResources() diff (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
 
-// 	t.Run("corrupt payload", func(t *testing.T) {
-// 		body, err := json.Marshal(map[string]any{
-// 			"name":             "projects/1234/locations/us-central1/skills/corrupt",
-// 			"zippedFilesystem": []byte("this is not a zip archive"),
-// 		})
-// 		if err != nil {
-// 			t.Fatalf("marshaling skill: %v", err)
-// 		}
-// 		src := newTestSource(t, "", func(string) (int, string) { return http.StatusOK, string(body) })
+func TestSkillRegistrySource_ListResources_DropsZipSlip(t *testing.T) {
+	c := newCymbalClient(t)
+	c.zips[revCymbal] = []zipEntry{
+		{name: "assets/", content: nil},                    // directory entry
+		{name: "./assets/ok.txt", content: []byte("ok")},   // survives, cleaned to assets/ok.txt
+		{name: "../escape.sh", content: []byte("pwned")},   // escapes
+		{name: "/etc/passwd", content: []byte("absolute")}, // absolute
+	}
+	src := newSource(t, c)
+	got, err := src.ListResources(t.Context(), nameCymbal, ".")
+	if err != nil {
+		t.Fatalf("ListResources() error = %v", err)
+	}
+	if diff := cmp.Diff([]string{"assets/ok.txt"}, got); diff != "" {
+		t.Errorf("ListResources() diff (-want +got):\n%s", diff)
+	}
 
-// 		_, err = src.LoadInstructions(t.Context(), "corrupt")
-// 		if err == nil || !strings.Contains(err.Error(), "zipped filesystem") {
-// 			t.Errorf("LoadInstructions() error = %v, want it to mention the zipped filesystem", err)
-// 		}
-// 	})
+	// The cleaned entry is reachable by its cleaned path via LoadResource.
+	rc, err := src.LoadResource(t.Context(), nameCymbal, "assets/ok.txt")
+	if err != nil {
+		t.Fatalf("LoadResource() error = %v", err)
+	}
+	_ = rc.Close()
+}
 
-// 	t.Run("list failure", func(t *testing.T) {
-// 		src := newTestSource(t, "", nil)
-// 		// The list handler returns the empty body configured above, which is
-// 		// not valid JSON, so the decode must surface as an error.
-// 		if _, err := src.ListFrontmatters(t.Context()); err == nil {
-// 			t.Error("ListFrontmatters() = nil error, want a decoding error")
-// 		}
-// 	})
-// }
+func TestSkillRegistrySource_LoadResource(t *testing.T) {
+	src := newSource(t, newCymbalClient(t))
 
-// // TestSkillRegistrySource_WithCompletePreload checks the source satisfies the
-// // contract the preload decorator relies on: ListResources(name, ".") must list
-// // every resource of the skill.
-// func TestSkillRegistrySource_WithCompletePreload(t *testing.T) {
-// 	list := `{"skills":[{"name":"projects/1234/locations/us-central1/skills/cymbal-skill","description":"Cymbal.","state":"ACTIVE"}]}`
-// 	src := newTestSource(t, list, func(string) (int, string) {
-// 		return http.StatusOK, skillJSON(t, "cymbal-skill", testSkillFiles())
-// 	})
+	t.Run("returns the file content", func(t *testing.T) {
+		rc, err := src.LoadResource(t.Context(), nameCymbal, "scripts/run.sh")
+		if err != nil {
+			t.Fatalf("LoadResource() error = %v", err)
+		}
+		defer func() { _ = rc.Close() }()
+		got, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatalf("reading resource: %v", err)
+		}
+		if string(got) != "echo hi" {
+			t.Errorf("content = %q, want %q", got, "echo hi")
+		}
+	})
 
-// 	cached, _, err := skill.WithCompletePreloadSource(t.Context(), src)
-// 	if err != nil {
-// 		t.Fatalf("WithCompletePreloadSource() error = %v", err)
-// 	}
+	t.Run("interior dot resolves to the same file", func(t *testing.T) {
+		rc, err := src.LoadResource(t.Context(), nameCymbal, "assets/./logo.svg")
+		if err != nil {
+			t.Fatalf("LoadResource() error = %v", err)
+		}
+		_ = rc.Close()
+	})
 
-// 	instructions, err := cached.LoadInstructions(t.Context(), "cymbal-skill")
-// 	if err != nil {
-// 		t.Fatalf("LoadInstructions() error = %v", err)
-// 	}
-// 	if want := "# Cymbal\n\nRun the deploy script.\n"; instructions != want {
-// 		t.Errorf("LoadInstructions() = %q, want %q", instructions, want)
-// 	}
+	t.Run("missing file returns ErrResourceNotFound", func(t *testing.T) {
+		if _, err := src.LoadResource(t.Context(), nameCymbal, "scripts/absent.sh"); !errors.Is(err, skill.ErrResourceNotFound) {
+			t.Fatalf("LoadResource() error = %v, want errors.Is %v", err, skill.ErrResourceNotFound)
+		}
+	})
 
-// 	resources, err := cached.ListResources(t.Context(), "cymbal-skill", ".")
-// 	if err != nil {
-// 		t.Fatalf("ListResources() error = %v", err)
-// 	}
-// 	want := []string{
-// 		"assets/logo.svg",
-// 		"assets/nested/pic.png",
-// 		"references/api.md",
-// 		"scripts/deploy.sh",
-// 		"scripts/lib/util.sh",
-// 	}
-// 	if diff := cmp.Diff(want, resources); diff != "" {
-// 		t.Errorf("ListResources() diff (-want +got):\n%s", diff)
-// 	}
-// }
+	t.Run("traversal and absolute paths are rejected", func(t *testing.T) {
+		for _, p := range []string{"../escape.sh", "scripts/../../escape.sh", "/etc/passwd", ".."} {
+			if _, err := src.LoadResource(t.Context(), nameCymbal, p); !errors.Is(err, skill.ErrInvalidResourcePath) {
+				t.Errorf("LoadResource(%q) error = %v, want errors.Is %v", p, err, skill.ErrInvalidResourcePath)
+			}
+		}
+	})
+}
+
+// A GetSkill failure must surface from every method that resolves the revision,
+// not just LoadFrontmatter.
+func TestSkillRegistrySource_GetSkillErrorPropagates(t *testing.T) {
+	boom := errors.New("registry down")
+	newErrSrc := func(t *testing.T) *SkillRegistrySource {
+		c := newCymbalClient(t)
+		c.getErr[nameCymbal] = boom
+		return newSource(t, c)
+	}
+
+	t.Run("LoadInstructions", func(t *testing.T) {
+		if _, err := newErrSrc(t).LoadInstructions(t.Context(), nameCymbal); !errors.Is(err, boom) {
+			t.Fatalf("LoadInstructions() error = %v, want errors.Is %v", err, boom)
+		}
+	})
+	t.Run("ListResources", func(t *testing.T) {
+		if _, err := newErrSrc(t).ListResources(t.Context(), nameCymbal, "."); !errors.Is(err, boom) {
+			t.Fatalf("ListResources() error = %v, want errors.Is %v", err, boom)
+		}
+	})
+	t.Run("LoadResource", func(t *testing.T) {
+		if _, err := newErrSrc(t).LoadResource(t.Context(), nameCymbal, "scripts/run.sh"); !errors.Is(err, boom) {
+			t.Fatalf("LoadResource() error = %v, want errors.Is %v", err, boom)
+		}
+	})
+}
+
+// A skill whose DefaultRevision is empty must not trigger a GetZip("") call.
+func TestSkillRegistrySource_EmptyRevision(t *testing.T) {
+	c := newCymbalClient(t)
+	c.byName[nameCymbal].DefaultRevision = ""
+	src := newSource(t, c)
+	if _, err := src.LoadInstructions(t.Context(), nameCymbal); err == nil {
+		t.Fatal("LoadInstructions() error = nil, want an error for a skill with no default revision")
+	}
+}

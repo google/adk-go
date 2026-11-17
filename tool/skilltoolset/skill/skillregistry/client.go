@@ -16,13 +16,14 @@ package skillregistry
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"regexp"
-	"strings"
 
 	agentregistry "google.golang.org/api/agentregistry/v1alpha"
+	"google.golang.org/api/option"
 )
 
 // Config holds the parameters for [NewClient].
@@ -75,10 +76,12 @@ type client struct {
 }
 
 // NewClient returns a [Client] backed by the Skill Registry for the project and
-// location in cfg. It fails if the Agent Registry service cannot be
-// initialized, for example when credentials are unavailable.
-func NewClient(ctx context.Context, cfg Config) (Client, error) {
-	as, err := agentregistry.NewService(ctx)
+// location in cfg. The option.ClientOption values are forwarded to the Agent
+// Registry service, e.g. to supply credentials or an alternate endpoint. It
+// fails if the service cannot be initialized, for example when credentials are
+// unavailable.
+func NewClient(ctx context.Context, cfg Config, opts ...option.ClientOption) (Client, error) {
+	as, err := agentregistry.NewService(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("agentregistry.NewService failed: %w", err)
 	}
@@ -154,8 +157,7 @@ func (c *client) GetZip(rev string) (*zip.Reader, error) {
 		return nil, fmt.Errorf("cannot read the revision: %w", err)
 	}
 
-	r := strings.NewReader(string(b))
-	zip, err := zip.NewReader(r, int64(len(b)))
+	zip, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
 	if err != nil {
 		return nil, fmt.Errorf("cannot read the zip: %w", err)
 	}

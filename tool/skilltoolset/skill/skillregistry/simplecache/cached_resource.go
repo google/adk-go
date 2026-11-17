@@ -20,9 +20,22 @@ import (
 	"strings"
 	"sync"
 
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
 )
+
+// safeResourcePath validates p as a path inside a skill's in-memory filesystem
+// and returns its cleaned, slash-separated form. It returns
+// [skill.ErrInvalidResourcePath] for an absolute path, or one that escapes the
+// skill root through "..".
+func safeResourcePath(p string) (string, error) {
+	clean, err := utils.SafeRelPath(p)
+	if err != nil {
+		return "", fmt.Errorf("%w: %q", skill.ErrInvalidResourcePath, p)
+	}
+	return clean, nil
+}
 
 type resources struct {
 	client skillregistry.Client
@@ -57,33 +70,61 @@ func (r *resources) loadResources(rev string) error {
 		return fmt.Errorf("cannot GetZip: %w", err)
 	}
 	for _, f := range zip.File {
+		// Skip directory entries; only files are served as resources.
+		if strings.HasSuffix(f.Name, "/") {
+			continue
+		}
+		// The archive is untrusted input. Drop any entry whose name would
+		// escape the skill root (a zip-slip payload) and index the survivors
+		// under their cleaned path, so a later lookup of the same cleaned path
+		// agrees with what was stored.
+		cleanPath, err := safeResourcePath(f.Name)
+		if err != nil {
+			continue
+		}
 		fr, err := f.Open()
 		if err != nil {
-			return fmt.Errorf("cannot open %v: %w", f.Name, err)
+			return fmt.Errorf("cannot open an archive entry: %w", err)
 		}
 		content, err := io.ReadAll(fr)
+		closeErr := fr.Close()
 		if err != nil {
-			return fmt.Errorf("cannot read %v: %w", f.Name, err)
+			return fmt.Errorf("cannot read an archive entry: %w", err)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("cannot close an archive entry: %w", closeErr)
 		}
 		newRes := &resource{
-			path:    f.Name,
+			path:    cleanPath,
 			content: content,
 		}
 		r.res = append(r.res, newRes)
-		r.pathToRes[f.Name] = newRes
+		r.pathToRes[cleanPath] = newRes
 	}
 	r.loaded = true
 	return nil
 }
 
-// listResources provides a simple mechanism for listing resources
-// it handles subpath "", ".", "/" and "\\" as a root path (listing all the resources)
-// returns the files which are explicit match for a subpath
-// returns all the files with a prefix matching the folder
-// We don't care about path traversal here, the implementation doesn't touch a real file system.
-// The implementation focuses on verbatim prefixes.
-// So, a file 'ccc' doesn't match the subpath 'aaa/bbb/../../ccc'
+// listResources lists the files of a skill's filesystem under subpath. An empty
+// subpath, ".", "/" or "\" names the root and lists every file. Otherwise
+// subpath names a directory (or a single file): a file is returned if it equals
+// subpath or sits anywhere below it.
+//
+// Matching is path-segment aware, not a raw string prefix, so "script" does not
+// match "scripts/run.sh". subpath is validated through [safeResourcePath]; a
+// traversal or absolute subpath returns [skill.ErrInvalidResourcePath].
 func (r *resources) listResources(rev, subpath string) ([]string, error) {
+	// An empty, "." , "/" or "\" subpath means the whole filesystem.
+	isRoot := subpath == "" || subpath == "." || subpath == "/" || subpath == "\\"
+	prefix := ""
+	if !isRoot {
+		clean, err := safeResourcePath(subpath)
+		if err != nil {
+			return nil, err
+		}
+		prefix = clean
+	}
+
 	r.mu.RLock()
 
 	if !r.loaded {
@@ -104,26 +145,11 @@ func (r *resources) listResources(rev, subpath string) ([]string, error) {
 	defer r.mu.RUnlock()
 
 	res := make([]string, 0)
-
-	// handle '.' as if there was no prefix at all
-	if subpath == "." || subpath == "/" || subpath == "\\" {
-		subpath = ""
-	}
-	subpath = strings.Trim(subpath, "\\/")
-
-	for _, r := range r.res {
-		// we want to add either explicit file of subtree (if subpath looks like a folder)
-		if r.path == subpath {
-			// got an explicit match
-			res = append(res, r.path)
-			continue
-		}
-		if strings.HasPrefix(r.path, subpath) {
-			// check subtree + "\\" or "/""
-			if subpath == "" || strings.HasPrefix(r.path, subpath+"\\") || strings.HasPrefix(r.path, subpath+"/") {
-				res = append(res, r.path)
-				continue
-			}
+	for _, entry := range r.res {
+		// Paths are cleaned and slash-separated at load time, so a plain
+		// segment-aware comparison is enough here.
+		if isRoot || entry.path == prefix || strings.HasPrefix(entry.path, prefix+"/") {
+			res = append(res, entry.path)
 		}
 	}
 
@@ -131,6 +157,11 @@ func (r *resources) listResources(rev, subpath string) ([]string, error) {
 }
 
 func (r *resources) getResource(rev, path string) (*resource, error) {
+	cleanPath, err := safeResourcePath(path)
+	if err != nil {
+		return nil, err
+	}
+
 	r.mu.RLock()
 	if r.loaded {
 		defer r.mu.RUnlock()
@@ -148,9 +179,9 @@ func (r *resources) getResource(rev, path string) (*resource, error) {
 		}
 	}
 	// loaded
-	res, ok := r.pathToRes[path]
+	res, ok := r.pathToRes[cleanPath]
 	if !ok {
-		return nil, fmt.Errorf("cannot find %v: %w", path, skill.ErrResourceNotFound)
+		return nil, fmt.Errorf("%w: %q", skill.ErrResourceNotFound, cleanPath)
 	}
 
 	return res, nil

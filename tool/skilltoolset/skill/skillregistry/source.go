@@ -18,12 +18,26 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	agentregistry "google.golang.org/api/agentregistry/v1alpha"
 	"google.golang.org/api/option"
 
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 )
+
+// safeResourcePath validates p as a path inside a skill's in-memory filesystem
+// and returns its cleaned, slash-separated form. It returns
+// [skill.ErrInvalidResourcePath] for an absolute path, or one that escapes the
+// skill root through "..".
+func safeResourcePath(p string) (string, error) {
+	clean, err := utils.SafeRelPath(p)
+	if err != nil {
+		return "", fmt.Errorf("%w: %q", skill.ErrInvalidResourcePath, p)
+	}
+	return clean, nil
+}
 
 // SkillRegistrySourceConfig configures a [skill.Source] backed by the Skill Registry.
 type SkillRegistrySourceConfig struct {
@@ -60,13 +74,29 @@ func NewSkillRegistrySource(ctx context.Context, cfg SkillRegistrySourceConfig, 
 		c, err := NewClient(ctx, Config{
 			ProjectID: cfg.ProjectID,
 			Location:  cfg.Location,
-		})
+		}, opts...)
 		if err != nil {
 			return nil, err
 		}
 		client = c
 	}
 	return &SkillRegistrySource{client: client}, nil
+}
+
+// defaultRevision resolves a skill's full resource name to the revision its
+// archive is downloaded from.
+func (s *SkillRegistrySource) defaultRevision(name string) (string, error) {
+	sk, err := s.client.GetSkill(name)
+	if err != nil {
+		return "", fmt.Errorf("cannot GetSkill: %w", err)
+	}
+	if sk == nil {
+		return "", fmt.Errorf("got nil from GetSkill")
+	}
+	if sk.DefaultRevision == "" {
+		return "", fmt.Errorf("skill has no default revision")
+	}
+	return sk.DefaultRevision, nil
 }
 
 // SkillRegistrySource serves skills straight from the Skill Registry. It holds
@@ -106,44 +136,70 @@ func (s *SkillRegistrySource) toFrontmatter(f *agentregistry.Frontmatter) *skill
 	}
 }
 
-// ListResources implements [skill.Source].
+// ListResources implements [skill.Source]. An empty subpath, ".", "/" or "\"
+// lists every file; otherwise subpath names a directory (or a single file) and
+// only files at or below it are returned. A traversal or absolute subpath
+// returns [skill.ErrInvalidResourcePath].
 func (s *SkillRegistrySource) ListResources(ctx context.Context, name, subpath string) ([]string, error) {
-	res := make([]string, 0)
-	zip, err := s.client.GetZip(name)
+	isRoot := subpath == "" || subpath == "." || subpath == "/" || subpath == "\\"
+	prefix := ""
+	if !isRoot {
+		clean, err := safeResourcePath(subpath)
+		if err != nil {
+			return nil, err
+		}
+		prefix = clean
+	}
+
+	rev, err := s.defaultRevision(name)
+	if err != nil {
+		return nil, err
+	}
+	zr, err := s.client.GetZip(rev)
 	if err != nil {
 		return nil, fmt.Errorf("cannot GetZip: %w", err)
 	}
 
-	for _, f := range zip.File {
-		res = append(res, f.Name)
+	res := make([]string, 0)
+	for _, f := range zr.File {
+		if strings.HasSuffix(f.Name, "/") {
+			continue // directory entry
+		}
+		// The archive is untrusted; skip any entry that escapes the skill root.
+		clean, err := safeResourcePath(f.Name)
+		if err != nil {
+			continue
+		}
+		if isRoot || clean == prefix || strings.HasPrefix(clean, prefix+"/") {
+			res = append(res, clean)
+		}
 	}
 	return res, nil
 }
 
 // LoadFrontmatter implements [skill.Source].
 func (s *SkillRegistrySource) LoadFrontmatter(ctx context.Context, name string) (*skill.Frontmatter, error) {
-	skill, err := s.client.GetSkill(name)
+	sk, err := s.client.GetSkill(name)
 	if err != nil {
 		return nil, fmt.Errorf("cannot GetSkill: %w", err)
 	}
-	if skill == nil {
+	if sk == nil {
 		return nil, fmt.Errorf("got nil from GetSkill")
 	}
-	sf := s.toFrontmatter(skill.Frontmatter)
-
-	return sf, nil
+	if sk.Frontmatter == nil {
+		return nil, fmt.Errorf("skill has no frontmatter")
+	}
+	return s.toFrontmatter(sk.Frontmatter), nil
 }
 
-// LoadInstructions implements [skill.Source].
+// LoadInstructions implements [skill.Source]. It returns the Markdown body of
+// the skill's SKILL.md, or [skill.ErrResourceNotFound] if the archive has none.
 func (s *SkillRegistrySource) LoadInstructions(ctx context.Context, name string) (string, error) {
-	sk, err := s.client.GetSkill(name)
+	rev, err := s.defaultRevision(name)
 	if err != nil {
-		return "", fmt.Errorf("cannot GetSkill: %w", err)
+		return "", err
 	}
-	if sk == nil {
-		return "", fmt.Errorf("got nil from GetSkill")
-	}
-	r, err := s.client.GetZip(sk.DefaultRevision)
+	r, err := s.client.GetZip(rev)
 	if err != nil {
 		return "", fmt.Errorf("cannot GetZip: %w", err)
 	}
@@ -168,22 +224,40 @@ func (s *SkillRegistrySource) LoadInstructions(ctx context.Context, name string)
 		}
 	}
 
-	return sk.Frontmatter.Description, nil
+	return "", fmt.Errorf("%w: SKILL.md", skill.ErrResourceNotFound)
 }
 
-// LoadResource implements [skill.Source].
+// LoadResource implements [skill.Source]. It returns
+// [skill.ErrResourceNotFound] when the skill has no such file, and
+// [skill.ErrInvalidResourcePath] for a traversal or absolute resourcePath.
 func (s *SkillRegistrySource) LoadResource(ctx context.Context, name, resourcePath string) (io.ReadCloser, error) {
-	zip, err := s.client.GetZip(name)
+	clean, err := safeResourcePath(resourcePath)
+	if err != nil {
+		return nil, err
+	}
+
+	rev, err := s.defaultRevision(name)
+	if err != nil {
+		return nil, err
+	}
+	zr, err := s.client.GetZip(rev)
 	if err != nil {
 		return nil, fmt.Errorf("cannot GetZip: %w", err)
 	}
 
-	for _, f := range zip.File {
-		if f.Name == resourcePath {
+	for _, f := range zr.File {
+		if strings.HasSuffix(f.Name, "/") {
+			continue // directory entry
+		}
+		fc, err := safeResourcePath(f.Name)
+		if err != nil {
+			continue
+		}
+		if fc == clean {
 			return f.Open()
 		}
 	}
-	return nil, fmt.Errorf("cannot find the requested resource %v", resourcePath)
+	return nil, fmt.Errorf("%w: %q", skill.ErrResourceNotFound, clean)
 }
 
 var _ skill.Source = (*SkillRegistrySource)(nil)

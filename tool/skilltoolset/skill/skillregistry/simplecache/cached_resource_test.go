@@ -26,6 +26,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	agentregistry "google.golang.org/api/agentregistry/v1alpha"
 
+	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
 )
 
@@ -192,6 +193,36 @@ func TestLoadResources(t *testing.T) {
 			t.Error("loaded = true after a failed load, want false")
 		}
 	})
+
+	// The archive is untrusted: a zip-slip entry (escaping "..", an absolute
+	// path) and directory entries are dropped, while in-root files survive under
+	// their cleaned path.
+	t.Run("drops zip-slip and directory entries", func(t *testing.T) {
+		c := &zipClientStub{entries: []zipEntry{
+			{name: "SKILL.md", content: []byte("# skill")},
+			{name: "assets/", content: nil},                       // directory entry
+			{name: "./assets/a.txt", content: []byte("alpha")},    // cleans to assets/a.txt
+			{name: "../escape.sh", content: []byte("pwned")},      // escapes the root
+			{name: "assets/../../escape2", content: []byte("no")}, // escapes the root
+			{name: "/etc/passwd", content: []byte("absolute")},    // absolute
+		}}
+		r := newResources(c)
+		if err := r.loadResources("rev-1"); err != nil {
+			t.Fatalf("loadResources() error = %v", err)
+		}
+
+		var got []string
+		for _, res := range r.res {
+			got = append(got, res.path)
+		}
+		want := []string{"SKILL.md", "assets/a.txt"}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("surviving entries diff (-want +got):\n%s", diff)
+		}
+		if _, ok := r.pathToRes["assets/a.txt"]; !ok {
+			t.Error("cleaned entry assets/a.txt was not indexed")
+		}
+	})
 }
 
 func TestListResources(t *testing.T) {
@@ -276,6 +307,16 @@ func TestListResources(t *testing.T) {
 		}
 	})
 
+	// A traversal or absolute subpath is rejected with ErrInvalidResourcePath.
+	t.Run("traversal subpath is rejected", func(t *testing.T) {
+		r := newResources(&zipClientStub{entries: entries})
+		for _, sub := range []string{"../other", "assets/../..", "/assets"} {
+			if _, err := r.listResources("rev-1", sub); !errors.Is(err, skill.ErrInvalidResourcePath) {
+				t.Errorf("listResources(%q) error = %v, want errors.Is %v", sub, err, skill.ErrInvalidResourcePath)
+			}
+		}
+	})
+
 	// Regression for the write-lock leak: the lazy-load error path must release
 	// the write lock, otherwise the next call blocks forever on r.mu.
 	t.Run("error path releases the lock so a retry can succeed", func(t *testing.T) {
@@ -350,9 +391,9 @@ func TestGetResource(t *testing.T) {
 		}
 	})
 
-	// getResource matches by exact path with no allow-listing, so SKILL.md (the
-	// instructions file) is reachable as a resource. Pinned as current behavior
-	// (see review item M2: the resource hardening is absent here).
+	// The whole archive is the skill's filesystem, so SKILL.md (the instructions
+	// file) is reachable as a resource by its exact path. Hardening (M2) rejects
+	// traversal, not in-root files.
 	t.Run("exposes SKILL.md by exact path", func(t *testing.T) {
 		r := newResources(&zipClientStub{entries: entries})
 		res, err := r.getResource("rev-1", "SKILL.md")
@@ -364,10 +405,34 @@ func TestGetResource(t *testing.T) {
 		}
 	})
 
-	t.Run("missing path returns an error", func(t *testing.T) {
+	t.Run("missing path returns ErrResourceNotFound", func(t *testing.T) {
 		r := newResources(&zipClientStub{entries: entries})
-		if _, err := r.getResource("rev-1", "nope.txt"); err == nil {
-			t.Fatal("getResource() error = nil, want an error for a missing path")
+		if _, err := r.getResource("rev-1", "nope.txt"); !errors.Is(err, skill.ErrResourceNotFound) {
+			t.Fatalf("getResource() error = %v, want errors.Is %v", err, skill.ErrResourceNotFound)
+		}
+	})
+
+	// A path that escapes the skill root (absolute or via "..") is rejected with
+	// skill.ErrInvalidResourcePath before any lookup. See M2.
+	t.Run("traversal and absolute paths are rejected", func(t *testing.T) {
+		r := newResources(&zipClientStub{entries: entries})
+		for _, p := range []string{"../escape.txt", "assets/../../escape.txt", "/etc/passwd", ".."} {
+			if _, err := r.getResource("rev-1", p); !errors.Is(err, skill.ErrInvalidResourcePath) {
+				t.Errorf("getResource(%q) error = %v, want errors.Is %v", p, err, skill.ErrInvalidResourcePath)
+			}
+		}
+	})
+
+	// An interior "." or ".." that stays inside the skill root is cleaned, not
+	// rejected: "assets/./a.txt" resolves to the same file as "assets/a.txt".
+	t.Run("interior dot is cleaned and resolves", func(t *testing.T) {
+		r := newResources(&zipClientStub{entries: entries})
+		res, err := r.getResource("rev-1", "assets/./a.txt")
+		if err != nil {
+			t.Fatalf("getResource() error = %v", err)
+		}
+		if string(res.content) != "alpha" {
+			t.Errorf("content = %q, want %q", res.content, "alpha")
 		}
 	})
 

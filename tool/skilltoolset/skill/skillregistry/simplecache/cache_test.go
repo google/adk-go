@@ -376,13 +376,20 @@ func TestCacheLoadResource(t *testing.T) {
 		}
 	})
 
-	// A missing resource within a known skill currently returns a generic error,
-	// not skill.ErrResourceNotFound (see review item M1). Pin that an error is
-	// returned; a fix for M1 should tighten this to the sentinel.
-	t.Run("missing resource returns an error", func(t *testing.T) {
+	// A missing resource within a known skill surfaces skill.ErrResourceNotFound.
+	t.Run("missing resource returns ErrResourceNotFound", func(t *testing.T) {
 		ca := newWarmCache(t, newFullClient(t))
-		if _, err := ca.LoadResource("alpha", "nope.txt"); err == nil {
-			t.Fatal("LoadResource() error = nil, want an error for a missing resource")
+		if _, err := ca.LoadResource("alpha", "nope.txt"); !errors.Is(err, skill.ErrResourceNotFound) {
+			t.Fatalf("LoadResource() error = %v, want errors.Is %v", err, skill.ErrResourceNotFound)
+		}
+	})
+
+	// A traversal path is rejected with skill.ErrInvalidResourcePath rather than
+	// reaching outside the skill's own filesystem.
+	t.Run("traversal path returns ErrInvalidResourcePath", func(t *testing.T) {
+		ca := newWarmCache(t, newFullClient(t))
+		if _, err := ca.LoadResource("alpha", "../beta/assets/a.txt"); !errors.Is(err, skill.ErrInvalidResourcePath) {
+			t.Fatalf("LoadResource() error = %v, want errors.Is %v", err, skill.ErrInvalidResourcePath)
 		}
 	})
 }
