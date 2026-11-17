@@ -325,8 +325,7 @@ func TestProvidersMintTokensAfterInit(t *testing.T) {
 // same four variables the gcp package's copy pins. With the service-account-key
 // fixture these tests use none of them changes what is sent, since the token is
 // applied by OAuth2Credential rather than the library's transports. Other
-// credential sources do read them (an impersonated credential sends the quota
-// project and can start the trust boundary lookup), so a future fixture is
+// credential sources do read some of them on this path, so a future fixture is
 // covered too.
 func isolateADCEnv(t *testing.T) {
 	t.Helper()
