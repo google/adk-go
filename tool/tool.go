@@ -66,6 +66,34 @@ type ResponseScheduler interface {
 	ResponseScheduling() genai.FunctionResponseScheduling
 }
 
+// SequentialRunner is implemented by a tool that wants each of its calls to
+// start only after the calls before it in the same model turn have returned.
+// ADK runs the calls of one model turn concurrently, and State has no
+// ordering; a tool that reads and then writes state that its sibling calls
+// also write, with no lock of its own, declares itself sequential to get
+// the writes of the earlier calls.
+//
+// Before a sequential call's callbacks and the tool run, the flow waits until
+// every earlier call of the turn has returned, whether those calls are
+// sequential or not. If the call's context is done first, the call is answered
+// with the error "wait for earlier function calls: context deadline exceeded"
+// (or "... context canceled"), and neither its callbacks nor the tool run. The
+// wait happens before any code of the tool, so a lock the tool takes cannot be
+// held across it.
+//
+// A sequential tool must not wait for something that a later call of the
+// same turn does: the later call is waiting for it. Only calls of a tool run
+// through ADK's function-call path are sequenced; the calls of a streaming
+// tool are not.
+//
+// tool.WithConfirmation and tool.WithToolNamePrefix keep the value of the
+// tools they wrap.
+type SequentialRunner interface {
+	// RunsSequentially reports whether the tool's calls are sequential. It must
+	// return the same value on every call and be safe for concurrent use.
+	RunsSequentially() bool
+}
+
 // Toolset is an interface for a collection of tools. It allows grouping
 // related tools together and providing them to an agent.
 //
@@ -187,6 +215,13 @@ func displaysResultOnSkipSummarization(t Tool) bool {
 	return ok && d.DisplayResultOnSkipSummarization()
 }
 
+// runsSequentially reports what t's RunsSequentially answers, and false when t
+// is not a SequentialRunner.
+func runsSequentially(t Tool) bool {
+	s, ok := t.(SequentialRunner)
+	return ok && s.RunsSequentially()
+}
+
 // responseScheduling reports what t's ResponseScheduling answers, and "" when
 // t is not a ResponseScheduler.
 func responseScheduling(t Tool) genai.FunctionResponseScheduling {
@@ -235,8 +270,8 @@ type ConfirmationProvider func(toolName string, toolInput any) bool
 // Close on the returned toolset closes ts when that implements [io.Closer].
 // The returned toolset's request hook calls the request hook of ts, when ts has
 // one. A wrapped tool keeps the DefersResponse,
-// DisplayResultOnSkipSummarization and ResponseScheduling answers of the tool
-// it wraps.
+// DisplayResultOnSkipSummarization, ResponseScheduling and RunsSequentially
+// answers of the tool it wraps.
 //
 // EXPERIMENTAL: WithConfirmation is experimental and not currently in scope for the v1.0 API.
 func WithConfirmation(ts Toolset, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) Toolset {
@@ -395,6 +430,8 @@ func (t *confirmationTool) RunRaw(ctx agent.Context, args any) (any, error) {
 func (t *confirmationTool) ResponseScheduling() genai.FunctionResponseScheduling {
 	return responseScheduling(t.runnableTool)
 }
+
+func (t *confirmationTool) RunsSequentially() bool { return runsSequentially(t.runnableTool) }
 
 // confirmationStreamingTool is the streaming counterpart of confirmationTool.
 // It embeds the streamingRunnableTool interface rather than the concrete tool so

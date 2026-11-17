@@ -35,9 +35,9 @@ import (
 // install its own runner with WithTaskRunner.
 //
 // An implementation must start the tasks in the order of the slice: a task
-// may wait for the tasks before it (a tool call's use of session state waits
-// for earlier calls to return), so a runner that holds an earlier task back
-// until a later one returns deadlocks.
+// may wait for the tasks before it (a sequential tool's call waits for the
+// calls before it), so a runner that holds an earlier task back until a later
+// one returns deadlocks.
 type TaskRunner func(ctx context.Context, tasks []func(context.Context))
 
 // taskRunnerKey is the context key under which a TaskRunner is stored.

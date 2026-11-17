@@ -35,11 +35,12 @@ import (
 // Each call to Tools lists ts again and returns, in the same order, one
 // prefixed tool per tool of ts. A prefixed tool keeps everything else of the
 // tool it stands for: its description, IsLongRunning, Run or RunStream, its
-// request hook, its DefersResponse, DisplayResultOnSkipSummarization and
-// ResponseScheduling answers and, for a tool that runs an agent, such as
-// agenttool's, the agent it wraps. Its declaration is a copy of the original's with the prefixed name,
-// or nil when the original's is nil. The original tool and its declaration are
-// never modified, so listing any number of times never prefixes a name twice.
+// request hook, its DefersResponse, DisplayResultOnSkipSummarization,
+// ResponseScheduling and RunsSequentially answers and, for a tool that runs an
+// agent, such as agenttool's, the agent it wraps. Its declaration is a copy of
+// the original's with the prefixed name, or nil when the original's is nil.
+// The original tool and its declaration are never modified, so listing any
+// number of times never prefixes a name twice.
 // Running a prefixed tool's request hook runs the original's and registers the
 // prefixed tool, under its prefixed name, in place of the original. It fails
 // with a duplicate tool error when the request already holds that name.
@@ -162,6 +163,8 @@ func (p *prefixedTool) DefersResponse() bool { return defersResponse(p.Tool) }
 func (p *prefixedTool) DisplayResultOnSkipSummarization() bool {
 	return displaysResultOnSkipSummarization(p.Tool)
 }
+
+func (p *prefixedTool) RunsSequentially() bool { return runsSequentially(p.Tool) }
 
 func (p *prefixedTool) ResponseScheduling() genai.FunctionResponseScheduling {
 	return responseScheduling(p.Tool)

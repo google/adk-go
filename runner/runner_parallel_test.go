@@ -16,7 +16,6 @@ package runner_test
 
 import (
 	"context"
-	"errors"
 	"iter"
 	"sync"
 	"testing"
@@ -27,6 +26,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
@@ -111,8 +111,8 @@ func runOnce(ctx context.Context, a agent.Agent) (map[string]map[string]any, err
 
 // TestRun_NestedRunIsNotOrderedByCallingBatch pins that a run started from a
 // tool call's context takes no part in the calling batch's order: the nested
-// agent's before-model callback uses State while an earlier call of the outer
-// batch still runs, and does not wait for it.
+// agent's before-model callback waits for the turn of its context while an
+// earlier call of the outer batch still runs, and does not wait for that call.
 func TestRun_NestedRunIsNotOrderedByCallingBatch(t *testing.T) {
 	ctx := t.Context()
 	nestedModelCalled := make(chan struct{})
@@ -138,10 +138,7 @@ func TestRun_NestedRunIsNotOrderedByCallingBatch(t *testing.T) {
 			}),
 			BeforeModelCallbacks: []llmagent.BeforeModelCallback{
 				func(ctx agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
-					if _, err := ctx.State().Get("k"); err != nil && !errors.Is(err, session.ErrStateKeyNotExist) {
-						return nil, err
-					}
-					return nil, nil
+					return nil, adkcontext.AwaitEarlierCalls(ctx)
 				},
 			},
 		})

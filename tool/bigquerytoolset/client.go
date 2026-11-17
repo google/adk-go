@@ -162,10 +162,8 @@ func accessToken(ctx agent.Context, key string) (string, error) {
 	return token, nil
 }
 
-// readToken returns what ctx.State().Get(key) returns, the call's own state
-// delta first and then the session state, without waiting for the earlier
-// calls of the model turn to return (see agent.Context.State): the tool only
-// reads the token and then blocks on the request.
+// readToken returns what ctx.State().Get(key) returns: the call's own state
+// delta first and then the session state.
 func readToken(ctx agent.Context, key string) (any, error) {
 	if a := ctx.Actions(); a != nil {
 		if v, ok := a.StateDelta[key]; ok {

@@ -128,8 +128,6 @@ func (p *recordPlugin) afterModel(ctx agent.Context, resp *model.LLMResponse, er
 }
 
 func (p *recordPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-	// ReadonlyState: State would make the call wait for the earlier calls of
-	// its model turn to return (see agent.Context.State).
 	on, err := p.isRecordModeOn(ctx.ReadonlyState())
 	if err != nil || !on {
 		return nil, nil
