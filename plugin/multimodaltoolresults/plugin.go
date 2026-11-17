@@ -50,6 +50,7 @@ package multimodaltoolresults
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -63,6 +64,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/internal/converters"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
@@ -167,7 +169,8 @@ const (
 
 // mtrPlugin holds a plugin's retention and the lock over its state updates.
 // The tool calls of one model turn run concurrently, so both callbacks hold mu
-// from their first read of the plugin's keys to their last write.
+// from their first read of the plugin's keys to their last write. A tool
+// call's after-tool callback takes mu with lockForCall, never directly.
 type mtrPlugin struct {
 	retention Retention
 	mu        sync.Mutex // guards the plugin's read-modify-write of ctx.State()
@@ -190,19 +193,36 @@ func (m *mtrPlugin) afterTool(ctx agent.Context, _ tool.Tool, _, result map[stri
 		return nil, nil
 	}
 	if m.retention == RetentionSession {
-		return nil, m.saveForSession(state, entries)
+		return nil, m.saveForSession(ctx, state, entries)
 	}
-	return nil, m.saveForNextModelCall(state, entries)
+	return nil, m.saveForNextModelCall(ctx, state, entries)
+}
+
+// lockForCall locks mu for the function call of ctx once the call's turn on
+// the session state has begun. The first State() use of a call waits until the
+// earlier calls of its model response have returned (see agent.Context.State);
+// waiting with mu held would block forever an earlier call that waits for mu.
+// So the call takes its turn first, and its State() uses under mu do not wait.
+// If ctx is done before the turn begins, mu stays unlocked and the error wraps
+// ctx's error.
+func (m *mtrPlugin) lockForCall(ctx context.Context) error {
+	if err := adkcontext.AwaitEarlierCalls(ctx); err != nil {
+		return fmt.Errorf("multimodaltoolresults: wait for earlier function calls: %w", err)
+	}
+	m.mu.Lock()
+	return nil
 }
 
 // saveForNextModelCall appends the entries the function response does not
 // carry itself to PartsReturnedByToolsKey.
-func (m *mtrPlugin) saveForNextModelCall(state session.State, entries []any) error {
+func (m *mtrPlugin) saveForNextModelCall(ctx context.Context, state session.State, entries []any) error {
 	kept := slices.DeleteFunc(entries, func(e any) bool { return toolinternal.MediaPart(e) != nil })
 	if len(kept) == 0 {
 		return nil
 	}
-	m.mu.Lock()
+	if err := m.lockForCall(ctx); err != nil {
+		return err
+	}
 	defer m.mu.Unlock()
 	return appendState(state, PartsReturnedByToolsKey, kept)
 }
@@ -210,7 +230,7 @@ func (m *mtrPlugin) saveForNextModelCall(state session.State, entries []any) err
 // saveForSession stores every entry except inline-data parts under
 // SessionPartsReturnedByToolsKey, replacing the list on the invocation's
 // first save, and appends all entries to currentTurnPartsKey.
-func (m *mtrPlugin) saveForSession(state session.State, entries []any) error {
+func (m *mtrPlugin) saveForSession(ctx context.Context, state session.State, entries []any) error {
 	var stored []any
 	for _, e := range entries {
 		p, isPart := e.(*genai.Part)
@@ -226,7 +246,9 @@ func (m *mtrPlugin) saveForSession(state session.State, entries []any) error {
 		}
 	}
 
-	m.mu.Lock()
+	if err := m.lockForCall(ctx); err != nil {
+		return err
+	}
 	defer m.mu.Unlock()
 	if len(stored) > 0 {
 		updated, err := hasKey(state, sessionUpdatedKey)
