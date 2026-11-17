@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -36,6 +37,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 	"weak"
 
 	bq "cloud.google.com/go/bigquery"
@@ -3653,8 +3655,8 @@ func TestEvalViewDefinitions_ColumnsAndSQLStructure(t *testing.T) {
 		}
 	}
 
-	assertQuerySHA256(t, "v_eval_session", sessionDef.Query, 24501, "a54b5f63ac7a1482109421d24a877a71ff59121423d3ca919b002b78cbab2bca")
-	assertQuerySHA256(t, "v_eval_turn", turnDef.Query, 23065, "7a5663fbf316198b894497a0ceb5c817885aa8d06a2effe94290bb147b3c5cce")
+	assertQuerySHA256(t, "v_eval_session", sessionDef.Query, 24885, "1bee1c7607c5b085630f5b0a2006ff35a9583f9851620bcb9875d4502bc7e209")
+	assertQuerySHA256(t, "v_eval_turn", turnDef.Query, 23449, "b8db94bbf3611fa3cd044f49da0f7832dc4c793f6248e85b5592eaf721d21d95")
 
 	if !strings.Contains(sessionDef.Query, "session_rollup AS (") {
 		t.Error("v_eval_session missing session_rollup CTE")
@@ -3786,43 +3788,43 @@ func TestEvalViewDefinitions_PayloadColumnDenylistProjection(t *testing.T) {
 	}{
 		{
 			name:              "default",
-			wantSessionLen:    24501,
-			wantSessionSHA256: "a54b5f63ac7a1482109421d24a877a71ff59121423d3ca919b002b78cbab2bca",
-			wantTurnLen:       23065,
-			wantTurnSHA256:    "7a5663fbf316198b894497a0ceb5c817885aa8d06a2effe94290bb147b3c5cce",
+			wantSessionLen:    24885,
+			wantSessionSHA256: "1bee1c7607c5b085630f5b0a2006ff35a9583f9851620bcb9875d4502bc7e209",
+			wantTurnLen:       23449,
+			wantTurnSHA256:    "b8db94bbf3611fa3cd044f49da0f7832dc4c793f6248e85b5592eaf721d21d95",
 		},
 		{
 			name:              "deny content_parts",
 			denylist:          []string{columnContentParts},
-			wantSessionLen:    24614,
-			wantSessionSHA256: "d95d3f6af72e1951ed98a914d9478be1ee0fab6614f0a8d224f8c2be87846383",
-			wantTurnLen:       23178,
-			wantTurnSHA256:    "d94d4535ee26a035d0e9e10287033c67b5a58364d56170445d277506cc9488f4",
+			wantSessionLen:    24998,
+			wantSessionSHA256: "7145f6ec4f95ec3b3868bec8b583422f28f63e7052855422abe23a71910917e8",
+			wantTurnLen:       23562,
+			wantTurnSHA256:    "5e1073e9e015a68040eeed2e1c13350c9c7f922a315e7a832929743aa1c6cf81",
 		},
 		{
 			name:              "deny attributes",
 			denylist:          []string{columnAttributes},
-			wantSessionLen:    24523,
-			wantSessionSHA256: "c1432d62a90543248fc1d91e728cf2e41866f9932e873fe67dbd2348439a0b88",
-			wantTurnLen:       23087,
-			wantTurnSHA256:    "439c446ad5bd8033bfa8a5a1e5282ce8e7d4545ca7ce48760f903c4244b45bab",
+			wantSessionLen:    24907,
+			wantSessionSHA256: "6243cb71585d1da6f49f95ab239284a4dcf4d27f90241d233347f3db52eddcba",
+			wantTurnLen:       23471,
+			wantTurnSHA256:    "bb4cf5bbaf26545b7b932a89c46fb293d668b5cc564d21d345204807c83837c3",
 		},
 		{
 			name:              "deny latency_ms",
 			denylist:          []string{columnLatencyMS},
-			wantSessionLen:    24523,
-			wantSessionSHA256: "e5f8b90c1ae64871235d7afcfb0fdf3b0539779ff3b8779e33628051e15b3d8a",
-			wantTurnLen:       23087,
-			wantTurnSHA256:    "d15050bb6203aedc43e2e8d8be75dd34642e33d36647e352f6e7d7b9963ef15a",
+			wantSessionLen:    24907,
+			wantSessionSHA256: "338e764dc6524e0a96c27f84c378178247f800d8cd5cb723e347f1553cb98e2e",
+			wantTurnLen:       23471,
+			wantTurnSHA256:    "228b1dfcc5c8ed4ccfec0dce1a308ff513c6ff01861ead9877fe02af0a350f47",
 		},
 		{
 			name:              "deny all three with custom ViewPrefix",
 			viewPrefix:        "custom_p",
 			denylist:          []string{columnContentParts, columnAttributes, columnLatencyMS},
-			wantSessionLen:    24665,
-			wantSessionSHA256: "32791bd7c6258325fe34f1fa74e51b83ead80757e5eb27370dcab7847fa9d91f",
-			wantTurnLen:       23229,
-			wantTurnSHA256:    "c1d9fcceab14e2b241e5eee12a5446768160e32228fdc8a4e0f7e2842c48eed5",
+			wantSessionLen:    25049,
+			wantSessionSHA256: "082baa8c9fe61ba4d612a0b9886dfa413e5ee92adf14f909755b9461b7a1446d",
+			wantTurnLen:       23613,
+			wantTurnSHA256:    "0aa73931d54c38d8ed2c51ffea87d094514083f8edb72cac88c6303dfe9471e7",
 		},
 	}
 
@@ -3905,19 +3907,19 @@ func TestViewAndEvalViewDefinitions_TableNameUnicodeAndControlChars(t *testing.T
 			name:              "ASCII space",
 			tableName:         "table 01",
 			wantEvalSHA:       true,
-			wantSessionLen:    24508,
-			wantSessionSHA256: "967ac1a7bf5147ace32550601567e62bbf38fc143b5f7c02973a3c38f6d4429c",
-			wantTurnLen:       23072,
-			wantTurnSHA256:    "9a10b5456a96cd340a1f1608fa9ad8f007510c415a94ceb9311621ce02b8d29d",
+			wantSessionLen:    24892,
+			wantSessionSHA256: "5f60654775c9b9660557126cdf61956d9222c1f80bd6b11276aa676d57793593",
+			wantTurnLen:       23456,
+			wantTurnSHA256:    "e5ffc23f281ac72e37370ebb76b997fd12cf58358fcdbb6e5360fab13ebeabe0",
 		},
 		{
 			name:              "Unicode Zs NO-BREAK SPACE",
 			tableName:         "table\u00a001",
 			wantEvalSHA:       true,
-			wantSessionLen:    24509,
-			wantSessionSHA256: "6f8801b51d0f66c15214f3d8d3c505b4b671e47eaefe6e8dcd62e47894fdf53b",
-			wantTurnLen:       23073,
-			wantTurnSHA256:    "711f9f18c3920cbc77c4a8643b00311dae6aa0fdb5f12212008dd68c3822331f",
+			wantSessionLen:    24893,
+			wantSessionSHA256: "b66f121148f1ac8216b10cd98d2a336415432507d82e30813a6c4055bab5d679",
+			wantTurnLen:       23457,
+			wantTurnSHA256:    "e92dab5601cf1ef41e544fb136364b19d9d45a5e2949856a8279c52c5216737e",
 		},
 		{
 			name:      "Unicode Zs EM SPACE",
@@ -3930,6 +3932,17 @@ func TestViewAndEvalViewDefinitions_TableNameUnicodeAndControlChars(t *testing.T
 		{
 			name:      "Unicode combining acute mark",
 			tableName: "tablea\u0301",
+		},
+		{
+			// U+00B2 SUPERSCRIPT TWO is a number (No) but not a decimal digit.
+			name:      "Unicode No superscript two",
+			tableName: "tbl\u00b2",
+		},
+		{
+			// U+216B ROMAN NUMERAL TWELVE is a letter number (Nl), neither a
+			// letter nor a decimal digit.
+			name:      "Unicode Nl Roman numeral twelve",
+			tableName: "tbl\u216b",
 		},
 	}
 
@@ -6023,9 +6036,7 @@ func cloneEventRow(r map[string]any) map[string]any {
 			partsCopy := make([]map[string]any, len(parts))
 			for i, p := range parts {
 				pm := make(map[string]any, len(p))
-				for pk, pv := range p {
-					pm[pk] = pv
-				}
+				maps.Copy(pm, p)
 				partsCopy[i] = pm
 			}
 			cp[k] = partsCopy
@@ -6797,7 +6808,7 @@ func TestEvalViews_SemanticExecution(t *testing.T) {
 		}
 	})
 
-	t.Run("user_message_reconstructs_from_gcs_reference_and_skips_media_offloaded", func(t *testing.T) {
+	t.Run("user_message_needs_whole_inline_text_and_skips_media_offloaded", func(t *testing.T) {
 		extractUserTexts := func(trace map[string]any) []string {
 			turnsAny, _ := trace["turns"].([]any)
 			var texts []string
@@ -6822,63 +6833,138 @@ func TestEvalViews_SemanticExecution(t *testing.T) {
 			return texts
 		}
 
-		// 1. End-to-end callback emission with real GCSOffloader offloading a text user prompt
-		// exceeding MaxInlineTextSize, leaving content_parts[].storage_mode="GCS_REFERENCE"
-		// and omitting content.text_summary.
-		off := &fakeOffloader{}
-		longPrompt := "Summarize quarterly metrics for " + strings.Repeat("segment-alpha-", 5)
-		e2eRows := emitCallbackTurnRows(t, syntheticTurnSpec{
-			appName:       "usr-app",
-			userID:        "u-gcs",
-			sessionID:     "sess-user-e2e-offloaded",
-			invocationID:  "inv-user-e2e-offloaded",
-			agentName:     "usr-agent",
-			agentDesc:     "User offload test agent",
-			instruction:   "Answer user prompts.",
-			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: longPrompt}}},
-			responseParts: []*genai.Part{{Text: "Summary ready."}},
-			pluginModifier: func(c *Config) {
-				c.GCSOffloader = off
-				c.ConnectionID = "us.my-connection"
-				c.MaxInlineTextSize = 40
-				c.BatchFlushIntv = 10 * time.Millisecond
-			},
-		})
-		var sawOffloadedUserRow bool
-		var wantUserPreview string
-		for _, r := range e2eRows {
-			if r["event_type"] == EventUserMessageReceived {
-				parts, _ := r[columnContentParts].([]map[string]any)
-				if len(parts) == 1 && parts[0]["storage_mode"] == "GCS_REFERENCE" {
-					sawOffloadedUserRow = true
-					wantUserPreview, _ = parts[0]["text"].(string)
-				}
-				if strings.Contains(fmt.Sprint(r[columnContent]), "segment-alpha-") {
-					t.Fatalf("expected USER_MESSAGE_RECEIVED content summary to omit offloaded text, got %v", r[columnContent])
+		// 1. End to end through the plugin callbacks with the default
+		// MaxInlineTextSize (32 KiB): a longer text part is offloaded, and the
+		// table keeps only its first 200 runes and a note, which lose the
+		// question at its end. Neither view may count such a turn as ready,
+		// whether the offloaded part is the whole message or one of its
+		// parts, while the same prompt stored inline is ready with all of its
+		// text.
+		const question = "Which region had the highest third-quarter revenue?"
+		notes := strings.Repeat("Regional revenue notes for the quarterly review. ", 700) + question
+		if len(notes) <= defaultMaxInlineTextSize {
+			t.Fatalf("len(notes) = %d, want more than %d", len(notes), defaultMaxInlineTextSize)
+		}
+		const instruction = "Answer the question at the end of these notes."
+		emitPrompt := func(id string, offloader GCSContentOffloader, parts ...*genai.Part) []map[string]any {
+			return emitCallbackTurnRows(t, syntheticTurnSpec{
+				appName:       "usr-app",
+				userID:        "u-gcs",
+				sessionID:     "sess-" + id,
+				invocationID:  "inv-" + id,
+				agentName:     "usr-agent",
+				agentDesc:     "User offload test agent",
+				instruction:   "Answer user prompts.",
+				userMsg:       &genai.Content{Role: "user", Parts: parts},
+				responseParts: []*genai.Part{{Text: "The West region."}},
+				pluginModifier: func(c *Config) {
+					if offloader != nil {
+						c.GCSOffloader = offloader
+						c.ConnectionID = "us.my-connection"
+					}
+					c.BatchFlushIntv = 10 * time.Millisecond
+				},
+			})
+		}
+		userParts := func(rows []map[string]any) []map[string]any {
+			t.Helper()
+			for _, r := range rows {
+				if r["event_type"] == EventUserMessageReceived {
+					parts, _ := r[columnContentParts].([]map[string]any)
+					return parts
 				}
 			}
-		}
-		if !sawOffloadedUserRow || !strings.HasSuffix(wantUserPreview, "... [OFFLOADED]") {
-			t.Fatalf("expected fakeOffloader to offload USER_MESSAGE_RECEIVED text prompt, preview=%q calls=%d", wantUserPreview, len(off.calls))
-		}
-
-		e2eTurns := executeEvalViewSQL(t, turnSQL, e2eRows)
-		if len(e2eTurns) != 1 || !e2eTurns[0].EvalReady {
-			t.Fatalf("e2e offloaded user prompt v_eval_turn = %+v, want 1 eval_ready turn", e2eTurns)
-		}
-		if gotUser := extractUserTexts(e2eTurns[0].Trace); !cmp.Equal(gotUser, []string{wantUserPreview}) {
-			t.Errorf("v_eval_turn user texts = %#v, want [%q]", gotUser, wantUserPreview)
-		}
-		e2eSessions := executeEvalViewSQL(t, sessionSQL, e2eRows)
-		if len(e2eSessions) != 1 || !e2eSessions[0].EvalReady {
-			t.Fatalf("e2e offloaded user prompt v_eval_session = %+v, want 1 eval_ready session", e2eSessions)
-		}
-		if gotUser := extractUserTexts(e2eSessions[0].Trace); !cmp.Equal(gotUser, []string{wantUserPreview}) {
-			t.Errorf("v_eval_session user texts = %#v, want [%q]", gotUser, wantUserPreview)
+			t.Fatalf("no %s row in %d rows", EventUserMessageReceived, len(rows))
+			return nil
 		}
 
-		// 2. Direct SQL row shapes: GCS_REFERENCE text prompt recovers preview, whereas
-		// [MEDIA OFFLOADED] placeholders (non-text or text/plain) are excluded.
+		off := &fakeOffloader{}
+		offloadedRows := emitPrompt("user-e2e-offloaded", off, &genai.Part{Text: notes})
+		offloadedPartRows := emitPrompt("user-e2e-offloaded-part", off, &genai.Part{Text: instruction}, &genai.Part{Text: notes})
+		inlineRows := emitPrompt("user-e2e-inline", nil, &genai.Part{Text: notes})
+
+		// The rows hold what the views read: the preview of each offloaded part
+		// lacks the question, which only the uploaded object has.
+		wantPreviewRunes := textPreviewRunes + utf8.RuneCountInString(textPreviewSuffix)
+		for _, tc := range []struct {
+			name  string
+			parts []map[string]any
+			slot  int
+		}{
+			{name: "single-part prompt", parts: userParts(offloadedRows), slot: 0},
+			{name: "two-part prompt", parts: userParts(offloadedPartRows), slot: 1},
+		} {
+			if len(tc.parts) <= tc.slot || tc.parts[tc.slot]["storage_mode"] != storageModeGCSReference {
+				t.Fatalf("%s has %d content_parts, want part %d stored as %s", tc.name, len(tc.parts), tc.slot, storageModeGCSReference)
+			}
+			preview, _ := tc.parts[tc.slot]["text"].(string)
+			if !strings.HasSuffix(preview, textPreviewSuffix) || utf8.RuneCountInString(preview) != wantPreviewRunes || strings.Contains(preview, question) {
+				t.Errorf("%s preview = %q (%d runes), want a %d-rune preview ending in %q without the question", tc.name, preview, utf8.RuneCountInString(preview), wantPreviewRunes, textPreviewSuffix)
+			}
+		}
+		if parts := userParts(offloadedPartRows); parts[0]["storage_mode"] != storageModeInline || parts[0]["text"] != instruction {
+			t.Errorf("two-part prompt part 0 = %v, want the inline instruction", parts[0])
+		}
+		if parts := userParts(inlineRows); len(parts) != 1 || parts[0]["storage_mode"] != storageModeInline || parts[0]["text"] != notes {
+			t.Errorf("inline prompt has %d content_parts, want 1 inline part holding the whole prompt", len(parts))
+		}
+		if !slices.ContainsFunc(off.uploads(), func(u uploadAttempt) bool { return string(u.Data) == notes }) {
+			t.Errorf("none of the %d uploads holds the whole offloaded prompt", len(off.uploads()))
+		}
+
+		// brief shortens texts for failure messages: notes is over 32 KiB.
+		brief := func(texts []string) []string {
+			out := make([]string, len(texts))
+			for i, s := range texts {
+				if r := []rune(s); len(r) > 60 {
+					s = string(r[:60]) + "..."
+				}
+				out[i] = s
+			}
+			return out
+		}
+		e2eRows := slices.Concat(offloadedRows, offloadedPartRows, inlineRows)
+		e2eTurnByInv := make(map[string]evalViewExecResultRow)
+		for _, tr := range executeEvalViewSQL(t, turnSQL, e2eRows) {
+			e2eTurnByInv[tr.InvocationID] = tr
+		}
+		e2eSessByID := make(map[string]evalViewExecResultRow)
+		for _, sr := range executeEvalViewSQL(t, sessionSQL, e2eRows) {
+			e2eSessByID[sr.SessionID] = sr
+		}
+		for _, tc := range []struct {
+			id        string
+			wantReady bool
+			wantUser  []string
+		}{
+			{id: "user-e2e-offloaded"},
+			{id: "user-e2e-offloaded-part"},
+			{id: "user-e2e-inline", wantReady: true, wantUser: []string{notes}},
+		} {
+			gotTurn, ok := e2eTurnByInv["inv-"+tc.id]
+			if !ok {
+				t.Fatalf("missing v_eval_turn row for inv-%s", tc.id)
+			}
+			gotSess, ok := e2eSessByID["sess-"+tc.id]
+			if !ok {
+				t.Fatalf("missing v_eval_session row for sess-%s", tc.id)
+			}
+			if gotTurn.EvalReady != tc.wantReady || gotSess.EvalReady != tc.wantReady {
+				t.Errorf("%s EvalReady = (v_eval_turn %v, v_eval_session %v), want %v", tc.id, gotTurn.EvalReady, gotSess.EvalReady, tc.wantReady)
+			}
+			if gotUser := extractUserTexts(gotTurn.Trace); !cmp.Equal(gotUser, tc.wantUser) {
+				t.Errorf("%s v_eval_turn user texts = %q, want %q", tc.id, brief(gotUser), brief(tc.wantUser))
+			}
+			if gotUser := extractUserTexts(gotSess.Trace); !cmp.Equal(gotUser, tc.wantUser) {
+				t.Errorf("%s v_eval_session user texts = %q, want %q", tc.id, brief(gotUser), brief(tc.wantUser))
+			}
+		}
+
+		// 2. Direct SQL row shapes, as another writer sharing the table may
+		// write them: a GCS_REFERENCE text prompt is only a preview and yields
+		// no user text, while [MEDIA OFFLOADED] placeholders (non-text or
+		// text/plain) are skipped without holding back the inline text beside
+		// them.
 		gcsRefUserRows := emitCallbackTurnRows(t, syntheticTurnSpec{
 			appName:       "usr-app",
 			userID:        "u-gcs",
@@ -6948,24 +7034,60 @@ func TestEvalViews_SemanticExecution(t *testing.T) {
 			}
 		}
 
-		directTurns := executeEvalViewSQL(t, turnSQL, slices.Concat(gcsRefUserRows, mediaUserRows, mediaTextPlaceholderRows))
+		textAndMediaRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "usr-app",
+			userID:        "u-gcs",
+			sessionID:     "sess-user-text-and-media",
+			invocationID:  "inv-user-text-and-media",
+			agentName:     "usr-agent",
+			agentDesc:     "User offload test agent",
+			instruction:   "Answer user prompts.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "placeholder"}}},
+			responseParts: []*genai.Part{{Text: "Read the attachment."}},
+		})
+		for i := range textAndMediaRows {
+			if textAndMediaRows[i]["event_type"] == EventUserMessageReceived {
+				textAndMediaRows[i][columnContent] = "{}"
+				textAndMediaRows[i][columnContentParts] = []map[string]any{
+					{
+						"part_index":   int64(0),
+						"mime_type":    "text/plain",
+						"storage_mode": "INLINE",
+						"text":         "Summarize the attached file.",
+					},
+					{
+						"part_index":   int64(1),
+						"mime_type":    "text/plain",
+						"storage_mode": "GCS_REFERENCE",
+						"text":         mediaOffloadedText,
+					},
+				}
+			}
+		}
+
+		directTurns := executeEvalViewSQL(t, turnSQL, slices.Concat(gcsRefUserRows, mediaUserRows, mediaTextPlaceholderRows, textAndMediaRows))
 		byInv := make(map[string]evalViewExecResultRow, len(directTurns))
 		for _, tr := range directTurns {
 			byInv[tr.InvocationID] = tr
 		}
-		if gcsTurn := byInv["inv-user-gcs-ref"]; !gcsTurn.EvalReady {
-			t.Errorf("inv-user-gcs-ref EvalReady = false, want true")
-		} else if gotUser := extractUserTexts(gcsTurn.Trace); !cmp.Equal(gotUser, []string{"Prompt snippet... [OFFLOADED]"}) {
-			t.Errorf("inv-user-gcs-ref user texts = %#v, want [\"Prompt snippet... [OFFLOADED]\"]", gotUser)
-		}
-		for _, id := range []string{"inv-user-media-offloaded", "inv-user-media-text-placeholder"} {
-			gotTurn := byInv[id]
+		for _, id := range []string{"inv-user-gcs-ref", "inv-user-media-offloaded", "inv-user-media-text-placeholder"} {
+			gotTurn, ok := byInv[id]
+			if !ok {
+				t.Fatalf("missing v_eval_turn row for %s", id)
+			}
 			if gotTurn.EvalReady {
-				t.Errorf("%s EvalReady = true, want false (media placeholder must not satisfy user message text)", id)
+				t.Errorf("%s EvalReady = true, want false (an offloaded text preview or a media placeholder must not satisfy user message text)", id)
 			}
 			if gotUser := extractUserTexts(gotTurn.Trace); len(gotUser) != 0 {
 				t.Errorf("%s unexpectedly emitted user text: %#v", id, gotUser)
 			}
+		}
+		if textTurn, ok := byInv["inv-user-text-and-media"]; !ok {
+			t.Fatal("missing v_eval_turn row for inv-user-text-and-media")
+		} else if !textTurn.EvalReady {
+			t.Errorf("inv-user-text-and-media EvalReady = false, want true (an offloaded media part must not hold back the inline text)")
+		} else if gotUser := extractUserTexts(textTurn.Trace); !cmp.Equal(gotUser, []string{"Summarize the attached file."}) {
+			t.Errorf("inv-user-text-and-media user texts = %#v, want [\"Summarize the attached file.\"]", gotUser)
 		}
 
 		// 3. ContentFormatter failure on USER_MESSAGE_RECEIVED vs legitimate user messages:

@@ -23,7 +23,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 	"weak"
 
 	bq "cloud.google.com/go/bigquery"
@@ -591,6 +590,18 @@ const evalViewCTEsTemplate = `WITH
       TO_JSON_STRING(JSON_QUERY(content, '$.args')) AS tool_args_json,
       CASE
         WHEN event_type != 'USER_MESSAGE_RECEIVED' THEN NULL
+        WHEN EXISTS(
+          SELECT 1
+          FROM UNNEST(content_parts) AS p
+          WHERE
+            p.mime_type = 'text/plain'
+            AND p.storage_mode = 'GCS_REFERENCE'
+            AND COALESCE(p.part_attributes, '{}') = '{}'
+            AND p.text IS NOT NULL
+            AND p.text NOT IN (
+              '', '[BINARY DATA]', '[MEDIA OFFLOADED]', '[UPLOAD FAILED]'
+            )
+        ) THEN NULL
         WHEN COALESCE(ARRAY_LENGTH(content_parts), 0) > 0 THEN (
           SELECT
             STRING_AGG(p.text, '\n' ORDER BY p.part_index)
@@ -598,8 +609,7 @@ const evalViewCTEsTemplate = `WITH
             UNNEST(content_parts) AS p
           WHERE
             p.mime_type = 'text/plain'
-            AND COALESCE(p.storage_mode, 'INLINE')
-              IN ('INLINE', 'GCS_REFERENCE')
+            AND COALESCE(p.storage_mode, 'INLINE') = 'INLINE'
             AND COALESCE(p.part_attributes, '{}') = '{}'
             AND p.text IS NOT NULL
             AND p.text NOT IN (
@@ -1571,10 +1581,16 @@ func isValidDatasetID(s string) bool {
 	return true
 }
 
+// isValidTableName reports whether s can be quoted in backticks as a BigQuery
+// table name: it holds only letters, marks, numbers of any kind (such as "²"
+// or "Ⅻ", not only decimal digits), space separators (Zs), '_' and '-', and
+// is not blank or longer than maxBigQueryIdentifierLen bytes.
 func isValidTableName(s string) bool {
-	if !utf8.ValidString(s) || strings.TrimSpace(s) == "" || len(s) > maxBigQueryIdentifierLen {
+	if strings.TrimSpace(s) == "" || len(s) > maxBigQueryIdentifierLen {
 		return false
 	}
+	// Ranging over s decodes each invalid UTF-8 byte to U+FFFD, which is in
+	// none of the accepted classes, so invalid UTF-8 needs no separate check.
 	for _, r := range s {
 		if !unicode.IsLetter(r) && !unicode.IsNumber(r) && !unicode.IsMark(r) && !unicode.Is(unicode.Zs, r) && r != '_' && r != '-' {
 			return false

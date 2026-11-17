@@ -313,7 +313,8 @@ type Config struct {
 	DisableSensitiveKeyRedaction bool
 
 	// ContentFormatter, if set, is applied to each event's raw payload before
-	// the content column is built.
+	// the content column is built. The evaluation views (see CreateEvalViews)
+	// need it to keep the content keys that they read.
 	ContentFormatter ContentFormatter
 	// DebugContentFormatterErrors includes error-shape metadata (such as error
 	// byte length) in the warning logged when ContentFormatter fails, without
@@ -537,6 +538,18 @@ type Config struct {
 	// any active emitter of these required events (including "EVENT" in
 	// EventAllowlist without explicit AGENT_RESPONSE when FinalResponseToolNames
 	// is non-empty, or "EVENT" in EventDenylist) is a configuration error.
+	//
+	// A custom ContentFormatter must keep the content keys that the views read
+	// ($.text_summary, $.response, $.tool, $.args, and $.result, as well as
+	// $.from_agent and $.to_agent of AGENT_TRANSFER rows and $.usage of
+	// LLM_RESPONSE rows). Setting ContentFormatter also stops AGENT_RESPONSE
+	// rows from writing content_parts, so the views then take the reply text
+	// from $.response alone.
+	//
+	// A user message with a text part offloaded to Cloud Storage (see
+	// GCSBucketName and MaxInlineTextSize) has only a 200-rune preview of that
+	// part in the table, so the views reconstruct no user text for the
+	// message: its turn is not eval_ready, and neither is its session.
 	//
 	// Because the evaluation views aggregate per session or turn, filtering on
 	// session_start_timestamp or turn_start_timestamp does not prune the
