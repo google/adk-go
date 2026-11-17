@@ -27,14 +27,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
-	"unsafe"
 
 	"google.golang.org/adk/plugin/agentanalytics"
-	"google.golang.org/api/option"
 )
 
 const agentAnalyticsPkgPath = "google.golang.org/adk/plugin/agentanalytics"
@@ -185,134 +183,102 @@ func TestStructLiterals_ExternalKeyedComparableAndJSON(t *testing.T) {
 	}
 }
 
-type unguardedRetryConfig struct {
-	MaxRetries   int
-	InitialDelay time.Duration
-	MaxDelay     time.Duration
-	Multiplier   float64
-}
-
-type unguardedDropStats struct {
-	QueueFullDrops        int64
-	AppendFailureDrops    int64
-	FormatterFailureDrops int64
-	ShutdownDrops         int64
-	TotalDrops            int64
-}
-
-type unguardedGCSUploadRequest struct {
-	Path        string
-	Data        []byte
-	ContentType string
-}
-
-type unguardedViewDefinition struct {
-	Name      string
-	EventType string
-	Query     string
-}
-
-type unguardedConfig struct {
-	Enabled                      bool
-	ProjectID                    string
-	DatasetID                    string
-	TableName                    string
-	MaxContentLen                int
-	BatchSize                    int
-	BatchFlushIntv               time.Duration
-	QueueMaxSize                 int
-	ClientOptions                []option.ClientOption
-	ClusteringFields             []string
-	CustomTags                   map[string]any
-	LogMultiModalContent         bool
-	ShutdownTimeout              time.Duration
-	Logger                       agentanalytics.Logger
-	RetryConfig                  agentanalytics.RetryConfig
-	DisableMultiModalContent     bool
-	DisableSessionMetadata       bool
-	CaptureFullMessageContent    bool
-	DisableSensitiveKeyRedaction bool
-	ContentFormatter             agentanalytics.ContentFormatter
-	DebugContentFormatterErrors  bool
-	EventAllowlist               []string
-	EventDenylist                []string
-	PayloadColumnDenylist        []string
-	CustomMetadataAllowlist      []string
-	FinalResponseToolNames       []string
-	DisableFlushOnRunEnd         bool
-	DisableSchemaUpgrade         bool
-	EnableOTelCorrelation        bool
-	GCSBucketName                string
-	GCSClientOptions             []option.ClientOption
-	GCSPathPrefix                string
-	ConnectionID                 string
-	MaxInlineTextSize            int
-	GCSMaxConcurrentUploads      int
-	GCSUploadTimeout             time.Duration
-	GCSMaxPendingUploadBytes     int64
-	GCSOffloader                 agentanalytics.GCSContentOffloader
-	DisableCreateViews           bool
-	ViewPrefix                   string
-	ExactlyOnceDelivery          bool
-}
-
 type guardedStructSpec struct {
 	name          string
 	typ           reflect.Type
 	unguardedSize uintptr
-	unguardedAlgn uintptr
+	unguardedAlgn int
 	exportedArgs  []string
 }
 
-func guardedStructSpecs() []guardedStructSpec {
-	return []guardedStructSpec{
-		{
-			name:          "RetryConfig",
-			typ:           reflect.TypeFor[agentanalytics.RetryConfig](),
-			unguardedSize: unsafe.Sizeof(unguardedRetryConfig{}),
-			unguardedAlgn: unsafe.Alignof(unguardedRetryConfig{}),
-			exportedArgs:  []string{"1", "0", "0", "1"},
-		},
-		{
-			name:          "DropStats",
-			typ:           reflect.TypeFor[agentanalytics.DropStats](),
-			unguardedSize: unsafe.Sizeof(unguardedDropStats{}),
-			unguardedAlgn: unsafe.Alignof(unguardedDropStats{}),
-			exportedArgs:  []string{"1", "2", "3", "4", "7"},
-		},
-		{
-			name:          "GCSUploadRequest",
-			typ:           reflect.TypeFor[agentanalytics.GCSUploadRequest](),
-			unguardedSize: unsafe.Sizeof(unguardedGCSUploadRequest{}),
-			unguardedAlgn: unsafe.Alignof(unguardedGCSUploadRequest{}),
-			exportedArgs:  []string{`"p"`, "nil", `"text/plain"`},
-		},
-		{
-			name:          "ViewDefinition",
-			typ:           reflect.TypeFor[agentanalytics.ViewDefinition](),
-			unguardedSize: unsafe.Sizeof(unguardedViewDefinition{}),
-			unguardedAlgn: unsafe.Alignof(unguardedViewDefinition{}),
-			exportedArgs:  []string{`"v_llm_request"`, `"LLM_REQUEST"`, `"SELECT 1"`},
-		},
-		{
-			name:          "Config",
-			typ:           reflect.TypeFor[agentanalytics.Config](),
-			unguardedSize: unsafe.Sizeof(unguardedConfig{}),
-			unguardedAlgn: unsafe.Alignof(unguardedConfig{}),
-			exportedArgs: []string{
-				"true", `"p"`, `"d"`, `"t"`, "0", "0", "0", "0", "nil",
-				"nil", "nil", "false", "0", "nil", "agentanalytics.RetryConfig{}",
-				"false", "false", "false", "false", "nil", "false",
-				"nil", "nil", "nil", "nil", "nil", "false", "false", "false",
-				`""`, "nil", `""`, `""`, "0", "0", "0", "0", "nil",
-				"false", `""`, "false",
-			},
-		},
+func exportedStructFields(rt reflect.Type) ([]reflect.StructField, error) {
+	fields := make([]reflect.StructField, 0, rt.NumField())
+	for sf := range rt.Fields() {
+		if sf.IsExported() {
+			fields = append(fields, sf)
+		}
+	}
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("%s has no exported fields", rt)
+	}
+	return fields, nil
+}
+
+func zeroValueExpr(ft reflect.Type) (string, error) {
+	switch ft.Kind() {
+	case reflect.Bool:
+		return "false", nil
+	case reflect.String:
+		return `""`, nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
+		return "0", nil
+	case reflect.Slice, reflect.Map, reflect.Chan, reflect.Func, reflect.Interface, reflect.Pointer:
+		return "nil", nil
+	case reflect.Struct:
+		if ft.PkgPath() == agentAnalyticsPkgPath && ft.Name() != "" {
+			return "agentanalytics." + ft.Name() + "{}", nil
+		}
+		if ft.Name() == "" && ft.NumField() == 0 {
+			return "struct{}{}", nil
+		}
+		return "", fmt.Errorf("unsupported struct field type %v in positional literal probe", ft)
+	default:
+		return "", fmt.Errorf("unsupported field kind %v (%v) in positional literal probe", ft.Kind(), ft)
 	}
 }
 
+func exportedPositionalArgs(rt reflect.Type) ([]string, error) {
+	fields, err := exportedStructFields(rt)
+	if err != nil {
+		return nil, err
+	}
+	args := make([]string, 0, len(fields))
+	for _, sf := range fields {
+		expr, err := zeroValueExpr(sf.Type)
+		if err != nil {
+			return nil, fmt.Errorf("%s.%s: %w", rt.Name(), sf.Name, err)
+		}
+		args = append(args, expr)
+	}
+	return args, nil
+}
+
+func guardedStructSpecs(t *testing.T) []guardedStructSpec {
+	t.Helper()
+
+	typesToCheck := []reflect.Type{
+		reflect.TypeFor[agentanalytics.RetryConfig](),
+		reflect.TypeFor[agentanalytics.DropStats](),
+		reflect.TypeFor[agentanalytics.GCSUploadRequest](),
+		reflect.TypeFor[agentanalytics.ViewDefinition](),
+		reflect.TypeFor[agentanalytics.Config](),
+	}
+	specs := make([]guardedStructSpec, 0, len(typesToCheck))
+	for _, rt := range typesToCheck {
+		fields, err := exportedStructFields(rt)
+		if err != nil {
+			t.Fatalf("exportedStructFields(%s) failed: %v", rt.Name(), err)
+		}
+		unguardedType := reflect.StructOf(fields)
+		args, err := exportedPositionalArgs(rt)
+		if err != nil {
+			t.Fatalf("exportedPositionalArgs(%s) failed: %v", rt.Name(), err)
+		}
+		specs = append(specs, guardedStructSpec{
+			name:          rt.Name(),
+			typ:           rt,
+			unguardedSize: unguardedType.Size(),
+			unguardedAlgn: unguardedType.Align(),
+			exportedArgs:  args,
+		})
+	}
+	return specs
+}
+
 func TestStructLiterals_ExternalPositionalRejected(t *testing.T) {
-	specs := guardedStructSpecs()
+	specs := guardedStructSpecs(t)
 
 	for _, spec := range specs {
 		t.Run(spec.name+"_LayoutAndBlankField", func(t *testing.T) {
@@ -323,10 +289,12 @@ func TestStructLiterals_ExternalPositionalRejected(t *testing.T) {
 			for i := 0; i < spec.typ.NumField(); i++ {
 				if spec.typ.Field(i).IsExported() {
 					exportedCount++
+				} else if i > 0 {
+					t.Fatalf("%s field %d (%q) is unexported; update positional guard check if intentional", spec.name, i, spec.typ.Field(i).Name)
 				}
 			}
 			if exportedCount != len(spec.exportedArgs) {
-				t.Fatalf("%s has %d exported fields, but test fixture has %d positional args", spec.name, exportedCount, len(spec.exportedArgs))
+				t.Fatalf("%s has %d exported fields, but derived %d positional args", spec.name, exportedCount, len(spec.exportedArgs))
 			}
 
 			first := spec.typ.Field(0)
@@ -340,7 +308,7 @@ func TestStructLiterals_ExternalPositionalRejected(t *testing.T) {
 			if spec.typ.Size() != spec.unguardedSize {
 				t.Fatalf("%s Size=%d, want %d (blank struct{} guard must not add padding)", spec.name, spec.typ.Size(), spec.unguardedSize)
 			}
-			if spec.typ.Align() != int(spec.unguardedAlgn) {
+			if spec.typ.Align() != spec.unguardedAlgn {
 				t.Fatalf("%s Align=%d, want %d", spec.name, spec.typ.Align(), spec.unguardedAlgn)
 			}
 		})
@@ -402,14 +370,38 @@ func reflectUnderlyingToGoTypes(rt reflect.Type, rootPkg *types.Package, pkgs ma
 		return types.Typ[types.Bool]
 	case reflect.Int:
 		return types.Typ[types.Int]
+	case reflect.Int8:
+		return types.Typ[types.Int8]
+	case reflect.Int16:
+		return types.Typ[types.Int16]
+	case reflect.Int32:
+		return types.Typ[types.Int32]
 	case reflect.Int64:
 		return types.Typ[types.Int64]
+	case reflect.Uint:
+		return types.Typ[types.Uint]
 	case reflect.Uint8:
 		return types.Typ[types.Byte]
+	case reflect.Uint16:
+		return types.Typ[types.Uint16]
+	case reflect.Uint32:
+		return types.Typ[types.Uint32]
+	case reflect.Uint64:
+		return types.Typ[types.Uint64]
+	case reflect.Uintptr:
+		return types.Typ[types.Uintptr]
+	case reflect.Float32:
+		return types.Typ[types.Float32]
 	case reflect.Float64:
 		return types.Typ[types.Float64]
+	case reflect.Complex64:
+		return types.Typ[types.Complex64]
+	case reflect.Complex128:
+		return types.Typ[types.Complex128]
 	case reflect.String:
 		return types.Typ[types.String]
+	case reflect.Pointer:
+		return types.NewPointer(reflectTypeToGoTypes(rt.Elem(), rootPkg, pkgs, named))
 	case reflect.Slice:
 		return types.NewSlice(reflectTypeToGoTypes(rt.Elem(), rootPkg, pkgs, named))
 	case reflect.Map:
@@ -430,8 +422,7 @@ func reflectUnderlyingToGoTypes(rt reflect.Type, rootPkg *types.Package, pkgs ma
 	case reflect.Struct:
 		fields := make([]*types.Var, 0, rt.NumField())
 		tags := make([]string, 0, rt.NumField())
-		for i := 0; i < rt.NumField(); i++ {
-			sf := rt.Field(i)
+		for sf := range rt.Fields() {
 			ft := reflectTypeToGoTypes(sf.Type, rootPkg, pkgs, named)
 			fieldPkg := rootPkg
 			if sf.PkgPath != "" && sf.PkgPath != rootPkg.Path() {
@@ -525,16 +516,29 @@ var (
 	}
 }
 
+var resolveGoBinary = sync.OnceValues(func() (string, error) {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(goBin, "env", "GOROOT")
+	if out, envErr := cmd.Output(); envErr == nil {
+		if goroot := strings.TrimSpace(string(out)); goroot != "" {
+			candidate := filepath.Join(goroot, "bin", "go")
+			if _, statErr := os.Stat(candidate); statErr == nil {
+				return candidate, nil
+			}
+		}
+	}
+	return goBin, nil
+})
+
 func checkExternalGoBuild(t *testing.T, specs []guardedStructSpec) {
 	t.Helper()
 
-	goBin := filepath.Join(runtime.GOROOT(), "bin", "go")
-	if _, err := os.Stat(goBin); err != nil {
-		var lookErr error
-		goBin, lookErr = exec.LookPath("go")
-		if lookErr != nil {
-			t.Skipf("go binary unavailable: %v", lookErr)
-		}
+	goBin, err := resolveGoBinary()
+	if err != nil {
+		t.Skipf("go binary unavailable: %v", err)
 	}
 
 	tmpDir := t.TempDir()
@@ -545,7 +549,8 @@ func checkExternalGoBuild(t *testing.T, specs []guardedStructSpec) {
 
 	replace := make(map[string]string)
 
-	// Positive external package check: keyed literals, equality, and JSON.
+	// Positive external package check: keyed literals and == equality
+	// (JSON round-trip is checked in-process near the top of this file).
 	const validKeyedPkg = "keyed_valid"
 	const validKeyedSrc = `package keyed_valid
 
@@ -652,7 +657,7 @@ var (
 	env := buildGoProbeEnv(pkgDir)
 
 	// 2a. Verify the keyed external package compiles cleanly.
-	validCmd := exec.CommandContext(context.Background(), goBin, "build", "-mod=readonly", "-overlay="+overlayPath, "./internal/extprobe/"+validKeyedPkg)
+	validCmd := exec.CommandContext(t.Context(), goBin, "build", "-mod=readonly", "-overlay="+overlayPath, "./internal/extprobe/"+validKeyedPkg)
 	validCmd.Dir = pkgDir
 	validCmd.Env = env
 	if out, err := validCmd.CombinedOutput(); err != nil {
@@ -662,7 +667,7 @@ var (
 	// 2b. Verify all 10 positional literal packages and the unexported symbols
 	// package fail compilation with the expected compiler diagnostics.
 	args := append([]string{"build", "-mod=readonly", "-overlay=" + overlayPath}, negPkgArgs...)
-	negCmd := exec.CommandContext(context.Background(), goBin, args...)
+	negCmd := exec.CommandContext(t.Context(), goBin, args...)
 	negCmd.Dir = pkgDir
 	negCmd.Env = env
 	outBytes, err := negCmd.CombinedOutput()
@@ -719,7 +724,7 @@ func buildGoProbeEnv(pkgDir string) []string {
 			continue
 		}
 		switch k {
-		case "GOPROXY":
+		case "GOPROXY", "GOFLAGS":
 			continue
 		case "GOWORK", "GOCACHE", "GOMODCACHE", "GOTMPDIR":
 			if v != "" && v != "off" && !filepath.IsAbs(v) {
@@ -737,7 +742,7 @@ func buildGoProbeEnv(pkgDir string) []string {
 			out = append(out, kv)
 		}
 	}
-	out = append(out, "GOPROXY=off")
+	out = append(out, "GOPROXY=off", "GOFLAGS=")
 	return out
 }
 
@@ -751,7 +756,7 @@ func parseGoBuildPackageSections(output string) map[string]string {
 			buf.Reset()
 		}
 	}
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		if strings.HasPrefix(line, "# ") {
 			flush()
 			hdr := strings.TrimSpace(strings.TrimPrefix(line, "# "))

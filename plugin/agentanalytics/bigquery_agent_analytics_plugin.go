@@ -317,11 +317,13 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 // existing table. Any failure to read, create, or upgrade the table fails
 // construction and closes writeClient. Passing bqClient == nil skips table
 // inspection, creation, and schema upgrades for pre-provisioned append-only
-// deployments. ctx bounds this table setup and, when ExactlyOnceDelivery is
-// enabled, the creation of the write stream. Background writes, stream
-// rotations, and Close use only the values carried by ctx, so canceling ctx
-// after construction neither stops nor drains the plugin; only closing the
-// plugin does (see [Config.ShutdownTimeout]). If config.ProjectID is empty or
+// deployments. ctx bounds this table setup, creating the Cloud Storage client
+// via storage.NewClient when GCSBucketName is set (with GCSOffloader nil and
+// content_parts logging enabled), and, when ExactlyOnceDelivery is enabled, the
+// creation of the write stream. Background writes, stream rotations, and Close
+// use only the values carried by ctx, so canceling ctx after construction
+// neither stops nor drains the plugin; only closing the plugin does (see
+// [Config.ShutdownTimeout]). If config.ProjectID is empty or
 // bigquery.DetectProjectID, the project of bqClient is used for the table, the
 // views and the write stream; when config.ProjectID names another project,
 // bqClient checks, creates and upgrades the events table (and views) in
