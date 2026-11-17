@@ -221,6 +221,13 @@ type queueItem interface{ isQueueItem() }
 // session before the node's flow rebuilds the next model request.
 // Mirrors adk-python's enqueue_event/processed_signal handshake. Nil
 // for partial events, which are fire-and-forget.
+//
+// The consumer also closes processed for an event the caller did not
+// take, after it has canceled the producer's context. So the node's
+// yield returns true for a non-partial event only if the caller took
+// the event and the node's context is not done when the producer
+// resumes; otherwise it returns false and the node's completion
+// carries ctx.Err().
 type eventItem struct {
 	nodeName  string
 	ev        *session.Event
@@ -444,6 +451,14 @@ func (s *scheduler) scheduleRetry(n Node, input any, triggeredBy, branch string,
 // deadlock — the goroutine drops the pending event and proceeds to
 // completion. The completion send is unconditional because the
 // consumer's runsByName bookkeeping relies on it.
+//
+// The node's yield returns true for a non-partial event only if the
+// consumer yielded the event, the caller took it, and ctx is not done
+// when the handshake is released (see eventItem.processed). Otherwise
+// yield returns false and the completion carries ctx.Err(), so a node
+// that returns when its yield returns false does not go on past an
+// event the caller did not take. A partial event is fire-and-forget:
+// its yield returns true once the event is queued.
 func runNode(
 	out chan<- queueItem,
 	wg *sync.WaitGroup,
@@ -501,6 +516,13 @@ func runNode(
 			case <-processed:
 			case <-ctx.Done():
 				completion.err = ctx.Err()
+				return
+			}
+			// A released handshake is not proof that the event was taken: the
+			// consumer releases it after a stop too, and select picks at random
+			// when processed and ctx.Done are both ready.
+			if err := ctx.Err(); err != nil {
+				completion.err = err
 				return
 			}
 		}
@@ -613,7 +635,11 @@ func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
 			}
 			// Release the producer's handshake now that the event is
 			// yielded and persisted. Always signal — even when
-			// draining — so a blocked producer does not leak.
+			// draining — so a blocked producer does not leak. The
+			// producer infers "not taken" from its own canceled context,
+			// so every path that stops the consumer cancels the producer
+			// (cancelAll, or an ancestor context) before this release; a
+			// new drain path must keep that order.
 			if it.processed != nil {
 				close(it.processed)
 			}
