@@ -290,10 +290,11 @@ func TestDiscardWithNothingToReport(t *testing.T) {
 // TestNilDeltaStillReachesTheInvocation pins that a delta carrying no
 // InvocationContextDelta is still handed to the implementation. Both wrappers in
 // this package delegate to the inner commonContext, which answers a nil delta by
-// returning itself — skipping the call leaves the wrapper in place, and its
-// Agent() returns nil.
+// returning itself — skipping the call leaves the tool context wrapper in place,
+// and its Session() returns nil where the invocation has a session.
 func TestNilDeltaStillReachesTheInvocation(t *testing.T) {
-	inner := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}}
+	sess := &fakeSession{id: "sess-1"}
+	inner := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}, session: sess}
 	wrapped := NewToolContext(inner, "fc-1", nil, nil).(InvocationContext)
 
 	c := Promote(wrapped).WithDelta(&CommonContextDelta{Path: new("wf/n@1")})
@@ -304,6 +305,9 @@ func TestNilDeltaStillReachesTheInvocation(t *testing.T) {
 	}
 	if name := c.AgentName(); name != "parent" {
 		t.Errorf("AgentName() = %q, want %q", name, "parent")
+	}
+	if s := c.Session(); s != sess {
+		t.Errorf("Session() = %v, want the invocation's session %v: the wrapper was not unwrapped", s, sess)
 	}
 }
 
