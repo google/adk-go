@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"reflect"
 	"strings"
 
 	"google.golang.org/genai"
@@ -31,18 +32,16 @@ type LiveConnection struct {
 	sdkSession *genai.Session
 
 	modelName               string
-	backend                 genai.Backend
 	inputTranscriptionText  string
 	outputTranscriptionText string
 	bufferedResponses       []*model.LLMResponse
 }
 
 // NewLiveConnection creates a new LiveConnection.
-func NewLiveConnection(session *genai.Session, modelName string, backend genai.Backend) *LiveConnection {
+func NewLiveConnection(session *genai.Session, modelName string) *LiveConnection {
 	return &LiveConnection{
 		sdkSession: session,
 		modelName:  modelName,
-		backend:    backend,
 	}
 }
 
@@ -69,7 +68,14 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 			if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
 				continue
 			}
-			filteredParts = append(filteredParts, part)
+			if IsInternalLiveArtifactPart(part) {
+				continue
+			}
+			sendPart, ok := withoutThoughtSignature(part)
+			if !ok {
+				continue
+			}
+			filteredParts = append(filteredParts, sendPart)
 		}
 		if len(filteredParts) > 0 {
 			filteredHistory = append(filteredHistory, &genai.Content{
@@ -93,6 +99,40 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 	return nil
 }
 
+// withoutThoughtSignature returns part without its thought signature, and
+// false when nothing is left to send once the signature is gone.
+//
+// A thought signature is an opaque token that only the model which produced
+// it can read back. History seeded from a text session carries the text
+// model's signatures, and the Live API closes the connection with 1007
+// ("PassbackContext should be decrypted before reaching here") when it is
+// sent one. The part is copied so the session event keeps its signature for
+// later text turns.
+func withoutThoughtSignature(part *genai.Part) (*genai.Part, bool) {
+	if len(part.ThoughtSignature) == 0 {
+		return part, true
+	}
+	stripped := *part
+	stripped.ThoughtSignature = nil
+	// A signature can arrive on a part of its own, possibly marked as a
+	// thought; without the signature such a part says nothing. Fields that
+	// only describe other content do not keep the part alive either:
+	// PartMetadata is the caller's bookkeeping (an empty map is not zero to
+	// reflect, yet it encodes to nothing), and the media and speech settings
+	// apply to text or media that the part does not carry.
+	rest := stripped
+	rest.Thought = false
+	rest.PartMetadata = nil
+	rest.VideoMetadata = nil
+	rest.MediaResolution = nil
+	rest.MediaProcessing = ""
+	rest.SpeechMetadata = nil
+	if reflect.ValueOf(rest).IsZero() {
+		return nil, false
+	}
+	return &stripped, true
+}
+
 // SendContent sends unary content or function responses to the model.
 func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content) error {
 	if content == nil || len(content.Parts) == 0 {
@@ -114,9 +154,7 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 		}
 		log.Printf("sending tool response\n") //nolint:forbidigo // pre-slog call site
 	} else {
-		isGemini31 := strings.Contains(c.modelName, "gemini-3.1")
-		isGeminiAPI := c.backend == genai.BackendGeminiAPI
-		if isGemini31 && isGeminiAPI && len(content.Parts) == 1 && content.Parts[0].Text != "" {
+		if IsGemini3xLive(c.modelName) && len(content.Parts) == 1 && content.Parts[0].Text != "" {
 			log.Printf("Attempting to send text via SendRealtimeInput\n") //nolint:forbidigo // pre-slog call site
 			err := c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 				Text: content.Parts[0].Text,
@@ -127,10 +165,9 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 			return nil
 		}
 
-		turnComplete := true
 		err := c.sdkSession.SendClientContent(genai.LiveClientContentInput{
 			Turns:        []*genai.Content{content},
-			TurnComplete: &turnComplete,
+			TurnComplete: new(true),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to send content: %w", err)
@@ -157,14 +194,15 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 			}
 		}
 
-		isGemini31 := strings.Contains(c.modelName, "gemini-3.1")
-		isGeminiAPI := c.backend == genai.BackendGeminiAPI
-		if isGemini31 && isGeminiAPI {
+		if IsGemini3xLive(c.modelName) || isGemini35LiveTranslate(c.modelName) {
 			if strings.HasPrefix(v.MIMEType, "image/") {
 				return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 					Video: v,
 				})
 			}
+			// Everything else goes to the audio field, where genai rejects a type
+			// other than audio/*. adk-python drops such a blob with a warning; ADK has
+			// no logger for library code yet, so the error goes to the caller.
 			return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 				Audio: v,
 			})
@@ -206,6 +244,9 @@ func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
 	}
 
 	resp := &model.LLMResponse{}
+	if msg.UsageMetadata != nil {
+		resp.UsageMetadata = liveUsageMetadata(msg.UsageMetadata)
+	}
 
 	if msg.SessionResumptionUpdate != nil {
 		resp.SessionResumptionHandle = msg.SessionResumptionUpdate.NewHandle
@@ -283,6 +324,27 @@ func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
 	}
 
 	return resp, nil
+}
+
+// liveUsageMetadata converts the Live API token usage to the usage type that
+// [model.LLMResponse] carries. The Live API names output tokens
+// ResponseTokenCount and ResponseTokensDetails, where the GenerateContent type
+// calls them CandidatesTokenCount and CandidatesTokensDetails. adk-python maps
+// the fields the same way.
+func liveUsageMetadata(u *genai.UsageMetadata) *genai.GenerateContentResponseUsageMetadata {
+	return &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:           u.PromptTokenCount,
+		CachedContentTokenCount:    u.CachedContentTokenCount,
+		CandidatesTokenCount:       u.ResponseTokenCount,
+		TotalTokenCount:            u.TotalTokenCount,
+		ThoughtsTokenCount:         u.ThoughtsTokenCount,
+		ToolUsePromptTokenCount:    u.ToolUsePromptTokenCount,
+		PromptTokensDetails:        u.PromptTokensDetails,
+		CacheTokensDetails:         u.CacheTokensDetails,
+		CandidatesTokensDetails:    u.ResponseTokensDetails,
+		ToolUsePromptTokensDetails: u.ToolUsePromptTokensDetails,
+		TrafficType:                u.TrafficType,
+	}
 }
 
 // Close closes the live server connection.

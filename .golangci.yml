@@ -10,7 +10,8 @@ formatters:
       local-prefixes:
         - google.golang.org/adk/v2
     gofumpt:
-      extra-rules: true
+      extra:
+        group-params: true
       module-path: google.golang.org/adk/v2
 
 linters:
@@ -19,6 +20,7 @@ linters:
     - goheader
     - revive
     - misspell
+    - modernize
 
   settings:
 

@@ -1906,9 +1906,7 @@ func TestUnwrapToolValue_ConcurrentUserWrapperNoRace(t *testing.T) {
 
 		done := make(chan struct{})
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := 0; ; i++ {
 				select {
 				case <-done:
@@ -1930,7 +1928,7 @@ func TestUnwrapToolValue_ConcurrentUserWrapperNoRace(t *testing.T) {
 				transferSwap.supportedAgents = nextAgents
 				transferSwap.mu.Unlock()
 			}
-		}()
+		})
 
 		var errs callbackErrors
 		for i := range 25 {
@@ -1973,9 +1971,7 @@ func TestUnwrapToolValue_ConcurrentUserWrapperNoRace(t *testing.T) {
 
 		done := make(chan struct{})
 		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := 0; ; i++ {
 				select {
 				case <-done:
@@ -1990,7 +1986,7 @@ func TestUnwrapToolValue_ConcurrentUserWrapperNoRace(t *testing.T) {
 				unwrapSwap.innerTool = nextTool
 				unwrapSwap.mu.Unlock()
 			}
-		}()
+		})
 
 		var errs callbackErrors
 		for i := range 25 {
@@ -2888,6 +2884,59 @@ func TestCustomMetadataAllowlist_GatingOnLifecycleEvents(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestCustomMetadataScrubLossSetsIsTruncated verifies that a session-event row
+// reports is_truncated when scrubbing replaced the value of an entry that its
+// custom_metadata keeps with a safety placeholder, as the row of a model
+// response with the same metadata does, and only then: a replaced value under
+// a key that custom_metadata leaves out does not count.
+func TestCustomMetadataScrubLossSetsIsTruncated(t *testing.T) {
+	// blob looks like JSON but does not parse, so redaction replaces it with
+	// the unparseable-JSON placeholder.
+	const blob = `{"api_key": "x"`
+	for _, tc := range []struct {
+		name      string
+		md        map[string]any
+		wantNote  string
+		wantTrunc bool
+	}{
+		{
+			name:      "allowlisted value replaced",
+			md:        map[string]any{"note": blob},
+			wantNote:  `"` + unparseableJSONPlaceholder + `"`,
+			wantTrunc: true,
+		},
+		{
+			name:      "a2a value replaced outside custom_metadata",
+			md:        map[string]any{"note": "kept", "a2a:blob": blob},
+			wantNote:  `"kept"`,
+			wantTrunc: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+				c.CustomMetadataAllowlist = []string{"note"}
+			})
+			var errs callbackErrors
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				Author:      "test-agent",
+				LLMResponse: model.LLMResponse{Content: textContent("model", "hi"), CustomMetadata: tc.md},
+			}))
+			errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{CustomMetadata: tc.md}, nil))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			for _, eventType := range []string{EventAgentResponse, EventLLMResponse} {
+				row := onlyRowOfType(t, rows, eventType)
+				checkJSONAt(t, jsonObjectColumn(t, row, "attributes"), tc.wantNote, "custom_metadata", "note")
+				if got := row["is_truncated"]; got != tc.wantTrunc {
+					t.Errorf("%s: is_truncated = %v, want %v", eventType, got, tc.wantTrunc)
+				}
+			}
+		})
+	}
 }
 
 func TestEventCompaction_SiblingKeysOmitted(t *testing.T) {

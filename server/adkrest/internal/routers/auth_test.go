@@ -151,7 +151,6 @@ func TestRouterAuthentication(t *testing.T) {
 			}
 
 			for _, route := range routes {
-				route := route
 				wantPublic := tc.publicRoutes[route.Name]
 				t.Run(route.Name, func(t *testing.T) {
 					// The declared Public flag must match the intended policy,

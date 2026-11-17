@@ -356,7 +356,7 @@ func TestAgentTool_Run_CodeParts(t *testing.T) {
 				{Thought: true, CodeExecutionResult: &genai.CodeExecutionResult{Output: "hidden"}},
 				{Thought: true, ExecutableCode: &genai.ExecutableCode{Code: "hidden"}},
 			},
-			want: map[string]any{},
+			want: map[string]any{"result": ""},
 		},
 		{
 			name: "text and code precedence",
@@ -455,7 +455,45 @@ func TestAgentTool_Run_AllThoughtPartsReturnsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() failed unexpectedly: %v", err)
 	}
-	want := map[string]any{}
+	want := map[string]any{"result": ""}
+	if diff := cmp.Diff(want, result); diff != "" {
+		t.Errorf("Run() result diff (-want +got):\n%s", diff)
+	}
+}
+
+// A reply without text is an empty result even when the agent has an output
+// schema, where adk-python validates the empty text and raises.
+func TestAgentTool_Run_AllThoughtPartsReturnsEmpty_WithOutputSchema(t *testing.T) {
+	outputSchema := &genai.Schema{
+		Type:       "OBJECT",
+		Properties: map[string]*genai.Schema{"is_valid": {Type: "BOOLEAN"}},
+		Required:   []string{"is_valid"},
+	}
+	testLLM := &testutil.MockModel{
+		Responses: []*genai.Content{
+			{
+				Parts: []*genai.Part{
+					{Text: "Just thinking...", Thought: true},
+				},
+				Role: genai.RoleModel,
+			},
+		},
+		StreamResponsesCount: 1,
+	}
+
+	agent := createAgentWithModel(t, nil, outputSchema, testLLM)
+	agentTool := agenttool.New(agent, nil)
+	toolCtx := createToolContext(t, agent)
+	toolImpl, ok := agentTool.(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("agentTool does not implement FunctionTool")
+	}
+
+	result, err := toolImpl.Run(toolCtx, map[string]any{"request": "think only"})
+	if err != nil {
+		t.Fatalf("Run() failed unexpectedly: %v", err)
+	}
+	want := map[string]any{"result": ""}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("Run() result diff (-want +got):\n%s", diff)
 	}
@@ -520,19 +558,54 @@ func TestAgentTool_Run_EmptyModelResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() failed unexpectedly: %v", err)
 	}
-	want := map[string]any{}
+	want := map[string]any{"result": ""}
+	if diff := cmp.Diff(want, result); diff != "" {
+		t.Errorf("Run() result diff (-want +got):\n%s", diff)
+	}
+}
+
+func TestAgentTool_Run_NoContentReturnsEmptyResult(t *testing.T) {
+	child, err := agent.New(agent.Config{
+		Name: "silent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				event := session.NewEvent(ctx, ctx.InvocationID())
+				event.Author = "silent"
+				yield(event, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+	wrapped := agenttool.New(child, nil).(toolinternal.FunctionTool)
+
+	result, err := wrapped.Run(createToolContext(t, child), map[string]any{"request": "anything"})
+	if err != nil {
+		t.Fatalf("Run() failed unexpectedly: %v", err)
+	}
+	want := map[string]any{"result": ""}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("Run() result diff (-want +got):\n%s", diff)
 	}
 }
 
 func TestAgentTool_Run_SkipSummarization(t *testing.T) {
+	inputSchema := &genai.Schema{
+		Type:       "OBJECT",
+		Properties: map[string]*genai.Schema{"city": {Type: "STRING"}},
+		Required:   []string{"city"},
+	}
 	tests := []struct {
 		name              string
 		skipSummarization bool
+		inputSchema       *genai.Schema
+		args              map[string]any
 	}{
-		{name: "skip_summarization_true", skipSummarization: true},
-		{name: "skip_summarization_false", skipSummarization: false},
+		{name: "skip_summarization_true", skipSummarization: true, args: map[string]any{"request": "magic"}},
+		{name: "skip_summarization_false", skipSummarization: false, args: map[string]any{"request": "magic"}},
+		{name: "input_schema_skip_summarization_true", skipSummarization: true, inputSchema: inputSchema, args: map[string]any{"city": "Paris"}},
+		{name: "input_schema_skip_summarization_false", skipSummarization: false, inputSchema: inputSchema, args: map[string]any{"city": "Paris"}},
 	}
 
 	for _, tt := range tests {
@@ -542,7 +615,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 					genai.NewContentFromText("test response", genai.RoleModel),
 				},
 			}
-			ag := createAgentWithModel(t, nil, nil, testLLM)
+			ag := createAgentWithModel(t, tt.inputSchema, nil, testLLM)
 			toolCtx := createToolContext(t, ag)
 
 			agentTool := agenttool.New(ag, &agenttool.Config{SkipSummarization: tt.skipSummarization})
@@ -551,7 +624,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 				t.Fatal("agentTool does not implement FunctionTool")
 			}
 
-			_, err := toolImpl.Run(toolCtx, map[string]any{"request": "magic"})
+			_, err := toolImpl.Run(toolCtx, tt.args)
 			if err != nil {
 				t.Fatalf("Run() failed unexpectedly: %v", err)
 			}
@@ -788,13 +861,13 @@ func TestAgentTool_Run_StreamedArgsAnsweredLongRunningCallSucceeds(t *testing.T)
 		Responses: []*genai.Content{
 			{
 				Role:  genai.RoleModel,
-				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "start_job", WillContinue: genai.Ptr(true)}}},
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "start_job", WillContinue: new(true)}}},
 			},
 			{
 				Role: genai.RoleModel,
 				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
-					PartialArgs:  []*genai.PartialArg{{JsonPath: "$.amount", NumberValue: genai.Ptr(1.0)}},
-					WillContinue: genai.Ptr(false),
+					PartialArgs:  []*genai.PartialArg{{JsonPath: "$.amount", NumberValue: new(1.0)}},
+					WillContinue: new(false),
 				}}},
 			},
 			genai.NewContentFromText("job started", genai.RoleModel),
@@ -841,13 +914,13 @@ func TestAgentTool_Run_StreamedArgsUnansweredLongRunningCallReturnsError(t *test
 		Responses: []*genai.Content{
 			{
 				Role:  genai.RoleModel,
-				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "start_job", WillContinue: genai.Ptr(true)}}},
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "start_job", WillContinue: new(true)}}},
 			},
 			{
 				Role: genai.RoleModel,
 				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
-					PartialArgs:  []*genai.PartialArg{{JsonPath: "$.amount", NumberValue: genai.Ptr(1.0)}},
-					WillContinue: genai.Ptr(false),
+					PartialArgs:  []*genai.PartialArg{{JsonPath: "$.amount", NumberValue: new(1.0)}},
+					WillContinue: new(false),
 				}}},
 			},
 		},
@@ -933,4 +1006,44 @@ func createToolContext(t *testing.T, testAgent agent.Agent) agent.Context {
 	})
 
 	return agent.NewToolContext(ctx, "", &session.EventActions{}, nil)
+}
+
+// With SkipSummarization, invalid arguments must not end the parent turn: the
+// error goes back to the parent model so it can retry with corrected args.
+func TestAgentTool_Run_SkipSummarizationNotSetOnInvalidArgs(t *testing.T) {
+	inputSchema := &genai.Schema{
+		Type: "OBJECT",
+		Properties: map[string]*genai.Schema{
+			"city": {Type: "STRING"},
+			"days": {Type: "INTEGER"},
+		},
+		Required: []string{"city", "days"},
+	}
+	tests := []struct {
+		name        string
+		inputSchema *genai.Schema
+		args        map[string]any
+	}{
+		{name: "input_schema_missing_required", inputSchema: inputSchema, args: map[string]any{"city": "Paris"}},
+		{name: "no_schema_missing_request", args: map[string]any{"query": "Paris"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ag := createAgent(t, tt.inputSchema, nil)
+			toolCtx := createToolContext(t, ag)
+			toolImpl, ok := agenttool.New(ag, &agenttool.Config{SkipSummarization: true}).(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
+
+			if _, err := toolImpl.Run(toolCtx, tt.args); err == nil {
+				t.Fatalf("Run(%v) succeeded unexpectedly, wanted error", tt.args)
+			}
+
+			if toolCtx.Actions().SkipSummarization {
+				t.Error("SkipSummarization = true after invalid arguments, want false so the parent model can retry")
+			}
+		})
+	}
 }

@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 
 	_ "embed"
@@ -117,6 +118,7 @@ func New(opts ...PluginOption) (*plugin.Plugin, error) {
 		Name:                "RetryAndReflectPlugin",
 		AfterToolCallback:   r.afterTool,
 		OnToolErrorCallback: r.onToolError,
+		AfterRunCallback:    r.afterRun,
 	})
 }
 
@@ -142,6 +144,62 @@ func (r *retryAndReflect) afterTool(ctx agent.Context, tool tool.Tool, args, res
 		}
 	}
 	return nil, nil
+}
+
+// afterRun drops the failure counts of an invocation once its run has ended.
+// Nothing reads them afterwards, so keeping them would grow
+// scopedFailureCounters with every invocation that saw a failure. Every scope
+// but Global keys its counts by invocation ID, as scopeKey does.
+// The counts of a run that paused on an unanswered long-running call are kept:
+// the run that answers the call reuses the invocation ID and continues the
+// same retry budget, as in adk-python.
+func (r *retryAndReflect) afterRun(ictx agent.InvocationContext) {
+	if r.scope == Global {
+		return
+	}
+	invocationID := ictx.InvocationID()
+	r.mu.Lock()
+	_, tracked := r.scopedFailureCounters[invocationID]
+	r.mu.Unlock()
+	// Most runs record no failure; skip the scan of the session events for them.
+	if !tracked || hasOpenLongRunningCall(ictx.Session(), invocationID) {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.scopedFailureCounters, invocationID)
+}
+
+// hasOpenLongRunningCall reports whether the invocation has a long-running call
+// that no user function response has answered yet. A failure response from
+// this plugin also settles the call, since no answer will follow.
+func hasOpenLongRunningCall(sess session.Session, invocationID string) bool {
+	if sess == nil {
+		return false
+	}
+	open := make(map[string]struct{})
+	for ev := range sess.Events().All() {
+		if ev == nil || ev.InvocationID != invocationID {
+			continue
+		}
+		for _, id := range ev.LongRunningToolIDs {
+			open[id] = struct{}{}
+		}
+		if ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if part == nil || part.FunctionResponse == nil || part.FunctionResponse.ID == "" {
+				continue
+			}
+			fr := part.FunctionResponse
+			if ev.Author == "user" || fr.Response["response_type"] == reflectAndRetryResponseType {
+				delete(open, fr.ID)
+			}
+		}
+	}
+	return len(open) > 0
 }
 
 func (r *retryAndReflect) onToolError(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
@@ -269,6 +327,8 @@ func (r *retryAndReflect) createToolRetryExceedMsg(tool tool.Tool, toolArgs map[
 		ToolName:     tool.Name(),
 		ErrorDetails: errType + ": " + errDetails,
 		ArgsSummary:  argsSummary,
+		RetryCount:   r.maxRetries,
+		MaxRetries:   r.maxRetries,
 	}
 
 	var buf bytes.Buffer

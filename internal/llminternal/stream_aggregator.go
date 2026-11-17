@@ -105,7 +105,8 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 
 	for _, part := range llmResponse.Content.Parts {
 		// gemini 3 in streaming returns a last response with an empty part. We will filter it out.
-		if reflect.ValueOf(*part).IsZero() {
+		// A nil part would panic the reflect check below, so skip it the same way.
+		if part == nil || reflect.ValueOf(*part).IsZero() {
 			continue
 		}
 		if len(part.ThoughtSignature) > 0 {
@@ -152,6 +153,10 @@ func (s *streamingResponseAggregator) processFunctionCallPart(part *genai.Part) 
 			}
 			s.currentThoughtSignature = nil
 			s.sequence = append(s.sequence, part)
+		} else if part.FunctionCall.ID == "" {
+			// A nameless chunk continues the call being streamed, for example by
+			// only setting WillContinue to false, so it carries that call's id.
+			part.FunctionCall.ID = s.currentFunctionID
 		}
 	}
 }
@@ -163,6 +168,8 @@ func (s *streamingResponseAggregator) processStreamingFunctionCallPart(part *gen
 	}
 	if part.FunctionCall.ID != "" {
 		s.currentFunctionID = part.FunctionCall.ID
+	} else {
+		part.FunctionCall.ID = s.currentFunctionID
 	}
 	for _, arg := range part.FunctionCall.PartialArgs {
 		segments, ok := parseJSONPath(arg.JsonPath)

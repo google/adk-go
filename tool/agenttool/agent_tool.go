@@ -112,12 +112,6 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
 	}
 
-	if t.skipSummarization {
-		if actions := toolCtx.Actions(); actions != nil {
-			actions.SkipSummarization = true
-		}
-	}
-
 	// The same lookup as Declaration, so that a workflow agent takes the
 	// arguments of its first sub-agent's input schema.
 	agentInputSchema := workflowinternal.InputSchema(t.agent)
@@ -146,6 +140,14 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 			inputText = fmt.Sprint(input)
 		}
 		content = genai.NewContentFromText(inputText, genai.RoleUser)
+	}
+
+	// Set only once the input is valid, so an argument error goes back to the
+	// parent model instead of ending its turn.
+	if t.skipSummarization {
+		if actions := toolCtx.Actions(); actions != nil {
+			actions.SkipSummarization = true
+		}
 	}
 
 	sessionService := session.InMemoryService()
@@ -236,7 +238,7 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	if lastEvent == nil {
-		return map[string]any{}, nil
+		return map[string]any{"result": ""}, nil
 	}
 
 	lastContent := lastEvent.LLMResponse.Content
@@ -260,8 +262,12 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 	outputText := strings.Join(textParts, "\n")
 
+	// A reply without text is an empty result even when the agent has an
+	// output schema, because there is nothing to validate. adk-python
+	// validates the empty text against the schema when the reply has parts,
+	// and raises.
 	if outputText == "" {
-		return map[string]any{}, nil
+		return map[string]any{"result": ""}, nil
 	}
 	if isLllmAgent {
 		internalLlmAgent, ok := t.agent.(llminternal.Agent)
