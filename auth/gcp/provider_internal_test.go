@@ -344,7 +344,8 @@ type requestKey struct{}
 // its context. That request may then come back with either the client or its
 // own context error: its ctx.Done arm and the published result race, and both
 // outcomes are correct for a waiter that gave up. What must hold is that the
-// build completed and was cached, which the second call checks.
+// build completed and produced the client, which the second call checks.
+// Caching itself is TestResolveClientBuildsDefaultClient's job.
 func TestResolveClientBuildsOnDetachedRequestContext(t *testing.T) {
 	p := newTestProvider(t)
 	reqCtx, cancel := context.WithCancel(context.WithValue(t.Context(), requestKey{}, "request"))

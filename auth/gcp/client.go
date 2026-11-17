@@ -437,11 +437,13 @@ type Retrieval struct {
 // sentinels, or a bare type assertion to [*APIError], stops being true where it
 // was true in v2.3.0. A decode failure is now [ErrMalformedResponse] and no
 // longer carries the [encoding/json] error behind it, so [errors.As] against
-// *json.SyntaxError stops finding one. On the ADC-backed client a token endpoint
-// rejecting the cloud-platform token request surfaces as the auth library's
-// *cloud.google.com/go/auth.Error behind the request error, where releases
-// through v2.8.0 carried an *oauth2.RetrieveError. A transport failure on the
-// way to the token endpoint is a plain wrapped error on both.
+// *json.SyntaxError stops finding one. On the ADC-backed client, when the
+// credentials are a service-account key or an authorized_user file and the
+// token endpoint rejects the cloud-platform token request, the error behind the
+// request error is the auth library's *cloud.google.com/go/auth.Error, where
+// releases through v2.8.0 carried an *oauth2.RetrieveError. Metadata-server,
+// impersonated and external-account credentials report such a rejection as a
+// message with no matchable type.
 func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ *Retrieval, err error) {
 	if req.Resource == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a Resource")

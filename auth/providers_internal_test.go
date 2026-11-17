@@ -321,12 +321,12 @@ func TestProvidersMintTokensAfterInit(t *testing.T) {
 	}
 }
 
-// isolateADCEnv pins the rest of the environment the auth library reads. On this
-// package's path only GOOGLE_AUTH_TRUST_BOUNDARY_ENABLED changes what the tests
-// send (it would send the token to iamcredentials.googleapis.com). The universe
-// domain and client certificate variables are read by the library's transports,
-// which this package does not use, and nothing here asks for the quota project.
-// They are pinned anyway so this copy and the gcp package's stay the same set.
+// isolateADCEnv pins the rest of the environment the auth library reads. None of
+// the four changes what this package sends today: the token reaches the request
+// through OAuth2Credential.Apply rather than the library's transports, which is
+// where the universe domain, the client certificate and the trust boundary
+// lookup take effect, and nothing here asks for the quota project. They are
+// pinned so this copy and the gcp package's stay the same set.
 func isolateADCEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("GOOGLE_CLOUD_QUOTA_PROJECT", "")
