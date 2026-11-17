@@ -1722,10 +1722,12 @@ func TestAuthRedirectStandaloneStream(t *testing.T) {
 	}
 }
 
-// TestAuthRedirectLocationStaysOut covers the two exits from the toolset
-// other than a call's error: Close, which sends a DELETE through the same
-// client, and the log line a reconnect writes when the old session's Close
-// fails. A refused redirect on either must not carry the server's Location.
+// TestAuthRedirectLocationStaysOut covers the exits from the toolset other
+// than a first call's error: Close, which sends a DELETE through the same
+// client, the log line a reconnect writes when the old session's Close
+// fails, a call on a session that is already up, and the error of a
+// reconnect that is itself redirected. A refused redirect on any of them
+// must not carry the server's Location.
 func TestAuthRedirectLocationStaysOut(t *testing.T) {
 	const token = "user-tok"
 	var mu sync.Mutex
@@ -1743,15 +1745,22 @@ func TestAuthRedirectLocationStaysOut(t *testing.T) {
 	})
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil)
 	var deletes atomic.Int32
-	// While set, the server drops every connection on a POST. A call then
-	// fails with a connection error the toolset answers by reconnecting,
-	// and the reconnect first closes the dead session, which sends the
-	// DELETE. The flag clears on that DELETE so the new session can start.
-	var dropPosts atomic.Bool
+	// While dropPosts is set, the server drops every connection on a POST. A
+	// call then fails with a connection error the toolset answers by
+	// reconnecting, and the reconnect first closes the dead session, which
+	// sends the DELETE. That DELETE clears dropPosts, so the new session can
+	// start. With redirectAfterDrop set it also sets redirectPosts, and the
+	// reconnect's own POSTs are redirected to the other host.
+	var dropPosts, redirectAfterDrop, redirectPosts atomic.Bool
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			deletes.Add(1)
 			dropPosts.Store(false)
+			redirectPosts.Store(redirectAfterDrop.Load())
+			http.Redirect(w, r, other.URL+"/sso?code=SECRET-CODE&state=xyz", http.StatusTemporaryRedirect)
+			return
+		}
+		if redirectPosts.Load() && r.Method == http.MethodPost {
 			http.Redirect(w, r, other.URL+"/sso?code=SECRET-CODE&state=xyz", http.StatusTemporaryRedirect)
 			return
 		}
@@ -1809,6 +1818,53 @@ func TestAuthRedirectLocationStaysOut(t *testing.T) {
 			t.Fatalf("log = %q, want the reconnect's close failure, so the test exercised the line", got)
 		} else if strings.Contains(got, "SECRET-CODE") {
 			t.Errorf("log = %q, want it not to carry the Location's query string", got)
+		}
+	})
+	t.Run("call on an established session", func(t *testing.T) {
+		ts, err := mcptoolset.New(mcptoolset.Config{Endpoint: endpoint.URL + "/mcp", Auth: auth.StaticToken(token)})
+		if err != nil {
+			t.Fatalf("mcptoolset.New() error = %v", err)
+		}
+		defer func() { _ = ts.(io.Closer).Close() }()
+		inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+		if _, err := ts.Tools(icontext.NewReadonlyContext(inv)); err != nil {
+			t.Fatalf("Tools() error = %v", err)
+		}
+		redirectPosts.Store(true)
+		defer redirectPosts.Store(false)
+		_, err = ts.Tools(icontext.NewReadonlyContext(inv))
+		if err == nil || !strings.Contains(err.Error(), "refusing redirect") {
+			t.Errorf("Tools() error = %v, want the refusal", err)
+		}
+		if err != nil && strings.Contains(err.Error(), "SECRET-CODE") {
+			t.Errorf("Tools() error = %v, want it not to carry the Location's query string", err)
+		}
+	})
+
+	t.Run("reconnect redirected to another host", func(t *testing.T) {
+		ts, err := mcptoolset.New(mcptoolset.Config{Endpoint: endpoint.URL + "/mcp", Auth: auth.StaticToken(token)})
+		if err != nil {
+			t.Fatalf("mcptoolset.New() error = %v", err)
+		}
+		defer func() { _ = ts.(io.Closer).Close() }()
+		inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+		if _, err := ts.Tools(icontext.NewReadonlyContext(inv)); err != nil {
+			t.Fatalf("Tools() error = %v", err)
+		}
+		redirectAfterDrop.Store(true)
+		defer func() {
+			redirectAfterDrop.Store(false)
+			redirectPosts.Store(false)
+		}()
+		dropPosts.Store(true)
+		_, err = ts.Tools(icontext.NewReadonlyContext(inv))
+		for _, want := range []string{"reconnection also failed", "refusing redirect"} {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("Tools() error = %v, want it to contain %q", err, want)
+			}
+		}
+		if err != nil && strings.Contains(err.Error(), "SECRET-CODE") {
+			t.Errorf("Tools() error = %v, want it not to carry the Location's query string", err)
 		}
 	})
 	if deletes.Load() == 0 {
