@@ -15,7 +15,8 @@
 // Package adkcontext holds the private context keys that more than one ADK
 // package reads: the key under which an ADK context registers its invocation
 // identity, so it can be recovered from a derived context.Context via
-// agent.IdentityFromContext, and the key of the runner's run config. It is a
+// agent.IdentityFromContext, the key of the runner's run config, and the key
+// under which ADK's contexts answer with their invocation's session. It is a
 // tiny leaf package shared by the agent, internal/context and
 // internal/agent/runconfig packages to avoid an import cycle.
 package adkcontext
@@ -52,6 +53,17 @@ const IdentityKey ctxKey = 0
 // *runconfig.RunConfig, so it reads the value through an interface the type
 // satisfies, such as one with CustomMetadataSnapshot() map[string]any.
 const RunConfigKey ctxKey = 1
+
+// sessionKey is the type of InvocationSessionKey. It is a type of its own,
+// not ctxKey, so the key can equal no other key of this package, whatever
+// values later ctxKey constants take.
+type sessionKey int
+
+// InvocationSessionKey is the context value key under which ADK's own context
+// types answer with the session.Session of the invocation they speak for,
+// including a tool context, whose Session method reports none. Its type is
+// unexported and the package internal, so only ADK packages can read it.
+const InvocationSessionKey sessionKey = 0
 
 // Recovered returns what read produced, and whether it returned at all.
 //
