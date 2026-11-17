@@ -108,6 +108,48 @@ func ExampleNew_pause() {
 	// root_agent: Analyzing APAC.
 }
 
+// A generator tool whose calls read state and write a value computed from it
+// sets Sequential, as a function tool does, so that the calls of one model
+// turn run one after the other and each sees the earlier calls' writes.
+func ExampleNew_sequential() {
+	type countResult struct {
+		Count int `json:"count"`
+	}
+	count, err := generatortool.New(functiontool.Config{Name: "count", Description: "Counts the calls.", Sequential: true},
+		func(ctx agent.Context, _ struct{}, emit func(*session.Event) error) (countResult, error) {
+			n := 0
+			if v, err := ctx.State().Get("calls"); err == nil {
+				n = v.(int)
+			} else if !errors.Is(err, session.ErrStateKeyNotExist) {
+				return countResult{}, err
+			}
+			n++
+			if err := ctx.State().Set("calls", n); err != nil {
+				return countResult{}, err
+			}
+			return countResult{Count: n}, nil
+		})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	r := exampleRunner(count,
+		&genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "count", Args: map[string]any{}}},
+			{FunctionCall: &genai.FunctionCall{ID: "call_2", Name: "count", Args: map[string]any{}}},
+		}},
+		genai.NewContentFromText("Counted twice.", genai.RoleModel),
+	)
+	printEvents(r.Run(context.Background(), "user", "s1", genai.NewContentFromText("Count twice.", genai.RoleUser), agent.RunConfig{}))
+
+	// Output:
+	// root_agent calls count map[]
+	// root_agent calls count map[]
+	// response from count: map[count:1]
+	// response from count: map[count:2]
+	// root_agent: Counted twice.
+}
+
 // exampleRunner returns a runner for an LLM agent named root_agent with one
 // tool, whose model answers with turns, one per request.
 func exampleRunner(t tool.Tool, turns ...*genai.Content) *runner.Runner {

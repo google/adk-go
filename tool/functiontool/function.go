@@ -92,6 +92,26 @@ var ErrInvalidArgument = errors.New("invalid argument")
 
 // New creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
+//
+// When the model calls the tool, the tool handles the call's arguments before
+// the handler runs. If the input schema forbids properties it does not
+// declare, as the schema inferred for a struct TArgs does, it drops every
+// argument the schema does not declare. If an argument the schema requires
+// is missing, the handler does not run, and the call is answered with an
+// "error" result that names the missing parameters, so that the model can
+// call again; in a schema inferred from a struct, a field whose json tag has
+// omitempty or omitzero is not required. The remaining arguments are then
+// validated against the schema and converted to TArgs, and a value the
+// schema refuses fails the call with the validation error.
+//
+// The handler's result is the function response: a result that converts to
+// a JSON object is that object, and any other result is wrapped as
+// {"result": <value>}. A result that holds a *genai.Part or a genai.Part, at
+// any depth of maps, slices and arrays, is passed to the flow unconverted.
+// The flow moves each part that has inline data or a file URI, and a MIME
+// type, out of the result itself or out of a map, slice or array directly
+// inside it, into the Parts of the function response, where the model
+// receives it as media.
 func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.Tool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
 	// https://github.com/modelcontextprotocol/go-sdk/discussions/37
