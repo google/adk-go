@@ -348,6 +348,9 @@ func TestRun_FunctionResponseRerunsNodeAfterRetry(t *testing.T) {
 		return "checked", nil
 	}, workflow.NodeConfig{RetryConfig: &workflow.RetryConfig{MaxAttempts: 2}})
 	skip := workflow.NewFunctionNode("skip", func(agent.Context, any) (string, error) { return "skipped", nil }, workflow.NodeConfig{})
+	// other has output and comes first among the edges into ask, but its
+	// edge never fires.
+	other := workflow.NewFunctionNode("other", func(agent.Context, any) (string, error) { return "other", nil }, workflow.NodeConfig{})
 
 	var inputs []string
 	var answer any
@@ -364,7 +367,9 @@ func TestRun_FunctionResponseRerunsNodeAfterRetry(t *testing.T) {
 	wf, err := workflowagent.New(workflowagent.Config{
 		Name: "wf",
 		Edges: []workflow.Edge{
+			{From: workflow.Start, To: other},
 			{From: workflow.Start, To: check},
+			{From: other, To: ask, Route: workflow.StringRoute("never")},
 			{From: check, To: skip, Route: workflow.StringRoute("skip")},
 			{From: skip, To: ask},
 			{From: check, To: ask, Route: workflow.Default},
@@ -378,6 +383,51 @@ func TestRun_FunctionResponseRerunsNodeAfterRetry(t *testing.T) {
 	}
 	if want := []string{"checked", "checked"}; attempts != 2 || !slices.Equal(inputs, want) || answer != "yes" {
 		t.Errorf("check ran %d times, ask ran with inputs %q and got the answer %v, want 2 runs, inputs %q and the answer yes", attempts, inputs, answer, want)
+	}
+}
+
+// TestRun_FunctionResponseRerunsNodeTriggeredOverStart checks a re-entry node
+// that was triggered over its START edge while another predecessor with output
+// routed elsewhere. It must rerun with the workflow input, as adk-python does,
+// not with that predecessor's output.
+func TestRun_FunctionResponseRerunsNodeTriggeredOverStart(t *testing.T) {
+	a := workflow.NewEmittingFunctionNode("a", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Routes = []string{"skip"}
+		ev.Output = "A"
+		return nil, emit(ev)
+	}, workflow.NodeConfig{})
+	b := workflow.NewFunctionNode("b", func(agent.Context, any) (any, error) { return nil, nil }, workflow.NodeConfig{})
+
+	var inputs []string
+	var answer any
+	ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, in string, emit func(*session.Event) error) (any, error) {
+		inputs = append(inputs, in)
+		reply, err := workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "ask-" + in})
+		if err != nil {
+			return nil, err
+		}
+		answer = reply
+		return reply, nil
+	}, workflow.NodeConfig{RerunOnResume: new(true)})
+
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name: "wf",
+		Edges: []workflow.Edge{
+			{From: workflow.Start, To: a},
+			{From: a, To: ask, Route: workflow.StringRoute("go")},
+			{From: a, To: b, Route: workflow.StringRoute("skip")},
+			{From: workflow.Start, To: ask},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runResumeTurn(t, wf, resumeContent("ask-start", workflow.WorkflowInputFunctionCallName, "yes"), nil); err != nil {
+		t.Fatalf("resume error: %v", err)
+	}
+	if want := []string{"start", "start"}; !slices.Equal(inputs, want) || answer != "yes" {
+		t.Errorf("ask ran with inputs %q and got the answer %v, want inputs %q and the answer yes", inputs, answer, want)
 	}
 }
 

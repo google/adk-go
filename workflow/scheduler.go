@@ -704,11 +704,25 @@ func (s *scheduler) completionEvent(name string, nr *nodeRun, inventory failureI
 		// A failed attempt can still recover through retries or a parent
 		// fallback. ErrorCode would terminate AgentTool/A2A consumers.
 		ev.CustomMetadata[workflowNodeOutcomeKey] = outcome
+		s.recordTrigger(ev.CustomMetadata, name)
 		recordFailedChildPaths(ev.CustomMetadata, inventory)
 	} else {
 		ev.CustomMetadata[workflowNodeCompletedKey] = true
 	}
 	return ev
+}
+
+// recordTrigger stores in metadata how the node's current activation was
+// started (see workflowNodeTriggerPrefix).
+func (s *scheduler) recordTrigger(metadata map[string]any, name string) {
+	ns := s.state.Nodes[name]
+	if ns == nil {
+		return
+	}
+	metadata[workflowNodeTriggerPrefix+s.workflowName] = map[string]any{
+		"from":  ns.TriggeredBy,
+		"input": ns.Input,
+	}
 }
 
 // finalize errors if more than one terminal node (no outgoing edges,
@@ -791,6 +805,11 @@ func (s *scheduler) handleEvent(it eventItem) {
 			metadata = map[string]any{}
 		}
 		metadata[workflowBasePathPrefix+s.workflowName] = s.parentCtx.Path()
+		// A dynamic child's pause pauses the node too, so it gets the
+		// node's record as well.
+		if raisesInterrupt(it.ev) {
+			s.recordTrigger(metadata, it.nodeName)
+		}
 		it.ev.CustomMetadata = metadata
 	}
 	// Stamp the activation's branch onto events that left
@@ -1077,14 +1096,31 @@ func findSuccessors(g *graph, state *RunState, currentNode Node, input any, even
 		return nil
 	}
 	from := currentNode.Name()
+	concreteMatched := false // any concrete Route fired (controls Default)
 	out := []successor{}
 	added := map[Node]struct{}{}
-	for _, edge := range firedEdges(succs, event) {
+	var defaultRouteNode Node
+	for _, edge := range succs {
 		if _, ok := added[edge.To]; ok {
 			continue
 		}
-		out = appendSuccessor(out, g, state, edge.To, input, from, parentBranch)
-		added[edge.To] = struct{}{}
+		if edge.Route == nil {
+			out = appendSuccessor(out, g, state, edge.To, input, from, parentBranch)
+			added[edge.To] = struct{}{}
+			continue
+		}
+		if edge.Route == Default {
+			defaultRouteNode = edge.To
+			continue
+		}
+		if event != nil && edge.Route.Matches(event) {
+			out = appendSuccessor(out, g, state, edge.To, input, from, parentBranch)
+			added[edge.To] = struct{}{}
+			concreteMatched = true
+		}
+	}
+	if !concreteMatched && defaultRouteNode != nil {
+		out = appendSuccessor(out, g, state, defaultRouteNode, input, from, parentBranch)
 	}
 	// Second pass: if we fanned out to more than one successor,
 	// stamp a sub-branch onto each non-Join entry whose branch is
@@ -1103,32 +1139,6 @@ func findSuccessors(g *graph, state *RunState, currentNode Node, input any, even
 		}
 	}
 	return out
-}
-
-// firedEdges returns the edges among a node's outgoing edges that fire
-// for its routing event (nil when the node emitted none), in dispatch
-// order. findSuccessors documents the rules. Rehydration replays them
-// over history to find what triggered a node (see collectTriggers), so
-// the rules live here and are not repeated there.
-func firedEdges(outgoing []Edge, event *session.Event) []Edge {
-	var fired []Edge
-	var defaultEdge *Edge
-	concreteMatched := false // any concrete Route fired (controls Default)
-	for i, edge := range outgoing {
-		switch {
-		case edge.Route == nil:
-			fired = append(fired, edge)
-		case edge.Route == Default:
-			defaultEdge = &outgoing[i]
-		case event != nil && edge.Route.Matches(event):
-			fired = append(fired, edge)
-			concreteMatched = true
-		}
-	}
-	if !concreteMatched && defaultEdge != nil {
-		fired = append(fired, *defaultEdge)
-	}
-	return fired
 }
 
 // appendSuccessor records a routing match in the dispatch list.

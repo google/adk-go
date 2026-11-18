@@ -202,11 +202,11 @@ func TestReconstructRunState_PreviouslyResumedReentry(t *testing.T) {
 	}
 }
 
-// A re-entry node with several incoming edges must rerun with the output
-// of the predecessor that triggered it. The order the edges are declared
-// in does not say which one that was.
+// A re-entry node with several incoming edges must rerun with the input it
+// ran with. The scheduler records that on the node's pause and failure events.
+// History without the record resumes as it did before the record existed.
 func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
-	a, b, c := newDummyNode("a"), newDummyNode("b"), newDummyNode("c")
+	a, b, c, p := newDummyNode("a"), newDummyNode("b"), newDummyNode("c"), newDummyNode("p")
 	ask := NewFunctionNode("ask", func(agent.Context, any) (any, error) { return nil, nil }, NodeConfig{RerunOnResume: new(true)})
 	// The events are stamped the way the scheduler stamps them: the node
 	// path on every event, and on an output event the emitter's own path
@@ -225,19 +225,9 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 		ev.Routes = routes
 		return ev
 	}
-	completed := func(node string) *session.Event {
-		ev := nodeEvent(node)
-		ev.CustomMetadata = map[string]any{workflowNodeCompletedKey: true}
-		return ev
-	}
 	failed := func(node string) *session.Event {
 		ev := nodeEvent(node)
 		ev.CustomMetadata = map[string]any{workflowNodeOutcomeKey: workflowNodeFailureOutcome}
-		return ev
-	}
-	delegated := func(node string, output any) *session.Event {
-		ev := completed(node)
-		ev.CustomMetadata[workflowDelegatedOutputKey] = output
 		return ev
 	}
 	raised := func(node, id string) *session.Event {
@@ -251,24 +241,25 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 		ev.Content.Parts[0].FunctionResponse.ID = id
 		return ev
 	}
-	// under moves an event below base, the path of the workflow run.
-	under := func(base string, ev *session.Event) *session.Event {
-		ev.NodeInfo.Path = base + "/" + ev.NodeInfo.Path
-		for i, path := range ev.NodeInfo.OutputFor {
-			ev.NodeInfo.OutputFor[i] = base + "/" + path
+	// recorded adds the scheduler's trigger record for workflow "wf".
+	recorded := func(ev *session.Event, from string, input any) *session.Event {
+		if ev.CustomMetadata == nil {
+			ev.CustomMetadata = map[string]any{}
 		}
+		ev.CustomMetadata[workflowNodeTriggerPrefix+"wf"] = map[string]any{"from": from, "input": input}
 		return ev
 	}
-	withError := func(ev *session.Event) *session.Event {
-		ev.ErrorCode = "SOME_ERROR"
-		return ev
-	}
-	partial := func(ev *session.Event) *session.Event {
-		ev.Partial = true
-		return ev
-	}
-	earlier := func(ev *session.Event) *session.Event {
-		ev.InvocationID = "earlier"
+	// stored passes the event's metadata through JSON, as a database
+	// session service does.
+	stored := func(ev *session.Event) *session.Event {
+		data, err := json.Marshal(ev.CustomMetadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev.CustomMetadata = nil
+		if err := json.Unmarshal(data, &ev.CustomMetadata); err != nil {
+			t.Fatal(err)
+		}
 		return ev
 	}
 	// routedElsewhere is the graph of the reported case: a comes first
@@ -279,514 +270,221 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 		{From: a, To: b, Route: StringRoute("skip")},
 		{From: b, To: ask},
 	}
-	// validateLoop sends a to b and back until a stops routing "retry".
-	validateLoop := []Edge{
-		{From: Start, To: a},
-		{From: Start, To: ask},
-		{From: a, To: b, Route: StringRoute("retry")},
-		{From: b, To: a, Route: Default},
-		{From: a, To: ask, Route: Default},
-	}
-	// secondVisit lets c send a through a second visit after a already
-	// triggered ask.
-	secondVisit := []Edge{
-		{From: Start, To: a},
-		{From: Start, To: c},
-		{From: c, To: a, Route: Default},
-		{From: Start, To: ask},
-		{From: a, To: ask, Route: Default},
-		{From: a, To: b, Route: StringRoute("skip")},
-	}
 	for _, tc := range []struct {
-		name     string
-		workflow string
-		edges    []Edge
-		history  []*session.Event
+		name    string
+		edges   []Edge
+		history []*session.Event
 		// pause is what ask itself recorded. By default it raised
-		// "approval" and got the answer.
+		// "approval", recorded as triggered by b with "B", and got the
+		// answer.
 		pause       []*session.Event
 		wantStatus  NodeStatus
 		wantTrigger string
 		wantInput   any
 	}{
 		{
-			name:        "predecessor_routed_elsewhere",
+			name:        "recorded_trigger",
 			edges:       routedElsewhere,
 			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
 			wantTrigger: "b",
 			wantInput:   "B",
 		},
 		{
-			// Both edges into ask have fired, a's on the first visit and
-			// b's on the way back around the loop.
-			name: "last_predecessor_to_finish",
+			// a has output and is declared first, but ask was triggered
+			// over its START edge and gets the workflow input.
+			name: "recorded_start",
 			edges: []Edge{
 				{From: Start, To: a},
 				{From: a, To: ask, Route: StringRoute("go")},
-				{From: ask, To: b, Route: StringRoute("again")},
-				{From: b, To: ask},
-			},
-			history:     []*session.Event{finished("a", "A", "go"), finished("b", "B")},
-			wantTrigger: "b",
-			wantInput:   "B",
-		},
-		{
-			name: "predecessor_routed_to_node",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: ask},
-				{From: a, To: ask, Route: StringRoute("go")},
-			},
-			history:     []*session.Event{finished("a", "A", "go")},
-			wantTrigger: "a",
-			wantInput:   "A",
-		},
-		{
-			name: "default_route_not_taken",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: ask},
-				{From: a, To: ask, Route: Default},
 				{From: a, To: b, Route: StringRoute("skip")},
+				{From: Start, To: ask},
 			},
 			history:     []*session.Event{finished("a", "A", "skip")},
+			pause:       []*session.Event{recorded(raised("ask", "approval"), Start.Name(), "seed"), answered("approval")},
 			wantTrigger: Start.Name(),
 			wantInput:   "seed",
 		},
 		{
-			name: "default_route_taken",
+			// b ran again after it triggered ask. ask gets the output
+			// it ran with, not b's latest one.
+			name: "recorded_input_older_than_latest_output",
 			edges: []Edge{
-				{From: Start, To: a},
 				{From: Start, To: b},
-				{From: b, To: ask, Route: StringRoute("go")},
-				{From: a, To: ask, Route: Default},
-				{From: a, To: b, Route: StringRoute("skip")},
-				{From: a, To: c},
-			},
-			history:     []*session.Event{finished("b", "B", "stop"), finished("a", "A", "other")},
-			wantTrigger: "a",
-			wantInput:   "A",
-		},
-		{
-			name: "default_route_without_routing_event",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: b},
-				{From: b, To: ask, Route: StringRoute("go")},
-				{From: a, To: ask, Route: Default},
-				{From: a, To: b, Route: StringRoute("skip")},
-			},
-			history:     []*session.Event{finished("b", "B", "stop"), finished("a", "A")},
-			wantTrigger: "a",
-			wantInput:   "A",
-		},
-		{
-			// An edge with a concrete route does not fire for a node that
-			// emitted no routing event at all.
-			name: "concrete_route_without_routing_event",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: ask},
-				{From: a, To: ask, Route: StringRoute("go")},
-			},
-			history:     []*session.Event{finished("a", "A")},
-			wantTrigger: Start.Name(),
-			wantInput:   "seed",
-		},
-		{
-			// Finishing without output still fires the edge.
-			name: "last_predecessor_finished_without_output",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: a, To: ask, Route: StringRoute("go")},
-				{From: ask, To: b, Route: StringRoute("again")},
 				{From: b, To: ask},
+				{From: ask, To: c, Route: StringRoute("again")},
+				{From: c, To: b, Route: Default},
 			},
-			history:     []*session.Event{finished("a", "A", "go"), completed("b")},
+			history:     []*session.Event{finished("b", "B1"), finished("b", "B2")},
+			pause:       []*session.Event{recorded(raised("ask", "approval"), "b", "B1"), answered("approval")},
 			wantTrigger: "b",
-			wantInput:   nil,
+			wantInput:   "B1",
 		},
 		{
-			// The comparison is by finish order. b is neither the first
-			// nor the last edge declared.
-			name: "finish_order_not_declaration_order",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: b},
-				{From: Start, To: c},
-				{From: a, To: ask, Route: StringRoute("go")},
-				{From: b, To: ask},
-				{From: c, To: ask, Route: StringRoute("go")},
-			},
-			history:     []*session.Event{finished("a", "A", "go"), finished("c", "C", "go"), finished("b", "B")},
-			wantTrigger: "b",
-			wantInput:   "B",
-		},
-		{
-			// a routed "retry" on its first visit and nothing on its
-			// second. The old route must not hide the Default edge that
-			// the second visit took.
-			name:        "route_of_earlier_visit",
-			edges:       validateLoop,
-			history:     []*session.Event{finished("a", "A1", "retry"), finished("b", "B"), finished("a", "A2")},
-			wantTrigger: "a",
-			wantInput:   "A2",
-		},
-		{
-			// The same loop with the route on its own event, ahead of
-			// the output it belongs to.
-			name:        "route_of_earlier_visit_on_its_own_event",
-			edges:       validateLoop,
-			history:     []*session.Event{routed("a", "retry"), finished("a", "A1"), finished("b", "B"), finished("a", "A2")},
-			wantTrigger: "a",
-			wantInput:   "A2",
-		},
-		{
-			// The first visit took the Default edge into ask. The second
-			// one routed back to b and ask has not been reached again.
-			name:        "route_of_latest_visit",
-			edges:       validateLoop,
-			history:     []*session.Event{finished("a", "A1"), finished("b", "B"), routed("a", "retry"), finished("a", "A2")},
-			wantTrigger: "a",
-			wantInput:   "A1",
-		},
-		{
-			// c recorded its output before a's first visit and triggered
-			// the second one later. Two outputs are two visits.
-			name:        "second_output_starts_a_visit",
-			edges:       secondVisit,
-			history:     []*session.Event{finished("c", "C"), finished("a", "A1", "skip"), finished("a", "A2")},
-			wantTrigger: "a",
-			wantInput:   "A2",
-		},
-		{
-			// Same for two routing events.
-			name:  "second_route_starts_a_visit",
-			edges: secondVisit,
-			history: []*session.Event{
-				finished("c", "C"),
-				routed("a", "other"), finished("a", "A1"),
-				routed("a", "skip"), finished("a", "A2"),
-			},
-			wantTrigger: "a",
-			wantInput:   "A1",
-		},
-		{
-			// a sent itself around again and paused on the second visit.
-			// The first visit completed and fired its edge into ask.
-			name: "self_loop",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: c},
-				{From: a, To: a, Route: StringRoute("again")},
-				{From: a, To: ask},
-				{From: c, To: ask, Route: Default},
-			},
-			history:     []*session.Event{finished("c", "C"), finished("a", "A", "again"), raised("a", "other")},
-			wantTrigger: "a",
-			wantInput:   "A",
-		},
-		{
-			// a keeps routing back to itself and never takes its Default
-			// edge into ask, so ask was triggered over its START edge.
-			name: "self_loop_never_taking_the_edge_to_node",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: ask},
-				{From: a, To: a, Route: StringRoute("again")},
-				{From: a, To: ask, Route: Default},
-			},
-			history:     []*session.Event{finished("a", "A1", "again"), finished("a", "A2", "again")},
-			wantTrigger: Start.Name(),
-			wantInput:   "seed",
-		},
-		{
-			// A Default edge back to the node. The route and the output
-			// of the second visit sit on one event and stay together.
-			name: "self_loop_on_default_route",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: ask},
-				{From: a, To: a, Route: Default},
-				{From: a, To: ask, Route: StringRoute("done")},
-			},
-			history:     []*session.Event{finished("a", "A1"), finished("a", "A2", "done")},
-			wantTrigger: "a",
-			wantInput:   "A2",
-		},
-		{
-			// Attempt 1 emitted a route and failed. The retry emitted
-			// none and took the Default edge.
-			name: "route_of_failed_attempt",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: ask},
-				{From: a, To: ask, Route: Default},
-				{From: a, To: b, Route: StringRoute("skip")},
-			},
-			history:     []*session.Event{routed("a", "skip"), failed("a"), finished("a", "A")},
-			wantTrigger: "a",
-			wantInput:   "A",
-		},
-		{
-			// A node may emit its output before its routing event.
-			name: "route_after_output",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: ask},
-				{From: a, To: ask, Route: StringRoute("go")},
-			},
-			history:     []*session.Event{finished("a", "A"), routed("a", "go")},
-			wantTrigger: "a",
-			wantInput:   "A",
-		},
-		{
-			// A node that routed but recorded no result has not completed.
-			name: "route_without_result",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: ask},
-				{From: a, To: ask, Route: StringRoute("go")},
-			},
-			history:     []*session.Event{routed("a", "go")},
-			wantTrigger: Start.Name(),
-			wantInput:   "seed",
-		},
-		{
-			// An error event that carries output is a result, as it is
-			// for the rest of the scan.
-			name: "output_on_error_event",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: ask},
-				{From: a, To: ask, Route: StringRoute("go")},
-			},
-			history:     []*session.Event{withError(finished("a", "A", "go"))},
-			wantTrigger: "a",
-			wantInput:   "A",
-		},
-		{
-			// The route of a dynamic child is not the route of the node
-			// that ran it. The workflow shares its name with that node,
-			// so the paths only resolve once the base is stripped.
-			name:     "route_of_dynamic_child",
-			workflow: "a",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: ask},
-				{From: a, To: ask, Route: Default},
-				{From: a, To: b, Route: StringRoute("skip")},
-			},
-			history: []*session.Event{
-				under("a@1/a@1", routed("child", "skip")),
-				under("a@1", finished("a", "A")),
-			},
-			wantTrigger: "a",
-			wantInput:   "A",
-		},
-		{
-			// A dynamic node that hands its output over to a child
-			// records the result on its completion record.
-			name:        "delegated_output",
+			// The pause came from a dynamic child of ask. The scheduler
+			// records ask's trigger on it as well.
+			name:        "recorded_on_child_pause",
 			edges:       routedElsewhere,
-			history:     []*session.Event{finished("a", "A", "skip"), delegated("b", "B")},
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause:       []*session.Event{recorded(raised("ask@1/child", "approval"), "b", "B"), answered("approval")},
 			wantTrigger: "b",
 			wantInput:   "B",
 		},
 		{
-			// With nothing delegated the scheduler adds its own record.
-			// Both belong to one visit and the route applies to it.
-			name: "delegated_nil_output",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: ask},
-				{From: a, To: ask, Route: Default},
-				{From: a, To: b, Route: StringRoute("skip")},
-			},
-			history:     []*session.Event{routed("a", "skip"), delegated("a", nil), completed("a")},
-			wantTrigger: Start.Name(),
-			wantInput:   "seed",
-		},
-		{
-			// A route emitted in an earlier run of the same session says
-			// nothing about the edges taken in this one.
-			name: "routing_from_earlier_invocation",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: b, To: ask},
-				{From: a, To: ask, Route: Default},
-				{From: a, To: b, Route: StringRoute("skip")},
-			},
-			history:     []*session.Event{earlier(routed("a", "skip")), finished("a", "A")},
-			wantTrigger: "a",
-			wantInput:   "A",
-		},
-		{
-			// A predecessor whose latest attempt failed did not trigger
-			// anything, whatever it emitted before failing.
-			name: "failed_predecessor",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: a, To: ask, Route: StringRoute("go")},
-				{From: Start, To: ask},
-			},
-			history:     []*session.Event{finished("a", "A", "go"), failed("a")},
-			wantTrigger: Start.Name(),
-			wantInput:   "seed",
-		},
-		{
-			// b emitted output and then paused on its own interrupt. A
-			// waiting node schedules no successors, so c triggered ask.
-			name: "paused_predecessor",
-			edges: []Edge{
-				{From: Start, To: c},
-				{From: Start, To: b},
-				{From: c, To: ask},
-				{From: b, To: ask, Route: Default},
-			},
-			history:     []*session.Event{finished("c", "C"), finished("b", "B"), raised("b", "other")},
-			wantTrigger: "c",
-			wantInput:   "C",
-		},
-		{
-			// Once b got its answer and finished, its edge did fire.
-			name: "paused_predecessor_finished_after_answer",
-			edges: []Edge{
-				{From: Start, To: c},
-				{From: Start, To: b},
-				{From: c, To: ask},
-				{From: b, To: ask, Route: Default},
-			},
-			history:     []*session.Event{finished("c", "C"), raised("b", "other"), answered("other"), finished("b", "B")},
-			wantTrigger: "b",
-			wantInput:   "B",
-		},
-		{
-			// Sending the same answer again changes nothing.
-			name: "paused_predecessor_answered_twice",
-			edges: []Edge{
-				{From: Start, To: c},
-				{From: Start, To: b},
-				{From: c, To: ask},
-				{From: b, To: ask, Route: Default},
-			},
-			history: []*session.Event{
-				finished("c", "C"), raised("b", "other"), answered("other"),
-				finished("b", "B"), answered("other"),
-			},
-			wantTrigger: "b",
-			wantInput:   "B",
-		},
-		{
-			// a asks under the same ID on every visit, like a node that
-			// builds the ID from the invocation ID. The answer to the
-			// second pause ends that pause too, and the rerun that
-			// follows fires into ask.
-			name:  "same_interrupt_id_on_later_visit",
-			edges: secondVisit,
-			history: []*session.Event{
-				raised("a", "q"), answered("q"), finished("a", "A1"),
-				completed("c"),
-				raised("a", "q"), answered("q"), finished("a", "A2"),
-			},
-			wantTrigger: "a",
-			wantInput:   "A2",
-		},
-		{
-			// a triggered ask on its first visit. Its second visit paused
-			// and fired nothing, but that does not undo the first one.
-			name:        "predecessor_paused_on_later_visit",
-			edges:       secondVisit,
-			history:     []*session.Event{finished("a", "A1"), completed("c"), raised("a", "other")},
-			wantTrigger: "a",
-			wantInput:   "A1",
-		},
-		{
-			// Same, with a second visit that failed.
-			name:        "predecessor_failed_on_later_visit",
-			edges:       secondVisit,
-			history:     []*session.Event{finished("a", "A1"), finished("c", "C"), failed("a")},
-			wantTrigger: "a",
-			wantInput:   "A1",
-		},
-		{
-			// The second visit of a was triggered by the answer to b's
-			// pause, which b hands on without an output event.
-			name: "predecessor_paused_on_visit_triggered_by_an_answer",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: Start, To: b},
-				{From: b, To: a, Route: Default},
-				{From: Start, To: ask},
-				{From: a, To: ask, Route: Default},
-			},
-			history:     []*session.Event{finished("a", "A"), raised("b", "other"), answered("other"), raised("a", "third")},
-			wantTrigger: "a",
-			wantInput:   "A",
-		},
-		{
-			// c recorded its output early. The completion record of a
-			// still closes the first visit, so the pause is a second one.
-			name:        "completion_record_ends_the_visit",
-			edges:       secondVisit,
-			history:     []*session.Event{finished("c", "C"), completed("a"), raised("a", "other")},
-			wantTrigger: "a",
-			wantInput:   nil,
-		},
-		{
-			// Same, with a second visit that routed away from ask.
-			name:        "predecessor_routed_elsewhere_on_later_visit",
-			edges:       secondVisit,
-			history:     []*session.Event{finished("a", "A1"), finished("c", "C"), finished("a", "A2", "skip")},
-			wantTrigger: "a",
-			wantInput:   "A1",
-		},
-		{
-			name: "partial_event",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: a, To: ask, Route: StringRoute("go")},
-				{From: Start, To: ask},
-			},
-			history:     []*session.Event{finished("a", "A", "skip"), partial(finished("a", "A", "go"))},
-			wantTrigger: Start.Name(),
-			wantInput:   "seed",
-		},
-		{
-			name: "only_start_edge_fired",
-			edges: []Edge{
-				{From: Start, To: a},
-				{From: a, To: ask, Route: StringRoute("go")},
-				{From: Start, To: ask},
-			},
-			history:     []*session.Event{finished("a", "A", "skip")},
-			wantTrigger: Start.Name(),
-			wantInput:   "seed",
-		},
-		{
-			// One of two interrupts answered: ask reruns with the answer
-			// it has and must get the same input again.
+			// Two interrupts and only one answered: ask reruns with the
+			// answer it has and must get the same input again.
 			name:        "partial_resume",
 			edges:       routedElsewhere,
 			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
-			pause:       []*session.Event{raised("ask", "approval"), raised("ask", "second"), answered("approval")},
+			pause:       []*session.Event{recorded(raised("ask", "approval"), "b", "B"), recorded(raised("ask", "second"), "b", "B"), answered("approval")},
 			wantTrigger: "b",
 			wantInput:   "B",
 		},
 		{
-			// The rerun after the answer failed. A retry needs the input
-			// as well.
+			// The rerun after the answer failed. The failure record
+			// carries the trigger for the retry.
 			name:        "failed_after_answer",
 			edges:       routedElsewhere,
 			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
-			pause:       []*session.Event{raised("ask", "approval"), answered("approval"), failed("ask")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval"), recorded(failed("ask"), "b", "B")},
 			wantStatus:  NodeFailed,
 			wantTrigger: "b",
 			wantInput:   "B",
 		},
+		{
+			// A database session service returns the record as plain
+			// JSON values.
+			name:        "recorded_after_json_round_trip",
+			edges:       routedElsewhere,
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause:       []*session.Event{stored(recorded(raised("ask", "approval"), "b", map[string]any{"n": 1})), answered("approval")},
+			wantTrigger: "b",
+			wantInput:   map[string]any{"n": float64(1)},
+		},
+		{
+			// Only the latest pause counts. Here it has no record, so ask
+			// resumes the way history without records does.
+			name:    "latest_pause_without_record",
+			edges:   routedElsewhere,
+			history: []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause: []*session.Event{
+				recorded(raised("ask", "first"), "b", "B"), answered("first"), finished("ask", "done"),
+				raised("ask", "approval"), answered("approval"),
+			},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		{
+			// An empty interrupt ID pauses nothing, so its event does not
+			// replace the record of the real pause.
+			name:    "empty_interrupt_id",
+			edges:   routedElsewhere,
+			history: []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause: []*session.Event{
+				recorded(raised("ask", "approval"), "b", "B"), raised("ask", ""), answered("approval"),
+			},
+			wantTrigger: "b",
+			wantInput:   "B",
+		},
+		{
+			// The graph no longer has the recorded edge.
+			name:        "recorded_node_not_a_predecessor",
+			edges:       routedElsewhere,
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause:       []*session.Event{recorded(raised("ask", "approval"), "gone", "G"), answered("approval")},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		{
+			// A record of an enclosing or nested workflow is not about
+			// this one.
+			name:    "record_of_another_workflow",
+			edges:   routedElsewhere,
+			history: []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause: func() []*session.Event {
+				ev := raised("ask", "approval")
+				ev.CustomMetadata = map[string]any{workflowNodeTriggerPrefix + "outer": map[string]any{"from": "b", "input": "B"}}
+				return []*session.Event{ev, answered("approval")}
+			}(),
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		// History written before the scheduler recorded triggers resumes
+		// as before: the first declared predecessor with output, else the
+		// workflow input over a START edge.
+		{
+			name:        "unrecorded_routed_elsewhere",
+			edges:       routedElsewhere,
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval")},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		{
+			// A sibling that routed elsewhere finishes between b's output
+			// and b's own pause.
+			name: "unrecorded_sibling_before_predecessor_pause",
+			edges: []Edge{
+				{From: Start, To: c},
+				{From: Start, To: b},
+				{From: Start, To: p},
+				{From: c, To: ask},
+				{From: b, To: ask, Route: Default},
+				{From: p, To: b, Route: StringRoute("x")},
+			},
+			history:     []*session.Event{finished("c", "C"), finished("b", "B"), finished("p", "P", "done"), raised("b", "other")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval")},
+			wantTrigger: "c",
+			wantInput:   "C",
+		},
+		{
+			// The same before a failure outcome.
+			name: "unrecorded_sibling_before_predecessor_failure",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: Start, To: c},
+				{From: Start, To: ask},
+				{From: c, To: a, Route: StringRoute("back")},
+				{From: a, To: ask, Route: Default},
+			},
+			history:     []*session.Event{finished("a", "A1"), finished("c", "C", "on"), failed("a")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval")},
+			wantTrigger: Start.Name(),
+			wantInput:   "seed",
+		},
+		{
+			// A node on a Default self-loop emits its route on its own
+			// event.
+			name: "unrecorded_route_after_output_on_self_loop",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: Start, To: ask},
+				{From: a, To: a, Route: Default},
+				{From: a, To: ask, Route: StringRoute("go")},
+			},
+			history:     []*session.Event{finished("a", "A"), routed("a", "go")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval")},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		{
+			// A sibling finishes between a node's output and its own
+			// route.
+			name: "unrecorded_sibling_before_predecessor_route",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: Start, To: c},
+				{From: Start, To: ask},
+				{From: a, To: ask, Route: StringRoute("go")},
+				{From: c, To: a, Route: StringRoute("back")},
+			},
+			history:     []*session.Event{finished("a", "A"), finished("c", "C", "on"), routed("a", "go")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval")},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			wf, err := New(tc.workflow, tc.edges)
+			wf, err := New("wf", tc.edges)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -794,7 +492,7 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 			seed.Content = genai.NewContentFromText("seed", genai.RoleUser)
 			pause := tc.pause
 			if pause == nil {
-				pause = []*session.Event{raised("ask", "approval"), answered("approval")}
+				pause = []*session.Event{recorded(raised("ask", "approval"), "b", "B"), answered("approval")}
 			}
 			events := append(sliceEvents{seed}, tc.history...)
 			events = append(events, pause...)
@@ -813,12 +511,52 @@ func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
 				wantStatus = NodePending
 			}
 			ns := nodeState(t, state, "ask")
-			if ns.Status != wantStatus || ns.TriggeredBy != tc.wantTrigger || ns.Input != tc.wantInput {
+			if ns.Status != wantStatus || ns.TriggeredBy != tc.wantTrigger || !reflect.DeepEqual(ns.Input, tc.wantInput) {
 				t.Errorf("ask = status %v, triggered by %q with input %v, want status %v, triggered by %q with input %v",
 					ns.Status, ns.TriggeredBy, ns.Input, wantStatus, tc.wantTrigger, tc.wantInput)
 			}
 		})
 	}
+}
+
+// The scheduler records how it started a node on the node's pause events and
+// failure records, and nowhere else.
+func TestScheduler_RecordsTrigger(t *testing.T) {
+	records := func(events []*session.Event) map[string]any {
+		got := map[string]any{}
+		for _, ev := range events {
+			if record, ok := ev.CustomMetadata[workflowNodeTriggerPrefix]; ok {
+				got[ev.NodeInfo.Path] = record
+			}
+		}
+		return got
+	}
+	t.Run("pause", func(t *testing.T) {
+		a := NewFunctionNode("a", func(agent.Context, any) (string, error) { return "A", nil }, NodeConfig{})
+		ask := NewDynamicNode("ask", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+			return ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "approval"})
+		}, NodeConfig{})
+		wf := mustNew(t, []Edge{{From: Start, To: a}, {From: a, To: ask}})
+		got := records(drain(t, wf.Run(newSeededMockCtx(t))))
+		want := map[string]any{"ask@1": map[string]any{"from": "a", "input": "A"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("trigger records %v, want %v", got, want)
+		}
+	})
+	t.Run("failure", func(t *testing.T) {
+		f := NewFunctionNode("f", func(agent.Context, any) (any, error) { return nil, errors.New("scripted failure") }, NodeConfig{})
+		wf := mustNew(t, []Edge{{From: Start, To: f}})
+		var events []*session.Event
+		for ev, err := range wf.Run(newSeededMockCtx(t)) {
+			if err == nil {
+				events = append(events, ev)
+			}
+		}
+		want := map[string]any{"f@1": map[string]any{"from": Start.Name(), "input": "seed"}}
+		if got := records(events); !reflect.DeepEqual(got, want) {
+			t.Errorf("trigger records %v, want %v", got, want)
+		}
+	})
 }
 
 func TestResume_FailedSiblingRequiresMatchedInterrupt(t *testing.T) {
