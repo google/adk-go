@@ -454,12 +454,13 @@ func (s *scheduler) startNode(t pendingActivation) {
 	n := t.node
 	name := n.Name()
 
-	// Per-node context: WithTimeout when Config().Timeout > 0,
-	// WithCancel otherwise. Either way it inherits from parentCtx,
-	// so an ambient deadline on the workflow invocation still
-	// applies.
+	// Per-node context: bounded by the node's timeout when
+	// Config().Timeout > 0, cancelable otherwise. Either way it inherits
+	// from parentCtx, so an ambient deadline on the workflow invocation
+	// still applies.
 	cfg := n.Config()
 	var cancel context.CancelFunc
+	var timeout nodeTimeout
 
 	runID := t.runID
 	if runID == "" {
@@ -503,7 +504,7 @@ func (s *scheduler) startNode(t pendingActivation) {
 	perNodeCtx = withRunCounters(perNodeCtx, s.counters)
 
 	if cfg.Timeout > 0 {
-		perNodeCtx, cancel = perNodeCtx.WithAgentTimeout(cfg.Timeout)
+		perNodeCtx, cancel, timeout = withNodeTimeout(perNodeCtx, n)
 	} else {
 		perNodeCtx, cancel = perNodeCtx.WithAgentCancel()
 	}
@@ -518,7 +519,7 @@ func (s *scheduler) startNode(t pendingActivation) {
 	s.runCancels[name] = cancel
 	s.wg.Add(1)
 
-	go runNode(s.eventQueue, &s.wg, name, n, perNodeCtx, t.input)
+	go runNode(s.eventQueue, &s.wg, name, n, perNodeCtx, t.input, timeout)
 }
 
 // scheduleRetry restarts activation t after delay. The node stays busy,
@@ -568,6 +569,7 @@ func runNode(
 	n Node,
 	ctx agent.Context,
 	input any,
+	timeout nodeTimeout,
 ) {
 	defer wg.Done()
 	own, ownErr := nodeStateValidator(ctx, n)
@@ -597,6 +599,10 @@ func runNode(
 		}
 		out <- completion
 	}()
+	// Registered after the completion defer, so it runs first: the
+	// completion, the span and the pending-write flush all see a node
+	// timeout as a *NodeTimeoutError.
+	defer func() { completion.err = timeout.attribute(ctx, completion.err) }()
 
 	// The failure is reported here, once the completion is registered, so
 	// the scheduler still receives it; the node does not run.

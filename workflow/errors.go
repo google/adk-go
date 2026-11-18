@@ -15,8 +15,10 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 var (
@@ -92,4 +94,64 @@ func (e *NodeRunError) Unwrap() error {
 		return nil
 	}
 	return e.Cause
+}
+
+// NodeTimeoutError reports that a node with NodeConfig.Timeout set ran past
+// that timeout. The workflow ends the node's attempt and reports this error as
+// the attempt's failure: RetryConfig sees it, and once the retries are spent it
+// is the run's error. Find it with errors.As, also through wrapping errors.
+//
+// The error names the node whose own timeout elapsed. When a node with a
+// timeout sits inside another node with a timeout (a nested workflow, or an
+// AgentNode over a workflow agent), the error names the inner node when its
+// timeout elapses and it returns before the enclosing node's deadline passes;
+// when the enclosing deadline has passed by the time the inner node returns,
+// for example because the inner node takes long to stop, the error names the
+// enclosing node. A deadline set by an enclosing node or by the caller of the
+// workflow is not the inner node's timeout, and fails it with
+// context.DeadlineExceeded. A node that runs its own code (not a
+// nested workflow, a ParallelWorker or an AgentNode over a workflow agent)
+// and returns an error matching context.DeadlineExceeded before its own
+// timeout elapses also fails with a NodeTimeoutError, because the timeout it
+// reports is taken to be its own.
+//
+// errors.Is(err, context.DeadlineExceeded) is true for every NodeTimeoutError,
+// so code that checks for a deadline keeps working. Unwrap returns the error
+// that signaled the timeout.
+//
+// The Error text is
+//
+//	node "slow" timed out after 0.05 seconds
+//
+// with the node's name quoted as by %q and the timeout in seconds as by %g.
+// A NodeTimeoutError is immutable once built and safe for concurrent use.
+type NodeTimeoutError struct {
+	// NodeName is the Name of the node whose timeout elapsed.
+	NodeName string
+	// Timeout is that node's NodeConfig.Timeout.
+	Timeout time.Duration
+
+	cause error // the body's timeout error; nil when the node's own deadline passed
+}
+
+// Error formats as: node "SlowNode" timed out after 0.1 seconds. A nil
+// receiver formats as "<nil>".
+func (e *NodeTimeoutError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("node %q timed out after %g seconds", e.NodeName, e.Timeout.Seconds())
+}
+
+// Unwrap returns the error that signaled the timeout: context.DeadlineExceeded
+// when the node's own deadline passed, or the error the node's body returned
+// when it reported a timeout of its own. It returns nil for a nil receiver.
+func (e *NodeTimeoutError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	if e.cause == nil {
+		return context.DeadlineExceeded
+	}
+	return e.cause
 }

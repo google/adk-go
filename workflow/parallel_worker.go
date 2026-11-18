@@ -36,6 +36,10 @@ type ParallelWorker struct {
 
 // NewParallelWorker creates a new ParallelWorker node.
 // maxConcurrency <= 0 means no limit on concurrency.
+// The wrapped node's NodeConfig.Timeout bounds each attempt of each item:
+// an attempt that exceeds it fails with a *NodeTimeoutError naming the
+// wrapped node, which cfg.RetryConfig may retry with a fresh Timeout.
+// cfg.Timeout bounds the whole worker.
 func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeConfig) (*ParallelWorker, error) {
 	if wrapped.Config().RetryConfig != nil {
 		return nil, fmt.Errorf("ParallelWorker %s: wrapped node %s cannot have RetryConfig", name, wrapped.Name())
@@ -307,6 +311,8 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 // the writes the attempt has not put on an event; a canceled attempt keeps
 // only the deltas of its events.
 func (n *ParallelWorker) runWrappedOnce(ctx agent.Context, item any) (outputs []any, delta *session.EventActions, err error) {
+	ctx, cancel, timeout := withNodeTimeout(ctx, n.wrapped)
+	defer cancel()
 	own, ownErr := nodeStateValidator(ctx, n.wrapped)
 	if ownErr != nil {
 		return nil, nil, ownErr
@@ -314,6 +320,7 @@ func (n *ParallelWorker) runWrappedOnce(ctx agent.Context, item any) (outputs []
 	ctx, writes := beginActivation(ctx, n.wrapped, own)
 	span, ctx := startNodeSpan(ctx, n.wrapped)
 	defer func() {
+		err = timeout.attribute(ctx, err)
 		span.recordError(err, nil)
 		span.end()
 	}()

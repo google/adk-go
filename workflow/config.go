@@ -79,10 +79,16 @@ type NodeConfig struct {
 	// on failure per the policy. nil means "no retries".
 	RetryConfig *RetryConfig
 
-	// Timeout, when > 0, bounds a single activation of the node via
-	// context.WithTimeout on the per-node context. Zero (the default)
-	// means the node is bounded only by the parent invocation
-	// context's deadline, if any.
+	// Timeout, when > 0, bounds each attempt of the node: when it
+	// elapses, the attempt's context is done and the attempt fails
+	// with a *NodeTimeoutError that names the node. Each attempt of a
+	// node retried per RetryConfig gets the whole Timeout. It applies
+	// wherever the node runs: in a graph, as a child started by
+	// RunNode, and to each item of a ParallelWorker that wraps the
+	// node. RunNode does not retry a child, so a child's timed-out
+	// attempt fails RunNode. Zero (the default) or a negative value
+	// means the node is bounded only by the parent context's deadline,
+	// if any.
 	Timeout time.Duration
 
 	// EmitsOwnSpan, when true, tells the scheduler not to wrap the node
