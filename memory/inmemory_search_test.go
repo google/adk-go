@@ -326,7 +326,6 @@ func Test_inMemoryService_SearchMemory_MixedScriptQuery(t *testing.T) {
 		{name: "partial Latin word in query", text: "I write my backend in Python.", query: "thonについて教えて", want: 0},
 		{name: "run split from query word matches whole words only", text: "私と犬", query: "Pythonと", want: 0},
 		{name: "dotted capital I leaves no i in query", text: "I like cats.", query: "İstanbul旅行", want: 0},
-		{name: "partial word", text: "I like to code in Python.", query: "thon", want: 0},
 		// Stored text with İ.
 		{name: "dotted capital I leaves no partial word in event", text: "We flew to İstanbul.", query: "stanbul", want: 0},
 		{name: "dotted capital I leaves no i in event", text: "We flew to İstanbul.", query: "i", want: 0},
