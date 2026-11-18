@@ -19,13 +19,10 @@ import (
 	"container/list"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash/maphash"
 	"maps"
-	"math"
 	"reflect"
 	"runtime"
 	"slices"
@@ -330,6 +327,10 @@ type spanRecord struct {
 	// or tool call, rather than popToolSpan making up a span for a call that
 	// this plugin did not see start.
 	callStarted bool
+	// errorAttempt is, for a tool call that OnToolErrorCallback ended, the
+	// attempt whose callback ended it (see toolAttempt and
+	// invocationTrace.completedTools).
+	errorAttempt toolAttempt
 	// handedOver reports, for a model or tool call, that the run left it open
 	// at AfterRun, which handed it over to the late state of its completed
 	// entry (see rememberCompletedLocked), rather than a callback starting it
@@ -502,7 +503,11 @@ type invocationTrace struct {
 	// so that the AfterToolCallback that ADK runs next for the same call
 	// finds its span instead of ending another one. ADK runs
 	// OnToolErrorCallback alone for a call of a tool that does not exist;
-	// such records last as long as the invocation.
+	// such records last as long as the invocation, or until the next call
+	// with the same key starts. A record answers only the AfterToolCallback
+	// of the attempt that it ended (see toolAttempt): a later call that
+	// reuses the function call ID, and whose start an earlier plugin hid
+	// from this one, is a call of its own.
 	completedTools map[string]*spanRecord
 	// unrecoveredErrors tracks unhandled errors encountered during the
 	// invocation keyed by activation / call identity (e.g. llmKey), together
@@ -4874,17 +4879,19 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 // TOOL_COMPLETED or, with fromError set, TOOL_ERROR row.
 //
 // ADK runs AfterToolCallback after OnToolErrorCallback for a failed call.
-// closedByError reports that OnToolErrorCallback already ended the call,
-// in which case the returned place reuses its span, without latency. If
-// the call is unknown, as for a call of a tool that does not exist, the
-// row gets a span of its own and no latency; the agent and invocation
-// spans are left alone. Once the agent has no tool call left open, the
-// activations that its tool calls ran and that never ended are ended—purged
-// if they failed, or retired quietly otherwise (see endToolRunsLocked).
+// closedByError reports that the OnToolErrorCallback of the same attempt
+// (see toolAttempt) already ended the call, in which case the returned
+// place reuses its span, without latency. If the call is unknown, as for a
+// call of a tool that does not exist, the row gets a span of its own and no
+// latency; the agent and invocation spans are left alone. Once the agent
+// has no tool call left open, the activations that its tool calls ran and
+// that never ended are ended—purged if they failed, or retired quietly
+// otherwise (see endToolRunsLocked).
 func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string, fromError bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
+	actions := toolActionsOf(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	if !inv.lockLive() {
 		return tm.popToolSpan(ctx, id, key, fromError)
@@ -4917,6 +4924,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 	if open != nil {
 		open.dropContexts()
 		if fromError {
+			open.errorAttempt = attemptOf(actions)
 			inv.completedTools[key] = open
 		}
 		span = inv.rowSpan(open, latencyOf(open, now), ambient)
@@ -4924,7 +4932,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 		return span, purged, false
 	}
 	if !fromError {
-		if rec := inv.completedTools[key]; rec != nil {
+		if rec := inv.completedTools[key]; rec != nil && rec.errorAttempt == attemptOf(actions) {
 			delete(inv.completedTools, key)
 			span = inv.rowSpan(rec, nil, ambient)
 			span.timestamp = now
@@ -4934,6 +4942,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 	rec := inv.newChild(inv.ownerOf(ctx, id), spanKindTool, now)
 	if fromError {
 		rec.dropContexts()
+		rec.errorAttempt = attemptOf(actions)
 		inv.completedTools[key] = rec
 	}
 	span = inv.rowSpan(rec, nil, ambient)
@@ -5161,6 +5170,44 @@ func (rec *spanRecord) collateralFailureCause() (cause error, collateral bool) {
 		top = top.parent
 	}
 	return cause, top.stopPoint
+}
+
+// toolAttempt identifies one dispatch of a tool call by the EventActions of
+// its tool context. ADK makes the EventActions of a tool context anew for
+// every call, so two attempts never share them, even when a model or
+// provider reuses a function call ID, and passes the one tool context of a
+// call to its BeforeToolCallback, OnToolErrorCallback and AfterToolCallback.
+// The contexts that ADK derives from a tool context (WithAgentTimeout,
+// WithAgentCancel, WithDelta) keep its EventActions. A context whose Actions
+// method returns other EventActions on each call, which ADK's contexts never
+// do, makes each callback an attempt of its own, so that its
+// AfterToolCallback does not find the call that its OnToolErrorCallback
+// ended. The reference is weak: it keeps nothing of the call alive and,
+// unlike an address, never compares equal to the reference of other
+// EventActions that the runtime later puts at the same address. The zero
+// value is the attempt of every context that exposes no EventActions, which
+// ADK's tool dispatch never builds, so the callbacks of such contexts match
+// by call key alone.
+type toolAttempt = weak.Pointer[session.EventActions]
+
+// toolActionsOf returns the EventActions of the tool callback context ctx, or
+// nil if ctx has no Actions method, or the method panics or returns nil. It
+// runs code of the context, so it is called without inv.mu held.
+func toolActionsOf(ctx context.Context) *session.EventActions {
+	c, ok := ctx.(interface{ Actions() *session.EventActions })
+	if !ok {
+		return nil
+	}
+	return orZero(c.Actions)
+}
+
+// attemptOf returns the attempt that actions identify, or the zero value for
+// nil.
+func attemptOf(actions *session.EventActions) toolAttempt {
+	if actions == nil {
+		return toolAttempt{}
+	}
+	return weak.Make(actions)
 }
 
 // callKey prefixes key with the pointer identity of ctx's agent-run
@@ -5400,969 +5447,4 @@ func newTraceID() string {
 func newSpanID() string {
 	id := uuid.New()
 	return hex.EncodeToString(id[:8])
-}
-
-// taskDeltaRef refers to the EventActions.StateDelta map of a tool call.
-// m holds the captured map itself so that its address stays valid even if
-// EventActions.StateDelta is later replaced; ptr is its address (for tests or
-// direct lookups). call is the function call ID, or else the tool name, of the
-// call.
-type taskDeltaRef struct {
-	m      map[string]any
-	ptr    uintptr
-	call   string
-	pinned context.Context
-}
-
-func (r taskDeltaRef) empty() bool {
-	return r.m == nil && r.ptr == 0
-}
-
-// addr returns the address of the map that r refers to.
-func (r taskDeltaRef) addr() uintptr {
-	if r.m != nil {
-		return reflect.ValueOf(r.m).Pointer()
-	}
-	return r.ptr
-}
-
-// matches reports whether r refers to the map at address evPtr.
-func (r taskDeltaRef) matches(evPtr uintptr) bool {
-	return evPtr != 0 && r.addr() == evPtr
-}
-
-func mapPtr(m map[string]any) uintptr {
-	if m == nil {
-		return 0
-	}
-	rv := reflect.ValueOf(m)
-	if rv.Kind() != reflect.Map || rv.IsNil() {
-		return 0
-	}
-	return rv.Pointer()
-}
-
-// toolCallIdentity identifies the attempt of a tool call that a callback
-// belongs to: when the context exposes live EventActions (as
-// agent.NewToolContext does, with fresh EventActions per attempt, including
-// WithAgentTimeout-derived copies), live EventActions equality is the attempt
-// identity without recording a bare context pointer; otherwise the unwrapped
-// EventActions pointer and/or non-zero-size pointer context are recorded and
-// pinned so GC cannot recycle their addresses. argsDigest is a bounded digest
-// of the call's arguments (see boundedArgsDigest).
-type toolCallIdentity struct {
-	ctxTyp      reflect.Type
-	ctxPtr      uintptr
-	actionsPtr  uintptr
-	actionsWeak weak.Pointer[session.EventActions]
-	hasWeakAct  bool
-	// pin keeps non-weak pointer targets (ctxPtr and actionsPtr) alive for the
-	// lifetime of this identity so GC cannot collect them and reuse their
-	// addresses while bare uintptrs remain comparable.
-	pin        any
-	argsDigest uint64
-	// argsTruncated reports that argsDigest covers only part of the
-	// arguments, so that equal digests do not prove equal arguments.
-	argsTruncated bool
-}
-
-// hasActions reports whether id carries the EventActions of its tool context,
-// as agent.NewToolContext creates per tool call attempt.
-func (id toolCallIdentity) hasActions() bool {
-	return id.hasWeakAct || id.actionsPtr != 0
-}
-
-// hasAttemptIdentity reports whether id tells one attempt from another
-// beyond its arguments: by a non-zero-size pointer context or by EventActions.
-func (id toolCallIdentity) hasAttemptIdentity() bool {
-	return id.ctxPtr != 0 || id.hasActions()
-}
-
-func (id toolCallIdentity) sameContext(other toolCallIdentity) bool {
-	if !id.hasAttemptIdentity() || !other.hasAttemptIdentity() {
-		return false
-	}
-	if id.hasWeakAct != other.hasWeakAct {
-		return false
-	}
-	if id.hasWeakAct {
-		a := id.actionsWeak.Value()
-		b := other.actionsWeak.Value()
-		return a != nil && a == b
-	}
-	return id.ctxTyp == other.ctxTyp && id.ctxPtr == other.ctxPtr && id.actionsPtr == other.actionsPtr
-}
-
-// sameArgs reports whether id and other carry complete, untruncated digests of
-// the same JSON-shaped arguments. A truncated digest (from values past the
-// size bounds or opaque pointers, structs, functions, or channels) proves
-// nothing and never matches.
-func (id toolCallIdentity) sameArgs(other toolCallIdentity) bool {
-	return !id.argsTruncated && !other.argsTruncated && id.argsDigest == other.argsDigest
-}
-
-// toolCallIdentityOf returns the attempt identity of a tool callback with ctx
-// and args, and the StateDelta of the tool call's EventActions (see
-// taskDeltaRef), whose call field the caller sets.
-func toolCallIdentityOf(ctx context.Context, args map[string]any) (toolCallIdentity, taskDeltaRef) {
-	var id toolCallIdentity
-	var delta taskDeltaRef
-	if ctx != nil {
-		rv := reflect.ValueOf(ctx)
-		actionsPtr, actions, d, pinnedCtx := unwrapToolContextActions(ctx)
-		if actions != nil {
-			// Live EventActions equality is the attempt identity when Actions()
-			// is available; omitting ctxPtr/ctxTyp prevents recycled context
-			// addresses from matching and keeps WithAgentTimeout wrappers equal
-			// to the underlying attempt.
-			id.hasWeakAct = true
-			id.actionsWeak = weak.Make(actions)
-		} else {
-			id.actionsPtr = actionsPtr
-			if rv.Kind() == reflect.Pointer && !rv.IsNil() && rv.Type().Elem().Size() > 0 {
-				id.ctxTyp = rv.Type()
-				id.ctxPtr = rv.Pointer()
-			} else if actionsPtr != 0 {
-				id.ctxTyp = rv.Type()
-			}
-			if id.ctxPtr != 0 || id.actionsPtr != 0 {
-				if pinnedCtx != nil {
-					id.pin = pinnedCtx
-				} else {
-					id.pin = ctx
-				}
-			}
-		}
-		if !d.empty() {
-			d.pinned = pinnedCtx
-			delta = d
-		}
-	}
-	id.argsDigest, id.argsTruncated = boundedArgsDigest(args)
-	return id, delta
-}
-
-var eventActionsPtrType = reflect.TypeFor[*session.EventActions]()
-
-// toolContextTaskDeltaRef returns the StateDelta of the EventActions of the
-// tool context ctx of call (see taskDeltaRef), or an empty reference.
-func toolContextTaskDeltaRef(ctx context.Context, call string) taskDeltaRef {
-	_, _, delta, pinnedCtx := unwrapToolContextActions(ctx)
-	if delta.empty() {
-		return taskDeltaRef{}
-	}
-	delta.pinned = pinnedCtx
-	delta.call = call
-	return delta
-}
-
-// safeCallActions returns ctx.Actions(), or nil if ctx has no Actions method or
-// the method panics.
-func safeCallActions(ctx context.Context) (actions *session.EventActions) {
-	ac, ok := ctx.(interface{ Actions() *session.EventActions })
-	if !ok {
-		return nil
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			actions = nil
-		}
-	}()
-	return ac.Actions()
-}
-
-// knownContextFields reports whether unwrapToolContextActions knows the layout
-// of the context struct type typ, and if so returns the fields that hold the
-// context that typ wraps: ADK's tool and callback context wrappers and the
-// commonContext that they wrap, and the context types of the standard library.
-// Their fields are set when the context is made and never change. The fields
-// of any other type belong to its own code, which may guard them with
-// synchronization of its own, so unwrapToolContextActions reads none of them.
-//
-// commonContext owns its actions field directly (mirroring commonContext.Actions())
-// and returns no child fields: a commonContext whose own actions are nil (such
-// as one from agent.Promote or agent.NewContext) stops the search rather than
-// falling through to an ancestor's EventActions or StateDelta.
-func knownContextFields(typ reflect.Type) (fields []string, ok bool) {
-	switch typ.PkgPath() {
-	case agentPkgPath:
-		switch typ.Name() {
-		case "toolContextWrapper", "callbackContextWrapper":
-			return []string{"context"}, true
-		case "commonContext":
-			return nil, true
-		}
-	case "context":
-		return []string{"Context", "c"}, true
-	}
-	return nil, false
-}
-
-// unwrapToolContextActions returns the EventActions of the tool context ctx
-// and their StateDelta map (see taskDeltaRef).
-//
-// A context of any type other than ADK's context types and the standard
-// library's tells its EventActions only through its Actions() method: its
-// fields are its own, even a private one that happens to be named actions,
-// and it may guard them with synchronization of its own, so none of them is
-// read.
-//
-// ADK's contexts are inspected instead, without calling Actions() on
-// callbackContextWrapper (which logs a warning), and through a standard
-// library wrapper that hides Actions() (such as
-// context.WithoutCancel(toolCtx)). A commonContext whose own actions field is
-// nil stops the inspection rather than falling through to an ancestor's
-// EventActions or StateDelta, matching commonContext.Actions(). When the
-// outermost ctx exposes Actions() without crossing a callbackContextWrapper,
-// the typed *session.EventActions reference is retained directly to avoid bare
-// uintptr identity retention; otherwise ctx is kept pinned in pinnedCtx
-// whenever an EventActions pointer is found (even when StateDelta is nil) so
-// the underlying EventActions cannot be collected while referenced by pointer
-// address. In all paths that observe a non-nil StateDelta, the captured map
-// itself is retained directly in taskDeltaRef.m so overwriting StateDelta on the
-// EventActions cannot allow GC to recycle the captured map address. The
-// inspection follows only fields of the
-// types that knownContextFields knows, and stops at any other type, coupled to
-// these unexported fields of google.golang.org/adk/v2 v2.0.0 and the Go
-// standard library:
-//   - agent.toolContextWrapper.context / agent.callbackContextWrapper.context
-//   - agent.commonContext.actions (*session.EventActions)
-//   - session.EventActions.StateDelta (exported)
-//   - the Context or c field of the context package's types, such as
-//     context.valueCtx.Context and context.withoutCancelCtx.c
-//
-// All reflection reads are guarded with recover() and fall back to zero values
-// if future wrapper layouts differ. This inspection is best effort: when it
-// misses, tool callbacks are told apart by their context pointer alone (see
-// toolCallIdentity), and StateDelta provenance falls back to empty.
-func unwrapToolContextActions(ctx context.Context) (actionsPtr uintptr, actions *session.EventActions, delta taskDeltaRef, pinnedCtx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			actionsPtr, actions, delta, pinnedCtx = 0, nil, taskDeltaRef{}, nil
-		}
-	}()
-	if ctx == nil {
-		return 0, nil, taskDeltaRef{}, nil
-	}
-	outer := reflect.TypeOf(ctx)
-	if outer.Kind() == reflect.Pointer {
-		outer = outer.Elem()
-	}
-	if _, known := knownContextFields(outer); !known {
-		got := safeCallActions(ctx)
-		if got == nil {
-			return 0, nil, taskDeltaRef{}, nil
-		}
-		if got.StateDelta != nil {
-			delta = taskDeltaRef{m: got.StateDelta, ptr: mapPtr(got.StateDelta)}
-		}
-		return reflect.ValueOf(got).Pointer(), got, delta, nil
-	}
-	seenCallbackWrapper := false
-	queue := []reflect.Value{reflect.ValueOf(ctx)}
-	var stackSeen [8]visitedContextStruct
-	stackLen := 0
-	var seen map[visitedContextStruct]bool
-	for steps := 0; len(queue) > 0 && steps < 64; steps++ {
-		v := queue[0]
-		queue = queue[1:]
-		var ptr uintptr
-		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
-			if v.IsNil() {
-				v = reflect.Value{}
-				break
-			}
-			if v.Kind() == reflect.Pointer {
-				ptr = v.Pointer()
-			}
-			v = v.Elem()
-		}
-		if !v.IsValid() || v.Kind() != reflect.Struct {
-			continue
-		}
-		typ := v.Type()
-		fields, known := knownContextFields(typ)
-		if !known {
-			continue
-		}
-		if ptr != 0 {
-			visitKey := visitedContextStruct{ptr: ptr, typ: typ}
-			if seen != nil {
-				if seen[visitKey] {
-					continue
-				}
-				seen[visitKey] = true
-			} else {
-				already := false
-				for idx := range stackLen {
-					if stackSeen[idx] == visitKey {
-						already = true
-						break
-					}
-				}
-				if already {
-					continue
-				}
-				if stackLen < len(stackSeen) {
-					stackSeen[stackLen] = visitKey
-					stackLen++
-				} else {
-					seen = make(map[visitedContextStruct]bool, 16)
-					for idx := range stackLen {
-						seen[stackSeen[idx]] = true
-					}
-					seen[visitKey] = true
-				}
-			}
-		}
-		isAgentType := typ.PkgPath() == agentPkgPath
-		if isAgentType && typ.Name() == "callbackContextWrapper" {
-			seenCallbackWrapper = true
-		}
-		var f reflect.Value
-		if isAgentType && typ.Name() == "commonContext" {
-			f = v.FieldByName("actions")
-		}
-		if f.IsValid() && f.Type() == eventActionsPtrType && !f.IsNil() {
-			actionsPtr = f.Pointer()
-			var stateDelta map[string]any
-			if sd := f.Elem().FieldByName("StateDelta"); sd.IsValid() && sd.Kind() == reflect.Map && !sd.IsNil() {
-				if !sd.CanInterface() && sd.CanAddr() {
-					sd = reflect.NewAt(sd.Type(), sd.Addr().UnsafePointer()).Elem()
-				}
-				if sd.CanInterface() {
-					if m, ok := reflect.TypeAssert[map[string]any](sd); ok {
-						stateDelta = m
-					}
-				}
-			}
-			if !seenCallbackWrapper {
-				if got := safeCallActions(ctx); got != nil && reflect.ValueOf(got).Pointer() == actionsPtr {
-					actions = got
-					if got.StateDelta != nil {
-						delta = taskDeltaRef{m: got.StateDelta, ptr: mapPtr(got.StateDelta)}
-					} else if stateDelta != nil {
-						delta = taskDeltaRef{m: stateDelta, ptr: mapPtr(stateDelta)}
-					}
-					return actionsPtr, actions, delta, nil
-				}
-			}
-			if stateDelta != nil {
-				delta = taskDeltaRef{m: stateDelta, ptr: mapPtr(stateDelta)}
-			}
-			pinnedCtx = ctx
-			return actionsPtr, nil, delta, pinnedCtx
-		}
-		for _, field := range fields {
-			if next := v.FieldByName(field); next.IsValid() {
-				queue = append(queue, next)
-			}
-		}
-	}
-	return 0, nil, taskDeltaRef{}, nil
-}
-
-// Bounds of boundedArgsDigest: each string or byte slice/array is hashed in
-// full up to maxDigestStringBytes, maps, slices, and arrays of JSON-shaped
-// values are hashed with up to maxDigestEntries entries and nesting depth
-// maxDigestDepth, and at most maxDigestNodes values and maxDigestBytes string
-// bytes are hashed in all. Cycles, pointers, structs, functions, channels, and
-// unsafe pointers are treated as incomplete evidence (truncated == true)
-// without dereferencing pointers or reading struct fields.
-const (
-	maxDigestNodes       = 1024
-	maxDigestEntries     = 256
-	maxDigestDepth       = 32
-	maxDigestStringBytes = 64 << 10
-	maxDigestBytes       = 1 << 20
-)
-
-// argsDigestSeed seeds the maphash stream of boundedArgsDigest. Digests are
-// compared only within the process, so a per-process seed suffices.
-var argsDigestSeed = maphash.MakeSeed()
-
-// boundedArgsDigest returns a digest of the JSON-shaped arguments of a tool
-// call, and whether the digest covers only part of args. Equal JSON-shaped
-// arguments get equal digests whatever the iteration order of their maps and
-// however their values share references, and a nil map gets the digest of an
-// empty one, as both pass no arguments. The cost stays within the bounds
-// above. A value past one of the bounds, a cycle, or an opaque value such as a
-// pointer or struct, makes the digest truncated: a truncated digest never
-// proves that two sets of arguments are equal (see toolCallIdentity.sameArgs).
-func boundedArgsDigest(args map[string]any) (digest uint64, truncated bool) {
-	if args == nil {
-		args = map[string]any{}
-	}
-	d := argsDigester{nodes: maxDigestNodes, bytes: maxDigestBytes}
-	d.hash(reflect.ValueOf(args))
-	return d.sum(), d.truncated
-}
-
-type digestAncestor struct {
-	ptr    uintptr
-	length int
-	typ    reflect.Type
-}
-
-// argsDigester computes boundedArgsDigest. ancestors holds the identity of
-// the maps and slices that lead to the value being hashed, so that a reference
-// back to one of them hashes as a cycle (marking truncated) while a value that
-// is shared without a cycle hashes as itself wherever it appears.
-type argsDigester struct {
-	nodes, bytes int
-	depth        int
-	ancestors    []digestAncestor
-	truncated    bool
-	h            maphash.Hash
-	seeded       bool
-}
-
-const (
-	digestTagNil        byte = 1
-	digestTagBudget     byte = 2
-	digestTagBool       byte = 3
-	digestTagInt        byte = 4
-	digestTagUint       byte = 5
-	digestTagFloat      byte = 6
-	digestTagComplex    byte = 7
-	digestTagStr        byte = 8
-	digestTagPtr        byte = 9
-	digestTagNilPtr     byte = 10
-	digestTagNilSlice   byte = 11
-	digestTagSlice      byte = 12
-	digestTagArray      byte = 13
-	digestTagBytes      byte = 14
-	digestTagNilMap     byte = 15
-	digestTagMap        byte = 16
-	digestTagMapEntry   byte = 17
-	digestTagStruct     byte = 18
-	digestTagOpaque     byte = 19
-	digestTagCycleSlice byte = 20
-	digestTagCycleMap   byte = 21
-)
-
-func (d *argsDigester) ensureSeed() {
-	if !d.seeded {
-		d.h.SetSeed(argsDigestSeed)
-		d.seeded = true
-	}
-}
-
-func (d *argsDigester) sum() uint64 {
-	d.ensureSeed()
-	return d.h.Sum64()
-}
-
-func (d *argsDigester) writeTag(tag byte) {
-	d.ensureSeed()
-	_ = d.h.WriteByte(tag)
-}
-
-func (d *argsDigester) writeUint64(v uint64) {
-	d.ensureSeed()
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], v)
-	_, _ = d.h.Write(buf[:])
-}
-
-// enter reports whether anc may be hashed below the current value, and if so
-// records it as an ancestor until leave.
-func (d *argsDigester) enter(anc digestAncestor) bool {
-	if slices.Contains(d.ancestors, anc) {
-		return false
-	}
-	d.ancestors = append(d.ancestors, anc)
-	return true
-}
-
-func (d *argsDigester) leave() {
-	d.ancestors = d.ancestors[:len(d.ancestors)-1]
-}
-
-// hashString hashes s, or its first bytes when s is longer than the bounds
-// allow, together with its length.
-func (d *argsDigester) hashString(s string) {
-	n := d.takeBytes(len(s))
-	d.writeTag(digestTagStr)
-	d.writeUint64(uint64(len(s)))
-	if n > 0 {
-		_, _ = d.h.WriteString(s[:n])
-	}
-}
-
-// hashAdmittedString hashes a map key string whose byte length was already
-// verified and charged when sortedMapKeys admitted the enclosing map.
-func (d *argsDigester) hashAdmittedString(s string) {
-	d.writeTag(digestTagStr)
-	d.writeUint64(uint64(len(s)))
-	if len(s) > 0 {
-		_, _ = d.h.WriteString(s)
-	}
-}
-
-// hashMapKey hashes an admitted map key k, charging one node without charging
-// string key bytes a second time.
-func (d *argsDigester) hashMapKey(k reflect.Value) {
-	if d.nodes <= 0 {
-		d.truncated = true
-		d.writeTag(digestTagBudget)
-		return
-	}
-	for k.IsValid() && k.Kind() == reflect.Interface {
-		if k.IsNil() {
-			d.nodes--
-			d.writeTag(digestTagNil)
-			return
-		}
-		k = k.Elem()
-	}
-	if k.IsValid() && k.Kind() == reflect.String {
-		d.nodes--
-		d.hashAdmittedString(k.String())
-		return
-	}
-	d.hash(k)
-}
-
-// hashBytes hashes a byte slice under digestTagBytes; equal contents hash alike.
-func (d *argsDigester) hashBytes(b []byte) {
-	n := d.takeBytes(len(b))
-	d.writeTag(digestTagBytes)
-	d.writeUint64(uint64(len(b)))
-	if n > 0 {
-		_, _ = d.h.Write(b[:n])
-	}
-}
-
-// hashByteArray reads at most takeBytes(v.Len()) bytes from a byte array v
-// without requiring v.CanAddr() so addressable and non-addressable [N]byte
-// values hash identically.
-func (d *argsDigester) hashByteArray(v reflect.Value, n int) {
-	take := d.takeBytes(n)
-	d.writeTag(digestTagBytes)
-	d.writeUint64(uint64(n))
-	var buf [256]byte
-	for i := 0; i < take; {
-		chunk := min(len(buf), take-i)
-		for j := range chunk {
-			buf[j] = byte(v.Index(i + j).Uint())
-		}
-		_, _ = d.h.Write(buf[:chunk])
-		i += chunk
-	}
-}
-
-// writeBoundedType writes a type tag and bounded Type().String() while charging
-// its length against d.bytes before hashing.
-func (d *argsDigester) writeBoundedType(tag byte, t reflect.Type) {
-	d.writeTag(tag)
-	if d.bytes <= 0 || typeStringExceeds(t, d.bytes, 0) {
-		d.bytes = 0
-		d.truncated = true
-		d.writeTag(digestTagBudget)
-		return
-	}
-	typStr := t.String()
-	n := d.takeBytes(len(typStr))
-	d.writeUint64(uint64(len(typStr)))
-	if n > 0 {
-		_, _ = d.h.WriteString(typStr[:n])
-	}
-}
-
-func typeStringExceeds(t reflect.Type, budget, depth int) bool {
-	if budget <= 0 || depth > 16 {
-		return true
-	}
-	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array || t.Kind() == reflect.Chan {
-		if t.Name() != "" {
-			return false
-		}
-		depth++
-		if depth > 16 {
-			return true
-		}
-		t = t.Elem()
-	}
-	if t.Name() != "" {
-		return false
-	}
-	switch t.Kind() {
-	case reflect.Struct:
-		return t.NumField() > 64
-	case reflect.Func:
-		return t.NumIn()+t.NumOut() > 64
-	default:
-		return false
-	}
-}
-
-// isSupportedMapKeyType reports whether sortedMapKeys can accept keys of type t
-// without calling v.MapKeys() to copy unsupported inline keys such as arrays or
-// structs.
-func isSupportedMapKeyType(t reflect.Type) bool {
-	switch t.Kind() {
-	case reflect.Interface, reflect.Bool,
-		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
-		reflect.Float32, reflect.Float64, reflect.String:
-		return true
-	default:
-		return false
-	}
-}
-
-// typeDigestCost inspects t without copying any value and reports whether
-// hashing a single value of type t would exceed the remaining digest budgets
-// (or require copying an oversized opaque array/struct), together with the
-// minimum node and byte counts hashing t consumes.
-func typeDigestCost(t reflect.Type, remNodes, remBytes, depth int) (exceeds bool, minNodes, minBytes int) {
-	exceeds, minNodes, minBytes, _ = typeDigestCostDetail(t, remNodes, remBytes, depth)
-	return exceeds, minNodes, minBytes
-}
-
-func typeDigestCostDetail(t reflect.Type, remNodes, remBytes, depth int) (exceeds bool, minNodes, minBytes int, opaque bool) {
-	switch t.Kind() {
-	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
-		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
-		return remNodes < 1, 1, 0, false
-	case reflect.Array:
-		if remNodes < 1 {
-			return true, 1, 0, false
-		}
-		n := t.Len()
-		if t.Elem().Kind() == reflect.Uint8 {
-			if n > min(maxDigestStringBytes, max(remBytes, 0)) {
-				return true, 1, n, false
-			}
-			return false, 1, n, false
-		}
-		if depth >= maxDigestDepth || n > maxDigestEntries {
-			return true, 1, 0, false
-		}
-		if n == 0 {
-			return false, 1, 0, false
-		}
-		elemExceeds, elemNodes, elemBytes, elemOpaque := typeDigestCostDetail(t.Elem(), remNodes-1, remBytes, depth+1)
-		if elemExceeds {
-			return true, 1, 0, elemOpaque
-		}
-		if elemNodes > 0 && n > (remNodes-1)/elemNodes {
-			return true, 1, 0, elemOpaque
-		}
-		if elemBytes > 0 && n > max(remBytes, 0)/elemBytes {
-			return true, 1, 0, elemOpaque
-		}
-		if elemOpaque && t.Size() > uintptr(min(maxDigestStringBytes, max(remBytes, 0))) {
-			return true, 1, 0, true
-		}
-		return false, 1 + n*elemNodes, n * elemBytes, elemOpaque
-	case reflect.Struct:
-		// Structs are opaque (always truncated), and copying a large struct
-		// out of a map or array only to read its type name allocates unboundedly.
-		sz := t.Size()
-		if remNodes < 1 || sz > uintptr(maxDigestStringBytes) || sz > uintptr(max(remBytes, 0)) {
-			return true, 1, 0, true
-		}
-		return false, 1, int(sz), true
-	default:
-		return remNodes < 1, 1, 0, false
-	}
-}
-
-// takeBytes returns how many of n string bytes the bounds let the digest
-// hash, and charges them.
-func (d *argsDigester) takeBytes(n int) int {
-	take := min(n, maxDigestStringBytes, max(d.bytes, 0))
-	if take < n {
-		d.truncated = true
-	}
-	d.bytes -= take
-	return take
-}
-
-func (d *argsDigester) hash(v reflect.Value) {
-	if d.nodes <= 0 {
-		d.truncated = true
-		d.writeTag(digestTagBudget)
-		return
-	}
-	d.nodes--
-	for v.IsValid() && v.Kind() == reflect.Interface {
-		if v.IsNil() {
-			d.writeTag(digestTagNil)
-			return
-		}
-		v = v.Elem()
-	}
-	if !v.IsValid() {
-		d.writeTag(digestTagNil)
-		return
-	}
-	switch v.Kind() {
-	case reflect.Bool:
-		d.writeTag(digestTagBool)
-		if v.Bool() {
-			_ = d.h.WriteByte(1)
-		} else {
-			_ = d.h.WriteByte(0)
-		}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		d.writeTag(digestTagInt)
-		d.writeUint64(uint64(v.Int()))
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		d.writeTag(digestTagUint)
-		d.writeUint64(v.Uint())
-	case reflect.Float32, reflect.Float64:
-		d.writeTag(digestTagFloat)
-		d.writeUint64(floatBits(v.Float()))
-	case reflect.Complex64, reflect.Complex128:
-		c := v.Complex()
-		d.writeTag(digestTagComplex)
-		d.writeUint64(floatBits(real(c)))
-		d.writeUint64(floatBits(imag(c)))
-	case reflect.String:
-		d.hashString(v.String())
-	case reflect.Pointer:
-		d.truncated = true
-		tag := digestTagPtr
-		if v.IsNil() {
-			tag = digestTagNilPtr
-		}
-		d.writeBoundedType(tag, v.Type())
-	case reflect.Slice:
-		if v.IsNil() {
-			d.writeTag(digestTagNilSlice)
-			return
-		}
-		n := v.Len()
-		if n > 0 {
-			if !d.enter(digestAncestor{ptr: v.Pointer(), length: n, typ: v.Type()}) {
-				d.truncated = true
-				d.writeTag(digestTagCycleSlice)
-				return
-			}
-			defer d.leave()
-		}
-		d.writeTag(digestTagSlice)
-		d.writeUint64(uint64(n))
-		if v.Type().Elem().Kind() == reflect.Uint8 {
-			d.hashBytes(v.Bytes())
-			return
-		}
-		if d.depth >= maxDigestDepth {
-			d.truncated = true
-			d.writeTag(digestTagBudget)
-			return
-		}
-		d.depth++
-		if n > maxDigestEntries {
-			d.truncated = true
-			n = maxDigestEntries
-		}
-		for i := range n {
-			d.hash(v.Index(i))
-		}
-		d.depth--
-	case reflect.Array:
-		n := v.Len()
-		d.writeTag(digestTagArray)
-		d.writeUint64(uint64(n))
-		if v.Type().Elem().Kind() == reflect.Uint8 {
-			d.hashByteArray(v, n)
-			return
-		}
-		if d.depth >= maxDigestDepth {
-			d.truncated = true
-			d.writeTag(digestTagBudget)
-			return
-		}
-		if n > 0 {
-			elemExceeds, _, elemBytes, elemOpaque := typeDigestCostDetail(v.Type().Elem(), d.nodes, d.bytes, d.depth+1)
-			if elemExceeds || (elemOpaque && (v.Type().Size() > uintptr(min(maxDigestStringBytes, max(d.bytes, 0))) ||
-				(elemBytes > 0 && n > max(d.bytes, 0)/elemBytes))) {
-				d.truncated = true
-				d.writeTag(digestTagBudget)
-				return
-			}
-		}
-		d.depth++
-		if n > maxDigestEntries {
-			d.truncated = true
-			n = maxDigestEntries
-		}
-		for i := range n {
-			d.hash(v.Index(i))
-		}
-		d.depth--
-	case reflect.Map:
-		if v.IsNil() {
-			d.writeTag(digestTagNilMap)
-			return
-		}
-		n := v.Len()
-		d.writeTag(digestTagMap)
-		d.writeUint64(uint64(n))
-		if n == 0 {
-			return
-		}
-		if n > maxDigestEntries || d.depth >= maxDigestDepth {
-			d.truncated = true
-			d.writeTag(digestTagBudget)
-			return
-		}
-		if !d.enter(digestAncestor{ptr: v.Pointer(), length: -1, typ: v.Type()}) {
-			d.truncated = true
-			d.writeTag(digestTagCycleMap)
-			return
-		}
-		defer d.leave()
-		if !isSupportedMapKeyType(v.Type().Key()) {
-			d.truncated = true
-			d.writeTag(digestTagBudget)
-			return
-		}
-		elemType := v.Type().Elem()
-		if elemType.Kind() == reflect.Array || elemType.Kind() == reflect.Struct {
-			if elemExceeds, elemNodes, elemBytes := typeDigestCost(elemType, d.nodes, d.bytes, d.depth+1); elemExceeds ||
-				n > d.nodes/(1+elemNodes) ||
-				(elemBytes > 0 && n > max(d.bytes, 0)/elemBytes) {
-				d.truncated = true
-				d.writeTag(digestTagBudget)
-				return
-			}
-		}
-		keys, keyBytes, ok := sortedMapKeys(v, d.bytes)
-		if !ok {
-			d.truncated = true
-			d.writeTag(digestTagBudget)
-			return
-		}
-		// Charge the admitted map's total string key bytes immediately so
-		// nested maps hashed under earlier keys cannot reuse outer key budget.
-		d.bytes -= keyBytes
-		if elemType.Kind() == reflect.Array || elemType.Kind() == reflect.Struct {
-			if elemExceeds, _, elemBytes := typeDigestCost(elemType, d.nodes, d.bytes, d.depth+1); elemExceeds ||
-				(elemBytes > 0 && n > max(d.bytes, 0)/elemBytes) {
-				d.truncated = true
-				d.writeTag(digestTagBudget)
-				return
-			}
-		}
-		d.depth++
-		for _, k := range keys {
-			d.writeTag(digestTagMapEntry)
-			d.hashMapKey(k)
-			d.hash(v.MapIndex(k))
-		}
-		d.depth--
-	case reflect.Struct:
-		d.truncated = true
-		d.writeBoundedType(digestTagStruct, v.Type())
-		if sz := v.Type().Size(); sz > 0 {
-			d.bytes = max(d.bytes-int(min(sz, uintptr(maxDigestBytes))), 0)
-		}
-	default:
-		// Functions, channels and unsafe pointers are opaque incomplete evidence.
-		d.truncated = true
-		d.writeBoundedType(digestTagOpaque, v.Type())
-	}
-}
-
-// floatBits returns the bits of f with -0 folded into 0, so that equal
-// floats hash alike.
-func floatBits(f float64) uint64 {
-	if f == 0 {
-		f = 0
-	}
-	return math.Float64bits(f)
-}
-
-// sortedMapKeys returns the keys of the map v in a deterministic order: by
-// kind, type and value for keys of a basic kind (also behind an interface),
-// which every map that JSON or YAML decoding builds has, together with the
-// total byte length of its string keys. ok is false for other keys, such as
-// pointers or structs, or for NaN keys, which have no order that depends on
-// the map's contents alone. ok is also false when the string keys of v cannot
-// be hashed in full: one is longer than maxDigestStringBytes, or together they
-// are longer than maxKeyBytes, the string bytes that the digest has left.
-// Their lengths are checked before any key is compared or looked up, so that
-// long keys, such as many that share a long prefix, cost no more than reading
-// their lengths.
-func sortedMapKeys(v reflect.Value, maxKeyBytes int) (keys []reflect.Value, keyBytes int, ok bool) {
-	keys = v.MapKeys()
-	type sortKey struct {
-		kind reflect.Kind
-		typ  string
-		i    int64
-		u    uint64
-		f    float64
-		s    string
-	}
-	sks := make([]sortKey, len(keys))
-	remaining := maxKeyBytes
-	for idx, k := range keys {
-		for k.Kind() == reflect.Interface {
-			if k.IsNil() {
-				break
-			}
-			k = k.Elem()
-		}
-		sk := sortKey{kind: k.Kind()}
-		switch k.Kind() {
-		case reflect.Interface:
-			// A nil interface key.
-		case reflect.Bool:
-			if k.Bool() {
-				sk.i = 1
-			}
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			sk.i = k.Int()
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			sk.u = k.Uint()
-		case reflect.Float32, reflect.Float64:
-			sk.f = k.Float()
-			if math.IsNaN(sk.f) {
-				return nil, 0, false
-			}
-		case reflect.String:
-			sk.s = k.String()
-			if len(sk.s) > min(maxDigestStringBytes, remaining) {
-				return nil, 0, false
-			}
-			remaining -= len(sk.s)
-			keyBytes += len(sk.s)
-		default:
-			return nil, 0, false
-		}
-		if k.IsValid() {
-			sk.typ = k.Type().String()
-		}
-		sks[idx] = sk
-	}
-	order := make([]int, len(keys))
-	for idx := range order {
-		order[idx] = idx
-	}
-	compare := func(a, b sortKey) int {
-		return cmp.Or(
-			cmp.Compare(a.kind, b.kind),
-			cmp.Compare(a.typ, b.typ),
-			cmp.Compare(a.i, b.i),
-			cmp.Compare(a.u, b.u),
-			cmp.Compare(a.f, b.f),
-			cmp.Compare(a.s, b.s),
-		)
-	}
-	slices.SortFunc(order, func(a, b int) int { return compare(sks[a], sks[b]) })
-	sorted := make([]reflect.Value, len(keys))
-	for idx, o := range order {
-		if idx > 0 && compare(sks[order[idx-1]], sks[o]) == 0 {
-			// Distinct keys that compare equal, such as two types of one name.
-			return nil, 0, false
-		}
-		sorted[idx] = keys[o]
-	}
-	return sorted, keyBytes, true
 }

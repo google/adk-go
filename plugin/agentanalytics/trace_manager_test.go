@@ -28,7 +28,6 @@ import (
 	"iter"
 	"log"
 	"maps"
-	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1006,6 +1005,322 @@ func TestTraceManager_FailedToolCallBookkeeping(t *testing.T) {
 	}
 	if got, want := openSpans(t, tm, "inv"), (spanCounts{agents: 1}); got != want {
 		t.Errorf("open spans = %+v, want %+v", got, want)
+	}
+}
+
+// TestRunner_CallAfterFailedCallWithReusedIDGetsItsOwnSpan runs a call of a
+// tool that does not exist, which ADK ends with OnToolErrorCallback alone, and
+// then, in the next model response, a call of an existing tool that reuses the
+// function call ID. A plugin registered before this one answers the
+// BeforeToolCallback of the later call, so this plugin sees neither its start
+// nor an error. The record that OnToolErrorCallback left for the failed call
+// belongs to the attempt that it ended: the later call's TOOL_COMPLETED row
+// gets a span of its own, and the call keeps its AGENT_RESPONSE row.
+func TestRunner_CallAfterFailedCallWithReusedIDGetsItsOwnSpan(t *testing.T) {
+	p, requests, _ := setupTestPluginWithConfig(t, func(c *Config) {
+		c.FinalResponseToolNames = []string{"lookup"}
+	})
+	lookupTool, err := functiontool.New(functiontool.Config{Name: "lookup", Description: "Looks up"},
+		func(agent.Context, map[string]any) (map[string]any, error) {
+			return map[string]any{"ok": true}, nil
+		})
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+	// cache answers every call of lookup before the tool runs.
+	cache, err := baseplugin.New(baseplugin.Config{
+		Name: "cache",
+		BeforeToolCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+			if tl.Name() == "lookup" {
+				return map[string]any{"cached": true}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+	llm := &scriptedLLM{responses: []*model.LLMResponse{
+		{Content: genai.NewContentFromParts([]*genai.Part{{
+			FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "missing_tool", Args: map[string]any{"x": 1}},
+		}}, genai.RoleModel)},
+		{Content: genai.NewContentFromParts([]*genai.Part{{
+			FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "lookup", Args: map[string]any{"q": "x"}},
+		}}, genai.RoleModel)},
+		{Content: textContent("model", "done"), TurnComplete: true},
+	}}
+	bot, err := llmagent.New(llmagent.Config{Name: "bot", Model: llm, Tools: []tool.Tool{lookupTool}})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	for _, runErr := range newTestRunner(t, bot, cache, p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if got := len(rowsOfType(rows, EventToolStarting)); got != 1 {
+		t.Errorf("got %d TOOL_STARTING rows, want 1 for the failed call; event types: %v", got, eventTypes(rows))
+	}
+	failed := onlyRowOfType(t, rows, EventToolError)
+	completed := onlyRowOfType(t, rows, EventToolCompleted)
+	if got := functionCallIDOf(t, completed); got != "call_0" {
+		t.Errorf("TOOL_COMPLETED function_call_id = %q, want %q", got, "call_0")
+	}
+	failedAt, completedAt := placeOf(failed), placeOf(completed)
+	if completedAt.span == failedAt.span {
+		t.Errorf("TOOL_COMPLETED of the later call reuses the span %q of the failed call", failedAt.span)
+	}
+	if completedAt.parent != failedAt.parent {
+		t.Errorf("TOOL_COMPLETED of the later call is under %q, want the agent span %q", completedAt.parent, failedAt.parent)
+	}
+	responses := 0
+	for _, row := range rowsOfType(rows, EventAgentResponse) {
+		if source, _ := lookup(jsonObjectColumn(t, row, "attributes"), "source_tool"); source == "lookup" {
+			responses++
+		}
+	}
+	if responses != 1 {
+		t.Errorf("got %d AGENT_RESPONSE rows with source_tool lookup, want 1; event types: %v", responses, eventTypes(rows))
+	}
+}
+
+// attemptInvocationContext is an InvocationContext to build tool contexts
+// over. Its WithICDelta returns the context itself, so that
+// agent.Context.WithDelta can derive contexts from such a tool context; the
+// mock alone panics there.
+type attemptInvocationContext struct{ *mockInvocationContext }
+
+func (c *attemptInvocationContext) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return c
+}
+
+// newAttemptInvocationContext returns an attemptInvocationContext of the
+// agent "agent" in the invocation "inv".
+func newAttemptInvocationContext() *attemptInvocationContext {
+	return &attemptInvocationContext{&mockInvocationContext{ctx: context.Background(), agentName: "agent", invocationID: "inv"}}
+}
+
+// actionsContext is a context whose Actions method runs actions.
+type actionsContext struct {
+	context.Context
+	actions func() *session.EventActions
+}
+
+func (c actionsContext) Actions() *session.EventActions { return c.actions() }
+
+// TestTraceManager_ErrorEndedToolCallAnswersOnlyItsOwnAttempt ends a tool
+// call with OnToolErrorCallback and then runs AfterToolCallback for the same
+// call key, each through a context of the table, for a call whose start this
+// plugin saw and for one whose start it did not see. A call that
+// OnToolErrorCallback ended answers only the AfterToolCallback of its own
+// attempt: of a context with the same EventActions, which every context that
+// ADK derives from a tool context keeps. The AfterToolCallback of another
+// attempt is a call of its own and leaves the record to its own attempt.
+// Contexts that expose no EventActions match each other by call key alone,
+// and never a tool context.
+func TestTraceManager_ErrorEndedToolCallAnswersOnlyItsOwnAttempt(t *testing.T) {
+	ic := newAttemptInvocationContext()
+	newToolContext := func(actions *session.EventActions) agent.Context {
+		return agent.NewToolContext(ic, "call-1", actions, nil)
+	}
+	type valueKey struct{}
+	tests := []struct {
+		name string
+		// contexts returns the contexts of OnToolErrorCallback and of
+		// AfterToolCallback.
+		contexts func(t *testing.T) (onError, after context.Context)
+		// sameAttempt reports that AfterToolCallback runs for the attempt
+		// that OnToolErrorCallback ended.
+		sameAttempt bool
+	}{
+		{
+			name: "same tool context",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				return c, c
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "WithAgentTimeout",
+			contexts: func(t *testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				d, cancel := c.WithAgentTimeout(time.Minute)
+				t.Cleanup(cancel)
+				return c, d
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "WithAgentCancel",
+			contexts: func(t *testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				d, cancel := c.WithAgentCancel()
+				t.Cleanup(cancel)
+				return c, d
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "WithDelta over a WithValue context",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				std := context.WithValue(c, valueKey{}, 1)
+				return c, c.WithDelta(&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Context: &std}})
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "WithDelta over a WithoutCancel context",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				std := context.WithoutCancel(c)
+				return c, c.WithDelta(&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Context: &std}})
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "tool contexts over the same EventActions",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				actions := &session.EventActions{}
+				return newToolContext(actions), newToolContext(actions)
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "tool contexts over distinct EventActions",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				return newToolContext(&session.EventActions{}), newToolContext(&session.EventActions{})
+			},
+		},
+		{
+			name: "contexts without EventActions",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				return context.Background(), withFunctionCall(ic.mockInvocationContext, "call-1")
+			},
+			sameAttempt: true,
+		},
+		// In the next two rows, ic is the context without EventActions: unlike
+		// context.Background(), it has the call key of the tool contexts over
+		// it, so these rows compare attempts rather than keys.
+		{
+			name: "tool context, then a context without EventActions",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				return newToolContext(&session.EventActions{}), ic
+			},
+		},
+		{
+			name: "context without EventActions, then a tool context",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				return ic, newToolContext(&session.EventActions{})
+			},
+		},
+	}
+	for _, tt := range tests {
+		for _, started := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/started=%t", tt.name, started), func(t *testing.T) {
+				onError, after := tt.contexts(t)
+				ctx := context.Background()
+				tm := newTraceManager()
+				id := identity{invocationID: "inv", agentName: "agent"}
+				key := toolKey(id, "call-1", "lookup")
+				tm.invocationSpan(ctx, id, nil)
+				agentSpan, _ := tm.pushAgentSpan(ctx, id)
+				var start rowSpan
+				if started {
+					start = tm.pushToolSpan(onError, id, key)
+				}
+				errorEnd, _, closedByError := tm.popToolSpan(onError, id, key, true)
+				if closedByError {
+					t.Fatal("OnToolErrorCallback found the call ended by an earlier error")
+				}
+				if started && errorEnd.spanID != start.spanID {
+					t.Fatalf("TOOL_ERROR at span %q, want the span of the call %q", errorEnd.spanID, start.spanID)
+				}
+				afterEnd, _, closedByError := tm.popToolSpan(after, id, key, false)
+				if closedByError != tt.sameAttempt {
+					t.Fatalf("AfterToolCallback found the call ended by its error: %t, want %t", closedByError, tt.sameAttempt)
+				}
+				if afterEnd.latency != nil {
+					t.Errorf("AfterToolCallback has latency %v, want none", afterEnd.latency)
+				}
+				if tt.sameAttempt {
+					if afterEnd.spanID != errorEnd.spanID {
+						t.Errorf("AfterToolCallback at span %q, want the span of the error %q", afterEnd.spanID, errorEnd.spanID)
+					}
+					return
+				}
+				if afterEnd.spanID == errorEnd.spanID || afterEnd.parentSpanID != agentSpan.spanID {
+					t.Errorf("AfterToolCallback of another attempt at span %q under %q, want a span of its own under the agent %q, not the span of the error %q", afterEnd.spanID, afterEnd.parentSpanID, agentSpan.spanID, errorEnd.spanID)
+				}
+				ownEnd, _, closedByError := tm.popToolSpan(onError, id, key, false)
+				if !closedByError || ownEnd.spanID != errorEnd.spanID {
+					t.Errorf("AfterToolCallback of the failed attempt at span %q (found ended by its error: %t), want the span of the error %q", ownEnd.spanID, closedByError, errorEnd.spanID)
+				}
+			})
+		}
+	}
+}
+
+// TestToolAttempt_WeakAndNeverReused checks the identity of attempts: an
+// attempt leaves its EventActions collectable, and never equals the attempt
+// of other EventActions, even once the runtime has reused the memory of
+// collected ones. The attempt is that of the EventActions whatever the
+// context that returns them, and the zero attempt when the context has no
+// Actions method, or the method panics or returns nil, as that of ADK's
+// callback context does.
+func TestToolAttempt_WeakAndNeverReused(t *testing.T) {
+	ic := newAttemptInvocationContext()
+	var zero toolAttempt
+	const attempts = 2000
+	held := make(map[toolAttempt]int, attempts)
+	for i := range attempts {
+		at := attemptOf(toolActionsOf(agent.NewToolContext(ic, "call-1", &session.EventActions{}, nil)))
+		if at == zero {
+			t.Fatalf("attempt %d of a tool context is the zero attempt", i)
+		}
+		if j, ok := held[at]; ok {
+			t.Fatalf("attempt %d equals attempt %d", i, j)
+		}
+		held[at] = i
+		if i%100 == 99 {
+			// Collect the EventActions so far, so that the later ones can
+			// reuse their memory.
+			runtime.GC()
+		}
+	}
+	runtime.GC()
+	collected := 0
+	for at := range held {
+		if at.Value() == nil {
+			collected++
+		}
+	}
+	// The runtime does not promise to collect every unreachable object.
+	if collected < attempts/2 {
+		t.Errorf("%d of %d EventActions were collected while their attempts were held, want most of them", collected, attempts)
+	}
+
+	actions := &session.EventActions{}
+	direct := actionsContext{context.Background(), func() *session.EventActions { return actions }}
+	if attemptOf(toolActionsOf(direct)) != attemptOf(toolActionsOf(agent.NewToolContext(ic, "call-1", actions, nil))) {
+		t.Error("a context that returns the EventActions of a tool context has another attempt")
+	}
+	// The Actions method of ADK's callback context logs that it has none.
+	origOut := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(origOut) })
+	for name, ctx := range map[string]context.Context{
+		"no Actions method":   context.Background(),
+		"Actions panics":      actionsContext{context.Background(), func() *session.EventActions { panic("no actions") }},
+		"Actions returns nil": actionsContext{context.Background(), func() *session.EventActions { return nil }},
+		"callback context":    agent.NewCallbackContext(ic, &session.EventActions{}),
+	} {
+		if attemptOf(toolActionsOf(ctx)) != zero {
+			t.Errorf("%s: got an attempt, want the zero attempt", name)
+		}
 	}
 }
 
@@ -24510,1319 +24825,4 @@ func TestLateSettledActivationWithoutCauseRetiresAboveOpenChild(t *testing.T) {
 	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"p"}) {
 		t.Errorf("late agents after o ended while p stays open = %v, want [p]", got)
 	}
-}
-
-func TestBoundedArgsDigest(t *testing.T) {
-	digest := boundedArgsDigest
-
-	t.Run("nil and empty args get the same complete digest", func(t *testing.T) {
-		dNil, truncNil := digest(nil)
-		dEmpty, truncEmpty := digest(map[string]any{})
-		if truncNil || truncEmpty {
-			t.Fatalf("truncated = (%v, %v) for nil and empty args, want (false, false)", truncNil, truncEmpty)
-		}
-		if dNil != dEmpty {
-			t.Errorf("digest(nil) = %d, digest(empty) = %d, want equal", dNil, dEmpty)
-		}
-		if d, _ := digest(map[string]any{"k": 1}); d == dNil {
-			t.Errorf("digest of non-empty args = %d, the digest of no args", d)
-		}
-		idNil, _ := toolCallIdentityOf(context.Background(), nil)
-		idEmpty, _ := toolCallIdentityOf(context.Background(), map[string]any{})
-		if !idNil.sameArgs(idEmpty) || !idEmpty.sameArgs(idNil) {
-			t.Error("sameArgs() = false for nil and empty args, want true")
-		}
-	})
-
-	t.Run("cyclic maps are truncated and deterministic", func(t *testing.T) {
-		cyclic1 := map[string]any{"k": 1}
-		cyclic1["self"] = cyclic1
-		cyclic2 := map[string]any{"k": 2}
-		cyclic2["self"] = cyclic2
-		d1a, truncated1 := digest(cyclic1)
-		d1b, _ := digest(cyclic1)
-		d2, truncated2 := digest(cyclic2)
-		if !truncated1 || !truncated2 {
-			t.Errorf("cyclic map digest truncated = (%v, %v), want (true, true)", truncated1, truncated2)
-		}
-		if d1a != d1b {
-			t.Errorf("cyclic map digest not deterministic: %d != %d", d1a, d1b)
-		}
-		if d1a == d2 {
-			t.Errorf("distinct cyclic maps produced identical digest %d", d1a)
-		}
-
-		// Two cyclic maps pointing to different ancestors must both be marked
-		// truncated so they never compare equal via sameArgs.
-		a1 := map[string]any{}
-		b1 := map[string]any{"inner": a1}
-		a1["back"] = a1
-		a2 := map[string]any{}
-		b2 := map[string]any{"inner": a2}
-		a2["back"] = b2
-		id1, _ := toolCallIdentityOf(context.Background(), b1)
-		id2, _ := toolCallIdentityOf(context.Background(), b2)
-		if !id1.argsTruncated || !id2.argsTruncated {
-			t.Fatalf("cyclic ancestor maps truncated = (%v, %v), want (true, true)", id1.argsTruncated, id2.argsTruncated)
-		}
-		if id1.sameArgs(id2) || id1.sameArgs(id1) {
-			t.Error("sameArgs() = true on cyclic maps, want false")
-		}
-	})
-
-	t.Run("map order does not matter", func(t *testing.T) {
-		mA := map[string]any{"a": "x", "b": 42, "nested": map[string]any{"p": true, "q": 3.5}}
-		mB := map[string]any{"nested": map[string]any{"q": 3.5, "p": true}, "b": 42, "a": "x"}
-		dA, _ := digest(mA)
-		dB, _ := digest(mB)
-		if dA != dB {
-			t.Errorf("equivalent maps produced different digests: %d != %d", dA, dB)
-		}
-	})
-
-	t.Run("shared values in non-string-keyed maps", func(t *testing.T) {
-		// A value shared by two entries hashes as itself in both, whatever
-		// order the map iterates in, rather than as a cycle the second time.
-		shared := []any{"x", map[string]any{"y": 1}}
-		sharedMap := map[string]any{"z": []int{1, 2}}
-		args := func() map[string]any {
-			m := map[int]any{}
-			for i := range 16 {
-				if i%2 == 0 {
-					m[i] = shared
-				} else {
-					m[i] = sharedMap
-				}
-			}
-			return map[string]any{"nested": m, "yaml": map[any]any{"a": shared, 2: shared, true: sharedMap}}
-		}
-		want, truncated := digest(args())
-		if truncated {
-			t.Fatal("digest of shared values is truncated, want full")
-		}
-		for i := range 64 {
-			if got, _ := digest(args()); got != want {
-				t.Fatalf("digest #%d = %d, want %d: shared values hash by iteration order", i, got, want)
-			}
-		}
-		other := args()
-		other["nested"].(map[int]any)[3] = shared
-		if got, _ := digest(other); got == want {
-			t.Error("digest unchanged after an entry of a non-string-keyed map changed")
-		}
-	})
-
-	t.Run("maps over 32 keys hash their contents", func(t *testing.T) {
-		big := make(map[string]any, 200)
-		for i := range 200 {
-			big[fmt.Sprintf("k%03d", i)] = i
-		}
-		twin := maps.Clone(big)
-		before, truncated := digest(big)
-		if truncated {
-			t.Fatal("digest of a 200-key map is truncated, want full")
-		}
-		if d, _ := digest(twin); d != before {
-			t.Errorf("equal maps in two allocations: digests %d and %d, want equal", d, before)
-		}
-		big["k150"] = "changed"
-		if after, _ := digest(big); after == before {
-			t.Error("digest unchanged after a 200-key map was changed in place")
-		}
-	})
-
-	t.Run("long strings hash their middle", func(t *testing.T) {
-		head, tail := strings.Repeat("a", 128), strings.Repeat("z", 128)
-		d1, truncated := digest(map[string]any{"s": head + strings.Repeat("m", 64) + tail})
-		d2, _ := digest(map[string]any{"s": head + strings.Repeat("n", 64) + tail})
-		if truncated {
-			t.Error("digest of a 320-byte string is truncated, want full")
-		}
-		if d1 == d2 {
-			t.Error("strings that differ only in the middle produced identical digests")
-		}
-		b1, _ := digest(map[string]any{"b": []byte("same bytes")})
-		b2, _ := digest(map[string]any{"b": []byte("same bytes")})
-		if b1 != b2 {
-			t.Errorf("equal byte slices in two allocations: digests %d and %d, want equal", b1, b2)
-		}
-	})
-
-	t.Run("past the bounds the digest is truncated", func(t *testing.T) {
-		huge := make(map[string]any, maxDigestEntries+1)
-		for i := range maxDigestEntries + 1 {
-			huge[fmt.Sprintf("k%d", i)] = i
-		}
-		dag := map[string]any{"leaf": 1}
-		for range 40 {
-			dag = map[string]any{"a": dag, "b": dag}
-		}
-		// The keys of keysPastBytes each fit maxDigestStringBytes, and share
-		// all but their last two bytes, but together they are four times
-		// maxDigestBytes. Those of keysPastBytesLeft fit maxDigestBytes, but
-		// not what is left of it once the string before them is hashed.
-		keysPastBytes := commonPrefixKeys(64, maxDigestStringBytes)
-		keysPastBytesLeft := map[string]any{
-			"a": slices.Repeat([]any{strings.Repeat("s", maxDigestStringBytes)}, 15),
-			"b": commonPrefixKeys(2, 40<<10),
-		}
-		for name, args := range map[string]map[string]any{
-			"long string":          {"s": strings.Repeat("x", maxDigestStringBytes+1)},
-			"long key":             {strings.Repeat("k", maxDigestStringBytes+1): 1},
-			"long nested key":      {"m": map[any]any{strings.Repeat("k", maxDigestStringBytes+1): 1}},
-			"keys past the bytes":  keysPastBytes,
-			"keys past bytes left": keysPastBytesLeft,
-			"large map":            huge,
-			"long slice":           {"s": make([]int, maxDigestEntries+1)},
-			"NaN key":              {"m": map[float64]any{math.NaN(): 1}},
-			"pointer key":          {"m": map[*int]any{new(int): 1}},
-			"shared subtree":       dag,
-		} {
-			d1, truncated := digest(args)
-			if !truncated {
-				t.Errorf("%s: digest is not truncated, want truncated", name)
-			}
-			if d2, _ := digest(args); d2 != d1 {
-				t.Errorf("%s: truncated digest not deterministic: %d != %d", name, d1, d2)
-			}
-		}
-	})
-
-	t.Run("keys that fill the byte bounds hash in full", func(t *testing.T) {
-		// 16 keys of maxDigestStringBytes each are maxDigestBytes in all.
-		keys := commonPrefixKeys(16, maxDigestStringBytes)
-		want, truncated := digest(keys)
-		if truncated {
-			t.Fatal("digest of keys that fill maxDigestBytes is truncated, want full")
-		}
-		if got, _ := digest(maps.Clone(keys)); got != want {
-			t.Errorf("equal maps in two allocations: digests %d and %d, want equal", got, want)
-		}
-	})
-
-	t.Run("truncated digests prove nothing", func(t *testing.T) {
-		args := map[string]any{"s": strings.Repeat("x", maxDigestStringBytes+1)}
-		a, _ := toolCallIdentityOf(context.Background(), args)
-		b, _ := toolCallIdentityOf(context.Background(), args)
-		if a.sameArgs(b) {
-			t.Error("sameArgs() = true for truncated digests, want false")
-		}
-		map300A := make(map[string]any, 300)
-		map300B := make(map[string]any, 300)
-		for i := range 300 {
-			map300A[fmt.Sprintf("k%03d", i)] = i
-			map300B[fmt.Sprintf("k%03d", i)] = i + 1000
-		}
-		idA, _ := toolCallIdentityOf(context.Background(), map300A)
-		idB, _ := toolCallIdentityOf(context.Background(), map300B)
-		if !idA.argsTruncated || !idB.argsTruncated || idA.sameArgs(idB) {
-			t.Errorf("300-key maps: truncated=(%v,%v) sameArgs=%v, want (true,true) and false", idA.argsTruncated, idB.argsTruncated, idA.sameArgs(idB))
-		}
-		full, _ := toolCallIdentityOf(context.Background(), map[string]any{"s": "x"})
-		if !full.sameArgs(full) {
-			t.Error("sameArgs() = false for equal full digests, want true")
-		}
-	})
-
-	t.Run("opaque structs pointers and functions set truncated without reading fields", func(t *testing.T) {
-		type opaqueState struct {
-			Public  string
-			counter atomic.Int64
-			mu      sync.Mutex
-			private map[string]int
-		}
-		st := &opaqueState{
-			Public:  "immutable",
-			private: map[string]int{"seed": 1},
-		}
-		stop := make(chan struct{})
-		var wg sync.WaitGroup
-		wg.Go(func() {
-			for i := 0; ; i++ {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				st.counter.Add(1)
-				st.mu.Lock()
-				st.private[fmt.Sprintf("k%d", i%8)] = i
-				st.mu.Unlock()
-			}
-		})
-		defer func() {
-			close(stop)
-			wg.Wait()
-		}()
-
-		type plainStruct struct{ X int }
-		var nilPtr *opaqueState
-		for i := range 64 {
-			for name, args := range map[string]map[string]any{
-				"live_struct_ptr": {"p": st},
-				"nil_struct_ptr":  {"p": nilPtr},
-				"struct_value":    {"s": plainStruct{X: i}},
-				"struct_array":    {"a": [2]plainStruct{{X: 1}, {X: 2}}},
-				"closure":         {"fn": func() int { return i }},
-			} {
-				if _, truncated := boundedArgsDigest(args); !truncated {
-					t.Fatalf("%s: boundedArgsDigest() truncated = false, want true", name)
-				}
-				id1, _ := toolCallIdentityOf(context.Background(), args)
-				id2, _ := toolCallIdentityOf(context.Background(), args)
-				if id1.sameArgs(id2) {
-					t.Fatalf("%s: sameArgs() = true on opaque argument, want false", name)
-				}
-			}
-		}
-	})
-}
-
-// commonPrefixKeys returns a map of n keys of size bytes each that differ only
-// in their last two bytes.
-func commonPrefixKeys(n, size int) map[string]any {
-	prefix := strings.Repeat("p", size-2)
-	m := make(map[string]any, n)
-	for i := range n {
-		m[fmt.Sprintf("%s%02d", prefix, i)] = i
-	}
-	return m
-}
-
-func TestSortedMapKeysByteBounds(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		m           any
-		maxKeyBytes int
-		wantOK      bool
-	}{
-		{name: "key at the string bound", m: commonPrefixKeys(1, maxDigestStringBytes), maxKeyBytes: maxDigestBytes, wantOK: true},
-		{name: "key past the string bound", m: commonPrefixKeys(1, maxDigestStringBytes+1), maxKeyBytes: maxDigestBytes},
-		{name: "keys that fill the bytes left", m: commonPrefixKeys(16, maxDigestStringBytes), maxKeyBytes: maxDigestBytes, wantOK: true},
-		{name: "keys past the bytes left", m: commonPrefixKeys(64, maxDigestStringBytes), maxKeyBytes: maxDigestBytes},
-		{name: "short keys within the bytes left", m: commonPrefixKeys(2, 1024), maxKeyBytes: 2048, wantOK: true},
-		{name: "short keys past the bytes left", m: commonPrefixKeys(2, 1024), maxKeyBytes: 2047},
-		{name: "string keys behind an interface within the bytes left", m: map[any]any{"ab": 1, "cd": 2, 3: 3}, maxKeyBytes: 4, wantOK: true},
-		{name: "string keys behind an interface past the bytes left", m: map[any]any{"ab": 1, "cd": 2, 3: 3}, maxKeyBytes: 3},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			v := reflect.ValueOf(tc.m)
-			keys, _, ok := sortedMapKeys(v, tc.maxKeyBytes)
-			if ok != tc.wantOK {
-				t.Fatalf("sortedMapKeys() ok = %v, want %v", ok, tc.wantOK)
-			}
-			if ok && len(keys) != v.Len() {
-				t.Errorf("sortedMapKeys() returned %d keys, want %d", len(keys), v.Len())
-			}
-		})
-	}
-}
-
-// BenchmarkBoundedArgsDigest_CommonPrefixKeys digests 64 keys that share a
-// long prefix and do not fit the digest's byte bounds, together (64KiB) or
-// each (1MiB and 4MiB). Comparing such keys takes time in proportion to their
-// length, so the digest checks their lengths before it sorts them.
-func BenchmarkBoundedArgsDigest_CommonPrefixKeys(b *testing.B) {
-	for _, bc := range []struct {
-		name string
-		size int
-	}{
-		{name: "64KiB", size: maxDigestStringBytes - 64},
-		{name: "1MiB", size: 1 << 20},
-		{name: "4MiB", size: 4 << 20},
-	} {
-		b.Run(bc.name, func(b *testing.B) {
-			// The keys are prefixes of one string, so they share its bytes.
-			s := strings.Repeat("k", bc.size+64)
-			args := make(map[string]any, 64)
-			for i := range 64 {
-				args[s[:bc.size+i]] = i
-			}
-			for b.Loop() {
-				if _, truncated := boundedArgsDigest(args); !truncated {
-					b.Fatal("boundedArgsDigest() truncated = false, want true")
-				}
-			}
-		})
-	}
-}
-
-type unwrapTestInvocationCtx struct {
-	agent.InvocationContext
-	context.Context
-	ag agent.Agent
-}
-
-func (c unwrapTestInvocationCtx) Deadline() (time.Time, bool) { return c.Context.Deadline() }
-func (c unwrapTestInvocationCtx) Done() <-chan struct{}       { return c.Context.Done() }
-func (c unwrapTestInvocationCtx) Err() error                  { return c.Context.Err() }
-func (c unwrapTestInvocationCtx) Value(key any) any           { return c.Context.Value(key) }
-func (c unwrapTestInvocationCtx) Agent() agent.Agent          { return c.ag }
-func (c unwrapTestInvocationCtx) Artifacts() agent.Artifacts  { return nil }
-func (c unwrapTestInvocationCtx) Memory() agent.Memory        { return nil }
-func (c unwrapTestInvocationCtx) Session() session.Session    { return nil }
-func (c unwrapTestInvocationCtx) InvocationID() string        { return "inv-unwrap" }
-func (c unwrapTestInvocationCtx) Branch() string              { return "" }
-func (c unwrapTestInvocationCtx) WithContext(ctx context.Context) agent.InvocationContext {
-	c.Context = ctx
-	return c
-}
-
-func (c unwrapTestInvocationCtx) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
-	return c
-}
-
-func TestTraceManager_UnwrapContext_WithoutCancel(t *testing.T) {
-	ic := unwrapTestInvocationCtx{Context: context.Background()}
-	acts := &session.EventActions{StateDelta: map[string]any{"k": "v"}}
-	toolCtx := agent.NewToolContext(ic, "call-wc", acts, nil)
-	cbCtx := agent.NewCallbackContext(ic, acts)
-
-	var logBuf bytes.Buffer
-	origOut := log.Writer()
-	log.SetOutput(&logBuf)
-	defer log.SetOutput(origOut)
-
-	// Unwrapping callbackContextWrapper must never call .Actions() (which logs
-	// a warning in adk/v2), even across WithoutCancel and WithTimeout wrappers.
-	for _, c := range []context.Context{cbCtx, context.WithoutCancel(cbCtx)} {
-		ap, gotActs, delta, pinned := unwrapToolContextActions(c)
-		if ap == 0 || delta.empty() {
-			t.Errorf("callback unwrap returned (%d, %+v), want non-zero actionsPtr and non-empty delta", ap, delta)
-		}
-		if gotActs != nil {
-			t.Errorf("callback unwrap returned non-nil *session.EventActions %p, want nil", gotActs)
-		}
-		if pinned == nil {
-			t.Errorf("callback unwrap returned nil pinnedCtx")
-		}
-	}
-	if logBuf.Len() != 0 {
-		t.Errorf("unexpected log output unwrapping callback contexts: %q", logBuf.String())
-	}
-
-	// Wrapping a ToolContext in context.WithoutCancel and context.WithTimeout
-	// exercises both the unexported "c" field (withoutCancelCtx) and the
-	// "Context" field that timerCtx promotes from its embedded cancelCtx in
-	// unwrapToolContextActions.
-	timedCtx, cancel := context.WithTimeout(context.WithoutCancel(toolCtx), time.Minute)
-	defer cancel()
-	for _, c := range []context.Context{context.WithoutCancel(toolCtx), timedCtx} {
-		ap, gotActs, delta, pinned := unwrapToolContextActions(c)
-		if ap == 0 || delta.empty() {
-			t.Errorf("withoutCancel tool unwrap returned (%d, %+v), want non-zero actionsPtr and delta", ap, delta)
-		}
-		if gotActs != nil {
-			t.Errorf("withoutCancel wrapper returned direct Actions pointer %p despite hiding Actions()", gotActs)
-		}
-		if pinned == nil {
-			t.Errorf("withoutCancel tool unwrap returned nil pinnedCtx")
-		}
-	}
-	if logBuf.Len() != 0 {
-		t.Errorf("unexpected log output unwrapping withoutCancel contexts: %q", logBuf.String())
-	}
-}
-
-// unwrapTestKey is a context key of TestTraceManager_UnwrapContext_CustomLayouts.
-type unwrapTestKey struct{}
-
-// TestTraceManager_UnwrapContext_CustomLayouts checks that the EventActions of
-// a custom context come from its Actions() method, never from a private field
-// that happens to be named actions, and that a standard-library wrapper around
-// a custom context reads none of the custom context's fields.
-func TestTraceManager_UnwrapContext_CustomLayouts(t *testing.T) {
-	stable := &session.EventActions{StateDelta: map[string]any{"stable": 1}}
-	custom := &privateActionsToolCtx{
-		mockInvocationContext: &mockInvocationContext{ctx: context.Background()},
-		stable:                stable,
-	}
-	custom.replaceActions(0)
-
-	ap, acts, delta, pinned := unwrapToolContextActions(custom)
-	if want := reflect.ValueOf(stable).Pointer(); acts != stable || ap != want {
-		t.Errorf("custom context unwrap = (%#x, %p), want Actions() = (%#x, %p)", ap, acts, want, stable)
-	}
-	if delta.m == nil || mapPtr(delta.m) != mapPtr(stable.StateDelta) || pinned != nil {
-		t.Errorf("custom context unwrap delta = %+v, pinned = %v, want Actions().StateDelta held directly without a pinned context", delta, pinned)
-	}
-
-	for _, tc := range []struct {
-		name string
-		ctx  context.Context
-	}{
-		{name: "WithValue", ctx: context.WithValue(custom, unwrapTestKey{}, 1)},
-		{name: "WithoutCancel", ctx: context.WithoutCancel(custom)},
-	} {
-		ap, acts, delta, pinned := unwrapToolContextActions(tc.ctx)
-		if ap != 0 || acts != nil || !delta.empty() || pinned != nil {
-			t.Errorf("%s(custom) unwrap = (%#x, %p, %+v, %v), want zero values: the custom context's fields are not read", tc.name, ap, acts, delta, pinned)
-		}
-	}
-}
-
-func TestBoundedArgsDigest_NestedMapsChargeKeysAtAdmissionAndBoundDepth(t *testing.T) {
-	t.Run("nested_map_under_early_sorted_key_cannot_reuse_outer_key_budget", func(t *testing.T) {
-		// Outer map has 15 keys of 64 KiB ("z_00".."z_14", 960 KiB total) plus
-		// key "a" (sorted first, 1 byte) holding an inner map with two 40 KiB
-		// keys (80 KiB). When node budget expires inside "a" before the outer
-		// loop reaches "z_00".."z_14", charging key bytes at map admission must
-		// already have deducted all 960 KiB + 1 bytes from d.bytes.
-		outer := make(map[string]any, 16)
-		prefix := strings.Repeat("z", maxDigestStringBytes-4)
-		wantOuterKeyBytes := 1 // "a"
-		for i := range 15 {
-			k := fmt.Sprintf("%s_%02d", prefix, i)
-			outer[k] = i
-			wantOuterKeyBytes += len(k)
-		}
-		outer["a"] = commonPrefixKeys(2, 40<<10)
-
-		d := argsDigester{nodes: 3, bytes: maxDigestBytes}
-		d.hash(reflect.ValueOf(outer))
-		if wantMaxLeft := maxDigestBytes - wantOuterKeyBytes; d.bytes > wantMaxLeft {
-			t.Errorf("d.bytes after admitting outer map keys = %d, want <= %d (outer key bytes were not charged at admission)", d.bytes, wantMaxLeft)
-		}
-
-		makeArgs := func(innerVal int) map[string]any {
-			m := maps.Clone(outer)
-			inner := commonPrefixKeys(2, 40<<10)
-			inner["v"] = innerVal
-			m["a"] = inner
-			return m
-		}
-		a1 := makeArgs(1)
-		a2 := makeArgs(2)
-		d1, trunc1 := boundedArgsDigest(a1)
-		_, trunc2 := boundedArgsDigest(a2)
-		if !trunc1 || !trunc2 {
-			t.Fatalf("nested maps exceeding combined key byte budget: truncated = (%v, %v), want (true, true)", trunc1, trunc2)
-		}
-		if dRepeat, _ := boundedArgsDigest(a1); dRepeat != d1 {
-			t.Errorf("truncated nested map digest not deterministic: %d != %d", dRepeat, d1)
-		}
-		id1, _ := toolCallIdentityOf(context.Background(), a1)
-		id2, _ := toolCallIdentityOf(context.Background(), a2)
-		if id1.sameArgs(id2) {
-			t.Error("sameArgs() = true on truncated nested maps with distinct inner values, want false")
-		}
-	})
-
-	t.Run("deeply_nested_maps_past_depth_bound_are_truncated", func(t *testing.T) {
-		buildDeep := func(depth, leaf int) map[string]any {
-			cur := map[string]any{"leaf": leaf}
-			for range depth {
-				cur = map[string]any{"next": cur}
-			}
-			return cur
-		}
-		// Exact 32-level container boundary (args + 31 nested maps = 32 levels) hashes in full.
-		atBound1 := buildDeep(31, 1)
-		atBound2 := buildDeep(31, 1)
-		db1, truncBound := boundedArgsDigest(atBound1)
-		db2, _ := boundedArgsDigest(atBound2)
-		if truncBound || db1 != db2 {
-			t.Fatalf("32-level map chain: truncated=%v digests=(%d,%d), want false and equal", truncBound, db1, db2)
-		}
-
-		// 33-level container chain (32 nested maps inside args) hits the documented 32-level depth cap.
-		pastBound1 := buildDeep(32, 1)
-		pastBound2 := buildDeep(32, 2)
-		dp1, truncPast1 := boundedArgsDigest(pastBound1)
-		_, truncPast2 := boundedArgsDigest(pastBound2)
-		if !truncPast1 || !truncPast2 {
-			t.Fatalf("33-level map chain: truncated = (%v, %v), want (true, true)", truncPast1, truncPast2)
-		}
-		if dpRepeat, _ := boundedArgsDigest(pastBound1); dpRepeat != dp1 {
-			t.Errorf("33-level map digest not deterministic: %d != %d", dpRepeat, dp1)
-		}
-		id1, _ := toolCallIdentityOf(context.Background(), pastBound1)
-		id2, _ := toolCallIdentityOf(context.Background(), pastBound2)
-		if id1.sameArgs(id2) {
-			t.Error("sameArgs() = true on depth-truncated maps with distinct leaves, want false")
-		}
-	})
-
-	t.Run("deeply_nested_slices_and_arrays_past_depth_bound_are_truncated", func(t *testing.T) {
-		buildDeepSlices := func(nestedSlices, leaf int) map[string]any {
-			var cur any = leaf
-			for range nestedSlices {
-				cur = []any{cur}
-			}
-			return map[string]any{"items": cur}
-		}
-		// Outer args map (1) + 31 nested slices = 32 container levels: hashed in full.
-		sBound1, sTruncBound := boundedArgsDigest(buildDeepSlices(31, 1))
-		sBound2, _ := boundedArgsDigest(buildDeepSlices(31, 1))
-		if sTruncBound || sBound1 != sBound2 {
-			t.Fatalf("32-level slice chain: truncated=%v digests=(%d,%d), want false and equal", sTruncBound, sBound1, sBound2)
-		}
-		// Outer args map (1) + 32 nested slices = 33 container levels: truncated at depth 32.
-		sp1 := buildDeepSlices(32, 1)
-		sp2 := buildDeepSlices(32, 2)
-		sd1, sTruncPast1 := boundedArgsDigest(sp1)
-		_, sTruncPast2 := boundedArgsDigest(sp2)
-		if !sTruncPast1 || !sTruncPast2 {
-			t.Fatalf("33-level slice chain: truncated = (%v, %v), want (true, true)", sTruncPast1, sTruncPast2)
-		}
-		if sdRepeat, _ := boundedArgsDigest(sp1); sdRepeat != sd1 {
-			t.Errorf("33-level slice digest not deterministic: %d != %d", sdRepeat, sd1)
-		}
-		sid1, _ := toolCallIdentityOf(context.Background(), sp1)
-		sid2, _ := toolCallIdentityOf(context.Background(), sp2)
-		if sid1.sameArgs(sid2) {
-			t.Error("sameArgs() = true on depth-truncated slices with distinct leaves, want false")
-		}
-
-		buildDeepArrays := func(nestedArrays, leaf int) map[string]any {
-			var cur any = leaf
-			for range nestedArrays {
-				cur = [1]any{cur}
-			}
-			return map[string]any{"arr": cur}
-		}
-		aBound1, aTruncBound := boundedArgsDigest(buildDeepArrays(31, 1))
-		aBound2, _ := boundedArgsDigest(buildDeepArrays(31, 1))
-		if aTruncBound || aBound1 != aBound2 {
-			t.Fatalf("32-level array chain: truncated=%v digests=(%d,%d), want false and equal", aTruncBound, aBound1, aBound2)
-		}
-		ap1 := buildDeepArrays(32, 1)
-		ap2 := buildDeepArrays(32, 2)
-		_, aTruncPast1 := boundedArgsDigest(ap1)
-		_, aTruncPast2 := boundedArgsDigest(ap2)
-		if !aTruncPast1 || !aTruncPast2 {
-			t.Fatalf("33-level array chain: truncated = (%v, %v), want (true, true)", aTruncPast1, aTruncPast2)
-		}
-		aid1, _ := toolCallIdentityOf(context.Background(), ap1)
-		aid2, _ := toolCallIdentityOf(context.Background(), ap2)
-		if aid1.sameArgs(aid2) {
-			t.Error("sameArgs() = true on depth-truncated arrays with distinct leaves, want false")
-		}
-	})
-}
-
-func TestTaskDeltaRef(t *testing.T) {
-	if !(taskDeltaRef{}).empty() {
-		t.Error("zero taskDeltaRef.empty() = false, want true")
-	}
-	if (taskDeltaRef{ptr: 1}).empty() {
-		t.Error("taskDeltaRef{ptr: 1}.empty() = true, want false")
-	}
-	if (taskDeltaRef{m: map[string]any{}}).empty() {
-		t.Error("taskDeltaRef{m: empty map}.empty() = true, want false")
-	}
-
-	m := map[string]any{"k": "v"}
-	wantPtr := mapPtr(m)
-	if wantPtr == 0 {
-		t.Fatal("mapPtr(non-nil) = 0, want non-zero")
-	}
-	if got := mapPtr(nil); got != 0 {
-		t.Errorf("mapPtr(nil) = %#x, want 0", got)
-	}
-
-	direct := taskDeltaRef{m: m, ptr: wantPtr + 1}
-	if direct.addr() != wantPtr {
-		t.Errorf("direct.addr() = %#x, want %#x from m", direct.addr(), wantPtr)
-	}
-	if !direct.matches(wantPtr) {
-		t.Errorf("direct.matches(%#x) = false, want true", wantPtr)
-	}
-	if direct.matches(0) || direct.matches(wantPtr+1) {
-		t.Error("direct.matches(0 or wrong ptr) = true, want false")
-	}
-
-	ptrOnly := taskDeltaRef{ptr: wantPtr}
-	if ptrOnly.addr() != wantPtr || !ptrOnly.matches(wantPtr) || ptrOnly.matches(0) {
-		t.Errorf("ptrOnly addr/matches failed: addr=%#x want=%#x", ptrOnly.addr(), wantPtr)
-	}
-	if (taskDeltaRef{}).matches(0) {
-		t.Error("empty taskDeltaRef.matches(0) = true, want false")
-	}
-
-	t.Run("toolContextTaskDeltaRef", func(t *testing.T) {
-		var nilCtx context.Context
-		if got := toolContextTaskDeltaRef(nilCtx, "c0"); !got.empty() {
-			t.Errorf("toolContextTaskDeltaRef(nil) = %+v, want empty", got)
-		}
-		noDeltaCustom := &privateActionsToolCtx{
-			mockInvocationContext: &mockInvocationContext{ctx: context.Background()},
-			stable:                &session.EventActions{},
-		}
-		if got := toolContextTaskDeltaRef(noDeltaCustom, "c1"); !got.empty() {
-			t.Errorf("toolContextTaskDeltaRef(nil StateDelta) = %+v, want empty", got)
-		}
-		ic := unwrapTestInvocationCtx{Context: context.Background()}
-		acts := &session.EventActions{StateDelta: map[string]any{"x": 1}}
-		toolCtx := agent.NewToolContext(ic, "c2", acts, nil)
-		directRef := toolContextTaskDeltaRef(toolCtx, "c2")
-		if directRef.empty() || directRef.call != "c2" || directRef.pinned != nil || !directRef.matches(mapPtr(acts.StateDelta)) {
-			t.Errorf("direct toolContextTaskDeltaRef = %+v, want call=c2, pinned=nil, matching StateDelta", directRef)
-		}
-		wrapped := context.WithoutCancel(toolCtx)
-		wrappedRef := toolContextTaskDeltaRef(wrapped, "c3")
-		if wrappedRef.empty() || wrappedRef.call != "c3" || wrappedRef.pinned == nil || wrappedRef.m == nil || !wrappedRef.matches(mapPtr(acts.StateDelta)) {
-			t.Errorf("wrapped toolContextTaskDeltaRef = %+v, want call=c3, non-nil m and pinned, matching StateDelta", wrappedRef)
-		}
-
-		// Replacing StateDelta on a wrapped context (WithoutCancel or CallbackContext)
-		// must keep the captured map alive so GC cannot recycle its address.
-		for _, tc := range []struct {
-			name string
-			wrap func(*session.EventActions) context.Context
-		}{
-			{
-				name: "WithoutCancel",
-				wrap: func(a *session.EventActions) context.Context {
-					return context.WithoutCancel(agent.NewToolContext(ic, "c-gc", a, nil))
-				},
-			},
-			{
-				name: "CallbackContext",
-				wrap: func(a *session.EventActions) context.Context {
-					return agent.NewCallbackContext(ic, a)
-				},
-			},
-			{
-				name: "WithoutCancelCallbackContext",
-				wrap: func(a *session.EventActions) context.Context {
-					return context.WithoutCancel(agent.NewCallbackContext(ic, a))
-				},
-			},
-		} {
-			t.Run(tc.name+"_retains_replaced_StateDelta", func(t *testing.T) {
-				actsLocal := &session.EventActions{StateDelta: map[string]any{"orig": 1}}
-				origPtr := mapPtr(actsLocal.StateDelta)
-				ref := toolContextTaskDeltaRef(tc.wrap(actsLocal), "c-gc")
-				if ref.empty() || ref.m == nil || !ref.matches(origPtr) {
-					t.Fatalf("ref = %+v, want non-empty with retained map matching %#x", ref, origPtr)
-				}
-				// Overwrite StateDelta so only ref retains the original map.
-				actsLocal.StateDelta = map[string]any{"replaced": 2}
-				for range 5 {
-					runtime.GC()
-				}
-				for i := range 2000 {
-					fresh := map[string]any{"i": i}
-					if ref.matches(mapPtr(fresh)) {
-						t.Fatalf("new map at iteration %d recycled address %#x of replaced StateDelta", i, ref.addr())
-					}
-				}
-				if !ref.matches(origPtr) || ref.m["orig"] != 1 {
-					t.Errorf("retained map corrupted after StateDelta replacement and GC: matches=%v val=%v", ref.matches(origPtr), ref.m["orig"])
-				}
-				runtime.KeepAlive(actsLocal)
-			})
-		}
-	})
-}
-
-type panicActionsToolCtx struct {
-	*mockInvocationContext
-}
-
-func (panicActionsToolCtx) Actions() *session.EventActions {
-	panic("boom")
-}
-
-type zeroSizeTestCtx struct{}
-
-var _ context.Context = (*zeroSizeTestCtx)(nil)
-
-func (*zeroSizeTestCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (*zeroSizeTestCtx) Done() <-chan struct{}       { return nil }
-func (*zeroSizeTestCtx) Err() error                  { return nil }
-func (*zeroSizeTestCtx) Value(any) any               { return nil }
-
-func TestToolCallIdentity(t *testing.T) {
-	idZero := toolCallIdentity{}
-	if idZero.hasActions() || idZero.hasAttemptIdentity() {
-		t.Errorf("zero toolCallIdentity hasActions=%v hasAttemptIdentity=%v, want both false", idZero.hasActions(), idZero.hasAttemptIdentity())
-	}
-	if idZero.sameContext(idZero) {
-		t.Error("zero toolCallIdentity.sameContext(zero) = true, want false")
-	}
-
-	var nilCtx context.Context
-	nilID, nilDelta := toolCallIdentityOf(nilCtx, map[string]any{"a": 1})
-	nilID2, _ := toolCallIdentityOf(nilCtx, map[string]any{"a": 1})
-	if nilID.hasAttemptIdentity() || !nilDelta.empty() {
-		t.Errorf("toolCallIdentityOf(nil) = (%+v, %+v), want no attempt identity and empty delta", nilID, nilDelta)
-	}
-	if nilID.sameContext(nilID2) {
-		t.Error("sameContext(nilCtx, nilCtx) = true, want false")
-	}
-
-	// Same-type value contexts without EventActions have no attempt identity
-	// and must return false from sameContext.
-	type valueOnlyCtx struct {
-		context.Context
-		id int
-	}
-	vCtx1 := valueOnlyCtx{Context: context.Background(), id: 1}
-	vCtx2 := valueOnlyCtx{Context: context.Background(), id: 2}
-	vID1, _ := toolCallIdentityOf(vCtx1, nil)
-	vID2, _ := toolCallIdentityOf(vCtx2, nil)
-	if vID1.hasAttemptIdentity() || vID2.hasAttemptIdentity() {
-		t.Fatalf("valueOnlyCtx hasAttemptIdentity = (%v, %v), want (false, false)", vID1.hasAttemptIdentity(), vID2.hasAttemptIdentity())
-	}
-	if vID1.sameContext(vID2) || vID1.sameContext(vID1) {
-		t.Error("sameContext returned true for value-type contexts without EventActions")
-	}
-
-	ic := unwrapTestInvocationCtx{Context: context.Background()}
-	acts1 := &session.EventActions{StateDelta: map[string]any{"k": 1}}
-	acts2 := &session.EventActions{StateDelta: map[string]any{"k": 2}}
-	tctx1 := agent.NewToolContext(ic, "call-1", acts1, nil)
-	tctx2 := agent.NewToolContext(ic, "call-2", acts2, nil)
-
-	id1, d1 := toolCallIdentityOf(tctx1, map[string]any{"q": "hi"})
-	id1Again, _ := toolCallIdentityOf(tctx1, map[string]any{"q": "hi"})
-	id2, _ := toolCallIdentityOf(tctx2, map[string]any{"q": "hi"})
-	if !id1.hasActions() || !id1.hasAttemptIdentity() || d1.empty() {
-		t.Fatalf("toolCallIdentityOf(toolCtx) = (%+v, %+v), want actions, attempt identity, and non-empty delta", id1, d1)
-	}
-	if !id1.sameContext(id1Again) || !id1.sameArgs(id1Again) {
-		t.Error("same toolContext and args should satisfy sameContext and sameArgs")
-	}
-	if id1.sameContext(id2) {
-		t.Error("distinct toolContext pointers with distinct EventActions should not match sameContext")
-	}
-
-	// Callback context wrapped in WithoutCancel uses actionsPtr + pinnedCtx instead of weak EventActions.
-	cbCtx := context.WithoutCancel(agent.NewCallbackContext(ic, acts1))
-	cbID1, cbDelta := toolCallIdentityOf(cbCtx, map[string]any{"q": "hi"})
-	cbID2, _ := toolCallIdentityOf(cbCtx, map[string]any{"q": "hi"})
-	if !cbID1.hasActions() || cbID1.hasWeakAct || cbDelta.empty() || cbDelta.pinned == nil {
-		t.Fatalf("wrapped callbackContext identity = (%+v, %+v), want actionsPtr without weak and pinned delta", cbID1, cbDelta)
-	}
-	if !cbID1.sameContext(cbID2) {
-		t.Error("same wrapped callbackContext should satisfy sameContext")
-	}
-	if id1.sameContext(cbID1) {
-		t.Error("toolContext and wrapped callbackContext should not match sameContext")
-	}
-
-	// Verify weak.Pointer eviction causes sameContext to return false once EventActions is collected.
-	weakID := func() toolCallIdentity {
-		ephemeral := &privateActionsToolCtx{
-			mockInvocationContext: &mockInvocationContext{ctx: context.Background()},
-			stable:                &session.EventActions{},
-		}
-		id, _ := toolCallIdentityOf(ephemeral, nil)
-		return id
-	}()
-	for range 5 {
-		runtime.GC()
-	}
-	if weakID.sameContext(weakID) {
-		t.Error("sameContext returned true after weak EventActions was collected")
-	}
-
-	// Non-weak wrapped EventActions with nil/cleared StateDelta must remain
-	// pinned by toolCallIdentity and unwrapToolContextActions so GC cannot
-	// collect the EventActions and reuse its address.
-	pinnedID, weakClearedActs := func() (toolCallIdentity, weak.Pointer[session.EventActions]) {
-		acts := &session.EventActions{StateDelta: map[string]any{"temp": 1}}
-		tctx := agent.NewToolContext(ic, "call-cleared", acts, nil)
-		// Clear StateDelta after construction, as a tool clearing its delta.
-		acts.StateDelta = nil
-		wrapped := context.WithoutCancel(tctx)
-		ap, directActs, delta, pinned := unwrapToolContextActions(wrapped)
-		if ap == 0 || directActs != nil || !delta.empty() || pinned == nil {
-			t.Fatalf("unwrapToolContextActions(wrapped nil StateDelta) = (%#x, %p, %+v, %v), want non-zero ap, nil directActs, empty delta, non-nil pinned", ap, directActs, delta, pinned)
-		}
-		id, idDelta := toolCallIdentityOf(wrapped, nil)
-		if id.hasWeakAct || id.actionsPtr == 0 || id.pin == nil || !idDelta.empty() {
-			t.Fatalf("wrapped cleared-StateDelta identity = (%+v, %+v), want non-weak actionsPtr with pin and empty delta", id, idDelta)
-		}
-		return id, weak.Make(acts)
-	}()
-	for range 5 {
-		runtime.GC()
-	}
-	if weakClearedActs.Value() == nil {
-		t.Fatal("wrapped EventActions with nil StateDelta was collected while toolCallIdentity remained live")
-	}
-	if !pinnedID.sameContext(pinnedID) {
-		t.Error("pinned non-weak toolCallIdentity did not match itself")
-	}
-	runtime.KeepAlive(pinnedID)
-
-	// Pointer context without EventActions (such as context.WithValue)
-	// also pins its ctxPtr target while the identity is live.
-	ptrOnlyID, weakWrappedCtx := func() (toolCallIdentity, weak.Pointer[int]) {
-		sentinel := new(int)
-		type ptrKey struct{}
-		ctx := context.WithValue(context.Background(), ptrKey{}, sentinel)
-		id, _ := toolCallIdentityOf(ctx, nil)
-		if !id.hasAttemptIdentity() || id.ctxPtr == 0 || id.pin == nil {
-			t.Fatalf("pointer-only context identity = %+v, want ctxPtr != 0 and pin != nil", id)
-		}
-		return id, weak.Make(sentinel)
-	}()
-	for range 5 {
-		runtime.GC()
-	}
-	if weakWrappedCtx.Value() == nil {
-		t.Fatal("pointer-only context target was collected while toolCallIdentity remained live")
-	}
-	if !ptrOnlyID.sameContext(ptrOnlyID) {
-		t.Error("pinned pointer-only toolCallIdentity did not match itself")
-	}
-	runtime.KeepAlive(ptrOnlyID)
-
-	// WithAgentTimeout copies commonContext while sharing its live EventActions;
-	// omitting ctxPtr/ctxTyp on the Actions()-bearing branch makes it match the
-	// underlying call's identity, while distinct EventActions still differ.
-	timedToolCtx, cancelTimed := tctx1.WithAgentTimeout(time.Minute)
-	defer cancelTimed()
-	timedID, _ := toolCallIdentityOf(timedToolCtx, map[string]any{"q": "hi"})
-	if id1.ctxPtr != 0 || id1.ctxTyp != nil || timedID.ctxPtr != 0 || timedID.ctxTyp != nil {
-		t.Errorf("Actions()-bearing identity recorded ctxPtr/ctxTyp: id1=(%#x,%v) timed=(%#x,%v)", id1.ctxPtr, id1.ctxTyp, timedID.ctxPtr, timedID.ctxTyp)
-	}
-	if !id1.sameContext(timedID) || !timedID.sameContext(id1) {
-		t.Error("WithAgentTimeout context sharing live EventActions should match sameContext")
-	}
-	if timedID.sameContext(id2) {
-		t.Error("WithAgentTimeout context should not match distinct EventActions")
-	}
-
-	// Zero-size pointer contexts without EventActions share runtime.zerobase, so
-	// they must not record a pointer identity or match via sameContext.
-	z1 := &zeroSizeTestCtx{}
-	z2 := &zeroSizeTestCtx{}
-	if reflect.ValueOf(z1).Pointer() != reflect.ValueOf(z2).Pointer() {
-		t.Fatalf("expected zero-size pointers to share runtime.zerobase")
-	}
-	zID1, _ := toolCallIdentityOf(z1, nil)
-	zID2, _ := toolCallIdentityOf(z2, nil)
-	if zID1.hasAttemptIdentity() || zID2.hasAttemptIdentity() || zID1.ctxPtr != 0 || zID2.ctxPtr != 0 {
-		t.Errorf("zero-size pointer contexts should have no attempt identity: z1=%+v z2=%+v", zID1, zID2)
-	}
-	if zID1.sameContext(zID2) || zID1.sameContext(zID1) {
-		t.Error("zero-size pointer contexts must not match via sameContext")
-	}
-
-	// Two pointer contexts of different types at the same address (&outer vs
-	// &outer.embedded at offset 0, without Actions()) must not match sameContext.
-	type embeddedCtx struct{ context.Context }
-	type outerCtx struct {
-		embeddedCtx
-		tag int
-	}
-	outer := outerCtx{embeddedCtx: embeddedCtx{Context: context.Background()}, tag: 1}
-	outerID, _ := toolCallIdentityOf(&outer, nil)
-	embID, _ := toolCallIdentityOf(&outer.embeddedCtx, nil)
-	if !outerID.hasAttemptIdentity() || !embID.hasAttemptIdentity() {
-		t.Fatalf("expected attempt identity for &outer and &outer.embeddedCtx")
-	}
-	if outerID.ctxPtr != embID.ctxPtr {
-		t.Fatalf("expected &outer (%#x) and &outer.embeddedCtx (%#x) to share address at offset 0", outerID.ctxPtr, embID.ctxPtr)
-	}
-	if outerID.sameContext(embID) || embID.sameContext(outerID) {
-		t.Error("&outer and &outer.embeddedCtx at same address must not match sameContext")
-	}
-
-	// Recycled context address with shared EventActions: because ctxPtr is not
-	// recorded on the Actions()-bearing branch, identity depends only on live
-	// EventActions equality, never on a recycled wrapper address.
-	sharedActs := &session.EventActions{StateDelta: map[string]any{"shared": true}}
-	recycledID1 := func() toolCallIdentity {
-		c := &privateActionsToolCtx{
-			mockInvocationContext: &mockInvocationContext{ctx: context.Background()},
-			stable:                sharedActs,
-		}
-		id, _ := toolCallIdentityOf(c, nil)
-		return id
-	}()
-	for range 5 {
-		runtime.GC()
-	}
-	otherActs := &session.EventActions{StateDelta: map[string]any{"other": true}}
-	for range 2000 {
-		c := &privateActionsToolCtx{
-			mockInvocationContext: &mockInvocationContext{ctx: context.Background()},
-			stable:                otherActs,
-		}
-		idOther, _ := toolCallIdentityOf(c, nil)
-		if recycledID1.sameContext(idOther) {
-			t.Fatal("recycled context address with distinct EventActions falsely matched sameContext")
-		}
-	}
-}
-
-func TestTraceManager_UnwrapContext_EdgeCases(t *testing.T) {
-	var nilCtx context.Context
-	if ap, acts, delta, pinned := unwrapToolContextActions(nilCtx); ap != 0 || acts != nil || !delta.empty() || pinned != nil {
-		t.Errorf("unwrapToolContextActions(nil) = (%#x, %p, %+v, %v), want zeros", ap, acts, delta, pinned)
-	}
-
-	pCtx := panicActionsToolCtx{mockInvocationContext: &mockInvocationContext{ctx: context.Background()}}
-	if ap, acts, delta, pinned := unwrapToolContextActions(pCtx); ap != 0 || acts != nil || !delta.empty() || pinned != nil {
-		t.Errorf("unwrapToolContextActions(panicActions) = (%#x, %p, %+v, %v), want zeros", ap, acts, delta, pinned)
-	}
-
-	// Build a standard-library context chain deeper than 8 wrappers to trigger
-	// stackSeen -> seen map promotion in unwrapToolContextActions.
-	ic := unwrapTestInvocationCtx{Context: context.Background()}
-	acts := &session.EventActions{StateDelta: map[string]any{"deep": true}}
-	var ctx context.Context = agent.NewToolContext(ic, "c-deep", acts, nil)
-	for i := range 12 {
-		ctx = context.WithValue(ctx, unwrapTestKey{}, i)
-	}
-	ap, gotActs, delta, pinned := unwrapToolContextActions(ctx)
-	if ap == 0 || gotActs != nil || delta.empty() || pinned == nil {
-		t.Errorf("deep WithValue unwrap = (%#x, %p, %+v, %v), want non-zero ap, nil acts, non-empty delta, pinnedCtx", ap, gotActs, delta, pinned)
-	}
-
-	// Exceeding the 64-step limit stops cleanly with zero values.
-	tooDeep := ctx
-	for i := range 70 {
-		tooDeep = context.WithValue(tooDeep, unwrapTestKey{}, i)
-	}
-	if ap2, acts2, delta2, pinned2 := unwrapToolContextActions(tooDeep); ap2 != 0 || acts2 != nil || !delta2.empty() || pinned2 != nil {
-		t.Errorf("over-64-step unwrap = (%#x, %p, %+v, %v), want zeros", ap2, acts2, delta2, pinned2)
-	}
-
-	// A commonContext with nil EventActions (agent.Promote, agent.NewContext)
-	// owns no actions of its own and stops rather than falling through to an
-	// enclosing toolContext's EventActions or StateDelta, matching commonContext.Actions().
-	toolCtx := agent.NewToolContext(ic, "c-parent", acts, nil)
-	for _, tc := range []struct {
-		name string
-		ctx  context.Context
-	}{
-		{name: "Promote(toolCtx)", ctx: agent.Promote(toolCtx)},
-		{name: "NewContext(toolCtx)", ctx: agent.NewContext(toolCtx)},
-		{name: "WithoutCancel(Promote(toolCtx))", ctx: context.WithoutCancel(agent.Promote(toolCtx))},
-	} {
-		if ap, gotActs, delta, pinned := unwrapToolContextActions(tc.ctx); ap != 0 || gotActs != nil || !delta.empty() || pinned != nil {
-			t.Errorf("%s unwrap = (%#x, %p, %+v, %v), want zeros (no ancestor fallthrough)", tc.name, ap, gotActs, delta, pinned)
-		}
-		if d := toolContextTaskDeltaRef(tc.ctx, "c-child"); !d.empty() {
-			t.Errorf("%s toolContextTaskDeltaRef = %+v, want empty", tc.name, d)
-		}
-	}
-
-	// Contrast with WithAgentTimeout on toolCtx, which copies the commonContext
-	// and preserves its non-nil actions.
-	timedToolCtx, cancelTimed := toolCtx.WithAgentTimeout(time.Minute)
-	defer cancelTimed()
-	if ap, gotActs, delta, pinned := unwrapToolContextActions(timedToolCtx); ap == 0 || gotActs != acts || delta.empty() || pinned != nil {
-		t.Errorf("WithAgentTimeout(toolCtx) unwrap = (%#x, %p, %+v, %v), want parent acts and direct StateDelta", ap, gotActs, delta, pinned)
-	}
-}
-
-func TestBoundedArgsDigest_AdditionalTypesAndEdges(t *testing.T) {
-	// Exercise scalar kinds, -0.0 normalization, nil containers, byte arrays,
-	// cyclic slices, node budget exhaustion in hashMapKey, and distinct types
-	// with identical Type().String() in sortedMapKeys.
-	dNegZero, t1 := boundedArgsDigest(map[string]any{"f": math.Copysign(0, -1)})
-	dPosZero, t2 := boundedArgsDigest(map[string]any{"f": 0.0})
-	if t1 || t2 || dNegZero != dPosZero {
-		t.Errorf("-0.0 vs +0.0: (%d,%v) vs (%d,%v), want equal untruncated", dNegZero, t1, dPosZero, t2)
-	}
-
-	var nilSlice []any
-	var nilMap map[string]any
-	var nilPtr *int
-	byteArr := [4]byte{'a', 'b', 'c', 'd'}
-	cyclicSlice := make([]any, 1)
-	cyclicSlice[0] = cyclicSlice
-
-	scalars := map[string]any{
-		"bt":       true,
-		"bf":       false,
-		"i8":       int8(-3),
-		"u64":      uint64(99),
-		"f32":      float32(1.5),
-		"c64":      complex64(1 + 2i),
-		"c128":     complex128(3 - 4i),
-		"nil":      nil,
-		"nilSlice": nilSlice,
-		"nilMap":   nilMap,
-		"byteArr":  byteArr,
-		"nilIFKey": map[any]any{nil: 1, "s": 2},
-	}
-	dScalars1, truncScalars := boundedArgsDigest(scalars)
-	dScalars2, _ := boundedArgsDigest(scalars)
-	if truncScalars || dScalars1 != dScalars2 {
-		t.Errorf("scalars digest = (%d,%v) vs (%d), want untruncated and deterministic", dScalars1, truncScalars, dScalars2)
-	}
-
-	// Cyclic slice marks truncated and stays deterministic.
-	dCycSlice1, truncCycSlice1 := boundedArgsDigest(map[string]any{"cycSlice": cyclicSlice})
-	dCycSlice2, truncCycSlice2 := boundedArgsDigest(map[string]any{"cycSlice": cyclicSlice})
-	if !truncCycSlice1 || !truncCycSlice2 || dCycSlice1 != dCycSlice2 {
-		t.Errorf("cyclic slice digest = (%d,%v) vs (%d,%v), want truncated and deterministic", dCycSlice1, truncCycSlice1, dCycSlice2, truncCycSlice2)
-	}
-
-	// Nil typed pointer and channel trigger opaque truncation.
-	if _, trunc := boundedArgsDigest(map[string]any{"np": nilPtr}); !trunc {
-		t.Error("nil typed pointer should mark digest truncated")
-	}
-	if _, trunc := boundedArgsDigest(map[string]any{"ch": make(chan int)}); !trunc {
-		t.Error("channel should mark digest truncated")
-	}
-
-	// Exhaust node budget across >1024 small values (covering d.nodes <= 0 in hash and hashMapKey).
-	many := make(map[string]any, 16)
-	for i := range 16 {
-		sub := make(map[string]any, 100)
-		for j := range 100 {
-			sub[fmt.Sprintf("k%02d", j)] = j
-		}
-		many[fmt.Sprintf("g%02d", i)] = sub
-	}
-	if _, trunc := boundedArgsDigest(many); !trunc {
-		t.Error("map with >1024 scalar nodes should mark digest truncated")
-	}
-
-	dKeyExhaust := argsDigester{nodes: 2, bytes: maxDigestBytes}
-	dKeyExhaust.hash(reflect.ValueOf(map[string]any{"a": 1, "b": 2}))
-	if !dKeyExhaust.truncated {
-		t.Error("exhausted nodes in hashMapKey should mark digest truncated")
-	}
-
-	dNilKeyExhaust := argsDigester{nodes: 1, bytes: maxDigestBytes}
-	dNilKeyExhaust.hashMapKey(reflect.ValueOf(map[any]any{nil: 1}).MapKeys()[0])
-	if dNilKeyExhaust.truncated || dNilKeyExhaust.nodes != 0 {
-		t.Errorf("hashMapKey(nil interface) truncated=%v nodes=%d, want false and 0", dNilKeyExhaust.truncated, dNilKeyExhaust.nodes)
-	}
-
-	// Two distinct named types with the same local Type().String() in different scopes.
-	makeScopedKey := func() any {
-		type sameName int
-		return sameName(1)
-	}
-	k1 := makeScopedKey()
-	k2 := func() any {
-		type sameName int
-		return sameName(1)
-	}()
-	dupTypeMap := map[any]any{k1: "one", k2: "two"}
-	if _, trunc := boundedArgsDigest(map[string]any{"m": dupTypeMap}); !trunc {
-		t.Error("distinct key types sharing Type().String() should fall back to truncated")
-	}
-}
-
-func TestBoundedArgsDigest_ReviewRegressions(t *testing.T) {
-	t.Run("type_tags_never_collide_across_distinct_values", func(t *testing.T) {
-		distinct := []struct {
-			name string
-			args map[string]any
-		}{
-			{"float_former_xor_collision", map[string]any{"x": -2.8415206140052242e-68}},
-			{"empty_any_slice", map[string]any{"x": []any{}}},
-			{"empty_byte_slice", map[string]any{"x": []byte{}}},
-			{"empty_byte_array", map[string]any{"x": [0]byte{}}},
-			{"empty_int_array", map[string]any{"x": [0]int{}}},
-			{"empty_string", map[string]any{"x": ""}},
-			{"empty_map", map[string]any{"x": map[string]any{}}},
-			{"nil_value", map[string]any{"x": nil}},
-			{"nil_slice", map[string]any{"x": []any(nil)}},
-			{"nil_map", map[string]any{"x": map[string]any(nil)}},
-			{"bool_false", map[string]any{"x": false}},
-			{"bool_true", map[string]any{"x": true}},
-			{"int_zero", map[string]any{"x": 0}},
-			{"uint_zero", map[string]any{"x": uint64(0)}},
-			{"float_zero", map[string]any{"x": 0.0}},
-			{"complex_zero", map[string]any{"x": complex128(0)}},
-			{"string_abc", map[string]any{"x": "abc"}},
-			{"byte_slice_abc", map[string]any{"x": []byte("abc")}},
-			{"byte_array_abc", map[string]any{"x": [3]byte{'a', 'b', 'c'}}},
-			{"nested_slice_1_2", map[string]any{"x": []any{1, 2}}},
-			{"nested_slice_sub_1_2", map[string]any{"x": []any{[]any{1}, 2}}},
-		}
-		seen := make(map[uint64]string, len(distinct))
-		for _, tc := range distinct {
-			d, trunc := boundedArgsDigest(tc.args)
-			if trunc {
-				t.Fatalf("%s: truncated = true, want false", tc.name)
-			}
-			if prev, exists := seen[d]; exists {
-				t.Errorf("%s collided with %s on digest %#x", tc.name, prev, d)
-			}
-			seen[d] = tc.name
-		}
-	})
-
-	t.Run("addressable_and_non_addressable_byte_arrays_match_and_differ_from_byte_slice", func(t *testing.T) {
-		arr := [3]byte{'a', 'b', 'c'}
-		// Element of [][3]byte is addressable (CanAddr() == true), while the value
-		// inside map[string]any is non-addressable (CanAddr() == false).
-		addrSlice := [][3]byte{arr}
-		if !reflect.ValueOf(addrSlice).Index(0).CanAddr() {
-			t.Fatal("expected slice element [3]byte to be addressable")
-		}
-		dFromSlice, t1 := boundedArgsDigest(map[string]any{"b": addrSlice})
-		dFromWrappedSlice, t2 := boundedArgsDigest(map[string]any{"b": []any{arr}})
-		if t1 || t2 || dFromSlice != dFromWrappedSlice {
-			t.Errorf("[][3]byte vs []any{[3]byte}: (%#x,%v) vs (%#x,%v), want equal and untruncated", dFromSlice, t1, dFromWrappedSlice, t2)
-		}
-
-		// Directly compare digesting an addressable [3]byte vs non-addressable [3]byte.
-		dAddr := argsDigester{nodes: maxDigestNodes, bytes: maxDigestBytes}
-		dAddr.hash(reflect.ValueOf(&arr).Elem())
-		dNonAddr := argsDigester{nodes: maxDigestNodes, bytes: maxDigestBytes}
-		dNonAddr.hash(reflect.ValueOf(map[string]any{"b": arr}).MapIndex(reflect.ValueOf("b")).Elem())
-		if dAddr.truncated || dNonAddr.truncated || dAddr.sum() != dNonAddr.sum() {
-			t.Errorf("addressable vs non-addressable [3]byte: (%#x,%v) vs (%#x,%v), want equal and untruncated", dAddr.sum(), dAddr.truncated, dNonAddr.sum(), dNonAddr.truncated)
-		}
-
-		dByteSlice, ts := boundedArgsDigest(map[string]any{"b": []any{[]byte("abc")}})
-		if ts || dByteSlice == dFromWrappedSlice {
-			t.Errorf("[]byte hashed equal to [3]byte (%#x, trunc=%v), want distinct", dByteSlice, ts)
-		}
-
-		// Distinct [N]byte contents must produce distinct untruncated digests in
-		// both addressable and non-addressable positions.
-		a1 := [4]byte{1, 2, 3, 4}
-		a2 := [4]byte{1, 2, 3, 5}
-		dNonAddr1, tn1 := boundedArgsDigest(map[string]any{"b": a1})
-		dNonAddr2, tn2 := boundedArgsDigest(map[string]any{"b": a2})
-		if tn1 || tn2 || dNonAddr1 == dNonAddr2 {
-			t.Errorf("distinct non-addressable [4]byte: (%#x,%v) vs (%#x,%v), want distinct untruncated digests", dNonAddr1, tn1, dNonAddr2, tn2)
-		}
-		dAddrSlice1, ta1 := boundedArgsDigest(map[string]any{"b": [][4]byte{a1}})
-		dAddrSlice2, ta2 := boundedArgsDigest(map[string]any{"b": [][4]byte{a2}})
-		if ta1 || ta2 || dAddrSlice1 == dAddrSlice2 {
-			t.Errorf("distinct addressable [4]byte: (%#x,%v) vs (%#x,%v), want distinct untruncated digests", dAddrSlice1, ta1, dAddrSlice2, ta2)
-		}
-	})
-
-	t.Run("zero_offset_subslice_hashes_identically_while_true_cycle_truncates", func(t *testing.T) {
-		parent := make([]any, 2)
-		parent[0] = "hello"
-		parent[1] = parent[:1] // non-cyclic subslice sharing backing array at offset 0
-
-		independent := []any{"hello", []any{"hello"}}
-
-		dParent, truncParent := boundedArgsDigest(map[string]any{"s": parent})
-		dIndep, truncIndep := boundedArgsDigest(map[string]any{"s": independent})
-		if truncParent || truncIndep {
-			t.Fatalf("non-cyclic zero-offset subslice truncated = (%v, %v), want (false, false)", truncParent, truncIndep)
-		}
-		if dParent != dIndep {
-			t.Errorf("zero-offset subslice digest = %#x, want %#x (equal to independent slice)", dParent, dIndep)
-		}
-
-		// A true self-referential slice cycle (same length and backing pointer)
-		// must still terminate and mark truncated.
-		selfCyc := make([]any, 2)
-		selfCyc[0] = "hello"
-		selfCyc[1] = selfCyc[:2]
-		if _, trunc := boundedArgsDigest(map[string]any{"s": selfCyc}); !trunc {
-			t.Error("true self-referential slice cycle truncated = false, want true")
-		}
-
-		// A cycle routed through a zero-offset subslice must also terminate and truncate.
-		subCyc := make([]any, 2)
-		subCyc[0] = subCyc[:1]
-		subCyc[1] = "tail"
-		if _, trunc := boundedArgsDigest(map[string]any{"s": subCyc}); !trunc {
-			t.Error("cycle through zero-offset subslice truncated = false, want true")
-		}
-	})
-
-	t.Run("oversized_inline_arrays_in_maps_truncate_without_large_allocations", func(t *testing.T) {
-		bigValMap := map[string][16777216]byte{"a": {}}
-		bigKeyMap := map[[16777216]byte]int{{}: 1}
-		nestedArrMap := map[string][2][16777216]byte{"a": {}}
-		type bigStruct struct {
-			Buf [16777216]byte
-		}
-		bigStructMap := map[string]bigStruct{"a": {Buf: [16777216]byte{1}}}
-		nestedInAny := map[string]any{"a": [2][16777216]byte{}}
-		type midStruct struct {
-			Buf [65536]byte
-		}
-		arrOfMidStructMap := map[string][256]midStruct{"a": {}}
-		arrOfMidStructInAny := map[string]any{"a": &[256]midStruct{}}
-		arrOfMidStructInAnyVal := map[string]any{"a": [256]midStruct{}}
-		pairOfMidStructMap := map[string][2]midStruct{"a": {}}
-		manyMidStructMap := make(map[string]midStruct, 20)
-		for i := range 20 {
-			manyMidStructMap[fmt.Sprintf("k%02d", i)] = midStruct{}
-		}
-		siblingMidStructMaps := make(map[string]any, 32)
-		for i := range 32 {
-			siblingMidStructMaps[fmt.Sprintf("m%02d", i)] = map[string]midStruct{"a": {}}
-		}
-
-		for _, tc := range []struct {
-			name     string
-			args     map[string]any
-			maxAlloc uint64
-		}{
-			{"big_value_map", map[string]any{"m": bigValMap}, 64 << 10},
-			{"big_key_map", map[string]any{"m": bigKeyMap}, 64 << 10},
-			{"nested_arr_map", map[string]any{"m": nestedArrMap}, 64 << 10},
-			{"big_struct_map", map[string]any{"m": bigStructMap}, 64 << 10},
-			{"nested_arr_once", nestedInAny, 64 << 10},
-			{"arr_of_mid_struct_map", map[string]any{"m": arrOfMidStructMap}, 64 << 10},
-			{"arr_of_mid_struct_pair", map[string]any{"m": pairOfMidStructMap}, 64 << 10},
-			{"arr_of_mid_struct_ptr", arrOfMidStructInAny, 64 << 10},
-			{"arr_of_mid_struct_any", arrOfMidStructInAnyVal, 64 << 10},
-			{"many_mid_struct_map", map[string]any{"m": manyMidStructMap}, 64 << 10},
-			{"sibling_mid_struct_map", siblingMidStructMaps, maxDigestBytes + (64 << 10)},
-		} {
-			var mBefore, mAfter runtime.MemStats
-			runtime.ReadMemStats(&mBefore)
-			d, trunc := boundedArgsDigest(tc.args)
-			runtime.ReadMemStats(&mAfter)
-			if !trunc {
-				t.Errorf("%s: truncated = false, want true", tc.name)
-			}
-			if d2, _ := boundedArgsDigest(tc.args); d2 != d {
-				t.Errorf("%s: truncated digest not deterministic: %d != %d", tc.name, d, d2)
-			}
-			if allocDelta := mAfter.TotalAlloc - mBefore.TotalAlloc; allocDelta > tc.maxAlloc {
-				t.Errorf("%s: TotalAlloc delta = %d bytes, want <= %d (must not copy inline array/struct)", tc.name, allocDelta, tc.maxAlloc)
-			}
-		}
-
-		// Empty map with oversized inline value type has zero entries and is not truncated.
-		if _, trunc := boundedArgsDigest(map[string]any{"m": map[string][16777216]byte{}}); trunc {
-			t.Error("empty map[string][16777216]byte truncated = true, want false")
-		}
-	})
-
-	t.Run("type_string_charges_byte_budget", func(t *testing.T) {
-		type longNamedStructForBudget struct {
-			X int
-		}
-		d := argsDigester{nodes: 100, bytes: 4}
-		d.hash(reflect.ValueOf(longNamedStructForBudget{X: 1}))
-		if !d.truncated || d.bytes != 0 {
-			t.Errorf("type string past byte budget: truncated=%v bytes=%d, want true and 0", d.truncated, d.bytes)
-		}
-
-		// Huge unnamed struct (> 64 fields) skips computing full Type().String() and zeroes budget.
-		fields := make([]reflect.StructField, 80)
-		for i := range fields {
-			fields[i] = reflect.StructField{Name: fmt.Sprintf("F%d", i), Type: reflect.TypeFor[int]()}
-		}
-		hugeStruct := reflect.New(reflect.StructOf(fields)).Elem()
-		dHuge := argsDigester{nodes: 100, bytes: maxDigestBytes}
-		dHuge.hash(hugeStruct)
-		if !dHuge.truncated || dHuge.bytes != 0 {
-			t.Errorf("huge unnamed struct: truncated=%v bytes=%d, want true and 0", dHuge.truncated, dHuge.bytes)
-		}
-
-		// Zero remaining node budget for a struct (or small struct array) must
-		// exceed immediately with a single budget tag instead of iterating elements.
-		type smallStruct struct{ X int }
-		if exceeds, _, _ := typeDigestCost(reflect.TypeFor[smallStruct](), 0, maxDigestBytes, 0); !exceeds {
-			t.Error("typeDigestCost(smallStruct, remNodes=0) = false, want true")
-		}
-		dIntArr := argsDigester{nodes: 1, bytes: maxDigestBytes}
-		dIntArr.hash(reflect.ValueOf([2]int{}))
-		dStructArr := argsDigester{nodes: 1, bytes: maxDigestBytes}
-		dStructArr.hash(reflect.ValueOf([2]smallStruct{}))
-		if !dStructArr.truncated || dStructArr.sum() != dIntArr.sum() {
-			t.Errorf("struct array at zero remaining nodes: truncated=%v sum=%#x, want true and %#x", dStructArr.truncated, dStructArr.sum(), dIntArr.sum())
-		}
-	})
 }
