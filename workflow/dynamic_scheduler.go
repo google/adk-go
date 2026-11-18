@@ -317,12 +317,16 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	}
 
 	var ss agent.DynamicSubScheduler = s
+	// A failed child is not retried, so it is always on its first attempt,
+	// whatever attempt the dynamic node is on.
+	one := 1
 	delta := &agent.CommonContextDelta{
 		Path:                   &childPath,
 		RunID:                  &runID,
 		SubScheduler:           &ss,
 		OutputForAncestors:     &childAncestors,
 		InvocationContextDelta: &agent.InvocationContextDelta{Branch: &childBranch, IsolationScope: &childScope},
+		AttemptCount:           &one,
 	}
 
 	childCtx := s.parentCtx.WithDelta(delta)
