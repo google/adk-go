@@ -88,9 +88,10 @@ func NewAgentNodeWithSchemas(a agent.Agent, inputSchema, outputSchema *jsonschem
 // task agents talk to the user between replies), and cannot transfer to other
 // agents.
 //
-// It goes out as the request's response schema or, on Gemini models that
-// cannot combine tools with one, as a set_model_response tool the model is
-// told to call. That tool is a function declaration, so, as with a declared
+// It goes out as the request's response schema or as a set_model_response
+// tool when the model opts into tool-based output, or is a Gemini model that
+// cannot combine tools with a response schema. The model is told to call that
+// tool. It is a function declaration, so, as with a declared
 // OutputSchema, an agent with a Gemini built-in tool such as Google Search
 // fails on models that cannot mix built-in tools with function declarations
 // (on Gemini 1.x, before the model is called); declare an untyped node for it.

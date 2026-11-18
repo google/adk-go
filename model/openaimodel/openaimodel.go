@@ -57,6 +57,15 @@ type ClientConfig struct {
 	// [APIResponses], so a configuration written before this field existed
 	// keeps the endpoint it already used.
 	API API
+
+	// UseOutputSchemaTool makes agents send their OutputSchema (including a
+	// typed workflow node's output schema) as a set_model_response function
+	// tool instead of a native response format. Enable it for endpoints that
+	// support function calling but cannot use native structured output, either
+	// alone or together with tools. The zero value keeps native output.
+	// Task-mode agents continue to use finish_task. Direct GenerateContent
+	// calls and schemas explicitly set in GenerateContentConfig are unchanged.
+	UseOutputSchemaTool bool
 }
 
 // FinishMessageKey is the [model.LLMResponse.CustomMetadata] key under which a
@@ -94,12 +103,23 @@ func NewModel(_ context.Context, modelName string, cfg *ClientConfig) (model.LLM
 	}
 	opts = append(opts, cfg.Options...)
 	client := openai.NewClient(opts...)
+	var llm model.LLM
 	switch cfg.API {
 	case "", APIResponses:
-		return responses.New(&client, modelName), nil
+		llm = responses.New(&client, modelName)
 	case APIChatCompletions:
-		return completions.New(&client, modelName), nil
+		llm = completions.New(&client, modelName)
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnsupportedAPI, cfg.API)
 	}
+	if cfg.UseOutputSchemaTool {
+		return &outputSchemaToolModel{LLM: llm}, nil
+	}
+	return llm, nil
 }
+
+type outputSchemaToolModel struct {
+	model.LLM
+}
+
+func (*outputSchemaToolModel) UseOutputSchemaTool() bool { return true }

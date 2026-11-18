@@ -23,6 +23,11 @@ import (
 )
 
 // LLM provides the access to the underlying LLM.
+//
+// An implementation may also implement UseOutputSchemaTool() bool. Returning
+// true asks agents to use set_model_response for structured output, including
+// when no other tools are configured. Task-mode agents still use finish_task.
+// Implementations without this method retain the model-name-based defaults.
 type LLM interface {
 	Name() string
 	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error]

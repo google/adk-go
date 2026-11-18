@@ -109,6 +109,11 @@ func needOutputSchemaProcessor(state *State) bool {
 	if state.Mode == ModeTask {
 		return false
 	}
+	// Unlike Python's combo-only capability, this opt-in also covers endpoints
+	// without native structured output when no other tools are configured.
+	if m, ok := state.Model.(interface{ UseOutputSchemaTool() bool }); ok && m.UseOutputSchemaTool() {
+		return true
+	}
 	hasTools := len(state.Tools) > 0 || len(state.Toolsets) > 0
 	return hasTools && googlellm.NeedsOutputSchemaProcessor(state.Model)
 }
