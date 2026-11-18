@@ -41,8 +41,9 @@ type MCPClient interface {
 }
 
 // connectionRefresher wraps an MCP client/transport and handles automatic reconnection.
-// It implements MCPClient and transparently retries operations after reconnecting
-// when the underlying session fails.
+// It implements MCPClient. After a session failure it repairs the connection,
+// but retries only operations that are safe to repeat. CallTool is never retried
+// because a connection error does not reveal whether the server ran the tool.
 type connectionRefresher struct {
 	client    *mcp.Client
 	transport mcp.Transport
@@ -52,7 +53,11 @@ type connectionRefresher struct {
 	// own context ends without interrupting the owner. See lock.
 	mu      chan struct{}
 	session *mcp.ClientSession
-	closed  bool
+	// sessionDone closes when session's connection has ended. It lets a later
+	// call replace a session that disconnected while idle before sending a
+	// request whose outcome would otherwise be ambiguous.
+	sessionDone <-chan struct{}
+	closed      bool
 
 	// identityOnlyConnect connects sessions on identityOnlyContext(ctx)
 	// rather than ctx.
@@ -96,7 +101,7 @@ func (c *connectionRefresher) Close() error {
 		// Closing is final so failed in-flight calls cannot reconnect.
 		c.closed = true
 		session := c.session
-		c.session = nil
+		c.clearSession()
 		c.unlock()
 
 		if session != nil {
@@ -127,53 +132,62 @@ func (c *connectionRefresher) unlock() {
 	<-c.mu
 }
 
-// CallTool calls a tool on the MCP server, automatically reconnecting if needed.
+// CallTool calls a tool on the MCP server. Before sending, it replaces a cached
+// session only if the client has already observed its connection end. If the call
+// itself fails, CallTool never resends it because the server may already have
+// run the tool. It returns the call error, wrapping it with a reconnection
+// failure when the connection cannot be repaired for a later call.
 func (c *connectionRefresher) CallTool(ctx context.Context, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
-	result, _, err := withRetry(ctx, c, func(session *mcp.ClientSession) (*mcp.CallToolResult, error) {
-		return session.CallTool(ctx, params)
-	})
-	return result, err
+	session, err := c.getSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result, err := session.CallTool(ctx, params)
+	if err == nil {
+		return result, nil
+	}
+	// Unlike Python's session-terminated retry, ErrSessionMissing is ambiguous
+	// here: the Go SDK also reports it to other calls already in flight.
+	_, repairErr := c.repairConnection(ctx, err)
+	if repairErr != nil {
+		return nil, repairErr
+	}
+	return nil, err
 }
 
 // ListTools lists all available tools from the MCP server, handling pagination
 // and automatically reconnecting if needed. Per MCP spec, cursors do not persist
 // across sessions, so pagination restarts from scratch after reconnection.
 func (c *connectionRefresher) ListTools(ctx context.Context) ([]*mcp.Tool, error) {
-	var tools []*mcp.Tool
-	cursor := ""
-	hasReconnected := false
-
-	for {
-		resp, reconnected, err := withRetry(ctx, c, func(session *mcp.ClientSession) (*mcp.ListToolsResult, error) {
-			return session.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to list MCP tools: %w", err)
-		}
-		if reconnected {
-			if hasReconnected {
-				return nil, fmt.Errorf("failed to list MCP tools: connection lost again after reconnection")
+	// Keep every page of an attempt on one session, even if another caller
+	// replaces the cached session. A retry discards all pages and cursors.
+	tools, reconnected, err := withRetry(ctx, c, func(session *mcp.ClientSession) ([]*mcp.Tool, error) {
+		var tools []*mcp.Tool
+		cursor := ""
+		for {
+			resp, err := session.ListTools(ctx, &mcp.ListToolsParams{Cursor: cursor})
+			if err != nil {
+				return nil, err
 			}
-			// On reconnection, restart pagination from scratch per MCP spec.
-			hasReconnected = true
-			cursor = ""
-			tools = nil
-			continue
+			tools = append(tools, resp.Tools...)
+			if resp.NextCursor == "" {
+				return tools, nil
+			}
+			cursor = resp.NextCursor
 		}
-
-		tools = append(tools, resp.Tools...)
-
-		if resp.NextCursor == "" {
-			break
+	})
+	if err != nil {
+		if reconnected && shouldRefreshConnection(err) {
+			return nil, fmt.Errorf("failed to list MCP tools: connection lost again after reconnection: %w", err)
 		}
-		cursor = resp.NextCursor
+		return nil, fmt.Errorf("failed to list MCP tools: %w", err)
 	}
-
 	return tools, nil
 }
 
 // withRetry executes fn with the current session, and if it fails, attempts to refresh
 // the connection and retry once. Returns the result, whether a reconnection occurred, and any error.
+// Use it only for operations that are safe to repeat.
 func withRetry[T any](ctx context.Context, c *connectionRefresher, fn func(*mcp.ClientSession) (T, error)) (T, bool, error) {
 	var zero T
 
@@ -184,17 +198,29 @@ func withRetry[T any](ctx context.Context, c *connectionRefresher, fn func(*mcp.
 
 	result, err := fn(session)
 	if err != nil {
-		if !shouldRefreshConnection(err) {
+		session, err = c.repairConnection(ctx, err)
+		if err != nil {
 			return zero, false, err
-		}
-		session, refreshErr := c.refreshConnection(ctx)
-		if refreshErr != nil {
-			return zero, false, fmt.Errorf("%w (reconnection also failed: %v)", err, refreshErr)
 		}
 		result, err = fn(session)
 		return result, true, err
 	}
 	return result, false, err
+}
+
+// repairConnection refreshes the connection after opErr, an operation's
+// failure, when opErr indicates the connection is broken. It returns the new
+// session. It returns opErr itself when opErr does not call for a refresh, and
+// an error wrapping opErr when the refresh fails.
+func (c *connectionRefresher) repairConnection(ctx context.Context, opErr error) (*mcp.ClientSession, error) {
+	if !shouldRefreshConnection(opErr) {
+		return nil, opErr
+	}
+	session, err := c.refreshConnection(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w (reconnection also failed: %v)", opErr, err)
+	}
+	return session, nil
 }
 
 // shouldRefreshConnection returns true if the error indicates we should
@@ -218,7 +244,10 @@ func (c *connectionRefresher) getSession(ctx context.Context) (*mcp.ClientSessio
 		return nil, mcp.ErrConnectionClosed
 	}
 	if c.session != nil {
-		return c.session, nil
+		if !c.sessionEnded() {
+			return c.session, nil
+		}
+		c.clearSession()
 	}
 
 	session, err := c.connect(ctx)
@@ -226,7 +255,7 @@ func (c *connectionRefresher) getSession(ctx context.Context) (*mcp.ClientSessio
 		return nil, fmt.Errorf("failed to init MCP session: %w", err)
 	}
 
-	c.session = session
+	c.setSession(session)
 	return c.session, nil
 }
 
@@ -243,13 +272,17 @@ func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.Clien
 	// Ping to verify the connection is actually dead before reconnecting.
 	// This handles the case where another goroutine already reconnected.
 	if c.session != nil {
-		if err := c.session.Ping(ctx, &mcp.PingParams{}); err == nil {
-			return c.session, nil
+		if c.sessionEnded() {
+			c.clearSession()
+		} else {
+			if err := c.session.Ping(ctx, &mcp.PingParams{}); err == nil {
+				return c.session, nil
+			}
+			if err := c.session.Close(); err != nil {
+				log.Printf("failed to close MCP session: %v", err) //nolint:forbidigo // pre-slog call site
+			}
+			c.clearSession()
 		}
-		if err := c.session.Close(); err != nil {
-			log.Printf("failed to close MCP session: %v", err) //nolint:forbidigo // pre-slog call site
-		}
-		c.session = nil
 	}
 
 	session, err := c.connect(ctx)
@@ -257,8 +290,40 @@ func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.Clien
 		return nil, fmt.Errorf("failed to refresh MCP session: %w", err)
 	}
 
-	c.session = session
+	c.setSession(session)
 	return c.session, nil
+}
+
+// setSession stores session and starts observing when its connection ends. The
+// caller holds c.mu.
+func (c *connectionRefresher) setSession(session *mcp.ClientSession) {
+	done := make(chan struct{})
+	c.session = session
+	c.sessionDone = done
+	go func() {
+		_ = session.Wait()
+		// Wait only observes transport termination. Close also cancels SDK
+		// keepalive, listener, and resource-subscription work.
+		_ = session.Close()
+		close(done)
+	}()
+}
+
+// clearSession forgets the current session. The caller holds c.mu.
+func (c *connectionRefresher) clearSession() {
+	c.session = nil
+	c.sessionDone = nil
+}
+
+// sessionEnded reports whether the current session's connection has ended.
+// The caller holds c.mu and c.session is non-nil.
+func (c *connectionRefresher) sessionEnded() bool {
+	select {
+	case <-c.sessionDone:
+		return true
+	default:
+		return false
+	}
 }
 
 // connect opens a new MCP session. The caller holds c.mu.
@@ -271,8 +336,8 @@ func (c *connectionRefresher) connect(ctx context.Context) (*mcp.ClientSession, 
 	return c.client.Connect(connCtx, c.transport, nil)
 }
 
-// disconnected reports whether c has no session and no connection attempt
-// in progress.
+// disconnected reports whether c has no session or has observed its session
+// end, with no connection attempt in progress.
 func (c *connectionRefresher) disconnected() bool {
 	select {
 	case c.mu <- struct{}{}:
@@ -280,7 +345,7 @@ func (c *connectionRefresher) disconnected() bool {
 		return false
 	}
 	defer c.unlock()
-	return c.session == nil
+	return c.session == nil || c.sessionEnded()
 }
 
 var _ MCPClient = (*connectionRefresher)(nil)

@@ -17,9 +17,15 @@ package mcptoolset
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
+	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/adk/v2/agent"
@@ -177,4 +183,375 @@ func TestIdentityOnlyContextWithoutIdentity(t *testing.T) {
 	}
 	stop()
 	<-connCtx.Done()
+}
+
+func TestWithRetryDoesNotRefreshNonRefreshableError(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "1"}, nil)
+	connects := 0
+	transport := connectFunc(func(ctx context.Context) (mcp.Connection, error) {
+		connects++
+		ct, st := mcp.NewInMemoryTransports()
+		session, err := server.Connect(ctx, st, nil)
+		if err != nil {
+			return nil, err
+		}
+		t.Cleanup(func() { _ = session.Close() })
+		return ct.Connect(ctx)
+	})
+	client := newConnectionRefresher(nil, transport)
+	t.Cleanup(func() { _ = client.Close() })
+	wantErr := errors.New("operation failed")
+	calls := 0
+	_, reconnected, err := withRetry(t.Context(), client, func(*mcp.ClientSession) (*mcp.CallToolResult, error) {
+		calls++
+		return nil, wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Errorf("withRetry() error = %v, want %v", err, wantErr)
+	}
+	if reconnected {
+		t.Error("withRetry() reconnected for a non-refreshable error")
+	}
+	if calls != 1 || connects != 1 {
+		t.Errorf("after a non-refreshable error: %d calls and %d connections, want 1 each", calls, connects)
+	}
+}
+
+func TestListToolsSessionChangesBetweenPages(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		disconnects   int
+		replaceBefore bool
+	}{
+		{name: "uninterrupted pagination"},
+		{name: "observed disconnect", disconnects: 1},
+		{name: "session replaced by another call", disconnects: 1, replaceBefore: true},
+		{name: "repeated disconnects", disconnects: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			connects := 0
+			transport := connectFunc(func(ctx context.Context) (mcp.Connection, error) {
+				connects++
+				names := []string{"b1", "b2", "b3"}
+				if connects == 1 {
+					names = []string{"a1", "a2", "a3"}
+				}
+				server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "1"}, &mcp.ServerOptions{PageSize: 1})
+				for _, name := range names {
+					mcp.AddTool(server, &mcp.Tool{Name: name}, func(context.Context, *mcp.CallToolRequest, countInput) (*mcp.CallToolResult, countOutput, error) {
+						return nil, countOutput{}, nil
+					})
+				}
+				ct, st := mcp.NewInMemoryTransports()
+				ss, err := server.Connect(ctx, st, nil)
+				if err != nil {
+					return nil, err
+				}
+				t.Cleanup(func() { _ = ss.Close() })
+				return ct.Connect(ctx)
+			})
+			client := mcp.NewClient(&mcp.Implementation{Name: "test_client", Version: "1"}, nil)
+			c := newConnectionRefresher(client, transport)
+			t.Cleanup(func() { _ = c.Close() })
+			remaining := tc.disconnects
+			listed := make(map[mcp.Session]bool)
+			client.AddSendingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+				return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+					result, err := next(ctx, method, req)
+					if method != "tools/list" || err != nil {
+						return result, err
+					}
+					params := req.GetParams().(*mcp.ListToolsParams)
+					if !listed[req.GetSession()] && params.Cursor != "" {
+						t.Error("replacement session received the previous session's cursor")
+					}
+					listed[req.GetSession()] = true
+					if remaining > 0 {
+						remaining--
+						// Deliver the page only after the watcher has observed the
+						// disconnect, so the next iteration cannot race the watcher.
+						done := c.sessionDone
+						if err := req.GetSession().(*mcp.ClientSession).Close(); err != nil {
+							t.Fatal(err)
+						}
+						select {
+						case <-done:
+						case <-ctx.Done():
+							t.Fatal("session watcher did not finish")
+						}
+						if tc.replaceBefore {
+							if _, err := c.getSession(ctx); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					return result, nil
+				}
+			})
+
+			tools, err := c.ListTools(ctx)
+			if tc.disconnects > 1 {
+				if err == nil || !strings.Contains(err.Error(), "connection lost again after reconnection") {
+					t.Errorf("ListTools() error = %v, want repeated connection loss", err)
+				}
+				if !errors.Is(err, mcp.ErrConnectionClosed) {
+					t.Errorf("ListTools() error = %v, want wrapping %v", err, mcp.ErrConnectionClosed)
+				}
+				if len(tools) != 0 {
+					t.Errorf("ListTools() returned %d partial tools on failure", len(tools))
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				var names []string
+				for _, tool := range tools {
+					names = append(names, tool.Name)
+				}
+				want := []string{"b1", "b2", "b3"}
+				if tc.disconnects == 0 {
+					want = []string{"a1", "a2", "a3"}
+				}
+				if !slices.Equal(names, want) {
+					t.Error("ListTools() did not return exactly the replacement server's tools")
+				}
+			}
+			wantConnects := 2
+			if tc.disconnects == 0 {
+				wantConnects = 1
+			}
+			if connects != wantConnects {
+				t.Errorf("Connect() calls = %d, want %d", connects, wantConnects)
+			}
+		})
+	}
+}
+
+func TestListToolsErrors(t *testing.T) {
+	opErr := errors.New("listing failed")
+	for _, tc := range []struct {
+		name      string
+		firstErr  error
+		close     bool
+		wantCalls int
+	}{
+		{name: "non-refreshable", firstErr: opErr, wantCalls: 1},
+		{name: "non-refreshable after retry", firstErr: io.EOF, wantCalls: 2},
+		{name: "repair fails", firstErr: io.EOF, close: true, wantCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var executions atomic.Int32
+			transport := &serverSessionTransport{server: newCountingServer(&executions)}
+			client := mcp.NewClient(&mcp.Implementation{Name: "test_client", Version: "1"}, nil)
+			c := newConnectionRefresher(client, transport)
+			t.Cleanup(func() { _ = c.Close() })
+			calls := 0
+			client.AddSendingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+				return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+					if method != "tools/list" {
+						return next(ctx, method, req)
+					}
+					calls++
+					if tc.close {
+						_ = c.Close()
+					}
+					if calls == 1 {
+						return nil, tc.firstErr
+					}
+					return nil, opErr
+				}
+			})
+			tools, err := c.ListTools(t.Context())
+			wantErr := opErr
+			if tc.close {
+				wantErr = tc.firstErr
+			}
+			if !errors.Is(err, wantErr) {
+				t.Errorf("ListTools() error = %v, want wrapping %v", err, wantErr)
+			}
+			if tc.close && (err == nil || !strings.Contains(err.Error(), "reconnection also failed")) {
+				t.Errorf("ListTools() error = %v, want it to report the failed reconnection", err)
+			}
+			if err != nil && strings.Contains(err.Error(), "connection lost again") {
+				t.Error("ListTools() incorrectly reported repeated connection loss")
+			}
+			if len(tools) != 0 || calls != tc.wantCalls {
+				t.Errorf("ListTools() returned %d tools after %d calls, want 0 tools after %d calls", len(tools), calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+type countInput struct{}
+
+type countOutput struct{}
+
+// newCountingServer returns a server with a single tool, "count", which
+// records each execution in calls.
+func newCountingServer(calls *atomic.Int32) *mcp.Server {
+	server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "count"},
+		func(context.Context, *mcp.CallToolRequest, countInput) (*mcp.CallToolResult, countOutput, error) {
+			calls.Add(1)
+			return nil, countOutput{}, nil
+		})
+	return server
+}
+
+// serverSessionTransport connects each client to server over a fresh in-memory
+// transport and records the server side of every connection.
+type serverSessionTransport struct {
+	server   *mcp.Server
+	sessions []*mcp.ServerSession
+}
+
+func (t *serverSessionTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	ct, st := mcp.NewInMemoryTransports()
+	ss, err := t.server.Connect(ctx, st, nil)
+	if err != nil {
+		return nil, err
+	}
+	t.sessions = append(t.sessions, ss)
+	return ct.Connect(ctx)
+}
+
+// closeIdleSession ends the server side of the current connection while the
+// client is idle, as when an MCP server process exits between tool calls, and
+// waits until the client session has observed it.
+func closeIdleSession(t *testing.T, c *connectionRefresher, transport *serverSessionTransport) {
+	t.Helper()
+	_, err := c.getSession(t.Context())
+	if err != nil {
+		t.Fatalf("getSession() failed: %v", err)
+	}
+	done := c.sessionDone
+	if err := transport.sessions[len(transport.sessions)-1].Close(); err != nil {
+		t.Fatalf("Closing server session failed: %v", err)
+	}
+	<-done
+}
+
+func TestCallToolReconnectsBeforeSendingAfterIdleDisconnect(t *testing.T) {
+	var calls atomic.Int32
+	transport := &serverSessionTransport{server: newCountingServer(&calls)}
+	c := newConnectionRefresher(nil, transport)
+	t.Cleanup(func() { _ = c.Close() })
+	closeIdleSession(t, c, transport)
+
+	if _, err := c.CallTool(t.Context(), &mcp.CallToolParams{Name: "count"}); err != nil {
+		t.Fatalf("CallTool() after idle disconnect failed: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("Server tool executions = %d, want 1", got)
+	}
+	if got := len(transport.sessions); got != 2 {
+		t.Errorf("Connections = %d, want 2", got)
+	}
+}
+
+type countingLogHandler struct{ count atomic.Int32 }
+
+func (*countingLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *countingLogHandler) Handle(context.Context, slog.Record) error {
+	h.count.Add(1)
+	return nil
+}
+
+func (h *countingLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *countingLogHandler) WithGroup(string) slog.Handler { return h }
+
+func TestIdleDisconnectClosesClientSession(t *testing.T) {
+	logs := &countingLogHandler{}
+	client := mcp.NewClient(
+		&mcp.Implementation{Name: "test_client", Version: "v1.0.0"},
+		&mcp.ClientOptions{
+			Logger:                    slog.New(logs),
+			KeepAlive:                 5 * time.Millisecond,
+			KeepAliveFailureThreshold: 100,
+		},
+	)
+	server := mcp.NewServer(
+		&mcp.Implementation{Name: "test_server", Version: "v1.0.0"},
+		&mcp.ServerOptions{SupportedProtocolVersions: []string{"2025-11-25"}},
+	)
+	transport := &serverSessionTransport{server: server}
+	c := newConnectionRefresher(client, transport)
+	t.Cleanup(func() { _ = c.Close() })
+	closeIdleSession(t, c, transport)
+
+	before := logs.count.Load()
+	time.Sleep(30 * time.Millisecond)
+	if got := logs.count.Load(); got != before {
+		t.Errorf("custom client emitted %d logs after ended-session cleanup, want 0", got-before)
+	}
+}
+
+func TestCallToolReconnectionFailure(t *testing.T) {
+	var calls atomic.Int32
+	server := newCountingServer(&calls)
+	connects := 0
+	failed := &atomic.Bool{}
+	transport := connectFunc(func(ctx context.Context) (mcp.Connection, error) {
+		connects++
+		if connects > 1 {
+			return nil, errors.New("server unavailable")
+		}
+		ct, st := mcp.NewInMemoryTransports()
+		ss, err := server.Connect(ctx, st, nil)
+		if err != nil {
+			return nil, err
+		}
+		t.Cleanup(func() { _ = ss.Close() })
+		conn, err := ct.Connect(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &failCallResponseConnection{Connection: conn, failed: failed}, nil
+	})
+	c := newConnectionRefresher(nil, transport)
+	t.Cleanup(func() { _ = c.Close() })
+
+	_, err := c.CallTool(t.Context(), &mcp.CallToolParams{Name: "count"})
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("CallTool() error = %v, want one wrapping %v", err, io.EOF)
+	}
+	if err == nil || !strings.Contains(err.Error(), "reconnection also failed") {
+		t.Errorf("CallTool() error = %v, want it to report the failed reconnection", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("Server tool executions = %d, want 1", got)
+	}
+	if connects != 2 {
+		t.Errorf("Connections = %d, want 2", connects)
+	}
+}
+
+// failCallResponseConnection lets the first tools/call reach the server, then
+// drops its response to simulate a connection failure after execution.
+type failCallResponseConnection struct {
+	mcp.Connection
+	failed       *atomic.Bool
+	failNextRead atomic.Bool
+}
+
+func (c *failCallResponseConnection) Write(ctx context.Context, msg jsonrpc.Message) error {
+	if req, ok := msg.(*jsonrpc.Request); ok && req.Method == "tools/call" && c.failed.CompareAndSwap(false, true) {
+		c.failNextRead.Store(true)
+	}
+	return c.Connection.Write(ctx, msg)
+}
+
+func (c *failCallResponseConnection) Read(ctx context.Context) (jsonrpc.Message, error) {
+	msg, err := c.Connection.Read(ctx)
+	if err == nil && c.failNextRead.Swap(false) {
+		if closeErr := c.Connection.Close(); closeErr != nil {
+			return nil, closeErr
+		}
+		return nil, io.EOF
+	}
+	return msg, err
 }
