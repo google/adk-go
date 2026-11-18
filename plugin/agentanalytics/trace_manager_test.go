@@ -24449,12 +24449,24 @@ func TestRetiredCallerReadsCause(t *testing.T) {
 				tm.popAgentSpan(ctx, q) // q ends while call-q is open
 				_, p2, _ = tm.popToolSpan(ctx, q, cq, false)
 			}
-			for _, p := range append(p1, p2...) {
-				if p.agentName == "g" && errors.Is(p.err, siblingErr) {
-					return
+			formatRows := func(rows []unclosedAgentSpan) string {
+				parts := make([]string, len(rows))
+				for i, r := range rows {
+					parts[i] = fmt.Sprintf("%s (%v)", r.agentName, r.err)
 				}
+				return "[" + strings.Join(parts, ", ") + "]"
 			}
-			t.Error("no AGENT_ERROR row for g; main and the live state write one")
+			if len(p1) != 0 {
+				t.Errorf("AGENT_ERROR rows on call-1 end = %d, want none: %s", len(p1), formatRows(p1))
+			}
+			// o is on its own node path, so ending call-q, whose owner resolves to
+			// the invocation span, also ends o as a failed run.
+			wantOErr := fmt.Sprintf("agent %q execution failed before completion", "o")
+			if len(p2) != 2 ||
+				p2[0].agentName != "g" || p2[0].err != siblingErr ||
+				p2[1].agentName != "o" || p2[1].err == nil || p2[1].err.Error() != wantOErr {
+				t.Errorf("AGENT_ERROR rows on call-q end = %s, want [g (%v), o (%s)]", formatRows(p2), siblingErr, wantOErr)
+			}
 		})
 	}
 }

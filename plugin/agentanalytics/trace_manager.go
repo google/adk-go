@@ -3966,9 +3966,14 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 	}
 	if inv.isLate {
 		// Nothing can end a retired late activation anymore, so once its
-		// cause moved up, its record keeps no callback context, unless an
-		// open span or call still reaches it (see
-		// dropRetiredLateContextsLocked).
+		// cause moved up, its record keeps no callback context except for
+		// canceled and parent while an open span or call still reaches it (see
+		// dropRetiredLateContextsLocked). When the last thing reaching rec is
+		// an open tool or model call, or a span drained by a response event
+		// (see retireDrainedDescendantsLocked), nothing revisits rec to clear
+		// canceled and parent; once nothing reachable still holds rec via
+		// parent, the record is unreachable (garbage), so those leftover fields
+		// do not matter.
 		retired = append(retired, rec)
 		inv.dropRetiredLateContextsLocked(retired...)
 	}
@@ -4162,10 +4167,17 @@ func (inv *invocationTrace) purgeActivationLocked(i int, failures map[string]err
 		})
 	}
 	// In the late state, nothing can end a purged activation anymore, so
-	// once it leaves agentStack, its record keeps no callback context unless
-	// an open span or call still reaches it (see
-	// dropRetiredLateContextsLocked). Only the removed records qualify: the
-	// span that agentStack[i] runs under may still be open.
+	// once it leaves agentStack, its record keeps no callback context except
+	// for canceled and parent while an open span or call still reaches it (see
+	// dropRetiredLateContextsLocked). The purge removes every open span that
+	// runs under rec, but not an open model or tool call owned by an activation
+	// that retired earlier under rec: the call cleanup below checks only a
+	// call's direct parent span ID. When such a call is the last thing reaching
+	// rec, nothing revisits rec to clear canceled and parent; once nothing
+	// reachable still holds rec via parent, the record is unreachable
+	// (garbage), so those leftover fields do not matter. Only the removed
+	// records qualify: the span that agentStack[i] runs under may still be
+	// open.
 	var latePurged []*spanRecord
 	if inv.isLate {
 		for _, rec := range inv.agentStack[i:] {
