@@ -24,6 +24,8 @@ var (
 	ErrModelNameRequired = shared.ErrModelNameRequired
 	// ErrUnsupportedAPI is returned when ClientConfig.API names an API this package does not implement.
 	ErrUnsupportedAPI = shared.ErrUnsupportedAPI
+	// ErrInvalidConfig is returned when a ClientConfig field other than API holds a value NewModel cannot use; the message names the field.
+	ErrInvalidConfig = shared.ErrInvalidConfig
 	// ErrNoChoices is returned when a Chat Completions response carries no choices.
 	ErrNoChoices = shared.ErrNoChoices
 	// ErrRequestNil is returned when the provided request is nil.

@@ -82,6 +82,35 @@ func TestRejectUnsupportedFieldsRefusesFieldsAddedLater(t *testing.T) {
 	}
 }
 
+// A refused RetryOptions points at ClientConfig.MaxRetries, and the hint does
+// not change which field is reported first.
+func TestRejectUntranslatableValuesPointsRetryOptionsAtMaxRetries(t *testing.T) {
+	tests := []struct {
+		name string
+		opts *genai.HTTPOptions
+		want string
+	}{
+		{
+			name: "retry options",
+			opts: &genai.HTTPOptions{RetryOptions: &genai.HTTPRetryOptions{}},
+			want: "HTTPOptions.RetryOptions; set the retry count with ClientConfig.MaxRetries",
+		},
+		{
+			name: "an earlier field first",
+			opts: &genai.HTTPOptions{BaseURL: "https://example.com", RetryOptions: &genai.HTTPRetryOptions{}},
+			want: "HTTPOptions.BaseURL",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := RejectUntranslatableValues(&genai.GenerateContentConfig{HTTPOptions: tc.opts})
+			if want := ErrUnsupportedConfigField.Error() + ": " + tc.want; !errors.Is(err, ErrUnsupportedConfigField) || err.Error() != want {
+				t.Errorf("RejectUntranslatableValues() error = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
 // The ThinkingConfig walk has nothing to refuse until genai grows that type, so
 // narrowing the supported list stands in for the field it will one day add. It
 // swaps a package variable, so it must not run in parallel with other tests.

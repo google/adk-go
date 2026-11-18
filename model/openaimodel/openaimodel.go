@@ -49,6 +49,13 @@ type ClientConfig struct {
 	BaseURL    string       // for OpenAI-compatible endpoints
 	HTTPClient *http.Client // optional; e.g. for tests
 
+	// MaxRetries overrides how many times openai-go retries a failed request,
+	// which is 2 when nil; 0 disables retries. It counts retries after the
+	// first request, so genai's HTTPRetryOptions.Attempts of n corresponds to
+	// a MaxRetries of n-1. NewModel returns ErrInvalidConfig for a negative
+	// value. A retry count set in Options takes precedence.
+	MaxRetries *int
+
 	// Options is an escape hatch for advanced openai-go request options,
 	// appended after the options derived from the fields above.
 	Options []option.RequestOption
@@ -82,6 +89,10 @@ func NewModel(_ context.Context, modelName string, cfg *ClientConfig) (model.LLM
 	if cfg == nil {
 		cfg = &ClientConfig{}
 	}
+	// option.WithMaxRetries panics on a negative count.
+	if cfg.MaxRetries != nil && *cfg.MaxRetries < 0 {
+		return nil, fmt.Errorf("%w: MaxRetries must be non-negative", ErrInvalidConfig)
+	}
 	var opts []option.RequestOption
 	if cfg.APIKey != "" {
 		opts = append(opts, option.WithAPIKey(cfg.APIKey))
@@ -91,6 +102,9 @@ func NewModel(_ context.Context, modelName string, cfg *ClientConfig) (model.LLM
 	}
 	if cfg.HTTPClient != nil {
 		opts = append(opts, option.WithHTTPClient(cfg.HTTPClient))
+	}
+	if cfg.MaxRetries != nil {
+		opts = append(opts, option.WithMaxRetries(*cfg.MaxRetries))
 	}
 	opts = append(opts, cfg.Options...)
 	client := openai.NewClient(opts...)

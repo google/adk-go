@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,6 +91,69 @@ func TestNewModel_RequiresModelName(t *testing.T) {
 	}
 }
 
+// TestNewModel_MaxRetries counts the requests a failing call makes, on both
+// APIs. The server asks for a 1 ms wait before each retry, so retries cost no
+// backoff.
+func TestNewModel_MaxRetries(t *testing.T) {
+	tests := []struct {
+		name         string
+		maxRetries   *int
+		options      []option.RequestOption
+		wantRequests int32
+	}{
+		{name: "nil keeps the default of 2 retries", wantRequests: 3},
+		{name: "zero disables retries", maxRetries: new(0), wantRequests: 1},
+		{name: "explicit count", maxRetries: new(4), wantRequests: 5},
+		{name: "Options takes precedence", maxRetries: new(4), options: []option.RequestOption{option.WithMaxRetries(1)}, wantRequests: 2},
+	}
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("%s/%s", api, tt.name), func(t *testing.T) {
+				var requests atomic.Int32
+				server := newLoopbackServer(t, func(w http.ResponseWriter, _ *http.Request) {
+					requests.Add(1)
+					w.Header().Set("Retry-After-Ms", "1")
+					w.WriteHeader(http.StatusInternalServerError)
+				})
+				llm, err := NewModel(t.Context(), "gpt-4o-mini", &ClientConfig{
+					APIKey:     "test",
+					BaseURL:    server.URL + "/v1",
+					HTTPClient: server.Client(),
+					MaxRetries: tt.maxRetries,
+					Options:    tt.options,
+					API:        api,
+				})
+				if err != nil {
+					t.Fatalf("NewModel() err = %v", err)
+				}
+				req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)}}
+				var gotErr error
+				for _, err := range llm.GenerateContent(t.Context(), req, false) {
+					gotErr = err
+				}
+				if gotErr == nil {
+					t.Fatal("GenerateContent() succeeded, want the server's 500")
+				}
+				if got := requests.Load(); got != tt.wantRequests {
+					t.Errorf("server got %d requests, want %d", got, tt.wantRequests)
+				}
+			})
+		}
+	}
+}
+
+// option.WithMaxRetries panics on a negative count, so NewModel has to refuse
+// one before building the client.
+func TestNewModel_RejectsNegativeMaxRetries(t *testing.T) {
+	_, err := NewModel(t.Context(), "m", &ClientConfig{APIKey: "k", MaxRetries: new(-1)})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("err = %v, want %v", err, ErrInvalidConfig)
+	}
+	if !strings.Contains(err.Error(), "MaxRetries") {
+		t.Errorf("err = %v, want it to name the field", err)
+	}
+}
+
 // TestSentinelsAliasTheInternalOnes pins the aliasing: errors.Is must still
 // match an error the endpoint packages return, so every exported sentinel has
 // to be the internal one rather than a lookalike with the same message.
@@ -97,6 +161,7 @@ func TestSentinelsAliasTheInternalOnes(t *testing.T) {
 	for name, pair := range map[string][2]error{
 		"ErrModelNameRequired":              {ErrModelNameRequired, shared.ErrModelNameRequired},
 		"ErrUnsupportedAPI":                 {ErrUnsupportedAPI, shared.ErrUnsupportedAPI},
+		"ErrInvalidConfig":                  {ErrInvalidConfig, shared.ErrInvalidConfig},
 		"ErrNoChoices":                      {ErrNoChoices, shared.ErrNoChoices},
 		"ErrRequestNil":                     {ErrRequestNil, shared.ErrRequestNil},
 		"ErrNoContents":                     {ErrNoContents, shared.ErrNoContents},

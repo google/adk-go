@@ -49,7 +49,8 @@
 //	            MediaResolution, SpeechConfig, AudioTimestamp, ImageConfig,
 //	            RoutingConfig, ModelSelectionConfig, ModelArmorConfig,
 //	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
-//	            ContinuationToken, HTTPOptions apart from Timeout and Headers,
+//	            ContinuationToken, HTTPOptions apart from Timeout and Headers
+//	            (ClientConfig.MaxRetries sets the retry count instead),
 //	            and on Responses also a non-empty StopSequences, the
 //	            penalties and Seed
 //	Ignored     HTTPOptions.Headers; AutomaticContinuation, which has no
