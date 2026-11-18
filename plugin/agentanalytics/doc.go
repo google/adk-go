@@ -136,18 +136,26 @@
 //     TestSessionEvents_EmitRichLifecycleTypes in events_test.go, and
 //     TestDocParity_PausedLongRunningToolWritesTwoToolCompletedRows in
 //     doc_test.go).
-//   - [Config.ToolResultClassifier] has no built-in reflect-and-retry rule:
-//     Unlike adk-python, which records reflect-and-retry responses as
-//     TOOL_ERROR before its classifier runs, when
-//     [Config.ToolResultClassifier] is nil, abstains, panics, or returns an
-//     undefined decision, Go records plugin/retryandreflect guidance maps from
-//     a function tool that ran as [EventToolCompleted]; recording them as
-//     [EventToolError] requires a custom classifier. Top-level boolean
-//     "isError" or "is_error" maps are recorded as [EventToolError] when the
-//     classifier is nil, abstains, panics, or returns an undefined decision,
-//     as in adk-python. (Pinned by
+//   - Reflect-and-retry recovery answers and [Config.ToolResultClassifier]:
+//     Like adk-python, Go records plugin/retryandreflect recovery maps
+//     (response_type "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") as
+//     [EventToolError] before calling [Config.ToolResultClassifier], and
+//     records top-level boolean "isError" or "is_error" maps as
+//     [EventToolError] when the classifier is nil, abstains, panics, or
+//     returns an undefined decision. Unlike adk-python, which copies
+//     error_details or error_type from a reflect-and-retry map into
+//     error_message unconditionally, Go writes the fixed fallback diagnostic
+//     when [Config.ContentFormatter] is set or "content" is in
+//     [Config.PayloadColumnDenylist]; when plugin/retryandreflect is
+//     registered before this plugin, calls to a non-FunctionTool or an
+//     unanswered missing tool skip AfterToolCallback in ADK Go and write no
+//     outcome row; and classifier panic or invalid-verdict warnings omit the
+//     tool name, panic value, and result. (Pinned by
 //     TestDocParity_ToolResultClassifierBuiltInRules in
-//     schema_callbacks_test.go and
+//     schema_callbacks_test.go,
+//     TestPlugin_RecoveredToolError_MissingOrNonFunctionToolWithRetryAndReflect
+//     and TestPlugin_RecoveredToolError_RetryAndReflectHonorsContentControls in
+//     bigquery_agent_analytics_plugin_test.go, and
 //     TestPlugin_ToolResultClassifier_FailuresAreSkipped in
 //     tool_result_classifier_test.go).
 //   - [Config.OnSchemaReady] and [Config.OnSchemaError] run at most once per
