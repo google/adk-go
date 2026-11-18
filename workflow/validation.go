@@ -30,7 +30,6 @@ import (
 	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/internal/workflowroute"
-	"google.golang.org/adk/v2/session"
 )
 
 // ErrGraphValidation is matched, with [errors.Is], by every error [New],
@@ -644,13 +643,17 @@ func validateStateSchemaConsistency(g *graph, schema *jsonschema.Resolved) error
 			continue
 		}
 		for _, fieldName := range spa.StateFieldNames() {
-			if strings.HasPrefix(fieldName, session.KeyPrefixApp) ||
-				strings.HasPrefix(fieldName, session.KeyPrefixUser) ||
-				strings.HasPrefix(fieldName, session.KeyPrefixTemp) {
+			if isOwnerPrefixed(fieldName) {
 				continue
 			}
 			if !slices.Contains(schemaFields, fieldName) {
-				return fmt.Errorf("node %q references state field %q which is not declared in StateSchema (declared: %v)", n.Name(), fieldName, schemaFields)
+				return &StateSchemaError{
+					Node:     n.Name(),
+					Key:      fieldName,
+					Schema:   schemaTitle(schema),
+					Reason:   StateBindingUndeclared,
+					Declared: slices.Clone(schemaFields),
+				}
 			}
 		}
 	}

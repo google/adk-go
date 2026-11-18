@@ -854,8 +854,19 @@ func (c *callbackContextState) Set(key string, val any) error {
 	return c.ctx.invocationContext.Session().State().Set(key, val)
 }
 
+// All yields the session's entries overlaid with the context's pending
+// StateDelta: a key in the delta is yielded once, with the delta's value. When
+// the delta is not empty, the entries are a snapshot built when All is called,
+// so writes made while the caller ranges are not visited. With no actions or an
+// empty delta, All returns the session state's own iterator.
 func (c *callbackContextState) All() iter.Seq2[string, any] {
-	return c.ctx.invocationContext.Session().State().All()
+	sessionAll := c.ctx.invocationContext.Session().State().All()
+	if c.ctx.actions == nil || len(c.ctx.actions.StateDelta) == 0 {
+		return sessionAll
+	}
+	snap := maps.Collect(sessionAll)
+	maps.Copy(snap, c.ctx.actions.StateDelta)
+	return maps.All(snap)
 }
 
 // newTrackedArtifacts wraps inner so that each successful Save is recorded

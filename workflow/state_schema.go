@@ -27,7 +27,8 @@ import (
 	"google.golang.org/adk/v2/agent"
 )
 
-// StateSchemaReason says why a state write was refused.
+// StateSchemaReason says why a state write or a node's state binding was
+// refused.
 type StateSchemaReason int
 
 const (
@@ -37,13 +38,18 @@ const (
 	// StateValueInvalid means the key is declared and the value fails its
 	// property's schema.
 	StateValueInvalid
+	// StateBindingUndeclared means a node binds a state key (without a colon)
+	// that the schema does not declare. [New] returns it; Node, Key and
+	// Declared are set.
+	StateBindingUndeclared
 )
 
 // StateSchemaError is returned when a state write violates the workflow's
-// state schema (see [WithStateSchema]). Match it with errors.As. It carries
-// the key and never the value.
+// state schema (see [WithStateSchema]), and by [New] when a node binds a state
+// key the schema does not declare. Match it with errors.As. It carries the key
+// and never the value.
 type StateSchemaError struct {
-	// Key is the state key of the refused write.
+	// Key is the state key of the refused write or binding.
 	Key string
 	// Schema is the title of the state schema, empty when the schema has none.
 	Schema string
@@ -51,18 +57,23 @@ type StateSchemaError struct {
 	// error ADK returns.
 	Reason StateSchemaReason
 	// Declared lists the schema's property names in sorted order, for
-	// StateKeyUndeclared; nil for StateValueInvalid.
+	// StateKeyUndeclared and StateBindingUndeclared; nil for
+	// StateValueInvalid.
 	Declared []string
 	// Type describes the property's declared JSON type ("integer",
 	// "string|null"), for StateValueInvalid; empty for StateKeyUndeclared and
 	// for a property whose schema declares no type (an enum, a $ref, an empty
 	// schema).
 	Type string
+	// Node is the name of the node whose binding is refused, for
+	// StateBindingUndeclared; empty for a refused write.
+	Node string
 }
 
 // Error names the key, the schema title when there is one, the class of
-// violation, and the declared names or the property's type. It never contains
-// the rejected value.
+// violation, and the declared names or the property's type. For
+// StateBindingUndeclared it names the node, the key and the declared names,
+// and not the title. It never contains the rejected value.
 func (e *StateSchemaError) Error() string {
 	var in string
 	if e.Schema != "" {
@@ -76,6 +87,8 @@ func (e *StateSchemaError) Error() string {
 			return fmt.Sprintf("workflow: value for state key %q does not satisfy type %s in the state schema%s", e.Key, e.Type, in)
 		}
 		return fmt.Sprintf("workflow: value for state key %q does not satisfy its property in the state schema%s", e.Key, in)
+	case StateBindingUndeclared:
+		return fmt.Sprintf("node %q references state field %q which is not declared in StateSchema (declared: %v)", e.Node, e.Key, e.Declared)
 	default:
 		return fmt.Sprintf("workflow: state key %q refused by the state schema", e.Key)
 	}
@@ -212,7 +225,7 @@ func typeOf(p *jsonschema.Schema) string {
 // its own state under "<owner>:<key>" names, as in adk-python. value is
 // validated in its JSON form and never kept.
 func (v *stateValidator) ValidateStateEntry(key string, value any) error {
-	if strings.Contains(key, ":") {
+	if isOwnerPrefixed(key) {
 		return nil
 	}
 	typ, declared := v.types[key]
@@ -231,4 +244,19 @@ func (v *stateValidator) ValidateStateEntry(key string, value any) error {
 		return invalid
 	}
 	return nil
+}
+
+// isOwnerPrefixed reports whether key contains a colon. Such a key is checked
+// neither on a write nor in a node's bindings at build time.
+func isOwnerPrefixed(key string) bool {
+	return strings.Contains(key, ":")
+}
+
+// schemaTitle returns the title of schema's root, or "" when schema or its
+// root is nil.
+func schemaTitle(schema *jsonschema.Resolved) string {
+	if schema == nil || schema.Schema() == nil {
+		return ""
+	}
+	return schema.Schema().Title
 }
