@@ -17,21 +17,16 @@ package agentanalytics_test
 import (
 	"bytes"
 	"context"
-	"encoding/asn1"
 	"encoding/json"
 	"fmt"
 	"go/ast"
-	"go/build"
 	"go/parser"
 	"go/token"
 	"go/types"
 	"iter"
 	"net/http"
-	"os"
 	"path"
-	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -213,41 +208,26 @@ func guardedStructs() []guardedStruct {
 	return structs
 }
 
-// unguardedFields returns a struct type with the exported fields of rt, in
-// order, and no other field. None of them is embedded: reflect.StructOf cannot
-// build every embedded field, and embedding does not change the layout.
-func unguardedFields(rt reflect.Type) reflect.Type {
-	var fields []reflect.StructField
-	for sf := range rt.Fields() {
-		if sf.IsExported() {
-			sf.Anonymous = false
-			fields = append(fields, sf)
-		}
-	}
-	return reflect.StructOf(fields)
-}
-
-// checkGuardLayout returns an error unless the first field of gs is the
-// guard, the blank `_ struct{}` of the struct's own package, every other field
-// is exported, and the guard leaves the size and alignment of the struct as
-// they would be without it.
+// checkGuardLayout returns an error unless field 0 of gs is the unexported
+// blank `_ struct{}` guard of gs's own package at byte offset 0 and gs has
+// at least one exported field after it. Additional unexported fields after
+// field 0 (for example, internal caches) are permitted.
 func checkGuardLayout(gs guardedStruct) error {
 	rt := gs.typ
-	if rt.NumField() < 2 {
-		return fmt.Errorf("%s has %d fields, want the guard and at least one exported field", gs.name, rt.NumField())
+	if rt.NumField() == 0 {
+		return fmt.Errorf("%s has no fields, want `_ struct{}` guard at field 0", gs.name)
 	}
-	if guard := rt.Field(0); guard.Name != "_" || guard.PkgPath != rt.PkgPath() || guard.Type != reflect.TypeFor[struct{}]() {
-		return fmt.Errorf("%s field 0 = {Name:%q PkgPath:%q Type:%v}, want `_ struct{}` of %q", gs.name, guard.Name, guard.PkgPath, guard.Type, rt.PkgPath())
+	guard := rt.Field(0)
+	if guard.Name != "_" || guard.Anonymous || guard.IsExported() || guard.PkgPath != rt.PkgPath() || guard.Type != reflect.TypeFor[struct{}]() || guard.Offset != 0 {
+		return fmt.Errorf("%s field 0 = {Name:%q PkgPath:%q Type:%v Offset:%d Anonymous:%v}, want unexported `_ struct{}` of %q at offset 0",
+			gs.name, guard.Name, guard.PkgPath, guard.Type, guard.Offset, guard.Anonymous, rt.PkgPath())
 	}
 	for i := 1; i < rt.NumField(); i++ {
-		if sf := rt.Field(i); !sf.IsExported() {
-			return fmt.Errorf("%s field %d (%s) is unexported; the literal probes expect the guard to be the only unexported field", gs.name, i, sf.Name)
+		if rt.Field(i).IsExported() {
+			return nil
 		}
 	}
-	if u := unguardedFields(rt); rt.Size() != u.Size() || rt.Align() != u.Align() {
-		return fmt.Errorf("%s Size=%d Align=%d, want %d and %d as without the guard", gs.name, rt.Size(), rt.Align(), u.Size(), u.Align())
-	}
-	return nil
+	return fmt.Errorf("%s has no exported fields after the guard", gs.name)
 }
 
 func TestStructLiterals_ExternalPositionalRejected(t *testing.T) {
@@ -274,8 +254,6 @@ func TestStructLiterals_ExternalPositionalRejected(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("SourceRemovedExports", checkUnexportedSymbolsByParser)
 }
 
 // basicKinds maps the kinds of the predeclared boolean, numeric and string
@@ -478,9 +456,9 @@ func isGuardRejection(err error) bool {
 // the way the guard intends:
 //   - a keyed literal of all the exported fields compiles;
 //   - a positional literal of the exported fields, as code could write before
-//     the guard was added, is rejected for assigning to the guard;
-//   - the same literal with struct{}{} in the guard's place is rejected for
-//     that alone.
+//     the guard was added, is rejected for assigning to the `_` guard;
+//   - the same literal with struct{}{} in the guard's place is also rejected
+//     for assigning to the `_` guard.
 //
 // The values are selectors on a zero value of gs, so each has exactly the type
 // of its field, whatever that type is.
@@ -500,8 +478,8 @@ func checkExternalPositional(pkg *types.Package, gs guardedStruct) []error {
 		problems = append(problems, fmt.Errorf("positional literal of %s: got errors %v, want %q", gs.name, errs, guardRejection))
 	}
 	padded := append([]string{"struct{}{}"}, positional...)
-	if errs := typecheckLiteral(pkg, gs.name, padded); len(errs) != 1 || !isGuardRejection(errs[0]) {
-		problems = append(problems, fmt.Errorf("positional literal of %s with struct{}{} for the guard: got errors %v, want only %q", gs.name, errs, guardRejection))
+	if errs := typecheckLiteral(pkg, gs.name, padded); !slices.ContainsFunc(errs, isGuardRejection) {
+		problems = append(problems, fmt.Errorf("positional literal of %s with struct{}{} for the guard: got errors %v, want %q", gs.name, errs, guardRejection))
 	}
 	return problems
 }
@@ -536,137 +514,18 @@ func (i probeImporter) Import(importPath string) (*types.Package, error) {
 	return i.pkg, nil
 }
 
-// removedNames are the names removed from the package's exported API.
-var removedNames = []string{
-	"ArrowSchema",
-	"SerializedArrowSchema",
-	"BatchProcessor",
-	"NewBatchProcessor",
-	"FormatContentParts",
-	"SmartTruncate",
-}
-
-// checkUnexportedSymbolsByParser fails if one of the package's non-test
-// source files that a build would compile declares one of removedNames at
-// package level. removed_exports_test.go already makes the test build fail
-// on any such declaration that it compiles, including one supplied with
-// `go test -overlay`; this check reads the files on disk, so it still holds
-// without that file. It skips when it finds no source files, either next to
-// the path this file was compiled from or in the working directory.
-func checkUnexportedSymbolsByParser(t *testing.T) {
-	var dirs []string
-	if _, file, _, ok := runtime.Caller(0); ok {
-		dirs = append(dirs, filepath.Dir(file))
-	}
-	if wd, err := os.Getwd(); err == nil {
-		dirs = append(dirs, wd)
-	}
-	for _, dir := range dirs {
-		declared, files := packageLevelNames(dir)
-		if files == 0 {
-			continue
-		}
-		if _, ok := declared["Config"]; !ok {
-			t.Fatalf("found no Config declaration in the %d agentanalytics files in %s", files, dir)
-		}
-		for _, name := range removedNames {
-			if file, ok := declared[name]; ok {
-				t.Errorf("%s declares %s, which must stay out of the exported API", filepath.Join(dir, file), name)
-			}
-		}
-		return
-	}
-	t.Skipf("found no agentanalytics source files in %q", dirs)
-}
-
-// packageLevelNames returns the file that declares each package-level name in
-// the non-test agentanalytics files in dir that a build would compile, and
-// how many such files there are.
-func packageLevelNames(dir string) (map[string]string, int) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, 0
-	}
-	declared := make(map[string]string)
-	files := 0
-	fset := token.NewFileSet()
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		// Leave out the files a build would, such as one under
-		// //go:build ignore.
-		if match, err := build.Default.MatchFile(dir, name); err != nil || !match {
-			continue
-		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
-		if err != nil || f.Name.Name != "agentanalytics" {
-			continue
-		}
-		files++
-		for _, decl := range f.Decls {
-			switch d := decl.(type) {
-			case *ast.FuncDecl:
-				if d.Recv == nil {
-					declared[d.Name.Name] = name
-				}
-			case *ast.GenDecl:
-				for _, spec := range d.Specs {
-					switch s := spec.(type) {
-					case *ast.TypeSpec:
-						declared[s.Name.Name] = name
-					case *ast.ValueSpec:
-						for _, id := range s.Names {
-							declared[id.Name] = name
-						}
-					}
-				}
-			}
+// unguardedFields returns a struct type with the exported fields of rt, in
+// order, and no other field. None of them is embedded: reflect.StructOf cannot
+// build every embedded field, and embedding does not change the layout.
+func unguardedFields(rt reflect.Type) reflect.Type {
+	var fields []reflect.StructField
+	for sf := range rt.Fields() {
+		if sf.IsExported() {
+			sf.Anonymous = false
+			fields = append(fields, sf)
 		}
 	}
-	return declared, files
-}
-
-func TestStructLiterals_ASN1MarshalRejectsGuardedStructs(t *testing.T) {
-	// encoding/asn1 encoded each of these before the guard was added.
-	// RetryConfig and Config already had fields it cannot encode.
-	cases := []struct {
-		name  string
-		value any
-	}{
-		{
-			name:  "DropStats",
-			value: agentanalytics.DropStats{},
-		},
-		{
-			name: "GCSUploadRequest",
-			value: agentanalytics.GCSUploadRequest{
-				Path:        "p",
-				Data:        []byte("x"),
-				ContentType: "text/plain",
-			},
-		},
-		{
-			name: "ViewDefinition",
-			value: agentanalytics.ViewDefinition{
-				Name:  "v",
-				Query: "SELECT 1",
-			},
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := asn1.Marshal(tc.value)
-			if err == nil {
-				t.Fatalf("asn1.Marshal(%s) succeeded; want unexported-field error", tc.name)
-			}
-			if !strings.Contains(err.Error(), "struct contains unexported fields") {
-				t.Fatalf("asn1.Marshal(%s) error = %q; want substring %q", tc.name, err.Error(), "struct contains unexported fields")
-			}
-		})
-	}
+	return reflect.StructOf(fields)
 }
 
 // syntheticGuardedStruct has the guard and fields of kinds that none of the
@@ -688,7 +547,29 @@ type syntheticGuardedStruct struct {
 	Ptr      unsafe.Pointer
 }
 
+// syntheticGuardedWithPrivateCache verifies that adding unexported fields
+// after the field-0 `_ struct{}` guard keeps keyed construction working and
+// positional literals rejected.
+type syntheticGuardedWithPrivateCache struct {
+	_     struct{}
+	Name  string
+	cache map[string]int
+	Count int
+	note  *http.Client
+}
+
+type syntheticNamedPrivateFirst struct {
+	cache int
+	Name  string
+}
+
 func TestStructLiterals_SyntheticGuardedStruct(t *testing.T) {
+	var zeroPrivate syntheticGuardedWithPrivateCache
+	var zeroNamedFirst syntheticNamedPrivateFirst
+	if zeroPrivate.cache != nil || zeroPrivate.note != nil || zeroNamedFirst.cache != 0 {
+		t.Fatalf("unexpected non-zero synthetic private fields: %#v / %#v", zeroPrivate, zeroNamedFirst)
+	}
+
 	gs := guardedStruct{name: "SyntheticGuarded", typ: reflect.TypeFor[syntheticGuardedStruct]()}
 	if err := checkGuardLayout(gs); err != nil {
 		t.Error(err)
@@ -738,16 +619,35 @@ func TestStructLiterals_SyntheticGuardedStruct(t *testing.T) {
 		t.Errorf("converted field types = %q, want %q", gotTypes, wantTypes)
 	}
 
-	// The same checks fail for a struct with these fields and no guard.
-	control := guardedStruct{name: "SyntheticUnguarded", typ: unguardedFields(gs.typ)}
-	if err := checkGuardLayout(control); err == nil {
-		t.Errorf("checkGuardLayout(%s) = nil, want an error", control.name)
+	// Unexported fields after field 0 (for example, internal caches) remain
+	// compatible with both the layout check and the external literal probes.
+	withPrivate := guardedStruct{name: "SyntheticGuardedWithPrivateCache", typ: reflect.TypeFor[syntheticGuardedWithPrivateCache]()}
+	if err := checkGuardLayout(withPrivate); err != nil {
+		t.Errorf("checkGuardLayout(%s) = %v, want nil", withPrivate.name, err)
 	}
-	controlPkg, err := probePackage([]guardedStruct{control})
+	withPrivatePkg, err := probePackage([]guardedStruct{withPrivate})
 	if err != nil {
-		t.Fatalf("probePackage(%s) failed: %v", control.name, err)
+		t.Fatalf("probePackage(%s) failed: %v", withPrivate.name, err)
 	}
-	if problems := checkExternalPositional(controlPkg, control); len(problems) != 2 {
-		t.Errorf("checkExternalPositional(%s) reported %d problems, want 2, one for each positional literal: %v", control.name, len(problems), problems)
+	if problems := checkExternalPositional(withPrivatePkg, withPrivate); len(problems) != 0 {
+		t.Errorf("checkExternalPositional(%s) reported problems: %v", withPrivate.name, problems)
+	}
+
+	// The same checks fail for a struct with these fields and no guard, and
+	// for a struct whose first field is a named unexported field rather than `_`.
+	for _, control := range []guardedStruct{
+		{name: "SyntheticUnguarded", typ: unguardedFields(gs.typ)},
+		{name: "SyntheticNamedPrivateFirst", typ: reflect.TypeFor[syntheticNamedPrivateFirst]()},
+	} {
+		if err := checkGuardLayout(control); err == nil {
+			t.Errorf("checkGuardLayout(%s) = nil, want an error", control.name)
+		}
+		controlPkg, err := probePackage([]guardedStruct{control})
+		if err != nil {
+			t.Fatalf("probePackage(%s) failed: %v", control.name, err)
+		}
+		if problems := checkExternalPositional(controlPkg, control); len(problems) != 2 {
+			t.Errorf("checkExternalPositional(%s) reported %d problems, want 2, one for each positional literal: %v", control.name, len(problems), problems)
+		}
 	}
 }

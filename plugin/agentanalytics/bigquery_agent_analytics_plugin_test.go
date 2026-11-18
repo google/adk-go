@@ -1475,9 +1475,10 @@ func TestEventFiltering_DenylistOverridesAllowlist(t *testing.T) {
 
 func TestNewPlugin_RejectsInvalidConfig(t *testing.T) {
 	tests := []struct {
-		name    string
-		mutate  func(*Config)
-		wantErr string
+		name     string
+		mutate   func(*Config)
+		wantErr  string
+		exactErr bool
 	}{
 		{
 			name:    "unknown payload column",
@@ -1520,8 +1521,10 @@ func TestNewPlugin_RejectsInvalidConfig(t *testing.T) {
 		{
 			name:   "negative RetryConfig.MaxRetries",
 			mutate: func(c *Config) { c.RetryConfig.MaxRetries = -1 },
-			// The full message pins how the rejected settings are reported.
-			wantErr: "invalid RetryConfig: needs MaxRetries >= 0, InitialDelay >= 0, Multiplier >= 1 and MaxDelay >= InitialDelay, got {MaxRetries:-1 InitialDelay:100ms MaxDelay:10s Multiplier:2}",
+			// The full message pins how the rejected settings are reported,
+			// including the leading "invalid config: " prefix.
+			wantErr:  "invalid config: invalid RetryConfig: needs MaxRetries >= 0, InitialDelay >= 0, Multiplier >= 1 and MaxDelay >= InitialDelay, got {MaxRetries:-1 InitialDelay:100ms MaxDelay:10s Multiplier:2}",
+			exactErr: true,
 		},
 		{
 			name:    "Multiplier less than 1",
@@ -1551,12 +1554,22 @@ func TestNewPlugin_RejectsInvalidConfig(t *testing.T) {
 			config.ProjectID = "test-project"
 			tt.mutate(&config)
 			// Validation happens before any client is created or used.
-			if _, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, config); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v, want an error containing %q", err, tt.wantErr)
+			_, errWithConfig := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, config)
+			_, errWithClients := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, nil, nil)
+			checkErr := func(fn string, err error) {
+				t.Helper()
+				if tt.exactErr {
+					if err == nil || err.Error() != tt.wantErr {
+						t.Errorf("%s() error = %v, want exact %q", fn, err, tt.wantErr)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("%s() error = %v, want an error containing %q", fn, err, tt.wantErr)
+				}
 			}
-			if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, nil, nil); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v, want an error containing %q", err, tt.wantErr)
-			}
+			checkErr("NewBigQueryAgentAnalyticsPluginWithConfig", errWithConfig)
+			checkErr("NewBigQueryAgentAnalyticsPluginWithClients", errWithClients)
 		})
 	}
 }

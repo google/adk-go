@@ -125,9 +125,9 @@ type DropStats struct {
 	// ContentFormatter returned an error or panicked; this does not itself
 	// discard a row.
 	FormatterFailureDrops int64 `json:"formatter_failure_drops"`
-	// ShutdownDrops counts events rejected because Append was called after Close,
-	// or queued events dropped during Close because ShutdownTimeout expired
-	// before their batch could be written.
+	// ShutdownDrops counts events logged by plugin callbacks after Close is
+	// called, or queued events dropped during Close because ShutdownTimeout
+	// expired before their batch could be written.
 	ShutdownDrops int64 `json:"shutdown_drops"`
 	// TotalDrops sums locally discarded events and writes whose success could
 	// not be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops).
