@@ -31,12 +31,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
 
@@ -292,6 +294,14 @@ type spanRecord struct {
 	// the event's node path saw a call with that ID complete, on the same one
 	// (see finishedTaskLocked and popTaskAgentSpan).
 	finishedTasks []string
+	// failedTasks holds, likewise, the function call IDs of the finish_task
+	// calls that this plugin's tool callback saw end the activation with a
+	// classified tool result error (see noteTaskFinished). Keeping them apart
+	// from finishedTasks lets finishedTaskLocked disambiguate a failed call
+	// and a completed call that share a reused ID when both runs are open on
+	// the same path, while still matching across both lists when an
+	// agent-level AfterToolCallback alters the error flag afterwards.
+	failedTasks []string
 	// nonLLM reports that the agent is a workflow agent, such as a sequential
 	// or loop agent, rather than an llmagent whose sub-agents can transfer to
 	// peers.
@@ -325,6 +335,10 @@ type spanRecord struct {
 	// or tool call, rather than popToolSpan making up a span for a call that
 	// this plugin did not see start.
 	callStarted bool
+	// errorAttempt is, for a tool call that OnToolErrorCallback ended, the
+	// attempt whose callback ended it (see toolAttempt and
+	// invocationTrace.completedTools).
+	errorAttempt toolAttempt
 	// handedOver reports, for a model or tool call, that the run left it open
 	// at AfterRun, which handed it over to the late state of its completed
 	// entry (see rememberCompletedLocked), rather than a callback starting it
@@ -479,6 +493,18 @@ type invocationTrace struct {
 	// workflow.RunNode activations, can end in any order, so spans are
 	// removed from wherever they are.
 	agentStack []*spanRecord
+	// lookalikes counts the open agent activations on agentStack by agent
+	// name, branch and node path (see lookalikeKey), and lookalikeDups counts
+	// the keys that two or more of them share, so that parentForRunLocked
+	// skips resolving concurrent lookalikes without scanning agentStack while
+	// every open activation is distinct. pushAgentLocked, removeAgentLocked,
+	// removeAgentsLocked and truncateAgentsLocked, through which agentStack
+	// changes, keep them up to date and set lookalikesLen to the length of
+	// agentStack. A stack whose length differs from lookalikesLen was built
+	// some other way, and is counted afresh (see syncLookalikesLocked).
+	lookalikes    map[lookalikeKey]int
+	lookalikeDups int
+	lookalikesLen int
 	// llmSpans holds the running model calls, by llmKey.
 	llmSpans map[string]*spanRecord
 	// completedModels holds the model calls that OnModelErrorCallback
@@ -497,7 +523,11 @@ type invocationTrace struct {
 	// so that the AfterToolCallback that ADK runs next for the same call
 	// finds its span instead of ending another one. ADK runs
 	// OnToolErrorCallback alone for a call of a tool that does not exist;
-	// such records last as long as the invocation.
+	// such records last as long as the invocation, or until the next call
+	// with the same key starts. A record answers only the AfterToolCallback
+	// of the attempt that it ended (see toolAttempt): a later call that
+	// reuses the function call ID, and whose start an earlier plugin hid
+	// from this one, is a call of its own.
 	completedTools map[string]*spanRecord
 	// unrecoveredErrors tracks unhandled errors encountered during the
 	// invocation keyed by activation / call identity (e.g. llmKey), together
@@ -581,6 +611,7 @@ func newInvocationTraceWithSpan(sc trace.SpanContext, traceID string, now time.T
 		parentAgent:       map[string]string{},
 		sequentialParent:  map[string]string{},
 		agentStack:        []*spanRecord{root},
+		lookalikesLen:     1,
 		llmSpans:          map[string]*spanRecord{},
 		completedModels:   map[string]*spanRecord{},
 		toolSpans:         map[string]*spanRecord{},
@@ -1140,33 +1171,1237 @@ func (inv *invocationTrace) parentOutsideLocked(id identity, exclude map[string]
 	return inv.parentFor(id)
 }
 
-// parentForRunLocked returns the span that an agent starting with id on
-// goroutine goid, whose origin is origin, runs under (see parentFor), leaving
-// out the open activations of id's agent, branch and node path that the
-// scheduler of their workflow agent started on other goroutines, as it
-// started goid, together with the agents under them (see subtreeLocked). The
-// scheduler runs each node run on a goroutine of its own right under the
-// workflow agent, so such an earlier run of the node does not enclose the new
-// one even when an agent under it shares id's branch and node path, as a
-// sub-agent of a sequential agent that a failed attempt left open does.
-func (inv *invocationTrace) parentForRunLocked(id identity, goid uint64, origin goroutineOrigin) *spanRecord {
-	var exclude map[string]bool
-	for i := 1; i < len(inv.agentStack); i++ {
-		other := inv.agentStack[i]
-		if other.kind != spanKindAgent || other.name != id.agentName || other.branch != id.branch || other.path != id.path ||
-			other.goroutineID == goid || other.parent == nil || !other.parent.isWorkflow ||
-			!origin.startedBy(schedulerCreator, other.parent) || !other.origin.startedBy(schedulerCreator, other.parent) {
+// lookalikeKey identifies concurrent activations of the same agent on the
+// same branch and node path.
+type lookalikeKey struct {
+	name, branch, path string
+}
+
+// pushAgentLocked appends rec to agentStack (see lookalikes).
+func (inv *invocationTrace) pushAgentLocked(rec *spanRecord) {
+	inv.syncLookalikesLocked()
+	inv.agentStack = append(inv.agentStack, rec)
+	inv.countLookalikeLocked(rec, 1)
+	inv.lookalikesLen = len(inv.agentStack)
+}
+
+// removeAgentLocked removes agentStack[i] (see lookalikes).
+func (inv *invocationTrace) removeAgentLocked(i int) {
+	inv.syncLookalikesLocked()
+	inv.countLookalikeLocked(inv.agentStack[i], -1)
+	inv.agentStack = slices.Delete(inv.agentStack, i, i+1)
+	inv.lookalikesLen = len(inv.agentStack)
+}
+
+// removeAgentsLocked removes the spans of agentStack for which del reports
+// true (see lookalikes).
+func (inv *invocationTrace) removeAgentsLocked(del func(*spanRecord) bool) {
+	inv.syncLookalikesLocked()
+	inv.agentStack = slices.DeleteFunc(inv.agentStack, func(rec *spanRecord) bool {
+		if !del(rec) {
+			return false
+		}
+		inv.countLookalikeLocked(rec, -1)
+		return true
+	})
+	inv.lookalikesLen = len(inv.agentStack)
+}
+
+// truncateAgentsLocked removes every span of agentStack but the invocation
+// span (see lookalikes).
+func (inv *invocationTrace) truncateAgentsLocked() {
+	inv.agentStack = inv.agentStack[:1]
+	clear(inv.lookalikes)
+	inv.lookalikeDups = 0
+	inv.lookalikesLen = len(inv.agentStack)
+}
+
+// countLookalikeLocked adds delta to the count of open activations of rec's
+// lookalikeKey, if rec is an agent span, keeping lookalikeDups in step.
+func (inv *invocationTrace) countLookalikeLocked(rec *spanRecord, delta int) {
+	if rec.kind != spanKindAgent {
+		return
+	}
+	k := lookalikeKey{name: rec.name, branch: rec.branch, path: rec.path}
+	before := inv.lookalikes[k]
+	after := before + delta
+	if before < 2 && after >= 2 {
+		inv.lookalikeDups++
+	} else if before >= 2 && after < 2 {
+		inv.lookalikeDups--
+	}
+	if after <= 0 {
+		delete(inv.lookalikes, k)
+		return
+	}
+	if inv.lookalikes == nil {
+		inv.lookalikes = make(map[lookalikeKey]int)
+	}
+	inv.lookalikes[k] = after
+}
+
+// syncLookalikesLocked counts the open activations on agentStack afresh if
+// agentStack changed other than through the methods that keep lookalikes up
+// to date (see lookalikes).
+func (inv *invocationTrace) syncLookalikesLocked() {
+	if inv.lookalikesLen == len(inv.agentStack) {
+		return
+	}
+	clear(inv.lookalikes)
+	inv.lookalikeDups = 0
+	for i, rec := range inv.agentStack {
+		if i > 0 {
+			inv.countLookalikeLocked(rec, 1)
+		}
+	}
+	inv.lookalikesLen = len(inv.agentStack)
+}
+
+// maxLaunchLineage bounds the chain of contexts that launcherLocked follows.
+const maxLaunchLineage = 64
+
+// launcherLocked returns the index in agentStack of the open agent activation,
+// not excluded, whose context the agent run with activation key act (see
+// activationKey) was started with, or 0 if no such activation is known. ADK
+// derives the context of each agent run from the context passed to its Run,
+// and each of its contexts, like the context package's own, embeds the
+// context that it derives from, so the chain of embedded Context fields from
+// act passes through the activation key of every run that the new run's
+// context derives from, nearest first. The first one of an open activation
+// tells which activation started the run, whichever goroutine runs it. The
+// chain is read through exported fields alone, so no user code runs while
+// inv.mu is held.
+func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
+	if act == nil {
+		return 0
+	}
+	byActivation := make(map[any]int)
+	for i, rec := range inv.agentStack {
+		if i == 0 || excluded[i] || rec.kind != spanKindAgent || rec.activation == nil {
 			continue
 		}
+		if reflect.ValueOf(rec.activation).Kind() == reflect.Pointer {
+			byActivation[rec.activation] = i
+		}
+	}
+	cur := act
+	for step := range maxLaunchLineage {
+		v := reflect.ValueOf(cur)
+		if v.Kind() != reflect.Pointer || v.IsNil() {
+			return 0
+		}
+		if step > 0 {
+			if i, ok := byActivation[cur]; ok {
+				return i
+			}
+		}
+		if v = v.Elem(); v.Kind() != reflect.Struct {
+			return 0
+		}
+		next := v.FieldByName("Context")
+		if !next.IsValid() || next.Kind() != reflect.Interface || next.IsNil() || !next.CanInterface() {
+			return 0
+		}
+		cur = next.Interface()
+	}
+	return 0
+}
+
+// parentForRunLocked returns the span that an agent starting with id on
+// goroutine goid, whose origin is origin and whose activation key is
+// activation, runs under (see parentFor), leaving out any spans in exclude
+// plus:
+//   - open activations of id's agent, branch and node path that the scheduler
+//     of their workflow agent (or of any open lookalike workflow activation
+//     sharing its name, branch and node path) started on other goroutines,
+//     together with the agents under them; and
+//   - when concurrent open activations share (name, branch, path), every one
+//     of them that neither is nor encloses the activation whose context the
+//     run was started with (see launcherLocked), together with the agents
+//     under them; or, when no open activation is on that context's chain, the
+//     peers of the member that runs on goid (or has a non-excluded open span
+//     in its subtree that does) or, failing that, started goid (origin.parent),
+//     keeping the winning member, its ancestors, and any earlier activations
+//     on its goroutine unexcluded.
+//
+// When no open activation is on the chain and the resolved parent itself (or
+// any ancestor of it) belongs to an unmatched multi-member concurrent
+// lookalike group (no member or descendant matches goid or origin.parent), it
+// moves up to the nearest open span enclosing the members of that group that
+// could hold the child (see appendPossibleOwnersLocked), so a helper-goroutine
+// activation cannot land inside one peer lookalike's open child span while the
+// child's branch and node path still pick out the only member that holds a
+// span they fit. Non-concurrent lookalike chains (nested re-entry,
+// same-goroutine stale spans, or suspended iterators) are left to parentFor
+// without exclusion or ambiguity demotion unless a cross-goroutine nested
+// ancestor directly matches goid or origin.parent.
+func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]bool, goid uint64, origin goroutineOrigin, activation any) *spanRecord {
+	callerExcluded := exclude
+	var clonedExclude bool
+	ensureExcludeMutable := func() {
+		if clonedExclude {
+			return
+		}
+		exclude = maps.Clone(exclude)
 		if exclude == nil {
 			exclude = make(map[string]bool)
 		}
-		maps.Copy(exclude, inv.subtreeLocked(i))
+		clonedExclude = true
 	}
-	if exclude == nil {
-		return inv.parentFor(id)
+	if origin.creator == schedulerCreator && origin.parent != 0 {
+		var wfStarterKeys map[lookalikeKey]bool
+		for _, candidate := range inv.agentStack[1:] {
+			if candidate.kind == spanKindAgent && candidate.isWorkflow && !callerExcluded[candidate.spanID] &&
+				origin.startedBy(schedulerCreator, candidate) {
+				if wfStarterKeys == nil {
+					wfStarterKeys = make(map[lookalikeKey]bool)
+				}
+				wfStarterKeys[lookalikeKey{name: candidate.name, branch: candidate.branch, path: candidate.path}] = true
+			}
+		}
+		var addedWfExclusion bool
+		for i := 1; i < len(inv.agentStack); i++ {
+			other := inv.agentStack[i]
+			if exclude[other.spanID] || other.kind != spanKindAgent ||
+				other.name != id.agentName || other.branch != id.branch || other.path != id.path ||
+				other.goroutineID == goid || other.parent == nil || !other.parent.isWorkflow ||
+				!other.origin.startedBy(schedulerCreator, other.parent) {
+				continue
+			}
+			if !origin.startedBy(schedulerCreator, other.parent) &&
+				!wfStarterKeys[lookalikeKey{name: other.parent.name, branch: other.parent.branch, path: other.parent.path}] {
+				continue
+			}
+			ensureExcludeMutable()
+			exclude[other.spanID] = true
+			addedWfExclusion = true
+		}
+		if addedWfExclusion {
+			inv.propagateExcludedLocked(exclude)
+		}
 	}
-	return inv.parentOutsideLocked(id, exclude)
+	var unmatched map[lookalikeKey][]*spanRecord
+	var unmatchedByRec map[*spanRecord][]*spanRecord
+	var tree *openSpanTree
+	if goid != 0 {
+		exclude, unmatched, unmatchedByRec, tree = inv.excludePeerLookalikesLocked(exclude, &clonedExclude, goid, origin, activation)
+	}
+	var parent *spanRecord
+	if len(exclude) > 0 {
+		parent = inv.parentOutsideLocked(id, exclude)
+	} else {
+		parent = inv.parentFor(id)
+	}
+	selected := parent
+	var seenAmbiguous map[*spanRecord]bool
+	var ambiguous []*spanRecord
+	for parent != nil && parent.kind == spanKindAgent && len(unmatched) > 0 {
+		ambiguous = ambiguous[:0]
+		for cur := parent; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
+			if recs := unmatchedByRec[cur]; len(recs) > 1 && !seenAmbiguous[recs[0]] {
+				if seenAmbiguous == nil {
+					seenAmbiguous = make(map[*spanRecord]bool)
+				}
+				seenAmbiguous[recs[0]] = true
+				ambiguous = inv.appendPossibleOwnersLocked(ambiguous, tree, exclude, recs, id, selected)
+			}
+		}
+		if len(ambiguous) == 0 {
+			break
+		}
+		parent = tree.enclosing(inv, ambiguous)
+	}
+	return parent
+}
+
+// appendPossibleOwnersLocked appends to dst the members of the unmatched
+// lookalike group recs that could hold a child agent starting with id whose
+// parent would otherwise be selected: the members with an open span, not
+// excluded, in their subtree (themselves included) that id's branch and node
+// path fit as they fit a parent (see parentFor) at or below selected's branch
+// and node path. A child cannot run under a member without such a span, so
+// when fewer than two members have one, their branch and node path already
+// tell which member holds the child, and nothing is appended. inv.mu must be
+// held.
+func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord) []*spanRecord {
+	start := len(dst)
+	for _, m := range recs {
+		mIdx, ok := tree.stackIdx[m]
+		if !ok {
+			continue
+		}
+		for _, u := range tree.dfsSeq[tree.tin[mIdx]-1 : tree.tout[mIdx]] {
+			rec := inv.agentStack[u]
+			if exclude[rec.spanID] ||
+				!withinBranch(id.branch, rec.branch) || !withinPath(id.path, rec.path, rec.name == id.agentName) ||
+				!withinBranch(rec.branch, selected.branch) || !atOrBelowPath(rec.path, selected.path) {
+				continue
+			}
+			dst = append(dst, m)
+			break
+		}
+	}
+	if len(dst)-start < 2 {
+		return dst[:start]
+	}
+	return dst
+}
+
+// atOrBelowPath reports whether node path path is ancestor or one of its
+// descendant node paths. An empty ancestor holds every path.
+func atOrBelowPath(path, ancestor string) bool {
+	return ancestor == "" || path == ancestor || strings.HasPrefix(path, ancestor+"/")
+}
+
+// propagateExcludedLocked marks every open agent span in inv.agentStack[1:]
+// whose ancestor along spanRecord.parent is in exclude. It runs in O(N) time
+// using memoized ancestor states. inv.mu must be held and exclude must be
+// mutable.
+func (inv *invocationTrace) propagateExcludedLocked(exclude map[string]bool) {
+	ancState := make(map[*spanRecord]uint8, len(inv.agentStack))
+	var chain []*spanRecord
+	for i := 1; i < len(inv.agentStack); i++ {
+		rec := inv.agentStack[i]
+		if rec.kind != spanKindAgent {
+			continue
+		}
+		if exclude[rec.spanID] {
+			ancState[rec] = 2
+			continue
+		}
+		chain = chain[:0]
+		var state uint8 = 1
+		for cur := rec.parent; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
+			if exclude[cur.spanID] || ancState[cur] == 2 {
+				state = 2
+				break
+			}
+			if ancState[cur] == 1 {
+				state = 1
+				break
+			}
+			chain = append(chain, cur)
+		}
+		ancState[rec] = state
+		for _, c := range chain {
+			ancState[c] = state
+		}
+		if state == 2 {
+			exclude[rec.spanID] = true
+		}
+	}
+}
+
+// openSpanTree indexes inv.agentStack by pointer and open-parent Euler-tour
+// intervals in O(N) time so ancestor, enclosing-span, and subtree-exclusion
+// queries avoid repeated parent-chain scans.
+type openSpanTree struct {
+	stackIdx    map[*spanRecord]int
+	openParent  []int
+	childrenOf  [][]int
+	tin         []int
+	tout        []int
+	depth       []int
+	dfsSeq      []int
+	preExcluded []bool
+}
+
+func (inv *invocationTrace) buildOpenSpanTreeLocked(exclude map[string]bool) *openSpanTree {
+	n := len(inv.agentStack)
+	stackIdx := make(map[*spanRecord]int, n)
+	for i, rec := range inv.agentStack {
+		stackIdx[rec] = i
+	}
+	openParent := make([]int, n)
+	childrenOf := make([][]int, n)
+	var preExcluded []bool
+	if len(exclude) > 0 {
+		preExcluded = make([]bool, n)
+	}
+	var retiredAnc map[*spanRecord]int
+	var retiredExcl map[*spanRecord]bool
+
+	for i := 1; i < n; i++ {
+		rec := inv.agentStack[i]
+		if preExcluded != nil && exclude[rec.spanID] {
+			preExcluded[i] = true
+		}
+		p := rec.parent
+		if p == nil || p.kind != spanKindAgent {
+			openParent[i] = 0
+			childrenOf[0] = append(childrenOf[0], i)
+			continue
+		}
+		if pIdx, ok := stackIdx[p]; ok {
+			openParent[i] = pIdx
+			childrenOf[pIdx] = append(childrenOf[pIdx], i)
+			continue
+		}
+		var path []*spanRecord
+		ancIdx := 0
+		baseExcl := false
+		for cur := p; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
+			if idx, ok := stackIdx[cur]; ok {
+				ancIdx = idx
+				break
+			}
+			if idx, ok := retiredAnc[cur]; ok {
+				ancIdx = idx
+				baseExcl = retiredExcl[cur]
+				break
+			}
+			path = append(path, cur)
+		}
+		curExcl := baseExcl
+		if len(path) > 0 {
+			if retiredAnc == nil {
+				retiredAnc = make(map[*spanRecord]int, len(path))
+			}
+			for _, node := range slices.Backward(path) {
+				retiredAnc[node] = ancIdx
+				if len(exclude) > 0 && exclude[node.spanID] {
+					curExcl = true
+				}
+				if curExcl {
+					if retiredExcl == nil {
+						retiredExcl = make(map[*spanRecord]bool)
+					}
+					retiredExcl[node] = true
+				}
+			}
+		}
+		openParent[i] = ancIdx
+		childrenOf[ancIdx] = append(childrenOf[ancIdx], i)
+		if curExcl && preExcluded != nil {
+			preExcluded[i] = true
+		}
+	}
+
+	type dfsFrame struct {
+		u       int
+		entered bool
+	}
+	stack := make([]dfsFrame, 1, n)
+	stack[0] = dfsFrame{u: 0}
+	tin := make([]int, n)
+	tout := make([]int, n)
+	depth := make([]int, n)
+	dfsSeq := make([]int, 0, n)
+	timer := 0
+	for len(stack) > 0 {
+		top := &stack[len(stack)-1]
+		u := top.u
+		if !top.entered {
+			top.entered = true
+			timer++
+			tin[u] = timer
+			dfsSeq = append(dfsSeq, u)
+			for _, v := range slices.Backward(childrenOf[u]) {
+				depth[v] = depth[u] + 1
+				stack = append(stack, dfsFrame{u: v})
+			}
+		} else {
+			tout[u] = timer
+			stack = stack[:len(stack)-1]
+		}
+	}
+
+	return &openSpanTree{
+		stackIdx:    stackIdx,
+		openParent:  openParent,
+		childrenOf:  childrenOf,
+		tin:         tin,
+		tout:        tout,
+		depth:       depth,
+		dfsSeq:      dfsSeq,
+		preExcluded: preExcluded,
+	}
+}
+
+func (t *openSpanTree) isOpenAncestor(ancIdx, descIdx int) bool {
+	return ancIdx > 0 && descIdx > 0 && ancIdx != descIdx && t.tin[ancIdx] < t.tin[descIdx] && t.tout[descIdx] <= t.tout[ancIdx]
+}
+
+// enclosing returns the nearest open span on agentStack that each of recs runs
+// under, or the invocation span when there is none.
+func (t *openSpanTree) enclosing(inv *invocationTrace, recs []*spanRecord) *spanRecord {
+	if len(recs) == 0 || len(inv.agentStack) == 0 {
+		if len(inv.agentStack) == 0 {
+			return nil
+		}
+		return inv.agentStack[0]
+	}
+	n := len(inv.agentStack)
+	minStrictTin := n + 1
+	minAncTin := n + 1
+	maxTout := 0
+	for _, rec := range recs {
+		if idx, ok := t.stackIdx[rec]; ok {
+			if t.tin[idx] < minStrictTin {
+				minStrictTin = t.tin[idx]
+			}
+			if t.tout[idx] > maxTout {
+				maxTout = t.tout[idx]
+			}
+			continue
+		}
+		var ancIdx int
+		for cur := rec.parent; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
+			if idx, ok := t.stackIdx[cur]; ok {
+				ancIdx = idx
+				break
+			}
+		}
+		if ancIdx == 0 {
+			return inv.agentStack[0]
+		}
+		if t.tin[ancIdx] < minAncTin {
+			minAncTin = t.tin[ancIdx]
+		}
+		if t.tout[ancIdx] > maxTout {
+			maxTout = t.tout[ancIdx]
+		}
+	}
+	var startAnc int
+	if idx, ok := t.stackIdx[recs[0]]; ok {
+		startAnc = t.openParent[idx]
+	} else {
+		for cur := recs[0].parent; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
+			if idx, ok := t.stackIdx[cur]; ok {
+				startAnc = idx
+				break
+			}
+		}
+	}
+	for u := startAnc; u > 0; u = t.openParent[u] {
+		if t.tin[u] < minStrictTin && t.tin[u] <= minAncTin && t.tout[u] >= maxTout {
+			return inv.agentStack[u]
+		}
+	}
+	return inv.agentStack[0]
+}
+
+// pushIntMinHeap pushes v onto a binary min-heap stored in h.
+func pushIntMinHeap(h []int, v int) []int {
+	h = append(h, v)
+	i := len(h) - 1
+	for i > 0 {
+		p := (i - 1) / 2
+		if h[p] <= h[i] {
+			break
+		}
+		h[p], h[i] = h[i], h[p]
+		i = p
+	}
+	return h
+}
+
+// popIntMinHeap pops the smallest element from a non-empty binary min-heap.
+func popIntMinHeap(h []int) ([]int, int) {
+	top := h[0]
+	last := h[len(h)-1]
+	h = h[:len(h)-1]
+	if len(h) > 0 {
+		h[0] = last
+		i := 0
+		for {
+			l := 2*i + 1
+			if l >= len(h) {
+				break
+			}
+			small := l
+			if r := l + 1; r < len(h) && h[r] < h[l] {
+				small = r
+			}
+			if h[i] <= h[small] {
+				break
+			}
+			h[i], h[small] = h[small], h[i]
+			i = small
+		}
+	}
+	return h, top
+}
+
+// maxSegTree is a bottom-up iterative binary segment tree over [0, n) storing
+// maximum values for O(log N) range-max subtree queries and point updates.
+type maxSegTree struct {
+	n    int
+	tree []int
+}
+
+func newMaxSegTree(n int) maxSegTree {
+	return maxSegTree{n: n, tree: make([]int, 2*n)}
+}
+
+func (s maxSegTree) build() {
+	for i := s.n - 1; i >= 1; i-- {
+		s.tree[i] = max(s.tree[2*i], s.tree[2*i+1])
+	}
+}
+
+func (s maxSegTree) set(pos, val int) {
+	i := pos + s.n
+	s.tree[i] = val
+	for i > 1 {
+		i >>= 1
+		s.tree[i] = max(s.tree[2*i], s.tree[2*i+1])
+	}
+}
+
+func (s maxSegTree) query(l, r int) int {
+	res := 0
+	l += s.n
+	r += s.n
+	for l <= r {
+		if l&1 == 1 {
+			res = max(res, s.tree[l])
+			l++
+		}
+		if r&1 == 0 {
+			res = max(res, s.tree[r])
+			r--
+		}
+		l >>= 1
+		r >>= 1
+	}
+	return res
+}
+
+// excludePeerLookalikesLocked inspects non-excluded open agent activations on
+// inv.agentStack[1:] grouped by lookalikeKey in O(N log N) worst-case time
+// (O(N + G log G) when no witness node is excluded mid-pass), and in O(1)
+// time without allocating while no two open activations share a lookalikeKey
+// (see lookalikes). When an open activation is on the context chain of the
+// run whose activation key is activation (see launcherLocked), every member
+// of every group that neither is nor encloses it is excluded with the agents
+// under it, and no group is left unmatched: the context that the run was
+// started with tells the members apart better than any goroutine does, as a
+// lookalike can stay open on a goroutine while suspended in yield or after
+// its BeforeAgentCallback answered for it, and a goroutine can run work that
+// any activation hands it after the one that created it. Otherwise, groups
+// with a live goroutine match (goid in Pass 1, then origin.parent in Pass 2)
+// are resolved in outer-to-inner topological order over the SCC condensation
+// DAG of group dependencies, excluding losing peers (while keeping the winner,
+// its ancestors, and earlier activations on the winner's non-zero goroutine
+// unexcluded, and scoping any unresolved inner peers to the matched subtree
+// below ancestor lookalikes). Groups with no goroutine match filter out
+// superseded same-goroutine activations and then collapse nested ancestor chains
+// (countEffectivePeers); when at least two effective concurrent peers remain,
+// all live members within the group's matched scope are returned in unmatched
+// (re-filtered and re-collapsed against final exclusions). inv.mu must be held.
+func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool, clonedExclude *bool, goid uint64, origin goroutineOrigin, activation any) (map[string]bool, map[lookalikeKey][]*spanRecord, map[*spanRecord][]*spanRecord, *openSpanTree) {
+	if goid == 0 || len(inv.agentStack) <= 2 {
+		return exclude, nil, nil, nil
+	}
+	if inv.syncLookalikesLocked(); inv.lookalikeDups == 0 {
+		return exclude, nil, nil, nil
+	}
+	n := len(inv.agentStack)
+	firstIdx := make(map[lookalikeKey]int, n-1)
+	var multiKeys []lookalikeKey
+	var groups map[lookalikeKey][]int
+	for i := 1; i < n; i++ {
+		rec := inv.agentStack[i]
+		if exclude[rec.spanID] || rec.kind != spanKindAgent {
+			continue
+		}
+		k := lookalikeKey{name: rec.name, branch: rec.branch, path: rec.path}
+		if first, ok := firstIdx[k]; !ok {
+			firstIdx[k] = i
+		} else {
+			if groups == nil {
+				groups = make(map[lookalikeKey][]int)
+			}
+			if len(groups[k]) == 0 {
+				multiKeys = append(multiKeys, k)
+				groups[k] = []int{first, i}
+			} else {
+				groups[k] = append(groups[k], i)
+			}
+		}
+	}
+	if len(multiKeys) == 0 {
+		return exclude, nil, nil, nil
+	}
+
+	slices.SortFunc(multiKeys, func(a, b lookalikeKey) int {
+		return cmp.Compare(firstIdx[a], firstIdx[b])
+	})
+	numGroups := len(multiKeys)
+	nodeGroupID := make([]int, n)
+	for i := range nodeGroupID {
+		nodeGroupID[i] = -1
+	}
+	for id, k := range multiKeys {
+		for _, mIdx := range groups[k] {
+			nodeGroupID[mIdx] = id
+		}
+	}
+
+	tree := inv.buildOpenSpanTreeLocked(exclude)
+	excluded := make([]bool, n)
+	if tree.preExcluded != nil {
+		for _, u := range tree.dfsSeq[1:] {
+			if tree.preExcluded[u] || excluded[tree.openParent[u]] {
+				excluded[u] = true
+			}
+		}
+	}
+
+	ensureExcludeMutable := func() {
+		if *clonedExclude {
+			return
+		}
+		exclude = maps.Clone(exclude)
+		if exclude == nil {
+			exclude = make(map[string]bool)
+		}
+		*clonedExclude = true
+	}
+
+	if launcher := inv.launcherLocked(activation, excluded); launcher > 0 {
+		for _, k := range multiKeys {
+			for _, mIdx := range groups[k] {
+				if excluded[mIdx] || mIdx == launcher || tree.isOpenAncestor(mIdx, launcher) {
+					continue
+				}
+				ensureExcludeMutable()
+				for _, u := range tree.dfsSeq[tree.tin[mIdx]-1 : tree.tout[mIdx]] {
+					excluded[u] = true
+					exclude[inv.agentStack[u].spanID] = true
+				}
+			}
+		}
+		return exclude, nil, nil, tree
+	}
+
+	groupsByTin := make([][]int, numGroups)
+	for _, u := range tree.dfsSeq[1:] {
+		if excluded[u] {
+			continue
+		}
+		if id := nodeGroupID[u]; id >= 0 {
+			groupsByTin[id] = append(groupsByTin[id], u)
+		}
+	}
+
+	var topoIDs []int
+	if numGroups == 1 {
+		topoIDs = []int{0}
+	} else {
+		adj := make([][]int, numGroups)
+		type groupEdge struct{ from, to int }
+		seenEdges := make(map[groupEdge]bool)
+		type ancFrame struct {
+			u       int
+			ancGrp  int
+			childAt int
+		}
+		dfsStack := make([]ancFrame, 1, n)
+		dfsStack[0] = ancFrame{u: 0, ancGrp: -1}
+		for len(dfsStack) > 0 {
+			top := &dfsStack[len(dfsStack)-1]
+			if top.childAt < len(tree.childrenOf[top.u]) {
+				v := tree.childrenOf[top.u][top.childAt]
+				top.childAt++
+				if excluded[v] {
+					continue
+				}
+				nextAnc := top.ancGrp
+				if ku := nodeGroupID[v]; ku >= 0 {
+					if top.ancGrp >= 0 && top.ancGrp != ku {
+						e := groupEdge{from: top.ancGrp, to: ku}
+						if !seenEdges[e] {
+							seenEdges[e] = true
+							adj[top.ancGrp] = append(adj[top.ancGrp], ku)
+						}
+					}
+					nextAnc = ku
+				}
+				dfsStack = append(dfsStack, ancFrame{u: v, ancGrp: nextAnc})
+			} else {
+				dfsStack = dfsStack[:len(dfsStack)-1]
+			}
+		}
+
+		// Condense cycles via iterative Tarjan SCC so every outer ancestor SCC
+		// resolves strictly before any downstream inner group SCC.
+		index := make([]int, numGroups)
+		lowlink := make([]int, numGroups)
+		onStack := make([]bool, numGroups)
+		tarjanStack := make([]int, 0, numGroups)
+		sccID := make([]int, numGroups)
+		var sccs [][]int
+		nextIndex := 1
+		type tarjanFrame struct {
+			u      int
+			edgeAt int
+		}
+		callStack := make([]tarjanFrame, 0, numGroups)
+		for start := range numGroups {
+			if index[start] != 0 {
+				continue
+			}
+			index[start] = nextIndex
+			lowlink[start] = nextIndex
+			nextIndex++
+			onStack[start] = true
+			tarjanStack = append(tarjanStack, start)
+			callStack = append(callStack, tarjanFrame{u: start})
+			for len(callStack) > 0 {
+				top := &callStack[len(callStack)-1]
+				u := top.u
+				if top.edgeAt < len(adj[u]) {
+					v := adj[u][top.edgeAt]
+					top.edgeAt++
+					if index[v] == 0 {
+						index[v] = nextIndex
+						lowlink[v] = nextIndex
+						nextIndex++
+						onStack[v] = true
+						tarjanStack = append(tarjanStack, v)
+						callStack = append(callStack, tarjanFrame{u: v})
+					} else if onStack[v] && index[v] < lowlink[u] {
+						lowlink[u] = index[v]
+					}
+					continue
+				}
+				callStack = callStack[:len(callStack)-1]
+				if len(callStack) > 0 {
+					p := callStack[len(callStack)-1].u
+					if lowlink[u] < lowlink[p] {
+						lowlink[p] = lowlink[u]
+					}
+				}
+				if lowlink[u] == index[u] {
+					cid := len(sccs)
+					var comp []int
+					for {
+						w := tarjanStack[len(tarjanStack)-1]
+						tarjanStack = tarjanStack[:len(tarjanStack)-1]
+						onStack[w] = false
+						sccID[w] = cid
+						comp = append(comp, w)
+						if w == u {
+							break
+						}
+					}
+					slices.Sort(comp)
+					sccs = append(sccs, comp)
+				}
+			}
+		}
+
+		numSCC := len(sccs)
+		sccAdj := make([][]int, numSCC)
+		sccIndeg := make([]int, numSCC)
+		seenSCCEdges := make(map[groupEdge]bool, len(seenEdges))
+		for u := range numGroups {
+			su := sccID[u]
+			for _, v := range adj[u] {
+				sv := sccID[v]
+				if su == sv {
+					continue
+				}
+				e := groupEdge{from: su, to: sv}
+				if !seenSCCEdges[e] {
+					seenSCCEdges[e] = true
+					sccAdj[su] = append(sccAdj[su], sv)
+					sccIndeg[sv]++
+				}
+			}
+		}
+
+		topoIDs = make([]int, 0, numGroups)
+		var heap []int
+		for cid := range numSCC {
+			if sccIndeg[cid] == 0 {
+				// sccs[cid][0] is unique across SCCs and maps back via sccID[minID] == cid.
+				heap = pushIntMinHeap(heap, sccs[cid][0])
+			}
+		}
+		for len(heap) > 0 {
+			var minID int
+			heap, minID = popIntMinHeap(heap)
+			cid := sccID[minID]
+			topoIDs = append(topoIDs, sccs[cid]...)
+			for _, dst := range sccAdj[cid] {
+				sccIndeg[dst]--
+				if sccIndeg[dst] == 0 {
+					heap = pushIntMinHeap(heap, sccs[dst][0])
+				}
+			}
+		}
+	}
+
+	var seg maxSegTree
+	var segActive bool
+	var segTargetGoid uint64
+	activateSeg := func(target uint64) {
+		segTargetGoid = target
+		if cap(seg.tree) < 2*n {
+			seg = newMaxSegTree(n)
+		} else {
+			seg.n = n
+			seg.tree = seg.tree[:2*n]
+			clear(seg.tree)
+		}
+		for u := 1; u < n; u++ {
+			if !excluded[u] && inv.agentStack[u].goroutineID == target {
+				seg.tree[n+tree.tin[u]-1] = u
+			}
+		}
+		seg.build()
+		segActive = true
+	}
+
+	var excludeQueue []int
+	propagateExclude := func(u int) {
+		if excluded[u] {
+			return
+		}
+		ensureExcludeMutable()
+		excluded[u] = true
+		exclude[inv.agentStack[u].spanID] = true
+		if segActive && inv.agentStack[u].goroutineID == segTargetGoid {
+			seg.set(tree.tin[u]-1, 0)
+		}
+		excludeQueue = append(excludeQueue[:0], u)
+		for len(excludeQueue) > 0 {
+			cur := excludeQueue[len(excludeQueue)-1]
+			excludeQueue = excludeQueue[:len(excludeQueue)-1]
+			for _, ch := range tree.childrenOf[cur] {
+				if !excluded[ch] {
+					excluded[ch] = true
+					exclude[inv.agentStack[ch].spanID] = true
+					if segActive && inv.agentStack[ch].goroutineID == segTargetGoid {
+						seg.set(tree.tin[ch]-1, 0)
+					}
+					excludeQueue = append(excludeQueue, ch)
+				}
+			}
+		}
+	}
+
+	computeBestMatch := func(targetGoid uint64, dst []int) {
+		clear(dst)
+		if targetGoid == 0 {
+			return
+		}
+		for _, u := range tree.dfsSeq[1:] {
+			if !excluded[u] && inv.agentStack[u].goroutineID == targetGoid {
+				dst[u] = u
+			}
+		}
+		for idx := len(tree.dfsSeq) - 1; idx >= 1; idx-- {
+			u := tree.dfsSeq[idx]
+			if excluded[u] || dst[u] == 0 {
+				continue
+			}
+			p := tree.openParent[u]
+			if p > 0 && !excluded[p] && dst[u] > dst[p] {
+				dst[p] = dst[u]
+			}
+		}
+	}
+
+	pickWinner := func(liveIdxs, best []int, useSeg bool, scopeIdx int) (int, int) {
+		winnerIdx := 0
+		bestMatch := 0
+		bestDepth := -1
+		for _, mIdx := range liveIdxs {
+			if scopeIdx != 0 && mIdx != scopeIdx && !tree.isOpenAncestor(scopeIdx, mIdx) {
+				continue
+			}
+			var bm int
+			if useSeg {
+				bm = seg.query(tree.tin[mIdx]-1, tree.tout[mIdx]-1)
+			} else {
+				bm = best[mIdx]
+			}
+			if bm == 0 {
+				continue
+			}
+			if bm > bestMatch || (bm == bestMatch && tree.depth[mIdx] > bestDepth) {
+				bestMatch = bm
+				bestDepth = tree.depth[mIdx]
+				winnerIdx = mIdx
+			}
+		}
+		return winnerIdx, bestMatch
+	}
+
+	var effectiveScratch []int
+	countEffectivePeers := func(liveByTin []int) int {
+		if len(liveByTin) <= 1 {
+			return len(liveByTin)
+		}
+		var lastForGoid map[uint64]int
+		for _, u := range liveByTin {
+			if g := inv.agentStack[u].goroutineID; g != 0 {
+				if lastForGoid == nil {
+					lastForGoid = make(map[uint64]int, len(liveByTin))
+				}
+				if prev, ok := lastForGoid[g]; !ok || u > prev {
+					lastForGoid[g] = u
+				}
+			}
+		}
+		compacted := effectiveScratch[:0]
+		for _, u := range liveByTin {
+			if g := inv.agentStack[u].goroutineID; g != 0 && lastForGoid[g] != u {
+				continue
+			}
+			compacted = append(compacted, u)
+		}
+		effectiveScratch = compacted
+		if len(compacted) <= 1 {
+			return len(compacted)
+		}
+		effective := 0
+		for i, u := range compacted {
+			if i+1 < len(compacted) && tree.tout[compacted[i+1]] <= tree.tout[u] {
+				continue
+			}
+			effective++
+		}
+		return effective
+	}
+
+	excludeLosers := func(liveIdxs []int, winnerIdx, bm int, matchGoid uint64) bool {
+		winner := inv.agentStack[winnerIdx]
+		var keptInsideBm bool
+		for _, mIdx := range liveIdxs {
+			if mIdx == winnerIdx || tree.isOpenAncestor(mIdx, winnerIdx) {
+				continue
+			}
+			// Only keep inner peers inside a descendant witness bm when the winner
+			// itself is on a different goroutine from matchGoid; a direct
+			// matchGoid winner must still exclude cross-goroutine inner peers even
+			// if an inline child frame shares winner's goroutine.
+			if bm != winnerIdx && winner.goroutineID != matchGoid && tree.isOpenAncestor(bm, mIdx) {
+				keptInsideBm = true
+				continue
+			}
+			other := inv.agentStack[mIdx]
+			if other.goroutineID != 0 && other.goroutineID == winner.goroutineID && mIdx < winnerIdx {
+				continue
+			}
+			propagateExclude(mIdx)
+		}
+		return keptInsideBm
+	}
+
+	// Pass 1: resolve groups with a live goid match before starter-only groups.
+	bestGoid := make([]int, n)
+	computeBestMatch(goid, bestGoid)
+	resolved := make([]bool, numGroups)
+	matchedScope := make([]int, numGroups)
+	var hasUnresolved bool
+	for _, id := range topoIDs {
+		k := multiKeys[id]
+		rawIdxs := groups[k]
+		liveIdxs := rawIdxs[:0]
+		var needRecompute bool
+		for _, mIdx := range rawIdxs {
+			if !excluded[mIdx] {
+				liveIdxs = append(liveIdxs, mIdx)
+				if !segActive {
+					if bm := bestGoid[mIdx]; bm != 0 && excluded[bm] {
+						needRecompute = true
+					}
+				}
+			}
+		}
+		groups[k] = liveIdxs
+		if len(liveIdxs) <= 1 {
+			resolved[id] = true
+			continue
+		}
+		if !segActive && needRecompute {
+			activateSeg(goid)
+		}
+		winnerIdx, bm := pickWinner(liveIdxs, bestGoid, segActive, 0)
+		if winnerIdx == 0 {
+			hasUnresolved = true
+			continue
+		}
+		if excludeLosers(liveIdxs, winnerIdx, bm, goid) {
+			matchedScope[id] = bm
+			hasUnresolved = true
+		} else {
+			resolved[id] = true
+		}
+	}
+
+	var unmatched map[lookalikeKey][]*spanRecord
+	var unmatchedRecKey map[int]lookalikeKey
+	if hasUnresolved {
+		bestStarter := make([]int, n)
+		computeBestMatch(origin.parent, bestStarter)
+		segActive = false
+
+		deepestGoidAnc := make([]int, n)
+		var deepestStarterAnc []int
+		if origin.parent != 0 {
+			deepestStarterAnc = make([]int, n)
+		}
+		for _, u := range tree.dfsSeq[1:] {
+			if excluded[u] {
+				continue
+			}
+			p := tree.openParent[u]
+			g := inv.agentStack[u].goroutineID
+			if g == goid {
+				deepestGoidAnc[u] = u
+			} else {
+				deepestGoidAnc[u] = deepestGoidAnc[p]
+			}
+			if deepestStarterAnc != nil {
+				if g == origin.parent {
+					deepestStarterAnc[u] = u
+				} else {
+					deepestStarterAnc[u] = deepestStarterAnc[p]
+				}
+			}
+		}
+
+		for _, id := range topoIDs {
+			if resolved[id] {
+				continue
+			}
+			k := multiKeys[id]
+			rawIdxs := groups[k]
+			liveIdxs := rawIdxs[:0]
+			var needRecompute bool
+			for _, mIdx := range rawIdxs {
+				if !excluded[mIdx] {
+					liveIdxs = append(liveIdxs, mIdx)
+					if !segActive {
+						if bm := bestStarter[mIdx]; bm != 0 && excluded[bm] {
+							needRecompute = true
+						}
+					}
+				}
+			}
+			groups[k] = liveIdxs
+			if len(liveIdxs) <= 1 {
+				continue
+			}
+			effScope := matchedScope[id]
+			goidScope := 0
+			for _, mIdx := range liveIdxs {
+				if effScope != 0 && mIdx != effScope && !tree.isOpenAncestor(effScope, mIdx) {
+					continue
+				}
+				if anc := deepestGoidAnc[mIdx]; anc > goidScope {
+					goidScope = anc
+				}
+			}
+			if goidScope != 0 && (effScope == 0 || tree.isOpenAncestor(effScope, goidScope)) {
+				effScope = goidScope
+			}
+			if !segActive && needRecompute {
+				activateSeg(origin.parent)
+			}
+			winnerIdx, bm := pickWinner(liveIdxs, bestStarter, segActive, effScope)
+			if winnerIdx != 0 {
+				if !excludeLosers(liveIdxs, winnerIdx, bm, origin.parent) {
+					continue
+				}
+				matchedScope[id] = bm
+			}
+
+			if matchedScope[id] == 0 {
+				ancM := effScope
+				if ancM == 0 && deepestStarterAnc != nil {
+					for _, mIdx := range liveIdxs {
+						if anc := deepestStarterAnc[mIdx]; anc > ancM {
+							ancM = anc
+						}
+					}
+				}
+				if ancM != 0 {
+					var hasInside, hasSiblingOutside bool
+					for _, mIdx := range liveIdxs {
+						if tree.isOpenAncestor(ancM, mIdx) {
+							hasInside = true
+						} else {
+							hasSiblingOutside = true
+						}
+					}
+					if hasInside && hasSiblingOutside {
+						kept := liveIdxs[:0]
+						for _, mIdx := range liveIdxs {
+							if tree.isOpenAncestor(ancM, mIdx) {
+								kept = append(kept, mIdx)
+							} else {
+								propagateExclude(mIdx)
+							}
+						}
+						liveIdxs = kept
+						groups[k] = liveIdxs
+						if len(liveIdxs) <= 1 {
+							continue
+						}
+						matchedScope[id] = ancM
+					}
+				}
+			}
+
+			scope := matchedScope[id]
+			rawTin := groupsByTin[id]
+			liveByTin := rawTin[:0]
+			for _, u := range rawTin {
+				if !excluded[u] && (scope == 0 || u == scope || tree.isOpenAncestor(scope, u)) {
+					liveByTin = append(liveByTin, u)
+				}
+			}
+			groupsByTin[id] = liveByTin
+			if countEffectivePeers(liveByTin) <= 1 {
+				continue
+			}
+			if unmatched == nil {
+				unmatched = make(map[lookalikeKey][]*spanRecord)
+				unmatchedRecKey = make(map[int]lookalikeKey, len(liveByTin))
+			}
+			unmatched[k] = nil
+			for _, u := range liveByTin {
+				unmatchedRecKey[u] = k
+			}
+		}
+	}
+
+	var unmatchedByRec map[*spanRecord][]*spanRecord
+	if len(unmatched) > 0 {
+		keptByTin := make(map[lookalikeKey][]int, len(unmatched))
+		for _, u := range tree.dfsSeq[1:] {
+			if excluded[u] {
+				continue
+			}
+			if k, ok := unmatchedRecKey[u]; ok {
+				keptByTin[k] = append(keptByTin[k], u)
+			}
+		}
+		unmatchedByRec = make(map[*spanRecord][]*spanRecord, len(unmatchedRecKey))
+		for k := range unmatched {
+			keptIdxs := keptByTin[k]
+			if countEffectivePeers(keptIdxs) <= 1 {
+				delete(unmatched, k)
+				continue
+			}
+			recs := make([]*spanRecord, len(keptIdxs))
+			for i, u := range keptIdxs {
+				recs[i] = inv.agentStack[u]
+			}
+			unmatched[k] = recs
+			for _, r := range recs {
+				unmatchedByRec[r] = recs
+			}
+		}
+	}
+	return exclude, unmatched, unmatchedByRec, tree
 }
 
 // ownerOf returns the span that the model and tool calls of id run under:
@@ -2002,7 +3237,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	// Register concurrent peers before the workflow-retry completion-inference
 	// loop so the retry guard can check !rec.concurrentPeer. Only peers that
 	// are NOT earlier attempts of the node are marked (see laterAttempt).
-	parent := inv.parentForRunLocked(id, goid, origin)
+	parent := inv.parentForRunLocked(id, nil, goid, origin, activation)
 	var concurrentPeer bool
 	isSyntheticRetry := func(other *spanRecord) bool {
 		return activation == nil && other.activation == nil && other.parent != nil && other.parent.activation == nil
@@ -2010,24 +3245,27 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	// laterAttempt reports whether the activation of id is a later attempt
 	// of the workflow node that other ran as its agent (see attemptSite), so
 	// that other's failure is handled: other runs, with another activation,
-	// under a workflow agent whose node path lies above id.path, and either
+	// under a parent span whose node path lies above id.path, and either
 	//
 	//   - both are the agent of a workflow.ParallelWorker item that ran on
 	//     this goroutine, as when RetryConfig runs the item's node again on
-	//     the worker's goroutine. The stack of this callback shows no other
-	//     agent run (see attemptSiteOfTrace), so other's run, and every run
-	//     that started on this goroutine before, has returned, and synced
-	//     reports that other's InvocationContext can be read; or
-	//   - both are the agent of a node attempt that the workflow agent's
-	//     scheduler started on a goroutine of its own (see startedBy), and a
-	//     node completion event reported that the node run that ran other
-	//     ended (see spanRecord.nodeRunEnded). A node can write the same
-	//     metadata on an event of its own while it still runs, so the report
-	//     does not show that other's run is over: synced is false, other's
-	//     InvocationContext is not read, and other is purged now only for a
-	//     failure that was recorded for it, not for having no response yet
-	//     or for a model or tool call that it or a run under it still has
-	//     open.
+	//     the worker's goroutine (even when other.parent is not the workflow
+	//     agent, as when concurrent lookalike activations moved other up to
+	//     the span that encloses them; see parentForRunLocked). The stack of
+	//     this callback shows no other agent run (see attemptSiteOfTrace), so
+	//     other's run, and every run that started on this goroutine before,
+	//     has returned, and synced reports that other's InvocationContext can
+	//     be read; or
+	//   - both are the agent of a node attempt under a workflow agent
+	//     (other.parent.isWorkflow) whose scheduler started both attempts on
+	//     goroutines of their own (see startedBy), and a node completion event
+	//     reported that the node run that ran other ended (see
+	//     spanRecord.nodeRunEnded). A node can write the same metadata on an
+	//     event of its own while it still runs, so the report does not show
+	//     that other's run is over: synced is false, other's InvocationContext
+	//     is not read, and other is purged now only for a failure that was
+	//     recorded for it, not for having no response yet or for a model or
+	//     tool call that it or a run under it still has open.
 	//
 	// Nothing else shows that other is an earlier attempt: the agent runs
 	// that a function node or a custom agent makes, one after another or one
@@ -2045,13 +3283,13 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		if isSyntheticRetry(other) {
 			return true, true
 		}
-		if !other.parent.isWorkflow {
-			return false, false
-		}
 		switch {
 		case attempt == attemptWorker && other.attempt == attemptWorker && goid != 0 && other.goroutineID == goid:
+			// A ParallelWorker item retry runs sequentially on the exact same
+			// runWorker goroutine, even when concurrent lookalike activations
+			// moved other up to a span that is not the workflow agent.
 			return true, true
-		case attempt == attemptNode && other.attempt == attemptNode && other.nodeRunEnded &&
+		case attempt == attemptNode && other.attempt == attemptNode && other.parent.isWorkflow && other.nodeRunEnded &&
 			origin.startedBy(schedulerCreator, other.parent) && other.origin.startedBy(schedulerCreator, other.parent):
 			return true, false
 		}
@@ -2077,6 +3315,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	}
 	// Workflow-retry completion-inference loop.
 	var purged []unclosedAgentSpan
+	var didPurge bool
 	for i := len(inv.agentStack) - 1; i > 0; i-- {
 		rec := inv.agentStack[i]
 		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch || rec.path != id.path {
@@ -2099,7 +3338,8 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		// the code's own to handle, so neither their InvocationContext nor
 		// whether they failed is read here.
 		later, synced := laterAttempt(rec)
-		if !later || rec.concurrentPeer || rec.parent != inv.parentOutsideLocked(id, inv.subtreeLocked(i)) {
+		sameWorker := attempt == attemptWorker && rec.attempt == attemptWorker && goid != 0 && rec.goroutineID == goid
+		if !later || (!sameWorker && (rec.concurrentPeer || rec.parent != inv.parentForRunLocked(id, inv.subtreeLocked(i), goid, origin, activation))) {
 			continue
 		}
 		if synced {
@@ -2122,12 +3362,15 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 				failures = inv.failuresLocked(i, false, inv.reportedOverLocked(i), false)
 			}
 			purged = inv.purgeActivationLocked(i, failures, now, ambient)
+			didPurge = true
 			break
 		}
 	}
 	// Mark concurrent peers on any remaining matching spans (workflow
 	// children that did not fail and were not purged by the retry loop).
-	parent = inv.parentForRunLocked(id, goid, origin)
+	if didPurge {
+		parent = inv.parentForRunLocked(id, nil, goid, origin, activation)
+	}
 	for _, other := range inv.agentStack[1:] {
 		if other.kind == spanKindAgent &&
 			other.parent == parent && other.name == id.agentName && other.branch == id.branch && other.path == id.path {
@@ -2161,7 +3404,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		children:             children.names,
 		seq:                  inv.nextSeqLocked(),
 	}
-	inv.agentStack = append(inv.agentStack, rec)
+	inv.pushAgentLocked(rec)
 	if rec.isNodeAgentOf(parent) {
 		if parent.nodeRuns == nil {
 			parent.nodeRuns = make(map[nodeRunKey]int)
@@ -2474,17 +3717,20 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 // AfterAgentCallback, and an ancestor LLM agent under which a resumed nested
 // task was parented is still active in its own runChat loop.
 //
+// failed reports that the response also carries a classified tool result
+// error, with which ADK ends the activation as well, but which fails its task.
 // The response ends the activation on the event's node path whose finish_task
-// call with one of the call IDs in calls completed (see finishedTaskLocked),
-// and otherwise, when no such activation is open or more than one is, as for
-// a response whose call this plugin did not see complete, the activation that
-// findAgentForContext finds. OnEventCallback runs on the runner's goroutine
+// call with one of the call IDs in calls ended the activation (using failed to
+// disambiguate when two runs on that path share a call ID; see
+// finishedTaskLocked), and otherwise, when no such activation is open or more
+// than one is, as for a response whose call this plugin did not see complete,
+// the activation that findAgentForContext finds. OnEventCallback runs on the runner's goroutine
 // with the runner's context, and the event does not show that the run that
 // wrote it returned: a custom agent can forward the event of a sub-agent that
 // it runs on another goroutine and wait for that goroutine later. So the span
 // is retired without the activation's InvocationContext being read and
 // without its run being taken to be over (see retireAgentLocked).
-func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls []string) (span rowSpan, ok bool) {
+func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls []string, failed bool) (span rowSpan, ok bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
@@ -2492,7 +3738,7 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	i := inv.finishedTaskLocked(id, calls)
+	i := inv.finishedTaskLocked(id, calls, failed)
 	if i < 0 {
 		i = inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
 	}
@@ -2529,37 +3775,61 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 
 // finishedTaskLocked returns the index in agentStack of the open activation
 // of the agent of id, on the node path of id, that saw one of the finish_task
-// calls in calls complete (see noteTaskFinished), or -1 if there is none, or
-// more than one. A function call ID is scoped to the activation that made the
-// call, not unique: ADK keeps the ID that a model gives a call, and providers
-// reuse IDs such as "call_0" (see toolKey). So another run of the agent on the
-// same branch may have seen a call with the same ID complete: one on another
-// node path did not write the event, and among several on the event's node
-// path the call ID does not tell which one did. As in findAgent, a node path
-// that either side lacks matches any. inv.mu must be held.
-func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string) int {
-	found := -1
+// calls in calls end the activation (see noteTaskFinished), or -1 if there is
+// none, or more than one. Both finishedTasks and failedTasks are searched
+// because agent-level AfterToolCallbacks run after this plugin and can add or
+// clear a tool result error flag before the FunctionResponse event is emitted.
+// A function call ID is scoped to the activation that made the call, not
+// unique: ADK keeps the ID that a model gives a call, and providers reuse IDs
+// such as "call_0" (see toolKey). When more than one open run on the event's
+// node path recorded the call ID, failed narrows the lookup to the list
+// matching the event's classification; if none or more than one still matches,
+// -1 is returned. As in findAgent, a node path that either side lacks matches
+// any. inv.mu must be held.
+func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string, failed bool) int {
+	const ambiguous = -2
+	anyFound := -1
+	matchedFound := -1
 	for i := len(inv.agentStack) - 1; i > 0; i-- {
 		rec := inv.agentStack[i]
 		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch ||
-			(id.path != "" && rec.path != "" && rec.path != id.path) ||
-			!slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.finishedTasks, call) }) {
+			(id.path != "" && rec.path != "" && rec.path != id.path) {
 			continue
 		}
-		if found >= 0 {
-			return -1
+		inFinished := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.finishedTasks, call) })
+		inFailed := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.failedTasks, call) })
+		if !inFinished && !inFailed {
+			continue
 		}
-		found = i
+		if anyFound == -1 {
+			anyFound = i
+		} else {
+			anyFound = ambiguous
+		}
+		if (failed && inFailed) || (!failed && inFinished) {
+			if matchedFound == -1 {
+				matchedFound = i
+			} else {
+				matchedFound = ambiguous
+			}
+		}
 	}
-	return found
+	if anyFound >= 0 {
+		return anyFound
+	}
+	if matchedFound >= 0 {
+		return matchedFound
+	}
+	return -1
 }
 
 // noteTaskFinished records that the finish_task call callID of the agent
-// activation that ctx and id identify completed, so that the function response
-// event that reports it ends that activation (see popTaskAgentSpan). The tool
-// callbacks get the context of the activation that made the call, which the
-// event callback does not.
-func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callID string) {
+// activation that ctx and id identify completed, or, if failed is set, ended
+// the activation with a classified tool result error, so that the function
+// response event that reports it ends that activation (see popTaskAgentSpan).
+// The tool callbacks get the context of the activation that made the call,
+// which the event callback does not.
+func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callID string, failed bool) {
 	if callID == "" {
 		return
 	}
@@ -2569,7 +3839,12 @@ func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callI
 	}
 	defer inv.mu.Unlock()
 	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
-		inv.agentStack[i].finishedTasks = append(inv.agentStack[i].finishedTasks, callID)
+		rec := inv.agentStack[i]
+		if failed {
+			rec.failedTasks = append(rec.failedTasks, callID)
+		} else {
+			rec.finishedTasks = append(rec.finishedTasks, callID)
+		}
 	}
 }
 
@@ -2633,7 +3908,7 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 	ownCtxCause := rec.contextFailureCause()
 	inheritedCause := rec.firstRetiredCause()
 	idx := i
-	inv.agentStack = slices.Delete(inv.agentStack, i, i+1)
+	inv.removeAgentLocked(i)
 	// Also retire any unclosed descendant spans in rec's subtree (for example,
 	// a sub-agent short-circuited in BeforeAgentCallback that never ran
 	// AfterAgentCallback, including one whose direct parent already retired
@@ -2664,7 +3939,7 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 			if inv.isLate {
 				retired = append(retired, d)
 			}
-			inv.agentStack = slices.Delete(inv.agentStack, idx, idx+1)
+			inv.removeAgentLocked(idx)
 			continue
 		}
 		idx++
@@ -2911,7 +4186,7 @@ func (inv *invocationTrace) purgeActivationLocked(i int, failures map[string]err
 			}
 		}
 	}
-	inv.agentStack = slices.DeleteFunc(inv.agentStack, func(rec *spanRecord) bool { return purged[rec.spanID] })
+	inv.removeAgentsLocked(func(rec *spanRecord) bool { return purged[rec.spanID] })
 	inv.syncOpenAgentsLocked()
 	for _, calls := range []map[string]*spanRecord{inv.llmSpans, inv.completedModels, inv.toolSpans, inv.completedTools} {
 		maps.DeleteFunc(calls, func(_ string, rec *spanRecord) bool { return purged[rec.parentSpanID] })
@@ -3252,7 +4527,7 @@ func (inv *invocationTrace) retireDrainedDescendantsLocked(matchAnc func(p *span
 			maps.Copy(failed, inv.lineageLocked(j))
 		}
 	}
-	inv.agentStack = slices.DeleteFunc(inv.agentStack, func(d *spanRecord) bool {
+	inv.removeAgentsLocked(func(d *spanRecord) bool {
 		if d.kind != spanKindAgent || failed[d.spanID] || d.parent == nil || d.parent.kind != spanKindAgent || openSet[d.parent.spanID] {
 			return false
 		}
@@ -3707,7 +4982,7 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 		if primaryErr == nil && !invocationEnded(ctx) && siblingCause != nil {
 			primaryErr = siblingCause
 		}
-		inv.agentStack = inv.agentStack[:1]
+		inv.truncateAgentsLocked()
 		return nil, primaryErr
 	}
 
@@ -3771,7 +5046,7 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 	}
 
 	if primaryErr == nil {
-		inv.agentStack = inv.agentStack[:1]
+		inv.truncateAgentsLocked()
 		inv.syncOpenAgentsLocked()
 		return nil, nil
 	}
@@ -3798,7 +5073,7 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 			err:       spanErr,
 		})
 	}
-	inv.agentStack = inv.agentStack[:1]
+	inv.truncateAgentsLocked()
 	inv.syncOpenAgentsLocked()
 	return popped, primaryErr
 }
@@ -4136,7 +5411,7 @@ func (inv *invocationTrace) retireLateSettledLocked() {
 				if rec.parent != nil && rec.parent.kind == spanKindAgent {
 					retired = append(retired, rec.parent)
 				}
-				inv.agentStack = slices.Delete(inv.agentStack, idx, idx+1)
+				inv.removeAgentLocked(idx)
 				changed = true
 				break
 			}
@@ -4881,17 +6156,19 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 // TOOL_COMPLETED or, with fromError set, TOOL_ERROR row.
 //
 // ADK runs AfterToolCallback after OnToolErrorCallback for a failed call.
-// closedByError reports that OnToolErrorCallback already ended the call,
-// in which case the returned place reuses its span, without latency. If
-// the call is unknown, as for a call of a tool that does not exist, the
-// row gets a span of its own and no latency; the agent and invocation
-// spans are left alone. Once the agent has no tool call left open, the
-// activations that its tool calls ran and that never ended are ended—purged
-// if they failed, or retired quietly otherwise (see endToolRunsLocked).
+// closedByError reports that the OnToolErrorCallback of the same attempt
+// (see toolAttempt) already ended the call, in which case the returned
+// place reuses its span, without latency. If the call is unknown, as for a
+// call of a tool that does not exist, the row gets a span of its own and no
+// latency; the agent and invocation spans are left alone. Once the agent
+// has no tool call left open, the activations that its tool calls ran and
+// that never ended are ended—purged if they failed, or retired quietly
+// otherwise (see endToolRunsLocked).
 func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string, fromError bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
+	actions := toolActionsOf(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	if !inv.lockLive() {
 		return tm.popToolSpan(ctx, id, key, fromError)
@@ -4924,6 +6201,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 	if open != nil {
 		open.dropContexts()
 		if fromError {
+			open.errorAttempt = attemptOf(actions)
 			inv.completedTools[key] = open
 		}
 		span = inv.rowSpan(open, latencyOf(open, now), ambient)
@@ -4931,7 +6209,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 		return span, purged, false
 	}
 	if !fromError {
-		if rec := inv.completedTools[key]; rec != nil {
+		if rec := inv.completedTools[key]; rec != nil && rec.errorAttempt == attemptOf(actions) {
 			delete(inv.completedTools, key)
 			span = inv.rowSpan(rec, nil, ambient)
 			span.timestamp = now
@@ -4941,6 +6219,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 	rec := inv.newChild(inv.ownerOf(ctx, id), spanKindTool, now)
 	if fromError {
 		rec.dropContexts()
+		rec.errorAttempt = attemptOf(actions)
 		inv.completedTools[key] = rec
 	}
 	span = inv.rowSpan(rec, nil, ambient)
@@ -5168,6 +6447,44 @@ func (rec *spanRecord) collateralFailureCause() (cause error, collateral bool) {
 		top = top.parent
 	}
 	return cause, top.stopPoint
+}
+
+// toolAttempt identifies one dispatch of a tool call by the EventActions of
+// its tool context. ADK makes the EventActions of a tool context anew for
+// every call, so two attempts never share them, even when a model or
+// provider reuses a function call ID, and passes the one tool context of a
+// call to its BeforeToolCallback, OnToolErrorCallback and AfterToolCallback.
+// The contexts that ADK derives from a tool context (WithAgentTimeout,
+// WithAgentCancel, WithDelta) keep its EventActions. A context whose Actions
+// method returns other EventActions on each call, which ADK's contexts never
+// do, makes each callback an attempt of its own, so that its
+// AfterToolCallback does not find the call that its OnToolErrorCallback
+// ended. The reference is weak: it keeps nothing of the call alive and,
+// unlike an address, never compares equal to the reference of other
+// EventActions that the runtime later puts at the same address. The zero
+// value is the attempt of every context that exposes no EventActions, which
+// ADK's tool dispatch never builds, so the callbacks of such contexts match
+// by call key alone.
+type toolAttempt = weak.Pointer[session.EventActions]
+
+// toolActionsOf returns the EventActions of the tool callback context ctx, or
+// nil if ctx has no Actions method, or the method panics or returns nil. It
+// runs code of the context, so it is called without inv.mu held.
+func toolActionsOf(ctx context.Context) *session.EventActions {
+	c, ok := ctx.(interface{ Actions() *session.EventActions })
+	if !ok {
+		return nil
+	}
+	return orZero(c.Actions)
+}
+
+// attemptOf returns the attempt that actions identify, or the zero value for
+// nil.
+func attemptOf(actions *session.EventActions) toolAttempt {
+	if actions == nil {
+		return toolAttempt{}
+	}
+	return weak.Make(actions)
 }
 
 // callKey prefixes key with the pointer identity of ctx's agent-run
