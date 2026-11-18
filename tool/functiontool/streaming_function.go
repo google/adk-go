@@ -186,10 +186,7 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 
 		for res, err := range f.handler(ctx, input) {
 			if err != nil {
-				// Wrap so live-mode streamingToolErrorMessage's exact *BeforeHandler
-				// assert does not treat handler-re-yielded framework errors as trusted
-				// pre-handler errors (TestStreamingHandlerReyieldedFrameworkError).
-				err = fmt.Errorf("%w", err)
+				err = &handlerError{err: err}
 			}
 			if !yield(res, err) {
 				return
@@ -197,3 +194,12 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 		}
 	}
 }
+
+// handlerError wraps errors yielded by a streaming handler so live-mode
+// streamingToolErrorMessage's exact *toolerror.BeforeHandler assertion does not
+// treat handler-re-yielded framework errors as trusted pre-handler text, while
+// keeping Error() and Unwrap() identical to the handler's error outside live mode.
+type handlerError struct{ err error }
+
+func (e *handlerError) Error() string { return e.err.Error() }
+func (e *handlerError) Unwrap() error { return e.err }
