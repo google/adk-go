@@ -5,6 +5,8 @@ go 1.26.10
 require (
 	cloud.google.com/go v0.123.0
 	cloud.google.com/go/aiplatform v1.127.1
+	cloud.google.com/go/auth v0.24.1
+	cloud.google.com/go/auth/oauth2adapt v0.3.0
 	cloud.google.com/go/storage v1.70.0
 	github.com/a2aproject/a2a-go v0.3.15
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
@@ -63,8 +65,6 @@ require (
 
 require (
 	cel.dev/expr v0.25.3 // indirect
-	cloud.google.com/go/auth v0.24.1 // indirect
-	cloud.google.com/go/auth/oauth2adapt v0.3.0 // indirect
 	cloud.google.com/go/compute/metadata v0.10.0 // indirect
 	cloud.google.com/go/iam v1.14.0 // indirect
 	cloud.google.com/go/longrunning v1.4.1
