@@ -31,12 +31,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
 
@@ -292,6 +294,14 @@ type spanRecord struct {
 	// the event's node path saw a call with that ID complete, on the same one
 	// (see finishedTaskLocked and popTaskAgentSpan).
 	finishedTasks []string
+	// failedTasks holds, likewise, the function call IDs of the finish_task
+	// calls that this plugin's tool callback saw end the activation with a
+	// classified tool result error (see noteTaskFinished). Keeping them apart
+	// from finishedTasks lets finishedTaskLocked disambiguate a failed call
+	// and a completed call that share a reused ID when both runs are open on
+	// the same path, while still matching across both lists when an
+	// agent-level AfterToolCallback alters the error flag afterwards.
+	failedTasks []string
 	// nonLLM reports that the agent is a workflow agent, such as a sequential
 	// or loop agent, rather than an llmagent whose sub-agents can transfer to
 	// peers.
@@ -325,6 +335,10 @@ type spanRecord struct {
 	// or tool call, rather than popToolSpan making up a span for a call that
 	// this plugin did not see start.
 	callStarted bool
+	// errorAttempt is, for a tool call that OnToolErrorCallback ended, the
+	// attempt whose callback ended it (see toolAttempt and
+	// invocationTrace.completedTools).
+	errorAttempt toolAttempt
 	// handedOver reports, for a model or tool call, that the run left it open
 	// at AfterRun, which handed it over to the late state of its completed
 	// entry (see rememberCompletedLocked), rather than a callback starting it
@@ -509,7 +523,11 @@ type invocationTrace struct {
 	// so that the AfterToolCallback that ADK runs next for the same call
 	// finds its span instead of ending another one. ADK runs
 	// OnToolErrorCallback alone for a call of a tool that does not exist;
-	// such records last as long as the invocation.
+	// such records last as long as the invocation, or until the next call
+	// with the same key starts. A record answers only the AfterToolCallback
+	// of the attempt that it ended (see toolAttempt): a later call that
+	// reuses the function call ID, and whose start an earlier plugin hid
+	// from this one, is a call of its own.
 	completedTools map[string]*spanRecord
 	// unrecoveredErrors tracks unhandled errors encountered during the
 	// invocation keyed by activation / call identity (e.g. llmKey), together
@@ -3699,17 +3717,20 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 // AfterAgentCallback, and an ancestor LLM agent under which a resumed nested
 // task was parented is still active in its own runChat loop.
 //
+// failed reports that the response also carries a classified tool result
+// error, with which ADK ends the activation as well, but which fails its task.
 // The response ends the activation on the event's node path whose finish_task
-// call with one of the call IDs in calls completed (see finishedTaskLocked),
-// and otherwise, when no such activation is open or more than one is, as for
-// a response whose call this plugin did not see complete, the activation that
-// findAgentForContext finds. OnEventCallback runs on the runner's goroutine
+// call with one of the call IDs in calls ended the activation (using failed to
+// disambiguate when two runs on that path share a call ID; see
+// finishedTaskLocked), and otherwise, when no such activation is open or more
+// than one is, as for a response whose call this plugin did not see complete,
+// the activation that findAgentForContext finds. OnEventCallback runs on the runner's goroutine
 // with the runner's context, and the event does not show that the run that
 // wrote it returned: a custom agent can forward the event of a sub-agent that
 // it runs on another goroutine and wait for that goroutine later. So the span
 // is retired without the activation's InvocationContext being read and
 // without its run being taken to be over (see retireAgentLocked).
-func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls []string) (span rowSpan, ok bool) {
+func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls []string, failed bool) (span rowSpan, ok bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
@@ -3717,7 +3738,7 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	i := inv.finishedTaskLocked(id, calls)
+	i := inv.finishedTaskLocked(id, calls, failed)
 	if i < 0 {
 		i = inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
 	}
@@ -3754,37 +3775,61 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 
 // finishedTaskLocked returns the index in agentStack of the open activation
 // of the agent of id, on the node path of id, that saw one of the finish_task
-// calls in calls complete (see noteTaskFinished), or -1 if there is none, or
-// more than one. A function call ID is scoped to the activation that made the
-// call, not unique: ADK keeps the ID that a model gives a call, and providers
-// reuse IDs such as "call_0" (see toolKey). So another run of the agent on the
-// same branch may have seen a call with the same ID complete: one on another
-// node path did not write the event, and among several on the event's node
-// path the call ID does not tell which one did. As in findAgent, a node path
-// that either side lacks matches any. inv.mu must be held.
-func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string) int {
-	found := -1
+// calls in calls end the activation (see noteTaskFinished), or -1 if there is
+// none, or more than one. Both finishedTasks and failedTasks are searched
+// because agent-level AfterToolCallbacks run after this plugin and can add or
+// clear a tool result error flag before the FunctionResponse event is emitted.
+// A function call ID is scoped to the activation that made the call, not
+// unique: ADK keeps the ID that a model gives a call, and providers reuse IDs
+// such as "call_0" (see toolKey). When more than one open run on the event's
+// node path recorded the call ID, failed narrows the lookup to the list
+// matching the event's classification; if none or more than one still matches,
+// -1 is returned. As in findAgent, a node path that either side lacks matches
+// any. inv.mu must be held.
+func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string, failed bool) int {
+	const ambiguous = -2
+	anyFound := -1
+	matchedFound := -1
 	for i := len(inv.agentStack) - 1; i > 0; i-- {
 		rec := inv.agentStack[i]
 		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch ||
-			(id.path != "" && rec.path != "" && rec.path != id.path) ||
-			!slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.finishedTasks, call) }) {
+			(id.path != "" && rec.path != "" && rec.path != id.path) {
 			continue
 		}
-		if found >= 0 {
-			return -1
+		inFinished := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.finishedTasks, call) })
+		inFailed := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.failedTasks, call) })
+		if !inFinished && !inFailed {
+			continue
 		}
-		found = i
+		if anyFound == -1 {
+			anyFound = i
+		} else {
+			anyFound = ambiguous
+		}
+		if (failed && inFailed) || (!failed && inFinished) {
+			if matchedFound == -1 {
+				matchedFound = i
+			} else {
+				matchedFound = ambiguous
+			}
+		}
 	}
-	return found
+	if anyFound >= 0 {
+		return anyFound
+	}
+	if matchedFound >= 0 {
+		return matchedFound
+	}
+	return -1
 }
 
 // noteTaskFinished records that the finish_task call callID of the agent
-// activation that ctx and id identify completed, so that the function response
-// event that reports it ends that activation (see popTaskAgentSpan). The tool
-// callbacks get the context of the activation that made the call, which the
-// event callback does not.
-func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callID string) {
+// activation that ctx and id identify completed, or, if failed is set, ended
+// the activation with a classified tool result error, so that the function
+// response event that reports it ends that activation (see popTaskAgentSpan).
+// The tool callbacks get the context of the activation that made the call,
+// which the event callback does not.
+func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callID string, failed bool) {
 	if callID == "" {
 		return
 	}
@@ -3794,7 +3839,12 @@ func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callI
 	}
 	defer inv.mu.Unlock()
 	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
-		inv.agentStack[i].finishedTasks = append(inv.agentStack[i].finishedTasks, callID)
+		rec := inv.agentStack[i]
+		if failed {
+			rec.failedTasks = append(rec.failedTasks, callID)
+		} else {
+			rec.finishedTasks = append(rec.finishedTasks, callID)
+		}
 	}
 }
 
@@ -6094,17 +6144,19 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 // TOOL_COMPLETED or, with fromError set, TOOL_ERROR row.
 //
 // ADK runs AfterToolCallback after OnToolErrorCallback for a failed call.
-// closedByError reports that OnToolErrorCallback already ended the call,
-// in which case the returned place reuses its span, without latency. If
-// the call is unknown, as for a call of a tool that does not exist, the
-// row gets a span of its own and no latency; the agent and invocation
-// spans are left alone. Once the agent has no tool call left open, the
-// activations that its tool calls ran and that never ended are ended—purged
-// if they failed, or retired quietly otherwise (see endToolRunsLocked).
+// closedByError reports that the OnToolErrorCallback of the same attempt
+// (see toolAttempt) already ended the call, in which case the returned
+// place reuses its span, without latency. If the call is unknown, as for a
+// call of a tool that does not exist, the row gets a span of its own and no
+// latency; the agent and invocation spans are left alone. Once the agent
+// has no tool call left open, the activations that its tool calls ran and
+// that never ended are ended—purged if they failed, or retired quietly
+// otherwise (see endToolRunsLocked).
 func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string, fromError bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
+	actions := toolActionsOf(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	if !inv.lockLive() {
 		return tm.popToolSpan(ctx, id, key, fromError)
@@ -6137,6 +6189,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 	if open != nil {
 		open.dropContexts()
 		if fromError {
+			open.errorAttempt = attemptOf(actions)
 			inv.completedTools[key] = open
 		}
 		span = inv.rowSpan(open, latencyOf(open, now), ambient)
@@ -6144,7 +6197,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 		return span, purged, false
 	}
 	if !fromError {
-		if rec := inv.completedTools[key]; rec != nil {
+		if rec := inv.completedTools[key]; rec != nil && rec.errorAttempt == attemptOf(actions) {
 			delete(inv.completedTools, key)
 			span = inv.rowSpan(rec, nil, ambient)
 			span.timestamp = now
@@ -6154,6 +6207,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 	rec := inv.newChild(inv.ownerOf(ctx, id), spanKindTool, now)
 	if fromError {
 		rec.dropContexts()
+		rec.errorAttempt = attemptOf(actions)
 		inv.completedTools[key] = rec
 	}
 	span = inv.rowSpan(rec, nil, ambient)
@@ -6381,6 +6435,44 @@ func (rec *spanRecord) collateralFailureCause() (cause error, collateral bool) {
 		top = top.parent
 	}
 	return cause, top.stopPoint
+}
+
+// toolAttempt identifies one dispatch of a tool call by the EventActions of
+// its tool context. ADK makes the EventActions of a tool context anew for
+// every call, so two attempts never share them, even when a model or
+// provider reuses a function call ID, and passes the one tool context of a
+// call to its BeforeToolCallback, OnToolErrorCallback and AfterToolCallback.
+// The contexts that ADK derives from a tool context (WithAgentTimeout,
+// WithAgentCancel, WithDelta) keep its EventActions. A context whose Actions
+// method returns other EventActions on each call, which ADK's contexts never
+// do, makes each callback an attempt of its own, so that its
+// AfterToolCallback does not find the call that its OnToolErrorCallback
+// ended. The reference is weak: it keeps nothing of the call alive and,
+// unlike an address, never compares equal to the reference of other
+// EventActions that the runtime later puts at the same address. The zero
+// value is the attempt of every context that exposes no EventActions, which
+// ADK's tool dispatch never builds, so the callbacks of such contexts match
+// by call key alone.
+type toolAttempt = weak.Pointer[session.EventActions]
+
+// toolActionsOf returns the EventActions of the tool callback context ctx, or
+// nil if ctx has no Actions method, or the method panics or returns nil. It
+// runs code of the context, so it is called without inv.mu held.
+func toolActionsOf(ctx context.Context) *session.EventActions {
+	c, ok := ctx.(interface{ Actions() *session.EventActions })
+	if !ok {
+		return nil
+	}
+	return orZero(c.Actions)
+}
+
+// attemptOf returns the attempt that actions identify, or the zero value for
+// nil.
+func attemptOf(actions *session.EventActions) toolAttempt {
+	if actions == nil {
+		return toolAttempt{}
+	}
+	return weak.Make(actions)
 }
 
 // callKey prefixes key with the pointer identity of ctx's agent-run

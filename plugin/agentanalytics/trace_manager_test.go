@@ -1008,6 +1008,322 @@ func TestTraceManager_FailedToolCallBookkeeping(t *testing.T) {
 	}
 }
 
+// TestRunner_CallAfterFailedCallWithReusedIDGetsItsOwnSpan runs a call of a
+// tool that does not exist, which ADK ends with OnToolErrorCallback alone, and
+// then, in the next model response, a call of an existing tool that reuses the
+// function call ID. A plugin registered before this one answers the
+// BeforeToolCallback of the later call, so this plugin sees neither its start
+// nor an error. The record that OnToolErrorCallback left for the failed call
+// belongs to the attempt that it ended: the later call's TOOL_COMPLETED row
+// gets a span of its own, and the call keeps its AGENT_RESPONSE row.
+func TestRunner_CallAfterFailedCallWithReusedIDGetsItsOwnSpan(t *testing.T) {
+	p, requests, _ := setupTestPluginWithConfig(t, func(c *Config) {
+		c.FinalResponseToolNames = []string{"lookup"}
+	})
+	lookupTool, err := functiontool.New(functiontool.Config{Name: "lookup", Description: "Looks up"},
+		func(agent.Context, map[string]any) (map[string]any, error) {
+			return map[string]any{"ok": true}, nil
+		})
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+	// cache answers every call of lookup before the tool runs.
+	cache, err := baseplugin.New(baseplugin.Config{
+		Name: "cache",
+		BeforeToolCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+			if tl.Name() == "lookup" {
+				return map[string]any{"cached": true}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+	llm := &scriptedLLM{responses: []*model.LLMResponse{
+		{Content: genai.NewContentFromParts([]*genai.Part{{
+			FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "missing_tool", Args: map[string]any{"x": 1}},
+		}}, genai.RoleModel)},
+		{Content: genai.NewContentFromParts([]*genai.Part{{
+			FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "lookup", Args: map[string]any{"q": "x"}},
+		}}, genai.RoleModel)},
+		{Content: textContent("model", "done"), TurnComplete: true},
+	}}
+	bot, err := llmagent.New(llmagent.Config{Name: "bot", Model: llm, Tools: []tool.Tool{lookupTool}})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	for _, runErr := range newTestRunner(t, bot, cache, p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if got := len(rowsOfType(rows, EventToolStarting)); got != 1 {
+		t.Errorf("got %d TOOL_STARTING rows, want 1 for the failed call; event types: %v", got, eventTypes(rows))
+	}
+	failed := onlyRowOfType(t, rows, EventToolError)
+	completed := onlyRowOfType(t, rows, EventToolCompleted)
+	if got := functionCallIDOf(t, completed); got != "call_0" {
+		t.Errorf("TOOL_COMPLETED function_call_id = %q, want %q", got, "call_0")
+	}
+	failedAt, completedAt := placeOf(failed), placeOf(completed)
+	if completedAt.span == failedAt.span {
+		t.Errorf("TOOL_COMPLETED of the later call reuses the span %q of the failed call", failedAt.span)
+	}
+	if completedAt.parent != failedAt.parent {
+		t.Errorf("TOOL_COMPLETED of the later call is under %q, want the agent span %q", completedAt.parent, failedAt.parent)
+	}
+	responses := 0
+	for _, row := range rowsOfType(rows, EventAgentResponse) {
+		if source, _ := lookup(jsonObjectColumn(t, row, "attributes"), "source_tool"); source == "lookup" {
+			responses++
+		}
+	}
+	if responses != 1 {
+		t.Errorf("got %d AGENT_RESPONSE rows with source_tool lookup, want 1; event types: %v", responses, eventTypes(rows))
+	}
+}
+
+// attemptInvocationContext is an InvocationContext to build tool contexts
+// over. Its WithICDelta returns the context itself, so that
+// agent.Context.WithDelta can derive contexts from such a tool context; the
+// mock alone panics there.
+type attemptInvocationContext struct{ *mockInvocationContext }
+
+func (c *attemptInvocationContext) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return c
+}
+
+// newAttemptInvocationContext returns an attemptInvocationContext of the
+// agent "agent" in the invocation "inv".
+func newAttemptInvocationContext() *attemptInvocationContext {
+	return &attemptInvocationContext{&mockInvocationContext{ctx: context.Background(), agentName: "agent", invocationID: "inv"}}
+}
+
+// actionsContext is a context whose Actions method runs actions.
+type actionsContext struct {
+	context.Context
+	actions func() *session.EventActions
+}
+
+func (c actionsContext) Actions() *session.EventActions { return c.actions() }
+
+// TestTraceManager_ErrorEndedToolCallAnswersOnlyItsOwnAttempt ends a tool
+// call with OnToolErrorCallback and then runs AfterToolCallback for the same
+// call key, each through a context of the table, for a call whose start this
+// plugin saw and for one whose start it did not see. A call that
+// OnToolErrorCallback ended answers only the AfterToolCallback of its own
+// attempt: of a context with the same EventActions, which every context that
+// ADK derives from a tool context keeps. The AfterToolCallback of another
+// attempt is a call of its own and leaves the record to its own attempt.
+// Contexts that expose no EventActions match each other by call key alone,
+// and never a tool context.
+func TestTraceManager_ErrorEndedToolCallAnswersOnlyItsOwnAttempt(t *testing.T) {
+	ic := newAttemptInvocationContext()
+	newToolContext := func(actions *session.EventActions) agent.Context {
+		return agent.NewToolContext(ic, "call-1", actions, nil)
+	}
+	type valueKey struct{}
+	tests := []struct {
+		name string
+		// contexts returns the contexts of OnToolErrorCallback and of
+		// AfterToolCallback.
+		contexts func(t *testing.T) (onError, after context.Context)
+		// sameAttempt reports that AfterToolCallback runs for the attempt
+		// that OnToolErrorCallback ended.
+		sameAttempt bool
+	}{
+		{
+			name: "same tool context",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				return c, c
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "WithAgentTimeout",
+			contexts: func(t *testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				d, cancel := c.WithAgentTimeout(time.Minute)
+				t.Cleanup(cancel)
+				return c, d
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "WithAgentCancel",
+			contexts: func(t *testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				d, cancel := c.WithAgentCancel()
+				t.Cleanup(cancel)
+				return c, d
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "WithDelta over a WithValue context",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				std := context.WithValue(c, valueKey{}, 1)
+				return c, c.WithDelta(&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Context: &std}})
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "WithDelta over a WithoutCancel context",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				c := newToolContext(&session.EventActions{})
+				std := context.WithoutCancel(c)
+				return c, c.WithDelta(&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Context: &std}})
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "tool contexts over the same EventActions",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				actions := &session.EventActions{}
+				return newToolContext(actions), newToolContext(actions)
+			},
+			sameAttempt: true,
+		},
+		{
+			name: "tool contexts over distinct EventActions",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				return newToolContext(&session.EventActions{}), newToolContext(&session.EventActions{})
+			},
+		},
+		{
+			name: "contexts without EventActions",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				return context.Background(), withFunctionCall(ic.mockInvocationContext, "call-1")
+			},
+			sameAttempt: true,
+		},
+		// In the next two rows, ic is the context without EventActions: unlike
+		// context.Background(), it has the call key of the tool contexts over
+		// it, so these rows compare attempts rather than keys.
+		{
+			name: "tool context, then a context without EventActions",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				return newToolContext(&session.EventActions{}), ic
+			},
+		},
+		{
+			name: "context without EventActions, then a tool context",
+			contexts: func(*testing.T) (context.Context, context.Context) {
+				return ic, newToolContext(&session.EventActions{})
+			},
+		},
+	}
+	for _, tt := range tests {
+		for _, started := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/started=%t", tt.name, started), func(t *testing.T) {
+				onError, after := tt.contexts(t)
+				ctx := context.Background()
+				tm := newTraceManager()
+				id := identity{invocationID: "inv", agentName: "agent"}
+				key := toolKey(id, "call-1", "lookup")
+				tm.invocationSpan(ctx, id, nil)
+				agentSpan, _ := tm.pushAgentSpan(ctx, id)
+				var start rowSpan
+				if started {
+					start = tm.pushToolSpan(onError, id, key)
+				}
+				errorEnd, _, closedByError := tm.popToolSpan(onError, id, key, true)
+				if closedByError {
+					t.Fatal("OnToolErrorCallback found the call ended by an earlier error")
+				}
+				if started && errorEnd.spanID != start.spanID {
+					t.Fatalf("TOOL_ERROR at span %q, want the span of the call %q", errorEnd.spanID, start.spanID)
+				}
+				afterEnd, _, closedByError := tm.popToolSpan(after, id, key, false)
+				if closedByError != tt.sameAttempt {
+					t.Fatalf("AfterToolCallback found the call ended by its error: %t, want %t", closedByError, tt.sameAttempt)
+				}
+				if afterEnd.latency != nil {
+					t.Errorf("AfterToolCallback has latency %v, want none", afterEnd.latency)
+				}
+				if tt.sameAttempt {
+					if afterEnd.spanID != errorEnd.spanID {
+						t.Errorf("AfterToolCallback at span %q, want the span of the error %q", afterEnd.spanID, errorEnd.spanID)
+					}
+					return
+				}
+				if afterEnd.spanID == errorEnd.spanID || afterEnd.parentSpanID != agentSpan.spanID {
+					t.Errorf("AfterToolCallback of another attempt at span %q under %q, want a span of its own under the agent %q, not the span of the error %q", afterEnd.spanID, afterEnd.parentSpanID, agentSpan.spanID, errorEnd.spanID)
+				}
+				ownEnd, _, closedByError := tm.popToolSpan(onError, id, key, false)
+				if !closedByError || ownEnd.spanID != errorEnd.spanID {
+					t.Errorf("AfterToolCallback of the failed attempt at span %q (found ended by its error: %t), want the span of the error %q", ownEnd.spanID, closedByError, errorEnd.spanID)
+				}
+			})
+		}
+	}
+}
+
+// TestToolAttempt_WeakAndNeverReused checks the identity of attempts: an
+// attempt leaves its EventActions collectable, and never equals the attempt
+// of other EventActions, even once the runtime has reused the memory of
+// collected ones. The attempt is that of the EventActions whatever the
+// context that returns them, and the zero attempt when the context has no
+// Actions method, or the method panics or returns nil, as that of ADK's
+// callback context does.
+func TestToolAttempt_WeakAndNeverReused(t *testing.T) {
+	ic := newAttemptInvocationContext()
+	var zero toolAttempt
+	const attempts = 2000
+	held := make(map[toolAttempt]int, attempts)
+	for i := range attempts {
+		at := attemptOf(toolActionsOf(agent.NewToolContext(ic, "call-1", &session.EventActions{}, nil)))
+		if at == zero {
+			t.Fatalf("attempt %d of a tool context is the zero attempt", i)
+		}
+		if j, ok := held[at]; ok {
+			t.Fatalf("attempt %d equals attempt %d", i, j)
+		}
+		held[at] = i
+		if i%100 == 99 {
+			// Collect the EventActions so far, so that the later ones can
+			// reuse their memory.
+			runtime.GC()
+		}
+	}
+	runtime.GC()
+	collected := 0
+	for at := range held {
+		if at.Value() == nil {
+			collected++
+		}
+	}
+	// The runtime does not promise to collect every unreachable object.
+	if collected < attempts/2 {
+		t.Errorf("%d of %d EventActions were collected while their attempts were held, want most of them", collected, attempts)
+	}
+
+	actions := &session.EventActions{}
+	direct := actionsContext{context.Background(), func() *session.EventActions { return actions }}
+	if attemptOf(toolActionsOf(direct)) != attemptOf(toolActionsOf(agent.NewToolContext(ic, "call-1", actions, nil))) {
+		t.Error("a context that returns the EventActions of a tool context has another attempt")
+	}
+	// The Actions method of ADK's callback context logs that it has none.
+	origOut := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(origOut) })
+	for name, ctx := range map[string]context.Context{
+		"no Actions method":   context.Background(),
+		"Actions panics":      actionsContext{context.Background(), func() *session.EventActions { panic("no actions") }},
+		"Actions returns nil": actionsContext{context.Background(), func() *session.EventActions { return nil }},
+		"callback context":    agent.NewCallbackContext(ic, &session.EventActions{}),
+	} {
+		if attemptOf(toolActionsOf(ctx)) != zero {
+			t.Errorf("%s: got an attempt, want the zero attempt", name)
+		}
+	}
+}
+
 // TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse replays a
 // failed tool call that a subsequent OnToolErrorCallback recovers (err == nil
 // in AfterToolCallback). TOOL_STARTING, TOOL_ERROR, and TOOL_COMPLETED share
@@ -6832,7 +7148,7 @@ func TestTraceManager_PopTaskAgentSpan_DoesNotMarkNonLLMParent(t *testing.T) {
 	}
 
 	// Pop the task span as popTaskAgentSpan does (finish_task completion).
-	tm.popTaskAgentSpan(ctx, taskID, nil)
+	tm.popTaskAgentSpan(ctx, taskID, nil, false)
 
 	// Verify seq was NOT marked taskDelegated (defensive guard).
 	inv.mu.Lock()
@@ -6904,7 +7220,7 @@ func TestTraceManager_PopTaskAgentSpan_MarksDirectLLMParent(t *testing.T) {
 		t.Fatalf("task parentSpanID = %q, want coordinator spanID %q", taskStart.parentSpanID, coordStart.spanID)
 	}
 
-	tm.popTaskAgentSpan(ctx, taskID, nil)
+	tm.popTaskAgentSpan(ctx, taskID, nil, false)
 
 	// Verify coordinator WAS marked taskDelegated.
 	inv.mu.Lock()
@@ -6964,7 +7280,7 @@ func TestTraceManager_PopTaskAgentSpan_IgnoresUnrelatedAncestor(t *testing.T) {
 		t.Fatalf("task parentSpanID = %q, want coordinator spanID %q", taskStart.parentSpanID, coordStart.spanID)
 	}
 
-	tm.popTaskAgentSpan(ctx, taskID, nil)
+	tm.popTaskAgentSpan(ctx, taskID, nil, false)
 
 	// Verify coordinator was NOT marked taskDelegated because task_worker is not in its children.
 	tm.mu.Lock()
@@ -7766,7 +8082,7 @@ func TestTraceManager_PurgedActivationLatencyFromLastActivity(t *testing.T) {
 				tm.popLLMSpan(ctx, child, true)
 			},
 			touchFunc: func(tm *traceManager) {
-				tm.popTaskAgentSpan(ctx, child, nil)
+				tm.popTaskAgentSpan(ctx, child, nil, false)
 			},
 		},
 		{
@@ -20230,7 +20546,7 @@ func TestTraceManager_PopTaskAgentSpanRejectsNonTaskAgent(t *testing.T) {
 	// Call popTaskAgentSpan on the non-task child at t2. It should return
 	// false and NOT advance parent.lastActivity.
 	clock = t2
-	_, ok := tm.popTaskAgentSpan(ctx, child, nil)
+	_, ok := tm.popTaskAgentSpan(ctx, child, nil, false)
 	if ok {
 		t.Fatal("popTaskAgentSpan returned ok=true for non-task child, want false")
 	}
@@ -21899,11 +22215,15 @@ func TestFinishedTaskLocked_RequiresOneRunOnTheEventPath(t *testing.T) {
 	run := func(path string, calls ...string) *spanRecord {
 		return &spanRecord{kind: spanKindAgent, name: "task", branch: "b", path: path, finishedTasks: calls}
 	}
+	failedRun := func(path string, calls ...string) *spanRecord {
+		return &spanRecord{kind: spanKindAgent, name: "task", branch: "b", path: path, failedTasks: calls}
+	}
 	for _, tc := range []struct {
-		name  string
-		path  string
-		stack []*spanRecord
-		want  int
+		name   string
+		path   string
+		failed bool
+		stack  []*spanRecord
+		want   int
 	}{
 		{name: "run on the event path", path: "left/task@1", stack: []*spanRecord{run("left/task@1", "call_0"), run("right/task@1", "call_0")}, want: 1},
 		{name: "run on another path only", path: "left/task@1", stack: []*spanRecord{run("right/task@1", "call_0")}, want: -1},
@@ -21911,11 +22231,15 @@ func TestFinishedTaskLocked_RequiresOneRunOnTheEventPath(t *testing.T) {
 		{name: "one of two runs on the event path saw the call", path: "left/task@1", stack: []*spanRecord{run("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1},
 		{name: "event without a node path", path: "", stack: []*spanRecord{run("left/task@1", "call_0")}, want: 1},
 		{name: "run without a node path", path: "left/task@1", stack: []*spanRecord{run("", "call_0")}, want: 1},
+		{name: "agent callback added error after completed call", path: "left/task@1", failed: true, stack: []*spanRecord{run("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1},
+		{name: "agent callback cleared error after failed call", path: "left/task@1", failed: false, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1},
+		{name: "same call ID disambiguated by failed classification", path: "left/task@1", failed: true, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_0")}, want: 1},
+		{name: "same call ID disambiguated by completed classification", path: "left/task@1", failed: false, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_0")}, want: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &invocationTrace{agentStack: append([]*spanRecord{{kind: spanKindAgent, name: "root"}}, tc.stack...)}
 			id := identity{agentName: "task", branch: "b", path: tc.path}
-			if got := inv.finishedTaskLocked(id, []string{"call_0"}); got != tc.want {
+			if got := inv.finishedTaskLocked(id, []string{"call_0"}, tc.failed); got != tc.want {
 				t.Errorf("finishedTaskLocked = %d, want %d", got, tc.want)
 			}
 		})
