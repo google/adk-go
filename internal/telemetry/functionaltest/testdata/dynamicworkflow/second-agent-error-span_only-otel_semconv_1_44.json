@@ -80,7 +80,11 @@
                       "content": "you are helpful\n\nYou are an agent. Your internal name is \"task_agent\". The description about you is \"collaborative task_agent\".\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n",
                       "type": "text"
                     }
-                  ]
+                  ],
+                  "gen_ai.usage.cache_read.input_tokens": 40,
+                  "gen_ai.usage.input_tokens": 100,
+                  "gen_ai.usage.output_tokens": 25,
+                  "gen_ai.usage.reasoning.output_tokens": 5
                 },
                 "status": "UNSET",
                 "children": [],
@@ -96,7 +100,11 @@
                       "gen_ai.request.model": "mock",
                       "gen_ai.response.finish_reasons": [
                         "stop"
-                      ]
+                      ],
+                      "gen_ai.usage.cache_read.input_tokens": 40,
+                      "gen_ai.usage.input_tokens": 100,
+                      "gen_ai.usage.output_tokens": 25,
+                      "gen_ai.usage.reasoning.output_tokens": 5
                     }
                   }
                 ]
@@ -211,7 +219,7 @@
           "gen_ai.request.model": "mock",
           "gen_ai.response.model": "mock"
         },
-        "value": 0
+        "value": 100
       }
     ],
     "gen_ai.client.inference.operation.output_tokens": [
@@ -231,7 +239,65 @@
           "gen_ai.request.model": "mock",
           "gen_ai.response.model": "mock"
         },
-        "value": 0
+        "value": 25
+      }
+    ],
+    "gen_ai.client.inference.usage.cache_read.input_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "text"
+        },
+        "value": 40
+      }
+    ],
+    "gen_ai.client.inference.usage.input_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "text"
+        },
+        "value": 100
+      }
+    ],
+    "gen_ai.client.inference.usage.output_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "text"
+        },
+        "value": 20
+      },
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "unknown"
+        },
+        "value": 5
+      }
+    ],
+    "gen_ai.client.inference.usage.reasoning.output_tokens": [
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "unknown"
+        },
+        "value": 5
       }
     ]
   }

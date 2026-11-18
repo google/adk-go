@@ -31,7 +31,10 @@ func newDelegation(t *testing.T) agent.Agent {
 	delegate, err := llmagent.New(llmagent.Config{
 		Name:        "some_delegate_agent",
 		Description: "A delegate agent.",
-		Model:       &testutil.MockModel{Responses: []*genai.Content{{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "delegate response"}}}}},
+		Model: &testutil.MockModel{
+			Responses: []*genai.Content{{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "delegate response"}}}},
+			Usage:     []*genai.GenerateContentResponseUsageMetadata{usageC()},
+		},
 		Instruction: "you are helpful",
 	})
 	if err != nil {
@@ -40,10 +43,13 @@ func newDelegation(t *testing.T) agent.Agent {
 	root, err := llmagent.New(llmagent.Config{
 		Name:        "some_delegating_agent",
 		Description: "A delegating agent.",
-		Model: &testutil.MockModel{Responses: []*genai.Content{
-			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "some_delegate_agent", Args: map[string]any{"request": "delegate this"}}}}},
-			{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "text response"}}},
-		}},
+		Model: &testutil.MockModel{
+			Responses: []*genai.Content{
+				{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "some_delegate_agent", Args: map[string]any{"request": "delegate this"}}}}},
+				{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "text response"}}},
+			},
+			Usage: []*genai.GenerateContentResponseUsageMetadata{usageA(), usageB()},
+		},
 		Instruction: "you are helpful",
 		Tools:       []tool.Tool{agenttool.New(delegate, nil)},
 	})

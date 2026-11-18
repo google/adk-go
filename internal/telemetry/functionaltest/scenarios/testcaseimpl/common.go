@@ -72,20 +72,33 @@ func Run(t *testing.T, s testcasedata.Scenario) error {
 	return nil
 }
 
-// firstTurnUsage is the token usage the model reports for the first turn of a
-// conversation, copied from adk-python's
+// usageA, usageB and usageC are token usage reports a mock model response
+// carries, with counts from adk-python's
 // tests/unittests/telemetry/functional/scenarios/conversation.py. Every count
-// across both turns is distinct, so a golden shows which turn and which count
-// a number came from. Over both turns that is 250 input, 75 output, 100 cache
-// read and 20 reasoning tokens.
-func firstTurnUsage() *genai.GenerateContentResponseUsageMetadata {
-	return &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 100, CachedContentTokenCount: 40, CandidatesTokenCount: 20, ThoughtsTokenCount: 5, TotalTokenCount: 125}
-}
+// across the three is distinct, so a golden shows which report a number came
+// from.
+func usageA() *genai.GenerateContentResponseUsageMetadata { return textUsage(100, 40, 20, 5) }
 
-// secondTurnUsage is the token usage the model reports for the second turn of
-// a conversation, from the same adk-python file.
-func secondTurnUsage() *genai.GenerateContentResponseUsageMetadata {
-	return &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 150, CachedContentTokenCount: 60, CandidatesTokenCount: 35, ThoughtsTokenCount: 15, TotalTokenCount: 200}
+func usageB() *genai.GenerateContentResponseUsageMetadata { return textUsage(150, 60, 35, 15) }
+
+func usageC() *genai.GenerateContentResponseUsageMetadata { return textUsage(70, 30, 10, 3) }
+
+// textUsage is a usage report whose breakdowns mark the prompt, cached and
+// candidates tokens as text. Reasoning tokens have no breakdown.
+func textUsage(prompt, cached, candidates, thoughts int32) *genai.GenerateContentResponseUsageMetadata {
+	text := func(n int32) []*genai.ModalityTokenCount {
+		return []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: n}}
+	}
+	return &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:        prompt,
+		PromptTokensDetails:     text(prompt),
+		CachedContentTokenCount: cached,
+		CacheTokensDetails:      text(cached),
+		CandidatesTokenCount:    candidates,
+		CandidatesTokensDetails: text(candidates),
+		ThoughtsTokenCount:      thoughts,
+		TotalTokenCount:         prompt + candidates + thoughts,
+	}
 }
 
 // Cases returns every case of every scenario build knows.

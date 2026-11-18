@@ -125,7 +125,7 @@
           "gen_ai.provider.name": "gcp.gemini",
           "gen_ai.request.model": "mock",
           "gen_ai.response.model": "mock",
-          "gen_ai.token.modality": "unknown"
+          "gen_ai.token.modality": "text"
         },
         "value": 60
       }
@@ -137,7 +137,7 @@
           "gen_ai.provider.name": "gcp.gemini",
           "gen_ai.request.model": "mock",
           "gen_ai.response.model": "mock",
-          "gen_ai.token.modality": "unknown"
+          "gen_ai.token.modality": "text"
         },
         "value": 150
       }
@@ -149,9 +149,19 @@
           "gen_ai.provider.name": "gcp.gemini",
           "gen_ai.request.model": "mock",
           "gen_ai.response.model": "mock",
+          "gen_ai.token.modality": "text"
+        },
+        "value": 35
+      },
+      {
+        "attributes": {
+          "gen_ai.operation.name": "generate_content",
+          "gen_ai.provider.name": "gcp.gemini",
+          "gen_ai.request.model": "mock",
+          "gen_ai.response.model": "mock",
           "gen_ai.token.modality": "unknown"
         },
-        "value": 50
+        "value": 15
       }
     ],
     "gen_ai.client.inference.usage.reasoning.output_tokens": [

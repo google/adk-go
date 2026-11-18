@@ -45,13 +45,13 @@ func newDynamicWorkflow(t *testing.T, s dynamicworkflow.Scenario) agent.Agent {
 			return strings.ToUpper(in), nil
 		}, nodeCfg)
 
-	taskAgent := newCollaborativeAgent(t, "task_agent", llmagent.ModeTask, s.Failure != dynamicworkflow.FirstAgentError, "task complete")
+	taskAgent := newCollaborativeAgent(t, "task_agent", llmagent.ModeTask, s.Failure != dynamicworkflow.FirstAgentError, "task complete", usageA())
 	taskNode, err := workflow.NewAgentNode(taskAgent, nodeCfg)
 	if err != nil {
 		t.Fatalf("NewAgentNode(task_agent): %v", err)
 	}
 
-	singleTurnAgent := newCollaborativeAgent(t, "single_turn_agent", llmagent.ModeSingleTurn, s.Failure != dynamicworkflow.SecondAgentError, "single turn complete")
+	singleTurnAgent := newCollaborativeAgent(t, "single_turn_agent", llmagent.ModeSingleTurn, s.Failure != dynamicworkflow.SecondAgentError, "single turn complete", usageB())
 	singleTurnNode, err := workflow.NewAgentNode(singleTurnAgent, nodeCfg)
 	if err != nil {
 		t.Fatalf("NewAgentNode(single_turn_agent): %v", err)
@@ -95,18 +95,21 @@ func newDynamicWorkflow(t *testing.T, s dynamicworkflow.Scenario) agent.Agent {
 	return a
 }
 
-// newCollaborativeAgent builds an llmagent in the given collaborative mode.
-// When ok is false its model has no response to give, so the agent fails.
-func newCollaborativeAgent(t *testing.T, name string, mode llmagent.Mode, ok bool, reply string) agent.Agent {
+// newCollaborativeAgent builds an llmagent in the given collaborative mode,
+// whose model replies with usage. When ok is false its model has no response
+// to give, so the agent fails.
+func newCollaborativeAgent(t *testing.T, name string, mode llmagent.Mode, ok bool, reply string, usage *genai.GenerateContentResponseUsageMetadata) agent.Agent {
 	t.Helper()
 	var responses []*genai.Content
+	var usages []*genai.GenerateContentResponseUsageMetadata
 	if ok {
 		responses = []*genai.Content{{Role: genai.RoleModel, Parts: []*genai.Part{{Text: reply}}}}
+		usages = []*genai.GenerateContentResponseUsageMetadata{usage}
 	}
 	a, err := llmagent.New(llmagent.Config{
 		Name:        name,
 		Description: "collaborative " + name,
-		Model:       &testutil.MockModel{Responses: responses},
+		Model:       &testutil.MockModel{Responses: responses, Usage: usages},
 		Instruction: "you are helpful",
 		Mode:        mode,
 	})
