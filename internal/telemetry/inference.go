@@ -21,14 +21,18 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 )
 
 // genAIProviderName supersedes gen_ai.system in semantic conventions >1.36.
 var genAIProviderName = attribute.Key("gen_ai.provider.name")
 
 // providerName is the provider a model call's span, log record and metrics
-// report: named by the model, else by the backend, else by the backend the
-// environment selects. adk-python skips the client's backend and guesses from
+// report: named by the model, else by the provider segment of an Apigee path,
+// else by the backend, else by the backend the environment selects, which for
+// an Apigee path is the one the Apigee model picks. A backend it does not know
+// reports gcp.gen_ai. adk-python skips the client's backend and guesses from
 // the environment; Go knows the backend, so it uses it.
 func providerName(modelName string, backend genai.Backend) attribute.KeyValue {
 	name := bareModelName(modelName)
@@ -40,25 +44,28 @@ func providerName(modelName string, backend genai.Backend) attribute.KeyValue {
 			return genAIProviderName.String(strings.ToLower(provider))
 		}
 	}
-	if backend == genai.BackendUnspecified {
-		backend = environmentBackend()
-	}
-	sys, _ := GenAISystemAttr(backend)
-	return genAIProviderName.String(sys.Value.AsString())
-}
-
-// environmentBackend returns the backend the environment selects for a client
-// that names none.
-func environmentBackend() genai.Backend {
-	for _, name := range []string{"GOOGLE_GENAI_USE_ENTERPRISE", "GOOGLE_GENAI_USE_VERTEXAI"} {
-		if v, ok := os.LookupEnv(name); ok {
-			if v := strings.ToLower(v); v == "1" || v == "true" {
-				return genai.BackendVertexAI
+	if rest, ok := strings.CutPrefix(modelName, "apigee/"); ok {
+		if segment, _, ok := strings.Cut(rest, "/"); ok && apigeeProviders[segment] != "" {
+			return genAIProviderName.String(apigeeProviders[segment])
+		}
+		if backend == genai.BackendUnspecified {
+			// The Apigee model reads GOOGLE_GENAI_USE_VERTEXAI alone.
+			backend = genai.BackendGeminiAPI
+			if v := os.Getenv("GOOGLE_GENAI_USE_VERTEXAI"); strings.ToLower(v) == "true" || v == "1" {
+				backend = genai.BackendVertexAI
 			}
-			return genai.BackendGeminiAPI
 		}
 	}
-	return genai.BackendGeminiAPI
+	switch backend {
+	case genai.BackendUnspecified:
+		backend = googlellm.EnvironmentBackend()
+	case genai.BackendEnterprise:
+		backend = genai.BackendVertexAI
+	}
+	if sys, ok := GenAISystemAttr(backend); ok {
+		return genAIProviderName.String(sys.Value.AsString())
+	}
+	return genAIProviderName.String("gcp.gen_ai")
 }
 
 var (
@@ -68,6 +75,12 @@ var (
 	modelPaths = []*regexp.Regexp{
 		regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/publishers/[^/]+/models/(.+)$`),
 		regexp.MustCompile(`^apigee/(?:[^/]+/)?(?:[^/]+/)?(.+)$`),
+	}
+
+	apigeeProviders = map[string]string{
+		"vertex_ai": "gcp.vertex_ai",
+		"gemini":    "gcp.gemini",
+		"openai":    "openai",
 	}
 
 	// Leading path segments that are not providers.

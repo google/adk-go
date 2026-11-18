@@ -15,6 +15,7 @@
 package googlellm
 
 import (
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,6 +34,21 @@ func GetGoogleLLMVariant(llm model.LLM) genai.Backend {
 		return genai.BackendUnspecified
 	}
 	return i.GetGoogleLLMVariant()
+}
+
+// EnvironmentBackend returns the backend the environment selects for a client
+// that names none. GOOGLE_GENAI_USE_ENTERPRISE, when set, decides over
+// GOOGLE_GENAI_USE_VERTEXAI; "1" or "true" in any case selects Vertex AI.
+func EnvironmentBackend() genai.Backend {
+	for _, name := range []string{"GOOGLE_GENAI_USE_ENTERPRISE", "GOOGLE_GENAI_USE_VERTEXAI"} {
+		if v, ok := os.LookupEnv(name); ok {
+			if v := strings.ToLower(v); v == "1" || v == "true" {
+				return genai.BackendVertexAI
+			}
+			return genai.BackendGeminiAPI
+		}
+	}
+	return genai.BackendGeminiAPI
 }
 
 // GoogleLLM is an interface which allows to distinguish between Vertex AI and Gemini API models.

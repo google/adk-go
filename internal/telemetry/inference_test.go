@@ -15,6 +15,7 @@
 package telemetry
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -43,15 +44,24 @@ func TestProviderName(t *testing.T) {
 		{"models/gemini-2.0-flash", genai.BackendGeminiAPI, "gcp.gemini"},
 		{"gemini-2.0-flash/001", genai.BackendVertexAI, "gcp.vertex_ai"},
 		{"models/claude-3-haiku", genai.BackendGeminiAPI, "anthropic"},
-		{"apigee/openai/gpt-4o", genai.BackendUnspecified, "gcp.gemini"},
+		{"apigee/openai/gpt-4o", genai.BackendUnspecified, "openai"},
+		{"apigee/vertex_ai/gemini-2.5-flash", genai.BackendUnspecified, "gcp.vertex_ai"},
+		{"apigee/vertex_ai/gemini-2.5-flash", genai.BackendGeminiAPI, "gcp.vertex_ai"},
+		{"apigee/gemini/gemini-2.5-flash", genai.BackendUnspecified, "gcp.gemini"},
+		{"apigee/vertex_ai/v1beta/gemini-2.5-flash", genai.BackendUnspecified, "gcp.vertex_ai"},
+		{"apigee/vertex_ai/claude-sonnet-4-5", genai.BackendUnspecified, "anthropic"},
+		{"apigee/v1/gemini-2.5-flash", genai.BackendVertexAI, "gcp.vertex_ai"},
+		{"gemini-2.0-flash", genai.BackendEnterprise, "gcp.vertex_ai"},
+		{"gemini-2.0-flash", genai.Backend(99), "gcp.gen_ai"},
 		{"some-model", genai.BackendVertexAI, "gcp.vertex_ai"},
 		{"/foo", genai.BackendVertexAI, "gcp.vertex_ai"},
 		// Guessed from the environment, which names no backend.
 		{"gemini-2.0-flash", genai.BackendUnspecified, "gcp.gemini"},
 		{"some-model", genai.BackendUnspecified, "gcp.gemini"},
 		{"", genai.BackendUnspecified, "gcp.gemini"},
+		{"apigee/gemini-2.5-flash", genai.BackendUnspecified, "gcp.gemini"},
 	} {
-		t.Run(tc.model+"/"+tc.backend.String(), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/%d", tc.model, tc.backend), func(t *testing.T) {
 			unsetEnvForTesting(t, "GOOGLE_GENAI_USE_ENTERPRISE", "GOOGLE_GENAI_USE_VERTEXAI")
 			if got := providerName(tc.model, tc.backend).Value.AsString(); got != tc.want {
 				t.Errorf("providerName(%q, %v) = %q, want %q", tc.model, tc.backend, got, tc.want)
@@ -86,6 +96,11 @@ func TestProviderNameFromEnvironment(t *testing.T) {
 		{"enterprise false wins", "some-model", genai.BackendUnspecified, map[string]string{enterprise: "false", vertexAI: "true"}, "gcp.gemini"},
 		{"vertex ai true", "some-model", genai.BackendUnspecified, map[string]string{vertexAI: "True"}, "gcp.vertex_ai"},
 		{"vertex ai 0", "some-model", genai.BackendUnspecified, map[string]string{vertexAI: "0"}, "gcp.gemini"},
+		{"apigee provider segment", "apigee/gemini/gemini-2.5-flash", genai.BackendUnspecified, map[string]string{vertexAI: "true"}, "gcp.gemini"},
+		{"apigee version segment", "apigee/v1/gemini-2.5-flash", genai.BackendUnspecified, map[string]string{vertexAI: "true"}, "gcp.vertex_ai"},
+		{"apigee bare model", "apigee/gemini-2.5-flash", genai.BackendUnspecified, map[string]string{vertexAI: "true"}, "gcp.vertex_ai"},
+		{"apigee ignores enterprise", "apigee/gemini-2.5-flash", genai.BackendUnspecified, map[string]string{enterprise: "true"}, "gcp.gemini"},
+		{"apigee reads vertex ai alone", "apigee/v1/gemini-2.5-flash", genai.BackendUnspecified, map[string]string{enterprise: "false", vertexAI: "true"}, "gcp.vertex_ai"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			unsetEnvForTesting(t, enterprise, vertexAI)
