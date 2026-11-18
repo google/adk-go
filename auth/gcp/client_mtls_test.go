@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -263,8 +264,14 @@ func TestNewClientTokenExchangePresentsTheCertificate(t *testing.T) {
 	}
 	workload, leaf := clientcerttest.Workload(t)
 	// One server for the token and for the credential service.
+	var scope atomic.Value
 	srv, peers := clientcerttest.Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ParseForm() == nil && r.PostForm.Get("assertion") != "" {
+			got, err := assertionScope(r)
+			if err != nil {
+				t.Errorf("token request: %v", err)
+			}
+			scope.Store(got)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"access_token":"ADC-TOKEN","token_type":"Bearer","expires_in":3600}`)
 			return
@@ -289,12 +296,17 @@ func TestNewClientTokenExchangePresentsTheCertificate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			clientcerttest.Setenv(t, "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE", tc.gcloud)
 			before := len(peers())
+			scope.Store("")
 			c, err := NewClient(t.Context(), &Config{AgentIdentityEndpoint: srv.URL, ConnectorEndpoint: srv.URL})
 			if err != nil {
 				t.Fatalf("NewClient() error = %v", err)
 			}
 			if _, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"}); err != nil {
 				t.Fatalf("RetrieveCredential() error = %v", err)
+			}
+			// Each of the two branches in NewClient asks for the scope itself.
+			if got, want := scope.Load(), "https://www.googleapis.com/auth/cloud-platform"; got != want {
+				t.Errorf("token request asked for scope %q, want %q", got, want)
 			}
 			got := peers()[before:]
 			if len(got) != tc.want {
