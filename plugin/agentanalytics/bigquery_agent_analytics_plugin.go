@@ -1211,6 +1211,99 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 	return nil, nil
 }
 
+// hasEventCreationProvenance is a heuristic that reports whether ev looks like
+// it was created via session.NewEvent rather than left without an ID until
+// runner fallback timestamping. It is NOT a strict proof of creation-time vs
+// delivery-time stamping: a custom agent can still construct
+// &session.Event{ID: platform.NewUUID(ctx)} with a zero Timestamp that
+// runner.go later stamps at delivery time, when a custom
+// platform.WithUUIDProvider is active on ctx any non-empty ev.ID passes, and
+// stored events re-emitted or forwarded from external session storage carry
+// whatever ID and Timestamp that storage assigned.
+func hasEventCreationProvenance(ctx context.Context, ev *session.Event) bool {
+	if ev == nil || ev.ID == "" {
+		return false
+	}
+	return hasNewEventUUID(ev.ID) || contextHasCustomUUIDProvider(ctx)
+}
+
+// hasEventCreationProvenance is the package-level heuristic for an event ev
+// that OnEventCallback delivers with ctx and the identity id read from it,
+// except that an ID that is not a UUIDv4 passes only if the agent activations
+// that created ev ran with a custom platform.UUIDProvider, as recorded for the
+// invocation in ev.InvocationID, or in id when ev has none (see
+// traceManager.eventUUIDProvider), rather than if ctx carries one: ctx is the
+// runner's context, so it neither shows a provider that a custom agent
+// installed for a sub-agent nor a nil one that turned the runner's provider
+// off. When ev.InvocationID differs from id.invocationID and tm does not track
+// ev.InvocationID, a tracked id.invocationID fails closed rather than letting
+// a stale or foreign ev.InvocationID fall back to ctx; ctx decides only when
+// neither invocation is tracked. As with the package-level helper, stored
+// events re-emitted or forwarded from external session storage carry whatever
+// ID and Timestamp external storage assigned (the inherent boundary of
+// in-process UUID-provider tracking).
+func (tm *traceManager) hasEventCreationProvenance(ctx context.Context, id identity, ev *session.Event) bool {
+	if ev == nil || ev.ID == "" {
+		return false
+	}
+	if hasNewEventUUID(ev.ID) {
+		return true
+	}
+	var evNodePath string
+	if ev.NodeInfo != nil {
+		evNodePath = ev.NodeInfo.Path
+	}
+	if ev.InvocationID != "" && ev.InvocationID != id.invocationID {
+		// A custom agent that yields the events of a nested runner hands on
+		// events of the nested invocation, whose activations are recorded
+		// under its ID when that runner shares this plugin.
+		if custom, tracked := tm.eventUUIDProvider(ev.InvocationID, ev.Author, ev.Branch, evNodePath); tracked {
+			return custom
+		}
+		if tm.isTrackedInvocation(id.invocationID) {
+			return false
+		}
+		return contextHasCustomUUIDProvider(ctx)
+	}
+	path := cmp.Or(evNodePath, id.path)
+	if custom, tracked := tm.eventUUIDProviderFor(cmp.Or(ev.InvocationID, id.invocationID), ev.Author, ev.Branch, path, id.agentName, id.branch); tracked {
+		return custom
+	}
+	return contextHasCustomUUIDProvider(ctx)
+}
+
+// hasNewEventUUID reports whether id has the canonical 36-byte RFC 4122 UUIDv4
+// format produced by session.NewEvent's default platform.NewUUID generator.
+func hasNewEventUUID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i := range 36 {
+		c := id[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		case 14:
+			if c != '4' {
+				return false
+			}
+		case 19:
+			switch c {
+			case '8', '9', 'a', 'b', 'A', 'B':
+			default:
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // nodeCompletion reports whether ev is the event that ADK's workflow
 // scheduler writes when a node run ends without an output, which the
 // scheduler marks with a node outcome or a completed flag in its custom
@@ -2264,64 +2357,57 @@ func contextPath(ctx context.Context) (path string) {
 			path = ""
 		}
 	}()
-	queue := []reflect.Value{reflect.ValueOf(ctx)}
-	seen := map[visitedContextStruct]bool{}
-	for steps := 0; len(queue) > 0 && steps < 512; steps++ {
-		v := queue[0]
-		queue = queue[1:]
-		var ptr uintptr
-		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
-			if v.IsNil() {
-				v = reflect.Value{}
-				break
-			}
-			if v.Kind() == reflect.Pointer {
-				ptr = v.Pointer()
-			}
-			v = v.Elem()
+	if ctx == nil {
+		return ""
+	}
+	var q contextStructQueue
+	q.push(reflect.ValueOf(ctx))
+	var seen map[visitedContextStruct]bool
+	for steps := range 512 {
+		item, ok := q.pop()
+		if !ok {
+			break
 		}
-		if v.Kind() != reflect.Struct {
+		v, ok := derefContextStructValueLazy(item, &seen, steps >= 32)
+		if !ok {
 			continue
 		}
-		if ptr != 0 {
-			key := visitedContextStruct{ptr: ptr, typ: v.Type()}
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-		}
-		if f := v.FieldByName("path"); f.IsValid() && f.Kind() == reflect.String {
-			if s := f.String(); s != "" {
-				return s
-			}
-		}
-		if f := v.FieldByName("params"); f.IsValid() {
-			for f.Kind() == reflect.Pointer || f.Kind() == reflect.Interface {
-				if f.IsNil() {
-					f = reflect.Value{}
-					break
-				}
-				f = f.Elem()
-			}
-			if f.Kind() == reflect.Struct {
-				if p := f.FieldByName("Path"); p.IsValid() && p.Kind() == reflect.String {
-					if s := p.String(); s != "" {
+		vt := v.Type()
+		switch vt.PkgPath() {
+		case agentPkgPath:
+			if vt.Name() == "commonContext" {
+				if f := directStructField(v, "path"); f.IsValid() && f.Kind() == reflect.String {
+					if s := f.String(); s != "" {
 						return s
 					}
 				}
 			}
-		}
-		for _, name := range []string{"context", "Context", "ctx", "invocationContext"} {
-			if f := v.FieldByName(name); f.IsValid() {
-				queue = append(queue, f)
+		case internalContextPkgPath:
+			if vt.Name() == "InvocationContext" {
+				if pf := directStructField(v, "params"); pf.IsValid() {
+					if p, ok := derefContextStructValueLazy(pf, &seen, steps >= 32); ok {
+						if f := directStructField(p, "Path"); f.IsValid() && f.Kind() == reflect.String {
+							if s := f.String(); s != "" {
+								return s
+							}
+						}
+					}
+				}
 			}
 		}
+		c1, c2 := adkContextChildren(v)
+		q.push(c1)
+		q.push(c2)
 	}
 	type pathCarrier interface {
 		Path() string
 	}
-	if p, ok := ctx.(pathCarrier); ok && !strings.HasSuffix(reflect.TypeOf(ctx).String(), "callbackContextWrapper") {
-		return orZero(p.Path)
+	if p, ok := ctx.(pathCarrier); ok {
+		vt := reflect.TypeOf(ctx)
+		if !(vt != nil && vt.Kind() == reflect.Pointer && vt.Elem().PkgPath() == agentPkgPath &&
+			(vt.Elem().Name() == "callbackContextWrapper" || vt.Elem().Name() == "commonContext" || vt.Elem().Name() == "toolContextWrapper")) {
+			return p.Path()
+		}
 	}
 	return ""
 }
