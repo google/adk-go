@@ -26,6 +26,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/telemetry/tokenusage"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -105,16 +106,16 @@ func (c *clientInference) record(ctx context.Context, elapsed time.Duration) {
 	histogram := metric.WithAttributes(histogramAttrs...)
 	inst.inferenceDuration.Record(ctx, elapsed.Seconds(), histogram)
 
-	usage := usageFromResponses(c.responses)
-	inst.inferenceInputTokens.Record(ctx, usage.input, histogram)
-	inst.inferenceOutputTokens.Record(ctx, usage.output, histogram)
-	addByModality(ctx, inst.usageInputTokens, usage.input, usage.inputDetails, attrs)
-	addByModality(ctx, inst.usageOutputTokens, usage.output, usage.outputDetails, attrs)
-	addByModality(ctx, inst.usageCacheReadInputTokens, usage.cacheRead, usage.cacheReadDetails, attrs)
+	usage := tokenusage.FromResponses(c.responses)
+	inst.inferenceInputTokens.Record(ctx, usage.Input, histogram)
+	inst.inferenceOutputTokens.Record(ctx, usage.Output, histogram)
+	addByModality(ctx, inst.usageInputTokens, usage.Input, usage.InputDetails, attrs)
+	addByModality(ctx, inst.usageOutputTokens, usage.Output, usage.OutputDetails, attrs)
+	addByModality(ctx, inst.usageCacheReadInputTokens, usage.CacheRead, usage.CacheReadDetails, attrs)
 	// The model reports cache writes and reasoning tokens without a modality
 	// breakdown.
-	addByModality(ctx, inst.usageCacheWriteInputTokens, usage.cacheWrite, nil, attrs)
-	addByModality(ctx, inst.usageReasoningOutputTokens, usage.reasoning, nil, attrs)
+	addByModality(ctx, inst.usageCacheWriteInputTokens, usage.CacheWrite, nil, attrs)
+	addByModality(ctx, inst.usageReasoningOutputTokens, usage.Reasoning, nil, attrs)
 }
 
 // attributes are the attributes every client inference metric shares. An

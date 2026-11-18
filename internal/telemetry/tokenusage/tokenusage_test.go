@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package telemetry
+package tokenusage
 
 import (
 	"testing"
@@ -26,7 +26,7 @@ import (
 
 // Cases from https://github.com/google/adk-python/blob/16898f30c9a5c6b2ae1ecf099424afff8fd28e77/tests/unittests/telemetry/test_token_usage.py
 // that apply to genai Go, where an unreported count is zero.
-func TestUsageFromMetadata(t *testing.T) {
+func TestFromMetadata(t *testing.T) {
 	text := func(n int32) []*genai.ModalityTokenCount {
 		return []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: n}}
 	}
@@ -36,19 +36,19 @@ func TestUsageFromMetadata(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		in   genai.GenerateContentResponseUsageMetadata
-		want tokenUsage
+		want Usage
 	}{
-		{"input all present", genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, ToolUsePromptTokenCount: 5}, tokenUsage{input: 15}},
-		{"input only prompt", genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10}, tokenUsage{input: 10}},
-		{"input only tool", genai.GenerateContentResponseUsageMetadata{ToolUsePromptTokenCount: 5}, tokenUsage{input: 5}},
-		{"output all present", genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 20, ThoughtsTokenCount: 8}, tokenUsage{output: 28, reasoning: 8}},
-		{"output only candidates", genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 20}, tokenUsage{output: 20}},
-		{"output only thoughts", genai.GenerateContentResponseUsageMetadata{ThoughtsTokenCount: 8}, tokenUsage{output: 8, reasoning: 8}},
-		{"nothing", genai.GenerateContentResponseUsageMetadata{}, tokenUsage{}},
+		{"input all present", genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, ToolUsePromptTokenCount: 5}, Usage{Input: 15}},
+		{"input only prompt", genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10}, Usage{Input: 10}},
+		{"input only tool", genai.GenerateContentResponseUsageMetadata{ToolUsePromptTokenCount: 5}, Usage{Input: 5}},
+		{"output all present", genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 20, ThoughtsTokenCount: 8}, Usage{Output: 28, Reasoning: 8}},
+		{"output only candidates", genai.GenerateContentResponseUsageMetadata{CandidatesTokenCount: 20}, Usage{Output: 20}},
+		{"output only thoughts", genai.GenerateContentResponseUsageMetadata{ThoughtsTokenCount: 8}, Usage{Output: 8, Reasoning: 8}},
+		{"nothing", genai.GenerateContentResponseUsageMetadata{}, Usage{}},
 		{
 			"every count",
 			genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 100, ToolUsePromptTokenCount: 20, CandidatesTokenCount: 30, ThoughtsTokenCount: 15, CachedContentTokenCount: 60, TotalTokenCount: 9999},
-			tokenUsage{input: 120, output: 45, cacheRead: 60, reasoning: 15},
+			Usage{Input: 120, Output: 45, CacheRead: 60, Reasoning: 15},
 		},
 		{
 			// The input details cover both prompt and tool-use tokens.
@@ -59,40 +59,40 @@ func TestUsageFromMetadata(t *testing.T) {
 				CandidatesTokenCount: 30, CandidatesTokensDetails: text(30),
 				CachedContentTokenCount: 8, CacheTokensDetails: text(8),
 			},
-			tokenUsage{
-				input: 25, output: 30, cacheRead: 8,
-				inputDetails:     append(text(20), image(5)...),
-				outputDetails:    text(30),
-				cacheReadDetails: text(8),
+			Usage{
+				Input: 25, Output: 30, CacheRead: 8,
+				InputDetails:     append(text(20), image(5)...),
+				OutputDetails:    text(30),
+				CacheReadDetails: text(8),
 			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if diff := cmp.Diff(tc.want, usageFromMetadata(&tc.in), cmp.AllowUnexported(tokenUsage{})); diff != "" {
-				t.Errorf("usageFromMetadata() mismatch (-want +got):\n%s", diff)
+			if diff := cmp.Diff(tc.want, fromMetadata(&tc.in)); diff != "" {
+				t.Errorf("fromMetadata() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
 }
 
-func TestUsageFromResponses(t *testing.T) {
+func TestFromResponses(t *testing.T) {
 	usage := func(prompt, candidates int32) *genai.GenerateContentResponseUsageMetadata {
 		return &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: prompt, CandidatesTokenCount: candidates}
 	}
 	for _, tc := range []struct {
 		name      string
 		responses []*model.LLMResponse
-		want      tokenUsage
+		want      Usage
 	}{
 		{
 			"keeps usage a trailing response omits",
 			[]*model.LLMResponse{{UsageMetadata: usage(10, 4)}, {Partial: true}},
-			tokenUsage{input: 10, output: 4},
+			Usage{Input: 10, Output: 4},
 		},
 		{
 			"takes the newest report",
 			[]*model.LLMResponse{{UsageMetadata: usage(10, 1)}, {UsageMetadata: usage(10, 4)}},
-			tokenUsage{input: 10, output: 4},
+			Usage{Input: 10, Output: 4},
 		},
 		{
 			"cache writes reported with the newest report",
@@ -100,7 +100,7 @@ func TestUsageFromResponses(t *testing.T) {
 				{UsageMetadata: usage(10, 1), CustomMetadata: map[string]any{anthropicmodel.CacheCreationInputTokensMetadataKey: int64(5)}},
 				{UsageMetadata: usage(10, 4), CustomMetadata: map[string]any{anthropicmodel.CacheCreationInputTokensMetadataKey: int64(6)}},
 			},
-			tokenUsage{input: 10, output: 4, cacheWrite: 6},
+			Usage{Input: 10, Output: 4, CacheWrite: 6},
 		},
 		{
 			"cache writes of an older report",
@@ -108,26 +108,26 @@ func TestUsageFromResponses(t *testing.T) {
 				{UsageMetadata: usage(10, 1), CustomMetadata: map[string]any{anthropicmodel.CacheCreationInputTokensMetadataKey: int64(5)}},
 				{UsageMetadata: usage(10, 4)},
 			},
-			tokenUsage{input: 10, output: 4},
+			Usage{Input: 10, Output: 4},
 		},
-		{"no responses", nil, tokenUsage{}},
-		{"no report", []*model.LLMResponse{{}}, tokenUsage{}},
+		{"no responses", nil, Usage{}},
+		{"no report", []*model.LLMResponse{{}}, Usage{}},
 		{
 			"report counting no tokens",
 			[]*model.LLMResponse{{UsageMetadata: &genai.GenerateContentResponseUsageMetadata{TotalTokenCount: 7}}},
-			tokenUsage{},
+			Usage{},
 		},
 		{
 			// The newest report decides, even when it counts nothing and an
 			// older one did, as in ADK Python. Its other counts are dropped.
 			"newest report counting no tokens",
 			[]*model.LLMResponse{{UsageMetadata: usage(10, 4)}, {UsageMetadata: &genai.GenerateContentResponseUsageMetadata{CachedContentTokenCount: 3}}},
-			tokenUsage{},
+			Usage{},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if diff := cmp.Diff(tc.want, usageFromResponses(tc.responses), cmp.AllowUnexported(tokenUsage{})); diff != "" {
-				t.Errorf("usageFromResponses() mismatch (-want +got):\n%s", diff)
+			if diff := cmp.Diff(tc.want, FromResponses(tc.responses)); diff != "" {
+				t.Errorf("FromResponses() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}

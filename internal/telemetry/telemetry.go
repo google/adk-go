@@ -34,6 +34,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/telemetry/tokenusage"
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -229,7 +230,7 @@ func generateContentResultAttributes(params generateContentResult) []attribute.K
 			genAIUsageCacheReadInputTokens.Int(int(u.CachedContentTokenCount)),
 			genAIUsageReasoningOutputTokens.Int(int(u.ThoughtsTokenCount)),
 		)
-		if n, _ := resp.CustomMetadata[cacheWriteKey].(int64); n > 0 {
+		if n, _ := resp.CustomMetadata[tokenusage.CacheWriteKey].(int64); n > 0 {
 			attrs = append(attrs, genAIUsageCacheWriteInputTokens.Int64(n))
 		}
 	}
