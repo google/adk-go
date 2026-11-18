@@ -404,6 +404,49 @@ func TestParallelCalls_OutOfOrderAppendKeepsEveryItem(t *testing.T) {
 	})
 }
 
+// TestParallelCalls_EmptiedListIsTheLatestWrite has two calls each remove one
+// entry of a two-entry list, and call 0 reads call 1's write before it writes.
+// The list call 0 writes is empty with spare capacity and is the session's
+// value, so the state ends empty, not with call 1's one-entry list.
+func TestParallelCalls_EmptiedListIsTheLatestWrite(t *testing.T) {
+	type itemArgs struct {
+		Item string `json:"item"`
+	}
+	bWritten := make(chan struct{})
+	removeItem := psoTool(t, "remove_item", func(ctx agent.Context, args itemArgs) (map[string]any, error) {
+		if args.Item == "a" {
+			if err := psoWait(bWritten); err != nil {
+				return nil, err
+			}
+		}
+		items, err := psoGet(ctx, "items", []any{})
+		if err != nil {
+			return nil, err
+		}
+		kept := make([]any, 0, len(items))
+		for _, it := range items {
+			if it != args.Item {
+				kept = append(kept, it)
+			}
+		}
+		if err := ctx.State().Set("items", kept); err != nil {
+			return nil, err
+		}
+		if args.Item == "b" {
+			close(bWritten)
+		}
+		return map[string]any{}, nil
+	})
+	initial := map[string]any{"items": []any{"a", "b"}}
+
+	turn := psoRun(t, []tool.Tool{removeItem}, initial,
+		psoCall("c0", "remove_item", map[string]any{"item": "a"}), psoCall("c1", "remove_item", map[string]any{"item": "b"}))
+
+	if diff := cmp.Diff([]any{}, psoStored(t, turn.state, "items")); diff != "" {
+		t.Errorf("stored items mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // psoWithLabel returns a deep copy of doc ({entities: [{name, labels}]}) with
 // label appended to the first entity's labels.
 func psoWithLabel(doc map[string]any, label string) map[string]any {
