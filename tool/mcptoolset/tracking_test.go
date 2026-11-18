@@ -171,10 +171,10 @@ func TestTrackingTransportMergesCallerHeaders(t *testing.T) {
 		{name: "caller value is kept after ADK tokens", header: http.Header{"User-Agent": {"my-app/1.0"}}, want: adk + " my-app/1.0"},
 		{name: "duplicate tokens are dropped", header: http.Header{"User-Agent": {"my-app/1.0 " + adk}}, want: adk + " my-app/1.0"},
 		{name: "repeated header values are joined", header: http.Header{"User-Agent": {"a/1", "b/2"}}, want: adk + " a/1 b/2"},
+		{name: "non-canonical key is merged", header: http.Header{"user-agent": {"my-app/1.0"}}, want: adk + " my-app/1.0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Parallel, so -race catches RoundTrip writing to the shared adkTokens.
 			t.Parallel()
 			req := httptest.NewRequest(http.MethodPost, "https://mcp.example/mcp", nil)
 			req.Header = tt.header
