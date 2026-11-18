@@ -93,8 +93,8 @@ func (p *loggingPlugin) formatContent(content *genai.Content, maxLength int) str
 	for _, part := range content.Parts {
 		if part.Text != "" {
 			text := strings.TrimSpace(part.Text)
-			if len(text) > maxLength {
-				text = text[:maxLength] + "..."
+			if cut, ok := truncate(text, maxLength); ok {
+				text = cut + "..."
 			}
 			parts = append(parts, fmt.Sprintf("text: '%s'", text))
 		} else if part.FunctionCall != nil {
@@ -110,13 +110,27 @@ func (p *loggingPlugin) formatContent(content *genai.Content, maxLength int) str
 	return strings.Join(parts, " | ")
 }
 
+// truncate cuts s to its first maxRunes characters, as adk-python's
+// text[:max_length] does, so that a cut never splits a multi-byte UTF-8
+// character. It reports whether s was shortened.
+func truncate(s string, maxRunes int) (string, bool) {
+	n := 0
+	for i := range s {
+		if n == maxRunes {
+			return s[:i], true
+		}
+		n++
+	}
+	return s, false
+}
+
 func (p *loggingPlugin) formatArgs(args map[string]any, maxLength int) string {
 	if len(args) == 0 {
 		return "{}"
 	}
 	formatted := fmt.Sprintf("%v", args)
-	if len(formatted) > maxLength {
-		formatted = formatted[:maxLength] + "...}"
+	if cut, ok := truncate(formatted, maxLength); ok {
+		formatted = cut + "...}"
 	}
 	return formatted
 }
@@ -226,8 +240,8 @@ func (p *loggingPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*
 		for _, part := range req.Config.SystemInstruction.Parts {
 			sysInstruction += part.Text
 		}
-		if len(sysInstruction) > 200 {
-			sysInstruction = sysInstruction[:200] + "..."
+		if cut, ok := truncate(sysInstruction, 200); ok {
+			sysInstruction = cut + "..."
 		}
 		p.log(fmt.Sprintf("   System Instruction: '%s'", sysInstruction))
 	}

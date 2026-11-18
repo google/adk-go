@@ -29,6 +29,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
@@ -966,5 +967,63 @@ func TestSequentialAgent_RunLive_StopsOnSubAgentError(t *testing.T) {
 	}
 	if !firstSess.closed {
 		t.Error("first sub-agent's live session was not closed after its error")
+	}
+}
+
+// TestSequentialAgent_RunWithoutSessionOrFunctionResponse checks that an
+// ordinary turn does not read the session to look for a resume target.
+func TestSequentialAgent_RunWithoutSessionOrFunctionResponse(t *testing.T) {
+	ran := false
+	sub, err := agent.New(agent.Config{Name: "sub", Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(func(*session.Event, error) bool) { ran = true }
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{sub}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: root})
+	for _, err := range root.Run(ctx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !ran {
+		t.Error("sub-agent did not run")
+	}
+}
+
+func TestSequentialAgent_FindAgentReturnsSequentialAgent(t *testing.T) {
+	child := newCustomAgent(t, 0)
+	seq := newSequentialAgent(t, []agent.Agent{child}, "seq")
+	llmParent, err := llmagent.New(llmagent.Config{Name: "llm_parent", SubAgents: []agent.Agent{seq}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseParent, err := agent.New(agent.Config{Name: "base_parent", SubAgents: []agent.Agent{seq}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		root       agent.Agent
+		targetName string
+		want       agent.Agent
+	}{
+		{name: "own name", root: seq, targetName: "seq", want: seq},
+		{name: "through llm agent parent", root: llmParent, targetName: "seq", want: seq},
+		{name: "through base agent parent", root: baseParent, targetName: "seq", want: seq},
+		{name: "sub-agent", root: seq, targetName: "custom_agent_0", want: child},
+		{name: "unknown name", root: seq, targetName: "unknown", want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.root.FindAgent(tc.targetName); got != tc.want {
+				t.Errorf("FindAgent(%q) = %T(%p), want %T(%p)", tc.targetName, got, got, tc.want, tc.want)
+			}
+		})
 	}
 }

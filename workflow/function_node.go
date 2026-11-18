@@ -141,8 +141,7 @@ func NewFunctionNodeFromState[Params, OUT any](
 	}
 	var bindings []fieldBinding
 
-	for i := 0; i < paramType.NumField(); i++ {
-		field := paramType.Field(i)
+	for field := range paramType.Fields() {
 		if !field.IsExported() {
 			continue
 		}
@@ -214,8 +213,7 @@ func NewFunctionNodeFromState[Params, OUT any](
 
 		p, err := typeutil.ConvertToWithJSONSchema[any, Params](stateMap, nil)
 		if err != nil {
-			var typeErr *json.UnmarshalTypeError
-			if errors.As(err, &typeErr) {
+			if typeErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
 				parts := strings.Split(typeErr.Field, ".")
 				fieldName := parts[len(parts)-1]
 				if hasNodeInput && fieldName == nodeInputField.Name {

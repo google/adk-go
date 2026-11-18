@@ -645,8 +645,8 @@ func (e *redactedError) Error() string { return e.msg }
 func (e *redactedError) Unwrap() error { return e.cause }
 
 // redactTokenError strips the token endpoint's verbatim response body from an
-// [oauth2.RetrieveError]. The error reaches the invocation's error event and
-// any log that records it, and what an identity provider writes into a non-2xx
+// [oauth2.RetrieveError]. The error is returned from Run and reaches any log
+// that records it, and what an identity provider writes into a non-2xx
 // body is outside our control.
 //
 // It never reads the wrapper's message to decide. Deciding from the inner

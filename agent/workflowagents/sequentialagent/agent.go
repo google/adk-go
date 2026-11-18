@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/functiontool"
 )
@@ -38,6 +39,15 @@ type seqAgent struct {
 
 func (s *seqAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	return s.impl.RunLive(ctx)
+}
+
+// FindAgent returns the agent with the given name in s and its descendants.
+// For s's own name it returns s, not the embedded base agent.
+func (s *seqAgent) FindAgent(name string) agent.Agent {
+	if s.Name() == name {
+		return s
+	}
+	return s.FindSubAgent(name)
 }
 
 // New creates a SequentialAgent.
@@ -83,7 +93,11 @@ type liveRunner interface {
 
 func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		for _, subAgent := range ctx.Agent().SubAgents() {
+		subAgents := ctx.Agent().SubAgents()
+		if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+			subAgents = subAgents[indexes[0]:]
+		}
+		for _, subAgent := range subAgents {
 			for event, err := range subAgent.Run(ctx) {
 				// A failed sub-agent ends the sequence, as in adk-python: later
 				// sub-agents would run without the output they depend on.

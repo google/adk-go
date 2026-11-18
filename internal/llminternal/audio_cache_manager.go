@@ -25,6 +25,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
@@ -142,7 +143,7 @@ func (m *AudioCacheManager) flushCache(ctx agent.InvocationContext, cache [][]by
 
 	// Create artifact reference
 	sess := ctx.Session()
-	artifactRef := fmt.Sprintf("artifact://%s/%s/%s/_adk_live/%s#%d", sess.AppName(), sess.UserID(), sess.ID(), filename, resp.Version)
+	artifactRef := fmt.Sprintf("artifact://%s/%s/%s/%s/%s#%d", sess.AppName(), sess.UserID(), sess.ID(), googlellm.LiveArtifactNamespace, filename, resp.Version)
 
 	// Create event with file data reference
 	author := ctx.Agent().Name()
