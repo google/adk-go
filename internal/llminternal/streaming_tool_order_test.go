@@ -17,10 +17,12 @@ package llminternal
 import (
 	"encoding/json"
 	"iter"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
@@ -99,5 +101,110 @@ func TestLiveErrorFollowUpOrder(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatalf("missing %s response for call_1", want)
 		}
+	}
+}
+
+// If a connection drops after RunLive queues pendingSend for a streaming tool
+// call and before inputCh drains it, reconnect discards pendingSend with the
+// dead socket. The pending gate must still open so the streaming tool's chunk
+// reaches the new connection.
+func TestLiveReconnectDropsQueuedPendingResponseReleasesTool(t *testing.T) {
+	const toolCall = `{"toolCall":{"functionCalls":[` +
+		`{"id":"call_1","name":"lookup","args":{"value":"x"}},` +
+		`{"id":"call_2","name":"slow","args":{}}]}}`
+	conn1Closed := make(chan struct{})
+	chunkReady := make(chan struct{})
+	var chunkReadyOnce sync.Once
+	sessReady := make(chan struct{})
+	gotOnConn2 := make(chan string, 4)
+
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		if connNum == 1 {
+			<-sessReady
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(toolCall))
+			_ = conn.Close()
+			close(conn1Closed)
+			return
+		}
+		chunkReadyOnce.Do(func() { close(chunkReady) })
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var m struct {
+				ClientContent struct {
+					Turns []struct {
+						Parts []struct {
+							Text string `json:"text"`
+						} `json:"parts"`
+					} `json:"turns"`
+				} `json:"clientContent"`
+			}
+			_ = json.Unmarshal(msg, &m)
+			for _, turn := range m.ClientContent.Turns {
+				for _, part := range turn.Parts {
+					if part.Text != "" {
+						gotOnConn2 <- part.Text
+					}
+				}
+			}
+		}
+	})
+
+	type args struct {
+		Value string `json:"value"`
+	}
+	var sess agent.LiveSession
+	lookup, _ := functiontool.NewStreaming(functiontool.Config{Name: "lookup"},
+		func(ctx agent.Context, _ args) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) {
+				select {
+				case <-chunkReady:
+				case <-ctx.Done():
+					return
+				}
+				yield("after-reconnect", nil)
+			}
+		})
+	slow := &mockFunctionTool{name: "slow", runFunc: func(agent.Context, map[string]any) (map[string]any, error) {
+		<-conn1Closed
+		// Give Connection 1's reader time to observe EOF and park on errChan;
+		// also write once through inputCh so Connection 1's sender goroutine
+		// fails on the closed socket and exits before pendingSend is queued,
+		// ensuring select deterministically takes the reconnect branch.
+		time.Sleep(15 * time.Millisecond)
+		go func() {
+			_ = sess.Send(agent.LiveRequest{RealtimeInput: &genai.Blob{MIMEType: "audio/pcm", Data: []byte{0}}})
+		}()
+		time.Sleep(15 * time.Millisecond)
+		return map[string]any{"ok": true}, nil
+	}}
+
+	f := newReconnectFlow(client, testLiveReconnectPolicy(4, 10))
+	f.Tools = []tool.Tool{lookup, slow}
+
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+	var seq iter.Seq2[*session.Event, error]
+	var err error
+	sess, seq, err = f.RunLive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(sessReady)
+	defer func() { _ = sess.Close() }()
+	go func() {
+		for range seq {
+		}
+	}()
+
+	select {
+	case text := <-gotOnConn2:
+		if text != "Function lookup returned: after-reconnect" {
+			t.Fatalf("conn 2 text = %q, want %q", text, "Function lookup returned: after-reconnect")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("streaming tool chunk never reached reconnected session (pending gate stuck)")
 	}
 }
