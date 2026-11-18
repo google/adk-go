@@ -115,7 +115,14 @@ func TestInMemorySource(t *testing.T) {
 			{"weather", "references/", []string{"references/api.md", "references/api/v1/spec.md", "references/guide.md"}},
 			{"weather", "references/api", []string{"references/api/v1/spec.md"}},
 			{"weather", "references/guide.md", []string{"references/guide.md"}},
+			// A subpath with no resource under it lists nothing: the
+			// source cannot tell an empty directory from a missing one.
+			{"weather", "references/absent", nil},
+			{"weather", "references/guide.md/", nil},
+			{"weather", "refer", nil}, // The start of a directory's name, not a directory.
+			{"weather", "notes", nil},
 			{"math", ".", nil},
+			{"math", "references", nil},
 		} {
 			got, err := source.ListResources(ctx, tc.skill, tc.subpath)
 			if err != nil {
@@ -148,16 +155,6 @@ func TestInMemorySource(t *testing.T) {
 			if _, err := source.LoadResource(ctx, "weather", resourcePath); !errors.Is(err, ErrResourceNotFound) {
 				t.Errorf("LoadResource(%q) error = %v, want %v", resourcePath, err, ErrResourceNotFound)
 			}
-		}
-		// "refer" is the start of a directory's name, not a directory.
-		for _, subpath := range []string{"references/absent", "references/guide.md/", "refer", "notes"} {
-			paths, err := source.ListResources(ctx, "weather", subpath)
-			if !errors.Is(err, ErrResourceNotFound) {
-				t.Errorf("ListResources(%q) = %v, %v, want %v", subpath, paths, err, ErrResourceNotFound)
-			}
-		}
-		if _, err := source.ListResources(ctx, "math", "references"); !errors.Is(err, ErrResourceNotFound) {
-			t.Errorf("ListResources() of a skill without resources: error = %v, want %v", err, ErrResourceNotFound)
 		}
 	})
 }

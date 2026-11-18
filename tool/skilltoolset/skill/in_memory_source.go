@@ -146,8 +146,11 @@ func (s *inMemorySource) LoadResource(ctx context.Context, name, resourcePath st
 
 // ListResources returns the skill's resource paths under subpath, sorted.
 // "." and "/" list every resource. A subpath that names a resource lists that
-// resource. A subpath with no resource under it is ErrResourceNotFound, as a
-// directory that does not exist is for a file-system source.
+// resource.
+//
+// The source holds resources, not directories, so it cannot tell a directory
+// that is empty from one that does not exist: a subpath with no resource
+// under it lists nothing, and is not an error.
 func (s *inMemorySource) ListResources(ctx context.Context, name, subpath string) ([]string, error) {
 	data, ok := s.skills[name]
 	if !ok {
@@ -177,9 +180,6 @@ func (s *inMemorySource) ListResources(ctx context.Context, name, subpath string
 			break // Nothing else will match since resourcePaths is sorted.
 		}
 		result = append(result, resourcePath)
-	}
-	if len(result) == 0 {
-		return nil, fmt.Errorf("%w: %q", ErrResourceNotFound, cleanPath)
 	}
 	return result, nil
 }
