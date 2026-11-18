@@ -951,7 +951,9 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 // path, the parent of the event's node path, under its workflow agent's name
 // (see workflowBasePathPrefix), as it does on the events of the nodes that it
 // runs, which therefore also carry the base paths of enclosing workflows. An
-// event whose node path has no unique such workflow is not attributed.
+// event whose node path has no unique such workflow is not attributed. The
+// record that the scheduler writes when a resumed run ends with an output
+// carries adk.workflow.node_resume_completed instead, and is not counted.
 func nodeCompletion(ev *session.Event) (workflowName string, failed, ok bool) {
 	if ev == nil || ev.Partial || ev.NodeInfo == nil || ev.NodeInfo.Path == "" {
 		return "", false, false

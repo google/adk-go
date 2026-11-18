@@ -36,6 +36,11 @@ const workflowNodeCompletedKey = "adk.workflow.node_completed"
 // rehydration can tell that the responses were used up. It has its own
 // key because readers take workflowNodeCompletedKey to mean a completion
 // without output and set the node's output to nil.
+//
+// adk-python does not need it: it gives every run of a node its own run
+// ID (ask@1, ask@2, ...) and scans each run separately. Go stamps every
+// visit of a static node as @1, so this record stands in for per-visit
+// run IDs and can go once Go assigns them.
 const workflowNodeResumeCompletedKey = "adk.workflow.node_resume_completed"
 
 const workflowBasePathPrefix = "adk.workflow.base_path."
@@ -384,6 +389,9 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 		for _, id := range ev.LongRunningToolIDs {
 			if id != "" {
 				interruptOwner[id] = name
+				// Raised again, the ID waits for a new answer, and
+				// that first answer clears output emitted before it.
+				delete(resolved, id)
 			}
 		}
 		if own := ownEventNodeName(ev, nodesByName); own != "" {

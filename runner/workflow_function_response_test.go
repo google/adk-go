@@ -440,6 +440,9 @@ func runResumeTurn(t *testing.T, root agent.Agent, msg *genai.Content, onResume 
 // answer, and the last answer won before this change too. That case is here to
 // check that the pause is opened again once its first answer is used up, or the
 // second answer would resume nothing.
+//
+// In the self loop case the node routes straight back to itself, so the next
+// pass starts before the completion of the first one is recorded.
 func TestRun_FunctionResponseAfterSecondPauseInLoop(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -447,9 +450,13 @@ func TestRun_FunctionResponseAfterSecondPauseInLoop(t *testing.T) {
 		// repeatFirst sends the first answer again during the second pause.
 		// With one ID for both pauses it would be the second answer.
 		repeatFirst bool
+		// selfLoop has ask route back to itself instead of through count.
+		// ask then counts its passes itself.
+		selfLoop bool
 	}{
 		{name: "new id per pause", interruptID: func(pass int) string { return "ask-" + strconv.Itoa(pass) }, repeatFirst: true},
 		{name: "same id", interruptID: func(int) string { return "ask" }},
+		{name: "self loop", interruptID: func(pass int) string { return "ask-" + strconv.Itoa(pass) }, repeatFirst: true, selfLoop: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -459,26 +466,38 @@ func TestRun_FunctionResponseAfterSecondPauseInLoop(t *testing.T) {
 				passes++
 				return passes, nil
 			}, workflow.NodeConfig{})
-			ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, pass int, emit func(*session.Event) error) (any, error) {
+			ask := workflow.NewEmittingFunctionNode("ask", func(ctx agent.Context, in any, emit func(*session.Event) error) (any, error) {
 				runs++
+				pass := passes
+				if !tc.selfLoop {
+					pass = in.(int)
+				}
 				reply, err := workflow.ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: tc.interruptID(pass)})
 				if err != nil {
 					return nil, err
 				}
 				answers = append(answers, reply)
+				if tc.selfLoop && reply == "again" {
+					passes++
+				}
 				ev := session.NewEvent(ctx, ctx.InvocationID())
 				ev.Routes = []string{reply.(string)}
 				ev.Output = reply
 				return nil, emit(ev)
 			}, workflow.NodeConfig{RerunOnResume: new(true)})
-			wf, err := workflowagent.New(workflowagent.Config{
-				Name: "wf",
-				Edges: []workflow.Edge{
-					{From: workflow.Start, To: count},
-					{From: count, To: ask},
-					{From: ask, To: count, Route: workflow.StringRoute("again")},
-				},
-			})
+			edges := []workflow.Edge{
+				{From: workflow.Start, To: count},
+				{From: count, To: ask},
+				{From: ask, To: count, Route: workflow.StringRoute("again")},
+			}
+			if tc.selfLoop {
+				passes = 1
+				edges = []workflow.Edge{
+					{From: workflow.Start, To: ask},
+					{From: ask, To: ask, Route: workflow.StringRoute("again")},
+				}
+			}
+			wf, err := workflowagent.New(workflowagent.Config{Name: "wf", Edges: edges})
 			if err != nil {
 				t.Fatal(err)
 			}

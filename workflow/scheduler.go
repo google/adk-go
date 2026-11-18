@@ -145,6 +145,12 @@ type nodeRun struct {
 	// responses from a resume. completionEvent records that completion
 	// so rehydration stops offering the responses to later visits.
 	usedResponses bool
+
+	// end is the node's state as this activation left it, saved before
+	// its successors are scheduled. A successor can be the node itself:
+	// starting or queueing it resets the node's NodeState before
+	// completionEvent reads it.
+	end *NodeState
 }
 
 // recordErr stores err as the accumulator's first error. Subsequent
@@ -681,11 +687,14 @@ func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
 // resume responses. Nothing else reads such a record, and one per node
 // would add an event to every step of every run.
 func (s *scheduler) completionEvent(name string, nr *nodeRun, inventory failureInventory) *session.Event {
-	if name == Start.Name() || s.graph.isRootWrapper {
+	if name == Start.Name() || s.graph.isRootWrapper || nr == nil {
 		return nil
 	}
 	ns := s.state.Nodes[name]
-	if ns == nil || nr == nil {
+	if nr.end != nil {
+		ns = nr.end
+	}
+	if ns == nil {
 		return nil
 	}
 	var outcome string
@@ -1011,6 +1020,10 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) er
 		nr.usedResponses = len(ns.ResumedInputs) > 0
 	}
 	ns.ResumedInputs = nil
+	if nr != nil {
+		end := *ns
+		nr.end = &end
+	}
 
 	if !scheduleNewWork {
 		return nil
