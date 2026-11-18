@@ -57,14 +57,11 @@ func newClientInference(params GenerateContentParams, start time.Time) *clientIn
 	}
 }
 
-// observe notes one response or error the model yielded, and records the
-// wait for a streamed chunk. The caller reports whether the inference span was
-// still open when the value arrived, since a chunk that arrives after the span
-// ended is not timed.
+// observe notes one response the model yielded, and records the wait for a
+// streamed chunk. A value that carries an error is not timed. The caller
+// reports whether the inference span was still open when the value arrived,
+// since a chunk that arrives after the span ended is not timed.
 func (c *clientInference) observe(ctx context.Context, resp *model.LLMResponse, err error, spanOpen bool) {
-	if c.err == nil {
-		c.err = inferenceError(err)
-	}
 	if resp == nil {
 		return
 	}

@@ -88,54 +88,67 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 			span.End()
 			duration = elapsed(span, fallbackStart, platform.Now(ctx))
 		}
-		// Set on every path that returns normally, so the deferred function
-		// can tell a panic apart.
-		returned := false
+		// reportError hands an error of the call to every signal: the span and
+		// its event, which record it if they have not ended, and the metrics,
+		// which record the first one. A cancellation reaches none of them.
+		reportError := func(err error) {
+			if err = notCanceledError(err); err == nil {
+				return
+			}
+			result.Error = err
+			if metrics.err == nil {
+				metrics.err = err
+			}
+		}
+		completed := false
 		// The metrics count responses that arrive after the span ended, such
 		// as an aggregate carrying usage, so they wait for the whole call.
 		defer func() {
-			if !returned && !ended {
-				result.Error = errInferencePanicked
-				metrics.observe(ctx, nil, errInferencePanicked, true)
+			if !completed && !ended {
+				reportError(errInferencePanicked)
 			}
 			end()
 			metrics.record(ctx, duration)
 		}()
 		legacy := useLegacySchema()
-		for v, err := range call(ctx) {
-			resp, eventID := response(v)
-			metrics.observe(ctx, resp, err, !ended)
-			switch {
-			case legacy:
-				result = generateContentResult{Response: resp, EventID: eventID, Error: inferenceError(err)}
+		func() {
+			for v, err := range call(ctx) {
+				resp, eventID := response(v)
+				metrics.observe(ctx, resp, err, !ended)
 				if err != nil {
-					end()
-				} else if !resp.Partial {
-					logResponse(ctx, resp, params.Backend)
-					end()
+					reportError(err)
 				}
-			case ended || (resp == nil && err == nil):
-				// After the end, what an aggregator assembles from the chunks
-				// already recorded.
-			default:
-				result.Error = inferenceError(err)
-				if resp != nil {
+				switch {
+				case legacy:
 					result.Response, result.EventID = resp, eventID
-					result.Responses = append(result.Responses, resp)
+					if err != nil {
+						end()
+					} else if !resp.Partial {
+						logResponse(ctx, resp, params.Backend)
+						end()
+					}
+				case ended || (resp == nil && err == nil):
+					// After the end, what an aggregator assembles from the chunks
+					// already recorded.
+				default:
+					if resp != nil {
+						result.Response, result.EventID = resp, eventID
+						result.Responses = append(result.Responses, resp)
+					}
+					// Partial is set by ADK's aggregator rather than the model, and a
+					// model.LLM may leave it unset; the finish reason comes from the
+					// model.
+					if err != nil || reportedFinishReason(resp, nil) != "" || !params.Stream {
+						end()
+					}
 				}
-				// Partial is set by ADK's aggregator rather than the model, and a
-				// model.LLM may leave it unset; the finish reason comes from the
-				// model, as in adk-python's _instrumentation.py.
-				if err != nil || reportedFinishReason(resp, nil) != "" || !params.Stream {
-					end()
+				if !yield(v, err) {
+					return
 				}
 			}
-			if !yield(v, err) {
-				returned = true
-				return
-			}
-		}
-		returned = true
+		}()
+		// Not reached when a panic unwinds the call.
+		completed = true
 	}
 }
 
@@ -144,10 +157,10 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 // since a panic value has no stable, low-cardinality name.
 var errInferencePanicked = errors.New("model call panicked")
 
-// inferenceError is the error the inference span, its event and its metrics
+// notCanceledError is the error the inference span, its event and its metrics
 // record for a model error. A canceled call did not fail, so it records none:
 // the span keeps an unset status and nothing gets an error type.
-func inferenceError(err error) error {
+func notCanceledError(err error) error {
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}

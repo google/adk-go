@@ -349,6 +349,15 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 			histogramAttrs: []attribute.KeyValue{semconv.ErrorTypeKey.String("*errors.errorString")},
 		},
 		{
+			name:   "first of two errors",
+			params: streamed,
+			steps: []modelStep{
+				{err: errors.New("boom")},
+				{err: genai.APIError{Code: 429}},
+			},
+			histogramAttrs: []attribute.KeyValue{semconv.ErrorTypeKey.String("*errors.errorString")},
+		},
+		{
 			name:   "canceled",
 			params: streamed,
 			steps:  []modelStep{{err: fmt.Errorf("stream: %w", context.Canceled)}},
