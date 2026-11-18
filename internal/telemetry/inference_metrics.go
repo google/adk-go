@@ -17,7 +17,6 @@ package telemetry
 import (
 	"cmp"
 	"context"
-	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -93,8 +92,9 @@ func (c *clientInference) observe(ctx context.Context, resp *model.LLMResponse, 
 }
 
 // record records the duration and token usage of the whole call, given how
-// long it took. Every call records each of them once, failed calls
-// included; usage the call did not report counts as zero tokens.
+// long it took. Every call records the duration and token histograms once,
+// failed calls included, with usage the call did not report as zero tokens.
+// The usage counters get only the tokens the call reported.
 func (c *clientInference) record(ctx context.Context, elapsed time.Duration) {
 	var responseModel string
 	if len(c.responses) > 0 {
@@ -134,42 +134,64 @@ func (c *clientInference) attributes(responseModel string) []attribute.KeyValue 
 }
 
 // addByModality adds a token count to a counter once per modality, split by
-// the model's per-modality breakdown. A split with nothing in it, such as zero
-// tokens, adds zero under the unknown modality, so every call adds a point.
-// This matches adk-python, though the conventions require strictly positive
-// points.
+// the model's per-modality breakdown. A modality with no tokens adds nothing,
+// as the conventions require strictly positive measurements.
 func addByModality(ctx context.Context, counter metric.Int64Counter, tokens int64, details []*genai.ModalityTokenCount, attrs []attribute.KeyValue) {
 	split := splitByModality(tokens, details)
-	if len(split) == 0 {
-		split = map[string]int64{"unknown": 0}
-	}
-	for modality, n := range split {
-		counter.Add(ctx, n, metric.WithAttributes(append(slices.Clip(attrs), genAITokenModality.String(modality))...))
+	for _, c := range []struct {
+		modality string
+		tokens   int64
+	}{
+		{"text", split.text},
+		{"image", split.image},
+		{"video", split.video},
+		{"audio", split.audio},
+		{"document", split.document},
+		{"unknown", split.unknown},
+	} {
+		if c.tokens > 0 {
+			counter.Add(ctx, c.tokens, metric.WithAttributes(append(slices.Clip(attrs), genAITokenModality.String(c.modality))...))
+		}
 	}
 }
 
+// modalitySplit is a token count split across the modalities the genai SDK
+// defines, plus unknown.
+type modalitySplit struct {
+	text, image, video, audio, document, unknown int64
+}
+
 // splitByModality splits a token count across the modalities of a
-// per-modality breakdown. Modalities are lowercased, and an unspecified
-// modality counts as text. Whatever the breakdown leaves unaccounted for, such
-// as reasoning tokens, goes to unknown, so the values sum to the count unless
-// the breakdown exceeds it.
-func splitByModality(total int64, details []*genai.ModalityTokenCount) map[string]int64 {
-	split := map[string]int64{}
+// per-modality breakdown. An unspecified or unrecognized modality counts as
+// unknown. Whatever the breakdown leaves unaccounted for, such as reasoning
+// tokens, goes to unknown too, so the split sums to the count unless the
+// breakdown exceeds it.
+func splitByModality(total int64, details []*genai.ModalityTokenCount) modalitySplit {
+	var split modalitySplit
 	var accounted int64
 	for _, d := range details {
 		if d == nil || d.Modality == "" {
 			continue
 		}
-		modality := strings.ToLower(string(d.Modality))
-		if d.Modality == genai.MediaModalityUnspecified {
-			modality = "text"
+		n := int64(d.TokenCount)
+		switch genai.MediaModality(strings.ToUpper(string(d.Modality))) {
+		case genai.MediaModalityText:
+			split.text += n
+		case genai.MediaModalityImage:
+			split.image += n
+		case genai.MediaModalityVideo:
+			split.video += n
+		case genai.MediaModalityAudio:
+			split.audio += n
+		case genai.MediaModalityDocument:
+			split.document += n
+		default:
+			split.unknown += n
 		}
-		split[modality] += int64(d.TokenCount)
-		accounted += int64(d.TokenCount)
+		accounted += n
 	}
 	if unknown := total - accounted; unknown > 0 {
-		split["unknown"] = unknown
+		split.unknown += unknown
 	}
-	maps.DeleteFunc(split, func(_ string, n int64) bool { return n == 0 })
 	return split
 }

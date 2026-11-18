@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -230,11 +231,10 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 		provider string
 		// histogramAttrs and counterAttrs follow the operation name, provider
 		// and request model, which every point carries.
-		histogramAttrs, counterAttrs        []attribute.KeyValue
-		opInput, opOutput                   float64
-		input, output, cacheRead, reasoning map[string]float64
-		// cacheWrite defaults to zero under the unknown modality.
-		cacheWrite map[string]float64
+		histogramAttrs, counterAttrs []attribute.KeyValue
+		opInput, opOutput            float64
+		// Counter points by modality; a nil map expects none.
+		input, output, cacheRead, reasoning, cacheWrite map[string]float64
 	}{
 		{
 			name:   "not streamed",
@@ -265,7 +265,7 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 			histogramAttrs: []attribute.KeyValue{responseModel},
 			counterAttrs:   []attribute.KeyValue{responseModel},
 			opInput:        10, opOutput: 3,
-			input: unknown(10), output: unknown(3), cacheRead: unknown(0), reasoning: unknown(0),
+			input: unknown(10), output: unknown(3),
 		},
 		{
 			// Without a finish reason the span stays open to the end of the
@@ -276,7 +276,7 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 			histogramAttrs: []attribute.KeyValue{responseModel},
 			counterAttrs:   []attribute.KeyValue{responseModel},
 			opInput:        10, opOutput: 2,
-			input: unknown(10), output: unknown(2), cacheRead: unknown(0), reasoning: unknown(0),
+			input: unknown(10), output: unknown(2),
 		},
 		{
 			name:   "no request model",
@@ -289,7 +289,7 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 			histogramAttrs: []attribute.KeyValue{semconv.GenAIResponseModel("gemini-x-001")},
 			counterAttrs:   []attribute.KeyValue{semconv.GenAIResponseModel("gemini-x-001")},
 			opInput:        3, opOutput: 1,
-			input: unknown(3), output: unknown(1), cacheRead: unknown(0), reasoning: unknown(0),
+			input: unknown(3), output: unknown(1),
 		},
 		{
 			name:   "cache writes",
@@ -302,7 +302,7 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 			histogramAttrs: []attribute.KeyValue{responseModel},
 			counterAttrs:   []attribute.KeyValue{responseModel},
 			opInput:        10, opOutput: 4,
-			input: unknown(10), output: unknown(4), cacheRead: unknown(0), reasoning: unknown(0), cacheWrite: unknown(6),
+			input: unknown(10), output: unknown(4), cacheWrite: unknown(6),
 		},
 		{
 			// The aggregate arrives after the span ended, so the span leaves
@@ -317,14 +317,13 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 			histogramAttrs: []attribute.KeyValue{responseModel},
 			counterAttrs:   []attribute.KeyValue{responseModel},
 			opInput:        7, opOutput: 2,
-			input: unknown(7), output: unknown(2), cacheRead: unknown(0), reasoning: unknown(0),
+			input: unknown(7), output: unknown(2),
 		},
 		{
 			name:           "API error",
 			params:         streamed,
 			steps:          []modelStep{{err: genai.APIError{Code: 429}}},
 			histogramAttrs: []attribute.KeyValue{semconv.ErrorTypeKey.String("429")},
-			input:          unknown(0), output: unknown(0), cacheRead: unknown(0), reasoning: unknown(0),
 		},
 		{
 			name:   "error after a response",
@@ -336,7 +335,7 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 			histogramAttrs: []attribute.KeyValue{semconv.GenAIResponseModel("gemini-x-001"), semconv.ErrorTypeKey.String("*errors.errorString")},
 			counterAttrs:   []attribute.KeyValue{semconv.GenAIResponseModel("gemini-x-001")},
 			opInput:        10, opOutput: 1,
-			input: unknown(10), output: unknown(1), cacheRead: unknown(0), reasoning: unknown(0),
+			input: unknown(10), output: unknown(1),
 		},
 		{
 			// The span ends at the cancellation, but the metrics still name the
@@ -348,13 +347,11 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 				{err: errors.New("boom")},
 			},
 			histogramAttrs: []attribute.KeyValue{semconv.ErrorTypeKey.String("*errors.errorString")},
-			input:          unknown(0), output: unknown(0), cacheRead: unknown(0), reasoning: unknown(0),
 		},
 		{
 			name:   "canceled",
 			params: streamed,
 			steps:  []modelStep{{err: fmt.Errorf("stream: %w", context.Canceled)}},
-			input:  unknown(0), output: unknown(0), cacheRead: unknown(0), reasoning: unknown(0),
 		},
 		{
 			name:   "consumer stops early",
@@ -367,11 +364,11 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 			histogramAttrs: []attribute.KeyValue{responseModel},
 			counterAttrs:   []attribute.KeyValue{responseModel},
 			opInput:        10, opOutput: 1,
-			input: unknown(10), output: unknown(1), cacheRead: unknown(0), reasoning: unknown(0),
+			input: unknown(10), output: unknown(1),
 		},
 		{
 			// Ported from https://github.com/google/adk-python/blob/16898f30c9a5c6b2ae1ecf099424afff8fd28e77/tests/unittests/telemetry/test_metrics.py#L558-L603
-			// without its cache write count.
+			// without its cache write count, and with unspecified as unknown.
 			name:   "modality split",
 			params: notStreamed,
 			steps: []modelStep{{resp: &model.LLMResponse{
@@ -393,7 +390,7 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 			opInput:        25, opOutput: 40,
 			input:     map[string]float64{"text": 18, "image": 5, "unknown": 2},
 			output:    map[string]float64{"text": 30, "unknown": 10},
-			cacheRead: map[string]float64{"text": 8},
+			cacheRead: unknown(8),
 			reasoning: unknown(10),
 		},
 		{
@@ -404,7 +401,6 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 			provider:       "gcp.vertex_ai",
 			histogramAttrs: []attribute.KeyValue{responseModel},
 			counterAttrs:   []attribute.KeyValue{responseModel},
-			input:          unknown(0), output: unknown(0), cacheRead: unknown(0), reasoning: unknown(0),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -433,10 +429,6 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 				}
 				return out
 			}
-			cacheWrite := tc.cacheWrite
-			if cacheWrite == nil {
-				cacheWrite = unknown(0)
-			}
 			want := map[string][]metricPoint{
 				"gen_ai.client.inference.duration":                       {{Attrs: with(tc.histogramAttrs), Count: 1}},
 				"gen_ai.client.inference.operation.input_tokens":         {{Attrs: with(tc.histogramAttrs), Value: tc.opInput, Count: 1}},
@@ -444,9 +436,10 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 				"gen_ai.client.inference.usage.input_tokens":             byModality(tc.input),
 				"gen_ai.client.inference.usage.output_tokens":            byModality(tc.output),
 				"gen_ai.client.inference.usage.cache_read.input_tokens":  byModality(tc.cacheRead),
-				"gen_ai.client.inference.usage.cache_write.input_tokens": byModality(cacheWrite),
+				"gen_ai.client.inference.usage.cache_write.input_tokens": byModality(tc.cacheWrite),
 				"gen_ai.client.inference.usage.reasoning.output_tokens":  byModality(tc.reasoning),
 			}
+			maps.DeleteFunc(want, func(_ string, points []metricPoint) bool { return len(points) == 0 })
 			got := collectMetrics(t, reader)
 			// Timings vary run to run. The chunk timing tests and the test that
 			// compares the duration with the span check them.

@@ -22,8 +22,8 @@ import (
 )
 
 // Cases from https://github.com/google/adk-python/blob/16898f30c9a5c6b2ae1ecf099424afff8fd28e77/tests/unittests/telemetry/test_metrics.py#L613-L653
-// plus corner cases it lacks. Its zero-token case expects zero under unknown,
-// which the counters add for an empty split.
+// plus corner cases it lacks. Expectations follow the conventions where they
+// differ from the source.
 func TestSplitByModality(t *testing.T) {
 	details := func(counts ...any) []*genai.ModalityTokenCount {
 		var out []*genai.ModalityTokenCount
@@ -36,20 +36,22 @@ func TestSplitByModality(t *testing.T) {
 		name    string
 		total   int64
 		details []*genai.ModalityTokenCount
-		want    map[string]int64
+		want    modalitySplit
 	}{
-		{"no details", 25, nil, map[string]int64{"unknown": 25}},
-		{"details sum to total", 20, details("TEXT", 12, "IMAGE", 8), map[string]int64{"text": 12, "image": 8}},
-		{"remainder", 25, details("TEXT", 12, "AUDIO", 8), map[string]int64{"text": 12, "audio": 8, "unknown": 5}},
-		{"video and document", 30, details("VIDEO", 10, "DOCUMENT", 20), map[string]int64{"video": 10, "document": 20}},
-		{"unspecified is text", 10, details("TEXT", 3, "TEXT", 2, "MODALITY_UNSPECIFIED", 5), map[string]int64{"text": 10}},
-		{"zero modality dropped", 8, details("TEXT", 8, "IMAGE", 0), map[string]int64{"text": 8}},
-		{"no modality skipped", 8, details("", 3, "TEXT", 5), map[string]int64{"text": 5, "unknown": 3}},
-		{"details exceed total", 5, details("TEXT", 8), map[string]int64{"text": 8}},
-		{"zero total", 0, nil, map[string]int64{}},
+		{"no details", 25, nil, modalitySplit{unknown: 25}},
+		{"details sum to total", 20, details("TEXT", 12, "IMAGE", 8), modalitySplit{text: 12, image: 8}},
+		{"remainder", 25, details("TEXT", 12, "AUDIO", 8), modalitySplit{text: 12, audio: 8, unknown: 5}},
+		{"video and document", 30, details("VIDEO", 10, "DOCUMENT", 20), modalitySplit{video: 10, document: 20}},
+		{"unspecified is unknown", 10, details("TEXT", 3, "TEXT", 2, "MODALITY_UNSPECIFIED", 5), modalitySplit{text: 5, unknown: 5}},
+		{"unrecognized is unknown", 10, details("TEXT", 4, "HOLOGRAM", 6), modalitySplit{text: 4, unknown: 6}},
+		{"lowercase modality", 10, details("text", 10), modalitySplit{text: 10}},
+		{"zero modality", 8, details("TEXT", 8, "IMAGE", 0), modalitySplit{text: 8}},
+		{"no modality skipped", 8, details("", 3, "TEXT", 5), modalitySplit{text: 5, unknown: 3}},
+		{"details exceed total", 5, details("TEXT", 8), modalitySplit{text: 8}},
+		{"zero total", 0, nil, modalitySplit{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if diff := cmp.Diff(tc.want, splitByModality(tc.total, tc.details)); diff != "" {
+			if diff := cmp.Diff(tc.want, splitByModality(tc.total, tc.details), cmp.AllowUnexported(modalitySplit{})); diff != "" {
 				t.Errorf("splitByModality() mismatch (-want +got):\n%s", diff)
 			}
 		})

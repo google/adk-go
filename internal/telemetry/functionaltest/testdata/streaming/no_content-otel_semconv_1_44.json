@@ -130,18 +130,6 @@
         "value": 60
       }
     ],
-    "gen_ai.client.inference.usage.cache_write.input_tokens": [
-      {
-        "attributes": {
-          "gen_ai.operation.name": "generate_content",
-          "gen_ai.provider.name": "gcp.gemini",
-          "gen_ai.request.model": "mock",
-          "gen_ai.response.model": "mock",
-          "gen_ai.token.modality": "unknown"
-        },
-        "value": 0
-      }
-    ],
     "gen_ai.client.inference.usage.input_tokens": [
       {
         "attributes": {
