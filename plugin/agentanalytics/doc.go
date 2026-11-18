@@ -64,8 +64,8 @@
 // set), string payloads are bounded by [Config.MaxContentLen], joined
 // [EventLLMResponse] summaries in content.response are bounded at
 // MaxContentLen + 4096 runes, and function call or response names in response
-// summaries are bounded at 256 runes before the 14-rune "...[TRUNCATED]"
-// suffix.
+// summaries, and the language or outcome of a code part in any summary, are
+// bounded at 256 runes before the 14-rune "...[TRUNCATED]" suffix.
 // Cloud Storage offloading requires content-parts logging (enabled by
 // [DefaultConfig] or by setting [Config.LogMultiModalContent] to true, and not
 // suppressed by [Config.DisableMultiModalContent] or by denying "content_parts"
@@ -285,7 +285,8 @@
 //   - Response summary and function-name bounds: When [Config.MaxContentLen]
 //     sets a limit (MaxContentLen >= 0 and [Config.CaptureFullMessageContent]
 //     is false), Go caps FunctionCall and FunctionResponse names in response
-//     summaries at 256 runes (with redaction when enabled) and caps joined
+//     summaries, and the language or outcome of a code part in any summary,
+//     at 256 runes (with redaction when enabled) and caps joined
 //     multi-part response summaries at [Config.MaxContentLen] + 4096 runes
 //     before appending the 14-rune "...[TRUNCATED]" suffix; [EventLLMResponse]
 //     writes that summary directly to content.response, whereas
@@ -294,9 +295,11 @@
 //     [Config.MaxContentLen] string truncation, and setting
 //     [Config.CaptureFullMessageContent] or MaxContentLen to -1 lifts both
 //     length caps while preserving redaction when enabled. adk-python
-//     interpolates function names verbatim and applies no joined-length cap
+//     interpolates function names, and in response summaries the language or
+//     outcome of a code part, verbatim and applies no joined-length cap
 //     after joining part summaries. (Pinned by
-//     TestResponseMessageSummaryLengthCap and
-//     TestResponseMessageSummaryFunctionNameCap in json_formatter_test.go, and
+//     TestResponseMessageSummaryLengthCap,
+//     TestResponseMessageSummaryFunctionNameCap and
+//     TestMessageSummaryCodeLabel in json_formatter_test.go, and
 //     TestDocParity_ResponseSummaryAndFunctionNameBounds in doc_test.go).
 package agentanalytics
