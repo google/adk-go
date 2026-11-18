@@ -149,11 +149,17 @@ type Toolset interface {
 // When no credential is ready, ADK asks the client for one, in an
 // adk_request_credential call made before the model is called, whose
 // functionCallId is "_adk_toolset_auth_" followed by the toolset's Name, and
-// ends the invocation without calling the model or listing any toolset.
-// Toolsets that share a Name share one call, which carries the config of the
-// last of them; toolsets that share a credential key share one call, the
-// first one's. When the user answers in a new message, the next model
-// call finds the credential.
+// ends the invocation without calling the model. Toolsets that share a Name
+// share one call, which carries the config of the last of them; toolsets that
+// share a credential key share one call, the first one's. When the user
+// answers in a new message, the next model call finds the credential.
+//
+// On most steps no toolset lists its tools before that request. A step that
+// first reruns a call, because the user answered a credential request or a
+// confirmation, lists the toolsets for the rerun before it makes the request,
+// so Tools can run while agent.ResolvedCredential returns nil for the
+// config's key. Tools must handle a nil credential. A toolset whose Tools
+// returns an error then offers no tools to the rerun, and the step goes on.
 //
 // AuthConfig returns nil when the toolset needs no credential. It must be safe
 // for concurrent use, and the toolset must not change a config after

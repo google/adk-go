@@ -34,6 +34,8 @@ const RequestCredentialFunctionCallName = "adk_request_credential"
 // adk_request_credential call, and the client fills ExchangedAuthCredential in
 // and sends it back.
 type Config struct {
+	// AuthScheme says how the resource expects to be authenticated. It is
+	// required.
 	AuthScheme Scheme `json:"authScheme"`
 	// RawAuthCredential is the credential the tool was configured with, such
 	// as an OAuth2 client ID and secret. A scheme that needs no exchange, such
@@ -318,8 +320,15 @@ func cloneJSONValue(v any) any {
 // ToolArguments are the arguments of an adk_request_credential call: the
 // ID of the tool call that needs the credential, and its config.
 type ToolArguments struct {
+	// FunctionCallID is the ID of the tool call that needs the credential.
+	// For a toolset's request (tool.AuthenticatedToolset) it is
+	// "_adk_toolset_auth_" followed by the toolset's name.
 	FunctionCallID string `json:"functionCallId"`
-	AuthConfig     Config `json:"authConfig"`
+	// AuthConfig is the config, without the secrets the agent was configured
+	// with ([Config.WithoutSecrets]). The client fills its
+	// ExchangedAuthCredential in and sends the config back as the function
+	// response.
+	AuthConfig Config `json:"authConfig"`
 	// Extra holds JSON keys that match no field. See [Credential.Extra].
 	Extra map[string]any `json:"-"`
 }
