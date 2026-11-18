@@ -2693,9 +2693,12 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 		// Nothing can end a retired late activation anymore, so once its
 		// cause moved up, its record keeps no callback context except for
 		// canceled and parent while an open span or call still reaches it (see
-		// dropRetiredLateContextsLocked); when the last thing reaching it is an
-		// open tool or model call, nothing revisits the now-unreachable record
-		// after that call ends, so canceled remains alongside parent.
+		// dropRetiredLateContextsLocked). When the last thing reaching rec is
+		// an open tool or model call, or a span drained by a response event
+		// (see retireDrainedDescendantsLocked), nothing revisits rec to clear
+		// canceled and parent; once nothing reachable still holds rec via
+		// parent, the record is unreachable (garbage), so those leftover fields
+		// do not matter.
 		retired = append(retired, rec)
 		inv.dropRetiredLateContextsLocked(retired...)
 	}
@@ -2891,11 +2894,13 @@ func (inv *invocationTrace) purgeActivationLocked(i int, failures map[string]err
 	// In the late state, nothing can end a purged activation anymore, so
 	// once it leaves agentStack, its record keeps no callback context except
 	// for canceled and parent while an open span or call still reaches it (see
-	// dropRetiredLateContextsLocked); when the last thing reaching it is an
-	// open tool or model call, nothing revisits the now-unreachable record
-	// after that call ends, so canceled remains alongside parent. Only the
-	// removed records qualify: the span that agentStack[i] runs under may
-	// still be open.
+	// dropRetiredLateContextsLocked). When the last thing reaching rec is an
+	// open tool or model call, or a span drained by a response event (see
+	// retireDrainedDescendantsLocked), nothing revisits rec to clear canceled
+	// and parent; once nothing reachable still holds rec via parent, the
+	// record is unreachable (garbage), so those leftover fields do not matter.
+	// Only the removed records qualify: the span that agentStack[i] runs under
+	// may still be open.
 	var latePurged []*spanRecord
 	if inv.isLate {
 		for _, rec := range inv.agentStack[i:] {

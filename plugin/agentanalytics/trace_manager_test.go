@@ -24125,13 +24125,21 @@ func TestRetiredCallerReadsCause(t *testing.T) {
 				tm.popAgentSpan(ctx, q) // q ends while call-q is open
 				_, p2, _ = tm.popToolSpan(ctx, q, cq, false)
 			}
-			if len(p1) != 0 {
-				t.Errorf("AGENT_ERROR rows on call-1 end = %d, want none: %v", len(p1), p1)
+			formatRows := func(rows []unclosedAgentSpan) string {
+				parts := make([]string, len(rows))
+				for i, r := range rows {
+					parts[i] = fmt.Sprintf("%s (%v)", r.agentName, r.err)
+				}
+				return "[" + strings.Join(parts, ", ") + "]"
 			}
+			if len(p1) != 0 {
+				t.Errorf("AGENT_ERROR rows on call-1 end = %d, want none: %s", len(p1), formatRows(p1))
+			}
+			wantOErr := fmt.Sprintf("agent %q execution failed before completion", "o")
 			if len(p2) != 2 ||
 				p2[0].agentName != "g" || !errors.Is(p2[0].err, siblingErr) ||
-				p2[1].agentName != "o" || p2[1].err == nil || !strings.Contains(p2[1].err.Error(), `agent "o" execution failed before completion`) {
-				t.Errorf("AGENT_ERROR rows on call-q end = %v, want [g (%v), o (execution failed before completion)]", p2, siblingErr)
+				p2[1].agentName != "o" || p2[1].err == nil || p2[1].err.Error() != wantOErr {
+				t.Errorf("AGENT_ERROR rows on call-q end = %s, want [g (%v), o (%s)]", formatRows(p2), siblingErr, wantOErr)
 			}
 		})
 	}
