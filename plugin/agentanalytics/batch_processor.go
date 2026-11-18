@@ -396,7 +396,8 @@ func (b *batchProcessor) recordAppendFailureDrop(n int64) {
 	}
 }
 
-// DropStats returns cumulative event-drop and formatter-failure counts.
+// DropStats returns cumulative event-drop and formatter-failure counts. It is
+// retained as an in-package test seam for direct batchProcessor tests.
 // TotalDrops sums locally discarded events and writes whose success could not
 // be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops); it can
 // include rows committed before an acknowledgment was lost, so it is an upper
