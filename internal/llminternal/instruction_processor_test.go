@@ -519,6 +519,20 @@ func (s *errorMockState) All() iter.Seq2[string, any] {
 	return nil
 }
 
+// The session is consulted only when a placeholder names a state key, so an
+// invocation without one can still use an instruction that names none.
+func TestInjectSessionState_NoSessionWithoutStatePlaceholder(t *testing.T) {
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	const template = "Answer briefly. {not a state name}"
+	got, err := InjectSessionState(ctx, template)
+	if err != nil {
+		t.Fatalf("InjectSessionState() failed: %v", err)
+	}
+	if got != template {
+		t.Errorf("InjectSessionState() = %q, want %q", got, template)
+	}
+}
+
 type errorMockSession struct{}
 
 func (s *errorMockSession) ID() string {
@@ -551,7 +565,7 @@ func TestProcessStateVariable_SystemicErrorPropagates(t *testing.T) {
 	})
 
 	t.Run("missing optional key", func(t *testing.T) {
-		val, err := replaceMatch(ctx, "{missing_key?}")
+		val, err := replaceMatch(ctx, invocationSource{ctx}, "{missing_key?}")
 		if err != nil {
 			t.Fatalf("expected no error for missing optional key, got: %v", err)
 		}
@@ -561,14 +575,14 @@ func TestProcessStateVariable_SystemicErrorPropagates(t *testing.T) {
 	})
 
 	t.Run("missing required key", func(t *testing.T) {
-		_, err := replaceMatch(ctx, "{missing_key}")
+		_, err := replaceMatch(ctx, invocationSource{ctx}, "{missing_key}")
 		if err == nil || !errors.Is(err, session.ErrStateKeyNotExist) {
 			t.Fatalf("expected ErrStateKeyNotExist, got: %v", err)
 		}
 	})
 
 	t.Run("systemic error on optional key", func(t *testing.T) {
-		_, err := replaceMatch(ctx, "{systemic_error?}")
+		_, err := replaceMatch(ctx, invocationSource{ctx}, "{systemic_error?}")
 		if err == nil || !errors.Is(err, errDatabaseFailure) {
 			t.Fatalf("expected systemic error to propagate even for optional key, got: %v", err)
 		}
