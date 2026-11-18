@@ -951,9 +951,22 @@ func (p *analyticsPlugin) emitUserMessageSignalEvents(ctx agent.InvocationContex
 	}
 }
 
+// scrubCustomMetadataValue redacts a single custom metadata entry under its
+// original keys when redact is true and reports whether safety caps or
+// placeholders discarded any nested content.
+func scrubCustomMetadataValue(key string, val any, redact bool) (any, bool) {
+	if !redact {
+		return val, false
+	}
+	if isSensitiveKey(key) || isSensitiveKey(strings.TrimPrefix(key, "a2a:")) {
+		return redactedValue, false
+	}
+	return sanitizeValue(val, -1, true)
+}
+
 // scrubA2ACustomMetadata filters and redacts custom metadata map.
 // Only keys allowed by allowlist or starting with "a2a:" are retained,
-// and their values are scrubbed using standard key-based redaction (redactJSONValue).
+// and their values are sanitized with sensitive-key and credential redaction.
 // It also returns the retained keys whose values lost content to a safety cap
 // or placeholder, or nil if none did.
 func scrubA2ACustomMetadata(meta map[string]any, allowlist customMetadataFilter, redact bool) (map[string]any, map[string]bool) {
@@ -967,22 +980,13 @@ func scrubA2ACustomMetadata(meta map[string]any, allowlist customMetadataFilter,
 		if !allowed && !strings.HasPrefix(k, "a2a:") {
 			continue
 		}
-		if redact {
-			if isSensitiveKey(k) || isSensitiveKey(strings.TrimPrefix(k, "a2a:")) {
-				out[k] = redactedValue
-				continue
+		cleanVal, contentLost := scrubCustomMetadataValue(k, v, redact)
+		out[k] = cleanVal
+		if contentLost {
+			if lost == nil {
+				lost = make(map[string]bool)
 			}
-			budget := &nodeBudget{remaining: maxSanitizeNodes}
-			cleanVal, _, contentLost := redactJSONValue(v, 0, budget)
-			out[k] = cleanVal
-			if contentLost {
-				if lost == nil {
-					lost = make(map[string]bool)
-				}
-				lost[k] = true
-			}
-		} else {
-			out[k] = v
+			lost[k] = true
 		}
 	}
 	if len(out) == 0 {
@@ -1054,12 +1058,17 @@ func (p *analyticsPlugin) emitSessionEventSignals(ctx agent.InvocationContext, e
 	// 4. AGENT_STATE_CHECKPOINT.
 	if p.shouldLogSessionEvent(EventAgentStateCheckpoint) {
 		if stateVal, endOfAgent, ok := extractAgentStateCheckpoint(ev.CustomMetadata); ok {
+			var stateTrunc bool
+			if !isNil(stateVal) {
+				stateVal, stateTrunc = scrubCustomMetadataValue("agent_state", stateVal, p.config.redactSensitiveKeys())
+			}
 			p.logSessionEvent(ctx, id, EventAgentStateCheckpoint, span, func(d *eventData) {
 				applyEventBase(d)
 				d.content = map[string]any{
 					"agent_state":  stateVal,
 					"end_of_agent": endOfAgent,
 				}
+				d.contentTruncated = stateTrunc
 			})
 		}
 	}

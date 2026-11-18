@@ -3202,3 +3202,195 @@ func TestAgentStateCheckpoint_RetainedCustomMetadataTruncation(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentStateCheckpoint_ScrubbedBeforeContentFormatter(t *testing.T) {
+	flattenFormatter := func(content any, eventType string) (any, error) {
+		if eventType != EventAgentStateCheckpoint {
+			return content, nil
+		}
+		m, ok := content.(map[string]any)
+		if !ok {
+			return content, nil
+		}
+		state, ok := m["agent_state"].(map[string]any)
+		if !ok {
+			return content, nil
+		}
+		var fields []map[string]any
+		for _, k := range []string{"step", "password", "raw"} {
+			if v, exists := state[k]; exists {
+				fields = append(fields, map[string]any{
+					"name":  k,
+					"value": v,
+				})
+			}
+		}
+		return map[string]any{
+			"fields":       fields,
+			"end_of_agent": m["end_of_agent"],
+		}, nil
+	}
+
+	const secretPassword = "secret-password"
+
+	for _, tc := range []struct {
+		name          string
+		allowlist     []string
+		redact        bool
+		meta          map[string]any
+		wantFields    []any
+		wantTruncated bool
+		forbidSecret  bool
+	}{
+		{
+			name:      "allowlisted agent_state scrubs credentials before ContentFormatter",
+			allowlist: []string{"agent_state"},
+			redact:    true,
+			meta: map[string]any{
+				"agent_state": map[string]any{
+					"step":     1,
+					"password": secretPassword,
+				},
+			},
+			wantFields: []any{
+				map[string]any{"name": "step", "value": json.Number("1")},
+				map[string]any{"name": "password", "value": "[REDACTED]"},
+			},
+			wantTruncated: false,
+			forbidSecret:  true,
+		},
+		{
+			name:      "empty allowlist scrubs adk_agent_state credentials before ContentFormatter",
+			allowlist: nil,
+			redact:    true,
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{
+					"step":     2,
+					"password": secretPassword,
+				},
+			},
+			wantFields: []any{
+				map[string]any{"name": "step", "value": json.Number("2")},
+				map[string]any{"name": "password", "value": "[REDACTED]"},
+			},
+			wantTruncated: false,
+			forbidSecret:  true,
+		},
+		{
+			name:      "state scrubbing carries truncation through ContentFormatter",
+			allowlist: nil,
+			redact:    true,
+			meta: map[string]any{
+				"agent_state": map[string]any{
+					"step":     3,
+					"password": secretPassword,
+					"raw":      `{"api_key": "x"`,
+				},
+			},
+			wantFields: []any{
+				map[string]any{"name": "step", "value": json.Number("3")},
+				map[string]any{"name": "password", "value": "[REDACTED]"},
+				map[string]any{"name": "raw", "value": unparseableJSONPlaceholder},
+			},
+			wantTruncated: true,
+			forbidSecret:  true,
+		},
+		{
+			name:      "typed map container scrubs credentials before ContentFormatter",
+			allowlist: nil,
+			redact:    true,
+			meta: map[string]any{
+				"agent_state": map[string]string{
+					"step":     "5",
+					"password": secretPassword,
+				},
+			},
+			wantFields: []any{
+				map[string]any{"name": "step", "value": "5"},
+				map[string]any{"name": "password", "value": "[REDACTED]"},
+			},
+			wantTruncated: false,
+			forbidSecret:  true,
+		},
+		{
+			name:      "plain-string credential in state scrubs before ContentFormatter",
+			allowlist: nil,
+			redact:    true,
+			meta: map[string]any{
+				"agent_state": map[string]any{
+					"step": 6,
+					"raw":  "Bearer " + secretPassword,
+				},
+			},
+			wantFields: []any{
+				map[string]any{"name": "step", "value": json.Number("6")},
+				map[string]any{"name": "raw", "value": scrubErrorText("Bearer " + secretPassword)},
+			},
+			wantTruncated: true,
+			forbidSecret:  true,
+		},
+		{
+			name:      "redaction disabled passes plaintext to ContentFormatter",
+			allowlist: []string{"agent_state"},
+			redact:    false,
+			meta: map[string]any{
+				"agent_state": map[string]any{
+					"step":     4,
+					"password": secretPassword,
+				},
+			},
+			wantFields: []any{
+				map[string]any{"name": "step", "value": json.Number("4")},
+				map[string]any{"name": "password", "value": secretPassword},
+			},
+			wantTruncated: false,
+			forbidSecret:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var formatterSawSecret bool
+			p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+				c.CustomMetadataAllowlist = tc.allowlist
+				c.DisableSensitiveKeyRedaction = !tc.redact
+				c.ContentFormatter = func(content any, eventType string) (any, error) {
+					if strings.Contains(fmt.Sprint(content), secretPassword) {
+						formatterSawSecret = true
+					}
+					return flattenFormatter(content, eventType)
+				}
+			})
+
+			var errs callbackErrors
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				Author: "state-agent",
+				LLMResponse: model.LLMResponse{
+					CustomMetadata: tc.meta,
+				},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			cpRow := onlyRowOfType(t, rows, EventAgentStateCheckpoint)
+			gotContent := jsonObjectColumn(t, cpRow, "content")
+			wantContent := map[string]any{
+				"fields":       tc.wantFields,
+				"end_of_agent": false,
+			}
+			if diff := cmp.Diff(wantContent, gotContent); diff != "" {
+				t.Errorf("content mismatch (-want +got):\n%s", diff)
+			}
+			if got := cpRow["is_truncated"]; got != tc.wantTruncated {
+				t.Errorf("is_truncated = %v, want %t", got, tc.wantTruncated)
+			}
+			if tc.forbidSecret {
+				if formatterSawSecret {
+					t.Errorf("ContentFormatter received unscrubbed %q before formatting", secretPassword)
+				}
+				if s := fmt.Sprint(cpRow); strings.Contains(s, secretPassword) {
+					t.Errorf("AGENT_STATE_CHECKPOINT row leaked %q: %s", secretPassword, s)
+				}
+			}
+		})
+	}
+}

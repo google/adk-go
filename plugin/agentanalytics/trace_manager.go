@@ -293,10 +293,12 @@ type spanRecord struct {
 	// (see finishedTaskLocked and popTaskAgentSpan).
 	finishedTasks []string
 	// failedTasks holds, likewise, the function call IDs of the finish_task
-	// calls that ended the activation with a classified tool result error
-	// (see noteTaskFinished). Keeping them apart from finishedTasks lets a
-	// failed call and a completed call with the same ID, made by two runs of
-	// the agent, each end the run that made it.
+	// calls that this plugin's tool callback saw end the activation with a
+	// classified tool result error (see noteTaskFinished). Keeping them apart
+	// from finishedTasks lets finishedTaskLocked disambiguate a failed call
+	// and a completed call that share a reused ID when both runs are open on
+	// the same path, while still matching across both lists when an
+	// agent-level AfterToolCallback alters the error flag afterwards.
 	failedTasks []string
 	// nonLLM reports that the agent is a workflow agent, such as a sequential
 	// or loop agent, rather than an llmagent whose sub-agents can transfer to
@@ -2483,10 +2485,11 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 // failed reports that the response also carries a classified tool result
 // error, with which ADK ends the activation as well, but which fails its task.
 // The response ends the activation on the event's node path whose finish_task
-// call with one of the call IDs in calls completed, or failed if failed is set
-// (see finishedTaskLocked), and otherwise, when no such activation is open or more than one is, as for
-// a response whose call this plugin did not see complete, the activation that
-// findAgentForContext finds. OnEventCallback runs on the runner's goroutine
+// call with one of the call IDs in calls ended the activation (using failed to
+// disambiguate when two runs on that path share a call ID; see
+// finishedTaskLocked), and otherwise, when no such activation is open or more
+// than one is, as for a response whose call this plugin did not see complete,
+// the activation that findAgentForContext finds. OnEventCallback runs on the runner's goroutine
 // with the runner's context, and the event does not show that the run that
 // wrote it returned: a custom agent can forward the event of a sub-agent that
 // it runs on another goroutine and wait for that goroutine later. So the span
@@ -2537,33 +2540,52 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 
 // finishedTaskLocked returns the index in agentStack of the open activation
 // of the agent of id, on the node path of id, that saw one of the finish_task
-// calls in calls complete, or fail if failed is set (see noteTaskFinished), or
-// -1 if there is none, or more than one. A function call ID is scoped to the activation that made the
-// call, not unique: ADK keeps the ID that a model gives a call, and providers
-// reuse IDs such as "call_0" (see toolKey). So another run of the agent on the
-// same branch may have seen a call with the same ID complete: one on another
-// node path did not write the event, and among several on the event's node
-// path the call ID does not tell which one did. As in findAgent, a node path
-// that either side lacks matches any. inv.mu must be held.
+// calls in calls end the activation (see noteTaskFinished), or -1 if there is
+// none, or more than one. Both finishedTasks and failedTasks are searched
+// because agent-level AfterToolCallbacks run after this plugin and can add or
+// clear a tool result error flag before the FunctionResponse event is emitted.
+// A function call ID is scoped to the activation that made the call, not
+// unique: ADK keeps the ID that a model gives a call, and providers reuse IDs
+// such as "call_0" (see toolKey). When more than one open run on the event's
+// node path recorded the call ID, failed narrows the lookup to the list
+// matching the event's classification; if none or more than one still matches,
+// -1 is returned. As in findAgent, a node path that either side lacks matches
+// any. inv.mu must be held.
 func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string, failed bool) int {
-	found := -1
+	const ambiguous = -2
+	anyFound := -1
+	matchedFound := -1
 	for i := len(inv.agentStack) - 1; i > 0; i-- {
 		rec := inv.agentStack[i]
-		noted := rec.finishedTasks
-		if failed {
-			noted = rec.failedTasks
-		}
 		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch ||
-			(id.path != "" && rec.path != "" && rec.path != id.path) ||
-			!slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(noted, call) }) {
+			(id.path != "" && rec.path != "" && rec.path != id.path) {
 			continue
 		}
-		if found >= 0 {
-			return -1
+		inFinished := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.finishedTasks, call) })
+		inFailed := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.failedTasks, call) })
+		if !inFinished && !inFailed {
+			continue
 		}
-		found = i
+		if anyFound == -1 {
+			anyFound = i
+		} else {
+			anyFound = ambiguous
+		}
+		if (failed && inFailed) || (!failed && inFinished) {
+			if matchedFound == -1 {
+				matchedFound = i
+			} else {
+				matchedFound = ambiguous
+			}
+		}
 	}
-	return found
+	if anyFound >= 0 {
+		return anyFound
+	}
+	if matchedFound >= 0 {
+		return matchedFound
+	}
+	return -1
 }
 
 // noteTaskFinished records that the finish_task call callID of the agent

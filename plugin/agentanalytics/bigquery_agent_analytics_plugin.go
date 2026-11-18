@@ -1223,9 +1223,16 @@ func (p *analyticsPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[st
 
 // isToolConfirmationOutcome reports whether err is a tool confirmation request
 // or rejection. Both outcomes complete the tool call in adk-python rather than
-// logging TOOL_ERROR.
+// logging TOOL_ERROR. If inspecting err panics (for example, Unwrap on a typed
+// nil *fs.PathError), it reports false so the caller records an ordinary tool
+// failure.
 func isToolConfirmationOutcome(err error) bool {
-	return errors.Is(err, tool.ErrConfirmationRequired) || errors.Is(err, tool.ErrConfirmationRejected)
+	if err == nil {
+		return false
+	}
+	return orZero(func() bool {
+		return errors.Is(err, tool.ErrConfirmationRequired) || errors.Is(err, tool.ErrConfirmationRejected)
+	})
 }
 
 func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
@@ -1325,11 +1332,40 @@ func (p *analyticsPlugin) logToolError(ctx context.Context, id identity, t tool.
 		if err != nil {
 			// An error whose Error method returns "" or panics, as a typed nil
 			// pointer to a type with a value receiver Error method does, is
-			// recorded by its type name.
-			d.errMsg = cmp.Or(orZero(err.Error), fmt.Sprintf("%T", err))
+			// recorded by its bare type name to match adk-python.
+			d.errMsg = cmp.Or(orZero(err.Error), errorTypeName(err))
 		}
 		d.functionCallID = callID
 	})
+}
+
+// errorTypeName returns the bare type name of err, matching adk-python's
+// type(err).__name__ fallback when Error() is empty or panics.
+func errorTypeName(err error) string {
+	return valueTypeName(err)
+}
+
+// valueTypeName returns the bare type name of v after unwrapping pointers,
+// stopping on self-referential pointer chains such as `type P *P` and falling
+// back to t.String() for unnamed types.
+func valueTypeName(v any) string {
+	t := reflect.TypeOf(v)
+	if t == nil {
+		return ""
+	}
+	var seen map[reflect.Type]bool
+	for t.Kind() == reflect.Pointer {
+		elem := t.Elem()
+		if elem == t || seen[elem] {
+			break
+		}
+		if seen == nil {
+			seen = make(map[reflect.Type]bool)
+		}
+		seen[t] = true
+		t = elem
+	}
+	return cmp.Or(t.Name(), t.String())
 }
 
 // classifyToolResultError reports whether a tool result map that came without
