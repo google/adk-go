@@ -66,9 +66,9 @@ type Config struct {
 // If cfg is nil, skipSummarization defaults to false.
 //
 // The tool runs agent in a nested run. When the calling run was given an
-// abort signal ([runner.WithAbortSignal]), the nested run gets the same
-// signal, so aborting the calling run aborts agent too. When the aborted
-// nested run leaves no text, the tool's result is
+// abort signal ([runner.WithAbortSignal]), the nested run is aborted with
+// it: closing the channel or sending one value on it aborts the calling run
+// and agent. When the aborted nested run leaves no text, the tool's result is
 // {"result": "Invocation was aborted by client."}.
 func New(agent agent.Agent, cfg *Config) tool.Tool {
 	if cfg == nil {
@@ -223,7 +223,9 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 
 	// Aborting the calling run aborts the nested one, as in adk-python. Go
 	// has no second event loop to exclude, so the nested run always gets the
-	// signal.
+	// signal. Given the same channel under toolCtx, the nested run shares the
+	// calling run's abort state, so a value sent on the channel stops both
+	// runs whichever of them receives it.
 	var runOpts []runner.RunOption
 	if state := icontext.AbortStateFrom(toolCtx); state != nil {
 		runOpts = append(runOpts, runner.WithAbortSignal(state.Signal()))

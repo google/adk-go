@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1693,6 +1694,77 @@ func TestRunner_Abort_PreSignaledAndNilSignal(t *testing.T) {
 	}
 }
 
+// TestRunner_Abort_PreSignaledResumeRunsNoNode checks that a turn that
+// resumes a paused node root, with a signal that fired before the run, runs
+// no node: a node that runs again on resume and ignores its context does not
+// run, and the turn stores the user message and the seal. The workflow starts
+// a node that runs again on resume before it looks at its context, so only
+// the runner's own check before the workflow starts keeps it from running, as
+// adk-python's runner cancels the root task before it has had a turn
+// (runners.py, _consume_event_queue and _cleanup_root_task).
+func TestRunner_Abort_PreSignaledResumeRunsNoNode(t *testing.T) {
+	t.Parallel()
+	signals := []struct {
+		name string
+		sig  func() chan struct{}
+	}{
+		{name: "pre_closed", sig: func() chan struct{} { ch := make(chan struct{}); close(ch); return ch }},
+		{name: "send_struct", sig: func() chan struct{} { ch := make(chan struct{}, 1); ch <- struct{}{}; return ch }},
+	}
+	for _, s := range signals {
+		t.Run(s.name, func(t *testing.T) {
+			var resumedRuns atomic.Int32
+			root := &abortGraphNode{
+				BaseNode: workflow.NewBaseNode("root", "", workflow.NodeConfig{RerunOnResume: new(true)}),
+				fn: func(ctx agent.Context, yield func(*session.Event, error) bool) {
+					if _, ok := ctx.ResumedInput("approval"); ok {
+						resumedRuns.Add(1)
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Output = "approved"
+						yield(ev, nil)
+						return
+					}
+					yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "approval", Message: "decide"}), nil)
+				},
+			}
+			r, svc := newAbortRunner(t, Config{Node: root})
+			paused := abortRun{sig: nil}.drive(t, r)
+			if len(paused.errs) != 0 || len(paused.events) != 1 {
+				t.Fatalf("first turn: errors = %v, events = %v, want no errors and the input request", paused.errs, describeAbortEvents(paused.events))
+			}
+			answer := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				ID:       "approval",
+				Name:     workflow.WorkflowInputFunctionCallName,
+				Response: map[string]any{"payload": "yes"},
+			}}}}
+
+			res := abortRun{msg: answer, sig: s.sig()}.drive(t, r)
+
+			if len(res.errs) != 0 {
+				t.Fatalf("Run() errors = %v, want none", res.errs)
+			}
+			if got := resumedRuns.Load(); got != 0 {
+				t.Errorf("root ran %d times on resume, want 0", got)
+			}
+			want := []string{`root INVOCATION_ABORTED "Invocation was aborted by client." no-content`}
+			if diff := cmp.Diff(want, describeAbortEvents(res.events)); diff != "" {
+				t.Errorf("yielded events mismatch (-want +got):\n%s", diff)
+			}
+			stored := describeAbortEvents(storedAbortSession(t, svc, "s"))
+			wantStored := []string{
+				`user response approval adk_request_input map[payload:yes]`,
+				`root INVOCATION_ABORTED "Invocation was aborted by client." no-content`,
+			}
+			if len(stored) < 2 {
+				t.Fatalf("stored events = %v, want at least the resume turn's 2", stored)
+			}
+			if diff := cmp.Diff(wantStored, stored[len(stored)-2:]); diff != "" {
+				t.Errorf("stored events of the resume turn mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestRunner_Abort_StopsAfterTheEventTheCallerAbortedOn checks that a signal
 // closed while the caller handles an event stops the run before the next
 // event is requested, even from a root that never looks at its context, as
@@ -1744,6 +1816,231 @@ func TestRunner_Abort_StopsAfterTheEventTheCallerAbortedOn(t *testing.T) {
 				t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// TestRunner_Abort_ValueSentWhileTheCallerHandlesAnEventStopsTheRun checks
+// that one value sent while the caller handles an event is seen by the check
+// before the next event is requested, and that the run yields its seal, even
+// when the goroutine that receives for the run's watch takes the value: a
+// check after the send sees the signal, as a check after adk-python's
+// Event.set does (runners.py, Runner.run_async's execute).
+func TestRunner_Abort_ValueSentWhileTheCallerHandlesAnEventStopsTheRun(t *testing.T) {
+	// One P, and two yields of it before the send: the goroutine that waits
+	// on the signal for the run's watch has run and is parked on the channel,
+	// so the send hands the value to it and leaves the channel empty, and it
+	// cannot trip the state before the caller's goroutine blocks. On the node
+	// path the scheduler then wakes that goroutine and the node's goroutine,
+	// in an order the race detector randomizes, so each root runs 32 times.
+	// Not parallel, as it changes GOMAXPROCS.
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	// offered counts the events the root offers; a run that requests no
+	// further event after "first" lets the root offer one.
+	var offered atomic.Int32
+	twoEvents := func(ctx agent.InvocationContext, yield func(*session.Event, error) bool) {
+		for _, text := range []string{"first", "second"} {
+			offered.Add(1)
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Author = "root"
+			ev.Content = genai.NewContentFromText(text, genai.RoleModel)
+			if !yield(ev, nil) {
+				return
+			}
+		}
+	}
+	tests := []struct {
+		name   string
+		config Config
+	}{
+		{
+			name: "custom",
+			config: Config{Agent: must(agent.New(agent.Config{Name: "root", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) { twoEvents(ctx, yield) }
+			}}))},
+		},
+		{
+			name: "node_root",
+			config: Config{Node: &abortGraphNode{BaseNode: workflow.NewBaseNode("root", "", workflow.NodeConfig{}), fn: func(ctx agent.Context, yield func(*session.Event, error) bool) {
+				twoEvents(ctx, yield)
+			}}},
+		},
+	}
+	want := []string{
+		`root text "first"`,
+		`root INVOCATION_ABORTED "Invocation was aborted by client." no-content`,
+	}
+	wantStored := []string{
+		`user text "Run"`,
+		`root text "first"`,
+		`root INVOCATION_ABORTED "Invocation was aborted by client." no-content`,
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, svc := newAbortRunner(t, tt.config)
+			for i := range 32 {
+				offered.Store(0)
+				sessionID := fmt.Sprintf("s%d", i)
+				sig := make(chan struct{}, 1)
+
+				var got []string
+				for ev, err := range r.Run(t.Context(), "u", sessionID, genai.NewContentFromText("Run", genai.RoleUser), agent.RunConfig{}, WithAbortSignal(sig)) {
+					if err != nil {
+						t.Fatalf("iteration %d: Run() error = %v, want none", i, err)
+					}
+					got = append(got, describeAbortEvent(ev))
+					if len(got) == 1 {
+						runtime.Gosched()
+						runtime.Gosched()
+						sig <- struct{}{}
+					}
+				}
+
+				if n := offered.Load(); n != 1 {
+					t.Fatalf("iteration %d: root offered %d events, want 1: the run requested an event after the abort", i, n)
+				}
+				if diff := cmp.Diff(want, got); diff != "" {
+					t.Fatalf("iteration %d: yielded events mismatch (-want +got):\n%s", i, diff)
+				}
+				if diff := cmp.Diff(wantStored, describeAbortEvents(storedAbortSession(t, svc, sessionID))); diff != "" {
+					t.Fatalf("iteration %d: stored events mismatch (-want +got):\n%s", i, diff)
+				}
+			}
+		})
+	}
+}
+
+// TestRunner_Abort_FollowUpRunUnderAnAbortedRunIsAborted checks that a run
+// started under the context of a run that one sent value aborted, with the
+// same channel, is aborted too, also after the first run was sealed: it runs
+// no agent and is sealed, as a closed channel aborts every run given it and
+// as adk-python's abort event stays set for whoever holds it
+// (agents/invocation_context.py, is_aborted).
+func TestRunner_Abort_FollowUpRunUnderAnAbortedRunIsAborted(t *testing.T) {
+	t.Parallel()
+	var secondRuns atomic.Int32
+	second, secondSvc := newAbortRunner(t, Config{Agent: must(agent.New(agent.Config{Name: "second", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			secondRuns.Add(1)
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Author = "second"
+			ev.Content = genai.NewContentFromText("hello", genai.RoleModel)
+			yield(ev, nil)
+		}
+	}}))})
+	sig := make(chan struct{}, 1)
+	var secondEvents []string
+	var secondErrs []error
+	p, err := plugin.New(plugin.Config{
+		Name: "follow_up",
+		// Runs after the first run was sealed, under its context.
+		AfterRunCallback: func(ctx agent.InvocationContext) {
+			for ev, err := range second.Run(ctx, "u", "s2", genai.NewContentFromText("again", genai.RoleUser), agent.RunConfig{}, WithAbortSignal(sig)) {
+				if err != nil {
+					secondErrs = append(secondErrs, err)
+					continue
+				}
+				secondEvents = append(secondEvents, describeAbortEvent(ev))
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+	var firstRuns atomic.Int32
+	first, _ := newAbortRunner(t, Config{
+		Agent: must(agent.New(agent.Config{Name: "root", Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) { firstRuns.Add(1) }
+		}})),
+		PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{p}},
+	})
+	sig <- struct{}{}
+
+	res := abortRun{session: "s1", sig: sig}.drive(t, first)
+
+	if len(res.errs) != 0 || len(secondErrs) != 0 {
+		t.Fatalf("Run() errors = %v, follow-up run errors = %v, want none", res.errs, secondErrs)
+	}
+	if got := firstRuns.Load(); got != 0 {
+		t.Errorf("first root ran %d times, want 0", got)
+	}
+	if got := secondRuns.Load(); got != 0 {
+		t.Errorf("follow-up root ran %d times, want 0", got)
+	}
+	wantFirst := []string{`root INVOCATION_ABORTED "Invocation was aborted by client." no-content`}
+	if diff := cmp.Diff(wantFirst, describeAbortEvents(res.events)); diff != "" {
+		t.Errorf("first run events mismatch (-want +got):\n%s", diff)
+	}
+	wantSecond := []string{`second INVOCATION_ABORTED "Invocation was aborted by client." no-content`}
+	if diff := cmp.Diff(wantSecond, secondEvents); diff != "" {
+		t.Errorf("follow-up run events mismatch (-want +got):\n%s", diff)
+	}
+	wantSecondStored := []string{
+		`user text "again"`,
+		`second INVOCATION_ABORTED "Invocation was aborted by client." no-content`,
+	}
+	if diff := cmp.Diff(wantSecondStored, describeAbortEvents(storedAbortSession(t, secondSvc, "s2"))); diff != "" {
+		t.Errorf("follow-up run stored events mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestRunner_Abort_ValueReceivedByAPollCancelsTheEngineContext checks that a
+// value sent on the signal and received by the runner's poll after an event
+// cancels the context the agent runs under, so work of the agent that waits
+// on ctx.Done() returns, as every reader of adk-python's abort event sees it
+// set (agents/invocation_context.py, is_aborted).
+func TestRunner_Abort_ValueReceivedByAPollCancelsTheEngineContext(t *testing.T) {
+	// One P: the abort watcher goroutine does not run before the run's
+	// goroutine blocks, so the value the caller sends stays in the channel
+	// until the runner's poll after the event receives it. Not parallel, as it
+	// changes GOMAXPROCS.
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	var workCanceled atomic.Bool
+	root, err := agent.New(agent.Config{Name: "root", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			// Work the agent started, such as a tool, that ends when the run's
+			// context is canceled.
+			workDone := make(chan struct{})
+			go func() {
+				<-ctx.Done()
+				close(workDone)
+			}()
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Author = "root"
+			ev.Content = genai.NewContentFromText("hello", genai.RoleModel)
+			yield(ev, nil)
+			select {
+			case <-workDone:
+				workCanceled.Store(true)
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	r, _ := newAbortRunner(t, Config{Agent: root})
+	sig := make(chan struct{}, 1)
+
+	var got []string
+	for ev, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("Run", genai.RoleUser), agent.RunConfig{}, WithAbortSignal(sig)) {
+		if err != nil {
+			t.Fatalf("Run() error = %v, want none", err)
+		}
+		got = append(got, describeAbortEvent(ev))
+		if len(got) == 1 {
+			sig <- struct{}{}
+		}
+	}
+
+	if !workCanceled.Load() {
+		t.Error("the agent's work was not canceled within 5s of the poll that received the signal")
+	}
+	want := []string{
+		`root text "hello"`,
+		`root INVOCATION_ABORTED "Invocation was aborted by client." no-content`,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("yielded events mismatch (-want +got):\n%s", diff)
 	}
 }
 

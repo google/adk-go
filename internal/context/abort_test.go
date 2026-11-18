@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -44,7 +45,7 @@ func TestAbortState_Aborted(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := WithAbortState(t.Context(), NewAbortState(tc.signal))
+			ctx := WithAbortState(t.Context(), NewAbortState(t.Context(), tc.signal))
 			if got := Aborted(ctx); got != tc.want {
 				t.Fatalf("Aborted() = %v, want %v", got, tc.want)
 			}
@@ -57,10 +58,10 @@ func TestAbortState_Aborted(t *testing.T) {
 }
 
 func TestAbortState_NilStateMeansNoAbort(t *testing.T) {
-	if s := NewAbortState(nil); s != nil {
-		t.Fatalf("NewAbortState(nil) = %v, want nil", s)
+	if s := NewAbortState(t.Context(), nil); s != nil {
+		t.Fatalf("NewAbortState(t.Context(), nil) = %v, want nil", s)
 	}
-	outer := WithAbortState(t.Context(), NewAbortState(closedSignal()))
+	outer := WithAbortState(t.Context(), NewAbortState(t.Context(), closedSignal()))
 	inner := WithAbortState(outer, nil)
 	if !Aborted(outer) {
 		t.Fatal("Aborted(outer) = false, want true")
@@ -82,14 +83,43 @@ func TestAbortState_NilStateMeansNoAbort(t *testing.T) {
 
 func TestAbortState_SignalIsTheCallersChannel(t *testing.T) {
 	ch := make(chan struct{})
-	s := AbortStateFrom(WithAbortState(t.Context(), NewAbortState(ch)))
+	s := AbortStateFrom(WithAbortState(t.Context(), NewAbortState(t.Context(), ch)))
 	if got := s.Signal(); got != (<-chan struct{})(ch) {
 		t.Errorf("Signal() = %v, want the channel given to NewAbortState", got)
 	}
 }
 
+// TestNewAbortState_NestedRunOfTheSameSignalSharesFiring checks that the
+// state of a run nested in a run with the same signal fires with the
+// enclosing state, whichever of them receives the signal, while a nested run
+// with another signal does not, and that each state seals once on its own.
+func TestNewAbortState_NestedRunOfTheSameSignalSharesFiring(t *testing.T) {
+	sig := make(chan struct{}, 1)
+	outer := NewAbortState(t.Context(), sig)
+	toolCtx := WithAbortState(t.Context(), outer)
+	nested := NewAbortState(toolCtx, sig)
+	otherSignal := NewAbortState(toolCtx, make(chan struct{}))
+
+	sig <- struct{}{}
+	if !nested.Aborted() {
+		t.Fatal("nested Aborted() after the send = false, want true")
+	}
+	if !outer.Aborted() {
+		t.Error("outer Aborted() after the nested state received the signal = false, want true")
+	}
+	if otherSignal.Aborted() {
+		t.Error("Aborted() of a nested state with another signal = true, want false")
+	}
+	if !nested.ClaimSeal() {
+		t.Error("nested ClaimSeal() = false, want true")
+	}
+	if !outer.ClaimSeal() {
+		t.Error("outer ClaimSeal() after the nested state sealed = false, want true")
+	}
+}
+
 func TestAbortState_ClaimSealOnce(t *testing.T) {
-	s := NewAbortState(make(chan struct{}))
+	s := NewAbortState(t.Context(), make(chan struct{}))
 	var wins atomic.Int32
 	var wg sync.WaitGroup
 	for range 16 {
@@ -108,7 +138,7 @@ func TestAbortState_ClaimSealOnce(t *testing.T) {
 func TestAbortState_Watch(t *testing.T) {
 	t.Run("signal_cancels_child_not_parent", func(t *testing.T) {
 		sig := make(chan struct{}, 1)
-		s := NewAbortState(sig)
+		s := NewAbortState(t.Context(), sig)
 		parent := t.Context()
 		child, stop := s.Watch(parent)
 		defer stop()
@@ -132,7 +162,7 @@ func TestAbortState_Watch(t *testing.T) {
 	})
 	t.Run("stop_cancels_child_and_ends_watch", func(t *testing.T) {
 		sig := make(chan struct{}, 1)
-		s := NewAbortState(sig)
+		s := NewAbortState(t.Context(), sig)
 		child, stop := s.Watch(t.Context())
 		stop()
 		stop()
@@ -143,6 +173,118 @@ func TestAbortState_Watch(t *testing.T) {
 		// No watcher is left to consume the value, so the first poll does.
 		if !s.Aborted() {
 			t.Error("Aborted() = false, want true")
+		}
+	})
+	t.Run("fired_before_watch_is_seen_when_watch_returns", func(t *testing.T) {
+		// One P: the watcher goroutine cannot run before this goroutine
+		// blocks, so only Watch itself can have taken the signal by the time
+		// it returns. No test in this package runs in parallel.
+		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+		sent := make(chan struct{}, 1)
+		sent <- struct{}{}
+		for name, sig := range map[string]chan struct{}{"value_sent": sent, "closed": closedSignal()} {
+			t.Run(name, func(t *testing.T) {
+				s := NewAbortState(t.Context(), sig)
+				child, stop := s.Watch(t.Context())
+				defer stop()
+
+				// Checked at once: the runner polls right after Watch returns,
+				// and a run whose signal fired before it started must not start.
+				if !s.Aborted() {
+					t.Error("Aborted() right after Watch = false, want true")
+				}
+				if child.Err() == nil {
+					t.Error("child.Err() right after Watch = nil, want context.Canceled")
+				}
+			})
+		}
+	})
+	t.Run("value_received_by_any_reader_cancels_every_watch", func(t *testing.T) {
+		// One P: the watcher goroutines usually have not run when the value is
+		// sent, so the poll below receives it and the watchers can only learn
+		// of it from the state. When a watcher has run and receives the value
+		// itself, the other watch can still only learn of it from the state.
+		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+		sig := make(chan struct{}, 1)
+		s := NewAbortState(t.Context(), sig)
+		first, stopFirst := s.Watch(t.Context())
+		defer stopFirst()
+		second, stopSecond := s.Watch(t.Context())
+		defer stopSecond()
+
+		sig <- struct{}{}
+		s.Aborted()
+		for name, child := range map[string]context.Context{"first": first, "second": second} {
+			select {
+			case <-child.Done():
+			case <-time.After(5 * time.Second):
+				t.Errorf("%s watch: child context not canceled 5s after the signal was received", name)
+			}
+		}
+		if !s.Aborted() {
+			t.Error("Aborted() after the watches were canceled = false, want true")
+		}
+	})
+	t.Run("check_after_a_send_sees_a_value_the_receiver_took", func(t *testing.T) {
+		// One P, and two yields of it after Watch: the receiver goroutine has
+		// run and is parked on the channel, so the send hands the value to it
+		// and leaves the channel empty, and the receiver cannot trip the state
+		// before this goroutine blocks.
+		defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+		sig := make(chan struct{}, 1)
+		s := NewAbortState(t.Context(), sig)
+		child, stop := s.Watch(t.Context())
+		defer stop()
+		runtime.Gosched()
+		runtime.Gosched()
+
+		sig <- struct{}{}
+		if !s.Aborted() {
+			t.Fatal("Aborted() right after the send = false, want true")
+		}
+		select {
+		case <-child.Done():
+		case <-time.After(5 * time.Second):
+			t.Error("child context not canceled 5s after the signal")
+		}
+	})
+	t.Run("checks_watches_and_a_send_at_once", func(t *testing.T) {
+		// Checks run beside watches that start and stop, and one value is
+		// sent: every check that starts after the send has returned reports
+		// true, and no check waits on a receiver that has ended.
+		sig := make(chan struct{}, 1)
+		outer := NewAbortState(t.Context(), sig)
+		nested := NewAbortState(WithAbortState(t.Context(), outer), sig)
+		var sent atomic.Bool
+		var missed atomic.Int32
+		var wg sync.WaitGroup
+		for i := range 8 {
+			s := outer
+			if i%2 == 1 {
+				s = nested
+			}
+			wg.Go(func() {
+				for range 200 {
+					_, stop := s.Watch(t.Context())
+					after := sent.Load()
+					if !s.Aborted() && after {
+						missed.Add(1)
+					}
+					stop()
+				}
+			})
+		}
+		wg.Go(func() {
+			runtime.Gosched()
+			sig <- struct{}{}
+			sent.Store(true)
+		})
+		wg.Wait()
+		if got := missed.Load(); got != 0 {
+			t.Errorf("%d checks that started after the send reported false, want 0", got)
+		}
+		if !outer.Aborted() || !nested.Aborted() {
+			t.Error("Aborted() after the send = false, want true on both states")
 		}
 	})
 	t.Run("nil_state_returns_parent", func(t *testing.T) {
@@ -157,8 +299,8 @@ func TestAbortState_Watch(t *testing.T) {
 }
 
 func TestIsAbortEcho(t *testing.T) {
-	aborted := WithAbortState(t.Context(), NewAbortState(closedSignal()))
-	notAborted := WithAbortState(t.Context(), NewAbortState(make(chan struct{})))
+	aborted := WithAbortState(t.Context(), NewAbortState(t.Context(), closedSignal()))
+	notAborted := WithAbortState(t.Context(), NewAbortState(t.Context(), make(chan struct{})))
 	callerCanceled, cancel := context.WithCancel(aborted)
 	cancel()
 	tests := []struct {

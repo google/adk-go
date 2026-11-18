@@ -80,7 +80,7 @@ func callResponse(id, name string) *model.LLMResponse {
 // context and, below it, the context the abort cancels.
 func abortableInvocation(t *testing.T, signal <-chan struct{}) agent.InvocationContext {
 	t.Helper()
-	state := icontext.NewAbortState(signal)
+	state := icontext.NewAbortState(context.Background(), signal)
 	runCtx := icontext.WithAbortState(runconfig.ToContext(t.Context(), &runconfig.RunConfig{}), state)
 	engine, stop := state.Watch(runCtx)
 	t.Cleanup(stop)

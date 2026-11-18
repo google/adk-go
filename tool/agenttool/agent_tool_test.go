@@ -17,6 +17,7 @@ package agenttool_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"log"
 	"strings"
@@ -1263,7 +1264,7 @@ func TestAgentTool_ForwardsAbortSignalToNestedRunner(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Create() error = %v", err)
 			}
-			ctx := icontext.WithAbortState(t.Context(), icontext.NewAbortState(sig))
+			ctx := icontext.WithAbortState(t.Context(), icontext.NewAbortState(t.Context(), sig))
 			ictx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Session: created.Session})
 			toolCtx := agent.NewToolContext(ictx, "", &session.EventActions{}, nil)
 
@@ -1279,4 +1280,115 @@ func TestAgentTool_ForwardsAbortSignalToNestedRunner(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAgentTool_SentAbortValueStopsCallingAndNestedRun checks that one value
+// sent on the calling run's abort signal while the nested run of an agent tool
+// is running stops both runs: the nested agent's context is canceled, the
+// nested run is sealed, so the tool's result is the abort message, and the
+// calling run calls its model no more and is sealed. adk-python's nested run
+// waits on the caller's asyncio.Event, which every reader sees once it is set
+// (tools/agent_tool.py, run_async).
+func TestAgentTool_SentAbortValueStopsCallingAndNestedRun(t *testing.T) {
+	started := make(chan struct{})
+	var childCanceled atomic.Bool
+	child, err := agent.New(agent.Config{Name: "child", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(func(*session.Event, error) bool) {
+			close(started)
+			select {
+			case <-ctx.Done():
+				childCanceled.Store(true)
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	outerModel := &testutil.MockModel{Responses: []*genai.Content{
+		{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "child", Args: map[string]any{"request": "go"}}}}},
+		genai.NewContentFromText("outer reply", genai.RoleModel),
+	}}
+	// The calling run is sealed before the tool's response is yielded, so the
+	// tool's result is read here.
+	var toolResult map[string]any
+	var toolErr error
+	root, err := llmagent.New(llmagent.Config{
+		Name:  "root",
+		Model: outerModel,
+		Tools: []tool.Tool{agenttool.New(child, nil)},
+		AfterToolCallbacks: []llmagent.AfterToolCallback{
+			func(_ agent.Context, _ tool.Tool, _, result map[string]any, err error) (map[string]any, error) {
+				toolResult, toolErr = result, err
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	sessions := session.InMemoryService()
+	r, err := runner.New(runner.Config{AppName: "app", Agent: root, SessionService: sessions, AutoCreateSession: true})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+	sig := make(chan struct{}, 1)
+	go func() {
+		select {
+		case <-started:
+			sig <- struct{}{}
+		case <-t.Context().Done():
+		}
+	}()
+
+	var got []string
+	for ev, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}, runner.WithAbortSignal(sig)) {
+		if err != nil {
+			t.Fatalf("Run() error = %v, want none", err)
+		}
+		got = append(got, describeEvent(ev))
+	}
+
+	if !childCanceled.Load() {
+		t.Error("the nested agent's context was not canceled within 5s of the signal")
+	}
+	if toolErr != nil {
+		t.Errorf("agent tool error = %v, want nil", toolErr)
+	}
+	if diff := cmp.Diff(map[string]any{"result": "Invocation was aborted by client."}, toolResult); diff != "" {
+		t.Errorf("agent tool result mismatch (-want +got):\n%s", diff)
+	}
+	if got := len(outerModel.Requests); got != 1 {
+		t.Errorf("calling run's model was called %d times, want 1", got)
+	}
+	want := []string{
+		"root call call_1 child",
+		`root INVOCATION_ABORTED "Invocation was aborted by client." response call_1 child map[error:Invocation was aborted by client.]`,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("calling run's events mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// describeEvent names ev by author, error code and message, function calls,
+// function responses and text.
+func describeEvent(ev *session.Event) string {
+	s := ev.Author
+	if ev.ErrorCode != "" || ev.ErrorMessage != "" {
+		s += fmt.Sprintf(" %s %q", ev.ErrorCode, ev.ErrorMessage)
+	}
+	if ev.Content == nil {
+		return s + " no-content"
+	}
+	for _, p := range ev.Content.Parts {
+		switch {
+		case p.FunctionCall != nil:
+			s += fmt.Sprintf(" call %s %s", p.FunctionCall.ID, p.FunctionCall.Name)
+		case p.FunctionResponse != nil:
+			s += fmt.Sprintf(" response %s %s %v", p.FunctionResponse.ID, p.FunctionResponse.Name, p.FunctionResponse.Response)
+		case p.Text != "":
+			s += fmt.Sprintf(" text %q", p.Text)
+		}
+	}
+	return s
 }
