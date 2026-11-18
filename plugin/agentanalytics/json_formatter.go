@@ -59,10 +59,11 @@ const (
 )
 
 // maxFunctionNameSummaryLength bounds, in runes, the function name that a
-// response summary shows for a function call or response part when maxLength >= 0
+// response summary shows for a function call or response part, and the language
+// or outcome that any summary shows for a code part, when maxLength >= 0
 // (before truncateString appends the 14-rune "...[TRUNCATED]" suffix). A
-// negative maxLength leaves function names unlimited in length while still
-// applying redaction when it is enabled.
+// negative maxLength leaves them unlimited in length while still applying
+// redaction when it is enabled.
 const maxFunctionNameSummaryLength = 256
 
 // responseSummarySlack is the fixed absolute 4096-rune allowance (not
@@ -450,20 +451,20 @@ func newMessageSummary(content *genai.Content, contentOrd, maxLength int, redact
 			name, t := sanitizeAndTruncateText(orUnknown(part.FunctionResponse.Name), maxLength, redact)
 			m.pieces = append(m.pieces, summaryPiece{partIdx: i, text: "Function response: " + name, truncated: t})
 		case part.ExecutableCode != nil:
+			label, lt := summaryLabel(string(part.ExecutableCode.Language), maxLength, redact)
 			code, t := sanitizeAndTruncateText(part.ExecutableCode.Code, maxLength, redact)
 			m.pieces = append(m.pieces, summaryPiece{
-				partIdx: i,
-				text: fmt.Sprintf("Executable code (%s): %s",
-					orUnknown(string(part.ExecutableCode.Language)), code),
-				truncated: t,
+				partIdx:   i,
+				text:      fmt.Sprintf("Executable code (%s): %s", label, code),
+				truncated: t || lt,
 			})
 		case part.CodeExecutionResult != nil:
+			label, lt := summaryLabel(string(part.CodeExecutionResult.Outcome), maxLength, redact)
 			output, t := sanitizeAndTruncateText(part.CodeExecutionResult.Output, maxLength, redact)
 			m.pieces = append(m.pieces, summaryPiece{
-				partIdx: i,
-				text: fmt.Sprintf("Code execution result (%s): %s",
-					orUnknown(string(part.CodeExecutionResult.Outcome)), output),
-				truncated: t,
+				partIdx:   i,
+				text:      fmt.Sprintf("Code execution result (%s): %s", label, output),
+				truncated: t || lt,
 			})
 		}
 	}
@@ -499,13 +500,17 @@ func newResponseMessageSummary(content *genai.Content, contentOrd, maxLength int
 			name, t = sanitizeAndTruncateText(part.FunctionResponse.Name, nameLimit, redact)
 			piece = "resp: " + name
 		case part.ExecutableCode != nil:
+			label, lt := summaryLabel(string(part.ExecutableCode.Language), maxLength, redact)
 			var code string
 			code, t = sanitizeAndTruncateText(part.ExecutableCode.Code, maxLength, redact)
-			piece = fmt.Sprintf("Executable code (%s): %s", orUnknown(string(part.ExecutableCode.Language)), code)
+			piece = fmt.Sprintf("Executable code (%s): %s", label, code)
+			t = t || lt
 		case part.CodeExecutionResult != nil:
+			label, lt := summaryLabel(string(part.CodeExecutionResult.Outcome), maxLength, redact)
 			var output string
 			output, t = sanitizeAndTruncateText(part.CodeExecutionResult.Output, maxLength, redact)
-			piece = fmt.Sprintf("Code execution result (%s): %s", orUnknown(string(part.CodeExecutionResult.Outcome)), output)
+			piece = fmt.Sprintf("Code execution result (%s): %s", label, output)
+			t = t || lt
 		}
 		m.pieces = append(m.pieces, summaryPiece{partIdx: i, isText: isText, text: piece, truncated: t})
 	}
@@ -534,9 +539,9 @@ func (m *messageSummary) render(maxLength int) (string, bool) {
 	joined := strings.Join(active, " | ")
 	if m.isResponse && maxLength >= 0 {
 		// Individual pieces are not strictly bounded by maxLength: function
-		// names are bounded at maxFunctionNameSummaryLength (256 runes), and
-		// text or code pieces carry wrappers (including language or outcome
-		// prefixes) and "...[TRUNCATED]" suffixes beyond maxLength. Adding the
+		// names, and the language or outcome of a code piece, are bounded at
+		// maxFunctionNameSummaryLength (256 runes), and text or code pieces
+		// carry wrappers and "...[TRUNCATED]" suffixes beyond maxLength. Adding the
 		// fixed responseSummarySlack (4096 runes) preserves single-part or
 		// small-part summaries while strictly bounding many-part summaries at
 		// maxLength + responseSummarySlack runes before truncateString appends
@@ -706,6 +711,21 @@ func contentSummary(content *genai.Content, maxLength int, redact bool) (string,
 // redact is true.
 func formatResponseContent(content *genai.Content, maxLength int, redact bool) (string, bool) {
 	return newResponseMessageSummary(content, 0, maxLength, redact).render(maxLength)
+}
+
+// summaryLabel returns the language of an executable code part, or the outcome
+// of a code execution result part, as a summary shows it. Both are plain
+// strings that a model or a remote agent can set to anything, so the label is
+// redacted and bounded like a function name: cut at
+// maxFunctionNameSummaryLength runes unless maxLength is negative. An empty
+// label is shown as "unknown".
+func summaryLabel(raw string, maxLength int, redact bool) (string, bool) {
+	limit := maxFunctionNameSummaryLength
+	if maxLength < 0 {
+		limit = -1
+	}
+	label, truncated := sanitizeAndTruncateText(raw, limit, redact)
+	return orUnknown(label), truncated
 }
 
 func orUnknown(s string) string {

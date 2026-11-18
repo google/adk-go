@@ -76,7 +76,9 @@ type Logger interface {
 // ShutdownTimeout. If a run-end flush times out while writing to BigQuery, the
 // rows of the in-flight batch that BigQuery has not confirmed are deferred for
 // at most one retry in the next flush (background, run-end, or Close); the
-// rows of the split requests that it confirmed before then are not resent.
+// rows of the split requests that it confirmed before then are not resent, and
+// neither are the rows of a request that BigQuery may have committed without
+// confirming it (see [Config]), which count in DropStats.AppendFailureDrops.
 // This provides at-least-once delivery; if
 // the backend already committed the cut-off write, duplicates under the same
 // event_id can occur (and may differ if uploads cut short on the first attempt
@@ -233,10 +235,13 @@ type GCSContentOffloader interface {
 // not after an ambiguous send under ExactlyOnceDelivery), Go isolates the
 // rejected rows under DropStats.RowErrorDrops and resends surviving rows up to
 // 8 passes per chunk, counting any remaining unconfirmed rows under
-// AppendFailureDrops,
-// whereas adk-python drops the entire batch when the response carries an error
-// status and treats a response with no status set as committed without
-// inspecting row_errors.
+// AppendFailureDrops, whereas adk-python drops the entire batch when the
+// status is InvalidArgument and treats a response with no status set as
+// committed without inspecting row_errors. A response that carries both
+// AppendResult and RowErrors leaves the rows of its request possibly
+// committed, as RowErrors after an ambiguous send do, so Go counts those rows
+// under AppendFailureDrops and never sends them again, not even when a run-end
+// flush times out.
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from

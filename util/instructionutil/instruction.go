@@ -27,8 +27,10 @@ import (
 // artifact, etc.
 //   - There can be placeholders like {key_name} that will be resolved by ADK
 //     at runtime using session state and context.
-//   - key_name must match "^[a-zA-Z_][a-zA-Z0-9_]*$", otherwise it will be
-//     treated as a literal.
+//   - key_name must be an underscore or a Unicode ID_Start character
+//     followed by Unicode ID_Continue characters, optionally after an
+//     app:, user: or temp: prefix; otherwise the placeholder is left
+//     as literal text.
 //   - {artifact.key_name} can be used to insert the text content of the
 //     artifact named key_name.
 //   - A placeholder directly preceded by $ or \ is treated as a literal,
