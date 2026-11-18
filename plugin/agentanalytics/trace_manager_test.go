@@ -7148,7 +7148,7 @@ func TestTraceManager_PopTaskAgentSpan_DoesNotMarkNonLLMParent(t *testing.T) {
 	}
 
 	// Pop the task span as popTaskAgentSpan does (finish_task completion).
-	tm.popTaskAgentSpan(ctx, taskID, nil)
+	tm.popTaskAgentSpan(ctx, taskID, nil, false)
 
 	// Verify seq was NOT marked taskDelegated (defensive guard).
 	inv.mu.Lock()
@@ -7220,7 +7220,7 @@ func TestTraceManager_PopTaskAgentSpan_MarksDirectLLMParent(t *testing.T) {
 		t.Fatalf("task parentSpanID = %q, want coordinator spanID %q", taskStart.parentSpanID, coordStart.spanID)
 	}
 
-	tm.popTaskAgentSpan(ctx, taskID, nil)
+	tm.popTaskAgentSpan(ctx, taskID, nil, false)
 
 	// Verify coordinator WAS marked taskDelegated.
 	inv.mu.Lock()
@@ -7280,7 +7280,7 @@ func TestTraceManager_PopTaskAgentSpan_IgnoresUnrelatedAncestor(t *testing.T) {
 		t.Fatalf("task parentSpanID = %q, want coordinator spanID %q", taskStart.parentSpanID, coordStart.spanID)
 	}
 
-	tm.popTaskAgentSpan(ctx, taskID, nil)
+	tm.popTaskAgentSpan(ctx, taskID, nil, false)
 
 	// Verify coordinator was NOT marked taskDelegated because task_worker is not in its children.
 	tm.mu.Lock()
@@ -8082,7 +8082,7 @@ func TestTraceManager_PurgedActivationLatencyFromLastActivity(t *testing.T) {
 				tm.popLLMSpan(ctx, child, true)
 			},
 			touchFunc: func(tm *traceManager) {
-				tm.popTaskAgentSpan(ctx, child, nil)
+				tm.popTaskAgentSpan(ctx, child, nil, false)
 			},
 		},
 		{
@@ -20546,7 +20546,7 @@ func TestTraceManager_PopTaskAgentSpanRejectsNonTaskAgent(t *testing.T) {
 	// Call popTaskAgentSpan on the non-task child at t2. It should return
 	// false and NOT advance parent.lastActivity.
 	clock = t2
-	_, ok := tm.popTaskAgentSpan(ctx, child, nil)
+	_, ok := tm.popTaskAgentSpan(ctx, child, nil, false)
 	if ok {
 		t.Fatal("popTaskAgentSpan returned ok=true for non-task child, want false")
 	}
@@ -22215,11 +22215,15 @@ func TestFinishedTaskLocked_RequiresOneRunOnTheEventPath(t *testing.T) {
 	run := func(path string, calls ...string) *spanRecord {
 		return &spanRecord{kind: spanKindAgent, name: "task", branch: "b", path: path, finishedTasks: calls}
 	}
+	failedRun := func(path string, calls ...string) *spanRecord {
+		return &spanRecord{kind: spanKindAgent, name: "task", branch: "b", path: path, failedTasks: calls}
+	}
 	for _, tc := range []struct {
-		name  string
-		path  string
-		stack []*spanRecord
-		want  int
+		name   string
+		path   string
+		failed bool
+		stack  []*spanRecord
+		want   int
 	}{
 		{name: "run on the event path", path: "left/task@1", stack: []*spanRecord{run("left/task@1", "call_0"), run("right/task@1", "call_0")}, want: 1},
 		{name: "run on another path only", path: "left/task@1", stack: []*spanRecord{run("right/task@1", "call_0")}, want: -1},
@@ -22227,11 +22231,15 @@ func TestFinishedTaskLocked_RequiresOneRunOnTheEventPath(t *testing.T) {
 		{name: "one of two runs on the event path saw the call", path: "left/task@1", stack: []*spanRecord{run("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1},
 		{name: "event without a node path", path: "", stack: []*spanRecord{run("left/task@1", "call_0")}, want: 1},
 		{name: "run without a node path", path: "left/task@1", stack: []*spanRecord{run("", "call_0")}, want: 1},
+		{name: "agent callback added error after completed call", path: "left/task@1", failed: true, stack: []*spanRecord{run("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1},
+		{name: "agent callback cleared error after failed call", path: "left/task@1", failed: false, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1},
+		{name: "same call ID disambiguated by failed classification", path: "left/task@1", failed: true, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_0")}, want: 1},
+		{name: "same call ID disambiguated by completed classification", path: "left/task@1", failed: false, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_0")}, want: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &invocationTrace{agentStack: append([]*spanRecord{{kind: spanKindAgent, name: "root"}}, tc.stack...)}
 			id := identity{agentName: "task", branch: "b", path: tc.path}
-			if got := inv.finishedTaskLocked(id, []string{"call_0"}); got != tc.want {
+			if got := inv.finishedTaskLocked(id, []string{"call_0"}, tc.failed); got != tc.want {
 				t.Errorf("finishedTaskLocked = %d, want %d", got, tc.want)
 			}
 		})
