@@ -175,7 +175,7 @@ func TestCompactionProcessorSkipsOnCancelledContext(t *testing.T) {
 	})
 	cancel()
 
-	for range llminternal.CompactionRequestProcessor(ictx, &model.LLMRequest{}, &llminternal.Flow{}) { //nolint:revive
+	for range llminternal.CompactionRequestProcessor(ictx, &model.LLMRequest{}, &llminternal.Flow{}) { //nolint:revive,errcheck // the canceled turn's error is not under test; the assertions below are on the summarizer and the store
 	}
 
 	if summarizer.calls != 0 {

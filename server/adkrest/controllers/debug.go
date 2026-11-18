@@ -208,7 +208,7 @@ func functionalCalls(event *session.Event) []*genai.FunctionCall {
 	}
 	fc := []*genai.FunctionCall{}
 	for _, part := range event.LLMResponse.Content.Parts {
-		if part.FunctionCall != nil {
+		if part != nil && part.FunctionCall != nil {
 			fc = append(fc, part.FunctionCall)
 		}
 	}
@@ -221,7 +221,7 @@ func functionalResponses(event *session.Event) []*genai.FunctionResponse {
 	}
 	fr := []*genai.FunctionResponse{}
 	for _, part := range event.LLMResponse.Content.Parts {
-		if part.FunctionResponse != nil {
+		if part != nil && part.FunctionResponse != nil {
 			fr = append(fr, part.FunctionResponse)
 		}
 	}

@@ -140,23 +140,20 @@ func TestRegistryConcurrentAccess(t *testing.T) {
 	// pattern so no name matches more than one of them.
 	const goroutines = 16
 	var wg sync.WaitGroup
-	wg.Add(goroutines * 2)
 
-	for i := 0; i < goroutines; i++ {
+	for i := range goroutines {
 		suffix := strconv.Itoa(i)
 		// Writer: register a unique pattern.
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			Register("^registry-test-concurrent-"+suffix+"-.*$", func(_ context.Context, name string) (LLM, error) {
 				return &stubLLM{name: name}, nil
 			})
-		}()
+		})
 		// Reader: look up a name. It may or may not match depending on
 		// scheduling; either outcome is fine, we only care about race safety.
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = NewLLM(t.Context(), "registry-test-concurrent-"+suffix+"-x")
-		}()
+		})
 	}
 
 	wg.Wait()

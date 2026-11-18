@@ -565,7 +565,7 @@ func firstUserInput(events session.Events, invocationID string) any {
 		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
-		var text string
+		var text strings.Builder
 		hasFR := false
 		for _, p := range ev.Content.Parts {
 			if p == nil {
@@ -574,13 +574,13 @@ func firstUserInput(events session.Events, invocationID string) any {
 			if p.FunctionResponse != nil {
 				hasFR = true
 			}
-			text += p.Text
+			text.WriteString(p.Text)
 		}
 		if hasFR {
 			continue
 		}
-		if text != "" {
-			return text
+		if text.String() != "" {
+			return text.String()
 		}
 	}
 	return nil
@@ -596,7 +596,7 @@ func firstUserInput(events session.Events, invocationID string) any {
 // LlmAgent node path, where Author == node name and no path is set.
 func eventNodeName(ev *session.Event, nodesByName map[string]Node) string {
 	if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
-		for _, seg := range strings.Split(ev.NodeInfo.Path, "/") {
+		for seg := range strings.SplitSeq(ev.NodeInfo.Path, "/") {
 			name := seg
 			if idx := strings.IndexByte(name, '@'); idx >= 0 {
 				name = name[:idx]

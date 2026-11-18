@@ -330,15 +330,13 @@ func TestNestedWorkflow_Cancellation(t *testing.T) {
 
 	var runErr error
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range outerWf.Run(mockCtx) {
 			if err != nil {
 				runErr = err
 			}
 		}
-	}()
+	})
 	// Wait for the node to start running deterministically
 	<-started
 	cancel()

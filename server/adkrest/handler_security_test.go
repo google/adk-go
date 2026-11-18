@@ -69,8 +69,7 @@ func TestServerRejectsOversizedBody(t *testing.T) {
 func TestMaxBytesMiddlewarePinsTheDefaultLimit(t *testing.T) {
 	handler := adkrest.MaxBytesMiddleware(0)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := io.ReadAll(r.Body); err != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}

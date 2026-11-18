@@ -226,14 +226,12 @@ func TestRunLiveReconnectSurvivesATransientDrop(t *testing.T) {
 		t.Fatalf("RunLive failed: %v", err)
 	}
 
-	// Key on content, not on any event: the connection that drops still yields
-	// a content-less event for the setup exchange before it dies.
+	// Key on content, not on any event: the turn that proves recovery is the
+	// pong from a connection after the drop.
 	sawTurn := make(chan struct{})
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		once := false
 		for ev, err := range seq {
 			if err != nil {
@@ -244,7 +242,7 @@ func TestRunLiveReconnectSurvivesATransientDrop(t *testing.T) {
 				close(sawTurn)
 			}
 		}
-	}()
+	})
 	select {
 	case <-sawTurn:
 	case <-time.After(drainTimeout):
@@ -587,15 +585,13 @@ func TestRunLiveCeilingSparesLongLivedConnections(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range seq {
 			if err != nil {
 				streamErr = err
 			}
 		}
-	}()
+	})
 
 	// Long enough for many more cycles than maxTotal.
 	time.Sleep(10 * connLifetime)
@@ -645,15 +641,13 @@ func TestRunLiveCeilingSparesAnIntermediaryCycledSession(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range seq {
 			if err != nil {
 				streamErr = err
 			}
 		}
-	}()
+	})
 
 	// Long enough for more cycles than the ceiling would allow.
 	time.Sleep(6 * connLifetime)
@@ -694,15 +688,13 @@ func TestRunLiveConsecutiveBudgetSparesASilentSession(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range seq {
 			if err != nil {
 				streamErr = err
 			}
 		}
-	}()
+	})
 
 	// Long enough for many more cycles than maxAttempts.
 	time.Sleep(10 * connLifetime)
@@ -724,12 +716,15 @@ func TestRunLiveConsecutiveBudgetSparesASilentSession(t *testing.T) {
 // slowness to the connection: a backend that dies at once then reads as healthy
 // and spends none of the ceiling.
 //
-// The server sends nothing, so each connection produces exactly one event, the
-// setup exchange. The reader hands that off and is free again before it meets
-// the error, which is what puts the caller's delay after the error is stamped
-// rather than before.
+// The server sends one turnComplete frame per connection, so each connection
+// produces exactly one event. The frame has no content, so it does not reset
+// the consecutive budget. The reader hands the event off and is free again
+// before it meets the error, which is what puts the caller's delay after the
+// error is stamped rather than before.
 func TestRunLiveCeilingIgnoresConsumerLatency(t *testing.T) {
-	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {})
+	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"serverContent":{"turnComplete":true}}`))
+	})
 	// maxAttempts well above maxTotal, so the ceiling is what fires.
 	p := testLiveReconnectPolicy(100, 3)
 	p.healthyUptime = 20 * time.Millisecond
@@ -745,9 +740,7 @@ func TestRunLiveCeilingIgnoresConsumerLatency(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var streamErr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for _, err := range seq {
 			if err != nil {
 				streamErr = err
@@ -755,7 +748,7 @@ func TestRunLiveCeilingIgnoresConsumerLatency(t *testing.T) {
 			// Far slower than healthyUptime, which is the whole point.
 			time.Sleep(10 * p.healthyUptime)
 		}
-	}()
+	})
 
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()

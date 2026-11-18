@@ -364,6 +364,12 @@ func validateGenerateContentConfig(cfg *genai.GenerateContentConfig, reqTools ma
 	if len(cfg.ContinuationToken) > 0 {
 		return fmt.Errorf("%w: ContinuationToken is not supported", ErrInvalidConfig)
 	}
+	if cfg.GenerationOutputConfig != nil {
+		return fmt.Errorf("%w: GenerationOutputConfig is not supported", ErrInvalidConfig)
+	}
+	if cfg.Store != nil {
+		return fmt.Errorf("%w: Store is not supported", ErrInvalidConfig)
+	}
 	// AutomaticContinuation is ignored by design.
 	return nil
 }
