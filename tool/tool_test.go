@@ -36,6 +36,7 @@ import (
 	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/tool/geminitool"
 	"google.golang.org/adk/v2/tool/loadartifactstool"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 	"google.golang.org/adk/v2/tool/toolutils"
 )
@@ -823,4 +824,64 @@ func TestToolsetWrappers_PassCloseThroughAndUnwrap(t *testing.T) {
 			t.Errorf("Unwrap().Unwrap() = %v, want the wrapped toolset %v", got, inner)
 		}
 	})
+}
+
+// authenticatedToolset is a toolset that declares cfg as its auth config.
+type authenticatedToolset struct {
+	testToolset
+	cfg *toolauth.Config
+}
+
+func (a *authenticatedToolset) AuthConfig() *toolauth.Config { return a.cfg }
+
+func TestToolsetWrappers_ForwardAuthConfig(t *testing.T) {
+	wrappers := []struct {
+		name string
+		wrap func(tool.Toolset) tool.Toolset
+	}{
+		{
+			name: "FilterToolset",
+			wrap: func(ts tool.Toolset) tool.Toolset { return tool.FilterToolset(ts, tool.AllowedToolsPredicate(nil)) },
+		},
+		{
+			name: "WithConfirmation",
+			wrap: func(ts tool.Toolset) tool.Toolset { return tool.WithConfirmation(ts, true, nil) },
+		},
+		{
+			name: "WithToolNamePrefix",
+			wrap: func(ts tool.Toolset) tool.Toolset { return tool.WithToolNamePrefix(ts, "pfx") },
+		},
+		{
+			name: "FilterToolset of WithToolNamePrefix",
+			wrap: func(ts tool.Toolset) tool.Toolset {
+				return tool.FilterToolset(tool.WithToolNamePrefix(ts, "pfx"), tool.AllowedToolsPredicate(nil))
+			},
+		},
+	}
+	for _, w := range wrappers {
+		t.Run(w.name, func(t *testing.T) {
+			t.Run("authenticated inner", func(t *testing.T) {
+				cfg := &toolauth.Config{
+					AuthScheme:    toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Api-Key"},
+					CredentialKey: "wrapped-key",
+				}
+				wrapped, ok := w.wrap(&authenticatedToolset{cfg: cfg}).(tool.AuthenticatedToolset)
+				if !ok {
+					t.Fatal("wrapper is not a tool.AuthenticatedToolset")
+				}
+				if got := wrapped.AuthConfig(); got != cfg {
+					t.Errorf("AuthConfig() = %p, want the inner toolset's config %p", got, cfg)
+				}
+			})
+			t.Run("plain inner", func(t *testing.T) {
+				wrapped, ok := w.wrap(&testToolset{}).(tool.AuthenticatedToolset)
+				if !ok {
+					t.Fatal("wrapper is not a tool.AuthenticatedToolset")
+				}
+				if got := wrapped.AuthConfig(); got != nil {
+					t.Errorf("AuthConfig() = %p, want nil", got)
+				}
+			})
+		})
+	}
 }

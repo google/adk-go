@@ -40,6 +40,7 @@ import (
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolauth"
 )
 
 const (
@@ -109,6 +110,8 @@ type Config struct {
 // session with the same duplicate-tool error.
 //
 // Close on the returned toolset closes base when that implements [io.Closer].
+// The returned toolset is a [tool.AuthenticatedToolset] whose AuthConfig
+// returns what base's does, and nil when base is not one.
 func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
 	if base == nil {
 		return nil, errors.New("toolsearch: base toolset is nil")
@@ -419,6 +422,14 @@ func (g *gatingToolset) Name() string { return "SearchGatedToolset" }
 func (g *gatingToolset) Close() error { return utils.CloseIfCloser(g.base) }
 
 func (g *gatingToolset) Unwrap() tool.Toolset { return g.base }
+
+func (g *gatingToolset) AuthConfig() *toolauth.Config {
+	a, ok := g.base.(tool.AuthenticatedToolset)
+	if !ok {
+		return nil
+	}
+	return a.AuthConfig()
+}
 
 // requestProcessor matches the per-tool hook ADK uses to pack a tool's
 // declaration into the outgoing LLM request. functiontool and the other ADK

@@ -67,6 +67,11 @@ func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flo
 		if len(calls) == 0 {
 			return
 		}
+		// adk-python lists the agent's tools here (canonical_tools).
+		if err := f.listToolsForRerun(ctx); err != nil {
+			yield(nil, err)
+			return
+		}
 		tools := make(map[string]tool.Tool, len(f.Tools))
 		for _, t := range f.Tools {
 			tools[t.Name()] = t

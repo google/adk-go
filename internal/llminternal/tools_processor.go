@@ -38,20 +38,29 @@ import (
 // runs. On a listing error it changes none of them.
 func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		llmAgent, ok := ctx.Agent().(Agent)
-		if !ok {
-			yield(nil, fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name()))
-			return
-		}
-		own, groups, err := resolveToolGroups(icontext.NewReadonlyContext(ctx), llmAgent)
-		if err != nil {
+		if err := f.listTools(ctx); err != nil {
 			yield(nil, err)
-			return
 		}
-		f.Tools = flattenTools(own, groups)
-		f.ownToolCount = len(own)
-		f.toolsetTools = groups
 	}
+}
+
+// listTools lists the agent's tools for ctx into f.Tools, f.ownToolCount and
+// f.toolsetTools. toolProcessor calls it on every step, and
+// listToolsForRerun before authPreprocessor or request confirmation reruns a
+// call. On error it changes none of them.
+func (f *Flow) listTools(ctx agent.InvocationContext) error {
+	llmAgent, ok := ctx.Agent().(Agent)
+	if !ok {
+		return fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name())
+	}
+	own, groups, err := resolveToolGroups(icontext.NewReadonlyContext(ctx), llmAgent)
+	if err != nil {
+		return err
+	}
+	f.Tools = flattenTools(own, groups)
+	f.ownToolCount = len(own)
+	f.toolsetTools = groups
+	return nil
 }
 
 // ResolveTools returns the tools of the LLM agent a for ctx: its own Tools,
