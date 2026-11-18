@@ -43,6 +43,7 @@ import (
 	"weak"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
@@ -23047,6 +23048,561 @@ func TestLateRecoveryEventRetiresSettledActivation(t *testing.T) {
 type liveInvocation struct{ agent.InvocationContext }
 
 func (*liveInvocation) Ended() bool { return false }
+
+func TestLatePopSpanEarlyReturn_RetiresSettledActivation(t *testing.T) {
+	t.Run("popLLMSpan recovered model response early return retires settled late activation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-popllm-early"
+		lateReviewEnded(tm, invID)
+
+		aID := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+		aLive := &liveInvocation{}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return aLive },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		late.mu.Unlock()
+
+		tm.pushLLMSpan(aIC, aID)
+		// OnModelErrorCallback records the model error and pops the LLM span
+		// with responded=false, storing it in completedModels while keeping a
+		// open on the late stack due to the unrecovered model error.
+		tm.recordError(aIC, aID, llmKey(aID), errors.New("transient model failure"))
+		tm.popLLMSpan(aIC, aID, false)
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a"}) {
+			t.Fatalf("late agentStack while awaiting recovered model response = %v, want [a]", got)
+		}
+
+		// Subsequent AfterModelCallback for the recovered call clears the error
+		// and takes the early return in popLLMSpan (rec == nil &&
+		// completedModels[key] != nil), retiring a once nothing holds it open.
+		tm.clearError(aIC, aID, llmKey(aID))
+		tm.popLLMSpan(aIC, aID, true)
+
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Fatalf("late agentStack after recovered popLLMSpan = %v, want empty", got)
+		}
+		if late.openAgents.Load() {
+			t.Error("late.openAgents = true after recovered popLLMSpan, want false")
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+
+	t.Run("popLLMSpan unknown call early return retires settled late activation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-popllm-unknown"
+		lateReviewEnded(tm, invID)
+
+		aID := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+		unknownID := identity{invocationID: invID, agentName: "ghost", path: "ghost", branch: "ghost"}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return &liveInvocation{} },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		aRec.hasResponse = true
+		late.mu.Unlock()
+
+		tm.popLLMSpan(ctx, unknownID, true)
+
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Fatalf("late agentStack after unknown popLLMSpan = %v, want empty", got)
+		}
+		if late.openAgents.Load() {
+			t.Error("late.openAgents = true after unknown popLLMSpan, want false")
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+
+	t.Run("popAgentSpan unknown agent early return retires settled late activation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-popagent-early"
+		lateReviewEnded(tm, invID)
+
+		aID := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+		unknownID := identity{invocationID: invID, agentName: "ghost", path: "ghost", branch: "ghost"}
+		aLive := &liveInvocation{}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return aLive },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		aRec.hasResponse = true
+		late.mu.Unlock()
+
+		tm.popAgentSpan(ctx, unknownID)
+
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Fatalf("late agentStack after unknown popAgentSpan = %v, want empty", got)
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+
+	t.Run("popTaskAgentSpan rejected calls leave settled late activation untouched and valid pop retires it", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-poptask"
+		lateReviewEnded(tm, invID)
+
+		// Settled late activation a directly under invocation (not in task subtree).
+		aID := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return &liveInvocation{} },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		aRec.hasResponse = true
+		late.mu.Unlock()
+
+		// Non-task agent owning its own finish_task tool.
+		nonTaskID := identity{invocationID: invID, agentName: "non_task", path: "non_task", branch: "non_task"}
+		nonTaskIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return &liveInvocation{} },
+		}
+		tm.pushAgentSpan(nonTaskIC, nonTaskID)
+
+		// 1. Unknown/no-open-span popTaskAgentSpan must leave settled activation a untouched.
+		unknownID := identity{invocationID: invID, agentName: "ghost", path: "ghost", branch: "ghost"}
+		if _, ok := tm.popTaskAgentSpan(ctx, unknownID, []string{"call_missing"}, false); ok {
+			t.Fatal("popTaskAgentSpan(unknownID) ok = true, want false")
+		}
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a", "non_task"}) {
+			t.Fatalf("late agentStack after no-open-span popTaskAgentSpan = %v, want [a non_task]", got)
+		}
+
+		// 2. Non-task agent popTaskAgentSpan must leave settled activation a untouched.
+		if _, ok := tm.popTaskAgentSpan(ctx, nonTaskID, []string{finishTaskToolName}, false); ok {
+			t.Fatal("popTaskAgentSpan(nonTaskID) ok = true, want false")
+		}
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a", "non_task"}) {
+			t.Fatalf("late agentStack after non-task popTaskAgentSpan = %v, want [a non_task]", got)
+		}
+
+		// 3. Valid task-mode popTaskAgentSpan must retire both taskRec and settled late activation a.
+		taskID := identity{invocationID: invID, agentName: "task_worker", path: "task_worker", branch: "task_worker"}
+		taskIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return &liveInvocation{} },
+		}
+		tm.pushAgentSpan(taskIC, taskID)
+		taskRec := lateReviewAgent(t, tm, invID, "task_worker")
+		late.mu.Lock()
+		taskRec.taskMode = true
+		late.mu.Unlock()
+
+		if _, ok := tm.popTaskAgentSpan(ctx, taskID, []string{"call_task"}, false); !ok {
+			t.Fatal("popTaskAgentSpan(taskID) ok = false, want true")
+		}
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"non_task"}) {
+			t.Fatalf("late agentStack after valid popTaskAgentSpan = %v, want [non_task]", got)
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+
+	t.Run("popDelegatingAgentSpan no-op leaves settled late activation untouched and valid pop retires it", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-popdelegating"
+		lateReviewEnded(tm, invID)
+
+		// Settled late activation a directly under invocation (not in coord subtree).
+		aID := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return &liveInvocation{} },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		aRec.hasResponse = true
+		late.mu.Unlock()
+
+		// Coordinator agent initially without taskDelegated.
+		coordID := identity{invocationID: invID, agentName: "coord", path: "coord", branch: "coord"}
+		coordIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return &liveInvocation{} },
+		}
+		tm.pushAgentSpan(coordIC, coordID)
+		coordRec := lateReviewAgent(t, tm, invID, "coord")
+
+		// 1. Rejected popDelegatingAgentSpan (not taskDelegated) leaves a untouched.
+		if _, ok := tm.popDelegatingAgentSpan(ctx, coordID); ok {
+			t.Fatal("popDelegatingAgentSpan(not delegated) ok = true, want false")
+		}
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a", "coord"}) {
+			t.Fatalf("late agentStack after rejected popDelegatingAgentSpan = %v, want [a coord]", got)
+		}
+
+		// 2. Valid popDelegatingAgentSpan (taskDelegated=true) retires coord and settled late activation a.
+		late.mu.Lock()
+		coordRec.taskDelegated = true
+		late.mu.Unlock()
+
+		if _, ok := tm.popDelegatingAgentSpan(ctx, coordID); !ok {
+			t.Fatal("popDelegatingAgentSpan(delegated) ok = false, want true")
+		}
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Fatalf("late agentStack after valid popDelegatingAgentSpan = %v, want empty", got)
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+
+	t.Run("popToolSpan retires settled late activation before parenting synthesized tool span", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-poptool-parent"
+		lateReviewEnded(tm, invID)
+
+		pID := identity{invocationID: invID, agentName: "p", path: "p", branch: "a"}
+		tm.pushAgentSpan(ctx, pID)
+
+		aID := identity{invocationID: invID, agentName: "a", path: "p/a", branch: "a"}
+		aLive := &liveInvocation{}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return aLive },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		tm.pushLLMSpan(aIC, aID)
+		// Retire p while a's open LLM call keeps a on agentStack, so a.parentSpanID
+		// points to the retired p rather than late.rootSpanID (skipped by endToolRunsLocked).
+		tm.popAgentSpan(ctx, pID)
+		tm.popLLMSpan(aIC, aID, true)
+
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		late.mu.Unlock()
+
+		bID := identity{invocationID: invID, agentName: "b", path: "p/a/b", branch: "a"}
+		span, _, _ := tm.popToolSpan(ctx, bID, "unknown-tool-call", false)
+
+		if span.parentSpanID == aRec.spanID {
+			t.Fatalf("synthesized tool span parentSpanID = %q (settled activation a), want invocation root %q", span.parentSpanID, late.rootSpanID)
+		}
+		if span.parentSpanID != late.rootSpanID {
+			t.Fatalf("synthesized tool span parentSpanID = %q, want invocation root %q", span.parentSpanID, late.rootSpanID)
+		}
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Fatalf("late agentStack after popToolSpan = %v, want empty", got)
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+}
+
+type panickingRandReader struct{}
+
+func (panickingRandReader) Read([]byte) (int, error) {
+	panic("boom inside rand reader")
+}
+
+func TestEndInvocation_PanicWhileMutexHeldUnlocksTraceManager(t *testing.T) {
+	t.Run("first tm.mu block in endInvocation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-end-first-tmmu-panic", agentName: "root"}
+
+		uuid.SetRand(panickingRandReader{})
+		defer uuid.SetRand(nil)
+		t.Cleanup(func() { uuid.SetRand(nil) })
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			tm.endInvocation(ctx, id)
+		}()
+		if recovered == nil {
+			t.Fatal("expected endInvocation to panic inside first tm.mu block")
+		}
+		if !tm.mu.TryLock() {
+			t.Fatal("tm.mu remained locked after panic inside first tm.mu block of endInvocation")
+		}
+		tm.mu.Unlock()
+	})
+
+	t.Run("row inv.mu block in endInvocation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-end-row-invmu-panic", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+
+		tm.mu.Lock()
+		inv := tm.invocations[id.invocationID]
+		tm.mu.Unlock()
+		inv.mu.Lock()
+		inv.agentStack = nil
+		inv.mu.Unlock()
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			tm.endInvocation(ctx, id)
+		}()
+		if recovered == nil {
+			t.Fatal("expected endInvocation to panic inside row inv.mu block")
+		}
+		if !inv.mu.TryLock() {
+			t.Fatal("inv.mu remained locked after panic inside row inv.mu block of endInvocation")
+		}
+		inv.mu.Unlock()
+		if !tm.mu.TryLock() {
+			t.Fatal("tm.mu locked unexpectedly after panic inside row inv.mu block")
+		}
+		tm.mu.Unlock()
+	})
+
+	t.Run("inv.mu block in rememberCompletedAtLocked", func(t *testing.T) {
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-remember-invmu-panic", agentName: "root"}
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, tm.traceIDFor(id.invocationID), time.Now())
+		inv.agentStack = nil
+
+		var recovered any
+		func() {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			defer func() { recovered = recover() }()
+			tm.rememberCompletedAtLocked(id.invocationID, id.agentName, inv, time.Now())
+		}()
+		if recovered == nil {
+			t.Fatal("expected rememberCompletedAtLocked to panic inside inv.mu block")
+		}
+		if !inv.mu.TryLock() {
+			t.Fatal("inv.mu remained locked after panic inside rememberCompletedAtLocked")
+		}
+		inv.mu.Unlock()
+	})
+
+	t.Run("late.mu block in rememberCompletedAtLocked", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-remember-latemu-panic", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		tm.pushLLMSpan(ctx, id)
+
+		late := &invocationTrace{} // nil llmSpans causes maps.Copy to panic while late.mu is held.
+		tm.mu.Lock()
+		tm.completed[id.invocationID] = &completedTrace{
+			position: tm.completionOrder.PushBack(id.invocationID),
+			late:     late,
+		}
+		tm.mu.Unlock()
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			tm.endInvocation(ctx, id)
+		}()
+		if recovered == nil {
+			t.Fatal("expected endInvocation to panic inside late.mu block of rememberCompletedAtLocked")
+		}
+		if !late.mu.TryLock() {
+			t.Fatal("late.mu remained locked after panic inside rememberCompletedAtLocked")
+		}
+		late.mu.Unlock()
+		if !tm.mu.TryLock() {
+			t.Fatal("tm.mu remained locked after panic inside late.mu block of rememberCompletedAtLocked")
+		}
+		tm.mu.Unlock()
+	})
+
+	t.Run("lookupInvocation tm.mu block", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-lookup-tmmu-panic", agentName: "root"}
+
+		uuid.SetRand(panickingRandReader{})
+		defer uuid.SetRand(nil)
+		t.Cleanup(func() { uuid.SetRand(nil) })
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			tm.lookupInvocation(ctx, id, true, false)
+		}()
+		if recovered == nil {
+			t.Fatal("expected lookupInvocation to panic inside tm.mu block")
+		}
+		uuid.SetRand(nil)
+		if !tm.mu.TryLock() {
+			t.Fatal("tm.mu remained locked after panic inside lookupInvocation")
+		}
+		tm.mu.Unlock()
+
+		// Subsequent endInvocation must complete without deadlocking on tm.mu.
+		tm.endInvocation(ctx, id)
+	})
+
+	t.Run("final tm.mu block in endInvocation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-end-panic-unlock", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		started := tm.pushLLMSpan(ctx, id)
+
+		// Seed enough completed entries with a nil entry in tm.completionOrder so
+		// pruneWaitingLocked panics inside endInvocation's final tm.mu block
+		// after handover has completed.
+		tm.mu.Lock()
+		tm.maxTracked = 1
+		for i := range 64 {
+			cid := fmt.Sprintf("completed-%d", i)
+			tm.completed[cid] = &completedTrace{position: tm.completionOrder.PushBack(cid)}
+		}
+		tm.completed["stale-nil"] = nil
+		tm.completionOrder.PushBack("stale-nil")
+		tm.mu.Unlock()
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			tm.endInvocation(ctx, id)
+		}()
+		if recovered == nil {
+			t.Fatal("expected endInvocation to panic inside final tm.mu block")
+		}
+		if !tm.mu.TryLock() {
+			t.Fatal("tm.mu remained locked after panic inside endInvocation")
+		}
+		_, stillActive := tm.invocations[id.invocationID]
+		tm.mu.Unlock()
+		if stillActive {
+			t.Fatal("finished invocation remained in tm.invocations after panic in final tm.mu block")
+		}
+
+		popped := tm.popLLMSpan(ctx, id, true)
+		if popped.spanID != started.spanID {
+			t.Errorf("popLLMSpan spanID = %q, want started spanID %q", popped.spanID, started.spanID)
+		}
+		if popped.latency == nil {
+			t.Error("popLLMSpan latency = nil, want non-nil latency from handed-over open call")
+		}
+	})
+}
+
+func TestHalfEndedInvocation(t *testing.T) {
+	t.Run("endInvocation passes captured now without calling tm.now again", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-half", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		started := tm.pushLLMSpan(ctx, id)
+
+		var n atomic.Int32
+		tm.now = func() time.Time {
+			if n.Add(1) == 2 {
+				panic("boom")
+			}
+			return time.Now()
+		}
+		func() {
+			defer func() { _ = recover() }()
+			tm.endInvocation(ctx, id)
+		}()
+		tm.now = time.Now
+
+		if got := n.Load(); got != 1 {
+			t.Errorf("endInvocation called tm.now %d times, want 1", got)
+		}
+		popped := tm.popLLMSpan(ctx, id, true)
+		if popped.spanID != started.spanID {
+			t.Errorf("popLLMSpan spanID = %q, want started spanID %q", popped.spanID, started.spanID)
+		}
+		if popped.latency == nil {
+			t.Error("popLLMSpan latency = nil, want non-nil latency from late state")
+		}
+	})
+
+	t.Run("panic in rememberCompletedLocked unlinks finished invocation and hands open calls to late state", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-half-remember", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		startedLLM := tm.pushLLMSpan(ctx, id)
+		startedTool := tm.pushToolSpan(ctx, id, "call-1")
+
+		tm.mu.Lock()
+		inv := tm.invocations[id.invocationID]
+		tm.mu.Unlock()
+
+		tm.now = func() time.Time { panic("boom in rememberCompletedLocked") }
+		var recovered any
+		func() {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			defer func() { recovered = recover() }()
+			tm.rememberCompletedLocked(id.invocationID, id.agentName, inv)
+		}()
+		tm.now = time.Now
+
+		if recovered == nil {
+			t.Fatal("expected rememberCompletedLocked to panic when tm.now panics")
+		}
+		if !tm.mu.TryLock() {
+			t.Fatal("tm.mu remained locked after panic in rememberCompletedLocked")
+		}
+		_, stillActive := tm.invocations[id.invocationID]
+		completed := tm.completed[id.invocationID]
+		tm.mu.Unlock()
+
+		if stillActive {
+			t.Fatal("invocation with finished=true remained reachable from tm.invocations after panic")
+		}
+		if completed == nil || completed.late == nil {
+			t.Fatalf("completed entry = %+v, want non-nil late state holding handed-over open calls", completed)
+		}
+
+		poppedLLM := tm.popLLMSpan(ctx, id, true)
+		if poppedLLM.spanID != startedLLM.spanID {
+			t.Errorf("popLLMSpan spanID = %q, want started spanID %q", poppedLLM.spanID, startedLLM.spanID)
+		}
+		if poppedLLM.latency == nil {
+			t.Error("popLLMSpan latency = nil, want non-nil latency from late state")
+		}
+
+		poppedTool, _, closedByError := tm.popToolSpan(ctx, id, "call-1", false)
+		if closedByError {
+			t.Error("popToolSpan closedByError = true, want false")
+		}
+		if poppedTool.spanID != startedTool.spanID {
+			t.Errorf("popToolSpan spanID = %q, want started spanID %q", poppedTool.spanID, startedTool.spanID)
+		}
+		if poppedTool.latency == nil {
+			t.Error("popToolSpan latency = nil, want non-nil latency from late state")
+		}
+	})
+}
 
 // TestLateRetiredActivationDropsInvocationContext verifies that a late
 // activation whose record still holds its InvocationContext when it retires,

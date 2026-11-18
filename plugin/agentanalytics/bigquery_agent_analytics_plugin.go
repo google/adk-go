@@ -331,7 +331,10 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 // config.Enabled is false, and before it returns any error, such as an invalid
 // config or a table that cannot be read, created or upgraded. bqClient and a
 // supplied GCSOffloader remain caller-owned, and the caller is responsible for
-// closing them.
+// closing them. Closing the plugin is idempotent across concurrent and repeated
+// calls: shutdown runs once, converts any panic in a cleanup step into an error
+// so remaining cleanup still executes, and returns the cached error result on
+// every call.
 //
 // Register the plugin before any plugin whose callbacks return replacement
 // events, model responses, tool results or agent content. ADK runs the
@@ -499,31 +502,59 @@ func newBigQueryAgentAnalyticsPlugin(
 		AfterToolCallback:   p.afterTool,
 		OnToolErrorCallback: p.onToolError,
 
-		CloseFunc: func() error {
-			state.stopAsyncViewCreation()
-			// The processor uploads while it flushes, so it goes first.
-			processor.Close()
+		CloseFunc: sync.OnceValue(func() (err error) {
 			var closeErrs []error
-			if ownedOffloader != nil {
-				if err := ownedOffloader.Close(); err != nil {
-					closeErrs = append(closeErrs, fmt.Errorf("failed to close GCS offloader: %w", err))
+			defer func() {
+				// The view runner refers to bqClient only weakly, so this function,
+				// which the plugin holds, keeps the client alive for the plugin.
+				runtime.KeepAlive(bqClient)
+				err = errors.Join(closeErrs...)
+			}()
+			runCloseStep := func(step string, fn func() error) {
+				defer func() {
+					if r := recover(); r != nil {
+						closeErrs = append(closeErrs, fmt.Errorf("agentanalytics: %s panicked of type %T", step, r))
+					}
+				}()
+				if stepErr := fn(); stepErr != nil {
+					closeErrs = append(closeErrs, stepErr)
 				}
+			}
+			runCloseStep("stop async view creation", func() error {
+				state.stopAsyncViewCreation()
+				return nil
+			})
+			// The processor uploads while it flushes, so it goes first.
+			runCloseStep("close batch processor", func() error {
+				processor.Close()
+				return nil
+			})
+			if ownedOffloader != nil {
+				runCloseStep("close GCS offloader", func() error {
+					if err := ownedOffloader.Close(); err != nil {
+						return fmt.Errorf("failed to close GCS offloader: %w", err)
+					}
+					return nil
+				})
 			}
 			if writeClient != nil {
-				if err := writeClient.Close(); err != nil {
-					closeErrs = append(closeErrs, fmt.Errorf("failed to close BigQuery write client: %w", err))
-				}
+				runCloseStep("close BigQuery write client", func() error {
+					if err := writeClient.Close(); err != nil {
+						return fmt.Errorf("failed to close BigQuery write client: %w", err)
+					}
+					return nil
+				})
 			}
 			if ownBQClient && bqClient != nil {
-				if err := closeBQClient(bqClient); err != nil {
-					closeErrs = append(closeErrs, fmt.Errorf("failed to close BigQuery client: %w", err))
-				}
+				runCloseStep("close BigQuery client", func() error {
+					if err := closeBQClient(bqClient); err != nil {
+						return fmt.Errorf("failed to close BigQuery client: %w", err)
+					}
+					return nil
+				})
 			}
-			// The view runner refers to bqClient only weakly, so this function,
-			// which the plugin holds, keeps the client alive for the plugin.
-			runtime.KeepAlive(bqClient)
-			return errors.Join(closeErrs...)
-		},
+			return nil
+		}),
 	})
 	if err != nil {
 		processor.Close()
@@ -695,14 +726,21 @@ func (p *analyticsPlugin) denied(column string) bool {
 	return ok
 }
 
+func (p *analyticsPlugin) recordPanic(format string, args ...any) {
+	if p.config.Enabled && p.processor != nil {
+		p.processor.recordAppendFailureDrop(1)
+	}
+	func() {
+		defer func() { _ = recover() }()
+		p.config.logf(format, args...)
+	}()
+}
+
 // recoverCallback logs and suppresses panics raised inside plugin callbacks so
 // that analytics logging never breaks the agent run.
 func (p *analyticsPlugin) recoverCallback(eventType string) {
 	if r := recover(); r != nil {
-		if p.config.Enabled && p.processor != nil {
-			p.processor.recordAppendFailureDrop(1)
-		}
-		p.config.logf("agentanalytics: dropped %s event: recovered panic of type %T", eventType, r)
+		p.recordPanic("agentanalytics: dropped %s event: recovered panic of type %T", eventType, r)
 	}
 }
 
@@ -826,6 +864,20 @@ func (p *analyticsPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content
 func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 	defer p.recoverCallback(EventInvocationCompleted)
 	id := identityOf(ctx)
+	var terminalEnded, flushed bool
+	// Register the run-end flush before endInvocationSafe so LIFO defer order
+	// runs endInvocationSafe first while still running flushRunEndSafe even if
+	// endInvocationSafe exits abnormally.
+	defer func() {
+		if p.config.flushOnRunEnd() && !flushed {
+			p.flushRunEndSafe()
+		}
+	}()
+	defer func() {
+		if !terminalEnded {
+			p.endInvocationSafe(ctx, id)
+		}
+	}()
 	unclosed, unrecErr := p.traces.popUnclosedAgentSpans(ctx, id)
 	if unrecErr == nil && ctx != nil {
 		// A canceled invocation failed even when no span is left open, for
@@ -837,7 +889,9 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 
 	if unrecErr != nil || len(unclosed) > 0 {
 		p.logEvent(ctx, id, EventInvocationError, func() rowSpan {
-			return p.traces.endInvocation(ctx, id)
+			span := p.traces.endInvocation(ctx, id)
+			terminalEnded = true
+			return span
 		}, func(d *eventData) {
 			d.failed = true
 			if unrecErr != nil {
@@ -847,12 +901,40 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 		})
 	} else {
 		p.logEvent(ctx, id, EventInvocationCompleted, func() rowSpan {
-			return p.traces.endInvocation(ctx, id)
+			span := p.traces.endInvocation(ctx, id)
+			terminalEnded = true
+			return span
 		}, nil)
 	}
 
 	if p.config.flushOnRunEnd() {
+		flushed = true
 		p.processor.flushRunEnd() // flush queue synchronously under ShutdownTimeout
+	}
+}
+
+func (p *analyticsPlugin) endInvocationSafe(ctx context.Context, id identity) {
+	defer func() {
+		if r := recover(); r != nil {
+			if id.invocationID != "" && p.traces != nil {
+				p.traces.forceEndInvocation(id)
+			}
+			p.recordPanic("agentanalytics: endInvocation fallback: recovered panic of type %T", r)
+		}
+	}()
+	if p.traces != nil {
+		p.traces.endInvocation(ctx, id)
+	}
+}
+
+func (p *analyticsPlugin) flushRunEndSafe() {
+	defer func() {
+		if r := recover(); r != nil {
+			p.recordPanic("agentanalytics: flushRunEnd fallback: recovered panic of type %T", r)
+		}
+	}()
+	if p.processor != nil {
+		p.processor.flushRunEnd()
 	}
 }
 

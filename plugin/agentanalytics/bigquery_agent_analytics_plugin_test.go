@@ -35,6 +35,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -51,6 +52,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
@@ -6219,5 +6221,692 @@ func TestMCPRecoverySingleToolError(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestPlugin_CloseOnceAndAfterRunPanic(t *testing.T) {
+	t.Run("Close executes shutdown once across concurrent and repeated calls", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		okHTTPClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"type":"TABLE","labels":{"adk_schema_version":"2"}}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			},
+		}
+
+		var closeCalls atomic.Int32
+		sentinelErr := errors.New("simulated bq close failure")
+		origClose := closeBQClient
+		closeBQClient = func(c *bq.Client) error {
+			closeCalls.Add(1)
+			_ = origClose(c)
+			return sentinelErr
+		}
+		t.Cleanup(func() { closeBQClient = origClose })
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test-dataset"
+		cfg.TableName = "agent_events"
+		cfg.DisableCreateViews = true
+
+		bqClient, err := bq.NewClient(ctx, cfg.ProjectID, option.WithHTTPClient(okHTTPClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient() error = %v", err)
+		}
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+
+		adkPlugin, err := newBigQueryAgentAnalyticsPlugin(ctx, cfg, bqClient, writeClient, true)
+		if err != nil {
+			t.Fatalf("newBigQueryAgentAnalyticsPlugin() error = %v", err)
+		}
+
+		const workers = 16
+		errs := make([]error, workers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range workers {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				<-start
+				errs[idx] = adkPlugin.Close()
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		repeatErr := adkPlugin.Close()
+		if got := closeCalls.Load(); got != 1 {
+			t.Fatalf("closeBQClient called %d times across %d concurrent + 1 sequential Close() calls, want 1", got, workers)
+		}
+		for i, cErr := range errs {
+			if !errors.Is(cErr, sentinelErr) {
+				t.Errorf("concurrent Close()[%d] error = %v, want %v", i, cErr, sentinelErr)
+			}
+			if cErr != repeatErr {
+				t.Errorf("concurrent Close()[%d] returned distinct error value %v vs sequential Close() %v", i, cErr, repeatErr)
+			}
+		}
+	})
+
+	t.Run("afterRun panic before terminal span still ends invocation and flushes run-end batch", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		requests := make(chan *storagepb.AppendRowsRequest, 100)
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: requests})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "test-tbl"
+		cfg.BatchSize = 100
+		cfg.BatchFlushIntv = time.Hour
+		cfg.DisableCreateViews = true
+
+		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(processor.Close)
+
+		tm := newTraceManager()
+		ap := &analyticsPlugin{
+			config:    cfg,
+			processor: processor,
+			traces:    tm,
+		}
+
+		mCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "test-agent",
+			sessionID:    "sess-1",
+			invocationID: "inv-afterrun-panic",
+			userID:       "user-1",
+		}
+		if _, err := ap.beforeRun(mCtx); err != nil {
+			t.Fatalf("beforeRun() error = %v", err)
+		}
+		if _, err := ap.onUserMessage(mCtx, textContent("user", "hello")); err != nil {
+			t.Fatalf("onUserMessage() error = %v", err)
+		}
+
+		tm.mu.Lock()
+		_, liveBefore := tm.invocations["inv-afterrun-panic"]
+		tm.mu.Unlock()
+		if !liveBefore {
+			t.Fatal("expected invocation trace to be active before afterRun")
+		}
+
+		var panickedOnce atomic.Bool
+		tm.now = func() time.Time {
+			if panickedOnce.CompareAndSwap(false, true) {
+				panic("boom inside popUnclosedAgentSpans")
+			}
+			return time.Now()
+		}
+
+		ap.afterRun(mCtx)
+
+		tm.mu.Lock()
+		_, stillLive := tm.invocations["inv-afterrun-panic"]
+		_, inCompleted := tm.completed["inv-afterrun-panic"]
+		tm.mu.Unlock()
+		if stillLive {
+			t.Error("invocation remained in traces.invocations after panic in afterRun; want endInvocation cleanup")
+		}
+		if !inCompleted {
+			t.Error("invocation missing from traces.completed after panic in afterRun; want endInvocation completion record")
+		}
+
+		select {
+		case req := <-requests:
+			rows := decodeArrowRows(t, req)
+			if len(rows) < 2 {
+				t.Fatalf("flushed %d rows on afterRun panic, want >= 2 queued rows; event types: %v", len(rows), eventTypes(rows))
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for flushRunEnd batch after panic in afterRun")
+		}
+
+		if got := processor.DropStats().AppendFailureDrops; got != 1 {
+			t.Errorf("AppendFailureDrops = %d, want 1 from recovered afterRun panic", got)
+		}
+	})
+
+	t.Run("Close panic in earlier shutdown step still runs remaining cleanup and caches error", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		srv := &failingFinalizeWriteServer{
+			committedStreamTestServer: &committedStreamTestServer{
+				createdStreamName: "projects/test-project/datasets/test-dataset/tables/agent_events/streams/committed-1",
+			},
+			finalizeErr: errors.New("simulated finalize failure"),
+		}
+		storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		okHTTPClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"type":"TABLE","labels":{"adk_schema_version":"2"}}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			},
+		}
+
+		var closeCalls atomic.Int32
+		sentinelBQErr := errors.New("simulated bq close failure after panic")
+		origClose := closeBQClient
+		closeBQClient = func(c *bq.Client) error {
+			closeCalls.Add(1)
+			_ = origClose(c)
+			return sentinelBQErr
+		}
+		t.Cleanup(func() { closeBQClient = origClose })
+
+		fs := newFakeStorage(t)
+		gcsOpts, _ := storageClientOptions(fs)
+		logger := &hookRecordingLogger{
+			recordingLogger: &recordingLogger{},
+			beforeRecord: func(msg string) {
+				if strings.Contains(msg, "failed to finalize write stream") {
+					panic("secret-finalize-panic-payload")
+				}
+			},
+		}
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test-dataset"
+		cfg.TableName = "agent_events"
+		cfg.DisableCreateViews = true
+		cfg.ExactlyOnceDelivery = true
+		cfg.GCSBucketName = "test-bucket"
+		cfg.GCSClientOptions = gcsOpts
+		cfg.Logger = logger
+
+		bqClient, err := bq.NewClient(ctx, cfg.ProjectID, option.WithHTTPClient(okHTTPClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient() error = %v", err)
+		}
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+
+		adkPlugin, err := newBigQueryAgentAnalyticsPlugin(ctx, cfg, bqClient, writeClient, true)
+		if err != nil {
+			t.Fatalf("newBigQueryAgentAnalyticsPlugin() error = %v", err)
+		}
+
+		firstErr := adkPlugin.Close()
+		if firstErr == nil {
+			t.Fatal("first Close() error = nil, want joined panic + close error")
+		}
+		if !strings.Contains(firstErr.Error(), "close batch processor panicked of type string") {
+			t.Errorf("first Close() error = %v, want panic type summary", firstErr)
+		}
+		if strings.Contains(firstErr.Error(), "secret-finalize-panic-payload") {
+			t.Errorf("first Close() error leaked panic value: %v", firstErr)
+		}
+		if !errors.Is(firstErr, sentinelBQErr) {
+			t.Errorf("first Close() error = %v, want joined %v from later shutdown step", firstErr, sentinelBQErr)
+		}
+		if got := closeCalls.Load(); got != 1 {
+			t.Errorf("closeBQClient calls = %d, want 1 even after earlier step panicked", got)
+		}
+		if err := writeClient.Close(); err == nil {
+			t.Error("writeClient.Close() succeeded after plugin Close(), want error proving plugin closed writeClient after panic")
+		}
+
+		secondErr := adkPlugin.Close()
+		if secondErr != firstErr {
+			t.Errorf("second Close() error = %v, want cached %v without re-panicking", secondErr, firstErr)
+		}
+		if got := closeCalls.Load(); got != 1 {
+			t.Errorf("closeBQClient calls after second Close() = %d, want 1", got)
+		}
+	})
+
+	t.Run("endInvocationSafe double-panic publishes completed record clears evicted and logs drop", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		logger := &recordingLogger{}
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "test-tbl"
+		cfg.BatchSize = 100
+		cfg.BatchFlushIntv = time.Hour
+		cfg.DisableCreateViews = true
+		cfg.Logger = logger
+
+		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(processor.Close)
+
+		tm := newTraceManager()
+		ap := &analyticsPlugin{
+			config:    cfg,
+			processor: processor,
+			traces:    tm,
+		}
+
+		activeCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "test-agent",
+			sessionID:    "sess-1",
+			invocationID: "inv-double-panic-active",
+			userID:       "user-1",
+		}
+		if _, err := ap.beforeRun(activeCtx); err != nil {
+			t.Fatalf("beforeRun() error = %v", err)
+		}
+
+		// Also seed an evicted trace entry to verify the fallback clears tm.evicted
+		// while preserving its saved identity in tm.completed.
+		const evictedInvID = "inv-double-panic-evicted"
+		tm.mu.Lock()
+		tm.evicted[evictedInvID] = evictedTrace{
+			traceID:       "0123456789abcdef0123456789abcdef",
+			spanID:        "0123456789abcdef",
+			rootAgentName: "evicted-root",
+		}
+		tm.mu.Unlock()
+		evictedCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "test-agent",
+			sessionID:    "sess-1",
+			invocationID: evictedInvID,
+			userID:       "user-1",
+		}
+
+		tm.now = func() time.Time { panic("secret-double-panic-now") }
+		ap.afterRun(activeCtx)
+		ap.afterRun(evictedCtx)
+		tm.now = time.Now
+
+		tm.mu.Lock()
+		_, stillActive := tm.invocations["inv-double-panic-active"]
+		_, stillEvicted := tm.evicted[evictedInvID]
+		activeCompleted := tm.completed["inv-double-panic-active"]
+		evictedCompleted := tm.completed[evictedInvID]
+		tm.mu.Unlock()
+
+		if stillActive {
+			t.Error("active invocation remained in traces.invocations after double panic")
+		}
+		if stillEvicted {
+			t.Error("evicted invocation remained in traces.evicted after double panic")
+		}
+		if activeCompleted == nil {
+			t.Fatal("active invocation missing from traces.completed after double panic")
+		}
+		if evictedCompleted == nil || evictedCompleted.identity.traceID != "0123456789abcdef0123456789abcdef" {
+			t.Fatalf("evicted completed entry = %+v, want restored traceID", evictedCompleted)
+		}
+
+		// A late callback after the double-panic fallback must take the late path
+		// rather than lookupInvocation's create-active path.
+		lateInv := tm.lookupInvocation(ctx, identityOf(activeCtx), false, false)
+		if !lateInv.isLate {
+			t.Error("late callback lookupInvocation.isLate = false, want true")
+		}
+		tm.mu.Lock()
+		_, recreatedActive := tm.invocations["inv-double-panic-active"]
+		tm.mu.Unlock()
+		if recreatedActive {
+			t.Error("late callback recreated active entry in traces.invocations after double-panic fallback")
+		}
+
+		if !logger.contains("agentanalytics: endInvocation fallback: recovered panic of type string") {
+			t.Errorf("missing endInvocation fallback panic log in:\n%s", logger.String())
+		}
+		if !logger.contains("agentanalytics: dropped INVOCATION_COMPLETED event: recovered panic of type string") {
+			t.Errorf("missing INVOCATION_COMPLETED drop log in:\n%s", logger.String())
+		}
+		if logger.contains("secret-double-panic-now") {
+			t.Errorf("logger leaked panic value in:\n%s", logger.String())
+		}
+		if got := processor.DropStats().AppendFailureDrops; got != 4 {
+			t.Errorf("AppendFailureDrops = %d, want 4 (2 invocations x [endInvocationSafe + recoverCallback])", got)
+		}
+	})
+
+	t.Run("flushRunEndSafe logs panic type and counts drop in DropStats", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		srv := &committedStreamTestServer{
+			createdStreamName:  "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/committed-1",
+			failAppendAttemptN: 1,
+		}
+		storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		recLog := &recordingLogger{}
+		logger := &hookRecordingLogger{
+			recordingLogger: recLog,
+			beforeRecord: func(msg string) {
+				if strings.Contains(msg, "Failed to write batch") {
+					panic("secret-flush-panic-payload")
+				}
+			},
+		}
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "test-tbl"
+		cfg.BatchSize = 100
+		cfg.BatchFlushIntv = time.Hour
+		cfg.DisableCreateViews = true
+		cfg.RetryConfig.MaxRetries = 0
+		cfg.Logger = logger
+
+		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(processor.Close)
+
+		tm := newTraceManager()
+		ap := &analyticsPlugin{
+			config:    cfg,
+			processor: processor,
+			traces:    tm,
+		}
+
+		mCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "test-agent",
+			sessionID:    "sess-1",
+			invocationID: "inv-flush-panic",
+			userID:       "user-1",
+		}
+		if _, err := ap.onUserMessage(mCtx, textContent("user", "hello")); err != nil {
+			t.Fatalf("onUserMessage() error = %v", err)
+		}
+
+		var panickedOnce atomic.Bool
+		tm.now = func() time.Time {
+			if panickedOnce.CompareAndSwap(false, true) {
+				panic("boom inside popUnclosedAgentSpans")
+			}
+			return time.Now()
+		}
+
+		ap.afterRun(mCtx)
+
+		if !recLog.contains("agentanalytics: flushRunEnd fallback: recovered panic of type string") {
+			t.Errorf("missing flushRunEnd fallback panic log in:\n%s", recLog.String())
+		}
+		if !recLog.contains("agentanalytics: dropped INVOCATION_COMPLETED event: recovered panic of type string") {
+			t.Errorf("missing INVOCATION_COMPLETED drop log in:\n%s", recLog.String())
+		}
+		if recLog.contains("secret-flush-panic-payload") {
+			t.Errorf("logger leaked flush panic value in:\n%s", recLog.String())
+		}
+		// 1 failed batch row + 1 flushRunEndSafe panic + 1 afterRun recoverCallback = 3.
+		if got := processor.DropStats().AppendFailureDrops; got != 3 {
+			t.Errorf("AppendFailureDrops = %d, want 3 (failed row + flushRunEndSafe + recoverCallback)", got)
+		}
+	})
+
+	t.Run("afterRun fallback with panicking Logger still ends invocation and flushes queued rows", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		requests := make(chan *storagepb.AppendRowsRequest, 100)
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: requests})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		tm := newTraceManager()
+		const invID = "inv-afterrun-panicking-logger"
+		var sawEndFallbackLog atomic.Bool
+		logger := &hookRecordingLogger{
+			recordingLogger: &recordingLogger{},
+			beforeRecord: func(msg string) {
+				if strings.Contains(msg, "endInvocation fallback") {
+					sawEndFallbackLog.Store(true)
+					// Verify endInvocationSafe runs before flushRunEndSafe and
+					// forceEndInvocation completed before recordPanic logged.
+					if len(requests) != 0 {
+						t.Errorf("flush ran before endInvocationSafe finished: len(requests) = %d, want 0", len(requests))
+					}
+					tm.mu.Lock()
+					_, stillLive := tm.invocations[invID]
+					_, inCompleted := tm.completed[invID]
+					tm.mu.Unlock()
+					if stillLive || !inCompleted {
+						t.Errorf("invocation state during endInvocation fallback log: stillLive=%t inCompleted=%t, want false/true", stillLive, inCompleted)
+					}
+					panic("boom inside endInvocation fallback logger")
+				}
+				if strings.Contains(msg, "dropped INVOCATION_COMPLETED") {
+					panic("boom inside recoverCallback logger")
+				}
+			},
+		}
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "test-tbl"
+		cfg.BatchSize = 100
+		cfg.BatchFlushIntv = time.Hour
+		cfg.DisableCreateViews = true
+		cfg.Logger = logger
+
+		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(processor.Close)
+
+		ap := &analyticsPlugin{
+			config:    cfg,
+			processor: processor,
+			traces:    tm,
+		}
+
+		mCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "test-agent",
+			sessionID:    "sess-1",
+			invocationID: invID,
+			userID:       "user-1",
+		}
+		if _, err := ap.beforeRun(mCtx); err != nil {
+			t.Fatalf("beforeRun() error = %v", err)
+		}
+		if _, err := ap.onUserMessage(mCtx, textContent("user", "hello")); err != nil {
+			t.Fatalf("onUserMessage() error = %v", err)
+		}
+
+		// Panic in popUnclosedAgentSpans and in endInvocationSafe's tm.endInvocation
+		// so endInvocationSafe invokes forceEndInvocation + recordPanic (panicking Logger).
+		tm.now = func() time.Time { panic("boom inside afterRun and endInvocation") }
+		ap.afterRun(mCtx)
+		tm.now = time.Now
+
+		if !sawEndFallbackLog.Load() {
+			t.Fatal("expected endInvocation fallback log attempt")
+		}
+
+		tm.mu.Lock()
+		_, stillLive := tm.invocations[invID]
+		_, inCompleted := tm.completed[invID]
+		tm.mu.Unlock()
+		if stillLive {
+			t.Error("invocation remained in traces.invocations after panicking Logger fallback")
+		}
+		if !inCompleted {
+			t.Error("invocation missing from traces.completed after panicking Logger fallback")
+		}
+
+		select {
+		case req := <-requests:
+			rows := decodeArrowRows(t, req)
+			if len(rows) < 2 {
+				t.Fatalf("flushed %d rows on panicking Logger fallback, want >= 2 queued rows; event types: %v", len(rows), eventTypes(rows))
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for flushRunEnd batch when Logger panicked in endInvocation fallback")
+		}
+
+		// 1 endInvocationSafe panic + 1 afterRun recoverCallback panic = 2,
+		// counted before each Logger.Printf call panicked.
+		if got := processor.DropStats().AppendFailureDrops; got != 2 {
+			t.Errorf("AppendFailureDrops = %d, want 2", got)
+		}
+	})
+}
+
+type failingFinalizeWriteServer struct {
+	*committedStreamTestServer
+	finalizeErr error
+}
+
+func (s *failingFinalizeWriteServer) FinalizeWriteStream(_ context.Context, req *storagepb.FinalizeWriteStreamRequest) (*storagepb.FinalizeWriteStreamResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.finalizeReqs = append(s.finalizeReqs, req)
+	return nil, s.finalizeErr
+}
+
+func TestClose_SecondCallAfterCleanCloseSucceeds(t *testing.T) {
+	p, _, _ := newTestPluginWithConfig(t, nil)
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("first Close() error = %v, want nil", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("second Close() error = %v, want nil", err)
 	}
 }

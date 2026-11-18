@@ -2633,39 +2633,44 @@ func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start
 	var warnIDs []string
 	var maxTracked int
 	var logf func(string, ...any)
-	tm.mu.Lock()
-	inv, ok := tm.invocations[id.invocationID]
-	if !ok {
-		if completed := tm.completed[id.invocationID]; completed != nil {
-			if !start {
-				late := tm.lateLocked(completed, sc, tm.traceIDFor(id.invocationID), now)
-				late.lastActive.Store(now.UnixNano())
-				tm.completionOrder.MoveToBack(completed.position)
-				if reserveSpan {
-					late.pendingSpans.Add(1)
+	inv, returned := func() (*invocationTrace, bool) {
+		tm.mu.Lock()
+		defer tm.mu.Unlock()
+		inv, ok := tm.invocations[id.invocationID]
+		if !ok {
+			if completed := tm.completed[id.invocationID]; completed != nil {
+				if !start {
+					late := tm.lateLocked(completed, sc, tm.traceIDFor(id.invocationID), now)
+					late.lastActive.Store(now.UnixNano())
+					tm.completionOrder.MoveToBack(completed.position)
+					if reserveSpan {
+						late.pendingSpans.Add(1)
+					}
+					return late, true
 				}
-				tm.mu.Unlock()
-				return late
+				tm.completionOrder.Remove(completed.position)
+				delete(tm.completed, id.invocationID)
 			}
-			tm.completionOrder.Remove(completed.position)
-			delete(tm.completed, id.invocationID)
+			ev, wasEvicted := tm.evicted[id.invocationID]
+			inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
+			if wasEvicted {
+				inv.restoreEvicted(ev)
+			}
+			tm.invocations[id.invocationID] = inv
+			tm.inserts++
+			warnIDs = tm.evictLocked(now, id.invocationID)
+			maxTracked = tm.maxTracked
+			logf = tm.logf
 		}
-		ev, wasEvicted := tm.evicted[id.invocationID]
-		inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
-		if wasEvicted {
-			inv.restoreEvicted(ev)
+		inv.lastActive.Store(now.UnixNano())
+		if reserveSpan {
+			inv.pendingSpans.Add(1)
 		}
-		tm.invocations[id.invocationID] = inv
-		tm.inserts++
-		warnIDs = tm.evictLocked(now, id.invocationID)
-		maxTracked = tm.maxTracked
-		logf = tm.logf
+		return inv, false
+	}()
+	if returned {
+		return inv
 	}
-	inv.lastActive.Store(now.UnixNano())
-	if reserveSpan {
-		inv.pendingSpans.Add(1)
-	}
-	tm.mu.Unlock()
 	if logf != nil {
 		for _, evictedID := range warnIDs {
 			logf("agentanalytics: trace manager capacity (%d) exceeded; evicting active invocation %q", maxTracked, evictedID)
@@ -2753,6 +2758,12 @@ func (inv *invocationTrace) savedIdentity() evictedTrace {
 	}
 }
 
+// rememberCompletedLocked records invocation completion using tm.now() when
+// creating late state; see rememberCompletedAtLocked. tm.mu must be held.
+func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv *invocationTrace) {
+	tm.rememberCompletedAtLocked(invocationID, runner, inv, time.Time{})
+}
+
 // Completed identities have their own capacity, max(maxTracked, 64):
 // finishing an ordinary run must never evict the saved identity of a run that
 // is still in progress. The model and tool calls that the run started and that
@@ -2797,8 +2808,10 @@ func (inv *invocationTrace) savedIdentity() evictedTrace {
 // Each pass walks the runs from the least recently active one and stops once
 // the capacity is met; a run that a pass checks costs a check of atomic state
 // (see hasPendingOrOpenLateSpans and waitsForLateCalls), without taking its
-// lock. A callback of a pruned run gets a span of its own.
-// tm.mu must be held.
+// lock. A callback of a pruned run gets a span of its own. If now is zero,
+// rememberCompletedAtLocked calls tm.now() when creating late state; callers
+// such as endInvocation and forceEndInvocation pass a non-zero now. tm.mu must
+// be held.
 //
 // Divergence from adk-python (google/adk-python@25d191710985,
 // after_run_callback lines 10102-10145): Python ADK clears the current
@@ -2806,7 +2819,13 @@ func (inv *invocationTrace) savedIdentity() evictedTrace {
 // shared late-call bookkeeping because goroutines do not inherit
 // task-local state and RunLive tool goroutines can outlive
 // AfterRunCallback, so open calls are handed to the late state instead.
-func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv *invocationTrace) {
+func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, inv *invocationTrace, now time.Time) {
+	// Unlink active and evicted entries before marking inv finished so a panic
+	// during handover can never leave a finished invocation reachable from
+	// tm.invocations.
+	delete(tm.evicted, invocationID)
+	delete(tm.invocations, invocationID)
+
 	completed := tm.completed[invocationID]
 	if completed == nil {
 		completed = &completedTrace{position: tm.completionOrder.PushBack(invocationID)}
@@ -2820,55 +2839,82 @@ func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv
 	} else if completed.livePending != nil && completed.livePending.Load() == 0 {
 		completed.livePending = nil
 	}
-	inv.mu.Lock()
-	inv.finished = true
-	inv.agentStack[0].dropContexts()
-	inv.runnerAgent = nil
-	lastSeq := inv.lastSeq
-	models, endedModels := startedCalls(inv.llmSpans), startedCalls(inv.completedModels)
-	maps.DeleteFunc(models, func(_ string, rec *spanRecord) bool { return rec.streamed || rec.endedWithRun(runner) })
-	tools, endedTools := startedCalls(inv.toolSpans), startedCalls(inv.completedTools)
-	maps.DeleteFunc(tools, func(_ string, rec *spanRecord) bool { return rec.endedWithRun(runner) })
-	// The late state keeps no context of the run's callbacks: the calls that
-	// are open drop theirs here, and those that ended did when they ended.
-	// The open ones are marked as handed over, so that the run waits for late
-	// calls only while one of them is open (see waitsForLateCalls).
-	for _, rec := range models {
-		rec.dropContexts()
-		rec.handedOver = true
-	}
-	for _, rec := range tools {
-		rec.dropContexts()
-		rec.handedOver = true
-	}
-	// The calls leave inv, so that no spanRecord is reachable from both inv,
-	// guarded by inv.mu, and the late state, guarded by its own mu.
-	clear(inv.llmSpans)
-	clear(inv.completedModels)
-	clear(inv.toolSpans)
-	clear(inv.completedTools)
-	inv.syncOpenCallsLocked()
-	inv.mu.Unlock()
+	var lastSeq uint64
+	var models, endedModels, tools, endedTools map[string]*spanRecord
+	func() {
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		inv.agentStack[0].dropContexts()
+		inv.runnerAgent = nil
+		lastSeq = inv.lastSeq
+		models, endedModels = startedCalls(inv.llmSpans), startedCalls(inv.completedModels)
+		maps.DeleteFunc(models, func(_ string, rec *spanRecord) bool { return rec.streamed || rec.endedWithRun(runner) })
+		tools, endedTools = startedCalls(inv.toolSpans), startedCalls(inv.completedTools)
+		maps.DeleteFunc(tools, func(_ string, rec *spanRecord) bool { return rec.endedWithRun(runner) })
+		// The late state keeps no context of the run's callbacks: the calls that
+		// are open drop theirs here, and those that ended did when they ended.
+		// The open ones are marked as handed over, so that the run waits for late
+		// calls only while one of them is open (see waitsForLateCalls).
+		for _, rec := range models {
+			rec.dropContexts()
+			rec.handedOver = true
+		}
+		for _, rec := range tools {
+			rec.dropContexts()
+			rec.handedOver = true
+		}
+		// Mark inv finished and clear its call maps last, once nothing left in
+		// this critical section can panic, so no half-cleared state is left.
+		inv.finished = true
+		clear(inv.llmSpans)
+		clear(inv.completedModels)
+		clear(inv.toolSpans)
+		clear(inv.completedTools)
+		inv.syncOpenCallsLocked()
+	}()
+	var panicVal any
+	var panicked bool
 	if len(models)+len(tools) > 0 {
-		tm.lateLocked(completed, trace.SpanContext{}, completed.identity.traceID, tm.now())
+		if now.IsZero() {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						panicVal = r
+						panicked = true
+						now = time.Now()
+					}
+				}()
+				now = tm.now()
+			}()
+		}
+		tm.lateLocked(completed, trace.SpanContext{}, completed.identity.traceID, now)
 	}
-	if late := completed.late; late != nil {
-		late.mu.Lock()
-		late.lastSeq = max(late.lastSeq, lastSeq)
-		maps.Copy(late.llmSpans, models)
-		maps.Copy(late.completedModels, endedModels)
-		maps.Copy(late.toolSpans, tools)
-		maps.Copy(late.completedTools, endedTools)
-		late.syncOpenCallsLocked()
-		late.mu.Unlock()
-	} else {
-		completed.endedModels = withCalls(completed.endedModels, endedModels)
-		completed.endedTools = withCalls(completed.endedTools, endedTools)
+	handoverCompletedCalls(completed, lastSeq, models, endedModels, tools, endedTools)
+	if panicked {
+		panic(panicVal)
 	}
 	limit := max(tm.maxTracked, 64)
 	tm.pruneWaitingLocked(limit, limit/2)
 	tm.pruneCompletedLocked(limit, func(c *completedTrace) bool { return !c.hasPendingOrOpenLateSpans() })
 	tm.pruneCompletedLocked(limit, func(c *completedTrace) bool { return !c.hasPendingSpans() })
+}
+
+func handoverCompletedCalls(completed *completedTrace, lastSeq uint64, models, endedModels, tools, endedTools map[string]*spanRecord) {
+	if late := completed.late; late != nil {
+		func() {
+			late.mu.Lock()
+			defer late.mu.Unlock()
+			late.lastSeq = max(late.lastSeq, lastSeq)
+			maps.Copy(late.llmSpans, models)
+			maps.Copy(late.completedModels, endedModels)
+			maps.Copy(late.toolSpans, tools)
+			maps.Copy(late.completedTools, endedTools)
+			late.syncOpenCallsLocked()
+		}()
+		return
+	}
+	completed.endedModels = withCalls(completed.endedModels, endedModels)
+	completed.endedTools = withCalls(completed.endedTools, endedTools)
 }
 
 // lateLocked returns the late state of completed, and makes it, with the
@@ -3058,42 +3104,70 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 	}
 	var inv *invocationTrace
 	if id.invocationID != "" {
-		tm.mu.Lock()
-		inv = tm.invocations[id.invocationID]
-		if inv == nil {
-			inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
-			if ev, ok := tm.evicted[id.invocationID]; ok {
-				inv.restoreEvicted(ev)
-			} else if completed := tm.completed[id.invocationID]; completed != nil {
-				inv.restoreEvicted(completed.identity)
+		func() {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			inv = tm.invocations[id.invocationID]
+			if inv == nil {
+				inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
+				if ev, ok := tm.evicted[id.invocationID]; ok {
+					inv.restoreEvicted(ev)
+				} else if completed := tm.completed[id.invocationID]; completed != nil {
+					inv.restoreEvicted(completed.identity)
+				}
 			}
-		}
-		tm.mu.Unlock()
+		}()
 	}
 	if inv == nil {
 		inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
 	}
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-	inv.mu.Lock()
-	inv.noteRootAgentLocked(id, rootIn, false)
-	var latency map[string]any
-	if inv.started && !inv.evicted {
-		latency = latencyOf(inv.agentStack[0], now)
-	}
-	row := inv.rowSpan(inv.agentStack[0], latency, ambient)
-	row.timestamp = now
-	inv.mu.Unlock()
+	var row rowSpan
+	func() {
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		inv.noteRootAgentLocked(id, rootIn, false)
+		var latency map[string]any
+		if inv.started && !inv.evicted {
+			latency = latencyOf(inv.agentStack[0], now)
+		}
+		row = inv.rowSpan(inv.agentStack[0], latency, ambient)
+		row.timestamp = now
+	}()
 	if id.invocationID != "" {
-		tm.mu.Lock()
-		// Publish the final identity, including any trace adopted by rowSpan,
-		// before removing active state. Late Live callbacks may start and end
-		// an operation, so their state is shared separately from the finished run.
-		tm.rememberCompletedLocked(id.invocationID, id.agentName, inv)
-		delete(tm.evicted, id.invocationID)
-		delete(tm.invocations, id.invocationID)
-		tm.mu.Unlock()
+		func() {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			// Publish the final identity, including any trace adopted by rowSpan,
+			// and remove active state before marking inv finished. Late Live
+			// callbacks may start and end an operation, so their state is shared
+			// separately from the finished run.
+			tm.rememberCompletedAtLocked(id.invocationID, id.agentName, inv, now)
+		}()
 	}
 	return row
+}
+
+// forceEndInvocation publishes completion bookkeeping and clears active and
+// evicted tracking for id without calling ctx methods or tm.now, used as a
+// panic-safe fallback when endInvocation itself panics.
+func (tm *traceManager) forceEndInvocation(id identity) {
+	if tm == nil || id.invocationID == "" {
+		return
+	}
+	now := time.Now()
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	inv := tm.invocations[id.invocationID]
+	if inv == nil {
+		inv = newInvocationTraceWithSpan(trace.SpanContext{}, tm.traceIDFor(id.invocationID), now)
+		if ev, ok := tm.evicted[id.invocationID]; ok {
+			inv.restoreEvicted(ev)
+		} else if completed := tm.completed[id.invocationID]; completed != nil {
+			inv.restoreEvicted(completed.identity)
+		}
+	}
+	tm.rememberCompletedAtLocked(id.invocationID, id.agentName, inv, now)
 }
 
 // popDelegatingAgentSpan ends the activation of the agent of id that a task
@@ -3128,6 +3202,7 @@ func (tm *traceManager) popDelegatingAgentSpan(ctx context.Context, id identity)
 	for i := len(inv.agentStack) - 1; i > 0; i-- {
 		rec := inv.agentStack[i]
 		if rec.kind == spanKindAgent && rec.name == id.agentName && rec.branch == id.branch && rec.path == id.path && rec.taskDelegated {
+			defer inv.retireLateSettledLocked()
 			if rec.parent != nil && rec.parent.kind == spanKindAgent {
 				inv.touchAgentActivityLocked(rec.parent, now)
 			}
@@ -3145,7 +3220,6 @@ func (tm *traceManager) popDelegatingAgentSpan(ctx context.Context, id identity)
 			// the delegating activation's run returned, so its
 			// InvocationContext is not read (see popTaskAgentSpan).
 			inv.retireAgentLocked(i, false, since)
-			inv.retireLateSettledLocked()
 			span = inv.rowSpan(rec, latencyOf(rec, now), ambient)
 			span.timestamp = now
 			return span, true
@@ -3466,6 +3540,7 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
+	defer inv.retireLateSettledLocked()
 	inv.noteRootAgentLocked(id, rootIn, true)
 	i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
 	if i < 0 {
@@ -3483,7 +3558,6 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 	}
 	inv.reconcileConcurrentResponseOnPopLocked(i, rec.seq)
 	inv.retireAgentLocked(i, true, rec.seq)
-	inv.retireLateSettledLocked()
 	span := inv.rowSpan(rec, latencyOf(rec, now), ambient)
 	span.timestamp = now
 	return span
@@ -3749,6 +3823,7 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	if !rec.taskMode {
 		return rowSpan{}, false
 	}
+	defer inv.retireLateSettledLocked()
 	if rec.parent != nil && rec.parent.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(rec.parent, now)
 	}
@@ -3767,7 +3842,6 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 		}
 	}
 	inv.retireAgentLocked(i, false, noFrame)
-	inv.retireLateSettledLocked()
 	span = inv.rowSpan(rec, latencyOf(rec, now), ambient)
 	span.timestamp = now
 	return span, true
@@ -6057,6 +6131,10 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 		return tm.popLLMSpan(ctx, id, responded)
 	}
 	defer inv.mu.Unlock()
+	// The ended call, including a recovered call completed from completedModels,
+	// no longer keeps its agent or the agents above it from retiring in the
+	// late state (see retireLateSettledLocked).
+	defer inv.retireLateSettledLocked()
 	inv.noteRootAgentLocked(id, rootIn, true)
 	key := callKey(ctx, llmKey(id))
 	rec := inv.llmSpans[key]
@@ -6102,10 +6180,6 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 			rec.firstToken = now
 		}
 	}
-	// The ended call no longer keeps its agent, or the agents that its agent
-	// runs under, from retiring in the late state (see
-	// retireLateSettledLocked).
-	inv.retireLateSettledLocked()
 	span := inv.rowSpan(rec, latencyOf(rec, now), ambient)
 	span.timestamp = now
 	return span
