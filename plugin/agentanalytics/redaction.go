@@ -1133,7 +1133,7 @@ func keptLiterals(scrubbed string) []string {
 	for _, sentinel := range []string{redactedURIPlaceholder, redactedValue, url.QueryEscape(redactedValue)} {
 		var next []string
 		for _, part := range parts {
-			for _, piece := range strings.Split(part, sentinel) {
+			for piece := range strings.SplitSeq(part, sentinel) {
 				if piece != "" {
 					next = append(next, piece)
 				}

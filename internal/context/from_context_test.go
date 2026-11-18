@@ -460,9 +460,8 @@ func TestIdentityDecisionMatrixCrossPackage(t *testing.T) {
 		// promotion, so an invocation from outside the module is dropped by its own
 		// promoted method and the enclosing one answers.
 		{"readonly context over a delta-derived context", true, func(ic agent.InvocationContext) context.Context {
-			branch := "br"
 			return icontext.NewReadonlyContext(agent.PromoteWithDelta(ic,
-				&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Branch: &branch}}))
+				&agent.CommonContextDelta{InvocationContextDelta: &agent.InvocationContextDelta{Branch: new("br")}}))
 		}},
 	}
 
