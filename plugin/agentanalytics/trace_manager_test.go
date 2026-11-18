@@ -24566,7 +24566,7 @@ func TestParentForRunLocked_LookalikeGoroutineResolution(t *testing.T) {
 			default:
 				want = recs[tc.want]
 			}
-			if got := inv.parentForRunLocked(childID, nil, g2, tc.origin); got != want {
+			if got := inv.parentForRunLocked(childID, nil, g2, tc.origin, nil); got != want {
 				t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, want.spanID)
 			}
 		})
@@ -24578,50 +24578,50 @@ func TestParentForRunLocked_LookalikeGoroutineResolution(t *testing.T) {
 		for _, rec := range recs {
 			rec.parent = mid
 		}
-		if got := inv.parentForRunLocked(childID, nil, g2, goroutineOrigin{parent: g0}); got != mid {
+		if got := inv.parentForRunLocked(childID, nil, g2, goroutineOrigin{parent: g0}, nil); got != mid {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, mid.spanID)
 		}
 	})
 	t.Run("an excluded lookalike leaves only p", func(t *testing.T) {
 		inv, _, recs := setup(g3, g4)
-		if got := inv.parentForRunLocked(childID, map[string]bool{recs[0].spanID: true}, g2, goroutineOrigin{parent: g0}); got != recs[1] {
+		if got := inv.parentForRunLocked(childID, map[string]bool{recs[0].spanID: true}, g2, goroutineOrigin{parent: g0}, nil); got != recs[1] {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, recs[1].spanID)
 		}
 	})
 	t.Run("an unknown goroutine leaves p", func(t *testing.T) {
 		inv, _, recs := setup(g3, g4)
-		if got := inv.parentForRunLocked(childID, nil, 0, goroutineOrigin{}); got != recs[1] {
+		if got := inv.parentForRunLocked(childID, nil, 0, goroutineOrigin{}, nil); got != recs[1] {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, recs[1].spanID)
 		}
 	})
-	t.Run("enclosingOpenSpanLocked skips retired spans and falls back to invocation", func(t *testing.T) {
+	t.Run("enclosing span skips retired spans and falls back to invocation", func(t *testing.T) {
 		inv, root, recs := setup(g3, g4)
 		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: root}
 		for _, rec := range recs {
 			rec.parent = mid
 		}
-		if got := inv.enclosingOpenSpanLocked(recs); got != root {
-			t.Fatalf("enclosingOpenSpanLocked = %s, want %s", got.spanID, root.spanID)
+		if got := inv.buildOpenSpanTreeLocked(nil).enclosing(inv, recs); got != root {
+			t.Fatalf("enclosing = %s, want %s", got.spanID, root.spanID)
 		}
 		inv.agentStack = slices.Insert(inv.agentStack, 2, mid)
-		if got := inv.enclosingOpenSpanLocked(recs); got != mid {
-			t.Fatalf("enclosingOpenSpanLocked = %s, want %s", got.spanID, mid.spanID)
+		if got := inv.buildOpenSpanTreeLocked(nil).enclosing(inv, recs); got != mid {
+			t.Fatalf("enclosing = %s, want %s", got.spanID, mid.spanID)
 		}
 		for _, rec := range recs {
 			rec.parent = inv.agentStack[0]
 		}
-		if got := inv.enclosingOpenSpanLocked(recs); got != inv.agentStack[0] {
-			t.Fatalf("enclosingOpenSpanLocked = %s, want %s", got.spanID, inv.agentStack[0].spanID)
+		if got := inv.buildOpenSpanTreeLocked(nil).enclosing(inv, recs); got != inv.agentStack[0] {
+			t.Fatalf("enclosing = %s, want %s", got.spanID, inv.agentStack[0].spanID)
 		}
 	})
 }
 
 // TestRunner_ConcurrentLookalikeCustomAgent_SubAgentParentSpanID verifies end
 // to end through runner.Run that concurrent lookalike activations of a custom
-// agent place sub-agents run on their own goroutine or a directly-started child
-// goroutine under each activation's own span_id (not the last-started peer's),
-// while sub-agents launched via an intermediate helper goroutine fall back to
-// the nearest enclosing open span.
+// agent place the sub-agents that each runs with its own context under that
+// activation's own span_id (not the last-started peer's), whether the
+// sub-agent runs on the activation's goroutine, on a goroutine that it starts
+// directly, or across an intermediate helper goroutine.
 func TestRunner_ConcurrentLookalikeCustomAgent_SubAgentParentSpanID(t *testing.T) {
 	t.Run("own goroutine and directly started child goroutine", func(t *testing.T) {
 		p, requests, _ := setupTestPlugin(t)
@@ -25026,7 +25026,7 @@ func TestRunner_ConcurrentLookalikeCustomAgent_SubAgentParentSpanID(t *testing.T
 					}
 				}
 				if matchedTag == "" {
-					t.Fatalf("%s LLM_RESPONSE %q missing tag", subName, content)
+					t.Fatalf("%s LLM_RESPONSE content is missing tag=%s:w1 or tag=%s:w2", subName, subName, subName)
 				}
 				seenTags[matchedTag] = true
 				if got, want := parentBySpan[subSpan], workerSpanByTag[matchedTag]; got != want {
@@ -25039,7 +25039,7 @@ func TestRunner_ConcurrentLookalikeCustomAgent_SubAgentParentSpanID(t *testing.T
 		}
 	})
 
-	t.Run("helper goroutine falls back to nearest enclosing span", func(t *testing.T) {
+	t.Run("helper goroutine runs under the worker whose context it was given", func(t *testing.T) {
 		p, requests, _ := setupTestPlugin(t)
 		subHelper, err := agent.New(agent.Config{
 			Name: "sub_helper",
@@ -25175,22 +25175,28 @@ func TestRunner_ConcurrentLookalikeCustomAgent_SubAgentParentSpanID(t *testing.T
 		rows := collectRows(t, requests, untilInvocationEnd)
 		onlyRowOfType(t, rows, EventInvocationCompleted)
 
-		midStarts := agentRowsOfType(rows, EventAgentStarting, "mid")
-		if len(midStarts) != 1 {
-			t.Fatalf("mid AGENT_STARTING count = %d, want 1", len(midStarts))
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+		if len(workerStarts) != 2 {
+			t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
 		}
-		midSpan, _ := midStarts[0]["span_id"].(string)
-		if midSpan == "" {
-			t.Fatal("mid span_id is empty")
-		}
+		w1Span, _ := workerStarts[0]["span_id"].(string)
+		w2Span, _ := workerStarts[1]["span_id"].(string)
 		helperStarts := agentRowsOfType(rows, EventAgentStarting, "sub_helper")
 		if len(helperStarts) != 2 {
 			t.Fatalf("sub_helper AGENT_STARTING count = %d, want 2", len(helperStarts))
 		}
-		for i, row := range helperStarts {
-			if got, _ := row["parent_span_id"].(string); got != midSpan {
-				t.Errorf("sub_helper[%d] parent_span_id = %q, want %q (nearest enclosing mid span)", i, got, midSpan)
-			}
+		// Each worker runs its own sub_helper with its own context, so each
+		// worker holds exactly one of them.
+		var parents []string
+		for _, row := range helperStarts {
+			pid, _ := row["parent_span_id"].(string)
+			parents = append(parents, pid)
+		}
+		slices.Sort(parents)
+		want := []string{w1Span, w2Span}
+		slices.Sort(want)
+		if !slices.Equal(parents, want) {
+			t.Errorf("sub_helper parent_span_ids = %q, want one under each worker %q", parents, want)
 		}
 	})
 
@@ -25367,7 +25373,7 @@ func TestRunner_ConcurrentLookalikeCustomAgent_SubAgentParentSpanID(t *testing.T
 		}
 	})
 
-	t.Run("2-hop helper goroutine with peer open child falls back to enclosing span", func(t *testing.T) {
+	t.Run("2-hop helper goroutine with peer open child runs under its own worker", func(t *testing.T) {
 		p, requests, _ := setupTestPlugin(t)
 		w2InSubInline := make(chan struct{})
 		w1HelperDone := make(chan struct{})
@@ -25523,17 +25529,17 @@ func TestRunner_ConcurrentLookalikeCustomAgent_SubAgentParentSpanID(t *testing.T
 		rows := collectRows(t, requests, untilInvocationEnd)
 		onlyRowOfType(t, rows, EventInvocationCompleted)
 
-		midStarts := agentRowsOfType(rows, EventAgentStarting, "mid")
-		if len(midStarts) != 1 {
-			t.Fatalf("mid AGENT_STARTING count = %d, want 1", len(midStarts))
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+		if len(workerStarts) != 2 {
+			t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
 		}
-		midSpan, _ := midStarts[0]["span_id"].(string)
+		w1Span, _ := workerStarts[0]["span_id"].(string)
 		helperStarts := agentRowsOfType(rows, EventAgentStarting, "sub_helper")
 		if len(helperStarts) != 1 {
 			t.Fatalf("sub_helper AGENT_STARTING count = %d, want 1", len(helperStarts))
 		}
-		if got, _ := helperStarts[0]["parent_span_id"].(string); got != midSpan {
-			t.Errorf("sub_helper parent_span_id = %q, want %q (nearest enclosing mid span, not W2's open sub_inline)", got, midSpan)
+		if got, _ := helperStarts[0]["parent_span_id"].(string); got != w1Span {
+			t.Errorf("sub_helper parent_span_id = %q, want %q (W1, whose context it runs with, not W2's open sub_inline)", got, w1Span)
 		}
 	})
 }
@@ -26053,10 +26059,9 @@ func TestRunner_ConcurrentLookalikeWorkflow_SequentialNodeSubtreeIsolation(t *te
 
 // TestRunner_ConcurrentLookalikeWorkflowParallelWorkerRetry_PurgesOwnFailedAttempt
 // verifies that when two concurrent lookalike WorkflowAgent activations run a
-// built-in workflow.ParallelWorker with RetryConfig and enclosingOpenSpanLocked
-// demotes the item's parent to a non-workflow span, retrying the item on the
-// same worker goroutine still purges the failed attempt and completes with
-// INVOCATION_COMPLETED.
+// built-in workflow.ParallelWorker with RetryConfig, each item runs under its
+// own workflow activation, and retrying the item on the same worker goroutine
+// still purges the failed attempt and completes with INVOCATION_COMPLETED.
 func TestRunner_ConcurrentLookalikeWorkflowParallelWorkerRetry_PurgesOwnFailedAttempt(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
@@ -26199,13 +26204,14 @@ func TestRunner_ConcurrentLookalikeWorkflowParallelWorkerRetry_PurgesOwnFailedAt
 				if len(rootStarts) != 1 || len(wfStartRows) != 2 {
 					t.Fatalf("unexpected root (%d) or wf (%d) AGENT_STARTING counts", len(rootStarts), len(wfStartRows))
 				}
-				rootSpan, _ := rootStarts[0]["span_id"].(string)
 				w1Span, _ := wfStartRows[0]["span_id"].(string)
 				w2Span, _ := wfStartRows[1]["span_id"].(string)
-				for i := range 2 {
-					if got, _ := itemStarts[i]["parent_span_id"].(string); got != rootSpan {
-						t.Errorf("item_agent[%d] parent_span_id = %q, want %q (root while both wf peers open)", i, got, rootSpan)
-					}
+				// Each workflow activation runs its own item with its own
+				// context, so the two first attempts sit one under each.
+				first, _ := itemStarts[0]["parent_span_id"].(string)
+				second, _ := itemStarts[1]["parent_span_id"].(string)
+				if (first != w1Span || second != w2Span) && (first != w2Span || second != w1Span) {
+					t.Errorf("item_agent[0], item_agent[1] parent_span_id = %q, %q, want one under each wf peer (%q, %q)", first, second, w1Span, w2Span)
 				}
 				retryStartIdx := slices.IndexFunc(rows, func(r map[string]any) bool {
 					return r["span_id"] == itemStarts[2]["span_id"] && r["event_type"] == EventAgentStarting
@@ -26230,6 +26236,9 @@ func TestRunner_ConcurrentLookalikeWorkflowParallelWorkerRetry_PurgesOwnFailedAt
 				}
 				if got, _ := itemStarts[2]["parent_span_id"].(string); got != activeWfSpan {
 					t.Errorf("item_agent[2] parent_span_id = %q, want active retry wf span %q (not closed peer %q)", got, activeWfSpan, closedWfSpan)
+				}
+				if got, _ := onlyAgentRow(t, rows, EventAgentError, "item_agent")["parent_span_id"].(string); got != activeWfSpan {
+					t.Errorf("failed item_agent attempt parent_span_id = %q, want the wf span %q that retried it", got, activeWfSpan)
 				}
 			}
 		})
@@ -26668,6 +26677,7 @@ func TestParentForRunLocked_PreservesCallerExclude(t *testing.T) {
 		callerExclude,
 		gChild,
 		goroutineOrigin{creator: schedulerCreator, parent: gOuter1},
+		nil,
 	)
 	if got != wfOuter1 {
 		t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wfOuter1.spanID)
@@ -26687,6 +26697,7 @@ func TestParentForRunLocked_PreservesCallerExclude(t *testing.T) {
 		callerExcludeOuter,
 		gChild,
 		goroutineOrigin{creator: schedulerCreator, parent: gOuter2},
+		nil,
 	)
 	if gotNoOuter1 != wfOuter2 {
 		t.Fatalf("parentForRunLocked with wf-outer-1 excluded = %s, want %s", gotNoOuter1.spanID, wfOuter2.spanID)
@@ -27281,7 +27292,7 @@ func TestRunner_NonConcurrentLookalike_SuspendedIterator(t *testing.T) {
 //   - filtering unmatched groups against final exclusions (including
 //     re-collapsing surviving non-concurrent pairs);
 //   - storing all live group members in unmatched for parent-chain ambiguity
-//     detection and enclosingOpenSpanLocked scoping;
+//     detection and enclosing-span scoping;
 //   - resolving outer ancestor groups before inner descendant groups; and
 //   - preserving direct goroutine matches on cross-goroutine nested ancestors.
 func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
@@ -27295,7 +27306,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		peer := &spanRecord{spanID: "planner-peer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: gPeer}
 		inv.agentStack = append(inv.agentStack, root, outer, mid, inner, peer)
 
-		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, gInner, goroutineOrigin{parent: gInner})
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, gInner, goroutineOrigin{parent: gInner}, nil)
 		if got != inner {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner.spanID)
 		}
@@ -27311,7 +27322,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		sub2 := &spanRecord{spanID: "sub2", kind: spanKindAgent, name: "sub_b", parent: w2, goroutineID: gSub2}
 		inv.agentStack = append(inv.agentStack, root, w1, w2, sub1, sub2)
 
-		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, gSub1, goroutineOrigin{parent: 999})
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, gSub1, goroutineOrigin{parent: 999}, nil)
 		if got != sub1 {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, sub1.spanID)
 		}
@@ -27332,7 +27343,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", parent: outer2, goroutineID: gInner3}
 		inv.agentStack = append(inv.agentStack, root, mid, inner1, inner2, outer1, outer2, inner3)
 
-		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, gOuter1, goroutineOrigin{parent: 300})
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, gOuter1, goroutineOrigin{parent: 300}, nil)
 		if got != mid {
 			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, mid.spanID, root.spanID)
 		}
@@ -27348,7 +27359,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		wf := &spanRecord{spanID: "wf", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, parent: inner, goroutineID: gInner}
 		inv.agentStack = append(inv.agentStack, root, outer, mid, inner, wf)
 
-		got := inv.parentForRunLocked(identity{agentName: "item"}, nil, gWorker, goroutineOrigin{parent: 999})
+		got := inv.parentForRunLocked(identity{agentName: "item"}, nil, gWorker, goroutineOrigin{parent: 999}, nil)
 		if got != wf {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wf.spanID)
 		}
@@ -27362,7 +27373,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		innerWorker := &spanRecord{spanID: "inner-worker", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
 		inv.agentStack = append(inv.agentStack, root, peerWorker, outerWorker, innerWorker)
 
-		got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 499})
+		got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 499}, nil)
 		if got != root {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
 		}
@@ -27377,13 +27388,13 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		plannerPeer := &spanRecord{spanID: "planner-peer", kind: spanKindAgent, name: "planner", parent: root, goroutineID: 102}
 		inv.agentStack = append(inv.agentStack, root, planner1, seq, plannerSub, plannerPeer)
 
-		got := inv.parentForRunLocked(identity{agentName: "item_agent"}, nil, 500, goroutineOrigin{parent: 499})
+		got := inv.parentForRunLocked(identity{agentName: "item_agent"}, nil, 500, goroutineOrigin{parent: 499}, nil)
 		if got != root {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
 		}
 	})
 
-	t.Run("unmatched enclosingOpenSpanLocked includes collapsed members", func(t *testing.T) {
+	t.Run("unmatched enclosing span includes collapsed members", func(t *testing.T) {
 		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unmatched-enclosing-scope", time.Unix(1_700_000_000, 0))
 		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
 		midA := &spanRecord{spanID: "mid-a", kind: spanKindAgent, name: "mid_a", parent: root, goroutineID: 101}
@@ -27393,12 +27404,12 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		w3 := &spanRecord{spanID: "w3", kind: spanKindAgent, name: "w", nonLLM: true, children: []string{"sub"}, parent: midB, goroutineID: 102}
 		inv.agentStack = append(inv.agentStack, root, midA, w1, midB, w2, w3)
 
-		got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 499})
+		got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 499}, nil)
 		if got != root {
 			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, root.spanID, midB.spanID)
 		}
-		if enc := inv.enclosingOpenSpanLocked([]*spanRecord{w1, w2, w3}); enc != root {
-			t.Fatalf("enclosingOpenSpanLocked = %s, want %s", enc.spanID, root.spanID)
+		if enc := inv.buildOpenSpanTreeLocked(nil).enclosing(inv, []*spanRecord{w1, w2, w3}); enc != root {
+			t.Fatalf("enclosing = %s, want %s", enc.spanID, root.spanID)
 		}
 	})
 
@@ -27412,7 +27423,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		outer2 := &spanRecord{spanID: "outer-2", kind: spanKindAgent, name: "outer", parent: root, goroutineID: 101}
 		inv.agentStack = append(inv.agentStack, root, w1, outer1, wPeer, w2, outer2)
 
-		got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 101})
+		got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 101}, nil)
 		if got != w1 {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, w1.spanID)
 		}
@@ -27428,7 +27439,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer2, goroutineID: 400, origin: goroutineOrigin{parent: 300}}
 		inv.agentStack = append(inv.agentStack, root, outer1, inner1, inner2, outer2, inner3)
 
-		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 100})
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 100}, nil)
 		if got != inner3 {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner3.spanID)
 		}
@@ -27445,7 +27456,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer2, goroutineID: 400, origin: goroutineOrigin{parent: 300}}
 		inv.agentStack = append(inv.agentStack, root, inner0, outer1, inner1, inner2, outer2, inner3)
 
-		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 100})
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 100}, nil)
 		if got != inner3 {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner3.spanID)
 		}
@@ -27462,7 +27473,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", children: []string{"leaf"}, parent: outer2, goroutineID: 400}
 		inv.agentStack = append(inv.agentStack, root, inner0, outer1, inner1, inner2, outer2, inner3)
 
-		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 500, goroutineOrigin{parent: 300})
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 500, goroutineOrigin{parent: 300}, nil)
 		if got != inner3 {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner3.spanID)
 		}
@@ -27476,16 +27487,16 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		coordInner := &spanRecord{spanID: "coord-inner", kind: spanKindAgent, name: "coord", nonLLM: true, children: []string{"sub_a", "mid"}, parent: mid, goroutineID: 102}
 		inv.agentStack = append(inv.agentStack, root, coordOuter, mid, coordInner)
 
-		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 101, goroutineOrigin{parent: 100}); got != coordOuter {
+		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 101, goroutineOrigin{parent: 100}, nil); got != coordOuter {
 			t.Fatalf("goid=101 parentForRunLocked = %s, want %s", got.spanID, coordOuter.spanID)
 		}
-		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 103, goroutineOrigin{parent: 101}); got != coordOuter {
+		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 103, goroutineOrigin{parent: 101}, nil); got != coordOuter {
 			t.Fatalf("starter=101 parentForRunLocked = %s, want %s", got.spanID, coordOuter.spanID)
 		}
-		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 102, goroutineOrigin{parent: 101}); got != coordInner {
+		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 102, goroutineOrigin{parent: 101}, nil); got != coordInner {
 			t.Fatalf("goid=102 parentForRunLocked = %s, want %s", got.spanID, coordInner.spanID)
 		}
-		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 500, goroutineOrigin{parent: 499}); got != coordInner {
+		if got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, 500, goroutineOrigin{parent: 499}, nil); got != coordInner {
 			t.Fatalf("helper goid=500 parentForRunLocked = %s, want %s", got.spanID, coordInner.spanID)
 		}
 	})
@@ -27500,7 +27511,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		a3 := &spanRecord{spanID: "a3", kind: spanKindAgent, name: "a", nonLLM: true, children: []string{"leaf"}, parent: b2, goroutineID: 400}
 		inv.agentStack = append(inv.agentStack, root, a1, b1, a2, b2, a3)
 
-		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 100})
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 100}, nil)
 		if got != a3 {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, a3.spanID)
 		}
@@ -27515,7 +27526,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 500}
 		inv.agentStack = append(inv.agentStack, root, pOuter, mid, pInner, pSibling)
 
-		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 101})
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 300, goroutineOrigin{parent: 101}, nil)
 		if got != pInner {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, pInner.spanID)
 		}
@@ -27547,7 +27558,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 				pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 500}
 				inv.agentStack = append(inv.agentStack, pSibling)
 
-				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
 				if got.spanID != tc.wantID {
 					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, tc.wantID)
 				}
@@ -27564,7 +27575,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		sub1 := &spanRecord{spanID: "sub-1", kind: spanKindAgent, name: "sub", nonLLM: true, children: []string{"node"}, parent: node1, goroutineID: 202}
 		inv.agentStack = append(inv.agentStack, root, wf2, wf1, node1, sub1)
 
-		got := inv.parentForRunLocked(identity{agentName: "node"}, nil, 0, goroutineOrigin{creator: schedulerCreator, parent: 102})
+		got := inv.parentForRunLocked(identity{agentName: "node"}, nil, 0, goroutineOrigin{creator: schedulerCreator, parent: 102}, nil)
 		if got != wf2 {
 			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, wf2.spanID, sub1.spanID)
 		}
@@ -27591,7 +27602,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 				pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 400}
 				inv.agentStack = append(inv.agentStack, root, pOuter, mid, pInner1, pInner2, pSibling)
 
-				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
 				if got != mid {
 					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, mid.spanID)
 				}
@@ -27624,7 +27635,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 				other := &spanRecord{spanID: "other", kind: spanKindAgent, name: "other", branch: "other_branch", parent: root, goroutineID: 200}
 				inv.agentStack = append(inv.agentStack, root, pOuter, mid, pInner1, pInner2, pSibling, other)
 
-				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
 				if got != mid {
 					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, mid.spanID)
 				}
@@ -27648,7 +27659,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 				w := &spanRecord{spanID: "w", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"sub"}, parent: root, goroutineID: 102}
 				inv.agentStack = append(inv.agentStack, root, u, v, w)
 
-				got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 499})
+				got := inv.parentForRunLocked(identity{agentName: "sub"}, nil, 500, goroutineOrigin{parent: 499}, nil)
 				if got != root {
 					t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, root.spanID, w.spanID)
 				}
@@ -27679,7 +27690,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 				inner3 := &spanRecord{spanID: "inner-3", kind: spanKindAgent, name: "inner", nonLLM: true, children: []string{"leaf"}, parent: b2, goroutineID: 400}
 				inv.agentStack = append(inv.agentStack, root, inner0, a1, b1, a2, inner1, inner2, a3, b2, inner3)
 
-				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
 				if got != inner3 {
 					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, inner3.spanID)
 				}
@@ -27709,7 +27720,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 				w0 := &spanRecord{spanID: "w0", kind: spanKindAgent, name: "g0", parent: root, goroutineID: witnessG}
 				inv.agentStack = append(inv.agentStack, root, m0, m1, l0, w1, v1, u0, w0)
 
-				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
 				if got != w1 {
 					t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, w1.spanID, m1.spanID)
 				}
@@ -27740,7 +27751,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 					inv.agentStack = append(inv.agentStack, subChild)
 				}
 
-				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 999, goroutineOrigin{parent: 998})
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 999, goroutineOrigin{parent: 998}, nil)
 				if got != root {
 					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
 				}
@@ -27775,7 +27786,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 				pSibling := &spanRecord{spanID: "p-sibling", kind: spanKindAgent, name: "planner", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: tc.siblingG}
 				inv.agentStack = append(inv.agentStack, root, mid, pInner1, pInner2, step1, pSibling)
 
-				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
 				if got.spanID != tc.wantMidID {
 					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, tc.wantMidID)
 				}
@@ -27794,7 +27805,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		other := &spanRecord{spanID: "other", kind: spanKindAgent, name: "other", branch: "other_branch", parent: root, goroutineID: 200}
 		inv.agentStack = append(inv.agentStack, root, outer, mid, pInner1, pInner2, pSibling, other)
 
-		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 200, goroutineOrigin{parent: 100})
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 200, goroutineOrigin{parent: 100}, nil)
 		if got != mid {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, mid.spanID)
 		}
@@ -27811,7 +27822,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 		s2 := &spanRecord{spanID: "s2", kind: spanKindAgent, name: "s2", parent: pOuter, goroutineID: 100}
 		inv.agentStack = append(inv.agentStack, root, pOuter, mid, pInner1, s1, pInner2, s2)
 
-		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 200, goroutineOrigin{parent: 100})
+		got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 200, goroutineOrigin{parent: 100}, nil)
 		if got != pInner1 {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, pInner1.spanID)
 		}
@@ -27841,7 +27852,7 @@ func TestParentForRunLocked_LookalikeInvariants(t *testing.T) {
 					inv.agentStack = append(inv.agentStack, coordInner2)
 				}
 
-				got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, tc.goid, goroutineOrigin{parent: tc.parent})
+				got := inv.parentForRunLocked(identity{agentName: "sub_a"}, nil, tc.goid, goroutineOrigin{parent: tc.parent}, nil)
 				if got != coordOuter {
 					t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, coordOuter.spanID)
 				}
@@ -27870,7 +27881,7 @@ func BenchmarkParentForRunLocked_DistinctOpenSpans(b *testing.B) {
 			origin := goroutineOrigin{parent: 1}
 			b.ResetTimer()
 			for b.Loop() {
-				if got := inv.parentForRunLocked(id, nil, 99999, origin); got == nil {
+				if got := inv.parentForRunLocked(id, nil, 99999, origin, nil); got == nil {
 					b.Fatal("got nil parent")
 				}
 			}
@@ -27910,7 +27921,7 @@ func BenchmarkParentForRunLocked_LookalikesDeepAncestors(b *testing.B) {
 			origin := goroutineOrigin{parent: 999998}
 			b.ResetTimer()
 			for b.Loop() {
-				if got := inv.parentForRunLocked(id, nil, 999999, origin); got != parent {
+				if got := inv.parentForRunLocked(id, nil, 999999, origin, nil); got != parent {
 					b.Fatalf("parentForRunLocked = %s, want %s", got.spanID, parent.spanID)
 				}
 			}
@@ -27981,10 +27992,599 @@ func BenchmarkLookalikeParentScaling(b *testing.B) {
 			origin := goroutineOrigin{parent: 1}
 			b.ResetTimer()
 			for b.Loop() {
-				if got := inv.parentForRunLocked(id, nil, targetGoid, origin); got != lastWinner {
+				if got := inv.parentForRunLocked(id, nil, targetGoid, origin, nil); got != lastWinner {
 					b.Fatalf("parentForRunLocked = %s, want %s", got.spanID, lastWinner.spanID)
 				}
 			}
 		})
+	}
+}
+
+// TestRunner_ConcurrentLookalike_ParallelItemKeepsUniqueWorkflowParent covers
+// a workflow.ParallelWorker item that runs under the only open workflow while
+// two activations of the same agent are open: the second activation runs
+// workflow wf on branch "selected", and the first runs nothing. The item's
+// branch and node path point at wf alone, so the item stays under wf instead
+// of moving up to the span that encloses both activations.
+func TestRunner_ConcurrentLookalike_ParallelItemKeepsUniqueWorkflowParent(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	itemAgent, err := llmagent.New(llmagent.Config{
+		Name: "item_agent",
+		Mode: llmagent.ModeSingleTurn,
+		Model: &callbackLLM{
+			name: "item-model",
+			fn: func(context.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+				return &model.LLMResponse{Content: textContent("model", "item ok"), TurnComplete: true}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(item_agent): %v", err)
+	}
+	itemNode, err := workflow.NewAgentNode(itemAgent, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode(item_agent): %v", err)
+	}
+	itemsFn := workflow.NewFunctionNode("items", func(agent.Context, any) ([]string, error) {
+		return []string{"x"}, nil
+	}, workflow.NodeConfig{})
+	pw, err := workflow.NewParallelWorker("items_work", itemNode, 0, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewParallelWorker: %v", err)
+	}
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf",
+		Edges: workflow.Chain(workflow.Start, itemsFn, pw),
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(wf): %v", err)
+	}
+
+	worker1Open := make(chan struct{})
+	wfDone := make(chan struct{})
+	var workerCalls atomic.Int32
+	worker, err := agent.New(agent.Config{
+		Name: "worker",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if workerCalls.Add(1) == 1 {
+					close(worker1Open)
+					// Stay open, running nothing, until the second activation's
+					// workflow is done.
+					select {
+					case <-wfDone:
+					case <-ctx.Done():
+						yield(nil, ctx.Err())
+						return
+					}
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "worker 1 ok")
+					yield(ev, nil)
+					return
+				}
+				defer close(wfDone)
+				selected := "selected"
+				for ev, runErr := range wf.Run(ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &selected})) {
+					if !yield(ev, runErr) || runErr != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				type item struct {
+					ev  *session.Event
+					err error
+				}
+				ch := make(chan item, 16)
+				var wg sync.WaitGroup
+				forward := func() {
+					for ev, runErr := range worker.Run(ctx) {
+						ch <- item{ev: ev, err: runErr}
+					}
+				}
+				wg.Go(forward)
+				select {
+				case <-worker1Open:
+				case <-ctx.Done():
+					return
+				}
+				wg.Go(forward)
+				go func() {
+					wg.Wait()
+					close(ch)
+				}()
+				for it := range ch {
+					if !yield(it.ev, it.err) || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	if got := len(agentRowsOfType(rows, EventAgentStarting, "worker")); got != 2 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 2", got)
+	}
+	wfSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "wf")["span_id"].(string)
+	item := onlyAgentRow(t, rows, EventAgentStarting, "item_agent")
+	if got, _ := item["parent_span_id"].(string); got != wfSpan {
+		t.Errorf("item_agent parent_span_id = %q, want %q (the only open workflow)", got, wfSpan)
+	}
+}
+
+// onlyAgentRow returns the only row of eventType that agent wrote.
+func onlyAgentRow(t *testing.T, rows []map[string]any, eventType, agent string) map[string]any {
+	t.Helper()
+	got := agentRowsOfType(rows, eventType, agent)
+	if len(got) != 1 {
+		t.Fatalf("%s %s row count = %d, want 1", agent, eventType, len(got))
+	}
+	return got[0]
+}
+
+// TestRunner_ConcurrentLookalike_ChildRunsUnderLaunchingActivation covers a
+// child agent that one activation of worker declares and runs with its own
+// context on a goroutine where another activation named worker is still open
+// without running the child: suspended in yield while root consumes its
+// events, or left open after its BeforeAgentCallback answered for it. The
+// child runs under the activation whose context it was run with, which is
+// also the one that declares it.
+func TestRunner_ConcurrentLookalike_ChildRunsUnderLaunchingActivation(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		shortCircuit bool
+	}{
+		{name: "lookalike suspended in yield"},
+		{name: "lookalike left open by its BeforeAgentCallback", shortCircuit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			leaf := newOneEventAgent(t, "leaf", nil)
+			type runJob func(yield func(*session.Event, error) bool) bool
+			jobs := make(chan runJob, 1)
+			leafDone := make(chan struct{})
+			// worker1 declares leaf and hands root a run of it with its own
+			// context, which root runs on its own goroutine.
+			worker1, err := agent.New(agent.Config{
+				Name:      "worker",
+				SubAgents: []agent.Agent{leaf},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						job := func(yield func(*session.Event, error) bool) bool {
+							defer close(leafDone)
+							for ev, runErr := range leaf.Run(ctx) {
+								if !yield(ev, runErr) || runErr != nil {
+									return false
+								}
+							}
+							return true
+						}
+						select {
+						case jobs <- job:
+						case <-ctx.Done():
+							yield(nil, ctx.Err())
+							return
+						}
+						select {
+						case <-leafDone:
+						case <-ctx.Done():
+							yield(nil, ctx.Err())
+							return
+						}
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "worker"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "worker 1 ok")
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(worker1): %v", err)
+			}
+			worker2Cfg := agent.Config{
+				Name: "worker",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "worker"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "worker 2 ok")
+						yield(ev, nil)
+					}
+				},
+			}
+			if tc.shortCircuit {
+				worker2Cfg.BeforeAgentCallbacks = []agent.BeforeAgentCallback{
+					func(agent.Context) (*genai.Content, error) {
+						return textContent("model", "worker 2 answered early"), nil
+					},
+				}
+			}
+			worker2, err := agent.New(worker2Cfg)
+			if err != nil {
+				t.Fatalf("agent.New(worker2): %v", err)
+			}
+			root, err := agent.New(agent.Config{
+				Name: "root",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						type item struct {
+							ev  *session.Event
+							err error
+						}
+						worker1Events := make(chan item, 8)
+						go func() {
+							defer close(worker1Events)
+							for ev, runErr := range worker1.Run(ctx) {
+								worker1Events <- item{ev: ev, err: runErr}
+							}
+						}()
+						var job runJob
+						select {
+						case job = <-jobs:
+						case <-ctx.Done():
+							return
+						}
+						if tc.shortCircuit {
+							for ev, runErr := range worker2.Run(ctx) {
+								if !yield(ev, runErr) {
+									return
+								}
+							}
+							if !job(yield) {
+								return
+							}
+						} else {
+							ran := false
+							for ev, runErr := range worker2.Run(ctx) {
+								if !ran {
+									ran = true
+									// worker2 is suspended in yield below this frame.
+									if !job(yield) {
+										return
+									}
+								}
+								if !yield(ev, runErr) {
+									return
+								}
+							}
+						}
+						for it := range worker1Events {
+							if !yield(it.ev, it.err) {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+			for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			onlyRowOfType(t, rows, EventInvocationCompleted)
+			workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+			if len(workerStarts) != 2 {
+				t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+			}
+			w1Span, _ := workerStarts[0]["span_id"].(string)
+			w2Span, _ := workerStarts[1]["span_id"].(string)
+			if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf")["parent_span_id"].(string); got != w1Span {
+				t.Errorf("leaf parent_span_id = %q, want %q (worker 1, not worker 2 %q)", got, w1Span, w2Span)
+			}
+		})
+	}
+}
+
+// TestRunner_ConcurrentLookalike_DispatchedChildRunsUnderSubmitter covers a
+// dispatcher goroutine that root starts before either activation of worker
+// runs. Worker 1 runs inline on root's goroutine and stays suspended in yield
+// while worker 2 hands the dispatcher a run of leaf with its own context. The
+// goroutine that created the dispatcher is the one worker 1 runs on, but the
+// job is worker 2's, so leaf runs under worker 2.
+func TestRunner_ConcurrentLookalike_DispatchedChildRunsUnderSubmitter(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	leaf := newOneEventAgent(t, "leaf", nil)
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+	// dispatch is set by root before either activation of worker starts.
+	var dispatch chan<- func()
+	var workerCalls atomic.Int32
+	worker, err := agent.New(agent.Config{
+		Name:      "worker",
+		SubAgents: []agent.Agent{leaf},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if workerCalls.Add(1) == 1 {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "worker 1 ok")
+					yield(ev, nil)
+					return
+				}
+				leafEvents := make(chan item, 4)
+				job := func() {
+					defer close(leafEvents)
+					for ev, runErr := range leaf.Run(ctx) {
+						leafEvents <- item{ev: ev, err: runErr}
+					}
+				}
+				select {
+				case dispatch <- job:
+				case <-ctx.Done():
+					yield(nil, ctx.Err())
+					return
+				}
+				for it := range leafEvents {
+					if !yield(it.ev, it.err) || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				jobs := make(chan func())
+				dispatcherDone := make(chan struct{})
+				go func() {
+					defer close(dispatcherDone)
+					for job := range jobs {
+						job()
+					}
+				}()
+				defer func() {
+					close(jobs)
+					<-dispatcherDone
+				}()
+				dispatch = jobs
+				for ev, runErr := range worker.Run(ctx) {
+					// Worker 1 is suspended in yield on this goroutine while
+					// worker 2 runs on another.
+					worker2Events := make(chan item, 8)
+					go func() {
+						defer close(worker2Events)
+						for ev, runErr := range worker.Run(ctx) {
+							worker2Events <- item{ev: ev, err: runErr}
+						}
+					}()
+					for it := range worker2Events {
+						if !yield(it.ev, it.err) {
+							return
+						}
+					}
+					if !yield(ev, runErr) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+	if len(workerStarts) != 2 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+	}
+	w1Span, _ := workerStarts[0]["span_id"].(string)
+	w2Span, _ := workerStarts[1]["span_id"].(string)
+	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf")["parent_span_id"].(string); got != w2Span {
+		t.Errorf("leaf parent_span_id = %q, want %q (worker 2, which submitted the job, not worker 1 %q)", got, w2Span, w1Span)
+	}
+}
+
+// lineageContext is a context whose activation chain parentForRunLocked
+// follows: like the contexts that ADK derives for each agent run, it embeds
+// the context that it was derived from.
+type lineageContext struct {
+	context.Context
+}
+
+// lineageKey is the key of a value that a test adds to a lineageContext.
+type lineageKey struct{}
+
+// TestParentForRunLocked_LaunchLineage pins that the activation on the
+// context chain of the starting run decides between concurrent lookalikes
+// ahead of goroutine evidence: an activation on the child's goroutine or on
+// the goroutine that started it is not its parent unless the child's context
+// derives from that activation.
+func TestParentForRunLocked_LaunchLineage(t *testing.T) {
+	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-launch-lineage", time.Unix(1_700_000_000, 0))
+	rootAct := &lineageContext{Context: context.Background()}
+	w1Act := &lineageContext{Context: rootAct}
+	w2Act := &lineageContext{Context: rootAct}
+	root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100, activation: rootAct}
+	w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 101, activation: w1Act}
+	w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 102, activation: w2Act}
+	inv.agentStack = append(inv.agentStack, root, w1, w2)
+	leaf := identity{agentName: "leaf"}
+	for _, tc := range []struct {
+		name   string
+		from   context.Context
+		goid   uint64
+		origin goroutineOrigin
+		want   *spanRecord
+	}{
+		{name: "run from worker 1 on worker 2's goroutine", from: w1Act, goid: 102, origin: goroutineOrigin{parent: 100}, want: w1},
+		{name: "run from worker 2 on a goroutine worker 1's goroutine started", from: w2Act, goid: 500, origin: goroutineOrigin{parent: 101}, want: w2},
+		{name: "run from root on worker 2's goroutine", from: rootAct, goid: 102, origin: goroutineOrigin{parent: 100}, want: root},
+		{name: "run through a derived context of worker 1", from: context.WithValue(w1Act, lineageKey{}, 1), goid: 102, origin: goroutineOrigin{parent: 100}, want: w1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			act := &lineageContext{Context: tc.from}
+			if got := inv.parentForRunLocked(leaf, nil, tc.goid, tc.origin, act); got != tc.want {
+				t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, tc.want.spanID)
+			}
+		})
+	}
+	t.Run("no activation on the chain falls back to goroutine evidence", func(t *testing.T) {
+		act := &lineageContext{Context: context.Background()}
+		if got := inv.parentForRunLocked(leaf, nil, 102, goroutineOrigin{parent: 100}, act); got != w2 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, w2.spanID)
+		}
+	})
+}
+
+// TestParentForRunLocked_DemotionKeepsUniqueBranchPathMatch pins that an
+// unmatched lookalike group above the selected parent moves the parent up
+// only when another member of the group also has an open span that the
+// child's branch and node path fit at or below the selected parent's.
+func TestParentForRunLocked_DemotionKeepsUniqueBranchPathMatch(t *testing.T) {
+	item := identity{agentName: "item_agent", branch: "selected.item_agent@1", path: "selected/wf@1/items_work@1"}
+	build := func(peerChild *spanRecord) (*invocationTrace, *spanRecord, *spanRecord) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unique-branch-path", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		inv.agentStack = append(inv.agentStack, root, w1, w2)
+		if peerChild != nil {
+			peerChild.parent = w1
+			inv.agentStack = append(inv.agentStack, peerChild)
+		}
+		wf := &spanRecord{spanID: "wf", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "selected/wf@1", parent: w2, goroutineID: 103}
+		inv.agentStack = append(inv.agentStack, wf)
+		return inv, root, wf
+	}
+	t.Run("only one member hosts the selected parent", func(t *testing.T) {
+		inv, _, wf := build(nil)
+		if got := inv.parentForRunLocked(item, nil, 200, goroutineOrigin{parent: 199}, nil); got != wf {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wf.spanID)
+		}
+	})
+	t.Run("only one member hosts a span off the child's path", func(t *testing.T) {
+		inv, _, wf := build(&spanRecord{spanID: "other", kind: spanKindAgent, name: "other", branch: "other", path: "other@1", goroutineID: 104})
+		if got := inv.parentForRunLocked(item, nil, 200, goroutineOrigin{parent: 199}, nil); got != wf {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wf.spanID)
+		}
+	})
+	t.Run("only one member hosts a span below the selected parent off the child's path", func(t *testing.T) {
+		// The sibling's branch and node path are at or below wf's, and the
+		// child's branch fits it, but the child's node path does not.
+		inv, _, wf := build(&spanRecord{spanID: "sibling", kind: spanKindAgent, name: "other_agent", branch: "selected", path: "selected/wf@1/other@1", goroutineID: 104})
+		if got := inv.parentForRunLocked(item, nil, 200, goroutineOrigin{parent: 199}, nil); got != wf {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wf.spanID)
+		}
+	})
+	t.Run("only one member hosts a span above the selected parent", func(t *testing.T) {
+		inv, _, wf := build(&spanRecord{spanID: "outer", kind: spanKindAgent, name: "outer", branch: "selected", path: "selected", goroutineID: 104})
+		if got := inv.parentForRunLocked(item, nil, 200, goroutineOrigin{parent: 199}, nil); got != wf {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, wf.spanID)
+		}
+	})
+	t.Run("both members host a span the child fits", func(t *testing.T) {
+		inv, root, _ := build(&spanRecord{spanID: "wf-alt", kind: spanKindAgent, name: "wf_alt", branch: "selected", path: "selected/wf@1", goroutineID: 104})
+		if got := inv.parentForRunLocked(item, nil, 200, goroutineOrigin{parent: 199}, nil); got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
+		}
+	})
+}
+
+// TestParentForRunLocked_DistinctOpenSpansAllocateNothing pins that while no
+// two open activations share an agent name, branch and node path,
+// parentForRunLocked skips lookalike resolution without allocating.
+func TestParentForRunLocked_DistinctOpenSpansAllocateNothing(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector allocates on its own")
+	}
+	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-distinct-allocs", time.Unix(1_700_000_000, 0))
+	root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+	inv.agentStack = append(inv.agentStack, root)
+	for i := range 1_000 {
+		inv.agentStack = append(inv.agentStack, &spanRecord{
+			spanID:      fmt.Sprintf("item-%d", i),
+			kind:        spanKindAgent,
+			name:        "item",
+			path:        fmt.Sprintf("pw[%d]", i),
+			parent:      root,
+			goroutineID: uint64(i + 2),
+		})
+	}
+	id := identity{agentName: "leaf", path: "pw[999]"}
+	if allocs := testing.AllocsPerRun(100, func() {
+		inv.parentForRunLocked(id, nil, 99999, goroutineOrigin{parent: 1}, nil)
+	}); allocs != 0 {
+		t.Errorf("parentForRunLocked allocated %v times per call, want 0", allocs)
+	}
+}
+
+// TestTraceManager_LookalikeCountFollowsPushAndPop pins that the count of
+// agent name, branch and node path keys that two or more open activations
+// share follows pushAgentSpan and popAgentSpan.
+func TestTraceManager_LookalikeCountFollowsPushAndPop(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	id := func(agentName string) identity {
+		return identity{invocationID: "inv", agentName: agentName}
+	}
+	tm.invocationSpan(ctx, id("root"), nil)
+	dups := func() int {
+		inv := tm.invocations["inv"]
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		if inv.lookalikesLen != len(inv.agentStack) {
+			t.Fatalf("lookalikesLen = %d, want len(agentStack) = %d", inv.lookalikesLen, len(inv.agentStack))
+		}
+		return inv.lookalikeDups
+	}
+	tm.pushAgentSpan(ctx, id("root"))
+	tm.pushAgentSpan(ctx, id("worker"))
+	if got := dups(); got != 0 {
+		t.Fatalf("after one worker: lookalikeDups = %d, want 0", got)
+	}
+	tm.pushAgentSpan(ctx, id("worker"))
+	if got := dups(); got != 1 {
+		t.Fatalf("after two workers: lookalikeDups = %d, want 1", got)
+	}
+	tm.popAgentSpan(ctx, id("worker"))
+	if got := dups(); got != 0 {
+		t.Fatalf("after one worker ends: lookalikeDups = %d, want 0", got)
+	}
+	tm.popAgentSpan(ctx, id("worker"))
+	tm.popAgentSpan(ctx, id("root"))
+	if got := dups(); got != 0 {
+		t.Fatalf("after every agent ends: lookalikeDups = %d, want 0", got)
 	}
 }

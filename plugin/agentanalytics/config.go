@@ -232,23 +232,18 @@ type GCSContentOffloader interface {
 // attributes.adk.schema_version on each row is "1". Recursive payload
 // sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
 //
-// An agent that a parent agent runs on its own goroutine or on a goroutine
-// that it starts directly is placed under that activation's span
-// (parent_span_id). Because the runtime names only the goroutine that directly
-// started another, when concurrent activations of the same agent each launch a
-// child agent across an intermediate goroutine that runs no ADK callback (for
-// example, a custom agent's helper goroutine, workflow.ParallelWorker, or
-// workflow.NewWorkflowNode), the child agent is placed under the nearest open
-// span enclosing all concurrent activations of that agent (or the invocation
-// span if none encloses them). Similarly, if an earlier activation of an agent
-// on a different goroutine ended without running AfterAgentCallback (for
-// example, after failing or short-circuiting in BeforeAgentCallback) and
-// remains open when a later activation of the same agent launches a child across
-// an intermediate goroutine, the plugin cannot distinguish the unclosed prior
-// span from a live concurrent peer without an end-of-run signal and places the
-// child under the nearest enclosing span. When per-activation parenting is
-// required for custom agents, run sub-agents on the agent's own goroutine or on
-// a goroutine that it starts directly.
+// While concurrent activations of the same agent on the same branch and node
+// path are open, an agent that one of them runs is placed under that
+// activation's span (parent_span_id): the activation whose context, or a
+// context derived from it, was passed to the agent's Run, whichever goroutine
+// runs the agent. If the context does not show the activation that it derives
+// from, as when it was derived through a context type that does not embed its
+// parent as an exported Context field, goroutines decide instead: a child agent
+// that runs on an activation's goroutine, or on a goroutine that the activation
+// starts directly, is placed under that activation, and one launched across an
+// intermediate goroutine that runs no ADK callback is placed under the nearest
+// open span enclosing the concurrent activations that hold an open span its
+// branch and node path fit (or the invocation span if none encloses them).
 type Config struct {
 	Enabled        bool
 	ProjectID      string
