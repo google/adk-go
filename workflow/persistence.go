@@ -659,7 +659,7 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		return nil, err
 	}
 
-	ns := &NodeState{Branch: scan.branch, interruptSchemas: scan.schemas}
+	ns := &NodeState{Branch: resumeBranch(node, scan, replay), interruptSchemas: scan.schemas}
 
 	switch {
 	case len(unresolved) > 0 && reenter && len(resumed) > 0:

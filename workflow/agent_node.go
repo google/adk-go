@@ -17,6 +17,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 
@@ -184,14 +185,21 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			InvocationID:   ctx.InvocationID(),
 		}
 		agentCtx := internalcontext.NewInvocationContext(bound, params)
-		exCtx := agent.NewContext(agentCtx)
+		// The agent's tools run nodes on a scheduler of their own, whose events
+		// leave through this iterator, serialized with the agent's. The node's
+		// path and run id stay off the agent's context: a workflow agent run
+		// here would nest its own path under them a second time.
+		emit, consumerGone := makeEmit(yield, ctx)
+		sub := newStandaloneSubScheduler(ctx, ctx.Path(), emit)
+		delta := &agent.CommonContextDelta{SubScheduler: &sub}
 		// The agent checks its state writes against the activation's state
 		// schema, as a nested workflow without a schema of its own does.
 		if sv, ok := ctx.(interface{ StateValidator() agent.StateValidator }); ok {
 			if v := sv.StateValidator(); v != nil {
-				exCtx = exCtx.WithDelta(&agent.CommonContextDelta{StateValidator: &v})
+				delta.StateValidator = &v
 			}
 		}
+		exCtx := agent.NewContext(agentCtx).WithDelta(delta)
 
 		type NodeRunner interface {
 			RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
@@ -212,6 +220,12 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 
 		for event, err := range events {
 			if err != nil {
+				// A tool's pause ends the agent's run; its pause event has
+				// already gone out, and the scheduler records the node as
+				// waiting from it.
+				if errors.Is(err, ErrNodeInterrupted) || consumerGone() {
+					return
+				}
 				yield(nil, err)
 				return
 			}
@@ -233,7 +247,7 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			// The output schema (if any) is applied by the scheduler via
 			// ValidateOutput; synthesizeAgentOutput leaves the raw model
 			// text for defaultValidateOutput to project onto the schema.
-			if !yield(event, nil) {
+			if emit(event) != nil {
 				return
 			}
 		}

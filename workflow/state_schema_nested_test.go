@@ -31,6 +31,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -828,4 +829,247 @@ func TestDynamicChild_GeneratorToolWritesChecked(t *testing.T) {
 	if got, _ := responses[0]["error"].(string); !strings.Contains(got, wantErr) {
 		t.Errorf("gen's function response error = %q, want it to contain %q", got, wantErr)
 	}
+}
+
+// countingValidator accepts every key and counts the checks of each.
+type countingValidator struct {
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+func (v *countingValidator) ValidateStateEntry(key string, _ any) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.calls == nil {
+		v.calls = map[string]int{}
+	}
+	v.calls[key]++
+	return nil
+}
+
+func (v *countingValidator) count(key string) int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.calls[key]
+}
+
+// placementNode places a in a workflow node: an agent node (P1), an agent node
+// run as a dynamic child of "orch" (P2), or a single_turn agent run by
+// llmagent.RunLLMAgentAsNode in the dynamic node "host" (P3).
+type placementNode func(t *testing.T, a agent.Agent) workflow.Node
+
+func agentNodePlacement(t *testing.T, a agent.Agent) workflow.Node {
+	t.Helper()
+	n, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode() error = %v", err)
+	}
+	return n
+}
+
+func dynamicChildPlacement(t *testing.T, a agent.Agent) workflow.Node {
+	t.Helper()
+	child := agentNodePlacement(t, a)
+	return workflow.NewDynamicNode("orch", func(ctx agent.Context, _ any, _ func(*session.Event) error) (any, error) {
+		return workflow.RunNode[any](ctx, child, nil)
+	}, workflow.NodeConfig{})
+}
+
+func singleTurnPlacement(_ *testing.T, a agent.Agent) workflow.Node {
+	return workflow.NewDynamicNode("host", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		for ev, err := range llmagent.RunLLMAgentAsNode(a, ctx, nil) {
+			if err != nil {
+				return nil, err
+			}
+			if err := emit(ev); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	}, workflow.NodeConfig{})
+}
+
+// genToolAgent is an LLM agent "a" in mode whose model calls the generator
+// tool "gen", with handler h, once and then answers "done".
+func genToolAgent(t *testing.T, mode llmagent.Mode, h generatortool.Func[struct{}, string]) agent.Agent {
+	t.Helper()
+	gen, err := generatortool.New(functiontool.Config{Name: "gen", Description: "writes state"}, h)
+	if err != nil {
+		t.Fatalf("generatortool.New() error = %v", err)
+	}
+	llm := &testutil.MockModel{Responses: []*genai.Content{
+		{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "gen", Args: map[string]any{}}}}},
+		genai.NewContentFromText("done", genai.RoleModel),
+	}}
+	a, err := llmagent.New(llmagent.Config{Name: "a", Model: llm, Tools: []tool.Tool{gen}, Mode: mode})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	return a
+}
+
+// pipelineSchema declares the one key "counter".
+func pipelineSchema(t *testing.T) *jsonschema.Resolved {
+	t.Helper()
+	schema, err := (&jsonschema.Schema{
+		Title:      "PipelineSchema",
+		Type:       "object",
+		Properties: map[string]*jsonschema.Schema{"counter": {Type: "integer"}},
+	}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	return schema
+}
+
+// runUnderValidator runs wf, which has no state schema of its own, as the root
+// agent "wf" whose context checks state writes with v, and returns the stored
+// state.
+func runUnderValidator(t *testing.T, wf *workflow.Workflow, v agent.StateValidator) map[string]any {
+	t.Helper()
+	root, err := agent.New(agent.Config{Name: "wf", Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return wf.Run(agent.NewContext(ic).WithDelta(&agent.CommonContextDelta{StateValidator: &v}))
+	}})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	return runRootAgent(t, root)
+}
+
+// runRootAgent runs root on a new in-memory session until the turn ends and
+// returns the stored state; a run error fails the test.
+func runRootAgent(t *testing.T, root agent.Agent) map[string]any {
+	t.Helper()
+	svc := session.InMemoryService()
+	created, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("session Create() error = %v", err)
+	}
+	r, err := runner.New(runner.Config{AppName: "app", Agent: root, SessionService: svc})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+	for _, err := range r.Run(t.Context(), "u", created.Session.ID(), genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("run error = %v", err)
+		}
+	}
+	return storedState(t, svc, created.Session.ID())
+}
+
+// Fails if a generator tool's state write escapes the workflow's state schema
+// in a placement where the tool runs as a node of a sub-scheduler, or the
+// enclosing node checks the tool's event a second time; or if a child that
+// RunNode runs under a context with no sub-scheduler writes a key the
+// context's validator refuses.
+func TestStandaloneChild_GeneratorToolWritesCheckedInEveryPlacement(t *testing.T) {
+	const wantErr = `workflow: state key "unknown" is not declared in the state schema "PipelineSchema"; declared: [counter]`
+	placements := []struct {
+		name  string
+		mode  llmagent.Mode
+		place placementNode
+	}{
+		{name: "p1_agent_node", place: agentNodePlacement},
+		{name: "p2_dynamic_child", place: dynamicChildPlacement},
+		{name: "p3_single_turn", mode: llmagent.ModeSingleTurn, place: singleTurnPlacement},
+	}
+	for _, p := range placements {
+		t.Run(p.name, func(t *testing.T) {
+			t.Run("undeclared_key_refused", func(t *testing.T) {
+				a := genToolAgent(t, p.mode, func(ctx agent.Context, _ struct{}, _ func(*session.Event) error) (string, error) {
+					if err := ctx.State().Set("unknown", 1); err != nil {
+						return "", err
+					}
+					return "ok", nil
+				})
+				wf := newStateWorkflow(t, p.place(t, a), workflow.WithStateSchema(pipelineSchema(t)))
+
+				events, stored, err := runStateWorkflow(t, wf, nil)
+				if err != nil {
+					t.Fatalf("run error = %v, want nil", err)
+				}
+
+				if len(stored) != 0 {
+					t.Errorf("stored state = %v, want empty", stored)
+				}
+				var responses []map[string]any
+				for _, ev := range events {
+					if ev.Author == "gen" {
+						t.Errorf("event authored by gen reached the caller: %+v", ev)
+					}
+					for _, fr := range ev.FunctionResponses() {
+						if fr.Name == "gen" {
+							responses = append(responses, fr.Response)
+						}
+					}
+				}
+				if len(responses) != 1 {
+					t.Fatalf("%d function responses of gen reached the caller, want 1", len(responses))
+				}
+				if got, _ := responses[0]["error"].(string); !strings.Contains(got, wantErr) {
+					t.Errorf("gen's function response error = %q, want it to contain %q", got, wantErr)
+				}
+			})
+
+			t.Run("valid_key_checked_once", func(t *testing.T) {
+				a := genToolAgent(t, p.mode, func(_ agent.Context, _ struct{}, emit func(*session.Event) error) (string, error) {
+					return "ok", emit(&session.Event{Actions: session.EventActions{StateDelta: map[string]any{"counter": 7}}})
+				})
+				wf, err := workflow.New("inner", workflow.Chain(workflow.Start, p.place(t, a)))
+				if err != nil {
+					t.Fatalf("workflow.New() error = %v", err)
+				}
+				var v countingValidator
+
+				stored := runUnderValidator(t, wf, &v)
+
+				if diff := cmp.Diff(map[string]any{"counter": 7}, stored); diff != "" {
+					t.Errorf("stored state mismatch (-want +got):\n%s", diff)
+				}
+				if got := v.count("counter"); got != 1 {
+					t.Errorf("checks of counter = %d, want 1", got)
+				}
+			})
+		})
+	}
+
+	t.Run("fallback", func(t *testing.T) {
+		// The validator of a node of a workflow with the schema, so the
+		// fallback's context checks writes as a workflow's node does.
+		var v agent.StateValidator
+		capture := newStateNode("capture", func(ctx agent.Context, _ func(*session.Event, error) bool) {
+			if sv, ok := ctx.(interface{ StateValidator() agent.StateValidator }); ok {
+				v = sv.StateValidator()
+			}
+		})
+		if _, _, err := runStateWorkflow(t, newStateWorkflow(t, capture, workflow.WithStateSchema(pipelineSchema(t))), nil); err != nil {
+			t.Fatalf("capture run error = %v", err)
+		}
+		if v == nil {
+			t.Fatal("the node of a workflow with a state schema has no state validator")
+		}
+		child := newStateNode("child", func(ctx agent.Context, yield func(*session.Event, error) bool) {
+			yield(outputEvent(ctx, "ok", map[string]any{"unknown": 1}), nil)
+		})
+		var runErr error
+		root, err := agent.New(agent.Config{Name: "root", Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {
+				ctx := agent.NewContext(ic).WithDelta(&agent.CommonContextDelta{StateValidator: &v})
+				_, runErr = workflow.RunNode[string](ctx, child, nil)
+			}
+		}})
+		if err != nil {
+			t.Fatalf("agent.New() error = %v", err)
+		}
+
+		stored := runRootAgent(t, root)
+
+		se, ok := errors.AsType[*workflow.StateSchemaError](runErr)
+		if !ok || se.Key != "unknown" {
+			t.Errorf("RunNode() error = %v, want a *workflow.StateSchemaError for key unknown", runErr)
+		}
+		if len(stored) != 0 {
+			t.Errorf("stored state = %v, want empty", stored)
+		}
+	})
 }

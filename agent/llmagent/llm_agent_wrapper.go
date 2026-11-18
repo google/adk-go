@@ -65,7 +65,9 @@ import (
 //     Agent.Run on each iteration it scans the session for unresolved
 //     task delegations (task FCs from this coordinator without a
 //     matching FR), dispatches each via workflow.RunNode under a
-//     stable WithRunID(fc.ID), and synthesizes a user-role FR event so
+//     stable WithRunID(fc.ID) on a sub-branch of its own
+//     (WithUseSubBranch, so the task agent sees only its own function
+//     calls), and synthesizes a user-role FR event so
 //     the LLM sees the task result on the next round. The loop ends
 //     when the LLM finishes without delegating. transfer_to_agent is
 //     handled in-process by llmagent.Run (forwarded through the same
@@ -74,6 +76,13 @@ import (
 //     transferred-to sub-agent's first response. See the package
 //     comment block in runChat below for why this differs from
 //     adk-python's "exit-and-re-pick-next-turn" model.
+//
+// In single_turn and task mode the agent runs on ctx.WithAgentContext of its
+// own invocation context, which keeps ctx's sub-scheduler: a tool or callback
+// of the agent can call workflow.RunNode, and a child it runs that way shows
+// its events and can pause, as in chat mode. When ctx is a tool or callback
+// context, which has no agent context to give, the agent runs on its own
+// invocation context alone.
 func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		llmA, ok := a.(llminternal.Agent)
@@ -185,10 +194,19 @@ func RunLLMAgentAsNode(a agent.Agent, ctx agent.Context, nodeInput any) iter.Seq
 				RunConfig:      ctx.RunConfig(),
 				InvocationID:   ctx.InvocationID(),
 			})
+			// The agent runs on ctx's agent context so that its tools and
+			// callbacks keep ctx's sub-scheduler: workflow.RunNode and a
+			// generator tool then run their child under it, show its events
+			// and can pause. A tool or callback context has no agent context
+			// to give (WithAgentContext returns nil), so the agent runs on ic.
+			runCtx := ic
+			if nodeCtx := ctx.WithAgentContext(ic); nodeCtx != nil {
+				runCtx = nodeCtx
+			}
 			if mode == llminternal.ModeSingleTurn {
-				runSingleTurn(a, ic, yield)
+				runSingleTurn(a, runCtx, yield)
 			} else {
-				runTask(a, ic, yield)
+				runTask(a, runCtx, yield)
 			}
 		}
 	}
@@ -511,6 +529,7 @@ func dispatchTaskFC(parentAgent agent.Agent, fc *genai.FunctionCall, ctx agent.C
 	}
 	out, err := workflow.RunNode[any](ctx, node, fc.Args,
 		workflow.WithRunID(fc.ID),
+		workflow.WithUseSubBranch(),
 		workflow.WithIsolationScope(fc.ID),
 		workflow.WithRaiseOnWait(),
 	)
