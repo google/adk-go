@@ -116,20 +116,37 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			return
 		}
 
-		responseLatestIndex := make(map[string]int)
+		responseIndexes := make(map[string][]int)
 		firstAnswerIndex := make(map[string]int)
 		for idx, ev := range events {
 			for _, resp := range utils.FunctionResponses(ev.Content) {
-				// A response carrying a confirmation request is the pending
-				// placeholder, whatever its payload looks like.
-				if _, pending := ev.Actions.RequestedToolConfirmations[resp.ID]; pending {
-					continue
-				}
-				responseLatestIndex[resp.ID] = idx
+				responseIndexes[resp.ID] = append(responseIndexes[resp.ID], idx)
 				if _, ok := firstAnswerIndex[resp.ID]; !ok && ev.Author == "user" && resp.Name == toolconfirmation.FunctionCallName {
 					firstAnswerIndex[resp.ID] = idx
 				}
 			}
+		}
+		// answeredAfter reports whether the response at idx for callID came
+		// after the user's first answer at ansIdx, so it is the result of
+		// resuming that call.
+		//
+		// The database session service orders events that share a timestamp
+		// by ID, so the order of the slice alone cannot be trusted on a tie:
+		//   - A real result that ties with the answer may sort before it; it
+		//     still counts.
+		//   - The pending placeholder (a response carrying a confirmation
+		//     request for the call) that ties with the answer may sort after
+		//     it; it was written before the answer, so it does not count. A
+		//     placeholder written later, when the resumed tool asks for
+		//     confirmation again, does count, as in adk-python
+		//     (flows/llm_flows/tools/_confirmation.py).
+		answeredAfter := func(idx, ansIdx int, callID string) bool {
+			ev, ans := events[idx], events[ansIdx]
+			tie := !ev.Timestamp.IsZero() && ev.Timestamp.Equal(ans.Timestamp)
+			if _, pending := ev.Actions.RequestedToolConfirmations[callID]; pending {
+				return idx > ansIdx && !tie
+			}
+			return idx > ansIdx || tie
 		}
 
 		agentName := ctx.Agent().Name()
@@ -244,18 +261,17 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			}
 
 			// Remove the tools that already have a result stored after the user's first
-			// answer to the confirmation (repeated approvals). Placeholders are skipped
-			// above. A store may order a real result before that answer when both share
-			// a timestamp, so a result also counts when it is not older than the answer.
+			// answer to the confirmation (repeated approvals).
 			for callID := range toolsToResumeByFunctionCallID {
-				idx, ok := responseLatestIndex[callID]
-				if !ok || idx <= k {
-					continue
-				}
 				ansIdx, answered := firstAnswerIndex[confirmationIDByCallID[callID]]
-				ts := events[idx].Timestamp
-				if !answered || idx > ansIdx || (!ts.IsZero() && !ts.Before(events[ansIdx].Timestamp)) {
-					delete(toolsToResumeByFunctionCallID, callID)
+				if !answered {
+					ansIdx = k
+				}
+				for _, idx := range responseIndexes[callID] {
+					if idx > k && answeredAfter(idx, ansIdx, callID) {
+						delete(toolsToResumeByFunctionCallID, callID)
+						break
+					}
 				}
 			}
 			if len(toolsToResumeByFunctionCallID) == 0 {
