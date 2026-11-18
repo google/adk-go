@@ -279,6 +279,8 @@ func getAuthorForEvent(ctx Context, event *session.Event) string {
 func eventActionsFrom(actions *session.EventActions) session.EventActions {
 	out := *actions
 	out.Compaction = nil
+	out.AgentState = nil
+	out.EndOfAgent = false
 	return out
 }
 
