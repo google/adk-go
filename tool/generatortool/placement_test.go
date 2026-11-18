@@ -121,6 +121,10 @@ func TestRun_BodyRunsInEveryPlacement(t *testing.T) {
 		{
 			name: "agent node in a workflow",
 			root: func(t *testing.T, a agent.Agent) agent.Agent { return workflowRoot(t, agentNode(t, a)) },
+			wantGen: []evSummary{
+				{Author: "gen", Branch: "gen@call_1", Path: "wf@1/a@1/gen@call_1", Text: "working"},
+				{Author: "gen", Branch: "gen@call_1", Path: "wf@1/a@1/gen@call_1", Output: "ok", NoContent: true},
+			},
 		},
 		{
 			name: "agent node as a dynamic child",
@@ -130,11 +134,30 @@ func TestRun_BodyRunsInEveryPlacement(t *testing.T) {
 					return workflow.RunNode[any](ctx, child, nil)
 				}, workflow.NodeConfig{}))
 			},
+			wantGen: []evSummary{
+				{Author: "gen", Branch: "gen@call_1", Path: "wf@1/orch@1/a@1/gen@call_1", Text: "working"},
+				{Author: "gen", Branch: "gen@call_1", Path: "wf@1/orch@1/a@1/gen@call_1", Output: "ok", NoContent: true},
+			},
 		},
 		{
 			name: "single_turn agent run as a node",
 			mode: llmagent.ModeSingleTurn,
 			root: func(t *testing.T, a agent.Agent) agent.Agent { return workflowRoot(t, hostNode(a)) },
+			wantGen: []evSummary{
+				{Author: "gen", Branch: "gen@call_1", Path: "wf@1/host@1/gen@call_1", Text: "working"},
+				{Author: "gen", Branch: "gen@call_1", Path: "wf@1/host@1/gen@call_1", Output: "ok", NoContent: true},
+			},
+		},
+		{
+			// A task agent's tool runs its child under the host node's
+			// sub-scheduler, so the child's events reach the session.
+			name: "task agent run as a node",
+			mode: llmagent.ModeTask,
+			root: func(t *testing.T, a agent.Agent) agent.Agent { return workflowRoot(t, hostNode(a)) },
+			wantGen: []evSummary{
+				{Author: "gen", Branch: "gen@call_1", Path: "wf@1/host@1/gen@call_1", Text: "working"},
+				{Author: "gen", Branch: "gen@call_1", Path: "wf@1/host@1/gen@call_1", Output: "ok", NoContent: true},
+			},
 		},
 		{
 			name: "undeclared mode agent run as a node",
@@ -214,7 +237,7 @@ func sequentialRoot(t *testing.T, a agent.Agent) agent.Agent {
 // Fails if a call with no workflow node loses an output, a state change or an
 // artifact change the function response event can carry, applies the deltas
 // of a partial event, pauses where nothing could answer, or runs the handler
-// on another branch than the call's.
+// on another branch or path than the call's.
 func TestRun_OffNodePathKeepsWhatTheResponseCarries(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -299,6 +322,15 @@ func TestRun_OffNodePathKeepsWhatTheResponseCarries(t *testing.T) {
 			name: "branch of the call",
 			handler: func(ctx agent.Context, _ noArgs, _ func(*session.Event) error) (any, error) {
 				return ctx.Branch(), nil
+			},
+			wantResponse:  map[string]any{"result": "gen@call_1"},
+			wantState:     map[string]any{},
+			wantArtifacts: map[string]int64{},
+		},
+		{
+			name: "path of the call",
+			handler: func(ctx agent.Context, _ noArgs, _ func(*session.Event) error) (any, error) {
+				return ctx.Path(), nil
 			},
 			wantResponse:  map[string]any{"result": "gen@call_1"},
 			wantState:     map[string]any{},

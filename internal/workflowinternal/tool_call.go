@@ -40,8 +40,7 @@ type ToolBody func(ctx agent.Context, emit func(*session.Event) error) (result a
 
 // RunToolCall runs body as a child node of toolCtx's node named after toolName,
 // on the tool branch and under the call run id of toolCtx.FunctionCallID(), and
-// returns its output. When toolCtx has no sub-scheduler, body runs outside any
-// node instead (see below).
+// returns its output.
 //
 // toolCtx must be a tool context made by agent.NewToolContext, and body must
 // be non-nil. The child node's name is toolName with every character outside
@@ -54,16 +53,20 @@ type ToolBody func(ctx agent.Context, emit func(*session.Event) error) (result a
 // its response reaching the model, runs under a run id of its own, so its body
 // runs again.
 //
-// A toolCtx with no sub-scheduler (the tool runs in a workflow's agent node,
-// in an agent run as single_turn, or in an agent off the runner's node path)
-// has no node to run body under and no way to send an event to the user. Body
-// then runs on every call, on the tool branch, with no answers to resume
-// with, and emit keeps of each non-partial event what the function response
-// event can carry: its Output becomes the call's output, and its state and
-// artifact deltas move onto toolCtx.Actions(). A partial event changes
-// nothing, and the rest of an event is dropped. Emitting a request for input
-// (an event with RequestedInput) moves its deltas and then returns an error
-// wrapping workflow.ErrInvalidRunNodeContext, since nothing could answer it.
+// Where toolCtx carries a sub-scheduler (the agent runs on the runner's node
+// path, in a workflow's agent node, in that node run as a dynamic child, or
+// under llmagent.RunLLMAgentAsNode in a workflow node), the child runs under
+// it: its events reach the user in order before the function response, and
+// the call can pause for input. A toolCtx with no sub-scheduler (an agent
+// under a root that is neither an LLM agent nor a workflow) runs the child
+// under workflow.RunNode's fallback scheduler: body runs on every call, with
+// no answers to resume with, and its events are not shown; of each
+// non-partial event the state and artifact deltas move onto toolCtx.Actions()
+// and the Output becomes the call's output. There emit refuses a request for
+// input (an event with RequestedInput), since nothing could show it or route
+// the answer: it sends nothing and returns an error wrapping
+// workflow.ErrInvalidRunNodeContext, and the writes made before it go out
+// with the next event the call sends.
 //
 // On success RunToolCall returns the output (nil for none) after the child's
 // events were emitted in order. The SkipSummarization flag the body sets on
@@ -94,14 +97,9 @@ func RunToolCall(toolCtx agent.Context, toolName string, body ToolBody) (any, er
 		nodeName: nodeName,
 		callID:   callID,
 		actions:  &session.EventActions{StateDelta: map[string]any{}, ArtifactDelta: map[string]int64{}},
+		noPause:  toolCtx.SubScheduler() == nil,
 	}
-	var out any
-	var err error
-	if toolCtx.SubScheduler() == nil {
-		out, err = call.runStandalone(toolCtx, branch, body)
-	} else {
-		out, err = call.runAsNode(toolCtx, branch, body)
-	}
+	out, err := call.runAsNode(toolCtx, branch, body)
 	if call.actions.SkipSummarization {
 		toolCtx.Actions().SkipSummarization = true
 	}
@@ -128,56 +126,6 @@ func (c *toolCall) runAsNode(toolCtx agent.Context, branch string, body ToolBody
 	return workflow.RunNode[any](toolCtx, node, nil, workflow.WithOverrideBranch(branch), workflow.WithRunID(runID))
 }
 
-// runStandalone runs body for a toolCtx with no sub-scheduler and returns the
-// call's output and the error of the run.
-//
-// It is adk-python's run of a node with no workflow scheduler installed
-// (workflow/_dynamic_node_scheduler.py:722-736 and :593-605): no replay, so
-// the body runs on every call, and nothing to pause.
-func (c *toolCall) runStandalone(toolCtx agent.Context, branch string, body ToolBody) (any, error) {
-	sink := &standaloneSink{toolName: c.toolName, actions: toolCtx.Actions()}
-	// WithDelta returns the unwrapped context, on which Session works.
-	nodeCtx := toolCtx.WithDelta(&agent.CommonContextDelta{
-		InvocationContextDelta: &agent.InvocationContextDelta{Branch: &branch},
-	})
-	err := c.run(nodeCtx, map[string]any{}, sink.deliver, body)
-	if errors.Is(err, workflow.ErrNodeInterrupted) {
-		// Nothing can pause here, so result reports the body's sentinel as
-		// the error of a pause that nothing could answer.
-		err = nil
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return sink.output, err
-}
-
-// standaloneSink is the emit target of a call run by runStandalone. Its
-// fields are guarded by the mu of the toolCall whose send calls deliver.
-type standaloneSink struct {
-	toolName string
-	// actions are the tool context's; the flow puts them on the function
-	// response event.
-	actions *session.EventActions
-	output  any
-}
-
-// deliver keeps of ev what the function response event can carry, as
-// RunToolCall's doc states.
-func (s *standaloneSink) deliver(ev *session.Event) error {
-	if ev.Partial {
-		return nil
-	}
-	maps.Copy(s.actions.StateDelta, ev.Actions.StateDelta)
-	maps.Copy(s.actions.ArtifactDelta, ev.Actions.ArtifactDelta)
-	if ev.RequestedInput != nil {
-		return fmt.Errorf("generator tool %q: cannot request input outside a workflow node: %w", s.toolName, workflow.ErrInvalidRunNodeContext)
-	}
-	if ev.Output != nil {
-		s.output = ev.Output
-	}
-	return nil
-}
-
 // toolCall is the state of one RunToolCall. mu guards every field below it.
 type toolCall struct {
 	toolName string
@@ -186,6 +134,10 @@ type toolCall struct {
 	// actions is the body's own EventActions; its deltas move onto the
 	// next non-partial event.
 	actions *session.EventActions
+	// noPause is set when the tool context has no sub-scheduler: the call
+	// runs under workflow.RunNode's fallback, where nothing can show a
+	// request for input or route its answer.
+	noPause bool
 
 	mu        sync.Mutex
 	base      agent.Context
@@ -261,6 +213,13 @@ func (c *toolCall) send(ev *session.Event) error {
 	if ev.Branch == "" {
 		ev.Branch = c.base.Branch()
 	}
+	if c.noPause && ev.RequestedInput != nil {
+		// workflow.RunNode's fallback would refuse the event too, but by
+		// stopping the child, so the body would see only a canceled
+		// context. Nothing is sent; pending writes stay pending and go
+		// out with the next event the call sends.
+		return fmt.Errorf("generator tool %q: cannot request input outside a workflow node: %w", c.toolName, workflow.ErrInvalidRunNodeContext)
+	}
 	if !ev.Partial {
 		c.flushDeltas(ev)
 	}
@@ -332,8 +291,12 @@ func resumeAnswers(ctx agent.Context) map[string]any {
 // node of ctx or a node below it.
 func interruptIDs(ctx agent.Context) map[string]bool {
 	ids := map[string]bool{}
+	sess := ctx.Session()
+	if sess == nil {
+		return ids
+	}
 	path, invocationID := ctx.Path(), ctx.InvocationID()
-	for ev := range ctx.Session().Events().All() {
+	for ev := range sess.Events().All() {
 		if ev == nil || ev.NodeInfo == nil || ev.InvocationID != invocationID {
 			continue
 		}
@@ -424,9 +387,15 @@ func plainRunID(id string) bool {
 // step that a sibling call paused (the flow sends no responses for that
 // step), so its body runs again on the replay.
 func callSlot(toolCtx agent.Context, toolName, nodeName, id string) int {
+	ss := toolCtx.SubScheduler()
+	if ss == nil {
+		// workflow.RunNode runs the call on a scheduler of its own, which
+		// caches nothing, so slot 0 always runs the body.
+		return 0
+	}
 	// The unwrapped context: Session and InvocationID work on it.
 	base := toolCtx.WithDelta(&agent.CommonContextDelta{})
-	prefix := toolCtx.SubScheduler().ParentPath() + "/" + nodeName + "@"
+	prefix := ss.ParentPath() + "/" + nodeName + "@"
 	served := servedPaths(base, prefix)
 	k := answeredCalls(base, toolName, id)
 	for served[prefix+runIDFor(id, k)] {

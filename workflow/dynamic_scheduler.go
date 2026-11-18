@@ -17,6 +17,7 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -30,6 +31,13 @@ type dynamicSubScheduler struct {
 	parentPath string
 	parentCtx  agent.Context
 	emitUp     func(*session.Event) error
+
+	// replay is true for the scheduler of a dynamic node: auto run ids count
+	// per child name, a stable run id serves a cached output or shares a run
+	// in flight, and completed children are read back from history. A
+	// standalone scheduler (replay false) runs every call: a child's run id
+	// is the caller's WithRunID or "1", and nothing is cached or shared.
+	replay bool
 
 	// outputForAncestors are the delegating-ancestor paths this
 	// activation's output also counts for, set when this dynamic node is
@@ -56,6 +64,8 @@ type dynamicSubScheduler struct {
 	inflightByPath map[string]*inflightRun
 	delegation     outputDelegation
 	failedPaths    map[string]struct{}
+	// hydrate reads the session history once, before the first child runs.
+	hydrate sync.Once
 }
 
 // runResult is one child run's outcome, shared by every caller that
@@ -160,7 +170,22 @@ func (d *outputDelegation) output() (any, bool) {
 	return d.value, d.hasValue
 }
 
+// newDynamicSubScheduler returns the replaying scheduler of a dynamic node's
+// activation. It reads the session history when built.
 func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func(*session.Event) error) agent.DynamicSubScheduler {
+	return newSubScheduler(parent, parentPath, emitUp, true)
+}
+
+// newStandaloneSubScheduler returns a scheduler without replay, as adk-python's
+// DynamicNodeScheduler(enable_replay=False). parent is the context the
+// children derive from and must answer Session, InvocationID and
+// IsolationScope; parentPath is the node path of the activation, "" for none;
+// emitUp receives every child event.
+func newStandaloneSubScheduler(parent agent.Context, parentPath string, emitUp func(*session.Event) error) agent.DynamicSubScheduler {
+	return newSubScheduler(parent, parentPath, emitUp, false)
+}
+
+func newSubScheduler(parent agent.Context, parentPath string, emitUp func(*session.Event) error, replay bool) agent.DynamicSubScheduler {
 	ancestors := []string{}
 	var counters *runCounters
 	if parent != nil {
@@ -174,14 +199,24 @@ func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func
 		parentPath:         parentPath,
 		parentCtx:          parent,
 		emitUp:             emitUp,
+		replay:             replay,
 		outputForAncestors: ancestors,
 		counters:           counters,
 		resultByPath:       map[string]any{},
 		inflightByPath:     map[string]*inflightRun{},
 		failedPaths:        map[string]struct{}{},
 	}
-	s.rehydrateCache()
+	if replay {
+		s.hydrate.Do(s.rehydrateCache)
+	}
 	return s
+}
+
+// forToolCall returns a standalone scheduler with s's context, node path and
+// emit path, for a RunNode call made by a tool: a tool call never replays,
+// as adk-python gives each tool call a fresh scheduler.
+func (s *dynamicSubScheduler) forToolCall() agent.DynamicSubScheduler {
+	return newSubScheduler(s.parentCtx, s.parentPath, s.emitUp, false)
 }
 
 // rehydrateCache repopulates resultByPath from session history so a
@@ -203,7 +238,10 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 		return
 	}
 	invocationID := s.parentCtx.InvocationID()
-	prefix := s.parentPath + "/"
+	prefix := ""
+	if s.parentPath != "" {
+		prefix = s.parentPath + "/"
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ev := range sess.Events().All() {
@@ -240,6 +278,8 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 		// cached success. Last outcome wins, as in live execution.
 		if len(ev.LongRunningToolIDs) > 0 || ev.RequestedInput != nil {
 			delete(s.resultByPath, ev.NodeInfo.Path)
+		} else if !s.replay {
+			continue
 		} else if out, ok := childEventOutput(ev); ok {
 			s.resultByPath[ev.NodeInfo.Path] = out
 		} else if out, delegated := completedDelegatedOutput(ev); delegated {
@@ -277,12 +317,19 @@ func (s *dynamicSubScheduler) invalidateCachePath(path string) {
 // Session, invocation metadata, and cancellation come from
 // s.parentCtx. opts carries the resolved RunNodeOption arguments.
 func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions) (out any, err error) {
+	s.hydrate.Do(s.rehydrateCache)
 	name := child.Name()
+	// Invalid input fails the call before anything is claimed or sent.
+	validated, err := child.ValidateInput(input)
+	if err != nil {
+		return nil, &NodeRunError{ChildName: name, Cause: fmt.Errorf("%w for node %q: %w", ErrInputValidation, name, err)}
+	}
+	input = validated
 	runID, err := s.resolveRunID(name, opts.customRunID)
 	if err != nil {
 		return nil, &NodeRunError{ChildName: name, Cause: err}
 	}
-	childPath := s.parentPath + "/" + name + "@" + runID
+	childPath := joinNodePath(s.parentPath, name+"@"+runID)
 
 	// A child whose own state schema cannot be checked does not start:
 	// nothing is claimed and no event is sent.
@@ -304,7 +351,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// must count their output for this parent and its ancestors too.
 	var childAncestors []string
 	if opts.useAsOutput {
-		childAncestors = append([]string{s.parentPath}, s.outputForAncestors...)
+		childAncestors = append(s.ownPath(), s.outputForAncestors...)
 	}
 	// Explicit scope wins over the node-path default; absent both,
 	// inherit. Matches adk-python _compute_isolation_scope_for_node.
@@ -407,6 +454,13 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	// The child is an activation of its own: its state writes are checked
 	// and carried on its own events, never on the orchestrator's.
 	childCtx, writes := beginActivation(childCtx, child, own)
+	// The caller of RunNode learns whether the child asked to skip the
+	// summary, whatever the outcome.
+	defer func() {
+		if opts.outcome != nil && writes.actions != nil && writes.actions.SkipSummarization {
+			opts.outcome.skipSummarization = true
+		}
+	}()
 	// Registered after the completion defer, so the child's unsent writes
 	// go out before its failure record. A child that failed because one of
 	// its own children failed, or that was canceled, sends none.
@@ -500,7 +554,15 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 				}
 			}
 		}
-		childOut, hasChildOutput := childEventOutput(ev)
+		// An event of a node below the child carries the child's output only
+		// when it delegates its output to the child: a tool child that the
+		// child's agent ran forwards its events through the child too. A
+		// workflow agent's events have paths of their own and still count.
+		var childOut any
+		hasChildOutput := false
+		if !strings.HasPrefix(ev.NodeInfo.Path, childPath+"/") || slices.Contains(ev.NodeInfo.OutputFor, childPath) {
+			childOut, hasChildOutput = childEventOutput(ev)
+		}
 		delegatedCompletion := false
 		if !hasChildOutput && ev.NodeInfo.Path == childPath {
 			childOut, delegatedCompletion = completedDelegatedOutput(ev)
@@ -527,7 +589,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			if !delegatedCompletion && ev.NodeInfo.OutputFor == nil {
 				outputFor := []string{ev.NodeInfo.Path}
 				if opts.useAsOutput {
-					outputFor = append(outputFor, s.parentPath)
+					outputFor = append(outputFor, s.ownPath()...)
 					outputFor = append(outputFor, s.outputForAncestors...)
 				}
 				ev.NodeInfo.OutputFor = outputFor
@@ -620,6 +682,9 @@ func waitsForOutput(node Node) bool {
 // outcome is then that cancellation — the leader keeps the slot and
 // finishes on its own.
 func (s *dynamicSubScheduler) awaitOrLead(childPath string) (runResult, bool) {
+	if !s.replay {
+		return runResult{}, false
+	}
 	s.mu.Lock()
 	if out, ok := s.resultByPath[childPath]; ok {
 		s.mu.Unlock()
@@ -654,7 +719,7 @@ func (s *dynamicSubScheduler) finishRun(childPath string, res runResult, failure
 			}
 		}
 	}
-	if res.err == nil {
+	if res.err == nil && s.replay {
 		s.resultByPath[childPath] = res.out
 		clearFailures()
 	} else if !errors.Is(res.err, ErrNodeInterrupted) {
@@ -747,8 +812,18 @@ func (s *dynamicSubScheduler) delegatedOutput() (any, bool) {
 }
 
 // resolveRunID validates a user-supplied id, or returns the next
-// auto run id of childName under this activation's path.
+// auto run id of childName under this activation's path. A standalone
+// scheduler accepts a numeric id and gives "1" when there is none.
 func (s *dynamicSubScheduler) resolveRunID(childName, custom string) (string, error) {
+	if !s.replay {
+		if strings.ContainsAny(custom, "/@") {
+			return "", fmt.Errorf("%w: %q contains reserved separator (/ or @)", ErrInvalidRunID, custom)
+		}
+		if custom != "" {
+			return custom, nil
+		}
+		return "1", nil
+	}
 	if custom != "" {
 		if err := validateCustomRunID(custom); err != nil {
 			return "", err
@@ -784,4 +859,22 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// joinNodePath appends segment to the node path parent, which is "" for a
+// context outside any workflow node.
+func joinNodePath(parent, segment string) string {
+	if parent == "" {
+		return segment
+	}
+	return parent + "/" + segment
+}
+
+// ownPath is the activation's node path as a one-element list, empty when the
+// scheduler has no node path.
+func (s *dynamicSubScheduler) ownPath() []string {
+	if s.parentPath == "" {
+		return nil
+	}
+	return []string{s.parentPath}
 }

@@ -25,12 +25,14 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/workflow"
 )
 
 // TestDispatchTaskFC_IsolationScope exercises the full
@@ -1647,5 +1649,75 @@ func TestTaskAgent_NullableResultClosesDelegation(t *testing.T) {
 	}
 	if taskLLM.callIdx != 2 {
 		t.Errorf("task model called %d times, want 2: the null result should be rejected and retried", taskLLM.callIdx)
+	}
+}
+
+// Fails if a chat coordinator, running as a node on a branch of its own,
+// delegates a task to a sub-agent that runs on the coordinator's branch
+// instead of a sub-branch of it, or out of the call's isolation scope.
+func TestRunLLMAgentAsNode_TaskDelegationUsesSubBranch(t *testing.T) {
+	worker := makeLLMAgent(t, "worker", withMode(llmagent.ModeTask), func(c *llmagent.Config) {
+		c.Model = &scriptedLLM{turns: []*model.LLMResponse{{Content: fcContent("finish-1", "finish_task", map[string]any{"result": "task-ok"})}}}
+	})
+	coord, err := llmagent.New(llmagent.Config{
+		Name: "parent",
+		Model: &scriptedLLM{turns: []*model.LLMResponse{
+			{Content: fcContent("fc_9", "worker", map[string]any{"request": "do it"})},
+			{Content: genai.NewContentFromText("all done", genai.RoleModel)},
+		}},
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{worker},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(parent) error = %v", err)
+	}
+	// "parent" is a dynamic node run on the sub-branch parent@1, so the
+	// coordinator's context holds a replaying sub-scheduler.
+	parent := workflow.NewDynamicNode("parent", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		for ev, err := range llmagent.RunLLMAgentAsNode(coord, ctx, nil) {
+			if err != nil {
+				return nil, err
+			}
+			if err := emit(ev); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	}, workflow.NodeConfig{})
+	orch := workflow.NewDynamicNode("orch", func(ctx agent.Context, _ any, _ func(*session.Event) error) (any, error) {
+		return workflow.RunNode[any](ctx, parent, nil, workflow.WithUseSubBranch())
+	}, workflow.NodeConfig{})
+	root, err := workflowagent.New(workflowagent.Config{Name: "wf", Edges: workflow.Chain(workflow.Start, orch)})
+	if err != nil {
+		t.Fatalf("workflowagent.New() error = %v", err)
+	}
+
+	events := runChatCoordinatorOneTurn(t, root, "go")
+
+	type tagged struct{ Branch, IsolationScope string }
+	var workerEvents []tagged
+	for _, ev := range events {
+		if ev.Author == "worker" {
+			workerEvents = append(workerEvents, tagged{Branch: ev.Branch, IsolationScope: ev.IsolationScope})
+		}
+	}
+	if len(workerEvents) == 0 {
+		t.Fatal("no event authored by worker")
+	}
+	for _, got := range workerEvents {
+		if want := (tagged{Branch: "parent@1.worker@fc_9", IsolationScope: "fc_9"}); got != want {
+			t.Errorf("event of worker = %+v, want %+v", got, want)
+		}
+	}
+	var responses []map[string]any
+	for _, ev := range events {
+		for _, fr := range ev.FunctionResponses() {
+			if fr.Name == "worker" {
+				responses = append(responses, fr.Response)
+			}
+		}
+	}
+	if diff := cmp.Diff([]map[string]any{{"result": "task-ok"}}, responses); diff != "" {
+		t.Errorf("worker's function responses mismatch (-want +got):\n%s", diff)
 	}
 }

@@ -34,9 +34,11 @@ var (
 	// errors.Is(ErrNodeInterrupted) checks still treat it as a pause.
 	ErrNodeWaitingForOutput = fmt.Errorf("%w: waiting for output", ErrNodeInterrupted)
 
-	// ErrInvalidRunNodeContext is returned by RunNode when ctx is not
-	// the context of a currently-executing dynamic node (i.e. it
-	// carries no sub-scheduler).
+	// ErrInvalidRunNodeContext is returned by RunNode when ctx is the
+	// context a workflow node that is not a dynamic node runs under, or
+	// carries neither a session nor a function call, and by the scheduler
+	// RunNode builds for a context without a sub-scheduler when the child
+	// asks for input.
 	ErrInvalidRunNodeContext = errors.New("workflow: RunNode called outside a dynamic node")
 
 	// ErrInvalidRunID rejects a custom run id that would collide

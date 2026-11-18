@@ -17,6 +17,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"reflect"
 	"slices"
@@ -26,8 +27,15 @@ import (
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
+	"time"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -1202,5 +1210,792 @@ func (n *fnNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, err
 			return
 		}
 		yield(&session.Event{Output: out}, nil)
+	}
+}
+
+// childObs is what one run of a child saw of its own context.
+type childObs struct {
+	RunID, Path string
+}
+
+// observingChild records the run id and path each run of its node sees; the
+// n-th run outputs "call-<n>".
+type observingChild struct {
+	mu  sync.Mutex
+	obs []childObs
+}
+
+func (c *observingChild) node(name string) Node {
+	return newFnNode(name, func(ctx agent.Context) (any, error) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.obs = append(c.obs, childObs{RunID: ctx.RunID(), Path: ctx.Path()})
+		return "call-" + strconv.Itoa(len(c.obs)), nil
+	})
+}
+
+func (c *observingChild) seen() []childObs {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.obs)
+}
+
+// runToolOfAgentNode runs workflow "wf" whose first node is an agent node "a",
+// followed by downstream. The agent's run calls tool once with a tool context
+// of its own, with call id call_1, as an LLM agent's flow calls a tool.
+func runToolOfAgentNode(t *testing.T, tool func(toolCtx agent.Context), downstream ...Node) ([]*session.Event, error) {
+	t.Helper()
+	a, err := agent.New(agent.Config{
+		Name: "a",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {
+				tool(agent.NewToolContext(ic, "call_1", nil, nil))
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	n, err := NewAgentNode(a, NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode() error = %v", err)
+	}
+	w, err := New("wf", Chain(append([]Node{Start, n}, downstream...)...))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	mock, _ := newSessionMockCtx(t)
+	return collect(w.Run(mock))
+}
+
+// sessionToolCtx is a tool context with call id call_1 outside any workflow:
+// it carries a session and no sub-scheduler.
+func sessionToolCtx(t *testing.T) agent.Context {
+	t.Helper()
+	mock, _ := newSessionMockCtx(t)
+	return agent.NewToolContext(mock, "call_1", nil, nil)
+}
+
+// deltaEvent is an event that carries state and artifact deltas.
+func deltaEvent(state map[string]any, artifacts map[string]int64) *session.Event {
+	return &session.Event{Actions: session.EventActions{StateDelta: state, ArtifactDelta: artifacts}}
+}
+
+// hasText reports whether an event in events has a text part equal to text.
+func hasText(events []*session.Event, text string) bool {
+	for _, ev := range events {
+		if ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p.Text == text {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Fails if RunNode from a context without a replaying sub-scheduler caches a
+// child's output, shares a run, numbers runs past 1, refuses a numeric run id,
+// accepts a run id with a path separator, attaches a scheduler to the caller's
+// context, puts a leading slash on a root path, loses or misplaces a delta,
+// loses the SkipSummarization of a child that fails, lets a child pause where
+// nothing can answer, or refuses a context it serves;
+// or if RunNode serves the context of a workflow node, or a tool call through
+// a dynamic node's context replays.
+func TestRunNode_StandaloneAndFallbackContract(t *testing.T) {
+	t.Run("agent_node_calls", func(t *testing.T) {
+		var child observingChild
+		var outs []string
+		var errs []error
+		_, err := runToolOfAgentNode(t, func(tc agent.Context) {
+			for range 2 {
+				out, err := RunNode[string](tc, child.node("child"), nil)
+				outs = append(outs, out)
+				errs = append(errs, err)
+			}
+		})
+		if err != nil {
+			t.Fatalf("workflow run error = %v", err)
+		}
+		if diff := cmp.Diff([]error{nil, nil}, errs, cmpopts.EquateErrors()); diff != "" {
+			t.Fatalf("RunNode errors mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]string{"call-1", "call-2"}, outs); diff != "" {
+			t.Errorf("RunNode outputs mismatch (-want +got):\n%s", diff)
+		}
+		want := []childObs{{RunID: "1", Path: "wf@1/a@1/child@1"}, {RunID: "1", Path: "wf@1/a@1/child@1"}}
+		if diff := cmp.Diff(want, child.seen()); diff != "" {
+			t.Errorf("child runs mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("fallback_empty_path", func(t *testing.T) {
+		tc := sessionToolCtx(t)
+		var child observingChild
+		out1, err1 := RunNode[string](tc, child.node("child"), nil)
+		out2, err2 := RunNode[string](tc, child.node("child"), nil)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("RunNode errors = %v, %v, want nil", err1, err2)
+		}
+		if out1 != "call-1" || out2 != "call-2" {
+			t.Errorf("RunNode outputs = %q, %q, want call-1, call-2", out1, out2)
+		}
+		want := []childObs{{RunID: "1", Path: "child@1"}, {RunID: "1", Path: "child@1"}}
+		if diff := cmp.Diff(want, child.seen()); diff != "" {
+			t.Errorf("child runs mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("custom_numeric_run_id", func(t *testing.T) {
+		var child observingChild
+		if _, err := RunNode[string](sessionToolCtx(t), child.node("child"), nil, WithRunID("42")); err != nil {
+			t.Fatalf("RunNode(WithRunID(42)) error = %v, want nil", err)
+		}
+		if diff := cmp.Diff([]childObs{{RunID: "42", Path: "child@42"}}, child.seen()); diff != "" {
+			t.Errorf("child runs mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("reserved_separators", func(t *testing.T) {
+		for _, id := range []string{"a/b", "a@b"} {
+			var child observingChild
+			_, err := RunNode[string](sessionToolCtx(t), child.node("child"), nil, WithRunID(id))
+			if !errors.Is(err, ErrInvalidRunID) {
+				t.Errorf("RunNode(WithRunID(%q)) error = %v, want ErrInvalidRunID", id, err)
+			}
+			if got := child.seen(); len(got) != 0 {
+				t.Errorf("RunNode(WithRunID(%q)) ran the child: %v", id, got)
+			}
+		}
+	})
+
+	t.Run("fallback_does_not_attach", func(t *testing.T) {
+		tc := sessionToolCtx(t)
+		if _, err := RunNode[string](tc, newStubNode("child", "x"), nil); err != nil {
+			t.Fatalf("RunNode() error = %v, want nil", err)
+		}
+		if ss := tc.SubScheduler(); ss != nil {
+			t.Errorf("SubScheduler() after RunNode = %v, want nil", ss)
+		}
+	})
+
+	t.Run("deltas_to_actions", func(t *testing.T) {
+		tc := sessionToolCtx(t)
+		child := newHitlNode("child", func(_ agent.Context, _ any, yield func(*session.Event, error) bool) {
+			partial := deltaEvent(map[string]any{"partial": 9}, nil)
+			partial.Partial = true
+			if !yield(partial, nil) {
+				return
+			}
+			committed := deltaEvent(map[string]any{"committed": 3}, map[string]int64{"doc.txt": 1})
+			committed.Output = "ok"
+			yield(committed, nil)
+		})
+		if _, err := RunNode[string](tc, child, nil); err != nil {
+			t.Fatalf("RunNode() error = %v, want nil", err)
+		}
+		if diff := cmp.Diff(map[string]any{"committed": 3}, tc.Actions().StateDelta); diff != "" {
+			t.Errorf("Actions().StateDelta mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(map[string]int64{"doc.txt": 1}, tc.Actions().ArtifactDelta); diff != "" {
+			t.Errorf("Actions().ArtifactDelta mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("nil_actions", func(t *testing.T) {
+		mock, _ := newSessionMockCtx(t)
+		ctx := agent.NewContext(mock)
+		child := newHitlNode("child", func(_ agent.Context, _ any, yield func(*session.Event, error) bool) {
+			ev := deltaEvent(map[string]any{"k": 1}, map[string]int64{"doc.txt": 1})
+			ev.Output = "ok"
+			yield(ev, nil)
+		})
+		out, err := RunNode[string](ctx, child, nil)
+		if err != nil || out != "ok" {
+			t.Errorf("RunNode() = %q, %v, want ok, nil", out, err)
+		}
+	})
+
+	t.Run("request_for_input_refused", func(t *testing.T) {
+		tc := sessionToolCtx(t)
+		child := newHitlNode("child", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+			if !yield(deltaEvent(map[string]any{"before": 1}, nil), nil) {
+				return
+			}
+			yield(NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "ask", Message: "region?"}), nil)
+		})
+		_, err := RunNode[string](tc, child, nil)
+		if !errors.Is(err, ErrInvalidRunNodeContext) || !errors.Is(err, ErrNodeFailed) {
+			t.Errorf("RunNode() error = %v, want one wrapping ErrInvalidRunNodeContext and ErrNodeFailed", err)
+		}
+		if diff := cmp.Diff(map[string]any{"before": 1}, tc.Actions().StateDelta); diff != "" {
+			t.Errorf("Actions().StateDelta mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("canceled", func(t *testing.T) {
+		mock, _ := newSessionMockCtx(t)
+		canceled, cancel := context.WithCancel(mock.Context)
+		cancel()
+		mock.Context = canceled
+		_, err := RunNode[string](agent.NewToolContext(mock, "call_1", nil, nil), newStubNode("child", "x"), nil)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("RunNode() error = %v, want context.Canceled", err)
+		}
+	})
+
+	t.Run("concurrent_calls", func(t *testing.T) {
+		tc := sessionToolCtx(t)
+		child := newHitlNode("child", func(_ agent.Context, in any, yield func(*session.Event, error) bool) {
+			yield(&session.Event{Output: fmt.Sprintf("w%v", in)}, nil)
+		})
+		outs := make([]string, 4)
+		errs := make([]error, 4)
+		var wg sync.WaitGroup
+		for i := range 4 {
+			wg.Go(func() { outs[i], errs[i] = RunNode[string](tc, child, i) })
+		}
+		wg.Wait()
+		if diff := cmp.Diff(make([]error, 4), errs, cmpopts.EquateErrors()); diff != "" {
+			t.Fatalf("RunNode errors mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]string{"w0", "w1", "w2", "w3"}, outs); diff != "" {
+			t.Errorf("RunNode outputs mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("tool_context_isolation_scope", func(t *testing.T) {
+		mock, _ := newSessionMockCtx(t)
+		mock.isolationScope = "fc_9"
+		child := newStubNode("child", "x")
+		if _, err := RunNode[string](agent.NewToolContext(mock, "call_1", nil, nil), child, nil); err != nil {
+			t.Fatalf("RunNode() error = %v, want nil", err)
+		}
+		if got := child.lastScope; got != "fc_9" {
+			t.Errorf("child IsolationScope() = %q, want fc_9", got)
+		}
+	})
+
+	t.Run("actions_with_nil_maps", func(t *testing.T) {
+		tc := sessionToolCtx(t)
+		tc.Actions().StateDelta = nil
+		tc.Actions().ArtifactDelta = nil
+		child := newHitlNode("child", func(_ agent.Context, _ any, yield func(*session.Event, error) bool) {
+			yield(deltaEvent(map[string]any{"committed": 3}, map[string]int64{"doc.txt": 1}), nil)
+		})
+		if _, err := RunNode[string](tc, child, nil); err != nil {
+			t.Fatalf("RunNode() error = %v, want nil", err)
+		}
+		if diff := cmp.Diff(map[string]any{"committed": 3}, tc.Actions().StateDelta); diff != "" {
+			t.Errorf("Actions().StateDelta mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(map[string]int64{"doc.txt": 1}, tc.Actions().ArtifactDelta); diff != "" {
+			t.Errorf("Actions().ArtifactDelta mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	// textChild emits a text event and then outputs child-out.
+	textChild := func(runs *atomic.Int32) Node {
+		return newHitlNode("child", func(_ agent.Context, _ any, yield func(*session.Event, error) bool) {
+			runs.Add(1)
+			text := &session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("child-text", genai.RoleModel)}}
+			if !yield(text, nil) {
+				return
+			}
+			yield(&session.Event{Output: "child-out"}, nil)
+		})
+	}
+	// runInFunctionNode runs workflow "wf" whose only node is the function
+	// node "host", whose body is body.
+	runInFunctionNode := func(t *testing.T, body func(ctx agent.Context)) []*session.Event {
+		t.Helper()
+		host := NewFunctionNode("host", func(ctx agent.Context, _ any) (string, error) {
+			body(ctx)
+			return "host-out", nil
+		}, NodeConfig{})
+		w, err := New("wf", Chain(Start, host))
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		mock, _ := newSessionMockCtx(t)
+		events, err := collect(w.Run(mock))
+		if err != nil {
+			t.Fatalf("workflow run error = %v", err)
+		}
+		return events
+	}
+
+	t.Run("static_function_node_refused", func(t *testing.T) {
+		var runs atomic.Int32
+		var runErr error
+		events := runInFunctionNode(t, func(ctx agent.Context) {
+			_, runErr = RunNode[string](ctx, textChild(&runs), nil)
+		})
+		if !errors.Is(runErr, ErrInvalidRunNodeContext) {
+			t.Errorf("RunNode() error = %v, want ErrInvalidRunNodeContext", runErr)
+		}
+		if got := runs.Load(); got != 0 {
+			t.Errorf("child runs = %d, want 0", got)
+		}
+		if hasText(events, "child-text") {
+			t.Errorf("the child's text event reached the workflow's events")
+		}
+	})
+
+	t.Run("tool_context_of_a_function_node_served", func(t *testing.T) {
+		var runs atomic.Int32
+		var out string
+		var runErr error
+		runInFunctionNode(t, func(ctx agent.Context) {
+			out, runErr = RunNode[string](agent.NewToolContext(ctx, "fc_1", nil, nil), textChild(&runs), nil)
+		})
+		if runErr != nil || out != "child-out" {
+			t.Errorf("RunNode() = %q, %v, want child-out, nil", out, runErr)
+		}
+		if got := runs.Load(); got != 1 {
+			t.Errorf("child runs = %d, want 1", got)
+		}
+	})
+
+	t.Run("bare_context_with_session_served", func(t *testing.T) {
+		mock, _ := newSessionMockCtx(t)
+		var runs atomic.Int32
+		out, err := RunNode[string](agent.NewContext(mock), textChild(&runs), nil)
+		if err != nil || out != "child-out" {
+			t.Errorf("RunNode() = %q, %v, want child-out, nil", out, err)
+		}
+		if got := runs.Load(); got != 1 {
+			t.Errorf("child runs = %d, want 1", got)
+		}
+	})
+
+	// runInDynamicNode runs workflow "wf" whose only node is the dynamic node
+	// "orch", whose body is body.
+	runInDynamicNode := func(t *testing.T, body func(ctx agent.Context)) {
+		t.Helper()
+		orch := NewDynamicNode("orch", func(ctx agent.Context, _ any, _ func(*session.Event) error) (any, error) {
+			body(ctx)
+			return nil, nil
+		}, NodeConfig{})
+		w, err := New("wf", Chain(Start, orch))
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		mock, _ := newSessionMockCtx(t)
+		if _, err := collect(w.Run(mock)); err != nil {
+			t.Fatalf("workflow run error = %v", err)
+		}
+	}
+
+	t.Run("tool_context_on_replaying_scheduler", func(t *testing.T) {
+		var child observingChild
+		var outs []string
+		var errs []error
+		runInDynamicNode(t, func(ctx agent.Context) {
+			tc := agent.NewToolContext(ctx, "fc_1", nil, nil)
+			for _, opts := range [][]RunNodeOption{nil, nil, {WithRunID("42")}} {
+				out, err := RunNode[string](tc, child.node("child"), nil, opts...)
+				outs = append(outs, out)
+				errs = append(errs, err)
+			}
+		})
+		if diff := cmp.Diff([]error{nil, nil, nil}, errs, cmpopts.EquateErrors()); diff != "" {
+			t.Fatalf("RunNode errors mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]string{"call-1", "call-2", "call-3"}, outs); diff != "" {
+			t.Errorf("RunNode outputs mismatch (-want +got):\n%s", diff)
+		}
+		want := []childObs{
+			{RunID: "1", Path: "wf@1/orch@1/child@1"},
+			{RunID: "1", Path: "wf@1/orch@1/child@1"},
+			{RunID: "42", Path: "wf@1/orch@1/child@42"},
+		}
+		if diff := cmp.Diff(want, child.seen()); diff != "" {
+			t.Errorf("child runs mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("dynamic_body_keeps_replay", func(t *testing.T) {
+		var child observingChild
+		runInDynamicNode(t, func(ctx agent.Context) {
+			for range 2 {
+				if _, err := RunNode[string](ctx, child.node("child"), nil); err != nil {
+					t.Errorf("RunNode() error = %v", err)
+				}
+			}
+		})
+		want := []childObs{{RunID: "1", Path: "wf@1/orch@1/child@1"}, {RunID: "2", Path: "wf@1/orch@1/child@2"}}
+		if diff := cmp.Diff(want, child.seen()); diff != "" {
+			t.Errorf("child runs mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("agent_node_parallel_tool_calls", func(t *testing.T) {
+		// Two tool calls of one agent run the same child at the same time,
+		// both under run id 1. Each runs the child: no run in flight is
+		// shared, as each adk-python tool call has a scheduler of its own.
+		var runs atomic.Int32
+		started := make(chan struct{}, 2)
+		release := make(chan struct{})
+		child := newFnNode("child", func(agent.Context) (any, error) {
+			runs.Add(1)
+			started <- struct{}{}
+			<-release
+			return "ok", nil
+		})
+		errs := make([]error, 2)
+		a, err := agent.New(agent.Config{
+			Name: "a",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					var wg sync.WaitGroup
+					for i, id := range []string{"call_1", "call_2"} {
+						tc := agent.NewToolContext(ic, id, nil, nil)
+						wg.Go(func() { _, errs[i] = RunNode[string](tc, child, nil) })
+					}
+					// A call that shares the other's run never starts the
+					// child, so stop waiting for it after a while.
+					timeout := time.After(10 * time.Second)
+				wait:
+					for range 2 {
+						select {
+						case <-started:
+						case <-timeout:
+							break wait
+						}
+					}
+					close(release)
+					wg.Wait()
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New() error = %v", err)
+		}
+		n, err := NewAgentNode(a, NodeConfig{})
+		if err != nil {
+			t.Fatalf("NewAgentNode() error = %v", err)
+		}
+		w, err := New("wf", Chain(Start, n))
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		mock, _ := newSessionMockCtx(t)
+		if _, err := collect(w.Run(mock)); err != nil {
+			t.Fatalf("workflow run error = %v", err)
+		}
+		if diff := cmp.Diff([]error{nil, nil}, errs, cmpopts.EquateErrors()); diff != "" {
+			t.Fatalf("RunNode errors mismatch (-want +got):\n%s", diff)
+		}
+		if got := runs.Load(); got != 2 {
+			t.Errorf("child runs = %d, want 2", got)
+		}
+	})
+
+	t.Run("concurrent_deltas", func(t *testing.T) {
+		// Concurrent calls on one context merge into the same actions; run
+		// under -race.
+		tc := sessionToolCtx(t)
+		child := newHitlNode("child", func(ctx agent.Context, in any, yield func(*session.Event, error) bool) {
+			ctx.Actions().SkipSummarization = true
+			yield(deltaEvent(map[string]any{fmt.Sprintf("k%v", in): in}, nil), nil)
+		})
+		var wg sync.WaitGroup
+		for i := range 4 {
+			wg.Go(func() {
+				if _, err := RunNode[any](tc, child, i); err != nil {
+					t.Errorf("RunNode(%d) error = %v", i, err)
+				}
+			})
+		}
+		wg.Wait()
+		want := map[string]any{"k0": 0, "k1": 1, "k2": 2, "k3": 3}
+		if diff := cmp.Diff(want, tc.Actions().StateDelta); diff != "" {
+			t.Errorf("Actions().StateDelta mismatch (-want +got):\n%s", diff)
+		}
+		if !tc.Actions().SkipSummarization {
+			t.Error("Actions().SkipSummarization = false, want true")
+		}
+	})
+
+	t.Run("skip_summarization_of_failed_child", func(t *testing.T) {
+		tc := sessionToolCtx(t)
+		child := newFnNode("child", func(ctx agent.Context) (any, error) {
+			ctx.Actions().SkipSummarization = true
+			return nil, errors.New("boom")
+		})
+		_, err := RunNode[any](tc, child, nil)
+		if !errors.Is(err, ErrNodeFailed) {
+			t.Errorf("RunNode() error = %v, want one wrapping ErrNodeFailed", err)
+		}
+		if !tc.Actions().SkipSummarization {
+			t.Error("Actions().SkipSummarization = false, want true")
+		}
+	})
+
+	t.Run("dynamic_child_agent_node_takes_delegated_tool_output", func(t *testing.T) {
+		// A tool child run with WithUseAsOutput delegates its output to the
+		// agent node, so the agent node, run as a dynamic child, returns it.
+		a, err := agent.New(agent.Config{
+			Name: "a",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					tc := agent.NewToolContext(ic, "call_1", nil, nil)
+					if _, err := RunNode[string](tc, newStubNode("child", "delegated"), nil, WithUseAsOutput()); err != nil {
+						t.Errorf("tool RunNode() error = %v", err)
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New() error = %v", err)
+		}
+		node, err := NewAgentNode(a, NodeConfig{})
+		if err != nil {
+			t.Fatalf("NewAgentNode() error = %v", err)
+		}
+		var out any
+		var runErr error
+		runInDynamicNode(t, func(ctx agent.Context) {
+			out, runErr = RunNode[any](ctx, node, nil)
+		})
+		if runErr != nil || out != "delegated" {
+			t.Errorf("RunNode(agent node) = %v, %v, want delegated, nil", out, runErr)
+		}
+	})
+}
+
+// inputSchemaNode outputs its input's "count" as text and counts its runs; its
+// input schema requires "count" to be an integer.
+type inputSchemaNode struct {
+	BaseNode
+	runs atomic.Int32
+}
+
+func newInputSchemaNode(t *testing.T, name string) *inputSchemaNode {
+	t.Helper()
+	schema, err := (&jsonschema.Schema{
+		Type:       "object",
+		Properties: map[string]*jsonschema.Schema{"count": {Type: "integer"}},
+	}).Resolve(nil)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	return &inputSchemaNode{BaseNode: NewBaseNodeWithSchemas(name, "", NodeConfig{}, schema, nil)}
+}
+
+func (n *inputSchemaNode) Run(_ agent.Context, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		n.runs.Add(1)
+		m, _ := input.(map[string]any)
+		yield(&session.Event{Output: fmt.Sprint(m["count"])}, nil)
+	}
+}
+
+// Fails if RunNode runs a child whose input fails the child's input schema,
+// or claims the parent's output for it first, on a replaying scheduler and on
+// an agent node's standalone one.
+func TestRunNode_ValidatesChildInputSchema(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T, body func(ctx agent.Context))
+	}{
+		{
+			name: "replaying",
+			run: func(t *testing.T, body func(ctx agent.Context)) {
+				_, err := runInOrchestratorWithErr[string](t, func(ctx agent.Context) (string, error) {
+					body(ctx)
+					return "", nil
+				})
+				if err != nil {
+					t.Fatalf("orchestrator error = %v", err)
+				}
+			},
+		},
+		{
+			name: "standalone",
+			run: func(t *testing.T, body func(ctx agent.Context)) {
+				if _, err := runToolOfAgentNode(t, body); err != nil {
+					t.Fatalf("workflow run error = %v", err)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			child := newInputSchemaNode(t, "child")
+			valid := newInputSchemaNode(t, "valid")
+			var badErr, goodErr error
+			var good any
+			tc.run(t, func(ctx agent.Context) {
+				_, badErr = RunNode[any](ctx, child, map[string]any{"count": "bad"}, WithUseAsOutput())
+				good, goodErr = RunNode[any](ctx, valid, map[string]any{"count": 3}, WithUseAsOutput())
+			})
+
+			if got := child.runs.Load(); got != 0 {
+				t.Errorf("child runs = %d, want 0", got)
+			}
+			if _, ok := errors.AsType[*NodeRunError](badErr); !ok || !errors.Is(badErr, ErrInputValidation) {
+				t.Errorf("RunNode(invalid input) error = %v, want a *NodeRunError wrapping ErrInputValidation", badErr)
+			}
+			if badErr == nil || !strings.Contains(badErr.Error(), `input validation failed for node "child"`) {
+				t.Errorf("RunNode(invalid input) error = %v, want it to name node child", badErr)
+			}
+			if goodErr != nil || good != "3" {
+				t.Errorf("RunNode(valid input, WithUseAsOutput()) = %v, %v, want 3, nil", good, goodErr)
+			}
+		})
+	}
+}
+
+// Fails if a child run by a tool of an agent node is not stamped as the
+// agent node's output under WithUseAsOutput, a second such child is not
+// refused before it runs, or the child's isolation scope does not follow
+// WithIsolationScopeFromNodePath and WithIsolationScope.
+func TestRunNode_StandaloneUseAsOutputAndIsolationScope(t *testing.T) {
+	child1 := newStubNode("child1", "one")
+	child2 := newCountingStubNode("child2", "two")
+	child3 := newStubNode("child3", "three")
+	var err1, err2, err3 error
+	// A downstream node keeps "a" from being a terminal node, whose output
+	// would also be the workflow's.
+	events, err := runToolOfAgentNode(t, func(tc agent.Context) {
+		_, err1 = RunNode[string](tc, child1, nil, WithUseAsOutput(), WithIsolationScopeFromNodePath())
+		_, err2 = RunNode[string](tc, child2, nil, WithUseAsOutput())
+		_, err3 = RunNode[string](tc, child3, nil, WithIsolationScopeFromNodePath(), WithIsolationScope("explicit"))
+	}, newStubNode("b", nil))
+	if err != nil {
+		t.Fatalf("workflow run error = %v", err)
+	}
+
+	if err1 != nil {
+		t.Fatalf("first RunNode(WithUseAsOutput()) error = %v, want nil", err1)
+	}
+	if diff := cmp.Diff([]string{"wf@1/a@1/child1@1", "wf@1/a@1"}, outputForAtPath(events, "wf@1/a@1/child1@1")); diff != "" {
+		t.Errorf("OutputFor of child1's event mismatch (-want +got):\n%s", diff)
+	}
+	if got := child1.lastScope; got != "wf@1/a@1/child1@1" {
+		t.Errorf("child1 IsolationScope() = %q, want wf@1/a@1/child1@1", got)
+	}
+	if !errors.Is(err2, ErrOutputAlreadyDelegated) {
+		t.Errorf("second RunNode(WithUseAsOutput()) error = %v, want ErrOutputAlreadyDelegated", err2)
+	}
+	if got := child2.runCount(); got != 0 {
+		t.Errorf("child2 runs = %d, want 0", got)
+	}
+	if err3 != nil || child3.lastScope != "explicit" {
+		t.Errorf("RunNode(both scope options) error = %v and child3 IsolationScope() = %q, want nil and explicit", err3, child3.lastScope)
+	}
+}
+
+// textEvent is a model text event.
+func textEvent(text string) *session.Event {
+	return &session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(text, genai.RoleModel)}}
+}
+
+// Fails if the events of an agent and of a child that one of its tools runs
+// reach the consumer of AgentNode.Run at the same time. The consumer of an
+// iterator is not concurrent, so it appends to a plain slice; run under -race.
+func TestAgentNode_ToolChildEventsSerializedWithAgentEvents(t *testing.T) {
+	const perSource = 50
+	child := newHitlNode("child", func(_ agent.Context, _ any, yield func(*session.Event, error) bool) {
+		for i := range perSource {
+			if !yield(textEvent(fmt.Sprintf("child-%d", i)), nil) {
+				return
+			}
+		}
+		yield(&session.Event{Output: "ok"}, nil)
+	})
+	var toolErr error
+	a, err := agent.New(agent.Config{
+		Name: "a",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				var wg sync.WaitGroup
+				wg.Go(func() { _, toolErr = RunNode[any](agent.NewToolContext(ic, "call_1", nil, nil), child, nil) })
+				for i := range perSource {
+					if !yield(textEvent(fmt.Sprintf("agent-%d", i)), nil) {
+						break
+					}
+				}
+				wg.Wait()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	node, err := NewAgentNode(a, NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode() error = %v", err)
+	}
+	mock, _ := newSessionMockCtx(t)
+
+	var events []*session.Event
+	for ev, err := range node.Run(agent.NewContext(mock), nil) {
+		if err != nil {
+			t.Fatalf("AgentNode.Run error = %v", err)
+		}
+		events = append(events, ev)
+	}
+
+	if toolErr != nil {
+		t.Errorf("RunNode() error = %v, want nil", toolErr)
+	}
+	var agentTexts, childTexts int
+	for _, ev := range events {
+		if ev.Content == nil || len(ev.Content.Parts) == 0 {
+			continue
+		}
+		switch text := ev.Content.Parts[0].Text; {
+		case strings.HasPrefix(text, "agent-"):
+			agentTexts++
+		case strings.HasPrefix(text, "child-"):
+			childTexts++
+		}
+	}
+	if agentTexts != 50 || childTexts != 50 {
+		t.Errorf("events seen = %d of the agent and %d of the child, want 50 and 50", agentTexts, childTexts)
+	}
+}
+
+// Fails if AgentNode.Run yields to a consumer that has stopped. The consumer
+// stops on the first event, which is the event of a child that the agent's
+// tool runs; the tool then fails and the agent reports that error, which
+// reaches AgentNode.Run after its consumer has gone.
+func TestAgentNode_ConsumerStopsWhileToolChildRuns(t *testing.T) {
+	child := newHitlNode("child", func(_ agent.Context, _ any, yield func(*session.Event, error) bool) {
+		yield(textEvent("child-text"), nil)
+	})
+	var toolErr error
+	a, err := agent.New(agent.Config{
+		Name: "a",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				_, toolErr = RunNode[any](agent.NewToolContext(ic, "call_1", nil, nil), child, nil)
+				yield(nil, toolErr)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	node, err := NewAgentNode(a, NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode() error = %v", err)
+	}
+	mock, _ := newSessionMockCtx(t)
+
+	for _, err := range node.Run(agent.NewContext(mock), nil) {
+		if err != nil {
+			t.Fatalf("AgentNode.Run error = %v, want the child's event first", err)
+		}
+		break
+	}
+
+	if !errors.Is(toolErr, context.Canceled) {
+		t.Errorf("RunNode() error = %v, want one wrapping context.Canceled", toolErr)
 	}
 }

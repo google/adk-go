@@ -53,6 +53,19 @@ type nodeWrites struct {
 // forwardedKey is the context key of an activation's forwardedEvents.
 type forwardedKey struct{}
 
+// activationActionsKey is the context key of the pending event actions
+// beginActivation gave an activation's context.
+type activationActionsKey struct{}
+
+// isActivationContext reports whether ctx is the context a node activation
+// runs under, or a copy of it that keeps its pending event actions. A tool
+// context derived from it has actions of its own, and a callback context or
+// agent.NewContext(ic) has none, so neither is one.
+func isActivationContext(ctx agent.Context) bool {
+	actions, ok := ctx.Value(activationActionsKey{}).(*session.EventActions)
+	return ok && actions == ctx.Actions()
+}
+
 // beginActivation derives the context n runs under, with fresh pending event
 // actions and a fresh registry of forwarded events, and returns the
 // activation's nodeWrites. A context that ignores the delta yields a
@@ -63,9 +76,10 @@ type forwardedKey struct{}
 func beginActivation(ctx agent.Context, n Node, own *agent.StateValidator) (agent.Context, *nodeWrites) {
 	w := &nodeWrites{up: forwardedFrom(ctx), mine: &forwardedEvents{}}
 	_, w.validatesPending = n.(*FunctionNode)
-	base := context.WithValue(ctx, forwardedKey{}, w.mine)
+	actions := &session.EventActions{}
+	base := context.WithValue(context.WithValue(ctx, forwardedKey{}, w.mine), activationActionsKey{}, actions)
 	derived := ctx.WithDelta(&agent.CommonContextDelta{
-		EventActions:           &session.EventActions{},
+		EventActions:           actions,
 		InvocationContextDelta: &agent.InvocationContextDelta{Context: &base},
 		StateValidator:         own,
 	})
