@@ -24135,9 +24135,11 @@ func TestRetiredCallerReadsCause(t *testing.T) {
 			if len(p1) != 0 {
 				t.Errorf("AGENT_ERROR rows on call-1 end = %d, want none: %s", len(p1), formatRows(p1))
 			}
+			// o is on its own node path, so ending call-q, whose owner resolves to
+			// the invocation span, also ends o as a failed run.
 			wantOErr := fmt.Sprintf("agent %q execution failed before completion", "o")
 			if len(p2) != 2 ||
-				p2[0].agentName != "g" || !errors.Is(p2[0].err, siblingErr) ||
+				p2[0].agentName != "g" || p2[0].err != siblingErr ||
 				p2[1].agentName != "o" || p2[1].err == nil || p2[1].err.Error() != wantOErr {
 				t.Errorf("AGENT_ERROR rows on call-q end = %s, want [g (%v), o (%s)]", formatRows(p2), siblingErr, wantOErr)
 			}
