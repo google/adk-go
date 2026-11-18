@@ -1764,8 +1764,9 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fA
 // turn that are still running. ADK Go fails only this call, because an error
 // from a tool callback already becomes the call's function response.
 //
-// The error is also recorded on the tool's span: callbacks are optional, so the
-// span is the one place that always receives it.
+// The error is also recorded on the tool's span, because callbacks are
+// optional. A panic recovered inside a tool built with functiontool, or inside
+// recoverStreamPanic, does not reach this function and is not recorded here.
 func recoverToolPanic(toolCtx agent.Context, toolName, callback string, step func() (map[string]any, error)) (result map[string]any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
