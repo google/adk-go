@@ -279,7 +279,8 @@ func WithInvocationID(id string) RunOption {
 }
 
 // WithAbortSignal lets the caller stop one run from outside and have the run
-// leave its session consistent. The run is aborted when abort is closed.
+// leave its session consistent. The run is aborted when abort is closed or
+// when one value is sent on it.
 //
 // The signal is separate from the ctx given to [Runner.Run]: an abort never
 // cancels that context, so the run can still persist events and call plugins
@@ -287,13 +288,16 @@ func WithInvocationID(id string) RunOption {
 //
 // The run checks the signal before the agent or workflow starts, after every
 // event it yields, and, in an LLM agent, before each model step, after each
-// event of a step and after each step. A signal closed while the caller
-// handles an event is seen before the next event is requested, so no further
-// agent event is yielded. Agents, tools, model and agent callbacks and
+// event of a step and after each step. A check made after the channel was
+// closed or the value was sent sees the signal, whichever part of the run
+// received the value, and so does every later one: nothing of the run starts
+// after that. A signal sent or closed while the caller handles an event is
+// seen before the next event is requested, so no further agent event is
+// yielded and the seal is. Agents, tools, model and agent callbacks and
 // workflow nodes run under a context that is canceled when the signal fires,
-// so a tool that selects on ctx.Done() returns at once. A tool that ignores
-// its context, or an agent that does not yield, delays the stop until it
-// returns or yields.
+// wherever it was received, so a tool that selects on ctx.Done() returns at
+// once. A tool that ignores its context, or an agent that does not yield,
+// delays the stop until it returns or yields.
 //
 // After the stop, the run seals the invocation once: for every function call
 // of the invocation that has no response, grouped by author, branch and
@@ -314,8 +318,8 @@ func WithInvocationID(id string) RunOption {
 //
 // The iterator ends without an error caused by the abort. An error that is
 // not the abort's cancellation, and the cancellation of the caller's own ctx,
-// are still yielded. A signal closed before the run starts stores the user
-// message, runs the before-run and after-run callbacks, runs no agent or
+// are still yielded. A signal that fired before the run starts stores the
+// user message, runs the before-run and after-run callbacks, runs no agent or
 // workflow, and seals the invocation. A signal closed after the run ended
 // does nothing.
 //
@@ -338,8 +342,11 @@ func WithInvocationID(id string) RunOption {
 //
 // A nil channel means no abort monitoring; the run behaves as without the
 // option. [Runner.RunLive] ignores the option. One channel may be given to
-// several runs, and closing it aborts all of them. Close the channel to
-// abort; a value sent on it is consumed by the first check that receives it.
+// several runs, and closing it aborts every run given it. A value sent on it
+// is received once: it aborts the run that receives it first and every run
+// started under that run's context with the same channel, such as the run of
+// an agent tool ([google.golang.org/adk/v2/tool/agenttool]), also one started
+// after the aborted run was sealed, for example from an after-run callback.
 // The option is safe to use from concurrent Run calls.
 func WithAbortSignal(abort <-chan struct{}) RunOption {
 	return func(o *runOptions) {
@@ -1299,7 +1306,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 		// Stored before any other context is built from ctx, so that every
 		// context of the run, on both paths, reaches the run's abort state.
-		ctx = icontext.WithAbortState(ctx, icontext.NewAbortState(options.abort))
+		ctx = icontext.WithAbortState(ctx, icontext.NewAbortState(ctx, options.abort))
 		ctx = adkcontext.WithoutCallPlace(ctx)
 
 		// The inbound message is always a user turn, whatever Role the caller
