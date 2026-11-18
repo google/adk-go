@@ -212,7 +212,7 @@ func expressionsKeepStringsApart(doc string) bool {
 // end of the source of its last byte: end+1, or, for a closing quote that the
 // outermost text spells as an escape, as the \" that closes a string of a
 // document in a JSON string literal, the end of that escape. redacted
-// reports that redactJSONValue replaces the value: it is the value of a
+// reports that redactJSONValuePass replaces the value: it is the value of a
 // sensitive key, which, when it is an object or an array, is one value from
 // its first byte to the "}" or "]" that closes it.
 type jsonValueSpan struct {
@@ -521,7 +521,7 @@ func appendValueSpans(text string, pos []int, values *[]jsonValueSpan, depth int
 	}
 	const structural = " \t\r\n,:[]{}\""
 	// sensitiveKey reports that the last string was a sensitive key, whose
-	// value redactJSONValue replaces.
+	// value redactJSONValuePass replaces.
 	sensitiveKey := false
 	for i := 0; i < len(text); i++ {
 		if c := text[i]; c != '"' {
@@ -1757,11 +1757,7 @@ func startsLikeEncodedContainer(s string) bool {
 		strings.HasPrefix(afterQuote, `\`) || strings.HasPrefix(afterQuote, `"`)
 }
 
-func redactJSONValue(v any, depth int, budget *nodeBudget) (out any, changed, contentLost bool) {
-	return redactJSONValuePass(v, depth, false, budget)
-}
-
-// redactJSONValuePass is redactJSONValue for one pass over v (see
+// redactJSONValuePass redacts sensitive keys in one pass over v (see
 // redactJSONTextPass).
 func redactJSONValuePass(v any, depth int, laterPass bool, budget *nodeBudget) (out any, changed, contentLost bool) {
 	out, changed, contentLost, _ = redactJSONValueInner(v, depth, false, laterPass, budget)
