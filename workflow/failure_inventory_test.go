@@ -109,7 +109,7 @@ func TestScheduler_FailureInventoryExecutors(t *testing.T) {
 			queue := make(chan queueItem, defaultEventQueueCapacity)
 			var wg sync.WaitGroup
 			wg.Add(1)
-			go runNode(queue, &wg, "body", n, parent, nil)
+			go runNode(queue, &wg, "body", n, parent, nil, nodeTimeout{})
 			var completion completionItem
 			for {
 				switch item := (<-queue).(type) {
@@ -328,7 +328,7 @@ func TestFailureInventory_DirectRunsRemainUnknown(t *testing.T) {
 			queue := make(chan queueItem, 1)
 			var wg sync.WaitGroup
 			wg.Add(1)
-			go runNode(queue, &wg, "body", node, agent.Promote(newMockCtx(t)), nil)
+			go runNode(queue, &wg, "body", node, agent.Promote(newMockCtx(t)), nil, nodeTimeout{})
 			completion, ok := (<-queue).(completionItem)
 			wg.Wait()
 			if !ok || completion.err != failure || completion.inventory.known {

@@ -354,6 +354,11 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		s.commitDelegation(childPath, res.out)
 		return res.out, nil
 	}
+	// Registered before the completion and flush defers, so the child's
+	// context stays live while they run; a child without a timeout keeps
+	// its context unchanged.
+	childCtx, cancelTimeout, timeout := withNodeTimeout(childCtx, child)
+	defer cancelTimeout()
 	childCtx, inventoryRecorder := withFailureInventory(childCtx, child)
 	// This caller leads: hand the outcome to every waiter, on every exit
 	// path, so overlapping callers never start a second run. completed is
@@ -429,7 +434,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		if evErr != nil {
 			// Child error wins over any prior interrupt.
 			rawErr = evErr
-			childFailure = evErr
+			childFailure = timeout.attribute(childCtx, evErr)
 			break
 		}
 		if ev == nil {
@@ -546,7 +551,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		}
 	}
 	if ctxErr := childCtx.Err(); ctxErr != nil {
-		return nil, &NodeRunError{ChildName: name, ChildPath: childPath, RunID: runID, Cause: fmt.Errorf("%w: %w", ErrNodeFailed, ctxErr)}
+		return nil, &NodeRunError{ChildName: name, ChildPath: childPath, RunID: runID, Cause: fmt.Errorf("%w: %w", ErrNodeFailed, timeout.attribute(childCtx, ctxErr))}
 	}
 
 	if opts.raiseOnWait && len(pendingLongRunningIDs) > 0 {
