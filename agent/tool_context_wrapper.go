@@ -56,6 +56,12 @@ func (c *toolContextWrapper) WithAgentTimeout(timeout time.Duration) (Context, c
 	return c.context.WithAgentTimeout(timeout)
 }
 
+// attemptCount implements attemptCounter. A tool reads the number of the node
+// attempt whose context the tool context was built from.
+func (c *toolContextWrapper) attemptCount() int {
+	return AttemptCount(c.context)
+}
+
 // InvocationContext implements [Context].
 func (c *toolContextWrapper) InvocationContext() InvocationContext {
 	log.Print("InvocationContext() is not supported for tool context") //nolint:forbidigo // pre-slog call site

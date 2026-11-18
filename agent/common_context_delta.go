@@ -51,6 +51,17 @@ type CommonContextDelta struct {
 	// context derived from it and the caller share one value. Two activations
 	// must not share one: the maps are not safe for concurrent writes.
 	EventActions *session.EventActions
+	// AttemptCount, when non-nil, points to the attempt number the new context
+	// and every context derived from it report through [AttemptCount]; nil
+	// keeps the number of the context WithDelta is called on. The value is
+	// copied, so a later change to *AttemptCount does not reach the new
+	// context. A value below 1 is not rejected: AttemptCount reports
+	// max(*AttemptCount, 1).
+	//
+	// [ContextMock.WithDelta] ignores the delta, so a mock always reports 1. A
+	// test builds the context of a node attempt with
+	// NewContext(ic).WithDelta(&CommonContextDelta{AttemptCount: &n}) instead.
+	AttemptCount *int
 }
 
 // InvocationContextDelta holds all the changes which should be applied to a new child context based on agent.InvocationContext
@@ -96,6 +107,9 @@ func (c *commonContext) WithDelta(d *CommonContextDelta) Context {
 	}
 	if d.EventActions != nil {
 		res.actions = prepareEventActions(d.EventActions)
+	}
+	if d.AttemptCount != nil {
+		res.attempt = *d.AttemptCount
 	}
 
 	return &res

@@ -32,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/workflow"
 )
 
 // docToolModel stands in for a real model. Its first answer calls the tool
@@ -242,4 +243,49 @@ func ExampleErrUnsupportedContext() {
 	// Output:
 	// true
 	// true
+}
+
+// docRunWorkflow runs w as the root agent of a runner, in a new in-memory
+// session with one user message, and returns the run's first error.
+func docRunWorkflow(w *workflow.Workflow) error {
+	ctx := context.Background()
+	a, err := agent.New(agent.Config{Name: w.Name(), Run: w.Run})
+	if err != nil {
+		return err
+	}
+	r, err := runner.New(runner.Config{AppName: "app", Agent: a, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		return err
+	}
+	msg := genai.NewContentFromText("go", genai.RoleUser)
+	for _, err := range r.Run(ctx, "user", "s1", msg, agent.RunConfig{}) {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// A node whose NodeConfig grants retries reads which attempt it is on with
+// AttemptCount: 1 on the first run, one more on each retry.
+func ExampleAttemptCount() {
+	flaky := workflow.NewFunctionNode("flaky", func(ctx agent.Context, _ any) (string, error) {
+		attempt := agent.AttemptCount(ctx)
+		fmt.Println("attempt", attempt)
+		if attempt < 3 {
+			return "", errors.New("service unavailable")
+		}
+		return "done", nil
+	}, workflow.NodeConfig{RetryConfig: &workflow.RetryConfig{MaxAttempts: 3}})
+	w, err := workflow.New("retry_demo", workflow.Chain(workflow.Start, flaky))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := docRunWorkflow(w); err != nil {
+		fmt.Println("run failed:", err)
+	}
+	// Output:
+	// attempt 1
+	// attempt 2
+	// attempt 3
 }

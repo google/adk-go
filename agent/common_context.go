@@ -421,6 +421,11 @@ type commonContext struct {
 	// stateValidator checks each State().Set write; nil checks nothing.
 	// NewToolContext clears it, and the callback constructors never set it.
 	stateValidator StateValidator
+
+	// attempt is the number of the node attempt this context belongs to, set
+	// by a CommonContextDelta and copied by every derivation that copies the
+	// struct. Zero outside a node attempt; AttemptCount reports at least 1.
+	attempt int
 }
 
 // SubScheduler returns the sub-scheduler RunNode uses to schedule
@@ -439,6 +444,11 @@ func (c *commonContext) Path() string {
 // RunID implements [Context].
 func (c *commonContext) RunID() string {
 	return c.runID
+}
+
+// attemptCount implements attemptCounter.
+func (c *commonContext) attemptCount() int {
+	return c.attempt
 }
 
 // StateValidator returns the validator that checks this context's

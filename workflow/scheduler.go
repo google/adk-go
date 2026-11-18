@@ -464,6 +464,16 @@ func (s *scheduler) startNode(t pendingActivation) {
 		branch = deriveSubBranch(t.branch, name+"@"+runID)
 	}
 
+	ns := s.state.EnsureNode(name)
+	if t.runID == "" {
+		// A new activation gets the whole retry budget; a retry or a
+		// resumed re-entry keeps the attempts it has used.
+		ns.Attempt = 0
+	}
+	// ns.Attempt counts the failed attempts of this activation, so the
+	// node reads 1 on its first run and one more on each retry.
+	attempt := ns.Attempt + 1
+
 	resumeInputs := t.resumeInputs
 	ofa := s.terminalAncestors(name)
 	var dss agent.DynamicSubScheduler
@@ -476,6 +486,7 @@ func (s *scheduler) startNode(t pendingActivation) {
 		RunID:              &runID,
 		SubScheduler:       &dss,
 		OutputForAncestors: &ofa,
+		AttemptCount:       &attempt,
 	})
 	perNodeCtx = withRunCounters(perNodeCtx, s.counters)
 
@@ -485,14 +496,8 @@ func (s *scheduler) startNode(t pendingActivation) {
 		perNodeCtx, cancel = perNodeCtx.WithAgentCancel()
 	}
 
-	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
 	ns.Output = nil
-	if t.runID == "" {
-		// A new activation gets the whole retry budget; a retry or a
-		// resumed re-entry keeps the attempts it has used.
-		ns.Attempt = 0
-	}
 	ns.Input = t.input
 	ns.TriggeredBy = t.triggeredBy
 	ns.Branch = branch

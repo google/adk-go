@@ -250,7 +250,11 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 	itemDelta := &session.EventActions{}
 
 	for {
-		workerOutputs, attemptDelta, runErr := n.runWrappedOnce(ctx, item)
+		// The retry delay and the cancellation checks below stay on the
+		// item's context; only the attempt's run sees its number.
+		attempt := failedAttempts + 1
+		attemptCtx := ctx.WithDelta(&agent.CommonContextDelta{AttemptCount: &attempt})
+		workerOutputs, attemptDelta, runErr := n.runWrappedOnce(attemptCtx, item)
 		mergeDelta(itemDelta, attemptDelta)
 
 		if runErr == nil {
