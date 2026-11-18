@@ -17,6 +17,7 @@ package clientcerttest
 import (
 	"net/http"
 	"os"
+	"os/user"
 	"runtime"
 	"testing"
 )
@@ -66,4 +67,24 @@ func TestPinOff(t *testing.T) {
 	if got := os.Getenv("GOOGLE_API_USE_CLIENT_CERTIFICATE"); got != "false" {
 		t.Errorf("GOOGLE_API_USE_CLIENT_CERTIFICATE = %q after PinOff, want false", got)
 	}
+}
+
+// TestSecureConnectSkipsOnlyWhereUnsafe checks the guard in SecureConnect
+// from the outside: the test must go on exactly where the auth library would
+// look for SecureConnect in the child's home. Going on anywhere else would
+// have a test run the machine's real helper.
+func TestSecureConnectSkipsOnlyWhereUnsafe(t *testing.T) {
+	if !Isolate(t) {
+		return
+	}
+	// As SecureConnect sets it. os/user keeps its first answer.
+	t.Setenv("USER", "clientcerttest")
+	u, err := user.Current()
+	safe := err == nil && u.HomeDir == os.Getenv("HOME")
+	t.Cleanup(func() {
+		if t.Skipped() == safe {
+			t.Errorf("SecureConnect skipped: %v, where the library looks in the test's home: %v", t.Skipped(), safe)
+		}
+	})
+	SecureConnect(t)
 }

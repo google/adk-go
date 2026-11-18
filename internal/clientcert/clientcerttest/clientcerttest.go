@@ -128,7 +128,7 @@ func Isolate(t *testing.T) bool {
 // It leaves a child [Isolate] started alone, so that a test there starts with
 // nothing set.
 func PinOff() {
-	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), homeMarker)); os.Getenv(childEnv) != "" && err == nil {
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), homeMarker)); err == nil {
 		return
 	}
 	if err := os.Setenv("GOOGLE_API_USE_CLIENT_CERTIFICATE", "false"); err != nil {
