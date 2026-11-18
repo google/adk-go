@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -30,8 +31,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
+	"cloud.google.com/go/auth/credentials"
+	"cloud.google.com/go/auth/httptransport"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
@@ -182,11 +183,10 @@ type Client struct {
 	// cannot observe the identity a Client authenticates as. A caller-supplied
 	// HTTPClient is opaque by construction. So is Application Default
 	// Credentials: NewClient resolves it afresh on every call, so two ADC clients
-	// in one process need not be the same principal — the credentials file can be
-	// rewritten between them, and oauth2.HTTPClient in the context supplies the
-	// transport underneath the ADC one, which this package's own PollTimeout doc
-	// invites a caller to use. Erring towards a false miss costs a round trip;
-	// erring the other way discloses one principal's token to another.
+	// in one process need not be the same principal — the credentials file, or
+	// GOOGLE_APPLICATION_CREDENTIALS itself, can be rewritten between them.
+	// Erring towards a false miss costs a round trip; erring the other way
+	// discloses one principal's token to another.
 	//
 	// The converse is a precondition this package cannot enforce and states on
 	// Config.HTTPClient: one Client must not authenticate as several identities.
@@ -245,20 +245,50 @@ type Config struct {
 	// It caps the retry loop, not an individual request; bound a single stalled
 	// request via ctx (or an HTTPClient with its own Timeout).
 	//
-	// To bound requests without giving up ADC, put an [http.Client] carrying a
-	// Timeout in the context passed to [NewClient] under [oauth2.HTTPClient]:
-	// its Timeout is carried through to the ADC-backed client.
+	// To bound requests without giving up ADC, build the client the way
+	// [NewClient] does and pass it as HTTPClient: [httptransport.NewClient] with
+	// DetectOpts naming the cloud-platform scope and a fresh, non-nil Headers map
+	// per client (the transport writes the quota project into the map it is
+	// given and drops it with a nil one, so a shared map carries the first
+	// client's quota project to the next), a Logger that discards (the default
+	// one writes token requests and responses to stderr when
+	// GOOGLE_SDK_GO_LOGGING_LEVEL=debug), DisableTelemetry, CheckRedirect
+	// returning [http.ErrUseLastResponse], and then the Timeout.
 	PollTimeout time.Duration
 }
 
 // NewClient builds a Client from cfg; a nil cfg (or any zero field) uses
 // defaults. Unless cfg.HTTPClient is set, it discovers Application Default
-// Credentials (cloud-platform scope) to authenticate calls to the services.
+// Credentials (cloud-platform scope) to authenticate calls to the services,
+// through the same transport the Google Cloud client libraries use: it sends the
+// quota project, when there is one, as X-Goog-User-Project, caches tokens and
+// refreshes them ahead of expiry, and is configured with the client certificate
+// the environment provides, if any (a workload certificate config, an enterprise
+// certificate proxy, or SecureConnect, unless GOOGLE_API_USE_CLIENT_CERTIFICATE=false
+// opts out). A certificate is only presented to an endpoint that requests one,
+// and the default endpoints do not. For now the services' mTLS endpoints have to
+// be set through [Config.AgentIdentityEndpoint] and [Config.ConnectorEndpoint].
+// The token request is the exception: with a certificate, gcloud user
+// credentials fetch their tokens from oauth2.mtls.googleapis.com, which requests
+// it. A service-account key keeps its token_uri.
+// A credentials file naming a universe domain other than the client's —
+// googleapis.com, or GOOGLE_CLOUD_UNIVERSE_DOMAIN when set — fails every request.
 //
-// ctx is used for credential discovery only, and its cancellation is not
-// honored: the token source backing the returned client is detached from ctx,
-// so a Client built inside a request-scoped context keeps refreshing its token
-// after that request ends.
+// The quota project is GOOGLE_CLOUD_QUOTA_PROJECT when set, and otherwise the
+// credentials file's quota_project_id. The variable is not tied to the
+// credentials, so the header can name a project they do not, as it does for
+// metadata-server credentials, which name none.
+//
+// ctx does not bound the returned Client and nothing is read from it:
+// credential discovery reads the environment, and tokens are minted as requests
+// need them rather than on ctx, so a Client built inside a request-scoped
+// context keeps working after that request ends. Through v2.8.0 the ADC-backed
+// client took its transport and Timeout from an [http.Client] stored in ctx under
+// oauth2.HTTPClient, as the PollTimeout doc then advised. That value is no longer
+// read. Passing that same plain client as [Config.HTTPClient] is not the
+// replacement: HTTPClient is used as given, so it would send no credentials.
+// To keep a Timeout together with ADC, build the client the [Config.PollTimeout]
+// doc describes.
 //
 // The ADC-backed client refuses redirects. A credentials:retrieve call has no
 // reason to redirect, and following one would re-sign the request and hand the
@@ -284,15 +314,35 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		c.pollTimeout = cfg.PollTimeout
 	}
 	if c.httpClient == nil {
-		// The token source captures this context and reuses it for every later
-		// refresh, so it must outlive the call; discovery itself needs no
-		// cancellation (its only network probe bounds itself).
-		creds, err := google.FindDefaultCredentials(context.WithoutCancel(ctx), cloudPlatformScope)
+		// The auth library's transport rather than a hand-written bearer header,
+		// so client certificates, the quota project header and token caching
+		// come from it. See the NewClient doc.
+		hc, err := httptransport.NewClient(&httptransport.Options{
+			DetectOpts: &credentials.DetectOptions{Scopes: []string{cloudPlatformScope}},
+			// Non-nil on purpose: the transport adds the quota project header to
+			// this map, and with a nil map it allocates a private one that its
+			// round-tripper never sees (cloud.google.com/go/auth through v0.24.4).
+			Headers: http.Header{},
+			// Discarded: the library's default logger answers
+			// GOOGLE_SDK_GO_LOGGING_LEVEL=debug by writing each token request and
+			// response to stderr, signed assertion and minted token included.
+			// Credential detection inherits this logger.
+			Logger: slog.New(slog.DiscardHandler),
+			// Off, as through v2.8.0. Left on, the library opens a client span for
+			// every call, and with GOOGLE_SDK_GO_EXPERIMENTAL_TRACING=true records
+			// on it the service's error message, which APIError.Body carries only
+			// scrubbed.
+			DisableTelemetry: true,
+		})
 		if err != nil {
-			return nil, fmt.Errorf("gcp: find default credentials: %w", err)
+			// Not "find default credentials": the same call fails on a malformed
+			// client certificate config, before discovery runs. The library
+			// resolves the certificate source once per process and keeps the
+			// outcome, so fixing the file does not clear that failure for a
+			// process that already hit it.
+			return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
 		}
-		hc := oauth2.NewClient(ctx, creds.TokenSource)
-		// oauth2.Transport re-signs every hop, below the layer where net/http
+		// The transport re-signs every hop, below the layer where net/http
 		// strips credentials on a cross-host redirect, so a redirect would leak
 		// the token to whatever host it names.
 		hc.CheckRedirect = func(*http.Request, []*http.Request) error {
@@ -411,7 +461,13 @@ type Retrieval struct {
 // sentinels, or a bare type assertion to [*APIError], stops being true where it
 // was true in v2.3.0. A decode failure is now [ErrMalformedResponse] and no
 // longer carries the [encoding/json] error behind it, so [errors.As] against
-// *json.SyntaxError stops finding one.
+// *json.SyntaxError stops finding one. On the ADC-backed client the error
+// behind a rejected cloud-platform token request is whatever the
+// cloud.google.com/go/auth credential for that source reports, where releases
+// through v2.8.0 reported golang.org/x/oauth2's. For a service-account key
+// that is a *cloud.google.com/go/auth.Error where it was an
+// *oauth2.RetrieveError. Which type the other credential sources wrap, if any,
+// is the library's choice, not this package's promise.
 func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ *Retrieval, err error) {
 	if req.Resource == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a Resource")
