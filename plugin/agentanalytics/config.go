@@ -345,8 +345,40 @@ type Config struct {
 	// credentials in URIs, Authorization headers and Bearer or Basic
 	// credentials, sensitive keys in JSON embedded in text, and credentials in
 	// error_message are all written unredacted. When false, key names match
-	// regardless of case and of "_" or "-", so apiKey, APIKey and api-key are
-	// redacted like api_key.
+	// regardless of case and of "_", "-" or ".", so apiKey, APIKey, api-key and
+	// api.key are redacted like api_key. A compound name that ends in a
+	// credential name, such as DB_PASSWORD, dbPassword or
+	// spring.datasource.password, is redacted too, and so is a credential name
+	// or "temp:" key behind "user:" or "app:" state prefixes, stacked or not,
+	// such as user:api_key, app:user:token or user:temp:x. The "." and
+	// compound-name matching apply to map keys, to the keys of query,
+	// fragment and ";" parameter pairs of a URI, and to keys in text. They do
+	// not apply to URI path segments: only a segment that is a credential
+	// name itself, whatever its case and "_" or "-", or a "temp:" key, alone
+	// or behind "user:" or "app:" prefixes, redacts the segment after it, as
+	// in https://h/api_key/abc123, while https://h/api.key/abc123 and
+	// https://h/DB_PASSWORD/abc123 keep abc123, as file names and route slugs
+	// such as /private.key/download or /reset-password/confirm stay as they
+	// are. Cursor and tokenizer names that end in "token" are not redacted,
+	// in snake, camel or upper case: next_token, prev_token and
+	// previous_token; page_token, sync_token, continuation_token and
+	// resume_token, alone or after next, prev, previous, start or newStart,
+	// as nextPageToken, startPageToken or newStartPageToken; and pad_token,
+	// eos_token, eot_token, bos_token, unk_token, cls_token, sep_token and
+	// mask_token. Plural count names such as input_tokens and output_tokens
+	// are also kept because they end in "tokens", whereas singular or
+	// flag-style compound names that end in a sensitive credential suffix,
+	// such as input_token, output_token, has_password or is_secret, are
+	// redacted regardless of value type. Redaction also applies to declared
+	// Go types whose type name matches a sensitive key (generic or not): a
+	// non-struct value, or a struct whose value or pointer type has a
+	// MarshalJSON or MarshalText method, redacts whole as "[REDACTED]" with
+	// truncated=true; any other struct shows its exported fields, with the
+	// sensitive ones redacted, and omits unexported fields; and map keys of
+	// such a type collapse to "[REDACTED]":"[REDACTED]" with
+	// truncated=true (for example, map[SyntaxToken]int{1: 12, 2: 9} formats as
+	// {"[REDACTED]":"[REDACTED]"} with truncated=true). The adk-python plugin
+	// matches exact key names only.
 	DisableSensitiveKeyRedaction bool
 
 	// ContentFormatter, if set, is applied to each event's raw payload before

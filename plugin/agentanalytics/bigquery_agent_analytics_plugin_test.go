@@ -3668,6 +3668,30 @@ func TestFileDataURICredentialsAreRedacted(t *testing.T) {
 			uri:  "https://example.com/a?a=1;access_token=SECRET123",
 			want: "https://example.com/a?a=1%3Baccess_token%3D%5BREDACTED%5D",
 		},
+		{
+			uri:  "https://h/secret_key/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://h/signing_key/token/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://h/user:temp:a/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://h/%5Cu00a0api_key/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://h/api_key%5Cu00a0/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://h/api_%5Cu212aey/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
 	}
 	p, requests, mCtx := setupTestPlugin(t)
 	content := &genai.Content{Role: "user"}
