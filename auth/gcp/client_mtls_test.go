@@ -30,6 +30,14 @@ import (
 	"google.golang.org/adk/v2/internal/clientcert/clientcerttest"
 )
 
+// NewClient builds its default client through the Google auth library, which
+// loads a client certificate when the shell running the tests turns one on,
+// and that can run a certificate helper installed on the machine.
+func TestMain(m *testing.M) {
+	clientcerttest.PinOff()
+	os.Exit(m.Run())
+}
+
 // TestNewClientMTLSEndpointMode covers the endpoint choice with no certificate
 // source, where only GOOGLE_API_USE_MTLS_ENDPOINT can select the mTLS hosts.
 func TestNewClientMTLSEndpointMode(t *testing.T) {
@@ -108,34 +116,33 @@ func TestNewClientWithCertificateSource(t *testing.T) {
 		return
 	}
 	workload, leaf := clientcerttest.Workload(t)
-	srv, peers := clientcerttest.Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
-	}))
+	home := clientcerttest.HomeCertificate(t)
+	srv, peers := clientcerttest.Server(t, credentialHandler)
 	fakeADC(t)
 
-	// useCert is GOOGLE_API_USE_CLIENT_CERTIFICATE, and config is
-	// GOOGLE_API_CERTIFICATE_CONFIG. Without it the only config is the one at
-	// gcloud's default path, which the auth library uses and the rule does not.
+	unset := clientcerttest.Unset
 	for _, tc := range []struct {
 		name          string
-		useCert       string
-		config        string
+		useCert       string // GOOGLE_API_USE_CLIENT_CERTIFICATE
+		gcloud        string // CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE
+		config        string // GOOGLE_API_CERTIFICATE_CONFIG
 		mode          string
 		wantMTLSHosts bool
-		wantCert      bool
+		wantCert      []byte
 	}{
-		// First, so that the auth library, which resolves its source once per
-		// process, resolves the certificate the cases below compare against.
-		{name: "unset, workload config", useCert: clientcerttest.Unset, config: workload, wantMTLSHosts: true, wantCert: true},
-		{name: "true", useCert: "true", config: workload, wantMTLSHosts: true, wantCert: true},
-		{name: "never keeps the plain hosts and the certificate", useCert: clientcerttest.Unset, config: workload, mode: "never", wantCert: true},
-		{name: "false", useCert: "false", config: workload},
+		{name: "workload config", useCert: unset, gcloud: unset, config: workload, wantMTLSHosts: true, wantCert: leaf},
+		{name: "workload config at the default path", useCert: unset, gcloud: unset, config: unset, wantMTLSHosts: true, wantCert: home},
+		{name: "true", useCert: "true", gcloud: unset, config: workload, wantMTLSHosts: true, wantCert: leaf},
+		{name: "gcloud's variable", useCert: unset, gcloud: "true", config: workload, wantMTLSHosts: true, wantCert: leaf},
+		{name: "never keeps the plain hosts and the certificate", useCert: unset, gcloud: unset, config: workload, mode: "never", wantCert: leaf},
+		{name: "false", useCert: "false", gcloud: unset, config: workload},
 		// The auth library alone turns the certificate on for these two.
-		{name: "unset, config only at the default path", useCert: clientcerttest.Unset, config: clientcerttest.Unset},
-		{name: "1", useCert: "1", config: workload},
+		{name: "gcloud's variable false", useCert: unset, gcloud: "false", config: workload},
+		{name: "1", useCert: "1", gcloud: unset, config: workload},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", tc.useCert)
+			clientcerttest.Setenv(t, "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE", tc.gcloud)
 			clientcerttest.Setenv(t, "GOOGLE_API_CERTIFICATE_CONFIG", tc.config)
 			t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", tc.mode)
 
@@ -161,18 +168,33 @@ func TestNewClientWithCertificateSource(t *testing.T) {
 				t.Fatalf("RetrieveCredential() error = %v", err)
 			}
 			got := peers()[before:]
-			if !tc.wantCert {
+			if tc.wantCert == nil {
 				if len(got) != 0 {
 					t.Errorf("server saw %d client certificates, want none", len(got))
 				}
 				return
 			}
-			if len(got) != 1 || !bytes.Equal(got[0], leaf) {
+			if len(got) != 1 || !bytes.Equal(got[0], tc.wantCert) {
 				t.Errorf("server saw %d client certificates, want exactly the configured one", len(got))
 			}
 		})
 	}
+
+	// The certificate does not stand in for credentials.
+	t.Run("no credentials", func(t *testing.T) {
+		clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", unset)
+		t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", workload)
+		t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "absent.json"))
+		if c, err := NewClient(t.Context(), nil); err == nil {
+			t.Errorf("NewClient() = %+v, nil error without credentials; want an error", c)
+		}
+	})
 }
+
+// credentialHandler answers a credentials:retrieve call with a token.
+var credentialHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
+})
 
 // TestNewClientTokenExchangeFollowsTheRule watches where gcloud user
 // credentials fetch their token. With the certificate on, that request goes
@@ -190,20 +212,25 @@ func TestNewClientTokenExchangeFollowsTheRule(t *testing.T) {
 	clientcerttest.WriteFile(t, adc, []byte(`{"type":"authorized_user","client_id":"id","client_secret":"secret","refresh_token":"refresh"}`))
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adc)
 
+	const plain, mtls = "oauth2.googleapis.com:443", "oauth2.mtls.googleapis.com:443"
+	unset := clientcerttest.Unset
 	for _, tc := range []struct {
 		name    string
 		useCert string
-		config  string
+		gcloud  string
 		want    string
 	}{
-		{name: "unset, workload config", useCert: clientcerttest.Unset, config: workload, want: "oauth2.mtls.googleapis.com:443"},
-		{name: "false", useCert: "false", config: workload, want: "oauth2.googleapis.com:443"},
-		// The auth library alone uses the certificate, and the mTLS token host, here.
-		{name: "unset, config only at the default path", useCert: clientcerttest.Unset, config: clientcerttest.Unset, want: "oauth2.googleapis.com:443"},
+		{name: "workload config", useCert: unset, gcloud: unset, want: mtls},
+		{name: "false", useCert: "false", gcloud: unset, want: plain},
+		// The auth library alone uses the certificate, and the mTLS token
+		// host, for these two.
+		{name: "gcloud's variable false", useCert: unset, gcloud: "false", want: plain},
+		{name: "1", useCert: "1", gcloud: unset, want: plain},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", tc.useCert)
-			clientcerttest.Setenv(t, "GOOGLE_API_CERTIFICATE_CONFIG", tc.config)
+			clientcerttest.Setenv(t, "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE", tc.gcloud)
+			t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", workload)
 			before := len(hosts())
 
 			// A loopback endpoint, which the proxy settings never apply to.
@@ -227,12 +254,67 @@ func TestNewClientTokenExchangeFollowsTheRule(t *testing.T) {
 	}
 }
 
+// TestNewClientTokenExchangePresentsTheCertificate has a service-account key
+// fetch its token from a server that requests a client certificate, where
+// TestNewClientTokenExchangeFollowsTheRule only sees which host is asked.
+func TestNewClientTokenExchangePresentsTheCertificate(t *testing.T) {
+	if !clientcerttest.Isolate(t) {
+		return
+	}
+	workload, leaf := clientcerttest.Workload(t)
+	// One server for the token and for the credential service.
+	srv, peers := clientcerttest.Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ParseForm() == nil && r.PostForm.Get("assertion") != "" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"access_token":"ADC-TOKEN","token_type":"Bearer","expires_in":3600}`)
+			return
+		}
+		credentialHandler(w, r)
+	}))
+	isolateADCEnv(t)
+	writeFakeADC(t, srv.URL, "")
+	clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", clientcerttest.Unset)
+	t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", workload)
+
+	for _, tc := range []struct {
+		name   string
+		gcloud string
+		// The token request and the call to the service each open a connection.
+		want int
+	}{
+		{name: "workload config", gcloud: clientcerttest.Unset, want: 2},
+		// The auth library alone presents the certificate on both.
+		{name: "gcloud's variable false", gcloud: "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientcerttest.Setenv(t, "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE", tc.gcloud)
+			before := len(peers())
+			c, err := NewClient(t.Context(), &Config{AgentIdentityEndpoint: srv.URL, ConnectorEndpoint: srv.URL})
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			if _, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"}); err != nil {
+				t.Fatalf("RetrieveCredential() error = %v", err)
+			}
+			got := peers()[before:]
+			if len(got) != tc.want {
+				t.Errorf("server saw %d client certificates, want %d", len(got), tc.want)
+			}
+			for _, c := range got {
+				if !bytes.Equal(c, leaf) {
+					t.Error("server saw a certificate other than the configured one")
+				}
+			}
+		})
+	}
+}
+
 // TestNewClientWithTheCertificateOff covers what the auth library would do on
 // its own while the rule leaves the certificate off. The certificate config at
 // gcloud's default path is one the library fails on, so NewClient succeeds
-// only if the library never looks. The test server is trusted only through
-// the TLS configuration of http.DefaultTransport, so a request succeeds only
-// if the client keeps that configuration.
+// only if neither the rule nor the library reads it. The test server is
+// trusted only through the TLS configuration of http.DefaultTransport, so a
+// request succeeds only if the client keeps that configuration.
 func TestNewClientWithTheCertificateOff(t *testing.T) {
 	if !clientcerttest.Isolate(t) {
 		return
@@ -242,7 +324,7 @@ func TestNewClientWithTheCertificateOff(t *testing.T) {
 	var certs int
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		certs += len(r.TLS.PeerCertificates)
-		_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
+		credentialHandler(w, r)
 	}))
 	srv.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
 	srv.StartTLS()
@@ -254,7 +336,8 @@ func TestNewClientWithTheCertificateOff(t *testing.T) {
 
 	fakeADC(t)
 	clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", clientcerttest.Unset)
-	clientcerttest.Setenv(t, "GOOGLE_API_CERTIFICATE_CONFIG", clientcerttest.Unset)
+	// With this the auth library alone still has the certificate on.
+	t.Setenv("CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE", "false")
 
 	c, err := NewClient(t.Context(), &Config{AgentIdentityEndpoint: srv.URL, ConnectorEndpoint: srv.URL})
 	if err != nil {
@@ -278,12 +361,11 @@ func TestNewClientWithAReplacedDefaultTransport(t *testing.T) {
 	if !clientcerttest.Isolate(t) {
 		return
 	}
-	srv, peers := clientcerttest.Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"success":{"token":"tok","header":"Authorization: Bearer"}}`)
-	}))
+	srv, peers := clientcerttest.Server(t, credentialHandler)
 	fakeADC(t)
 	clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", clientcerttest.Unset)
-	clientcerttest.Setenv(t, "GOOGLE_API_CERTIFICATE_CONFIG", clientcerttest.Unset)
+	// With this the auth library alone still has the certificate on.
+	t.Setenv("CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE", "false")
 	// Safe to change: this child process runs no other test.
 	http.DefaultTransport = roundTripperFunc(http.DefaultTransport.RoundTrip)
 
@@ -299,35 +381,85 @@ func TestNewClientWithAReplacedDefaultTransport(t *testing.T) {
 	}
 }
 
-func TestPlainTransport(t *testing.T) {
-	if got := plainTransport(roundTripperFunc(nil)); got != nil {
-		t.Errorf("plainTransport() = %v for a default transport that is not an http.Transport, want nil", got)
+// TestNewClientLeavesSecureConnectAlone covers the certificate source that
+// runs a helper program: with no variable set the helper must not run, where
+// the auth library by itself runs it. Where [clientcerttest.SecureConnect]
+// skips the test, the cases above that the auth library alone turns on cover
+// the same code with a workload certificate.
+func TestNewClientLeavesSecureConnectAlone(t *testing.T) {
+	if !clientcerttest.Isolate(t) {
+		return
+	}
+	leaf, ran := clientcerttest.SecureConnect(t)
+	srv, peers := clientcerttest.Server(t, credentialHandler)
+	fakeADC(t)
+	clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", clientcerttest.Unset)
+
+	retrieve := func() *Client {
+		t.Helper()
+		c, err := NewClient(t.Context(), &Config{AgentIdentityEndpoint: srv.URL, ConnectorEndpoint: srv.URL})
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		if _, err := c.RetrieveCredential(t.Context(), Request{Resource: authProviderResource, UserID: "u"}); err != nil {
+			t.Fatalf("RetrieveCredential() error = %v", err)
+		}
+		c, err = NewClient(t.Context(), nil)
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		return c
 	}
 
+	if c := retrieve(); c.agentIdentityURL != defaultAgentIdentityURL || len(peers()) != 0 || ran() {
+		t.Fatalf("with no variable set: agent identity endpoint %q, %d client certificates, helper ran: %v; want the plain endpoint, none and false", c.agentIdentityURL, len(peers()), ran())
+	}
+
+	t.Setenv("CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE", "true")
+	c := retrieve()
+	if got := peers(); c.agentIdentityURL != defaultAgentIdentityMTLSURL || len(got) != 1 || !bytes.Equal(got[0], leaf) {
+		t.Errorf("with gcloud's variable true: agent identity endpoint %q, %d client certificates; want the mTLS endpoint and the helper's certificate", c.agentIdentityURL, len(got))
+	}
+}
+
+// TestPlainTransport compares with what the auth library does to its own base
+// transport: see plainTransport.
+func TestPlainTransport(t *testing.T) {
+	if got, h2 := plainTransport(roundTripperFunc(nil)); got != nil || h2 != nil {
+		t.Errorf("plainTransport() = %v, %v for a default transport that is not an http.Transport, want nil", got, h2)
+	}
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, r.Proto)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
 	roots := x509.NewCertPool()
-	def := &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: roots},
-		HTTP2:           &http.HTTP2Config{PingTimeout: time.Second},
-	}
-	got, ok := plainTransport(def).(*http.Transport)
+	roots.AddCert(srv.Certificate())
+	// Built by hand, a transport with a TLS configuration of its own speaks
+	// HTTP/1.1 unless told otherwise. The library turns HTTP/2 on regardless.
+	def := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}
+
+	base, h2 := plainTransport(def)
+	got, ok := base.(*http.Transport)
 	if !ok || got == def {
-		t.Fatalf("plainTransport() = %v, want a copy of the default transport", got)
+		t.Fatalf("plainTransport() = %v, want a copy of the default transport", base)
 	}
-	if got.TLSClientConfig == nil || got.TLSClientConfig.RootCAs != roots {
-		t.Error("plainTransport() dropped the default transport's TLS configuration")
+	if got.MaxIdleConnsPerHost != 100 || h2 == nil || h2.ReadIdleTimeout != 31*time.Second {
+		t.Errorf("plainTransport() idle connections per host = %d, HTTP/2 side = %+v; want 100 and a 31s read idle timeout", got.MaxIdleConnsPerHost, h2)
 	}
-	// The values the auth library sets on its own base transport.
-	if got.MaxIdleConnsPerHost != 100 || got.HTTP2.SendPingTimeout != 31*time.Second {
-		t.Errorf("plainTransport() idle connections per host = %d, ping after = %v, want 100 and 31s", got.MaxIdleConnsPerHost, got.HTTP2.SendPingTimeout)
-	}
-	if got.HTTP2.PingTimeout != time.Second {
-		t.Errorf("plainTransport() ping timeout = %v, want the default transport's 1s kept", got.HTTP2.PingTimeout)
-	}
-	if def.MaxIdleConnsPerHost != 0 || def.HTTP2.SendPingTimeout != 0 {
+	if def.MaxIdleConnsPerHost != 0 || len(def.TLSClientConfig.NextProtos) != 0 || def.TLSNextProto != nil || def.Protocols != nil || def.HTTP2 != nil {
 		t.Error("plainTransport() changed the default transport")
 	}
-	if plain, ok := plainTransport(&http.Transport{}).(*http.Transport); !ok || plain.HTTP2 == nil || plain.HTTP2.SendPingTimeout != 31*time.Second {
-		t.Error("plainTransport() set no ping for a default transport without HTTP/2 settings")
+	// The server is trusted only through the default transport's roots.
+	resp, err := (&http.Client{Transport: base}).Get(srv.URL)
+	if err != nil {
+		t.Fatalf("Get() through plainTransport() error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.ProtoMajor != 2 {
+		t.Errorf("request through plainTransport() used %s, want HTTP/2", resp.Proto)
 	}
 }
 
@@ -335,21 +467,41 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// TestNewClientReportsABrokenCertificateConfig runs apart from the tests above
-// because the auth library keeps the failure for the rest of the process.
+// TestNewClientReportsABrokenCertificateConfig runs in a child process so that
+// a NewClient that went on past the error would find only the test's files.
 func TestNewClientReportsABrokenCertificateConfig(t *testing.T) {
 	if !clientcerttest.Isolate(t) {
 		return
 	}
 	fakeADC(t)
-	clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", clientcerttest.Unset)
-	t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", clientcerttest.BrokenWorkload(t))
+	notJSON := filepath.Join(t.TempDir(), "certificate_config.json")
+	clientcerttest.WriteFile(t, notJSON, []byte("{"))
+	for _, tc := range []struct {
+		name   string
+		config string
+	}{
+		{name: "workload section without paths", config: clientcerttest.BrokenWorkload(t)},
+		{name: "not JSON", config: notJSON},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", clientcerttest.Unset)
+			t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", tc.config)
 
-	c, err := NewClient(t.Context(), nil)
-	if err == nil {
-		t.Fatalf("NewClient() = %+v, nil error; want an error for a workload section without paths", c)
-	}
-	if !strings.Contains(err.Error(), "client certificate") {
-		t.Errorf("NewClient() error = %q, want it to name the client certificate", err)
+			c, err := NewClient(t.Context(), nil)
+			if err == nil {
+				t.Fatalf("NewClient() = %+v, nil error; want an error", c)
+			}
+			// The file, and the way out.
+			for _, want := range []string{tc.config, "GOOGLE_API_USE_CLIENT_CERTIFICATE=false"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("NewClient() error = %q, want it to contain %q", err, want)
+				}
+			}
+
+			t.Setenv("GOOGLE_API_USE_CLIENT_CERTIFICATE", "false")
+			if _, err := NewClient(t.Context(), nil); err != nil {
+				t.Errorf("NewClient() error = %v with the certificate turned off, want nil", err)
+			}
+		})
 	}
 }

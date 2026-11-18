@@ -33,13 +33,17 @@ func TestIsolateRunsOnLinux(t *testing.T) {
 			t.Error("Isolate or Server skipped the test")
 		}
 	})
+	if os.Getenv(childEnv) == "" {
+		// The kind of setting a developer's shell has. None may reach the child.
+		t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", "/nonexistent/certificate_config.json")
+		t.Setenv("CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE", "true")
+	}
 	if !Isolate(t) {
 		return
 	}
-	for _, name := range cleared {
-		if v, ok := os.LookupEnv(name); ok {
-			t.Errorf("the child starts with %s=%q, want it unset", name, v)
-		}
+	PinOff()
+	if env := os.Environ(); len(env) != 2 {
+		t.Errorf("the child has %q after PinOff, want only HOME and the child marker", env)
 	}
 	Server(t, http.NotFoundHandler())
 }
@@ -51,4 +55,15 @@ func TestIsolateReportsAChildSkip(t *testing.T) {
 		t.Skip("skipped in the child")
 	}
 	t.Error("Isolate returned in the parent after its child skipped")
+}
+
+func TestPinOff(t *testing.T) {
+	// The child marker alone, as a shell could export it, is not a child.
+	t.Setenv(childEnv, "TestSomethingElse")
+	t.Setenv("HOME", t.TempDir())
+	Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", Unset)
+	PinOff()
+	if got := os.Getenv("GOOGLE_API_USE_CLIENT_CERTIFICATE"); got != "false" {
+		t.Errorf("GOOGLE_API_USE_CLIENT_CERTIFICATE = %q after PinOff, want false", got)
+	}
 }

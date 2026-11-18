@@ -35,6 +35,7 @@ import (
 
 	"cloud.google.com/go/auth/credentials"
 	"cloud.google.com/go/auth/httptransport"
+	"golang.org/x/net/http2"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
@@ -261,8 +262,9 @@ type Config struct {
 	// GOOGLE_SDK_GO_LOGGING_LEVEL=debug), DisableTelemetry, CheckRedirect
 	// returning [http.ErrUseLastResponse], and then the Timeout. That client
 	// decides on a client certificate by the auth library's default, which is
-	// wider than the rule [NewClient] documents, so set
-	// GOOGLE_API_USE_CLIENT_CERTIFICATE where the two differ.
+	// wider than the rule [NewClient] documents: set
+	// GOOGLE_API_USE_CLIENT_CERTIFICATE to true or to false to make the two
+	// agree.
 	PollTimeout time.Duration
 }
 
@@ -274,17 +276,35 @@ type Config struct {
 // refreshes them ahead of expiry, and presents the environment's client
 // certificate when the rule below turns it on.
 //
-// The client certificate follows adk-python's rule, narrowed to what the
-// Google auth library for Go (cloud.google.com/go/auth) accepts.
-// GOOGLE_API_USE_CLIENT_CERTIFICATE decides when it is set: true, TRUE or True
-// turns the certificate on, and any other value, the empty string included,
-// turns it off. When it is unset, the certificate is on only if
-// GOOGLE_API_CERTIFICATE_CONFIG names a certificate config file with a workload
-// section, and only in the googleapis.com universe. With the variable unset
-// the auth library by itself also uses an enterprise certificate proxy,
-// SecureConnect, or a certificate config at gcloud's default path. Here those
-// take GOOGLE_API_USE_CLIENT_CERTIFICATE=true. While the certificate is on, a
-// workload section without a certificate path or a key path fails NewClient.
+// The client certificate follows adk-python's rule, as far as the Google auth
+// library for Go (cloud.google.com/go/auth) can load the certificate:
+//
+//   - GOOGLE_API_USE_CLIENT_CERTIFICATE decides when it is set: true, TRUE or
+//     True turns the certificate on, and any other value, the empty string
+//     included, turns it off.
+//   - Otherwise CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE, the variable
+//     gcloud reads, decides unless it is empty: true in any letter case turns
+//     the certificate on, and any other value turns it off.
+//   - Otherwise the certificate is on only if a certificate config has a
+//     workload section. The config is the file GOOGLE_API_CERTIFICATE_CONFIG
+//     names, or the one at gcloud's default path:
+//     ~/.config/gcloud/certificate_config.json, and
+//     %APPDATA%\gcloud\certificate_config.json on Windows.
+//
+// With GOOGLE_API_USE_CLIENT_CERTIFICATE unset, the certificate is on only in
+// the googleapis.com universe.
+//
+// A workload section names the certificate. Without one, a variable that
+// turns the certificate on selects an enterprise certificate proxy or
+// SecureConnect, if the machine has either, and the auth library runs that
+// source's helper program the first time a client is built. With both
+// variables unset that helper is not run, where the auth library by itself
+// would run it.
+//
+// While the certificate can be on, NewClient fails on a certificate config
+// that is not valid JSON or whose workload section lacks cert_path or
+// key_path, and on a proxy or SecureConnect setup the auth library cannot
+// use. A config file that is missing or cannot be read counts as no config.
 //
 // A certificate is only presented to an endpoint that requests one, so when
 // the client has one the default endpoints become the services' mTLS
@@ -364,14 +384,15 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		}
 		detect := &credentials.DetectOptions{Scopes: []string{cloudPlatformScope}}
 		if certSource != nil {
-			// The library finds the same source on its own, and with it also
-			// sends the token exchange through the certificate.
+			// With a source the library also sends the token exchange through
+			// the certificate.
+			opts.ClientCertProvider = certSource
 			opts.DetectOpts = detect
 		} else {
 			// Left to its default the library would look for a certificate on
 			// its own, by a wider rule than clientcert.Source's, and use it
 			// for the token exchange as well. Handing it a source stops that
-			// lookup, which can run a SecureConnect helper. With a source the
+			// lookup, which can run a certificate helper. With a source the
 			// library also moves credentials it detects to its mTLS token
 			// endpoint, so they are detected here.
 			detect.Logger = opts.Logger
@@ -381,7 +402,7 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 			}
 			opts.Credentials = creds
 			opts.ClientCertProvider = noClientCertificate
-			opts.BaseRoundTripper = plainTransport(http.DefaultTransport)
+			opts.BaseRoundTripper, _ = plainTransport(http.DefaultTransport)
 		}
 		hc, err := httptransport.NewClient(opts)
 		if err != nil {
@@ -423,22 +444,24 @@ func noClientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) 
 // an application set on the default transport.
 //
 // It returns nil when def is not an [http.Transport]. The library then starts
-// from a transport of its own, which has no configuration to lose.
-func plainTransport(def http.RoundTripper) http.RoundTripper {
+// from a transport of its own, which has no configuration to lose. The second
+// result is the HTTP/2 side of the transport, for the tests.
+func plainTransport(def http.RoundTripper) (http.RoundTripper, *http2.Transport) {
 	t, ok := def.(*http.Transport)
 	if !ok {
-		return nil
+		return nil, nil
 	}
+	// The same steps as the library's (cloud.google.com/go/auth v0.24.4,
+	// httptransport.defaultBaseTransport): a larger idle pool, HTTP/2
+	// configured by golang.org/x/net/http2, and a health check that drops a
+	// connection gone quiet.
 	t = t.Clone()
-	// The library's two adjustments (cloud.google.com/go/auth v0.24.4,
-	// httptransport.defaultBaseTransport): a larger idle pool, and a health
-	// check that drops a connection gone quiet.
 	t.MaxIdleConnsPerHost = 100
-	if t.HTTP2 == nil {
-		t.HTTP2 = &http.HTTP2Config{}
+	h2, err := http2.ConfigureTransports(t)
+	if err == nil {
+		h2.ReadIdleTimeout = 31 * time.Second
 	}
-	t.HTTP2.SendPingTimeout = 31 * time.Second
-	return t
+	return t, h2
 }
 
 const (

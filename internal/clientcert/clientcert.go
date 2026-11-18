@@ -21,75 +21,176 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"cloud.google.com/go/auth/httptransport"
 )
 
 const (
-	envUseClientCert  = "GOOGLE_API_USE_CLIENT_CERTIFICATE"
-	envCertConfig     = "GOOGLE_API_CERTIFICATE_CONFIG"
-	envUniverseDomain = "GOOGLE_CLOUD_UNIVERSE_DOMAIN"
+	envUseClientCert       = "GOOGLE_API_USE_CLIENT_CERTIFICATE"
+	envGcloudUseClientCert = "CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE"
+	envCertConfig          = "GOOGLE_API_CERTIFICATE_CONFIG"
+	envUniverseDomain      = "GOOGLE_CLOUD_UNIVERSE_DOMAIN"
+
+	// Ends the error for a certificate config that cannot be used.
+	optOut = envUseClientCert + "=false turns the client certificate off"
 )
+
+type source = func(*tls.CertificateRequestInfo) (*tls.Certificate, error)
 
 // Source returns the environment's client certificate source when the rule
 // below turns the certificate on. It returns nil when the rule is off, and
-// when it is on but the environment has no certificate. An error means the
-// rule is on and the configured source is broken.
+// when it is on but the environment has no certificate. An error means a
+// certificate config that cannot be used, or a certificate source the auth
+// library fails on.
 //
-// The rule is adk-python's, as far as the auth library allows:
+// The rule is adk-python's, as far as the auth library can load the
+// certificate:
 //
 //   - GOOGLE_API_USE_CLIENT_CERTIFICATE, when set, decides: on for true in any
 //     letter case, off for anything else.
-//   - When it is unset, the certificate is on only if
-//     GOOGLE_API_CERTIFICATE_CONFIG names a JSON file with a
-//     cert_configs.workload section.
+//   - Otherwise CLOUDSDK_CONTEXT_AWARE_USE_CLIENT_CERTIFICATE, the variable
+//     gcloud reads, decides in the same way unless it is empty.
+//   - Otherwise the certificate is on only if a certificate config has a
+//     workload section. The config is the file GOOGLE_API_CERTIFICATE_CONFIG
+//     names, or the one at gcloud's default path.
 //
-// The certificate itself comes from the auth library, whose own gate applies
-// on top: it parses a set variable with [strconv.ParseBool], so of the
-// spellings of true only true, TRUE and True pass, and it leaves an unset one
-// off outside the googleapis.com universe. It ignores a certificate it is
-// handed while that gate is off, so the rule cannot be wider than it.
+// A workload section names the certificate, and that certificate is the one
+// returned, so the decision and the certificate come from one file. Without
+// such a section, a variable that turns the certificate on leaves the choice
+// to the auth library: an enterprise certificate proxy, then SecureConnect.
 //
-// Left to itself the auth library is wider: with the variable unset it also
-// uses an enterprise certificate proxy, SecureConnect, or a workload config at
-// gcloud's default path. A caller that builds its transport through that
-// library has to keep it from doing so when Source returns nil.
+// The auth library's own gate comes first, because the library ignores a
+// certificate it is handed while that gate is off, and then no config is
+// read. It parses a set GOOGLE_API_USE_CLIENT_CERTIFICATE with
+// [strconv.ParseBool], so of the spellings of true only true, TRUE and True
+// pass. With that variable unset it leaves the certificate off outside the
+// googleapis.com universe.
 //
-// Nothing is cached here. The auth library resolves its source once per
-// process and keeps the outcome, an error included.
+// Left to itself the auth library is wider: with the variable unset it uses a
+// proxy or SecureConnect without being asked. A caller that builds its
+// transport through that library has to keep it from doing so when Source
+// returns nil.
+//
+// Nothing is cached here: every call reads the environment and the config
+// again. The auth library resolves its own source once per process and keeps
+// the outcome, an error included.
 func Source() (func(*tls.CertificateRequestInfo) (*tls.Certificate, error), error) {
-	if !enabled() {
+	on, decided := switched()
+	if decided && !on {
 		return nil, nil
 	}
-	// The auth library hands out its certificate source only by building a
-	// client, into whose options it writes the source back.
-	opts := &httptransport.Options{
-		DisableAuthentication: true,
-		// The universe the Google API clients pass, so the answer is theirs.
-		UniverseDomain: os.Getenv(envUniverseDomain),
+	// Asked with a certificate in hand, the library answers for its gate
+	// alone and searches for nothing.
+	if gate, err := authLibrary(noCertificate); gate == nil || err != nil {
+		return nil, err
 	}
-	if _, err := httptransport.NewClient(opts); err != nil {
-		return nil, fmt.Errorf("clientcert: load the client certificate source: %w", err)
+	workload, err := workloadSource()
+	if workload != nil || err != nil {
+		return workload, err
 	}
-	return opts.ClientCertProvider, nil
+	if !decided {
+		return nil, nil
+	}
+	return authLibrary(nil)
 }
 
-// enabled is the rule in the [Source] doc, before the auth library's gate.
-func enabled() bool {
+// noCertificate stands for a certificate where only the auth library's gate
+// is asked about.
+func noCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	return &tls.Certificate{}, nil
+}
+
+// switched reports what the two variables say, and whether either says
+// anything.
+func switched() (on, decided bool) {
 	if v, ok := os.LookupEnv(envUseClientCert); ok {
-		return strings.EqualFold(v, "true")
+		return strings.EqualFold(v, "true"), true
 	}
-	data, err := os.ReadFile(os.Getenv(envCertConfig))
+	if v := os.Getenv(envGcloudUseClientCert); v != "" {
+		return strings.EqualFold(v, "true"), true
+	}
+	return false, false
+}
+
+// workloadSource returns the certificate the certificate config's workload
+// section names, and nil when no config has such a section. A config that is
+// missing or cannot be read counts as no config, as it does to adk-python.
+func workloadSource() (source, error) {
+	path := os.Getenv(envCertConfig)
+	if path == "" {
+		path = defaultConfigPath(runtime.GOOS)
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return nil, nil
 	}
 	var config struct {
 		CertConfigs struct {
 			// A pointer, so that a null section reads as absent, as it does to
 			// the auth library.
-			Workload *json.RawMessage `json:"workload"`
+			Workload *struct {
+				CertPath string `json:"cert_path"`
+				KeyPath  string `json:"key_path"`
+			} `json:"workload"`
 		} `json:"cert_configs"`
 	}
-	return json.Unmarshal(data, &config) == nil && config.CertConfigs.Workload != nil
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("clientcert: certificate config %s: %w (%s)", path, err, optOut)
+	}
+	w := config.CertConfigs.Workload
+	if w == nil {
+		return nil, nil
+	}
+	if w.CertPath == "" || w.KeyPath == "" {
+		return nil, fmt.Errorf("clientcert: certificate config %s: the workload section needs cert_path and key_path (%s)", path, optOut)
+	}
+	// Read for every handshake, so that a rotated certificate is picked up.
+	return func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		cert, err := tls.LoadX509KeyPair(w.CertPath, w.KeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("clientcert: load the workload certificate: %w", err)
+		}
+		return &cert, nil
+	}, nil
+}
+
+// defaultConfigPath is where gcloud keeps the certificate config on the
+// system goos names, or "" when the directory it lives under is not known.
+func defaultConfigPath(goos string) string {
+	dir := os.Getenv("APPDATA")
+	if goos != "windows" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		dir = filepath.Join(home, ".config")
+	}
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "gcloud", "certificate_config.json")
+}
+
+// authLibrary returns the certificate source the auth library gives a
+// transport that is handed given: given itself, the source of its own search
+// when given is nil, or nil when its gate is off.
+//
+// It is a variable so that the tests of the rule can stand in for the
+// library, whose own search can run a certificate helper.
+var authLibrary = func(given source) (source, error) {
+	// The library hands out its certificate source only by building a client,
+	// into whose options it writes the source back.
+	opts := &httptransport.Options{
+		DisableAuthentication: true,
+		// The universe the Google API clients pass, so the answer is theirs.
+		UniverseDomain:     os.Getenv(envUniverseDomain),
+		ClientCertProvider: given,
+	}
+	if _, err := httptransport.NewClient(opts); err != nil {
+		return nil, fmt.Errorf("clientcert: load the client certificate source: %w (%s)", err, optOut)
+	}
+	return opts.ClientCertProvider, nil
 }

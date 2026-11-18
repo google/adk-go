@@ -31,9 +31,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -42,25 +42,11 @@ import (
 
 const (
 	childEnv = "ADK_CLIENTCERT_TEST_CHILD"
-	// Where the auth library looks for a certificate config when
-	// GOOGLE_API_CERTIFICATE_CONFIG is unset, relative to $HOME.
+	// Where gcloud keeps the certificate config, relative to $HOME.
 	defaultConfig = ".config/gcloud/certificate_config.json"
 	// A file Isolate leaves in the child's home, which no real one has.
 	homeMarker = ".adk-clientcerttest-home"
 )
-
-// cleared are the variables a child starts without, so that each test states
-// the ones it depends on.
-var cleared = []string{
-	"GOOGLE_API_USE_CLIENT_CERTIFICATE",
-	"GOOGLE_API_CERTIFICATE_CONFIG",
-	"GOOGLE_API_USE_MTLS_ENDPOINT",
-	"GOOGLE_API_USE_MTLS",
-	"GOOGLE_CLOUD_UNIVERSE_DOMAIN",
-	"GOOGLE_API_GO_EXPERIMENTAL_DISABLE_NEW_AUTH_LIB",
-	"GOOGLE_API_GO_EXPERIMENTAL_ENABLE_NEW_AUTH_LIB",
-	"EXPERIMENTAL_GOOGLE_API_USE_S2A",
-}
 
 // Isolate re-runs the calling top-level test in a child process and reports
 // whether the caller is that child, so a test starts with
@@ -69,24 +55,30 @@ var cleared = []string{
 //		return
 //	}
 //
-// A test needs the child when it lets the auth library load a certificate
-// source, for two reasons. The library resolves its source once per process
-// and keeps the outcome, an error included. And with the variables above
-// unset it looks beyond the test's own files: after a workload config comes an
-// enterprise certificate proxy and then SecureConnect, whose helper a
-// developer machine may really have.
+// A test needs the child when it lets the auth library handle a certificate
+// source. The library resolves its own source once per process and keeps the
+// outcome, an error included. And once the certificate is on, the library
+// looks beyond the test's files: at a certificate config the shell names, at
+// an enterprise certificate proxy and at SecureConnect, whose helper programs
+// a developer machine may really have.
 //
-// The child therefore gets a home directory holding a workload config at
-// gcloud's default path. The library reads $HOME for that path and tries it
-// first, so its search ends there whatever the test, or a mutant of the code
-// under test, leaves unset.
+// The child therefore starts with none of the parent's environment, and with a
+// home directory of its own that holds a workload certificate config at
+// gcloud's default path. With nothing set, the certificate is on and is
+// [HomeCertificate], and the library's own search, should a mutant of the code
+// under test start it, ends at that config.
+//
+// That holds while GOOGLE_API_CERTIFICATE_CONFIG is unset or names a config
+// with a workload section, as [Workload] and [BrokenWorkload] return. The
+// library does not go back to the default path from a named config without
+// one, so a test must not name such a config with the certificate on.
 func Isolate(t *testing.T) bool {
 	t.Helper()
 	if strings.Contains(t.Name(), "/") {
 		t.Fatal("clientcerttest.Isolate: call it from a top-level test")
 	}
 	if runtime.GOOS == "windows" {
-		t.Skip("the auth library takes the default certificate config from %APPDATA% on Windows")
+		t.Skip("gcloud's default certificate config is under %APPDATA% on Windows, not under the home directory")
 	}
 	if os.Getenv(childEnv) == t.Name() {
 		// The marker tells the home Isolate made from a real one, should the
@@ -104,17 +96,14 @@ func Isolate(t *testing.T) bool {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeWorkload(t, filepath.Dir(path), path)
+	writeWorkload(t, path)
 	WriteFile(t, filepath.Join(home, homeMarker), nil)
 
-	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v", "-test.count=1")
-	for _, kv := range os.Environ() {
-		if name, _, _ := strings.Cut(kv, "="); !slices.Contains(cleared, name) {
-			cmd.Env = append(cmd.Env, kv)
-		}
-	}
-	// Last, so that they win over the inherited values.
-	cmd.Env = append(cmd.Env, "HOME="+home, childEnv+"="+t.Name())
+	// The deadline is the child's own: it outlives a parent that is killed.
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v", "-test.count=1", "-test.timeout=1m")
+	// Nothing inherited, and no filter over the parent's variables that could
+	// let one through.
+	cmd.Env = []string{"HOME=" + home, childEnv + "=" + t.Name()}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("child process: %v\n%s", err, out)
@@ -129,6 +118,22 @@ func Isolate(t *testing.T) bool {
 		t.Fatalf("child process did not pass the test:\n%s", out)
 	}
 	return false
+}
+
+// PinOff turns the client certificate off for the whole test process, for a
+// TestMain. A package needs it when a test outside an [Isolate] child can
+// reach the certificate rule: on a machine whose shell turns the certificate
+// on, that test would otherwise run the machine's certificate helper.
+//
+// It leaves a child [Isolate] started alone, so that a test there starts with
+// nothing set.
+func PinOff() {
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), homeMarker)); os.Getenv(childEnv) != "" && err == nil {
+		return
+	}
+	if err := os.Setenv("GOOGLE_API_USE_CLIENT_CERTIFICATE", "false"); err != nil {
+		panic(err)
+	}
 }
 
 // Unset, as a value for [Setenv], leaves the variable out of the environment.
@@ -171,14 +176,20 @@ func HomeCertificate(t *testing.T) []byte {
 // GOOGLE_API_CERTIFICATE_CONFIG, and the certificate's DER bytes.
 func Workload(t *testing.T) (configPath string, der []byte) {
 	t.Helper()
-	dir := t.TempDir()
-	configPath = filepath.Join(dir, "certificate_config.json")
-	return configPath, writeWorkload(t, dir, configPath)
+	configPath = filepath.Join(t.TempDir(), "certificate_config.json")
+	return configPath, writeWorkload(t, configPath)
+}
+
+// Rotate replaces the certificate and key that the config from [Workload]
+// names, and returns the new certificate's DER bytes.
+func Rotate(t *testing.T, configPath string) (der []byte) {
+	t.Helper()
+	_, _, der = writeCertificate(t, filepath.Dir(configPath))
+	return der
 }
 
 // BrokenWorkload writes a certificate config whose workload section names no
-// certificate, and returns its path. The auth library reports it as an error
-// and keeps that error for the rest of the process.
+// certificate, and returns its path.
 func BrokenWorkload(t *testing.T) (configPath string) {
 	t.Helper()
 	configPath = filepath.Join(t.TempDir(), "certificate_config.json")
@@ -186,7 +197,17 @@ func BrokenWorkload(t *testing.T) (configPath string) {
 	return configPath
 }
 
-func writeWorkload(t *testing.T, dir, configPath string) (der []byte) {
+// writeWorkload writes a workload certificate config at configPath, and the
+// certificate and key it names next to it.
+func writeWorkload(t *testing.T, configPath string) (der []byte) {
+	t.Helper()
+	certPath, keyPath, der := writeCertificate(t, filepath.Dir(configPath))
+	WriteFile(t, configPath, fmt.Appendf(nil, `{"cert_configs":{"workload":{"cert_path":%q,"key_path":%q}}}`, certPath, keyPath))
+	return der
+}
+
+// writeCertificate writes a new client certificate and its key into dir.
+func writeCertificate(t *testing.T, dir string) (certPath, keyPath string, der []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -207,11 +228,52 @@ func writeWorkload(t *testing.T, dir, configPath string) (der []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	certPath, keyPath := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	certPath, keyPath = filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
 	WriteFile(t, certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 	WriteFile(t, keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}))
-	WriteFile(t, configPath, fmt.Appendf(nil, `{"cert_configs":{"workload":{"cert_path":%q,"key_path":%q}}}`, certPath, keyPath))
-	return der
+	return certPath, keyPath, der
+}
+
+// SecureConnect replaces the certificate config in the child's home with a
+// SecureConnect setup, the certificate source that runs a helper program. It
+// returns the DER bytes of the certificate the helper prints, and ran, which
+// reports whether the helper has run.
+//
+// It skips the test unless the auth library would look for SecureConnect in
+// that home. The library takes the home directory from the user database when
+// it can, as it does under -race, and would then run the machine's real
+// helper, if it has one.
+func SecureConnect(t *testing.T) (der []byte, ran func() bool) {
+	t.Helper()
+	home := os.Getenv("HOME")
+	if _, err := os.Stat(filepath.Join(home, homeMarker)); err != nil {
+		t.Fatalf("clientcerttest.SecureConnect: call it in a child Isolate started: %v", err)
+	}
+	// Without a user database entry the library needs a user name to take the
+	// home directory from $HOME, and the child starts without one.
+	t.Setenv("USER", "clientcerttest")
+	if u, err := user.Current(); err != nil || u.HomeDir != home {
+		t.Skip("the auth library would look for SecureConnect in the machine's home directory, not the test's")
+	}
+	if err := os.Remove(filepath.Join(home, defaultConfig)); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".secureConnect")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	certPath, keyPath, der := writeCertificate(t, dir)
+	marker, helper := filepath.Join(dir, "ran"), filepath.Join(dir, "helper.sh")
+	// The child has no PATH, so the helper names its one program in full.
+	script := fmt.Sprintf("#!/bin/sh\necho ran >> %q\n/bin/cat %q %q\n", marker, certPath, keyPath)
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	WriteFile(t, filepath.Join(dir, "context_aware_metadata.json"), fmt.Appendf(nil, `{"cert_provider_command":[%q]}`, helper))
+	return der, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}
 }
 
 // WriteFile writes data to path, readable by the owner only.
