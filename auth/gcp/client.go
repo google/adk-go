@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
+	"google.golang.org/adk/v2/internal/clientcert"
 )
 
 const (
@@ -249,15 +251,18 @@ type Config struct {
 	// It caps the retry loop, not an individual request; bound a single stalled
 	// request via ctx (or an HTTPClient with its own Timeout).
 	//
-	// To bound requests without giving up ADC, build the client the way
-	// [NewClient] does and pass it as HTTPClient: [httptransport.NewClient] with
-	// DetectOpts naming the cloud-platform scope and a fresh, non-nil Headers map
+	// To bound requests without giving up ADC, build a client with
+	// [httptransport.NewClient] and pass it as HTTPClient: DetectOpts naming
+	// the cloud-platform scope and a fresh, non-nil Headers map
 	// per client (the transport writes the quota project into the map it is
 	// given and drops it with a nil one, so a shared map carries the first
 	// client's quota project to the next), a Logger that discards (the default
 	// one writes token requests and responses to stderr when
 	// GOOGLE_SDK_GO_LOGGING_LEVEL=debug), DisableTelemetry, CheckRedirect
-	// returning [http.ErrUseLastResponse], and then the Timeout.
+	// returning [http.ErrUseLastResponse], and then the Timeout. That client
+	// decides on a client certificate by the auth library's default, which is
+	// wider than the rule [NewClient] documents, so set
+	// GOOGLE_API_USE_CLIENT_CERTIFICATE where the two differ.
 	PollTimeout time.Duration
 }
 
@@ -266,11 +271,22 @@ type Config struct {
 // Credentials (cloud-platform scope) to authenticate calls to the services,
 // through the same transport the Google Cloud client libraries use: it sends the
 // quota project, when there is one, as X-Goog-User-Project, caches tokens and
-// refreshes them ahead of expiry, and is configured with the client certificate
-// the environment provides, if any (a workload certificate config, an enterprise
-// certificate proxy, or SecureConnect, unless GOOGLE_API_USE_CLIENT_CERTIFICATE=false
-// opts out). A certificate is only presented to an endpoint that requests one,
-// so when the transport has one the default endpoints become the services' mTLS
+// refreshes them ahead of expiry, and presents the environment's client
+// certificate when the rule below turns it on.
+//
+// The client certificate follows adk-python's rule.
+// GOOGLE_API_USE_CLIENT_CERTIFICATE decides when it is set: true, TRUE or True
+// turns the certificate on, and any other value, the empty string included,
+// turns it off. When it is unset, the certificate is on only if
+// GOOGLE_API_CERTIFICATE_CONFIG names a certificate config file with a workload
+// section, and only in the googleapis.com universe. With the variable unset
+// the Google Cloud client libraries for Go also use an enterprise certificate
+// proxy, SecureConnect, or a certificate config at gcloud's default path. Here
+// those take GOOGLE_API_USE_CLIENT_CERTIFICATE=true. A workload section that
+// names no certificate fails NewClient.
+//
+// A certificate is only presented to an endpoint that requests one, so when
+// the client has one the default endpoints become the services' mTLS
 // hosts, agentidentitycredentials.mtls.googleapis.com and
 // iamconnectorcredentials.mtls.googleapis.com. GOOGLE_API_USE_MTLS_ENDPOINT
 // overrides that choice with the values the client libraries take: auto (the
@@ -322,33 +338,50 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		if err != nil {
 			return nil, err
 		}
+		certSource, err := clientcert.Source()
+		if err != nil {
+			return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
+		}
+		// Discarded: the library's default logger answers
+		// GOOGLE_SDK_GO_LOGGING_LEVEL=debug by writing each token request and
+		// response to stderr, signed assertion and minted token included.
+		logger := slog.New(slog.DiscardHandler)
+		detect := &credentials.DetectOptions{Scopes: []string{cloudPlatformScope}, Logger: logger}
 		// The auth library's transport rather than a hand-written bearer header,
 		// so client certificates, the quota project header and token caching
 		// come from it. See the NewClient doc.
 		opts := &httptransport.Options{
-			DetectOpts: &credentials.DetectOptions{Scopes: []string{cloudPlatformScope}},
 			// Non-nil on purpose: the transport adds the quota project header to
 			// this map, and with a nil map it allocates a private one that its
 			// round-tripper never sees (cloud.google.com/go/auth through v0.24.4).
 			Headers: http.Header{},
-			// Discarded: the library's default logger answers
-			// GOOGLE_SDK_GO_LOGGING_LEVEL=debug by writing each token request and
-			// response to stderr, signed assertion and minted token included.
-			// Credential detection inherits this logger.
-			Logger: slog.New(slog.DiscardHandler),
+			Logger:  logger,
 			// Off, as through v2.8.0. Left on, the library opens a client span for
 			// every call, and with GOOGLE_SDK_GO_EXPERIMENTAL_TRACING=true records
 			// on it the service's error message, which APIError.Body carries only
 			// scrubbed.
 			DisableTelemetry: true,
 		}
+		if certSource != nil {
+			// The library finds the same source on its own, and with it also
+			// sends the token exchange through the certificate.
+			opts.DetectOpts = detect
+		} else {
+			// Left to its default the library would look for a certificate on
+			// its own, by a wider rule than clientcert.Source's, and use it
+			// for the token exchange as well. A source that presents nothing
+			// stops the lookup, and credentials detected here keep the token
+			// exchange off that source: detected by the library, they would
+			// move to its mTLS token endpoint for any non-nil source.
+			creds, err := credentials.DetectDefault(detect)
+			if err != nil {
+				return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
+			}
+			opts.Credentials = creds
+			opts.ClientCertProvider = noClientCertificate
+		}
 		hc, err := httptransport.NewClient(opts)
 		if err != nil {
-			// Not "find default credentials": the same call fails on a malformed
-			// client certificate config, before discovery runs. The library
-			// resolves the certificate source once per process and keeps the
-			// outcome, so fixing the file does not clear that failure for a
-			// process that already hit it.
 			return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
 		}
 		// The transport re-signs every hop, below the layer where net/http
@@ -358,11 +391,9 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 			return http.ErrUseLastResponse
 		}
 		c.httpClient = hc
-		// httptransport.NewClient returns no endpoint, but it writes the
-		// certificate provider it gave the transport back into opts (nil when
-		// there is none). One decision serves both services, since its inputs
-		// are environment variables and certificate files, not the host.
-		if mtlsMode == mtlsAlways || (mtlsMode == mtlsAuto && opts.ClientCertProvider != nil) {
+		// One decision serves both services, since its inputs are environment
+		// variables and certificate files, not the host.
+		if mtlsMode == mtlsAlways || (mtlsMode == mtlsAuto && certSource != nil) {
 			c.agentIdentityURL = defaultAgentIdentityMTLSURL
 			c.connectorURL = defaultConnectorMTLSURL
 		}
@@ -375,6 +406,12 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 	}
 	c.cacheSlot = joinFields(clientNonce, strconv.FormatUint(clientSeq.Add(1), 10))
 	return c, nil
+}
+
+// noClientCertificate answers a server's certificate request with no
+// certificate.
+func noClientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	return &tls.Certificate{}, nil
 }
 
 const (
