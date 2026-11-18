@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool/toolauth"
 )
 
 // WithToolNamePrefix returns a Toolset whose tools are the tools of ts, each
@@ -57,8 +58,10 @@ import (
 //
 // The returned toolset's request hook calls the request hook of ts, when ts has
 // one. Close on the returned toolset closes ts when that implements
-// [io.Closer], and Unwrap returns ts. The returned toolset holds no state of
-// its own, so it is safe for concurrent use when ts is.
+// [io.Closer], and Unwrap returns ts. It is an [AuthenticatedToolset] whose
+// AuthConfig returns what ts's does, and nil when ts is not one. The returned
+// toolset holds no state of its own, so it is safe for concurrent use when ts
+// is.
 func WithToolNamePrefix(ts Toolset, prefix string) Toolset {
 	if ts == nil {
 		panic("toolset must not be nil")
@@ -111,6 +114,8 @@ func (p *prefixedToolset) ProcessRequest(ctx agent.Context, req *model.LLMReques
 func (p *prefixedToolset) Close() error { return utils.CloseIfCloser(p.toolset) }
 
 func (p *prefixedToolset) Unwrap() Toolset { return p.toolset }
+
+func (p *prefixedToolset) AuthConfig() *toolauth.Config { return toolsetAuthConfig(p.toolset) }
 
 // newPrefixedTool returns the stand-in of t named name. The stand-in has the
 // method set the flow dispatches on that t has: streaming is checked first, as

@@ -42,11 +42,6 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			return // In python, no error is yielded.
 		}
 
-		toolsmap := make(map[string]tool.Tool)
-		for _, tool := range f.Tools {
-			toolsmap[tool.Name()] = tool
-		}
-
 		var events []*session.Event
 		if ctx.Session() != nil {
 			for e := range ctx.Session().Events().All() {
@@ -128,6 +123,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 		}
 
 		agentName := ctx.Agent().Name()
+		var toolsmap map[string]tool.Tool
 
 		// Detect tampered confirmations before resuming any tool.
 		//
@@ -268,6 +264,18 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				toolsToResumeConfirmation[callID] = cc.confirmation
 			}
 
+			// adk-python lists the agent's tools only once a confirmed call is
+			// to run (tools/_confirmation.py).
+			if toolsmap == nil {
+				if err := f.listToolsForRerun(ctx); err != nil {
+					yield(nil, err)
+					return
+				}
+				toolsmap = make(map[string]tool.Tool, len(f.Tools))
+				for _, t := range f.Tools {
+					toolsmap[t.Name()] = t
+				}
+			}
 			ev, err := f.handleFunctionCalls(ctx, toolsmap, &model.LLMResponse{
 				Content: &genai.Content{Parts: parts, Role: genai.RoleUser},
 			}, toolsToResumeConfirmation, nil)

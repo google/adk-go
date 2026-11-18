@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/exp/authflow"
+	"google.golang.org/adk/v2/internal/authhandler"
 	icredentialservice "google.golang.org/adk/v2/internal/credentialservice"
 	"google.golang.org/adk/v2/tool/toolauth"
 )
@@ -135,7 +136,7 @@ func (m *CredentialManager) RegisterCredentialExchanger(credType toolauth.Creden
 // EXPERIMENTAL: GetAuthCredential is experimental; its API and behavior may change or be removed in a later version.
 func (m *CredentialManager) GetAuthCredential(ctx agent.Context) (*toolauth.Credential, error) {
 	if !knownSchemeType(m.cfg.AuthScheme.Type) {
-		return nil, errors.New("custom auth scheme is not supported")
+		return nil, &authhandler.ConfigError{Err: errors.New("custom auth scheme is not supported")}
 	}
 	key, err := m.cfg.Key()
 	if err != nil {
@@ -256,21 +257,24 @@ func knownSchemeType(t toolauth.SchemeType) bool {
 }
 
 // validate checks cfg as adk-python's _validate_credential does, with its
-// error texts, and refuses the inputs this package does not support.
+// error texts, and refuses the inputs this package does not support. The
+// errors adk-python raises as ValueError are *authhandler.ConfigError; the
+// refusals of OAuth2 auto-discovery and service accounts, which adk-python
+// supports, are not.
 func validate(cfg *toolauth.Config) error {
 	scheme, raw := &cfg.AuthScheme, cfg.RawAuthCredential
 	if raw == nil && (scheme.Type == toolauth.SchemeTypeOAuth2 || scheme.Type == toolauth.SchemeTypeOpenIDConnect) {
-		return fmt.Errorf("raw_auth_credential is required for auth_scheme type %s", scheme.Type)
+		return &authhandler.ConfigError{Err: fmt.Errorf("raw_auth_credential is required for auth_scheme type %s", scheme.Type)}
 	}
 	if raw != nil && raw.OAuth2 == nil &&
 		(raw.AuthType == toolauth.CredentialTypeOAuth2 || raw.AuthType == toolauth.CredentialTypeOpenIDConnect) {
-		return fmt.Errorf("auth_config.raw_credential.oauth2 required for credential type %s", raw.AuthType)
+		return &authhandler.ConfigError{Err: fmt.Errorf("auth_config.raw_credential.oauth2 required for credential type %s", raw.AuthType)}
 	}
 	if missingOAuthInfo(scheme) {
 		if scheme.IssuerURL != "" {
 			return errors.New("OAuth2 auto-discovery is not supported")
 		}
-		return errors.New("OAuth scheme info is missing, and auto-discovery has failed to fill them in.") //nolint:staticcheck // ST1005: the text is adk-python's
+		return &authhandler.ConfigError{Err: errors.New("OAuth scheme info is missing, and auto-discovery has failed to fill them in.")} //nolint:staticcheck // ST1005: the text is adk-python's
 	}
 	if raw != nil && raw.AuthType == toolauth.CredentialTypeServiceAccount {
 		return errors.New("service account is not supported")

@@ -89,10 +89,15 @@ type Flow struct {
 	// ownToolCount is how many leading entries of Tools are the agent's own
 	// tools. toolsetTools holds the tools each of the agent's Toolsets listed
 	// in the current step, index-aligned with them, so that a toolset's
-	// request hook runs just before its tools'. toolProcessor sets Tools and
+	// request hook runs just before its tools'. listTools sets Tools and
 	// both fields together; toolsetTools is nil until it has run.
 	ownToolCount int
 	toolsetTools [][]tool.Tool
+
+	// toolsetAuth is the current step's resolution of the toolsets'
+	// credentials, nil until resolveToolsetCredentials has run in the step.
+	// preprocessRecording clears it when a step starts.
+	toolsetAuth *toolsetAuthStep
 
 	// reconnect bounds RunLive's reconnect attempts. Nil means the defaults;
 	// only tests set it, to shrink the delays.
@@ -102,7 +107,6 @@ type Flow struct {
 var (
 	DefaultRequestProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{
 		basicRequestProcessor,
-		toolProcessor,
 		authPreprocessor,
 		RequestConfirmationRequestProcessor,
 		instructionsRequestProcessor,
@@ -127,6 +131,12 @@ var (
 		// The continuation turn depends on the role of the last content, which
 		// code execution changes when it turns a result into a user turn.
 		continuationTurnRequestProcessor,
+		// adk-python's tool_request_processors, which run after all other
+		// request processors (flows/llm_flows/base_llm_flow.py): toolset
+		// authentication resolves credentials from the answers authPreprocessor
+		// stored, then the toolsets list their tools with them.
+		toolsetAuthProcessor,
+		toolProcessor,
 	}
 	DefaultResponseProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error]{
 		nlPlanningResponseProcessor,
@@ -715,6 +725,11 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					return
 				}
 			}
+		}
+		// adk-python's live flow does not connect when preprocessing ended the
+		// invocation (live/_live_llm_flow.py).
+		if ctx.Ended() {
+			return
 		}
 
 		// The reconnect loop writes the resumption handle into this config, so
@@ -1422,6 +1437,7 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) it
 // deleted name in dropped.
 func (f *Flow) preprocessRecording(ctx agent.InvocationContext, req *model.LLMRequest, dropped map[string]struct{}) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
+		f.toolsetAuth = nil
 		// apply request processor functions to the request in the configured order.
 		for _, processor := range f.RequestProcessors {
 			for ev, err := range processor(ctx, req, f) {
@@ -1432,6 +1448,12 @@ func (f *Flow) preprocessRecording(ctx agent.InvocationContext, req *model.LLMRe
 				if ev != nil && !yield(ev, nil) {
 					return
 				}
+			}
+			// A processor that ended the invocation, such as toolset
+			// authentication asking for a credential, stops the request here,
+			// as in adk-python (base_llm_flow.py, _preprocess_async).
+			if ctx.Ended() {
+				return
 			}
 		}
 

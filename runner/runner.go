@@ -1329,6 +1329,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = adkcontext.WithoutCallPlace(ctx)
 		// Before the node branch, so that node roots reach it too.
 		ctx = r.withCredentialService(ctx)
+		ctx = icredentialservice.WithResolved(ctx)
 
 		// The inbound message is always a user turn, whatever Role the caller
 		// set. Normalize it once here so that findAgentToRun, the invocation
@@ -1850,6 +1851,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	})
 	ctx = r.withPluginManager(ctx)
 	ctx = r.withCredentialService(ctx)
+	ctx = icredentialservice.WithResolved(ctx)
 	// Deliberately no compactionctx here: context compaction does not apply to
 	// live runs. A live session streams over a persistent connection instead of
 	// re-sending assembled history each turn, so replacing older events with a

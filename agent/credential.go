@@ -70,3 +70,21 @@ func SaveCredential(ctx Context, config *toolauth.Config) error {
 	}
 	return svc.SaveCredential(ctx, ctx.AppName(), ctx.UserID(), config)
 }
+
+// ResolvedCredential returns the credential toolset authentication resolved
+// under key in ctx's run, or nil when it resolved none. A toolset whose
+// AuthConfig method (tool.AuthenticatedToolset) returned a config reads its
+// credential here, under that config's key ([toolauth.Config.Key]), when it
+// lists or runs its tools. Every context of the run sees the same
+// credentials: the one a toolset lists its tools with, a tool's context and a
+// callback's context, also those of another agent the run transfers to. A run
+// a tool starts, such as an agenttool sub-agent, has its own.
+//
+// It returns nil when ctx does not belong to a run of a runner.Runner. The
+// returned credential is a copy the caller may change. It is safe for
+// concurrent use.
+//
+// This is adk-python's ReadonlyContext.get_credential.
+func ResolvedCredential(ctx ReadonlyContext, key string) *toolauth.Credential {
+	return icredentialservice.ResolvedFrom(ctx).Get(key)
+}
