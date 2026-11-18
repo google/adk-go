@@ -28,6 +28,48 @@ import (
 
 const maxPreconditionRetries = 2
 
+// safeLogf calls logf, if it is not nil, and suppresses any panic from the
+// logger so a broken Logger cannot escape a recovery handler.
+func safeLogf(logf func(format string, args ...any), format string, args ...any) {
+	if logf == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	logf(format, args...)
+}
+
+// notifySchemaReady calls onReady, Config.OnSchemaReady, if it is set. A
+// panic in the callback is recovered and reported through logf, if that is
+// not nil, by the type of the panic value, which can carry anything.
+func notifySchemaReady(onReady func(), logf func(format string, args ...any)) {
+	if onReady == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			safeLogf(logf, "agentanalytics: OnSchemaReady callback failed: recovered panic of type %T", r)
+		}
+	}()
+	onReady()
+}
+
+// notifySchemaError calls onError, Config.OnSchemaError, with err if it is
+// set. A panic in the callback is recovered and reported through logf, if
+// that is not nil, by the type of the panic value, which can carry anything.
+func notifySchemaError(onError func(error), err error, logf func(format string, args ...any)) {
+	if onError == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			safeLogf(logf, "agentanalytics: OnSchemaError callback failed: recovered panic of type %T", r)
+		}
+	}()
+	onError(err)
+}
+
 // tableMetadataOps abstracts the BigQuery Table metadata RPCs so that all
 // startup and schema upgrade paths can be unit-tested deterministically.
 type tableMetadataOps interface {

@@ -286,17 +286,20 @@ type spanRecord struct {
 	// AfterAgentCallback, and an ancestor LLM agent under which a resumed
 	// nested task was parented is still active in its own runChat loop.
 	taskDelegated bool
-	// finishedTasks holds the function call IDs of the finish_task calls
-	// that the activation's own tool callbacks saw complete (see
-	// noteTaskFinished), so that the function response event that reports
-	// one of them ends this activation rather than another run of the same
-	// agent on the same branch, on another node path or, if no other run on
-	// the event's node path saw a call with that ID complete, on the same one
+	// finishedTasks and pendingTasks hold the function call IDs of the
+	// finish_task calls that the activation's own tool callbacks saw complete
+	// or return a non-completion result (see noteTaskAttempt and
+	// retireFailedTaskAttempts). Keeping every attempt until its final
+	// function response arrives—and retiring attempts whose final response is
+	// not a completion—lets the completion event end this activation even
+	// when a later AfterToolCallback turns a non-completion result into a
+	// completion, without letting reused call IDs claim another run's span
 	// (see finishedTaskLocked and popTaskAgentSpan).
 	finishedTasks []string
+	pendingTasks  []string
 	// failedTasks holds, likewise, the function call IDs of the finish_task
 	// calls that this plugin's tool callback saw end the activation with a
-	// classified tool result error (see noteTaskFinished). Keeping them apart
+	// classified tool result error (see noteTaskAttempt). Keeping them apart
 	// from finishedTasks lets finishedTaskLocked disambiguate a failed call
 	// and a completed call that share a reused ID when both runs are open on
 	// the same path, while still matching across both lists when an
@@ -4130,18 +4133,21 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 }
 
 // finishedTaskLocked returns the index in agentStack of the open activation
-// of the agent of id, on the node path of id, that saw one of the finish_task
-// calls in calls end the activation (see noteTaskFinished), or -1 if there is
-// none, or more than one. Both finishedTasks and failedTasks are searched
-// because agent-level AfterToolCallbacks run after this plugin and can add or
-// clear a tool result error flag before the FunctionResponse event is emitted.
-// A function call ID is scoped to the activation that made the call, not
-// unique: ADK keeps the ID that a model gives a call, and providers reuse IDs
-// such as "call_0" (see toolKey). When more than one open run on the event's
-// node path recorded the call ID, failed narrows the lookup to the list
-// matching the event's classification; if none or more than one still matches,
-// -1 is returned. As in findAgent, a node path that either side lacks matches
-// any. inv.mu must be held.
+// of the agent of id, on the node path of id, that owns an unretired
+// finish_task attempt for one of the call IDs in calls (see noteTaskAttempt
+// and retireFailedTaskAttempts), or -1 if there is none, or more than one.
+// finishedTasks, failedTasks and pendingTasks are all searched because
+// agent-level AfterToolCallbacks run after this plugin and can add or clear a
+// tool result error flag, or turn a result that does not end the task into
+// one that does, before the FunctionResponse event is emitted. A function call
+// ID is scoped to the activation that made the call, not unique: ADK keeps the
+// ID that a model gives a call, and providers reuse IDs such as "call_0" (see
+// toolKey). When more than one open run on the event's node path holds an
+// attempt with the call ID, failed narrows the lookup to the runs whose
+// attempt matches the event's classification, which a pending attempt does
+// either way; if none or more than one still matches, -1 is returned. As in
+// findAgent, a node path that either side lacks matches any. inv.mu must be
+// held.
 func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string, failed bool) int {
 	const ambiguous = -2
 	anyFound := -1
@@ -4154,7 +4160,8 @@ func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string, fail
 		}
 		inFinished := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.finishedTasks, call) })
 		inFailed := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.failedTasks, call) })
-		if !inFinished && !inFailed {
+		inPending := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.pendingTasks, call) })
+		if !inFinished && !inFailed && !inPending {
 			continue
 		}
 		if anyFound == -1 {
@@ -4162,7 +4169,7 @@ func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string, fail
 		} else {
 			anyFound = ambiguous
 		}
-		if (failed && inFailed) || (!failed && inFinished) {
+		if inPending || (failed && inFailed) || (!failed && inFinished) {
 			if matchedFound == -1 {
 				matchedFound = i
 			} else {
@@ -4179,13 +4186,15 @@ func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string, fail
 	return -1
 }
 
-// noteTaskFinished records that the finish_task call callID of the agent
-// activation that ctx and id identify completed, or, if failed is set, ended
-// the activation with a classified tool result error, so that the function
-// response event that reports it ends that activation (see popTaskAgentSpan).
-// The tool callbacks get the context of the activation that made the call,
-// which the event callback does not.
-func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callID string, failed bool) {
+// noteTaskAttempt records a finish_task call on the agent activation that ctx
+// and id identify, distinguishing calls whose result already ended the task in
+// afterTool (ends), with a classified tool result error or not (failed), from
+// attempts that did not end it, which a later AfterToolCallback may still turn
+// into ones that do before the FunctionResponse event is emitted (see
+// popTaskAgentSpan and retireFailedTaskAttempts). The tool callbacks get the
+// context of the activation that made the call, which the event callback does
+// not.
+func (tm *traceManager) noteTaskAttempt(ctx context.Context, id identity, callID string, ends, failed bool) {
 	if callID == "" {
 		return
 	}
@@ -4196,10 +4205,61 @@ func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callI
 	defer inv.mu.Unlock()
 	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
 		rec := inv.agentStack[i]
-		if failed {
+		switch {
+		case !ends:
+			rec.pendingTasks = append(rec.pendingTasks, callID)
+		case failed:
 			rec.failedTasks = append(rec.failedTasks, callID)
-		} else {
+		default:
 			rec.finishedTasks = append(rec.finishedTasks, callID)
+		}
+	}
+}
+
+// retireFailedTaskAttempts removes non-completion finish_task attempts for
+// calls once their final FunctionResponse event arrives without completing the
+// task, preferring attempts that afterTool already saw as non-completions so a
+// reused call ID on a failing run does not disturb another open run's
+// completed attempt.
+func (tm *traceManager) retireFailedTaskAttempts(ctx context.Context, id identity, calls []string) {
+	if len(calls) == 0 {
+		return
+	}
+	inv := tm.invocation(ctx, id)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	for _, call := range calls {
+		inv.retireFailedTaskAttemptLocked(id, call)
+	}
+}
+
+func (inv *invocationTrace) retireFailedTaskAttemptLocked(id identity, call string) {
+	matchesTask := func(rec *spanRecord) bool {
+		return rec.kind == spanKindAgent && rec.name == id.agentName && rec.branch == id.branch &&
+			(id.path == "" || rec.path == "" || rec.path == id.path)
+	}
+	for i := len(inv.agentStack) - 1; i > 0; i-- {
+		rec := inv.agentStack[i]
+		if !matchesTask(rec) {
+			continue
+		}
+		if j := slices.Index(rec.pendingTasks, call); j >= 0 {
+			rec.pendingTasks = slices.Delete(rec.pendingTasks, j, j+1)
+			return
+		}
+	}
+	for i := len(inv.agentStack) - 1; i > 0; i-- {
+		rec := inv.agentStack[i]
+		if !matchesTask(rec) {
+			continue
+		}
+		if j := slices.Index(rec.finishedTasks, call); j >= 0 {
+			rec.finishedTasks = slices.Delete(rec.finishedTasks, j, j+1)
+			return
+		}
+		if j := slices.Index(rec.failedTasks, call); j >= 0 {
+			rec.failedTasks = slices.Delete(rec.failedTasks, j, j+1)
+			return
 		}
 	}
 }

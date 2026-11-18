@@ -6092,7 +6092,7 @@ func TestMCPRecoverySingleToolError(t *testing.T) {
 				var callSeq atomic.Int32
 
 				// Agent-level AfterToolCallbacks run after plugin AfterToolCallbacks, so
-				// noteTaskFinished records "call-1" in finishedTasks before the callback
+				// noteTaskAttempt records "call-1" in finishedTasks before the callback
 				// adds flagKey to Activation 1's response. Even when both responses are
 				// buffered, AGENT_ERROR must close Activation 1 and AGENT_COMPLETED must
 				// close Activation 2 rather than swapping spans.

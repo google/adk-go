@@ -22247,6 +22247,41 @@ func TestFinishedTaskLocked_RequiresOneRunOnTheEventPath(t *testing.T) {
 	}
 }
 
+func TestRetireFailedTaskAttemptLocked_PrefersPendingAttempt(t *testing.T) {
+	id := identity{agentName: "task", branch: "b", path: "left/task@1"}
+
+	t.Run("pending attempt promoted by later callback matches finishedTaskLocked", func(t *testing.T) {
+		inv := &invocationTrace{
+			agentStack: []*spanRecord{
+				{kind: spanKindAgent, name: "root"},
+				{kind: spanKindAgent, name: "task", branch: "b", path: "left/task@1", pendingTasks: []string{"call_0"}},
+				{kind: spanKindAgent, name: "task", branch: "b", path: "left/task@1", finishedTasks: []string{"call_1"}},
+			},
+		}
+		if got := inv.finishedTaskLocked(id, []string{"call_0"}, false); got != 1 {
+			t.Fatalf("finishedTaskLocked = %d, want 1", got)
+		}
+	})
+
+	t.Run("retiring failed call removes pending attempt without disturbing earlier completed run", func(t *testing.T) {
+		inv := &invocationTrace{
+			agentStack: []*spanRecord{
+				{kind: spanKindAgent, name: "root"},
+				{kind: spanKindAgent, name: "task", branch: "b", path: "left/task@1", finishedTasks: []string{"call_0"}},
+				{kind: spanKindAgent, name: "task", branch: "b", path: "left/task@1", pendingTasks: []string{"call_0"}},
+			},
+		}
+		// Before retirement, both runs hold an unretired "call_0" attempt.
+		if got := inv.finishedTaskLocked(id, []string{"call_0"}, false); got != -1 {
+			t.Fatalf("finishedTaskLocked before retirement = %d, want -1", got)
+		}
+		inv.retireFailedTaskAttemptLocked(id, "call_0")
+		if got := inv.finishedTaskLocked(id, []string{"call_0"}, false); got != 1 {
+			t.Fatalf("finishedTaskLocked after retirement = %d, want 1", got)
+		}
+	})
+}
+
 // TestFailuresLocked_OpenCallFailsWithoutOpenCallsOnlyARunThatIsOver verifies
 // that without openCalls a model call that a run under an earlier node attempt
 // still has open shows a failure only if that run is known to be over or a

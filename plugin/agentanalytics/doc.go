@@ -130,6 +130,27 @@
 //     TestSessionEvents_EmitRichLifecycleTypes in events_test.go, and
 //     TestDocParity_PausedLongRunningToolWritesTwoToolCompletedRows in
 //     doc_test.go).
+//   - [Config.ToolResultClassifier] has no built-in reflect-and-retry rule:
+//     Unlike adk-python, which records reflect-and-retry responses as
+//     TOOL_ERROR before its classifier runs, when
+//     [Config.ToolResultClassifier] is nil, abstains, panics, or returns an
+//     undefined decision, Go records plugin/retryandreflect guidance maps as
+//     [EventToolCompleted]; recording them as [EventToolError] requires a
+//     custom classifier. Top-level "isError" or "is_error" maps are recorded
+//     as [EventToolError] in those cases, as in adk-python. (Pinned by
+//     TestDocParity_ToolResultClassifierBuiltInRules in
+//     schema_callbacks_test.go and
+//     TestPlugin_ToolResultClassifier_FailuresAreSkipped in
+//     tool_result_classifier_test.go).
+//   - [Config.OnSchemaReady] and [Config.OnSchemaError] run at most once per
+//     plugin: Unlike adk-python, which runs schema setup lazily on events and
+//     may retry across events, Go runs table setup eagerly and synchronously at
+//     plugin construction followed by a single background view sync, invokes
+//     [Config.OnSchemaReady] or [Config.OnSchemaError] at most once per plugin
+//     instance when setup reaches its terminal outcome, and then releases both
+//     callback references. (Pinned by TestDocParity_SchemaCallbacksAtMostOnce
+//     and TestPlugin_SchemaCallbacks_ClosuresReleased in
+//     schema_callbacks_test.go).
 //   - [EventAgentResponse] on final events carrying function responses: Go's
 //     final-response check excludes FunctionCall parts, LongRunningToolIDs, and
 //     compaction events, and accepts final events (including events with

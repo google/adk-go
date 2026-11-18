@@ -1629,19 +1629,49 @@ type bqViewRunner struct {
 	datasetID string
 }
 
+type unverifiedViewConflictError struct {
+	viewName  string
+	err       error
+	verifyErr error
+}
+
+func (e *unverifiedViewConflictError) Error() string {
+	if e.verifyErr != nil {
+		return fmt.Sprintf("%v (verifying view %q: %v)", e.err, e.viewName, e.verifyErr)
+	}
+	return fmt.Sprintf("%v (view %q is not ready)", e.err, e.viewName)
+}
+
+func (e *unverifiedViewConflictError) Unwrap() []error {
+	if e.verifyErr != nil {
+		return []error{e.err, e.verifyErr}
+	}
+	return []error{e.err}
+}
+
+func isUnverifiedViewConflict(err error) bool {
+	_, ok := errors.AsType[*unverifiedViewConflictError](err)
+	return ok
+}
+
 func (r bqViewRunner) RunViewDDL(ctx context.Context, viewName, query string) error {
 	client := r.client.Value()
 	if client == nil {
 		return errors.New("agentanalytics: BigQuery client is not configured for view creation")
 	}
+	var (
+		table         *bq.Table
+		selectBody    string
+		hasSelectBody bool
+	)
 	if r.datasetID != "" && viewName != "" {
-		if _, selectBody, ok := strings.Cut(query, " AS\n"); ok {
-			var table *bq.Table
-			if r.projectID != "" {
-				table = client.DatasetInProject(r.projectID, r.datasetID).Table(viewName)
-			} else {
-				table = client.Dataset(r.datasetID).Table(viewName)
-			}
+		if r.projectID != "" {
+			table = client.DatasetInProject(r.projectID, r.datasetID).Table(viewName)
+		} else {
+			table = client.Dataset(r.datasetID).Table(viewName)
+		}
+		if _, body, ok := strings.Cut(query, " AS\n"); ok {
+			selectBody, hasSelectBody = body, true
 			md, err := table.Metadata(ctx)
 			if err == nil && md != nil {
 				// CREATE OR REPLACE VIEW cannot replace a table that is not a
@@ -1660,16 +1690,43 @@ func (r bqViewRunner) RunViewDDL(ctx context.Context, viewName, query string) er
 	// BigQuery is not canceled on the server.
 	job, err := client.Query(query).Run(ctx)
 	if err != nil {
-		return err
+		return r.resolveDDLConflict(ctx, table, viewName, selectBody, hasSelectBody, err)
 	}
 	js := job.LastStatus()
 	if js == nil || !js.Done() {
 		js, err = job.Wait(ctx)
 		if err != nil {
-			return err
+			return r.resolveDDLConflict(ctx, table, viewName, selectBody, hasSelectBody, err)
 		}
 	}
-	return js.Err()
+	if err := js.Err(); err != nil {
+		return r.resolveDDLConflict(ctx, table, viewName, selectBody, hasSelectBody, err)
+	}
+	return nil
+}
+
+// resolveDDLConflict checks whether a 409 / AlreadyExists error left the
+// target view in place with its expected query. A retried jobs.insert can get
+// 409 for the existing job ID while that DDL job is still pending or has
+// failed, so the view is read back before treating the conflict as ready.
+func (r bqViewRunner) resolveDDLConflict(ctx context.Context, table *bq.Table, viewName, selectBody string, hasSelectBody bool, ddlErr error) error {
+	if !isConflictError(ddlErr) {
+		return ddlErr
+	}
+	if table == nil {
+		return &unverifiedViewConflictError{viewName: viewName, err: ddlErr}
+	}
+	md, err := table.Metadata(ctx)
+	if err != nil {
+		return &unverifiedViewConflictError{viewName: viewName, err: ddlErr, verifyErr: err}
+	}
+	if md == nil || md.Type != bq.ViewTable {
+		return &unverifiedViewConflictError{viewName: viewName, err: ddlErr}
+	}
+	if hasSelectBody && strings.TrimSpace(md.ViewQuery) != strings.TrimSpace(selectBody) {
+		return &unverifiedViewConflictError{viewName: viewName, err: ddlErr}
+	}
+	return nil
 }
 
 // syncAnalyticsViews executes CREATE OR REPLACE VIEW for every definition in
@@ -1701,7 +1758,7 @@ func syncAnalyticsViewsWithRetryHint(ctx context.Context, runner viewRunner, def
 		ddlCtx, cancel := context.WithTimeout(ctx, viewDDLTimeout)
 		err := runner.RunViewDDL(ddlCtx, def.Name, def.Query)
 		cancel()
-		if err == nil || isConflictError(err) {
+		if err == nil || (isConflictError(err) && !isUnverifiedViewConflict(err)) {
 			created++
 			continue
 		}
@@ -1735,7 +1792,7 @@ var errPluginClosed = errors.New("agentanalytics: plugin is closed")
 // synchronously using ctx. It runs even when DisableCreateViews is set,
 // permanently cancels any in-flight startup view creation pass, and returns
 // the joined per-view errors with 409 Conflict / AlreadyExists responses
-// ignored. When one view group (per-event or evaluation) fails definition or
+// ignored once the view is confirmed to exist. When one view group (per-event or evaluation) fails definition or
 // configuration validation while the other group is valid, the valid views
 // still run and their result is joined with the group validation error; if no
 // valid views remain, SyncViews returns the validation error without
@@ -1901,13 +1958,16 @@ func (s *pluginState) isClosed() bool {
 }
 
 // startAsyncViewCreation runs a view creation pass for defs in the background,
-// logging failures through logf if it is not nil. The pass keeps client
-// reachable until it ends, because the runner refers to it only weakly.
-func (s *pluginState) startAsyncViewCreation(parentCtx context.Context, defs []ViewDefinition, logf func(format string, args ...any), client *bq.Client) {
-	s.startAsyncViewCreationWithRetryHint(parentCtx, defs, logf, "SyncViews", client)
+// logging failures through logf if it is not nil, and calling onReady,
+// Config.OnSchemaReady, if it is not nil, once the pass has created every
+// view. The pass keeps client reachable until it ends, because the runner
+// refers to it only weakly, and holds onReady, which can refer to the
+// caller's objects, only until it ends.
+func (s *pluginState) startAsyncViewCreation(parentCtx context.Context, defs []ViewDefinition, logf func(format string, args ...any), client *bq.Client, onReady func()) {
+	s.startAsyncViewCreationWithRetryHint(parentCtx, defs, logf, "SyncViews", client, onReady)
 }
 
-func (s *pluginState) startAsyncViewCreationWithRetryHint(parentCtx context.Context, defs []ViewDefinition, logf func(format string, args ...any), retryMethod string, client *bq.Client) {
+func (s *pluginState) startAsyncViewCreationWithRetryHint(parentCtx context.Context, defs []ViewDefinition, logf func(format string, args ...any), retryMethod string, client *bq.Client, onReady func()) {
 	viewsCtx, viewsCancel := context.WithCancel(context.WithoutCancel(parentCtx))
 	done := make(chan struct{})
 	s.viewsMu.Lock()
@@ -1923,6 +1983,7 @@ func (s *pluginState) startAsyncViewCreationWithRetryHint(parentCtx context.Cont
 		// caller's objects, so the pass forgets it once it ends, before
 		// anyone waiting on done goes on.
 		defer func() {
+			onReady = nil
 			s.viewsMu.Lock()
 			s.viewsCancel = nil
 			s.asyncViewsDone = nil
@@ -1936,7 +1997,15 @@ func (s *pluginState) startAsyncViewCreationWithRetryHint(parentCtx context.Cont
 		if s.isClosed() || viewsCtx.Err() != nil {
 			return
 		}
-		_ = syncAnalyticsViewsWithRetryHint(viewsCtx, runner, defs, logf, retryMethod)
+		if err := syncAnalyticsViewsWithRetryHint(viewsCtx, runner, defs, logf, retryMethod); err != nil {
+			// A view that failed, or a pass that SyncViews or Close ended,
+			// leaves the schema not ready, as in adk-python.
+			return
+		}
+		if s.isClosed() || viewsCtx.Err() != nil {
+			return
+		}
+		notifySchemaReady(onReady, logf)
 	}()
 }
 
