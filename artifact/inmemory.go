@@ -189,7 +189,7 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	nextVersion := int64(1)
+	nextVersion := int64(0)
 	if internalVer, _, ok := s.find(appName, userID, sessionID, fileName); ok {
 		nextVersion = internalVer + 1
 	}
@@ -208,7 +208,6 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 		return fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-	version := req.Version
 	// If file is user scoped, adjust artifactKey part
 	if fileHasUserNamespace(fileName) {
 		sessionID = userScopedArtifactKey
@@ -217,14 +216,14 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if version != 0 {
-		s.delete(appName, userID, sessionID, fileName, version)
+	if req.Version != nil {
+		s.delete(appName, userID, sessionID, fileName, *req.Version)
 		return nil
 	}
 
-	// pick the latest version
+	// Delete all versions.
 	lo := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: math.MaxInt64}.Encode()
-	hi := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName}.Encode()
+	hi := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: 0}.Encode()
 	s.artifacts.DeleteRange(lo, hi)
 	return nil
 }
@@ -236,10 +235,9 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-	version := req.Version
 
 	s.mu.RLock()
-	entry, err := s.resolve(appName, userID, sessionID, fileName, version)
+	entry, err := s.resolve(appName, userID, sessionID, fileName, req.Version)
 	s.mu.RUnlock()
 	if err != nil {
 		return nil, err
@@ -251,7 +249,7 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 
 // resolve returns the entry Load reports for the named artifact, following
 // artifact references. The caller must hold s.mu for reading.
-func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, version int64) (*artifactEntry, error) {
+func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, version *int64) (*artifactEntry, error) {
 	// An artifact part may be a reference (its FileData.FileURI uses the
 	// "artifact://" scheme), pointing at another artifact rather than storing
 	// data. Resolve it here, re-validating scope at each hop so a reference can
@@ -274,8 +272,8 @@ func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, v
 			entry *artifactEntry
 			ok    bool
 		)
-		if version > 0 {
-			entry, ok = s.get(appName, userID, lookupSession, fileName, version)
+		if version != nil {
+			entry, ok = s.get(appName, userID, lookupSession, fileName, *version)
 		} else {
 			// pick the latest version
 			_, entry, ok = s.find(appName, userID, lookupSession, fileName)
@@ -305,7 +303,7 @@ func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, v
 
 		// Follow the reference: the next hop is validated against the session it
 		// just followed, as adk-python resolves each hop against the URI it reached.
-		appName, userID, sessionID, fileName, version = parsed.AppName, parsed.UserID, parsed.SessionID, parsed.FileName, parsed.Version
+		appName, userID, sessionID, fileName, version = parsed.AppName, parsed.UserID, parsed.SessionID, parsed.FileName, &parsed.Version
 	}
 }
 
@@ -368,7 +366,7 @@ func (s *inMemoryService) Versions(ctx context.Context, req *VersionsRequest) (*
 
 	var versions []int64
 	lo := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: math.MaxInt64}.Encode()
-	hi := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName}.Encode()
+	hi := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: 0}.Encode()
 	// TODO(hyangah): extend omap to search key only and skip value decoding.
 	for key := range s.scan(lo, hi) {
 		versions = append(versions, key.Version)
@@ -385,7 +383,7 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 	if err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
-	appName, userID, sessionID, fileName, version := req.AppName, req.UserID, req.SessionID, req.FileName, req.Version
+	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	userScoped := fileHasUserNamespace(fileName)
 	if userScoped {
 		sessionID = userScopedArtifactKey
@@ -394,9 +392,13 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var entry *artifactEntry
-	var ok bool
-	if version > 0 {
+	var (
+		version int64
+		entry   *artifactEntry
+		ok      bool
+	)
+	if req.Version != nil {
+		version = *req.Version
 		entry, ok = s.get(appName, userID, sessionID, fileName, version)
 	} else {
 		version, entry, ok = s.find(appName, userID, sessionID, fileName)
