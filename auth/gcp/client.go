@@ -274,16 +274,17 @@ type Config struct {
 // refreshes them ahead of expiry, and presents the environment's client
 // certificate when the rule below turns it on.
 //
-// The client certificate follows adk-python's rule.
+// The client certificate follows adk-python's rule, narrowed to what the
+// Google auth library for Go (cloud.google.com/go/auth) accepts.
 // GOOGLE_API_USE_CLIENT_CERTIFICATE decides when it is set: true, TRUE or True
 // turns the certificate on, and any other value, the empty string included,
 // turns it off. When it is unset, the certificate is on only if
 // GOOGLE_API_CERTIFICATE_CONFIG names a certificate config file with a workload
 // section, and only in the googleapis.com universe. With the variable unset
-// the Google Cloud client libraries for Go also use an enterprise certificate
-// proxy, SecureConnect, or a certificate config at gcloud's default path. Here
-// those take GOOGLE_API_USE_CLIENT_CERTIFICATE=true. A workload section that
-// names no certificate fails NewClient.
+// the auth library by itself also uses an enterprise certificate proxy,
+// SecureConnect, or a certificate config at gcloud's default path. Here those
+// take GOOGLE_API_USE_CLIENT_CERTIFICATE=true. While the certificate is on, a
+// workload section without a certificate path or a key path fails NewClient.
 //
 // A certificate is only presented to an endpoint that requests one, so when
 // the client has one the default endpoints become the services' mTLS
@@ -342,11 +343,6 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
 		}
-		// Discarded: the library's default logger answers
-		// GOOGLE_SDK_GO_LOGGING_LEVEL=debug by writing each token request and
-		// response to stderr, signed assertion and minted token included.
-		logger := slog.New(slog.DiscardHandler)
-		detect := &credentials.DetectOptions{Scopes: []string{cloudPlatformScope}, Logger: logger}
 		// The auth library's transport rather than a hand-written bearer header,
 		// so client certificates, the quota project header and token caching
 		// come from it. See the NewClient doc.
@@ -355,13 +351,18 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 			// this map, and with a nil map it allocates a private one that its
 			// round-tripper never sees (cloud.google.com/go/auth through v0.24.4).
 			Headers: http.Header{},
-			Logger:  logger,
+			// Discarded: the library's default logger answers
+			// GOOGLE_SDK_GO_LOGGING_LEVEL=debug by writing each token request and
+			// response to stderr, signed assertion and minted token included.
+			// Credential detection gets this logger on both branches below.
+			Logger: slog.New(slog.DiscardHandler),
 			// Off, as through v2.8.0. Left on, the library opens a client span for
 			// every call, and with GOOGLE_SDK_GO_EXPERIMENTAL_TRACING=true records
 			// on it the service's error message, which APIError.Body carries only
 			// scrubbed.
 			DisableTelemetry: true,
 		}
+		detect := &credentials.DetectOptions{Scopes: []string{cloudPlatformScope}}
 		if certSource != nil {
 			// The library finds the same source on its own, and with it also
 			// sends the token exchange through the certificate.
@@ -369,16 +370,18 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		} else {
 			// Left to its default the library would look for a certificate on
 			// its own, by a wider rule than clientcert.Source's, and use it
-			// for the token exchange as well. A source that presents nothing
-			// stops the lookup, and credentials detected here keep the token
-			// exchange off that source: detected by the library, they would
-			// move to its mTLS token endpoint for any non-nil source.
+			// for the token exchange as well. Handing it a source stops that
+			// lookup, which can run a SecureConnect helper. With a source the
+			// library also moves credentials it detects to its mTLS token
+			// endpoint, so they are detected here.
+			detect.Logger = opts.Logger
 			creds, err := credentials.DetectDefault(detect)
 			if err != nil {
 				return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
 			}
 			opts.Credentials = creds
 			opts.ClientCertProvider = noClientCertificate
+			opts.BaseRoundTripper = plainTransport(http.DefaultTransport)
 		}
 		hc, err := httptransport.NewClient(opts)
 		if err != nil {
@@ -412,6 +415,30 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 // certificate.
 func noClientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 	return &tls.Certificate{}, nil
+}
+
+// plainTransport returns the base transport the auth library builds from def,
+// the default transport, when it has no certificate source. Given a source,
+// even one that presents nothing, the library replaces the TLS configuration
+// an application set on the default transport.
+//
+// It returns nil when def is not an [http.Transport]. The library then starts
+// from a transport of its own, which has no configuration to lose.
+func plainTransport(def http.RoundTripper) http.RoundTripper {
+	t, ok := def.(*http.Transport)
+	if !ok {
+		return nil
+	}
+	t = t.Clone()
+	// The library's two adjustments (cloud.google.com/go/auth v0.24.4,
+	// httptransport.defaultBaseTransport): a larger idle pool, and a health
+	// check that drops a connection gone quiet.
+	t.MaxIdleConnsPerHost = 100
+	if t.HTTP2 == nil {
+		t.HTTP2 = &http.HTTP2Config{}
+	}
+	t.HTTP2.SendPingTimeout = 31 * time.Second
+	return t
 }
 
 const (

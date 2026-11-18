@@ -15,20 +15,22 @@
 package clientcerttest
 
 import (
+	"net/http"
 	"os"
 	"runtime"
 	"testing"
 )
 
-// TestIsolateRunsOnLinux guards the tests built on Isolate against all being
-// skipped on the one system CI runs them on, which would still read as a pass.
+// TestIsolateRunsOnLinux guards the tests built on Isolate and Server against
+// all being skipped on the one system CI runs them on, which would still read
+// as a pass.
 func TestIsolateRunsOnLinux(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("Isolate may skip elsewhere")
+		t.Skip("Isolate and Server may skip elsewhere")
 	}
 	t.Cleanup(func() {
 		if t.Skipped() {
-			t.Error("Isolate skipped the test")
+			t.Error("Isolate or Server skipped the test")
 		}
 	})
 	if !Isolate(t) {
@@ -39,4 +41,14 @@ func TestIsolateRunsOnLinux(t *testing.T) {
 			t.Errorf("the child starts with %s=%q, want it unset", name, v)
 		}
 	}
+	Server(t, http.NotFoundHandler())
+}
+
+// TestIsolateReportsAChildSkip always ends skipped: Isolate has to pass the
+// child's skip on, neither failing the test nor counting it as run.
+func TestIsolateReportsAChildSkip(t *testing.T) {
+	if Isolate(t) {
+		t.Skip("skipped in the child")
+	}
+	t.Error("Isolate returned in the parent after its child skipped")
 }

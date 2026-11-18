@@ -45,6 +45,8 @@ const (
 	// Where the auth library looks for a certificate config when
 	// GOOGLE_API_CERTIFICATE_CONFIG is unset, relative to $HOME.
 	defaultConfig = ".config/gcloud/certificate_config.json"
+	// A file Isolate leaves in the child's home, which no real one has.
+	homeMarker = ".adk-clientcerttest-home"
 )
 
 // cleared are the variables a child starts without, so that each test states
@@ -56,6 +58,8 @@ var cleared = []string{
 	"GOOGLE_API_USE_MTLS",
 	"GOOGLE_CLOUD_UNIVERSE_DOMAIN",
 	"GOOGLE_API_GO_EXPERIMENTAL_DISABLE_NEW_AUTH_LIB",
+	"GOOGLE_API_GO_EXPERIMENTAL_ENABLE_NEW_AUTH_LIB",
+	"EXPERIMENTAL_GOOGLE_API_USE_S2A",
 }
 
 // Isolate re-runs the calling top-level test in a child process and reports
@@ -85,8 +89,12 @@ func Isolate(t *testing.T) bool {
 		t.Skip("the auth library takes the default certificate config from %APPDATA% on Windows")
 	}
 	if os.Getenv(childEnv) == t.Name() {
-		if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), defaultConfig)); err != nil {
-			t.Fatalf("clientcerttest.Isolate: the child has no default certificate config: %v", err)
+		// The marker tells the home Isolate made from a real one, should the
+		// variable above come from somewhere else.
+		for _, name := range []string{homeMarker, defaultConfig} {
+			if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), name)); err != nil {
+				t.Fatalf("clientcerttest.Isolate: $HOME is not a home Isolate prepared: %v", err)
+			}
 		}
 		return true
 	}
@@ -97,6 +105,7 @@ func Isolate(t *testing.T) bool {
 		t.Fatal(err)
 	}
 	writeWorkload(t, filepath.Dir(path), path)
+	WriteFile(t, filepath.Join(home, homeMarker), nil)
 
 	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v", "-test.count=1")
 	for _, kv := range os.Environ() {
@@ -110,8 +119,13 @@ func Isolate(t *testing.T) bool {
 	if err != nil {
 		t.Fatalf("child process: %v\n%s", err, out)
 	}
-	// A child that ran nothing exits 0 too.
-	if !bytes.Contains(out, []byte("--- PASS: "+t.Name())) {
+	// A child that ran nothing exits 0 too, and so does one that skipped, as
+	// [Server] does where it cannot make the process trust it.
+	switch {
+	case bytes.Contains(out, []byte("\n--- PASS: "+t.Name()+" (")):
+	case bytes.Contains(out, []byte("\n--- SKIP: "+t.Name()+" (")):
+		t.Skipf("the child process skipped the test:\n%s", out)
+	default:
 		t.Fatalf("child process did not pass the test:\n%s", out)
 	}
 	return false
@@ -241,5 +255,35 @@ func Server(t *testing.T, h http.Handler) (srv *httptest.Server, peers func() []
 		mu.Lock()
 		defer mu.Unlock()
 		return append([][]byte(nil), seen...)
+	}
+}
+
+// RecordingProxy makes the process send its HTTPS requests to a local proxy
+// that refuses each one, so that none leaves the machine. hosts returns the
+// host and port every request so far asked the proxy for. Requests to a
+// loopback address bypass any proxy.
+//
+// Call it before the process makes its first request: net/http reads the
+// proxy variables once.
+func RecordingProxy(t *testing.T) (hosts func() []string) {
+	t.Helper()
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Host)
+		mu.Unlock()
+		http.Error(w, "refused by the test", http.StatusBadGateway)
+	}))
+	t.Cleanup(proxy.Close)
+	t.Setenv("HTTPS_PROXY", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), seen...)
 	}
 }
