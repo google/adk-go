@@ -42,7 +42,12 @@ func sanitizeURI(raw string) (string, bool) {
 
 // uriKeys tells sanitizeURIWith which names of a URI are sensitive: the path
 // segments that start a /<key>/<value> pair, and the keys of path segment,
-// query and fragment pairs whose values are redacted. decodeQueryKeys reads
+// query and fragment pairs whose values are redacted. unescapeKeys percent-
+// unescapes path segments and matrix/query/fragment keys before classifying
+// them (using url.QueryUnescape when decodeQueryKeys is set and
+// url.PathUnescape otherwise, falling back to raw text on an invalid escape)
+// so multibyte padding such as %EF%BB%BF or %C2%A0 is trimmed before matching
+// while preserving the raw key spelling in output. decodeQueryKeys reads
 // each query key with each "+" as a space, as redactQueryComponent and
 // url.QueryUnescape read a query, and also counts a key that ends in a
 // sensitive key name after a space or another byte that no key name holds
@@ -53,23 +58,24 @@ func sanitizeURI(raw string) (string, bool) {
 type uriKeys struct {
 	pathSegment, key func(string) bool
 	canonicalize     func(string) string
+	unescapeKeys     bool
 	decodeQueryKeys  bool
 	scrubKeys        bool
 }
 
 var (
 	// scannerURIKeys are the names that sanitizeURI reads as sensitive.
-	scannerURIKeys = uriKeys{isSensitivePathSegment, isSensitiveKey, canonicalizeCredentialMarker, true, true}
+	scannerURIKeys = uriKeys{isSensitivePathSegment, isSensitiveKey, canonicalizeCredentialMarker, true, true, true}
 	// legacyURIKeys are the names that the expressions on main read as
 	// sensitive in a URI, with a "+" in a key read as itself (see
 	// isLegacySensitiveKey), and whose own text main kept, so that the
 	// legacy scrub leaves for its text passes what main left (see
 	// legacyScrubTokensTraced).
-	legacyURIKeys = uriKeys{isLegacySensitiveKey, isLegacySensitiveKey, canonicalizeLegacyCredentialMarker, false, false}
+	legacyURIKeys = uriKeys{isLegacySensitiveKey, isLegacySensitiveKey, canonicalizeLegacyCredentialMarker, false, false, false}
 	// compoundLegacyURIKeys are scannerURIKeys with a "+" in a key read as
 	// itself and the text of a sensitive key kept, for
 	// compoundLegacyScrubErrorTokens.
-	compoundLegacyURIKeys = uriKeys{isSensitivePathSegment, isSensitiveKey, canonicalizeLegacyCredentialMarker, false, false}
+	compoundLegacyURIKeys = uriKeys{isSensitivePathSegment, isSensitiveKey, canonicalizeLegacyCredentialMarker, false, false, false}
 )
 
 // uriComponentScrub scrubs one decoded URI component (a path segment, a
@@ -136,7 +142,11 @@ func sanitizePathSegments(escapedPath string, scrub uriComponentScrub, keys uriK
 		if rawSeg == "" {
 			continue
 		}
-		seg := keys.canonicalize(rawSeg)
+		segText := rawSeg
+		if keys.unescapeKeys {
+			segText = unescapePathOrRaw(rawSeg)
+		}
+		seg := keys.canonicalize(segText)
 		if redactNext {
 			segments[i] = escapedRedacted
 			changed = true
@@ -160,22 +170,40 @@ func sanitizePathSegments(escapedPath string, scrub uriComponentScrub, keys uriK
 			fromLegacy = isLegacySensitiveKey(canonicalizeLegacyCredentialMarker(rawSeg))
 			continue
 		}
-		if rawKey, value, hasEq := strings.Cut(seg, "="); hasEq {
-			canonKey := keys.canonicalize(rawKey)
+		if left, rawValue, hasRawEq := strings.Cut(rawSeg, "="); hasRawEq {
+			keyText := left
+			if keys.unescapeKeys {
+				keyText = unescapePathOrRaw(left)
+			}
+			canonKey := keys.canonicalize(keyText)
 			if keys.key(canonKey) || normalizeKey(canonKey) == "key" {
-				left, rawValue, hasRawEq := strings.Cut(rawSeg, "=")
-				if !hasRawEq {
-					left, rawValue = url.PathEscape(canonKey), escapedRedacted
-				}
 				keyChanged := false
 				if keys.scrubKeys {
 					left, keyChanged = redactPathComponent(left, scrub)
 				}
-				if isRedactedMarker(value) {
+				if isRedactedMarker(keys.canonicalize(rawValue)) {
 					// Already redacted, as when redacted text is
 					// scrubbed again.
 					if keyChanged {
 						segments[i] = left + "=" + rawValue
+						changed = true
+					}
+					continue
+				}
+				segments[i] = left + "=" + escapedRedacted
+				changed = true
+				continue
+			}
+		} else if rawKey, value, hasEq := strings.Cut(seg, "="); hasEq {
+			canonKey := keys.canonicalize(rawKey)
+			if keys.key(canonKey) || normalizeKey(canonKey) == "key" {
+				left, keyChanged := url.PathEscape(canonKey), false
+				if keys.scrubKeys {
+					left, keyChanged = redactPathComponent(left, scrub)
+				}
+				if isRedactedMarker(value) {
+					if keyChanged {
+						segments[i] = left + "=" + escapedRedacted
 						changed = true
 					}
 					continue
@@ -272,13 +300,19 @@ func sanitizeQueryPairs(raw string, requireEquals bool, scrub uriComponentScrub,
 		}
 		keyText := rawKey
 		if keys.decodeQueryKeys {
-			keyText = strings.ReplaceAll(rawKey, "+", " ")
+			keyText = unescapeQueryOrRaw(rawKey)
+		} else if keys.unescapeKeys {
+			keyText = unescapePathOrRaw(rawKey)
 		}
 		key := keys.canonicalize(keyText)
 		if keys.key(key) || normalizeKey(key) == "key" || (keys.decodeQueryKeys && endsInSensitiveTextKey(key)) {
 			safeKey, keyChanged := rawKey, false
 			if keys.scrubKeys {
-				safeKey, keyChanged = redactQueryComponent(rawKey, scrub)
+				if requireEquals {
+					safeKey, keyChanged = redactPathComponent(rawKey, scrub)
+				} else {
+					safeKey, keyChanged = redactQueryComponent(rawKey, scrub)
+				}
 			}
 			if hasEq && isRedactedMarker(rawValue) {
 				// Already redacted, as when redacted text is scrubbed
@@ -312,18 +346,45 @@ func sanitizeQueryPairs(raw string, requireEquals bool, scrub uriComponentScrub,
 	return strings.Join(pairs, "&"), true
 }
 
-// endsInSensitiveTextKey reports whether key, a decoded query key, ends in a
-// sensitive key name, possibly before delimiter whitespace (see isDelimSpace),
-// at a boundary that the text scrub of key=value accepts (see
-// findTextKeyStart), as the token of "my token", which my+token decodes to, of
-// "+token", which %2Btoken decodes to, or of "my token\t", which my+token%09
-// decodes to.
-func endsInSensitiveTextKey(key string) bool {
-	end := len(key)
-	for end > 0 && isDelimSpace(key[end-1]) {
-		end--
+func unescapePathOrRaw(s string) string {
+	if strings.IndexByte(s, '%') < 0 {
+		return s
 	}
-	return end > 0 && findTextKeyStart(key, 0, end) >= 0
+	if decoded, err := url.PathUnescape(s); err == nil {
+		return decoded
+	}
+	return s
+}
+
+func unescapeQueryOrRaw(s string) string {
+	if strings.IndexByte(s, '%') < 0 && strings.IndexByte(s, '+') < 0 {
+		return s
+	}
+	if decoded, err := url.QueryUnescape(s); err == nil {
+		return decoded
+	}
+	return strings.ReplaceAll(s, "+", " ")
+}
+
+// endsInSensitiveTextKey reports whether key, a decoded query key, ends in a
+// sensitive key name, possibly before delimiter whitespace, Unicode space or a
+// BOM (see isDelimSpace and trimBOMAndSpace), at a boundary that the text
+// scrub of key=value accepts (see findTextKeyStart), as the token of
+// "my token", which my+token decodes to, of "+token", which %2Btoken decodes
+// to, or of "my token\t", which my+token%09 decodes to.
+func endsInSensitiveTextKey(key string) bool {
+	for {
+		trimmed := trimBOMAndSpace(key)
+		end := len(trimmed)
+		for end > 0 && isDelimSpace(trimmed[end-1]) {
+			end--
+		}
+		if end == len(key) {
+			break
+		}
+		key = trimmed[:end]
+	}
+	return key != "" && findTextKeyStart(key, 0, len(key)) >= 0
 }
 
 // redactQueryComponent scrubs one escaped query key or value as text with
@@ -432,13 +493,18 @@ func uriTokenSpans(msg string) [][]int {
 				start = i - 1
 			}
 		}
+		if start < 0 {
+			// No scheme stands before the "://".
+			from = sep + len("://")
+			continue
+		}
 		end := sep + len("://")
 		for end < len(msg) && !isRegexpSpace(msg[end]) && strings.IndexByte(`"'<>`, msg[end]) < 0 {
 			end++
 		}
-		if start < 0 || end == sep+len("://") {
-			// No scheme stands before the "://", or nothing after it.
-			from = sep + 1
+		if end == sep+len("://") {
+			// Nothing stands after the "://".
+			from = sep + len("://")
 			continue
 		}
 		spans = append(spans, []int{start, end})

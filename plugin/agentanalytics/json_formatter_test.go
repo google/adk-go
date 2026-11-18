@@ -6925,3 +6925,25 @@ func TestJSONFormatter_CollidingMapKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestJSONFormatter_DeclaredSensitiveTypeMapKey(t *testing.T) {
+	type SyntaxToken int
+
+	gotMapOn, truncMapOn, err := SmartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, 1000)
+	if err != nil || string(gotMapOn) != `{"[REDACTED]":"[REDACTED]"}` || !truncMapOn {
+		t.Errorf("SmartTruncate(map[SyntaxToken]int{1: 12, 2: 9}) = (%s, %v, %v), want (%s, true, nil)", gotMapOn, truncMapOn, err, `{"[REDACTED]":"[REDACTED]"}`)
+	}
+	gotMapOff, truncMapOff, err := smartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, 1000, false)
+	if err != nil || string(gotMapOff) != `{"1":12,"2":9}` || truncMapOff {
+		t.Errorf("smartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, redact off) = (%s, %v, %v), want (%s, false, nil)", gotMapOff, truncMapOff, err, `{"1":12,"2":9}`)
+	}
+
+	gotValOn, truncValOn, err := SmartTruncate(SyntaxToken(7), 1000)
+	if err != nil || string(gotValOn) != `"[REDACTED]"` || !truncValOn {
+		t.Errorf("SmartTruncate(SyntaxToken(7)) = (%s, %v, %v), want (%s, true, nil)", gotValOn, truncValOn, err, `"[REDACTED]"`)
+	}
+	gotValOff, truncValOff, err := smartTruncate(SyntaxToken(7), 1000, false)
+	if err != nil || string(gotValOff) != `7` || truncValOff {
+		t.Errorf("smartTruncate(SyntaxToken(7), redact off) = (%s, %v, %v), want (7, false, nil)", gotValOff, truncValOff, err)
+	}
+}

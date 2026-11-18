@@ -705,81 +705,143 @@ func jsonHexRune(s string) (rune, bool) {
 	return r, true
 }
 
-// keyRedactionHidesRunOn reports whether the expressions of main read a value
-// across the strings of s, a JSON document or a JSON string literal that holds
-// one at depth (see expressionsKeepStringsApart, which reads escapes decoded
-// too), as written or as main writes it again once it redacts a key in it,
-// with the keys sorted (see sortedJSONTextDepth). A document whose redaction of
-// sensitive keys changes it then fails closed: the redaction may take the
-// value that runs on, as a header in the value of a compound key, which main
-// keeps, as the Authorization\u003a\n of
-// {"zz_secret":"Authorization\u003a\n","b":"SECRET"}, or write it before
-// other strings than in s, and keep a string that main redacts with it.
+// hasHexOrPercentEscape reports whether s holds a percent escape or a \u, \U,
+// \x or \X escape, any of which may hide text from the expressions of main.
 func hasHexOrPercentEscape(s string) bool {
 	return strings.IndexByte(s, '%') >= 0 ||
 		strings.Contains(s, `\u`) || strings.Contains(s, `\U`) ||
 		strings.Contains(s, `\x`) || strings.Contains(s, `\X`)
 }
 
+// keyRedactionHidesRunOn reports whether the expressions of main read a value
+// across the strings of s, a JSON document or a JSON string literal that holds
+// one at depth (see expressionsKeepStringsApart, which reads escapes decoded
+// too), in the JSON text that main's structural redactor passes to its text
+// expressions (see legacyRedactedJSONTextDepth). A document whose redaction of
+// sensitive keys changes it then fails closed when main's structural redactor
+// leaves a value that runs on across strings, as a header in the value of a
+// compound key, which main keeps, as the Authorization\u003a\n of
+// {"zz_secret":"Authorization\u003a\n","b":"SECRET"}, or writes it before
+// other strings than in s, and would otherwise keep a string that main redacts
+// with it, while keeping sibling fields when main's structural redactor
+// already replaced the field holding the header with "[REDACTED]".
 func keyRedactionHidesRunOn(s string, depth int) bool {
-	if !expressionsKeepStringsApart(s) {
+	legacy, changed, sawAmbiguous, ok := legacyRedactedJSONTextDepth(s, depth, false, &nodeBudget{remaining: maxSanitizeNodes})
+	if !ok || !expressionsKeepStringsApart(legacy) {
 		return true
 	}
-	sorted, ok := sortedJSONTextDepth(s, depth, &nodeBudget{remaining: maxSanitizeNodes})
-	return !ok || (sorted != s && !expressionsKeepStringsApart(sorted))
+	if !changed && sawAmbiguous {
+		sorted, _, _, ok := legacyRedactedJSONTextDepth(s, depth, true, &nodeBudget{remaining: maxSanitizeNodes})
+		return !ok || (sorted != legacy && !expressionsKeepStringsApart(sorted))
+	}
+	return false
 }
 
-// sortedJSONTextDepth returns the value of s, a JSON document or a JSON string
-// literal that holds one at depth, as json.Marshal writes it, with the keys
-// of each object sorted and each string that is such text written so in turn,
-// as main writes a document again when it redacts a key in it, and reports
-// true. It reports false when s does not parse, depth or budget runs out, or
-// the text that it writes is too long (see rewritesTooLong).
-func sortedJSONTextDepth(s string, depth int, budget *nodeBudget) (string, bool) {
+// legacyRedactedJSONTextDepth returns the JSON text that main's structural
+// redactor produces for s at depth before main runs its text expressions:
+// values under isLegacySensitiveKey are replaced with "[REDACTED]", and each
+// container or JSON string literal that changes (or when forceSort is set) is
+// marshaled with json.Marshal, while unchanged levels keep their original text
+// and key order. sawAmbiguous reports an already-redacted legacy key or a
+// non-JSON container-led string leaf whose re-serialization order is checked
+// both ways when changed is false. It reports ok=false when s does not parse,
+// depth or budget runs out, or the marshaled text is too long (see
+// rewritesTooLong).
+func legacyRedactedJSONTextDepth(s string, depth int, forceSort bool, budget *nodeBudget) (out string, changed, sawAmbiguous, ok bool) {
 	if depth >= maxSanitizeDepth {
-		return "", false
+		return "", false, false, false
 	}
-	v, _, exceeded, err := unmarshalJSONStrictWithBudget(trimBOMAndSpace(s), budget)
-	if err != nil || exceeded {
-		return "", false
-	}
-	if v, ok := sortedJSONValue(v, depth+1, budget); ok {
-		if b, err := json.Marshal(v); err == nil && !rewritesTooLong(s, b) {
-			return string(b), true
+	trimmed := trimBOMAndSpace(s)
+	if strings.HasPrefix(trimmed, `"`) {
+		if budget != nil && !budget.take() {
+			return "", false, false, false
 		}
+		var decoded string
+		if err := json.Unmarshal([]byte(trimmed), &decoded); err != nil {
+			return "", false, false, false
+		}
+		innerTrimmed := trimBOMAndSpace(decoded)
+		if innerTrimmed == "" || strings.IndexByte(`{["`, innerTrimmed[0]) < 0 || !json.Valid([]byte(innerTrimmed)) {
+			amb := innerTrimmed != "" && strings.IndexByte(`{["`, innerTrimmed[0]) >= 0
+			return s, false, amb, true
+		}
+		innerOut, innerChanged, innerAmb, innerOK := legacyRedactedJSONTextDepth(decoded, depth+1, forceSort, budget)
+		if !innerOK {
+			return "", false, false, false
+		}
+		if !innerChanged && !forceSort {
+			return s, false, innerAmb, true
+		}
+		b, err := json.Marshal(innerOut)
+		if err != nil || rewritesTooLong(trimmed, b) {
+			return "", false, false, false
+		}
+		return string(b), innerChanged, innerAmb, true
 	}
-	return "", false
+	v, sawDup, exceeded, err := unmarshalJSONStrictWithBudget(trimmed, budget)
+	if err != nil || exceeded {
+		return "", false, false, false
+	}
+	redacted, valChanged, valAmb, valOK := legacyRedactedJSONValue(v, depth+1, forceSort, budget)
+	if !valOK {
+		return "", false, false, false
+	}
+	changed = valChanged || sawDup
+	if !changed && !forceSort {
+		return s, false, valAmb, true
+	}
+	b, err := json.Marshal(redacted)
+	if err != nil || rewritesTooLong(trimmed, b) {
+		return "", false, false, false
+	}
+	return string(b), changed, valAmb, true
 }
 
-// sortedJSONValue is sortedJSONTextDepth for v, a JSON value at depth, written
-// in place.
-func sortedJSONValue(v any, depth int, budget *nodeBudget) (any, bool) {
+// legacyRedactedJSONValue is legacyRedactedJSONTextDepth for v, a decoded JSON
+// value at depth, updated in place.
+func legacyRedactedJSONValue(v any, depth int, forceSort bool, budget *nodeBudget) (out any, changed, sawAmbiguous, ok bool) {
 	if depth >= maxSanitizeDepth {
-		return nil, false
+		return nil, false, false, false
 	}
 	switch x := v.(type) {
 	case map[string]any:
 		for k, val := range x {
-			sorted, ok := sortedJSONValue(val, depth+1, budget)
-			if !ok {
-				return nil, false
+			if isLegacySensitiveKey(k) {
+				if str, isStr := val.(string); !isStr || str != redactedValue {
+					changed = true
+				} else {
+					sawAmbiguous = true
+				}
+				x[k] = redactedValue
+				continue
 			}
-			x[k] = sorted
+			child, c, amb, childOK := legacyRedactedJSONValue(val, depth+1, forceSort, budget)
+			if !childOK {
+				return nil, false, false, false
+			}
+			x[k] = child
+			changed = changed || c
+			sawAmbiguous = sawAmbiguous || amb
 		}
 	case []any:
 		for i, val := range x {
-			sorted, ok := sortedJSONValue(val, depth+1, budget)
-			if !ok {
-				return nil, false
+			child, c, amb, childOK := legacyRedactedJSONValue(val, depth+1, forceSort, budget)
+			if !childOK {
+				return nil, false, false, false
 			}
-			x[i] = sorted
+			x[i] = child
+			changed = changed || c
+			sawAmbiguous = sawAmbiguous || amb
 		}
 	case string:
-		if t := trimBOMAndSpace(x); t != "" && strings.IndexByte(`{["`, t[0]) >= 0 && json.Valid([]byte(t)) {
-			return sortedJSONTextDepth(t, depth+1, budget)
+		if t := trimBOMAndSpace(x); t != "" && strings.IndexByte(`{["`, t[0]) >= 0 {
+			if json.Valid([]byte(t)) {
+				return legacyRedactedJSONTextDepth(x, depth+1, forceSort, budget)
+			}
+			return v, false, true, true
 		}
 	}
-	return v, true
+	return v, changed, sawAmbiguous, true
 }
 
 // isScrubbedPlainText reports whether out, text that a pass of
@@ -1522,7 +1584,7 @@ func redactJSONTextInner(s string, depth int, inContainer, allowCandidateRecheck
 		if keyRedactionHidesRunOn(trimmed, depth) {
 			return redactedSensitiveTextPlaceholder, true, true, false
 		}
-	} else if hasHexOrPercentEscape(trimmed) && !expressionsKeepStringsApart(trimmed) {
+	} else if hasHexOrPercentEscape(trimmed) && keyRedactionHidesRunOn(trimmed, depth) {
 		return redactedSensitiveTextPlaceholder, true, true, false
 	}
 	return string(b), true, valLost, false

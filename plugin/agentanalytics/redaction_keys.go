@@ -321,7 +321,7 @@ func fixedSensitiveKeyRegex() string {
 }
 
 func normalizeKey(k string) string {
-	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(k)), "-", "_")
+	return strings.ReplaceAll(foldKeyASCII(trimBOMAndSpace(k)), "-", "_")
 }
 
 // removeKeySeparators returns k without its "_", "-" and "." separators.

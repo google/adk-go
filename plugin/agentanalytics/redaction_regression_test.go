@@ -3966,6 +3966,230 @@ func TestURIPathSegmentsMatchKeyNamesOnly(t *testing.T) {
 	}
 }
 
+// TestURIEncodedPaddingRedactsAcrossComponentsAndEntryPoints covers multibyte
+// percent-encoded BOM (%EF%BB%BF) and no-break space (%C2%A0) padding on
+// query keys (from url.Values.Encode), path segments, matrix key=val segments,
+// and fragment keys (from url.URL.String), plus invalid-escape fallback and
+// legacyURIKeys vs scannerURIKeys parity across SmartTruncate, sanitizeRawText,
+// redactErrorMessage and FormatContentParts.
+func TestURIEncodedPaddingRedactsAcrossComponentsAndEntryPoints(t *testing.T) {
+	runInParallel(t)
+	const (
+		secret = "S3CR3T_URI_PAD_99"
+		r      = "%5BREDACTED%5D"
+	)
+
+	queryBOM := (&url.URL{
+		Scheme:   "https",
+		Host:     "example.com",
+		Path:     "/api",
+		RawQuery: url.Values{"\ufeffDB_PASSWORD": {secret}}.Encode() + "&status=ready",
+	}).String()
+	queryNBSPAndKey := (&url.URL{
+		Scheme:   "https",
+		Host:     "example.com",
+		Path:     "/api",
+		RawQuery: url.Values{"DB_PASSWORD\u00a0": {secret}, "\ufeffkey\u00a0": {secret}}.Encode(),
+	}).String()
+	pathSegments := (&url.URL{
+		Scheme: "https",
+		Host:   "example.com",
+		Path:   "/v1/\ufeffsigning_key/" + secret + "/\u00a0api_key\ufeff/" + secret + "/ready",
+	}).String()
+	matrixPairs := (&url.URL{
+		Scheme: "https",
+		Host:   "example.com",
+		Path:   "/v1/\ufeffDB_PASSWORD=" + secret + "/signing_key\u00a0=" + secret + "/\ufeffkey=" + secret,
+	}).String()
+	fragmentPairs := (&url.URL{
+		Scheme:   "https",
+		Host:     "example.com",
+		Path:     "/cb",
+		Fragment: "\ufeffDB_PASSWORD=" + secret + "&signing_key\u00a0=" + secret + "&\u00a0key\ufeff=" + secret + "&state=ready",
+	}).String()
+
+	cases := []struct {
+		name string
+		uri  string
+		want string
+		// wantText, when set, is the URI as the text entry points write it
+		// (see the matrix case below); want is used otherwise.
+		wantText string
+	}{
+		{
+			name: "url.Values.Encode BOM-padded DB_PASSWORD",
+			uri:  queryBOM,
+			want: "https://example.com/api?%EF%BB%BFDB_PASSWORD=" + r + "&status=ready",
+		},
+		{
+			name: "url.Values.Encode NBSP DB_PASSWORD and BOM-NBSP key",
+			uri:  queryNBSPAndKey,
+			want: "https://example.com/api?DB_PASSWORD%C2%A0=" + r + "&%EF%BB%BFkey%C2%A0=" + r,
+		},
+		{
+			name: "plus-prefixed query key with trailing encoded BOM",
+			uri:  "https://example.com/api?my+DB_PASSWORD%EF%BB%BF=" + secret,
+			want: "https://example.com/api?my+DB_PASSWORD%EF%BB%BF=" + r,
+		},
+		{
+			name: "credential before encoded-BOM query key scrubs key too",
+			uri:  "https://example.com/api?Bearer+" + secret + "+%EF%BB%BFDB_PASSWORD=" + secret,
+			want: "https://example.com/api?Bearer+" + r + "+%EF%BB%BFDB_PASSWORD=" + r,
+		},
+		{
+			name: "invalid percent escape in query key falls back cleanly",
+			uri:  "https://example.com/api?%ZZ+DB_PASSWORD=" + secret,
+			want: "https://example.com/api?%ZZ+DB_PASSWORD=" + r,
+		},
+		{
+			name: "url.URL.String BOM signing_key and NBSP api_key path segments",
+			uri:  pathSegments,
+			want: "https://example.com/v1/" + r + "/" + r + "/" + r + "/" + r + "/ready",
+		},
+		{
+			name: "encoded NBSP api_key before password keeps following secret armed",
+			uri:  "https://example.com/%C2%A0api_key/password/" + secret,
+			want: "https://example.com/" + r + "/" + r + "/" + r,
+		},
+		{
+			name: "url.URL.String matrix key=val with BOM and NBSP padding",
+			uri:  matrixPairs,
+			want: "https://example.com/v1/%EF%BB%BFDB_PASSWORD=" + r + "/signing_key%C2%A0=" + r + "/%EF%BB%BFkey=" + r,
+			// In text, the value of DB_PASSWORD= runs to the next space,
+			// so the rest of the path is redacted with it, as main and
+			// the unpadded password=v/token=v/key=v do (see
+			// TestURIMatrixPairsInTextRedactRestOfPath).
+			wantText: "https://example.com/v1/%EF%BB%BFDB_PASSWORD=[REDACTED]",
+		},
+		{
+			name: "url.URL.String fragment keys with BOM and NBSP padding",
+			uri:  fragmentPairs,
+			want: "https://example.com/cb#%EF%BB%BFDB_PASSWORD=" + r + "&signing_key%C2%A0=" + r + "&%C2%A0key%EF%BB%BF=" + r + "&state=ready",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotURI, changed := sanitizeURI(tc.uri)
+			if !changed || gotURI != tc.want {
+				t.Errorf("sanitizeURI(%q) = (%q, %v), want (%q, true)", tc.uri, gotURI, changed, tc.want)
+			}
+			if strings.Contains(gotURI, secret) {
+				t.Errorf("sanitizeURI(%q) = %q leaked %q", tc.uri, gotURI, secret)
+			}
+			if again, againChanged := sanitizeURI(gotURI); againChanged || again != gotURI {
+				t.Errorf("sanitizeURI second pass(%q) = (%q, %v), want (%q, false)", gotURI, again, againChanged, gotURI)
+			}
+
+			msg := "fetch " + tc.uri + " done"
+			wantText := tc.want
+			if tc.wantText != "" {
+				wantText = tc.wantText
+			}
+			wantMsg := "fetch " + wantText + " done"
+
+			if gotErr := redactErrorMessage(msg); gotErr != wantMsg {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", msg, gotErr, wantMsg)
+			} else if again := redactErrorMessage(gotErr); again != gotErr {
+				t.Errorf("redactErrorMessage second pass(%q) = %q, want unchanged", gotErr, again)
+			}
+
+			if gotSan, lost := sanitizeRawText(msg); !lost || gotSan != wantMsg {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", msg, gotSan, lost, wantMsg)
+			} else if again, lost2 := sanitizeRawText(gotSan); lost2 || again != gotSan {
+				t.Errorf("sanitizeRawText second pass(%q) = (%q, %v), want (%q, false)", gotSan, again, lost2, gotSan)
+			}
+
+			wantTrunc := `"` + strings.ReplaceAll(wantMsg, "&", `\u0026`) + `"`
+			if gotTrunc, truncated, err := SmartTruncate(msg, -1); err != nil || !truncated || string(gotTrunc) != wantTrunc {
+				t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want (%s, true, nil)", msg, gotTrunc, truncated, err, wantTrunc)
+			}
+
+			if gotTextPart := formatContentTextPart(t, msg); gotTextPart != wantMsg {
+				t.Errorf("FormatContentParts(Text %q) = %q, want %q", msg, gotTextPart, wantMsg)
+			}
+			fileParts := FormatContentParts(&genai.Content{Parts: []*genai.Part{{
+				FileData: &genai.FileData{MIMEType: "application/octet-stream", FileURI: tc.uri},
+			}}}, -1)
+			if len(fileParts) != 1 || fileParts[0]["uri"] != tc.want {
+				t.Errorf("FormatContentParts(FileData %q) = %v, want uri %q", tc.uri, fileParts, tc.want)
+			}
+		})
+	}
+
+	// Verify legacyURIKeys preserves merge-base ASCII-only matching while
+	// scannerURIKeys redacts multibyte percent-escaped padding cleanly without
+	// tripping leavesLegacyValue.
+	if leg, legChanged := sanitizeURIWith(queryBOM, legacyRedactURIComponent, legacyURIKeys); legChanged || leg != queryBOM {
+		t.Errorf("legacyURIKeys on %q = (%q, %v), want unchanged", queryBOM, leg, legChanged)
+	}
+	if leg, legChanged := sanitizeURIWith(pathSegments, legacyRedactURIComponent, legacyURIKeys); legChanged || leg != pathSegments {
+		t.Errorf("legacyURIKeys on %q = (%q, %v), want unchanged", pathSegments, leg, legChanged)
+	}
+}
+
+// TestURIMatrixPairsInTextRedactRestOfPath covers a sensitive matrix pair of
+// a URI in text. The text entry points read the value of the pair up to the
+// next space, so the rest of the path is redacted with it, as on main, even
+// when sanitizeURI already scrubbed every later pair: the scrubbed path is
+// never kept in place of the value. A later segment that holds a secret, a
+// non-sensitive key, a bare value or an unclosed quote is redacted the same
+// way, and scrubbing the result again changes nothing.
+func TestURIMatrixPairsInTextRedactRestOfPath(t *testing.T) {
+	runInParallel(t)
+	const (
+		secret = "S3CR3T_URI_MATRIX_7"
+		r      = "%5BREDACTED%5D"
+	)
+	for _, tc := range []struct{ name, in, want string }{
+		{
+			name: "unpadded legacy names",
+			in:   "fetch https://example.com/v1/password=" + secret + "/token=" + secret + "/key=" + secret + " done",
+			want: "fetch https://example.com/v1/password=[REDACTED] done",
+		},
+		{
+			name: "padded names already scrubbed",
+			in:   "fetch https://example.com/v1/%EF%BB%BFDB_PASSWORD=" + r + "/signing_key%C2%A0=" + r + "/%EF%BB%BFkey=" + r + " done",
+			want: "fetch https://example.com/v1/%EF%BB%BFDB_PASSWORD=[REDACTED] done",
+		},
+		{
+			name: "scrubbed pairs then secret behind non-sensitive key",
+			in:   "fetch https://example.com/v1/DB_PASSWORD=" + r + "/signing_key=" + r + "/x=" + secret + " done",
+			want: "fetch https://example.com/v1/DB_PASSWORD=[REDACTED] done",
+		},
+		{
+			name: "scrubbed pairs then bare secret segment",
+			in:   "fetch https://example.com/v1/DB_PASSWORD=" + r + "/signing_key=" + r + "/" + secret + " done",
+			want: "fetch https://example.com/v1/DB_PASSWORD=[REDACTED] done",
+		},
+		{
+			name: "scrubbed pair then unclosed quote",
+			in:   "fetch https://example.com/v1/DB_PASSWORD=" + r + "/token='" + secret + " done",
+			want: "fetch https://example.com/v1/DB_PASSWORD=[REDACTED] done",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := redactErrorMessage(tc.in); got != tc.want {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", tc.in, got, tc.want)
+			} else if again := redactErrorMessage(got); again != got {
+				t.Errorf("redactErrorMessage second pass(%q) = %q, want unchanged", got, again)
+			}
+			if got, lost := sanitizeRawText(tc.in); !lost || got != tc.want {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tc.in, got, lost, tc.want)
+			} else if again, lost2 := sanitizeRawText(got); lost2 || again != got {
+				t.Errorf("sanitizeRawText second pass(%q) = (%q, %v), want (%q, false)", got, again, lost2, got)
+			}
+			wantTrunc := `"` + tc.want + `"`
+			if got, truncated, err := SmartTruncate(tc.in, -1); err != nil || !truncated || string(got) != wantTrunc {
+				t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want (%s, true, nil)", tc.in, got, truncated, err, wantTrunc)
+			}
+			if got := formatContentTextPart(t, tc.in); got != tc.want {
+				t.Errorf("FormatContentParts(Text %q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSensitiveKeyContainerValuesKeepDocument covers JSON documents in which
 // a sensitive key holds an object or an array, as the Credentials of an AWS
 // STS response: the value is redacted as a whole and the rest of the document
@@ -3973,13 +4197,21 @@ func TestURIPathSegmentsMatchKeyNamesOnly(t *testing.T) {
 // document in a string of another too. The expressions of main remove a part
 // of such a container, which holds the start of the strings inside it; none
 // of them is a value that the redaction keeps, so that hides no run-on (see
-// appendValueSpans).
+// appendValueSpans and keyRedactionHidesRunOn).
 func TestSensitiveKeyContainerValuesKeepDocument(t *testing.T) {
 	runInParallel(t)
 	eps := largeTextEntryPoints(t)[1:]
 	for _, tc := range []struct{ in, want string }{
 		{`{"Credentials":{"AccessKeyId":"EXAMPLEKEYID","SecretAccessKey":"SECRET123","SessionToken":"SECRET123"},"Message":"ok"}`, `{"Credentials":"[REDACTED]","Message":"ok"}`},
 		{`{"Message":"ok","Credentials":{"AccessKeyId":"EXAMPLEKEYID","SecretAccessKey":"SECRET123"}}`, `{"Credentials":"[REDACTED]","Message":"ok"}`},
+		{`{"credentials":{"header":"Authorization: sample"},"status":"ready"}`, `{"credentials":"[REDACTED]","status":"ready"}`},
+		{`{"status":"ready","credentials":{"header":"Authorization: sample"}}`, `{"credentials":"[REDACTED]","status":"ready"}`},
+		{`{"credentials":"Authorization: sample","status":"ready"}`, `{"credentials":"[REDACTED]","status":"ready"}`},
+		{`{"status":"ready","credentials":"Authorization: sample"}`, `{"credentials":"[REDACTED]","status":"ready"}`},
+		{`{"wrapper":"{\"credentials\":{\"header\":\"Authorization: sample%20x\"},\"status\":\"ready\"}"}`, `{"wrapper":"{\"credentials\":\"[REDACTED]\",\"status\":\"ready\"}"}`},
+		{`{"wrapper":"{\"status\":\"ready\",\"credentials\":{\"header\":\"Authorization: sample%20x\"}}"}`, `{"wrapper":"{\"credentials\":\"[REDACTED]\",\"status\":\"ready\"}"}`},
+		{`"{\"credentials\":{\"header\":\"Authorization: sample\"},\"status\":\"ready\"}"`, `"{\"credentials\":\"[REDACTED]\",\"status\":\"ready\"}"`},
+		{`"{\"status\":\"ready\",\"credentials\":{\"header\":\"Authorization: sample\"}}"`, `"{\"credentials\":\"[REDACTED]\",\"status\":\"ready\"}"`},
 		{`{"token":{"value":"SECRET123"},"status":"ok"}`, `{"status":"ok","token":"[REDACTED]"}`},
 		{`{"token":["SECRET123","b"],"status":"ok"}`, `{"status":"ok","token":"[REDACTED]"}`},
 		{`{"token":{},"a":1}`, `{"a":1,"token":"[REDACTED]"}`},
@@ -4132,14 +4364,40 @@ func TestURITokenSpansMatchExpression(t *testing.T) {
 		"9a://h<b://i>'c://j'",
 		"user:temp://x",
 		"://a://b",
+		"://://http://h/a",
+		"http://://https://h/b",
+		"123://456://http://h/c",
 		"a://b\vc://d\x00e://f\ufefff",
 		"\xffhttp://h/\xff\xfe x",
 		strings.Repeat("[INFO] fetched https://example.com/docs/page?id=42 in 12 ms\\tok\u00a0\n", 2000),
 		strings.Repeat("a", 5000) + "://" + strings.Repeat("b", 5000),
 		strings.Repeat("://", 5000),
+		strings.Repeat("123://", 5000),
+		strings.Repeat("://abc/def", 5000),
 		strings.Repeat("a://", 5000),
 	} {
 		check(s)
+	}
+
+	const smallReps, largeReps = 2 << 10, 32 << 10
+	for _, shape := range []struct {
+		name string
+		unit string
+	}{
+		{"repeated delimiter", "://"},
+		{"scheme-less delimiter with body", "123://456/789"},
+	} {
+		small := strings.Repeat(shape.unit, smallReps)
+		large := strings.Repeat(shape.unit, largeReps)
+		if got := uriTokenSpans(large); len(got) != 0 {
+			t.Fatalf("uriTokenSpans(%s) = %v, want empty", shape.name, got)
+		}
+		if ratio, tSmall, tLarge := linearRatio(64, func() { _ = uriTokenSpans(small) }, func() { _ = uriTokenSpans(large) }); ratio > 64 {
+			t.Errorf("uriTokenSpans(%s): %d bytes took %v, %d bytes took %v: ratio %.0f, want linear", shape.name, len(small), tSmall, len(large), tLarge, ratio)
+		}
+		if ratio, tSmall, tLarge := linearRatio(64, func() { _ = scrubErrorText(small) }, func() { _ = scrubErrorText(large) }); ratio > 64 {
+			t.Errorf("scrubErrorText(%s): %d bytes took %v, %d bytes took %v: ratio %.0f, want linear", shape.name, len(small), tSmall, len(large), tLarge, ratio)
+		}
 	}
 }
 

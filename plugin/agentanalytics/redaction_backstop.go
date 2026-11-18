@@ -49,6 +49,12 @@ import (
 // copied from raw kept maps back to raw (see copyRun), keeps a byte that the
 // legacy expressions remove from raw, counting every byte as removed when they
 // fail raw closed (see scrubErrorText and keepsRemovedByte).
+//
+// Deletion condition: keep this runtime backstop while the differential parity
+// corpus (TestRedactionBaseParity in redaction_base_parity_test.go) verifies
+// the regex-to-scanner migration across a release; once the corpus alone
+// guards the boundary, remove redaction_backstop.go and update its callers and
+// comment references accordingly.
 func (m *scrubMemo) leavesLegacyValue(raw, scrubbed string, kept []copyRun) bool {
 	if !strings.ContainsAny(raw, `\%`) && !mayMatchTextPatterns(raw) {
 		return false

@@ -48,6 +48,8 @@ func TestCompoundAndStatePrefixedSensitiveKeys(t *testing.T) {
 			"resync_token", "async_token", "app_sync_token",
 			"startToken", "start_token", "newStartToken", "restartPageToken", "resumePageToken", "presumeToken",
 			"beotToken", "app:user:token",
+			"input_token", "output_token", "inputToken", "outputToken", "INPUT_TOKEN", "OUTPUT_TOKEN",
+			"has_password", "hasPassword", "HAS_PASSWORD", "is_secret", "isSecret", "IS_SECRET",
 			"temp:access_token", "temp:anything", "user:api_key", "app:client_secret", "USER:API_KEY",
 			"user:temp:refresh_token", "app:temp:scratch", " user: temp:x ", "user:db_password", "app:dbPassword",
 		}

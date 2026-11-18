@@ -327,7 +327,20 @@ type Config struct {
 	// resume_token, alone or after next, prev, previous, start or newStart,
 	// as nextPageToken, startPageToken or newStartPageToken; and pad_token,
 	// eos_token, eot_token, bos_token, unk_token, cls_token, sep_token and
-	// mask_token. The adk-python plugin matches exact key names only.
+	// mask_token. Plural count names such as input_tokens and output_tokens
+	// are also kept because they end in "tokens", whereas singular or
+	// flag-style compound names that end in a sensitive credential suffix,
+	// such as input_token, output_token, has_password or is_secret, are
+	// redacted regardless of value type. Redaction also applies to declared
+	// Go types whose type name matches a sensitive key (generic or not): a
+	// non-struct value, or a struct whose value or pointer type has a
+	// MarshalJSON or MarshalText method, redacts whole as "[REDACTED]" with
+	// truncated=true; any other struct shows its exported fields, with the
+	// sensitive ones redacted, and omits unexported fields; and map keys of
+	// such a type collapse to "[REDACTED]":"[REDACTED]" with
+	// truncated=true (for example, map[SyntaxToken]int{1: 12, 2: 9} formats as
+	// {"[REDACTED]":"[REDACTED]"} with truncated=true). The adk-python plugin
+	// matches exact key names only.
 	DisableSensitiveKeyRedaction bool
 
 	// ContentFormatter, if set, is applied to each event's raw payload before

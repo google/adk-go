@@ -58,7 +58,9 @@
 // permissions can pass a nil BigQuery client to
 // [NewBigQueryAgentAnalyticsPluginWithClients].
 //
-// Automatic credential and sensitive-key redaction is enabled by default unless
+// Automatic credential and sensitive-key redaction (covering structured keys,
+// text and URI patterns, and declared Go types whose type name matches a
+// sensitive key) is enabled by default unless
 // [Config.DisableSensitiveKeyRedaction] is set. When [Config.MaxContentLen]
 // sets a limit (is non-negative and [Config.CaptureFullMessageContent] is not
 // set), string payloads are bounded by [Config.MaxContentLen], joined
