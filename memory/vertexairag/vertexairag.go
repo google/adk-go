@@ -75,6 +75,19 @@ type Config struct {
 // HTTP media upload (the protobuf UploadRagFileRequest has no field for the
 // file bytes), so opts are applied to HTTP clients only. Options that need a
 // gRPC transport, such as [option.WithGRPCConn], are not supported.
+//
+// When the client certificate is on under the rule
+// [google.golang.org/adk/v2/auth/gcp.NewClient] documents, the clients present
+// it, and GOOGLE_API_USE_MTLS_ENDPOINT's default, auto, selects the location's
+// mTLS endpoint. An [option.WithHTTPClient] is the caller's to configure: the
+// service adds neither to it. The same holds outside the googleapis.com
+// universe.
+// With the certificate, the upload client is built by the newer Google auth
+// library, as the generated clients for listing and retrieval always are.
+// That library does not apply the deprecated [option.ImpersonateCredentials],
+// and on its own it turns the certificate on more widely than the rule: to an
+// endpoint that requests a certificate, the generated clients can present one
+// that the rule leaves off.
 func NewService(ctx context.Context, cfg Config, opts ...option.ClientOption) (memory.Service, error) {
 	ctx = context.WithoutCancel(ctx)
 	resolved := resolveConfig(cfg, os.Getenv)
