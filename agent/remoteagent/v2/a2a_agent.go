@@ -37,6 +37,7 @@ import (
 	"google.golang.org/adk/v2/auth"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
+	"google.golang.org/adk/v2/internal/googlemtls"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 	"google.golang.org/adk/v2/session"
 )
@@ -176,9 +177,13 @@ var defaultPorts = map[string]string{"http": "80", "https": "443"}
 // cards that spell the port explicitly or the host in a different case,
 // even though DNS hostnames are case-insensitive and both name the same
 // origin.
+//
+// A Google API's mTLS host counts as its plain host, as in adk-python's
+// _card_target_origin: with a client certificate the card fetch goes to the
+// mTLS host, so a card fetched from one may name the other.
 func urlOrigin(u *url.URL) (scheme, host, port string) {
 	scheme = u.Scheme
-	host = strings.ToLower(u.Hostname())
+	host = googlemtls.PlainHost(u.Hostname())
 	port = u.Port()
 	if port == "" {
 		port = defaultPorts[scheme]
@@ -431,6 +436,12 @@ type A2AConfig struct {
 
 // NewA2A creates a remote A2A agent. A2A (Agent-To-Agent) protocol is used for communication with an
 // agent which can run in a different process or on a different host.
+//
+// Unless ClientProvider is set, an https request to a *.googleapis.com host,
+// the agent card fetch with Auth included, presents the client certificate the
+// environment provides, if any, and goes to the host's .mtls.googleapis.com
+// name. Whether there is a certificate follows the rule
+// [google.golang.org/adk/v2/auth/gcp.NewClient] documents.
 func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	if cfg.AgentCard == nil && cfg.AgentCardProvider == nil {
 		return nil, fmt.Errorf("either AgentCard or AgentCardProvider must be provided")
@@ -443,16 +454,18 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	}
 	var authClient, cardClient *http.Client
 	if cfg.ClientProvider == nil {
-		var opts []a2aclient.FactoryOption
+		// Without Auth a bound token can still be sent, from a header the
+		// caller attaches, so both clients present the client certificate.
+		rpcClient := &http.Client{Timeout: a2aRequestTimeout, Transport: googlemtls.NewTransport(nil)}
 		if cfg.Auth != nil {
 			authClient = authHTTPClient(cfg.Auth)
 			cardClient = cardFetchHTTPClient(authClient)
-			opts = append(opts,
-				a2aclient.WithJSONRPCTransport(authClient),
-				a2aclient.WithRESTTransport(authClient),
-			)
+			rpcClient = authClient
 		}
-		cfg.ClientProvider = NewA2AClientProvider(a2aclient.NewFactory(opts...))
+		cfg.ClientProvider = NewA2AClientProvider(a2aclient.NewFactory(
+			a2aclient.WithJSONRPCTransport(rpcClient),
+			a2aclient.WithRESTTransport(rpcClient),
+		))
 	}
 
 	remoteAgent := &a2aAgent{

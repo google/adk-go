@@ -27,6 +27,8 @@ import (
 	"strings"
 
 	"golang.org/x/net/idna"
+
+	"google.golang.org/adk/v2/internal/googlemtls"
 )
 
 // MaxRedirects is net/http's default cap on requests per redirect chain, which
@@ -109,6 +111,9 @@ func hostHeader(hostport string) (string, bool) {
 // host must be identical, and the scheme may only stay the same or be upgraded
 // from http to https, which strictly improves confidentiality.
 func sameTarget(from, to *url.URL) bool {
+	if mtlsTwins(from, to) {
+		return true
+	}
 	if !strings.EqualFold(dialName(from), dialName(to)) {
 		return false
 	}
@@ -131,6 +136,25 @@ func sameTarget(from, to *url.URL) bool {
 	default:
 		return false
 	}
+}
+
+// mtlsTwins reports whether from and to are a Google API host and its
+// .mtls.googleapis.com name, both https on the same port. A client that
+// presents a client certificate is sent to the mTLS name, so a server may
+// redirect between the two, and both serve the same API. Only ASCII names
+// qualify: strings.ToLower folds some non-ASCII letters, the Kelvin sign
+// among them, into ASCII ones.
+func mtlsTwins(from, to *url.URL) bool {
+	if !strings.EqualFold(from.Scheme, "https") || !strings.EqualFold(to.Scheme, "https") ||
+		defaultedPort(from) != defaultedPort(to) {
+		return false
+	}
+	f, t := from.Hostname(), to.Hostname()
+	if !isASCII(f) || !isASCII(t) {
+		return false
+	}
+	pf, pt := googlemtls.PlainHost(f), googlemtls.PlainHost(t)
+	return pf == pt && strings.HasSuffix(pf, ".googleapis.com") && len(pf) > len(".googleapis.com")
 }
 
 // dialName returns the address net/http dials for u, falling back to the

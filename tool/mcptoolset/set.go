@@ -32,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
 	"google.golang.org/adk/v2/internal/credredirect"
+	"google.golang.org/adk/v2/internal/googlemtls"
 	"google.golang.org/adk/v2/tool"
 )
 
@@ -214,7 +215,9 @@ func (t *commandTransport) reconnectTransport() *mcp.CommandTransport {
 // httpClient returns a shallow copy of base whose Transport adds the ADK
 // tracking headers and, when provider is non-nil, applies provider to every
 // request. A nil base stands for http.DefaultClient, as it does in the SDK,
-// except with a provider (see Config.Auth).
+// except with a provider (see Config.Auth). A nil Transport is replaced by
+// one that presents the environment's client certificate to Google API hosts
+// (see Config.Transport).
 func httpClient(base *http.Client, provider auth.CredentialProvider) *http.Client {
 	var c http.Client
 	switch {
@@ -222,6 +225,9 @@ func httpClient(base *http.Client, provider auth.CredentialProvider) *http.Clien
 		c = *base
 	case provider == nil:
 		c = *http.DefaultClient
+	}
+	if c.Transport == nil {
+		c.Transport = googlemtls.NewTransport(nil)
 	}
 	c.Transport = &trackingTransport{base: c.Transport}
 	if provider != nil {
@@ -369,6 +375,16 @@ type Config struct {
 	// sets with Header.Set replaces the labels, and one it adds with
 	// Header.Add is not sent, because net/http sends only the first value.
 	//
+	// When that HTTPClient has no Transport of its own, an https request to a
+	// *.googleapis.com host presents the client certificate the environment
+	// provides, if any, and goes to the host's .mtls.googleapis.com name,
+	// which is where Google APIs accept a certificate-bound token. Whether
+	// there is a certificate follows the rule
+	// [google.golang.org/adk/v2/auth/gcp.NewClient] documents.
+	// GOOGLE_API_USE_MTLS_ENDPOINT=never keeps the host as given. Requests to
+	// other hosts are sent by http.DefaultTransport as before. An HTTPClient
+	// with a Transport is left to manage TLS itself.
+	//
 	// A *mcp.CommandTransport with a non-nil Command is wrapped when New is
 	// called, so the server can be started again after the connection is
 	// lost (an *exec.Cmd can be started only once). The first connect runs
@@ -410,8 +426,8 @@ type Config struct {
 	// With Auth and a nil HTTPClient, requests use a zero http.Client rather
 	// than a copy of http.DefaultClient, so the credential never reaches
 	// http.DefaultClient's Transport or CheckRedirect, and cookies set for one
-	// user's requests are not kept in its Jar. Requests are sent by
-	// http.DefaultTransport.
+	// user's requests are not kept in its Jar. Requests are sent as described
+	// under Transport for an HTTPClient without a Transport.
 	//
 	// With Auth, a redirect is followed only when it stays on the endpoint's
 	// host and port and either keeps the scheme or upgrades http to https,

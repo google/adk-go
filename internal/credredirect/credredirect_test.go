@@ -90,6 +90,23 @@ func TestSameTarget(t *testing.T) {
 		// A punycode label net/http cannot encode has no Host header, so
 		// the request could not be sent, and the hop is refused.
 		{name: "invalid punycode label beside a unicode one", from: "https://xn--zzz-.fa\u00df.example/rpc", to: "https://xn--zzz-.fa\u00df.example/rpc", want: false},
+		// A Google API host and its mTLS name are the same service: a
+		// client presenting a certificate is sent to the mTLS name.
+		{name: "google api host to its mtls name", from: "https://agent.googleapis.com/rpc", to: "https://agent.mtls.googleapis.com/rpc", want: true},
+		{name: "mtls name to its google api host", from: "https://agent.mtls.googleapis.com/rpc", to: "https://agent.googleapis.com:443/rpc", want: true},
+		{name: "mtls twin, mixed case", from: "https://Agent.GoogleAPIs.com/rpc", to: "https://agent.MTLS.googleapis.com/rpc", want: true},
+		{name: "mtls name of another service", from: "https://agent.googleapis.com/rpc", to: "https://other.mtls.googleapis.com/rpc", want: false},
+		{name: "mtls twin on another port", from: "https://agent.googleapis.com/rpc", to: "https://agent.mtls.googleapis.com:8443/rpc", want: false},
+		{name: "mtls twin over http", from: "http://agent.googleapis.com/rpc", to: "http://agent.mtls.googleapis.com/rpc", want: false},
+		{name: "mtls twin upgraded to https", from: "http://agent.googleapis.com/rpc", to: "https://agent.mtls.googleapis.com/rpc", want: false},
+		{name: "mtls suffix outside googleapis", from: "https://agent.example.com/rpc", to: "https://agent.mtls.example.com/rpc", want: false},
+		{name: "mtls twin upgraded to https, same explicit port", from: "http://agent.googleapis.com:443/rpc", to: "https://agent.mtls.googleapis.com:443/rpc", want: false},
+		// strings.ToLower folds the Kelvin sign into k, which would make
+		// these twins although they send different Host headers.
+		{name: "kelvin sign in the mtls twin", from: "https://agentk.googleapis.com/rpc", to: "https://agent\u212a.mtls.googleapis.com/rpc", want: false},
+		{name: "kelvin sign in the plain twin", from: "https://agent\u212a.googleapis.com/rpc", to: "https://agentk.mtls.googleapis.com/rpc", want: false},
+		{name: "empty label and its mtls name", from: "https://.googleapis.com/rpc", to: "https://.mtls.googleapis.com/rpc", want: false},
+		{name: "bare mtls host to bare googleapis", from: "https://googleapis.com/rpc", to: "https://mtls.googleapis.com/rpc", want: false},
 		{name: "ipv6 literal, same", from: "https://[::1]:8443/rpc", to: "https://[::1]:8443/rpc", want: true},
 		{name: "ipv6 literals differ", from: "https://[::1]:8443/rpc", to: "https://[2001:db8::1]:8443/rpc", want: false},
 	}
