@@ -207,7 +207,10 @@ type ServiceAccountConfig struct {
 func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 	return lazyTokenSource(func(ctx context.Context) (oauth2.TokenSource, error) {
 		if cfg.Audience != "" {
-			var opts []option.ClientOption
+			// Discarded: the auth library's default logger answers
+			// GOOGLE_SDK_GO_LOGGING_LEVEL=debug by writing the token request and
+			// response to stderr, signed assertion and minted ID token included.
+			opts := []option.ClientOption{option.WithLogger(slog.New(slog.DiscardHandler))}
 			if len(cfg.JSONKey) > 0 {
 				opts = append(opts, option.WithAuthCredentialsJSON(option.ServiceAccount, cfg.JSONKey))
 			}
