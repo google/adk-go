@@ -1638,13 +1638,14 @@ func runLookupCall(t *testing.T, result map[string]any, toolErr error, plugins .
 	}
 }
 
-// TestDocParity_ToolResultClassifierBuiltInRules pins the doc.go difference
-// from adk-python: the plugin has no built-in rule for plugin/retryandreflect
-// answers, while, as in adk-python, its built-in rule records top-level
-// isError and is_error results as TOOL_ERROR unless Config.ToolResultClassifier
-// decides otherwise. Each result goes through a real runner: a ToolResultError
-// verdict records it as TOOL_ERROR and a ToolResultOK verdict as
-// TOOL_COMPLETED, and without either the built-in rule decides.
+// TestDocParity_ToolResultClassifierBuiltInRules pins the precedence of the
+// built-in rules and Config.ToolResultClassifier: as in adk-python,
+// plugin/retryandreflect answers are recorded as TOOL_ERROR before
+// Config.ToolResultClassifier runs (without invoking it or allowing a
+// ToolResultOK verdict to turn them into TOOL_COMPLETED), while top-level
+// isError and is_error results are decided by Config.ToolResultClassifier
+// first (ToolResultError -> TOOL_ERROR, ToolResultOK -> TOOL_COMPLETED) and by
+// mcpResultError when the classifier is nil or abstains.
 func TestDocParity_ToolResultClassifierBuiltInRules(t *testing.T) {
 	// reflectAndRetryAnswer is the response_type of the answer with which
 	// plugin/retryandreflect replaces a tool error.
@@ -1657,20 +1658,20 @@ func TestDocParity_ToolResultClassifierBuiltInRules(t *testing.T) {
 		// retry registers plugin/retryandreflect before the analytics plugin.
 		retry bool
 		// wantKey and wantValue are a field of the result that the
-		// classifier sees.
+		// classifier sees when called.
 		wantKey   string
 		wantValue any
 		// builtInError is the error_message of the TOOL_ERROR row with which
-		// the built-in rule records the result, or "" if it has no rule for
-		// it.
+		// the built-in rules record the result.
 		builtInError string
 	}{
 		{
-			name:      "plugin/retryandreflect answer",
-			toolErr:   errors.New("invalid query"),
-			retry:     true,
-			wantKey:   "response_type",
-			wantValue: reflectAndRetryAnswer,
+			name:         "plugin/retryandreflect answer",
+			toolErr:      errors.New("invalid query"),
+			retry:        true,
+			wantKey:      "response_type",
+			wantValue:    reflectAndRetryAnswer,
+			builtInError: "invalid query",
 		},
 		{
 			name:         "top-level isError true",
@@ -1703,13 +1704,19 @@ func TestDocParity_ToolResultClassifierBuiltInRules(t *testing.T) {
 			t.Run(env.name+"/"+cl.name, func(t *testing.T) {
 				// wantErrMessage is the error_message of the call's TOOL_ERROR
 				// row, or "" when the call is recorded as TOOL_COMPLETED. A
-				// nil classifier decides as an abstaining one does.
+				// plugin/retryandreflect answer is classified before
+				// Config.ToolResultClassifier runs; otherwise a nil classifier
+				// decides as an abstaining one does.
 				var wantErrMessage string
-				switch cl.verdict.Decision {
-				case ToolResultError:
-					wantErrMessage = classifiedToolErrorMessage
-				case ToolResultAbstain:
+				if env.retry {
 					wantErrMessage = env.builtInError
+				} else {
+					switch cl.verdict.Decision {
+					case ToolResultError:
+						wantErrMessage = classifiedToolErrorMessage
+					case ToolResultAbstain:
+						wantErrMessage = env.builtInError
+					}
 				}
 				wantToolErrors := 0
 				if wantErrMessage != "" {
@@ -1740,7 +1747,7 @@ func TestDocParity_ToolResultClassifierBuiltInRules(t *testing.T) {
 				gotCalls := slices.Clone(calls)
 				mu.Unlock()
 				wantCalls := 1
-				if cl.nilClassifier {
+				if cl.nilClassifier || env.retry {
 					wantCalls = 0
 				}
 				if len(gotCalls) != wantCalls {

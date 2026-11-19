@@ -1225,23 +1225,21 @@ func TestPlugin_ToolResultClassifier_Runner(t *testing.T) {
 		}
 	})
 
-	// adk-python records the answer of its ReflectAndRetryToolPlugin as a tool
-	// error before its classifier runs. This plugin has no such rule: when a
-	// retryandreflect plugin registered before it answers a tool error, the
-	// answer reaches the classifier as the call's result.
-	t.Run("retryandreflect answer reaches the classifier when that plugin is registered first", func(t *testing.T) {
-		const retryAnswerType = "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN"
+	// As in adk-python, which checks its ReflectAndRetryToolPlugin marker
+	// before calling tool_result_classifier, a retryandreflect recovery answer
+	// is recorded as TOOL_ERROR before Config.ToolResultClassifier runs when
+	// retryandreflect is registered first: the classifier is not called and
+	// cannot turn the answer into TOOL_COMPLETED or replace its error_message.
+	t.Run("retryandreflect answer is recorded as TOOL_ERROR before the classifier runs when that plugin is registered first", func(t *testing.T) {
 		for _, tc := range []struct {
-			name              string
-			nilClassifier     bool
-			verdict           ToolResultVerdict
-			wantToolCompleted int
-			wantToolErrors    int
+			name          string
+			nilClassifier bool
+			verdict       ToolResultVerdict
 		}{
-			{name: "nil classifier records TOOL_COMPLETED", nilClassifier: true, wantToolCompleted: 1},
-			{name: "abstain records TOOL_COMPLETED", verdict: ToolResultVerdict{}, wantToolCompleted: 1},
-			{name: "OK records TOOL_COMPLETED", verdict: ToolResultVerdict{Decision: ToolResultOK}, wantToolCompleted: 1},
-			{name: "ERROR records TOOL_ERROR", verdict: ToolResultVerdict{Decision: ToolResultError, ErrorMessage: "lookup failed"}, wantToolErrors: 1},
+			{name: "nil classifier records TOOL_ERROR", nilClassifier: true},
+			{name: "abstain records TOOL_ERROR", verdict: ToolResultVerdict{}},
+			{name: "OK still records TOOL_ERROR", verdict: ToolResultVerdict{Decision: ToolResultOK}},
+			{name: "ERROR keeps retryandreflect error_message", verdict: ToolResultVerdict{Decision: ToolResultError, ErrorMessage: "lookup failed"}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				type toolArgs struct {
@@ -1303,32 +1301,19 @@ func TestPlugin_ToolResultClassifier_Runner(t *testing.T) {
 				mu.Lock()
 				gotCalls := append([]classifierCall(nil), calls...)
 				mu.Unlock()
-				wantCalls := 1
-				if tc.nilClassifier {
-					wantCalls = 0
+				if len(gotCalls) != 0 {
+					t.Fatalf("classifier called %d times, want 0", len(gotCalls))
 				}
-				if len(gotCalls) != wantCalls {
-					t.Fatalf("classifier called %d times, want %d", len(gotCalls), wantCalls)
-				}
-				for _, call := range gotCalls {
-					if got := call.result["response_type"]; got != retryAnswerType {
-						t.Errorf("classifier result response_type = %v, want %q", got, retryAnswerType)
-					}
-				}
-				completedRows := rowsOfType(rows, EventToolCompleted)
-				if got := len(completedRows); got != tc.wantToolCompleted {
-					t.Errorf("got %d TOOL_COMPLETED rows, want %d; events: %v", got, tc.wantToolCompleted, eventTypes(rows))
-				}
-				for _, row := range completedRows {
-					checkJSONAt(t, jsonObjectColumn(t, row, "content"), `"`+retryAnswerType+`"`, "result", "response_type")
+				if got := len(rowsOfType(rows, EventToolCompleted)); got != 0 {
+					t.Errorf("got %d TOOL_COMPLETED rows, want 0; events: %v", got, eventTypes(rows))
 				}
 				toolErrRows := rowsOfType(rows, EventToolError)
-				if got := len(toolErrRows); got != tc.wantToolErrors {
-					t.Errorf("got %d TOOL_ERROR rows, want %d; events: %v", got, tc.wantToolErrors, eventTypes(rows))
+				if got := len(toolErrRows); got != 1 {
+					t.Errorf("got %d TOOL_ERROR rows, want 1; events: %v", got, eventTypes(rows))
 				}
 				for _, row := range toolErrRows {
-					if got := row["error_message"]; got != "lookup failed" {
-						t.Errorf("TOOL_ERROR error_message = %v, want %q", got, "lookup failed")
+					if got := row["error_message"]; got != "boom" {
+						t.Errorf("TOOL_ERROR error_message = %v, want %q", got, "boom")
 					}
 				}
 			})
@@ -1567,6 +1552,24 @@ func TestPlugin_FinishTask_OverlappingErrorDoesNotStealCompletion(t *testing.T) 
 			},
 			wantToolErrors: 1,
 			wantErrMessage: "rewrapped: " + toolErr.Error(),
+		},
+		{
+			// An agent on-tool-error callback recovers the second activation's
+			// failed finish_task call into a map result (closedByError == true,
+			// err == nil in afterTool), so noteTaskAttempt records ends=false
+			// (pending) and Run 1's held completion keeps Run 1's span.
+			name: "agent on-tool-error callback recovers the error",
+			configure: func(run *atomic.Int32, cfg *llmagent.Config, p *baseplugin.Plugin) []*baseplugin.Plugin {
+				cfg.BeforeToolCallbacks = []llmagent.BeforeToolCallback{failRun2(run, func(agent.Context, tool.Tool) error { return toolErr })}
+				cfg.OnToolErrorCallbacks = []llmagent.OnToolErrorCallback{
+					func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+						return map[string]any{"recovered": true}, nil
+					},
+				}
+				return []*baseplugin.Plugin{p}
+			},
+			wantToolErrors: 1,
+			wantErrMessage: toolErr.Error(),
 		},
 		{
 			// An agent after-tool callback, which ADK runs after the

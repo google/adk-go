@@ -63,10 +63,35 @@ const (
 	// non-partial response. Streamed chunks with Partial set only feed
 	// latency_ms.time_to_first_token_ms on that final row, and only the
 	// first chunk with generated content does.
-	EventLLMResponse   = "LLM_RESPONSE"
-	EventLLMError      = "LLM_ERROR"
-	EventToolStarting  = "TOOL_STARTING"
+	EventLLMResponse  = "LLM_RESPONSE"
+	EventLLMError     = "LLM_ERROR"
+	EventToolStarting = "TOOL_STARTING"
+	// EventToolCompleted is written when a tool call finishes without an error
+	// (or with a tool confirmation request/rejection). It is not written for
+	// a call whose failure OnToolErrorCallback already recorded as TOOL_ERROR
+	// (for example, when an agent OnToolErrorCallback or a later plugin
+	// recovers the error), nor for a call whose result is classified as a
+	// failure (see Config.ToolResultClassifier), such as one answered by
+	// plugin/retryandreflect.
 	EventToolCompleted = "TOOL_COMPLETED"
+	// EventToolError is written when a tool call fails, including when the
+	// failure is recovered by an agent OnToolErrorCallback, a later plugin, or
+	// plugin/retryandreflect (except when plugin/retryandreflect is registered
+	// first and a call to a non-FunctionTool, or to a missing tool that no
+	// BeforeToolCallback answered, fails: ADK then skips AfterToolCallback and
+	// plugin/retryandreflect answers in OnToolErrorCallback before this plugin
+	// runs; if a BeforeToolCallback answers a missing-tool lookup with a
+	// non-nil error, ADK dispatches the error and after-tool callbacks so
+	// TOOL_ERROR is still written), and when a tool returns a result that is
+	// classified as a failure (see Config.ToolResultClassifier). An
+	// AfterToolCallback that runs after OnToolErrorCallback already recorded
+	// the failure adds no second row. When plugin/retryandreflect is
+	// registered before this plugin, any tool result carrying the reserved
+	// response_type "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN" is classified
+	// as TOOL_ERROR before Config.ToolResultClassifier runs; its error_message
+	// comes from error_details or error_type unless Config.ContentFormatter is
+	// set or "content" is in Config.PayloadColumnDenylist, in which case a
+	// fixed fallback diagnostic is written instead.
 	EventToolError     = "TOOL_ERROR"
 	EventStateDelta    = "STATE_DELTA"
 	EventAgentTransfer = "AGENT_TRANSFER"
@@ -138,6 +163,26 @@ var knownEventTypes = newSet(
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// Tool errors handled by plugin/retryandreflect are recognized from its
+// reserved response_type ("ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") before
+// Config.ToolResultClassifier runs and logged as TOOL_ERROR in either
+// registration order, except when plugin/retryandreflect is registered first
+// for a call to a tool that is not a FunctionTool or to a missing tool that no
+// BeforeToolCallback answered: ADK skips AfterToolCallback for those calls and
+// plugin/retryandreflect answers in OnToolErrorCallback, so this plugin never
+// receives the error and logs no outcome row. (If a BeforeToolCallback answers
+// a missing-tool lookup with a non-nil error, ADK runs the error and
+// after-tool callbacks, so TOOL_ERROR is written.) When Config.ContentFormatter
+// is set or "content" is in Config.PayloadColumnDenylist, the TOOL_ERROR row
+// of a plugin/retryandreflect recovery payload writes a fixed fallback
+// error_message rather than copying error_details or error_type from the map.
+// Recoveries by other plugins registered before this plugin emit
+// TOOL_COMPLETED when AfterToolCallback runs (such as BeforeToolCallback map
+// answers or FunctionTool OnToolErrorCallback map recoveries, unless classified
+// as a failure by Config.ToolResultClassifier), whereas OnToolErrorCallback map
+// recoveries on a missing tool (that no BeforeToolCallback answered) or a
+// non-FunctionTool skip AfterToolCallback and write no outcome row.
 func NewBigQueryAgentAnalyticsPlugin(
 	ctx context.Context,
 	projectID string,
@@ -164,6 +209,26 @@ func NewBigQueryAgentAnalyticsPlugin(
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// Tool errors handled by plugin/retryandreflect are recognized from its
+// reserved response_type ("ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") before
+// Config.ToolResultClassifier runs and logged as TOOL_ERROR in either
+// registration order, except when plugin/retryandreflect is registered first
+// for a call to a tool that is not a FunctionTool or to a missing tool that no
+// BeforeToolCallback answered: ADK skips AfterToolCallback for those calls and
+// plugin/retryandreflect answers in OnToolErrorCallback, so this plugin never
+// receives the error and logs no outcome row. (If a BeforeToolCallback answers
+// a missing-tool lookup with a non-nil error, ADK runs the error and
+// after-tool callbacks, so TOOL_ERROR is written.) When Config.ContentFormatter
+// is set or "content" is in Config.PayloadColumnDenylist, the TOOL_ERROR row
+// of a plugin/retryandreflect recovery payload writes a fixed fallback
+// error_message rather than copying error_details or error_type from the map.
+// Recoveries by other plugins registered before this plugin emit
+// TOOL_COMPLETED when AfterToolCallback runs (such as BeforeToolCallback map
+// answers or FunctionTool OnToolErrorCallback map recoveries, unless classified
+// as a failure by Config.ToolResultClassifier), whereas OnToolErrorCallback map
+// recoveries on a missing tool (that no BeforeToolCallback answered) or a
+// non-FunctionTool skip AfterToolCallback and write no outcome row.
 func NewBigQueryAgentAnalyticsPluginWithConfig(
 	ctx context.Context,
 	config Config,
@@ -351,6 +416,26 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// Tool errors handled by plugin/retryandreflect are recognized from its
+// reserved response_type ("ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") before
+// Config.ToolResultClassifier runs and logged as TOOL_ERROR in either
+// registration order, except when plugin/retryandreflect is registered first
+// for a call to a tool that is not a FunctionTool or to a missing tool that no
+// BeforeToolCallback answered: ADK skips AfterToolCallback for those calls and
+// plugin/retryandreflect answers in OnToolErrorCallback, so this plugin never
+// receives the error and logs no outcome row. (If a BeforeToolCallback answers
+// a missing-tool lookup with a non-nil error, ADK runs the error and
+// after-tool callbacks, so TOOL_ERROR is written.) When Config.ContentFormatter
+// is set or "content" is in Config.PayloadColumnDenylist, the TOOL_ERROR row
+// of a plugin/retryandreflect recovery payload writes a fixed fallback
+// error_message rather than copying error_details or error_type from the map.
+// Recoveries by other plugins registered before this plugin emit
+// TOOL_COMPLETED when AfterToolCallback runs (such as BeforeToolCallback map
+// answers or FunctionTool OnToolErrorCallback map recoveries, unless classified
+// as a failure by Config.ToolResultClassifier), whereas OnToolErrorCallback map
+// recoveries on a missing tool (that no BeforeToolCallback answered) or a
+// non-FunctionTool skip AfterToolCallback and write no outcome row.
 func NewBigQueryAgentAnalyticsPluginWithClients(
 	ctx context.Context,
 	config Config,
@@ -367,6 +452,17 @@ func newBigQueryAgentAnalyticsPlugin(
 	writeClient *bqstorage.BigQueryWriteClient,
 	ownBQClient bool,
 ) (*baseplugin.Plugin, error) {
+	adkPlugin, _, err := newBigQueryAgentAnalyticsPluginWithTraces(ctx, config, bqClient, writeClient, ownBQClient)
+	return adkPlugin, err
+}
+
+func newBigQueryAgentAnalyticsPluginWithTraces(
+	ctx context.Context,
+	config Config,
+	bqClient *bq.Client,
+	writeClient *bqstorage.BigQueryWriteClient,
+	ownBQClient bool,
+) (*baseplugin.Plugin, *traceManager, error) {
 	closeClients := func() {
 		closeWriteClient(writeClient, config)
 		if ownBQClient && bqClient != nil {
@@ -378,16 +474,17 @@ func newBigQueryAgentAnalyticsPlugin(
 	if !config.Enabled {
 		// The disabled plugin never writes, so it does not keep the clients.
 		closeClients()
-		return newDisabledPlugin()
+		adkPlugin, err := newDisabledPlugin()
+		return adkPlugin, nil, err
 	}
 	config = applyDefaults(config)
 	deniedColumns, err := validateConfig(config)
 	if err != nil {
 		closeClients()
-		return nil, err
+		return nil, nil, err
 	}
 	if writeClient == nil {
-		return nil, errors.New("agentanalytics: writeClient must not be nil when plugin is enabled")
+		return nil, nil, errors.New("agentanalytics: writeClient must not be nil when plugin is enabled")
 	}
 	validateEventFilterLists(config)
 
@@ -408,7 +505,7 @@ func newBigQueryAgentAnalyticsPlugin(
 			o, err := newGCSOffloader(ctx, config.GCSBucketName, gcsOpts...)
 			if err != nil {
 				closeClients()
-				return nil, fmt.Errorf("failed to create GCS offloader: %w", err)
+				return nil, nil, fmt.Errorf("failed to create GCS offloader: %w", err)
 			}
 			ownedOffloader = o
 			config.GCSOffloader = o
@@ -450,7 +547,7 @@ func newBigQueryAgentAnalyticsPlugin(
 		if err := ensureTableAndSchema(ctx, bqTableAdapter{table: tableRef}, config, deniedColumns); err != nil {
 			notifySchemaError(onSchemaError, err, config.logf)
 			closeOwnedResources()
-			return nil, err
+			return nil, nil, err
 		}
 		tableChecked = true
 	}
@@ -465,7 +562,7 @@ func newBigQueryAgentAnalyticsPlugin(
 	processor, err := NewBatchProcessor(ctx, writeClient, streamName, config)
 	if err != nil {
 		closeOwnedResources()
-		return nil, fmt.Errorf("failed to initialize batch processor: %w", err)
+		return nil, nil, fmt.Errorf("failed to initialize batch processor: %w", err)
 	}
 	processor.Start()
 
@@ -582,9 +679,10 @@ func newBigQueryAgentAnalyticsPlugin(
 	if err != nil {
 		processor.Close()
 		closeOwnedResources()
-		return nil, err
+		return nil, nil, err
 	}
 
+	traces.selfPlugin = weak.Make(adkPlugin)
 	registerPlugin(adkPlugin, state)
 
 	if (config.createViews() || config.CreateEvalViews) && state.runner != nil {
@@ -633,7 +731,7 @@ func newBigQueryAgentAnalyticsPlugin(
 		// No view pass runs, so the schema is ready once the table is.
 		notifySchemaReady(onSchemaReady, config.logf)
 	}
-	return adkPlugin, nil
+	return adkPlugin, traces, nil
 }
 
 // closeWriteClient closes a write client that the plugin will not use,
@@ -787,6 +885,13 @@ func (p *analyticsPlugin) shouldLogSessionEvent(eventType string) bool {
 func (p *analyticsPlugin) denied(column string) bool {
 	_, ok := p.deniedColumns[column]
 	return ok
+}
+
+// suppressesToolPayload reports whether content controls omit or transform raw
+// tool result payloads so payload fields must not be copied verbatim into
+// error_message.
+func (p *analyticsPlugin) suppressesToolPayload() bool {
+	return p.denied(columnContent) || p.config.ContentFormatter != nil
 }
 
 func (p *analyticsPlugin) recordPanic(format string, args ...any) {
@@ -1076,7 +1181,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.Partial {
 			p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil)
 		} else if ev.Content != nil || ev.Output != nil {
-			p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content))
+			p.traces.completeResponseWithActions(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content), &ev.Actions)
 		} else {
 			p.traces.clearLastPartial(ctx, evID)
 		}
@@ -1088,7 +1193,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 			taskID := evID
 			taskID.agentName = ev.Author
 			taskID.branch = ev.Branch
-			taskOut := classifyTaskResponses(ev.Content)
+			taskOut := classifyTaskResponsesWithPolicy(ev.Content, p.suppressesToolPayload())
 			evDispatch := dispatchMapsOf(&ev.Actions)
 			if len(taskOut.retiredCallIDs) > 0 || len(taskOut.overruledEndingCallIDs) > 0 {
 				p.traces.retireFailedTaskAttemptsForEvent(ctx, taskID, taskOut.retiredCallIDs, taskOut.overruledEndingCallIDs, taskOut.leadingActionCallID, evDispatch, taskOut.mergedResponse, ev.Timestamp)
@@ -1117,6 +1222,99 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		}
 	}
 	return nil, nil
+}
+
+// hasEventCreationProvenance is a heuristic that reports whether ev looks like
+// it was created via session.NewEvent rather than left without an ID until
+// runner fallback timestamping. It is NOT a strict proof of creation-time vs
+// delivery-time stamping: a custom agent can still construct
+// &session.Event{ID: platform.NewUUID(ctx)} with a zero Timestamp that
+// runner.go later stamps at delivery time, when a custom
+// platform.WithUUIDProvider is active on ctx any non-empty ev.ID passes, and
+// stored events re-emitted or forwarded from external session storage carry
+// whatever ID and Timestamp that storage assigned.
+func hasEventCreationProvenance(ctx context.Context, ev *session.Event) bool {
+	if ev == nil || ev.ID == "" {
+		return false
+	}
+	return hasNewEventUUID(ev.ID) || contextHasCustomUUIDProvider(ctx)
+}
+
+// hasEventCreationProvenance is the package-level heuristic for an event ev
+// that OnEventCallback delivers with ctx and the identity id read from it,
+// except that an ID that is not a UUIDv4 passes only if the agent activations
+// that created ev ran with a custom platform.UUIDProvider, as recorded for the
+// invocation in ev.InvocationID, or in id when ev has none (see
+// traceManager.eventUUIDProvider), rather than if ctx carries one: ctx is the
+// runner's context, so it neither shows a provider that a custom agent
+// installed for a sub-agent nor a nil one that turned the runner's provider
+// off. When ev.InvocationID differs from id.invocationID and tm does not track
+// ev.InvocationID, a tracked id.invocationID fails closed rather than letting
+// a stale or foreign ev.InvocationID fall back to ctx; ctx decides only when
+// neither invocation is tracked. As with the package-level helper, stored
+// events re-emitted or forwarded from external session storage carry whatever
+// ID and Timestamp external storage assigned (the inherent boundary of
+// in-process UUID-provider tracking).
+func (tm *traceManager) hasEventCreationProvenance(ctx context.Context, id identity, ev *session.Event) bool {
+	if ev == nil || ev.ID == "" {
+		return false
+	}
+	if hasNewEventUUID(ev.ID) {
+		return true
+	}
+	var evNodePath string
+	if ev.NodeInfo != nil {
+		evNodePath = ev.NodeInfo.Path
+	}
+	if ev.InvocationID != "" && ev.InvocationID != id.invocationID {
+		// A custom agent that yields the events of a nested runner hands on
+		// events of the nested invocation, whose activations are recorded
+		// under its ID when that runner shares this plugin.
+		if custom, tracked := tm.eventUUIDProvider(ev.InvocationID, ev.Author, ev.Branch, evNodePath); tracked {
+			return custom
+		}
+		if tm.isTrackedInvocation(id.invocationID) {
+			return false
+		}
+		return contextHasCustomUUIDProvider(ctx)
+	}
+	path := cmp.Or(evNodePath, id.path)
+	if custom, tracked := tm.eventUUIDProviderFor(cmp.Or(ev.InvocationID, id.invocationID), ev.Author, ev.Branch, path, id.agentName, id.branch); tracked {
+		return custom
+	}
+	return contextHasCustomUUIDProvider(ctx)
+}
+
+// hasNewEventUUID reports whether id has the canonical 36-byte RFC 4122 UUIDv4
+// format produced by session.NewEvent's default platform.NewUUID generator.
+func hasNewEventUUID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i := range 36 {
+		c := id[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		case 14:
+			if c != '4' {
+				return false
+			}
+		case 19:
+			switch c {
+			case '8', '9', 'a', 'b', 'A', 'B':
+			default:
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // nodeCompletion reports whether ev is the event that ADK's workflow
@@ -1185,10 +1383,17 @@ func isTaskEndingResult(resp map[string]any) bool {
 // is_error), with its diagnostic. A task that ends with such an error has
 // failed rather than completed.
 func taskEndResult(resp map[string]any) (ends, failed bool, errMsg string) {
+	return taskEndResultWithPolicy(resp, false)
+}
+
+func taskEndResultWithPolicy(resp map[string]any, suppressPayload bool) (ends, failed bool, errMsg string) {
 	if !isTaskEndingResult(resp) {
 		return false, false, ""
 	}
-	errMsg, failed = classifyToolResultError(resp)
+	if msg, ok := retryAnswerError(resp, suppressPayload); ok {
+		return true, true, msg
+	}
+	errMsg, failed = mcpResultError(resp)
 	return true, failed, errMsg
 }
 
@@ -1222,7 +1427,11 @@ type taskResponseOutcome struct {
 	overruledEndingCallIDs []string
 }
 
-func classifyTaskResponses(c *genai.Content) (out taskResponseOutcome) {
+func classifyTaskResponses(c *genai.Content) taskResponseOutcome {
+	return classifyTaskResponsesWithPolicy(c, false)
+}
+
+func classifyTaskResponsesWithPolicy(c *genai.Content, suppressPayload bool) (out taskResponseOutcome) {
 	if c == nil {
 		return out
 	}
@@ -1242,7 +1451,7 @@ func classifyTaskResponses(c *genai.Content) (out taskResponseOutcome) {
 		}
 		if !seenFirst {
 			seenFirst = true
-			out.ends, out.failed, out.errMsg = taskEndResult(fr.Response)
+			out.ends, out.failed, out.errMsg = taskEndResultWithPolicy(fr.Response, suppressPayload)
 			if out.ends {
 				out.endingCallID = fr.ID
 				if fr.ID != "" {
@@ -1456,6 +1665,39 @@ func (p *analyticsPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[st
 	return nil, nil
 }
 
+const (
+	// reflectAndRetryResponseType matches the unexported response_type marker
+	// emitted by plugin/retryandreflect (and adk-python's ReflectAndRetryToolPlugin)
+	// when it recovers a tool error into retry guidance. Kept here because
+	// plugin/agentanalytics requires google.golang.org/adk/v2 v2.0.0.
+	reflectAndRetryResponseType         = "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN"
+	reflectAndRetryFallbackErrorMessage = "Tool raised an error that ReflectAndRetryToolPlugin handled."
+)
+
+// retryAnswerError reports whether result is a recovery payload produced by
+// plugin/retryandreflect, returning the extracted error message and true.
+// Only exact string values on "error_details" and "error_type" are accepted;
+// non-string values are ignored and fall back to
+// reflectAndRetryFallbackErrorMessage. When suppressPayload is true (because
+// ContentFormatter is set or "content" is in PayloadColumnDenylist), it returns
+// reflectAndRetryFallbackErrorMessage directly rather than copying fields from
+// the recovery map into error_message.
+func retryAnswerError(result map[string]any, suppressPayload bool) (string, bool) {
+	rt, ok := result["response_type"].(string)
+	if !ok || rt != reflectAndRetryResponseType {
+		return "", false
+	}
+	if suppressPayload {
+		return reflectAndRetryFallbackErrorMessage, true
+	}
+	for _, k := range []string{"error_details", "error_type"} {
+		if s, ok := result[k].(string); ok && s != "" {
+			return s, true
+		}
+	}
+	return reflectAndRetryFallbackErrorMessage, true
+}
+
 // isToolConfirmationOutcome reports whether err is a tool confirmation request
 // or rejection. Both outcomes complete the tool call in adk-python rather than
 // logging TOOL_ERROR. If inspecting err panics (for example, Unwrap on a typed
@@ -1502,14 +1744,16 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		}
 		p.traces.noteTaskAttempt(ctx, id, callID, ends, failed)
 	}
+	if closedByError {
+		// onToolError already wrote TOOL_ERROR; even when an agent
+		// OnToolErrorCallback or a later plugin recovered or replaced the error,
+		// suppress TOOL_COMPLETED and AGENT_RESPONSE.
+		return nil, nil
+	}
 	if err != nil && !confirmationOutcome {
-		// OnToolErrorCallback normally owns the TOOL_ERROR row and sets
-		// closedByError; when an earlier plugin short-circuited
-		// OnToolErrorCallback before onToolError ran, emit TOOL_ERROR here so
-		// the failed call still gets its terminal row.
-		if !closedByError {
-			p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, err)
-		}
+		// When an earlier plugin short-circuited OnToolErrorCallback before
+		// onToolError ran and passed the error through, emit TOOL_ERROR here.
+		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, err)
 		return nil, nil
 	}
 	if confirmationOutcome {
@@ -1518,16 +1762,11 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		// and the classifier sees it, as it does there.
 		result = map[string]any{"error": err.Error()}
 	}
-	if closedByError {
-		// A call whose failure OnToolErrorCallback already recorded has its
-		// TOOL_ERROR row; the classifier is not asked about the result that a
-		// later plugin recovered it into, and a recovered result that the
-		// built-in rules still classify as an error writes no TOOL_COMPLETED
-		// row.
-		if _, failed := classifyToolResultError(result); failed {
-			return nil, nil
-		}
-	} else if msg, failed := p.classifyToolResultError(ctx, t, args, result); failed {
+	if msg, failed := p.classifyToolResultError(ctx, t, args, result); failed {
+		// This includes the answer of a plugin/retryandreflect registered
+		// before this plugin, which short-circuits OnToolErrorCallback and
+		// returns a recovery payload with err == nil: it is logged as
+		// TOOL_ERROR, without TOOL_COMPLETED and AGENT_RESPONSE.
 		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
 		return nil, nil
 	}
@@ -1627,15 +1866,6 @@ func valueTypeName(v any) string {
 	return cmp.Or(t.Name(), t.String())
 }
 
-// classifyToolResultError reports whether a tool result map that came without
-// a Go error marks a failure, and if so the diagnostic to record for it. A
-// result fails when its top-level isError or is_error key is the boolean true,
-// as an MCP CallToolResult reports a failed tool call. The diagnostic is a
-// fixed message, so the result's payload is not copied into error_message.
-func classifyToolResultError(result map[string]any) (string, bool) {
-	return mcpResultError(result)
-}
-
 func mcpResultError(result map[string]any) (string, bool) {
 	if len(result) == 0 {
 		return "", false
@@ -1650,14 +1880,19 @@ func mcpResultError(result map[string]any) (string, bool) {
 
 // classifyToolResultError returns the error_message of the TOOL_ERROR row of a
 // result that a tool returned without an error, and true, or false to record
-// the result as TOOL_COMPLETED. Config.ToolResultClassifier decides first: its
+// the result as TOOL_COMPLETED. A plugin/retryandreflect recovery payload is
+// recorded as TOOL_ERROR first (honoring content controls on error_message),
+// matching adk-python regardless of registration order or classifier verdicts.
+// For other results, Config.ToolResultClassifier decides next: its
 // ToolResultError verdict records the row, with the classifier's ErrorMessage,
 // or classifiedToolErrorMessage when that is empty, as the error_message, and
 // its ToolResultOK verdict completes the call, whatever the result holds. When
 // the classifier is nil, abstains, panics or returns a decision that is not
-// defined, the package-level classifyToolResultError decides with the
-// plugin's built-in rules.
+// defined, mcpResultError decides with the remaining built-in rules.
 func (p *analyticsPlugin) classifyToolResultError(ctx agent.Context, t tool.Tool, args, result map[string]any) (string, bool) {
+	if msg, ok := retryAnswerError(result, p.suppressesToolPayload()); ok {
+		return msg, true
+	}
 	if p.config.ToolResultClassifier != nil {
 		switch verdict := p.runToolResultClassifier(ctx, t, args, result); verdict.Decision {
 		case ToolResultOK:
@@ -1666,7 +1901,7 @@ func (p *analyticsPlugin) classifyToolResultError(ctx agent.Context, t tool.Tool
 			return cmp.Or(verdict.ErrorMessage, classifiedToolErrorMessage), true
 		}
 	}
-	return classifyToolResultError(result)
+	return mcpResultError(result)
 }
 
 // runToolResultClassifier calls Config.ToolResultClassifier and returns its
@@ -2069,6 +2304,134 @@ func agentConfig(a agent.Agent) any {
 	return nil
 }
 
+type agentAfterCBLayout struct {
+	configIndex  []int
+	afterCBIndex []int
+	agentIndex   []int
+}
+
+var agentAfterCBLayouts sync.Map // map[reflect.Type]agentAfterCBLayout
+
+func fieldPathExported(t reflect.Type, idx []int) bool {
+	if len(idx) == 0 {
+		return false
+	}
+	for _, i := range idx {
+		if t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		if t.Kind() != reflect.Struct {
+			return false
+		}
+		sf := t.Field(i)
+		if !sf.IsExported() {
+			return false
+		}
+		t = sf.Type
+	}
+	return true
+}
+
+func lookupAgentAfterCBLayout(t reflect.Type) agentAfterCBLayout {
+	if cached, ok := agentAfterCBLayouts.Load(t); ok {
+		return cached.(agentAfterCBLayout)
+	}
+	var layout agentAfterCBLayout
+	if sf, ok := t.FieldByName("Config"); ok && fieldPathExported(t, sf.Index) {
+		layout.configIndex = sf.Index
+	}
+	if sf, ok := t.FieldByName("afterAgentCallbacks"); ok {
+		layout.afterCBIndex = sf.Index
+	}
+	if sf, ok := t.FieldByName("Agent"); ok && fieldPathExported(t, sf.Index) {
+		layout.agentIndex = sf.Index
+	}
+	actual, _ := agentAfterCBLayouts.LoadOrStore(t, layout)
+	return actual.(agentAfterCBLayout)
+}
+
+func safeFieldByIndex(v reflect.Value, idx []int) (reflect.Value, bool) {
+	if len(idx) == 0 {
+		return reflect.Value{}, false
+	}
+	for _, i := range idx {
+		if v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return reflect.Value{}, false
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			return reflect.Value{}, false
+		}
+		v = v.Field(i)
+	}
+	return v, true
+}
+
+// agentHasAfterAgentCallbacks reports whether a configures (or conservatively
+// may configure, when a's concrete layout cannot be unwrapped to ADK's base
+// agent within the bounded hop limit) agent-level AfterAgentCallbacks, which
+// ADK invokes after plugins' AfterAgentCallback hooks finish.
+func agentHasAfterAgentCallbacks(a agent.Agent) (res bool) {
+	if a == nil {
+		return false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			res = true
+		}
+	}()
+	for hop := range 4 {
+		v := reflect.ValueOf(a)
+		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+			if v.IsNil() {
+				return hop > 0
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			return true
+		}
+		vt := v.Type()
+		layout := lookupAgentAfterCBLayout(vt)
+		if vt.PkgPath() == agentPkgPath && vt.Name() == "agent" {
+			if len(layout.afterCBIndex) == 0 {
+				return true
+			}
+			cb, ok := safeFieldByIndex(v, layout.afterCBIndex)
+			if !ok || cb.Kind() != reflect.Slice {
+				return true
+			}
+			return cb.Len() > 0
+		}
+		if f, ok := safeFieldByIndex(v, layout.configIndex); ok && f.CanInterface() {
+			if cfg, ok := reflect.TypeAssert[llmagent.Config](f); ok && len(cfg.AfterAgentCallbacks) > 0 {
+				return true
+			}
+			if cfg, ok := reflect.TypeAssert[*llmagent.Config](f); ok && cfg != nil && len(cfg.AfterAgentCallbacks) > 0 {
+				return true
+			}
+		}
+		if len(layout.afterCBIndex) > 0 {
+			cb, ok := safeFieldByIndex(v, layout.afterCBIndex)
+			if !ok || cb.Kind() != reflect.Slice || cb.Len() > 0 {
+				return true
+			}
+		}
+		inner, ok := safeFieldByIndex(v, layout.agentIndex)
+		if !ok || !inner.CanInterface() {
+			return true
+		}
+		next, ok := reflect.TypeAssert[agent.Agent](inner)
+		if !ok || next == nil {
+			return true
+		}
+		a = next
+	}
+	return true
+}
+
 // identity holds the invocation fields of a row.
 type identity struct {
 	agentName    string
@@ -2135,64 +2498,57 @@ func contextPath(ctx context.Context) (path string) {
 			path = ""
 		}
 	}()
-	queue := []reflect.Value{reflect.ValueOf(ctx)}
-	seen := map[visitedContextStruct]bool{}
-	for steps := 0; len(queue) > 0 && steps < 512; steps++ {
-		v := queue[0]
-		queue = queue[1:]
-		var ptr uintptr
-		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
-			if v.IsNil() {
-				v = reflect.Value{}
-				break
-			}
-			if v.Kind() == reflect.Pointer {
-				ptr = v.Pointer()
-			}
-			v = v.Elem()
+	if ctx == nil {
+		return ""
+	}
+	var q contextStructQueue
+	q.push(reflect.ValueOf(ctx))
+	var seen map[visitedContextStruct]bool
+	for steps := range 512 {
+		item, ok := q.pop()
+		if !ok {
+			break
 		}
-		if v.Kind() != reflect.Struct {
+		v, ok := derefContextStructValueLazy(item, &seen, steps >= 32)
+		if !ok {
 			continue
 		}
-		if ptr != 0 {
-			key := visitedContextStruct{ptr: ptr, typ: v.Type()}
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-		}
-		if f := v.FieldByName("path"); f.IsValid() && f.Kind() == reflect.String {
-			if s := f.String(); s != "" {
-				return s
-			}
-		}
-		if f := v.FieldByName("params"); f.IsValid() {
-			for f.Kind() == reflect.Pointer || f.Kind() == reflect.Interface {
-				if f.IsNil() {
-					f = reflect.Value{}
-					break
-				}
-				f = f.Elem()
-			}
-			if f.Kind() == reflect.Struct {
-				if p := f.FieldByName("Path"); p.IsValid() && p.Kind() == reflect.String {
-					if s := p.String(); s != "" {
+		vt := v.Type()
+		switch vt.PkgPath() {
+		case agentPkgPath:
+			if vt.Name() == "commonContext" {
+				if f := directStructField(v, "path"); f.IsValid() && f.Kind() == reflect.String {
+					if s := f.String(); s != "" {
 						return s
 					}
 				}
 			}
-		}
-		for _, name := range []string{"context", "Context", "ctx", "invocationContext"} {
-			if f := v.FieldByName(name); f.IsValid() {
-				queue = append(queue, f)
+		case internalContextPkgPath:
+			if vt.Name() == "InvocationContext" {
+				if pf := directStructField(v, "params"); pf.IsValid() {
+					if p, ok := derefContextStructValueLazy(pf, &seen, steps >= 32); ok {
+						if f := directStructField(p, "Path"); f.IsValid() && f.Kind() == reflect.String {
+							if s := f.String(); s != "" {
+								return s
+							}
+						}
+					}
+				}
 			}
 		}
+		c1, c2 := adkContextChildren(v)
+		q.push(c1)
+		q.push(c2)
 	}
 	type pathCarrier interface {
 		Path() string
 	}
-	if p, ok := ctx.(pathCarrier); ok && !strings.HasSuffix(reflect.TypeOf(ctx).String(), "callbackContextWrapper") {
-		return orZero(p.Path)
+	if p, ok := ctx.(pathCarrier); ok {
+		vt := reflect.TypeOf(ctx)
+		if !(vt != nil && vt.Kind() == reflect.Pointer && vt.Elem().PkgPath() == agentPkgPath &&
+			(vt.Elem().Name() == "callbackContextWrapper" || vt.Elem().Name() == "commonContext" || vt.Elem().Name() == "toolContextWrapper")) {
+			return p.Path()
+		}
 	}
 	return ""
 }
