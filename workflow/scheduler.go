@@ -608,7 +608,9 @@ func (s *scheduler) wouldRetry(name string, err error, failedAttempts int) bool 
 // yield returns false and the completion carries ctx.Err(), so a node
 // that returns when its yield returns false does not go on past an
 // event the caller did not take. A partial event is fire-and-forget:
-// its yield returns true once the event is queued.
+// its yield returns true once the event is queued. An event of either
+// kind yielded once ctx is done is not sent, and its yield returns
+// false.
 func runNode(
 	out chan<- queueItem,
 	wg *sync.WaitGroup,
@@ -669,6 +671,15 @@ func runNode(
 		if err != nil {
 			completion.err = err
 			completion.inventory = inventoryRecorder.snapshot()
+			return
+		}
+		// An event yielded after ctx is done is never sent: adk-python
+		// cancels the node at its deadline, so no such event exists there.
+		// The select below cannot be relied on for this, as it picks at
+		// random when the queue has room. The activation's pending writes
+		// are not moved onto the dropped event, so the flush still sends them.
+		if err := ctx.Err(); err != nil {
+			completion.err = err
 			return
 		}
 		// The consumer validates the output after admit has moved the
