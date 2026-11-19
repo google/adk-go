@@ -42,8 +42,13 @@ func FunctionCallEvent(events session.Events, msg *genai.Content) *session.Event
 }
 
 func findCallEvent(events session.Events, callID string) *session.Event {
-	for i := events.Len() - 1; i >= 0; i-- {
-		event := events.At(i)
+	if events == nil {
+		return nil
+	}
+	for _, event := range slices.Backward(ApplyRewinds(slices.Collect(events.All()))) {
+		if event == nil {
+			continue
+		}
 		for _, part := range FunctionCalls(event.Content) {
 			if part.ID == callID {
 				return event

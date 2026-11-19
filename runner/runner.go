@@ -2019,7 +2019,7 @@ func (r *Runner) restoreBranchFromHistory(sess session.Session, agentToRun agent
 // It ports adk-python's find_agent_to_run (agents/_agent_router.py) with
 // Runner._session_for_routing (runners.py).
 func (r *Runner) findAgentToRun(sess session.Session, msg *genai.Content) (agent.Agent, error) {
-	if r.outermostGraphWorkflow(r.rootAgent) != nil {
+	if isGraphWorkflowAgent(r.rootAgent) {
 		return r.rootAgent, nil
 	}
 	events := utils.ApplyRewinds(slices.Collect(sess.Events().All()))
@@ -2027,8 +2027,8 @@ func (r *Runner) findAgentToRun(sess session.Session, msg *genai.Content) (agent
 		events = append(events, &session.Event{Author: "user", LLMResponse: model.LLMResponse{Content: msg}})
 	}
 	if subAgent := r.answeredCallAgent(events); subAgent != nil {
-		if wf := r.outermostGraphWorkflow(subAgent); wf != nil {
-			return wf, nil
+		if entry := r.graphWorkflowEntrypoint(subAgent); entry != nil {
+			return entry, nil
 		}
 		return subAgent, nil
 	}
@@ -2152,16 +2152,51 @@ func (r *Runner) isInGraphWorkflow(a agent.Agent) bool {
 	return r.outermostGraphWorkflow(a) != nil
 }
 
+func isGraphWorkflowAgent(a agent.Agent) bool {
+	ia, ok := a.(agentinternal.Agent)
+	return ok && agentinternal.Reveal(ia).AgentType == agentinternal.TypeWorkflowAgent
+}
+
+func isCompositeWorkflowAgent(a agent.Agent) bool {
+	ia, ok := a.(agentinternal.Agent)
+	if !ok {
+		return false
+	}
+	switch agentinternal.Reveal(ia).AgentType {
+	case agentinternal.TypeWorkflowAgent, agentinternal.TypeSequentialAgent, agentinternal.TypeLoopAgent, agentinternal.TypeParallelAgent:
+		return true
+	default:
+		return false
+	}
+}
+
 // outermostGraphWorkflow returns the highest graph workflow agent
 // (workflowagent.New) enclosing a, or nil when none does.
 func (r *Runner) outermostGraphWorkflow(a agent.Agent) agent.Agent {
 	var outermost agent.Agent
 	for cur := a; cur != nil; cur = r.parents[cur.Name()] {
-		if ia, ok := cur.(agentinternal.Agent); ok && agentinternal.Reveal(ia).AgentType == agentinternal.TypeWorkflowAgent {
+		if isGraphWorkflowAgent(cur) {
 			outermost = cur
 		}
 	}
 	return outermost
+}
+
+// graphWorkflowEntrypoint returns the agent findAgentToRun dispatches to when a
+// belongs to a graph workflow: the highest contiguous composite workflow
+// ancestor above the outermost graph workflow (so SequentialAgent, LoopAgent
+// and ParallelAgent narrow via utils.GraphResumeIndexes and still run sibling
+// sub-agents), stopping before any non-workflow ancestor such as an LlmAgent.
+func (r *Runner) graphWorkflowEntrypoint(a agent.Agent) agent.Agent {
+	wf := r.outermostGraphWorkflow(a)
+	if wf == nil {
+		return nil
+	}
+	entry := wf
+	for parent := r.parents[entry.Name()]; parent != nil && isCompositeWorkflowAgent(parent); parent = r.parents[entry.Name()] {
+		entry = parent
+	}
+	return entry
 }
 
 // checks if the agent and its parent chain allow transfer up the tree.

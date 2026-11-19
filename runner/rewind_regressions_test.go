@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
@@ -236,6 +237,77 @@ func TestResumableRunner_GraphWorkflowSubAgentRouting(t *testing.T) {
 	if !sawD {
 		t.Error("resumable runner: resume did not reach downstream node d in WorkflowAgent")
 	}
+
+	t.Run("sequential_root_runs_after_agent", func(t *testing.T) {
+		var beforeRuns atomic.Int32
+		before, err := llmagent.New(llmagent.Config{
+			Name:  "before",
+			Model: &scriptedModel{responses: []*genai.Content{genai.NewContentFromText("before-out", genai.RoleModel), genai.NewContentFromText("before-again", genai.RoleModel)}},
+			BeforeAgentCallbacks: []agent.BeforeAgentCallback{func(agent.Context) (*genai.Content, error) {
+				beforeRuns.Add(1)
+				return nil, nil
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b2, d2 := joinResumeAgent(t, "b2", "B2", true), joinResumeAgent(t, "d2", "D2", false)
+		bn2, dn2 := joinResumeAgentNode(t, b2), joinResumeAgentNode(t, d2)
+		wf2, err := workflowagent.New(workflowagent.Config{
+			Name:      "wf2",
+			SubAgents: []agent.Agent{b2, d2},
+			Edges:     []workflow.Edge{{From: workflow.Start, To: bn2}, {From: bn2, To: dn2}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := llmagent.New(llmagent.Config{
+			Name:  "after",
+			Model: &scriptedModel{responses: []*genai.Content{genai.NewContentFromText("after-out", genai.RoleModel)}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seq, err := sequentialagent.New(sequentialagent.Config{
+			AgentConfig: agent.Config{Name: "seq_root", SubAgents: []agent.Agent{before, wf2, after}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r2, err := runner.New(runner.Config{
+			AppName:           "repro",
+			Agent:             seq,
+			SessionService:    session.InMemoryService(),
+			AutoCreateSession: true,
+			Resumable:         true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, err := range r2.Run(t.Context(), "u", "s", genai.NewContentFromText("start", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		sawD2, sawAfter := false, false
+		for ev, err := range r2.Run(t.Context(), "u", "s", resumeContent("b2", workflow.WorkflowInputFunctionCallName, "approved"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("resume error: %v", err)
+			}
+			if ev.Author == "d2" && ev.Content != nil {
+				sawD2 = true
+			}
+			if ev.Author == "after" && ev.Content != nil {
+				sawAfter = true
+			}
+		}
+		if got := beforeRuns.Load(); got != 1 {
+			t.Errorf("before ran %d times across pause+resume, want 1", got)
+		}
+		if !sawD2 || !sawAfter {
+			t.Errorf("sawD2=%v sawAfter=%v, want both true", sawD2, sawAfter)
+		}
+	})
 }
 
 func TestNodePathResume_OnUserMessageCallbackKeepsRestoredUserContent(t *testing.T) {
