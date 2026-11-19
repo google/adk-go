@@ -52,7 +52,7 @@ func TestHandleFunctionCalls_Streaming(t *testing.T) {
 
 	handler := func(ctx agent.Context, args Args) iter.Seq2[string, error] {
 		return func(yield func(string, error) bool) {
-			for i := 0; i < args.Count; i++ {
+			for i := range args.Count {
 				if !yield(fmt.Sprintf("chunk %d", i), nil) {
 					return
 				}

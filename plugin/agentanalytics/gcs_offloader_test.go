@@ -6932,7 +6932,7 @@ func BenchmarkBatchProcessorObjectPath(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			var sink string
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				sink = bp.objectPath(row, upload)
 			}
 			_ = sink
