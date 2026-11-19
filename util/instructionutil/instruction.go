@@ -40,12 +40,16 @@ import (
 // error. If you want to ignore the error, you can append a ? to the
 // variable name as in {var?}.
 //
-// This method is intended to be used in InstructionProvider based Instruction
-// and GlobalInstruction which are called with ReadonlyContext.
+// ctx is the context ADK passes to an InstructionProvider, or an
+// [agent.Context], such as the one ADK passes to a callback, a plugin
+// callback or a tool. Any other ReadonlyContext returns an error, as does a
+// state placeholder when the context has no state.
 func InjectSessionState(ctx agent.ReadonlyContext, template string) (string, error) {
-	ictx, ok := ctx.(*icontext.ReadonlyContext)
-	if !ok {
-		return "", fmt.Errorf("unexpected context type: %T", ctx)
+	switch c := ctx.(type) {
+	case *icontext.ReadonlyContext:
+		return llminternal.InjectSessionState(c.InvocationContext, template)
+	case agent.Context:
+		return llminternal.InjectContextState(c, template)
 	}
-	return llminternal.InjectSessionState(ictx.InvocationContext, template)
+	return "", fmt.Errorf("unexpected context type: %T", ctx)
 }
