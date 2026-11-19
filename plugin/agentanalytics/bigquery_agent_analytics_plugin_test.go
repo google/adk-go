@@ -2424,9 +2424,9 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableSetup(t *testing.T) {
 		{
 			name:           "409 from create with DisableSchemaUpgrade keeps the table as is",
 			disableUpgrade: true,
-			getStatuses:    []int{http.StatusNotFound},
+			getStatuses:    []int{http.StatusNotFound, http.StatusOK},
 			postStatus:     http.StatusConflict,
-			wantGets:       1,
+			wantGets:       2,
 			wantPost:       true,
 		},
 		{
@@ -5195,7 +5195,7 @@ func TestPlugin_ToolResultIsError(t *testing.T) {
 		}
 	})
 
-	t.Run("isTaskCompletedResult and hasTaskCompletedResponse reject mixed error maps", func(t *testing.T) {
+	t.Run("taskEndResult and classifyTaskResponses classify mixed error maps", func(t *testing.T) {
 		finishResp := func(m map[string]any) *genai.Content {
 			return &genai.Content{
 				Role: "user",
@@ -5211,15 +5211,14 @@ func TestPlugin_ToolResultIsError(t *testing.T) {
 		for _, tc := range []struct {
 			name string
 			resp map[string]any
-			want bool
 			// wantEnds reports that ADK ends the task on resp, which it does
 			// on the sentinel alone; wantFailed that resp also fails it.
 			wantEnds, wantFailed bool
 		}{
-			{name: "genuine sentinel", resp: map[string]any{"result": "Task completed."}, want: true, wantEnds: true},
-			{name: "isError false", resp: map[string]any{"result": "Task completed.", "isError": false}, want: true, wantEnds: true},
-			{name: "is_error false", resp: map[string]any{"result": "Task completed.", "is_error": false}, want: true, wantEnds: true},
-			{name: "isError non-boolean string true", resp: map[string]any{"result": "Task completed.", "isError": "true"}, want: true, wantEnds: true},
+			{name: "genuine sentinel", resp: map[string]any{"result": "Task completed."}, wantEnds: true},
+			{name: "isError false", resp: map[string]any{"result": "Task completed.", "isError": false}, wantEnds: true},
+			{name: "is_error false", resp: map[string]any{"result": "Task completed.", "is_error": false}, wantEnds: true},
+			{name: "isError non-boolean string true", resp: map[string]any{"result": "Task completed.", "isError": "true"}, wantEnds: true},
 			{name: "mixed sentinel and isError true", resp: map[string]any{"result": "Task completed.", "isError": true}, wantEnds: true, wantFailed: true},
 			{name: "mixed sentinel and is_error true", resp: map[string]any{"result": "Task completed.", "is_error": true}, wantEnds: true, wantFailed: true},
 			{name: "isError true without sentinel", resp: map[string]any{"isError": true}},
@@ -5227,26 +5226,24 @@ func TestPlugin_ToolResultIsError(t *testing.T) {
 			{name: "nil map", resp: nil},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				if got := isTaskCompletedResult(tc.resp); got != tc.want {
-					t.Errorf("isTaskCompletedResult(%v) = %v, want %v", tc.resp, got, tc.want)
-				}
-				if got := hasTaskCompletedResponse(finishResp(tc.resp)); got != tc.want {
-					t.Errorf("hasTaskCompletedResponse(%v) = %v, want %v", tc.resp, got, tc.want)
-				}
 				wantMsg := ""
 				if tc.wantFailed {
 					wantMsg = mcpToolErrorMessage
 				}
-				ends, failed, msg := taskEndResponse(finishResp(tc.resp))
+				ends, failed, msg := taskEndResult(tc.resp)
 				if ends != tc.wantEnds || failed != tc.wantFailed || msg != wantMsg {
-					t.Errorf("taskEndResponse(%v) = (%v, %v, %q), want (%v, %v, %q)", tc.resp, ends, failed, msg, tc.wantEnds, tc.wantFailed, wantMsg)
+					t.Errorf("taskEndResult() = (%v, %v, %q), want (%v, %v, %q)", ends, failed, msg, tc.wantEnds, tc.wantFailed, wantMsg)
+				}
+				out := classifyTaskResponses(finishResp(tc.resp))
+				if out.ends != tc.wantEnds || out.failed != tc.wantFailed || out.errMsg != wantMsg {
+					t.Errorf("classifyTaskResponses() = (ends=%v, failed=%v, errMsg=%q), want (ends=%v, failed=%v, errMsg=%q)", out.ends, out.failed, out.errMsg, tc.wantEnds, tc.wantFailed, wantMsg)
 				}
 			})
 		}
-		if hasTaskCompletedResponse(nil) {
-			t.Error("hasTaskCompletedResponse(nil) = true, want false")
+		if out := classifyTaskResponses(nil); out.ends || out.failed || out.errMsg != "" {
+			t.Errorf("classifyTaskResponses(nil) = (ends=%v, failed=%v, errMsg=%q), want (false, false, \"\")", out.ends, out.failed, out.errMsg)
 		}
-		if hasTaskCompletedResponse(&genai.Content{
+		if out := classifyTaskResponses(&genai.Content{
 			Role: "user",
 			Parts: []*genai.Part{{
 				FunctionResponse: &genai.FunctionResponse{
@@ -5255,8 +5252,8 @@ func TestPlugin_ToolResultIsError(t *testing.T) {
 					Response: map[string]any{"result": "Task completed."},
 				},
 			}},
-		}) {
-			t.Error("hasTaskCompletedResponse(other_tool) = true, want false")
+		}); out.ends || out.failed || out.errMsg != "" {
+			t.Errorf("classifyTaskResponses(other_tool) = (ends=%v, failed=%v, errMsg=%q), want (false, false, \"\")", out.ends, out.failed, out.errMsg)
 		}
 	})
 
@@ -5366,7 +5363,7 @@ func TestPlugin_ToolResultIsError(t *testing.T) {
 										yield(nil, err)
 										return
 									}
-									if hasTaskCompletedResponse(ev.Content) {
+									if out := classifyTaskResponses(ev.Content); out.ends && !out.failed {
 										held = append(held, ev)
 										continue
 									}
@@ -5633,23 +5630,6 @@ func TestPlugin_ToolErrorTypedNilPathError(t *testing.T) {
 			}
 		}
 	})
-}
-
-// isTaskCompletedResult reports whether a finish_task response map carries the
-// successful completion sentinel ("result": "Task completed.") without a
-// classified tool result error (see taskEndResult).
-func isTaskCompletedResult(resp map[string]any) bool {
-	ends, failed, _ := taskEndResult(resp)
-	return ends && !failed
-}
-
-// hasTaskCompletedResponse reports whether c carries a successful
-// finish_task function response ("result": "Task completed." without a
-// classified tool result error), which ends a task-mode LLM agent in ADK
-// without running its AfterAgentCallback.
-func hasTaskCompletedResponse(c *genai.Content) bool {
-	ends, failed, _ := taskEndResponse(c)
-	return ends && !failed
 }
 
 // requireInvocationCompletedOKWithAgentErrors is requireInvocationCompletedOK
@@ -6003,7 +5983,7 @@ func TestMCPRecoverySingleToolError(t *testing.T) {
 										yield(nil, err)
 										return
 									}
-									// Match FunctionResponse.Name rather than hasTaskCompletedResponse
+									// Match FunctionResponse.Name rather than classifyTaskResponses
 									// so even the rejected finish_task event reaches OnEventCallback.
 									if buffered && hasFinishTaskResponse(ev.Content) {
 										held = append(held, ev)
@@ -6092,7 +6072,7 @@ func TestMCPRecoverySingleToolError(t *testing.T) {
 				var callSeq atomic.Int32
 
 				// Agent-level AfterToolCallbacks run after plugin AfterToolCallbacks, so
-				// noteTaskFinished records "call-1" in finishedTasks before the callback
+				// noteTaskAttempt records "call-1" in finishedTasks before the callback
 				// adds flagKey to Activation 1's response. Even when both responses are
 				// buffered, AGENT_ERROR must close Activation 1 and AGENT_COMPLETED must
 				// close Activation 2 rather than swapping spans.

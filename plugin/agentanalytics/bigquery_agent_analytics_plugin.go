@@ -429,7 +429,17 @@ func newBigQueryAgentAnalyticsPlugin(
 		config.ProjectID = bqClient.Project()
 	}
 
+	// Keep the schema callbacks in locals and clear them on config so long-lived
+	// copies (the batch processor, trace logger method value, and analyticsPlugin)
+	// do not retain anything the closures capture once startup finishes.
+	onSchemaReady, onSchemaError := config.OnSchemaReady, config.OnSchemaError
+	config.OnSchemaReady = nil
+	config.OnSchemaError = nil
+
 	// Ensure table exists and optionally upgrade schema (done once per instance).
+	// OnSchemaError hears of a table that cannot be read, created or upgraded;
+	// OnSchemaReady hears of a ready table once the views are ready too (below).
+	tableChecked := false
 	if bqClient != nil {
 		ds := bqClient.Dataset(config.DatasetID)
 		if config.ProjectID != "" {
@@ -438,9 +448,11 @@ func newBigQueryAgentAnalyticsPlugin(
 		}
 		tableRef := ds.Table(config.TableName)
 		if err := ensureTableAndSchema(ctx, bqTableAdapter{table: tableRef}, config, deniedColumns); err != nil {
+			notifySchemaError(onSchemaError, err, config.logf)
 			closeOwnedResources()
 			return nil, err
 		}
+		tableChecked = true
 	}
 
 	// Determine destination stream: default stream unless ExactlyOnceDelivery
@@ -579,8 +591,10 @@ func newBigQueryAgentAnalyticsPlugin(
 		logf := config.viewLogf()
 		var startupDefs []ViewDefinition
 		hasPerEventViews := false
+		viewValidationFailed := false
 		if config.createViews() {
 			if defsErr != nil {
+				viewValidationFailed = true
 				if logf != nil {
 					logf("agentanalytics: skipping view creation: %v", defsErr)
 				}
@@ -591,6 +605,7 @@ func newBigQueryAgentAnalyticsPlugin(
 		}
 		if config.CreateEvalViews {
 			if evalErr := cmp.Or(evalConfigErr, evalDefsErr); evalErr != nil {
+				viewValidationFailed = true
 				if logf != nil {
 					logf("agentanalytics: skipping view creation: %v", evalErr)
 				}
@@ -603,9 +618,20 @@ func newBigQueryAgentAnalyticsPlugin(
 			if !hasPerEventViews {
 				retryMethod = "SyncEvalViews"
 			}
-			// Pass only the non-default Logger hook so the goroutine does not retain Config.
-			state.startAsyncViewCreationWithRetryHint(ctx, startupDefs, logf, retryMethod, bqClient)
+			readyFn := onSchemaReady
+			if viewValidationFailed {
+				// One requested view group failed validation, so views are not
+				// ready as a whole; do not invoke OnSchemaReady.
+				readyFn = nil
+			}
+			// Pass only the non-default Logger hook so the goroutine does not
+			// retain Config. The pass calls OnSchemaReady once every view is
+			// created, and forgets the callback when it ends.
+			state.startAsyncViewCreationWithRetryHint(ctx, startupDefs, logf, retryMethod, bqClient, readyFn)
 		}
+	} else if tableChecked {
+		// No view pass runs, so the schema is ready once the table is.
+		notifySchemaReady(onSchemaReady, config.logf)
 	}
 	return adkPlugin, nil
 }
@@ -767,10 +793,7 @@ func (p *analyticsPlugin) recordPanic(format string, args ...any) {
 	if p.config.Enabled && p.processor != nil {
 		p.processor.recordAppendFailureDrop(1)
 	}
-	func() {
-		defer func() { _ = recover() }()
-		p.config.logf(format, args...)
-	}()
+	safeLogf(p.config.logf, format, args...)
 }
 
 // recoverCallback logs and suppresses panics raised inside plugin callbacks so
@@ -1062,22 +1085,29 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		}
 		p.emitSessionEventSignals(ctx, ev)
 		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor {
-			// ADK ends a task-mode LLM agent on the completion sentinel alone,
-			// so a finish_task response that also reports a tool result error
-			// ends the activation too, and it gets AGENT_ERROR instead of
-			// AGENT_COMPLETED.
-			if ends, failed, errMsg := taskEndResponse(ev.Content); ends {
-				taskID := evID
-				taskID.agentName = ev.Author
-				taskID.branch = ev.Branch
-				if span, ok := p.traces.popTaskAgentSpan(ctx, taskID, functionResponseCalls(ev.Content), failed); ok {
-					if failed {
+			taskID := evID
+			taskID.agentName = ev.Author
+			taskID.branch = ev.Branch
+			taskOut := classifyTaskResponses(ev.Content)
+			evDispatch := dispatchMapsOf(&ev.Actions)
+			if len(taskOut.retiredCallIDs) > 0 || len(taskOut.overruledEndingCallIDs) > 0 {
+				p.traces.retireFailedTaskAttemptsForEvent(ctx, taskID, taskOut.retiredCallIDs, taskOut.overruledEndingCallIDs, taskOut.leadingActionCallID, evDispatch, taskOut.mergedResponse, ev.Timestamp)
+			}
+			// ADK ends a task-mode LLM agent on the first finish_task
+			// FunctionResponse when it carries the completion sentinel, so a
+			// first response that also reports a tool result error ends the
+			// activation with AGENT_ERROR instead of AGENT_COMPLETED, while a
+			// non-ending first response keeps the task running even if a later
+			// part in the same event carries the sentinel.
+			if taskOut.ends {
+				if span, ok := p.traces.popTaskAgentSpanForEvent(ctx, taskID, taskOut.endingCallIDs, taskOut.leadingActionCallID, evDispatch, taskOut.failed, taskOut.mergedResponse, ev.Timestamp); ok {
+					if taskOut.failed {
 						p.logAgentErrors(ctx, taskID, []unclosedAgentSpan{{
 							span:      span,
 							agentName: taskID.agentName,
 							branch:    taskID.branch,
 							path:      taskID.path,
-							err:       errors.New(taskFailedPrefix + errMsg),
+							err:       errors.New(taskFailedPrefix + taskOut.errMsg),
 						}}, nil)
 					} else {
 						p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
@@ -1139,6 +1169,15 @@ const finishTaskToolName = "finish_task"
 // tool result error ended (see taskEndResult).
 const taskFailedPrefix = "finish_task ended the task with a tool result error: "
 
+// isTaskEndingResult reports whether ADK ends a task-mode LLM agent on the
+// finish_task response map resp, which it does when resp carries the
+// completion sentinel ("result": "Task completed."), whether or not resp also
+// reports a tool result error (see taskEndResult).
+func isTaskEndingResult(resp map[string]any) bool {
+	res, ok := resp["result"].(string)
+	return ok && res == "Task completed."
+}
+
 // taskEndResult reports whether ADK ends a task-mode LLM agent on the
 // finish_task response map resp, which it does when resp carries the
 // completion sentinel ("result": "Task completed."), and whether resp also
@@ -1146,29 +1185,90 @@ const taskFailedPrefix = "finish_task ended the task with a tool result error: "
 // is_error), with its diagnostic. A task that ends with such an error has
 // failed rather than completed.
 func taskEndResult(resp map[string]any) (ends, failed bool, errMsg string) {
-	if res, ok := resp["result"].(string); !ok || res != "Task completed." {
+	if !isTaskEndingResult(resp) {
 		return false, false, ""
 	}
 	errMsg, failed = classifyToolResultError(resp)
 	return true, failed, errMsg
 }
 
-// taskEndResponse applies taskEndResult to the first finish_task function
-// response in c, which is the one that decides whether ADK ends a task-mode
-// LLM agent.
-func taskEndResponse(c *genai.Content) (ends, failed bool, errMsg string) {
+// taskResponseOutcome summarizes the finish_task function responses in a
+// session event's content in a single pass. ADK's isFinishTaskSuccessFR
+// inspects only the first finish_task FunctionResponse in an event:
+//
+//   - If the first finish_task response carries the completion sentinel, ends
+//     is true, failed and errMsg come from taskEndResult on that first
+//     response, endingCallIDs holds the non-empty call IDs of all ending
+//     finish_task responses in part order (with endingCallID set to the first
+//     such call ID) so a trailing observed call ID can still resolve the
+//     activation when an earlier ending response had an empty or unobserved
+//     ID, and retiredCallIDs holds the non-empty call IDs of any subsequent
+//     non-ending finish_task responses in the same event.
+//   - If the first finish_task response does not carry the completion sentinel,
+//     ends is false (ADK keeps the task running), non-ending responses with
+//     non-empty call IDs are added to retiredCallIDs, and any subsequent
+//     sentinel-bearing responses with non-empty call IDs behind the failed
+//     first one are added to overruledEndingCallIDs so their observed ending
+//     attempts are retired even if the failed first response had an empty ID.
+type taskResponseOutcome struct {
+	ends                   bool
+	failed                 bool
+	mergedResponse         bool
+	errMsg                 string
+	leadingActionCallID    string
+	endingCallID           string
+	endingCallIDs          []string
+	retiredCallIDs         []string
+	overruledEndingCallIDs []string
+}
+
+func classifyTaskResponses(c *genai.Content) (out taskResponseOutcome) {
 	if c == nil {
-		return false, false, ""
+		return out
 	}
+	seenFirst := false
+	funcRespCount := 0
 	for _, part := range c.Parts {
 		if part == nil || part.FunctionResponse == nil {
 			continue
 		}
-		if part.FunctionResponse.Name == finishTaskToolName {
-			return taskEndResult(part.FunctionResponse.Response)
+		fr := part.FunctionResponse
+		funcRespCount++
+		if funcRespCount == 1 && fr.Name == finishTaskToolName && fr.ID != "" {
+			out.leadingActionCallID = fr.ID
+		}
+		if fr.Name != finishTaskToolName {
+			continue
+		}
+		if !seenFirst {
+			seenFirst = true
+			out.ends, out.failed, out.errMsg = taskEndResult(fr.Response)
+			if out.ends {
+				out.endingCallID = fr.ID
+				if fr.ID != "" {
+					out.endingCallIDs = append(out.endingCallIDs, fr.ID)
+				}
+			} else if fr.ID != "" {
+				out.retiredCallIDs = append(out.retiredCallIDs, fr.ID)
+			}
+			continue
+		}
+		if fr.ID == "" {
+			continue
+		}
+		if !isTaskEndingResult(fr.Response) {
+			out.retiredCallIDs = append(out.retiredCallIDs, fr.ID)
+		} else if out.ends {
+			if out.endingCallID == "" {
+				out.endingCallID = fr.ID
+			}
+			out.endingCallIDs = append(out.endingCallIDs, fr.ID)
+		} else {
+			out.overruledEndingCallIDs = append(out.overruledEndingCallIDs, fr.ID)
 		}
 	}
-	return false, false, ""
+	out.mergedResponse = funcRespCount > 1
+	return out
 }
 
 // functionResponseCalls returns the function call ID, or else the tool name,
@@ -1333,6 +1433,9 @@ func (p *analyticsPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[st
 	id := identityOf(ctx)
 	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
+	if name == finishTaskToolName {
+		p.traces.noteTaskStart(ctx, id, callID)
+	}
 	p.logEvent(ctx, id, EventToolStarting, func() rowSpan {
 		return p.traces.pushToolSpan(ctx, id, toolKey(id, callID, name))
 	}, func(d *eventData) {
@@ -1381,6 +1484,24 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	// result, so, as there, the call completes with the error that ADK sends
 	// the model as its result.
 	confirmationOutcome := isToolConfirmationOutcome(err)
+	if name == finishTaskToolName {
+		// Record every finish_task attempt on the calling activation before
+		// error returns or classification run. ADK emits a FunctionResponse
+		// carrying callID even when AfterToolCallback receives err != nil or a
+		// confirmation outcome, and a later plugin or agent-level
+		// AfterToolCallback can promote a failure into a completion (or rewrite
+		// a completion into an error) before that FunctionResponse arrives.
+		// Non-completion FunctionResponse events retire their own attempt in
+		// onEvent so reused call IDs cannot claim or retire another run's
+		// attempt. Whether an attempt ended the task, and failed it, follows
+		// the result that ADK sees (see taskEndResult), not the verdict of
+		// Config.ToolResultClassifier, which decides only this call's row.
+		var ends, failed bool
+		if err == nil && !confirmationOutcome {
+			ends, failed, _ = taskEndResult(result)
+		}
+		p.traces.noteTaskAttempt(ctx, id, callID, ends, failed)
+	}
 	if err != nil && !confirmationOutcome {
 		// OnToolErrorCallback normally owns the TOOL_ERROR row and sets
 		// closedByError; when an earlier plugin short-circuited
@@ -1391,27 +1512,24 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		}
 		return nil, nil
 	}
-	if !confirmationOutcome {
-		msg, failed := classifyToolResultError(result)
-		if name == finishTaskToolName {
-			if ends, _, _ := taskEndResult(result); ends {
-				// The finish_task response event that follows reaches
-				// OnEventCallback without the context of the activation that
-				// made the call. A failed call that does not end the task, such
-				// as one whose arguments failed validation, is not noted: the
-				// model can retry it.
-				p.traces.noteTaskFinished(ctx, id, callID, failed)
-			}
-		}
-		if failed {
-			if !closedByError {
-				p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
-			}
+	if confirmationOutcome {
+		// The tool has not run. ADK sends the model the confirmation outcome
+		// as the call's result, as adk-python does, so the row carries it,
+		// and the classifier sees it, as it does there.
+		result = map[string]any{"error": err.Error()}
+	}
+	if closedByError {
+		// A call whose failure OnToolErrorCallback already recorded has its
+		// TOOL_ERROR row; the classifier is not asked about the result that a
+		// later plugin recovered it into, and a recovered result that the
+		// built-in rules still classify as an error writes no TOOL_COMPLETED
+		// row.
+		if _, failed := classifyToolResultError(result); failed {
 			return nil, nil
 		}
-	}
-	if confirmationOutcome {
-		result = map[string]any{"error": err.Error()}
+	} else if msg, failed := p.classifyToolResultError(ctx, t, args, result); failed {
+		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
+		return nil, nil
 	}
 	p.logEvent(ctx, id, EventToolCompleted, func() rowSpan { return span }, func(d *eventData) {
 		origin := p.resolveToolOrigin(ctx, id, t, args)
@@ -1445,6 +1563,9 @@ func (p *analyticsPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[s
 	id := identityOf(ctx)
 	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
+	if name == finishTaskToolName {
+		p.traces.noteTaskStart(ctx, id, callID)
+	}
 	span, purged, _ := p.traces.popToolSpan(ctx, id, toolKey(id, callID, name), true)
 	// An agent that the call ran as a tool and that failed ends with it.
 	p.logPurgedAgents(ctx, id, purged)
@@ -1455,6 +1576,12 @@ func (p *analyticsPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[s
 }
 
 const mcpToolErrorMessage = "Tool returned an MCP result with isError=true."
+
+// classifiedToolErrorMessage is the error_message of a result that
+// Config.ToolResultClassifier records as TOOL_ERROR without a message of its
+// own. It matches adk-python, whose classifier is tool_result_classifier, so
+// that rows from either language can be queried together.
+const classifiedToolErrorMessage = "tool_result_classifier classified the tool result as an error."
 
 func (p *analyticsPlugin) logToolError(ctx context.Context, id identity, t tool.Tool, spanFn func() rowSpan, name, callID string, args map[string]any, err error) {
 	p.logEvent(ctx, id, EventToolError, spanFn, func(d *eventData) {
@@ -1519,6 +1646,50 @@ func mcpResultError(result map[string]any) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// classifyToolResultError returns the error_message of the TOOL_ERROR row of a
+// result that a tool returned without an error, and true, or false to record
+// the result as TOOL_COMPLETED. Config.ToolResultClassifier decides first: its
+// ToolResultError verdict records the row, with the classifier's ErrorMessage,
+// or classifiedToolErrorMessage when that is empty, as the error_message, and
+// its ToolResultOK verdict completes the call, whatever the result holds. When
+// the classifier is nil, abstains, panics or returns a decision that is not
+// defined, the package-level classifyToolResultError decides with the
+// plugin's built-in rules.
+func (p *analyticsPlugin) classifyToolResultError(ctx agent.Context, t tool.Tool, args, result map[string]any) (string, bool) {
+	if p.config.ToolResultClassifier != nil {
+		switch verdict := p.runToolResultClassifier(ctx, t, args, result); verdict.Decision {
+		case ToolResultOK:
+			return "", false
+		case ToolResultError:
+			return cmp.Or(verdict.ErrorMessage, classifiedToolErrorMessage), true
+		}
+	}
+	return classifyToolResultError(result)
+}
+
+// runToolResultClassifier calls Config.ToolResultClassifier and returns its
+// verdict, or an abstaining verdict when the classifier panicked or returned
+// a decision that is not defined, so that the call is recorded as if the
+// classifier abstained. Warnings omit the tool name (which can be an
+// unregistered model-hallucinated call answered by a BeforeToolCallback) and
+// format only the panic type string or numeric decision so neither the tool
+// name nor the raw panic value reaches Config.Logger.
+func (p *analyticsPlugin) runToolResultClassifier(ctx agent.Context, t tool.Tool, args, result map[string]any) (verdict ToolResultVerdict) {
+	defer func() {
+		if r := recover(); r != nil {
+			verdict = ToolResultVerdict{}
+			safeLogf(p.config.logf, "agentanalytics: ToolResultClassifier failed: recovered panic of type %s; recording the call as if the classifier abstained", fmt.Sprintf("%T", r))
+		}
+	}()
+	verdict = p.config.ToolResultClassifier(ctx, t, args, result)
+	switch verdict.Decision {
+	case ToolResultAbstain, ToolResultOK, ToolResultError:
+		return verdict
+	}
+	safeLogf(p.config.logf, "agentanalytics: ToolResultClassifier returned an unusable verdict %d; recording the call as if the classifier abstained", int(verdict.Decision))
+	return ToolResultVerdict{}
 }
 
 // toolName returns the name of t, or "" if t is nil or its Name method
