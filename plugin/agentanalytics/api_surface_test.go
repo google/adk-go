@@ -152,7 +152,26 @@ func TestStructLiterals_ExternalKeyedComparableAndJSON(t *testing.T) {
 		t.Fatalf("distinct ViewDefinition values compared equal: %#v == %#v", viewA, viewC)
 	}
 
-	// Pin cmp.Equal without options on the four exported value structs. Blank
+	verdictA := agentanalytics.ToolResultVerdict{
+		Decision:     agentanalytics.ToolResultError,
+		ErrorMessage: "classified failure",
+	}
+	verdictB := agentanalytics.ToolResultVerdict{
+		Decision:     agentanalytics.ToolResultError,
+		ErrorMessage: "classified failure",
+	}
+	verdictC := agentanalytics.ToolResultVerdict{
+		Decision:     agentanalytics.ToolResultOK,
+		ErrorMessage: "classified failure",
+	}
+	if verdictA != verdictB {
+		t.Fatalf("equal ToolResultVerdict values compared unequal: %#v != %#v", verdictA, verdictB)
+	}
+	if verdictA == verdictC {
+		t.Fatalf("distinct ToolResultVerdict values compared equal: %#v == %#v", verdictA, verdictC)
+	}
+
+	// Pin cmp.Equal without options on the five exported value structs. Blank
 	// `_ struct{}` guards are ignored by go-cmp, whereas adding a named
 	// unexported field to any of these structs would make cmp.Equal panic for
 	// external callers.
@@ -180,6 +199,12 @@ func TestStructLiterals_ExternalKeyedComparableAndJSON(t *testing.T) {
 		}
 		if cmp.Equal(uploadReqA, uploadReqC) {
 			t.Errorf("cmp.Equal(uploadReqA, uploadReqC) = true, want false")
+		}
+		if !cmp.Equal(verdictA, verdictB) {
+			t.Errorf("cmp.Equal(verdictA, verdictB) = false, want true")
+		}
+		if cmp.Equal(verdictA, verdictC) {
+			t.Errorf("cmp.Equal(verdictA, verdictC) = true, want false")
 		}
 	})
 
@@ -243,6 +268,7 @@ type guardedStruct struct {
 func guardedStructs() []guardedStruct {
 	return []guardedStruct{
 		{name: "RetryConfig", typ: reflect.TypeFor[agentanalytics.RetryConfig]()},
+		{name: "ToolResultVerdict", typ: reflect.TypeFor[agentanalytics.ToolResultVerdict]()},
 		{name: "DropStats", typ: reflect.TypeFor[agentanalytics.DropStats]()},
 		{name: "GCSUploadRequest", typ: reflect.TypeFor[agentanalytics.GCSUploadRequest]()},
 		{name: "ViewDefinition", typ: reflect.TypeFor[agentanalytics.ViewDefinition]()},
@@ -338,12 +364,9 @@ func TestRetryConfig_ValidationErrorIncludesAllExportedFields(t *testing.T) {
 	if strings.Contains(msg, "_:") || strings.Contains(msg, "struct {}") {
 		t.Fatalf("RetryConfig validation error leaked guard field: %q", msg)
 	}
-	for sf := range reflect.TypeFor[agentanalytics.RetryConfig]().Fields() {
-		if !sf.IsExported() {
-			continue
-		}
-		if !strings.Contains(msg, sf.Name+":") {
-			t.Errorf("RetryConfig validation error %q does not include exported field %q", msg, sf.Name)
+	for _, name := range []string{"MaxRetries", "InitialDelay", "MaxDelay", "Multiplier"} {
+		if !strings.Contains(msg, name+":") {
+			t.Errorf("RetryConfig validation error %q does not include validated field %q", msg, name)
 		}
 	}
 }
@@ -411,21 +434,61 @@ func TestGuardedStructs_JSONTagAndReflectionEncoderOmitsGuard(t *testing.T) {
 		EventType: agentanalytics.EventLLMRequest,
 		Query:     "SELECT 1",
 	}
+	verdict := agentanalytics.ToolResultVerdict{
+		Decision:     agentanalytics.ToolResultError,
+		ErrorMessage: "classified failure",
+	}
 
 	for _, tc := range []struct {
-		name string
-		val  any
-		dst  any
+		name     string
+		val      any
+		dst      any
+		wantJSON string
+		wantKeys []string
 	}{
-		{name: "RetryConfig", val: retry, dst: &agentanalytics.RetryConfig{}},
-		{name: "DropStats", val: drops, dst: &agentanalytics.DropStats{}},
-		{name: "GCSUploadRequest", val: upload, dst: &agentanalytics.GCSUploadRequest{}},
-		{name: "ViewDefinition", val: view, dst: &agentanalytics.ViewDefinition{}},
+		{
+			name:     "RetryConfig",
+			val:      retry,
+			dst:      &agentanalytics.RetryConfig{},
+			wantJSON: `{"MaxRetries":3,"InitialDelay":100000000,"MaxDelay":10000000000,"Multiplier":2}`,
+			wantKeys: []string{"MaxRetries", "InitialDelay", "MaxDelay", "Multiplier"},
+		},
+		{
+			name:     "ToolResultVerdict",
+			val:      verdict,
+			dst:      &agentanalytics.ToolResultVerdict{},
+			wantJSON: `{"Decision":2,"ErrorMessage":"classified failure"}`,
+			wantKeys: []string{"Decision", "ErrorMessage"},
+		},
+		{
+			name:     "DropStats",
+			val:      drops,
+			dst:      &agentanalytics.DropStats{},
+			wantJSON: `{"queue_full_drops":1,"append_failure_drops":2,"row_error_drops":3,"formatter_failure_drops":4,"shutdown_drops":5,"total_drops":11}`,
+			wantKeys: []string{"queue_full_drops", "append_failure_drops", "row_error_drops", "formatter_failure_drops", "shutdown_drops", "total_drops"},
+		},
+		{
+			name:     "GCSUploadRequest",
+			val:      upload,
+			dst:      &agentanalytics.GCSUploadRequest{},
+			wantJSON: `{"Path":"prefix/obj.txt","Data":"cGF5bG9hZA==","ContentType":"text/plain"}`,
+			wantKeys: []string{"Path", "Data", "ContentType"},
+		},
+		{
+			name:     "ViewDefinition",
+			val:      view,
+			dst:      &agentanalytics.ViewDefinition{},
+			wantJSON: `{"Name":"v_llm_request","EventType":"LLM_REQUEST","Query":"SELECT 1"}`,
+			wantKeys: []string{"Name", "EventType", "Query"},
+		},
 	} {
 		t.Run(tc.name+"_StrictJSON", func(t *testing.T) {
 			raw, err := json.Marshal(tc.val)
 			if err != nil {
 				t.Fatalf("json.Marshal(%s) failed: %v", tc.name, err)
+			}
+			if string(raw) != tc.wantJSON {
+				t.Fatalf("json.Marshal(%s) = %s, want %s", tc.name, raw, tc.wantJSON)
 			}
 			var m map[string]any
 			if err := json.Unmarshal(raw, &m); err != nil {
@@ -434,10 +497,23 @@ func TestGuardedStructs_JSONTagAndReflectionEncoderOmitsGuard(t *testing.T) {
 			if _, hasGuard := m["_"]; hasGuard {
 				t.Fatalf("json.Marshal(%s) emitted %q key in %s", tc.name, "_", raw)
 			}
+			if len(m) != len(tc.wantKeys) {
+				t.Fatalf("json.Marshal(%s) key count = %d (%v), want %d (%v)", tc.name, len(m), m, len(tc.wantKeys), tc.wantKeys)
+			}
+			for _, key := range tc.wantKeys {
+				v, ok := m[key]
+				if !ok || reflect.ValueOf(v).IsZero() {
+					t.Fatalf("json.Marshal(%s) missing or zero key %q in %s", tc.name, key, raw)
+				}
+			}
 			dec := json.NewDecoder(bytes.NewReader(raw))
 			dec.DisallowUnknownFields()
 			if err := dec.Decode(tc.dst); err != nil {
 				t.Fatalf("strict json.Decode(%s) failed: %v (payload %s)", tc.name, err, raw)
+			}
+			got := reflect.ValueOf(tc.dst).Elem().Interface()
+			if diff := cmp.Diff(tc.val, got); diff != "" {
+				t.Fatalf("strict json round-trip %s mismatch (-want +got):\n%s", tc.name, diff)
 			}
 		})
 	}

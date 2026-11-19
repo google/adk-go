@@ -58,7 +58,10 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	baseplugin "google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/plugin/loggingplugin"
+	"google.golang.org/adk/v2/plugin/retryandreflect"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -287,6 +290,13 @@ func setupTestPlugin(t *testing.T) (*baseplugin.Plugin, chan *storagepb.AppendRo
 	return setupTestPluginWithConfig(t, nil)
 }
 
+func setupTestPluginWithTraces(t *testing.T) (*baseplugin.Plugin, *traceManager, chan *storagepb.AppendRowsRequest, *mockInvocationContext) {
+	t.Helper()
+	p, tm, requestsChan, mCtx := newTestPluginWithConfigAndTraces(t, nil)
+	t.Cleanup(func() { _ = p.Close() })
+	return p, tm, requestsChan, mCtx
+}
+
 // setupTestPluginWithConfig creates a plugin that writes to a fake BigQuery
 // Storage Write server, whose requests are delivered on the returned channel.
 // mutate, if set, adjusts the test configuration first. The plugin is closed
@@ -301,6 +311,12 @@ func setupTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.
 // newTestPluginWithConfig is setupTestPluginWithConfig for tests that close
 // the plugin themselves.
 func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Plugin, chan *storagepb.AppendRowsRequest, *mockInvocationContext) {
+	t.Helper()
+	p, _, requestsChan, mCtx := newTestPluginWithConfigAndTraces(t, mutate)
+	return p, requestsChan, mCtx
+}
+
+func newTestPluginWithConfigAndTraces(t *testing.T, mutate func(*Config)) (*baseplugin.Plugin, *traceManager, chan *storagepb.AppendRowsRequest, *mockInvocationContext) {
 	t.Helper()
 	ctx := context.Background()
 	config := DefaultConfig()
@@ -353,7 +369,7 @@ func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Pl
 		t.Fatalf("Failed to create bigquery client: %v", err)
 	}
 
-	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+	p, traces, err := newBigQueryAgentAnalyticsPluginWithTraces(ctx, config, bqClient, writeClient, false)
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
 	}
@@ -366,7 +382,7 @@ func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Pl
 		userID:       "user-id",
 	}
 
-	return p, requestsChan, mCtx
+	return p, traces, requestsChan, mCtx
 }
 
 func TestOnEventCallback_AppendsToWriter(t *testing.T) {
@@ -1886,19 +1902,27 @@ func TestToolCallbacks_NilToolDoesNotPanic(t *testing.T) {
 	errs.add(p.BeforeToolCallback()(mCtx, nil, map[string]any{"q": "1"}))
 	errs.add(p.OnToolErrorCallback()(mCtx, nil, map[string]any{"q": "1"}, errors.New("tool not found")))
 	errs.add(p.AfterToolCallback()(mCtx, nil, map[string]any{"q": "1"}, map[string]any{"ok": true}, nil))
+	call2Ctx := withFunctionCall(mCtx, "call-2")
+	errs.add(p.BeforeToolCallback()(call2Ctx, nil, map[string]any{"q": "2"}))
+	errs.add(p.AfterToolCallback()(call2Ctx, nil, map[string]any{"q": "2"}, map[string]any{"ok": true}, nil))
 	errs.check(t)
 	p.AfterRunCallback()(mCtx)
 
 	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-	if diff := cmp.Diff([]string{EventToolStarting, EventToolError, EventToolCompleted, EventInvocationCompleted}, eventTypes(rows)); diff != "" {
+	if diff := cmp.Diff([]string{EventToolStarting, EventToolError, EventToolStarting, EventToolCompleted, EventInvocationCompleted}, eventTypes(rows)); diff != "" {
 		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
 	}
-	startRow := onlyRowOfType(t, rows, EventToolStarting)
+	startRow := rowsOfType(rows, EventToolStarting)[0]
 	errRow := onlyRowOfType(t, rows, EventToolError)
+	if errRow["span_id"] != startRow["span_id"] {
+		t.Errorf("errRow span_id = %v, want equal to TOOL_STARTING span_id %v",
+			errRow["span_id"], startRow["span_id"])
+	}
+	start2Row := rowsOfType(rows, EventToolStarting)[1]
 	doneRow := onlyRowOfType(t, rows, EventToolCompleted)
-	if errRow["span_id"] != startRow["span_id"] || doneRow["span_id"] != startRow["span_id"] {
-		t.Errorf("span_ids = (%v, %v, %v), want all equal to TOOL_STARTING span_id",
-			startRow["span_id"], errRow["span_id"], doneRow["span_id"])
+	if doneRow["span_id"] != start2Row["span_id"] {
+		t.Errorf("doneRow span_id = %v, want equal to second TOOL_STARTING span_id %v",
+			doneRow["span_id"], start2Row["span_id"])
 	}
 	checkJSON(t, "TOOL_STARTING content", jsonObjectColumn(t, startRow, "content"),
 		`{"tool":"","args":{"q":"1"},"tool_origin":"UNKNOWN"}`)
@@ -2438,9 +2462,9 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableSetup(t *testing.T) {
 		{
 			name:           "409 from create with DisableSchemaUpgrade keeps the table as is",
 			disableUpgrade: true,
-			getStatuses:    []int{http.StatusNotFound},
+			getStatuses:    []int{http.StatusNotFound, http.StatusOK},
 			postStatus:     http.StatusConflict,
-			wantGets:       1,
+			wantGets:       2,
 			wantPost:       true,
 		},
 		{
@@ -5209,7 +5233,7 @@ func TestPlugin_ToolResultIsError(t *testing.T) {
 		}
 	})
 
-	t.Run("isTaskCompletedResult and hasTaskCompletedResponse reject mixed error maps", func(t *testing.T) {
+	t.Run("taskEndResult and classifyTaskResponses classify mixed error maps", func(t *testing.T) {
 		finishResp := func(m map[string]any) *genai.Content {
 			return &genai.Content{
 				Role: "user",
@@ -5225,15 +5249,14 @@ func TestPlugin_ToolResultIsError(t *testing.T) {
 		for _, tc := range []struct {
 			name string
 			resp map[string]any
-			want bool
 			// wantEnds reports that ADK ends the task on resp, which it does
 			// on the sentinel alone; wantFailed that resp also fails it.
 			wantEnds, wantFailed bool
 		}{
-			{name: "genuine sentinel", resp: map[string]any{"result": "Task completed."}, want: true, wantEnds: true},
-			{name: "isError false", resp: map[string]any{"result": "Task completed.", "isError": false}, want: true, wantEnds: true},
-			{name: "is_error false", resp: map[string]any{"result": "Task completed.", "is_error": false}, want: true, wantEnds: true},
-			{name: "isError non-boolean string true", resp: map[string]any{"result": "Task completed.", "isError": "true"}, want: true, wantEnds: true},
+			{name: "genuine sentinel", resp: map[string]any{"result": "Task completed."}, wantEnds: true},
+			{name: "isError false", resp: map[string]any{"result": "Task completed.", "isError": false}, wantEnds: true},
+			{name: "is_error false", resp: map[string]any{"result": "Task completed.", "is_error": false}, wantEnds: true},
+			{name: "isError non-boolean string true", resp: map[string]any{"result": "Task completed.", "isError": "true"}, wantEnds: true},
 			{name: "mixed sentinel and isError true", resp: map[string]any{"result": "Task completed.", "isError": true}, wantEnds: true, wantFailed: true},
 			{name: "mixed sentinel and is_error true", resp: map[string]any{"result": "Task completed.", "is_error": true}, wantEnds: true, wantFailed: true},
 			{name: "isError true without sentinel", resp: map[string]any{"isError": true}},
@@ -5241,26 +5264,24 @@ func TestPlugin_ToolResultIsError(t *testing.T) {
 			{name: "nil map", resp: nil},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				if got := isTaskCompletedResult(tc.resp); got != tc.want {
-					t.Errorf("isTaskCompletedResult(%v) = %v, want %v", tc.resp, got, tc.want)
-				}
-				if got := hasTaskCompletedResponse(finishResp(tc.resp)); got != tc.want {
-					t.Errorf("hasTaskCompletedResponse(%v) = %v, want %v", tc.resp, got, tc.want)
-				}
 				wantMsg := ""
 				if tc.wantFailed {
 					wantMsg = mcpToolErrorMessage
 				}
-				ends, failed, msg := taskEndResponse(finishResp(tc.resp))
+				ends, failed, msg := taskEndResult(tc.resp)
 				if ends != tc.wantEnds || failed != tc.wantFailed || msg != wantMsg {
-					t.Errorf("taskEndResponse(%v) = (%v, %v, %q), want (%v, %v, %q)", tc.resp, ends, failed, msg, tc.wantEnds, tc.wantFailed, wantMsg)
+					t.Errorf("taskEndResult() = (%v, %v, %q), want (%v, %v, %q)", ends, failed, msg, tc.wantEnds, tc.wantFailed, wantMsg)
+				}
+				out := classifyTaskResponses(finishResp(tc.resp))
+				if out.ends != tc.wantEnds || out.failed != tc.wantFailed || out.errMsg != wantMsg {
+					t.Errorf("classifyTaskResponses() = (ends=%v, failed=%v, errMsg=%q), want (ends=%v, failed=%v, errMsg=%q)", out.ends, out.failed, out.errMsg, tc.wantEnds, tc.wantFailed, wantMsg)
 				}
 			})
 		}
-		if hasTaskCompletedResponse(nil) {
-			t.Error("hasTaskCompletedResponse(nil) = true, want false")
+		if out := classifyTaskResponses(nil); out.ends || out.failed || out.errMsg != "" {
+			t.Errorf("classifyTaskResponses(nil) = (ends=%v, failed=%v, errMsg=%q), want (false, false, \"\")", out.ends, out.failed, out.errMsg)
 		}
-		if hasTaskCompletedResponse(&genai.Content{
+		if out := classifyTaskResponses(&genai.Content{
 			Role: "user",
 			Parts: []*genai.Part{{
 				FunctionResponse: &genai.FunctionResponse{
@@ -5269,8 +5290,8 @@ func TestPlugin_ToolResultIsError(t *testing.T) {
 					Response: map[string]any{"result": "Task completed."},
 				},
 			}},
-		}) {
-			t.Error("hasTaskCompletedResponse(other_tool) = true, want false")
+		}); out.ends || out.failed || out.errMsg != "" {
+			t.Errorf("classifyTaskResponses(other_tool) = (ends=%v, failed=%v, errMsg=%q), want (false, false, \"\")", out.ends, out.failed, out.errMsg)
 		}
 	})
 
@@ -5380,7 +5401,7 @@ func TestPlugin_ToolResultIsError(t *testing.T) {
 										yield(nil, err)
 										return
 									}
-									if hasTaskCompletedResponse(ev.Content) {
+									if out := classifyTaskResponses(ev.Content); out.ends && !out.failed {
 										held = append(held, ev)
 										continue
 									}
@@ -5647,23 +5668,6 @@ func TestPlugin_ToolErrorTypedNilPathError(t *testing.T) {
 			}
 		}
 	})
-}
-
-// isTaskCompletedResult reports whether a finish_task response map carries the
-// successful completion sentinel ("result": "Task completed.") without a
-// classified tool result error (see taskEndResult).
-func isTaskCompletedResult(resp map[string]any) bool {
-	ends, failed, _ := taskEndResult(resp)
-	return ends && !failed
-}
-
-// hasTaskCompletedResponse reports whether c carries a successful
-// finish_task function response ("result": "Task completed." without a
-// classified tool result error), which ends a task-mode LLM agent in ADK
-// without running its AfterAgentCallback.
-func hasTaskCompletedResponse(c *genai.Content) bool {
-	ends, failed, _ := taskEndResponse(c)
-	return ends && !failed
 }
 
 // requireInvocationCompletedOKWithAgentErrors is requireInvocationCompletedOK
@@ -6017,7 +6021,7 @@ func TestMCPRecoverySingleToolError(t *testing.T) {
 										yield(nil, err)
 										return
 									}
-									// Match FunctionResponse.Name rather than hasTaskCompletedResponse
+									// Match FunctionResponse.Name rather than classifyTaskResponses
 									// so even the rejected finish_task event reaches OnEventCallback.
 									if buffered && hasFinishTaskResponse(ev.Content) {
 										held = append(held, ev)
@@ -6106,7 +6110,7 @@ func TestMCPRecoverySingleToolError(t *testing.T) {
 				var callSeq atomic.Int32
 
 				// Agent-level AfterToolCallbacks run after plugin AfterToolCallbacks, so
-				// noteTaskFinished records "call-1" in finishedTasks before the callback
+				// noteTaskAttempt records "call-1" in finishedTasks before the callback
 				// adds flagKey to Activation 1's response. Even when both responses are
 				// buffered, AGENT_ERROR must close Activation 1 and AGENT_COMPLETED must
 				// close Activation 2 rather than swapping spans.
@@ -7583,5 +7587,2620 @@ func TestPlugin_PanicSitesNeverPassRawPanicValueToLogger(t *testing.T) {
 	}
 	if !sawCallbackDrop || !sawEndFallback || !sawFlushFallback {
 		t.Fatalf("missing expected panic log sites: callback=%t endFallback=%t flushFallback=%t; calls=%+v", sawCallbackDrop, sawEndFallback, sawFlushFallback, calls)
+	}
+}
+
+func TestRetryAnswerError(t *testing.T) {
+	tests := []struct {
+		name    string
+		result  map[string]any
+		wantMsg string
+		wantOK  bool
+	}{
+		{
+			name:   "nil map",
+			result: nil,
+		},
+		{
+			name:   "empty map",
+			result: map[string]any{},
+		},
+		{
+			name:   "missing response_type",
+			result: map[string]any{"error_details": "boom"},
+		},
+		{
+			name:   "non-string response_type",
+			result: map[string]any{"response_type": 42, "error_details": "boom"},
+		},
+		{
+			name:   "other response_type",
+			result: map[string]any{"response_type": "OK", "error_details": "boom"},
+		},
+		{
+			name: "matching response_type extracts error_details",
+			result: map[string]any{
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "connection reset by peer",
+				"error_type":    "NetworkError",
+			},
+			wantMsg: "connection reset by peer",
+			wantOK:  true,
+		},
+		{
+			name: "falls back to error_type when error_details empty or non-string",
+			result: map[string]any{
+				"response_type": reflectAndRetryResponseType,
+				"error_details": 123,
+				"error_type":    "ValueError",
+			},
+			wantMsg: "ValueError",
+			wantOK:  true,
+		},
+		{
+			name: "falls back to error_type when error_details empty string",
+			result: map[string]any{
+				"response_type": reflectAndRetryResponseType,
+				"error_details": "",
+				"error_type":    "TimeoutError",
+			},
+			wantMsg: "TimeoutError",
+			wantOK:  true,
+		},
+		{
+			name: "falls back to default message when details and type missing or non-string",
+			result: map[string]any{
+				"response_type": reflectAndRetryResponseType,
+				"error_details": []string{"x"},
+				"error_type":    false,
+			},
+			wantMsg: reflectAndRetryFallbackErrorMessage,
+			wantOK:  true,
+		},
+		{
+			name: "falls back to default message when only response_type set",
+			result: map[string]any{
+				"response_type": reflectAndRetryResponseType,
+			},
+			wantMsg: reflectAndRetryFallbackErrorMessage,
+			wantOK:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, ok := retryAnswerError(tc.result, false)
+			if ok != tc.wantOK || msg != tc.wantMsg {
+				t.Errorf("retryAnswerError(%v, false) = (%q, %v), want (%q, %v)", tc.result, msg, ok, tc.wantMsg, tc.wantOK)
+			}
+			wantSuppressedMsg := ""
+			if tc.wantOK {
+				wantSuppressedMsg = reflectAndRetryFallbackErrorMessage
+			}
+			suppressedMsg, suppressedOK := retryAnswerError(tc.result, true)
+			if suppressedOK != tc.wantOK || suppressedMsg != wantSuppressedMsg {
+				t.Errorf("retryAnswerError(%v, true) = (%q, %v), want (%q, %v)", tc.result, suppressedMsg, suppressedOK, wantSuppressedMsg, tc.wantOK)
+			}
+		})
+	}
+}
+
+func runFailingToolWithPlugins(
+	t *testing.T,
+	toolName string,
+	finalResponseTools []string,
+	agentOnToolError llmagent.OnToolErrorCallback,
+	pluginsFn func(analyticsPlugin *baseplugin.Plugin) []*baseplugin.Plugin,
+) []map[string]any {
+	t.Helper()
+	p, requests, _ := setupTestPluginWithConfig(t, func(c *Config) {
+		c.FinalResponseToolNames = finalResponseTools
+	})
+	failingTool, err := functiontool.New(functiontool.Config{
+		Name:        toolName,
+		Description: "Always fails",
+	}, func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+		return nil, errors.New("boom")
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+	llm := &scriptedLLM{responses: []*model.LLMResponse{
+		{Content: genai.NewContentFromParts([]*genai.Part{
+			genai.NewPartFromFunctionCall(toolName, map[string]any{"x": "1"}),
+		}, genai.RoleModel)},
+		{Content: textContent("model", "done"), TurnComplete: true},
+	}}
+	var onToolErrs []llmagent.OnToolErrorCallback
+	if agentOnToolError != nil {
+		onToolErrs = append(onToolErrs, agentOnToolError)
+	}
+	bot, err := llmagent.New(llmagent.Config{
+		Name:                 "bot",
+		Model:                llm,
+		Tools:                []tool.Tool{failingTool},
+		OnToolErrorCallbacks: onToolErrs,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	r := newTestRunner(t, bot, pluginsFn(p)...)
+	for _, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("r.Run unexpected error: %v", runErr)
+		}
+	}
+	return collectRows(t, requests, untilInvocationEnd)
+}
+
+func TestPlugin_RecoveredToolError_AgentCallback(t *testing.T) {
+	rows := runFailingToolWithPlugins(t, "lookup", nil,
+		func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+			return map[string]any{"answer": "recovered"}, nil
+		},
+		func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+			return []*baseplugin.Plugin{p}
+		},
+	)
+	if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+		t.Fatalf("got %d TOOL_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+	}
+	startRow := onlyRowOfType(t, rows, EventToolStarting)
+	errRow := onlyRowOfType(t, rows, EventToolError)
+	if got, want := placeOf(errRow), placeOf(startRow); got != want {
+		t.Errorf("TOOL_ERROR span = %+v, want %+v", got, want)
+	}
+	mustLatency(t, errRow)
+	if errRow["status"] != "ERROR" {
+		t.Errorf("TOOL_ERROR status = %v, want ERROR", errRow["status"])
+	}
+	if errRow["error_message"] != "boom" {
+		t.Errorf("TOOL_ERROR error_message = %v, want %q", errRow["error_message"], "boom")
+	}
+}
+
+func TestPlugin_RecoveredToolError_LaterPlugin(t *testing.T) {
+	t.Run("custom plugin after analytics", func(t *testing.T) {
+		recoverPlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "recover",
+			OnToolErrorCallback: func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+				return map[string]any{"answer": "recovered"}, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+		rows := runFailingToolWithPlugins(t, "lookup", nil, nil, func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+			return []*baseplugin.Plugin{p, recoverPlugin}
+		})
+		if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+			t.Fatalf("got %d TOOL_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+		}
+		errRow := onlyRowOfType(t, rows, EventToolError)
+		if errRow["status"] != "ERROR" || errRow["error_message"] != "boom" {
+			t.Errorf("TOOL_ERROR = (status=%v, error_message=%v), want (ERROR, boom)", errRow["status"], errRow["error_message"])
+		}
+	})
+
+	t.Run("retryandreflect after analytics", func(t *testing.T) {
+		rrPlugin, err := retryandreflect.New()
+		if err != nil {
+			t.Fatalf("retryandreflect.New: %v", err)
+		}
+		rows := runFailingToolWithPlugins(t, "lookup", nil, nil, func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+			return []*baseplugin.Plugin{p, rrPlugin}
+		})
+		if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+			t.Fatalf("got %d TOOL_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+		}
+		errRow := onlyRowOfType(t, rows, EventToolError)
+		if errRow["status"] != "ERROR" || errRow["error_message"] != "boom" {
+			t.Errorf("TOOL_ERROR = (status=%v, error_message=%v), want (ERROR, boom)", errRow["status"], errRow["error_message"])
+		}
+	})
+}
+
+func TestPlugin_RecoveredToolError_RetryAndReflectBeforeAnalytics(t *testing.T) {
+	t.Run("normal retry guidance", func(t *testing.T) {
+		rrPlugin, err := retryandreflect.New()
+		if err != nil {
+			t.Fatalf("retryandreflect.New: %v", err)
+		}
+		rows := runFailingToolWithPlugins(t, "lookup", nil, nil, func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+			return []*baseplugin.Plugin{rrPlugin, p}
+		})
+		if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+			t.Fatalf("got %d TOOL_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+		}
+		startRow := onlyRowOfType(t, rows, EventToolStarting)
+		errRow := onlyRowOfType(t, rows, EventToolError)
+		if got, want := placeOf(errRow), placeOf(startRow); got != want {
+			t.Errorf("TOOL_ERROR span = %+v, want %+v", got, want)
+		}
+		mustLatency(t, errRow)
+		if errRow["status"] != "ERROR" || errRow["error_message"] != "boom" {
+			t.Errorf("TOOL_ERROR = (status=%v, error_message=%v), want (ERROR, boom)", errRow["status"], errRow["error_message"])
+		}
+		checkJSON(t, "TOOL_ERROR content", jsonObjectColumn(t, errRow, "content"),
+			`{"tool":"lookup","args":{"x":"1"},"tool_origin":"LOCAL"}`)
+	})
+
+	t.Run("WithMaxRetries(0) exceeded-retries guidance", func(t *testing.T) {
+		rrPlugin, err := retryandreflect.New(retryandreflect.WithMaxRetries(0))
+		if err != nil {
+			t.Fatalf("retryandreflect.New: %v", err)
+		}
+		rows := runFailingToolWithPlugins(t, "lookup", nil, nil, func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+			return []*baseplugin.Plugin{rrPlugin, p}
+		})
+		if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+			t.Fatalf("got %d TOOL_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+		}
+		errRow := onlyRowOfType(t, rows, EventToolError)
+		if errRow["status"] != "ERROR" || errRow["error_message"] != "boom" {
+			t.Errorf("TOOL_ERROR = (status=%v, error_message=%v), want (ERROR, boom)", errRow["status"], errRow["error_message"])
+		}
+	})
+
+	t.Run("WithErrorIfRetryExceeded(true) passthrough", func(t *testing.T) {
+		rrPlugin, err := retryandreflect.New(
+			retryandreflect.WithMaxRetries(0),
+			retryandreflect.WithErrorIfRetryExceeded(true),
+		)
+		if err != nil {
+			t.Fatalf("retryandreflect.New: %v", err)
+		}
+		p, requests, _ := setupTestPlugin(t)
+		failingTool, err := functiontool.New(functiontool.Config{
+			Name:        "lookup",
+			Description: "Always fails",
+		}, func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+			return nil, errors.New("boom")
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New: %v", err)
+		}
+		llm := &scriptedLLM{responses: []*model.LLMResponse{
+			{Content: genai.NewContentFromParts([]*genai.Part{
+				genai.NewPartFromFunctionCall("lookup", map[string]any{"x": "1"}),
+			}, genai.RoleModel)},
+			{Content: textContent("model", "done"), TurnComplete: true},
+		}}
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Model: llm,
+			Tools: []tool.Tool{failingTool},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		r := newTestRunner(t, bot, rrPlugin, p)
+		var fnResp *genai.FunctionResponse
+		for ev, e := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+			if e != nil {
+				t.Fatalf("r.Run yielded unexpected error: %v", e)
+			}
+			if ev != nil && ev.Content != nil {
+				for _, part := range ev.Content.Parts {
+					if part != nil && part.FunctionResponse != nil {
+						fnResp = part.FunctionResponse
+					}
+				}
+			}
+		}
+		if fnResp == nil {
+			t.Fatal("missing FunctionResponse event")
+		}
+		if diff := cmp.Diff(map[string]any{"error": "boom"}, fnResp.Response); diff != "" {
+			t.Fatalf("FunctionResponse.Response mismatch (-want +got):\n%s", diff)
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+			t.Fatalf("got %d TOOL_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+		}
+		startRow := onlyRowOfType(t, rows, EventAgentStarting)
+		errRow := onlyRowOfType(t, rows, EventToolError)
+		if errRow["status"] != "ERROR" || errRow["error_message"] != "boom" {
+			t.Errorf("TOOL_ERROR = (status=%v, error_message=%v), want (ERROR, boom)", errRow["status"], errRow["error_message"])
+		}
+		if errRow["trace_id"] != startRow["trace_id"] {
+			t.Errorf("TOOL_ERROR trace_id = %v, want %v", errRow["trace_id"], startRow["trace_id"])
+		}
+		mustLatency(t, errRow)
+	})
+
+	t.Run("error_type fallback when error_details empty or non-string", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			errorDetails any
+		}{
+			{"empty string", ""},
+			{"non-string int", 123},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				toolCtx := withFunctionCall(mCtx, "call-err-type")
+				tl := &fakeTool{name: "lookup"}
+				args := map[string]any{"x": "1"}
+				ans := map[string]any{
+					"response_type": "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN",
+					"error_details": tc.errorDetails,
+					"error_type":    "*errors.errorString",
+				}
+				var errs callbackErrors
+				errs.add(p.BeforeAgentCallback()(mCtx))
+				errs.add(p.BeforeToolCallback()(toolCtx, tl, args))
+				errs.add(p.AfterToolCallback()(toolCtx, tl, args, ans, nil))
+				errs.add(p.AfterAgentCallback()(mCtx))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+					t.Fatalf("got %d TOOL_COMPLETED rows, want 0", n)
+				}
+				errRow := onlyRowOfType(t, rows, EventToolError)
+				if errRow["error_message"] != "*errors.errorString" {
+					t.Errorf("TOOL_ERROR error_message = %v, want %q", errRow["error_message"], "*errors.errorString")
+				}
+			})
+		}
+	})
+
+	t.Run("crafted non-string error_details and error_type uses fixed fallback", func(t *testing.T) {
+		p, requests, mCtx := setupTestPlugin(t)
+		toolCtx := withFunctionCall(mCtx, "call-fallback")
+		tl := &fakeTool{name: "lookup"}
+		args := map[string]any{"x": "1"}
+		ans := map[string]any{
+			"response_type": "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN",
+			"error_details": 42,
+			"error_type":    []string{"not-a-string"},
+		}
+		var errs callbackErrors
+		errs.add(p.BeforeAgentCallback()(mCtx))
+		errs.add(p.BeforeToolCallback()(toolCtx, tl, args))
+		errs.add(p.AfterToolCallback()(toolCtx, tl, args, ans, nil))
+		errs.add(p.AfterAgentCallback()(mCtx))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+			t.Fatalf("got %d TOOL_COMPLETED rows, want 0", n)
+		}
+		errRow := onlyRowOfType(t, rows, EventToolError)
+		wantMsg := "Tool raised an error that ReflectAndRetryToolPlugin handled."
+		if errRow["error_message"] != wantMsg {
+			t.Errorf("TOOL_ERROR error_message = %v, want %q", errRow["error_message"], wantMsg)
+		}
+	})
+}
+
+func assertNoFinalResponseFromTool(t *testing.T, rows []map[string]any, toolName string) {
+	t.Helper()
+	for _, row := range rowsOfType(rows, EventAgentResponse) {
+		attrs := jsonObjectColumn(t, row, "attributes")
+		if attrs["source_tool"] == toolName {
+			t.Errorf("got unexpected AGENT_RESPONSE with source_tool=%q: %+v", toolName, row)
+		}
+	}
+}
+
+func TestPlugin_RecoveredToolError_FinalResponseToolSuppressed(t *testing.T) {
+	t.Run("agent OnToolErrorCallback", func(t *testing.T) {
+		rows := runFailingToolWithPlugins(t, "final_answer", []string{"final_answer"},
+			func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+				return map[string]any{"answer": "recovered"}, nil
+			},
+			func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+				return []*baseplugin.Plugin{p}
+			},
+		)
+		if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+			t.Errorf("got %d TOOL_COMPLETED rows, want 0", n)
+		}
+		assertNoFinalResponseFromTool(t, rows, "final_answer")
+		onlyRowOfType(t, rows, EventToolError)
+	})
+
+	t.Run("retryandreflect before analytics", func(t *testing.T) {
+		rrPlugin, err := retryandreflect.New()
+		if err != nil {
+			t.Fatalf("retryandreflect.New: %v", err)
+		}
+		rows := runFailingToolWithPlugins(t, "final_answer", []string{"final_answer"}, nil,
+			func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+				return []*baseplugin.Plugin{rrPlugin, p}
+			},
+		)
+		if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+			t.Errorf("got %d TOOL_COMPLETED rows, want 0", n)
+		}
+		assertNoFinalResponseFromTool(t, rows, "final_answer")
+		onlyRowOfType(t, rows, EventToolError)
+	})
+}
+
+func TestPlugin_RecoveredToolError_ConfirmationOutcomesUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"required", tool.ErrConfirmationRequired},
+		{"rejected", tool.ErrConfirmationRejected},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+				c.FinalResponseToolNames = []string{"final_answer"}
+			})
+			toolCtx := withFunctionCall(mCtx, "call-confirm")
+			tl := &fakeTool{name: "final_answer"}
+			args := map[string]any{"answer": "draft"}
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(mCtx))
+			errs.add(p.BeforeToolCallback()(toolCtx, tl, args))
+			errs.add(p.OnToolErrorCallback()(toolCtx, tl, args, tc.err))
+			errs.add(p.AfterToolCallback()(toolCtx, tl, args, nil, tc.err))
+			errs.add(p.AfterAgentCallback()(mCtx))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n := len(rowsOfType(rows, EventToolError)); n != 0 {
+				t.Errorf("got %d TOOL_ERROR rows, want 0", n)
+			}
+			if n := len(rowsOfType(rows, EventAgentResponse)); n != 0 {
+				t.Errorf("got %d AGENT_RESPONSE rows, want 0", n)
+			}
+			compRow := onlyRowOfType(t, rows, EventToolCompleted)
+			if compRow["status"] != "OK" {
+				t.Errorf("TOOL_COMPLETED status = %v, want OK", compRow["status"])
+			}
+		})
+	}
+
+	t.Run("replacement confirmation error after onToolError emits no duplicate TOOL_COMPLETED", func(t *testing.T) {
+		p, requests, mCtx := setupTestPlugin(t)
+		toolCtx := withFunctionCall(mCtx, "call-confirm-after-err")
+		tl := &fakeTool{name: "lookup"}
+		args := map[string]any{"q": "1"}
+		var errs callbackErrors
+		errs.add(p.BeforeAgentCallback()(mCtx))
+		errs.add(p.BeforeToolCallback()(toolCtx, tl, args))
+		errs.add(p.OnToolErrorCallback()(toolCtx, tl, args, errors.New("boom")))
+		errs.add(p.AfterToolCallback()(toolCtx, tl, args, nil, tool.ErrConfirmationRequired))
+		errs.add(p.AfterAgentCallback()(mCtx))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		want := []string{
+			EventAgentStarting,
+			EventToolStarting,
+			EventToolError,
+			EventAgentCompleted,
+			EventInvocationCompleted,
+		}
+		if diff := cmp.Diff(want, eventTypes(rows)); diff != "" {
+			t.Fatalf("event types mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestPlugin_RecoveredToolError_SequentialRetry(t *testing.T) {
+	t.Run("distinct FunctionCall.IDs via runner", func(t *testing.T) {
+		for _, mode := range []struct {
+			name             string
+			agentOnToolError llmagent.OnToolErrorCallback
+			pluginsFn        func(analytics *baseplugin.Plugin) []*baseplugin.Plugin
+		}{
+			{
+				name: "agent OnToolErrorCallback",
+				agentOnToolError: func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+					return map[string]any{"retry": true}, nil
+				},
+				pluginsFn: func(p *baseplugin.Plugin) []*baseplugin.Plugin { return []*baseplugin.Plugin{p} },
+			},
+			{
+				name: "retryandreflect after analytics",
+				pluginsFn: func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+					rr, err := retryandreflect.New()
+					if err != nil {
+						t.Fatalf("retryandreflect.New: %v", err)
+					}
+					return []*baseplugin.Plugin{p, rr}
+				},
+			},
+			{
+				name: "retryandreflect before analytics",
+				pluginsFn: func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+					rr, err := retryandreflect.New()
+					if err != nil {
+						t.Fatalf("retryandreflect.New: %v", err)
+					}
+					return []*baseplugin.Plugin{rr, p}
+				},
+			},
+		} {
+			t.Run(mode.name, func(t *testing.T) {
+				p, requests, _ := setupTestPluginWithConfig(t, func(c *Config) {
+					c.FinalResponseToolNames = []string{"final_answer"}
+				})
+				var calls atomic.Int32
+				flakyTool, err := functiontool.New(functiontool.Config{
+					Name:        "final_answer",
+					Description: "Fails once then succeeds",
+				}, func(_ agent.Context, args map[string]any) (map[string]any, error) {
+					if calls.Add(1) == 1 {
+						return nil, errors.New("boom")
+					}
+					return map[string]any{"accepted": true, "answer": args["answer"]}, nil
+				})
+				if err != nil {
+					t.Fatalf("functiontool.New: %v", err)
+				}
+				llm := &scriptedLLM{responses: []*model.LLMResponse{
+					{Content: genai.NewContentFromParts([]*genai.Part{{
+						FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "final_answer", Args: map[string]any{"answer": "bad"}},
+					}}, genai.RoleModel)},
+					{Content: genai.NewContentFromParts([]*genai.Part{{
+						FunctionCall: &genai.FunctionCall{ID: "call-2", Name: "final_answer", Args: map[string]any{"answer": "good"}},
+					}}, genai.RoleModel)},
+					{Content: textContent("model", "done"), TurnComplete: true},
+				}}
+				var onToolErrs []llmagent.OnToolErrorCallback
+				if mode.agentOnToolError != nil {
+					onToolErrs = append(onToolErrs, mode.agentOnToolError)
+				}
+				bot, err := llmagent.New(llmagent.Config{
+					Name:                 "bot",
+					Model:                llm,
+					Tools:                []tool.Tool{flakyTool},
+					OnToolErrorCallbacks: onToolErrs,
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New: %v", err)
+				}
+				for _, runErr := range newTestRunner(t, bot, mode.pluginsFn(p)...).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+					if runErr != nil {
+						t.Fatalf("r.Run error: %v", runErr)
+					}
+				}
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				requireInvocationCompletedOK(t, rows)
+
+				starts := rowsOfType(rows, EventToolStarting)
+				if len(starts) != 2 {
+					t.Fatalf("got %d TOOL_STARTING rows, want 2; events=%v", len(starts), eventTypes(rows))
+				}
+				if placeOf(starts[0]).span == placeOf(starts[1]).span {
+					t.Errorf("expected distinct TOOL_STARTING spans, got %+v and %+v", placeOf(starts[0]), placeOf(starts[1]))
+				}
+
+				errRow := onlyRowOfType(t, rows, EventToolError)
+				if got, want := placeOf(errRow), placeOf(starts[0]); got != want {
+					t.Errorf("TOOL_ERROR span = %+v, want Call 1 span %+v", got, want)
+				}
+				mustLatency(t, errRow)
+				if errRow["status"] != "ERROR" || errRow["error_message"] != "boom" {
+					t.Errorf("TOOL_ERROR = (status=%v, error_message=%v), want (ERROR, boom)", errRow["status"], errRow["error_message"])
+				}
+				checkJSONAt(t, jsonObjectColumn(t, errRow, "attributes"), `"call-1"`, "adk", "function_call_id")
+
+				compRow := onlyRowOfType(t, rows, EventToolCompleted)
+				if got, want := placeOf(compRow), placeOf(starts[1]); got != want {
+					t.Errorf("TOOL_COMPLETED span = %+v, want Call 2 span %+v", got, want)
+				}
+				mustLatency(t, compRow)
+				if compRow["status"] != "OK" {
+					t.Errorf("TOOL_COMPLETED status = %v, want OK", compRow["status"])
+				}
+				checkJSONAt(t, jsonObjectColumn(t, compRow, "attributes"), `"call-2"`, "adk", "function_call_id")
+				checkJSON(t, "TOOL_COMPLETED content", jsonObjectColumn(t, compRow, "content"),
+					`{"tool":"final_answer","result":{"accepted":true,"answer":"good"},"tool_origin":"LOCAL"}`)
+
+				agentResps := rowsOfType(rows, EventAgentResponse)
+				if len(agentResps) != 2 {
+					t.Fatalf("got %d AGENT_RESPONSE rows, want 2 (Call 2 source_tool + final model text); events=%v", len(agentResps), eventTypes(rows))
+				}
+				checkJSONAt(t, jsonObjectColumn(t, agentResps[0], "attributes"), `"final_answer"`, "source_tool")
+				checkJSONAt(t, jsonObjectColumn(t, agentResps[0], "attributes"), `"call-2"`, "adk", "function_call_id")
+				checkJSON(t, "Call 2 final response content", jsonObjectColumn(t, agentResps[0], "content"), `{"response":{"answer":"good"}}`)
+				checkJSON(t, "final model text content", jsonObjectColumn(t, agentResps[1], "content"), `{"response":"text: 'done'"}`)
+			})
+		}
+	})
+}
+
+// TestPlugin_RecoveredToolError_LoggingPluginOrder verifies that recovered
+// tool errors suppress TOOL_COMPLETED and any tool-promoted AGENT_RESPONSE
+// regardless of plugin registration order.
+func TestPlugin_RecoveredToolError_LoggingPluginOrder(t *testing.T) {
+	for _, kind := range []struct {
+		name              string
+		finalResponseTool bool
+	}{
+		{name: "regular_tool", finalResponseTool: false},
+		{name: "final_response_tool", finalResponseTool: true},
+	} {
+		for _, mode := range []string{
+			"analytics_only",
+			"logging_plugin_first",
+			"logging_plugin_after",
+			"split_before_and_after_plugins_first",
+		} {
+			t.Run(kind.name+"/"+mode, func(t *testing.T) {
+				const wantCompleted, wantAgentResp = 0, 1
+				p, requests, _ := setupTestPluginWithConfig(t, func(c *Config) {
+					if kind.finalResponseTool {
+						c.FinalResponseToolNames = []string{"final_answer"}
+					}
+				})
+				toolName := "flaky"
+				if kind.finalResponseTool {
+					toolName = "final_answer"
+				}
+				flaky, err := functiontool.New(functiontool.Config{
+					Name:        toolName,
+					Description: "always fails",
+				}, func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+					return nil, errors.New("flaky failed")
+				})
+				if err != nil {
+					t.Fatalf("functiontool.New: %v", err)
+				}
+				a, err := llmagent.New(llmagent.Config{
+					Name: "probe",
+					Model: &scriptedLLM{responses: []*model.LLMResponse{
+						{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+							FunctionCall: &genai.FunctionCall{
+								ID:   "call-1",
+								Name: toolName,
+								Args: map[string]any{"x": 1},
+							},
+						}}}},
+						{Content: textContent("model", "done")},
+					}},
+					Tools: []tool.Tool{flaky},
+					OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+						func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+							return map[string]any{"recovered": true}, nil
+						},
+					},
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New: %v", err)
+				}
+				plugins := []*baseplugin.Plugin{p}
+				switch mode {
+				case "logging_plugin_first":
+					plugins = []*baseplugin.Plugin{loggingplugin.MustNew("log"), p}
+				case "logging_plugin_after":
+					plugins = []*baseplugin.Plugin{p, loggingplugin.MustNew("log")}
+				case "split_before_and_after_plugins_first":
+					beforeOnly, err := baseplugin.New(baseplugin.Config{
+						Name: "before_only",
+						BeforeToolCallback: func(_ agent.Context, _ tool.Tool, _ map[string]any) (map[string]any, error) {
+							return nil, nil
+						},
+					})
+					if err != nil {
+						t.Fatalf("baseplugin.New(before_only): %v", err)
+					}
+					afterOnly, err := baseplugin.New(baseplugin.Config{
+						Name: "after_only",
+						AfterToolCallback: func(_ agent.Context, _ tool.Tool, _, _ map[string]any, _ error) (map[string]any, error) {
+							return nil, nil
+						},
+					})
+					if err != nil {
+						t.Fatalf("baseplugin.New(after_only): %v", err)
+					}
+					plugins = []*baseplugin.Plugin{beforeOnly, afterOnly, p}
+				}
+				for _, runErr := range newTestRunner(t, a, plugins...).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						t.Fatalf("runner.Run error: %v", runErr)
+					}
+				}
+				rows := collectRows(t, requests, untilInvocationEnd)
+				requireInvocationCompletedOK(t, rows)
+				if te := len(rowsOfType(rows, EventToolError)); te != 1 {
+					t.Errorf("got TOOL_ERROR=%d, want 1; events=%v", te, eventTypes(rows))
+				}
+				if tc := len(rowsOfType(rows, EventToolCompleted)); tc != wantCompleted {
+					t.Errorf("got TOOL_COMPLETED=%d, want %d; events=%v", tc, wantCompleted, eventTypes(rows))
+				}
+				if ar := len(rowsOfType(rows, EventAgentResponse)); ar != wantAgentResp {
+					t.Errorf("got AGENT_RESPONSE=%d, want %d; events=%v", ar, wantAgentResp, eventTypes(rows))
+				}
+			})
+		}
+	}
+}
+
+// argumentMutatingAfterToolPlugin returns a plugin whose AfterToolCallback
+// changes the tool call's arguments in place and passes the call on.
+func argumentMutatingAfterToolPlugin(t *testing.T) *baseplugin.Plugin {
+	t.Helper()
+	pl, err := baseplugin.New(baseplugin.Config{
+		Name: "mutate_args",
+		AfterToolCallback: func(_ agent.Context, _ tool.Tool, args, _ map[string]any, _ error) (map[string]any, error) {
+			args["x"] = "changed by an earlier AfterToolCallback"
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+	return pl
+}
+
+// TestPlugin_RecoveredToolError_ArgumentsMutatedInPlace runs a failing tool
+// through the runner while a callback that runs between this plugin's
+// OnToolErrorCallback and AfterToolCallback changes the call's arguments in
+// place: an earlier plugin's AfterToolCallback, or the agent's
+// OnToolErrorCallback that counts retries in the arguments. The
+// AfterToolCallback still belongs to the attempt whose failure
+// OnToolErrorCallback recorded, so an unrecovered failure ends with one
+// TOOL_ERROR row and a recovered one with no TOOL_COMPLETED row.
+func TestPlugin_RecoveredToolError_ArgumentsMutatedInPlace(t *testing.T) {
+	countRetries := func(recover bool) llmagent.OnToolErrorCallback {
+		return func(_ agent.Context, _ tool.Tool, args map[string]any, _ error) (map[string]any, error) {
+			n, _ := args["retries"].(int)
+			args["retries"] = n + 1
+			if recover {
+				return map[string]any{"answer": "recovered"}, nil
+			}
+			return nil, nil
+		}
+	}
+	recoverOnly := func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+		return map[string]any{"answer": "recovered"}, nil
+	}
+	for _, tc := range []struct {
+		name          string
+		earlierPlugin bool
+		agentCallback llmagent.OnToolErrorCallback
+	}{
+		{name: "earlier_after_tool_plugin/unrecovered", earlierPlugin: true},
+		{name: "earlier_after_tool_plugin/recovered", earlierPlugin: true, agentCallback: recoverOnly},
+		{name: "agent_on_tool_error/unrecovered", agentCallback: countRetries(false)},
+		{name: "agent_on_tool_error/recovered", agentCallback: countRetries(true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := runFailingToolWithPlugins(t, "lookup", nil, tc.agentCallback, func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+				if tc.earlierPlugin {
+					return []*baseplugin.Plugin{argumentMutatingAfterToolPlugin(t), p}
+				}
+				return []*baseplugin.Plugin{p}
+			})
+			if n := len(rowsOfType(rows, EventToolError)); n != 1 {
+				t.Fatalf("got %d TOOL_ERROR rows, want 1; events=%v", n, eventTypes(rows))
+			}
+			if errRow := onlyRowOfType(t, rows, EventToolError); errRow["error_message"] != "boom" {
+				t.Errorf("TOOL_ERROR error_message = %v, want boom", errRow["error_message"])
+			}
+			if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+				t.Errorf("got %d TOOL_COMPLETED rows, want 0; events=%v", n, eventTypes(rows))
+			}
+		})
+	}
+}
+
+// sharedNestedArgs returns tool arguments whose map with int keys holds
+// values that several of its entries share.
+func sharedNestedArgs() map[string]any {
+	sharedSlice := []any{"a", map[string]any{"b": 1}}
+	sharedMap := map[string]any{"c": []int{1, 2}}
+	nested := map[int]any{}
+	for i := range 16 {
+		if i%2 == 0 {
+			nested[i] = sharedSlice
+		} else {
+			nested[i] = sharedMap
+		}
+	}
+	return map[string]any{"q": "1", "nested": nested}
+}
+
+// TestPlugin_RecoveredToolError_SharedNestedArgsUnrecovered fails 16 tool
+// calls through the runner whose arguments share nested values inside a map
+// with int keys, verifying that each unrecovered failure emits one TOOL_ERROR
+// row and no TOOL_COMPLETED row.
+func TestPlugin_RecoveredToolError_SharedNestedArgsUnrecovered(t *testing.T) {
+	const calls = 16
+	t.Run("runner", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		failing, err := functiontool.New(functiontool.Config{
+			Name:        "lookup",
+			Description: "Always fails",
+		}, func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+			return nil, errors.New("boom")
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New: %v", err)
+		}
+		var responses []*model.LLMResponse
+		for i := range calls {
+			responses = append(responses, &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("call-%d", i), Name: "lookup", Args: sharedNestedArgs()},
+			}}}})
+		}
+		responses = append(responses, &model.LLMResponse{Content: textContent("model", "done")})
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Model: &scriptedLLM{responses: responses},
+			Tools: []tool.Tool{failing},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		for _, runErr := range newTestRunner(t, bot, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventToolError)); n != calls {
+			t.Errorf("got %d TOOL_ERROR rows, want %d", n, calls)
+		}
+		if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+			t.Errorf("got %d TOOL_COMPLETED rows, want 0", n)
+		}
+	})
+}
+
+func TestPlugin_RecoveredToolError_RetryAndReflectAfterThisPlugin(t *testing.T) {
+	requireCounts := func(t *testing.T, rows []map[string]any, wantErrors, wantCompleted int) {
+		t.Helper()
+		if n, m := len(rowsOfType(rows, EventToolError)), len(rowsOfType(rows, EventToolCompleted)); n != wantErrors || m != wantCompleted {
+			t.Errorf("got TOOL_ERROR=%d TOOL_COMPLETED=%d, want %d and %d; events=%v", n, m, wantErrors, wantCompleted, eventTypes(rows))
+		}
+	}
+	for _, order := range []string{"logging_plugin_first", "this_plugin_first"} {
+		t.Run("runner/"+order, func(t *testing.T) {
+			retry, err := retryandreflect.New()
+			if err != nil {
+				t.Fatalf("retryandreflect.New: %v", err)
+			}
+			rows := runFailingToolWithPlugins(t, "lookup", nil, nil, func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+				if order == "logging_plugin_first" {
+					return []*baseplugin.Plugin{loggingplugin.MustNew("log"), p, retry}
+				}
+				return []*baseplugin.Plugin{p, retry}
+			})
+			requireCounts(t, rows, 1, 0)
+		})
+	}
+}
+
+func TestPlugin_RecoveredToolError_ParallelCallsInOneResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		agentOnToolError llmagent.OnToolErrorCallback
+		pluginsFn        func(analytics *baseplugin.Plugin) []*baseplugin.Plugin
+	}{
+		{
+			name: "agent OnToolErrorCallback",
+			agentOnToolError: func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+				return map[string]any{"recovered": true}, nil
+			},
+			pluginsFn: func(p *baseplugin.Plugin) []*baseplugin.Plugin { return []*baseplugin.Plugin{p} },
+		},
+		{
+			name: "retryandreflect after analytics",
+			pluginsFn: func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+				rr, err := retryandreflect.New()
+				if err != nil {
+					t.Fatalf("retryandreflect.New: %v", err)
+				}
+				return []*baseplugin.Plugin{p, rr}
+			},
+		},
+		{
+			name: "retryandreflect before analytics",
+			pluginsFn: func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+				rr, err := retryandreflect.New()
+				if err != nil {
+					t.Fatalf("retryandreflect.New: %v", err)
+				}
+				return []*baseplugin.Plugin{rr, p}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			lookup, err := functiontool.New(functiontool.Config{
+				Name:        "lookup",
+				Description: "Fails when fail=true and succeeds otherwise",
+			}, func(_ agent.Context, args map[string]any) (map[string]any, error) {
+				if fail, _ := args["fail"].(bool); fail {
+					return nil, errors.New("boom")
+				}
+				return map[string]any{"ok": true}, nil
+			})
+			if err != nil {
+				t.Fatalf("functiontool.New: %v", err)
+			}
+			llm := &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: genai.NewContentFromParts([]*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: "call-fail", Name: "lookup", Args: map[string]any{"fail": true}}},
+					{FunctionCall: &genai.FunctionCall{ID: "call-ok", Name: "lookup", Args: map[string]any{"fail": false}}},
+				}, genai.RoleModel)},
+				{Content: textContent("model", "done"), TurnComplete: true},
+			}}
+			var onToolErrs []llmagent.OnToolErrorCallback
+			if tc.agentOnToolError != nil {
+				onToolErrs = append(onToolErrs, tc.agentOnToolError)
+			}
+			bot, err := llmagent.New(llmagent.Config{
+				Name:                 "bot",
+				Model:                llm,
+				Tools:                []tool.Tool{lookup},
+				OnToolErrorCallbacks: onToolErrs,
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			for _, runErr := range newTestRunner(t, bot, tc.pluginsFn(p)...).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOK(t, rows)
+
+			starts := rowsOfType(rows, EventToolStarting)
+			if len(starts) != 2 {
+				t.Fatalf("got %d TOOL_STARTING rows, want 2; events=%v", len(starts), eventTypes(rows))
+			}
+			if placeOf(starts[0]).span == placeOf(starts[1]).span {
+				t.Errorf("expected distinct TOOL_STARTING spans, got %+v and %+v", placeOf(starts[0]), placeOf(starts[1]))
+			}
+			errRow := onlyRowOfType(t, rows, EventToolError)
+			compRow := onlyRowOfType(t, rows, EventToolCompleted)
+			if placeOf(errRow).span == placeOf(compRow).span {
+				t.Errorf("TOOL_ERROR and TOOL_COMPLETED unexpectedly share span %q", placeOf(errRow).span)
+			}
+			mustLatency(t, errRow)
+			mustLatency(t, compRow)
+			if errRow["status"] != "ERROR" || errRow["error_message"] != "boom" {
+				t.Errorf("TOOL_ERROR = (status=%v, error_message=%v), want (ERROR, boom)", errRow["status"], errRow["error_message"])
+			}
+			if compRow["status"] != "OK" {
+				t.Errorf("TOOL_COMPLETED status = %v, want OK", compRow["status"])
+			}
+			checkJSON(t, "TOOL_COMPLETED content", jsonObjectColumn(t, compRow, "content"),
+				`{"tool":"lookup","result":{"ok":true},"tool_origin":"LOCAL"}`)
+
+			startBySpan := map[string]tracePlace{
+				placeOf(starts[0]).span: placeOf(starts[0]),
+				placeOf(starts[1]).span: placeOf(starts[1]),
+			}
+			if want, ok := startBySpan[placeOf(errRow).span]; !ok || placeOf(errRow) != want {
+				t.Errorf("TOOL_ERROR span %+v does not match either TOOL_STARTING span %+v", placeOf(errRow), starts)
+			}
+			if want, ok := startBySpan[placeOf(compRow).span]; !ok || placeOf(compRow) != want {
+				t.Errorf("TOOL_COMPLETED span %+v does not match either TOOL_STARTING span %+v", placeOf(compRow), starts)
+			}
+			checkJSONAt(t, jsonObjectColumn(t, errRow, "attributes"), `"call-fail"`, "adk", "function_call_id")
+			checkJSONAt(t, jsonObjectColumn(t, compRow, "attributes"), `"call-ok"`, "adk", "function_call_id")
+		})
+	}
+}
+
+type nonFunctionTool struct{ *fakeTool }
+
+func (n *nonFunctionTool) ProcessRequest(_ agent.Context, req *model.LLMRequest) error {
+	if req.Tools == nil {
+		req.Tools = make(map[string]any)
+	}
+	req.Tools[n.Name()] = n
+	return nil
+}
+
+func TestPlugin_RecoveredToolError_MissingOrNonFunctionToolWithRetryAndReflect(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		toolName       string
+		tools          []tool.Tool
+		rrFirst        bool
+		wantStartCount int
+		wantErrorCount int
+	}{
+		{
+			name:           "missing_tool/retryandreflect_before_analytics",
+			toolName:       "missing_tool",
+			rrFirst:        true,
+			wantStartCount: 1,
+			wantErrorCount: 0,
+		},
+		{
+			name:           "missing_tool/retryandreflect_after_analytics",
+			toolName:       "missing_tool",
+			rrFirst:        false,
+			wantStartCount: 1,
+			wantErrorCount: 1,
+		},
+		{
+			name:           "non_function_tool/retryandreflect_before_analytics",
+			toolName:       "custom_tool",
+			tools:          []tool.Tool{&nonFunctionTool{fakeTool: &fakeTool{name: "custom_tool"}}},
+			rrFirst:        true,
+			wantStartCount: 0,
+			wantErrorCount: 0,
+		},
+		{
+			name:           "non_function_tool/retryandreflect_after_analytics",
+			toolName:       "custom_tool",
+			tools:          []tool.Tool{&nonFunctionTool{fakeTool: &fakeTool{name: "custom_tool"}}},
+			rrFirst:        false,
+			wantStartCount: 0,
+			wantErrorCount: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			rr, err := retryandreflect.New()
+			if err != nil {
+				t.Fatalf("retryandreflect.New: %v", err)
+			}
+			llm := &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: genai.NewContentFromParts([]*genai.Part{{
+					FunctionCall: &genai.FunctionCall{ID: "call-1", Name: tc.toolName, Args: map[string]any{"x": 1}},
+				}}, genai.RoleModel)},
+				{Content: textContent("model", "done"), TurnComplete: true},
+			}}
+			bot, err := llmagent.New(llmagent.Config{
+				Name:  "bot",
+				Model: llm,
+				Tools: tc.tools,
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			plugins := []*baseplugin.Plugin{p, rr}
+			if tc.rrFirst {
+				plugins = []*baseplugin.Plugin{rr, p}
+			}
+			for _, runErr := range newTestRunner(t, bot, plugins...).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOK(t, rows)
+			if got := len(rowsOfType(rows, EventToolStarting)); got != tc.wantStartCount {
+				t.Errorf("got %d TOOL_STARTING rows, want %d; events=%v", got, tc.wantStartCount, eventTypes(rows))
+			}
+			if got := len(rowsOfType(rows, EventToolError)); got != tc.wantErrorCount {
+				t.Errorf("got %d TOOL_ERROR rows, want %d; events=%v", got, tc.wantErrorCount, eventTypes(rows))
+			}
+			if got := len(rowsOfType(rows, EventToolCompleted)); got != 0 {
+				t.Errorf("got %d TOOL_COMPLETED rows, want 0; events=%v", got, eventTypes(rows))
+			}
+		})
+	}
+}
+
+func TestPlugin_RecoveredToolError_ErrorOnlyDoesNotRetainArgs(t *testing.T) {
+	const numCalls = 128
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+		c.BatchSize = 16
+		c.BatchFlushIntv = 10 * time.Millisecond
+		c.MaxContentLen = 512
+	})
+	missing := &fakeTool{name: "missing"}
+	toolErr := errors.New("tool failed")
+
+	weakBufs := make([]weak.Pointer[byte], 0, numCalls)
+	runCall := func(i int) {
+		buf := bytes.Repeat([]byte("a"), 1<<20)
+		weakBufs = append(weakBufs, weak.Make(&buf[0]))
+		args := map[string]any{"blob": buf}
+		callCtx := withFunctionCall(mCtx, fmt.Sprintf("call-%d", i))
+		var errs callbackErrors
+		errs.add(p.BeforeToolCallback()(callCtx, missing, args))
+		errs.add(p.OnToolErrorCallback()(callCtx, missing, args, toolErr))
+		errs.check(t)
+	}
+	var agentErrs callbackErrors
+	agentErrs.add(p.BeforeAgentCallback()(mCtx))
+	agentErrs.check(t)
+	for i := range numCalls {
+		runCall(i)
+	}
+
+	// Wait for the async batch worker to flush the TOOL_ERROR rows before the
+	// invocation ends so only traceManager state remains live.
+	_ = collectRows(t, requests, func(rows []map[string]any) bool {
+		return len(rowsOfType(rows, EventToolError)) >= numCalls
+	})
+
+	collected := func() int {
+		n := 0
+		for _, wp := range weakBufs {
+			if wp.Value() == nil {
+				n++
+			}
+		}
+		return n
+	}
+	for range 20 {
+		runtime.Gosched()
+		runtime.GC()
+		if collected() == numCalls {
+			break
+		}
+	}
+	if got := collected(); got != numCalls {
+		t.Errorf("GC collected %d/%d 1 MiB arg payloads before AfterRunCallback, want all %d collected", got, numCalls, numCalls)
+	}
+
+	agentErrs.add(p.AfterAgentCallback()(mCtx))
+	agentErrs.check(t)
+	p.AfterRunCallback()(mCtx)
+	_ = collectRows(t, requests, untilInvocationEnd)
+}
+
+func TestPlugin_RecoveredToolError_FreshContextBetweenErrorAndAfterTool(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		afterErr error
+		afterRes map[string]any
+	}{
+		{
+			name:     "unrecovered_error_suppresses_duplicate_TOOL_ERROR",
+			afterErr: errors.New("boom"),
+		},
+		{
+			name:     "recovered_result_suppresses_TOOL_COMPLETED",
+			afterRes: map[string]any{"answer": "recovered"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			tl := &fakeTool{name: "lookup"}
+			args := map[string]any{"q": "1"}
+
+			// The three tool contexts share the call's EventActions, as every
+			// context that ADK builds for the callbacks of one call does (see
+			// toolAttempt); contexts over distinct EventActions are distinct
+			// attempts.
+			actions := &session.EventActions{}
+			beforeCtx := agent.NewToolContext(mCtx, "call-fresh", actions, nil)
+			errCtx := agent.NewToolContext(mCtx, "call-fresh", actions, nil)
+			afterCtx := agent.NewToolContext(mCtx, "call-fresh", actions, nil)
+
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(mCtx))
+			errs.add(p.BeforeToolCallback()(beforeCtx, tl, args))
+			errs.add(p.OnToolErrorCallback()(errCtx, tl, args, errors.New("boom")))
+			ev := session.NewEvent(mCtx, mCtx.InvocationID())
+			ev.Author = mCtx.AgentName()
+			ev.Content = textContent("model", "interim")
+			errs.add(p.OnEventCallback()(mCtx, ev))
+			errs.add(p.AfterToolCallback()(afterCtx, tl, args, tc.afterRes, tc.afterErr))
+			errs.add(p.AfterAgentCallback()(mCtx))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOK(t, rows)
+			if got := len(rowsOfType(rows, EventToolStarting)); got != 1 {
+				t.Errorf("got %d TOOL_STARTING rows, want 1; events=%v", got, eventTypes(rows))
+			}
+			if got := len(rowsOfType(rows, EventToolError)); got != 1 {
+				t.Errorf("got %d TOOL_ERROR rows, want 1; events=%v", got, eventTypes(rows))
+			}
+			if got := len(rowsOfType(rows, EventToolCompleted)); got != 0 {
+				t.Errorf("got %d TOOL_COMPLETED rows, want 0; events=%v", got, eventTypes(rows))
+			}
+		})
+	}
+}
+
+// TestPlugin_RecoveredToolError_FinishTaskCall0Reuse verifies that when two
+// ModeTask runs reuse "call_0" — Run 1 succeeds with "call_0" while the
+// coordinator briefly holds its completion event, and Run 2 fails "call_0" and
+// recovers via OnToolErrorCallback (closedByError == true in afterTool) before
+// Run 1's completion is delivered — Run 1's AGENT_COMPLETED carries Run 1's
+// span_id and Run 2's subsequent completion carries Run 2's span_id. A frozen
+// platform.TimeProvider ensures timestamps cannot mask a tie between Tier 1
+// (observed ending attempt) and Tier 3 (pending/failed attempt).
+func TestPlugin_RecoveredToolError_FinishTaskCall0Reuse(t *testing.T) {
+	const sharedCall = "call_0"
+	fixedNow := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	frozenCtx := func(t *testing.T) context.Context {
+		return platform.WithTimeProvider(t.Context(), func() time.Time { return fixedNow })
+	}
+	failFirstRun2Call := func(run *atomic.Int32, fired *atomic.Bool, err error) llmagent.BeforeToolCallback {
+		return func(ctx agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+			if run.Load() == 2 && tl != nil && tl.Name() == finishTaskToolName &&
+				ctx.FunctionCallID() == sharedCall && fired.CompareAndSwap(false, true) {
+				return nil, err
+			}
+			return nil, nil
+		}
+	}
+
+	t.Run("non-ending OnToolErrorCallback recovery held before Run 2 FunctionResponse", func(t *testing.T) {
+		p, requests, _ := setupTestPluginWithConfig(t, nil)
+		var (
+			run   atomic.Int32
+			fired atomic.Bool
+		)
+		worker, err := llmagent.New(llmagent.Config{
+			Name: "worker",
+			Mode: llmagent.ModeTask,
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				finishTaskCall(map[string]any{"result": "run 1 ok"}, sharedCall),
+				finishTaskCall(map[string]any{"result": "run 2 attempt 1"}, sharedCall),
+				finishTaskCall(map[string]any{"result": "run 2 ok"}, sharedCall),
+			}},
+			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+				failFirstRun2Call(&run, &fired, errors.New("run 2 transient error")),
+			},
+			OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+				func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+					return map[string]any{"recovered": true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name: "coordinator",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var heldRun1 []*session.Event
+					flushed := false
+					nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
+					for range 2 {
+						n := run.Add(1)
+						for ev, runErr := range llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work") {
+							if runErr != nil {
+								yield(nil, runErr)
+								return
+							}
+							if n == 1 {
+								if out := classifyTaskResponses(ev.Content); out.ends && !out.failed {
+									heldRun1 = append(heldRun1, ev)
+									continue
+								}
+							}
+							if n == 2 && !flushed && isFailedTaskResponse(ev) {
+								// Deliver Run 1's held completion while Run 2's
+								// recovered attempt on call_0 is still unretired.
+								for _, h := range heldRun1 {
+									if !yield(h, nil) {
+										return
+									}
+								}
+								heldRun1 = nil
+								flushed = true
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+					}
+					for _, h := range heldRun1 {
+						if !yield(h, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(coordinator): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, root, p).Run(frozenCtx(t), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		requireTaskSpansInOrder(t, rows)
+		if got := len(rowsOfType(rows, EventToolError)); got != 1 {
+			t.Errorf("got %d TOOL_ERROR rows, want 1; events=%v", got, eventTypes(rows))
+		}
+		if got := len(rowsOfType(rows, EventToolCompleted)); got != 2 {
+			t.Errorf("got %d TOOL_COMPLETED rows, want 2; events=%v", got, eventTypes(rows))
+		}
+	})
+
+	t.Run("sentinel-bearing OnToolErrorCallback recovery records observed ending attempt", func(t *testing.T) {
+		p, requests, _ := setupTestPluginWithConfig(t, nil)
+		var (
+			run   atomic.Int32
+			fired atomic.Bool
+		)
+		worker, err := llmagent.New(llmagent.Config{
+			Name: "worker",
+			Mode: llmagent.ModeTask,
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				finishTaskCall(map[string]any{"result": "run 1 ok"}, sharedCall),
+				finishTaskCall(map[string]any{"result": "run 2 attempt 1"}, sharedCall),
+			}},
+			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+				failFirstRun2Call(&run, &fired, errors.New("run 2 sentinel recovery")),
+			},
+			OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+				func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+					return map[string]any{"result": "Task completed."}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name: "coordinator",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var held []*session.Event
+					nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
+					for range 2 {
+						run.Add(1)
+						for ev, runErr := range llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work") {
+							if runErr != nil {
+								yield(nil, runErr)
+								return
+							}
+							if out := classifyTaskResponses(ev.Content); out.ends && !out.failed {
+								held = append(held, ev)
+								continue
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+					}
+					for _, h := range held {
+						if !yield(h, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(coordinator): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, root, p).Run(frozenCtx(t), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		requireTaskSpansInOrder(t, rows)
+		if got := len(rowsOfType(rows, EventToolError)); got != 1 {
+			t.Errorf("got %d TOOL_ERROR rows, want 1; events=%v", got, eventTypes(rows))
+		}
+		if got := len(rowsOfType(rows, EventToolCompleted)); got != 1 {
+			t.Errorf("got %d TOOL_COMPLETED rows, want 1; events=%v", got, eventTypes(rows))
+		}
+	})
+
+	t.Run("merged reused call_0 short-circuited and unique call_1 recovered with sentinel closes Run 2 then Run 1", func(t *testing.T) {
+		for _, frozen := range []bool{false, true} {
+			name := "wall_clock"
+			if frozen {
+				name = "frozen_clock"
+			}
+			t.Run(name, func(t *testing.T) {
+				p, requests, _ := setupTestPluginWithConfig(t, nil)
+				var run atomic.Int32
+				interceptRun2Call0, err := baseplugin.New(baseplugin.Config{
+					Name: "short_circuit_run2_call0",
+					BeforeToolCallback: func(ctx agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+						if run.Load() == 2 && tl != nil && tl.Name() == finishTaskToolName && ctx.FunctionCallID() == sharedCall {
+							return map[string]any{"result": "Task completed."}, nil
+						}
+						return nil, nil
+					},
+					AfterToolCallback: func(ctx agent.Context, tl tool.Tool, _, res map[string]any, _ error) (map[string]any, error) {
+						if run.Load() == 2 && tl != nil && tl.Name() == finishTaskToolName && ctx.FunctionCallID() == sharedCall {
+							return res, nil
+						}
+						return nil, nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("baseplugin.New(interceptRun2Call0): %v", err)
+				}
+				worker, err := llmagent.New(llmagent.Config{
+					Name: "worker",
+					Mode: llmagent.ModeTask,
+					Model: &scriptedLLM{responses: []*model.LLMResponse{
+						finishTaskCall(map[string]any{"result": "run 1 ok"}, sharedCall),
+						{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+							{FunctionCall: &genai.FunctionCall{ID: sharedCall, Name: finishTaskToolName, Args: map[string]any{"result": "r2-0"}}},
+							{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: finishTaskToolName, Args: map[string]any{"result": "r2-1"}}},
+						}}},
+					}},
+					BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+						func(ctx agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+							if run.Load() == 2 && tl != nil && tl.Name() == finishTaskToolName && ctx.FunctionCallID() == "call_1" {
+								return nil, errors.New("run 2 call_1 failed")
+							}
+							return nil, nil
+						},
+					},
+					OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+						func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+							return map[string]any{"result": "Task completed."}, nil
+						},
+					},
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New(worker): %v", err)
+				}
+				root, err := agent.New(agent.Config{
+					Name: "coordinator",
+					Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							nodeCtx := agent.PromoteWithDelta(ic, &agent.CommonContextDelta{})
+							run.Store(1)
+							next1, stop1 := iter.Pull2(llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work"))
+							defer stop1()
+							var heldRun1 []*session.Event
+							for {
+								ev, runErr, ok := next1()
+								if !ok {
+									break
+								}
+								if runErr != nil {
+									yield(nil, runErr)
+									return
+								}
+								if classifyTaskResponses(ev.Content).ends {
+									heldRun1 = append(heldRun1, ev)
+									break
+								}
+								if !yield(ev, nil) {
+									return
+								}
+							}
+							run.Store(2)
+							for ev, runErr := range llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work") {
+								if !yield(ev, runErr) || runErr != nil {
+									return
+								}
+							}
+							for {
+								ev, runErr, ok := next1()
+								if !ok {
+									break
+								}
+								if !yield(ev, runErr) || runErr != nil {
+									return
+								}
+							}
+							for _, h := range heldRun1 {
+								if !yield(h, nil) {
+									return
+								}
+							}
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(coordinator): %v", err)
+				}
+				ctx := t.Context()
+				if frozen {
+					ctx = frozenCtx(t)
+				}
+				for _, runErr := range newTestRunner(t, root, interceptRun2Call0, p).Run(ctx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						t.Fatalf("runner.Run error: %v", runErr)
+					}
+				}
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				requireInvocationCompletedOK(t, rows)
+				starts := agentRowsOfType(rows, EventAgentStarting, "worker")
+				ends := agentRowsOfType(rows, EventAgentCompleted, "worker")
+				if len(starts) != 2 || len(ends) != 2 {
+					t.Fatalf("got %d starts and %d ends, want 2 of each; events=%v", len(starts), len(ends), eventTypes(rows))
+				}
+				if ends[0]["span_id"] != starts[1]["span_id"] || ends[1]["span_id"] != starts[0]["span_id"] {
+					t.Errorf("AGENT_COMPLETED spans = [%v, %v], want [Run 2 %v, Run 1 %v]", ends[0]["span_id"], ends[1]["span_id"], starts[1]["span_id"], starts[0]["span_id"])
+				}
+				if got := len(rowsOfType(rows, EventToolError)); got != 1 {
+					t.Errorf("got %d TOOL_ERROR rows, want 1", got)
+				}
+				if got := len(rowsOfType(rows, EventToolCompleted)); got != 1 {
+					t.Errorf("got %d TOOL_COMPLETED rows, want 1", got)
+				}
+			})
+		}
+	})
+
+	t.Run("equal-timestamp recovered sentinel ranks Tier 1 ahead of earlier pending attempt", func(t *testing.T) {
+		p, requests, _ := setupTestPluginWithConfig(t, nil)
+		var run atomic.Int32
+		worker, err := llmagent.New(llmagent.Config{
+			Name: "worker",
+			Mode: llmagent.ModeTask,
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				finishTaskCall(map[string]any{"result": "run 1 pending"}, sharedCall),
+				finishTaskCall(map[string]any{"result": "run 2 recovered"}, sharedCall),
+				finishTaskCall(map[string]any{"result": "run 1 ok"}, "call_retry"),
+			}},
+			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+				func(ctx agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+					if tl == nil || tl.Name() != finishTaskToolName {
+						return nil, nil
+					}
+					if ctx.FunctionCallID() == sharedCall {
+						return nil, errors.New("fail call_0")
+					}
+					return nil, nil
+				},
+			},
+			OnToolErrorCallbacks: []llmagent.OnToolErrorCallback{
+				func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+					if run.Load() == 1 {
+						return map[string]any{"retry": true}, nil
+					}
+					return map[string]any{"result": "Task completed."}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name: "coordinator",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					nodeCtx := agent.PromoteWithDelta(ic, &agent.CommonContextDelta{})
+					run.Store(1)
+					next1, stop1 := iter.Pull2(llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work"))
+					defer stop1()
+					var heldRun1 []*session.Event
+					for {
+						ev, runErr, ok := next1()
+						if !ok {
+							break
+						}
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if isFailedTaskResponse(ev) {
+							// Hold Run 1's non-ending response so Run 1 stays open with
+							// a Tier-3 pending attempt on call_0 when Run 2 runs.
+							heldRun1 = append(heldRun1, ev)
+							break
+						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+					run.Store(2)
+					for ev, runErr := range llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work") {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						// Strip EventActions on Run 2's completion so Tier 1 > Tier 3
+						// ranking (not EventActions map matching) decides ownership.
+						if classifyTaskResponses(ev.Content).ends {
+							ev.Actions = session.EventActions{}
+						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+					run.Store(1)
+					for _, h := range heldRun1 {
+						if !yield(h, nil) {
+							return
+						}
+					}
+					for {
+						ev, runErr, ok := next1()
+						if !ok {
+							break
+						}
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(coordinator): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, root, p).Run(frozenCtx(t), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		starts := agentRowsOfType(rows, EventAgentStarting, "worker")
+		ends := agentRowsOfType(rows, EventAgentCompleted, "worker")
+		if len(starts) != 2 || len(ends) != 2 {
+			t.Fatalf("got %d starts and %d ends, want 2 of each; events=%v", len(starts), len(ends), eventTypes(rows))
+		}
+		if ends[0]["span_id"] != starts[1]["span_id"] || ends[1]["span_id"] != starts[0]["span_id"] {
+			t.Errorf("AGENT_COMPLETED spans = [%v, %v], want [Run 2 %v, Run 1 %v]", ends[0]["span_id"], ends[1]["span_id"], starts[1]["span_id"], starts[0]["span_id"])
+		}
+	})
+
+	t.Run("retryandreflect after analytics recovery on Run 2 call_0", func(t *testing.T) {
+		p, requests, _ := setupTestPluginWithConfig(t, nil)
+		rr, err := retryandreflect.New()
+		if err != nil {
+			t.Fatalf("retryandreflect.New: %v", err)
+		}
+		var (
+			run   atomic.Int32
+			fired atomic.Bool
+		)
+		worker, err := llmagent.New(llmagent.Config{
+			Name: "worker",
+			Mode: llmagent.ModeTask,
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				finishTaskCall(map[string]any{"result": "run 1 ok"}, sharedCall),
+				finishTaskCall(map[string]any{"result": "run 2 attempt 1"}, sharedCall),
+				finishTaskCall(map[string]any{"result": "run 2 ok"}, sharedCall),
+			}},
+			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+				failFirstRun2Call(&run, &fired, errors.New("run 2 retryandreflect")),
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		runHeldTaskCompletions(t, worker, &run, isFailedTaskResponse, p, rr)
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		requireTaskSpansInOrder(t, rows)
+		if got := len(rowsOfType(rows, EventToolError)); got != 1 {
+			t.Errorf("got %d TOOL_ERROR rows, want 1; events=%v", got, eventTypes(rows))
+		}
+		if got := len(rowsOfType(rows, EventToolCompleted)); got != 2 {
+			t.Errorf("got %d TOOL_COMPLETED rows, want 2; events=%v", got, eventTypes(rows))
+		}
+	})
+}
+
+func TestPlugin_FinishTask_Call0ReuseCoordinatorForwardsHeldRun1SuccessBeforeRun2ValidationFailure(t *testing.T) {
+	const sharedCall = "call_0"
+	fixedNow := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return fixedNow })
+
+	p, requests, _ := setupTestPluginWithConfig(t, nil)
+	worker, err := llmagent.New(llmagent.Config{
+		Name: "worker",
+		Mode: llmagent.ModeTask,
+		OutputSchema: &genai.Schema{
+			Type:       genai.TypeObject,
+			Properties: map[string]*genai.Schema{"answer": {Type: genai.TypeString}},
+			Required:   []string{"answer"},
+		},
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			finishTaskCall(map[string]any{"answer": "run 1 ok"}, sharedCall),
+			finishTaskCall(map[string]any{"wrong_field": "bad"}, sharedCall),
+			finishTaskCall(map[string]any{"answer": "run 2 ok"}, sharedCall),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(worker): %v", err)
+	}
+
+	isValidationErrEvent := func(ev *session.Event) bool {
+		if ev == nil || ev.Content == nil {
+			return false
+		}
+		for _, part := range ev.Content.Parts {
+			if fr := part.FunctionResponse; fr != nil && fr.Name == finishTaskToolName {
+				errText, _ := fr.Response["error"].(string)
+				if errText != "" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	var forwardedBeforeValidationErr atomic.Bool
+	root, err := agent.New(agent.Config{
+		Name: "coordinator",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				var held []*session.Event
+				nodeCtx := agent.PromoteWithDelta(ic, &agent.CommonContextDelta{})
+				for runIdx := range 2 {
+					for ev, runErr := range llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work") {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if runIdx == 0 {
+							if out := classifyTaskResponses(ev.Content); out.ends && !out.failed {
+								held = append(held, ev)
+								continue
+							}
+						} else if len(held) > 0 && isValidationErrEvent(ev) {
+							forwardedBeforeValidationErr.Store(true)
+							for _, h := range held {
+								if !yield(h, nil) {
+									return
+								}
+							}
+							held = nil
+						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+				for _, h := range held {
+					if !yield(h, nil) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(coordinator): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(ctx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+	if !forwardedBeforeValidationErr.Load() {
+		t.Fatal("coordinator did not observe Run 2 finish_task validation failure while holding Run 1 completion")
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	requireInvocationCompletedOK(t, rows)
+	requireTaskSpansInOrder(t, rows)
+}
+
+func TestPlugin_RecoveredToolError_ToolResultOKDoesNotOverrideRetryAndReflect(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rrFirst bool
+	}{
+		{name: "retryandreflect_before_analytics", rrFirst: true},
+		{name: "retryandreflect_after_analytics", rrFirst: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var classifierCalls atomic.Int32
+			p, requests, _ := setupTestPluginWithConfig(t, func(c *Config) {
+				c.FinalResponseToolNames = []string{"final_answer"}
+				c.ToolResultClassifier = func(_ agent.Context, _ tool.Tool, _, _ map[string]any) ToolResultVerdict {
+					classifierCalls.Add(1)
+					return ToolResultVerdict{Decision: ToolResultOK}
+				}
+			})
+			rr, err := retryandreflect.New()
+			if err != nil {
+				t.Fatalf("retryandreflect.New: %v", err)
+			}
+			failTool, err := functiontool.New(functiontool.Config{
+				Name:        "final_answer",
+				Description: "Always fails",
+			}, func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+				return nil, errors.New("boom")
+			})
+			if err != nil {
+				t.Fatalf("functiontool.New: %v", err)
+			}
+			bot, err := llmagent.New(llmagent.Config{
+				Name:  "bot",
+				Tools: []tool.Tool{failTool},
+				Model: &scriptedLLM{responses: []*model.LLMResponse{
+					{Content: genai.NewContentFromParts([]*genai.Part{{
+						FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "final_answer", Args: map[string]any{"answer": "draft"}},
+					}}, genai.RoleModel)},
+					{Content: textContent("model", "done"), TurnComplete: true},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			plugins := []*baseplugin.Plugin{p, rr}
+			if tc.rrFirst {
+				plugins = []*baseplugin.Plugin{rr, p}
+			}
+			for _, runErr := range newTestRunner(t, bot, plugins...).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOK(t, rows)
+			if got := classifierCalls.Load(); got != 0 {
+				t.Errorf("ToolResultClassifier called %d times, want 0", got)
+			}
+			if got := len(rowsOfType(rows, EventToolCompleted)); got != 0 {
+				t.Errorf("got %d TOOL_COMPLETED rows, want 0; events=%v", got, eventTypes(rows))
+			}
+			assertNoFinalResponseFromTool(t, rows, "final_answer")
+			errRow := onlyRowOfType(t, rows, EventToolError)
+			if got := errRow["error_message"]; got != "boom" {
+				t.Errorf("TOOL_ERROR error_message = %v, want %q", got, "boom")
+			}
+		})
+	}
+}
+
+func TestPlugin_RecoveredToolError_RetryAndReflectHonorsContentControls(t *testing.T) {
+	const rawSecret = "secret_payload_detail_from_tool_failure"
+
+	for _, tc := range []struct {
+		name        string
+		configure   func(*Config)
+		wantErrMsg  string
+		wantNoRawIn bool
+	}{
+		{
+			name:       "default_config_records_error_details",
+			wantErrMsg: rawSecret,
+		},
+		{
+			name: "payload_column_denylist_content_uses_fallback",
+			configure: func(c *Config) {
+				c.PayloadColumnDenylist = []string{"content"}
+			},
+			wantErrMsg:  reflectAndRetryFallbackErrorMessage,
+			wantNoRawIn: true,
+		},
+		{
+			name: "masking_content_formatter_uses_fallback",
+			configure: func(c *Config) {
+				c.ContentFormatter = func(_ any, _ string) (any, error) {
+					return map[string]any{"masked": true}, nil
+				}
+			},
+			wantErrMsg:  reflectAndRetryFallbackErrorMessage,
+			wantNoRawIn: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPluginWithConfig(t, tc.configure)
+			rr, err := retryandreflect.New()
+			if err != nil {
+				t.Fatalf("retryandreflect.New: %v", err)
+			}
+			failTool, err := functiontool.New(functiontool.Config{
+				Name:        "lookup",
+				Description: "Fails with raw detail",
+			}, func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+				return nil, errors.New(rawSecret)
+			})
+			if err != nil {
+				t.Fatalf("functiontool.New: %v", err)
+			}
+			bot, err := llmagent.New(llmagent.Config{
+				Name:  "bot",
+				Tools: []tool.Tool{failTool},
+				Model: &scriptedLLM{responses: []*model.LLMResponse{
+					{Content: genai.NewContentFromParts([]*genai.Part{{
+						FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "lookup", Args: map[string]any{"q": "1"}},
+					}}, genai.RoleModel)},
+					{Content: textContent("model", "done"), TurnComplete: true},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			// Register retryandreflect before analytics so AfterToolCallback
+			// classifies the recovery map via retryAnswerError.
+			for _, runErr := range newTestRunner(t, bot, rr, p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOK(t, rows)
+			errRow := onlyRowOfType(t, rows, EventToolError)
+			gotMsg, _ := errRow["error_message"].(string)
+			if gotMsg != tc.wantErrMsg {
+				t.Errorf("TOOL_ERROR error_message = %q, want %q", gotMsg, tc.wantErrMsg)
+			}
+			if tc.wantNoRawIn && strings.Contains(gotMsg, rawSecret) {
+				t.Errorf("TOOL_ERROR error_message %q leaked raw payload %q", gotMsg, rawSecret)
+			}
+		})
+	}
+
+	t.Run("error_type_field_also_masked_when_content_denied", func(t *testing.T) {
+		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+			c.PayloadColumnDenylist = []string{"content"}
+		})
+		toolCtx := withFunctionCall(mCtx, "call-err-type")
+		tl := &fakeTool{name: "lookup"}
+		ans := map[string]any{
+			"response_type": reflectAndRetryResponseType,
+			"error_type":    "SensitiveInternalErrorType",
+		}
+		var errs callbackErrors
+		errs.add(p.BeforeAgentCallback()(mCtx))
+		errs.add(p.BeforeToolCallback()(toolCtx, tl, map[string]any{"q": "1"}))
+		errs.add(p.AfterToolCallback()(toolCtx, tl, map[string]any{"q": "1"}, ans, nil))
+		errs.add(p.AfterAgentCallback()(mCtx))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		errRow := onlyRowOfType(t, rows, EventToolError)
+		if got := errRow["error_message"]; got != reflectAndRetryFallbackErrorMessage {
+			t.Errorf("TOOL_ERROR error_message = %v, want %q", got, reflectAndRetryFallbackErrorMessage)
+		}
+	})
+}
+
+func TestPlugin_RecoveredToolError_ReusedCallIDMissingToolThenBeforeToolShortCircuit(t *testing.T) {
+	t.Run("runner_missing_tool_then_earlier_BeforeToolCallback_map_answer_on_reused_call_0", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		var attempt atomic.Int32
+		interceptSecond, err := baseplugin.New(baseplugin.Config{
+			Name: "intercept_second_missing_call",
+			BeforeToolCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+				if tl != nil && tl.Name() == "missing_tool" && attempt.Add(1) == 2 {
+					return map[string]any{"cached": true}, nil
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+		bot, err := llmagent.New(llmagent.Config{
+			Name: "bot",
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: genai.NewContentFromParts([]*genai.Part{{
+					FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "missing_tool", Args: map[string]any{"n": 1}},
+				}}, genai.RoleModel)},
+				{Content: genai.NewContentFromParts([]*genai.Part{{
+					FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "missing_tool", Args: map[string]any{"n": 2}},
+				}}, genai.RoleModel)},
+				{Content: textContent("model", "done"), TurnComplete: true},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		for _, runErr := range newTestRunner(t, bot, interceptSecond, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		errRow := onlyRowOfType(t, rows, EventToolError)
+		compRow := onlyRowOfType(t, rows, EventToolCompleted)
+		if placeOf(errRow).span == placeOf(compRow).span {
+			t.Errorf("TOOL_ERROR and TOOL_COMPLETED unexpectedly share span %q", placeOf(errRow).span)
+		}
+		checkJSON(t, "second call TOOL_COMPLETED content", jsonObjectColumn(t, compRow, "content"),
+			`{"tool":"missing_tool","result":{"cached":true},"tool_origin":"UNKNOWN"}`)
+	})
+
+	t.Run("missing_tool_answered_with_BeforeToolCallback_error_writes_TOOL_ERROR", func(t *testing.T) {
+		for _, rrFirst := range []bool{false, true} {
+			name := "without_retryandreflect"
+			if rrFirst {
+				name = "with_retryandreflect_first"
+			}
+			t.Run(name, func(t *testing.T) {
+				p, requests, _ := setupTestPlugin(t)
+				rejectMissing, err := baseplugin.New(baseplugin.Config{
+					Name: "reject_missing",
+					BeforeToolCallback: func(_ agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+						if tl != nil && tl.Name() == "missing_tool" {
+							return nil, errors.New("denied missing tool")
+						}
+						return nil, nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("baseplugin.New: %v", err)
+				}
+				plugins := []*baseplugin.Plugin{rejectMissing, p}
+				if rrFirst {
+					rr, err := retryandreflect.New()
+					if err != nil {
+						t.Fatalf("retryandreflect.New: %v", err)
+					}
+					plugins = []*baseplugin.Plugin{rejectMissing, rr, p}
+				}
+				bot, err := llmagent.New(llmagent.Config{
+					Name: "bot",
+					Model: &scriptedLLM{responses: []*model.LLMResponse{
+						{Content: genai.NewContentFromParts([]*genai.Part{{
+							FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "missing_tool", Args: map[string]any{"n": 1}},
+						}}, genai.RoleModel)},
+						{Content: textContent("model", "done"), TurnComplete: true},
+					}},
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New: %v", err)
+				}
+				for _, runErr := range newTestRunner(t, bot, plugins...).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						t.Fatalf("runner.Run error: %v", runErr)
+					}
+				}
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				requireInvocationCompletedOK(t, rows)
+				errRow := onlyRowOfType(t, rows, EventToolError)
+				if got := errRow["error_message"]; got != "denied missing tool" {
+					t.Errorf("TOOL_ERROR error_message = %v, want %q", got, "denied missing tool")
+				}
+				if got := len(rowsOfType(rows, EventToolCompleted)); got != 0 {
+					t.Errorf("got %d TOOL_COMPLETED rows, want 0; events=%v", got, eventTypes(rows))
+				}
+			})
+		}
+	})
+
+	t.Run("direct_callbacks_nil_actions_without_open_span", func(t *testing.T) {
+		t.Run("same_nil_actions_call_after_tool_reuses_error_span", func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			tl := &fakeTool{name: "custom_tool"}
+			callCtx := withFunctionCall(mCtx, "call_0")
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(mCtx))
+			// Earlier plugin short-circuited BeforeToolCallback with an error (no open span, nil Actions).
+			errs.add(p.OnToolErrorCallback()(callCtx, tl, map[string]any{"n": 1}, errors.New("denied before tool")))
+			errs.add(p.AfterToolCallback()(callCtx, tl, map[string]any{"n": 1}, map[string]any{"recovered": true}, nil))
+			errs.add(p.AfterAgentCallback()(mCtx))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOK(t, rows)
+			onlyRowOfType(t, rows, EventToolError)
+			if got := len(rowsOfType(rows, EventToolCompleted)); got != 0 {
+				t.Errorf("got %d TOOL_COMPLETED rows, want 0; events=%v", got, eventTypes(rows))
+			}
+		})
+
+		t.Run("reused_call_0_with_tool_context_actions_writes_TOOL_COMPLETED", func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			tl := &fakeTool{name: "custom_tool"}
+			callCtx := withFunctionCall(mCtx, "call_0")
+			actions := &session.EventActions{}
+			reusedCtx := agent.NewToolContext(mCtx, "call_0", actions, nil)
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(mCtx))
+			// First call: non-FunctionTool error path with nil Actions (errorAttempt == toolAttempt{}).
+			errs.add(p.OnToolErrorCallback()(callCtx, tl, map[string]any{"n": 1}, errors.New("not a function tool")))
+			// Second call reuses call_0 with ADK tool.Context EventActions and is short-circuited in BeforeToolCallback.
+			errs.add(p.AfterToolCallback()(reusedCtx, tl, map[string]any{"n": 2}, map[string]any{"cached": true}, nil))
+			errs.add(p.AfterAgentCallback()(mCtx))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOK(t, rows)
+			errRow := onlyRowOfType(t, rows, EventToolError)
+			compRow := onlyRowOfType(t, rows, EventToolCompleted)
+			if placeOf(errRow).span == placeOf(compRow).span {
+				t.Errorf("TOOL_ERROR and TOOL_COMPLETED unexpectedly share span %q", placeOf(errRow).span)
+			}
+		})
+
+		t.Run("reused_call_0_with_nil_actions_cleared_by_response_event", func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			tl := &fakeTool{name: "custom_tool"}
+			callCtx := withFunctionCall(mCtx, "call_0")
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(mCtx))
+			// First call: non-FunctionTool error path (no BeforeToolCallback, no AfterToolCallback, nil Actions).
+			errs.add(p.OnToolErrorCallback()(callCtx, tl, map[string]any{"n": 1}, errors.New("not a function tool")))
+			ev := session.NewEvent(mCtx, mCtx.InvocationID())
+			ev.Author = mCtx.AgentName()
+			ev.Content = &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       "call_0",
+						Name:     "custom_tool",
+						Response: map[string]any{"error": "not a function tool"},
+					},
+				}},
+			}
+			errs.add(p.OnEventCallback()(mCtx, ev))
+			// Second call reuses call_0 and is short-circuited in an earlier plugin's BeforeToolCallback.
+			errs.add(p.AfterToolCallback()(callCtx, tl, map[string]any{"n": 2}, map[string]any{"cached": true}, nil))
+			errs.add(p.AfterAgentCallback()(mCtx))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOK(t, rows)
+			errRow := onlyRowOfType(t, rows, EventToolError)
+			compRow := onlyRowOfType(t, rows, EventToolCompleted)
+			if placeOf(errRow).span == placeOf(compRow).span {
+				t.Errorf("TOOL_ERROR and TOOL_COMPLETED unexpectedly share span %q", placeOf(errRow).span)
+			}
+		})
+	})
+
+	t.Run("direct_callbacks_nil_actions_missing_tool_cleared_by_response_event", func(t *testing.T) {
+		p, requests, mCtx := setupTestPlugin(t)
+		tl := &fakeTool{name: "missing_tool"}
+		callCtx := withFunctionCall(mCtx, "call_0")
+		var errs callbackErrors
+		errs.add(p.BeforeAgentCallback()(mCtx))
+		errs.add(p.BeforeToolCallback()(callCtx, tl, map[string]any{"n": 1}))
+		errs.add(p.OnToolErrorCallback()(callCtx, tl, map[string]any{"n": 1}, errors.New("tool not found")))
+		ev := session.NewEvent(mCtx, mCtx.InvocationID())
+		ev.Author = mCtx.AgentName()
+		ev.Content = &genai.Content{
+			Role: "user",
+			Parts: []*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{
+					ID:       "call_0",
+					Name:     "missing_tool",
+					Response: map[string]any{"error": "tool not found"},
+				},
+			}},
+		}
+		errs.add(p.OnEventCallback()(mCtx, ev))
+		// Second call reuses call_0 and is short-circuited in an earlier plugin's BeforeToolCallback.
+		errs.add(p.AfterToolCallback()(callCtx, tl, map[string]any{"n": 2}, map[string]any{"cached": true}, nil))
+		errs.add(p.AfterAgentCallback()(mCtx))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		onlyRowOfType(t, rows, EventToolError)
+		onlyRowOfType(t, rows, EventToolCompleted)
+	})
+}
+
+func TestPlugin_RecoveredToolError_EmptyFunctionCallIDDirectCallbacks(t *testing.T) {
+	p, requests, mCtx := setupTestPlugin(t)
+	tl := &fakeTool{name: "lookup"}
+
+	actions1 := &session.EventActions{}
+	ctx1 := agent.NewToolContext(mCtx, "", actions1, nil)
+	actions2 := &session.EventActions{}
+	ctx2 := agent.NewToolContext(mCtx, "", actions2, nil)
+
+	var errs callbackErrors
+	errs.add(p.BeforeAgentCallback()(mCtx))
+	// Attempt 1 with empty FunctionCallID fails and recovers.
+	errs.add(p.BeforeToolCallback()(ctx1, tl, map[string]any{"q": "1"}))
+	errs.add(p.OnToolErrorCallback()(ctx1, tl, map[string]any{"q": "1"}, errors.New("boom")))
+	errs.add(p.AfterToolCallback()(ctx1, tl, map[string]any{"q": "1"}, map[string]any{"recovered": true}, nil))
+	// Attempt 2 with empty FunctionCallID is answered in an earlier plugin's BeforeToolCallback.
+	errs.add(p.AfterToolCallback()(ctx2, tl, map[string]any{"q": "2"}, map[string]any{"ok": true}, nil))
+	errs.add(p.AfterAgentCallback()(mCtx))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	requireInvocationCompletedOK(t, rows)
+	onlyRowOfType(t, rows, EventToolError)
+	onlyRowOfType(t, rows, EventToolCompleted)
+}
+
+func TestPlugin_RecoveredToolError_FinishTaskOnEventContentControls(t *testing.T) {
+	const rawSecret = "secret_finish_task_payload_detail"
+	for _, tc := range []struct {
+		name      string
+		configure func(*Config)
+		wantMsg   string
+	}{
+		{
+			name:    "default_config_keeps_error_details_on_AGENT_ERROR",
+			wantMsg: taskFailedPrefix + rawSecret,
+		},
+		{
+			name: "payload_column_denylist_content_uses_fallback_on_AGENT_ERROR",
+			configure: func(c *Config) {
+				c.PayloadColumnDenylist = []string{"content"}
+			},
+			wantMsg: taskFailedPrefix + reflectAndRetryFallbackErrorMessage,
+		},
+		{
+			name: "content_formatter_uses_fallback_on_AGENT_ERROR",
+			configure: func(c *Config) {
+				c.ContentFormatter = func(_ any, _ string) (any, error) {
+					return map[string]any{"masked": true}, nil
+				}
+			},
+			wantMsg: taskFailedPrefix + reflectAndRetryFallbackErrorMessage,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPluginWithConfig(t, tc.configure)
+			rr, err := retryandreflect.New()
+			if err != nil {
+				t.Fatalf("retryandreflect.New: %v", err)
+			}
+			// Inject the completion sentinel into retryandreflect's recovery payload
+			// before analyticsPlugin sees AfterToolCallback or OnEventCallback so
+			// onEvent runs classifyTaskResponsesWithPolicy(ev.Content, p.suppressesToolPayload()).
+			addSentinel, err := baseplugin.New(baseplugin.Config{
+				Name: "attach_finish_sentinel",
+				AfterToolCallback: func(_ agent.Context, tl tool.Tool, _, res map[string]any, _ error) (map[string]any, error) {
+					if tl != nil && tl.Name() == finishTaskToolName && res["response_type"] == reflectAndRetryResponseType {
+						out := maps.Clone(res)
+						out["result"] = "Task completed."
+						return out, nil
+					}
+					return nil, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("baseplugin.New(addSentinel): %v", err)
+			}
+			worker, err := llmagent.New(llmagent.Config{
+				Name: "worker",
+				Mode: llmagent.ModeTask,
+				Model: &scriptedLLM{responses: []*model.LLMResponse{
+					finishTaskCall(map[string]any{"result": "draft"}, "call-rr-finish"),
+				}},
+				BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+					func(_ agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+						if tl != nil && tl.Name() == finishTaskToolName {
+							return nil, errors.New(rawSecret)
+						}
+						return nil, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(worker): %v", err)
+			}
+			root, err := agent.New(agent.Config{
+				Name: "coordinator",
+				Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						nodeCtx := agent.PromoteWithDelta(ic, &agent.CommonContextDelta{})
+						for ev, runErr := range llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work") {
+							if !yield(ev, runErr) || runErr != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(coordinator): %v", err)
+			}
+			for _, runErr := range newTestRunner(t, root, rr, addSentinel, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOKWithAgentErrors(t, rows, map[string]int{"worker": 1})
+			if got := len(agentRowsOfType(rows, EventAgentCompleted, "worker")); got != 0 {
+				t.Errorf("got %d worker AGENT_COMPLETED rows, want 0; events=%v", got, eventTypes(rows))
+			}
+			agentErr := onlyRowOfType(t, rows, EventAgentError)
+			gotAgentMsg, _ := agentErr["error_message"].(string)
+			if gotAgentMsg != tc.wantMsg {
+				t.Errorf("AGENT_ERROR error_message = %q, want %q", gotAgentMsg, tc.wantMsg)
+			}
+			if tc.configure != nil && strings.Contains(gotAgentMsg, rawSecret) {
+				t.Errorf("AGENT_ERROR error_message %q leaked raw payload %q", gotAgentMsg, rawSecret)
+			}
+		})
+	}
+}
+
+func TestPlugin_RecoveredToolError_BufferedCall0DoesNotCauseDuplicateToolError(t *testing.T) {
+	for _, recoverCall2 := range []bool{false, true} {
+		name := "unrecovered_error_emits_single_TOOL_ERROR"
+		if recoverCall2 {
+			name = "recovered_error_suppresses_TOOL_COMPLETED_and_second_TOOL_ERROR"
+		}
+		t.Run(name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			var run atomic.Int32
+			call2Errored := make(chan struct{})
+			releaseCall2 := make(chan struct{})
+			var gateOnce sync.Once
+			gate, err := baseplugin.New(baseplugin.Config{
+				Name: "pause_call2_between_on_tool_error_and_after_tool",
+				OnToolErrorCallback: func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+					if run.Load() == 2 {
+						gateOnce.Do(func() { close(call2Errored) })
+						<-releaseCall2
+						if recoverCall2 {
+							return map[string]any{"recovered": true}, nil
+						}
+					}
+					return nil, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("baseplugin.New(gate): %v", err)
+			}
+
+			lookup, err := functiontool.New(functiontool.Config{
+				Name:        "lookup",
+				Description: "Succeeds on Call 1 and fails on Call 2",
+			}, func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+				if run.Load() == 2 {
+					return nil, errors.New("call 2 boom")
+				}
+				return map[string]any{"ok": true}, nil
+			})
+			if err != nil {
+				t.Fatalf("functiontool.New(lookup): %v", err)
+			}
+
+			worker, err := llmagent.New(llmagent.Config{
+				Name:  "worker",
+				Tools: []tool.Tool{lookup},
+				Model: &scriptedLLM{responses: []*model.LLMResponse{
+					{Content: genai.NewContentFromParts([]*genai.Part{{
+						FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "lookup", Args: map[string]any{"n": 1}},
+					}}, genai.RoleModel)},
+					{Content: textContent("model", "call 1 done"), TurnComplete: true},
+					{Content: genai.NewContentFromParts([]*genai.Part{{
+						FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "lookup", Args: map[string]any{"n": 2}},
+					}}, genai.RoleModel)},
+					{Content: textContent("model", "call 2 done"), TurnComplete: true},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(worker): %v", err)
+			}
+
+			root, err := agent.New(agent.Config{
+				Name: "coordinator",
+				Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						nodeCtx := agent.PromoteWithDelta(ic, &agent.CommonContextDelta{})
+						run.Store(1)
+						var heldCall1Resp *session.Event
+						for ev, runErr := range llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work") {
+							if runErr != nil {
+								yield(nil, runErr)
+								return
+							}
+							if ev != nil && len(functionResponseCalls(ev.Content)) > 0 {
+								heldCall1Resp = ev
+								continue
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+						if heldCall1Resp == nil {
+							yield(nil, errors.New("missing buffered Call 1 FunctionResponse"))
+							return
+						}
+
+						run.Store(2)
+						type item struct {
+							ev  *session.Event
+							err error
+							ack chan struct{}
+						}
+						ch := make(chan item)
+						go func() {
+							defer close(ch)
+							for ev, runErr := range llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work") {
+								ack := make(chan struct{})
+								ch <- item{ev: ev, err: runErr, ack: ack}
+								<-ack
+							}
+						}()
+						for drain := true; drain; {
+							select {
+							case <-call2Errored:
+								drain = false
+							case it, ok := <-ch:
+								if !ok {
+									drain = false
+									break
+								}
+								okYield := yield(it.ev, it.err)
+								close(it.ack)
+								if !okYield || it.err != nil {
+									close(releaseCall2)
+									for rem := range ch {
+										close(rem.ack)
+									}
+									return
+								}
+							}
+						}
+						// Deliver Call 1's buffered call_0 FunctionResponse while Call 2
+						// is paused between OnToolErrorCallback and AfterToolCallback.
+						if !yield(heldCall1Resp, nil) {
+							close(releaseCall2)
+							for it := range ch {
+								close(it.ack)
+							}
+							return
+						}
+						close(releaseCall2)
+						for it := range ch {
+							ok := yield(it.ev, it.err)
+							close(it.ack)
+							if !ok || it.err != nil {
+								for rem := range ch {
+									close(rem.ack)
+								}
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(coordinator): %v", err)
+			}
+
+			for _, runErr := range newTestRunner(t, root, p, gate).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOK(t, rows)
+			if got := len(rowsOfType(rows, EventToolCompleted)); got != 1 {
+				t.Errorf("got %d TOOL_COMPLETED rows, want 1; events=%v", got, eventTypes(rows))
+			}
+			if got := len(rowsOfType(rows, EventToolError)); got != 1 {
+				t.Errorf("got %d TOOL_ERROR rows, want 1; events=%v", got, eventTypes(rows))
+			}
+		})
+	}
+}
+
+func TestPlugin_RecoveredToolError_FinishTaskAfterToolErrorOrConfirmationGuards(t *testing.T) {
+	fixedNow := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	for _, tc := range []struct {
+		name        string
+		injectedErr error
+	}{
+		{name: "sentinel_with_non_nil_err_stays_pending", injectedErr: errors.New("tool rejected after sentinel")},
+		{name: "sentinel_with_confirmation_required_stays_pending", injectedErr: tool.ErrConfirmationRequired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			var run atomic.Int32
+			worker, err := llmagent.New(llmagent.Config{
+				Name: "worker",
+				Mode: llmagent.ModeTask,
+				Model: &scriptedLLM{responses: []*model.LLMResponse{
+					finishTaskCall(map[string]any{"result": "run 1 blocked"}, "call_0"),
+					finishTaskCall(map[string]any{"result": "run 2 ok"}, "call_0"),
+					finishTaskCall(map[string]any{"result": "run 1 finish"}, "call_1"),
+				}},
+				BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+					func(ctx agent.Context, tl tool.Tool, _ map[string]any) (map[string]any, error) {
+						if run.Load() == 1 && tl != nil && tl.Name() == finishTaskToolName && ctx.FunctionCallID() == "call_0" {
+							// Pass a sentinel result alongside a non-nil error (or ErrConfirmationRequired)
+							// straight to AfterToolCallback (OnToolErrorCallback returns nil, nil).
+							return map[string]any{"result": "Task completed."}, tc.injectedErr
+						}
+						return nil, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(worker): %v", err)
+			}
+
+			root, err := agent.New(agent.Config{
+				Name: "coordinator",
+				Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						nodeCtx := agent.PromoteWithDelta(ic, &agent.CommonContextDelta{})
+						run.Store(1)
+						next1, stop1 := iter.Pull2(llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work"))
+						defer stop1()
+						var heldRun1 []*session.Event
+						for {
+							ev, runErr, ok := next1()
+							if !ok {
+								break
+							}
+							if runErr != nil {
+								yield(nil, runErr)
+								return
+							}
+							if len(functionResponseCalls(ev.Content)) > 0 {
+								heldRun1 = append(heldRun1, ev)
+								break
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+
+						run.Store(2)
+						for ev, runErr := range llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work") {
+							if runErr != nil {
+								yield(nil, runErr)
+								return
+							}
+							// Clear EventActions on Run 2's completion so Tier 1 (Run 2) >
+							// Tier 3 (Run 1) decides ownership.
+							if classifyTaskResponses(ev.Content).ends {
+								ev.Actions = session.EventActions{}
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+
+						run.Store(1)
+						for _, h := range heldRun1 {
+							if !yield(h, nil) {
+								return
+							}
+						}
+						for {
+							ev, runErr, ok := next1()
+							if !ok {
+								break
+							}
+							if !yield(ev, runErr) || runErr != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(coordinator): %v", err)
+			}
+
+			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return fixedNow })
+			for _, runErr := range newTestRunner(t, root, p).Run(ctx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			requireInvocationCompletedOK(t, rows)
+			starts := agentRowsOfType(rows, EventAgentStarting, "worker")
+			ends := agentRowsOfType(rows, EventAgentCompleted, "worker")
+			if len(starts) != 2 || len(ends) != 2 {
+				t.Fatalf("got %d starts and %d ends, want 2 of each; events=%v", len(starts), len(ends), eventTypes(rows))
+			}
+			if ends[0]["span_id"] != starts[1]["span_id"] || ends[1]["span_id"] != starts[0]["span_id"] {
+				t.Errorf("AGENT_COMPLETED spans = [%v, %v], want [Run 2 %v, Run 1 %v]", ends[0]["span_id"], ends[1]["span_id"], starts[1]["span_id"], starts[0]["span_id"])
+			}
+		})
 	}
 }
