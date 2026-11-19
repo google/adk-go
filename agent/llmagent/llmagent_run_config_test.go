@@ -384,6 +384,11 @@ func TestOutputSchemaWithTools_UndeclaredModelFallbackIgnoresEnvironment(t *test
 			wantSetModelResp: true,
 		},
 		{
+			name:             "non_gemini_reporting_no_backend_gets_set_model_response",
+			model:            &backendlessModel{name: "my-model"},
+			wantSetModelResp: true,
+		},
+		{
 			name:         "gemini_reporting_vertex_gets_native_schema",
 			model:        &undeclaredModel{name: "gemini-2.5-flash", backend: genai.BackendVertexAI},
 			wantSchema:   schema,
