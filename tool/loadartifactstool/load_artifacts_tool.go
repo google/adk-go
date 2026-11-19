@@ -179,39 +179,31 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 	if lastContent == nil || len(lastContent.Parts) == 0 {
 		return nil
 	}
-	var functionResponse *genai.FunctionResponse
-	// Iterate over all parts in the last content turn to find load_artifacts responses.
-	// Note: adk-python only checks parts[0]; scanning all parts is intentional in Go to
-	// support parallel/multi-tool turns where load_artifacts may not be the first part.
-	for _, part := range lastContent.Parts {
-		if part != nil && part.FunctionResponse != nil && part.FunctionResponse.Name == "load_artifacts" {
-			functionResponse = part.FunctionResponse
-			// Keep only the first load_artifacts response if multiple exist in one turn.
-			break
-		}
-	}
-	if functionResponse == nil {
-		return nil
-	}
-	artifactNamesRaw, ok := functionResponse.Response["artifact_names"]
-	if !ok {
-		return nil
-	}
+	// Every load_artifacts response in the last turn counts: a model can issue
+	// several calls in one response, and each one names its own artifacts.
 	var artifactNames []string
-	switch names := artifactNamesRaw.(type) {
-	case []string:
-		artifactNames = names
-	case []any:
-		artifactNames = make([]string, len(names))
-		for i, name := range names {
-			s, ok := name.(string)
-			if !ok {
-				return fmt.Errorf("invalid artifact name type at index %d: %T, expected string", i, name)
-			}
-			artifactNames[i] = s
+	for _, part := range lastContent.Parts {
+		if part == nil || part.FunctionResponse == nil || part.FunctionResponse.Name != "load_artifacts" {
+			continue
 		}
-	default:
-		return fmt.Errorf("invalid artifact names type: %T, expected []string or []any", artifactNamesRaw)
+		artifactNamesRaw, ok := part.FunctionResponse.Response["artifact_names"]
+		if !ok {
+			continue
+		}
+		switch names := artifactNamesRaw.(type) {
+		case []string:
+			artifactNames = append(artifactNames, names...)
+		case []any:
+			for i, name := range names {
+				s, ok := name.(string)
+				if !ok {
+					return fmt.Errorf("invalid artifact name type at index %d: %T, expected string", i, name)
+				}
+				artifactNames = append(artifactNames, s)
+			}
+		default:
+			return fmt.Errorf("invalid artifact names type: %T, expected []string or []any", artifactNamesRaw)
+		}
 	}
 	if len(artifactNames) == 0 {
 		return nil

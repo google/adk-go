@@ -24,11 +24,16 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/artifact"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/loadartifactstool"
 )
 
@@ -594,4 +599,80 @@ func createToolContext(t *testing.T) agent.Context {
 	})
 
 	return agent.NewToolContext(ctx, "", nil, nil)
+}
+
+// TestLoadArtifactsTool_ParallelCallsAttachEveryBody reproduces
+// https://github.com/google/adk-go/issues/2415: the model answers with two
+// load_artifacts calls in one turn, so the next request must carry both bodies.
+func TestLoadArtifactsTool_ParallelCallsAttachEveryBody(t *testing.T) {
+	const app, user, sid = "app", "client", "session"
+	ctx := t.Context()
+	artifacts := artifact.InMemoryService()
+
+	calls := &genai.Content{Role: genai.RoleModel}
+	for _, file := range []struct{ name, text string }{
+		{"january.txt", "january body"},
+		{"february.txt", "february body"},
+	} {
+		if _, err := artifacts.Save(ctx, &artifact.SaveRequest{
+			AppName: app, UserID: user, SessionID: sid,
+			FileName: file.name, Part: genai.NewPartFromText(file.text),
+		}); err != nil {
+			t.Fatalf("Save(%s) failed: %v", file.name, err)
+		}
+		part := genai.NewPartFromFunctionCall("load_artifacts", map[string]any{
+			"artifact_names": []any{file.name},
+		})
+		part.FunctionCall.ID = file.name
+		calls.Parts = append(calls.Parts, part)
+	}
+
+	fake := &testutil.MockModel{Responses: []*genai.Content{
+		calls,
+		genai.NewContentFromText("done", genai.RoleModel),
+	}}
+	a, err := llmagent.New(llmagent.Config{
+		Name: "reader", Model: fake, Tools: []tool.Tool{loadartifactstool.New()},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New failed: %v", err)
+	}
+	sessions := session.InMemoryService()
+	if _, err := sessions.Create(ctx, &session.CreateRequest{
+		AppName: app, UserID: user, SessionID: sid,
+	}); err != nil {
+		t.Fatalf("session Create failed: %v", err)
+	}
+	r, err := runner.New(runner.Config{
+		AppName: app, Agent: a, SessionService: sessions, ArtifactService: artifacts,
+	})
+	if err != nil {
+		t.Fatalf("runner.New failed: %v", err)
+	}
+
+	prompt := genai.NewContentFromText("Compare January and February", genai.RoleUser)
+	for _, err := range r.Run(ctx, user, sid, prompt, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+	}
+	if len(fake.Requests) != 2 {
+		t.Fatalf("model requests = %d, want 2", len(fake.Requests))
+	}
+
+	var responses, bodies int
+	for _, content := range fake.Requests[1].Contents {
+		for _, part := range content.Parts {
+			if part.FunctionResponse != nil && part.FunctionResponse.Name == "load_artifacts" {
+				responses++
+			}
+			switch part.Text {
+			case "january body", "february body":
+				bodies++
+			}
+		}
+	}
+	if responses != 2 || bodies != 2 {
+		t.Errorf("tool responses = %d, artifact bodies = %d; want 2 of each", responses, bodies)
+	}
 }
