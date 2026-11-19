@@ -17,6 +17,7 @@ package workflow
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -51,9 +52,56 @@ func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 // The node takes no input or output schema from this constructor. To give it both, set them on the node it
 // returns, as NewWorkflowNodeWithSchemas does for its own: n.BaseNode = NewBaseNodeWithSchemas(name, "",
 // NodeConfig{}, inputSchema, outputSchema). The state schema lives on the nested workflow and is not
-// touched by that assignment.
+// touched by that assignment. [NewWorkflowNodeWithOptions] takes the state schema together with the
+// concurrency cap and the input and output schemas.
 func NewWorkflowNodeWithStateSchema(name string, edges []Edge, schema *jsonschema.Resolved) (*WorkflowNode, error) {
 	return newWorkflowNode(name, edges, schema)
+}
+
+// NewWorkflowNodeWithOptions is NewWorkflowNode whose nested workflow is built with the options opts
+// takes in New, so a workflow nested in another one, or run as runner.Config.Node, takes the same
+// options as a root workflow. With no options it returns the node NewWorkflowNode returns.
+//
+// [WithMaxConcurrency] caps the graph-scheduled nodes of the nested workflow: the cap counts that
+// workflow's own nodes, the enclosing workflow counts the node as one of its nodes, and the enclosing
+// workflow's cap does not reach the nested workflow's nodes. [WithStateSchema] checks the writes of the
+// nested workflow's nodes and replaces the enclosing workflow's schema for them; without it they are
+// checked against the enclosing workflow's schema. Both hold on every turn of a resumed run.
+//
+// [WithInputSchema] and [WithOutputSchema] become the node's schemas, as NewWorkflowNodeWithSchemas sets
+// them: the enclosing workflow validates the node's input before the nested workflow starts and its
+// single terminal output, with defaults filled, before the next node receives the coerced value. The
+// nested workflow does not validate them again.
+//
+// The node resumes a paused or failed run of its nested workflow when it is itself runner.Config.Node.
+// Nested in a workflow under a root built with workflowagent.New, a later turn's answer does not reach
+// its nested workflow. Under a root built with agent.New over [Workflow.Run], every turn starts the
+// graph from Start.
+//
+// WithRootWrapper and WithNodeRootWrapper are for the workflows the runner builds: given either, in any
+// position, it returns an error that names the node and builds nothing. Otherwise it returns the errors
+// New returns, unwrapped. The returned node has an empty description and NodeConfig; assigning
+// n.BaseNode = NewBaseNodeWithSchemas(name, description, cfg, inputSchema, outputSchema) sets them and
+// leaves the nested workflow's cap and state schema as they are.
+func NewWorkflowNodeWithOptions(name string, edges []Edge, opts ...Option) (*WorkflowNode, error) {
+	var o workflowOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if o.isRootWrapper || o.isNodeRootWrapper {
+		return nil, fmt.Errorf("workflow: node %q: WithRootWrapper and WithNodeRootWrapper are for the runner and do not apply to a WorkflowNode", name)
+	}
+	// The input and output schemas are validated by the enclosing workflow on the node, so that the
+	// next node receives the coerced output; the nested workflow is built without them.
+	inner := append(slices.Clone(opts), WithInputSchema(nil), WithOutputSchema(nil))
+	wf, err := New(name, edges, inner...)
+	if err != nil {
+		return nil, err
+	}
+	return &WorkflowNode{
+		BaseNode:    NewBaseNodeWithSchemas(name, "", NodeConfig{}, o.inputSchema, o.outputSchema),
+		subWorkflow: wf,
+	}, nil
 }
 
 // newWorkflowNode builds the nested workflow with stateSchema, which may be nil, and wraps it in a node
@@ -83,6 +131,9 @@ func newWorkflowNode(name string, edges []Edge, stateSchema *jsonschema.Resolved
 // describes. Its single terminal output is validated, with defaults
 // filled, before the next node receives it, and a failure wraps
 // [ErrNodeFailed].
+//
+// [NewWorkflowNodeWithOptions] with [WithInputSchema] and [WithOutputSchema] builds the same node and
+// takes the nested workflow's other options too.
 func NewWorkflowNodeWithSchemas(name string, edges []Edge, inputSchema, outputSchema *jsonschema.Resolved) (*WorkflowNode, error) {
 	n, err := NewWorkflowNode(name, edges)
 	if err != nil {
