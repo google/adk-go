@@ -34,12 +34,14 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"runtime/pprof"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 	"weak"
 
 	"github.com/google/go-cmp/cmp"
@@ -411,6 +413,7 @@ type clockedPlugin struct {
 func newClockedPlugin(t *testing.T) *clockedPlugin {
 	t.Helper()
 	config := applyDefaults(DefaultConfig())
+	config.DisableFlushOnRunEnd = true
 	processor, err := NewBatchProcessor(t.Context(), nil, "test_stream", config)
 	if err != nil {
 		t.Fatalf("NewBatchProcessor: %v", err)
@@ -30043,6 +30046,322 @@ func TestRetireLateSettledLocked_FastSkipWith2048LiveActivations(t *testing.T) {
 	}
 }
 
+func TestHasNewEventUUID(t *testing.T) {
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		{id: "550e8400-e29b-41d4-a716-446655440000", want: true},
+		{id: "550E8400-E29B-41D4-A716-446655440000", want: true},
+		{id: "01234567-89ab-4def-8123-456789abcdef", want: true},
+		{id: "01234567-89ab-4def-b123-456789abcdef", want: true},
+		{id: "", want: false},
+		{id: "clean-run-1", want: false},
+		{id: "550e8400-e29b-11d4-a716-446655440000", want: false}, // v1, not v4
+		{id: "550e8400-e29b-41d4-7716-446655440000", want: false}, // non-RFC4122 variant
+		{id: "550e8400-e29b-41d4-c716-446655440000", want: false}, // variant 'c' outside 8/9/a/b
+		{id: "550e8400e29b41d4a716446655440000", want: false},     // missing hyphens
+		{id: "550e8400-e29b-41d4-a716-44665544000g", want: false}, // non-hex
+		{id: "550e8400-e29b-41d4-a716-4466554400001", want: false},
+	}
+	for _, tc := range cases {
+		if got := hasNewEventUUID(tc.id); got != tc.want {
+			t.Errorf("hasNewEventUUID(%q) = %v, want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
+type cyclicContext struct {
+	Context context.Context
+}
+
+func (c *cyclicContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cyclicContext) Done() <-chan struct{}       { return nil }
+func (c *cyclicContext) Err() error                  { return nil }
+func (c *cyclicContext) Value(any) any               { return nil }
+
+type lockedEmbeddedContext struct {
+	mu sync.RWMutex
+	context.Context
+}
+
+func (c *lockedEmbeddedContext) setContext(p context.Context) {
+	c.mu.Lock()
+	c.Context = p
+	c.mu.Unlock()
+}
+
+func (c *lockedEmbeddedContext) Value(key any) any {
+	c.mu.RLock()
+	p := c.Context
+	c.mu.RUnlock()
+	if p == nil {
+		return nil
+	}
+	return p.Value(key)
+}
+
+func TestContextHasCustomUUIDProviderAndProvenance(t *testing.T) {
+	var calls atomic.Int32
+	provider := func() string {
+		calls.Add(1)
+		return fmt.Sprintf("event-%d", calls.Load())
+	}
+
+	key := discoverUUIDProviderCtxKey()
+	if key == nil {
+		t.Fatal("discoverUUIDProviderCtxKey() = nil")
+	}
+	parentCtx := platform.WithUUIDProvider(t.Context(), provider)
+	if parentCtx.Value(key) == nil {
+		t.Fatal("parentCtx.Value(discoverUUIDProviderCtxKey()) = nil, want provider")
+	}
+	if !contextHasCustomUUIDProvider(parentCtx) {
+		t.Fatal("contextHasCustomUUIDProvider(WithUUIDProvider) = false, want true")
+	}
+	if !contextHasCustomUUIDProvider(context.WithoutCancel(parentCtx)) {
+		t.Fatal("contextHasCustomUUIDProvider(WithoutCancel) = false, want true")
+	}
+	cancelCtx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+	if !contextHasCustomUUIDProvider(cancelCtx) {
+		t.Fatal("contextHasCustomUUIDProvider(WithCancel) = false, want true")
+	}
+	timeoutCtx, cancelTimeout := context.WithTimeout(parentCtx, time.Minute)
+	defer cancelTimeout()
+	if !contextHasCustomUUIDProvider(timeoutCtx) {
+		t.Fatal("contextHasCustomUUIDProvider(WithTimeout) = false, want true")
+	}
+	// WithUUIDProvider(child, nil) overrides and disables the outer provider.
+	shadowedCtx := platform.WithUUIDProvider(parentCtx, nil)
+	if contextHasCustomUUIDProvider(shadowedCtx) {
+		t.Fatal("contextHasCustomUUIDProvider(WithUUIDProvider(child, nil)) = true, want false")
+	}
+	if contextHasCustomUUIDProvider(context.Background()) {
+		t.Fatal("contextHasCustomUUIDProvider(Background) = true, want false")
+	}
+	var nilCtx context.Context
+	if contextHasCustomUUIDProvider(nilCtx) {
+		t.Fatal("contextHasCustomUUIDProvider(nil) = true, want false")
+	}
+	if contextHasCustomUUIDProvider(panickingValueContext{}) {
+		t.Fatal("contextHasCustomUUIDProvider(panicking) = true, want false")
+	}
+
+	validUUID := "550e8400-e29b-41d4-a716-446655440000"
+	newEventActions := session.EventActions{
+		StateDelta:    map[string]any{},
+		ArtifactDelta: map[string]int64{},
+	}
+	cases := []struct {
+		name string
+		ctx  context.Context
+		ev   *session.Event
+		want bool
+	}{
+		{name: "nil event rejected", ctx: parentCtx, ev: nil, want: false},
+		{name: "empty ID with default context", ctx: context.Background(), ev: &session.Event{}, want: false},
+		{name: "empty ID rejected even with custom provider", ctx: parentCtx, ev: &session.Event{}, want: false},
+		{name: "empty ID rejected even with NewEvent actions", ctx: context.Background(), ev: &session.Event{Actions: newEventActions}, want: false},
+		{name: "custom ID accepted when custom provider active", ctx: parentCtx, ev: &session.Event{ID: "event-1"}, want: true},
+		{name: "custom ID rejected on default context without NewEvent actions", ctx: context.Background(), ev: &session.Event{ID: "event-1"}, want: false},
+		{name: "custom ID rejected even when NewEvent actions initialized", ctx: context.Background(), ev: &session.Event{ID: "event-1", Actions: newEventActions}, want: false},
+		{name: "custom ID rejected when NewEvent actions initialized under shadowed nil provider", ctx: shadowedCtx, ev: &session.Event{ID: "event-1", Actions: newEventActions}, want: false},
+		{name: "custom ID rejected when nil provider shadows outer without actions", ctx: shadowedCtx, ev: &session.Event{ID: "event-1"}, want: false},
+		{name: "UUIDv4 accepted on default context", ctx: context.Background(), ev: &session.Event{ID: validUUID}, want: true},
+		{name: "UUIDv4 accepted when nil provider shadows outer", ctx: shadowedCtx, ev: &session.Event{ID: validUUID}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasEventCreationProvenance(tc.ctx, tc.ev); got != tc.want {
+				t.Errorf("hasEventCreationProvenance(%+v) = %v, want %v", tc.ev, got, tc.want)
+			}
+		})
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("custom UUIDProvider was invoked %d times during inspection, want 0", got)
+	}
+}
+
+// TestCallbackAfterAgentActionMaps checks, against the event of a real run,
+// the reflection that reads the action maps of ADK's after-agent callback
+// context: a field that a later ADK release renames fails this test instead of
+// silently disabling the recognition of after-agent callback events.
+func TestCallbackAfterAgentActionMaps(t *testing.T) {
+	if got := callbackAfterAgentActionMaps(context.Background()); got != (actionMaps{}) {
+		t.Fatalf("callbackAfterAgentActionMaps(Background) = %+v, want zero", got)
+	}
+	if got := eventActionMaps(nil); got != (actionMaps{}) {
+		t.Fatalf("eventActionMaps(nil) = %+v, want zero", got)
+	}
+	if got := eventActionMaps(&session.Event{}); got != (actionMaps{}) {
+		t.Fatalf("eventActionMaps(zero Event) = %+v, want zero", got)
+	}
+
+	var observed actionMaps
+	var observedKeep any
+	var events []*session.Event
+	var errLogs bytes.Buffer
+
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		AfterAgentCallbacks: []agent.AfterAgentCallback{
+			func(ctx agent.Context) (*genai.Content, error) {
+				return textContent("model", "recovered"), nil
+			},
+		},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	probePlugin, err := baseplugin.New(baseplugin.Config{
+		Name: "probe-action-maps",
+		AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+			observed = callbackAfterAgentActionMaps(ctx)
+			_, observedKeep = callbackAfterAgentActions(ctx)
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+
+	prevOut := log.Writer()
+	log.SetOutput(&errLogs)
+	defer log.SetOutput(prevOut)
+
+	for ev, runErr := range newTestRunner(t, root, probePlugin).Run(t.Context(), "u1", "s-action-maps", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error = %v", runErr)
+		}
+		if ev != nil {
+			events = append(events, ev)
+		}
+	}
+	if strings.Contains(errLogs.String(), "not supported for callback context") {
+		t.Fatalf("callbackAfterAgentActionMaps triggered callback-context warning log: %q", errLogs.String())
+	}
+	if observed.stateDelta == nil || observed.artifactDelta == nil {
+		t.Fatalf("callbackAfterAgentActionMaps = %+v during AfterAgentCallback, want both maps", observed)
+	}
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if got := eventActionMaps(events[0]); got != observed {
+		t.Fatalf("eventActionMaps(after-agent event) = %+v, want %+v", got, observed)
+	}
+	// What keeps the captured maps reachable is the [2]unsafe.Pointer pinning
+	// them directly, not the callback context or EventActions struct.
+	if _, keep := callbackAfterAgentActions(context.Background()); keep != nil {
+		t.Fatalf("callbackAfterAgentActions(Background) keeps %T, want nil", keep)
+	}
+	if _, ok := observedKeep.(context.Context); ok {
+		t.Fatalf("callbackAfterAgentActions keeps the callback context %T", observedKeep)
+	}
+	kept, ok := observedKeep.([2]unsafe.Pointer)
+	if !ok {
+		t.Fatalf("callbackAfterAgentActions keeps %T, want [2]unsafe.Pointer", observedKeep)
+	}
+	if got := (actionMaps{stateDelta: kept[0], artifactDelta: kept[1]}); got != observed {
+		t.Fatalf("pinned pointers = %+v, want %+v", got, observed)
+	}
+
+	t.Run("callback replacing StateDelta and ArtifactDelta via WithDelta(nil).Actions() updates live EventActions and keep pins old maps across GC", func(t *testing.T) {
+		var (
+			keep                   any
+			weakState, weakArt     weak.Pointer[byte]
+			beforeState, beforeArt uintptr
+		)
+		// Run the callback and event assertions in an inner frame so before and
+		// all runner/event references go out of scope, leaving keep as the sole
+		// strong reference to the replaced maps.
+		func() {
+			var before, after actionMaps
+			var replaceEvents []*session.Event
+			replacePlugin, err := baseplugin.New(baseplugin.Config{
+				Name: "replace-action-maps",
+				AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+					before, keep = callbackAfterAgentActions(ctx)
+					live := ctx.WithDelta(nil).Actions()
+					live.StateDelta = map[string]any{"replaced": true}
+					live.ArtifactDelta = map[string]int64{"replaced": 1}
+					after = callbackAfterAgentActionMaps(ctx)
+					return textContent("model", "replaced-event"), nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("baseplugin.New: %v", err)
+			}
+			for ev, runErr := range newTestRunner(t, root, replacePlugin).Run(t.Context(), "u1", "s-replace-delta", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error = %v", runErr)
+				}
+				if ev != nil {
+					replaceEvents = append(replaceEvents, ev)
+				}
+			}
+			if len(replaceEvents) != 1 {
+				t.Fatalf("got %d events, want 1", len(replaceEvents))
+			}
+			if before.stateDelta == nil || before.artifactDelta == nil {
+				t.Fatalf("before = %+v, want non-nil maps", before)
+			}
+			if after.stateDelta == before.stateDelta || after.artifactDelta == before.artifactDelta {
+				t.Fatalf("replacing maps via WithDelta(nil).Actions() did not update captured pointers: before=%+v after=%+v", before, after)
+			}
+			evMaps := eventActionMaps(replaceEvents[0])
+			if evMaps != after {
+				t.Fatalf("eventActionMaps = %+v, want %+v", evMaps, after)
+			}
+			if evMaps.shares(before) {
+				t.Fatalf("eventActionMaps %+v unexpectedly shared replaced maps with before %+v", evMaps, before)
+			}
+			weakState = weak.Make((*byte)(before.stateDelta))
+			weakArt = weak.Make((*byte)(before.artifactDelta))
+			beforeState = uintptr(before.stateDelta)
+			beforeArt = uintptr(before.artifactDelta)
+		}()
+
+		// Phase 1: while keep is held, weak pointers to both replaced maps must
+		// stay live across GC cycles and no fresh map may reuse their addresses.
+		for i := range 2000 {
+			if i%200 == 0 {
+				runtime.GC()
+				if weakState.Value() == nil || weakArt.Value() == nil {
+					t.Fatalf("replaced maps were garbage-collected while keep was held at iteration %d (state=%v artifact=%v)", i, weakState.Value(), weakArt.Value())
+				}
+			}
+			sd := map[string]any{"i": i}
+			if got := uintptr(mapPointer(reflect.ValueOf(sd))); got == beforeState {
+				t.Fatalf("fresh StateDelta reused pinned address %#x at iteration %d", beforeState, i)
+			}
+			ad := map[string]int64{"i": int64(i)}
+			if got := uintptr(mapPointer(reflect.ValueOf(ad))); got == beforeArt {
+				t.Fatalf("fresh ArtifactDelta reused pinned address %#x at iteration %d", beforeArt, i)
+			}
+		}
+		runtime.KeepAlive(keep)
+
+		// Phase 2: once keep is dropped, GC collects both replaced maps, proving
+		// Phase 1 relied on keep rather than any leaked reference.
+		keep = nil
+		for range 16 {
+			runtime.GC()
+			runtime.Gosched()
+			if weakState.Value() == nil && weakArt.Value() == nil {
+				break
+			}
+		}
+		if weakState.Value() != nil || weakArt.Value() != nil {
+			t.Fatalf("replaced maps remained reachable after dropping keep (state=%v artifact=%v)", weakState.Value(), weakArt.Value())
+		}
+	})
+}
+
 func TestTraceManager_UnobservedTaskLocked(t *testing.T) {
 	base := time.Date(2026, 11, 19, 13, 0, 0, 0, time.UTC)
 	taskID := identity{invocationID: "inv-unobs-unit", agentName: "worker", path: "work"}
@@ -30642,5 +30961,2866 @@ func TestCompleteResponseWithActions_CompletedToolsGuards(t *testing.T) {
 			t.Fatal("Call 2's own EventActions did not clear its completedTools record")
 		}
 		runtime.KeepAlive(ctx2)
+	})
+}
+
+func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
+	t.Run("reaches callback actions through stdlib and ADK context wrappers", func(t *testing.T) {
+		type cbKey struct{}
+		var (
+			cbCtx    agent.Context
+			toolCtx  agent.Context
+			wantCB   actionMaps
+			wantTool actionMaps
+		)
+		root, err := agent.New(agent.Config{
+			Name: "wrappers",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					cbCtx = agent.NewCallbackContext(ic, nil)
+					wantCB = callbackAfterAgentActionMaps(cbCtx)
+					toolCtx = agent.NewToolContext(ic, "call-1", nil, nil)
+					wantTool = callbackAfterAgentActionMaps(toolCtx)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(wrappers): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, root).Run(t.Context(), "u1", "s-wrappers", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		if wantCB.stateDelta == nil || wantCB.artifactDelta == nil {
+			t.Fatalf("wantCB = %+v, want non-nil maps", wantCB)
+		}
+		if wantTool.stateDelta == nil || wantTool.artifactDelta == nil {
+			t.Fatalf("wantTool = %+v, want non-nil maps", wantTool)
+		}
+
+		cancelWrapped, cancel := context.WithCancel(cbCtx)
+		defer cancel()
+		timeoutWrapped, cancelTimeout := context.WithTimeout(cbCtx, time.Minute)
+		defer cancelTimeout()
+		withoutCancelWrapped := context.WithoutCancel(cbCtx)
+		valueWrapped := context.WithValue(cbCtx, cbKey{}, 1)
+
+		for _, tc := range []struct {
+			name string
+			ctx  context.Context
+			want actionMaps
+		}{
+			{name: "NewCallbackContext", ctx: cbCtx, want: wantCB},
+			{name: "WithValue", ctx: valueWrapped, want: wantCB},
+			{name: "WithCancel", ctx: cancelWrapped, want: wantCB},
+			{name: "WithTimeout", ctx: timeoutWrapped, want: wantCB},
+			{name: "WithoutCancel", ctx: withoutCancelWrapped, want: wantCB},
+			{name: "NewToolContext", ctx: toolCtx, want: wantTool},
+		} {
+			if got := callbackAfterAgentActionMaps(tc.ctx); got != tc.want {
+				t.Errorf("%s: callbackAfterAgentActionMaps = %+v, want %+v", tc.name, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("NewContext and WithAgentContext(context.Background()) shadow outer UUID provider and callback actions", func(t *testing.T) {
+		var (
+			cbCtx     agent.Context
+			cbActions actionMaps
+			plainCtx  agent.Context
+			rebound   agent.Context
+			cbWithBg  agent.Context
+			innerCB   agent.Context
+			innerWant actionMaps
+		)
+		root, err := agent.New(agent.Config{
+			Name: "rebind",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					cbCtx = agent.NewCallbackContext(ic, nil)
+					cbActions = callbackAfterAgentActionMaps(cbCtx)
+					plainCtx = agent.NewContext(cbCtx)
+					rebound = plainCtx.WithAgentContext(context.Background())
+					cbWithBg = cbCtx.WithDelta(nil).WithAgentContext(context.Background())
+					innerActions := &session.EventActions{
+						StateDelta:    map[string]any{"inner": 1},
+						ArtifactDelta: map[string]int64{"inner": 1},
+					}
+					innerCB = agent.NewCallbackContext(cbCtx, innerActions)
+					innerWant = actionMaps{
+						stateDelta:    mapPointer(reflect.ValueOf(innerActions.StateDelta)),
+						artifactDelta: mapPointer(reflect.ValueOf(innerActions.ArtifactDelta)),
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(rebind): %v", err)
+		}
+		outerCtx := platform.WithUUIDProvider(t.Context(), func() string { return "outer-custom-id" })
+		for _, runErr := range newTestRunner(t, root).Run(outerCtx, "u1", "s-rebind", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		if cbCtx == nil || plainCtx == nil || rebound == nil || cbWithBg == nil || innerCB == nil {
+			t.Fatal("agent.Run did not build expected contexts")
+		}
+		if cbActions.stateDelta == nil || cbActions.artifactDelta == nil {
+			t.Fatalf("cbActions = %+v, want non-nil maps", cbActions)
+		}
+		// NewContext(cbCtx) keeps cbCtx as its Context (so UUID provider stays
+		// visible) while creating a fresh commonContext with nil actions.
+		if !contextHasCustomUUIDProvider(plainCtx) {
+			t.Fatal("contextHasCustomUUIDProvider(NewContext(cbCtx)) = false, want true")
+		}
+		if am, keep := callbackAfterAgentActions(plainCtx); am != (actionMaps{}) || keep != nil {
+			t.Fatalf("callbackAfterAgentActions(NewContext(cbCtx)) = (%+v, %v), want zero", am, keep)
+		}
+		// WithAgentContext(Background) shadows the outer UUID provider on both
+		// plainCtx and a *commonContext retaining cbCtx's actions.
+		if contextHasCustomUUIDProvider(rebound) {
+			t.Fatal("contextHasCustomUUIDProvider(WithAgentContext(Background)) = true, want false")
+		}
+		if hasEventCreationProvenance(rebound, &session.Event{ID: "outer-custom-id"}) {
+			t.Fatal("hasEventCreationProvenance accepted custom ID after WithAgentContext(Background)")
+		}
+		if !hasNewEventUUID(platform.NewUUID(rebound)) {
+			t.Fatal("platform.NewUUID(WithAgentContext(Background)) did not fall back to UUIDv4")
+		}
+		if contextHasCustomUUIDProvider(cbWithBg) {
+			t.Fatal("contextHasCustomUUIDProvider(cbCtx.WithDelta(nil).WithAgentContext(Background)) = true, want false")
+		}
+		if got := callbackAfterAgentActionMaps(cbWithBg); got != cbActions {
+			t.Fatalf("callbackAfterAgentActionMaps(cbWithBg) = %+v, want %+v", got, cbActions)
+		}
+		if got := callbackAfterAgentActionMaps(innerCB); got != innerWant || got == cbActions {
+			t.Fatalf("callbackAfterAgentActionMaps(innerCB) = %+v, want %+v (distinct from %+v)", got, innerWant, cbActions)
+		}
+	})
+
+	t.Run("contextHasCustomUUIDProvider and callbackAfterAgentActions leave the fields of mutex-guarded custom contexts unread", func(t *testing.T) {
+		var cbCtx agent.Context
+		root, err := agent.New(agent.Config{
+			Name: "race-ctx",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					cbCtx = agent.NewCallbackContext(ic, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(race-ctx): %v", err)
+		}
+		outerUUIDCtx := platform.WithUUIDProvider(t.Context(), func() string { return "swapped-id" })
+		for _, runErr := range newTestRunner(t, root).Run(outerUUIDCtx, "u1", "s-race", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		if cbCtx == nil {
+			t.Fatal("cbCtx = nil")
+		}
+
+		swappable := &mutexSwappableContext{parent: outerUUIDCtx}
+		embedded := &lockedEmbeddedContext{Context: cbCtx}
+		type testKey struct{}
+		wrappedEmbedded := context.WithValue(embedded, testKey{}, 1)
+
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				next := context.Background()
+				if i%2 == 0 {
+					next = outerUUIDCtx
+				}
+				swappable.setParent(next)
+				if i%2 == 0 {
+					embedded.setContext(cbCtx)
+				} else {
+					embedded.setContext(context.Background())
+				}
+			}
+		})
+		defer func() {
+			close(stop)
+			wg.Wait()
+		}()
+
+		for range 200 {
+			_ = contextHasCustomUUIDProvider(swappable)
+			_ = contextHasCustomUUIDProvider(embedded)
+			_ = contextHasCustomUUIDProvider(wrappedEmbedded)
+			if am, keep := callbackAfterAgentActions(swappable); am != (actionMaps{}) || keep != nil {
+				t.Fatalf("callbackAfterAgentActions(swappable) = (%+v, %v), want zero", am, keep)
+			}
+			if am, keep := callbackAfterAgentActions(embedded); am != (actionMaps{}) || keep != nil {
+				t.Fatalf("callbackAfterAgentActions(embedded) = (%+v, %v), want zero", am, keep)
+			}
+			if am, keep := callbackAfterAgentActions(wrappedEmbedded); am != (actionMaps{}) || keep != nil {
+				t.Fatalf("callbackAfterAgentActions(wrappedEmbedded) = (%+v, %v), want zero", am, keep)
+			}
+		}
+	})
+
+	t.Run("deep stdlib nesting >250 layers succeeds without panic", func(t *testing.T) {
+		type testKey struct{}
+
+		baseCtx := platform.WithUUIDProvider(t.Context(), func() string { return "deep-id" })
+		deepCtx := baseCtx
+		for i := range 300 {
+			deepCtx = context.WithValue(deepCtx, testKey{}, i)
+		}
+		if !contextHasCustomUUIDProvider(deepCtx) {
+			t.Fatal("contextHasCustomUUIDProvider(deep) = false, want true")
+		}
+
+		var gotActions actionMaps
+		root, err := agent.New(agent.Config{
+			Name: "deep-cb",
+			Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New: %v", err)
+		}
+		probe, err := baseplugin.New(baseplugin.Config{
+			Name: "probe-deep-cb",
+			AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+				wrapped := context.Context(ctx)
+				for i := range 300 {
+					wrapped = context.WithValue(wrapped, testKey{}, i)
+				}
+				gotActions = callbackAfterAgentActionMaps(wrapped)
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+		for _, runErr := range newTestRunner(t, root, probe).Run(t.Context(), "u1", "s-deep-cb", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		if gotActions.stateDelta == nil || gotActions.artifactDelta == nil {
+			t.Fatalf("callbackAfterAgentActionMaps(deep) = %+v, want non-nil maps", gotActions)
+		}
+	})
+
+	t.Run("nil, cyclic, deep-bounded, and panicking Value contexts fail closed", func(t *testing.T) {
+		var nilCtx context.Context
+		if am, keep := callbackAfterAgentActions(nilCtx); am != (actionMaps{}) || keep != nil {
+			t.Fatalf("callbackAfterAgentActions(nil) = (%+v, %v), want zero", am, keep)
+		}
+		cyc := &cyclicContext{}
+		cyc.Context = cyc
+		if am, keep := callbackAfterAgentActions(cyc); am != (actionMaps{}) || keep != nil {
+			t.Fatalf("callbackAfterAgentActions(cyclic) = (%+v, %v), want zero", am, keep)
+		}
+
+		// Self-parented and mutually cyclic stdlib and ADK wrappers fail closed.
+		// The visited set ends these walks at the first pointer they revisit,
+		// but the 512-step bound alone would end them with the same result, so
+		// the subtest after this one pins the visited set and the dereference
+		// bound on their own.
+		type cycleKey struct{}
+		setUnexportedField := func(ptr any, field string, val any) {
+			f := reflect.ValueOf(ptr).Elem().FieldByName(field)
+			reflect.NewAt(f.Type(), f.Addr().UnsafePointer()).Elem().Set(reflect.ValueOf(val))
+		}
+		stdlibCycle := context.WithValue(context.Background(), cycleKey{}, 1)
+		setUnexportedField(stdlibCycle, "Context", stdlibCycle)
+		if am, keep := callbackAfterAgentActions(stdlibCycle); am != (actionMaps{}) || keep != nil {
+			t.Fatalf("callbackAfterAgentActions(stdlibCycle) = (%+v, %v), want zero", am, keep)
+		}
+
+		mIC := &mockInvocationContext{ctx: t.Context()}
+		cbCycle := agent.NewCallbackContext(mIC, nil)
+		setUnexportedField(cbCycle, "context", cbCycle)
+		if am, keep := callbackAfterAgentActions(cbCycle); am != (actionMaps{}) || keep != nil {
+			t.Fatalf("callbackAfterAgentActions(cbCycle) = (%+v, %v), want zero", am, keep)
+		}
+
+		cb1 := agent.NewCallbackContext(mIC, nil)
+		tool2 := agent.NewToolContext(mIC, "call-cycle", nil, nil)
+		setUnexportedField(cb1, "context", tool2)
+		setUnexportedField(tool2, "context", cb1)
+		wrappedAgentCycle := context.WithValue(cb1, cycleKey{}, 2)
+		if am, keep := callbackAfterAgentActions(wrappedAgentCycle); am != (actionMaps{}) || keep != nil {
+			t.Fatalf("callbackAfterAgentActions(wrappedAgentCycle) = (%+v, %v), want zero", am, keep)
+		}
+
+		// A self-referential pointer and interface fails closed; the visited
+		// set and the dereference bound each end it alone.
+		var selfIface any
+		selfIface = &selfIface
+		if am, pins := extractCallbackAfterAgentActionsValue(reflect.ValueOf(&selfIface)); am != (actionMaps{}) || pins != ([2]unsafe.Pointer{}) {
+			t.Fatalf("extractCallbackAfterAgentActionsValue(selfIface) = (%+v, %+v), want zero", am, pins)
+		}
+
+		// Chains exceeding the 512-step bound fail closed cleanly.
+		overBound := context.Context(agent.NewCallbackContext(mIC, nil))
+		for i := range 600 {
+			overBound = context.WithValue(overBound, cycleKey{}, i)
+		}
+		if am, keep := callbackAfterAgentActions(overBound); am != (actionMaps{}) || keep != nil {
+			t.Fatalf("callbackAfterAgentActions(>512 layers) = (%+v, %v), want zero", am, keep)
+		}
+
+		bad := panickingValueContext{}
+		if contextHasCustomUUIDProvider(bad) {
+			t.Fatal("contextHasCustomUUIDProvider(panicking) = true, want false")
+		}
+		if am, keep := callbackAfterAgentActions(bad); am != (actionMaps{}) || keep != nil {
+			t.Fatalf("callbackAfterAgentActions(panicking) = (%+v, %v), want zero", am, keep)
+		}
+	})
+
+	t.Run("derefContextStructValue fails on a revisited pointer and on a long chain", func(t *testing.T) {
+		mIC := &mockInvocationContext{ctx: t.Context()}
+		cb := agent.NewCallbackContext(mIC, nil)
+		seen := map[visitedContextStruct]bool{}
+		if _, ok := derefContextStructValue(reflect.ValueOf(cb), seen); !ok {
+			t.Fatal("first visit of a callback context failed")
+		}
+		if _, ok := derefContextStructValue(reflect.ValueOf(cb), seen); ok {
+			t.Error("second visit of the same pointer succeeded, so a cyclic context would walk to the step bound")
+		}
+		// A pointer of another type to the same address, as to a struct and to
+		// its first field, is not a revisit.
+		type inner struct{ n int }
+		type outer struct{ in inner }
+		o := &outer{in: inner{n: 1}}
+		if _, ok := derefContextStructValue(reflect.ValueOf(o), seen); !ok {
+			t.Fatal("first visit of outer failed")
+		}
+		if _, ok := derefContextStructValue(reflect.ValueOf(&o.in), seen); !ok {
+			t.Error("a pointer to the first field of a visited struct counted as a revisit")
+		}
+
+		// chain wraps cb in levels of *any, which take two dereferences each,
+		// ahead of the dereference of cb itself.
+		chain := func(levels int) reflect.Value {
+			var v any = cb
+			for range levels {
+				p := new(any)
+				*p = v
+				v = p
+			}
+			return reflect.ValueOf(v)
+		}
+		if am, _ := extractCallbackAfterAgentActionsValue(chain(255)); am == (actionMaps{}) {
+			t.Error("a chain of 511 dereferences did not reach the callback context's maps")
+		}
+		if am, _ := extractCallbackAfterAgentActionsValue(chain(256)); am != (actionMaps{}) {
+			t.Errorf("a chain of 513 dereferences reached the callback context's maps (%+v), want the 512-dereference bound to fail it closed", am)
+		}
+	})
+
+	t.Run("contextParentMap, contextPath, and identityOf survive cyclic ctx any and params any wrappers", func(t *testing.T) {
+		var capturedIC agent.InvocationContext
+		leaf, err := agent.New(agent.Config{
+			Name: "leaf",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					capturedIC = ic
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(leaf): %v", err)
+		}
+		leafNode, err := workflow.NewAgentNode(leaf, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode(leaf): %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf_cycle",
+			Edges: workflow.Chain(workflow.Start, leafNode),
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New(wf_cycle): %v", err)
+		}
+		parentRoot, err := agent.New(agent.Config{
+			Name:      "parent_root",
+			SubAgents: []agent.Agent{wf},
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return wf.Run(ic)
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(parent_root): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, parentRoot).Run(t.Context(), "u1", "s-ctx-cycle", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		if capturedIC == nil {
+			t.Fatal("leaf did not capture InvocationContext")
+		}
+
+		// Non-ADK application wrappers with self-referential fields are ignored by
+		// contextParentMap and contextPath (never inspected for fields), while
+		// allowlisted ADK/stdlib wrappers around capturedIC still resolve.
+		type cyclicReadonlyWrapper struct {
+			agent.ReadonlyContext
+			params            any
+			ctx               any
+			invocationContext agent.InvocationContext
+		}
+		type cyclicInvocationWrapper struct {
+			agent.InvocationContext
+			params any
+			ctx    any
+		}
+
+		// Verify real ADK + stdlib wrappers remain traversed accurately.
+		type wrapKey struct{}
+		realCB := context.WithValue(agent.NewCallbackContext(capturedIC, nil), wrapKey{}, 1)
+		realTool := context.WithoutCancel(agent.NewToolContext(capturedIC, "c1", nil, nil))
+		for _, tc := range []struct {
+			name string
+			ctx  context.Context
+		}{
+			{name: "capturedIC", ctx: capturedIC},
+			{name: "CallbackContext+WithValue", ctx: realCB},
+			{name: "ToolContext+WithoutCancel", ctx: realTool},
+		} {
+			if got := contextParentMap(tc.ctx); got["wf_cycle"] != parentRoot {
+				t.Errorf("%s: contextParentMap()[wf_cycle] = %v, want %v", tc.name, got["wf_cycle"], parentRoot)
+			}
+			if got := contextPath(tc.ctx); got != "wf_cycle@1/leaf@1" {
+				t.Errorf("%s: contextPath() = %q, want wf_cycle@1/leaf@1", tc.name, got)
+			}
+		}
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+
+			var nilCtx context.Context
+			if got := contextParentMap(nilCtx); got != nil {
+				t.Errorf("contextParentMap(nil) = %v, want nil", got)
+			}
+			if got := contextPath(nilCtx); got != "" {
+				t.Errorf("contextPath(nil) = %q, want empty", got)
+			}
+			if got := identityOf(nilCtx); got != (identity{}) {
+				t.Errorf("identityOf(nil) = %+v, want zero", got)
+			}
+
+			var selfCtx any
+			selfCtx = &selfCtx
+			var selfParams any
+			selfParams = &selfParams
+
+			roWrapped := &cyclicReadonlyWrapper{
+				ReadonlyContext:   agent.NewCallbackContext(capturedIC, nil),
+				params:            &selfParams,
+				ctx:               &selfCtx,
+				invocationContext: capturedIC,
+			}
+			if parents := contextParentMap(roWrapped); parents != nil {
+				t.Errorf("contextParentMap(roWrapped) = %v, want nil (non-ADK wrapper ignored)", parents)
+			}
+			if got := contextPath(roWrapped); got != "" {
+				t.Errorf("contextPath(roWrapped) = %q, want empty (non-ADK wrapper ignored)", got)
+			}
+			if got := identityOf(roWrapped); got.path != "" || got.agentName != "leaf" {
+				t.Errorf("identityOf(roWrapped) = %+v, want agentName=leaf path=\"\"", got)
+			}
+
+			icWrapped := &cyclicInvocationWrapper{
+				InvocationContext: capturedIC,
+				params:            &selfParams,
+				ctx:               &selfCtx,
+			}
+			if got := contextParentMap(icWrapped); got != nil {
+				t.Errorf("contextParentMap(icWrapped) = %v, want nil (non-ADK wrapper ignored)", got)
+			}
+			if got := contextPath(icWrapped); got != "" {
+				t.Errorf("contextPath(icWrapped) = %q, want empty (non-ADK wrapper ignored)", got)
+			}
+			if got := identityOf(icWrapped); got.path != "" || got.agentName != "leaf" {
+				t.Errorf("identityOf(icWrapped) = %+v, want agentName=leaf path=\"\"", got)
+			}
+
+			// Purely cyclic wrapper with embedded mockInvocationContext keeps empty path.
+			pureCycle := &cyclicReadonlyWrapper{
+				ReadonlyContext: agent.NewCallbackContext(&mockInvocationContext{ctx: context.Background(), agentName: "solo", invocationID: "inv-cyc"}, nil),
+			}
+			pureCycle.params = pureCycle
+			pureCycle.ctx = pureCycle
+			if got := contextParentMap(pureCycle); got != nil {
+				t.Errorf("contextParentMap(pureCycle) = %v, want nil", got)
+			}
+			if got := contextPath(pureCycle); got != "" {
+				t.Errorf("contextPath(pureCycle) = %q, want empty", got)
+			}
+			if got := identityOf(pureCycle); got.path != "" || got.invocationID != "inv-cyc" {
+				t.Errorf("identityOf(pureCycle) = %+v, want invocationID=inv-cyc path=\"\"", got)
+			}
+		}()
+
+		// Mutex-guarded application contexts with fields concurrently mutated under -race
+		// must never be read by contextPath or contextParentMap.
+		type concurrentAppInvocationWrapper struct {
+			agent.InvocationContext
+			mu              sync.Mutex
+			ReadonlyContext agent.ReadonlyContext
+			params          any
+			ctx             any
+		}
+		type concurrentAppReadonlyWrapper struct {
+			agent.ReadonlyContext
+			mu                sync.Mutex
+			InvocationContext agent.InvocationContext
+			params            any
+			ctx               any
+		}
+		appInv := &concurrentAppInvocationWrapper{
+			InvocationContext: capturedIC,
+			params:            map[string]any{"Path": "app/path"},
+		}
+		appRO := &concurrentAppReadonlyWrapper{
+			ReadonlyContext: agent.NewCallbackContext(capturedIC, nil),
+			params:          map[string]any{"Path": "app/path"},
+		}
+		raceStop := make(chan struct{})
+		var raceWG sync.WaitGroup
+		raceWG.Go(func() {
+			for i := 0; ; i++ {
+				select {
+				case <-raceStop:
+					return
+				default:
+				}
+				appInv.mu.Lock()
+				if i%2 == 0 {
+					appInv.ReadonlyContext = agent.NewCallbackContext(capturedIC, nil)
+					appInv.params = map[string]any{"Path": "even"}
+					appInv.ctx = capturedIC
+				} else {
+					appInv.ReadonlyContext = nil
+					appInv.params = nil
+					appInv.ctx = nil
+				}
+				appInv.mu.Unlock()
+
+				appRO.mu.Lock()
+				if i%2 == 0 {
+					appRO.InvocationContext = capturedIC
+					appRO.params = map[string]any{"Path": "even"}
+					appRO.ctx = capturedIC
+				} else {
+					appRO.InvocationContext = nil
+					appRO.params = nil
+					appRO.ctx = nil
+				}
+				appRO.mu.Unlock()
+			}
+		})
+		for range 200 {
+			if got := contextPath(appInv); got != "" {
+				t.Errorf("contextPath(concurrentAppInvocationWrapper) = %q, want empty", got)
+			}
+			if got := contextParentMap(appInv); got != nil {
+				t.Errorf("contextParentMap(concurrentAppInvocationWrapper) = %v, want nil", got)
+			}
+			if got := contextPath(appRO); got != "" {
+				t.Errorf("contextPath(concurrentAppReadonlyWrapper) = %q, want empty", got)
+			}
+			if got := contextParentMap(appRO); got != nil {
+				t.Errorf("contextParentMap(concurrentAppReadonlyWrapper) = %v, want nil", got)
+			}
+		}
+		close(raceStop)
+		raceWG.Wait()
+
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			t.Fatal("contextParentMap / contextPath / identityOf hung on cyclic ctx any or params any wrapper")
+		}
+	})
+}
+
+func TestRetiredSwallowerAndCause(t *testing.T) {
+	sw := retiredSwallower{spanID: "span-1", seq: 7, name: "worker", branch: "par.b1", path: "root/worker"}
+	for _, tc := range []struct {
+		name   string
+		branch string
+		path   string
+		want   bool
+	}{
+		{name: "worker", branch: "par.b1", path: "root/worker", want: true},
+		{name: "worker", branch: "par.b1", path: "", want: true},
+		{name: "worker", branch: "par.b1", path: "root/other", want: false},
+		{name: "worker", branch: "par.b2", path: "root/worker", want: false},
+		{name: "other", branch: "par.b1", path: "root/worker", want: false},
+	} {
+		if got := sw.matches(tc.name, tc.branch, tc.path); got != tc.want {
+			t.Errorf("sw.matches(%q, %q, %q) = %v, want %v", tc.name, tc.branch, tc.path, got, tc.want)
+		}
+	}
+	emptyPathSw := retiredSwallower{name: "worker", branch: "par.b1"}
+	if !emptyPathSw.matches("worker", "par.b1", "root/worker") {
+		t.Fatal("emptyPathSw.matches with non-empty event path = false, want true")
+	}
+
+	var c retiredCause
+	c.addSwallower(nil)
+	if len(c.swallowers) != 0 {
+		t.Fatalf("addSwallower(nil) added %d swallowers, want 0", len(c.swallowers))
+	}
+	rec1 := &spanRecord{spanID: "span-1", seq: 7, name: "worker", branch: "par.b1", path: "root/worker"}
+	c.addSwallower(rec1)
+	c.addSwallower(&spanRecord{spanID: "span-1", seq: 99, name: "dup"})
+	if !c.hasSwallowerSpan("span-1") {
+		t.Fatal("hasSwallowerSpan(span-1) = false, want true")
+	}
+	if c.hasSwallowerSpan("span-2") {
+		t.Fatal("hasSwallowerSpan(span-2) = true, want false")
+	}
+	// Empty-spanID records deduplicate on (name, branch, path) while keeping distinct paths.
+	c.addSwallower(&spanRecord{seq: 11, name: "anon", branch: "b", path: "p1"})
+	c.addSwallower(&spanRecord{seq: 12, name: "anon", branch: "b", path: "p1"})
+	c.addSwallower(&spanRecord{seq: 13, name: "anon", branch: "b", path: "p2"})
+	want := []retiredSwallower{
+		{spanID: "span-1", seq: 7, name: "worker", branch: "par.b1", path: "root/worker"},
+		{seq: 11, name: "anon", branch: "b", path: "p1"},
+		{seq: 13, name: "anon", branch: "b", path: "p2"},
+	}
+	if diff := cmp.Diff(want, c.swallowers, cmp.AllowUnexported(retiredSwallower{})); diff != "" {
+		t.Fatalf("c.swallowers mismatch (-want +got):\n%s", diff)
+	}
+	if c.hasSwallowerSpan("") {
+		t.Fatal(`hasSwallowerSpan("") = true, want false`)
+	}
+
+	// Verify sibling value copies of retiredCause never overwrite each other's
+	// swallowers across both cap > len and cap == len slice states, without
+	// relying on append's growth policy.
+	assertSiblingIsolation := func(label string, base retiredCause) {
+		t.Helper()
+		c1, c2 := base, base
+		c1.addSwallower(&spanRecord{spanID: "branch-a", seq: 101})
+		c2.addSwallower(&spanRecord{spanID: "branch-b", seq: 102})
+		c1.addSwallower(&spanRecord{spanID: "branch-a2", seq: 103})
+		c2.addSwallower(&spanRecord{spanID: "branch-b2", seq: 104})
+		if !c1.hasSwallowerSpan("branch-a") || !c1.hasSwallowerSpan("branch-a2") || c1.hasSwallowerSpan("branch-b") || c1.hasSwallowerSpan("branch-b2") {
+			t.Fatalf("%s: c1 swallowers aliased c2: %+v", label, c1.swallowers)
+		}
+		if !c2.hasSwallowerSpan("branch-b") || !c2.hasSwallowerSpan("branch-b2") || c2.hasSwallowerSpan("branch-a") || c2.hasSwallowerSpan("branch-a2") {
+			t.Fatalf("%s: c2 swallowers aliased c1: %+v", label, c2.swallowers)
+		}
+	}
+
+	var withSharedSpare retiredCause
+	withSharedSpare.addSwallower(&spanRecord{spanID: "base-0", seq: 1})
+	if cap(withSharedSpare.swallowers) <= len(withSharedSpare.swallowers) {
+		t.Fatalf("expected cap > len after first addSwallower, got len=%d cap=%d", len(withSharedSpare.swallowers), cap(withSharedSpare.swallowers))
+	}
+	assertSiblingIsolation("cap>len shared", withSharedSpare)
+
+	rawSpareSlice := make([]retiredSwallower, 1, 4)
+	rawSpareSlice[0] = retiredSwallower{spanID: "raw-0", seq: 1}
+	assertSiblingIsolation("cap>len unshared", retiredCause{swallowers: rawSpareSlice})
+
+	withSharedFull := withSharedSpare
+	for len(withSharedFull.swallowers) < cap(withSharedFull.swallowers) {
+		idx := len(withSharedFull.swallowers)
+		withSharedFull.addSwallower(&spanRecord{spanID: fmt.Sprintf("full-%d", idx), seq: uint64(idx + 1)})
+	}
+	assertSiblingIsolation("cap==len shared", withSharedFull)
+	assertSiblingIsolation("cap==len unshared", retiredCause{
+		swallowers: []retiredSwallower{{spanID: "exact-0", seq: 1}},
+	})
+
+	// Linear ancestor chains of 1,024 addSwallower calls must grow
+	// geometrically (O(N) total copies, O(log N) backing-array allocations)
+	// rather than reallocating on every step.
+	var chain retiredCause
+	reallocs := 0
+	var prevBase *retiredSwallower
+	for i := range 1024 {
+		chain.addSwallower(&spanRecord{spanID: fmt.Sprintf("anc-%d", i), seq: uint64(i + 1)})
+		if curBase := &chain.swallowers[0]; curBase != prevBase {
+			reallocs++
+			prevBase = curBase
+		}
+	}
+	if len(chain.swallowers) != 1024 || !chain.hasSwallowerSpan("anc-0") || !chain.hasSwallowerSpan("anc-1023") {
+		t.Fatalf("1024-ancestor chain = len %d, missing expected spans", len(chain.swallowers))
+	}
+	if reallocs > 16 {
+		t.Fatalf("1024 linear addSwallower calls reallocated %d times, want <= 16 (geometric O(N) growth)", reallocs)
+	}
+}
+
+func TestActionMapsShares(t *testing.T) {
+	if (actionMaps{}).shares(actionMaps{}) {
+		t.Fatal("zero actionMaps should not share")
+	}
+	s1 := map[string]any{"k": 1}
+	s2 := map[string]any{"k": 2}
+	a1 := map[string]int64{"f": 1}
+	a2 := map[string]int64{"f": 2}
+	ev1 := &session.Event{Actions: session.EventActions{StateDelta: s1, ArtifactDelta: a1}}
+	ev2 := &session.Event{Actions: session.EventActions{StateDelta: s1, ArtifactDelta: a2}}
+	ev3 := &session.Event{Actions: session.EventActions{StateDelta: s2, ArtifactDelta: a1}}
+	ev4 := &session.Event{Actions: session.EventActions{StateDelta: s2, ArtifactDelta: a2}}
+
+	m1, m2, m3, m4 := eventActionMaps(ev1), eventActionMaps(ev2), eventActionMaps(ev3), eventActionMaps(ev4)
+	if !m1.shares(m2) {
+		t.Fatal("events sharing StateDelta did not match via shares")
+	}
+	if !m1.shares(m3) {
+		t.Fatal("events sharing ArtifactDelta did not match via shares")
+	}
+	if m1.shares(m4) {
+		t.Fatal("events with disjoint maps matched via shares")
+	}
+	if m1.shares(actionMaps{}) {
+		t.Fatal("non-zero actionMaps matched zero actionMaps")
+	}
+}
+
+// TestIsGoroutineTraceHeader covers the header forms of Go 1.26, which prints
+// pprof labels inside the bracket and quotes them all when
+// GODEBUG=tracebacklabels=1, and of Go 1.27, which prints them after the
+// bracket and quotes only what needs it; each rejected row breaks one rule.
+func TestIsGoroutineTraceHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name, header string
+		want         bool
+	}{
+		{"plain", `goroutine 7 [running]:`, true},
+		{"wait time and lock", `goroutine 7 [chan receive, 2 minutes, locked to thread]:`, true},
+		{"GOTRACEBACK=system fields", `goroutine 7 gp=0xc000002380 m=0 mp=0x5b7e60 [running]:`, true},
+		{"GOTRACEBACK=system fields without an M", `goroutine 7 gp=0xc000002380 m=nil [semacquire]:`, true},
+		{"Go 1.26 labels", `goroutine 7 [running labels:{"k": "v"}]:`, true},
+		{"Go 1.26 labels after the wait time", `goroutine 7 [select, 3 minutes labels:{"a": "b", "c": "d"}]:`, true},
+		{"Go 1.26 labels with brackets and braces", `goroutine 7 [running labels:{"route": "a] [b", "x": "{y}"}]:`, true},
+		{"Go 1.26 label with an escaped quote", `goroutine 7 [running labels:{"k": "a\"] [b"}]:`, true},
+		{"Go 1.26 label ending in an escaped backslash", `goroutine 7 [running labels:{"k": "a\\"}]:`, true},
+		{"Go 1.27 labels", `goroutine 7 [running] {"span id": 123}:`, true},
+		{"Go 1.27 unquoted labels", `goroutine 7 [running] {Route: v1/X_y.z, k: v}:`, true},
+		{"Go 1.27 labels with brackets and braces", `goroutine 7 [running] {"route": "a] [b", "x": "{y}"}:`, true},
+		{"Go 1.27 empty label value", `goroutine 7 [running] {k: }:`, true},
+		{"Go 1.27 labels and GOTRACEBACK=system fields", `goroutine 7 gp=0x1 m=0 mp=0x2 [chan receive (durable), 2 minutes] {a: b, "x]y": "z}w"}:`, true},
+
+		{"not a goroutine header", `x`, false},
+		{"non-numeric ID", `goroutine abc [running]:`, false},
+		{"no space after the ID", `goroutine 7[running]:`, false},
+		{"ID alone", `goroutine 7`, false},
+		{"no bracket", `goroutine 7 running:`, false},
+		{"no space before the bracket", `goroutine 7 foo[running]:`, false},
+		{"close bracket before the status", `goroutine 7 x] [running]:`, false},
+		{"brace before the status", `goroutine 7 {x [running]:`, false},
+		{"close brace before the status", `goroutine 7 x} [running]:`, false},
+		{"quote before the status", `goroutine 7 "x" [running]:`, false},
+		{"empty status", `goroutine 7 []:`, false},
+		{"unclosed status", `goroutine 7 [running`, false},
+		{"bracket in the status", `goroutine 7 [run [ning]:`, false},
+		{"brace in the status", `goroutine 7 [running {x]:`, false},
+		{"close brace in the status", `goroutine 7 [running}]:`, false},
+		{"quote in the status", `goroutine 7 [run"ning]:`, false},
+		{"no colon", `goroutine 7 [running]`, false},
+		{"text after the bracket", `goroutine 7 [running] extra:`, false},
+		{"text right after the bracket", `goroutine 7 [running]x:`, false},
+		{"second bracket", `goroutine 7 [running] [x]:`, false},
+		{"Go 1.26 labels without a status", `goroutine 7 [ labels:{"k": "v"}]:`, false},
+		{"Go 1.26 unquoted label", `goroutine 7 [running labels:{k: "v"}]:`, false},
+		{"Go 1.26 labels without the opening brace", `goroutine 7 [running labels:"k": "v"}]:`, false},
+		{"Go 1.26 unclosed quote", `goroutine 7 [running labels:{"k": "v}]:`, false},
+		{"Go 1.26 labels followed by Go 1.27 labels", `goroutine 7 [running labels:{"k": "v"}] {a: b}:`, false},
+		{"Go 1.26 label without a colon", `goroutine 7 [running labels:{"k""v"}]:`, false},
+		{"Go 1.26 labels without a comma", `goroutine 7 [running labels:{"a": "b""c": "d"}]:`, false},
+		{"Go 1.27 empty labels", `goroutine 7 [running] {}:`, false},
+		{"Go 1.27 unclosed labels", `goroutine 7 [running] {k: v:`, false},
+		{"Go 1.27 unquoted label with a space", `goroutine 7 [running] {k: v w}:`, false},
+		{"Go 1.27 two label groups", `goroutine 7 [running] {a: b} {c: d}:`, false},
+		{"Go 1.27 labels without the colon", `goroutine 7 [running] {a: b}`, false},
+		{"Go 1.27 labels with an empty status", `goroutine 7 [] {a: b}:`, false},
+	} {
+		if got := isGoroutineTraceHeader(tc.header); got != tc.want {
+			t.Errorf("isGoroutineTraceHeader(%s: %s) = %v, want %v", tc.name, tc.header, got, tc.want)
+		}
+	}
+}
+
+func TestAfterAgentCallbackRunsOfTrace(t *testing.T) {
+	frame := func(fn string) string {
+		return fn + "(0x1, 0x2)\n\t/src/file.go:10 +0x20\n"
+	}
+	run := agentPkgPath + ".runAfterAgentCallbacks"
+	for _, tc := range []struct {
+		name     string
+		trace    string
+		complete bool
+		want     int
+		wantOK   bool
+	}{
+		{"none", "goroutine 7 [running]:\n" + frame(agentPkgPath+".runBeforeAgentCallbacks") + frame(agentPkgPath+".(*agent).Run.func1"), true, 0, true},
+		{"one", "goroutine 7 [running]:\n" + frame(agentPkgPath+".runBeforeAgentCallbacks") + frame(run) + frame(agentPkgPath+".(*agent).Run.func1"), true, 1, true},
+		{"one with created by", "goroutine 7 [running]:\n" + frame(run) + "created by main.f in goroutine 1\n\t/src/file.go:3 +0x1\n", true, 1, true},
+		{"nested", "goroutine 7 [running]:\n" + frame(run) + frame("main.callback") + frame(run), true, 2, true},
+		{"another package's function of that name", "goroutine 7 [running]:\n" + frame("example.com/other.runAfterAgentCallbacks"), true, 0, true},
+		{"a function inside it", "goroutine 7 [running]:\n" + frame(run+".func1"), true, 0, true},
+		{"after the created by line", "goroutine 7 [running]:\n" + frame("main.f") + "created by " + run + " in goroutine 1\n\t/src/file.go:3 +0x1\n", true, 0, true},
+		{"tab-indented file line", "goroutine 7 [running]:\n" + frame("main.f") + "\t/dir/" + run + "(0x1)/file.go:10 +0x20\n", true, 0, true},
+		{"no frames", "goroutine 7 [running]:\n", true, 0, true},
+		{"header without newline", "goroutine 7 [running]:", true, 0, false},
+		{"non-goroutine header", "x\n" + frame(run), true, 0, false},
+		{"non-numeric goroutine id header", "goroutine abc [running]:\n" + frame(run), true, 0, false},
+		{"header without bracket state", "goroutine 7 running\n" + frame(run), true, 0, false},
+		{"header missing open bracket", "goroutine 7 running]:\n" + frame(run), true, 0, false},
+		{"header missing close bracket", "goroutine 7 [running\n" + frame(run), true, 0, false},
+		{"header empty bracket state", "goroutine 7 []:\n" + frame(run), true, 0, false},
+		{"header unclosed label brace", "goroutine 7 [running] {unclosed:\n" + frame(run), true, 0, false},
+		{"header empty label braces", "goroutine 7 [running] {}:\n" + frame(run), true, 0, false},
+		{"header trailing garbage after state", "goroutine 7 [running] extra:\n" + frame(run), true, 0, false},
+		{"header missing space before bracket", "goroutine 7 foo[running]:\n" + frame(run), true, 0, false},
+		{"header empty bracket state with labels", "goroutine 42 [] {\"route\": \"a]b\"}:\n" + frame(run), true, 0, false},
+		{"labeled Go 1.27 header", "goroutine 42 [running] {\"span id\": 123}:\n" + frame(run), true, 1, true},
+		{"labeled Go 1.27 header with bracket in label value", "goroutine 42 [running] {\"route\": \"v1/[id]\", \"k]2\": \"x]y\"}:\n" + frame(run), true, 1, true},
+		{"labeled header with brace in status", "goroutine 42 [select {custom}] {\"route\": \"v1/[id]\"}:\n" + frame(run), true, 0, false},
+		{"labeled Go 1.26 header with bracket in label value", "goroutine 42 [running labels:{\"route\": \"a] [b\"}]:\n" + frame(run), true, 1, true},
+		{"higher GOTRACEBACK header with labels", "goroutine 42 gp=0x1 m=0 [chan receive (durable), 2 minutes] {a: b, \"x]y\": \"z}w\"}:\n" + frame(run), true, 1, true},
+		{"higher GOTRACEBACK header", "goroutine 7 gp=0x1 m=0 [running]:\n" + frame(run), true, 1, true},
+		{"empty", "", true, 0, false},
+		{"frame without arguments", "goroutine 7 [running]:\n" + run + "\n\t/src/file.go:10 +0x20\n", true, 0, false},
+		{"frame starting with paren", "goroutine 7 [running]:\n(0x1)\n\t/src/file.go:10 +0x20\n", true, 0, false},
+		{"elided between two run frames", "goroutine 7 [running]:\n" + frame(run) + "...42 frames elided...\n" + frame(run), true, 0, false},
+		{"additional frames elided between two run frames", "goroutine 7 [running]:\n" + frame(run) + "...additional frames elided...\n" + frame(run), true, 0, false},
+		{"elided with zero visible run frames", "goroutine 7 [running]:\n" + frame(agentPkgPath+".runBeforeAgentCallbacks") + "...42 frames elided...\n" + frame("main.outer"), true, 0, false},
+		{"elided after the created by line", "goroutine 7 [running]:\n" + frame(run) + "created by main.f in goroutine 1\n\t/src/file.go:3 +0x1\n...5 frames elided...\n", true, 1, true},
+		{"truncated with visible run frame", "goroutine 7 [running]:\n" + frame(run), false, 0, false},
+		{"truncated with zero visible run frames", "goroutine 7 [running]:\n" + frame(agentPkgPath+".runBeforeAgentCallbacks"), false, 0, false},
+	} {
+		got, ok := afterAgentCallbackRunsOfTrace([]byte(tc.trace), tc.complete)
+		if got != tc.want || ok != tc.wantOK {
+			t.Errorf("afterAgentCallbackRunsOfTrace(%s) = (%d, %v), want (%d, %v)", tc.name, got, ok, tc.want, tc.wantOK)
+		}
+	}
+	if trace, complete := currentGoroutineTrace(); !complete {
+		t.Fatalf("currentGoroutineTrace() complete = false on test goroutine")
+	} else if got, ok := afterAgentCallbackRunsOfTrace(trace, complete); got != 0 || !ok {
+		t.Errorf("afterAgentCallbackRunsOfTrace(this goroutine) = (%d, %v), want (0, true)", got, ok)
+	}
+	var callDepth func(int, func()) int
+	callDepth = func(depth int, fn func()) int {
+		if depth <= 0 {
+			fn()
+			return 0
+		}
+		return callDepth(depth-1, fn) + 1
+	}
+	callDepth(110, func() {
+		trace, complete := currentGoroutineTrace()
+		if !complete || !strings.Contains(string(trace), "frames elided") {
+			t.Fatalf("deep stack trace complete = %v, elided = %v; trace:\n%s", complete, strings.Contains(string(trace), "frames elided"), trace)
+		}
+		if got, ok := afterAgentCallbackRunsOfTrace(trace, complete); got != 0 || ok {
+			t.Errorf("afterAgentCallbackRunsOfTrace(elided goroutine) = (%d, %v), want (0, false)", got, ok)
+		}
+	})
+}
+
+type mutexSwappableContext struct {
+	mu     sync.RWMutex
+	parent context.Context
+}
+
+func (c *mutexSwappableContext) setParent(p context.Context) {
+	c.mu.Lock()
+	c.parent = p
+	c.mu.Unlock()
+}
+
+func (c *mutexSwappableContext) Deadline() (time.Time, bool) {
+	c.mu.RLock()
+	p := c.parent
+	c.mu.RUnlock()
+	return p.Deadline()
+}
+
+func (c *mutexSwappableContext) Done() <-chan struct{} {
+	c.mu.RLock()
+	p := c.parent
+	c.mu.RUnlock()
+	return p.Done()
+}
+
+func (c *mutexSwappableContext) Err() error {
+	c.mu.RLock()
+	p := c.parent
+	c.mu.RUnlock()
+	return p.Err()
+}
+
+func (c *mutexSwappableContext) Value(key any) any {
+	c.mu.RLock()
+	p := c.parent
+	c.mu.RUnlock()
+	return p.Value(key)
+}
+
+type panickingValueContext struct{}
+
+func (panickingValueContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (panickingValueContext) Done() <-chan struct{}       { return nil }
+func (panickingValueContext) Err() error                  { return nil }
+func (panickingValueContext) Value(any) any               { panic("boom") }
+
+// TestEventCreationProvenance_RealRun ties hasNewEventUUID and
+// hasEventCreationProvenance to real runner.Run / session.NewEvent output so a
+// change to ADK's default platform.NewUUID format breaks the test loudly.
+func TestEventCreationProvenance_RealRun(t *testing.T) {
+	runOnce := func(parentCtx context.Context) []*session.Event {
+		root, err := agent.New(agent.Config{
+			Name: "provenance-real",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "provenance-real"
+					ev.Content = textContent("model", "ok")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New: %v", err)
+		}
+		var out []*session.Event
+		for ev, runErr := range newTestRunner(t, root).Run(parentCtx, "u1", "s-prov", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+			if ev != nil {
+				out = append(out, ev)
+			}
+		}
+		if len(out) != 1 {
+			t.Fatalf("got %d events, want 1", len(out))
+		}
+		return out
+	}
+
+	defaultEvents := runOnce(t.Context())
+	if !hasNewEventUUID(defaultEvents[0].ID) {
+		t.Fatalf("hasNewEventUUID(%q) = false for real ADK default session.NewEvent", defaultEvents[0].ID)
+	}
+	if !hasEventCreationProvenance(t.Context(), defaultEvents[0]) {
+		t.Fatalf("hasEventCreationProvenance(default, %q) = false, want true", defaultEvents[0].ID)
+	}
+
+	customCtx := platform.WithUUIDProvider(t.Context(), func() string { return "custom-real-run-1" })
+	customEvents := runOnce(customCtx)
+	if customEvents[0].ID != "custom-real-run-1" {
+		t.Fatalf("real run event ID = %q, want custom-real-run-1", customEvents[0].ID)
+	}
+	if hasNewEventUUID(customEvents[0].ID) {
+		t.Fatalf("hasNewEventUUID(%q) = true, want false", customEvents[0].ID)
+	}
+	if !hasEventCreationProvenance(customCtx, customEvents[0]) {
+		t.Fatal("hasEventCreationProvenance(customCtx, customEvent) = false, want true")
+	}
+
+	t.Run("child activation WithUUIDProvider passes delivery OnEventCallback without sibling false positives", func(t *testing.T) {
+		cp := newClockedPlugin(t)
+
+		type deliveryObs struct {
+			pure       bool
+			withTraces bool
+			persisted  bool
+		}
+		var (
+			mu         sync.Mutex
+			atDelivery = map[string]deliveryObs{}
+			delivered  = map[string]*session.Event{}
+			invID      string
+		)
+
+		probePlugin, err := baseplugin.New(baseplugin.Config{
+			Name:                  "provenance-child-probe",
+			OnUserMessageCallback: cp.onUserMessage,
+			BeforeRunCallback:     cp.beforeRun,
+			AfterRunCallback:      cp.afterRun,
+			BeforeAgentCallback:   cp.beforeAgent,
+			AfterAgentCallback:    cp.afterAgent,
+			BeforeModelCallback:   cp.beforeModel,
+			AfterModelCallback:    cp.afterModel,
+			OnModelErrorCallback:  cp.onModelError,
+			BeforeToolCallback:    cp.beforeTool,
+			AfterToolCallback:     cp.afterTool,
+			OnToolErrorCallback:   cp.onToolError,
+			OnEventCallback: func(evCtx agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+				if ev != nil {
+					alreadyPersisted := false
+					for persisted := range evCtx.Session().Events().All() {
+						if persisted != nil && persisted.ID == ev.ID {
+							alreadyPersisted = true
+							break
+						}
+					}
+					obs := deliveryObs{
+						pure:       hasEventCreationProvenance(evCtx, ev),
+						withTraces: cp.traces.hasEventCreationProvenance(evCtx, identityOf(evCtx), ev),
+						persisted:  alreadyPersisted,
+					}
+					mu.Lock()
+					if invID == "" {
+						if id := evCtx.InvocationID(); id != "" {
+							invID = id
+						} else {
+							invID = ev.InvocationID
+						}
+					}
+					atDelivery[ev.ID] = obs
+					delivered[ev.ID] = ev
+					mu.Unlock()
+				}
+				return cp.onEvent(evCtx, ev)
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+
+		customChild, err := agent.New(agent.Config{
+			Name: "custom_child",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "custom_child"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "from custom child")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(custom_child): %v", err)
+		}
+
+		var defaultUUIDEventID string
+		defaultSibling, err := agent.New(agent.Config{
+			Name: "default_sibling",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					forged := &session.Event{
+						ID:           "forged-sibling-1",
+						InvocationID: ctx.InvocationID(),
+						Author:       "default_sibling",
+						Branch:       ctx.Branch(),
+						LLMResponse:  model.LLMResponse{Content: textContent("model", "forged sibling")},
+					}
+					if !yield(forged, nil) {
+						return
+					}
+					genuine := session.NewEvent(ctx, ctx.InvocationID())
+					genuine.Author = "default_sibling"
+					genuine.Branch = ctx.Branch()
+					genuine.Content = textContent("model", "genuine sibling")
+					defaultUUIDEventID = genuine.ID
+					yield(genuine, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(default_sibling): %v", err)
+		}
+
+		sharedWorker, err := agent.New(agent.Config{
+			Name: "shared_worker",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					if ctx.Branch() == "parent_prov.worker_custom" {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "shared_worker"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "worker custom")
+						yield(ev, nil)
+						return
+					}
+					forged := &session.Event{
+						ID:           "forged-worker-1",
+						InvocationID: ctx.InvocationID(),
+						Author:       "shared_worker",
+						Branch:       ctx.Branch(),
+						LLMResponse:  model.LLMResponse{Content: textContent("model", "forged worker")},
+					}
+					yield(forged, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(shared_worker): %v", err)
+		}
+
+		parent, err := agent.New(agent.Config{
+			Name:      "parent_prov",
+			SubAgents: []agent.Agent{customChild, defaultSibling, sharedWorker},
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					customBranch := "parent_prov.custom"
+					branchIC := ic.WithICDelta(&agent.InvocationContextDelta{Branch: &customBranch})
+					childIC := branchIC.WithContext(platform.WithUUIDProvider(branchIC, func() string { return "child-custom-real-1" }))
+					for ev, runErr := range customChild.Run(childIC) {
+						if !yield(ev, runErr) {
+							return
+						}
+					}
+
+					sibBranch := "parent_prov.default"
+					sibIC := ic.WithICDelta(&agent.InvocationContextDelta{Branch: &sibBranch})
+					for ev, runErr := range defaultSibling.Run(sibIC) {
+						if !yield(ev, runErr) {
+							return
+						}
+					}
+
+					workerCustomBranch := "parent_prov.worker_custom"
+					workerBranchIC := ic.WithICDelta(&agent.InvocationContextDelta{Branch: &workerCustomBranch})
+					workerCustomIC := workerBranchIC.WithContext(platform.WithUUIDProvider(workerBranchIC, func() string { return "worker-custom-real-1" }))
+					for ev, runErr := range sharedWorker.Run(workerCustomIC) {
+						if !yield(ev, runErr) {
+							return
+						}
+					}
+
+					workerDefaultBranch := "parent_prov.worker_default"
+					workerDefaultIC := ic.WithICDelta(&agent.InvocationContextDelta{Branch: &workerDefaultBranch})
+					for ev, runErr := range sharedWorker.Run(workerDefaultIC) {
+						if !yield(ev, runErr) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(parent_prov): %v", err)
+		}
+
+		// Run parent with t.Context() (default UUID provider on runnerCtx).
+		for _, runErr := range newTestRunner(t, parent, probePlugin).Run(t.Context(), "u1", "s-child-prov", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		onlyRowOfType(t, cp.takeRows(), EventInvocationCompleted)
+
+		for _, tc := range []struct {
+			id         string
+			wantPure   bool
+			wantTraces bool
+		}{
+			{id: "child-custom-real-1", wantPure: false, wantTraces: true},
+			{id: "forged-sibling-1", wantPure: false, wantTraces: false},
+			{id: defaultUUIDEventID, wantPure: true, wantTraces: true},
+			{id: "worker-custom-real-1", wantPure: false, wantTraces: true},
+			{id: "forged-worker-1", wantPure: false, wantTraces: false},
+		} {
+			obs, ok := atDelivery[tc.id]
+			if !ok {
+				t.Fatalf("OnEventCallback did not observe event %q", tc.id)
+			}
+			if obs.persisted {
+				t.Fatalf("event %q was already in session.Events() during OnEventCallback delivery", tc.id)
+			}
+			if obs.pure != tc.wantPure {
+				t.Errorf("OnEventCallback pure hasEventCreationProvenance(%q) = %v, want %v", tc.id, obs.pure, tc.wantPure)
+			}
+			if obs.withTraces != tc.wantTraces {
+				t.Errorf("OnEventCallback traces.hasEventCreationProvenance(%q) = %v, want %v", tc.id, obs.withTraces, tc.wantTraces)
+			}
+			// After AfterRunCallback completes (rememberCompletedLocked),
+			// completed-trace provenance lookup preserves the same result.
+			gotCompleted := cp.traces.hasEventCreationProvenance(context.Background(), identity{invocationID: invID}, delivered[tc.id])
+			if gotCompleted != tc.wantTraces {
+				t.Errorf("completed traces.hasEventCreationProvenance(%q) = %v, want %v", tc.id, gotCompleted, tc.wantTraces)
+			}
+		}
+	})
+}
+
+// TestUUIDProviderStateWith pins the lattice of uuidProviderState: a key that
+// saw activations with and without a custom provider stays mixed.
+func TestUUIDProviderStateWith(t *testing.T) {
+	const (
+		unseen = uuidProviderUnseen
+		custom = uuidProviderCustom
+		def    = uuidProviderDefault
+		mixed  = uuidProviderMixed
+	)
+	for _, tc := range []struct {
+		s, o, want uuidProviderState
+	}{
+		{unseen, unseen, unseen},
+		{unseen, custom, custom},
+		{unseen, def, def},
+		{custom, unseen, custom},
+		{def, unseen, def},
+		{custom, custom, custom},
+		{def, def, def},
+		{custom, def, mixed},
+		{def, custom, mixed},
+		{mixed, unseen, mixed},
+		{unseen, mixed, mixed},
+		{mixed, custom, mixed},
+		{custom, mixed, mixed},
+		{mixed, def, mixed},
+	} {
+		if got := tc.s.with(tc.o); got != tc.want {
+			t.Errorf("%d.with(%d) = %d, want %d", tc.s, tc.o, got, tc.want)
+		}
+	}
+}
+
+// TestEventUUIDProvider covers how traceManager.hasEventCreationProvenance
+// judges an event ID that is not a UUIDv4 by the agent activations that
+// created the event (see traceManager.eventUUIDProvider), on a traceManager
+// that the callbacks drive directly.
+func TestEventUUIDProvider(t *testing.T) {
+	plain := t.Context()
+	customCtx := platform.WithUUIDProvider(plain, func() string { return "custom-id" })
+	// shadowed is what a custom agent passes to a sub-agent to turn the
+	// provider of customCtx off for it.
+	shadowed := platform.WithUUIDProvider(customCtx, nil)
+
+	start := func(tm *traceManager, ctx context.Context, inv string) {
+		tm.invocationSpan(ctx, identity{invocationID: inv, agentName: "root"}, nil)
+	}
+	push := func(tm *traceManager, ctx context.Context, inv, name, branch, path string) {
+		tm.pushAgentSpan(ctx, identity{invocationID: inv, agentName: name, branch: branch, path: path})
+	}
+	// delivery describes how OnEventCallback delivers an event whose ID is not
+	// a UUIDv4: with ctx and the identity read from it, in invocation inv at
+	// path.
+	type delivery struct {
+		ctx       context.Context
+		inv, path string
+	}
+	// accepts reports whether tm takes an event with a hand-built ID, of
+	// author on branch, in invocation evInv at nodePath, for one that
+	// session.NewEvent created.
+	accepts := func(tm *traceManager, d delivery, evInv, author, branch, nodePath string) bool {
+		ev := &session.Event{ID: "hand-built-id", InvocationID: evInv, Author: author, Branch: branch}
+		if nodePath != "" {
+			ev.NodeInfo = &session.NodeInfo{Path: nodePath}
+		}
+		return tm.hasEventCreationProvenance(d.ctx, identity{invocationID: d.inv, agentName: "root", path: d.path}, ev)
+	}
+	runnerCtx := delivery{ctx: plain, inv: "inv"}
+	customRunnerCtx := delivery{ctx: customCtx, inv: "inv"}
+
+	t.Run("an invocation that never sees a custom provider records nothing and decides without ctx", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		push(tm, plain, "inv", "child", "root.child", "")
+		if l := tm.invocations["inv"].uuidProviders.Load(); l != nil {
+			t.Fatalf("ledger = %p, want none", l)
+		}
+		if accepts(tm, runnerCtx, "inv", "child", "root.child", "") {
+			t.Error("accepted a hand-built ID in an invocation without a custom provider")
+		}
+		if accepts(tm, customRunnerCtx, "inv", "child", "root.child", "") {
+			t.Error("a custom provider on the delivery context decided for a tracked invocation")
+		}
+		tm.endInvocation(plain, identity{invocationID: "inv", agentName: "root"})
+		if accepts(tm, customRunnerCtx, "inv", "child", "root.child", "") {
+			t.Error("a custom provider on the delivery context decided for a completed invocation")
+		}
+		if got := tm.hasEventCreationProvenance(plain, identity{invocationID: "inv"}, &session.Event{ID: "550e8400-e29b-41d4-a716-446655440000", InvocationID: "inv", Author: "child"}); !got {
+			t.Error("rejected a UUIDv4 ID")
+		}
+		// An untracked invocation would let customCtx decide, so these pin the
+		// checks of the event itself.
+		if tm.hasEventCreationProvenance(customCtx, identity{invocationID: "untracked"}, &session.Event{InvocationID: "untracked", Author: "child"}) {
+			t.Error("accepted an event without an ID")
+		}
+		if tm.hasEventCreationProvenance(customCtx, identity{invocationID: "untracked"}, nil) {
+			t.Error("accepted a nil event")
+		}
+	})
+
+	t.Run("a provider that a custom agent installs for one sub-agent passes only that sub-agent's events", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		push(tm, plain, "inv", "root", "", "")
+		push(tm, customCtx, "inv", "child", "root.child", "")
+		push(tm, plain, "inv", "sibling", "root.sibling", "")
+		if !accepts(tm, runnerCtx, "inv", "child", "root.child", "") {
+			t.Error("rejected the ID of the sub-agent with a custom provider")
+		}
+		if accepts(tm, runnerCtx, "inv", "sibling", "root.sibling", "") {
+			t.Error("accepted a hand-built ID of the sibling without one")
+		}
+		if accepts(tm, runnerCtx, "inv", "root", "", "") {
+			t.Error("accepted a hand-built ID of the root agent without one")
+		}
+	})
+
+	t.Run("WithUUIDProvider(ctx, nil) under a custom run rejects the sub-agent's IDs whatever the delivery context carries", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, customCtx, "inv")
+		push(tm, customCtx, "inv", "root", "", "")
+		push(tm, shadowed, "inv", "child", "root.child", "")
+		if accepts(tm, customRunnerCtx, "inv", "child", "root.child", "") {
+			t.Error("accepted a hand-built ID of a sub-agent whose provider was turned off")
+		}
+		if !accepts(tm, customRunnerCtx, "inv", "root", "", "") {
+			t.Error("rejected the ID of the root agent, which ran with the run's provider")
+		}
+	})
+
+	t.Run("a worker that runs again on the same branch and path with the other kind of provider is mixed", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		push(tm, customCtx, "inv", "worker", "root.worker", "")
+		if !accepts(tm, runnerCtx, "inv", "worker", "root.worker", "") {
+			t.Fatal("rejected the ID of the first run, which had a custom provider")
+		}
+		push(tm, plain, "inv", "worker", "root.worker", "")
+		if accepts(tm, runnerCtx, "inv", "worker", "root.worker", "") {
+			t.Error("accepted a hand-built ID once the worker ran again without a custom provider")
+		}
+		// Once the invocation has a ledger, the reverse order is mixed too.
+		push(tm, plain, "inv", "helper", "root.helper", "")
+		push(tm, customCtx, "inv", "helper", "root.helper", "")
+		if accepts(tm, runnerCtx, "inv", "helper", "root.helper", "") {
+			t.Error("accepted a hand-built ID of a helper that ran without and then with a custom provider")
+		}
+	})
+
+	t.Run("the node path of the event decides, and the path is part of the key", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		push(tm, customCtx, "inv", "worker", "wf", "wf@1/worker@1")
+		push(tm, plain, "inv", "worker", "wf", "wf@1/worker@2")
+		atWorker2 := delivery{ctx: plain, inv: "inv", path: "wf@1/worker@2"}
+		atWorker1 := delivery{ctx: plain, inv: "inv", path: "wf@1/worker@1"}
+		if !accepts(tm, atWorker2, "inv", "worker", "wf", "wf@1/worker@1") {
+			t.Error("rejected the ID of worker@1, which ran with a custom provider, delivered at the path of worker@2")
+		}
+		if accepts(tm, atWorker1, "inv", "worker", "wf", "wf@1/worker@2") {
+			t.Error("accepted a hand-built ID of worker@2, which ran without one, delivered at the path of worker@1")
+		}
+		if !accepts(tm, atWorker1, "inv", "worker", "wf", "") {
+			t.Error("rejected an event without a node path delivered at the path of worker@1")
+		}
+	})
+
+	t.Run("a function or dynamic node's output is judged by the nearest ancestor where its workflow agent ran", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		// The workflow agent ran with a custom provider at root@1/wf@1 and
+		// without one at top@1/wf@1 on the same branch, so anyPath is mixed
+		// and only the non-empty '/' ancestor path gives true.
+		push(tm, customCtx, "inv", "wf", "outer.wfb", "root@1/wf@1")
+		push(tm, plain, "inv", "wf", "outer.wfb", "top@1/wf@1")
+		for _, nodePath := range []string{"root@1/wf@1/fn@1", "root@1/wf@1/orch@1", "root@1/wf@1/orch@1/leaf@1"} {
+			if !accepts(tm, runnerCtx, "inv", "wf", "outer.wfb", nodePath) {
+				t.Errorf("rejected the output of %s, whose workflow agent ran with a custom provider", nodePath)
+			}
+		}
+		if accepts(tm, runnerCtx, "inv", "wf", "outer.wfb", "top@1/wf@1/fn@1") {
+			t.Error("accepted a hand-built ID under the node where the workflow agent ran without a custom provider")
+		}
+	})
+
+	t.Run("a nested workflow agent's events, whose paths start at it, are judged by its activations at any path", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		push(tm, customCtx, "inv", "inner", "outer.topb", "top@1/inner@1")
+		if !accepts(tm, runnerCtx, "inv", "inner", "outer.topb", "inner@1/ifn@1") {
+			t.Error("rejected the output of a node of a nested workflow agent that ran with a custom provider")
+		}
+		push(tm, plain, "inv", "inner", "outer.topb", "top@1/inner@2")
+		if accepts(tm, runnerCtx, "inv", "inner", "outer.topb", "inner@1/ifn@1") {
+			t.Error("accepted a hand-built ID once the nested workflow agent also ran without a custom provider")
+		}
+	})
+
+	t.Run("an event that leaves its branch empty is judged by its author's activations on every branch", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		push(tm, customCtx, "inv", "child", "par.child", "")
+		if !accepts(tm, runnerCtx, "inv", "child", "", "") {
+			t.Error("rejected an event without a branch of a sub-agent that ran with a custom provider on a named branch")
+		}
+		push(tm, plain, "inv", "child", "par.other", "")
+		if accepts(tm, runnerCtx, "inv", "child", "", "") {
+			t.Error("accepted a hand-built ID without a branch once the sub-agent also ran without a custom provider")
+		}
+		if !accepts(tm, runnerCtx, "inv", "child", "par.child", "") {
+			t.Error("rejected the ID of the branch that ran with a custom provider")
+		}
+	})
+
+	t.Run("an event without a branch at a node path is judged by its author's activations at that path on every branch", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		push(tm, customCtx, "inv", "w", "wfa", "wfa@1/w@1")
+		push(tm, plain, "inv", "w", "wfb", "wfb@1/w@1")
+		if !accepts(tm, runnerCtx, "inv", "w", "", "wfa@1/w@1") {
+			t.Error("rejected an event without a branch at the node path where its author ran only with a custom provider")
+		}
+		if accepts(tm, runnerCtx, "inv", "w", "", "wfb@1/w@1") {
+			t.Error("accepted a hand-built ID without a branch at the node path where its author ran without one")
+		}
+	})
+
+	t.Run("an event that a custom agent hands on from a nested runner is judged in the nested invocation", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "outer")
+		start(tm, customCtx, "nested")
+		push(tm, customCtx, "nested", "inner", "", "")
+		atOuter := delivery{ctx: plain, inv: "outer"}
+		if !accepts(tm, atOuter, "nested", "inner", "", "") {
+			t.Error("rejected the ID of an event of the nested invocation delivered in the outer one")
+		}
+		if accepts(tm, atOuter, "", "inner", "", "") {
+			t.Error("accepted a hand-built ID of an event without an invocation ID in the outer invocation")
+		}
+	})
+
+	t.Run("an invocation that is not tracked falls back to the delivery context", func(t *testing.T) {
+		tm := newTraceManager()
+		if !accepts(tm, delivery{ctx: customCtx, inv: "unknown"}, "unknown", "child", "", "") {
+			t.Error("rejected an ID delivered with a custom provider in an untracked invocation")
+		}
+		if accepts(tm, delivery{ctx: plain, inv: "unknown"}, "unknown", "child", "", "") {
+			t.Error("accepted a hand-built ID delivered without a custom provider in an untracked invocation")
+		}
+		var nilTM *traceManager
+		if !accepts(nilTM, delivery{ctx: customCtx, inv: "unknown"}, "unknown", "child", "", "") {
+			t.Error("a nil traceManager rejected an ID delivered with a custom provider")
+		}
+	})
+
+	t.Run("an event of no recorded activation is judged by how the run started", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, customCtx, "inv")
+		if !accepts(tm, runnerCtx, "inv", "user", "", "") {
+			t.Error("rejected the ID of an event of no activation in a run that started with a custom provider")
+		}
+		tm = newTraceManager()
+		start(tm, plain, "inv")
+		push(tm, customCtx, "inv", "child", "root.child", "")
+		if accepts(tm, runnerCtx, "inv", "user", "", "") {
+			t.Error("accepted a hand-built ID of an event of no activation in a run that started without a custom provider")
+		}
+	})
+
+	t.Run("callbacks that act for another activation record nothing for it", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		child := identity{invocationID: "inv", agentName: "child", branch: "root.child"}
+		tm.pushAgentSpan(customCtx, child)
+		// OnEventCallback ends a task-mode sub-agent with the runner's
+		// context, and a transfer resolves its target with the caller's.
+		tm.popTaskAgentSpanForCalls(plain, child, []string{"call-1"}, false, time.Time{})
+		tm.agentNamed(plain, child)
+		if !accepts(tm, runnerCtx, "inv", "child", "root.child", "") {
+			t.Error("rejected the ID of a sub-agent with a custom provider after callbacks of other activations named it")
+		}
+	})
+
+	t.Run("a completed run keeps its ledger without copying it", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		push(tm, customCtx, "inv", "child", "root.child", "")
+		ledger := tm.invocations["inv"].uuidProviders.Load()
+		tm.endInvocation(plain, identity{invocationID: "inv", agentName: "root"})
+		if got := tm.completed["inv"].uuidProviders; got != ledger {
+			t.Fatalf("completed ledger = %p, want the run's %p", got, ledger)
+		}
+		if !accepts(tm, runnerCtx, "inv", "child", "root.child", "") {
+			t.Error("rejected the ID of the sub-agent with a custom provider after the run completed")
+		}
+		// AfterRun can run again for the completed invocation, which then
+		// gets a fresh trace that recorded nothing.
+		tm.endInvocation(plain, identity{invocationID: "inv", agentName: "root"})
+		if got := tm.completed["inv"].uuidProviders; got != ledger {
+			t.Errorf("completed ledger after a second AfterRun = %p, want %p", got, ledger)
+		}
+		if !accepts(tm, runnerCtx, "inv", "child", "root.child", "") {
+			t.Error("rejected the ID of the sub-agent with a custom provider after a second AfterRun")
+		}
+	})
+
+	t.Run("an activation after AfterRun shares the run's ledger", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		push(tm, customCtx, "inv", "child", "root.child", "")
+		ledger := tm.invocations["inv"].uuidProviders.Load()
+		tm.endInvocation(plain, identity{invocationID: "inv", agentName: "root"})
+		push(tm, plain, "inv", "child", "root.child", "")
+		if got := tm.completed["inv"].late.uuidProviders.Load(); got != ledger {
+			t.Fatalf("late ledger = %p, want the run's %p", got, ledger)
+		}
+		if accepts(tm, runnerCtx, "inv", "child", "root.child", "") {
+			t.Error("accepted a hand-built ID once the sub-agent ran again after AfterRun without a custom provider")
+		}
+	})
+
+	t.Run("a custom provider first seen after AfterRun is found in the late state", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		push(tm, plain, "inv", "root", "", "")
+		tm.endInvocation(plain, identity{invocationID: "inv", agentName: "root"})
+		push(tm, customCtx, "inv", "late_child", "root.late", "")
+		if tm.completed["inv"].uuidProviders != nil {
+			t.Fatal("the completed run got a ledger from an activation after AfterRun")
+		}
+		if !accepts(tm, runnerCtx, "inv", "late_child", "root.late", "") {
+			t.Error("rejected the ID of an activation with a custom provider that started after AfterRun")
+		}
+		if accepts(tm, runnerCtx, "inv", "root", "", "") {
+			t.Error("accepted a hand-built ID of the root agent, which ran without a custom provider")
+		}
+	})
+
+	t.Run("evicted and restored invocations preserve their UUID provider ledger", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.maxTracked = 1
+		start(tm, customCtx, "inv-1")
+		push(tm, customCtx, "inv-1", "custom_child", "root.custom", "")
+		push(tm, shadowed, "inv-1", "plain_child", "root.plain", "")
+
+		// Evict inv-1 from tm.invocations into tm.evicted.
+		start(tm, plain, "inv-2")
+		if tm.invocations["inv-1"] != nil {
+			t.Fatal("expected inv-1 to be evicted from tm.invocations")
+		}
+
+		// Provenance checks while inv-1 sits in tm.evicted (before restoration)
+		// preserve both custom_child and plain_child's shadowed nil provider.
+		evPlain := delivery{ctx: plain, inv: "inv-1"}
+		evCustom := delivery{ctx: customCtx, inv: "inv-1"}
+		if !accepts(tm, evPlain, "inv-1", "custom_child", "root.custom", "") {
+			t.Error("evicted invocation rejected custom_child's custom-provider ID")
+		}
+		if accepts(tm, evCustom, "inv-1", "plain_child", "root.plain", "") {
+			t.Error("evicted invocation accepted plain_child's hand-built ID after WithUUIDProvider(ctx, nil)")
+		}
+
+		// Restore inv-1 via a subsequent callback and verify the ledger stays intact.
+		push(tm, plain, "inv-1", "after_restore", "root.ar", "")
+		if tm.invocations["inv-1"] == nil || !tm.invocations["inv-1"].evicted {
+			t.Fatal("expected inv-1 to be restored with evicted == true")
+		}
+		if !accepts(tm, evPlain, "inv-1", "custom_child", "root.custom", "") {
+			t.Error("restored invocation rejected custom_child's custom-provider ID")
+		}
+		if accepts(tm, evCustom, "inv-1", "plain_child", "root.plain", "") {
+			t.Error("restored invocation accepted plain_child's hand-built ID")
+		}
+		if accepts(tm, evCustom, "inv-1", "after_restore", "root.ar", "") {
+			t.Error("restored invocation accepted after_restore's hand-built ID")
+		}
+
+		tm.endInvocation(plain, identity{invocationID: "inv-1", agentName: "root"})
+		if !accepts(tm, evPlain, "inv-1", "custom_child", "root.custom", "") {
+			t.Error("completed restored invocation rejected custom_child's custom-provider ID")
+		}
+		if accepts(tm, evCustom, "inv-1", "plain_child", "root.plain", "") {
+			t.Error("completed restored invocation accepted plain_child's hand-built ID")
+		}
+	})
+
+	t.Run("an untracked foreign ev.InvocationID fails closed when id.invocationID is tracked", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, customCtx, "inv")
+		push(tm, customCtx, "inv", "root", "", "")
+		push(tm, shadowed, "inv", "child", "root.child", "")
+
+		// Stale/bogus ev.InvocationID delivered in a tracked outer invocation
+		// must fail closed rather than escaping to customCtx on delivery.
+		if accepts(tm, customRunnerCtx, "stale-foreign", "child", "root.child", "") {
+			t.Error("accepted a stale foreign ev.InvocationID from a child that called WithUUIDProvider(ctx, nil)")
+		}
+		if accepts(tm, customRunnerCtx, "stale-foreign", "root", "", "") {
+			t.Error("accepted an untracked foreign ev.InvocationID in a tracked live invocation")
+		}
+
+		tm.endInvocation(customCtx, identity{invocationID: "inv", agentName: "root"})
+		if accepts(tm, customRunnerCtx, "stale-foreign", "child", "root.child", "") {
+			t.Error("accepted an untracked foreign ev.InvocationID in a tracked completed invocation")
+		}
+
+		// When neither ev.InvocationID nor id.invocationID is tracked, delivery ctx still decides.
+		if !accepts(tm, delivery{ctx: customCtx, inv: "untracked-outer"}, "untracked-nested", "child", "", "") {
+			t.Error("rejected custom delivery ctx when neither outer nor event invocation is tracked")
+		}
+		if accepts(tm, delivery{ctx: plain, inv: "untracked-outer"}, "untracked-nested", "child", "", "") {
+			t.Error("accepted plain delivery ctx when neither outer nor event invocation is tracked")
+		}
+	})
+
+	t.Run("user or empty ev.Author consults id.agentName so WithUUIDProvider(ctx, nil) fails closed", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, customCtx, "inv")
+		push(tm, customCtx, "inv", "root", "", "")
+		push(tm, shadowed, "inv", "worker", "root.worker", "")
+
+		for _, author := range []string{"user", ""} {
+			ev := &session.Event{ID: "hand-built-user-id", InvocationID: "inv", Author: author}
+			workerID := identity{invocationID: "inv", agentName: "worker", branch: "root.worker"}
+			if tm.hasEventCreationProvenance(customCtx, workerID, ev) {
+				t.Errorf("accepted hand-built ID with Author=%q under worker that disabled custom UUIDs", author)
+			}
+			// Even without branch on id, anyBranch on worker's ledger fails closed.
+			if tm.hasEventCreationProvenance(customCtx, identity{invocationID: "inv", agentName: "worker"}, ev) {
+				t.Errorf("accepted hand-built ID with Author=%q and empty id.branch under worker that disabled custom UUIDs", author)
+			}
+		}
+
+		// Conversely, a worker with its own custom provider in a plain run
+		// passes synthesized user/empty-author events.
+		tmPlain := newTraceManager()
+		start(tmPlain, plain, "inv-plain")
+		push(tmPlain, customCtx, "inv-plain", "worker", "root.worker", "")
+		for _, author := range []string{"user", ""} {
+			ev := &session.Event{ID: "worker-synth-1", InvocationID: "inv-plain", Author: author}
+			workerID := identity{invocationID: "inv-plain", agentName: "worker", branch: "root.worker"}
+			if !tmPlain.hasEventCreationProvenance(plain, workerID, ev) {
+				t.Errorf("rejected custom-provider worker event with Author=%q", author)
+			}
+		}
+	})
+
+	t.Run("direct empty-path activation is not conflated with nested workflow paths", func(t *testing.T) {
+		// Direct top-level activation at path == "" with customCtx + nested
+		// activation at path == "wf@1" without one.
+		tm := newTraceManager()
+		start(tm, plain, "inv")
+		push(tm, customCtx, "inv", "wf", "outer.wfb", "")
+		push(tm, plain, "inv", "wf", "outer.wfb", "wf@1")
+		if !accepts(tm, runnerCtx, "inv", "wf", "outer.wfb", "") {
+			t.Error("rejected direct top-level event at path == \"\" where wf ran with customCtx")
+		}
+		if accepts(tm, runnerCtx, "inv", "wf", "outer.wfb", "wf@1") {
+			t.Error("accepted nested event at path == \"wf@1\" where wf ran without a custom provider")
+		}
+		if accepts(tm, runnerCtx, "inv", "wf", "outer.wfb", "wf@1/fn@1") {
+			t.Error("accepted nested node output at wf@1/fn@1 where wf@1 ran without a custom provider")
+		}
+
+		// Direct top-level activation at path == "" with customCtx + nested
+		// workflow node at path == "top@1/wf@1" without one (whose own nodes
+		// emit paths starting at "wf@1/..."): stopping before "" consults
+		// anyPath (mixed) and fails closed instead of matching path == "".
+		tm2 := newTraceManager()
+		start(tm2, plain, "inv2")
+		push(tm2, customCtx, "inv2", "wf", "outer.wfb", "")
+		push(tm2, plain, "inv2", "wf", "outer.wfb", "top@1/wf@1")
+		if !accepts(tm2, delivery{ctx: plain, inv: "inv2"}, "inv2", "wf", "outer.wfb", "") {
+			t.Error("rejected direct top-level event at path == \"\" in inv2")
+		}
+		if accepts(tm2, delivery{ctx: plain, inv: "inv2"}, "inv2", "wf", "outer.wfb", "wf@1/fn@1") {
+			t.Error("conflated nested wf@1/fn@1 output with direct top-level path == \"\" when top@1/wf@1 ran without a custom provider")
+		}
+	})
+
+	t.Run("deep node paths cap ancestor lookups at maxUUIDProviderAncestorSteps before falling back to anyPath", func(t *testing.T) {
+		segments := make([]string, 20)
+		for i := range segments {
+			segments[i] = fmt.Sprintf("s%d@1", i)
+		}
+		deep20 := strings.Join(segments, "/")
+		within8 := strings.Join(segments[:maxUUIDProviderAncestorSteps], "/")
+		beyond8 := strings.Join(segments[:maxUUIDProviderAncestorSteps+1], "/")
+
+		// Pure custom workflow: >16-segment path falls back to anyPath after 8
+		// lookups and still passes.
+		tmPure := newTraceManager()
+		start(tmPure, plain, "inv")
+		push(tmPure, customCtx, "inv", "wf", "b", segments[0])
+		if !accepts(tmPure, runnerCtx, "inv", "wf", "b", deep20) {
+			t.Errorf("rejected 20-segment path %q under pure custom workflow", deep20)
+		}
+
+		// Mixed workflow (segments[0] custom + other@1 plain -> anyPath mixed):
+		// depth <= 8 reaches segments[0] (true), while depth > 8 stops after 8
+		// lookups, consults anyPath (mixed), and fails closed (false).
+		tmMixed := newTraceManager()
+		start(tmMixed, plain, "inv")
+		push(tmMixed, customCtx, "inv", "wf", "b", segments[0])
+		push(tmMixed, plain, "inv", "wf", "b", "other@1")
+		if !accepts(tmMixed, runnerCtx, "inv", "wf", "b", within8) {
+			t.Errorf("rejected %d-segment path %q within maxUUIDProviderAncestorSteps", maxUUIDProviderAncestorSteps, within8)
+		}
+		if accepts(tmMixed, runnerCtx, "inv", "wf", "b", beyond8) {
+			t.Errorf("accepted %d-segment path %q beyond maxUUIDProviderAncestorSteps under mixed anyPath", maxUUIDProviderAncestorSteps+1, beyond8)
+		}
+		if accepts(tmMixed, runnerCtx, "inv", "wf", "b", deep20) {
+			t.Errorf("accepted 20-segment path %q beyond maxUUIDProviderAncestorSteps under mixed anyPath", deep20)
+		}
+	})
+
+	t.Run("disabled worker branch fails closed for unrecorded authors, user/empty authors, and sub-branches", func(t *testing.T) {
+		tm := newTraceManager()
+		start(tm, customCtx, "inv")
+		push(tm, customCtx, "inv", "root", "", "")
+		push(tm, shadowed, "inv", "worker", "root.worker", "")
+
+		// (a) Unrecorded author on disabled worker branch fails closed.
+		if accepts(tm, runnerCtx, "inv", "unrecorded", "root.worker", "") {
+			t.Error("accepted unrecorded author on disabled worker branch root.worker")
+		}
+		// (b) Root/parent context yielding user or empty Author with ev.Branch = "root.worker" fails closed.
+		for _, author := range []string{userAuthor, ""} {
+			ev := &session.Event{ID: "hand-built-branch", InvocationID: "inv", Author: author, Branch: "root.worker"}
+			if tm.hasEventCreationProvenance(customCtx, identity{invocationID: "inv", agentName: "root", branch: ""}, ev) {
+				t.Errorf("accepted hand-built ID with Author=%q and ev.Branch=root.worker delivered under root", author)
+			}
+		}
+		// (c) Nested sub-branch under disabled worker branch fails closed.
+		if accepts(tm, runnerCtx, "inv", "unrecorded", "root.worker.sub", "") {
+			t.Error("accepted unrecorded author on sub-branch root.worker.sub of disabled worker branch")
+		}
+		if custom, tracked := tm.eventUUIDProviderFor("inv", "", "root.worker.sub", "", "root", ""); custom || !tracked {
+			t.Errorf("eventUUIDProviderFor(empty, root.worker.sub) = (%v, %v), want (false, true)", custom, tracked)
+		}
+		// (d) Sibling custom author on a mixed branch keeps its own custom verdict while unrecorded fails closed.
+		push(tm, customCtx, "inv", "helper", "root.worker", "")
+		if !accepts(tm, runnerCtx, "inv", "helper", "root.worker", "") {
+			t.Error("rejected recorded custom helper on root.worker")
+		}
+		if accepts(tm, runnerCtx, "inv", "unrecorded", "root.worker", "") {
+			t.Error("accepted unrecorded author on mixed branch root.worker")
+		}
+		// (e) Branch summary state survives endInvocation compaction.
+		tm.endInvocation(customCtx, identity{invocationID: "inv", agentName: "root"})
+		if accepts(tm, runnerCtx, "inv", "unrecorded", "root.worker.sub", "") {
+			t.Error("accepted unrecorded author on compacted disabled sub-branch")
+		}
+		if custom, tracked := tm.eventUUIDProviderFor("inv", userAuthor, "root.worker", "", "root", ""); custom || !tracked {
+			t.Errorf("compacted eventUUIDProviderFor(user, root.worker) = (%v, %v), want (false, true)", custom, tracked)
+		}
+
+		// (f) Overflowing branchStates (> maxCompletedUUIDProviderEntries) with a disabled branch fails closed via branchSummaryOverflow.
+		tmOverflow := newTraceManager()
+		start(tmOverflow, customCtx, "inv-bo")
+		push(tmOverflow, customCtx, "inv-bo", "root", "", "")
+		for i := range maxCompletedUUIDProviderEntries + 10 {
+			c := customCtx
+			if i == maxCompletedUUIDProviderEntries+5 {
+				c = shadowed
+			}
+			push(tmOverflow, c, "inv-bo", "w", fmt.Sprintf("root.b%d", i), "")
+		}
+		tmOverflow.endInvocation(customCtx, identity{invocationID: "inv-bo", agentName: "root"})
+		if accepts(tmOverflow, runnerCtx, "inv-bo", "unrecorded", fmt.Sprintf("root.b%d.sub", maxCompletedUUIDProviderEntries+5), "") {
+			t.Error("accepted unrecorded author on overflowed disabled branch")
+		}
+	})
+
+	t.Run("eviction between lookup and noteUUIDProviderLocked preserves first custom provider observation", func(t *testing.T) {
+		// Deterministic window test with maxTracked = 1:
+		// evict inv-1 right after lookupInvocationWithUUID releases tm.mu and before
+		// inv-1's noteUUIDProviderLocked runs.
+		tm := newTraceManager()
+		tm.maxTracked = 1
+		id1 := identity{invocationID: "inv-1", agentName: "worker", branch: "root.w"}
+		id2 := identity{invocationID: "inv-2", agentName: "other"}
+
+		inv1 := tm.lookupInvocationWithUUID(customCtx, id1, true, false, true)
+		// Force eviction of inv-1 under tm.mu while inv1 has not yet run noteUUIDProviderLocked.
+		tm.invocationSpan(plain, id2, nil)
+		if _, evicted := tm.evicted["inv-1"]; !evicted {
+			t.Fatal("expected inv-1 in tm.evicted after maxTracked=1 eviction")
+		}
+		inv1.mu.Lock()
+		inv1.noteUUIDProviderLocked(id1, true, true)
+		inv1.noteUUIDProviderLocked(id1, true, false)
+		inv1.mu.Unlock()
+
+		if custom, tracked := tm.eventUUIDProvider("inv-1", "worker", "root.w", ""); !custom || !tracked {
+			t.Fatalf("eventUUIDProvider(evicted inv-1) = (%v, %v), want (true, true)", custom, tracked)
+		}
+
+		// Concurrent start/push under maxTracked = 1 with -race.
+		tmRace := newTraceManager()
+		tmRace.maxTracked = 1
+		var wg sync.WaitGroup
+		for i := range 20 {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				invID := fmt.Sprintf("race-inv-%d", idx)
+				rid := identity{invocationID: invID, agentName: "root"}
+				tmRace.invocationSpan(customCtx, rid, nil)
+				wid := identity{invocationID: invID, agentName: "worker", branch: "root.w"}
+				tmRace.pushAgentSpan(customCtx, wid)
+				tmRace.popAgentSpan(customCtx, wid)
+			}(i)
+		}
+		wg.Wait()
+		for i := range 20 {
+			invID := fmt.Sprintf("race-inv-%d", i)
+			if custom, tracked := tmRace.eventUUIDProvider(invID, "worker", "root.w", ""); !custom || !tracked {
+				t.Errorf("%s: eventUUIDProvider = (%v, %v), want (true, true)", invID, custom, tracked)
+			}
+		}
+	})
+}
+
+// TestUUIDProviderLedger_DistinctPaths pins the cost of recording UUID
+// providers for an invocation whose agents start at 20,000 distinct node paths,
+// as the node runs of a large workflow do: without a custom provider no
+// callback allocates or records anything and the completed run keeps no
+// ledger, and with one the live ledger caps states at maxUUIDProviderEntries
+// while the completed run compacts per-path keys and shares the ledger with its
+// late state.
+func TestUUIDProviderLedger_DistinctPaths(t *testing.T) {
+	const paths = 20000
+	ids := make([]identity, paths)
+	for i := range ids {
+		ids[i] = identity{invocationID: "inv", agentName: "worker", branch: "wf", path: fmt.Sprintf("wf@1/worker@%d", i+1)}
+	}
+	root := identity{invocationID: "inv", agentName: "wf"}
+
+	t.Run("default provider", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.invocationSpan(t.Context(), root, nil)
+		inv := tm.invocations["inv"]
+		inv.mu.Lock()
+		for _, id := range ids {
+			inv.noteUUIDProviderLocked(id, false, false)
+		}
+		allocs := testing.AllocsPerRun(100, func() { inv.noteUUIDProviderLocked(ids[0], false, false) })
+		inv.mu.Unlock()
+		if allocs != 0 {
+			t.Errorf("noteUUIDProviderLocked without a custom provider allocated %v times, want 0", allocs)
+		}
+		if l := inv.uuidProviders.Load(); l != nil {
+			t.Fatalf("ledger = %p, want none", l)
+		}
+		tm.endInvocation(t.Context(), root)
+		if l := tm.completed["inv"].uuidProviders; l != nil {
+			t.Errorf("completed ledger = %p, want none", l)
+		}
+	})
+
+	t.Run("custom provider", func(t *testing.T) {
+		tm := newTraceManager()
+		customCtx := platform.WithUUIDProvider(t.Context(), func() string { return "custom-id" })
+		tm.invocationSpan(customCtx, root, nil)
+		inv := tm.invocations["inv"]
+		inv.mu.Lock()
+		for _, id := range ids {
+			inv.noteUUIDProviderLocked(id, true, false)
+		}
+		inv.mu.Unlock()
+		ledger := inv.uuidProviders.Load()
+		if got := len(ledger.states); got != maxUUIDProviderEntries {
+			t.Fatalf("live ledger has %d keys, want %d", got, maxUUIDProviderEntries)
+		}
+		if !ledger.pathOverflowed {
+			t.Fatal("expected ledger.pathOverflowed == true after 20,000 distinct paths")
+		}
+		tm.endInvocation(customCtx, root)
+		completed := tm.completed["inv"]
+		if completed.uuidProviders != ledger {
+			t.Fatalf("completed ledger = %p, want the run's %p", completed.uuidProviders, ledger)
+		}
+		if got := len(completed.uuidProviders.states); got != 2 {
+			t.Fatalf("compacted completed ledger has %d keys, want 2 anyPath summary keys", got)
+		}
+		if late := tm.invocation(customCtx, root); late.uuidProviders.Load() != ledger {
+			t.Fatalf("late ledger = %p, want the run's %p", late.uuidProviders.Load(), ledger)
+		}
+		for _, i := range []int{0, paths / 2, paths - 1} {
+			if custom, tracked := tm.eventUUIDProvider("inv", "worker", "wf", ids[i].path); !custom || !tracked {
+				t.Errorf("eventUUIDProvider(%s) = (%v, %v), want (true, true)", ids[i].path, custom, tracked)
+			}
+		}
+	})
+}
+
+func TestUUIDProviderLedger_BoundedAcrossDistinctPathsAndCompletedRuns(t *testing.T) {
+	const paths = 20000
+	plain := t.Context()
+	customCtx := platform.WithUUIDProvider(plain, func() string { return "custom-id" })
+	shadowed := platform.WithUUIDProvider(customCtx, nil)
+
+	t.Run("20k distinct paths bound states and fail closed when mixed under overflow", func(t *testing.T) {
+		tm := newTraceManager()
+		root := identity{invocationID: "inv-live", agentName: "wf"}
+		tm.invocationSpan(customCtx, root, nil)
+		tm.pushAgentSpan(customCtx, root)
+		for i := range paths {
+			nodeID := identity{
+				invocationID: "inv-live",
+				agentName:    "worker",
+				branch:       "wf",
+				path:         fmt.Sprintf("wf@1/worker@%d", i+1),
+			}
+			tm.pushAgentSpan(customCtx, nodeID)
+			tm.popAgentSpan(customCtx, nodeID)
+		}
+
+		ledger := tm.invocations["inv-live"].uuidProviders.Load()
+		if ledger == nil {
+			t.Fatal("expected non-nil live ledger")
+		}
+		if got := len(ledger.states); got > maxUUIDProviderEntries {
+			t.Fatalf("len(ledger.states) = %d, want <= %d", got, maxUUIDProviderEntries)
+		}
+		for _, p := range []string{"wf@1/worker@1", "wf@1/worker@10000", "wf@1/worker@20000"} {
+			if custom, tracked := tm.eventUUIDProvider("inv-live", "worker", "wf", p); !custom || !tracked {
+				t.Fatalf("pure custom eventUUIDProvider(%q) = (%v, %v), want (true, true)", p, custom, tracked)
+			}
+		}
+
+		// Once an overflowed activation runs without a custom provider, both
+		// pre-overflow and post-overflow paths fail closed as mixed.
+		mixedID := identity{
+			invocationID: "inv-live",
+			agentName:    "worker",
+			branch:       "wf",
+			path:         "wf@1/worker@20001",
+		}
+		tm.pushAgentSpan(shadowed, mixedID)
+		tm.popAgentSpan(shadowed, mixedID)
+		if got := len(ledger.states); got > maxUUIDProviderEntries {
+			t.Fatalf("len(ledger.states) after mixed overflow = %d, want <= %d", got, maxUUIDProviderEntries)
+		}
+		for _, p := range []string{"wf@1/worker@1", "wf@1/worker@20000", "wf@1/worker@20001"} {
+			if custom, tracked := tm.eventUUIDProvider("inv-live", "worker", "wf", p); custom || !tracked {
+				t.Errorf("mixed overflow eventUUIDProvider(%q) = (%v, %v), want (false, true)", p, custom, tracked)
+			}
+		}
+	})
+
+	t.Run("completed runs compact per-path keys to < 1 KB across 20k-path and multi-branch runs", func(t *testing.T) {
+		tm := newTraceManager()
+		for runIdx := range 4 {
+			invID := fmt.Sprintf("inv-comp-%d", runIdx)
+			root := identity{invocationID: invID, agentName: "wf"}
+			tm.invocationSpan(customCtx, root, nil)
+			tm.pushAgentSpan(customCtx, root)
+			for i := range paths {
+				nodeID := identity{
+					invocationID: invID,
+					agentName:    "worker",
+					branch:       "wf",
+					path:         fmt.Sprintf("wf@1/worker@%d", i+1),
+				}
+				ctx := customCtx
+				if runIdx == 3 && i == paths-1 {
+					ctx = shadowed
+				}
+				tm.pushAgentSpan(ctx, nodeID)
+				tm.popAgentSpan(ctx, nodeID)
+			}
+			tm.popAgentSpan(customCtx, root)
+			tm.endInvocation(customCtx, root)
+
+			c := tm.completed[invID]
+			if c == nil || c.uuidProviders == nil {
+				t.Fatalf("%s: missing completed ledger", invID)
+			}
+			if got := len(c.uuidProviders.states); got > maxCompletedUUIDProviderEntries {
+				t.Fatalf("%s: len(completed.states) = %d, want <= %d", invID, got, maxCompletedUUIDProviderEntries)
+			}
+			// Estimate retained bytes: struct + 1 Go map bucket (8 slots) + retained string bytes.
+			retainedBytes := unsafe.Sizeof(*c.uuidProviders) + 8*(unsafe.Sizeof(uuidProviderKey{})+unsafe.Sizeof(uuidProviderState(0)))
+			for k := range c.uuidProviders.states {
+				if !k.anyPath || k.path != "" {
+					t.Fatalf("%s: completed ledger retained per-path key %+v", invID, k)
+				}
+				retainedBytes += uintptr(len(k.name) + len(k.branch) + len(k.path))
+			}
+			if retainedBytes >= 1024 {
+				t.Fatalf("%s: completed ledger retains %d B, want < 1024 B", invID, retainedBytes)
+			}
+
+			wantCustom := runIdx < 3
+			for _, p := range []string{"wf@1/worker@1", "wf@1/worker@20000"} {
+				if custom, tracked := tm.eventUUIDProvider(invID, "worker", "wf", p); custom != wantCustom || !tracked {
+					t.Errorf("%s: eventUUIDProvider(%q) = (%v, %v), want (%v, true)", invID, p, custom, tracked, wantCustom)
+				}
+			}
+		}
+
+		// Also exercise > maxCompletedUUIDProviderEntries distinct authors/branches on completion.
+		tmMany := newTraceManager()
+		manyRoot := identity{invocationID: "inv-many", agentName: "root"}
+		tmMany.invocationSpan(customCtx, manyRoot, nil)
+		for i := range 50 {
+			ctx := customCtx
+			if i == 49 {
+				ctx = shadowed
+			}
+			id := identity{
+				invocationID: "inv-many",
+				agentName:    fmt.Sprintf("agent-%d", i),
+				branch:       fmt.Sprintf("b-%d", i),
+				path:         fmt.Sprintf("wf@1/a@%d", i),
+			}
+			tmMany.pushAgentSpan(ctx, id)
+			tmMany.popAgentSpan(ctx, id)
+		}
+		tmMany.endInvocation(customCtx, manyRoot)
+		cMany := tmMany.completed["inv-many"]
+		if got := len(cMany.uuidProviders.states); got > maxCompletedUUIDProviderEntries {
+			t.Fatalf("inv-many: len(completed.states) = %d, want <= %d", got, maxCompletedUUIDProviderEntries)
+		}
+		if custom, tracked := tmMany.eventUUIDProvider("inv-many", "agent-49", "b-49", "wf@1/a@49"); custom || !tracked {
+			t.Errorf("inv-many: overflowed shadowed agent-49 = (%v, %v), want (false, true)", custom, tracked)
+		}
+	})
+
+	t.Run("evicted invocations compact uuidProviders to <= maxCompletedUUIDProviderEntries", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.maxTracked = 1
+		evID := identity{invocationID: "inv-evict-compact", agentName: "wf"}
+		tm.invocationSpan(customCtx, evID, nil)
+		for i := range maxUUIDProviderEntries + 50 {
+			nodeID := identity{
+				invocationID: evID.invocationID,
+				agentName:    "worker",
+				branch:       fmt.Sprintf("wf.b%d", i),
+				path:         fmt.Sprintf("wf@1/worker@%d", i+1),
+			}
+			tm.pushAgentSpan(customCtx, nodeID)
+			tm.popAgentSpan(customCtx, nodeID)
+		}
+		// Trigger capacity eviction with a second invocation.
+		tm.invocationSpan(plain, identity{invocationID: "inv-evictor", agentName: "other"}, nil)
+		ev, ok := tm.evicted[evID.invocationID]
+		if !ok || ev.uuidProviders == nil {
+			t.Fatalf("expected evicted trace with non-nil compacted uuidProviders ledger")
+		}
+		ev.uuidProviders.mu.Lock()
+		nStates := len(ev.uuidProviders.states)
+		nBranches := len(ev.uuidProviders.branchStates)
+		compacted := ev.uuidProviders.compacted
+		ev.uuidProviders.mu.Unlock()
+		if !compacted {
+			t.Error("expected ev.uuidProviders.compacted = true after markEvictedLocked")
+		}
+		if nStates > maxCompletedUUIDProviderEntries {
+			t.Errorf("len(ev.uuidProviders.states) = %d, want <= %d", nStates, maxCompletedUUIDProviderEntries)
+		}
+		if nBranches > maxCompletedUUIDProviderEntries {
+			t.Errorf("len(ev.uuidProviders.branchStates) = %d, want <= %d", nBranches, maxCompletedUUIDProviderEntries)
+		}
+		if custom, tracked := tm.eventUUIDProvider(evID.invocationID, "worker", "wf.b0", "wf@1/worker@1"); !custom || !tracked {
+			t.Errorf("evicted pure custom eventUUIDProvider = (%v, %v), want (true, true)", custom, tracked)
+		}
+	})
+
+	t.Run("late activations after default-provider completion stay bounded at maxCompletedUUIDProviderEntries", func(t *testing.T) {
+		tm := newTraceManager()
+		root := identity{invocationID: "inv-late-bound", agentName: "root"}
+		tm.invocationSpan(plain, root, nil)
+		tm.endInvocation(plain, root)
+		if c := tm.completed[root.invocationID]; c == nil || c.uuidProviders != nil {
+			t.Fatalf("expected completed default-provider entry with nil uuidProviders, got %+v", c)
+		}
+
+		for i := range 60 {
+			ctx := customCtx
+			if i == 59 {
+				ctx = shadowed
+			}
+			nodeID := identity{
+				invocationID: root.invocationID,
+				agentName:    fmt.Sprintf("late-%d", i),
+				branch:       fmt.Sprintf("b-%d", i),
+				path:         fmt.Sprintf("wf@1/late@%d", i),
+			}
+			tm.pushAgentSpan(ctx, nodeID)
+			tm.popAgentSpan(ctx, nodeID)
+		}
+		lateLedger := tm.completed[root.invocationID].late.uuidProviders.Load()
+		if lateLedger == nil {
+			t.Fatal("expected non-nil late ledger after custom late activation")
+		}
+		lateLedger.mu.Lock()
+		nStates := len(lateLedger.states)
+		nBranches := len(lateLedger.branchStates)
+		compacted := lateLedger.compacted
+		lateLedger.mu.Unlock()
+		if !compacted {
+			t.Error("expected lateLedger.compacted = true for late activation")
+		}
+		if nStates > maxCompletedUUIDProviderEntries {
+			t.Errorf("len(lateLedger.states) = %d, want <= %d", nStates, maxCompletedUUIDProviderEntries)
+		}
+		if nBranches > maxCompletedUUIDProviderEntries {
+			t.Errorf("len(lateLedger.branchStates) = %d, want <= %d", nBranches, maxCompletedUUIDProviderEntries)
+		}
+		if custom, tracked := tm.eventUUIDProvider(root.invocationID, "late-59", "b-59", "wf@1/late@59"); custom || !tracked {
+			t.Errorf("overflowed shadowed late activation = (%v, %v), want (false, true)", custom, tracked)
+		}
+	})
+}
+
+// BenchmarkEndInvocationDistinctPaths times the UUID provider bookkeeping of
+// one invocation whose agents start at 20,000 distinct node paths: the run's
+// start, one recorded activation per path and the run's end, which end-ns/op
+// reports on its own.
+func BenchmarkEndInvocationDistinctPaths(b *testing.B) {
+	const paths = 20000
+	ids := make([]identity, paths)
+	for i := range ids {
+		ids[i] = identity{invocationID: "inv", agentName: "worker", branch: "wf", path: fmt.Sprintf("wf@1/worker@%d", i+1)}
+	}
+	root := identity{invocationID: "inv", agentName: "wf"}
+	for _, custom := range []bool{false, true} {
+		name, ctx := "default provider", context.Background()
+		if custom {
+			name, ctx = "custom provider", platform.WithUUIDProvider(ctx, func() string { return "custom-id" })
+		}
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			var end time.Duration
+			runs := 0
+			for b.Loop() {
+				tm := newTraceManager()
+				tm.invocationSpan(ctx, root, nil)
+				inv := tm.invocations["inv"]
+				inv.mu.Lock()
+				for _, id := range ids {
+					inv.noteUUIDProviderLocked(id, custom, false)
+				}
+				inv.mu.Unlock()
+				start := time.Now()
+				tm.endInvocation(ctx, root)
+				end += time.Since(start)
+				runs++
+			}
+			b.ReportMetric(float64(end.Nanoseconds())/float64(runs), "end-ns/op")
+		})
+	}
+}
+
+// provenanceDeliveries runs root with the plugin of cp under parentCtx and
+// returns, by event ID, what OnEventCallback saw for each event it delivered:
+// the package-level hasEventCreationProvenance with the delivery context, and
+// the traceManager's. An event that two runners deliver, as one that a custom
+// agent hands on from a nested runner, keeps what the last delivery saw.
+type provenanceDelivery struct {
+	pure, traced bool
+	ev           *session.Event
+}
+
+func provenanceDeliveries(t *testing.T, cp *clockedPlugin, parentCtx context.Context, root agent.Agent, nested func(*baseplugin.Plugin)) map[string]provenanceDelivery {
+	t.Helper()
+	var mu sync.Mutex
+	seen := map[string]provenanceDelivery{}
+	probe, err := baseplugin.New(baseplugin.Config{
+		Name:                  "provenance-shapes-probe",
+		OnUserMessageCallback: cp.onUserMessage,
+		BeforeRunCallback:     cp.beforeRun,
+		AfterRunCallback:      cp.afterRun,
+		BeforeAgentCallback:   cp.beforeAgent,
+		AfterAgentCallback:    cp.afterAgent,
+		BeforeModelCallback:   cp.beforeModel,
+		AfterModelCallback:    cp.afterModel,
+		OnModelErrorCallback:  cp.onModelError,
+		BeforeToolCallback:    cp.beforeTool,
+		AfterToolCallback:     cp.afterTool,
+		OnToolErrorCallback:   cp.onToolError,
+		OnEventCallback: func(evCtx agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+			if ev != nil {
+				d := provenanceDelivery{
+					pure:   hasEventCreationProvenance(evCtx, ev),
+					traced: cp.traces.hasEventCreationProvenance(evCtx, identityOf(evCtx), ev),
+					ev:     ev,
+				}
+				mu.Lock()
+				seen[ev.ID] = d
+				mu.Unlock()
+			}
+			return cp.onEvent(evCtx, ev)
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+	if nested != nil {
+		nested(probe)
+	}
+	for _, runErr := range newTestRunner(t, root, probe).Run(parentCtx, "u1", "s-shapes", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error = %v", runErr)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	return maps.Clone(seen)
+}
+
+// sequentialUUIDs returns a provider of the IDs prefix-1, prefix-2, ...
+func sequentialUUIDs(prefix string) platform.UUIDProvider {
+	var n atomic.Int64
+	return func() string { return fmt.Sprintf("%s-%d", prefix, n.Add(1)) }
+}
+
+// runUnder returns an agent named name that runs each of runs in turn on its
+// branch, with its provider installed on the sub-agent's context when it is
+// not nil.
+type subRun struct {
+	sub      agent.Agent
+	branch   string
+	provider platform.UUIDProvider
+	// noProvider installs platform.WithUUIDProvider(ctx, nil).
+	noProvider bool
+}
+
+func runUnder(t *testing.T, name string, runs ...subRun) agent.Agent {
+	t.Helper()
+	var subs []agent.Agent
+	for _, r := range runs {
+		if !slices.Contains(subs, r.sub) {
+			subs = append(subs, r.sub)
+		}
+	}
+	a, err := agent.New(agent.Config{
+		Name:      name,
+		SubAgents: subs,
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for _, r := range runs {
+					branch := r.branch
+					subIC := ic.WithICDelta(&agent.InvocationContextDelta{Branch: &branch})
+					switch {
+					case r.noProvider:
+						subIC = subIC.WithContext(platform.WithUUIDProvider(subIC, nil))
+					case r.provider != nil:
+						subIC = subIC.WithContext(platform.WithUUIDProvider(subIC, r.provider))
+					}
+					for ev, err := range r.sub.Run(subIC) {
+						if !yield(ev, err) {
+							return
+						}
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(%s): %v", name, err)
+	}
+	return a
+}
+
+// TestEventCreationProvenance_RealRunShapes delivers the events of real runs
+// whose shapes the traceManager's provenance check has to handle, and checks
+// what OnEventCallback sees for each, where the delivery context, the
+// runner's, does not carry the provider that created the event.
+func TestEventCreationProvenance_RealRunShapes(t *testing.T) {
+	// yielder returns an agent that yields a session.NewEvent, with the branch
+	// of its context when setBranch is true, or, when forged is not empty, an
+	// event built by hand with that ID.
+	yielder := func(t *testing.T, name string, setBranch bool, forged string) agent.Agent {
+		t.Helper()
+		a, err := agent.New(agent.Config{
+			Name: name,
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var ev *session.Event
+					if forged != "" {
+						ev = &session.Event{ID: forged, InvocationID: ctx.InvocationID(), Author: name}
+					} else {
+						ev = session.NewEvent(ctx, ctx.InvocationID())
+					}
+					if setBranch {
+						ev.Branch = ctx.Branch()
+					}
+					ev.Content = textContent("model", name)
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(%s): %v", name, err)
+		}
+		return a
+	}
+	check := func(t *testing.T, seen map[string]provenanceDelivery, id string, wantTraced bool) {
+		t.Helper()
+		d, ok := seen[id]
+		if !ok {
+			t.Fatalf("OnEventCallback did not deliver event %q; delivered %v", id, slices.Sorted(maps.Keys(seen)))
+		}
+		if d.traced != wantTraced {
+			t.Errorf("traceManager provenance of %q (author %q, branch %q) = %v, want %v", id, d.ev.Author, d.ev.Branch, d.traced, wantTraced)
+		}
+	}
+
+	t.Run("function and dynamic node outputs of a workflow agent with a provider of its own", func(t *testing.T) {
+		leaf := workflow.NewFunctionNode("leaf", func(agent.Context, any) (string, error) { return "leaf", nil }, workflow.NodeConfig{})
+		fn := workflow.NewFunctionNode("fn", func(agent.Context, any) (string, error) { return "fn", nil }, workflow.NodeConfig{})
+		orch := workflow.NewDynamicNode[any, string]("orch",
+			func(ctx agent.Context, _ any, _ func(*session.Event) error) (string, error) {
+				out, err := workflow.RunNode[string](ctx, leaf, "x")
+				return "orch:" + out, err
+			}, workflow.NodeConfig{})
+		wf, err := workflowagent.New(workflowagent.Config{Name: "wf", Edges: workflow.Chain(workflow.Start, fn, orch)})
+		if err != nil {
+			t.Fatalf("workflowagent.New: %v", err)
+		}
+		cp := newClockedPlugin(t)
+		seen := provenanceDeliveries(t, cp, t.Context(), runUnder(t, "outer", subRun{sub: wf, branch: "outer.wfb", provider: sequentialUUIDs("wf")}), nil)
+		for _, id := range []string{"wf-1", "wf-2", "wf-3"} {
+			check(t, seen, id, true)
+			if d := seen[id]; d.pure || d.ev.NodeInfo == nil || !strings.HasPrefix(d.ev.NodeInfo.Path, "wf@1/") || d.ev.Author != "wf" {
+				t.Errorf("event %q: pure provenance %v, node info %+v, author %q; want an output of a node of wf that the delivery context alone rejects", id, d.pure, d.ev.NodeInfo, d.ev.Author)
+			}
+		}
+	})
+
+	t.Run("node outputs of a workflow agent that runs as a node of another", func(t *testing.T) {
+		ifn := workflow.NewFunctionNode("ifn", func(agent.Context, any) (string, error) { return "ifn", nil }, workflow.NodeConfig{})
+		inner, err := workflowagent.New(workflowagent.Config{Name: "inner", Edges: workflow.Chain(workflow.Start, ifn)})
+		if err != nil {
+			t.Fatalf("workflowagent.New(inner): %v", err)
+		}
+		innerNode, err := workflow.NewAgentNode(inner, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode(inner): %v", err)
+		}
+		outer, err := workflowagent.New(workflowagent.Config{Name: "outer", Edges: workflow.Chain(workflow.Start, innerNode)})
+		if err != nil {
+			t.Fatalf("workflowagent.New(outer): %v", err)
+		}
+		cp := newClockedPlugin(t)
+		seen := provenanceDeliveries(t, cp, t.Context(), runUnder(t, "top", subRun{sub: outer, branch: "top.outer", provider: sequentialUUIDs("top")}), nil)
+		// inner runs at its node's path, outer@1/inner@1, while the paths of
+		// the events of its nodes start at inner@1.
+		var innerIDs []string
+		for id, d := range seen {
+			if d.ev.Author == "inner" {
+				innerIDs = append(innerIDs, id)
+			}
+		}
+		if len(innerIDs) == 0 {
+			t.Fatalf("OnEventCallback delivered no event of inner; delivered %v", slices.Sorted(maps.Keys(seen)))
+		}
+		for _, id := range innerIDs {
+			check(t, seen, id, true)
+			if d := seen[id]; d.pure || d.ev.NodeInfo == nil || !strings.HasPrefix(d.ev.NodeInfo.Path, "inner@1/") {
+				t.Errorf("event %q: pure provenance %v, node info %+v; want an output of a node of inner that the delivery context alone rejects", id, d.pure, d.ev.NodeInfo)
+			}
+		}
+	})
+
+	t.Run("a session.NewEvent that a sub-agent on a named branch yields without its branch", func(t *testing.T) {
+		cp := newClockedPlugin(t)
+		child := yielder(t, "child", false, "")
+		seen := provenanceDeliveries(t, cp, t.Context(), runUnder(t, "par", subRun{sub: child, branch: "par.child", provider: sequentialUUIDs("child")}), nil)
+		check(t, seen, "child-1", true)
+		if d := seen["child-1"]; d.ev.Branch != "" {
+			t.Errorf("event branch = %q, want it left empty", d.ev.Branch)
+		}
+	})
+
+	t.Run("a sub-agent that turns the runner's provider off", func(t *testing.T) {
+		cp := newClockedPlugin(t)
+		forger := yielder(t, "forger", true, "forged-1")
+		genuine := yielder(t, "genuine", true, "")
+		root := runUnder(t, "root",
+			subRun{sub: forger, branch: "root.forger", noProvider: true},
+			subRun{sub: genuine, branch: "root.genuine", noProvider: true},
+		)
+		seen := provenanceDeliveries(t, cp, platform.WithUUIDProvider(t.Context(), sequentialUUIDs("run")), root, nil)
+		check(t, seen, "forged-1", false)
+		if !seen["forged-1"].pure {
+			t.Error("the delivery context alone rejected the hand-built ID; the case does not exercise the runner's provider")
+		}
+		var genuineID string
+		for id, d := range seen {
+			if d.ev.Author == "genuine" {
+				genuineID = id
+			}
+		}
+		if !hasNewEventUUID(genuineID) {
+			t.Fatalf("event of the sub-agent without a provider has ID %q, want a UUIDv4", genuineID)
+		}
+		check(t, seen, genuineID, true)
+	})
+
+	t.Run("a worker that runs again on the same branch without the provider of its first run", func(t *testing.T) {
+		cp := newClockedPlugin(t)
+		var runs atomic.Int32
+		worker, err := agent.New(agent.Config{
+			Name: "worker",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					if runs.Add(1) == 2 {
+						ev = &session.Event{ID: "forged-rerun", InvocationID: ctx.InvocationID(), Author: "worker"}
+					}
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "worker")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(worker): %v", err)
+		}
+		root := runUnder(t, "root",
+			subRun{sub: worker, branch: "root.worker", provider: sequentialUUIDs("worker")},
+			subRun{sub: worker, branch: "root.worker"},
+		)
+		seen := provenanceDeliveries(t, cp, t.Context(), root, nil)
+		check(t, seen, "worker-1", true)
+		check(t, seen, "forged-rerun", false)
+	})
+
+	t.Run("an event that a custom agent hands on from a nested runner", func(t *testing.T) {
+		cp := newClockedPlugin(t)
+		inner := yielder(t, "inner", false, "")
+		var nestedRunner *runner.Runner
+		forwarder, err := agent.New(agent.Config{
+			Name: "forwarder",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ctx := platform.WithUUIDProvider(context.WithoutCancel(ic), sequentialUUIDs("nested"))
+					for ev, err := range nestedRunner.Run(ctx, "u1", "s-nested", textContent("user", "in"), agent.RunConfig{}) {
+						if !yield(ev, err) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(forwarder): %v", err)
+		}
+		seen := provenanceDeliveries(t, cp, t.Context(), forwarder, func(probe *baseplugin.Plugin) {
+			nestedRunner = newTestRunner(t, inner, probe)
+		})
+		var innerID string
+		for id, d := range seen {
+			if d.ev.Author == "inner" {
+				innerID = id
+			}
+		}
+		if !strings.HasPrefix(innerID, "nested-") {
+			t.Fatalf("nested event ID = %q, want one from the nested runner's provider", innerID)
+		}
+		check(t, seen, innerID, true)
+		if seen[innerID].pure {
+			t.Error("the outer delivery context alone accepted the nested ID; the case does not exercise the event's own invocation")
+		}
+	})
+}
+
+// TestAfterAgentCallbackRunsOfTrace_RealRun ties afterAgentCallbackRunsOfTrace
+// to real runner.Run frames (agent.runAfterAgentCallbacks) across agent and
+// plugin callbacks, including both a synchronous agent.New run and an
+// llmagent.New workflow-node run inside an AfterAgentCallback.
+func TestAfterAgentCallbackRunsOfTrace_RealRun(t *testing.T) {
+	var (
+		beforeRuns, runBodyRuns, pluginAfterRuns, agentAfterRuns, nestedAfterRuns int
+		nestedLLMBeforeRuns, nestedLLMAfterRuns                                   int
+		beforeOK, runBodyOK, pluginAfterOK, agentAfterOK, nestedOK                bool
+		nestedLLMBeforeOK, nestedLLMAfterOK                                       bool
+	)
+
+	nestedAgent, err := agent.New(agent.Config{
+		Name: "nested-after",
+		AfterAgentCallbacks: []agent.AfterAgentCallback{
+			func(agent.Context) (*genai.Content, error) {
+				tr, complete := currentGoroutineTrace()
+				nestedAfterRuns, nestedOK = afterAgentCallbackRunsOfTrace(tr, complete)
+				return nil, nil
+			},
+		},
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(nested): %v", err)
+	}
+	nestedRunner := newTestRunner(t, nestedAgent)
+
+	nestedLLMAgent, err := llmagent.New(llmagent.Config{
+		Name:  "nested-llm-after",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "nested-llm-ok")}}},
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(agent.Context) (*genai.Content, error) {
+				tr, complete := currentGoroutineTrace()
+				nestedLLMBeforeRuns, nestedLLMBeforeOK = afterAgentCallbackRunsOfTrace(tr, complete)
+				return nil, nil
+			},
+		},
+		AfterAgentCallbacks: []agent.AfterAgentCallback{
+			func(agent.Context) (*genai.Content, error) {
+				tr, complete := currentGoroutineTrace()
+				nestedLLMAfterRuns, nestedLLMAfterOK = afterAgentCallbackRunsOfTrace(tr, complete)
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(nested): %v", err)
+	}
+	nestedLLMRunner := newTestRunner(t, nestedLLMAgent)
+
+	root, err := agent.New(agent.Config{
+		Name: "outer-after",
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(agent.Context) (*genai.Content, error) {
+				tr, complete := currentGoroutineTrace()
+				beforeRuns, beforeOK = afterAgentCallbackRunsOfTrace(tr, complete)
+				return nil, nil
+			},
+		},
+		AfterAgentCallbacks: []agent.AfterAgentCallback{
+			func(ctx agent.Context) (*genai.Content, error) {
+				tr, complete := currentGoroutineTrace()
+				agentAfterRuns, agentAfterOK = afterAgentCallbackRunsOfTrace(tr, complete)
+				for _, runErr := range nestedRunner.Run(ctx, "u1", "s-nested-after", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						return nil, runErr
+					}
+				}
+				for _, runErr := range nestedLLMRunner.Run(ctx, "u1", "s-nested-llm-after", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						return nil, runErr
+					}
+				}
+				return nil, nil
+			},
+		},
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {
+				tr, complete := currentGoroutineTrace()
+				runBodyRuns, runBodyOK = afterAgentCallbackRunsOfTrace(tr, complete)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(outer): %v", err)
+	}
+
+	probePlugin, err := baseplugin.New(baseplugin.Config{
+		Name: "probe-after-runs",
+		AfterAgentCallback: func(agent.Context) (*genai.Content, error) {
+			tr, complete := currentGoroutineTrace()
+			pluginAfterRuns, pluginAfterOK = afterAgentCallbackRunsOfTrace(tr, complete)
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+
+	pprof.Do(t.Context(), pprof.Labels("route", "v1/[id]", "meta", "{x]y}"), func(pprofCtx context.Context) {
+		for _, runErr := range newTestRunner(t, root, probePlugin).Run(pprofCtx, "u1", "s-after-runs", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+	})
+
+	if !beforeOK || beforeRuns != 0 {
+		t.Errorf("BeforeAgentCallback stack = (%d, %v), want (0, true)", beforeRuns, beforeOK)
+	}
+	if !runBodyOK || runBodyRuns != 0 {
+		t.Errorf("Run body stack = (%d, %v), want (0, true)", runBodyRuns, runBodyOK)
+	}
+	if !pluginAfterOK || pluginAfterRuns != 1 {
+		t.Errorf("plugin AfterAgentCallback stack = (%d, %v), want (1, true)", pluginAfterRuns, pluginAfterOK)
+	}
+	if !agentAfterOK || agentAfterRuns != 1 {
+		t.Errorf("agent AfterAgentCallback stack = (%d, %v), want (1, true)", agentAfterRuns, agentAfterOK)
+	}
+	if !nestedOK || nestedAfterRuns != 2 {
+		t.Errorf("nested AfterAgentCallback stack = (%d, %v), want (2, true)", nestedAfterRuns, nestedOK)
+	}
+	if !nestedLLMBeforeOK || nestedLLMBeforeRuns != 0 {
+		t.Errorf("nested llmagent BeforeAgentCallback stack = (%d, %v), want (0, true)", nestedLLMBeforeRuns, nestedLLMBeforeOK)
+	}
+	if !nestedLLMAfterOK || nestedLLMAfterRuns != 1 {
+		t.Errorf("nested llmagent AfterAgentCallback stack = (%d, %v), want (1, true)", nestedLLMAfterRuns, nestedLLMAfterOK)
+	}
+}
+
+// TestWorkflowRetry_DeepBeforeAgentStackAtTracebackLimit_EmitsCompleted
+// verifies that a workflow node RetryConfig whose first attempt fails and
+// second attempt succeeds still recognizes the node attempts and emits
+// INVOCATION_COMPLETED (rather than INVOCATION_ERROR) when BeforeAgentCallback
+// runs right at Go's 100-frame runtime.Stack limit—where an extra helper frame
+// around runtime.Stack would trigger "...frames elided..." and lose attemptNode.
+func TestWorkflowRetry_DeepBeforeAgentStackAtTracebackLimit_EmitsCompleted(t *testing.T) {
+	cp := newClockedPlugin(t)
+	ap := cp.analyticsPlugin
+
+	var padFrames func(int, func() (*genai.Content, error)) (*genai.Content, error)
+	padFrames = func(depth int, fn func() (*genai.Content, error)) (*genai.Content, error) {
+		if depth <= 0 {
+			res, err := fn()
+			runtime.KeepAlive(depth)
+			return res, err
+		}
+		res, err := padFrames(depth-1, fn)
+		runtime.KeepAlive(depth)
+		return res, err
+	}
+
+	var (
+		calibratedDepth = -1
+		flakyStarts     int
+	)
+	deepPlugin, err := baseplugin.New(baseplugin.Config{
+		Name:                  "deep-before-agent-retry",
+		OnUserMessageCallback: ap.onUserMessage,
+		BeforeRunCallback:     ap.beforeRun,
+		AfterRunCallback:      ap.afterRun,
+		OnEventCallback:       ap.onEvent,
+		BeforeAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+			if ctx.AgentName() != "flaky" {
+				return ap.beforeAgent(ctx)
+			}
+			flakyStarts++
+			if calibratedDepth < 0 {
+				// Calibrate Go's 100-frame runtime.Stack ceiling directly with
+				// runtime.Stack (not currentGoroutine), finding the highest
+				// recursion depth d where workflowPkgPath+".runNode" is still
+				// visible without "...frames elided...".
+				stackBuf := make([]byte, 64<<10)
+				rawMax := -1
+				for d := 50; d <= 105; d++ {
+					var rawTrace string
+					_, _ = padFrames(d, func() (*genai.Content, error) {
+						for {
+							n := runtime.Stack(stackBuf, false)
+							if n < len(stackBuf) {
+								rawTrace = string(stackBuf[:n])
+								break
+							}
+							stackBuf = make([]byte, len(stackBuf)*2)
+						}
+						return nil, nil
+					})
+					if !strings.Contains(rawTrace, "frames elided") && strings.Contains(rawTrace, workflowPkgPath+".runNode") {
+						rawMax = d
+					} else if rawMax >= 0 {
+						break
+					}
+				}
+				if rawMax < 55 || rawMax >= 105 {
+					t.Errorf("failed to calibrate 100-frame runtime.Stack ceiling on workflow node goroutine: rawMax = %d", rawMax)
+					return ap.beforeAgent(ctx)
+				}
+
+				// Verify currentGoroutine() does not lose frame headroom to an
+				// internal wrapper around runtime.Stack: calling currentGoroutine()
+				// from fn adds only currentGoroutine itself (1 frame relative to
+				// calling runtime.Stack directly inside fn).
+				cgMax := -1
+				for d := 50; d <= 105; d++ {
+					var got attemptSite
+					_, _ = padFrames(d, func() (*genai.Content, error) {
+						_, _, got = currentGoroutine()
+						return nil, nil
+					})
+					if got == attemptNode {
+						cgMax = d
+					} else if cgMax >= 0 {
+						break
+					}
+				}
+				if cgMax < rawMax-1 || cgMax >= 105 {
+					t.Errorf("currentGoroutine() lost frame headroom or failed to bound ceiling relative to direct runtime.Stack: cgMax = %d, want [%d, 105) (rawMax = %d)", cgMax, rawMax-1, rawMax)
+					return ap.beforeAgent(ctx)
+				}
+
+				// Bind callbacks directly on *analyticsPlugin (avoiding
+				// *clockedPlugin's promoted-method wrapper frame under -race).
+				// (*analyticsPlugin).beforeAgent -> (*traceManager).pushAgentSpan
+				// adds 2 frames between fn and currentGoroutine, so cgMax-2 runs
+				// pushAgentSpan at cgMax depth (100 frames at currentGoroutine()
+				// without eliding runNode, even when frames below runNode are
+				// elided) under both default and -race builds.
+				calibratedDepth = cgMax - 2
+			}
+			return padFrames(calibratedDepth, func() (*genai.Content, error) {
+				return ap.beforeAgent(ctx)
+			})
+		},
+		AfterAgentCallback:   ap.afterAgent,
+		BeforeModelCallback:  ap.beforeModel,
+		AfterModelCallback:   ap.afterModel,
+		OnModelErrorCallback: ap.onModelError,
+		BeforeToolCallback:   ap.beforeTool,
+		AfterToolCallback:    ap.afterTool,
+		OnToolErrorCallback:  ap.onToolError,
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+
+	flaky, err := llmagent.New(llmagent.Config{
+		Name:  "flaky",
+		Mode:  llmagent.ModeSingleTurn,
+		Model: &flakyOnFirstPassLLM{err: errors.New("transient 503"), reply: "succeeded on attempt 2"},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(flaky): %v", err)
+	}
+
+	node, err := workflow.NewAgentNode(flaky, workflow.NodeConfig{
+		RetryConfig: &workflow.RetryConfig{
+			MaxAttempts:   2,
+			InitialDelay:  time.Millisecond,
+			MaxDelay:      time.Millisecond,
+			BackoffFactor: 1.0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode(flaky): %v", err)
+	}
+
+	wfRoot, err := workflowagent.New(workflowagent.Config{
+		Name: "wf_deep_retry",
+		Edges: []workflow.Edge{
+			{From: workflow.Start, To: node},
+		},
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(wf_deep_retry): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, wfRoot, deepPlugin).Run(t.Context(), "u1", "s-deep-retry", textContent("user", "run workflow"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error = %v", runErr)
+		}
+	}
+
+	if calibratedDepth < 0 {
+		t.Fatalf("stack ceiling calibration did not complete (calibratedDepth = %d)", calibratedDepth)
+	}
+	if flakyStarts != 2 {
+		t.Fatalf("flaky BeforeAgentCallback ran %d times, want 2", flakyStarts)
+	}
+	rows := cp.takeRows()
+	requireCompletedWithHandledAgentError(t, rows, "flaky", "transient 503")
+	if n := len(rowsOfType(rows, EventLLMError)); n != 1 {
+		t.Errorf("got %d LLM_ERROR rows, want 1", n)
+	}
+	if n := len(rowsOfType(rows, EventLLMResponse)); n != 1 {
+		t.Errorf("got %d LLM_RESPONSE rows, want 1", n)
+	}
+}
+
+func BenchmarkContextLookups(b *testing.B) {
+	var (
+		cbCtx   agent.Context
+		wfCBCtx agent.Context
+	)
+	type benchKey struct{}
+	leaf, err := agent.New(agent.Config{
+		Name: "bench_leaf",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {
+				wfCBCtx = agent.NewCallbackContext(ic, nil)
+			}
+		},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	leafNode, err := workflow.NewAgentNode(leaf, workflow.NodeConfig{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf_bench",
+		Edges: workflow.Chain(workflow.Start, leafNode),
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	root, err := agent.New(agent.Config{
+		Name:      "bench",
+		SubAgents: []agent.Agent{wf},
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			cbCtx = agent.NewCallbackContext(ic, nil)
+			return wf.Run(ic)
+		},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{
+		AppName:           "bench",
+		Agent:             root,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	parentCtx := platform.WithUUIDProvider(context.Background(), func() string { return "custom-1" })
+	for _, err := range r.Run(parentCtx, "u", "s", nil, agent.RunConfig{}) {
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	wrappedWFCtx := context.WithValue(wfCBCtx, benchKey{}, 1)
+
+	b.Run("contextHasCustomUUIDProvider", func(b *testing.B) {
+		for b.Loop() {
+			if !contextHasCustomUUIDProvider(cbCtx) {
+				b.Fatal("expected true")
+			}
+		}
+	})
+	b.Run("callbackAfterAgentActionMaps", func(b *testing.B) {
+		for b.Loop() {
+			if am := callbackAfterAgentActionMaps(cbCtx); am == (actionMaps{}) {
+				b.Fatal("expected non-zero actionMaps")
+			}
+		}
+	})
+	b.Run("contextPath", func(b *testing.B) {
+		for b.Loop() {
+			if p := contextPath(wrappedWFCtx); p != "wf_bench@1/bench_leaf@1" {
+				b.Fatalf("contextPath = %q", p)
+			}
+		}
+	})
+	b.Run("contextPathEmpty", func(b *testing.B) {
+		for b.Loop() {
+			if p := contextPath(cbCtx); p != "" {
+				b.Fatalf("contextPath = %q, want empty", p)
+			}
+		}
+	})
+	b.Run("contextParentMap", func(b *testing.B) {
+		for b.Loop() {
+			if m := contextParentMap(wrappedWFCtx); m["wf_bench"] != root {
+				b.Fatalf("contextParentMap = %v", m)
+			}
+		}
 	})
 }
