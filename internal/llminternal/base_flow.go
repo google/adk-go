@@ -1351,12 +1351,13 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 // A delta is never final while the stream continues, so a replacement that
 // leaves Partial unset takes Partial and PartialSet from the original. Partial
 // counts as set when it is true or PartialSet is true, so a replacement with
-// Partial: false and PartialSet: true keeps its explicit false and can end a
-// stream on purpose. TurnComplete is a plain bool, so an unset value
-// cannot be told apart from an explicit false; a response that ended the turn
-// keeps its replacement ending it. UsageMetadata and CacheMetadata set on the
-// replacement are respected. The replacement is copied rather than modified,
-// and returned as is when nothing needs filling.
+// Partial: false and PartialSet: true keeps its explicit false and becomes a
+// non-partial event, while later chunks of the stream still follow.
+// TurnComplete is a plain bool, so an unset value cannot be told apart from an
+// explicit false; a response that ended the turn keeps its replacement ending
+// it. UsageMetadata and CacheMetadata set on the replacement are respected.
+// The replacement is copied rather than modified, and returned as is when
+// nothing needs filling.
 //
 // adk-python carries the first three fields but not the cache state
 // (flows/llm_flows/core/_finalizer.py, _inherit_unset_model_fields), so a
