@@ -20,7 +20,10 @@ package loadartifactstool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"slices"
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
@@ -182,10 +185,12 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 	// Every load_artifacts response in the last turn counts: a model can issue
 	// several calls in one response, and each one names its own artifacts.
 	var artifactNames []string
+	responses := 0
 	for _, part := range lastContent.Parts {
 		if part == nil || part.FunctionResponse == nil || part.FunctionResponse.Name != "load_artifacts" {
 			continue
 		}
+		responses++
 		artifactNamesRaw, ok := part.FunctionResponse.Response["artifact_names"]
 		if !ok {
 			continue
@@ -209,6 +214,17 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 		return nil
 	}
 
+	// With several calls in one turn, one artifact that cannot be loaded must not
+	// keep the rest from the model. A single call keeps propagating its error.
+	parallel := responses > 1
+	if parallel {
+		if listed, err := ctx.Artifacts().List(ctx); err == nil {
+			artifactNames = slices.DeleteFunc(artifactNames, func(name string) bool {
+				return !slices.Contains(listed.FileNames, name)
+			})
+		}
+	}
+
 	results := make([]*genai.Content, len(artifactNames))
 	group, childCtx := errgroup.WithContext(ctx)
 	artifactsService := ctx.Artifacts()
@@ -218,6 +234,9 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 			// Although not used, we need to pass childCtx for early return in case of an error.
 			content, err := t.loadIndividualArtifact(childCtx, artifactsService, artifactName)
 			if err != nil {
+				if parallel && errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
 				return err
 			}
 			results[i] = content
@@ -229,7 +248,11 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 		return err
 	}
 
-	req.Contents = append(req.Contents, results...)
+	for _, content := range results {
+		if content != nil {
+			req.Contents = append(req.Contents, content)
+		}
+	}
 	return nil
 }
 

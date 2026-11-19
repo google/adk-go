@@ -676,3 +676,89 @@ func TestLoadArtifactsTool_ParallelCallsAttachEveryBody(t *testing.T) {
 		t.Errorf("tool responses = %d, artifact bodies = %d; want 2 of each", responses, bodies)
 	}
 }
+
+// TestLoadArtifactsTool_ParallelCallsSkipMissingFile covers the follow-up on
+// PR #2416: with two calls in one turn, one artifact that cannot be loaded must
+// not keep the other body from the model, in either order.
+func TestLoadArtifactsTool_ParallelCallsSkipMissingFile(t *testing.T) {
+	for _, order := range []struct {
+		name   string
+		first  string
+		second string
+		body   string
+	}{
+		{name: "missing file follows a saved one", first: "january.txt", second: "missing.txt", body: "january body"},
+		{name: "missing file precedes a saved one", first: "missing.txt", second: "february.txt", body: "february body"},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			const app, user, sid = "app", "client", "session"
+			ctx := t.Context()
+			artifacts := artifact.InMemoryService()
+			if _, err := artifacts.Save(ctx, &artifact.SaveRequest{
+				AppName: app, UserID: user, SessionID: sid,
+				FileName: "january.txt", Part: genai.NewPartFromText("january body"),
+			}); err != nil {
+				t.Fatalf("Save(january.txt) failed: %v", err)
+			}
+			if _, err := artifacts.Save(ctx, &artifact.SaveRequest{
+				AppName: app, UserID: user, SessionID: sid,
+				FileName: "february.txt", Part: genai.NewPartFromText("february body"),
+			}); err != nil {
+				t.Fatalf("Save(february.txt) failed: %v", err)
+			}
+
+			calls := &genai.Content{Role: genai.RoleModel}
+			for _, name := range []string{order.first, order.second} {
+				part := genai.NewPartFromFunctionCall("load_artifacts", map[string]any{
+					"artifact_names": []any{name},
+				})
+				part.FunctionCall.ID = name
+				calls.Parts = append(calls.Parts, part)
+			}
+
+			fake := &testutil.MockModel{Responses: []*genai.Content{
+				calls,
+				genai.NewContentFromText("done", genai.RoleModel),
+			}}
+			a, err := llmagent.New(llmagent.Config{
+				Name: "reader", Model: fake, Tools: []tool.Tool{loadartifactstool.New()},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New failed: %v", err)
+			}
+			sessions := session.InMemoryService()
+			if _, err := sessions.Create(ctx, &session.CreateRequest{
+				AppName: app, UserID: user, SessionID: sid,
+			}); err != nil {
+				t.Fatalf("session Create failed: %v", err)
+			}
+			r, err := runner.New(runner.Config{
+				AppName: app, Agent: a, SessionService: sessions, ArtifactService: artifacts,
+			})
+			if err != nil {
+				t.Fatalf("runner.New failed: %v", err)
+			}
+
+			prompt := genai.NewContentFromText("Read the file", genai.RoleUser)
+			for _, err := range r.Run(ctx, user, sid, prompt, agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("Run failed: %v", err)
+				}
+			}
+			if len(fake.Requests) != 2 {
+				t.Fatalf("model requests = %d, want 2", len(fake.Requests))
+			}
+			bodies := 0
+			for _, content := range fake.Requests[1].Contents {
+				for _, part := range content.Parts {
+					if part.Text == order.body {
+						bodies++
+					}
+				}
+			}
+			if bodies != 1 {
+				t.Errorf("artifact bodies reaching the model = %d, want 1", bodies)
+			}
+		})
+	}
+}
