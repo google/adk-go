@@ -21,7 +21,6 @@ import (
 	"slices"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/google/go-cmp/cmp"
 	agentregistry "google.golang.org/api/agentregistry/v1alpha"
@@ -175,8 +174,6 @@ func newWarmCache(t *testing.T, c skillregistry.Client) *cache {
 	ca := &cache{
 		client:                  c,
 		frontmattersParallelism: 4,
-		updateInterval:          time.Hour,
-		stop:                    make(chan struct{}),
 	}
 	if err := ca.WarmUp(); err != nil {
 		t.Fatalf("WarmUp() error = %v", err)
@@ -198,11 +195,10 @@ func frontmatterNames(fms []*skill.Frontmatter) []string {
 func TestNewCache(t *testing.T) {
 	t.Run("warms up and starts the periodic refresher", func(t *testing.T) {
 		c := newFullClient(t)
-		ca, err := NewCache(CacheConfig{Client: c, UpdateInterval: time.Hour})
+		ca, err := NewCache(CacheConfig{Client: c})
 		if err != nil {
 			t.Fatalf("NewCache() error = %v", err)
 		}
-		t.Cleanup(func() { close(ca.(*cache).stop) })
 
 		got, err := ca.ListFrontmatters()
 		if err != nil {
@@ -218,11 +214,10 @@ func TestNewCache(t *testing.T) {
 
 	t.Run("SkipWarmUp leaves the cache empty", func(t *testing.T) {
 		c := newFullClient(t)
-		ca, err := NewCache(CacheConfig{Client: c, UpdateInterval: time.Hour, SkipWarmUp: true})
+		ca, err := NewCache(CacheConfig{Client: c, SkipWarmUp: true})
 		if err != nil {
 			t.Fatalf("NewCache() error = %v", err)
 		}
-		t.Cleanup(func() { close(ca.(*cache).stop) })
 
 		got, err := ca.ListFrontmatters()
 		if err != nil {
@@ -238,7 +233,7 @@ func TestNewCache(t *testing.T) {
 
 	t.Run("warm-up failure is returned and no cache is created", func(t *testing.T) {
 		boom := errors.New("registry down")
-		ca, err := NewCache(CacheConfig{Client: &fullClient{listErr: boom}, UpdateInterval: time.Hour})
+		ca, err := NewCache(CacheConfig{Client: &fullClient{listErr: boom}})
 		if !errors.Is(err, boom) {
 			t.Fatalf("NewCache() error = %v, want errors.Is %v", err, boom)
 		}
@@ -250,17 +245,6 @@ func TestNewCache(t *testing.T) {
 	// Regression for the zero-interval default: storing cfg.UpdateInterval (0)
 	// instead of the computed default made runPeriodicalReloads call
 	// time.NewTicker(0), which panics and crashes the process.
-	t.Run("zero interval falls back to the one-hour default", func(t *testing.T) {
-		ca, err := NewCache(CacheConfig{Client: newFullClient(t), SkipWarmUp: true})
-		if err != nil {
-			t.Fatalf("NewCache() error = %v", err)
-		}
-		impl := ca.(*cache)
-		t.Cleanup(func() { close(impl.stop) })
-		if impl.updateInterval != time.Hour {
-			t.Errorf("updateInterval = %v, want %v (the default)", impl.updateInterval, time.Hour)
-		}
-	})
 }
 
 func TestCacheListFrontmatters(t *testing.T) {
@@ -493,8 +477,6 @@ func TestCacheWarmUp(t *testing.T) {
 		ca := &cache{
 			client:                  &fullClient{listErr: boom},
 			frontmattersParallelism: 4,
-			updateInterval:          time.Hour,
-			stop:                    make(chan struct{}),
 		}
 		if err := ca.WarmUp(); !errors.Is(err, boom) {
 			t.Fatalf("WarmUp() error = %v, want errors.Is %v", err, boom)
@@ -510,148 +492,9 @@ func TestCacheWarmUp(t *testing.T) {
 		ca := &cache{
 			client:                  c,
 			frontmattersParallelism: 4,
-			updateInterval:          time.Hour,
-			stop:                    make(chan struct{}),
 		}
 		if err := ca.WarmUp(); !errors.Is(err, boom) {
 			t.Fatalf("WarmUp() error = %v, want errors.Is %v", err, boom)
-		}
-	})
-}
-
-func TestRunPeriodicalReloads(t *testing.T) {
-	t.Run("ticks trigger reloads and stop ends the loop", func(t *testing.T) {
-		c := newFullClient(t)
-		c.onList = make(chan struct{}, 8)
-		ca := &cache{
-			client:                  c,
-			frontmattersParallelism: 4,
-			updateInterval:          10 * time.Millisecond,
-			stop:                    make(chan struct{}),
-		}
-
-		done := make(chan struct{})
-		go func() {
-			ca.runPeriodicalReloads()
-			close(done)
-		}()
-
-		// Wait for a tick-driven reload (reset calls ListSkills).
-		select {
-		case <-c.onList:
-		case <-time.After(2 * time.Second):
-			t.Fatal("no periodic reload within 2s")
-		}
-
-		close(ca.stop)
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatal("runPeriodicalReloads did not return after stop")
-		}
-	})
-
-	t.Run("a failing reload does not stop the loop", func(t *testing.T) {
-		c := &fullClient{listErr: errors.New("registry down"), onList: make(chan struct{}, 8)}
-		ca := &cache{
-			client:                  c,
-			frontmattersParallelism: 4,
-			updateInterval:          10 * time.Millisecond,
-			stop:                    make(chan struct{}),
-		}
-
-		done := make(chan struct{})
-		go func() {
-			ca.runPeriodicalReloads()
-			close(done)
-		}()
-
-		// Two ticks despite every reload failing: the loop keeps going.
-		for i := range 2 {
-			select {
-			case <-c.onList:
-			case <-time.After(2 * time.Second):
-				t.Fatalf("periodic reload %d did not run", i+1)
-			}
-		}
-
-		close(ca.stop)
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatal("runPeriodicalReloads did not return after stop")
-		}
-	})
-}
-
-func TestCacheStopAutorefresh(t *testing.T) {
-	t.Run("stops the periodic refresher", func(t *testing.T) {
-		c := newFullClient(t)
-		c.onList = make(chan struct{}, 8)
-		ca := &cache{
-			client:                  c,
-			frontmattersParallelism: 4,
-			updateInterval:          10 * time.Millisecond,
-			stop:                    make(chan struct{}),
-		}
-
-		done := make(chan struct{})
-		go func() {
-			ca.runPeriodicalReloads()
-			close(done)
-		}()
-
-		// Confirm the loop is running before stopping it (reset calls ListSkills).
-		select {
-		case <-c.onList:
-		case <-time.After(2 * time.Second):
-			t.Fatal("no periodic reload within 2s")
-		}
-
-		ca.StopAutorefresh()
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatal("runPeriodicalReloads did not return after StopAutorefresh")
-		}
-	})
-
-	// Guards the sync.Once + close: repeated calls must neither panic (a second
-	// close of the channel) nor block (an unbuffered send with no receiver left).
-	t.Run("is safe to call more than once", func(t *testing.T) {
-		c := newFullClient(t)
-		ca := &cache{
-			client:                  c,
-			frontmattersParallelism: 4,
-			updateInterval:          time.Hour,
-			stop:                    make(chan struct{}),
-		}
-
-		done := make(chan struct{})
-		go func() {
-			ca.runPeriodicalReloads()
-			close(done)
-		}()
-
-		// Run the repeated stops off the test goroutine so a block trips the
-		// timeout instead of hanging the whole test binary.
-		returned := make(chan struct{})
-		go func() {
-			ca.StopAutorefresh()
-			ca.StopAutorefresh()
-			ca.StopAutorefresh()
-			close(returned)
-		}()
-		select {
-		case <-returned:
-		case <-time.After(2 * time.Second):
-			t.Fatal("StopAutorefresh blocked on a repeat call")
-		}
-
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatal("runPeriodicalReloads did not return after StopAutorefresh")
 		}
 	})
 }

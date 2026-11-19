@@ -39,7 +39,6 @@ package simplecache
 import (
 	"fmt"
 	"sync"
-	"time"
 
 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 	"google.golang.org/adk/v2/tool/skilltoolset/skill/skillregistry"
@@ -49,12 +48,13 @@ import (
 type CacheConfig struct {
 	// Client is the Skill Registry client the cache reads through. Required.
 	Client skillregistry.Client
-	// UpdateInterval is how often the cache is refreshed in the background.
-	// A zero value defaults to one hour.
-	UpdateInterval time.Duration
 	// SkipWarmUp, when true, returns from [NewCache] without the initial
 	// blocking load; the cache fills on the first background refresh instead.
 	SkipWarmUp bool
+
+	// Parallelism for downloading of frontmatters. If you specify a number <= 0 it
+	// will default to 15
+	Parallelism int
 }
 
 type cache struct {
@@ -63,9 +63,6 @@ type cache struct {
 	preloadMutex            sync.Mutex           // for cache updates only - used to separate [preload]
 	data                    dataCache            // cache data
 	frontmattersParallelism int                  // controls the number of workers reading frontmatters in parallel
-	updateInterval          time.Duration        // controls how often the cache is refreshed
-	stop                    chan struct{}        // stop is controlling go routine runPeriodicalReset, allowing to stop the ticker
-	stopOnce                sync.Once
 }
 
 // NewCache returns a [skillregistry.Cache] backed by CacheConfig.Client. Unless
@@ -73,18 +70,14 @@ type cache struct {
 // starts a goroutine that refreshes the cache every CacheConfig.UpdateInterval.
 // Call StopAutorefresh on the returned cache to release that goroutine.
 func NewCache(cfg CacheConfig) (skillregistry.Cache, error) {
-	updateInterval := cfg.UpdateInterval
-	if updateInterval == 0 {
-		updateInterval = 1 * time.Hour
-	}
 	c := &cache{
 		mu:                      sync.RWMutex{},
 		client:                  cfg.Client,
-		frontmattersParallelism: 15,
-		updateInterval:          updateInterval,
-		stop:                    make(chan struct{}),
+		frontmattersParallelism: cfg.Parallelism,
 		preloadMutex:            sync.Mutex{},
-		stopOnce:                sync.Once{},
+	}
+	if c.frontmattersParallelism <= 0 {
+		c.frontmattersParallelism = 15
 	}
 
 	if !cfg.SkipWarmUp {
@@ -93,30 +86,12 @@ func NewCache(cfg CacheConfig) (skillregistry.Cache, error) {
 			return nil, fmt.Errorf("cannot WarmUp: %w", err)
 		}
 	}
-	go c.runPeriodicalReloads()
 	return c, nil
 }
 
-// runPeriodicalReloads starts periodic cache cleanup and preload
-func (c *cache) runPeriodicalReloads() {
-	ticker := time.NewTicker(c.updateInterval)
-	for {
-		select {
-		case <-ticker.C:
-			// Best-effort background refresh; on failure keep serving the
-			// existing cache until the next tick. There is no library logger to
-			// report the error through.
-			_ = c.reset()
-		case <-c.stop:
-			ticker.Stop()
-			return
-		}
-	}
-}
-
-// StopAutorefresh implements [skillregistry.Cache].
-func (c *cache) StopAutorefresh() {
-	c.stopOnce.Do(func() { close(c.stop) })
+// Refesh implements [skillregistry.Cache].
+func (c *cache) Refesh() error {
+	return c.preload()
 }
 
 // ListFrontmatters implements [Cache].

@@ -30,18 +30,6 @@ import (
 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 )
 
-// safeResourcePath validates p as a path inside a skill's in-memory filesystem
-// and returns its cleaned, slash-separated form. It returns
-// [skill.ErrInvalidResourcePath] for an absolute path, or one that escapes the
-// skill root through "..".
-func safeResourcePath(p string) (string, error) {
-	clean, err := utils.SafeRelPath(p)
-	if err != nil {
-		return "", fmt.Errorf("%w: %q", skill.ErrInvalidResourcePath, p)
-	}
-	return clean, nil
-}
-
 // SkillRegistrySourceConfig configures a [skill.Source] backed by the Skill Registry.
 type SkillRegistrySourceConfig struct {
 	// ProjectID is the Google Cloud project ID. Required unless Client is set.
@@ -281,6 +269,18 @@ func (s *SkillRegistrySource) LoadResource(ctx context.Context, name, resourcePa
 		}
 	}
 	return nil, fmt.Errorf("%w: %q", skill.ErrResourceNotFound, clean)
+}
+
+// safeResourcePath validates p as a path inside a skill's in-memory filesystem
+// and returns its cleaned, slash-separated form. It returns
+// [skill.ErrInvalidResourcePath] for an absolute path, or one that escapes the
+// skill root through "..".
+func safeResourcePath(p string) (string, error) {
+	clean, err := utils.SafeRelPath(p)
+	if err != nil {
+		return "", fmt.Errorf("%w: %q", skill.ErrInvalidResourcePath, p)
+	}
+	return clean, nil
 }
 
 var _ skill.Source = (*SkillRegistrySource)(nil)

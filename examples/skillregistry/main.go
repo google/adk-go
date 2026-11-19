@@ -74,7 +74,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create skill cache: %v", err)
 	}
-	defer cache.StopAutorefresh()
 
 	source, err := simplecache.NewCachedSkillRegistrySource(ctx, cache)
 	if err != nil {

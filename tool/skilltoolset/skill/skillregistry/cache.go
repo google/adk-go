@@ -30,12 +30,10 @@ import (
 // Implementations are safe for concurrent use; build one with
 // simplecache.NewCache.
 type Cache interface {
-	// WarmUp loads the skill list and all frontmatters, blocking until they are
-	// available. Skill archives (instructions and resources) are not preloaded.
+	// WarmUp loads what's needed at start.
 	WarmUp() error
-	// StopAutorefresh stops the background refresh goroutine. It is safe to call
-	// more than once.
-	StopAutorefresh()
+	// Refresh refreshes the cache. Blocking. The cache can be used during the refresh.
+	Refesh() error
 	// ListFrontmatters returns the cached frontmatter of every skill.
 	ListFrontmatters() ([]*skill.Frontmatter, error)
 	// LoadFrontmatter returns the cached frontmatter of one skill, or

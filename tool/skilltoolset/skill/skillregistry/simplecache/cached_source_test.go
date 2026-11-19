@@ -86,6 +86,11 @@ func (f *fakeCache) ListResources(name, subpath string) ([]string, error) {
 	return f.resourcePaths, f.listResErr
 }
 
+// Refesh implements [skillregistry.Cache].
+func (f *fakeCache) Refesh() error {
+	return nil
+}
+
 // mustSource builds a CachedSkillRegistrySource over c, failing the test if the
 // constructor errors.
 func mustSource(t *testing.T, c skillregistry.Cache) *CachedSkillRegistrySource {
