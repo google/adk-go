@@ -16,9 +16,12 @@ package workflow
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+
+	"google.golang.org/adk/v2/session"
 )
 
 // edgeString names an edge's endpoints without calling Name on a nil node,
@@ -96,7 +99,9 @@ func TestEdgeBuilder_EmptyRoutingMapSetsError(t *testing.T) {
 			if !strings.Contains(err.Error(), "classifier") {
 				t.Errorf("Err() = %q, want it to name the source node %q", err, "classifier")
 			}
-			assertEdges(t, eb.Build(), nil)
+			assertEdges(t, eb.Build(), []Edge{
+				{Route: refusedEdge{err: fmt.Errorf("%w: from node %q", ErrEmptyRoutingMap, "classifier")}},
+			})
 		})
 	}
 
@@ -111,6 +116,7 @@ func TestEdgeBuilder_EmptyRoutingMapSetsError(t *testing.T) {
 		}
 		assertEdges(t, eb.Build(), []Edge{
 			{From: Start, To: a},
+			{Route: refusedEdge{err: fmt.Errorf("%w: from node %q", ErrEmptyRoutingMap, "A")}},
 			{From: a, To: b},
 			{From: b, To: c, Route: StringRoute("r")},
 		})
@@ -157,7 +163,10 @@ func TestEdgeBuilder_NilRoutingTargetSetsError(t *testing.T) {
 		if msg := err.Error(); !strings.Contains(msg, `"x"`) || !strings.Contains(msg, `"A"`) {
 			t.Errorf("Err() = %q, want it to name route %q and source node %q", msg, "x", "A")
 		}
-		assertEdges(t, eb.Build(), []Edge{{From: a, To: b, Route: StringRoute("y")}})
+		assertEdges(t, eb.Build(), []Edge{
+			{Route: refusedEdge{err: fmt.Errorf("%w: route %q from node %q", ErrNilRoutingTarget, "x", "A")}},
+			{From: a, To: b, Route: StringRoute("y")},
+		})
 	})
 
 	t.Run("only entry has nil target", func(t *testing.T) {
@@ -169,6 +178,84 @@ func TestEdgeBuilder_NilRoutingTargetSetsError(t *testing.T) {
 		if errors.Is(err, ErrEmptyRoutingMap) {
 			t.Errorf("Err() = %v, want no match with ErrEmptyRoutingMap for a map with an entry", err)
 		}
-		assertEdges(t, eb.Build(), nil)
+		assertEdges(t, eb.Build(), []Edge{
+			{Route: refusedEdge{err: fmt.Errorf("%w: route %q from node %q", ErrNilRoutingTarget, "x", "A")}},
+		})
 	})
+}
+
+// TestNew_RefusesAddRoutesErrors checks that New refuses the edges of a
+// builder whose AddRoutes recorded an error, so a caller that never calls
+// Err still gets an error instead of a graph without the described routes.
+func TestNew_RefusesAddRoutesErrors(t *testing.T) {
+	a := newDummyNode("a")
+	b := newDummyNode("b")
+
+	for _, tc := range []struct {
+		name     string
+		routes   map[string]Node
+		sentinel error
+		wantErr  string
+	}{
+		{
+			name:     "empty map",
+			routes:   map[string]Node{},
+			sentinel: ErrEmptyRoutingMap,
+			wantErr:  `graph validation failed: edges[1]: routing map must not be empty: provide at least one route-to-node mapping: from node "a"`,
+		},
+		{
+			name:     "nil map",
+			routes:   nil,
+			sentinel: ErrEmptyRoutingMap,
+			wantErr:  `graph validation failed: edges[1]: routing map must not be empty: provide at least one route-to-node mapping: from node "a"`,
+		},
+		{
+			name:     "nil target",
+			routes:   map[string]Node{"x": nil, "y": b},
+			sentinel: ErrNilRoutingTarget,
+			wantErr:  `graph validation failed: edges[1]: routing map target must not be nil: route "x" from node "a"`,
+		},
+		{
+			name:     "nil target after a valid route",
+			routes:   map[string]Node{"w": b, "x": nil},
+			sentinel: ErrNilRoutingTarget,
+			wantErr:  `graph validation failed: edges[2]: routing map target must not be nil: route "x" from node "a"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			edges := NewEdgeBuilder().Add(Start, a).AddRoutes(a, tc.routes).Build()
+
+			_, err := New("w", edges)
+			if !errors.Is(err, ErrGraphValidation) || !errors.Is(err, tc.sentinel) {
+				t.Fatalf("New() error = %v, want an error matching ErrGraphValidation and %v", err, tc.sentinel)
+			}
+			if err.Error() != tc.wantErr {
+				t.Errorf("New() error = %q, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestEdgeBuilder_AddRoutesPlaceholderPerError checks the edges Build
+// returns after two AddRoutes calls that each record an error: one
+// placeholder per error, at the position of the bad map or route, carrying
+// that call's error, with a route that matches no event.
+func TestEdgeBuilder_AddRoutesPlaceholderPerError(t *testing.T) {
+	a := newDummyNode("A")
+	b := newDummyNode("B")
+	c := newDummyNode("C")
+
+	edges := NewEdgeBuilder().
+		AddRoutes(a, nil).
+		AddRoutes(b, map[string]Node{"x": nil, "y": c}).
+		Build()
+
+	assertEdges(t, edges, []Edge{
+		{Route: refusedEdge{err: fmt.Errorf("%w: from node %q", ErrEmptyRoutingMap, "A")}},
+		{Route: refusedEdge{err: fmt.Errorf("%w: route %q from node %q", ErrNilRoutingTarget, "x", "B")}},
+		{From: b, To: c, Route: StringRoute("y")},
+	})
+	if edges[0].Route.Matches(&session.Event{}) {
+		t.Errorf("placeholder route Matches(event) = true, want false")
+	}
 }

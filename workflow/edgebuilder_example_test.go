@@ -23,8 +23,8 @@ import (
 )
 
 // Check Err after the last builder call and before workflow.New: an empty
-// routing map adds no edge, so the edges Build returns would otherwise
-// describe a graph without the routes the caller meant to add.
+// routing map adds no route edge, so the edges Build returns describe a
+// graph without the routes the caller meant to add, and New refuses them.
 func ExampleEdgeBuilder_Err() {
 	classify := workflow.NewFunctionNode("classify", func(_ agent.Context, in string) (string, error) {
 		return in, nil
@@ -38,5 +38,5 @@ func ExampleEdgeBuilder_Err() {
 	fmt.Println(len(b.Build()))
 	// Output:
 	// true
-	// 1
+	// 2
 }
