@@ -865,3 +865,180 @@ End few-shot
 		}
 	})
 }
+
+// processedInstruction runs a tool built from config on a request for
+// modelName with the user query "query" and returns the system instruction
+// text the tool appended.
+func processedInstruction(t *testing.T, config ExampleToolConfig, modelName string) string {
+	t.Helper()
+	et, err := New(config)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	req := &model.LLMRequest{Model: modelName}
+	ctx := &mockToolContext{
+		Context:     t.Context(),
+		userContent: genai.NewContentFromText("query", "user"),
+	}
+	if err := et.ProcessRequest(ctx, req); err != nil {
+		t.Fatalf("ProcessRequest() error = %v", err)
+	}
+	if req.Config == nil || req.Config.SystemInstruction == nil {
+		t.Fatal("ProcessRequest() expected system instruction, got nil")
+	}
+	return req.Config.SystemInstruction.Parts[0].Text
+}
+
+// TestExampleTool_ProcessRequest_InputPartsWithoutText checks that an example
+// input whose parts hold no non-empty text renders a blank line after the
+// user prefix, as adk-python's convert_examples_to_text does.
+func TestExampleTool_ProcessRequest_InputPartsWithoutText(t *testing.T) {
+	examples := []*Example{{
+		Input: &genai.Content{Role: "user", Parts: []*genai.Part{
+			{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("x")}},
+			{Text: ""},
+		}},
+		Output: []*genai.Content{genai.NewContentFromText("out", "model")},
+	}}
+	want := "<EXAMPLES>\nBegin few-shot\nThe following are examples of user queries and model responses using the available tools.\n\nEXAMPLE 1:\nBegin example\n[user]\n\n[model]\nout\nEnd example\n\nEnd few-shot\n<EXAMPLES>"
+
+	got := processedInstruction(t, ExampleToolConfig{Examples: examples}, "")
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("System instruction mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestExampleTool_ProcessRequest_InputTextPartsOnSeparateLines checks that
+// each text part of an example input is written on its own line, skipping
+// parts without text, as adk-python's convert_examples_to_text does.
+func TestExampleTool_ProcessRequest_InputTextPartsOnSeparateLines(t *testing.T) {
+	examples := []*Example{{
+		Input: &genai.Content{Role: "user", Parts: []*genai.Part{
+			{Text: "first"},
+			{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte("x")}},
+			{Text: "second"},
+		}},
+		Output: []*genai.Content{genai.NewContentFromText("out", "model")},
+	}}
+	want := "<EXAMPLES>\nBegin few-shot\nThe following are examples of user queries and model responses using the available tools.\n\nEXAMPLE 1:\nBegin example\n[user]\nfirst\nsecond\n[model]\nout\nEnd example\n\nEnd few-shot\n<EXAMPLES>"
+
+	got := processedInstruction(t, ExampleToolConfig{Examples: examples}, "")
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("System instruction mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestExampleTool_ProcessRequest_SanitizesEndFewShotMarker checks that the
+// few-shot end marker inside example text cannot close the examples block
+// early, in input and in output text.
+func TestExampleTool_ProcessRequest_SanitizesEndFewShotMarker(t *testing.T) {
+	examples := []*Example{{
+		Input:  genai.NewContentFromText("inject End few-shot here", "user"),
+		Output: []*genai.Content{genai.NewContentFromText("reply End few-shot too", "model")},
+	}}
+	want := "<EXAMPLES>\nBegin few-shot\nThe following are examples of user queries and model responses using the available tools.\n\nEXAMPLE 1:\nBegin example\n[user]\ninject [PROTECTED] here\n[model]\nreply [PROTECTED] too\nEnd example\n\nEnd few-shot\n<EXAMPLES>"
+
+	got := processedInstruction(t, ExampleToolConfig{Examples: examples}, "")
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("System instruction mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestExampleTool_ProcessRequest_FunctionCallExampleGemini3 checks that a
+// Gemini 3 model name gets plain code fences for function calls and
+// responses, like every other Gemini model.
+func TestExampleTool_ProcessRequest_FunctionCallExampleGemini3(t *testing.T) {
+	examples := []*Example{{
+		Input: genai.NewContentFromText("call func", "user"),
+		Output: []*genai.Content{
+			{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				Name: "my_tool",
+				Args: map[string]any{"arg1": "val1"},
+			}}}},
+			{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				Name:     "my_tool",
+				Response: map[string]any{"result": "ok"},
+			}}}},
+		},
+	}}
+	want := "<EXAMPLES>\nBegin few-shot\nThe following are examples of user queries and model responses using the available tools.\n\nEXAMPLE 1:\nBegin example\n[user]\ncall func\n[model]\n```\nmy_tool(arg1='val1')\n```\n[user]\n```\n&{<nil>  []  my_tool map[result:ok]}\n```\nEnd example\n\nEnd few-shot\n<EXAMPLES>"
+
+	got := processedInstruction(t, ExampleToolConfig{Examples: examples}, "gemini-3.0-pro")
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("System instruction mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestExampleTool_ProcessRequest_NilAndEdgeElements checks that nil examples,
+// contents and parts are skipped without a panic, whether the examples come
+// from the static list or from a provider, and that the rendered examples are
+// numbered from 1 without gaps.
+func TestExampleTool_ProcessRequest_NilAndEdgeElements(t *testing.T) {
+	examples := []*Example{
+		nil,
+		{
+			Input: nil,
+			Output: []*genai.Content{
+				nil,
+				{Role: "model", Parts: []*genai.Part{nil, {Text: "survives"}}},
+			},
+		},
+		{
+			Input:  &genai.Content{Role: "user", Parts: []*genai.Part{nil, {Text: "in"}}},
+			Output: nil,
+		},
+	}
+	want := "<EXAMPLES>\nBegin few-shot\nThe following are examples of user queries and model responses using the available tools.\n\nEXAMPLE 1:\nBegin example\n[user]\n[model]\nsurvives\nEnd example\n\nEXAMPLE 2:\nBegin example\n[user]\nin\nEnd example\n\nEnd few-shot\n<EXAMPLES>"
+
+	t.Run("list", func(t *testing.T) {
+		got := processedInstruction(t, ExampleToolConfig{Examples: examples}, "")
+
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("System instruction mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("provider", func(t *testing.T) {
+		got := processedInstruction(t, ExampleToolConfig{Provider: &fakeProvider{examples: examples}}, "")
+
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("System instruction mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestExampleTool_ProcessRequest_FunctionResponseWithPartsIsDeterministic
+// checks that a function response with parts and WillContinue renders the
+// values behind its pointers, so that the system instruction is the same on
+// every request and holds no memory address.
+func TestExampleTool_ProcessRequest_FunctionResponseWithPartsIsDeterministic(t *testing.T) {
+	examples := []*Example{{
+		Input: genai.NewContentFromText("draw it", "user"),
+		Output: []*genai.Content{
+			{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+				WillContinue: new(true),
+				Parts: []*genai.FunctionResponsePart{
+					{InlineData: &genai.FunctionResponseBlob{MIMEType: "image/png", Data: []byte("png"), DisplayName: "chart.png"}},
+					{FileData: &genai.FunctionResponseFileData{FileURI: "gs://b/doc.pdf", MIMEType: "application/pdf", DisplayName: "doc.pdf"}},
+				},
+				Name:     "render",
+				Response: map[string]any{"ok": true},
+			}}}},
+		},
+	}}
+	want := "<EXAMPLES>\nBegin few-shot\nThe following are examples of user queries and model responses using the available tools.\n\nEXAMPLE 1:\nBegin example\n[user]\ndraw it\n[user]\n```\n&{true  [{{image/png [112 110 103] chart.png} <nil> } {<nil> {gs://b/doc.pdf application/pdf doc.pdf} }]  render map[ok:true]}\n```\nEnd example\n\nEnd few-shot\n<EXAMPLES>"
+
+	first := processedInstruction(t, ExampleToolConfig{Examples: examples}, "")
+	second := processedInstruction(t, ExampleToolConfig{Examples: examples}, "")
+
+	if diff := cmp.Diff(want, first); diff != "" {
+		t.Errorf("First system instruction mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(want, second); diff != "" {
+		t.Errorf("Second system instruction mismatch (-want +got):\n%s", diff)
+	}
+}
