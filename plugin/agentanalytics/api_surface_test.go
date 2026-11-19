@@ -20,21 +20,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
-	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
-	"io"
 	"iter"
 	"net/http"
-	"os"
-	"os/exec"
 	"path"
-	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -283,153 +276,36 @@ func checkGuardLayout(gs guardedStruct) error {
 	return fmt.Errorf("%s has no exported fields after the guard", gs.name)
 }
 
-var realAgentAnalyticsExportPkg = sync.OnceValues(func() (*types.Package, error) {
-	goBin := "go"
-	if goroot := runtime.GOROOT(); goroot != "" {
-		candidate := filepath.Join(goroot, "bin", "go")
-		if _, err := os.Stat(candidate); err == nil {
-			goBin = candidate
-		}
+func checkGuardStructName(gs guardedStruct) error {
+	if gs.typ.PkgPath() != agentAnalyticsPkgPath || gs.typ.Name() != gs.name {
+		return fmt.Errorf("guardedStructs entry %q has reflect type %q.%q, want %q.%q",
+			gs.name, gs.typ.PkgPath(), gs.typ.Name(), agentAnalyticsPkgPath, gs.name)
 	}
-	cmd := exec.Command(goBin, "list", "-mod=readonly", "-export", "-deps", "-json", ".")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("go list -export: %w\n%s", err, stderr.String())
-	}
-	exports := make(map[string]string)
-	dec := json.NewDecoder(bytes.NewReader(out))
-	for dec.More() {
-		var p struct {
-			ImportPath string
-			Export     string
-		}
-		if err := dec.Decode(&p); err != nil {
-			return nil, fmt.Errorf("decoding go list -json output: %w", err)
-		}
-		if p.ImportPath != "" && p.Export != "" {
-			exports[p.ImportPath] = p.Export
-		}
-	}
-	lookup := func(importPath string) (io.ReadCloser, error) {
-		exportFile, ok := exports[importPath]
-		if !ok {
-			return nil, fmt.Errorf("no export data recorded for %q", importPath)
-		}
-		return os.Open(exportFile)
-	}
-	imp := importer.ForCompiler(token.NewFileSet(), "gc", lookup)
-	if imp == nil {
-		return nil, fmt.Errorf("importer.ForCompiler(\"gc\") returned nil")
-	}
-	return imp.Import(agentAnalyticsPkgPath)
-})
-
-func loadRealAgentAnalyticsExportPkg(t *testing.T) *types.Package {
-	t.Helper()
-	pkg, err := realAgentAnalyticsExportPkg()
-	if err != nil {
-		t.Fatalf("loading real export data for %s: %v", agentAnalyticsPkgPath, err)
-	}
-	return pkg
-}
-
-// typecheckExternalRef type-checks a snippet in package external importing pkg
-// under the identifier agentanalytics and returns any type-checker errors.
-func typecheckExternalRef(pkg *types.Package, decl string) []error {
-	src := fmt.Sprintf("package external\n\nimport %q\n\n%s\n", pkg.Path(), decl)
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "external.go", src, 0)
-	if err != nil {
-		return []error{fmt.Errorf("parsing %q: %w", src, err)}
-	}
-	var errs []error
-	conf := types.Config{
-		Importer: probeImporter{pkg},
-		Error:    func(err error) { errs = append(errs, err) },
-	}
-	_, _ = conf.Check("external", fset, []*ast.File{file}, nil)
-	return errs
-}
-
-func TestRemovedExports_RejectedAgainstExportData(t *testing.T) {
-	exportPkg := loadRealAgentAnalyticsExportPkg(t)
-
-	// Positive sanity check: kept value and type exports compile cleanly against
-	// the real package export data, proving typecheckExternalRef only fails when
-	// an export is genuinely absent or invalid.
-	if errs := typecheckExternalRef(exportPkg, "var _ = agentanalytics.EventsSchema"); len(errs) != 0 {
-		t.Fatalf("kept value export EventsSchema failed to type-check: %v", errs)
-	}
-	if errs := typecheckExternalRef(exportPkg, "var _ agentanalytics.Config"); len(errs) != 0 {
-		t.Fatalf("kept type export Config failed to type-check: %v", errs)
-	}
-
-	for _, name := range []string{
-		"ArrowSchema",
-		"SerializedArrowSchema",
-		"BatchProcessor",
-		"NewBatchProcessor",
-		"FormatContentParts",
-		"SmartTruncate",
-	} {
-		t.Run(name, func(t *testing.T) {
-			if obj := exportPkg.Scope().Lookup(name); obj != nil {
-				t.Errorf("%s is still present in %s export scope: %v", name, agentAnalyticsPkgPath, obj)
-			}
-			if errs := typecheckExternalRef(exportPkg, "var _ = agentanalytics."+name); len(errs) == 0 {
-				t.Errorf("value reference agentanalytics.%s compiled without error against export data, want rejection", name)
-			}
-			if errs := typecheckExternalRef(exportPkg, "var _ agentanalytics."+name); len(errs) == 0 {
-				t.Errorf("type reference agentanalytics.%s compiled without error against export data, want rejection", name)
-			}
-		})
-	}
+	return nil
 }
 
 func TestStructLiterals_ExternalPositionalRejected(t *testing.T) {
 	structs := guardedStructs()
 	for _, gs := range structs {
 		t.Run(gs.name+"_GuardLayout", func(t *testing.T) {
+			if err := checkGuardStructName(gs); err != nil {
+				t.Fatal(err)
+			}
 			if err := checkGuardLayout(gs); err != nil {
 				t.Error(err)
 			}
 		})
 	}
-
-	// Drive external keyed-literal and positional-literal checks from the real
-	// compiled package's export data so a typo in guardedStructs().name fails
-	// immediately instead of declaring a synthetic stand-in type.
-	exportPkg := loadRealAgentAnalyticsExportPkg(t)
-	for _, gs := range structs {
-		t.Run(gs.name+"_ExportDataLiterals", func(t *testing.T) {
-			obj := exportPkg.Scope().Lookup(gs.name)
-			tn, ok := obj.(*types.TypeName)
-			if !ok {
-				t.Fatalf("%s is not an exported type in %s export data (got %v)", gs.name, agentAnalyticsPkgPath, obj)
-			}
-			if _, ok := tn.Type().Underlying().(*types.Struct); !ok {
-				t.Fatalf("%s underlying type in export data = %T, want *types.Struct", gs.name, tn.Type().Underlying())
-			}
-			for _, problem := range checkExternalPositional(exportPkg, gs) {
-				t.Error(problem)
-			}
-		})
-	}
-	t.Run("TypoNameRejectedAgainstExportData", func(t *testing.T) {
+	t.Run("TypoNameRejectedInProcess", func(t *testing.T) {
 		typo := guardedStruct{name: "DropStatz", typ: reflect.TypeFor[agentanalytics.DropStats]()}
-		if obj := exportPkg.Scope().Lookup(typo.name); obj != nil {
-			t.Fatalf("unexpected export %s in %s: %v", typo.name, agentAnalyticsPkgPath, obj)
-		}
-		if problems := checkExternalPositional(exportPkg, typo); len(problems) == 0 {
-			t.Fatal("checkExternalPositional(exportPkg, DropStatz) succeeded, want failure on undefined exported type")
+		if err := checkGuardStructName(typo); err == nil {
+			t.Fatal("checkGuardStructName(DropStatz) = nil, want mismatch error")
 		}
 	})
 
-	// Also type-check against the struct types compiled into this test binary
-	// via reflect, so an in-memory `go test -overlay` edit that does not touch
-	// disk is caught as well.
+	// Type-check against the struct types compiled into this test binary via
+	// reflect so in-memory edits (including `go test -overlay`) are checked
+	// hermetic in-process without shelling out to `go list`.
 	probePkg, err := probePackage(structs)
 	if err != nil {
 		t.Fatalf("probePackage() failed: %v", err)
@@ -440,6 +316,35 @@ func TestStructLiterals_ExternalPositionalRejected(t *testing.T) {
 				t.Error(problem)
 			}
 		})
+	}
+}
+
+func TestRetryConfig_ValidationErrorIncludesAllExportedFields(t *testing.T) {
+	cfg := agentanalytics.Config{
+		Enabled:   true,
+		ProjectID: "test-project",
+		RetryConfig: agentanalytics.RetryConfig{
+			MaxRetries:   -1,
+			InitialDelay: 100 * time.Millisecond,
+			MaxDelay:     10 * time.Second,
+			Multiplier:   2.0,
+		},
+	}
+	_, err := agentanalytics.NewBigQueryAgentAnalyticsPluginWithConfig(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("NewBigQueryAgentAnalyticsPluginWithConfig with negative MaxRetries = nil, want error")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "_:") || strings.Contains(msg, "struct {}") {
+		t.Fatalf("RetryConfig validation error leaked guard field: %q", msg)
+	}
+	for sf := range reflect.TypeFor[agentanalytics.RetryConfig]().Fields() {
+		if !sf.IsExported() {
+			continue
+		}
+		if !strings.Contains(msg, sf.Name+":") {
+			t.Errorf("RetryConfig validation error %q does not include exported field %q", msg, sf.Name)
+		}
 	}
 }
 

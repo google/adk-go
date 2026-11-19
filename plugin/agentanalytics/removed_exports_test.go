@@ -14,7 +14,7 @@
 
 package agentanalytics_test
 
-import . "google.golang.org/adk/plugin/agentanalytics" //nolint:staticcheck,revive // intentional dot-import so re-exporting any removed symbol fails to compile
+import . "google.golang.org/adk/plugin/agentanalytics"
 
 // These external-test variables take the names that were removed from the
 // package's exported API without re-exporting them on package agentanalytics
@@ -23,10 +23,13 @@ import . "google.golang.org/adk/plugin/agentanalytics" //nolint:staticcheck,revi
 // dot-import collides with the package-block declaration below and fails to
 // compile, while any reference such as `agentanalytics.SmartTruncate` in
 // agentanalytics_test fails as undefined just as it does for downstream callers.
+// Because of the dot-import, external test helpers in package agentanalytics_test
+// also must not declare names that collide with any exported identifier of
+// package agentanalytics.
 // Note that this check only sees files included in the current build
 // configuration (for example, a `//go:build !race` file re-adding a name is
 // not compiled under `go test -race`).
-var ( //nolint:revive // intentional tripwire names matching removed exports
+var (
 	ArrowSchema           struct{}
 	SerializedArrowSchema struct{}
 	BatchProcessor        struct{}

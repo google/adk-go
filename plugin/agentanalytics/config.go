@@ -136,9 +136,9 @@ type DropStats struct {
 	// ContentFormatter returned an error or panicked; this does not itself
 	// discard a row.
 	FormatterFailureDrops int64 `json:"formatter_failure_drops"`
-	// ShutdownDrops counts rows rejected once the processor stops accepting
-	// rows (after Close finishes stopping any in-flight view-creation wait),
-	// plus queued rows discarded when the ShutdownTimeout write budget expires.
+	// ShutdownDrops counts events logged after Close finishes stopping any
+	// in-flight view-creation wait and stops accepting new rows, plus queued
+	// events discarded when the ShutdownTimeout write budget expires.
 	ShutdownDrops int64 `json:"shutdown_drops"`
 	// TotalDrops sums locally discarded events and writes whose success could
 	// not be confirmed (QueueFullDrops + AppendFailureDrops + RowErrorDrops +
