@@ -175,29 +175,41 @@ type NodeConfig struct {
 // The struct shape is deliberately a flat set of plain values: no
 // dependency on cenkalti/backoff/v5.
 type RetryConfig struct {
-	// Maximum number of attempts, including the original request. If 0 or 1, it means no retries. If not specified, default to 5.
+	// MaxAttempts is the maximum number of attempts, the first one
+	// included. Zero, one or a negative value means a single attempt
+	// and no retry, so the zero value never retries.
+	// DefaultRetryConfig sets 5.
 	MaxAttempts int
 
-	// Initial delay before the first retry, in fractions of a second. If not specified, default to 1 second.
+	// InitialDelay is the delay before the first retry; BackoffFactor
+	// scales it for each later retry (see CalculateDelay). Zero means
+	// no wait between attempts. DefaultRetryConfig sets 1 second.
 	InitialDelay time.Duration
 
-	// Maximum delay between retries, in fractions of a second. If not specified, default to 60 seconds.
-	// It bounds every delay, jitter included.
+	// MaxDelay bounds every delay between attempts, jitter included.
+	// Zero or a negative value means no bound. DefaultRetryConfig sets
+	// 60 seconds.
 	MaxDelay time.Duration
 
 	// BackoffFactor is the per-attempt multiplier applied to the
 	// delay. A factor of 1.0 means a constant InitialDelay between
-	// retries; 2.0 means classic exponential backoff. Values < 1.0
-	// shrink the delay each attempt (rare but permitted).
+	// retries; 2.0 means classic exponential backoff. Values between
+	// 0 and 1.0 shrink the delay each attempt (rare but permitted).
+	// Zero or a negative value counts as 1.0, so the zero value gives
+	// a constant delay. DefaultRetryConfig sets 2.0.
 	BackoffFactor float64
 
 	// Jitter is a randomness factor in [0.0, 1.0]. The actual delay
 	// is sampled from delay * (1 ± Jitter); with a MaxDelay the sample
 	// never exceeds it, because the delay is capped at
 	// MaxDelay / (1 + Jitter) before it is sampled. Zero means
-	// deterministic delays.
+	// deterministic delays. DefaultRetryConfig sets 1.0.
 	Jitter float64
 
-	// Predicate that defines when to retry (true means retry). If not specified, default to true.
+	// ShouldRetry reports whether a failed attempt is retried (true
+	// means retry). It is called only while attempts remain under
+	// MaxAttempts. nil retries every error except one that matches
+	// ErrInputValidation (errors.Is), which a retry cannot fix;
+	// DefaultRetryConfig sets the same predicate.
 	ShouldRetry func(error) bool
 }
