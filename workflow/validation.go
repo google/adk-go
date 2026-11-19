@@ -134,14 +134,14 @@ func invalidGraph(err error) error {
 	return fmt.Errorf("%w: %w", ErrGraphValidation, err)
 }
 
-// validateEdgeShapes checks that no edge is a placeholder Concat put in
-// place of a foreign item and that every edge has a From and a To node. It
-// reports the first defect by edge index, and runs before any rule that
-// calls a node's methods.
+// validateEdgeShapes checks that no edge is a placeholder that Concat or
+// EdgeBuilder.AddRoutes put in the list (see refusedEdge), and that every
+// edge has a From and a To node. It reports the first defect by edge index,
+// and runs before any rule that calls a node's methods.
 func validateEdgeShapes(edges []Edge) error {
 	for i, e := range edges {
-		if item, ok := e.Route.(concatForeignItem); ok {
-			return fmt.Errorf("edges[%d]: Concat was given a value of type %s, which is neither an Edge nor a []Edge", i, item.typeName)
+		if r, ok := e.Route.(refusedEdge); ok {
+			return fmt.Errorf("edges[%d]: %w", i, r.err)
 		}
 		if isNilNode(e.From) {
 			return fmt.Errorf("edges[%d] has a nil From node", i)

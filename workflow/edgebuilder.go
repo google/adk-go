@@ -24,14 +24,17 @@ import (
 )
 
 // ErrEmptyRoutingMap is the error [EdgeBuilder.Err] reports after
-// [EdgeBuilder.AddRoutes] was given a map with no entry. [EdgeBuilder.AddRoutes]
-// wraps it with the name of the source node, so match it with [errors.Is].
+// [EdgeBuilder.AddRoutes] was given a map with no entry; [New] refuses the
+// edges of that builder with an error that matches it and
+// [ErrGraphValidation]. [EdgeBuilder.AddRoutes] wraps it with the name of the
+// source node, so match it with [errors.Is].
 var ErrEmptyRoutingMap = errors.New("routing map must not be empty: provide at least one route-to-node mapping")
 
 // ErrNilRoutingTarget is the error [EdgeBuilder.Err] reports after
 // [EdgeBuilder.AddRoutes] was given a map in which a route has a nil target
-// node. [EdgeBuilder.AddRoutes] wraps it with the route and the name of the
-// source node, so match it with [errors.Is].
+// node; [New] refuses the edges of that builder with an error that matches
+// it and [ErrGraphValidation]. [EdgeBuilder.AddRoutes] wraps it with the
+// route and the name of the source node, so match it with [errors.Is].
 var ErrNilRoutingTarget = errors.New("routing map target must not be nil")
 
 // EdgeBuilder provides a fluent API for building a list of Edges.
@@ -84,10 +87,14 @@ func (b *EdgeBuilder) AddFanIn(to Node, from ...Node) *EdgeBuilder {
 // [EdgeBuilder.AddRoute] per route to choose the order yourself, or to add a
 // [Default] edge, which AddRoutes cannot express.
 //
-// An empty or nil routes map adds no edge and records [ErrEmptyRoutingMap]
-// for [EdgeBuilder.Err]. A route whose target is nil adds no edge for that
-// route and records [ErrNilRoutingTarget]; the other routes of the map are
-// still added. Only the first recorded error is kept.
+// An empty or nil routes map records an error that wraps
+// [ErrEmptyRoutingMap]. A route whose target is nil records an error that
+// wraps [ErrNilRoutingTarget]; the other routes of the map are still added.
+// [EdgeBuilder.Err] returns the first recorded error. Each recorded error
+// also puts an edge with no nodes in the list, at the position of the bad
+// map or route, and [New] refuses that edge with an error that matches
+// [ErrGraphValidation] and the recorded error, so the edges of a builder
+// that recorded an error never build a workflow.
 func (b *EdgeBuilder) AddRoutes(from Node, routes map[string]Node) *EdgeBuilder {
 	if len(routes) == 0 {
 		b.recordErr(fmt.Errorf("%w: from node %q", ErrEmptyRoutingMap, nodeNameOrNil(from)))
@@ -104,11 +111,13 @@ func (b *EdgeBuilder) AddRoutes(from Node, routes map[string]Node) *EdgeBuilder 
 	return b
 }
 
-// recordErr keeps err unless an earlier error is already recorded.
+// recordErr keeps err unless an earlier error is already recorded, and
+// appends a placeholder edge that New refuses with err.
 func (b *EdgeBuilder) recordErr(err error) {
 	if b.err == nil {
 		b.err = err
 	}
+	b.edges = append(b.edges, Edge{Route: refusedEdge{err: err}})
 }
 
 // nodeNameOrNil returns n.Name(), or "<nil>" for a nil n, so an error about
@@ -120,9 +129,9 @@ func nodeNameOrNil(n Node) string {
 	return n.Name()
 }
 
-// Err returns the first error a builder method recorded, or nil. Call it
-// after the last method and before [New]: an error here means the edges
-// Build returns are not the ones the caller described.
+// Err returns the first error a builder method recorded, or nil. An error
+// here means the edges Build returns are not the ones the caller described,
+// and [New] refuses them; call Err to learn it before New.
 func (b *EdgeBuilder) Err() error {
 	return b.err
 }
@@ -163,21 +172,23 @@ func Concat(items ...any) []Edge {
 		case []Edge:
 			edges = append(edges, v...)
 		default:
-			edges = append(edges, Edge{Route: concatForeignItem{typeName: fmt.Sprintf("%T", item)}})
+			edges = append(edges, Edge{Route: refusedEdge{err: fmt.Errorf("Concat was given a value of type %T, which is neither an Edge nor a []Edge", item)}})
 		}
 	}
 	return edges
 }
 
-// concatForeignItem is the route of the edge Concat puts in place of an
-// item that is neither an Edge nor a []Edge. Concat cannot return an error,
-// so New reports the edge instead (see validateEdgeShapes).
-type concatForeignItem struct {
-	typeName string // the item's Go type, as %T formats it
+// refusedEdge is the route of a placeholder edge that New refuses with err:
+// the edge Concat puts in place of an item that is neither an Edge nor a
+// []Edge, and the edge EdgeBuilder.AddRoutes puts for each error it records.
+// Neither function can return an error, so New reports the edge instead (see
+// validateEdgeShapes).
+type refusedEdge struct {
+	err error // why the edge was refused; New wraps it with the edge index
 }
 
 // Matches reports false. New refuses an edge with this route, so no run
 // evaluates it.
-func (concatForeignItem) Matches(*session.Event) bool {
+func (refusedEdge) Matches(*session.Event) bool {
 	return false
 }
