@@ -230,6 +230,68 @@ func TestNewModelWithoutProxyURL(t *testing.T) {
 	}
 }
 
+func TestNewModelBlankConfigTreatedAsUnset(t *testing.T) {
+	tests := []struct {
+		name    string
+		vertex  bool
+		env     map[string]string
+		opts    []Option
+		wantErr string
+	}{
+		{
+			name:    "blank proxy URL env",
+			env:     map[string]string{apigeeProxyURLEnvVar: "   "},
+			wantErr: apigeeProxyURLEnvVar,
+		},
+		{
+			name:    "blank proxy URL option and no env",
+			env:     map[string]string{apigeeProxyURLEnvVar: ""},
+			opts:    []Option{WithProxyURL("   ")},
+			wantErr: apigeeProxyURLEnvVar,
+		},
+		{
+			name:    "blank project",
+			vertex:  true,
+			env:     map[string]string{projectEnvVar: "  ", locationEnvVar: "us-central1"},
+			opts:    []Option{WithProxyURL(proxyURL)},
+			wantErr: projectEnvVar,
+		},
+		{
+			name:    "blank location",
+			vertex:  true,
+			env:     map[string]string{projectEnvVar: "p", locationEnvVar: "  "},
+			opts:    []Option{WithProxyURL(proxyURL)},
+			wantErr: locationEnvVar,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GOOGLE_API_KEY", "test-key")
+			if tt.vertex {
+				t.Setenv(googleGenaiUseVertexAIEnvVar, "true")
+			}
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			_, err := NewModel(t.Context(), "apigee/gemini-1.5-flash", tt.opts...)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("NewModel() error = %v, want error mentioning %s", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewModelBlankProxyURLOptionFallsBackToEnv(t *testing.T) {
+	t.Setenv("GOOGLE_API_KEY", "test-key")
+	t.Setenv(apigeeProxyURLEnvVar, "https://env.proxy.url")
+	if _, err := NewModel(t.Context(), "apigee/gemini-1.5-flash", WithProxyURL("   ")); err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	if got := resolveProxyURL("   "); got != "https://env.proxy.url" {
+		t.Errorf("resolveProxyURL(blank) = %q, want env value", got)
+	}
+}
+
 func TestNewModelVertexMissingProjectOrLocation(t *testing.T) {
 	ctx := t.Context()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
