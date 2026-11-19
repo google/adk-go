@@ -15,34 +15,22 @@
 package skill
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"path"
 	"slices"
 	"strings"
-	"sync"
+	"sync/atomic"
 )
 
 const maxResourceSize = 10 * 1024 * 1024 // 10MB
 
-type completePreloadSkillData struct {
-	frontmatter  *Frontmatter
-	instructions string
-	// resources enables fast lookup.
-	resources map[string][]byte
-	// sortedResourcePaths enables fast filtered listing of resources in
-	// deterministic order.
-	sortedResourcePaths []string
-}
-
+// completePreloadSource serves every call from an in-memory copy of base's
+// skills, which reload replaces as a whole.
 type completePreloadSource struct {
-	base   Source
-	mu     sync.RWMutex
-	skills map[string]*completePreloadSkillData
-	// sortedFrontmatters enables listing of frontmatters in deterministic order.
-	sortedFrontmatters []*Frontmatter
+	base    Source
+	preload atomic.Pointer[inMemorySource]
 }
 
 // WithCompletePreloadSource returns a Source proxy that wraps the given source
@@ -63,76 +51,23 @@ func WithCompletePreloadSource(ctx context.Context, source Source) (Source, func
 }
 
 func (s *completePreloadSource) ListFrontmatters(ctx context.Context) ([]*Frontmatter, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.sortedFrontmatters, nil
+	return s.preload.Load().ListFrontmatters(ctx)
 }
 
 func (s *completePreloadSource) LoadFrontmatter(ctx context.Context, name string) (*Frontmatter, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	data, ok := s.skills[name]
-	if !ok {
-		return nil, ErrSkillNotFound
-	}
-	return data.frontmatter, nil
+	return s.preload.Load().LoadFrontmatter(ctx, name)
 }
 
 func (s *completePreloadSource) LoadInstructions(ctx context.Context, name string) (string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	data, ok := s.skills[name]
-	if !ok {
-		return "", ErrSkillNotFound
-	}
-	return data.instructions, nil
+	return s.preload.Load().LoadInstructions(ctx, name)
 }
 
 func (s *completePreloadSource) LoadResource(ctx context.Context, name, resourcePath string) (io.ReadCloser, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	skill, ok := s.skills[name]
-	if !ok {
-		return nil, ErrSkillNotFound
-	}
-	resource, ok := skill.resources[path.Clean(resourcePath)]
-	if !ok {
-		return nil, ErrResourceNotFound
-	}
-	return io.NopCloser(bytes.NewReader(resource)), nil
+	return s.preload.Load().LoadResource(ctx, name, resourcePath)
 }
 
 func (s *completePreloadSource) ListResources(ctx context.Context, name, subpath string) ([]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	data, ok := s.skills[name]
-	if !ok {
-		return nil, ErrSkillNotFound
-	}
-
-	cleanPath := path.Clean(subpath)
-	if cleanPath == "." || cleanPath == "/" {
-		return data.sortedResourcePaths, nil
-	}
-
-	var result []string
-	if !strings.HasSuffix(subpath, "/") {
-		if _, matchesSpecificResource := data.resources[cleanPath]; matchesSpecificResource {
-			result = append(result, cleanPath)
-		}
-	}
-	// Optimization for skills with many resources: binary search to find the
-	// first resource path that could match the prefix.
-	prefix := cleanPath + "/" // clean path is guaranteed to not end with "/".
-	startIdx, _ := slices.BinarySearch(data.sortedResourcePaths, prefix)
-	for i := startIdx; i < len(data.sortedResourcePaths); i++ {
-		resourcePath := data.sortedResourcePaths[i]
-		if !strings.HasPrefix(resourcePath, prefix) {
-			break // Nothing else will match since resourcePaths is sorted.
-		}
-		result = append(result, resourcePath)
-	}
-	return result, nil
+	return s.preload.Load().ListResources(ctx, name, subpath)
 }
 
 func (s *completePreloadSource) reload(ctx context.Context) error {
@@ -145,13 +80,15 @@ func (s *completePreloadSource) reload(ctx context.Context) error {
 		return strings.Compare(a.Name, b.Name)
 	})
 
-	skills := make(map[string]*completePreloadSkillData, len(frontmatters))
-	for _, frontmatter := range frontmatters {
+	skills := make([]InMemorySkill, 0, len(frontmatters))
+	for i, frontmatter := range frontmatters {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		if _, exists := skills[frontmatter.Name]; exists {
+		// The frontmatters are sorted by name, so a repeated name follows
+		// its first use.
+		if i > 0 && frontmatters[i-1].Name == frontmatter.Name {
 			return fmt.Errorf("%w: %q", ErrDuplicateSkill, frontmatter.Name)
 		}
 
@@ -165,7 +102,6 @@ func (s *completePreloadSource) reload(ctx context.Context) error {
 			return fmt.Errorf("list resources for skill %q: %w", frontmatter.Name, err)
 		}
 
-		var cleanResourcePaths []string
 		resources := make(map[string][]byte)
 		for _, resourcePath := range resourcePaths {
 			if err := ctx.Err(); err != nil {
@@ -183,23 +119,16 @@ func (s *completePreloadSource) reload(ctx context.Context) error {
 			if len(data) > maxResourceSize {
 				return fmt.Errorf("resource %q in skill %q exceeds %d bytes limit", resourcePath, frontmatter.Name, maxResourceSize)
 			}
-			cleanPath := path.Clean(resourcePath)
-			resources[cleanPath] = data
-			cleanResourcePaths = append(cleanResourcePaths, cleanPath)
+			resources[path.Clean(resourcePath)] = data
 		}
-		slices.Sort(cleanResourcePaths)
 
-		skills[frontmatter.Name] = &completePreloadSkillData{
-			frontmatter:         frontmatter,
-			instructions:        instructions,
-			sortedResourcePaths: cleanResourcePaths,
-			resources:           resources,
-		}
+		skills = append(skills, InMemorySkill{
+			Frontmatter:  frontmatter,
+			Instructions: instructions,
+			Resources:    resources,
+		})
 	}
 
-	s.mu.Lock()
-	s.skills = skills
-	s.sortedFrontmatters = frontmatters
-	s.mu.Unlock()
+	s.preload.Store(newInMemorySource(skills))
 	return nil
 }

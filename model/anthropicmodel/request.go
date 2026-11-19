@@ -70,7 +70,7 @@ func (m *anthropicModel) buildMessageParams(
 	}
 
 	params := anthropic.MessageNewParams{
-		Model:        anthropic.Model(modelID),
+		Model:        modelID,
 		MaxTokens:    int64(maxTokens),
 		Messages:     messages,
 		System:       systemBlocks,

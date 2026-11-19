@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 
@@ -96,9 +97,7 @@ func convertEventSpan(span services.DebugSpan) map[string]any {
 		"parent_span_id": span.ParentSpanID,
 		"logs":           logs,
 	}
-	for k, v := range span.Attributes {
-		flattened[string(k)] = v
-	}
+	maps.Copy(flattened, span.Attributes)
 	return flattened
 }
 

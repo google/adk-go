@@ -152,7 +152,7 @@ func NewExecutor(config ExecutorConfig) *Executor {
 	v1Config := v2.ExecutorConfig{
 		RunnerConfig: config.RunnerConfig,
 		RunConfig:    config.RunConfig,
-		OutputMode:   v2.OutputMode(config.OutputMode),
+		OutputMode:   config.OutputMode,
 	}
 
 	if config.RunnerProvider != nil {

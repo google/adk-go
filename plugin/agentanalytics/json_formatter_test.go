@@ -2871,6 +2871,26 @@ func TestSanitizeRawText(t *testing.T) {
 		if got, want := scrubErrorText(`{"msg":"password=SECRET123"}`), `{"msg":"password=[REDACTED]}`; got != want {
 			t.Errorf("scrubErrorText unescaped JSON pair = %q, want %q", got, want)
 		}
+		// Scrubbing the text of the valid JSON value takes its closing quote
+		// with the redacted value. sanitizeRawText and SmartTruncate return
+		// that malformed text, as main did. A second call reads it as any
+		// other malformed JSON text: sanitizeRawText keeps it as prose, and
+		// SmartTruncate, which keeps none, fails it closed, as on main.
+		const scrubbedPair = `{"msg":"password=[REDACTED]}`
+		if got, lost := sanitizeRawText(`{"msg":"password=SECRET123"}`); got != scrubbedPair || !lost {
+			t.Errorf("sanitizeRawText(unescaped JSON pair) = (%q, %v), want (%q, true)", got, lost, scrubbedPair)
+		}
+		if got, lost := sanitizeRawText(scrubbedPair); got != scrubbedPair || lost {
+			t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", scrubbedPair, got, lost)
+		}
+		wantPair := `"{\"msg\":\"password=[REDACTED]}"`
+		if raw, truncated, err := SmartTruncate(`{"msg":"password=SECRET123"}`, 4096); err != nil || !truncated || string(raw) != wantPair {
+			t.Errorf("SmartTruncate(unescaped JSON pair) = (%s, %v, %v), want (%s, true, nil)", raw, truncated, err, wantPair)
+		}
+		wantClosed := `"` + unparseableJSONPlaceholder + `"`
+		if raw, truncated, err := SmartTruncate(scrubbedPair, 4096); err != nil || !truncated || string(raw) != wantClosed {
+			t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want (%s, true, nil)", scrubbedPair, raw, truncated, err, wantClosed)
+		}
 		for _, harmless := range []string{
 			`C:\new\file.txt`,
 			`{"msg":"talk to Ken\ntomorrow"}`,
@@ -2903,8 +2923,10 @@ func TestSanitizeRawText(t *testing.T) {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", pair.raw, got, lost, pair.want)
 			}
 		}
-		if got, want := nestedPairEnd("token=abc rest", len("token=abc "), 0), len("token=abc "); got != want {
-			t.Errorf("nestedPairEnd fallback = %d, want %d", got, want)
+		fallback := "token=abc rest"
+		st := newQuoteScanState(len(fallback))
+		if got, want := nestedPairEndWithState(fallback, len("token=abc "), 0, openQuoteState{}, &st), len("token=abc "); got != want {
+			t.Errorf("nestedPairEndWithState fallback = %d, want %d", got, want)
 		}
 	})
 
@@ -6901,5 +6923,27 @@ func TestJSONFormatter_CollidingMapKeys(t *testing.T) {
 				t.Errorf("smartTruncate(%s, redact off) = (%s, %v, %v), want (%s, %v, nil)", tt.name, gotOff, truncOff, err, tt.wantOff, tt.wantTrunc)
 			}
 		})
+	}
+}
+
+func TestJSONFormatter_DeclaredSensitiveTypeMapKey(t *testing.T) {
+	type SyntaxToken int
+
+	gotMapOn, truncMapOn, err := SmartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, 1000)
+	if err != nil || string(gotMapOn) != `{"[REDACTED]":"[REDACTED]"}` || !truncMapOn {
+		t.Errorf("SmartTruncate(map[SyntaxToken]int{1: 12, 2: 9}) = (%s, %v, %v), want (%s, true, nil)", gotMapOn, truncMapOn, err, `{"[REDACTED]":"[REDACTED]"}`)
+	}
+	gotMapOff, truncMapOff, err := smartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, 1000, false)
+	if err != nil || string(gotMapOff) != `{"1":12,"2":9}` || truncMapOff {
+		t.Errorf("smartTruncate(map[SyntaxToken]int{1: 12, 2: 9}, redact off) = (%s, %v, %v), want (%s, false, nil)", gotMapOff, truncMapOff, err, `{"1":12,"2":9}`)
+	}
+
+	gotValOn, truncValOn, err := SmartTruncate(SyntaxToken(7), 1000)
+	if err != nil || string(gotValOn) != `"[REDACTED]"` || !truncValOn {
+		t.Errorf("SmartTruncate(SyntaxToken(7)) = (%s, %v, %v), want (%s, true, nil)", gotValOn, truncValOn, err, `"[REDACTED]"`)
+	}
+	gotValOff, truncValOff, err := smartTruncate(SyntaxToken(7), 1000, false)
+	if err != nil || string(gotValOff) != `7` || truncValOff {
+		t.Errorf("smartTruncate(SyntaxToken(7), redact off) = (%s, %v, %v), want (7, false, nil)", gotValOff, truncValOff, err)
 	}
 }

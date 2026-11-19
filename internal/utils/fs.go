@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -118,6 +119,38 @@ func SafeSubpath(base, rel string) (absPath, relPath string, resErr error) {
 		return "", "", err
 	}
 	return real, r, nil
+}
+
+// SafeRelPath validates rel as a path inside a notional root and returns its
+// cleaned, slash-separated form, without touching the filesystem. Unlike
+// [SafeSubpath] it resolves no links and makes no syscalls, so it suits an
+// in-memory tree — a zip archive, an embed.FS, an object store — whose paths
+// never reach disk and whose separators are always "/". It is therefore
+// OS-independent: it applies no Windows filename rules, which concern a real
+// filesystem rather than an in-memory one.
+//
+// It returns ErrNotValidRelativePath for an empty path, one containing a NUL
+// byte, one that is absolute or effectively empty (".", "/"), or one that
+// escapes the root through "..".
+func SafeRelPath(rel string) (string, error) {
+	if rel == "" {
+		return "", fmt.Errorf("%w: rel path is empty", ErrNotValidRelativePath)
+	}
+	if strings.Contains(rel, "\x00") {
+		return "", fmt.Errorf("%w: rel path contains null byte", ErrNotValidRelativePath)
+	}
+	// Normalize separators and clean textually, then judge the result by the
+	// io/fs rules for an in-memory tree: a slash-separated, rooted-at-"." path
+	// with no "." , ".." or empty element.
+	clean := path.Clean(filepath.ToSlash(rel))
+	if clean == "." {
+		return "", fmt.Errorf("%w: rel is effectively empty", ErrNotValidRelativePath)
+	}
+	if !fs.ValidPath(clean) {
+		// Absolute, or escaping the root through "..".
+		return "", fmt.Errorf("%w: rel path escapes the root", ErrNotValidRelativePath)
+	}
+	return clean, nil
 }
 
 // resolveInside follows the links in target and reports where it really lands.
