@@ -417,6 +417,11 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		// an agent that started.
 		event.Actions.EndOfAgent != nil ||
 		event.Actions.AgentState != nil ||
+		// The EventActions message has no field for a transfer reason. The
+		// whole event then goes out as raw_event, which also keeps
+		// TransferToAgent; that is a side effect, not a mapping: an event with
+		// a transfer and no reason still loses its transfer.
+		event.Actions.TransferReason != "" ||
 		// The EventActions message has no field for UI widgets either.
 		len(event.Actions.RenderUIWidgets) > 0
 }

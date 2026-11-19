@@ -23,7 +23,10 @@ import (
 	"google.golang.org/adk/v2/tool/functiontool"
 )
 
-func exitLoop(ctx agent.Context, myArgs struct{}) (map[string]string, error) {
+// exitLoop returns nothing, as adk-python's exit_loop returns None
+// (tools/exit_loop_tool.py:20-26): after-tool callbacks see nil, and the flow
+// answers the call with {"result": null} (flows/llm_flows/tools/_caller.py).
+func exitLoop(ctx agent.Context, myArgs struct{}) (map[string]any, error) {
 	ctx.Actions().Escalate = true
 	ctx.Actions().SkipSummarization = true
 	return nil, nil

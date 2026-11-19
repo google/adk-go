@@ -16,16 +16,22 @@ package llminternal
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"slices"
 	"strings"
+	"text/template"
 
-	"github.com/google/safehtml/template"
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/exp/feature"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
@@ -74,34 +80,97 @@ func AgentTransferRequestProcessor(ctx agent.InvocationContext, req *model.LLMRe
 			return
 		}
 
-		parents := parentmap.FromContext(ctx)
-
-		targets := transferTargets(agent, parents[agent.Name()])
+		parent := parentOf(ctx, agent)
+		targets := transferTargets(agent, parent)
 		if len(targets) == 0 {
+			return
+		}
+		if skip, err := builtinSearchGuard(ctx, f, agent, targets); err != nil {
+			yield(nil, err)
+			return
+		} else if skip {
 			return
 		}
 
 		// TODO(hyangah): why do we set this up in request processor
 		// instead of registering this as a normal function tool of the Agent?
-		transferToAgentTool, err := NewTransferToAgentTool(ctx, agent, parents[agent.Name()], targets)
+		transferToAgentTool, err := NewTransferToAgentTool(ctx, agent, parent, targets)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 		utils.AppendInstructions(req, transferToAgentTool.instructions)
-		err = appendTools(req, transferToAgentTool)
+		err = appendTools(req, transferToAgentTool.forRequest(ctx, processorModel(ctx, f)))
 		if err != nil {
 			yield(nil, err)
 		}
 	}
 }
 
+// parentOf returns the agent that a's transfers, and a's model inheritance,
+// treat as a's parent: the parent the run's parent map
+// (parentmap.FromContext(ctx)) holds for a.Name() when there is one, else the
+// parent link agent.New recorded (agentinternal.ParentOf), as the link's owner
+// when it has one and otherwise as the inner agent. It returns nil when a has
+// no parent from either source, when a holds no inner agent (innerAgent(a) ==
+// nil, as for the mock agents of the tests), and when the link's parent is not
+// an agent.Agent. The run's map wins wherever it knows a, so an agent listed
+// in two trees has the parent of the tree being run. Safe for concurrent use:
+// the link is read under agentinternal.ParentOf's lock.
+func parentOf(ctx context.Context, a agent.Agent) agent.Agent {
+	if parent := parentmap.FromContext(ctx)[a.Name()]; parent != nil {
+		return parent
+	}
+	inner := innerAgent(a)
+	if inner == nil {
+		return nil
+	}
+	parent, owner := agentinternal.ParentOf(agentinternal.Reveal(inner))
+	if owner, ok := owner.(agent.Agent); ok {
+		return owner
+	}
+	if parent, ok := parent.(agent.Agent); ok {
+		return parent
+	}
+	return nil
+}
+
 const transferAgentName = "transfer_to_agent"
 
-// TransferToAgentTool is a tool that handles transferring control to another agent.
+// transferToAgentDescription is adk-python's description of the tool without
+// transfer_reason: the cleaned docstring of _transfer_to_agent_without_reason
+// (tools/transfer_to_agent_tool.py).
+const transferToAgentDescription = "Transfer the query to another agent.\n\nUse this tool to hand off control to another agent that is more suitable to\nanswer the user's query according to the agent's description.\n\nArgs:\n  agent_name: the agent name to transfer to."
+
+// transferReasonDescriptionLine is the line adk-python's cleaned docstring of
+// transfer_to_agent adds to transferToAgentDescription for transfer_reason
+// (tools/transfer_to_agent_tool.py).
+const transferReasonDescriptionLine = "\n  transfer_reason: the reason for transferring to the target agent."
+
+// TransferToAgentTool is a tool that handles transferring control to another
+// agent. Its zero value declares the JSON-schema form for the Gemini API.
 type TransferToAgentTool struct {
 	instructions    string
 	supportedAgents []agent.Agent
+	// typed makes Declaration return the typed Parameters form.
+	typed bool
+	// vertex makes Declaration add the null response schema Vertex AI gets.
+	vertex bool
+	// agentNames is the target list of a tool built over names
+	// (NewNamedTransferToAgentTool); empty for a tool the flow builds.
+	agentNames []string
+	// includeReason makes Declaration offer transfer_reason and Run record it.
+	includeReason bool
+}
+
+// NewNamedTransferToAgentTool is the constructor of the public tool (package
+// transfertoagenttool): a tool over a fixed list of names, with no targets to
+// resolve and no instructions.
+func NewNamedTransferToAgentTool(names []string, includeReason bool) *TransferToAgentTool {
+	return &TransferToAgentTool{
+		agentNames:    slices.Clone(names),
+		includeReason: includeReason,
+	}
 }
 
 // NewTransferToAgentTool creates a new TransferToAgentTool. ctx supplies the
@@ -119,10 +188,17 @@ func NewTransferToAgentTool(ctx agent.InvocationContext, curAgent, parent agent.
 	}, nil
 }
 
-// Description implements tool.Tool.
+// Description implements tool.Tool. It returns adk-python's cleaned
+// description of the tool, with the transfer_reason line when the tool offers
+// that parameter: the same text Declaration carries, in both forms.
+// adk-python sends the raw, indented docstring in the typed form with the
+// reason (tools/_automatic_function_calling_util.py); the tool sends the
+// cleaned text there too.
 func (t *TransferToAgentTool) Description() string {
-	return `Transfer the question to another agent.
-This tool hands off control to another agent when it's more suitable to answer the user's question according to the agent's description.`
+	if t.includeReason {
+		return transferToAgentDescription + transferReasonDescriptionLine
+	}
+	return transferToAgentDescription
 }
 
 // Name implements tool.Tool.
@@ -135,25 +211,115 @@ func (t *TransferToAgentTool) IsLongRunning() bool {
 	return false
 }
 
+// Declaration returns a new declaration of the tool on every call, which the
+// caller may modify without changing the tool. It declares one required
+// string parameter, agent_name, whose enum lists the transfer targets in order
+// (no enum when there are none), and, when the tool offers it, the optional
+// string parameter transfer_reason with default "": as a JSON Schema in
+// ParametersJsonSchema, or as a genai.Schema in Parameters when the tool was
+// prepared for a request under feature.LegacyFunctionDeclarationSchema; the
+// other field is nil. For a Vertex AI request it adds a null response schema
+// in the same form, as adk-python does for a function that returns None.
+// Safe for concurrent use.
 func (t *TransferToAgentTool) Declaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{
+	if t.typed {
+		return t.typedDeclaration()
+	}
+	return t.jsonDeclaration()
+}
+
+// forRequest returns a copy of t that declares itself in the form of one
+// request: the typed form when ctx carries
+// feature.LegacyFunctionDeclarationSchema, and the null response schema when
+// llm is a Vertex AI model. llm may be nil. t is not modified, so one tool can
+// serve requests of different forms at the same time.
+func (t *TransferToAgentTool) forRequest(ctx context.Context, llm model.LLM) *TransferToAgentTool {
+	return t.forContext(googlellm.ContextWithBackend(ctx, googlellm.GetGoogleLLMVariant(llm)))
+}
+
+// forContext returns a copy of t that declares itself in the form ctx asks
+// for: the typed form when ctx carries feature.LegacyFunctionDeclarationSchema,
+// and the null response schema when ctx carries the Vertex AI backend
+// (googlellm.ContextWithBackend). For a nil ctx the copy keeps t's form. t is not
+// modified, and the copy shares t's read-only target lists, so one tool can
+// serve requests of different forms at the same time.
+func (t *TransferToAgentTool) forContext(ctx context.Context) *TransferToAgentTool {
+	c := *t
+	if ctx == nil {
+		return &c
+	}
+	c.typed = feature.LegacyFunctionDeclarationSchema(ctx)
+	c.vertex = googlellm.BackendFromContext(ctx) == genai.BackendVertexAI
+	return &c
+}
+
+// jsonDeclaration returns the declaration in the JSON-schema form.
+func (t *TransferToAgentTool) jsonDeclaration() *genai.FunctionDeclaration {
+	properties := map[string]*jsonschema.Schema{
+		"agent_name": {Type: "string", Enum: t.jsonEnums()},
+	}
+	if t.includeReason {
+		properties["transfer_reason"] = &jsonschema.Schema{Type: "string", Default: json.RawMessage(`""`)}
+	}
+	decl := &genai.FunctionDeclaration{
+		Name:        t.Name(),
+		Description: t.Description(),
+		ParametersJsonSchema: &jsonschema.Schema{
+			Type:       "object",
+			Properties: properties,
+			Required:   []string{"agent_name"},
+		},
+	}
+	if t.vertex {
+		decl.ResponseJsonSchema = &jsonschema.Schema{Type: "null"}
+	}
+	return decl
+}
+
+// typedDeclaration returns the declaration in the typed genai.Schema form.
+func (t *TransferToAgentTool) typedDeclaration() *genai.FunctionDeclaration {
+	properties := map[string]*genai.Schema{
+		"agent_name": {Type: genai.TypeString, Enum: t.enums()},
+	}
+	if t.includeReason {
+		properties["transfer_reason"] = &genai.Schema{Type: genai.TypeString, Default: ""}
+	}
+	decl := &genai.FunctionDeclaration{
 		Name:        t.Name(),
 		Description: t.Description(),
 		Parameters: &genai.Schema{
-			Type: genai.TypeObject,
-			Properties: map[string]*genai.Schema{
-				"agent_name": {
-					Type:        genai.TypeString,
-					Description: "the agent name to transfer to",
-					Enum:        t.enums(),
-				},
-			},
-			Required: []string{"agent_name"},
+			Type:       genai.TypeObject,
+			Properties: properties,
+			Required:   []string{"agent_name"},
 		},
 	}
+	if t.vertex {
+		decl.Response = &genai.Schema{Type: genai.TypeNULL}
+	}
+	return decl
 }
 
+// jsonEnums returns enums as JSON Schema enum values, or nil when there are
+// no targets, so an empty enum is omitted.
+func (t *TransferToAgentTool) jsonEnums() []any {
+	var values []any
+	for _, name := range t.enums() {
+		values = append(values, name)
+	}
+	return values
+}
+
+// enums returns the target list in order, as a new slice on every call: the
+// names of the transfer targets of a tool the flow builds, else the names a
+// tool over names was built with. It returns nil when there are none, so that
+// neither declaration form has an enum.
 func (t *TransferToAgentTool) enums() []string {
+	if len(t.supportedAgents) == 0 {
+		if len(t.agentNames) == 0 {
+			return nil
+		}
+		return slices.Clone(t.agentNames)
+	}
 	var agentNames []string
 	for _, a := range t.supportedAgents {
 		agentNames = append(agentNames, a.Name())
@@ -161,9 +327,10 @@ func (t *TransferToAgentTool) enums() []string {
 	return agentNames
 }
 
-// ProcessRequest implements types.Tool.
+// ProcessRequest implements types.Tool. It registers a copy of t declared in
+// the form ctx asks for (forContext). ctx may be nil.
 func (t *TransferToAgentTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	return appendTools(req, t)
+	return appendTools(req, t.forContext(ctx))
 }
 
 // Run implements types.Tool.
@@ -188,6 +355,13 @@ func (t *TransferToAgentTool) Run(ctx agent.Context, args any) (map[string]any, 
 		return nil, fmt.Errorf("agent %q is not a valid transfer target; available agents: %s", agent, strings.Join(targets, ", "))
 	}
 	ctx.Actions().TransferToAgent = agent
+	// Only a tool that declares transfer_reason records it, and only as a
+	// string. adk-python records whatever the model sends under that key,
+	// declared or not (tools/transfer_to_agent_tool.py, tools/function_tool.py).
+	if t.includeReason {
+		reason, _ := m["transfer_reason"].(string)
+		ctx.Actions().TransferReason = reason
+	}
 	return nil, nil
 }
 
@@ -327,7 +501,11 @@ func instructionsForTransferToAgent(ctx agent.InvocationContext, curAgent, paren
 		return "", nil
 	}
 
-	if cur.internal().DisallowTransferToParent {
+	// The parent line names the parent only when it is a target: a non-LLM
+	// parent, or one DisallowTransferToParent excludes, cannot be transferred
+	// to. adk-python writes the line for any parent
+	// (flows/llm_flows/extensions/_agent_transfer.py:226-229).
+	if parent != nil && !slices.ContainsFunc(targets, func(target agent.Agent) bool { return target.Name() == parent.Name() }) {
 		parent = nil
 	}
 

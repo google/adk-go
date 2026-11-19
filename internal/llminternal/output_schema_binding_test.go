@@ -141,6 +141,25 @@ func TestOutputSchemaFor(t *testing.T) {
 	}
 }
 
+// An agent run outside the tree it was built in can still transfer to the
+// LLM agent that lists it, so it gets no bound schema, as under a run's
+// parent map ("agent that can transfer to its parent" above).
+// Fails when outputSchemaFor reads the parent only from the run's parent map.
+func TestOutputSchemaForLinkParent(t *testing.T) {
+	bound := &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{"a": {Type: genai.TypeString}}}
+	self := newLinkedLLMAgent(t, "self", nil)
+	newLinkedLLMAgent(t, "parent", nil, self)
+	state := self.(*mockLLMAgent).s
+	ctx := icontext.NewInvocationContext(
+		WithBoundOutputSchema(WithBoundMode(t.Context(), "self", state, ModeSingleTurn), "self", state, bound),
+		icontext.InvocationContextParams{Agent: self},
+	)
+
+	if got := outputSchemaFor(ctx, state); got != nil {
+		t.Errorf("outputSchemaFor = %v for an agent linked to an LLM parent, want nil", got)
+	}
+}
+
 // Each request gets its own copy of a bound schema, so editing one request's
 // schema does not change what the next request is sent.
 func TestOutputSchemaForCopiesBoundSchema(t *testing.T) {

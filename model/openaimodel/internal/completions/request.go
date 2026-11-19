@@ -26,6 +26,7 @@ import (
 	oaishared "github.com/openai/openai-go/v3/shared"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
 
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
@@ -511,7 +512,7 @@ func newResponseFormat(cfg *genai.GenerateContentConfig) (*openai.ChatCompletion
 	if cfg.ResponseJsonSchema != nil {
 		schema, err = shared.NormalizeSchema(cfg.ResponseJsonSchema)
 	} else {
-		schema, err = shared.SchemaToMap(cfg.ResponseSchema)
+		schema, err = typeutil.GenaiSchemaToJSONMap(cfg.ResponseSchema)
 	}
 	if err != nil {
 		return nil, err

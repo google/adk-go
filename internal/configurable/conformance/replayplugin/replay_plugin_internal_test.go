@@ -14,7 +14,14 @@
 
 package replayplugin
 
-import "testing"
+import (
+	"testing"
+
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/model"
+)
 
 func TestNormalizeDescription(t *testing.T) {
 	tests := []struct {
@@ -76,5 +83,36 @@ func TestNormalizeDescription(t *testing.T) {
 				t.Errorf("normalizeDescription(%q) = %q; want %q", tt.input, actual, tt.expected)
 			}
 		})
+	}
+}
+
+// A recorded transfer_to_agent declaration carrying adk-python 2.12's
+// description matches the declaration adk-go sends.
+// Fails when verifyLLMRequestMatch rewrites the expected description, or when
+// adk-go's description differs from Python's.
+func TestVerifyLLMRequestMatch_TransferToAgentDescription(t *testing.T) {
+	const pythonDescription = "Transfer the query to another agent.\n\nUse this tool to hand off control to another agent that is more suitable to\nanswer the user's query according to the agent's description.\n\nArgs:\n  agent_name: the agent name to transfer to."
+	expected := &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{
+				FunctionDeclarations: []*genai.FunctionDeclaration{{
+					Name:        "transfer_to_agent",
+					Description: pythonDescription,
+				}},
+			}},
+		},
+	}
+	actual := &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{
+				FunctionDeclarations: []*genai.FunctionDeclaration{
+					(&llminternal.TransferToAgentTool{}).Declaration(),
+				},
+			}},
+		},
+	}
+
+	if err := verifyLLMRequestMatch(expected, actual, "root", 0); err != nil {
+		t.Errorf("verifyLLMRequestMatch() = %v, want nil", err)
 	}
 }

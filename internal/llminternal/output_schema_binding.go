@@ -20,7 +20,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/internal/agent/parentmap"
 )
 
 type boundOutputSchemaKey struct {
@@ -83,7 +82,7 @@ func outputSchemaFor(ctx agent.InvocationContext, state *State) *genai.Schema {
 	if cfg := state.GenerateContentConfig; cfg != nil && (cfg.ResponseSchema != nil || cfg.ResponseJsonSchema != nil || cfg.ResponseMIMEType != "") {
 		return nil
 	}
-	if shouldUseAutoFlow(cur) && len(transferTargets(cur, parentmap.FromContext(ctx)[cur.Name()])) > 0 {
+	if shouldUseAutoFlow(cur) && len(transferTargets(cur, parentOf(ctx, cur))) > 0 {
 		return nil
 	}
 	return clone(schema)

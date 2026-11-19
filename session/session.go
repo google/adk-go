@@ -358,6 +358,12 @@ type EventActions struct {
 	SkipSummarization bool `json:"skipSummarization,omitempty"`
 	// If set, the event transfers to the specified agent.
 	TransferToAgent string `json:"transferToAgent,omitempty"`
+	// TransferReason is the reason given for the transfer in TransferToAgent.
+	// Empty means no reason was given, and an empty reason is left out of the
+	// JSON form. The transfer_to_agent tool sets it when it is built with
+	// transfertoagenttool.Config.IncludeTransferReason and the model sends a
+	// reason. ADK stores and returns it but never acts on it.
+	TransferReason string `json:"transferReason,omitempty"`
 	// The agent is escalating to a higher level agent.
 	Escalate bool `json:"escalate,omitempty"`
 

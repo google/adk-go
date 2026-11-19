@@ -613,7 +613,7 @@ func TestLoopAgent_ResumablePauseEndsLoop(t *testing.T) {
 
 	got := runLoop(t, loop, true)
 
-	want := []string{"p:p text", "p:FC(ask)"}
+	want := []string{"loop:", "p:p text", "loop:", "p:FC(ask)"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("events mismatch (-want +got):\n%s", diff)
 	}
@@ -631,7 +631,7 @@ func TestLoopAgent_ResumablePauseSkipsRestOfPass(t *testing.T) {
 
 	got := runLoop(t, loop, true)
 
-	want := []string{"p:FC(ask)"}
+	want := []string{"loop:", "p:FC(ask)"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("events mismatch (-want +got):\n%s", diff)
 	}
@@ -652,7 +652,7 @@ func TestLoopAgent_ResumablePauseLetsPausedSubAgentFinish(t *testing.T) {
 
 	got := runLoop(t, loop, true)
 
-	want := []string{"p:FC(ask)", "p:tail"}
+	want := []string{"loop:", "p:FC(ask)", "p:tail"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("events mismatch (-want +got):\n%s", diff)
 	}
@@ -733,7 +733,7 @@ func TestLoopAgent_LongRunningIDOfAnotherCallDoesNotPause(t *testing.T) {
 
 	got := runLoop(t, loop, true)
 
-	want := []string{"b:FC(ask)", "c:c text", "b:FC(ask)", "c:c text"}
+	want := []string{"loop:", "b:FC(ask)", "loop:", "c:c text", "loop:", "b:FC(ask)", "loop:", "c:c text", "loop:"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("events mismatch (-want +got):\n%s", diff)
 	}

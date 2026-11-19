@@ -4190,13 +4190,11 @@ func requireInvocationCompletedOK(t *testing.T, rows []map[string]any) {
 
 // requireChildStartedAfterPartialStop calls attempt, which runs an agent
 // until the caller stops reading on a partial event and returns the rows of
-// the run, until the rows hold an AGENT_STARTING row of an agent named child,
-// and requires every run to be reported as completed.
+// the run, up to 20 times, until the rows hold an AGENT_STARTING row of an
+// agent named child, and requires every run to be reported as completed. It
+// fails the test when none of the 20 runs holds that row.
 func requireChildStartedAfterPartialStop(t *testing.T, attempt func(t *testing.T) []map[string]any) {
 	t.Helper()
-	// A parallel agent closes the event's ackChan right before it calls
-	// cancelSubAgents when its caller stops reading, so about one run in 30 the
-	// branch sees done or ctx.Done() first and returns before it runs child.
 	const maxAttempts = 20
 	for range maxAttempts {
 		rows := attempt(t)
@@ -8293,9 +8291,9 @@ func TestRunner_ParallelRootStoppedMidStream_SiblingModelReturnsContextCanceled_
 // TestRunner_ParallelStreamStop_CanceledWorkAfterPartialIsNotAnError verifies
 // that a caller that stops reading at a partial event of a parallel branch
 // stops mid-stream, not at a failure, when the branch then starts work that
-// ends on the branch's cancellation. A parallel agent lets the branch go on
-// once the event was yielded, even when the caller stopped reading on it, and
-// then cancels its branches.
+// ends on the branch's cancellation. The parallel agent cancels its branches
+// once the caller stops reading, and the branch starts that work when its
+// context is canceled.
 func TestRunner_ParallelStreamStop_CanceledWorkAfterPartialIsNotAnError(t *testing.T) {
 	requireADKParallelEarlyStopTeardown(t)
 	for _, tc := range []struct {
@@ -8337,30 +8335,7 @@ func TestRunner_ParallelStreamStop_CanceledWorkAfterPartialIsNotAnError(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			requireChildStartedAfterPartialStop(t, func(t *testing.T) []map[string]any {
 				p, requests, _ := setupTestPlugin(t)
-				child := tc.newChild(t)
-				streamer, err := agent.New(agent.Config{
-					Name:      "streamer",
-					SubAgents: []agent.Agent{child},
-					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-						return func(yield func(*session.Event, error) bool) {
-							partial := session.NewEvent(ctx, ctx.InvocationID())
-							partial.Author = "streamer"
-							partial.Branch = ctx.Branch()
-							partial.LLMResponse = model.LLMResponse{Partial: true, Content: textContent("model", "progress update...")}
-							if !yield(partial, nil) {
-								return
-							}
-							for ev, err := range child.Run(ctx) {
-								if !yield(ev, err) || err != nil {
-									return
-								}
-							}
-						}
-					},
-				})
-				if err != nil {
-					t.Fatalf("agent.New(streamer): %v", err)
-				}
+				streamer := newChildOnCancelAuthor(t, "streamer", tc.newChild(t), textContent("model", "progress update..."))
 				par, err := parallelagent.New(parallelagent.Config{
 					AgentConfig: agent.Config{
 						Name:      "par_root",
@@ -8391,6 +8366,41 @@ func TestRunner_ParallelStreamStop_CanceledWorkAfterPartialIsNotAnError(t *testi
 			})
 		})
 	}
+}
+
+// newChildOnCancelAuthor returns a custom agent with the given name that
+// writes one partial event with content, which may be nil, waits until its
+// context is canceled, and then runs child. It yields child's events only if
+// the caller took the partial event. It stops reading child at child's first
+// error, so child's AfterAgentCallback does not run and the error stays
+// unrecovered. Under a parallel agent, the agent's context is canceled when
+// the caller stops reading on the partial event, so child starts only after
+// that stop.
+func newChildOnCancelAuthor(t *testing.T, name string, child agent.Agent, content *genai.Content) agent.Agent {
+	t.Helper()
+	author, err := agent.New(agent.Config{
+		Name:      name,
+		SubAgents: []agent.Agent{child},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				partial := session.NewEvent(ctx, ctx.InvocationID())
+				partial.Author = name
+				partial.Branch = ctx.Branch()
+				partial.LLMResponse = model.LLMResponse{Partial: true, Content: content}
+				taken := yield(partial, nil)
+				<-ctx.Done()
+				for ev, err := range child.Run(ctx) {
+					if taken && !yield(ev, err) || err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(%s): %v", name, err)
+	}
+	return author
 }
 
 // newStreamingAuthor returns a custom agent named author that writes one
@@ -8428,9 +8438,9 @@ func newStreamingAuthor(t *testing.T, child agent.Agent, withContent bool) agent
 
 // TestRunner_StopOnPartialEventOfAsyncAuthor_IsNotAnError verifies that a
 // caller that stops reading on the partial event of an agent that goes on
-// without waiting for the caller stops mid-stream, not at a failure: the agent
-// then runs its child, which the run cancels, under a parallel agent, whose
-// sibling waits for its cancellation, and as a node of a workflow, which does
+// after the stop stops mid-stream, not at a failure: the agent then runs its
+// child, under a parallel agent, which cancels the agent and its sibling, both
+// of which wait for that cancellation, and as a node of a workflow, which does
 // not wait for its caller to read a partial event.
 func TestRunner_StopOnPartialEventOfAsyncAuthor_IsNotAnError(t *testing.T) {
 	newChild := func(t *testing.T) agent.Agent {
@@ -8466,10 +8476,14 @@ func TestRunner_StopOnPartialEventOfAsyncAuthor_IsNotAnError(t *testing.T) {
 		if err != nil {
 			t.Fatalf("agent.New(waiter): %v", err)
 		}
+		var content *genai.Content
+		if withContent {
+			content = textContent("model", "progress...")
+		}
 		par, err := parallelagent.New(parallelagent.Config{
 			AgentConfig: agent.Config{
 				Name:      "par_root",
-				SubAgents: []agent.Agent{newStreamingAuthor(t, newChild(t), withContent), waiter},
+				SubAgents: []agent.Agent{newChildOnCancelAuthor(t, "author", newChild(t), content), waiter},
 			},
 		})
 		if err != nil {

@@ -25,9 +25,10 @@ type legacyKey struct{}
 
 // WithLegacyFunctionDeclarationSchema returns a copy of parent with the legacy
 // function-declaration switch set to v. When it is true, the set_model_response
-// tool declares its parameters in the typed genai.Schema form (Parameters)
-// instead of a JSON Schema (ParametersJsonSchema). Only the set_model_response
-// declaration follows the switch today; other tools' declarations do not.
+// tool and the transfer_to_agent tool (the built-in one and the one
+// transfertoagenttool.New builds) declare their parameters in the typed
+// genai.Schema form (Parameters) instead of a JSON Schema
+// (ParametersJsonSchema). Other tools' declarations do not follow the switch.
 // Safe for concurrent use.
 //
 // EXPERIMENTAL: WithLegacyFunctionDeclarationSchema is experimental; its API and behavior may change or be removed in a later version.

@@ -28,7 +28,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/internal/agent/parentmap"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
@@ -50,9 +49,7 @@ func instructionsRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 			return // do nothing.
 		}
 
-		parents := parentmap.FromContext(ctx)
-
-		rootAgent := asLLMAgent(parents.RootAgent(ctx.Agent()))
+		rootAgent := asLLMAgent(rootOf(ctx, ctx.Agent()))
 		if rootAgent == nil {
 			rootAgent = llmAgent
 		}

@@ -283,6 +283,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
 			RequestedAuthConfigs:       maps.Clone(event.Actions.RequestedAuthConfigs),
 			TransferToAgent:            event.Actions.TransferToAgent,
+			TransferReason:             event.Actions.TransferReason,
 			Escalate:                   event.Actions.Escalate,
 			SetModelResponse:           sessionutils.CloneValue(event.Actions.SetModelResponse),
 			RewindBeforeInvocationID:   event.Actions.RewindBeforeInvocationID,

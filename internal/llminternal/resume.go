@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"fmt"
 	"iter"
 	"slices"
 	"strings"
@@ -22,7 +23,6 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
@@ -220,12 +220,38 @@ func callIDsOnBranch(sess session.Session, branch string) map[string]bool {
 // Actions.EndOfAgent true. It ports adk-python's
 // BaseAgent._create_agent_state_event for an agent that ended
 // (agents/base_agent.py).
+//
+// It also records author's end in ctx's run config (RecordAgentEnd, which
+// does nothing outside a resumable run), as adk-python sets the end flag
+// before it builds the event (agents/llm_agent.py, _run_async_impl), so that a
+// resumable ParallelAgent above author learns that author ended.
 func NewEndOfAgentEvent(ctx agent.InvocationContext, author string) *session.Event {
 	ev := session.NewEvent(ctx, ctx.InvocationID())
 	ev.Author = author
 	ev.Branch = ctx.Branch()
 	ended := true
 	ev.Actions.EndOfAgent = &ended
+	if rc := runconfig.FromContext(ctx); rc != nil {
+		rc.RecordAgentEnd(author)
+	}
+	return ev
+}
+
+// NewAgentStateEvent returns the event that records state as author's
+// checkpoint in ctx's invocation: ctx's invocation ID and branch, no content,
+// and Actions.AgentState set to state as given. A nil state becomes an empty,
+// non-nil map, because a nil Actions.AgentState means the event carries no
+// state. It ports adk-python's BaseAgent._create_agent_state_event for an
+// agent with a state (agents/base_agent.py). It records nothing in ctx's run
+// config.
+func NewAgentStateEvent(ctx agent.InvocationContext, author string, state map[string]any) *session.Event {
+	ev := session.NewEvent(ctx, ctx.InvocationID())
+	ev.Author = author
+	ev.Branch = ctx.Branch()
+	if state == nil {
+		state = map[string]any{}
+	}
+	ev.Actions.AgentState = state
 	return ev
 }
 
@@ -233,17 +259,25 @@ func NewEndOfAgentEvent(ctx agent.InvocationContext, author string) *session.Eve
 // a transfer response carries.
 const TransferToAgentToolName = transferAgentName
 
-// TransferTarget returns the agent named name among the agents that ctx's
-// agent may transfer to (its sub-agents, and its parent and peers unless
-// they are disallowed), or nil when there is none.
-func TransferTarget(ctx agent.InvocationContext, name string) agent.Agent {
-	parents := parentmap.FromContext(ctx)
-	for _, target := range transferTargets(ctx.Agent(), parents[ctx.Agent().Name()]) {
+// TransferTarget returns the agent a resumed transfer of ctx's agent to name
+// runs, as adk-python's LlmAgent.__get_agent_to_run finds it
+// (agents/llm_agent.py): the agent named name among the agents ctx's agent may
+// transfer to (its sub-agents, and its parent and peers unless they are
+// disallowed), else the agent of that name in the tree ctx's agent belongs to,
+// whose root is the last of its ancestors. It returns an error naming name
+// when the tree has no agent named name.
+func TransferTarget(ctx agent.InvocationContext, name string) (agent.Agent, error) {
+	cur := ctx.Agent()
+	for _, target := range transferTargets(cur, parentOf(ctx, cur)) {
 		if target.Name() == name {
-			return target
+			return target, nil
 		}
 	}
-	return nil
+	// A target wins over a same-named agent elsewhere in the tree.
+	if found := rootOf(ctx, cur).FindAgent(name); found != nil {
+		return found, nil
+	}
+	return nil, fmt.Errorf("failed to find agent: %s", name)
 }
 
 // RunTransferTarget runs target, the agent a transfer hands the invocation

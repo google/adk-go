@@ -37,7 +37,6 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/adkcontext"
-	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
@@ -1706,8 +1705,7 @@ func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.A
 	// NOTE: in python, BaseLlmFlow._get_agent_to_run searches the entire agent
 	// tree from the root_agent when processing _postprocess_handle_function_calls_async.
 	// I think that is strange. In our version, we check the agents included in transferTarget.
-	parents := parentmap.FromContext(ctx)
-	agents := transferTargets(ctx.Agent(), parents[ctx.Agent().Name()])
+	agents := transferTargets(ctx.Agent(), parentOf(ctx, ctx.Agent()))
 	for _, agent := range agents {
 		if agent.Name() == agentName {
 			return agent
@@ -2266,6 +2264,9 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 	}
 	if other.TransferToAgent != "" {
 		base.TransferToAgent = other.TransferToAgent
+	}
+	if other.TransferReason != "" {
+		base.TransferReason = other.TransferReason
 	}
 	if other.Escalate {
 		base.Escalate = true

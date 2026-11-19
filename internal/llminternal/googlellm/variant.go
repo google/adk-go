@@ -15,6 +15,7 @@
 package googlellm
 
 import (
+	"context"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,6 +34,25 @@ func GetGoogleLLMVariant(llm model.LLM) genai.Backend {
 		return genai.BackendUnspecified
 	}
 	return i.GetGoogleLLMVariant()
+}
+
+type backendKey struct{}
+
+// ContextWithBackend returns a copy of ctx carrying the model's genai.Backend.
+// The LLM flow sets it on the context it passes to tools' ProcessRequest, so a
+// tool can declare itself in the form the request's backend expects.
+func ContextWithBackend(ctx context.Context, b genai.Backend) context.Context {
+	return context.WithValue(ctx, backendKey{}, b)
+}
+
+// BackendFromContext returns the genai.Backend stored in ctx, or
+// genai.BackendUnspecified if ctx is nil or has none.
+func BackendFromContext(ctx context.Context) genai.Backend {
+	if ctx == nil {
+		return genai.BackendUnspecified
+	}
+	b, _ := ctx.Value(backendKey{}).(genai.Backend)
+	return b
 }
 
 // GoogleLLM is an interface which allows to distinguish between Vertex AI and Gemini API models.
