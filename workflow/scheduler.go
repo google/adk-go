@@ -27,6 +27,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -780,6 +781,12 @@ func defaultContentRole(c *genai.Content) string {
 	return genai.RoleModel
 }
 
+// carriesFunctionParts reports whether c holds a function call or a
+// function response part.
+func carriesFunctionParts(c *genai.Content) bool {
+	return len(utils.FunctionCalls(c)) > 0 || len(utils.FunctionResponses(c)) > 0
+}
+
 // terminalAncestors returns the ancestor paths for a terminal node's output,
 // or nil if nodeName is not terminal or the workflow is running at root level.
 func (s *scheduler) terminalAncestors(nodeName string) []string {
@@ -828,8 +835,13 @@ func (s *scheduler) handleEvent(it eventItem) {
 	// Default Content.Role for nodes that left it empty
 	// (FunctionNode/BaseNode set Parts but not Role); clients like
 	// the web UI rely on it. Before the descendant short-circuit so
-	// dynamic children are covered too.
-	if it.ev.Content != nil && it.ev.Content.Role == "" {
+	// dynamic children are covered too. An authored event (an agent's
+	// own) keeps the role its producer gave it, even an empty one, as
+	// adk-python's node runtime adds no role to an agent's events;
+	// except when it carries a function call or response, which the
+	// next model request drops without a role.
+	if it.ev.Content != nil && it.ev.Content.Role == "" &&
+		(it.ev.Author == "" || carriesFunctionParts(it.ev.Content)) {
 		it.ev.Content.Role = defaultContentRole(it.ev.Content)
 	}
 	expectedPath := nr.nodePath

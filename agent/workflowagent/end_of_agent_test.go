@@ -606,4 +606,26 @@ func TestWorkflowAgent_EndOfAgentEvent_WithheldOnErrorCancelAndEarlyStop(t *test
 		checkErr(t, turn2.errs, func(err error) bool { return errors.Is(err, workflow.ErrInvalidResumeResponse) }, "workflow.ErrInvalidResumeResponse")
 		checkNoEnd(t, turn2.events, storedEvents(t, svc))
 	})
+
+	t.Run("resume_nothing_to_resume", func(t *testing.T) {
+		wf := mustWorkflow(t, workflowagent.Config{Name: "wf", Edges: workflow.Chain(workflow.Start, askerNode("asker", "ask", nil))})
+		r, svc := newEndRunner(t, wf, true)
+		if turn1 := runEndTurn(t.Context(), r, userText("go"), nil); len(turn1.errs) != 0 {
+			t.Fatalf("turn 1 Run() errors = %v, want none", turn1.errs)
+		}
+		if turn2 := runEndTurn(t.Context(), r, testutil.InputResponse("ask", "yes"), nil); len(turn2.errs) != 0 {
+			t.Fatalf("turn 2 Run() errors = %v, want none", turn2.errs)
+		}
+		endsAfterTurn2 := len(endEvents(storedEvents(t, svc)))
+
+		turn3 := runEndTurn(t.Context(), r, testutil.InputResponse("ask", "yes"), nil)
+
+		checkErr(t, turn3.errs, func(err error) bool { return errors.Is(err, workflow.ErrNothingToResume) }, "workflow.ErrNothingToResume")
+		if n := len(endEvents(turn3.events)); n != 0 {
+			t.Errorf("turn 3 yielded %d end events, want 0", n)
+		}
+		if n := len(endEvents(storedEvents(t, svc))); n != endsAfterTurn2 {
+			t.Errorf("session holds %d end events after turn 3, want the %d it held after turn 2", n, endsAfterTurn2)
+		}
+	})
 }

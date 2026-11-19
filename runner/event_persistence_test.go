@@ -852,3 +852,106 @@ func TestRunner_MessageAsOutput_ClearedAfterPlugin(t *testing.T) {
 		})
 	}
 }
+
+// TestRunner_Abort_SealingPipelineMetadataPluginsAndAfterRunOrder checks that
+// an event that seals an aborted run takes the path of an agent event, the
+// run's custom metadata and the OnEventCallback plugins (whose in-place edit
+// is kept) before it is stored, and that the seal comes before the after-run
+// callbacks, on both run loops. adk-python seals through
+// _process_and_append_event in the finally that ends with after_run
+// (runners.py, Runner._exec_with_plugin).
+func TestRunner_Abort_SealingPipelineMetadataPluginsAndAfterRunOrder(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		config func(t *testing.T) Config
+	}{
+		{
+			name: "custom",
+			config: func(t *testing.T) Config {
+				_, a := newBlockingCallAgent(t, "tool_agent", false)
+				return Config{Agent: a}
+			},
+		},
+		{
+			name: "llm",
+			config: func(t *testing.T) Config {
+				_, _, a := newSlowToolAgent(t, "tool_agent")
+				return Config{Agent: a}
+			},
+		},
+		{
+			name: "node_root",
+			config: func(t *testing.T) Config {
+				return Config{Node: &abortGraphNode{BaseNode: workflow.NewBaseNode("root", "", workflow.NodeConfig{}), fn: func(ctx agent.Context, yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "root"
+					ev.Content = genai.NewContentFromText("working", genai.RoleModel)
+					if !yield(ev, nil) {
+						return
+					}
+					select {
+					case <-ctx.Done():
+					case <-time.After(abortBlockFor):
+					}
+				}}}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var log []string
+			p, err := plugin.New(plugin.Config{
+				Name: "lifecycle",
+				BeforeRunCallback: func(agent.InvocationContext) (*genai.Content, error) {
+					log = append(log, "before_run")
+					return nil, nil
+				},
+				OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+					if ev.ErrorCode != abortedCode {
+						log = append(log, "on_event:normal")
+						return nil, nil
+					}
+					log = append(log, "on_event:"+ev.ErrorCode)
+					ev.CustomMetadata["plugin_tag"] = "seen"
+					return nil, nil
+				},
+				AfterRunCallback: func(ic agent.InvocationContext) {
+					evs := ic.Session().Events()
+					log = append(log, "after_run:"+evs.At(evs.Len()-1).ErrorCode)
+				},
+			})
+			if err != nil {
+				t.Fatalf("plugin.New() error = %v", err)
+			}
+			cfg := tt.config(t)
+			cfg.PluginConfig = PluginConfig{Plugins: []*plugin.Plugin{p}}
+			r, svc := newAbortRunner(t, cfg)
+			first := func(*session.Event) bool { return true }
+
+			res := abortRun{sig: make(chan struct{}), cfg: agent.RunConfig{CustomMetadata: &map[string]any{"label": "value"}}, closeOn: first}.drive(t, r)
+
+			if len(res.errs) != 0 {
+				t.Fatalf("Run() errors = %v, want none", res.errs)
+			}
+			wantLog := []string{"before_run", "on_event:normal", "on_event:INVOCATION_ABORTED", "after_run:INVOCATION_ABORTED"}
+			if diff := cmp.Diff(wantLog, log); diff != "" {
+				t.Errorf("plugin log mismatch (-want +got):\n%s", diff)
+			}
+			wantMetadata := []map[string]any{{"label": "value", "plugin_tag": "seen"}}
+			var yielded, stored []map[string]any
+			for _, ev := range abortedEvents(res.events) {
+				yielded = append(yielded, ev.CustomMetadata)
+			}
+			for _, ev := range abortedEvents(storedAbortSession(t, svc, "s")) {
+				stored = append(stored, ev.CustomMetadata)
+			}
+			if diff := cmp.Diff(wantMetadata, yielded); diff != "" {
+				t.Errorf("yielded abort event metadata mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(wantMetadata, stored); diff != "" {
+				t.Errorf("stored abort event metadata mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

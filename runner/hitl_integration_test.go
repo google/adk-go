@@ -15,12 +15,15 @@
 package runner_test
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -385,6 +388,83 @@ func newWorkflowRunner(t *testing.T, edges []workflow.Edge) *runner.Runner {
 	return newNodeTestRunner(t, wfAgent, svc)
 }
 
+// TestRunner_WorkflowHITL_AbortCancelsResumedWorkflow aborts a turn that
+// resumes a paused workflow node root while a node of the resumed workflow is
+// running: the node's context is canceled at once and the run ends with the
+// abort event, instead of waiting for the node.
+func TestRunner_WorkflowHITL_AbortCancelsResumedWorkflow(t *testing.T) {
+	asker := newHitlAsker("asker", "approval", false /*rerunOnResume*/)
+	started := make(chan struct{})
+	nodeEnded := make(chan error, 1)
+	blocker := workflow.NewFunctionNode(
+		"blocker",
+		func(ctx agent.Context, _ any) (string, error) {
+			close(started)
+			select {
+			case <-ctx.Done():
+				nodeEnded <- ctx.Err()
+			case <-time.After(30 * time.Second):
+				nodeEnded <- nil
+			}
+			return "", nil
+		},
+		workflow.NodeConfig{},
+	)
+	wf, err := workflow.NewWorkflowNode("wf", workflow.Chain(workflow.Start, asker, blocker))
+	if err != nil {
+		t.Fatalf("workflow.NewWorkflowNode() error = %v", err)
+	}
+	svc := session.InMemoryService()
+	newNodeTestSession(t, t.Context(), svc)
+	r := newNodeRootRunner(t, wf, svc)
+
+	turn1 := drainRunner(t, r.Run(t.Context(), nodeTestUser, nodeTestSession, userText("draft"), agent.RunConfig{}))
+	if id, _ := findLongRunningInterrupt(turn1); id != "approval" {
+		t.Fatalf("turn 1 interrupt id = %q, want %q; events:\n%s", id, "approval", debugEvents(turn1))
+	}
+
+	signal := make(chan struct{})
+	go func() {
+		select {
+		case <-started:
+			close(signal)
+		case <-t.Context().Done():
+		}
+	}()
+	answer := resumeContent("approval", workflow.WorkflowInputFunctionCallName, "approve")
+	begin := time.Now()
+	var errs []error
+	var events []*session.Event
+	for ev, err := range r.Run(t.Context(), nodeTestUser, nodeTestSession, answer, agent.RunConfig{}, runner.WithAbortSignal(signal)) {
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		events = append(events, ev)
+	}
+
+	if len(errs) != 0 {
+		t.Errorf("resume Run() errors = %v, want none", errs)
+	}
+	if elapsed := time.Since(begin); elapsed >= 10*time.Second {
+		t.Errorf("resume Run() took %v, want well under the node's 30s block", elapsed)
+	}
+	select {
+	case err := <-nodeEnded:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("node ended with ctx.Err() = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("the node did not end")
+	}
+	if len(events) == 0 {
+		t.Fatal("resume Run() yielded no events")
+	}
+	if last := events[len(events)-1]; last.Author != "wf" || last.ErrorCode != "INVOCATION_ABORTED" {
+		t.Errorf("last resume event = author %q, error code %q; want author %q, error code %q", last.Author, last.ErrorCode, "wf", "INVOCATION_ABORTED")
+	}
+}
+
 // hitlAskerNode is the pause point in the scenarios: it requests human
 // input, then on re-entry emits the resumed response as its output.
 type hitlAskerNode struct {
@@ -516,8 +596,8 @@ func eventFields(ev *session.Event) []string {
 }
 
 // A workflow agent paused in two runs, then one message answering both
-// interrupts: the workflow resumes the first run instead of restarting the
-// graph, which would run finished nodes again and ask a new question.
+// interrupts: Run refuses the message because its responses resolve to
+// multiple invocations, and runs neither node again.
 func TestRunner_WorkflowAgent_AnswersToTwoPausedRunsResumeTheFirst(t *testing.T) {
 	ctx := t.Context()
 	var prepareRuns atomic.Int32
@@ -550,15 +630,20 @@ func TestRunner_WorkflowAgent_AnswersToTwoPausedRunsResumeTheFirst(t *testing.T)
 		{FunctionResponse: &genai.FunctionResponse{ID: id1, Name: name1, Response: map[string]any{"payload": "first"}}},
 		{FunctionResponse: &genai.FunctionResponse{ID: id2, Name: name2, Response: map[string]any{"payload": "second"}}},
 	}}
-	newID, _ := findLongRunningInterrupt(drainRunner(t, r.Run(ctx, nodeTestUser, nodeTestSession, msg, agent.RunConfig{})))
+	var runErr error
+	for _, err := range r.Run(ctx, nodeTestUser, nodeTestSession, msg, agent.RunConfig{}) {
+		if err != nil {
+			runErr = err
+		}
+	}
 
 	if got := prepareRuns.Load(); got != 2 {
 		t.Errorf("prepare ran %d times, want 2", got)
 	}
-	if newID != "" {
-		t.Errorf("the run raised a new interrupt %q, want the paused run resumed", newID)
+	if runErr == nil || !strings.Contains(runErr.Error(), "resolve to multiple invocations") {
+		t.Errorf("Run() error = %v, want one that says the responses resolve to multiple invocations", runErr)
 	}
-	if got := handlerInput.Load(); got != "first" {
-		t.Errorf("handler input = %v, want %q", got, "first")
+	if got := handlerInput.Load(); got != nil {
+		t.Errorf("handler input = %v, want none", got)
 	}
 }

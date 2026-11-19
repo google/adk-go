@@ -15,12 +15,15 @@
 package agenttool_test
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"log"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -314,6 +317,74 @@ func TestAgentTool_Run_WithoutSchema(t *testing.T) {
 	want := map[string]any{"result": "First text part is returned This should not be ignored"}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("Run() result diff (-want +got):\n%s", diff)
+	}
+}
+
+// Without an input schema, the agent's request is the "request" argument, or,
+// without one, the arguments as adk-python's json.dumps(args,
+// ensure_ascii=False, sort_keys=True) writes them.
+func TestAgentTool_Run_WithoutSchemaRequestText(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{name: "request_argument_wins", args: map[string]any{"request": "find shoes", "brand": "Nike"}, want: "find shoes"},
+		{name: "empty", args: map[string]any{}, want: "{}"},
+		{
+			name: "keys_sorted_non_ascii_kept",
+			args: map[string]any{"product": "Laufschuhe für Damen", "brand": "Nike & Co"},
+			want: `{"brand": "Nike & Co", "product": "Laufschuhe für Damen"}`,
+		},
+		{
+			name: "nested",
+			args: map[string]any{"filter": map[string]any{"size": 38.0, "colors": []any{"rot", "grün"}}},
+			want: `{"filter": {"colors": ["rot", "grün"], "size": 38}}`,
+		},
+		{
+			name: "string_with_quote_comma_colon",
+			args: map[string]any{"note": `say "hi, then: go`},
+			want: `{"note": "say \"hi, then: go"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := &requestTextModel{}
+			ag := createAgentWithModel(t, nil, nil, recorder)
+			toolImpl, ok := agenttool.New(ag, nil).(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
+
+			if _, err := toolImpl.Run(createToolContext(t, ag), tt.args); err != nil {
+				t.Fatalf("Run(%v) failed unexpectedly: %v", tt.args, err)
+			}
+
+			if diff := cmp.Diff([]string{tt.want}, recorder.texts); diff != "" {
+				t.Errorf("request texts the agent's model received (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// requestTextModel answers every request with "done" and records the text of
+// the request's last content.
+type requestTextModel struct {
+	model.LLM
+	texts []string
+}
+
+func (m *requestTextModel) Name() string { return "request-text-mock" }
+
+func (m *requestTextModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		var text string
+		if n := len(req.Contents); n > 0 && len(req.Contents[n-1].Parts) > 0 {
+			text = req.Contents[n-1].Parts[0].Text
+		}
+		m.texts = append(m.texts, text)
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("done", genai.RoleModel)}, nil)
 	}
 }
 
@@ -1000,12 +1071,27 @@ func TestAgentTool_Run_SkipSummarizationNotSetOnInvalidArgs(t *testing.T) {
 		Required: []string{"city", "days"},
 	}
 	tests := []struct {
-		name        string
-		inputSchema *genai.Schema
-		args        map[string]any
+		name          string
+		inputSchema   *genai.Schema
+		args          any
+		wantErrPrefix string
 	}{
-		{name: "input_schema_missing_required", inputSchema: inputSchema, args: map[string]any{"city": "Paris"}},
-		{name: "no_schema_missing_request", args: map[string]any{"query": "Paris"}},
+		{
+			name:          "input_schema_missing_required",
+			inputSchema:   inputSchema,
+			args:          map[string]any{"city": "Paris"},
+			wantErrPrefix: "argument validation failed for agent math_agent: ",
+		},
+		{
+			name:          "no_schema_args_not_an_object",
+			args:          "Paris",
+			wantErrPrefix: "agentTool expects map[string]any arguments, got string",
+		},
+		{
+			name:          "no_schema_args_not_json",
+			args:          map[string]any{"callback": func() {}},
+			wantErrPrefix: "error serializing tool arguments for agent math_agent: ",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1017,8 +1103,12 @@ func TestAgentTool_Run_SkipSummarizationNotSetOnInvalidArgs(t *testing.T) {
 				t.Fatal("agentTool does not implement FunctionTool")
 			}
 
-			if _, err := toolImpl.Run(toolCtx, tt.args); err == nil {
+			_, err := toolImpl.Run(toolCtx, tt.args)
+			if err == nil {
 				t.Fatalf("Run(%v) succeeded unexpectedly, wanted error", tt.args)
+			}
+			if !strings.HasPrefix(err.Error(), tt.wantErrPrefix) {
+				t.Errorf("Run(%v) error = %q, want prefix %q", tt.args, err, tt.wantErrPrefix)
 			}
 
 			if toolCtx.Actions().SkipSummarization {
@@ -1095,4 +1185,210 @@ func TestAgentTool_RunTwiceLeavesChildToolsetOpen(t *testing.T) {
 	if diff := cmp.Diff(map[string]any{"result": "second answer"}, second); diff != "" {
 		t.Errorf("second Run() result diff (-want +got):\n%s", diff)
 	}
+}
+
+// TestAgentTool_ForwardsAbortSignalToNestedRunner checks that the agent tool
+// gives its nested run the caller's abort signal and returns the abort message
+// as its result when the nested run is sealed, as adk-python's AgentTool does
+// (tools/agent_tool.py, run_async). The tool contexts carry an abort state but
+// no watcher, so they are never canceled: only the forwarded signal can stop
+// the nested run.
+func TestAgentTool_ForwardsAbortSignalToNestedRunner(t *testing.T) {
+	tests := []struct {
+		name string
+		// signal returns the caller's abort channel and abort, which the
+		// child calls after its first event.
+		signal func() (sig <-chan struct{}, abort func())
+		// child is what the wrapped agent yields before it waits.
+		child    func(ctx agent.InvocationContext) *session.Event
+		wantRuns int32
+	}{
+		{
+			name: "fired_before_run",
+			signal: func() (<-chan struct{}, func()) {
+				ch := make(chan struct{})
+				close(ch)
+				return ch, func() {}
+			},
+			child: func(ctx agent.InvocationContext) *session.Event {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Content = genai.NewContentFromText("not aborted", genai.RoleModel)
+				return ev
+			},
+			wantRuns: 0,
+		},
+		{
+			name: "fired_during_nested_run",
+			signal: func() (<-chan struct{}, func()) {
+				ch := make(chan struct{})
+				return ch, func() { close(ch) }
+			},
+			child: func(ctx agent.InvocationContext) *session.Event {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "approve"}},
+				}}
+				ev.LongRunningToolIDs = []string{"call_1"}
+				return ev
+			},
+			wantRuns: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sig, abort := tt.signal()
+			var runs atomic.Int32
+			child, err := agent.New(agent.Config{Name: "child", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					runs.Add(1)
+					ev := tt.child(ctx)
+					ev.Author = "child"
+					if !yield(ev, nil) {
+						return
+					}
+					abort()
+					select {
+					case <-ctx.Done():
+					case <-time.After(30 * time.Second):
+					}
+				}
+			}})
+			if err != nil {
+				t.Fatalf("agent.New() error = %v", err)
+			}
+			toolImpl, ok := agenttool.New(child, nil).(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
+			created, err := session.InMemoryService().Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "testUser"})
+			if err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			ctx := icontext.WithAbortState(t.Context(), icontext.NewAbortState(t.Context(), sig))
+			ictx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Session: created.Session})
+			toolCtx := agent.NewToolContext(ictx, "", &session.EventActions{}, nil)
+
+			result, err := toolImpl.Run(toolCtx, map[string]any{"request": "go"})
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
+			}
+			if diff := cmp.Diff(map[string]any{"result": "Invocation was aborted by client."}, result); diff != "" {
+				t.Errorf("Run() result diff (-want +got):\n%s", diff)
+			}
+			if got := runs.Load(); got != tt.wantRuns {
+				t.Errorf("child ran %d times, want %d", got, tt.wantRuns)
+			}
+		})
+	}
+}
+
+// TestAgentTool_SentAbortValueStopsCallingAndNestedRun checks that one value
+// sent on the calling run's abort signal while the nested run of an agent tool
+// is running stops both runs: the nested agent's context is canceled, the
+// nested run is sealed, so the tool's result is the abort message, and the
+// calling run calls its model no more and is sealed. adk-python's nested run
+// waits on the caller's asyncio.Event, which every reader sees once it is set
+// (tools/agent_tool.py, run_async).
+func TestAgentTool_SentAbortValueStopsCallingAndNestedRun(t *testing.T) {
+	started := make(chan struct{})
+	var childCanceled atomic.Bool
+	child, err := agent.New(agent.Config{Name: "child", Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(func(*session.Event, error) bool) {
+			close(started)
+			select {
+			case <-ctx.Done():
+				childCanceled.Store(true)
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	outerModel := &testutil.MockModel{Responses: []*genai.Content{
+		{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "child", Args: map[string]any{"request": "go"}}}}},
+		genai.NewContentFromText("outer reply", genai.RoleModel),
+	}}
+	// The calling run is sealed before the tool's response is yielded, so the
+	// tool's result is read here.
+	var toolResult map[string]any
+	var toolErr error
+	root, err := llmagent.New(llmagent.Config{
+		Name:  "root",
+		Model: outerModel,
+		Tools: []tool.Tool{agenttool.New(child, nil)},
+		AfterToolCallbacks: []llmagent.AfterToolCallback{
+			func(_ agent.Context, _ tool.Tool, _, result map[string]any, err error) (map[string]any, error) {
+				toolResult, toolErr = result, err
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	sessions := session.InMemoryService()
+	r, err := runner.New(runner.Config{AppName: "app", Agent: root, SessionService: sessions, AutoCreateSession: true})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+	sig := make(chan struct{}, 1)
+	go func() {
+		select {
+		case <-started:
+			sig <- struct{}{}
+		case <-t.Context().Done():
+		}
+	}()
+
+	var got []string
+	for ev, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}, runner.WithAbortSignal(sig)) {
+		if err != nil {
+			t.Fatalf("Run() error = %v, want none", err)
+		}
+		got = append(got, describeEvent(ev))
+	}
+
+	if !childCanceled.Load() {
+		t.Error("the nested agent's context was not canceled within 5s of the signal")
+	}
+	if toolErr != nil {
+		t.Errorf("agent tool error = %v, want nil", toolErr)
+	}
+	if diff := cmp.Diff(map[string]any{"result": "Invocation was aborted by client."}, toolResult); diff != "" {
+		t.Errorf("agent tool result mismatch (-want +got):\n%s", diff)
+	}
+	if got := len(outerModel.Requests); got != 1 {
+		t.Errorf("calling run's model was called %d times, want 1", got)
+	}
+	want := []string{
+		"root call call_1 child",
+		`root INVOCATION_ABORTED "Invocation was aborted by client." response call_1 child map[error:Invocation was aborted by client.]`,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("calling run's events mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// describeEvent names ev by author, error code and message, function calls,
+// function responses and text.
+func describeEvent(ev *session.Event) string {
+	s := ev.Author
+	if ev.ErrorCode != "" || ev.ErrorMessage != "" {
+		s += fmt.Sprintf(" %s %q", ev.ErrorCode, ev.ErrorMessage)
+	}
+	if ev.Content == nil {
+		return s + " no-content"
+	}
+	for _, p := range ev.Content.Parts {
+		switch {
+		case p.FunctionCall != nil:
+			s += fmt.Sprintf(" call %s %s", p.FunctionCall.ID, p.FunctionCall.Name)
+		case p.FunctionResponse != nil:
+			s += fmt.Sprintf(" response %s %s %v", p.FunctionResponse.ID, p.FunctionResponse.Name, p.FunctionResponse.Response)
+		case p.Text != "":
+			s += fmt.Sprintf(" text %q", p.Text)
+		}
+	}
+	return s
 }

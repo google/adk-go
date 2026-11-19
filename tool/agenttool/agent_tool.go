@@ -18,6 +18,7 @@
 package agenttool
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -27,8 +28,10 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/abortevents"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/internal/toolinternal"
@@ -61,6 +64,12 @@ type Config struct {
 
 // New creates a new agent tool.
 // If cfg is nil, skipSummarization defaults to false.
+//
+// The tool runs agent in a nested run. When the calling run was given an
+// abort signal ([runner.WithAbortSignal]), the nested run is aborted with
+// it: closing the channel or sending one value on it aborts the calling run
+// and agent. When the aborted nested run leaves no text, the tool's result is
+// {"result": "Invocation was aborted by client."}.
 func New(agent agent.Agent, cfg *Config) tool.Tool {
 	if cfg == nil {
 		return &agentTool{
@@ -114,6 +123,10 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 // Run executes the wrapped agent with the provided arguments.
 // It creates a new session for the sub-agent, runs the agent, and returns
 // the final result. Artifacts are accessed through the parent tool context.
+//
+// When the agent has no input schema, its request is the "request" argument,
+// or, when the arguments have none, the arguments as JSON text with sorted
+// keys, as adk-python sends them.
 func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
@@ -138,14 +151,15 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		}
 		content = genai.NewContentFromText(string(jsonData), genai.RoleUser)
 	} else {
-		input, ok := margs["request"]
-		if !ok {
-			return nil, fmt.Errorf("missing required argument 'request' for agent %s", t.agent.Name())
-		}
-		inputText, ok := input.(string)
-		if !ok {
-			// Try to convert to string if not already one
-			inputText = fmt.Sprint(input)
+		var inputText string
+		if input, ok := margs["request"]; ok {
+			inputText, ok = input.(string)
+			if !ok {
+				// Try to convert to string if not already one
+				inputText = fmt.Sprint(input)
+			}
+		} else if inputText, err = pythonJSON(margs); err != nil {
+			return nil, fmt.Errorf("error serializing tool arguments for agent %s: %w", t.agent.Name(), err)
 		}
 		content = genai.NewContentFromText(inputText, genai.RoleUser)
 	}
@@ -207,6 +221,16 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		labels = rc.Labels
 	}
 
+	// Aborting the calling run aborts the nested one, as in adk-python. Go
+	// has no second event loop to exclude, so the nested run always gets the
+	// signal. Given the same channel under toolCtx, the nested run shares the
+	// calling run's abort state, so a value sent on the channel stops both
+	// runs whichever of them receives it.
+	var runOpts []runner.RunOption
+	if state := icontext.AbortStateFrom(toolCtx); state != nil {
+		runOpts = append(runOpts, runner.WithAbortSignal(state.Signal()))
+	}
+
 	// TODO(dpasiukevich): verify agent loop termination.
 	// Only this sub-runner keeps the calling run's plugins, so they also see
 	// the sub-agent's agents, models and tools.
@@ -215,9 +239,12 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		MaxLLMCalls:   maxLLMCalls,
 		HTTPOptions:   httpOptions,
 		Labels:        labels,
-	})
+	}, runOpts...)
 
 	var lastEvent *session.Event
+	// The message of the events that seal an aborted nested run. They are not
+	// sub-agent errors: the result is the message when the run left no text.
+	var abortMessage string
 	// Long-running calls that are never answered before the run ends (e.g. a
 	// tool confirmation) leave the sub-agent paused. Its session is discarded,
 	// so the pause can never be resumed.
@@ -226,7 +253,9 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		if err != nil {
 			return nil, fmt.Errorf("error during execution of sub-agent %s: %w", t.agent.Name(), err)
 		}
-		if event.ErrorCode != "" || event.ErrorMessage != "" {
+		if abortevents.IsAbortEvent(event) {
+			abortMessage = event.ErrorMessage
+		} else if event.ErrorCode != "" || event.ErrorMessage != "" {
 			return nil, fmt.Errorf("error from sub-agent %q (code: %q, message: %q)", t.agent.Name(), event.ErrorCode, event.ErrorMessage)
 		}
 		// Partial chunks carry IDs the flow never acts on; a streamed call
@@ -254,7 +283,7 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	if lastEvent == nil {
-		return map[string]any{"result": ""}, nil
+		return noTextResult(abortMessage), nil
 	}
 
 	lastContent := lastEvent.LLMResponse.Content
@@ -283,7 +312,7 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	// validates the empty text against the schema when the reply has parts,
 	// and raises.
 	if outputText == "" {
-		return map[string]any{"result": ""}, nil
+		return noTextResult(abortMessage), nil
 	}
 	if isLllmAgent {
 		internalLlmAgent, ok := t.agent.(llminternal.Agent)
@@ -305,6 +334,53 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	return map[string]any{"result": outputText}, nil
+}
+
+// noTextResult is the result of a nested run that left no text: the abort
+// message when the run was aborted, else "", under "result", as adk-python
+// returns its last error message or an empty string (tools/agent_tool.py,
+// run_async) and the flow wraps it.
+func noTextResult(abortMessage string) map[string]any {
+	return map[string]any{"result": abortMessage}
+}
+
+// pythonJSON writes v the way adk-python's json.dumps(v, ensure_ascii=False,
+// sort_keys=True) writes it (tools/agent_tool.py, run_async): map keys
+// sorted, ", " and ": " between items, and no escaping of non-ASCII or of &,
+// < and >. Some differences remain. Go always escapes U+2028 and U+2029.
+// Go formats some floats differently from Python's repr:
+//
+//	value     Go                  Python
+//	38.0      38                  38.0
+//	0.00001   0.00001             1e-05
+//	1e-7      1e-7                1e-07
+//	1e16      10000000000000000   1e+16
+//	-0.0      -0                  -0.0
+func pythonJSON(v any) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	var out strings.Builder
+	inString, escaped := false, false
+	// Multi-byte UTF-8 sequences hold no ASCII bytes, so a byte scan finds
+	// every quote, backslash, comma and colon.
+	for _, c := range bytes.TrimSuffix(buf.Bytes(), []byte("\n")) {
+		out.WriteByte(c)
+		switch {
+		case escaped:
+			escaped = false
+		case inString && c == '\\':
+			escaped = true
+		case c == '"':
+			inString = !inString
+		case !inString && (c == ',' || c == ':'):
+			out.WriteByte(' ')
+		}
+	}
+	return out.String(), nil
 }
 
 // parseJSONOutput parses the reply of a sub-agent that has an

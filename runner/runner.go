@@ -13,6 +13,36 @@
 // limitations under the License.
 
 // Package runner provides a runtime for ADK agents.
+//
+// A [Runner] runs one root, an agent ([Config.Agent]) or a workflow node
+// ([Config.Node]), against the sessions of a [session.Service]. Each call of
+// [Runner.Run] is one invocation: the runner loads the session, stores the
+// user message as an event, runs the root, and passes every event the root
+// produces through the plugins' OnEventCallback before it appends the
+// non-partial ones to the session and yields them to the caller. The
+// iterator ends when the root is done, when the caller stops ranging, or
+// after an error that ends the run.
+//
+// Each run takes an [agent.RunConfig], which sets per-run behavior such as
+// the metadata merged into every event (CustomMetadata) and the window of
+// session events the run loads (GetSessionConfig), and [RunOption] values:
+//
+//   - [WithInvocationID] continues or retries an invocation by its ID.
+//   - [WithStateDelta] stores a state change with the user event.
+//   - [WithYieldUserMessage] yields the stored user event first.
+//   - [WithAbortSignal] lets the caller stop the run and have it seal the
+//     invocation.
+//
+// The runner runs an LlmAgent root and a node root as workflow nodes (the
+// node path), and other agent roots by calling their Run method (the classic
+// path). The doc comments of [Runner.Run] and the options say where the two
+// paths differ.
+//
+// [Runner.RunLive] runs a live, bidirectional session, [Runner.Rewind]
+// restores a session's state and artifacts to what they were before a given
+// invocation, and
+// [Runner.Close] releases the toolsets and plugins of the runner's agent
+// tree when the application is done with the runner.
 package runner
 
 import (
@@ -30,6 +60,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
+	"google.golang.org/adk/v2/internal/abortevents"
 	"google.golang.org/adk/v2/internal/adkcontext"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
@@ -77,7 +108,9 @@ type Config struct {
 	// of its [workflow.Start] in the form that successor declares (see
 	// [workflow.NodeConfig.ContentInput]). The node's events carry the root
 	// path "<Node.Name()>@1" in [session.NodeInfo].
-	Node           workflow.Node
+	Node workflow.Node
+	// SessionService stores the sessions the runner loads and appends events
+	// to. Required.
 	SessionService session.Service
 
 	// optional
@@ -159,18 +192,27 @@ type runOptions struct {
 	stateDelta       map[string]any
 	yieldUserMessage bool
 	invocationID     string
+	abort            <-chan struct{}
 }
 
-// WithStateDelta sets a state delta for the run invocation.
+// WithStateDelta stores delta as the state delta of the user event the run
+// appends, so the session's state holds it before the root runs. With a nil
+// message, a non-empty delta is stored in a user event without content. On a
+// retry (see [Runner.Run]), an LlmAgent root, a [Config.Node] root and a root
+// graph workflow (workflowagent.New) store it the same way, and other roots
+// discard it.
 func WithStateDelta(delta map[string]any) RunOption {
 	return func(o *runOptions) {
 		o.stateDelta = delta
 	}
 }
 
-// WithYieldUserMessage makes Run yield the user message event (after it is
-// appended to the session) before any agent/node events. Mirrors
-// adk-python's yield_user_message. Currently honored by the node path.
+// WithYieldUserMessage makes Run yield the user event it stores, after the
+// event is appended to the session and before any event of the root. It
+// applies to an LlmAgent root, a [Config.Node] root and a root graph
+// workflow (workflowagent.New); on any other root Run yields no user event.
+// When the run stores no user event, as on a retry without a state delta,
+// there is nothing to yield.
 func WithYieldUserMessage() RunOption {
 	return func(o *runOptions) {
 		o.yieldUserMessage = true
@@ -187,25 +229,122 @@ func WithYieldUserMessage() RunOption {
 // event and runs no on-user-message callback. It does not skip an agent that
 // already ended.
 //
-// On any other runner (the classic path), if [Config.Resumable] is true, the
-// run resumes the invocation: it restores the original user message when msg
-// is nil, appends msg under id when msg is given, rebuilds the agents' states
-// from the invocation's events, routes to the agent that was active, and
-// yields nothing if that agent already ended. If [Config.Resumable] is false,
-// the run's events carry id.
+// On any other runner (the classic path), if [Config.Resumable] is true and
+// the root is not a graph workflow (workflowagent.New), the run resumes the
+// invocation: it restores the original user message when msg
+// is nil; when msg is given, it appends msg under id unless the invocation
+// already holds a user message, in which case msg is a retry and no user
+// event is appended; it rebuilds the agents' states from the invocation's
+// events, routes to the agent that was active, and yields nothing if that
+// agent already ended. If [Config.Resumable] is false, the run's events
+// carry id. A root graph workflow, which adk-python runs as a node, runs
+// under id without that resume on either runner: with the invocation's
+// original user message when the invocation holds one and msg is nil or has
+// no function response, and otherwise with msg, or with no message.
+//
+// Without this option, a message on a runner whose root is an LlmAgent, a
+// [Config.Node] or a graph workflow can join an open task delegation and
+// run under its invocation ID; see [Runner.Run].
 //
 // With no message and a non-empty [WithStateDelta], both paths append a user
-// event with no content that carries the delta.
+// event with no content that carries the delta. With no message, the classic
+// path of a runner that is not resumable runs the agent over the stored
+// history.
 //
-// On the resumable classic path, Run yields an error and adds no event when
-// the session has no events ("session <id> has no events to resume") or when
-// no user message of the invocation is stored and msg is nil ("no user
-// message available for resuming invocation: <id>").
+// A message whose function responses answer calls stored in the session
+// ignores id and continues the invocation of those calls. A message with no
+// function response, when the invocation id already holds a user message,
+// is a retry of that turn; see [Runner.Run].
+//
+// On the resumable classic path, for a root that is not a graph workflow,
+// Run yields an error that matches [ErrInvalidMessage] and adds no event
+// when the session has no events ("session <id> has no events to resume")
+// or when no user message of the invocation is stored and msg is nil ("no
+// user message available for resuming invocation: <id>").
+//
+// With [WithAbortSignal], the abort applies to the resumed invocation as to a
+// new one.
 //
 // The option is safe to use from concurrent Run calls.
 func WithInvocationID(id string) RunOption {
 	return func(o *runOptions) {
 		o.invocationID = id
+	}
+}
+
+// WithAbortSignal lets the caller stop one run from outside and have the run
+// leave its session consistent. The run is aborted when abort is closed or
+// when one value is sent on it.
+//
+// The signal is separate from the ctx given to [Runner.Run]: an abort never
+// cancels that context, so the run can still persist events and call plugins
+// while it stops. Canceling ctx is an ordinary cancellation, not an abort.
+//
+// The run checks the signal before the agent or workflow starts, after every
+// event it yields, and, in an LLM agent, before each model step, after each
+// event of a step and after each step. A check made after the channel was
+// closed or the value was sent sees the signal, whichever part of the run
+// received the value, and so does every later one: nothing of the run starts
+// after that. A signal sent or closed while the caller handles an event is
+// seen before the next event is requested, so no further agent event is
+// yielded and the seal is. Agents, tools, model and agent callbacks and
+// workflow nodes run under a context that is canceled when the signal fires,
+// wherever it was received, so a tool that selects on ctx.Done() returns at
+// once. A tool that ignores its context, or an agent that does not yield,
+// delays the stop until it returns or yields.
+//
+// After the stop, the run seals the invocation once: for every function call
+// of the invocation that has no response, grouped by author, branch and
+// isolation scope, it appends an event with error code "INVOCATION_ABORTED",
+// error message "Invocation was aborted by client." and a function response
+// {"error": "Invocation was aborted by client."} for each call. When no call
+// is left open, it appends one event with that error code and message, no
+// content, and the root agent or node as author. Sealing events pass through
+// the OnEventCallback plugins like any other event, after-run callbacks run
+// after the seal, and the run skips compaction. A caller that keeps ranging
+// receives the sealing events; a caller that stops ranging after closing the
+// signal still finds them in the session once the range ends. A sealing
+// failure is yielded as an error to a caller that keeps ranging; a caller
+// that has stopped ranging does not receive it. A task agent that was running
+// when the run was aborted is closed, and the next message goes to the agent
+// that delegated to it; a task agent that had already replied and was waiting
+// for the user stays open.
+//
+// The iterator ends without an error caused by the abort. An error that is
+// not the abort's cancellation, and the cancellation of the caller's own ctx,
+// are still yielded. A signal that fired before the run starts stores the
+// user message, runs the before-run and after-run callbacks, runs no agent or
+// workflow, and seals the invocation. A signal closed after the run ended
+// does nothing.
+//
+// A resumed run takes the signal like any other run: see [WithInvocationID].
+// The signal belongs to one call of Run. Each call that finds it closed seals
+// the calls of the invocation that are still unanswered at that moment,
+// including calls of earlier runs, so an invocation that was aborted, resumed
+// and aborted again is sealed again; a call that an earlier seal answered is
+// not sealed twice, and when no call is open the run appends the event with
+// no content. A sealed call counts as answered: when the seal answers the
+// calls of a single call event, resuming the aborted invocation continues from
+// the sealed responses and does not run those calls' tools again. A resume
+// with no message whose signal is closed before it starts stores no user
+// event; with [WithStateDelta] it still stores the event with no content that
+// carries the delta. On the classic path of a resumable runner (a root that
+// is neither an LlmAgent nor a [Config.Node], with [Config.Resumable] set), a
+// resume of an agent that has already ended returns at once and writes
+// nothing, even when the signal is closed. On the node path the resumed run is
+// sealed like any other.
+//
+// A nil channel means no abort monitoring; the run behaves as without the
+// option. [Runner.RunLive] ignores the option. One channel may be given to
+// several runs, and closing it aborts every run given it. A value sent on it
+// is received once: it aborts the run that receives it first and every run
+// started under that run's context with the same channel, such as the run of
+// an agent tool ([google.golang.org/adk/v2/tool/agenttool]), also one started
+// after the aborted run was sealed, for example from an after-run callback.
+// The option is safe to use from concurrent Run calls.
+func WithAbortSignal(abort <-chan struct{}) RunOption {
+	return func(o *runOptions) {
+		o.abort = abort
 	}
 }
 
@@ -927,18 +1066,68 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // final, so a replacement message that answers a sub-agent's call is routed to
 // that sub-agent. The message they leave is refused, with nothing stored, when
 // it carries a function call ("user message cannot contain function calls"),
-// or when it has no parts and the root agent is not an LlmAgent ("no parts in
-// the new_message").
+// or when it has no parts and the root is neither an LlmAgent, a
+// [Config.Node] nor a root graph workflow (workflowagent.New) ("no parts in
+// the new_message"); those roots store it as a user event without parts.
 //
 // A root node (Config.Node) runs on the node path; see [Config.Node] for the
-// input it receives and the paths its events carry. On a node root, Run also
-// refuses, with nothing stored, a message that holds both text and a
+// input it receives and the paths its events carry. On a node root and a
+// root graph workflow, Run also refuses, with nothing stored and before the
+// message's invocation is resolved, a message that holds both text and a
 // function response with an ID ("message cannot contain both function
-// responses and text: ..."); a BeforeRunCallback reply is authored "model";
-// and the node's events carry no workflow bookkeeping metadata. On any root,
-// a nil msg with a non-empty [WithStateDelta] stores a user event without
-// content that carries the delta, which [WithYieldUserMessage] yields on the
-// node path.
+// responses and text: ..."). On a node root a BeforeRunCallback reply is
+// authored "model", and the node's events carry no workflow bookkeeping
+// metadata. On any root, a nil msg with a non-empty [WithStateDelta] stores
+// a user event without content that carries the delta, which
+// [WithYieldUserMessage] yields on the roots it applies to.
+//
+// A message whose function responses answer calls stored in the session
+// continues the invocation of those calls, whatever [WithInvocationID] says.
+// When the responses cannot be attributed to exactly one invocation, Run
+// refuses the message before anything is stored or any callback runs on
+// any root of a resumable runner ([Config.Resumable]) and on a
+// [Config.Node] root, a root graph workflow (workflowagent.New) or an
+// LlmAgent root given a [WithInvocationID] id: "function call not found
+// for N function response ids: ..." when a response matches no call, and
+// "function responses resolve to multiple invocations (N): ..." when the
+// calls belong to several invocations. A [Config.Node] root and a root
+// graph workflow refuse calls of several invocations on any runner. The
+// runs that refuse an unmatched response also refuse a message whose first
+// response has no ID ("function response id is required to resume an
+// invocation"), except that a node root, a root graph workflow and an
+// LlmAgent root accept it when no [WithInvocationID] id is given. In every
+// other case such a message starts a new invocation, under the
+// [WithInvocationID] id when one is given.
+//
+// A replacement message from an on-user-message callback moves the run to
+// the invocation of the calls it answers only when the run has no
+// invocation ID of its own, from [WithInvocationID] or from the message. On
+// a node root, a root graph workflow and an LlmAgent root, a replacement
+// that cannot be attributed is refused as a message without a
+// [WithInvocationID] id would be; on other roots the run keeps its
+// invocation.
+//
+// A message with no function response whose invocation already holds a
+// stored user message is a retry: Run stores no second user event, runs no
+// on-user-message callback, and runs the agent again in that invocation.
+// The retry is recognized by the invocation ID alone, so a different text
+// is dropped without an error. On the node path and for a root graph
+// workflow, a non-empty [WithStateDelta] is stored in a user event without
+// content, which [WithYieldUserMessage] yields; on other roots Run discards
+// the delta. On the node path and for a root graph workflow, on any runner,
+// the root receives the stored message. A retry that carries a function
+// call is refused as any message is.
+//
+// Every error with which Run refuses a message, as described above, matches
+// [ErrInvalidMessage], as do the resume refusals of [WithInvocationID].
+//
+// On a runner whose root is a Config.Node, an LlmAgent or a graph
+// workflow (workflowagent.New), a message that is given no invocation ID
+// and holds no function response with an ID joins an open task
+// delegation: it runs under the invocation ID of the event that opened
+// the delegation, is stored as a new user event with the delegation's
+// isolation scope, and is that run's user content and node input. Such a
+// message is not a retry.
 //
 // A user message whose first function response answers a call made in the
 // same invocation is stored with that call's branch, and with the call's
@@ -947,19 +1136,25 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // of its newest event in the invocation it continues that a rewind did not
 // remove and that is not on a tool's message branch.
 //
+// To stop a run from outside and leave its session consistent, give it
+// [WithAbortSignal] and close the channel: the run stops, answers the calls
+// it left open with INVOCATION_ABORTED events and ends without an error.
+// Canceling ctx instead stops the run with ctx's error and seals nothing.
+//
 // A caller that breaks from the range loop at a non-partial event leaves
 // that event stored in the session. The yield of the node that produced the
 // event returns false, so a node that returns when its yield returns false,
 // as every node and agent in adk-go does, does not go on: an LlmAgent, or an
 // LlmAgent in a graph workflow, does not start the tools that the event's
 // function call names. A custom node that ignores the result of its yield
-// goes on. Run returns after every node it started has ended. A partial
-// event is not stored and is not waited for, so the node that produced it
-// keeps going until its next event or until it sees that its context is
-// done. A resumable runner whose root is an LlmAgent runs a call that was
-// left without a response when it is resumed with [WithInvocationID]. A
-// branch of a parallel agent (package parallelagent) may still start the
-// tool that the function call of the event it produced names.
+// goes on. Run returns after every node it started has ended. Nothing is
+// sealed, unlike an abort. A partial event is not stored and is not waited
+// for, so the node that produced it keeps going until its next event or
+// until it sees that its context is done. A resumable runner whose root is
+// an LlmAgent runs a call that was left without a response when it is
+// resumed with [WithInvocationID]. A branch of a parallel agent (package
+// parallelagent) may still start the tool that the function call of the
+// event it produced names.
 //
 // Run yields each event after the session service has stored it, except a
 // partial event, which is not stored. The state delta of a stored event has
@@ -967,8 +1162,8 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // invocation reads them, and the OnEvent plugin callbacks, which see the
 // event before it is stored, but the event Run yields is a copy without them,
 // as [session.Service.Get] returns it later. The same holds for the user
-// event [WithYieldUserMessage] yields. A partial event keeps its state delta,
-// "temp:" keys included.
+// event [WithYieldUserMessage] yields and for the events that seal an aborted
+// run. A partial event keeps its state delta, "temp:" keys included.
 //
 // When Run drops a "temp:" key, the event it yields is a copy with its own
 // top-level fields and its own state delta map. The copy shares everything
@@ -1039,6 +1234,9 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		for _, opt := range opts {
 			opt(&options)
 		}
+		// Stored before any other context is built from ctx, so that every
+		// context of the run, on both paths, reaches the run's abort state.
+		ctx = icontext.WithAbortState(ctx, icontext.NewAbortState(ctx, options.abort))
 		ctx = adkcontext.WithoutCallPlace(ctx)
 
 		// The inbound message is always a user turn, whatever Role the caller
@@ -1104,16 +1302,38 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
+		// The message and the invocation ID are checked before anything is
+		// stored or any callback runs (adk-python Runner.run_async). A root
+		// graph workflow's message is validated before its invocation is
+		// resolved, as in adk-python's run_node_async.
+		if msg != nil {
+			if err := r.validateNodeRootMessage(msg); err != nil {
+				yield(nil, err)
+				return
+			}
+		}
+		invocationID, err := r.runInvocationID(storedSession, msg, options.invocationID, classicPath)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		// A root graph workflow is a node in adk-python, so its message joins
+		// an open task delegation as on the node path.
+		if r.rootIsNode() {
+			if taskInvocationID := joinedTaskInvocationID(storedSession, msg, invocationID); taskInvocationID != "" {
+				invocationID = taskInvocationID
+				ctx = context.WithValue(ctx, joinedTaskKey{}, true)
+			}
+		}
+
 		// A resumable runner treats an invocation ID, given by the caller or
 		// resolved from a function response, as a resume. Its refusals come
 		// before anything is stored (adk-python Runner.run_async and
-		// Runner._setup_context_for_resumed_invocation).
+		// Runner._setup_context_for_resumed_invocation). A root graph
+		// workflow never resumes this way: adk-python runs it on the node
+		// runtime, which has no such resume or refusals.
 		userContent := msg
-		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
-		if options.invocationID != "" {
-			invocationID = options.invocationID
-		}
-		resuming := r.resumable && invocationID != ""
+		resuming := r.resumable && invocationID != "" && !r.rootIsNode()
 		var agentStates map[string]map[string]any
 		var ended map[string]bool
 		if resuming {
@@ -1123,6 +1343,13 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 				return
 			}
 			agentStates, ended = rebuildAgentStates(storedSession.Events(), invocationID)
+		}
+		// A root graph workflow's retry, or its run with no message, runs on
+		// the invocation's stored user message on any runner, as on the node
+		// path (adk-python run_node_async). A message with function responses
+		// stays the user content, which the workflow resumes from.
+		if r.rootIsNode() && !isJoinedTurn(ctx) && retriesStoredTurn(storedSession, invocationID, msg) {
+			userContent = utils.FindUserMessageForInvocation(storedSession.Events(), invocationID)
 		}
 
 		ctx = parentmap.ToContext(ctx, r.parents)
@@ -1153,7 +1380,9 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 		compacted := false
 		compactOnce := func() error {
-			if compacted || invocationFailed {
+			// An aborted invocation is not a finished turn either
+			// (adk-python runners.py, Runner._run_with_trace).
+			if compacted || invocationFailed || icontext.Aborted(ctx) {
 				return nil
 			}
 			compacted = true
@@ -1190,18 +1419,6 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		agentToRun, branch := r.rootAgent, ""
 		if !resuming {
 			agentToRun, branch = r.classicAgentToRun(storedSession, msg, routingView(storedSession, msg))
-			// Answers to calls from several invocations start a new invocation
-			// when they go back to the calling agent, as adk-python does for a
-			// BaseAgent root of an app that is not resumable. A graph workflow
-			// resumes a paused run from its invocation's events, so it keeps the
-			// first call's invocation; adk-python raises for a Workflow root. So
-			// does an answer whose caller is not in the agent tree, since that
-			// caller can be a workflow node agent missing from the workflow's
-			// sub-agents; adk-python starts a new invocation there. An ID the
-			// caller gives with WithInvocationID is kept.
-			if spansInvocations && options.invocationID == "" && agentToRun != r.rootAgent {
-				invocationID = ""
-			}
 		}
 
 		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
@@ -1216,7 +1433,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		})
 		invocationCtx = ic
 		ctx := agent.NewContext(ic)
-		ctx, _, replaced, err := r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, true, r.pluginManager, options.stateDelta)
+		ctx, userEvent, replaced, err := r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, classicPath, invocationID, r.pluginManager, options.stateDelta)
 		// A stage error from it is a run error, reported with this context.
 		lc.bind(ctx)
 		if err != nil {
@@ -1258,6 +1475,19 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		pluginManager := r.pluginManager
 		lc.start(ctx)
 		defer lc.finish(nil)
+		// Deferred after the after-run callbacks, so it runs before them, as
+		// adk-python seals before after_run in one finally.
+		abortState := icontext.AbortStateFrom(ctx)
+		if abortState != nil {
+			defer r.sealOnStop(ctx, storedSession)
+		}
+		// adk-python runs a root graph workflow as a node, whose runtime
+		// yields the stored user event; other agent roots ignore the option.
+		if options.yieldUserMessage && r.rootIsNode() && userEvent != nil {
+			if !yield(userEvent, nil) {
+				return
+			}
+		}
 		if pluginManager != nil {
 			if event, err := r.runBeforeRunCallback(ctx, false); event != nil || err != nil {
 				lc.shortCircuit()
@@ -1269,8 +1499,21 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		for event, err := range agentToRun.Run(ctx) {
+		// The agent runs under the engine context, which the abort cancels;
+		// events are persisted and sealed under ctx, which it does not.
+		engine, stopWatch := watchAbort(ctx)
+		defer stopWatch()
+		events := agentToRun.Run(engine)
+		if abortState.Aborted() {
+			events = func(func(*session.Event, error) bool) {}
+		}
+		for event, err := range events {
 			if err != nil {
+				// The abort's own cancellation, coming back from the agent, ends
+				// the run as a stop, not as a failure.
+				if icontext.IsAbortEcho(ctx, err) {
+					break
+				}
 				// The model-call budget is spent for the whole invocation, so
 				// nothing that runs after this can reach a model. Ending here
 				// stops a root agent that carries on after a sub-agent error
@@ -1314,6 +1557,16 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			if !yield(event, nil) {
 				return
 			}
+			// A signal closed while the caller handled the event stops the run
+			// before the next event is requested.
+			if abortState.Aborted() {
+				break
+			}
+		}
+
+		if !r.yieldSealed(ctx, storedSession, yield) {
+			lc.stop()
+			return
 		}
 
 		// After-run runs before post-invocation compaction, as in adk-python,
@@ -1382,8 +1635,8 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext, isLive bool) 
 
 // errUserFunctionCall rejects a user message that carries a function call.
 // Only a model makes function calls, so storing one would put a call no model
-// produced into the history.
-var errUserFunctionCall = errors.New("user message cannot contain function calls")
+// produced into the history. It wraps [ErrInvalidMessage].
+var errUserFunctionCall = refuseMessagef("user message cannot contain function calls")
 
 type liveAgent interface {
 	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
@@ -1717,27 +1970,51 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 // appendMessageToSession runs the on-user-message callbacks on msg, refuses
 // the resulting message if it is not a valid user turn, and appends it to
-// storedSession as the user event. requireParts refuses a message with no
-// parts, which only the classic path does (adk-python
-// Runner._append_new_message_to_session; the node path's _append_user_event
-// stores it). replaced reports whether a callback returned a replacement; the
-// replacement is then ctx's UserContent, and when it answers a function call
-// in history, ctx carries that call's invocation ID. On a node root, a
-// message that holds both text and a function response with an ID is
-// refused before and after the callbacks. A nil msg runs no callback and
-// appends a content-less user event carrying stateDelta when stateDelta is
-// not empty, and nothing otherwise (adk-python
+// storedSession as the user event. A message with no parts is refused when
+// runsAsNode(path) is false (adk-python
+// Runner._append_new_message_to_session; the node runtime's
+// _append_user_event stores it). replaced reports whether a callback
+// returned a replacement; the replacement is then ctx's UserContent. On a
+// root that rootIsNode reports, a message that holds both text and a
+// function response with an ID is refused before and after the callbacks.
+// A nil msg runs no callback and appends a content-less user event carrying
+// stateDelta when stateDelta is not empty, and nothing otherwise (adk-python
 // Runner._append_state_delta_event).
-func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts, requireParts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (_ agent.Context, _ *session.Event, replaced bool, _ error) {
+//
+// A msg with no function response whose invocation, ctx's, already stored
+// a user message is a retry: no callback runs and no user event is stored,
+// except that a run that runsAsNode(path) reports stores a non-empty
+// stateDelta in a content-less user event, which it returns (adk-python
+// Runner._handle_new_message and
+// workflow/_node_runner_utils.py run_node_async). A retry carrying a
+// function call is refused as any message is.
+//
+// resolvedID is the run's invocation ID as runInvocationID decided it, ""
+// when ctx's was minted. Only then does a replacement that answers function calls
+// move ctx to their invocation (adk-python re-resolves only without one,
+// workflow/_node_runner_utils.py). On the roots adk-python runs as nodes
+// that resolution has the run's mode, so a replacement that mode refuses is
+// refused before anything is stored; on other classic roots it is lenient.
+func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, path runPath, resolvedID string, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (_ agent.Context, _ *session.Event, replaced bool, _ error) {
 	if msg == nil {
 		if len(stateDelta) == 0 {
 			return ctx, nil, false, nil
 		}
-		event, err := r.appendUserEvent(ctx, !requireParts, storedSession, nil, stateDelta)
+		event, err := r.appendUserEvent(ctx, path, storedSession, nil, stateDelta)
 		return ctx, event, false, err
 	}
 	if err := r.validateNodeRootMessage(msg); err != nil {
 		return ctx, nil, false, err
+	}
+	if !isJoinedTurn(ctx) && retriesStoredTurn(storedSession, ctx.InvocationID(), msg) {
+		if err := rejectFunctionCalls(msg); err != nil {
+			return ctx, nil, false, err
+		}
+		if !r.runsAsNode(path) || len(stateDelta) == 0 {
+			return ctx, nil, false, nil
+		}
+		event, err := r.appendUserEvent(ctx, path, storedSession, nil, stateDelta)
+		return ctx, event, false, err
 	}
 	if pluginManager != nil {
 		modifiedMsg, err := pluginManager.RunOnUserMessageCallback(ctx, msg)
@@ -1750,13 +2027,26 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 			// it becomes the invocation context's UserContent: WithDelta copies
 			// the value it points to, so a later reassignment would not reach it.
 			msg = asUserContent(modifiedMsg)
+			if err := r.validateNodeRootMessage(msg); err != nil {
+				return ctx, nil, replaced, err
+			}
 
 			// A replacement that answers an earlier call continues that call's
-			// invocation (adk-python workflow/_node_runner_utils.py). The ID is
-			// set before WithDelta, which copies the invocation context.
-			if id, _ := resolveInvocationID(storedSession, msg); id != "" {
-				if err := setInvocationID(ctx, id); err != nil {
+			// invocation. The ID is set before WithDelta, which copies the
+			// invocation context.
+			if resolvedID == "" {
+				mode := resolveLenient
+				if r.runsAsNode(path) {
+					mode = r.resolutionMode(path, "")
+				}
+				id, err := resolveInvocationID(storedSession, msg, mode)
+				if err != nil {
 					return ctx, nil, replaced, err
+				}
+				if id != "" {
+					if err := setInvocationID(ctx, id); err != nil {
+						return ctx, nil, replaced, err
+					}
 				}
 			}
 
@@ -1765,17 +2055,14 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 					UserContent: &msg,
 				},
 			})
-			if err := r.validateNodeRootMessage(msg); err != nil {
-				return ctx, nil, replaced, err
-			}
 		}
 	}
 
-	if requireParts && len(msg.Parts) == 0 {
-		return ctx, nil, replaced, errors.New("no parts in the new_message")
+	if !r.runsAsNode(path) && len(msg.Parts) == 0 {
+		return ctx, nil, replaced, refuseMessagef("no parts in the new_message")
 	}
-	if len(utils.FunctionCalls(msg)) > 0 {
-		return ctx, nil, replaced, errUserFunctionCall
+	if err := rejectFunctionCalls(msg); err != nil {
+		return ctx, nil, replaced, err
 	}
 
 	if r.artifactService != nil && saveInputBlobsAsArtifacts {
@@ -1795,18 +2082,18 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		}
 	}
 
-	event, err := r.appendUserEvent(ctx, !requireParts, storedSession, msg, stateDelta)
+	event, err := r.appendUserEvent(ctx, path, storedSession, msg, stateDelta)
 	return ctx, event, replaced, err
 }
 
 // appendUserEvent appends a user event with content msg, which may be nil,
 // and stateDelta to storedSession, and returns the event as the caller sees
-// it, without its "temp:" keys. On the node path (onNodePath) an append
+// it, without its "temp:" keys. On the node path an append
 // failure is a run error (a *runStageError), as adk-python appends the user
 // event inside run_node_async's notified try (workflow/_node_runner_utils.py);
 // on the classic path it is a setup failure, as Runner.run_async appends it
 // before _exec_with_plugin (runners.py).
-func (r *Runner) appendUserEvent(ctx agent.Context, onNodePath bool, storedSession session.Session, msg *genai.Content, stateDelta map[string]any) (*session.Event, error) {
+func (r *Runner) appendUserEvent(ctx agent.Context, path runPath, storedSession session.Session, msg *genai.Content, stateDelta map[string]any) (*session.Event, error) {
 	event := session.NewEvent(ctx, ctx.InvocationID())
 
 	event.Author = "user"
@@ -1826,7 +2113,7 @@ func (r *Runner) appendUserEvent(ctx agent.Context, onNodePath bool, storedSessi
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 		err = fmt.Errorf("failed to append event to sessionService: %w", err)
-		if onNodePath {
+		if path == nodePath {
 			return nil, &runStageError{err: err}
 		}
 		return nil, err
@@ -1861,13 +2148,14 @@ func stampCallBranch(ctx agent.InvocationContext, ev *session.Event) {
 	}
 }
 
-// validateNodeRootMessage refuses, on a node root, a message that holds
-// both non-empty text and a function response with an ID: the response
-// resumes an existing invocation while the text starts a new one
-// (adk-python Runner._validate_new_message). Agent roots accept such a
-// message, which the A2A input-required flow sends.
+// validateNodeRootMessage refuses, on a root that rootIsNode reports, a
+// message that holds both non-empty text and a function response with an
+// ID: the response resumes an existing invocation while the text starts a
+// new one (adk-python Runner._validate_new_message). Other roots, LlmAgent
+// roots among them, accept such a message, which the A2A input-required flow
+// sends.
 func (r *Runner) validateNodeRootMessage(msg *genai.Content) error {
-	if r.rootNode == nil {
+	if !r.rootIsNode() {
 		return nil
 	}
 	hasResumeResponse, hasText := false, false
@@ -1883,7 +2171,7 @@ func (r *Runner) validateNodeRootMessage(msg *genai.Content) error {
 		}
 	}
 	if hasResumeResponse && hasText {
-		return errors.New("message cannot contain both function responses and text: function responses resume an existing invocation while text starts a new one")
+		return refuseMessagef("message cannot contain both function responses and text: function responses resume an existing invocation while text starts a new one")
 	}
 	return nil
 }
@@ -1923,14 +2211,22 @@ func asUserContent(msg *genai.Content) *genai.Content {
 
 // findActiveTaskIsolationScope returns the open task delegation of sess: the
 // isolation scope of its newest live event (see utils.ApplyRewinds) whose
-// scope no finish_task response has closed, and that event's invocation ID.
-// It returns two empty strings when sess is nil or no scope is open.
+// scope no finish_task response has closed and whose invocation was not
+// aborted, and that event's invocation ID. It returns two empty strings when
+// sess is nil or no scope is open.
 //
 // A scope is closed when the first finish_task function response of a live
 // event in that scope has the result FinishTaskSuccessResult or
 // FinishTaskErrorResult, wherever the response sits; events after it in the
 // same scope do not reopen it. A response with an error instead of a result
-// leaves the scope open, because the task agent retries. Port of adk-python's
+// leaves the scope open, because the task agent retries.
+//
+// A scoped event whose invocation has an abort event (abortevents.IsAbortEvent)
+// anywhere in the live events does not count: its task agent was canceled
+// without calling finish_task, so its scope is closed. The rule goes by
+// invocation ID, so an older event of the same scope under another invocation
+// that was not aborted keeps the scope open. A finish_task response inside an
+// aborted invocation still closes its scope. Port of adk-python's
 // _find_active_task_scope (runners.py).
 func findActiveTaskIsolationScope(sess session.Session) (scope, invocationID string) {
 	if sess == nil {
@@ -1955,8 +2251,12 @@ func findActiveTaskIsolationScope(sess session.Session) (scope, invocationID str
 			finished[ev.IsolationScope] = struct{}{}
 		}
 	}
+	aborted := abortedInvocationIDs(events)
 	for _, ev := range slices.Backward(events) {
 		if ev.IsolationScope == "" {
+			continue
+		}
+		if _, gone := aborted[ev.InvocationID]; gone {
 			continue
 		}
 		if _, done := finished[ev.IsolationScope]; !done {
@@ -1989,8 +2289,9 @@ func findActiveTaskIsolationScope(sess session.Session) (scope, invocationID str
 // The call and the agent that owns it are found as findAgentToRun finds them,
 // in events, the routing view (see routingView): routingView(storedSession,
 // msg) before msg is stored, and routingView(storedSession, nil) once it is,
-// as after a plugin replaced the message. An answer to a pause raised inside
-// a tool goes to the agent that owns the tool (see resolveResumedAgent).
+// as after a plugin replaced the message. The abort guards apply, and an
+// answer to a pause raised inside a tool goes to the agent that owns the tool
+// (see resolveResumedAgent).
 func (r *Runner) classicAgentToRun(storedSession session.Session, msg *genai.Content, events []*session.Event) (agent.Agent, string) {
 	if len(utils.FunctionResponses(msg)) == 0 {
 		return r.rootAgent, ""
@@ -2003,11 +2304,8 @@ func (r *Runner) classicAgentToRun(storedSession session.Session, msg *genai.Con
 	if sub == nil || r.isInGraphWorkflow(sub) {
 		return r.rootAgent, ""
 	}
-	// Answers to calls of several invocations search the whole session.
-	invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
-	if spansInvocations {
-		invocationID = ""
-	}
+	// Lenient resolution never fails: it returns "" instead.
+	invocationID, _ := resolveInvocationID(storedSession, msg, resolveLenient)
 	return sub, r.restoreBranchFromHistory(storedSession, sub, invocationID)
 }
 
@@ -2067,10 +2365,14 @@ func (r *Runner) restoreBranchFromHistory(sess session.Session, agentToRun agent
 // carries function responses. msg is the run's message before it is stored;
 // once it is stored, as a plugin's replacement is before the route is taken
 // again, msg is nil and the view is the stored session alone, as in
-// adk-python (Runner._session_for_routing, runners.py).
+// adk-python. msg is left out when the last live event seals an aborted
+// invocation (adk-python Runner._session_for_routing, runners.py).
 func routingView(sess session.Session, msg *genai.Content) []*session.Event {
 	events := utils.ApplyRewinds(slices.Collect(sess.Events().All()))
 	if len(utils.FunctionResponses(msg)) == 0 {
+		return events
+	}
+	if n := len(events); n > 0 && abortevents.IsAbortEvent(events[n-1]) {
 		return events
 	}
 	return append(events, &session.Event{Author: "user", LLMResponse: model.LLMResponse{Content: msg}})
@@ -2082,8 +2384,9 @@ func routingView(sess session.Session, msg *genai.Content) []*session.Event {
 // It decides on the routing view of sess and msg (see routingView). When the
 // view ends with an answer to a function call that routedCall routes to its
 // author, the agent resolveResumedAgent finds runs. Otherwise the most recent
-// agent that may transfer across the agent tree runs, skipping user events
-// and the events that record an agent's state or end, and the root agent when there is none. It ports adk-python's
+// agent that may transfer across the agent tree runs, skipping user events,
+// seals of aborted invocations and the events that record an agent's state
+// or end, and the root agent when there is none. It ports adk-python's
 // find_agent_to_run (agents/_agent_router.py) with Runner._session_for_routing
 // (runners.py).
 func (r *Runner) findAgentToRun(sess session.Session, msg *genai.Content) (agent.Agent, error) {
@@ -2093,7 +2396,7 @@ func (r *Runner) findAgentToRun(sess session.Session, msg *genai.Content) (agent
 	}
 
 	for _, event := range slices.Backward(events) {
-		if event.Author == "user" || event.Actions.AgentState != nil ||
+		if event.Author == "user" || abortevents.IsAbortEvent(event) || event.Actions.AgentState != nil ||
 			(event.Actions.EndOfAgent != nil && *event.Actions.EndOfAgent) {
 			continue
 		}
@@ -2131,16 +2434,20 @@ func (r *Runner) answeredCallAgent(events []*session.Event) agent.Agent {
 
 // routedCall returns the event holding the function call that the first
 // function response of the last of events answers, when that answer goes to
-// the call's author; nil otherwise. It is nil when the call event has no
-// author, and when llminternal.DecideResumeAction neither routes the answer
-// to the author nor replays the calls; the answer of a user always goes to
-// the author, and an agent's own answer does on a resumable runner
-// (adk-python agents/_agent_router.py, find_agent_to_run).
+// the call's author; nil otherwise. It is nil when the last event, or the
+// last event not authored "user", seals an aborted invocation, when the
+// call event has no author, and when llminternal.DecideResumeAction neither
+// routes the answer to the author nor replays the calls; the answer of a
+// user always goes to the author, and an agent's own answer does on a
+// resumable runner (adk-python agents/_agent_router.py, find_agent_to_run).
 func (r *Runner) routedCall(events []*session.Event) *session.Event {
 	if len(events) == 0 {
 		return nil
 	}
 	answer := events[len(events)-1]
+	if abortevents.IsAbortEvent(answer) || abortevents.IsAbortEvent(lastNonUserEvent(events)) {
+		return nil
+	}
 	responses := utils.FunctionResponses(answer.Content)
 	if len(responses) == 0 {
 		return nil
@@ -2152,6 +2459,17 @@ func (r *Runner) routedCall(events []*session.Event) *session.Event {
 	switch llminternal.DecideResumeAction(call, answer, r.resumable) {
 	case llminternal.ResumeRouteToAuthor, llminternal.ResumeReplayCalls:
 		return call
+	}
+	return nil
+}
+
+// lastNonUserEvent returns the last of events not authored "user", or nil
+// when there is none.
+func lastNonUserEvent(events []*session.Event) *session.Event {
+	for _, ev := range slices.Backward(events) {
+		if ev.Author != "user" {
+			return ev
+		}
 	}
 	return nil
 }
@@ -2214,7 +2532,7 @@ func isDigits(s string) bool {
 // stored (adk-python Runner._setup_context_for_resumed_invocation).
 func resumedUserContent(sess session.Session, msg *genai.Content, invocationID string) (*genai.Content, error) {
 	if sess.Events().Len() == 0 {
-		return nil, fmt.Errorf("session %s has no events to resume", sess.ID())
+		return nil, refuseMessagef("session %s has no events to resume", sess.ID())
 	}
 	if msg != nil {
 		return msg, nil
@@ -2222,7 +2540,7 @@ func resumedUserContent(sess session.Session, msg *genai.Content, invocationID s
 	if stored := utils.FindUserMessageForInvocation(sess.Events(), invocationID); stored != nil {
 		return stored, nil
 	}
-	return nil, fmt.Errorf("no user message available for resuming invocation: %s", invocationID)
+	return nil, refuseMessagef("no user message available for resuming invocation: %s", invocationID)
 }
 
 // rebuildAgentStates returns the agent states and the ended agents of the
