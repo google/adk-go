@@ -15,6 +15,8 @@
 package agentanalytics
 
 import (
+	"cmp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -221,7 +223,7 @@ func (a *uriAligner) alignSplit(oa, ob, ua, ub int, sep byte, pairs bool) bool {
 	}
 	for {
 		oe, ue := pieceEnd(a.orig, oa, ob, sep), pieceEnd(a.out, ua, ub, sep)
-		ok := false
+		var ok bool
 		if pairs {
 			ok = a.alignPair(oa, oe, ua, ue)
 		} else {
@@ -676,7 +678,7 @@ func wholePlaceholderBytes(s string) []bool {
 			continue
 		}
 		start, end := i, i+n
-		quote := ""
+		var quote string
 		if start > 0 && isQuoteByte(s[start-1]) {
 			quote = s[start-1 : start]
 			if start > 1 && s[start-2] == '\\' {
@@ -723,10 +725,10 @@ type spanCheck struct {
 }
 
 func newSpanCheck(raw, scrubbed string, kept []copyRun) *spanCheck {
-	sorted := sort.SliceIsSorted(kept, func(i, j int) bool { return kept[i].in < kept[j].in })
+	sortCmp := func(a, b copyRun) int { return cmp.Compare(a.in, b.in) }
+	sorted := slices.IsSortedFunc(kept, sortCmp)
 	if !sorted {
-		kept = append([]copyRun(nil), kept...)
-		sort.Slice(kept, func(i, j int) bool { return kept[i].in < kept[j].in })
+		kept = slices.SortedFunc(slices.Values(kept), sortCmp)
 	}
 	return &spanCheck{raw: raw, scrubbed: scrubbed, kept: kept}
 }

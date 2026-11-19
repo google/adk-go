@@ -28,9 +28,6 @@ linters:
     - whitespace
 
   settings:
-    copyloopvar:
-      check-alias: true
-
     # Library code must not write diagnostics to a process-wide sink: an
     # application embedding ADK cannot silence, route or filter them. See
     # "Logging and error messages" in AGENTS.md for what to do instead.

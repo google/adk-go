@@ -53,8 +53,8 @@ func hasQuotedSensitiveKeyWithRedacted(s string, skipRedacted bool) bool {
 		return false
 	}
 	prevQuote := -1
-	for i := 0; i < len(s); i++ {
-		if s[i] != '"' && s[i] != '\'' {
+	for i, c := range []byte(s) {
+		if c != '"' && c != '\'' {
 			continue
 		}
 		if prevQuote >= 0 {
@@ -406,8 +406,8 @@ func unescapeCredentialStepMapped(s string) textReading {
 func canonicalizeMapped(s string) (string, []int) {
 	out := make([]byte, 0, len(s))
 	pos := make([]int, 0, len(s)+1)
-	for i := 0; i < len(s); i++ {
-		out = append(out, s[i])
+	for i, c := range []byte(s) {
+		out = append(out, c)
 		pos = append(pos, i)
 		for {
 			n := len(out)
@@ -968,8 +968,7 @@ func hasCandidateQuotedSensitiveKeyWithRedacted(s string, depth int, skipRedacte
 	start := 0
 	escaped := false
 
-	for i := range len(s) {
-		b := s[i]
+	for i, b := range []byte(s) {
 		if !inQuote {
 			if b == '"' || b == '\'' {
 				inQuote = true
@@ -1114,8 +1113,8 @@ func isRedactedPlaceholderBoundary(tail string) bool {
 // end at clean boundaries (see hasMalformedQuotedMembers).
 func isBalancedAlreadyRedactedProse(raw string) bool {
 	doubleQuotes := 0
-	for i := 0; i < len(raw); i++ {
-		switch raw[i] {
+	for i, c := range []byte(raw) {
+		switch c {
 		case '"':
 			doubleQuotes++
 		case '{':
@@ -1642,8 +1641,8 @@ func hasRedactableContainerText(s, whole string, laterPass bool) bool {
 // second pass, while a placeholder with text glued after it, as in
 // "token":"[REDACTED]":SECRET, still counts.
 func hasContainerOpener(s string) bool {
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
+	for i, c := range []byte(s) {
+		switch c {
 		case '{':
 			return true
 		case '[':
