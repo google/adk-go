@@ -58,12 +58,16 @@ type Logger interface {
 // enabled), and the requests that BigQuery already confirmed are not resent. A
 // status that a retry cannot fix, such as PermissionDenied or InvalidArgument,
 // ends the write of the batch without further retries when opening the stream
-// fails with it or BigQuery reports it in an AppendRowsResponse. When it
-// instead ends the stream, the server may not have read the request, so while
-// retries remain the request is resent on a fresh stream: always if an earlier
-// request opened that stream, and once per request if it was opened for the
-// request, after which the status ends the write. Each such resend uses up one
-// retry and its backoff.
+// fails with it or BigQuery reports it in an AppendRowsResponse, except that
+// when a response without AppendResult carries a nil or InvalidArgument status
+// and valid in-range AppendRowsResponse.RowErrors (and not after an ambiguous
+// send under ExactlyOnceDelivery), the rejected rows are dropped under
+// DropStats.RowErrorDrops and the surviving rows are resent up to 8 passes
+// per chunk. When a non-retryable status instead ends the stream, the server
+// may not have read the request, so while retries remain the request is resent
+// on a fresh stream: always if an earlier request opened that stream, and once
+// per request if it was opened for the request, after which the status ends the
+// write. Each such resend uses up one retry and its backoff.
 //
 // Retries never extend a write beyond Config.ShutdownTimeout. Each batch
 // write made by a background flush, including its retries and the backoff
@@ -72,7 +76,9 @@ type Logger interface {
 // ShutdownTimeout. If a run-end flush times out while writing to BigQuery, the
 // rows of the in-flight batch that BigQuery has not confirmed are deferred for
 // at most one retry in the next flush (background, run-end, or Close); the
-// rows of the split requests that it confirmed before then are not resent.
+// rows of the split requests that it confirmed before then are not resent, and
+// neither are the rows of a request that BigQuery may have committed without
+// confirming it (see [Config]), which count in DropStats.AppendFailureDrops.
 // This provides at-least-once delivery; if
 // the backend already committed the cut-off write, duplicates under the same
 // event_id can occur (and may differ if uploads cut short on the first attempt
@@ -99,10 +105,10 @@ type ContentFormatter func(payload any, eventType string) (any, error)
 // DropStats reports cumulative event-drop and formatter-failure counts across
 // the plugin's event processing pipeline.
 // TotalDrops sums locally discarded events and writes whose success could not
-// be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops); it can
-// include rows committed before an acknowledgment was lost, so it is an upper
-// bound. FormatterFailureDrops separately counts payload replacement or
-// omission, which does not itself discard a row.
+// be confirmed (QueueFullDrops + AppendFailureDrops + RowErrorDrops +
+// ShutdownDrops); it can include rows committed before an acknowledgment was
+// lost, so it is an upper bound. FormatterFailureDrops separately counts
+// payload replacement or omission, which does not itself discard a row.
 type DropStats struct {
 	// QueueFullDrops counts events dropped because QueueMaxSize was reached.
 	QueueFullDrops int64 `json:"queue_full_drops"`
@@ -116,6 +122,10 @@ type DropStats struct {
 	// If the last attempt's outcome was unknown (sent, but no response), the
 	// rows may in fact have been written, so this is an upper bound.
 	AppendFailureDrops int64 `json:"append_failure_drops"`
+	// RowErrorDrops counts individual rows rejected by BigQuery Storage Write
+	// AppendRowsResponse.RowErrors and isolated from their batch so the
+	// remaining valid rows could still be written.
+	RowErrorDrops int64 `json:"row_error_drops"`
 	// FormatterFailureDrops counts events whose payload was replaced with
 	// "[FORMATTER_FAILED]" (or omitted from content_parts) because
 	// ContentFormatter returned an error or panicked; this does not itself
@@ -126,7 +136,8 @@ type DropStats struct {
 	// before their batch could be written.
 	ShutdownDrops int64 `json:"shutdown_drops"`
 	// TotalDrops sums locally discarded events and writes whose success could
-	// not be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops).
+	// not be confirmed (QueueFullDrops + AppendFailureDrops + RowErrorDrops +
+	// ShutdownDrops).
 	TotalDrops int64 `json:"total_drops"`
 }
 
@@ -180,29 +191,32 @@ type GCSContentOffloader interface {
 // was split into several requests; see below), with two exceptions: if the
 // stream was rotated by an earlier batch and has not committed yet, Go drops
 // the batch and pauses rotation; if an earlier attempt of the request had an
-// unknown outcome, OutOfRange or NotFound makes Go drop the batch, to prevent
-// duplicate delivery, and replace the stream before the next batch (pausing
-// rotation if the stream had not committed yet). adk-python drops the batch
-// after any of the three and replaces the stream before the next one. On an
-// RPC-level receive error after a successful Send (an AppendRowsResponse.Error
-// carrying one of these codes is a server rejection), Go treats Unavailable,
-// DeadlineExceeded, Canceled, Aborted, Internal, and Unknown as unknown
-// outcomes, whereas adk-python also treats ResourceExhausted (TooManyRequests)
-// as one. After an RPC-level InvalidArgument or FailedPrecondition, Go
-// replaces the stream only if an earlier attempt of the request had an unknown
-// outcome, whereas adk-python also replaces it when the error is not a schema
-// mismatch. DropStats has four counters, whereas adk-python's get_drop_stats()
-// returns ten per-reason counts. adk-python uploads while it parses an event,
-// before the row is queued, with a Cloud Storage client built from the
-// credentials of the plugin, a fixed 32 KiB inline text limit and the
-// parallelism of its thread pool. This plugin queues payloads with rows and
-// uploads them at batch flush time, bounds upload concurrency and memory,
-// supports customizable offloaders, exposes atomic DropStats counters, and
-// optionally writes through a COMMITTED stream with explicit offsets when
-// ExactlyOnceDelivery is enabled. ExactlyOnceDelivery handles offset
-// desynchronization (rotating to a fresh stream without consuming append retry
-// attempts) and distinguishes ambiguous transport errors from definite server
-// rejections.
+// unknown outcome, OutOfRange or NotFound, or a response that reports
+// RowErrors, makes Go drop the batch, to prevent duplicate delivery, and
+// replace the stream before the next batch (pausing rotation if the stream
+// had not committed yet). adk-python drops the batch after OutOfRange,
+// NotFound, or an unexpected AlreadyExists (treating AlreadyExists after an
+// attempt with an unknown outcome as confirmation) and replaces the stream
+// before the next one. On
+// an RPC-level receive error after a successful Send (an
+// AppendRowsResponse.Error carrying one of these codes is a server
+// rejection), Go treats Unavailable, DeadlineExceeded, Canceled, Aborted,
+// Internal, and Unknown as unknown outcomes, whereas adk-python also treats
+// ResourceExhausted (TooManyRequests) as one. After an RPC-level
+// InvalidArgument or FailedPrecondition, Go replaces the stream only if an
+// earlier attempt of the request had an unknown outcome, whereas adk-python
+// also replaces it when the error is not a schema mismatch. DropStats has five
+// per-reason counters, whereas adk-python's get_drop_stats() returns ten.
+// adk-python uploads while it parses an event, before the row is queued, with a
+// Cloud Storage client built from the credentials of the plugin, a fixed 32 KiB
+// inline text limit and the parallelism of its thread pool. This plugin queues
+// payloads with rows and uploads them at batch flush time, bounds upload
+// concurrency and memory, supports customizable offloaders, exposes atomic
+// DropStats counters, and optionally writes through a COMMITTED stream with
+// explicit offsets when ExactlyOnceDelivery is enabled. ExactlyOnceDelivery
+// handles offset desynchronization (rotating to a fresh stream without
+// consuming append retry attempts) and distinguishes ambiguous transport errors
+// from definite server rejections.
 //
 // Go splits a batch whose rows are estimated at more than 8 MiB into several
 // AppendRows requests, and halves a multi-row request that serializes to more
@@ -216,7 +230,18 @@ type GCSContentOffloader interface {
 // retries remain if the code is Unavailable, ResourceExhausted, Internal,
 // DeadlineExceeded, or Aborted, whereas adk-python resends it only for
 // DeadlineExceeded, Internal, or Unavailable, and drops the batch for any
-// other code.
+// other code. When AppendRowsResponse.RowErrors reports valid in-range row
+// indices without AppendResult alongside a nil or InvalidArgument status (and
+// not after an ambiguous send under ExactlyOnceDelivery), Go isolates the
+// rejected rows under DropStats.RowErrorDrops and resends surviving rows up to
+// 8 passes per chunk, counting any remaining unconfirmed rows under
+// AppendFailureDrops, whereas adk-python drops the entire batch when the
+// status is InvalidArgument and treats a response with no status set as
+// committed without inspecting row_errors. A response that carries both
+// AppendResult and RowErrors leaves the rows of its request possibly
+// committed, as RowErrors after an ambiguous send do, so Go counts those rows
+// under AppendFailureDrops and never sends them again, not even when a run-end
+// flush times out.
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
@@ -232,6 +257,19 @@ type GCSContentOffloader interface {
 // upgraded tables carry label adk_schema_version="2" ([SchemaVersion]), while
 // attributes.adk.schema_version on each row is "1". Recursive payload
 // sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
+//
+// While concurrent activations of the same agent on the same branch and node
+// path are open, an agent that one of them runs is placed under that
+// activation's span (parent_span_id): the activation whose context, or a
+// context derived from it, was passed to the agent's Run, whichever goroutine
+// runs the agent. If the context does not show the activation that it derives
+// from, as when it was derived through a context type that does not embed its
+// parent as an exported Context field, goroutines decide instead: a child agent
+// that runs on an activation's goroutine, or on a goroutine that the activation
+// starts directly, is placed under that activation, and one launched across an
+// intermediate goroutine that runs no ADK callback is placed under the nearest
+// open span enclosing the concurrent activations that hold an open span its
+// branch and node path fit (or the invocation span if none encloses them).
 type Config struct {
 	Enabled        bool
 	ProjectID      string
@@ -308,8 +346,40 @@ type Config struct {
 	// credentials in URIs, Authorization headers and Bearer or Basic
 	// credentials, sensitive keys in JSON embedded in text, and credentials in
 	// error_message are all written unredacted. When false, key names match
-	// regardless of case and of "_" or "-", so apiKey, APIKey and api-key are
-	// redacted like api_key.
+	// regardless of case and of "_", "-" or ".", so apiKey, APIKey, api-key and
+	// api.key are redacted like api_key. A compound name that ends in a
+	// credential name, such as DB_PASSWORD, dbPassword or
+	// spring.datasource.password, is redacted too, and so is a credential name
+	// or "temp:" key behind "user:" or "app:" state prefixes, stacked or not,
+	// such as user:api_key, app:user:token or user:temp:x. The "." and
+	// compound-name matching apply to map keys, to the keys of query,
+	// fragment and ";" parameter pairs of a URI, and to keys in text. They do
+	// not apply to URI path segments: only a segment that is a credential
+	// name itself, whatever its case and "_" or "-", or a "temp:" key, alone
+	// or behind "user:" or "app:" prefixes, redacts the segment after it, as
+	// in https://h/api_key/abc123, while https://h/api.key/abc123 and
+	// https://h/DB_PASSWORD/abc123 keep abc123, as file names and route slugs
+	// such as /private.key/download or /reset-password/confirm stay as they
+	// are. Cursor and tokenizer names that end in "token" are not redacted,
+	// in snake, camel or upper case: next_token, prev_token and
+	// previous_token; page_token, sync_token, continuation_token and
+	// resume_token, alone or after next, prev, previous, start or newStart,
+	// as nextPageToken, startPageToken or newStartPageToken; and pad_token,
+	// eos_token, eot_token, bos_token, unk_token, cls_token, sep_token and
+	// mask_token. Plural count names such as input_tokens and output_tokens
+	// are also kept because they end in "tokens", whereas singular or
+	// flag-style compound names that end in a sensitive credential suffix,
+	// such as input_token, output_token, has_password or is_secret, are
+	// redacted regardless of value type. Redaction also applies to declared
+	// Go types whose type name matches a sensitive key (generic or not): a
+	// non-struct value, or a struct whose value or pointer type has a
+	// MarshalJSON or MarshalText method, redacts whole as "[REDACTED]" with
+	// truncated=true; any other struct shows its exported fields, with the
+	// sensitive ones redacted, and omits unexported fields; and map keys of
+	// such a type collapse to "[REDACTED]":"[REDACTED]" with
+	// truncated=true (for example, map[SyntaxToken]int{1: 12, 2: 9} formats as
+	// {"[REDACTED]":"[REDACTED]"} with truncated=true). The adk-python plugin
+	// matches exact key names only.
 	DisableSensitiveKeyRedaction bool
 
 	// ContentFormatter, if set, is applied to each event's raw payload before
@@ -343,6 +413,9 @@ type Config struct {
 	// CustomMetadataAllowlist selects the model response and event
 	// CustomMetadata keys written to attributes.custom_metadata. An entry
 	// ending in "*" matches keys by prefix; other entries match exactly.
+	// EventAgentStateCheckpoint rows read their reserved checkpoint keys
+	// directly from CustomMetadata, while attributes.custom_metadata still
+	// includes only allowlisted keys.
 	CustomMetadataAllowlist []string
 
 	// FinalResponseToolNames lists tools whose successful completion is also
