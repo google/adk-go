@@ -40,12 +40,11 @@ func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flo
 		if asLLMAgent(ctx.Agent()) == nil || ctx.Session() == nil {
 			return
 		}
-		var events []*session.Event
-		for ev := range ctx.Session().Events().All() {
-			if utils.EventBelongsToBranch(ctx.Branch(), ev.Branch) {
-				events = append(events, ev)
-			}
-		}
+		// The events of the invocation's branch, read as adk-python's
+		// _get_events(current_branch=True) reads them, not by the history
+		// rule of utils.EventBelongsToBranch: an ancestor branch's call or
+		// answer is not this invocation's to resume.
+		events := InvocationEvents(ctx, false, true)
 		answers := credentialAnswers(events)
 		if len(answers) == 0 {
 			return
@@ -66,6 +65,11 @@ func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flo
 		}
 		calls := callsToRerun(events, agentName, toolCallsToResume(events, agentName, requests, authorized))
 		if len(calls) == 0 {
+			return
+		}
+		// adk-python lists the agent's tools here (canonical_tools).
+		if err := f.listToolsForRerun(ctx); err != nil {
+			yield(nil, err)
 			return
 		}
 		tools := make(map[string]tool.Tool, len(f.Tools))

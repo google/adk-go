@@ -34,6 +34,8 @@ const RequestCredentialFunctionCallName = "adk_request_credential"
 // adk_request_credential call, and the client fills ExchangedAuthCredential in
 // and sends it back.
 type Config struct {
+	// AuthScheme says how the resource expects to be authenticated. It is
+	// required.
 	AuthScheme Scheme `json:"authScheme"`
 	// RawAuthCredential is the credential the tool was configured with, such
 	// as an OAuth2 client ID and secret. A scheme that needs no exchange, such
@@ -187,8 +189,8 @@ func (c *Config) WithoutSecrets() (*Config, error) {
 	}
 	out := *c
 	out.AuthScheme = c.AuthScheme.clone()
-	out.RawAuthCredential = c.RawAuthCredential.clone()
-	out.ExchangedAuthCredential = c.ExchangedAuthCredential.clone()
+	out.RawAuthCredential = c.RawAuthCredential.Clone()
+	out.ExchangedAuthCredential = c.ExchangedAuthCredential.Clone()
 	out.CredentialKey = key
 	out.Extra = cloneExtra(c.Extra)
 	for _, cred := range []*Credential{out.RawAuthCredential, out.ExchangedAuthCredential} {
@@ -212,8 +214,9 @@ func (c *Config) WithoutSecrets() (*Config, error) {
 	return &out, nil
 }
 
-// The clone methods return deep copies for [Config.WithoutSecrets]. Each
-// pointer receiver may be nil, and then the copy is nil too.
+// The clone methods return deep copies for [Config.WithoutSecrets] and
+// [Credential.Clone]. Each pointer receiver may be nil, and then the copy is
+// nil too.
 
 func (s Scheme) clone() Scheme {
 	s.Flows = s.Flows.clone()
@@ -247,24 +250,12 @@ func (f *OAuthFlow) clone() *OAuthFlow {
 	return &out
 }
 
-func (c *Credential) clone() *Credential {
-	if c == nil {
-		return nil
-	}
-	out := *c
-	out.HTTP = c.HTTP.clone()
-	out.OAuth2 = c.OAuth2.clone()
-	out.ServiceAccount = c.ServiceAccount.clone()
-	out.Extra = cloneExtra(c.Extra)
-	return &out
-}
-
-// clone leaves AdditionalHeaders shared, since WithoutSecrets drops it.
 func (h *HTTPAuth) clone() *HTTPAuth {
 	if h == nil {
 		return nil
 	}
 	out := *h
+	out.AdditionalHeaders = maps.Clone(h.AdditionalHeaders)
 	out.Credentials.Extra = cloneExtra(h.Credentials.Extra)
 	out.Extra = cloneExtra(h.Extra)
 	return &out
@@ -329,8 +320,15 @@ func cloneJSONValue(v any) any {
 // ToolArguments are the arguments of an adk_request_credential call: the
 // ID of the tool call that needs the credential, and its config.
 type ToolArguments struct {
+	// FunctionCallID is the ID of the tool call that needs the credential.
+	// For a toolset's request (tool.AuthenticatedToolset) it is
+	// "_adk_toolset_auth_" followed by the toolset's name.
 	FunctionCallID string `json:"functionCallId"`
-	AuthConfig     Config `json:"authConfig"`
+	// AuthConfig is the config, without the secrets the agent was configured
+	// with ([Config.WithoutSecrets]). The client fills its
+	// ExchangedAuthCredential in and sends the config back as the function
+	// response.
+	AuthConfig Config `json:"authConfig"`
 	// Extra holds JSON keys that match no field. See [Credential.Extra].
 	Extra map[string]any `json:"-"`
 }

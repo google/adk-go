@@ -163,6 +163,140 @@ func TestOAuthFlowsUnmarshalRejects(t *testing.T) {
 	}
 }
 
+// adk-python 2.12.0 accepts any string as tokenUrl, the empty one included.
+func TestOAuthFlowsUnmarshalAcceptsAnEmptyTokenURL(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want toolauth.OAuthFlows
+	}{
+		{
+			name: "authorization code",
+			data: `{"authorizationCode":{"authorizationUrl":"https://example.com/authorize","tokenUrl":"","scopes":{}}}`,
+			want: toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{AuthorizationURL: "https://example.com/authorize"}},
+		},
+		{
+			name: "password",
+			data: `{"password":{"tokenUrl":"","scopes":{}}}`,
+			want: toolauth.OAuthFlows{Password: &toolauth.OAuthFlow{}},
+		},
+		{
+			name: "client credentials",
+			data: `{"clientCredentials":{"tokenUrl":"","scopes":{}}}`,
+			want: toolauth.OAuthFlows{ClientCredentials: &toolauth.OAuthFlow{}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got toolauth.OAuthFlows
+			if err := json.Unmarshal([]byte(tc.data), &got); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("json.Unmarshal() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// adk-python 2.12.0 rejects a null tokenUrl as it rejects a missing one.
+func TestOAuthFlowsUnmarshalRejectsANullTokenURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantErr string
+	}{
+		{
+			name:    "authorization code",
+			data:    `{"authorizationCode":{"authorizationUrl":"https://example.com/authorize","tokenUrl":null,"scopes":{}}}`,
+			wantErr: "authorizationCode flow needs tokenUrl",
+		},
+		{name: "password", data: `{"password":{"tokenUrl":null,"scopes":{}}}`, wantErr: "password flow needs tokenUrl"},
+		{name: "client credentials", data: `{"clientCredentials":{"tokenUrl":null,"scopes":{}}}`, wantErr: "clientCredentials flow needs tokenUrl"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var flows toolauth.OAuthFlows
+			err := json.Unmarshal([]byte(tc.data), &flows)
+			if err == nil {
+				t.Fatal("json.Unmarshal() succeeded, want an error")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("json.Unmarshal() error = %q, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// adk-python 2.12.0 writes tokenUrl "" for the flows that require it, so what
+// one runtime writes the other reads back.
+func TestOAuthFlowsMarshalWritesAnEmptyTokenURL(t *testing.T) {
+	tests := []struct {
+		name  string
+		flows toolauth.OAuthFlows
+		want  string
+	}{
+		{
+			name:  "authorization code",
+			flows: toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{AuthorizationURL: "https://example.com/authorize"}},
+			want:  `{"authorizationCode":{"scopes":{},"authorizationUrl":"https://example.com/authorize","tokenUrl":""}}`,
+		},
+		{
+			name:  "password",
+			flows: toolauth.OAuthFlows{Password: &toolauth.OAuthFlow{}},
+			want:  `{"password":{"scopes":{},"tokenUrl":""}}`,
+		},
+		{
+			name:  "client credentials",
+			flows: toolauth.OAuthFlows{ClientCredentials: &toolauth.OAuthFlow{}},
+			want:  `{"clientCredentials":{"scopes":{},"tokenUrl":""}}`,
+		},
+		{
+			// The implicit flow has no token URL.
+			name:  "implicit",
+			flows: toolauth.OAuthFlows{Implicit: &toolauth.OAuthFlow{AuthorizationURL: "https://example.com/authorize"}},
+			want:  `{"implicit":{"scopes":{},"authorizationUrl":"https://example.com/authorize"}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := json.Marshal(tc.flows)
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			if diff := cmp.Diff(decodeJSON(t, []byte(tc.want)), decodeJSON(t, got)); diff != "" {
+				t.Errorf("json.Marshal() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestConfigKeyOfAnEmptyTokenURLMatchesPython(t *testing.T) {
+	config := toolauth.Config{
+		AuthScheme: toolauth.Scheme{
+			Type: toolauth.SchemeTypeOAuth2,
+			Flows: &toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{
+				AuthorizationURL: "https://example.com/oauth2/authorize",
+				Scopes:           map[string]string{"read": "Read access", "write": "Write access"},
+			}},
+		},
+		RawAuthCredential: &toolauth.Credential{
+			AuthType: toolauth.CredentialTypeOAuth2,
+			OAuth2:   &toolauth.OAuth2Auth{ClientID: "mock_client_id", ClientSecret: "mock_client_secret"},
+		},
+	}
+	got, err := config.Key()
+	if err != nil {
+		t.Fatalf("Key() error = %v", err)
+	}
+	// adk-python 2.12.0's AuthConfig.credential_key for the same config, whose
+	// scheme dump holds tokenUrl "".
+	const want = "adk_oauth2_8e630a373ddbd3ce_oauth2_ca7393c05868b945"
+	if got != want {
+		t.Errorf("Key() = %q, want %q", got, want)
+	}
+}
+
 func TestOAuthFlowsGrantType(t *testing.T) {
 	tests := []struct {
 		name  string

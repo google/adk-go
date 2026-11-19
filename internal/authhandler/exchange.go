@@ -28,13 +28,17 @@ import (
 	"google.golang.org/adk/v2/tool/toolauth"
 )
 
-// tokenRequestTimeout matches adk-python's _TOKEN_REQUEST_TIMEOUT_SECONDS.
-const tokenRequestTimeout = 10 * time.Second
+// TokenRequestTimeout matches adk-python's _TOKEN_REQUEST_TIMEOUT_SECONDS. It
+// bounds each request to a token endpoint.
+const TokenRequestTimeout = 10 * time.Second
 
-// authCode returns the authorization code to redeem: the one in the redirect
-// URL the client sent back, or AuthCode when the URL carries none. A bare
-// AuthCode comes with no redirect state, so nothing ties it to the request.
-func authCode(o *toolauth.OAuth2Auth) (string, error) {
+// AuthCode returns the authorization code to redeem from o: the code in the
+// redirect URL the client sent back (o.AuthResponseURI), or o.AuthCode when
+// the URL carries none. A bare AuthCode comes with no redirect state, so
+// nothing ties it to the request. Like authlib, it returns an error when the
+// redirect URL does not parse or its state is not o.State (an empty o.State
+// is not checked), and when o holds no code at all.
+func AuthCode(o *toolauth.OAuth2Auth) (string, error) {
 	code, err := codeFromRedirect(o.AuthResponseURI, o.State)
 	if err != nil {
 		return "", err
@@ -67,17 +71,20 @@ func codeFromRedirect(raw, state string) (string, error) {
 	return code, nil
 }
 
-// tokenConfig returns the settings for redeeming o's code under scheme: the
-// token URL and how the client authenticates there.
-func tokenConfig(scheme *toolauth.Scheme, o *toolauth.OAuth2Auth) (*oauth2.Config, error) {
-	tokenURL, err := tokenEndpoint(scheme)
+// TokenConfig returns the settings for redeeming o's code under scheme: the
+// token URL ([TokenEndpoint]), o's client ID, secret and redirect URI, and how
+// the client authenticates there ([AuthStyle]). It returns an error when scheme
+// declares no token endpoint, o has no client ID, or o's client
+// authentication method is not supported.
+func TokenConfig(scheme *toolauth.Scheme, o *toolauth.OAuth2Auth) (*oauth2.Config, error) {
+	tokenURL, err := TokenEndpoint(scheme)
 	if err != nil {
 		return nil, err
 	}
 	if o.ClientID == "" {
 		return nil, errors.New("authhandler: token request needs a client ID")
 	}
-	style, err := authStyle(o)
+	style, err := AuthStyle(o)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +96,11 @@ func tokenConfig(scheme *toolauth.Scheme, o *toolauth.OAuth2Auth) (*oauth2.Confi
 	}, nil
 }
 
-func tokenEndpoint(s *toolauth.Scheme) (string, error) {
+// TokenEndpoint returns the token endpoint from the scheme: an OpenID Connect
+// scheme's TokenEndpoint, or the TokenURL of an OAuth2 scheme's
+// authorization-code flow, else of its client-credentials flow. It returns an
+// error when s declares none.
+func TokenEndpoint(s *toolauth.Scheme) (string, error) {
 	if s.Type == toolauth.SchemeTypeOpenIDConnect && s.TokenEndpoint != "" {
 		return s.TokenEndpoint, nil
 	}
@@ -104,9 +115,12 @@ func tokenEndpoint(s *toolauth.Scheme) (string, error) {
 	return "", errors.New("authhandler: auth scheme declares no token endpoint")
 }
 
-// authStyle says where the client's credentials go in the token request. A
-// client without a secret is public and sends only its ID in the body.
-func authStyle(o *toolauth.OAuth2Auth) (oauth2.AuthStyle, error) {
+// AuthStyle says where the client's credentials go in the token request,
+// following o's TokenEndpointAuthMethod: the Authorization header for "" and
+// "client_secret_basic", the body for "client_secret_post". A client without a
+// secret is public and sends only its ID in the body. It returns an error for
+// "private_key_jwt", and for any other method when o has a secret.
+func AuthStyle(o *toolauth.OAuth2Auth) (oauth2.AuthStyle, error) {
 	switch m := o.TokenEndpointAuthMethod; {
 	case m == "private_key_jwt":
 		return 0, errors.New("authhandler: token endpoint auth method private_key_jwt is not supported")
@@ -134,11 +148,11 @@ func exchangeCode(ctx context.Context, scheme *toolauth.Scheme, cred *toolauth.C
 	if !usesCodeGrant(scheme) {
 		return nil, errors.New("authhandler: only the authorization code grant is exchanged here")
 	}
-	code, err := authCode(o)
+	code, err := AuthCode(o)
 	if err != nil {
 		return nil, err
 	}
-	conf, err := tokenConfig(scheme, o)
+	conf, err := TokenConfig(scheme, o)
 	if err != nil {
 		return nil, err
 	}
@@ -146,13 +160,13 @@ func exchangeCode(ctx context.Context, scheme *toolauth.Scheme, cred *toolauth.C
 	if o.CodeVerifier != "" {
 		opts = append(opts, oauth2.VerifierOption(o.CodeVerifier))
 	}
-	ctx, cancel := context.WithTimeout(ctx, tokenRequestTimeout)
+	ctx, cancel := context.WithTimeout(ctx, TokenRequestTimeout)
 	defer cancel()
 	tok, err := conf.Exchange(ctx, code, opts...)
 	if err != nil {
-		return nil, tokenError(err)
+		return nil, TokenError(err)
 	}
-	return withTokens(cred, tok), nil
+	return WithTokens(cred, tok), nil
 }
 
 // usesCodeGrant reports whether scheme is redeemed with the authorization code
@@ -164,9 +178,11 @@ func usesCodeGrant(s *toolauth.Scheme) bool {
 	return s.Flows != nil && s.Flows.GrantType() == toolauth.OAuthGrantTypeAuthorizationCode
 }
 
-// tokenError keeps the status and OAuth error code of a refused token request.
-// x/oauth2's message quotes the response, which can hold text about the user.
-func tokenError(err error) error {
+// TokenError keeps the status and OAuth error code of a refused token request,
+// and wraps any other error from x/oauth2 with %w. x/oauth2's message quotes
+// the response, which can hold text about the user, so a refusal's message is
+// dropped.
+func TokenError(err error) error {
 	var re *oauth2.RetrieveError
 	if !errors.As(err, &re) {
 		return fmt.Errorf("authhandler: token request: %w", err)
@@ -174,9 +190,10 @@ func tokenError(err error) error {
 	return fmt.Errorf("authhandler: token endpoint refused the code: %s %s", re.Response.Status, re.ErrorCode)
 }
 
-// withTokens returns a copy of cred holding tok, field by field as adk-python's
-// update_credential_with_tokens sets them.
-func withTokens(cred *toolauth.Credential, tok *oauth2.Token) *toolauth.Credential {
+// WithTokens returns a copy of cred holding tok, field by field as adk-python's
+// update_credential_with_tokens sets them. cred must have an OAuth2 section;
+// cred itself is not changed.
+func WithTokens(cred *toolauth.Credential, tok *oauth2.Token) *toolauth.Credential {
 	o := *cred.OAuth2
 	o.AccessToken = tok.AccessToken
 	o.RefreshToken = tok.RefreshToken

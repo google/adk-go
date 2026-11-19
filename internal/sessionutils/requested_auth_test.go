@@ -74,3 +74,23 @@ func TestCheckRequestedAuthConfigsReadsNumbersAsFloat64(t *testing.T) {
 		})
 	}
 }
+
+// adk-python accepts tokenUrl "", so a request whose flow has an empty
+// TokenURL is stored as it is in Python.
+func TestCheckRequestedAuthConfigsAcceptsAFlowWithAnEmptyTokenURL(t *testing.T) {
+	config := toolauth.Config{
+		AuthScheme: toolauth.Scheme{
+			Type: toolauth.SchemeTypeOAuth2,
+			Flows: &toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{
+				AuthorizationURL: "https://example.com/oauth2/authorize",
+			}},
+		},
+		RawAuthCredential: &toolauth.Credential{
+			AuthType: toolauth.CredentialTypeOAuth2,
+			OAuth2:   &toolauth.OAuth2Auth{ClientID: "mock_client_id"},
+		},
+	}
+	if err := sessionutils.CheckRequestedAuthConfigs(map[string]toolauth.Config{"call-1": config}); err != nil {
+		t.Errorf("CheckRequestedAuthConfigs() error = %v, want nil", err)
+	}
+}

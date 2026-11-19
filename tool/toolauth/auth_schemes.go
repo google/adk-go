@@ -15,6 +15,7 @@
 package toolauth
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -34,9 +35,15 @@ const (
 // OAuthFlow is one OAuth2 flow of an OpenAPI security scheme. Which URLs it
 // needs depends on the flow; see [OAuthFlows].
 type OAuthFlow struct {
+	// AuthorizationURL is the provider's sign-in page, where the authorization
+	// URI ADK generates sends the user.
 	AuthorizationURL string `json:"authorizationUrl,omitempty"`
-	TokenURL         string `json:"tokenUrl,omitempty"`
-	RefreshURL       string `json:"refreshUrl,omitempty"`
+	// TokenURL is the token endpoint, where ADK redeems a code, requests a
+	// token with client credentials and refreshes a token.
+	TokenURL string `json:"tokenUrl,omitempty"`
+	// RefreshURL is the URL for refreshing tokens. ADK does not read it; it
+	// refreshes at TokenURL.
+	RefreshURL string `json:"refreshUrl,omitempty"`
 	// Scopes maps each scope to its description.
 	Scopes map[string]string `json:"scopes"`
 	// Extra holds JSON keys that match no field, under the names they arrived
@@ -65,11 +72,17 @@ func (f OAuthFlow) MarshalJSON() ([]byte, error) {
 
 // OAuthFlows lists the OAuth2 flows a scheme supports. The implicit flow needs
 // AuthorizationURL, the password and client credentials flows need TokenURL,
-// and the authorization code flow needs both.
+// which may be empty, and the authorization code flow needs both.
 type OAuthFlows struct {
-	Implicit          *OAuthFlow `json:"implicit,omitempty"`
-	Password          *OAuthFlow `json:"password,omitempty"`
+	// Implicit is the implicit flow, or nil.
+	Implicit *OAuthFlow `json:"implicit,omitempty"`
+	// Password is the resource owner password flow, or nil.
+	Password *OAuthFlow `json:"password,omitempty"`
+	// ClientCredentials is the client credentials flow, in which the agent's
+	// app gets a token for itself without the user, or nil.
 	ClientCredentials *OAuthFlow `json:"clientCredentials,omitempty"`
+	// AuthorizationCode is the authorization code flow, in which the user
+	// signs in and ADK redeems the code, or nil.
 	AuthorizationCode *OAuthFlow `json:"authorizationCode,omitempty"`
 	// Extra holds JSON keys that match no field. See [OAuthFlow.Extra].
 	Extra map[string]any `json:"-"`
@@ -77,12 +90,17 @@ type OAuthFlows struct {
 
 // UnmarshalJSON implements [encoding/json.Unmarshaler] the way
 // [OAuthFlow.UnmarshalJSON] does, and rejects a flow without the URLs it
-// needs. An empty URL counts as missing: Go cannot tell the two apart after
-// decoding, and neither can be used.
+// needs. A missing or null tokenUrl is rejected; an empty one is accepted, as
+// adk-python accepts any string there, and fails when ADK looks for a token
+// endpoint. An empty authorizationUrl counts as missing.
 func (f *OAuthFlows) UnmarshalJSON(data []byte) error {
 	type plain OAuthFlows
 	if err := decodeOpenAPIModel(data, (*plain)(f), &f.Extra, "OAuthFlows"); err != nil {
 		return err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return decodeError("OAuthFlows", err)
 	}
 	for _, c := range []struct {
 		name                string
@@ -98,18 +116,62 @@ func (f *OAuthFlows) UnmarshalJSON(data []byte) error {
 		case c.flow == nil:
 		case c.needAuth && c.flow.AuthorizationURL == "":
 			return fmt.Errorf("toolauth: OAuthFlows: %s flow needs authorizationUrl", c.name)
-		case c.needToken && c.flow.TokenURL == "":
+		case c.needToken && !hasValue(raw[c.name], "tokenUrl"):
 			return fmt.Errorf("toolauth: OAuthFlows: %s flow needs tokenUrl", c.name)
 		}
 	}
 	return nil
 }
 
+// hasValue reports whether the JSON object obj has key with a value other
+// than null.
+func hasValue(obj json.RawMessage, key string) bool {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(obj, &m) != nil {
+		return false
+	}
+	v, ok := m[key]
+	return ok && string(v) != "null"
+}
+
+// flowsJSON is the JSON form of [OAuthFlows]. The flows that require a
+// tokenUrl are [tokenURLFlow]s.
+type flowsJSON struct {
+	Implicit          *OAuthFlow    `json:"implicit,omitempty"`
+	Password          *tokenURLFlow `json:"password,omitempty"`
+	ClientCredentials *tokenURLFlow `json:"clientCredentials,omitempty"`
+	AuthorizationCode *tokenURLFlow `json:"authorizationCode,omitempty"`
+}
+
+// tokenURLFlow is an [OAuthFlow] that writes tokenUrl even when it is empty,
+// as adk-python writes the required string, so that what
+// [OAuthFlows.UnmarshalJSON] accepts reads back.
+type tokenURLFlow OAuthFlow
+
+// MarshalJSON implements [encoding/json.Marshaler].
+func (f tokenURLFlow) MarshalJSON() ([]byte, error) {
+	b, err := OAuthFlow(f).MarshalJSON()
+	if err != nil || f.TokenURL != "" {
+		return b, err
+	}
+	// scopes is always written, so the object has a member before this one.
+	return append(b[:len(b)-1], `,"tokenUrl":""}`...), nil
+}
+
 // MarshalJSON implements [encoding/json.Marshaler]. It writes Extra after the
-// fields.
+// fields, and tokenUrl for each flow that requires one, empty or not.
+//
+// [Config.Key] digests this JSON, so the derived key of a config whose flow
+// has an empty TokenURL is the key adk-python derives for tokenUrl "". A
+// credential saved under a key derived without that member is not found under
+// this one; set [Config.CredentialKey] to keep naming a key explicitly.
 func (f OAuthFlows) MarshalJSON() ([]byte, error) {
-	type plain OAuthFlows
-	return encodeOpenAPIModel(plain(f), f.Extra)
+	return encodeOpenAPIModel(flowsJSON{
+		Implicit:          f.Implicit,
+		Password:          (*tokenURLFlow)(f.Password),
+		ClientCredentials: (*tokenURLFlow)(f.ClientCredentials),
+		AuthorizationCode: (*tokenURLFlow)(f.AuthorizationCode),
+	}, f.Extra)
 }
 
 // GrantType returns the grant type of the first flow that is set, checking
@@ -148,36 +210,58 @@ const (
 // for OAuth2 discovery. Type decides which fields apply. A Type outside the
 // four OpenAPI ones is a custom scheme, whose own fields live in Extra.
 type Scheme struct {
-	Type        SchemeType `json:"type"`
-	Description string     `json:"description,omitempty"`
+	// Type is the scheme's type. [Scheme.UnmarshalJSON] infers a missing one
+	// from the fields.
+	Type SchemeType `json:"type"`
+	// Description describes the scheme to people.
+	Description string `json:"description,omitempty"`
 
-	// In and Name place an apiKey. In is query, header or cookie.
-	In   string `json:"in,omitempty"`
+	// In is where an apiKey goes: query, header or cookie.
+	In string `json:"in,omitempty"`
+	// Name is the name of the apiKey's query parameter, header or cookie.
 	Name string `json:"name,omitempty"`
 
-	// Scheme is the http scheme, such as basic or bearer. BearerFormat hints
-	// at how a bearer token is formatted.
-	Scheme       string `json:"scheme,omitempty"`
+	// Scheme is the http scheme, such as basic or bearer.
+	Scheme string `json:"scheme,omitempty"`
+	// BearerFormat hints at how a bearer token is formatted, such as JWT.
 	BearerFormat string `json:"bearerFormat,omitempty"`
 
-	// Flows are the oauth2 flows. IssuerURL, when set, lets the endpoints be
-	// discovered, as adk-python's ExtendedOAuth2 does.
-	Flows     *OAuthFlows `json:"flows,omitempty"`
-	IssuerURL string      `json:"issuer_url,omitempty"`
+	// Flows are the oauth2 flows.
+	Flows *OAuthFlows `json:"flows,omitempty"`
+	// IssuerURL, when set, lets the endpoints of Flows be discovered, as
+	// adk-python's ExtendedOAuth2 does. ADK does not discover them: a flow
+	// without the URLs it needs makes the credential manager return the error
+	// "OAuth2 auto-discovery is not supported".
+	IssuerURL string `json:"issuer_url,omitempty"`
 
 	// OpenIDConnectURL is the openIdConnect discovery URL.
 	OpenIDConnectURL string `json:"openIdConnectUrl,omitempty"`
 
-	// The fields below give openIdConnect endpoints inline instead of a
-	// discovery URL, as adk-python's OpenIdConnectWithConfig does. adk-python
-	// writes them in snake_case.
-	AuthorizationEndpoint             string   `json:"authorization_endpoint,omitempty"`
-	TokenEndpoint                     string   `json:"token_endpoint,omitempty"`
-	UserinfoEndpoint                  string   `json:"userinfo_endpoint,omitempty"`
-	RevocationEndpoint                string   `json:"revocation_endpoint,omitempty"`
+	// AuthorizationEndpoint and the fields below give openIdConnect endpoints
+	// inline instead of a discovery URL, as adk-python's
+	// OpenIdConnectWithConfig does. adk-python writes them in snake_case.
+	// AuthorizationEndpoint is the provider's sign-in page.
+	AuthorizationEndpoint string `json:"authorization_endpoint,omitempty"`
+	// TokenEndpoint is the openIdConnect token endpoint, where ADK redeems a
+	// code or requests a token.
+	TokenEndpoint string `json:"token_endpoint,omitempty"`
+	// UserinfoEndpoint is the openIdConnect userinfo endpoint. ADK does not
+	// call it.
+	UserinfoEndpoint string `json:"userinfo_endpoint,omitempty"`
+	// RevocationEndpoint is the openIdConnect token revocation endpoint. ADK
+	// does not call it.
+	RevocationEndpoint string `json:"revocation_endpoint,omitempty"`
+	// TokenEndpointAuthMethodsSupported lists how a client may authenticate
+	// to TokenEndpoint. ADK does not read it; [OAuth2Auth]'s
+	// TokenEndpointAuthMethod decides.
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitzero"`
-	GrantTypesSupported               []string `json:"grant_types_supported,omitzero"`
-	Scopes                            []string `json:"scopes,omitzero"`
+	// GrantTypesSupported lists the grant types of the openIdConnect
+	// provider. ADK uses the client credentials grant when it holds
+	// "client_credentials", and the authorization code grant otherwise.
+	GrantTypesSupported []string `json:"grant_types_supported,omitzero"`
+	// Scopes are the scopes of the authorization URI ADK generates for an
+	// openIdConnect scheme.
+	Scopes []string `json:"scopes,omitzero"`
 
 	// Extra holds JSON keys that match no field. See [OAuthFlow.Extra].
 	Extra map[string]any `json:"-"`

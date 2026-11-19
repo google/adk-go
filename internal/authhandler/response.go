@@ -61,17 +61,23 @@ func pinAuthResponse(requested *toolauth.Config, answer *toolauth.Credential) *t
 	return &out
 }
 
-// mergeOAuth2 returns a copy of source when target is nil, as adk-python does,
-// and otherwise a copy of target with six fields filled from source where
-// empty. The state always comes from source, so the redirect URL is checked
-// against the state ADK issued rather than one the client names. adk-python's
-// agent path keeps the answer's state, so there the check proves nothing.
+// mergeOAuth2 returns a copy of source when target is nil, as adk-python
+// does, and otherwise a copy of target with six fields filled from source
+// where empty. When ADK will try to redeem a code from target (it holds no
+// access token, and an authorization code or a redirect URL), the state also
+// comes from source, so the redirect URL is checked against the state ADK
+// issued rather than one the client names. Any other answer keeps its own
+// state, as in adk-python, since no code of it is redeemed. The condition
+// lists the code sources exchangeCode reads through [AuthCode] (AuthCode and
+// AuthResponseURI), so the two change together.
 func mergeOAuth2(target, source *toolauth.OAuth2Auth) *toolauth.OAuth2Auth {
 	if target == nil {
 		return new(*source)
 	}
 	o := *target
-	o.State = source.State
+	if o.AccessToken == "" && (o.AuthCode != "" || o.AuthResponseURI != "") {
+		o.State = source.State
+	}
 	o.ClientID = cmp.Or(o.ClientID, source.ClientID)
 	o.ClientSecret = cmp.Or(o.ClientSecret, source.ClientSecret)
 	o.RedirectURI = cmp.Or(o.RedirectURI, source.RedirectURI)

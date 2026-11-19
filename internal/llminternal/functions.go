@@ -125,19 +125,40 @@ func generateAuthEvent(ctx agent.InvocationContext, functionResponseEvent *sessi
 	if len(requests) == 0 {
 		return nil, nil
 	}
+	var ordered []authRequest
+	for _, fr := range utils.FunctionResponses(functionResponseEvent.Content) {
+		if cfg, ok := requests[fr.ID]; ok {
+			ordered = append(ordered, authRequest{functionCallID: fr.ID, cfg: cfg})
+		}
+	}
+	// adk-python gives the request the role of the tool responses, which is user.
+	return authRequestEvent(ctx, ordered, genai.RoleUser)
+}
+
+// authRequest is one credential request: the call it is for and the config
+// sent to the client.
+type authRequest struct {
+	functionCallID string
+	cfg            toolauth.Config
+}
+
+// authRequestEvent returns the event that asks the client for requests, with
+// content role role, or nil when requests is empty. It makes one
+// adk_request_credential call per credential key, for the first request with
+// that key, as adk-python's build_auth_request_event (_functions.py) does.
+func authRequestEvent(ctx agent.InvocationContext, requests []authRequest, role genai.Role) (*session.Event, error) {
 	var parts []*genai.Part
 	var longRunningToolIDs []string
 	seenKeys := map[string]bool{}
-	for _, fr := range utils.FunctionResponses(functionResponseEvent.Content) {
-		cfg, ok := requests[fr.ID]
-		if !ok || seenKeys[cfg.CredentialKey] {
+	for _, r := range requests {
+		if seenKeys[r.cfg.CredentialKey] {
 			continue
 		}
 		// A request with no key is never merged with another, as in adk-python.
-		if cfg.CredentialKey != "" {
-			seenKeys[cfg.CredentialKey] = true
+		if r.cfg.CredentialKey != "" {
+			seenKeys[r.cfg.CredentialKey] = true
 		}
-		args, err := converters.ToMapStructure(toolauth.ToolArguments{FunctionCallID: fr.ID, AuthConfig: cfg})
+		args, err := converters.ToMapStructure(toolauth.ToolArguments{FunctionCallID: r.functionCallID, AuthConfig: r.cfg})
 		if err != nil {
 			return nil, fmt.Errorf("encode %s args: %w", toolauth.RequestCredentialFunctionCallName, err)
 		}
@@ -155,8 +176,7 @@ func generateAuthEvent(ctx agent.InvocationContext, functionResponseEvent *sessi
 	ev := session.NewEvent(ctx, ctx.InvocationID())
 	ev.Author = ctx.Agent().Name()
 	ev.Branch = ctx.Branch()
-	// adk-python gives the request the role of the tool responses, which is user.
-	ev.LLMResponse = model.LLMResponse{Content: &genai.Content{Parts: parts, Role: genai.RoleUser}}
+	ev.LLMResponse = model.LLMResponse{Content: &genai.Content{Parts: parts, Role: string(role)}}
 	ev.LongRunningToolIDs = longRunningToolIDs
 	return ev, nil
 }

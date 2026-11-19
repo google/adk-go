@@ -41,9 +41,14 @@ const (
 // HTTPCredentials is the secret for an HTTP auth scheme: a username and
 // password, or a token.
 type HTTPCredentials struct {
+	// Username is the user name for the basic scheme.
 	Username string `json:"username,omitempty"`
+	// Password is the password for the basic scheme. [Config.WithoutSecrets]
+	// removes it.
 	Password string `json:"password,omitempty"`
-	Token    string `json:"token,omitempty"`
+	// Token is the token for the bearer scheme. [Config.WithoutSecrets]
+	// removes it.
+	Token string `json:"token,omitempty"`
 	// Extra holds JSON keys that match no field. See [Credential.Extra].
 	Extra map[string]any `json:"-"`
 }
@@ -92,33 +97,92 @@ func (h HTTPAuth) MarshalJSON() ([]byte, error) {
 
 // OAuth2Auth is an OAuth2 or OpenID Connect credential, together with the
 // state of the flow that obtains it.
+//
+// The developer sets the client's fields (ClientID, ClientSecret and,
+// optionally, RedirectURI, Nonce, Audience, Prompt, CodeChallengeMethod and
+// TokenEndpointAuthMethod) in a config's RawAuthCredential. The other fields
+// change during a sign-in. When a tool asks the user for the credential, ADK
+// sets AuthURI and State, and for PKCE CodeVerifier and CodeChallengeMethod,
+// in the config it sends to the client. The client sets AuthResponseURI or
+// AuthCode in its answer. ADK then redeems the code at the token endpoint and
+// sets AccessToken, RefreshToken, IDToken, ExpiresAt and ExpiresIn from the
+// response; a client credentials grant or a refresh sets the same five.
 type OAuth2Auth struct {
-	ClientID     string `json:"clientId,omitempty"`
+	// ClientID is the OAuth2 client ID of the agent's app. When ADK stores
+	// the client's answer or redeems its code, it uses the ClientID of the
+	// tool's RawAuthCredential, so the client cannot choose which app redeems
+	// the code.
+	ClientID string `json:"clientId,omitempty"`
+	// ClientSecret is the client secret of the agent's app. Empty means a
+	// public client, which ADK signs in with PKCE. ADK never sends it to the
+	// client ([Config.WithoutSecrets]) or writes it to session state; it takes
+	// it from the tool's RawAuthCredential when it calls the token endpoint.
 	ClientSecret string `json:"clientSecret,omitempty"`
-	// AuthURI is the authorization URI. ADK or the tool can generate it with
-	// the state in it, so the client can verify the state.
+	// AuthURI is the authorization URI, where the client sends the user to
+	// sign in. ADK or the tool can generate it with the state in it, so the
+	// client can verify the state. When the tool's RawAuthCredential has
+	// none, ADK generates it, with State, in the ExchangedAuthCredential of
+	// the config it sends in an adk_request_credential call.
 	AuthURI string `json:"authUri,omitempty"`
 	// Nonce binds the user's session to the authorization request. It is
 	// generated at the start of the flow, usually stored with the session, and
-	// checked by the backend.
+	// checked by the backend. ADK does not generate it; when it is set, ADK
+	// adds it to the authorization URI it generates.
 	Nonce string `json:"nonce,omitempty"`
+	// State is the OAuth2 state parameter. ADK sets a new random value each
+	// time it generates AuthURI, and puts it in that URI. When the client
+	// answers with AuthResponseURI or AuthCode and no access token, ADK
+	// replaces the answer's State with the one it issued, and refuses a
+	// redirect URL whose state parameter differs from a non-empty State.
 	State string `json:"state,omitempty"`
 	// RedirectURI is set when ADK or the tool chooses the redirect URI instead
-	// of the client.
-	RedirectURI     string `json:"redirectUri,omitempty"`
+	// of the client. ADK puts it in the authorization URI it generates and
+	// sends it to the token endpoint with the code. When the client's answer
+	// has none, ADK takes the one of the request it sent.
+	RedirectURI string `json:"redirectUri,omitempty"`
+	// AuthResponseURI is the full URL the provider redirected the user to
+	// after sign-in, with the code and the state in its query. The client
+	// sets it in its answer, and ADK redeems the code it carries. It stays
+	// set in the stored credential after the code is redeemed.
 	AuthResponseURI string `json:"authResponseUri,omitempty"`
-	AuthCode        string `json:"authCode,omitempty"`
-	AccessToken     string `json:"accessToken,omitempty"`
-	RefreshToken    string `json:"refreshToken,omitempty"`
-	IDToken         string `json:"idToken,omitempty"`
-	// ExpiresAt is when the access token expires, in Unix seconds.
+	// AuthCode is the authorization code, which the client may set in its
+	// answer instead of AuthResponseURI. ADK redeems the code of
+	// AuthResponseURI when that URL carries one, and AuthCode otherwise. A
+	// bare AuthCode carries no state, so ADK cannot check it against State.
+	AuthCode string `json:"authCode,omitempty"`
+	// AccessToken is the access token. ADK sets it from the token endpoint's
+	// response when it redeems a code, uses the client credentials grant or
+	// refreshes the token. A credential that has one is not exchanged again.
+	AccessToken string `json:"accessToken,omitempty"`
+	// RefreshToken is the refresh token of the token endpoint's response, set
+	// with AccessToken. ADK uses it to get a new access token when the current
+	// one expires.
+	RefreshToken string `json:"refreshToken,omitempty"`
+	// IDToken is the OpenID Connect ID token, the id_token member of the
+	// token endpoint's response, set with AccessToken.
+	IDToken string `json:"idToken,omitempty"`
+	// ExpiresAt is when the access token expires, in Unix seconds. ADK sets it
+	// with AccessToken, and leaves it zero when the response gives no
+	// lifetime.
 	ExpiresAt int64 `json:"expiresAt,omitempty"`
 	// ExpiresIn is the access token lifetime the token endpoint reported, in
-	// seconds.
-	ExpiresIn           int64  `json:"expiresIn,omitempty"`
-	Audience            string `json:"audience,omitempty"`
-	Prompt              string `json:"prompt,omitempty"`
-	CodeVerifier        string `json:"codeVerifier,omitempty"`
+	// seconds. ADK sets it with AccessToken.
+	ExpiresIn int64 `json:"expiresIn,omitempty"`
+	// Audience is the audience parameter ADK adds to the authorization URI it
+	// generates, for providers that need one.
+	Audience string `json:"audience,omitempty"`
+	// Prompt is the prompt parameter of the authorization URI ADK generates.
+	// Empty means consent.
+	Prompt string `json:"prompt,omitempty"`
+	// CodeVerifier is the PKCE code verifier. When ADK generates AuthURI with
+	// PKCE, it uses this one, or generates one when it is empty, and it sends
+	// it to the token endpoint with the code. When the client's answer has
+	// none, ADK takes the one of the request it sent.
+	CodeVerifier string `json:"codeVerifier,omitempty"`
+	// CodeChallengeMethod is the PKCE code challenge method. Only S256 is
+	// supported. When it is empty, ADK uses PKCE with S256 for a client with
+	// no ClientSecret, sets this field to S256, and uses no PKCE for a client
+	// with a secret.
 	CodeChallengeMethod string `json:"codeChallengeMethod,omitempty"`
 	// TokenEndpointAuthMethod is how the client authenticates to the token
 	// endpoint: client_secret_basic, client_secret_post, client_secret_jwt or
@@ -166,17 +230,31 @@ func (o OAuth2Auth) MarshalJSON() ([]byte, error) {
 // Python requires them all.
 type ServiceAccountCredential struct {
 	// Type is "service_account" in a key file.
-	Type                    string `json:"type"`
-	ProjectID               string `json:"projectId"`
-	PrivateKeyID            string `json:"privateKeyId"`
-	PrivateKey              string `json:"privateKey"`
-	ClientEmail             string `json:"clientEmail"`
-	ClientID                string `json:"clientId"`
-	AuthURI                 string `json:"authUri"`
-	TokenURI                string `json:"tokenUri"`
+	Type string `json:"type"`
+	// ProjectID is the project_id of the key file.
+	ProjectID string `json:"projectId"`
+	// PrivateKeyID is the private_key_id of the key file.
+	// [Config.WithoutSecrets] removes it.
+	PrivateKeyID string `json:"privateKeyId"`
+	// PrivateKey is the private_key of the key file, in PEM.
+	// [Config.WithoutSecrets] removes it.
+	PrivateKey string `json:"privateKey"`
+	// ClientEmail is the client_email of the key file, the service account's
+	// email address.
+	ClientEmail string `json:"clientEmail"`
+	// ClientID is the client_id of the key file.
+	ClientID string `json:"clientId"`
+	// AuthURI is the auth_uri of the key file.
+	AuthURI string `json:"authUri"`
+	// TokenURI is the token_uri of the key file.
+	TokenURI string `json:"tokenUri"`
+	// AuthProviderX509CertURL is the auth_provider_x509_cert_url of the key
+	// file.
 	AuthProviderX509CertURL string `json:"authProviderX509CertUrl"`
-	ClientX509CertURL       string `json:"clientX509CertUrl"`
-	UniverseDomain          string `json:"universeDomain"`
+	// ClientX509CertURL is the client_x509_cert_url of the key file.
+	ClientX509CertURL string `json:"clientX509CertUrl"`
+	// UniverseDomain is the universe_domain of the key file.
+	UniverseDomain string `json:"universeDomain"`
 	// Extra holds JSON keys that match no field. See [Credential.Extra].
 	Extra map[string]any `json:"-"`
 }
@@ -275,14 +353,22 @@ func (s ServiceAccount) MarshalJSON() ([]byte, error) {
 // one is, as in adk-python. [OAuth2Auth.MarshalJSON] describes the other
 // exception.
 type Credential struct {
+	// AuthType is the kind of credential, and says which field below holds
+	// it. It is required.
 	AuthType CredentialType `json:"authType"`
 	// ResourceRef names a resource that holds the credential. adk-python
 	// reserves it for future use.
-	ResourceRef    string          `json:"resourceRef,omitempty"`
-	APIKey         string          `json:"apiKey,omitempty"`
-	HTTP           *HTTPAuth       `json:"http,omitempty"`
+	ResourceRef string `json:"resourceRef,omitempty"`
+	// APIKey is the key of a [CredentialTypeAPIKey] credential.
+	// [Config.WithoutSecrets] removes it.
+	APIKey string `json:"apiKey,omitempty"`
+	// HTTP holds a [CredentialTypeHTTP] credential.
+	HTTP *HTTPAuth `json:"http,omitempty"`
+	// ServiceAccount holds a [CredentialTypeServiceAccount] credential.
 	ServiceAccount *ServiceAccount `json:"serviceAccount,omitempty"`
-	OAuth2         *OAuth2Auth     `json:"oauth2,omitempty"`
+	// OAuth2 holds a [CredentialTypeOAuth2] or [CredentialTypeOpenIDConnect]
+	// credential, and the state of the flow that obtains it.
+	OAuth2 *OAuth2Auth `json:"oauth2,omitempty"`
 	// Extra holds the JSON keys that match no field, under the names they
 	// arrived with. They are written back after the fields, in sorted order, so
 	// a credential passing through Go keeps keys that only adk-python, a client
@@ -323,4 +409,25 @@ func (c *Credential) UnmarshalJSON(data []byte) error {
 func (c Credential) MarshalJSON() ([]byte, error) {
 	type plain Credential
 	return encodeModel(plain(c), c.Extra)
+}
+
+// Clone returns a copy of c that a caller can change without changing c, or
+// nil when c is nil. Every struct, slice and map it reaches is copied,
+// HTTP.AdditionalHeaders included. Values in an Extra map are copied deeply
+// when they are JSON objects or arrays as encoding/json decodes them,
+// map[string]any and []any; any other value is shared with c. A nil map or
+// slice stays nil, so the copy equals c under [reflect.DeepEqual].
+//
+// Clone only reads c: it may run concurrently with other reads of c, but not
+// with a change to it.
+func (c *Credential) Clone() *Credential {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	out.HTTP = c.HTTP.clone()
+	out.OAuth2 = c.OAuth2.clone()
+	out.ServiceAccount = c.ServiceAccount.clone()
+	out.Extra = cloneExtra(c.Extra)
+	return &out
 }

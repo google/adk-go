@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolutils"
 )
 
@@ -131,6 +132,43 @@ type Toolset interface {
 	Tools(ctx agent.ReadonlyContext) ([]Tool, error)
 }
 
+// AuthenticatedToolset is implemented by a Toolset that needs a credential
+// before it can list its tools, such as one whose server refuses to list
+// tools to an unauthenticated client.
+//
+// Before every model call of an LLM agent, ADK asks each of the agent's
+// toolsets that implements AuthenticatedToolset for its config. For a non-nil
+// config it gets the credential the config describes: from the config itself
+// (an API key or HTTP credential), the runner's credential service, the
+// user's answer to an earlier request, or an OAuth2 client-credentials grant.
+// The toolset reads that credential with agent.ResolvedCredential under the
+// config's key (toolauth.Config.Key) when it lists or runs its tools. ADK
+// never writes to the config, so its ExchangedAuthCredential stays as the
+// toolset set it.
+//
+// When no credential is ready, ADK asks the client for one, in an
+// adk_request_credential call made before the model is called, whose
+// functionCallId is "_adk_toolset_auth_" followed by the toolset's Name, and
+// ends the invocation without calling the model. Toolsets that share a Name
+// share one call, which carries the config of the last of them; toolsets that
+// share a credential key share one call, the first one's. When the user
+// answers in a new message, the next model call finds the credential.
+//
+// On most steps no toolset lists its tools before that request. A step that
+// first reruns a call, because the user answered a credential request or a
+// confirmation, lists the toolsets for the rerun before it makes the request,
+// so Tools can run while agent.ResolvedCredential returns nil for the
+// config's key. Tools must handle a nil credential. A toolset whose Tools
+// returns an error then offers no tools to the rerun, and the step goes on.
+//
+// AuthConfig returns nil when the toolset needs no credential. It must be safe
+// for concurrent use, and the toolset must not change a config after
+// returning it.
+type AuthenticatedToolset interface {
+	Toolset
+	AuthConfig() *toolauth.Config
+}
+
 // Predicate is a function which decides whether a tool should be exposed to LLM.
 type Predicate func(ctx agent.ReadonlyContext, tool Tool) bool
 
@@ -157,7 +195,8 @@ func AllowedToolsPredicate(allowedTools []string) Predicate {
 // that implements [io.Closer]. When toolset has a request hook, a
 // ProcessRequest(agent.Context, *model.LLMRequest) error method, the returned
 // toolset has one that calls it, so filtering keeps the toolset's own request
-// processing.
+// processing. The returned toolset is an [AuthenticatedToolset] whose
+// AuthConfig returns what toolset's does, and nil when toolset is not one.
 func FilterToolset(toolset Toolset, predicate Predicate) Toolset {
 	if toolset == nil {
 		panic("toolset must not be nil")
@@ -199,6 +238,8 @@ func (f *filteredToolset) Close() error { return utils.CloseIfCloser(f.toolset) 
 
 func (f *filteredToolset) Unwrap() Toolset { return f.toolset }
 
+func (f *filteredToolset) AuthConfig() *toolauth.Config { return toolsetAuthConfig(f.toolset) }
+
 func (f *filteredToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return processToolsetRequest(f.toolset, ctx, req)
 }
@@ -213,6 +254,17 @@ func processToolsetRequest(ts Toolset, ctx agent.Context, req *model.LLMRequest)
 		return nil
 	}
 	return rp.ProcessRequest(ctx, req)
+}
+
+// toolsetAuthConfig returns what ts's AuthConfig returns, and nil when ts is
+// not an AuthenticatedToolset. A toolset wrapper forwards its own AuthConfig
+// here, so wrapping a toolset keeps its authentication.
+func toolsetAuthConfig(ts Toolset) *toolauth.Config {
+	a, ok := ts.(AuthenticatedToolset)
+	if !ok {
+		return nil
+	}
+	return a.AuthConfig()
 }
 
 // defersResponse reports what t's DefersResponse answers, and false when t has
@@ -286,7 +338,9 @@ type ConfirmationProvider func(toolName string, toolInput any) bool
 // The returned toolset's request hook calls the request hook of ts, when ts has
 // one. A wrapped tool keeps the DefersResponse,
 // DisplayResultOnSkipSummarization, ResponseScheduling and RunsSequentially
-// answers of the tool it wraps.
+// answers of the tool it wraps. The returned toolset is an
+// [AuthenticatedToolset] whose AuthConfig returns what ts's does, and nil when
+// ts is not one.
 //
 // EXPERIMENTAL: WithConfirmation is experimental and not currently in scope for the v1.0 API.
 func WithConfirmation(ts Toolset, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) Toolset {
@@ -308,6 +362,8 @@ func (c *confirmationToolset) Name() string { return c.toolset.Name() }
 func (c *confirmationToolset) Close() error { return utils.CloseIfCloser(c.toolset) }
 
 func (c *confirmationToolset) Unwrap() Toolset { return c.toolset }
+
+func (c *confirmationToolset) AuthConfig() *toolauth.Config { return toolsetAuthConfig(c.toolset) }
 
 func (c *confirmationToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	return processToolsetRequest(c.toolset, ctx, req)
