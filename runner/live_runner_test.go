@@ -977,7 +977,7 @@ func TestRunner_RunLive_BufferedEventExits(t *testing.T) {
 			}
 			saved := getRunLiveTestEvents(t, service, sessionID)
 			var savedIDs []string
-			for i := 0; i < saved.Len(); i++ {
+			for i := range saved.Len() {
 				event := saved.At(i)
 				savedIDs = append(savedIDs, event.ID)
 				if !event.Timestamp.Equal(timestamps[event.ID]) {

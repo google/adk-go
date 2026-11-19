@@ -53,3 +53,23 @@ func TestFormatArgsTruncatesByCharacter(t *testing.T) {
 		t.Errorf("formatArgs() = %q, want %q", got, want)
 	}
 }
+
+func TestFormatContentSkipsNilParts(t *testing.T) {
+	p := &loggingPlugin{}
+	for _, tc := range []struct {
+		name  string
+		parts []*genai.Part
+		want  string
+	}{
+		{"nil_before_text", []*genai.Part{nil, {Text: "THY"}}, "text: 'THY'"},
+		{"only_nil", []*genai.Part{nil}, "None"},
+		{"no_parts", []*genai.Part{}, "None"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := &genai.Content{Parts: tc.parts}
+			if got := p.formatContent(content, 100); got != tc.want {
+				t.Errorf("formatContent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -52,7 +52,7 @@ func TestBuildParams_Text(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildParams() err = %v", err)
 	}
-	if got, want := string(params.Model), "gpt-4o-mini"; got != want {
+	if got, want := params.Model, "gpt-4o-mini"; got != want {
 		t.Fatalf("Model mismatch got=%q want=%q", got, want)
 	}
 	items := params.Input.OfInputItemList
@@ -1641,7 +1641,7 @@ func TestApplyGenerationConfig(t *testing.T) {
 				Temperature:     param.NewOpt(float64(float32(temp))),
 				TopP:            param.NewOpt(float64(float32(topP))),
 				MaxOutputTokens: param.NewOpt(int64(100)),
-				TopLogprobs:     param.NewOpt(int64(int32(logprobs))),
+				TopLogprobs:     param.NewOpt(int64(logprobs)),
 				Include:         []oairesponses.ResponseIncludable{oairesponses.ResponseIncludableMessageOutputTextLogprobs},
 				Instructions:    param.NewOpt("sys"),
 				Text: oairesponses.ResponseTextConfigParam{

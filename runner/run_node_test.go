@@ -1503,7 +1503,7 @@ var errNodeBoom = errors.New("node failure")
 // whose content carries the given text.
 func sessionHasUserText(sess session.Session, want string) bool {
 	events := sess.Events()
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		ev := events.At(i)
 		if ev == nil || ev.Author != "user" || ev.LLMResponse.Content == nil {
 			continue
@@ -1521,7 +1521,7 @@ func sessionHasUserText(sess session.Session, want string) bool {
 func sessionOutputs(sess session.Session) []any {
 	var outs []any
 	events := sess.Events()
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		ev := events.At(i)
 		if ev != nil && ev.Output != nil {
 			outs = append(outs, ev.Output)
