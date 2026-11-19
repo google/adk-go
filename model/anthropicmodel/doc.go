@@ -33,12 +33,12 @@
 // overridden per request by [genai.GenerateContentConfig.MaxOutputTokens].
 //
 //	// First-party Anthropic API (uses ANTHROPIC_API_KEY when APIKey is empty):
-//	llm, err := anthropicmodel.NewModel(ctx, "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+//	llm, err := anthropicmodel.NewModel(ctx, "claude-sonnet-5-5", anthropicmodel.ClientConfig{
 //		Backend: anthropicmodel.BackendAnthropic,
 //	})
 //
 //	// Claude on Vertex AI (uses GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION, and ADC):
-//	llm, err := anthropicmodel.NewModel(ctx, "claude-sonnet-4-5@20250929", anthropicmodel.ClientConfig{
+//	llm, err := anthropicmodel.NewModel(ctx, "claude-sonnet-5-5", anthropicmodel.ClientConfig{
 //		Backend: anthropicmodel.BackendVertex,
 //	})
 //

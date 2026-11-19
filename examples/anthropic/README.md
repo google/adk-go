@@ -11,7 +11,7 @@ Runs a non-interactive ADK `llmagent` backed by **Anthropic Claude** using `goog
 Show that an ADK agent can combine multimodal image input and function tool calling on Claude across both serving backends without changing agent, tool, or runner code:
 
 ```go
-llm, err := anthropicmodel.NewModel(ctx, "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+llm, err := anthropicmodel.NewModel(ctx, "claude-sonnet-5-5", anthropicmodel.ClientConfig{
     Backend:  anthropicmodel.BackendVertex,
     Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
     Location: os.Getenv("GOOGLE_CLOUD_LOCATION"),
@@ -54,7 +54,7 @@ sequenceDiagram
 ```
 
 1. `resolveClientConfig` selects `BackendVertex` when `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` are set (or `ANTHROPIC_BACKEND=vertex`), or `BackendAnthropic` when `ANTHROPIC_API_KEY` is set (or `ANTHROPIC_BACKEND=anthropic`).
-2. `anthropicmodel.NewModel` creates the `model.LLM` instance for `claude-sonnet-4-5-20250929`.
+2. `anthropicmodel.NewModel` creates the `model.LLM` instance for `claude-sonnet-5-5`.
 3. `functiontool.New` wraps `getPaletteInfo` as the `get_palette_info` tool.
 4. `runner.Runner.Run` sends the embedded 1x1 blue PNG image (`genai.NewPartFromBytes`) alongside the question, executes the `get_palette_info` tool call requested by Claude, and prints the final answer.
 
@@ -64,7 +64,7 @@ Against **Claude on Vertex AI**:
 
 ```bash
 export GOOGLE_CLOUD_PROJECT=my-project
-export GOOGLE_CLOUD_LOCATION=us-east5
+export GOOGLE_CLOUD_LOCATION=us
 go run ./examples/anthropic
 ```
 
@@ -78,18 +78,18 @@ go run ./examples/anthropic
 | Variable | Required | Meaning |
 |---|---|---|
 | `GOOGLE_CLOUD_PROJECT` | Yes (for Vertex AI) | Google Cloud project ID used by `BackendVertex`. |
-| `GOOGLE_CLOUD_LOCATION` | Yes (for Vertex AI) | Vertex AI region serving Claude (for example, `us-east5` or `global`). |
+| `GOOGLE_CLOUD_LOCATION` | Yes (for Vertex AI) | Vertex AI region serving Claude (for example, `us` or `global`). |
 | `ANTHROPIC_API_KEY` | Yes (for Anthropic API) | Anthropic API key used by `BackendAnthropic`. |
 | `ANTHROPIC_BACKEND` | No | Explicitly selects `"vertex"` or `"anthropic"` when both credential sets are present in the environment. |
-| `ANTHROPIC_MODEL` | No | Overrides the Claude model ID (defaults to `claude-sonnet-4-5-20250929`). |
+| `ANTHROPIC_MODEL` | No | Overrides the Claude model ID (defaults to `claude-sonnet-5-5`). |
 
 ## Example session
 
-Output from running the sample with `claude-sonnet-4-5-20250929` (the final sentence wording varies slightly across runs):
+Output from running the sample with `claude-sonnet-5-5` (the final sentence wording varies slightly across runs):
 
 ```text
 $ go run ./examples/anthropic
-Backend: vertex (claude-sonnet-4-5-20250929)
+Backend: vertex (claude-sonnet-5-5)
 User -> [inline image/png, 73 bytes] What color is the attached image? Use get_palette_info to report its hex code and color family.
 Tool Call -> get_palette_info(map[color:blue])
 Tool Result -> get_palette_info: map[color:blue family:cool primary hex_code:#0055FF]
@@ -98,5 +98,5 @@ Agent -> The attached image is blue. According to `get_palette_info`, its canoni
 
 ## Notes
 
-- **Use a versioned model ID on Vertex AI.** Vertex AI does not serve `-latest` aliases, so always pass an explicit versioned ID such as `claude-sonnet-4-5-20250929` (or a full `projects/<project>/locations/<location>/publishers/anthropic/models/<model>` resource name).
+- **Use a pinned model ID on Vertex AI.** Vertex AI does not serve `-latest` aliases, so always pass an explicit versioned ID such as `claude-sonnet-5-5` (or a full `projects/<project>/locations/<location>/publishers/anthropic/models/<model>` resource name).
 - **Image URLs require `BackendAnthropic`.** Claude on Vertex AI accepts inline image and PDF bytes (`genai.NewPartFromBytes`), whereas `https://` image and PDF URLs (`genai.NewPartFromURI`) are supported only on `BackendAnthropic`.

@@ -37,9 +37,9 @@ import (
 	"google.golang.org/adk/v2/tool/functiontool"
 )
 
-// defaultModel is a versioned Claude model ID served on both Vertex AI and the
+// defaultModel is a versioned pinned Claude model ID served on both Vertex AI and the
 // first-party Anthropic API. Vertex AI does not serve -latest aliases.
-const defaultModel = "claude-sonnet-4-5-20250929"
+const defaultModel = "claude-sonnet-5-5"
 
 // sampleBluePNG is a 1x1 solid blue PNG image embedded directly so the sample
 // runs without external asset files.
