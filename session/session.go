@@ -181,8 +181,9 @@ type NodeInfo struct {
 }
 
 // Name returns the node's name: the last segment of n.Path with its
-// "@<run id>" suffix removed. A segment is split at its last "@". It returns
-// "" when n is nil or n.Path is empty.
+// "@<run id>" suffix removed. A segment is split at its last "@", so an
+// unsuffixed root-agent path whose agent name contains "@" is split there too.
+// It returns "" when n is nil or n.Path is empty.
 func (n *NodeInfo) Name() string {
 	if n == nil {
 		return ""
