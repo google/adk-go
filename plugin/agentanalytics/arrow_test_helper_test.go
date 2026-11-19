@@ -291,9 +291,10 @@ func checkJSONAt(t *testing.T, obj map[string]any, want string, path ...string) 
 
 // recordingLogger is a Logger that keeps what is logged.
 type recordingLogger struct {
-	mu     sync.Mutex
-	lines  []string
-	notify chan struct{}
+	mu      sync.Mutex
+	lines   []string
+	rawArgs [][]any
+	notify  chan struct{}
 }
 
 func (l *recordingLogger) broadcastLocked() {
@@ -307,6 +308,7 @@ func (l *recordingLogger) Printf(format string, v ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lines = append(l.lines, fmt.Sprintf(format, v...))
+	l.rawArgs = append(l.rawArgs, slices.Clone(v))
 	l.broadcastLocked()
 }
 
@@ -314,7 +316,18 @@ func (l *recordingLogger) Println(v ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lines = append(l.lines, fmt.Sprintln(v...))
+	l.rawArgs = append(l.rawArgs, slices.Clone(v))
 	l.broadcastLocked()
+}
+
+func (l *recordingLogger) argsSnapshot() [][]any {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([][]any, len(l.rawArgs))
+	for i, args := range l.rawArgs {
+		out[i] = slices.Clone(args)
+	}
+	return out
 }
 
 func (l *recordingLogger) contains(substr string) bool {

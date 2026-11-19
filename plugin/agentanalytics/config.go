@@ -175,9 +175,10 @@ type ToolResultVerdict struct {
 // called concurrently for parallel tool calls. A classifier that panics, or
 // that returns a Decision that is not one of the defined decisions, is skipped
 // for that call: the call is recorded as it is without a classifier, and the
-// warning logged to Config.Logger names only the tool. [Config] describes the
-// rule that adk-python applies before its tool_result_classifier and this
-// plugin does not.
+// warning logged to Config.Logger reports only the panic type or unusable
+// decision, omitting the tool name and result. [Config] describes the rule
+// that adk-python applies before its tool_result_classifier and this plugin
+// does not.
 type ToolResultClassifier func(ctx agent.Context, t tool.Tool, args, result map[string]any) ToolResultVerdict
 
 // DropStats reports cumulative event-drop and formatter-failure counts across
@@ -332,20 +333,29 @@ type GCSContentOffloader interface {
 // applies a rule of its own before its classifier that this plugin does not
 // have, so the same classifier can record a different row here: adk-python
 // records an answer of its ReflectAndRetryToolPlugin as a tool error before
-// the classifier runs. Here, when a plugin/retryandreflect plugin that is
-// registered before this one answers a tool error, the answer reaches
-// ToolResultClassifier like any other result, and it is recorded as
-// TOOL_COMPLETED when the classifier is nil, fails, or returns ToolResultOK or
-// ToolResultAbstain, so a classifier ported from adk-python must return
-// ToolResultError for it itself to keep it recorded as TOOL_ERROR.
+// the classifier runs. Here, when a plugin/retryandreflect plugin registered
+// before this one answers an error from a function tool that ran, the answer
+// reaches ToolResultClassifier in AfterToolCallback like any other result (for
+// a missing tool or a non-function tool answered by retryandreflect in
+// OnToolErrorCallback, ADK skips AfterToolCallback so the classifier does not
+// run). For a function tool that ran, that retryandreflect answer is recorded
+// as TOOL_COMPLETED when the classifier is nil, fails, or returns ToolResultOK
+// or ToolResultAbstain, while a top-level boolean "isError" or "is_error"
+// result is recorded as TOOL_ERROR when the classifier is nil, fails, or
+// returns ToolResultAbstain; a classifier ported from adk-python must
+// therefore return ToolResultError for retryandreflect answers itself to keep
+// them recorded as TOOL_ERROR.
 //
 // OnSchemaReady and OnSchemaError map to adk-python's on_schema_ready and
 // on_schema_error. adk-python runs its table readiness pass, which creates the
 // views too, lazily on the first event and again on later events after a
 // failure, so its two schema callbacks can be called several times; this
-// plugin reads, creates or upgrades the table once, in the constructor, which
-// fails on a table error, and creates the views in the background, so each
-// callback is called at most once per plugin.
+// plugin reads, creates, validates, or upgrades the table once, in the
+// constructor (calling OnSchemaError and returning the error on a table
+// failure), and creates the views in the background when enabled (where a
+// failed startup view logs a warning and returns without calling either
+// callback, while [BigQueryAgentAnalyticsPlugin.SyncViews] returns view errors
+// directly), so each callback is called at most once per plugin.
 //
 // Use [DefaultConfig] or set LogMultiModalContent: true to enable
 // content_parts (DisableMultiModalContent overrides it). Session metadata
@@ -566,34 +576,40 @@ type Config struct {
 
 	// OnSchemaReady, if set, is called once the plugin's startup pass over the
 	// BigQuery schema has succeeded: the events table was read, created or
-	// upgraded during construction and, unless DisableCreateViews is set, the
-	// startup view creation pass has created every view (see
-	// DisableCreateViews). It is called at most once per plugin: when
-	// DisableCreateViews is set, synchronously from the constructor before it
-	// returns; otherwise from the background view creation goroutine, so keep
-	// it fast and non-blocking, and expect it on another goroutine. It must
-	// not call Close or SyncViews on the plugin, nor wait for anything that
-	// does, since both wait for the callback to return first. A callback that
-	// never returns therefore keeps Close from returning, and Close drains
-	// the queued rows only after it has waited. It is not called when a view
-	// fails, when the startup view pass is preempted by
-	// [BigQueryAgentAnalyticsPlugin.SyncViews] or ended by closing the plugin,
-	// when the view definitions are invalid, when the plugin is disabled, or
-	// when the plugin was built with [NewBigQueryAgentAnalyticsPluginWithClients]
-	// and bqClient == nil, since no pass runs then; a SyncViews call of its
-	// own never calls it either. A panic in the callback is recovered and
-	// logged (through Config.Logger when called from the constructor, and only
-	// through a non-default Logger when called from the background pass, as
-	// view failures are).
+	// upgraded during construction and, when startup view creation is enabled
+	// (DisableCreateViews is false or CreateEvalViews is true), the startup view
+	// creation pass has created every enabled view (see DisableCreateViews and
+	// CreateEvalViews). When DisableCreateViews is set and CreateEvalViews is
+	// false, view definitions are not validated at startup and OnSchemaReady is
+	// called synchronously from the constructor once table setup succeeds;
+	// otherwise it is called from the background view creation goroutine, at
+	// most once per plugin, so keep it fast and non-blocking, and expect it on
+	// another goroutine. It must not call Close, SyncViews, or SyncEvalViews on
+	// the plugin, nor wait for anything that does, since they wait for the
+	// callback to return first. A callback that never returns therefore keeps
+	// Close from returning, and Close drains the queued rows only after it has
+	// waited. It is not called when a startup view fails (which logs a warning
+	// and returns without calling OnSchemaError either), when the startup view
+	// pass is preempted by [BigQueryAgentAnalyticsPlugin.SyncViews] or
+	// [BigQueryAgentAnalyticsPlugin.SyncEvalViews] or ended by closing the
+	// plugin, when an enabled view group fails definition or configuration
+	// validation, when the plugin is disabled, or when the plugin was built with
+	// [NewBigQueryAgentAnalyticsPluginWithClients] and bqClient == nil, since no
+	// pass runs then; a SyncViews or SyncEvalViews call of its own never calls
+	// it either. A panic in the callback is recovered and logged (through
+	// Config.Logger when called from the constructor, and only through a
+	// non-default Logger when called from the background pass, as view failures
+	// are).
 	OnSchemaReady func()
 
 	// OnSchemaError, if set, is called with the error when the startup pass
-	// fails to read, create or upgrade the events table, right before the
-	// constructor returns that error. It is called at most once per
+	// fails to read, create, validate, or upgrade the events table, right
+	// before the constructor returns that error. It is called at most once per
 	// constructor call, synchronously from the constructor, and never for a
-	// view that fails to be created, which is logged instead and retried by
-	// SyncViews, nor when the plugin is disabled or was built with bqClient ==
-	// nil. A panic in the callback is recovered and logged through
+	// startup view that fails to be created (which logs a warning and returns
+	// without calling OnSchemaReady or OnSchemaError; SyncViews returns view
+	// errors directly), nor when the plugin is disabled or was built with
+	// bqClient == nil. A panic in the callback is recovered and logged through
 	// Config.Logger, and the constructor still returns the error.
 	OnSchemaError func(err error)
 

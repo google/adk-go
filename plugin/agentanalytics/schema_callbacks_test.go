@@ -36,6 +36,8 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 	"google.golang.org/genai"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
@@ -70,13 +72,16 @@ func TestNotifySchemaCallbacks(t *testing.T) {
 		}
 	})
 
-	t.Run("a panic is recovered and logged by type only", func(t *testing.T) {
+	t.Run("a panic is recovered and logged by pre-formatted type string only", func(t *testing.T) {
 		const secret = "panic-secret-19ab"
+		type secretPanic struct {
+			token string
+		}
 		logger := &recordingLogger{}
-		notifySchemaReady(func() { panic(secret) }, logger.Printf)
+		notifySchemaReady(func() { panic(secretPanic{token: secret}) }, logger.Printf)
 		notifySchemaError(func(error) { panic(fmt.Errorf("wrapped %s: %w", secret, errors.New("cause"))) }, errors.New("boom"), logger.Printf)
 		for _, want := range []string{
-			"agentanalytics: OnSchemaReady callback failed: recovered panic of type string",
+			"agentanalytics: OnSchemaReady callback failed: recovered panic of type agentanalytics.secretPanic",
 			"agentanalytics: OnSchemaError callback failed: recovered panic of type *fmt.wrapError",
 		} {
 			if !logger.contains(want) {
@@ -85,6 +90,17 @@ func TestNotifySchemaCallbacks(t *testing.T) {
 		}
 		if logger.contains(secret) {
 			t.Errorf("the log leaks the panic value:\n%s", logger)
+		}
+		gotArgs := logger.argsSnapshot()
+		if len(gotArgs) != 2 {
+			t.Fatalf("recorded %d log calls, want 2", len(gotArgs))
+		}
+		for i, callArgs := range gotArgs {
+			for j, arg := range callArgs {
+				if _, isString := arg.(string); !isString {
+					t.Errorf("log call %d arg %d has raw type %T (%v), want pre-formatted string", i, j, arg, arg)
+				}
+			}
 		}
 	})
 
@@ -169,8 +185,10 @@ func (r *schemaCallbackRecorder) waitReady(n int32, d time.Duration) bool {
 // unless jobHook, if set, returns a response or an error for one.
 type tableTransport struct {
 	t           *testing.T
+	tableName   string
 	getStatuses []int
 	legacy      bool
+	tableType   string
 	postStatus  int
 	patchStatus int
 	jobHook     func(r *http.Request) (*http.Response, error)
@@ -188,7 +206,11 @@ func (tr *tableTransport) apiError(status int) *http.Response {
 }
 
 func (tr *tableTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	const tablePath = "/datasets/test_dataset/tables/test-table"
+	tableName := tr.tableName
+	if tableName == "" {
+		tableName = "test-table"
+	}
+	tablePath := "/datasets/test_dataset/tables/" + tableName
 	switch {
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, tablePath):
 		n := int(tr.gets.Add(1))
@@ -215,7 +237,11 @@ func (tr *tableTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		if err != nil {
 			tr.t.Errorf("ToJSONFields: %v", err)
 		}
-		return tr.respond(http.StatusOK, fmt.Sprintf(`{"etag":"etag-1","schema":{"fields":%s}}`, fields)), nil
+		typeField := ""
+		if tr.tableType != "" {
+			typeField = fmt.Sprintf(`"type":%q,`, tr.tableType)
+		}
+		return tr.respond(http.StatusOK, fmt.Sprintf(`{%s"etag":"etag-1","schema":{"fields":%s}}`, typeField, fields)), nil
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/datasets/test_dataset/tables"):
 		tr.posts.Add(1)
 		if tr.postStatus != 0 && tr.postStatus != http.StatusOK {
@@ -394,6 +420,88 @@ func TestPlugin_OnSchemaReady_TablePass(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("DisableCreateViews fires OnSchemaReady once table passes without validating view definitions while still rejecting invalid ViewPrefix", func(t *testing.T) {
+		transport := &tableTransport{t: t, tableName: "v_llm_request"}
+		rec := newSchemaCallbackRecorder()
+		logger := &recordingLogger{}
+		var collidingCfg Config
+		p, err := newSchemaCallbackPlugin(t, transport, rec, func(c *Config) {
+			c.DisableCreateViews = true
+			c.TableName = "v_llm_request"
+			c.Logger = logger
+			collidingCfg = *c
+		})
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		if _, vdErr := collidingCfg.ViewDefinitions(); vdErr == nil {
+			t.Fatal("ViewDefinitions() = nil for colliding TableName v_llm_request, want error")
+		}
+		if got := rec.ready.Load(); got != 1 {
+			t.Errorf("OnSchemaReady called %d times, want 1", got)
+		}
+		if errs := rec.errors(); len(errs) != 0 {
+			t.Errorf("OnSchemaError called with %v, want no calls", errs)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+
+		// Invalid ViewPrefix remains rejected at construction even when DisableCreateViews is true.
+		badPrefixRec := newSchemaCallbackRecorder()
+		if badPlugin, badErr := newSchemaCallbackPlugin(t, &tableTransport{t: t}, badPrefixRec, func(c *Config) {
+			c.DisableCreateViews = true
+			c.ViewPrefix = "bad!prefix"
+		}); badErr == nil || !strings.Contains(badErr.Error(), "invalid ViewPrefix") {
+			if badPlugin != nil {
+				_ = badPlugin.Close()
+			}
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients(bad ViewPrefix) = (%v, %v), want invalid ViewPrefix error", badPlugin, badErr)
+		}
+	})
+
+	t.Run("CreateEvalViews with DisableCreateViews fires OnSchemaReady after eval views succeed and withholds it if per-event views fail validation", func(t *testing.T) {
+		transport := &tableTransport{t: t}
+		rec := newSchemaCallbackRecorder()
+		p, err := newSchemaCallbackPlugin(t, transport, rec, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = true
+		})
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		if !rec.waitReady(1, 5*time.Second) {
+			t.Fatalf("OnSchemaReady called %d times with CreateEvalViews, want 1", rec.ready.Load())
+		}
+		if got := transport.jobs.Load(); got != 2 {
+			t.Errorf("eval view DDL jobs = %d, want 2", got)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+
+		// When per-event views are also enabled and fail ViewDefinitions (TableName == "v_llm_request"),
+		// eval views still run but OnSchemaReady must not fire because the requested schema views are incomplete.
+		partialTransport := &tableTransport{t: t, tableName: "v_llm_request"}
+		partialRec := newSchemaCallbackRecorder()
+		partialLogger := &recordingLogger{}
+		partialPlugin, err := newSchemaCallbackPlugin(t, partialTransport, partialRec, func(c *Config) {
+			c.TableName = "v_llm_request"
+			c.CreateEvalViews = true
+			c.Logger = partialLogger
+		})
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients(partial) error = %v", err)
+		}
+		waitAsyncViewPass(t, partialPlugin)
+		if got := partialRec.ready.Load(); got != 0 {
+			t.Errorf("OnSchemaReady called %d times when per-event view validation failed, want 0", got)
+		}
+		if err := partialPlugin.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	})
 }
 
 func TestPlugin_OnSchemaError(t *testing.T) {
@@ -450,6 +558,93 @@ func TestPlugin_OnSchemaError(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a non-regular destination object triggers OnSchemaError instead of OnSchemaReady", func(t *testing.T) {
+		for _, objectType := range []string{"VIEW", "MATERIALIZED_VIEW", "EXTERNAL", "SNAPSHOT"} {
+			for _, disableUpgrade := range []bool{false, true} {
+				name := objectType + "/upgrade_enabled"
+				if disableUpgrade {
+					name = objectType + "/upgrade_disabled"
+				}
+				t.Run(name, func(t *testing.T) {
+					transport := &tableTransport{t: t, tableType: objectType}
+					rec := newSchemaCallbackRecorder()
+					p, err := newSchemaCallbackPlugin(t, transport, rec, func(c *Config) {
+						c.DisableSchemaUpgrade = disableUpgrade
+						c.DisableCreateViews = true
+					})
+					wantErr := fmt.Sprintf("BigQuery destination test-table has type %s, want TABLE", objectType)
+					if p != nil || err == nil || !strings.Contains(err.Error(), wantErr) {
+						t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() = %v, %v; want nil and an error containing %q", p, err, wantErr)
+					}
+					errs := rec.errors()
+					if len(errs) != 1 || errs[0] != err {
+						t.Fatalf("OnSchemaError errors = %v, want [%v]", errs, err)
+					}
+					if got := rec.ready.Load(); got != 0 {
+						t.Errorf("OnSchemaReady called %d times, want 0", got)
+					}
+					if got := transport.jobs.Load(); got != 0 {
+						t.Errorf("view DDL jobs = %d, want 0", got)
+					}
+				})
+			}
+		}
+	})
+
+	t.Run("DisableSchemaUpgrade conflict on create validates follow-up metadata and routes failures to OnSchemaError", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			getStatuses []int
+			tableType   string
+			wantErr     string
+		}{
+			{
+				name:        "follow_up_404",
+				getStatuses: []int{http.StatusNotFound, http.StatusNotFound},
+				wantErr:     "failed to get BigQuery table test-table metadata",
+			},
+			{
+				name:        "follow_up_view",
+				getStatuses: []int{http.StatusNotFound, http.StatusOK},
+				tableType:   "VIEW",
+				wantErr:     "BigQuery destination test-table has type VIEW, want TABLE",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				transport := &tableTransport{
+					t:           t,
+					getStatuses: tc.getStatuses,
+					postStatus:  http.StatusConflict,
+					tableType:   tc.tableType,
+				}
+				rec := newSchemaCallbackRecorder()
+				p, err := newSchemaCallbackPlugin(t, transport, rec, func(c *Config) {
+					c.DisableSchemaUpgrade = true
+					c.DisableCreateViews = true
+				})
+				if p != nil || err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() = %v, %v; want nil and an error containing %q", p, err, tc.wantErr)
+				}
+				errs := rec.errors()
+				if len(errs) != 1 || errs[0] != err {
+					t.Fatalf("OnSchemaError errors = %v, want [%v]", errs, err)
+				}
+				if got := rec.ready.Load(); got != 0 {
+					t.Errorf("OnSchemaReady called %d times, want 0", got)
+				}
+				if got := transport.gets.Load(); got != 2 {
+					t.Errorf("table metadata requests = %d, want 2", got)
+				}
+				if got := transport.posts.Load(); got != 1 {
+					t.Errorf("table create requests = %d, want 1", got)
+				}
+				if got := transport.jobs.Load(); got != 0 {
+					t.Errorf("view DDL jobs = %d, want 0", got)
+				}
+			})
+		}
+	})
 
 	t.Run("a panic in OnSchemaError is logged and the constructor still fails", func(t *testing.T) {
 		logger := &recordingLogger{}
@@ -771,6 +966,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	})
 
 	t.Run("not called when a retried DDL job gets 409 while the target view returns 404", func(t *testing.T) {
+		shortenConflictVerifyForTest(t, time.Millisecond, 40*time.Millisecond)
 		transport := &tableTransport{t: t}
 		var (
 			mu          sync.Mutex
@@ -846,6 +1042,7 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 	})
 
 	t.Run("not called when a retried DDL job gets 409 while an existing view still has a stale query", func(t *testing.T) {
+		shortenConflictVerifyForTest(t, time.Millisecond, 40*time.Millisecond)
 		transport := &tableTransport{t: t}
 		var (
 			mu         sync.Mutex
@@ -945,6 +1142,207 @@ func TestPlugin_OnSchemaReady_ViewPass(t *testing.T) {
 		waitAsyncViewPass(t, p)
 		if got := rec.ready.Load(); got != 1 {
 			t.Errorf("OnSchemaReady called %d times after view was confirmed in place, want 1", got)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	})
+
+	t.Run("called when a retried DDL job gets 409 while the in-flight DDL job finishes on a retry metadata read", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+		cfg.TableName = "test-table"
+		defs, err := cfg.ViewDefinitions()
+		if err != nil {
+			t.Fatalf("ViewDefinitions() error = %v", err)
+		}
+		var wantSelectBody string
+		for _, def := range defs {
+			if def.Name == "v_llm_request" {
+				_, wantSelectBody, _ = strings.Cut(def.Query, " AS\n")
+				break
+			}
+		}
+		readyJSON, err := json.Marshal(map[string]any{
+			"type": "VIEW",
+			"view": map[string]string{"query": wantSelectBody},
+		})
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+
+		for _, pendingState := range []struct {
+			name        string
+			pendingResp func(tr *tableTransport) *http.Response
+		}{
+			{
+				name: "first_post_409_metadata_read_is_404",
+				pendingResp: func(tr *tableTransport) *http.Response {
+					return tr.apiError(http.StatusNotFound)
+				},
+			},
+			{
+				name: "first_post_409_metadata_read_has_stale_query",
+				pendingResp: func(tr *tableTransport) *http.Response {
+					return tr.respond(http.StatusOK, `{"type":"VIEW","view":{"query":"SELECT 1"}}`)
+				},
+			},
+		} {
+			t.Run(pendingState.name, func(t *testing.T) {
+				transport := &tableTransport{t: t}
+				var (
+					hitConflict       atomic.Bool
+					postConflictReads atomic.Int32
+				)
+				transport.viewHook = func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/datasets/test_dataset/tables/v_llm_request") {
+						if !hitConflict.Load() {
+							return transport.apiError(http.StatusNotFound), nil
+						}
+						if postConflictReads.Add(1) == 1 {
+							return pendingState.pendingResp(transport), nil
+						}
+						return transport.respond(http.StatusOK, string(readyJSON)), nil
+					}
+					return nil, nil
+				}
+				var firstAttempt atomic.Bool
+				transport.jobHook = func(r *http.Request) (*http.Response, error) {
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						return nil, err
+					}
+					if !strings.Contains(string(body), "v_llm_request") {
+						return nil, nil
+					}
+					if firstAttempt.CompareAndSwap(false, true) {
+						return transport.apiError(http.StatusServiceUnavailable), nil
+					}
+					hitConflict.Store(true)
+					return transport.apiError(http.StatusConflict), nil
+				}
+
+				rec := newSchemaCallbackRecorder()
+				p, err := newSchemaCallbackPlugin(t, transport, rec, nil)
+				if err != nil {
+					t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+				}
+				waitAsyncViewPass(t, p)
+				if got := postConflictReads.Load(); got < 2 {
+					t.Errorf("post-409 metadata reads = %d, want >= 2", got)
+				}
+				if got := rec.ready.Load(); got != 1 {
+					t.Errorf("OnSchemaReady called %d times, want 1", got)
+				}
+				bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+				if !ok {
+					t.Fatal("AsBigQueryAgentAnalyticsPlugin(p) = false")
+				}
+				// Re-test via SyncViews with a 1ms initial backoff so SyncViews also exercises the fast retry path.
+				hitConflict.Store(false)
+				postConflictReads.Store(0)
+				firstAttempt.Store(false)
+				if r, ok := bqaap.runner.(bqViewRunner); ok {
+					r.conflictInitialBackoff = time.Millisecond
+					bqaap.viewsMu.Lock()
+					bqaap.runner = r
+					bqaap.viewsMu.Unlock()
+				}
+				if err := bqaap.SyncViews(context.Background()); err != nil {
+					t.Errorf("SyncViews() error = %v, want nil", err)
+				}
+				if err := p.Close(); err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("409 conflict error and logger omit raw response bodies while preserving Unwrap", func(t *testing.T) {
+		const (
+			conflictSecret = "raw-409-secret-payload-xyz"
+			verifySecret   = "raw-403-verify-secret-abc"
+		)
+		transport := &tableTransport{t: t}
+		var hitConflict atomic.Bool
+		transport.viewHook = func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/datasets/test_dataset/tables/v_llm_request") {
+				if !hitConflict.Load() {
+					return transport.apiError(http.StatusNotFound), nil
+				}
+				return transport.respond(http.StatusForbidden, conflictSecret+" "+verifySecret), nil
+			}
+			return nil, nil
+		}
+		var firstAttempt atomic.Bool
+		transport.jobHook = func(r *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				return nil, err
+			}
+			if !strings.Contains(string(body), "v_llm_request") {
+				return nil, nil
+			}
+			if firstAttempt.CompareAndSwap(false, true) {
+				return transport.apiError(http.StatusServiceUnavailable), nil
+			}
+			hitConflict.Store(true)
+			return transport.respond(http.StatusConflict, conflictSecret), nil
+		}
+
+		rec := newSchemaCallbackRecorder()
+		logger := &recordingLogger{}
+		p, err := newSchemaCallbackPlugin(t, transport, rec, func(c *Config) { c.Logger = logger })
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		waitAsyncViewPass(t, p)
+		if logger.contains(conflictSecret) || logger.contains(verifySecret) {
+			t.Errorf("logger leaked raw response body:\n%s", logger)
+		}
+		if !logger.contains("HTTP 409") || !logger.contains("HTTP 403") {
+			t.Errorf("logger lacks structured HTTP status codes; got:\n%s", logger)
+		}
+		for callIdx, callArgs := range logger.argsSnapshot() {
+			for argIdx, arg := range callArgs {
+				if errArg, ok := arg.(error); ok {
+					var gErr *googleapi.Error
+					var cErr *unverifiedViewConflictError
+					if errors.As(errArg, &gErr) || errors.As(errArg, &cErr) {
+						t.Errorf("logger call %d arg %d (%T) unwraps transport error; want pre-formatted sanitized string", callIdx, argIdx, arg)
+					}
+				}
+			}
+		}
+
+		bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+		if !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin(p) = false")
+		}
+		hitConflict.Store(false)
+		firstAttempt.Store(false)
+		syncErr := bqaap.SyncViews(context.Background())
+		if syncErr == nil {
+			t.Fatal("SyncViews() = nil, want error")
+		}
+		if strings.Contains(syncErr.Error(), conflictSecret) || strings.Contains(syncErr.Error(), verifySecret) {
+			t.Errorf("SyncViews() error leaked raw response body: %q", syncErr.Error())
+		}
+		var conflictWrapper *unverifiedViewConflictError
+		if !errors.As(syncErr, &conflictWrapper) {
+			t.Fatalf("SyncViews() error %T does not unwrap *unverifiedViewConflictError", syncErr)
+		}
+		unwrapped := conflictWrapper.Unwrap()
+		if len(unwrapped) != 2 {
+			t.Fatalf("Unwrap() returned %d errors, want 2", len(unwrapped))
+		}
+		var apiErr0, apiErr1 *googleapi.Error
+		if !errors.As(unwrapped[0], &apiErr0) || apiErr0.Code != http.StatusConflict {
+			t.Errorf("Unwrap()[0] = %v, want *googleapi.Error with HTTP 409", unwrapped[0])
+		}
+		if !errors.As(unwrapped[1], &apiErr1) || apiErr1.Code != http.StatusForbidden {
+			t.Errorf("Unwrap()[1] = %v, want *googleapi.Error with HTTP 403", unwrapped[1])
 		}
 		if err := p.Close(); err != nil {
 			t.Fatalf("Close() error = %v", err)
@@ -1485,6 +1883,447 @@ func TestPlugin_SchemaCallbacks_ClosuresReleased(t *testing.T) {
 				t.Error("OnSchemaError closure capture remained reachable on live plugin")
 			}
 			runtime.KeepAlive(p)
+		})
+	}
+}
+
+func shortenConflictVerifyForTest(t *testing.T, initialBackoff, maxDuration time.Duration) {
+	t.Helper()
+	prevBackoff := conflictVerifyInitialBackoff
+	prevMax := conflictVerifyMaxDuration
+	conflictVerifyInitialBackoff = initialBackoff
+	conflictVerifyMaxDuration = maxDuration
+	t.Cleanup(func() {
+		conflictVerifyInitialBackoff = prevBackoff
+		conflictVerifyMaxDuration = prevMax
+	})
+}
+
+func TestResolveDDLConflict_EdgeCases(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ProjectID = "test-project"
+	cfg.DatasetID = "test_dataset"
+	cfg.TableName = "test-table"
+	defs, err := cfg.ViewDefinitions()
+	if err != nil {
+		t.Fatalf("ViewDefinitions() error = %v", err)
+	}
+	var targetDef ViewDefinition
+	for _, def := range defs {
+		if def.Name == "v_llm_request" {
+			targetDef = def
+			break
+		}
+	}
+	_, wantSelectBody, _ := strings.Cut(targetDef.Query, " AS\n")
+	readyViewJSON, err := json.Marshal(map[string]any{
+		"type": "VIEW",
+		"view": map[string]string{"query": wantSelectBody},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	newClientFor := func(t *testing.T, tr *tableTransport) *bq.Client {
+		t.Helper()
+		tr.t = t
+		c, err := bq.NewClient(t.Context(), "test-project", option.WithHTTPClient(&http.Client{Transport: tr}))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+
+	t.Run("existing TABLE on 409 returns immediately without backoff", func(t *testing.T) {
+		var (
+			hitConflict       atomic.Bool
+			postConflictReads atomic.Int32
+		)
+		tr := &tableTransport{}
+		tr.viewHook = func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/datasets/test_dataset/tables/v_llm_request") {
+				if !hitConflict.Load() {
+					return tr.apiError(http.StatusNotFound), nil
+				}
+				postConflictReads.Add(1)
+				return tr.respond(http.StatusOK, `{"type":"TABLE"}`), nil
+			}
+			return nil, nil
+		}
+		tr.jobHook = func(_ *http.Request) (*http.Response, error) {
+			hitConflict.Store(true)
+			return tr.apiError(http.StatusConflict), nil
+		}
+
+		client := newClientFor(t, tr)
+		runner := bqViewRunner{
+			client:                 weak.Make(client),
+			projectID:              "test-project",
+			datasetID:              "test_dataset",
+			conflictInitialBackoff: 5 * time.Second,
+		}
+		start := time.Now()
+		ddlErr := runner.RunViewDDL(t.Context(), targetDef.Name, targetDef.Query)
+		elapsed := time.Since(start)
+		if ddlErr == nil || !strings.Contains(ddlErr.Error(), "existing BigQuery object is not a view") {
+			t.Fatalf("RunViewDDL() error = %v, want existing BigQuery object is not a view", ddlErr)
+		}
+		if got := postConflictReads.Load(); got != 1 {
+			t.Errorf("post-409 metadata reads = %d, want 1 (no retry on TABLE)", got)
+		}
+		if elapsed > time.Second {
+			t.Errorf("RunViewDDL() took %v, want immediate return without 5s backoff", elapsed)
+		}
+	})
+
+	for _, statusCode := range []int{
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+		http.StatusTooManyRequests,
+	} {
+		t.Run(fmt.Sprintf("transient_%d_on_tables_get_during_409_verification_retries_and_succeeds", statusCode), func(t *testing.T) {
+			var (
+				hitConflict       atomic.Bool
+				postConflictReads atomic.Int32
+			)
+			tr := &tableTransport{}
+			tr.viewHook = func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/datasets/test_dataset/tables/v_llm_request") {
+					if !hitConflict.Load() {
+						return tr.apiError(http.StatusNotFound), nil
+					}
+					if postConflictReads.Add(1) == 1 {
+						return tr.apiError(statusCode), nil
+					}
+					return tr.respond(http.StatusOK, string(readyViewJSON)), nil
+				}
+				return nil, nil
+			}
+			tr.jobHook = func(_ *http.Request) (*http.Response, error) {
+				hitConflict.Store(true)
+				return tr.apiError(http.StatusConflict), nil
+			}
+
+			client := newClientFor(t, tr)
+			runner := bqViewRunner{
+				client:                 weak.Make(client),
+				projectID:              "test-project",
+				datasetID:              "test_dataset",
+				conflictInitialBackoff: time.Millisecond,
+			}
+			if ddlErr := runner.RunViewDDL(t.Context(), targetDef.Name, targetDef.Query); ddlErr != nil {
+				t.Fatalf("RunViewDDL() error = %v, want nil after transient HTTP %d recovery", ddlErr, statusCode)
+			}
+			if got := postConflictReads.Load(); got < 2 {
+				t.Errorf("post-409 metadata reads = %d, want >= 2", got)
+			}
+		})
+	}
+
+	t.Run("ctx cancellation mid-backoff returns promptly", func(t *testing.T) {
+		var (
+			hitConflict atomic.Bool
+			enteredPoll = make(chan struct{})
+			pollOnce    sync.Once
+		)
+		tr := &tableTransport{}
+		tr.viewHook = func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/datasets/test_dataset/tables/v_llm_request") {
+				if hitConflict.Load() {
+					pollOnce.Do(func() { close(enteredPoll) })
+				}
+				return tr.apiError(http.StatusNotFound), nil
+			}
+			return nil, nil
+		}
+		tr.jobHook = func(_ *http.Request) (*http.Response, error) {
+			hitConflict.Store(true)
+			return tr.apiError(http.StatusConflict), nil
+		}
+
+		client := newClientFor(t, tr)
+		runner := bqViewRunner{
+			client:                 weak.Make(client),
+			projectID:              "test-project",
+			datasetID:              "test_dataset",
+			conflictInitialBackoff: 10 * time.Second,
+		}
+		runCtx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		go func() {
+			<-enteredPoll
+			time.Sleep(10 * time.Millisecond)
+			cancel()
+		}()
+
+		start := time.Now()
+		ddlErr := runner.RunViewDDL(runCtx, targetDef.Name, targetDef.Query)
+		elapsed := time.Since(start)
+		if !errors.Is(ddlErr, context.Canceled) {
+			t.Fatalf("RunViewDDL() error = %v, want context.Canceled", ddlErr)
+		}
+		if elapsed > time.Second {
+			t.Errorf("RunViewDDL() took %v after ctx cancellation, want prompt return", elapsed)
+		}
+	})
+
+	t.Run("uses caller ctx deadline directly without 1s cap and falls back to viewDDLTimeout without deadline", func(t *testing.T) {
+		for _, withCallerDeadline := range []bool{true, false} {
+			subName := "caller_deadline_preserved"
+			if !withCallerDeadline {
+				subName = "background_ctx_uses_viewDDLTimeout_fallback"
+			}
+			t.Run(subName, func(t *testing.T) {
+				var (
+					hitConflict    atomic.Bool
+					observedRemain atomic.Int64
+					sawDeadline    atomic.Bool
+				)
+				tr := &tableTransport{}
+				tr.viewHook = func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/datasets/test_dataset/tables/v_llm_request") {
+						if !hitConflict.Load() {
+							return tr.apiError(http.StatusNotFound), nil
+						}
+						if dl, ok := r.Context().Deadline(); ok {
+							sawDeadline.Store(true)
+							observedRemain.Store(int64(time.Until(dl)))
+						}
+						return tr.respond(http.StatusOK, string(readyViewJSON)), nil
+					}
+					return nil, nil
+				}
+				tr.jobHook = func(_ *http.Request) (*http.Response, error) {
+					hitConflict.Store(true)
+					return tr.apiError(http.StatusConflict), nil
+				}
+
+				client := newClientFor(t, tr)
+				runner := bqViewRunner{
+					client:    weak.Make(client),
+					projectID: "test-project",
+					datasetID: "test_dataset",
+				}
+				callCtx := context.Background()
+				if withCallerDeadline {
+					var cancel context.CancelFunc
+					callCtx, cancel = context.WithTimeout(t.Context(), 15*time.Second)
+					defer cancel()
+				}
+				if ddlErr := runner.RunViewDDL(callCtx, targetDef.Name, targetDef.Query); ddlErr != nil {
+					t.Fatalf("RunViewDDL() error = %v, want nil", ddlErr)
+				}
+				if !sawDeadline.Load() {
+					t.Fatal("post-409 metadata request had no context deadline")
+				}
+				rem := time.Duration(observedRemain.Load())
+				if withCallerDeadline {
+					if rem < 5*time.Second || rem > 16*time.Second {
+						t.Errorf("post-409 metadata remaining deadline = %v, want ~15s caller deadline (not 1s cap)", rem)
+					}
+				} else if rem < 15*time.Second || rem > 31*time.Second {
+					t.Errorf("post-409 metadata remaining deadline = %v, want ~30s viewDDLTimeout fallback", rem)
+				}
+			})
+		}
+	})
+
+	t.Run("verification budget timeout after transient metadata error or stale query unwraps context.DeadlineExceeded", func(t *testing.T) {
+		staleViewJSON, err := json.Marshal(map[string]any{
+			"type": "VIEW",
+			"view": map[string]any{"query": "SELECT 1 AS stale"},
+		})
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		for _, tc := range []struct {
+			name        string
+			staleQuery  bool
+			wantAPICode int
+		}{
+			{name: "transient_404_metadata_until_timeout", staleQuery: false, wantAPICode: http.StatusNotFound},
+			{name: "stale_view_query_until_timeout", staleQuery: true, wantAPICode: http.StatusConflict},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var hitConflict atomic.Bool
+				tr := &tableTransport{}
+				tr.viewHook = func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/datasets/test_dataset/tables/v_llm_request") {
+						if !hitConflict.Load() {
+							return tr.apiError(http.StatusNotFound), nil
+						}
+						if tc.staleQuery {
+							return tr.respond(http.StatusOK, string(staleViewJSON)), nil
+						}
+						return tr.apiError(http.StatusNotFound), nil
+					}
+					return nil, nil
+				}
+				tr.jobHook = func(_ *http.Request) (*http.Response, error) {
+					hitConflict.Store(true)
+					return tr.apiError(http.StatusConflict), nil
+				}
+				client := newClientFor(t, tr)
+				runner := bqViewRunner{
+					client:                 weak.Make(client),
+					projectID:              "test-project",
+					datasetID:              "test_dataset",
+					conflictInitialBackoff: 5 * time.Millisecond,
+					conflictVerifyTimeout:  25 * time.Millisecond,
+				}
+				ddlErr := runner.RunViewDDL(t.Context(), targetDef.Name, targetDef.Query)
+				if !errors.Is(ddlErr, context.DeadlineExceeded) {
+					t.Fatalf("RunViewDDL() error = %v, want errors.Is(..., context.DeadlineExceeded) == true", ddlErr)
+				}
+				var conflictWrapper *unverifiedViewConflictError
+				if !errors.As(ddlErr, &conflictWrapper) {
+					t.Fatalf("RunViewDDL() error %T does not unwrap *unverifiedViewConflictError", ddlErr)
+				}
+				unwrapped := conflictWrapper.Unwrap()
+				var sawCode bool
+				for _, u := range unwrapped {
+					var apiErr *googleapi.Error
+					if errors.As(u, &apiErr) && apiErr.Code == tc.wantAPICode {
+						sawCode = true
+					}
+				}
+				if !sawCode {
+					t.Errorf("Unwrap() = %v, missing *googleapi.Error with HTTP %d", unwrapped, tc.wantAPICode)
+				}
+			})
+		}
+	})
+
+	t.Run("retries HTTP 500 and 502 during post-conflict metadata verification", func(t *testing.T) {
+		for _, status5xx := range []int{http.StatusInternalServerError, http.StatusBadGateway} {
+			t.Run(fmt.Sprintf("HTTP_%d", status5xx), func(t *testing.T) {
+				var (
+					hitConflict atomic.Bool
+					verifyCalls atomic.Int32
+				)
+				tr := &tableTransport{}
+				tr.viewHook = func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/datasets/test_dataset/tables/v_llm_request") {
+						if !hitConflict.Load() {
+							return tr.apiError(http.StatusNotFound), nil
+						}
+						if verifyCalls.Add(1) == 1 {
+							return tr.apiError(status5xx), nil
+						}
+						return tr.respond(http.StatusOK, string(readyViewJSON)), nil
+					}
+					return nil, nil
+				}
+				tr.jobHook = func(_ *http.Request) (*http.Response, error) {
+					hitConflict.Store(true)
+					return tr.apiError(http.StatusConflict), nil
+				}
+				client := newClientFor(t, tr)
+				runner := bqViewRunner{
+					client:                 weak.Make(client),
+					projectID:              "test-project",
+					datasetID:              "test_dataset",
+					conflictInitialBackoff: time.Millisecond,
+					conflictVerifyTimeout:  2 * time.Second,
+				}
+				if ddlErr := runner.RunViewDDL(t.Context(), targetDef.Name, targetDef.Query); ddlErr != nil {
+					t.Fatalf("RunViewDDL() after HTTP %d = %v, want nil", status5xx, ddlErr)
+				}
+				if got := verifyCalls.Load(); got < 2 {
+					t.Errorf("post-conflict metadata calls = %d, want >= 2", got)
+				}
+			})
+		}
+	})
+}
+
+type fakeTableMetadataOps struct {
+	metadatas []*bq.TableMetadata
+	metaErrs  []error
+	updateErr error
+	gets      int
+	updates   int
+}
+
+func (f *fakeTableMetadataOps) Metadata(context.Context) (*bq.TableMetadata, error) {
+	idx := f.gets
+	f.gets++
+	var md *bq.TableMetadata
+	if idx < len(f.metadatas) {
+		md = f.metadatas[idx]
+	}
+	var err error
+	if idx < len(f.metaErrs) {
+		err = f.metaErrs[idx]
+	}
+	return md, err
+}
+
+func (f *fakeTableMetadataOps) Create(context.Context, *bq.TableMetadata) error {
+	return nil
+}
+
+func (f *fakeTableMetadataOps) Update(context.Context, bq.TableMetadataToUpdate, string) (*bq.TableMetadata, error) {
+	f.updates++
+	return nil, f.updateErr
+}
+
+func TestMaybeUpgradeSchema_RetryRevalidatesDestinationTableType(t *testing.T) {
+	var legacySchema bq.Schema
+	for _, field := range EventsSchema() {
+		if field.Name != eventIDField {
+			legacySchema = append(legacySchema, field)
+		}
+	}
+	ops := &fakeTableMetadataOps{
+		metadatas: []*bq.TableMetadata{
+			{Type: bq.RegularTable, ETag: "etag-1", Schema: legacySchema},
+			{Type: bq.ViewTable, ETag: "etag-2", Schema: legacySchema},
+		},
+		updateErr: &googleapi.Error{Code: http.StatusPreconditionFailed, Message: "etag mismatch"},
+	}
+	cfg := applyDefaults(Config{ProjectID: "p", DatasetID: "d", TableName: "events_tbl"})
+	err := ensureTableAndSchema(t.Context(), ops, cfg, nil)
+	if err == nil || !strings.Contains(err.Error(), "has type VIEW, want TABLE") {
+		t.Fatalf("ensureTableAndSchema() error = %v, want VIEW destination rejection on retry", err)
+	}
+	if ops.updates != 1 {
+		t.Errorf("table.Update calls = %d, want 1 (must stop before second Update when refreshed metadata is VIEW)", ops.updates)
+	}
+}
+
+func TestIsRetryableConflictVerifyError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "http_404", err: &googleapi.Error{Code: http.StatusNotFound}, want: true},
+		{name: "http_429", err: &googleapi.Error{Code: http.StatusTooManyRequests}, want: true},
+		{name: "http_500", err: &googleapi.Error{Code: http.StatusInternalServerError}, want: true},
+		{name: "http_502", err: &googleapi.Error{Code: http.StatusBadGateway}, want: true},
+		{name: "http_503", err: &googleapi.Error{Code: http.StatusServiceUnavailable}, want: true},
+		{name: "http_504", err: &googleapi.Error{Code: http.StatusGatewayTimeout}, want: true},
+		{name: "http_400", err: &googleapi.Error{Code: http.StatusBadRequest}, want: false},
+		{name: "http_401", err: &googleapi.Error{Code: http.StatusUnauthorized}, want: false},
+		{name: "http_403", err: &googleapi.Error{Code: http.StatusForbidden}, want: false},
+		{name: "http_409", err: &googleapi.Error{Code: http.StatusConflict}, want: false},
+		{name: "http_600", err: &googleapi.Error{Code: 600}, want: false},
+		{name: "grpc_not_found", err: status.Error(codes.NotFound, "not found"), want: true},
+		{name: "grpc_resource_exhausted", err: status.Error(codes.ResourceExhausted, "quota"), want: true},
+		{name: "grpc_internal", err: status.Error(codes.Internal, "internal"), want: true},
+		{name: "grpc_unavailable", err: status.Error(codes.Unavailable, "unavailable"), want: true},
+		{name: "grpc_deadline_exceeded", err: status.Error(codes.DeadlineExceeded, "deadline"), want: true},
+		{name: "grpc_permission_denied", err: status.Error(codes.PermissionDenied, "denied"), want: false},
+		{name: "grpc_invalid_argument", err: status.Error(codes.InvalidArgument, "bad arg"), want: false},
+		{name: "plain_error", err: errors.New("boom"), want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRetryableConflictVerifyError(tc.err); got != tc.want {
+				t.Errorf("isRetryableConflictVerifyError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
 		})
 	}
 }

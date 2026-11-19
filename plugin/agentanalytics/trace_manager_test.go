@@ -54,6 +54,7 @@ import (
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
@@ -7149,7 +7150,7 @@ func TestTraceManager_PopTaskAgentSpan_DoesNotMarkNonLLMParent(t *testing.T) {
 	}
 
 	// Pop the task span as popTaskAgentSpan does (finish_task completion).
-	tm.popTaskAgentSpan(ctx, taskID, nil, false)
+	tm.popTaskAgentSpan(ctx, taskID, "", false, time.Time{})
 
 	// Verify seq was NOT marked taskDelegated (defensive guard).
 	inv.mu.Lock()
@@ -7221,7 +7222,7 @@ func TestTraceManager_PopTaskAgentSpan_MarksDirectLLMParent(t *testing.T) {
 		t.Fatalf("task parentSpanID = %q, want coordinator spanID %q", taskStart.parentSpanID, coordStart.spanID)
 	}
 
-	tm.popTaskAgentSpan(ctx, taskID, nil, false)
+	tm.popTaskAgentSpan(ctx, taskID, "", false, time.Time{})
 
 	// Verify coordinator WAS marked taskDelegated.
 	inv.mu.Lock()
@@ -7281,7 +7282,7 @@ func TestTraceManager_PopTaskAgentSpan_IgnoresUnrelatedAncestor(t *testing.T) {
 		t.Fatalf("task parentSpanID = %q, want coordinator spanID %q", taskStart.parentSpanID, coordStart.spanID)
 	}
 
-	tm.popTaskAgentSpan(ctx, taskID, nil, false)
+	tm.popTaskAgentSpan(ctx, taskID, "", false, time.Time{})
 
 	// Verify coordinator was NOT marked taskDelegated because task_worker is not in its children.
 	tm.mu.Lock()
@@ -8083,7 +8084,7 @@ func TestTraceManager_PurgedActivationLatencyFromLastActivity(t *testing.T) {
 				tm.popLLMSpan(ctx, child, true)
 			},
 			touchFunc: func(tm *traceManager) {
-				tm.popTaskAgentSpan(ctx, child, nil, false)
+				tm.popTaskAgentSpan(ctx, child, "", false, time.Time{})
 			},
 		},
 		{
@@ -20547,7 +20548,7 @@ func TestTraceManager_PopTaskAgentSpanRejectsNonTaskAgent(t *testing.T) {
 	// Call popTaskAgentSpan on the non-task child at t2. It should return
 	// false and NOT advance parent.lastActivity.
 	clock = t2
-	_, ok := tm.popTaskAgentSpan(ctx, child, nil, false)
+	_, ok := tm.popTaskAgentSpan(ctx, child, "", false, time.Time{})
 	if ok {
 		t.Fatal("popTaskAgentSpan returned ok=true for non-task child, want false")
 	}
@@ -22169,7 +22170,7 @@ func TestRunner_FinishTaskWithReusedCallIDEndsTheRunOnTheEventPath(t *testing.T)
 							ev.NodeInfo = &session.NodeInfo{}
 						}
 						ev.NodeInfo.Path = path
-						if hasTaskCompletedResponse(ev.Content) {
+						if out := classifyTaskResponses(ev.Content); out.ends && !out.failed {
 							held = append(held, ev)
 							continue
 						}
@@ -22213,35 +22214,43 @@ func TestRunner_FinishTaskWithReusedCallIDEndsTheRunOnTheEventPath(t *testing.T)
 // ID in each run, and only when one run there saw it complete: among several,
 // the call ID does not tell which one wrote the event.
 func TestFinishedTaskLocked_RequiresOneRunOnTheEventPath(t *testing.T) {
+	attempts := func(kind taskAttemptKind, calls []string) []taskAttempt {
+		out := make([]taskAttempt, len(calls))
+		for i, c := range calls {
+			out[i] = taskAttempt{callID: c, kind: kind}
+		}
+		return out
+	}
 	run := func(path string, calls ...string) *spanRecord {
-		return &spanRecord{kind: spanKindAgent, name: "task", branch: "b", path: path, finishedTasks: calls}
+		return &spanRecord{kind: spanKindAgent, taskMode: true, name: "task", branch: "b", path: path, taskAttempts: attempts(taskAttemptCompleted, calls)}
 	}
 	failedRun := func(path string, calls ...string) *spanRecord {
-		return &spanRecord{kind: spanKindAgent, name: "task", branch: "b", path: path, failedTasks: calls}
+		return &spanRecord{kind: spanKindAgent, taskMode: true, name: "task", branch: "b", path: path, taskAttempts: attempts(taskAttemptFailedEnd, calls)}
 	}
 	for _, tc := range []struct {
-		name   string
-		path   string
-		failed bool
-		stack  []*spanRecord
-		want   int
+		name       string
+		path       string
+		failed     bool
+		stack      []*spanRecord
+		want       int
+		wantStatus taskMatchStatus
 	}{
-		{name: "run on the event path", path: "left/task@1", stack: []*spanRecord{run("left/task@1", "call_0"), run("right/task@1", "call_0")}, want: 1},
-		{name: "run on another path only", path: "left/task@1", stack: []*spanRecord{run("right/task@1", "call_0")}, want: -1},
-		{name: "two runs on the event path", path: "left/task@1", stack: []*spanRecord{run("left/task@1", "call_0"), run("left/task@1", "call_0")}, want: -1},
-		{name: "one of two runs on the event path saw the call", path: "left/task@1", stack: []*spanRecord{run("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1},
-		{name: "event without a node path", path: "", stack: []*spanRecord{run("left/task@1", "call_0")}, want: 1},
-		{name: "run without a node path", path: "left/task@1", stack: []*spanRecord{run("", "call_0")}, want: 1},
-		{name: "agent callback added error after completed call", path: "left/task@1", failed: true, stack: []*spanRecord{run("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1},
-		{name: "agent callback cleared error after failed call", path: "left/task@1", failed: false, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1},
-		{name: "same call ID disambiguated by failed classification", path: "left/task@1", failed: true, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_0")}, want: 1},
-		{name: "same call ID disambiguated by completed classification", path: "left/task@1", failed: false, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_0")}, want: 2},
+		{name: "run on the event path", path: "left/task@1", stack: []*spanRecord{run("left/task@1", "call_0"), run("right/task@1", "call_0")}, want: 1, wantStatus: taskMatchFound},
+		{name: "run on another path only", path: "left/task@1", stack: []*spanRecord{run("right/task@1", "call_0")}, want: -1, wantStatus: taskMatchUnobserved},
+		{name: "two runs on the event path", path: "left/task@1", stack: []*spanRecord{run("left/task@1", "call_0"), run("left/task@1", "call_0")}, want: 1, wantStatus: taskMatchFound},
+		{name: "one of two runs on the event path saw the call", path: "left/task@1", stack: []*spanRecord{run("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1, wantStatus: taskMatchFound},
+		{name: "event without a node path", path: "", stack: []*spanRecord{run("left/task@1", "call_0")}, want: 1, wantStatus: taskMatchFound},
+		{name: "run without a node path", path: "left/task@1", stack: []*spanRecord{run("", "call_0")}, want: 1, wantStatus: taskMatchFound},
+		{name: "agent callback added error after completed call", path: "left/task@1", failed: true, stack: []*spanRecord{run("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1, wantStatus: taskMatchFound},
+		{name: "agent callback cleared error after failed call", path: "left/task@1", failed: false, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_1")}, want: 1, wantStatus: taskMatchFound},
+		{name: "same call ID disambiguated by failed classification", path: "left/task@1", failed: true, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_0")}, want: 1, wantStatus: taskMatchFound},
+		{name: "same call ID disambiguated by completed classification", path: "left/task@1", failed: false, stack: []*spanRecord{failedRun("left/task@1", "call_0"), run("left/task@1", "call_0")}, want: 2, wantStatus: taskMatchFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &invocationTrace{agentStack: append([]*spanRecord{{kind: spanKindAgent, name: "root"}}, tc.stack...)}
 			id := identity{agentName: "task", branch: "b", path: tc.path}
-			if got := inv.finishedTaskLocked(id, []string{"call_0"}, tc.failed); got != tc.want {
-				t.Errorf("finishedTaskLocked = %d, want %d", got, tc.want)
+			if got, status := inv.finishedTaskLocked(id, "call_0", tc.failed, time.Time{}); got != tc.want || status != tc.wantStatus {
+				t.Errorf("finishedTaskLocked = (%d, %v), want (%d, %v)", got, status, tc.want, tc.wantStatus)
 			}
 		})
 	}
@@ -22254,12 +22263,12 @@ func TestRetireFailedTaskAttemptLocked_PrefersPendingAttempt(t *testing.T) {
 		inv := &invocationTrace{
 			agentStack: []*spanRecord{
 				{kind: spanKindAgent, name: "root"},
-				{kind: spanKindAgent, name: "task", branch: "b", path: "left/task@1", pendingTasks: []string{"call_0"}},
-				{kind: spanKindAgent, name: "task", branch: "b", path: "left/task@1", finishedTasks: []string{"call_1"}},
+				{kind: spanKindAgent, taskMode: true, name: "task", branch: "b", path: "left/task@1", taskAttempts: []taskAttempt{{callID: "call_0", kind: taskAttemptPending}}},
+				{kind: spanKindAgent, taskMode: true, name: "task", branch: "b", path: "left/task@1", taskAttempts: []taskAttempt{{callID: "call_1", kind: taskAttemptCompleted}}},
 			},
 		}
-		if got := inv.finishedTaskLocked(id, []string{"call_0"}, false); got != 1 {
-			t.Fatalf("finishedTaskLocked = %d, want 1", got)
+		if got, status := inv.finishedTaskLocked(id, "call_0", false, time.Time{}); got != 1 || status != taskMatchFound {
+			t.Fatalf("finishedTaskLocked = (%d, %v), want (1, %v)", got, status, taskMatchFound)
 		}
 	})
 
@@ -22267,17 +22276,35 @@ func TestRetireFailedTaskAttemptLocked_PrefersPendingAttempt(t *testing.T) {
 		inv := &invocationTrace{
 			agentStack: []*spanRecord{
 				{kind: spanKindAgent, name: "root"},
-				{kind: spanKindAgent, name: "task", branch: "b", path: "left/task@1", finishedTasks: []string{"call_0"}},
-				{kind: spanKindAgent, name: "task", branch: "b", path: "left/task@1", pendingTasks: []string{"call_0"}},
+				{kind: spanKindAgent, taskMode: true, name: "task", branch: "b", path: "left/task@1", taskAttempts: []taskAttempt{{callID: "call_0", kind: taskAttemptCompleted}}},
+				{kind: spanKindAgent, taskMode: true, name: "task", branch: "b", path: "left/task@1", taskAttempts: []taskAttempt{{callID: "call_0", kind: taskAttemptPending}}},
 			},
 		}
-		// Before retirement, both runs hold an unretired "call_0" attempt.
-		if got := inv.finishedTaskLocked(id, []string{"call_0"}, false); got != -1 {
-			t.Fatalf("finishedTaskLocked before retirement = %d, want -1", got)
+		inv.retireFailedTaskAttemptsLocked(t.Context(), id, map[string]int{"call_0": 1}, 1, nil, 0)
+		if len(inv.agentStack[2].taskAttempts) != 0 {
+			t.Fatalf("newer run taskAttempts after retirement = %v, want empty", inv.agentStack[2].taskAttempts)
 		}
-		inv.retireFailedTaskAttemptLocked(id, "call_0")
-		if got := inv.finishedTaskLocked(id, []string{"call_0"}, false); got != 1 {
-			t.Fatalf("finishedTaskLocked after retirement = %d, want 1", got)
+		// An additional unobserved failure must never delete the earlier run's completed attempt.
+		inv.retireFailedTaskAttemptsLocked(t.Context(), id, map[string]int{"call_0": 1}, 1, nil, 0)
+		if got, status := inv.finishedTaskLocked(id, "call_0", false, time.Time{}); got != 1 || status != taskMatchFound {
+			t.Fatalf("finishedTaskLocked after retirement = (%d, %v), want (1, %v)", got, status, taskMatchFound)
+		}
+	})
+
+	t.Run("retiring failed call removes newer pending attempt and leaves remaining pending attempt", func(t *testing.T) {
+		inv := &invocationTrace{
+			agentStack: []*spanRecord{
+				{kind: spanKindAgent, name: "root"},
+				{kind: spanKindAgent, taskMode: true, name: "task", branch: "b", path: "left/task@1", taskAttempts: []taskAttempt{{callID: "call_0", kind: taskAttemptPending}}},
+				{kind: spanKindAgent, taskMode: true, name: "task", branch: "b", path: "left/task@1", taskAttempts: []taskAttempt{{callID: "call_0", kind: taskAttemptPending}}},
+			},
+		}
+		inv.retireFailedTaskAttemptsLocked(t.Context(), id, map[string]int{"call_0": 1}, 1, nil, 0)
+		if len(inv.agentStack[2].taskAttempts) != 0 {
+			t.Fatalf("newer run taskAttempts after retirement = %v, want empty", inv.agentStack[2].taskAttempts)
+		}
+		if got, status := inv.finishedTaskLocked(id, "call_0", false, time.Time{}); got != 1 || status != taskMatchFound {
+			t.Fatalf("finishedTaskLocked after retirement = (%d, %v), want (1, %v)", got, status, taskMatchFound)
 		}
 	})
 }
@@ -23223,7 +23250,7 @@ func TestLatePopSpanEarlyReturn_RetiresSettledActivation(t *testing.T) {
 
 		// 1. Unknown/no-open-span popTaskAgentSpan must leave settled activation a untouched.
 		unknownID := identity{invocationID: invID, agentName: "ghost", path: "ghost", branch: "ghost"}
-		if _, ok := tm.popTaskAgentSpan(ctx, unknownID, []string{"call_missing"}, false); ok {
+		if _, ok := tm.popTaskAgentSpan(ctx, unknownID, "call_missing", false, time.Time{}); ok {
 			t.Fatal("popTaskAgentSpan(unknownID) ok = true, want false")
 		}
 		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a", "non_task"}) {
@@ -23231,7 +23258,7 @@ func TestLatePopSpanEarlyReturn_RetiresSettledActivation(t *testing.T) {
 		}
 
 		// 2. Non-task agent popTaskAgentSpan must leave settled activation a untouched.
-		if _, ok := tm.popTaskAgentSpan(ctx, nonTaskID, []string{finishTaskToolName}, false); ok {
+		if _, ok := tm.popTaskAgentSpan(ctx, nonTaskID, finishTaskToolName, false, time.Time{}); ok {
 			t.Fatal("popTaskAgentSpan(nonTaskID) ok = true, want false")
 		}
 		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a", "non_task"}) {
@@ -23250,7 +23277,7 @@ func TestLatePopSpanEarlyReturn_RetiresSettledActivation(t *testing.T) {
 		taskRec.taskMode = true
 		late.mu.Unlock()
 
-		if _, ok := tm.popTaskAgentSpan(ctx, taskID, []string{"call_task"}, false); !ok {
+		if _, ok := tm.popTaskAgentSpan(ctx, taskID, "call_task", false, time.Time{}); !ok {
 			t.Fatal("popTaskAgentSpan(taskID) ok = false, want true")
 		}
 		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"non_task"}) {
@@ -29608,6 +29635,279 @@ func TestRememberCompletedAtLocked_PrepareLateBeforeUnlinkAndClear(t *testing.T)
 	})
 }
 
+func TestTraceManager_FinishedTaskLocked(t *testing.T) {
+	base := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	taskID := identity{invocationID: "inv-task-unit", agentName: "worker", path: "work"}
+
+	newTaskInv := func() *invocationTrace {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-task-unit", base)
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "coordinator", parent: inv.agentStack[0], seq: 1}
+		inv.pushAgentLocked(root)
+		inv.lastSeq = 1
+		return inv
+	}
+
+	t.Run("non-zero eventTime excludes newer activation started after held completion event", func(t *testing.T) {
+		inv := newTaskInv()
+		rec1 := &spanRecord{
+			spanID:          "run-1",
+			kind:            spanKindAgent,
+			name:            "worker",
+			path:            "work",
+			taskMode:        true,
+			parent:          inv.agentStack[1],
+			eventClockStart: base.Add(10 * time.Millisecond),
+			seq:             2,
+			taskAttempts: []taskAttempt{{
+				callID:     "call_0",
+				kind:       taskAttemptCompleted,
+				recordedAt: base.Add(20 * time.Millisecond),
+				seq:        2,
+			}},
+		}
+		rec2 := &spanRecord{
+			spanID:          "run-2",
+			kind:            spanKindAgent,
+			name:            "worker",
+			path:            "work",
+			taskMode:        true,
+			parent:          inv.agentStack[1],
+			eventClockStart: base.Add(50 * time.Millisecond),
+			seq:             3,
+			taskAttempts: []taskAttempt{{
+				callID:     "call_0",
+				kind:       taskAttemptCompleted,
+				recordedAt: base.Add(60 * time.Millisecond),
+				seq:        3,
+			}},
+		}
+		inv.pushAgentLocked(rec1)
+		inv.pushAgentLocked(rec2)
+
+		idx, st := inv.finishedTaskLocked(taskID, "call_0", false, base.Add(25*time.Millisecond))
+		if st != taskMatchFound || idx < 0 || inv.agentStack[idx].spanID != "run-1" {
+			t.Fatalf("finishedTaskLocked() = (%d, %v), want run-1 with taskMatchFound", idx, st)
+		}
+		if len(rec1.taskAttempts) != 0 {
+			t.Errorf("rec1.taskAttempts = %v, want consumed", rec1.taskAttempts)
+		}
+		if len(rec2.taskAttempts) != 1 {
+			t.Errorf("rec2.taskAttempts = %v, want preserved for run-2's event", rec2.taskAttempts)
+		}
+	})
+
+	t.Run("promoted pending attempt on newer activation supersedes held earlier completion when newer event arrives first", func(t *testing.T) {
+		inv := newTaskInv()
+		rec1 := &spanRecord{
+			spanID:          "run-1",
+			kind:            spanKindAgent,
+			name:            "worker",
+			path:            "work",
+			taskMode:        true,
+			parent:          inv.agentStack[1],
+			eventClockStart: base.Add(10 * time.Millisecond),
+			seq:             2,
+			taskAttempts: []taskAttempt{{
+				callID:     "call_0",
+				kind:       taskAttemptCompleted,
+				recordedAt: base.Add(20 * time.Millisecond),
+				seq:        2,
+			}},
+		}
+		rec2 := &spanRecord{
+			spanID:          "run-2",
+			kind:            spanKindAgent,
+			name:            "worker",
+			path:            "work",
+			taskMode:        true,
+			parent:          inv.agentStack[1],
+			eventClockStart: base.Add(50 * time.Millisecond),
+			seq:             3,
+			taskAttempts: []taskAttempt{{
+				callID:     "call_0",
+				kind:       taskAttemptPending,
+				recordedAt: base.Add(60 * time.Millisecond),
+				seq:        4,
+			}},
+		}
+		inv.pushAgentLocked(rec1)
+		inv.pushAgentLocked(rec2)
+
+		// Run 2's promoted completion event (stamped at +65ms) arrives ahead of Run 1's held event (+25ms).
+		idx, st := inv.finishedTaskLocked(taskID, "call_0", false, base.Add(65*time.Millisecond))
+		if st != taskMatchFound || idx < 0 || inv.agentStack[idx].spanID != "run-2" {
+			t.Fatalf("finishedTaskLocked(ev2) = (%d, %v), want run-2 with taskMatchFound", idx, st)
+		}
+		inv.removeAgentLocked(idx)
+
+		// Run 1's held completion event (+25ms) then resolves Run 1 cleanly.
+		idx, st = inv.finishedTaskLocked(taskID, "call_0", false, base.Add(25*time.Millisecond))
+		if st != taskMatchFound || idx < 0 || inv.agentStack[idx].spanID != "run-1" {
+			t.Fatalf("finishedTaskLocked(ev1) = (%d, %v), want run-1 with taskMatchFound", idx, st)
+		}
+	})
+
+	t.Run("concurrent peers preserve tier precedence when both started before first attempt", func(t *testing.T) {
+		inv := newTaskInv()
+		rec1 := &spanRecord{
+			spanID:          "run-1",
+			kind:            spanKindAgent,
+			name:            "worker",
+			path:            "work",
+			taskMode:        true,
+			parent:          inv.agentStack[1],
+			eventClockStart: base.Add(10 * time.Millisecond),
+			seq:             2,
+			taskAttempts: []taskAttempt{{
+				callID:     "call_0",
+				kind:       taskAttemptCompleted,
+				recordedAt: base.Add(40 * time.Millisecond),
+				seq:        4,
+			}},
+		}
+		rec2 := &spanRecord{
+			spanID:          "run-2",
+			kind:            spanKindAgent,
+			name:            "worker",
+			path:            "work",
+			taskMode:        true,
+			parent:          inv.agentStack[1],
+			eventClockStart: base.Add(15 * time.Millisecond),
+			seq:             3,
+			taskAttempts: []taskAttempt{{
+				callID:     "call_0",
+				kind:       taskAttemptPending,
+				recordedAt: base.Add(45 * time.Millisecond),
+				seq:        5,
+			}},
+		}
+		inv.pushAgentLocked(rec1)
+		inv.pushAgentLocked(rec2)
+
+		// Even with eventTime at +50ms, rec2 started (seq=3) before rec1's attempt (seq=4),
+		// so rec1's observed completion (Tier 1) wins over rec2's concurrent pending call (Tier 3).
+		idx, st := inv.finishedTaskLocked(taskID, "call_0", false, base.Add(50*time.Millisecond))
+		if st != taskMatchFound || idx < 0 || inv.agentStack[idx].spanID != "run-1" {
+			t.Fatalf("finishedTaskLocked() = (%d, %v), want run-1 with taskMatchFound", idx, st)
+		}
+	})
+
+	t.Run("concurrent tie in same tier resolves earliest-recorded attempt in order so both runs close", func(t *testing.T) {
+		inv := newTaskInv()
+		for n := 1; n <= 2; n++ {
+			inv.pushAgentLocked(&spanRecord{
+				spanID:          fmt.Sprintf("run-%d", n),
+				kind:            spanKindAgent,
+				name:            "worker",
+				path:            "work",
+				taskMode:        true,
+				parent:          inv.agentStack[1],
+				eventClockStart: base.Add(10 * time.Millisecond),
+				seq:             uint64(n + 1),
+				taskAttempts: []taskAttempt{{
+					callID:     "call_0",
+					kind:       taskAttemptCompleted,
+					recordedAt: base.Add(30 * time.Millisecond),
+					seq:        5,
+				}},
+			})
+		}
+
+		idx, st := inv.finishedTaskLocked(taskID, "call_0", false, base.Add(35*time.Millisecond))
+		if st != taskMatchFound || idx != 2 || inv.agentStack[idx].spanID != "run-1" {
+			t.Fatalf("first finishedTaskLocked() = (%d, %v), want (2/run-1, taskMatchFound)", idx, st)
+		}
+		if len(inv.agentStack[2].taskAttempts) != 0 || len(inv.agentStack[3].taskAttempts) != 1 {
+			t.Fatalf("after first match: run-1=%v (want empty), run-2=%v (want preserved)", inv.agentStack[2].taskAttempts, inv.agentStack[3].taskAttempts)
+		}
+		inv.removeAgentLocked(idx)
+
+		idx2, st2 := inv.finishedTaskLocked(taskID, "call_0", false, base.Add(35*time.Millisecond))
+		if st2 != taskMatchFound || idx2 != 2 || inv.agentStack[idx2].spanID != "run-2" {
+			t.Fatalf("second finishedTaskLocked() = (%d, %v), want (2/run-2, taskMatchFound)", idx2, st2)
+		}
+	})
+
+	t.Run("empty and unknown callIDs return taskMatchUnobserved", func(t *testing.T) {
+		inv := newTaskInv()
+		inv.pushAgentLocked(&spanRecord{
+			spanID:   "run-1",
+			kind:     spanKindAgent,
+			name:     "worker",
+			path:     "work",
+			taskMode: true,
+			parent:   inv.agentStack[1],
+		})
+		if idx, st := inv.finishedTaskLocked(taskID, "", false, base); st != taskMatchUnobserved || idx != -1 {
+			t.Errorf("finishedTaskLocked(empty) = (%d, %v), want (-1, taskMatchUnobserved)", idx, st)
+		}
+		if idx, st := inv.finishedTaskLocked(taskID, "missing", false, base); st != taskMatchUnobserved || idx != -1 {
+			t.Errorf("finishedTaskLocked(missing) = (%d, %v), want (-1, taskMatchUnobserved)", idx, st)
+		}
+	})
+
+	t.Run("retireFailedTaskAttempts retires overruledEndingCalls when failedCalls is empty and popTaskAgentSpanForCalls resolves trailing callID", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		tm.invocationSpan(ctx, identity{invocationID: taskID.invocationID, agentName: "coordinator"}, nil)
+		tm.pushAgentSpan(ctx, identity{invocationID: taskID.invocationID, agentName: "coordinator"})
+
+		inv := tm.invocations[taskID.invocationID]
+		inv.mu.Lock()
+		rec1 := &spanRecord{
+			spanID:       "run-1",
+			parentSpanID: inv.agentStack[1].spanID,
+			kind:         spanKindAgent,
+			name:         "worker",
+			path:         "work",
+			taskMode:     true,
+			parent:       inv.agentStack[1],
+			start:        base,
+			seq:          2,
+			taskAttempts: []taskAttempt{{
+				callID:     "call_1",
+				kind:       taskAttemptCompleted,
+				recordedAt: base.Add(10 * time.Millisecond),
+				seq:        2,
+			}},
+		}
+		inv.pushAgentLocked(rec1)
+		inv.mu.Unlock()
+
+		// First failed response had empty ID (failedCalls == nil), second was overruled "call_1".
+		tm.retireFailedTaskAttempts(ctx, taskID, nil, []string{"call_1"})
+		inv.mu.Lock()
+		if len(rec1.taskAttempts) != 0 {
+			t.Fatalf("rec1.taskAttempts after retireFailedTaskAttempts(nil, [call_1]) = %v, want empty", rec1.taskAttempts)
+		}
+		rec2 := &spanRecord{
+			spanID:       "run-2",
+			parentSpanID: inv.agentStack[1].spanID,
+			kind:         spanKindAgent,
+			name:         "worker",
+			path:         "work",
+			taskMode:     true,
+			parent:       inv.agentStack[1],
+			start:        base.Add(20 * time.Millisecond),
+			seq:          3,
+			taskAttempts: []taskAttempt{{
+				callID:     "call_1",
+				kind:       taskAttemptCompleted,
+				recordedAt: base.Add(30 * time.Millisecond),
+				seq:        3,
+			}},
+		}
+		inv.pushAgentLocked(rec2)
+		inv.mu.Unlock()
+
+		// Merged ending event where first callID is unobserved and second is observed "call_1" on run-2.
+		span, ok := tm.popTaskAgentSpanForCalls(ctx, taskID, []string{"call_unobs", "call_1"}, false, base.Add(35*time.Millisecond))
+		if !ok || span.spanID != "run-2" {
+			t.Fatalf("popTaskAgentSpanForCalls([call_unobs, call_1]) = (%q, %v), want (run-2, true)", span.spanID, ok)
+		}
+	})
+}
+
 func TestForceEndInvocation_EvictedRunNeedsNoUUIDAndDeletesEvicted(t *testing.T) {
 	ctx := context.Background()
 	tm := newTraceManager()
@@ -29748,5 +30048,531 @@ func TestRetireLateSettledLocked_FastSkipWith2048LiveActivations(t *testing.T) {
 	tm.popLLMSpan(ctx, identity{invocationID: invID, agentName: "unmatched", path: "other"}, true)
 	if got := len(lateReviewStack(t, tm, invID)); got != 2047 {
 		t.Fatalf("late activations after settling one leaf = %d, want 2047", got)
+	}
+}
+
+func TestTraceManager_UnobservedTaskLocked(t *testing.T) {
+	base := time.Date(2026, 11, 19, 13, 0, 0, 0, time.UTC)
+	taskID := identity{invocationID: "inv-unobs-unit", agentName: "worker", path: "work"}
+
+	newTaskInv := func() *invocationTrace {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-unobs-unit", base)
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "coordinator", parent: inv.agentStack[0], seq: 1}
+		inv.pushAgentLocked(root)
+		return inv
+	}
+
+	t.Run("prefers activation without an unconsumed observed ending attempt", func(t *testing.T) {
+		inv := newTaskInv()
+		inv.pushAgentLocked(&spanRecord{
+			spanID:   "run-with-ending",
+			kind:     spanKindAgent,
+			name:     "worker",
+			path:     "work",
+			taskMode: true,
+			parent:   inv.agentStack[1],
+			taskAttempts: []taskAttempt{{
+				callID: "call_held",
+				kind:   taskAttemptCompleted,
+			}},
+		})
+		inv.pushAgentLocked(&spanRecord{
+			spanID:   "run-without-ending",
+			kind:     spanKindAgent,
+			name:     "worker",
+			path:     "work",
+			taskMode: true,
+			parent:   inv.agentStack[1],
+		})
+
+		idx := inv.unobservedTaskLocked(context.Background(), taskID, "call_unobs", time.Time{})
+		if idx < 0 || inv.agentStack[idx].spanID != "run-without-ending" {
+			t.Fatalf("unobservedTaskLocked() = %d, want run-without-ending", idx)
+		}
+	})
+
+	t.Run("narrows multiple candidates by eventTime against eventClockStart", func(t *testing.T) {
+		inv := newTaskInv()
+		inv.pushAgentLocked(&spanRecord{
+			spanID:          "run-1",
+			kind:            spanKindAgent,
+			name:            "worker",
+			path:            "work",
+			taskMode:        true,
+			parent:          inv.agentStack[1],
+			eventClockStart: base.Add(10 * time.Millisecond),
+		})
+		inv.pushAgentLocked(&spanRecord{
+			spanID:          "run-2",
+			kind:            spanKindAgent,
+			name:            "worker",
+			path:            "work",
+			taskMode:        true,
+			parent:          inv.agentStack[1],
+			eventClockStart: base.Add(50 * time.Millisecond),
+		})
+
+		idx := inv.unobservedTaskLocked(context.Background(), taskID, "call_unobs", base.Add(25*time.Millisecond))
+		if idx < 0 || inv.agentStack[idx].spanID != "run-1" {
+			t.Fatalf("unobservedTaskLocked() = %d, want run-1", idx)
+		}
+	})
+
+	t.Run("ambiguous unobserved non-empty callID returns -1 while empty callID falls back to findAgentForContext", func(t *testing.T) {
+		inv := newTaskInv()
+		inv.pushAgentLocked(&spanRecord{
+			spanID:          "run-1",
+			kind:            spanKindAgent,
+			name:            "worker",
+			path:            "work",
+			taskMode:        true,
+			parent:          inv.agentStack[1],
+			eventClockStart: base.Add(10 * time.Millisecond),
+		})
+		inv.pushAgentLocked(&spanRecord{
+			spanID:          "run-2",
+			kind:            spanKindAgent,
+			name:            "worker",
+			path:            "work",
+			taskMode:        true,
+			parent:          inv.agentStack[1],
+			eventClockStart: base.Add(15 * time.Millisecond),
+		})
+
+		if idx := inv.unobservedTaskLocked(context.Background(), taskID, "call_unobs", base.Add(30*time.Millisecond)); idx < 0 || inv.agentStack[idx].spanID != "run-2" {
+			t.Errorf("unobservedTaskLocked(non-empty callID) = %d, want newest matching activation run-2", idx)
+		}
+		if idx := inv.unobservedTaskLocked(context.Background(), taskID, "", base.Add(30*time.Millisecond)); idx < 0 || inv.agentStack[idx].spanID != "run-2" {
+			t.Errorf("unobservedTaskLocked(empty callID) = %d, want newest matching activation run-2", idx)
+		}
+	})
+}
+
+func TestRetireFailedTaskAttemptsLocked_PreservesSiblingRecordedSuccess(t *testing.T) {
+	base := time.Date(2026, 11, 19, 13, 30, 0, 0, time.UTC)
+	taskID := identity{invocationID: "inv-preserve-sibling", agentName: "worker", branch: "b", path: "work"}
+
+	for _, tc := range []struct {
+		name   string
+		kind   taskAttemptKind
+		failed bool
+	}{
+		{name: "recorded_completed", kind: taskAttemptCompleted, failed: false},
+		{name: "recorded_failed_end", kind: taskAttemptFailedEnd, failed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			tm.invocationSpan(ctx, identity{invocationID: taskID.invocationID, agentName: "coordinator"}, nil)
+			tm.pushAgentSpan(ctx, identity{invocationID: taskID.invocationID, agentName: "coordinator"})
+
+			inv := tm.invocations[taskID.invocationID]
+			inv.mu.Lock()
+			run1 := &spanRecord{
+				spanID:          "run-1",
+				parentSpanID:    inv.agentStack[1].spanID,
+				kind:            spanKindAgent,
+				name:            "worker",
+				branch:          "b",
+				path:            "work",
+				taskMode:        true,
+				parent:          inv.agentStack[1],
+				start:           base,
+				eventClockStart: base.Add(10 * time.Millisecond),
+				seq:             2,
+				taskAttempts: []taskAttempt{{
+					callID:     "call_0",
+					kind:       tc.kind,
+					recordedAt: base.Add(20 * time.Millisecond),
+					seq:        2,
+				}},
+			}
+			run2 := &spanRecord{
+				spanID:          "run-2",
+				parentSpanID:    inv.agentStack[1].spanID,
+				kind:            spanKindAgent,
+				name:            "worker",
+				branch:          "b",
+				path:            "work",
+				taskMode:        true,
+				parent:          inv.agentStack[1],
+				start:           base.Add(15 * time.Millisecond),
+				eventClockStart: base.Add(15 * time.Millisecond),
+				seq:             3,
+			}
+			inv.pushAgentLocked(run1)
+			inv.pushAgentLocked(run2)
+			inv.mu.Unlock()
+
+			// Run 2 emits a non-ending finish_task FunctionResponse for "call_0"
+			// with no pending attempt on run-2 (for example, when an earlier
+			// plugin short-circuited its tool callbacks); run-1's recorded
+			// terminal outcome for "call_0" must remain intact.
+			tm.retireFailedTaskAttempts(ctx, taskID, []string{"call_0"}, nil)
+
+			inv.mu.Lock()
+			if len(run1.taskAttempts) != 1 || run1.taskAttempts[0].callID != "call_0" || run1.taskAttempts[0].kind != tc.kind {
+				got := slices.Clone(run1.taskAttempts)
+				inv.mu.Unlock()
+				t.Fatalf("run-1 taskAttempts = %v, want its recorded call_0 %v kept", got, tc.kind)
+			}
+			inv.mu.Unlock()
+
+			// With eventTime after both activations' eventClockStart (so
+			// unobservedTaskLocked plausibility cannot exclude run-2),
+			// popTaskAgentSpanForCalls still resolves run-1 via its preserved
+			// recorded outcome.
+			span, ok := tm.popTaskAgentSpanForCalls(ctx, taskID, []string{"call_0"}, tc.failed, base.Add(25*time.Millisecond))
+			if !ok || span.spanID != "run-1" {
+				t.Fatalf("popTaskAgentSpanForCalls([call_0]) = (%q, %v), want (run-1, true)", span.spanID, ok)
+			}
+		})
+	}
+}
+
+func TestEndInvocation_ReconcilesEvictedAndRestoredActiveTrace(t *testing.T) {
+	for _, viaRetry := range []bool{false, true} {
+		name := "endInvocationTarget"
+		if viaRetry {
+			name = "completeRunEndTarget"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			tm.maxTracked = 1
+
+			id := identity{invocationID: "inv-evict-restore", agentName: "root-agent"}
+			otherID := identity{invocationID: "inv-evictor", agentName: "other-root"}
+
+			origRow := tm.invocationSpan(ctx, id, nil)
+			origInv := tm.invocations[id.invocationID]
+			if origInv == nil {
+				t.Fatal("origInv not active after invocationSpan")
+			}
+			// Keep an open RunLive tool call on origInv (directly under invocation span)
+			// so handover to completed.late is exercised.
+			tm.pushToolSpan(ctx, id, toolKey(id, "live_orig", "stream_tool"))
+
+			if viaRetry {
+				target := tm.captureRunEndTarget(id.invocationID)
+				// Evict origInv with capacity 1, then restore a new *invocationTrace cur
+				// with the same rootSpanID via a callback for id.
+				tm.invocationSpan(ctx, otherID, nil)
+				tm.endInvocation(ctx, otherID)
+				tm.pushToolSpan(ctx, id, toolKey(id, "live_restored", "stream_tool"))
+				cur := tm.invocations[id.invocationID]
+				if cur == nil || cur == origInv || cur.rootSpanID != origInv.rootSpanID {
+					t.Fatalf("restored cur = %p (root=%q), origInv = %p (root=%q); want distinct pointer with same rootSpanID", cur, func() string {
+						if cur == nil {
+							return ""
+						}
+						return cur.rootSpanID
+					}(), origInv, origInv.rootSpanID)
+				}
+
+				tm.endInvocationRetry(ctx, id, target)
+
+				tm.mu.Lock()
+				stillActive := tm.invocations[id.invocationID]
+				_, stillEvicted := tm.evicted[id.invocationID]
+				completed := tm.completed[id.invocationID]
+				tm.mu.Unlock()
+				if stillActive != nil {
+					t.Fatalf("tm.invocations[%q] = %p after endInvocationRetry, want nil", id.invocationID, stillActive)
+				}
+				if stillEvicted {
+					t.Fatalf("tm.evicted[%q] still present after endInvocationRetry", id.invocationID)
+				}
+				if !origInv.finished || !cur.finished {
+					t.Fatalf("finished flags: origInv=%v cur=%v, want both true", origInv.finished, cur.finished)
+				}
+				if completed == nil || completed.late == nil {
+					t.Fatalf("completed entry = %+v, want non-nil with late trace", completed)
+				}
+			} else {
+				// Trigger eviction + restoration inside the window after endInvocationTarget
+				// looked up origInv (by hooking rootAgentName lookup via prepareRootAgentInput?
+				// Simpler: use a custom Agent whose SubAgents or OTel span triggers nothing, or
+				// hook tm.now on the second call? endInvocationTarget calls tm.now() first, then
+				// looks up origInv under tm.mu, unlocks tm.mu at line 3280, acquires origInv.mu,
+				// and re-locks tm.mu at line 3300). Hold origInv.mu in another goroutine so we
+				// deterministically evict and restore cur while endInvocationTarget waits for origInv.mu!
+				origInv.mu.Lock()
+				enteredEnd := make(chan struct{})
+				doneEnd := make(chan rowSpan, 1)
+				tm.now = func() time.Time {
+					close(enteredEnd)
+					return time.Now()
+				}
+				go func() {
+					doneEnd <- tm.endInvocation(ctx, id)
+				}()
+				<-enteredEnd
+				// Give endInvocationTarget a moment to pass the first tm.mu block and park on origInv.mu.
+				for {
+					tm.mu.Lock()
+					_, active := tm.invocations[id.invocationID]
+					tm.mu.Unlock()
+					if active {
+						break
+					}
+				}
+				time.Sleep(5 * time.Millisecond)
+
+				// Evict origInv (openCalls is >0? Note evictOneLocked skips openCalls > 0 unless expired TTL,
+				// so age lastActive past invocationTTL to guarantee deterministic capacity-1 eviction).
+				origInv.lastActive.Store(time.Now().Add(-2 * invocationTTL).UnixNano())
+				tm.now = time.Now
+				tm.invocationSpan(ctx, otherID, nil)
+				tm.endInvocation(ctx, otherID)
+
+				// Restore id from tm.evicted into a fresh active *invocationTrace cur with the same rootSpanID.
+				tm.pushToolSpan(ctx, id, toolKey(id, "live_restored", "stream_tool"))
+				tm.mu.Lock()
+				cur := tm.invocations[id.invocationID]
+				tm.mu.Unlock()
+				if cur == nil || cur == origInv || cur.rootSpanID != origInv.rootSpanID {
+					origInv.mu.Unlock()
+					<-doneEnd
+					t.Fatalf("restored cur = %p, origInv = %p; want distinct active trace with same rootSpanID", cur, origInv)
+				}
+
+				// Release origInv.mu so endInvocationTarget finishes rowSpan and reconciles under tm.mu.
+				origInv.mu.Unlock()
+				endRow := <-doneEnd
+				if endRow.spanID != origRow.spanID {
+					t.Errorf("endInvocation spanID = %q, want %q", endRow.spanID, origRow.spanID)
+				}
+
+				tm.mu.Lock()
+				stillActive := tm.invocations[id.invocationID]
+				_, stillEvicted := tm.evicted[id.invocationID]
+				completed := tm.completed[id.invocationID]
+				tm.mu.Unlock()
+				if stillActive != nil {
+					t.Fatalf("tm.invocations[%q] = %p after endInvocation, want nil", id.invocationID, stillActive)
+				}
+				if stillEvicted {
+					t.Fatalf("tm.evicted[%q] still present after endInvocation", id.invocationID)
+				}
+				if !origInv.finished || !cur.finished {
+					t.Fatalf("finished flags: origInv=%v cur=%v, want both true", origInv.finished, cur.finished)
+				}
+				if completed == nil || completed.late == nil || completed.identity.rootAgentName != "root-agent" {
+					t.Fatalf("completed = %+v, want late trace and preserved rootAgentName", completed)
+				}
+			}
+
+			// Late tool completions for both origInv and cur must find their handed-over spans in completed.late.
+			spanOrig, _, _ := tm.popToolSpan(ctx, id, toolKey(id, "live_orig", "stream_tool"), false)
+			spanRestored, _, _ := tm.popToolSpan(ctx, id, toolKey(id, "live_restored", "stream_tool"), false)
+			if spanOrig.parentSpanID != origRow.spanID || spanRestored.parentSpanID != origRow.spanID {
+				t.Errorf("late tool parentSpanIDs = (%q, %q), want both %q", spanOrig.parentSpanID, spanRestored.parentSpanID, origRow.spanID)
+			}
+
+			// A new resumed run with the same invocation ID must allocate a fresh rootSpanID.
+			resumedRow := tm.invocationSpan(ctx, id, nil)
+			if resumedRow.spanID == origRow.spanID {
+				t.Errorf("resumed invocation reused finished rootSpanID %q, want fresh span ID", resumedRow.spanID)
+			}
+		})
+	}
+}
+
+func TestPushAgentSpan_PlatformClockOutsideLockAndTaskModeOnly(t *testing.T) {
+	t.Run("non-task agent does not call custom platform TimeProvider", func(t *testing.T) {
+		normalAgent, err := llmagent.New(llmagent.Config{
+			Name:  "chat_agent",
+			Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "hello")}}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		var clockCalls atomic.Int32
+		ctx := deltaContext{
+			Context: platform.WithTimeProvider(t.Context(), func() time.Time {
+				clockCalls.Add(1)
+				return time.Unix(1700000000, 0)
+			}),
+			derive: func() agent.InvocationContext { return runningInvocation{running: normalAgent} },
+		}
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-no-clock-shift", agentName: "chat_agent"}
+		tm.invocationSpan(ctx, id, normalAgent)
+		tm.pushAgentSpan(ctx, id)
+		tm.popAgentSpan(ctx, id)
+		tm.endInvocation(ctx, id)
+		if got := clockCalls.Load(); got != 0 {
+			t.Fatalf("platform.TimeProvider calls for non-task agent = %d, want 0", got)
+		}
+	})
+
+	t.Run("task-mode agent reads platform TimeProvider before acquiring inv.mu", func(t *testing.T) {
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task_worker",
+			Mode:  llmagent.ModeTask,
+			Model: &scriptedLLM{},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-clock-outside-lock", agentName: "task_worker"}
+		tm.invocationSpan(t.Context(), id, taskAgent)
+
+		var reentered atomic.Bool
+		ctx := deltaContext{
+			Context: platform.WithTimeProvider(t.Context(), func() time.Time {
+				// Acquires inv.mu on the same invocation; would deadlock if pushAgentSpan
+				// held inv.mu while calling platform.Now(ctx).
+				_ = tm.eventSpan(context.Background(), id, "task_worker", "")
+				reentered.Store(true)
+				return time.Unix(1700000100, 0)
+			}),
+			derive: func() agent.InvocationContext { return runningInvocation{running: taskAgent} },
+		}
+		done := make(chan struct{})
+		go func() {
+			tm.pushAgentSpan(ctx, id)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("pushAgentSpan deadlocked calling platform.TimeProvider under inv.mu")
+		}
+		if !reentered.Load() {
+			t.Fatal("TimeProvider was not called for task-mode agent")
+		}
+	})
+}
+
+func TestResolveFinishedTaskLocked_512OverlappingActivationsEquivalence(t *testing.T) {
+	const numActivations = 512
+	base := time.Date(2026, 11, 19, 15, 0, 0, 0, time.UTC)
+	taskID := identity{invocationID: "inv-512", agentName: "worker", path: "work"}
+
+	buildStack := func() *invocationTrace {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-512", base)
+		inv.pushAgentLocked(&spanRecord{
+			spanID: "coord",
+			kind:   spanKindAgent,
+			name:   "coordinator",
+			parent: inv.agentStack[0],
+			seq:    1,
+		})
+		for k := range numActivations {
+			clkOffset := time.Duration((k*7)%190) * time.Millisecond
+			recOffset := clkOffset + time.Duration(5+(k*11)%40)*time.Millisecond
+			kind := taskAttemptPending
+			switch k % 5 {
+			case 0:
+				kind = taskAttemptCompleted
+			case 1:
+				kind = taskAttemptFailedEnd
+			}
+			inv.pushAgentLocked(&spanRecord{
+				spanID:          fmt.Sprintf("w-%d", k),
+				kind:            spanKindAgent,
+				name:            "worker",
+				path:            "work",
+				taskMode:        true,
+				parent:          inv.agentStack[1],
+				eventClockStart: base.Add(clkOffset),
+				seq:             uint64(k + 2),
+				taskAttempts: []taskAttempt{{
+					callID:     "call_0",
+					kind:       kind,
+					recordedAt: base.Add(recOffset),
+					seq:        uint64(k + 2 + (k % 3)),
+				}},
+			})
+		}
+		return inv
+	}
+
+	quadraticWinner := func(inv *invocationTrace, failed bool, eventTime time.Time) int {
+		wantKind := taskAttemptCompleted
+		altKind := taskAttemptFailedEnd
+		if failed {
+			wantKind = taskAttemptFailedEnd
+			altKind = taskAttemptCompleted
+		}
+		type cand struct {
+			idx        int
+			tier       uint8
+			recordedAt time.Time
+			seq        uint64
+		}
+		var cs []cand
+		for i := 1; i < len(inv.agentStack); i++ {
+			rec := inv.agentStack[i]
+			if !inv.matchesTaskAgentLocked(rec, taskID) || len(rec.taskAttempts) == 0 {
+				continue
+			}
+			att := rec.taskAttempts[0]
+			tier := uint8(3)
+			switch att.kind {
+			case wantKind:
+				tier = 1
+			case altKind:
+				tier = 2
+			}
+			if !eventTime.IsZero() {
+				if !rec.eventClockStart.IsZero() && eventTime.Before(rec.eventClockStart) {
+					continue
+				}
+				if !att.recordedAt.IsZero() && eventTime.Before(att.recordedAt) {
+					continue
+				}
+			}
+			cs = append(cs, cand{idx: i, tier: tier, recordedAt: att.recordedAt, seq: att.seq})
+		}
+		var unsup []cand
+		for _, cOld := range cs {
+			sup := false
+			for _, cNew := range cs {
+				if cNew.idx == cOld.idx || eventTime.Before(cNew.recordedAt) || !cOld.recordedAt.Before(cNew.recordedAt) {
+					continue
+				}
+				recNew := inv.agentStack[cNew.idx]
+				if (recNew.seq > 0 && cOld.seq < recNew.seq) || (!recNew.eventClockStart.IsZero() && cOld.recordedAt.Before(recNew.eventClockStart)) {
+					sup = true
+					break
+				}
+			}
+			if !sup {
+				unsup = append(unsup, cOld)
+			}
+		}
+		if len(unsup) > 0 {
+			cs = unsup
+		}
+		best := cs[0]
+		for _, c := range cs[1:] {
+			if c.tier < best.tier ||
+				(c.tier == best.tier && (earlierTaskAttempt(c.recordedAt, c.seq, best.recordedAt, best.seq) ||
+					(c.recordedAt.Equal(best.recordedAt) && c.seq == best.seq && c.idx < best.idx))) {
+				best = c
+			}
+		}
+		return best.idx
+	}
+
+	for _, ms := range []int{40, 95, 160, 260} {
+		evTime := base.Add(time.Duration(ms) * time.Millisecond)
+		invOracle := buildStack()
+		wantIdx := quadraticWinner(invOracle, false, evTime)
+
+		invFast := buildStack()
+		start := time.Now()
+		gotIdx, st := invFast.finishedTaskLocked(taskID, "call_0", false, evTime)
+		elapsed := time.Since(start)
+		if st != taskMatchFound || gotIdx != wantIdx {
+			t.Fatalf("at +%dms: finishedTaskLocked = (%d, %v), want (%d, taskMatchFound)", ms, gotIdx, st, wantIdx)
+		}
+		if elapsed > 50*time.Millisecond {
+			t.Errorf("at +%dms: 512-activation lookup took %v, want O(N log N) << 50ms", ms, elapsed)
+		}
 	}
 }
