@@ -131,6 +131,7 @@ type SkillRegistrySource struct {
 }
 
 // ListFrontmatters implements [skill.Source].
+// Please mind that a name in frontmatter doesn't have to be aligned with skill name as defined in the registry.
 func (s *SkillRegistrySource) ListFrontmatters(ctx context.Context) ([]*skill.Frontmatter, error) {
 	lf, err := s.client.ListFrontmatters()
 	if err != nil {
