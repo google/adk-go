@@ -60,6 +60,12 @@
 //	            generation with CONTINUATION; and on Chat Completions
 //	            ThinkingConfig.IncludeThoughts, which has no equivalent there
 //
+// The rejection of HTTPOptions fields and labels applies to values set on the
+// agent's GenerateContentConfig. From agent.RunConfig.HTTPOptions, which
+// applies to every agent of a run, the agent flow passes only Timeout and
+// Headers to these models and drops the other fields; it drops
+// agent.RunConfig.Labels whole.
+//
 // Function tools are sent with strict parameter validation disabled, and that
 // is not configurable, so tool call arguments are best effort rather than
 // guaranteed to match the declared parameter schema.

@@ -25,9 +25,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/openai/openai-go/v3/option"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/openaimodel/internal/responses"
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
@@ -385,4 +387,60 @@ func redact(v string) string {
 		return "empty"
 	}
 	return fmt.Sprintf("<%d-byte value>", len(v))
+}
+
+// TestRunHTTPOptions_KeepsTimeoutAndHeaders checks, on both APIs, that the
+// agent flow is given only the fields of a run's HTTP options these models
+// accept, so that RetryOptions or ExtraBody set for every agent of a run do
+// not make an OpenAI request fail, as adk-python's OpenAI models ignore HTTP
+// options.
+func TestRunHTTPOptions_KeepsTimeoutAndHeaders(t *testing.T) {
+	opts := &genai.HTTPOptions{
+		Timeout:      genai.Ptr(2 * time.Second),
+		Headers:      http.Header{"X-Run": {"run"}},
+		BaseURL:      "https://proxy.example",
+		RetryOptions: &genai.HTTPRetryOptions{Attempts: genai.Ptr[int32](3)},
+		ExtraBody:    map[string]any{"k": "v"},
+	}
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gpt-4o", &ClientConfig{APIKey: "test", API: api})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			filter, ok := llm.(llminternal.RunHTTPOptionsFilter)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement llminternal.RunHTTPOptionsFilter", llm)
+			}
+			want := &genai.HTTPOptions{Timeout: genai.Ptr(2 * time.Second), Headers: http.Header{"X-Run": {"run"}}}
+			if diff := cmp.Diff(want, filter.RunHTTPOptions(opts)); diff != "" {
+				t.Errorf("RunHTTPOptions() mismatch (-want +got):\n%s", diff)
+			}
+			if got := filter.RunHTTPOptions(&genai.HTTPOptions{ExtraBody: map[string]any{"k": "v"}}); got != nil {
+				t.Errorf("RunHTTPOptions(ExtraBody only) = %+v, want nil", got)
+			}
+		})
+	}
+}
+
+// TestRunLabels_DropsAll checks, on both APIs, that the agent flow is given
+// none of a run's labels for an OpenAI agent, so labels set for every agent of
+// a run do not make an OpenAI request fail, as adk-python's OpenAI models
+// ignore labels.
+func TestRunLabels_DropsAll(t *testing.T) {
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gpt-4o", &ClientConfig{APIKey: "test", API: api})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			filter, ok := llm.(llminternal.RunLabelsFilter)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement llminternal.RunLabelsFilter", llm)
+			}
+			if got := filter.RunLabels(map[string]string{"cost_center": "x"}); got != nil {
+				t.Errorf("RunLabels() = %v, want nil", got)
+			}
+		})
+	}
 }
