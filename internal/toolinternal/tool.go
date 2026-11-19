@@ -39,6 +39,16 @@ type StreamingFunctionTool interface {
 	RunStream(ctx agent.Context, args any) iter.Seq2[string, error]
 }
 
+// RawResultTool is implemented by a FunctionTool that can return its handler's
+// output before wrapping a non-map value into map[string]any{"result": v}, so
+// that *genai.Part values, slices of parts, and nil results reach the flow's
+// response builder intact. RunRaw handles arguments, confirmation and errors
+// as Run does; only the form of a successful result differs. The flow calls
+// RunRaw instead of Run when a tool implements it.
+type RawResultTool interface {
+	RunRaw(ctx agent.Context, args any) (any, error)
+}
+
 type RequestProcessor interface {
 	ProcessRequest(ctx agent.Context, req *model.LLMRequest) error
 }
@@ -91,6 +101,47 @@ func NewPanicError(toolName string, value any, stack []byte) *PanicError {
 }
 
 func (e *PanicError) Error() string { return e.msg }
+
+// PausedError is returned by a tool whose call stopped to wait for input. The
+// flow returns it as the step's error without running callbacks: no
+// on-tool-error and no after-tool callback sees it, no function response is
+// written for the call, and the model is not called again. Err is the cause,
+// and may be nil.
+type PausedError struct{ Err error }
+
+// Error returns the text of Err, or "tool call paused" when Err is nil.
+func (e *PausedError) Error() string {
+	if e.Err == nil {
+		return "tool call paused"
+	}
+	return e.Err.Error()
+}
+
+// Unwrap returns Err.
+func (e *PausedError) Unwrap() error { return e.Err }
+
+// Paused reports true. Packages that cannot import this one recognize a pause
+// by this method.
+func (e *PausedError) Paused() bool { return true }
+
+// FailRunError is returned by a tool for a violation of the framework's own
+// contract with the tool body, such as a second output. The flow offers it to
+// the on-tool-error callbacks: a callback response answers the call, a
+// callback error ends the run with that error, and when every callback
+// declines, the flow ends the run with the FailRunError instead of answering
+// the model. Err is the cause, and may be nil.
+type FailRunError struct{ Err error }
+
+// Error returns the text of Err, or "tool call failed the run" when Err is nil.
+func (e *FailRunError) Error() string {
+	if e.Err == nil {
+		return "tool call failed the run"
+	}
+	return e.Err.Error()
+}
+
+// Unwrap returns Err.
+func (e *FailRunError) Unwrap() error { return e.Err }
 
 // ModelErrorText is the text a failed call of the tool named toolName may show
 // the model, and whether err turned out to be a recovered panic. A recovered

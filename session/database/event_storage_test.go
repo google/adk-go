@@ -32,6 +32,7 @@ type responseFields struct {
 	AvgLogprobs             float64
 	LogprobsResult          *genai.LogprobsResult
 	SessionResumptionHandle string
+	LiveSessionID           string
 }
 
 func responseFieldsOf(ev *session.Event) responseFields {
@@ -41,6 +42,7 @@ func responseFieldsOf(ev *session.Event) responseFields {
 		AvgLogprobs:             ev.AvgLogprobs,
 		LogprobsResult:          ev.LogprobsResult,
 		SessionResumptionHandle: ev.SessionResumptionHandle,
+		LiveSessionID:           ev.LiveSessionID,
 	}
 }
 
@@ -56,6 +58,7 @@ func appendWithResponseFields(t *testing.T, svc session.Service, held session.Se
 		ChosenCandidates: []*genai.LogprobsResultCandidate{{Token: "hi", LogProbability: -0.25}},
 	}
 	ev.SessionResumptionHandle = "h1"
+	ev.LiveSessionID = "live-sess-db-1"
 	if err := svc.AppendEvent(t.Context(), held, ev); err != nil {
 		t.Fatalf("AppendEvent(%q) error = %v", id, err)
 	}
@@ -69,11 +72,13 @@ var wantResponseFields = responseFields{
 		ChosenCandidates: []*genai.LogprobsResultCandidate{{Token: "hi", LogProbability: -0.25}},
 	},
 	SessionResumptionHandle: "h1",
+	LiveSessionID:           "live-sess-db-1",
 }
 
 // adk-python's database service stores the whole event
 // (schemas/v1.py:222, rebuilt at :236), so the model's finish reason, model
-// version, log probabilities and resumption handle come back from Get.
+// version, log probabilities, resumption handle and live session id come
+// back from Get.
 func TestDatabaseService_AppendEvent_ResponseFieldsRoundTrip(t *testing.T) {
 	svc := emptyService(t)
 	held := createAt(t, svc, "app-fields", "s1", appendT0, nil)
@@ -96,7 +101,7 @@ func TestDatabaseService_AppendEvent_ResponseFieldsAfterMigratingOldTable(t *tes
 	svc := emptyService(t)
 	held := createAt(t, svc, "app-fields-old", "s1", appendT0, nil)
 	appendWithResponseFields(t, svc, held, "e_old", appendT1)
-	for _, column := range []string{"finish_reason", "model_version", "avg_logprobs", "logprobs_result", "session_resumption_handle"} {
+	for _, column := range []string{"finish_reason", "model_version", "avg_logprobs", "logprobs_result", "session_resumption_handle", "live_session_id"} {
 		if err := svc.db.Migrator().DropColumn(&storageEvent{}, column); err != nil {
 			t.Fatalf("DropColumn(%q) error = %v", column, err)
 		}

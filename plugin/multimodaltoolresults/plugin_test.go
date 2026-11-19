@@ -15,6 +15,7 @@
 package multimodaltoolresults_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -30,6 +31,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
@@ -1129,4 +1131,153 @@ func TestSessionRetentionNonListStoredValue(t *testing.T) {
 			t.Errorf("current-turn parts mismatch (-want +got):\n%s", diff)
 		}
 	})
+}
+
+// Two function calls of one model response whose tools both return parts end
+// the run, and the next model request carries both parts, when the later call
+// reaches the plugin while the earlier call's tool still runs. Fails if an
+// after-tool callback holds the plugin's lock while it waits for the earlier
+// calls of the response: the earlier call then waits for the lock and the run
+// hangs until its context is done.
+func TestParallelCallsThatSavePartsEndTheRun(t *testing.T) {
+	// runLimit bounds the run, so that a hang fails the test in seconds.
+	// headStart is how long the earlier call's tool keeps running after the
+	// later call has reached the after-tool callbacks.
+	const (
+		runLimit  = 3 * time.Second
+		headStart = 100 * time.Millisecond
+	)
+	for _, retention := range []multimodaltoolresults.Retention{multimodaltoolresults.RetentionNextModelCall, multimodaltoolresults.RetentionSession} {
+		t.Run(string(retention), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), runLimit)
+			defer cancel()
+			laterAtCallbacks := make(chan struct{})
+			// Registered before the plugin under test, so it runs first.
+			probe, err := plugin.New(plugin.Config{
+				Name: "probe",
+				AfterToolCallback: func(_ agent.Context, tl tool.Tool, _, _ map[string]any, _ error) (map[string]any, error) {
+					if tl.Name() == "later" {
+						close(laterAtCallbacks)
+					}
+					return nil, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("plugin.New failed: %v", err)
+			}
+			earlier, err := functiontool.New(functiontool.Config{Name: "earlier", Description: "Returns a part late."},
+				func(tc agent.Context, _ struct{}) (*genai.Part, error) {
+					select {
+					case <-laterAtCallbacks:
+						time.Sleep(headStart)
+					case <-tc.Done():
+					}
+					return genai.NewPartFromText("from earlier"), nil
+				})
+			if err != nil {
+				t.Fatalf("functiontool.New failed: %v", err)
+			}
+			later, err := functiontool.New(functiontool.Config{Name: "later", Description: "Returns a part."},
+				func(agent.Context, struct{}) (*genai.Part, error) {
+					return genai.NewPartFromText("from later"), nil
+				})
+			if err != nil {
+				t.Fatalf("functiontool.New failed: %v", err)
+			}
+			mockModel := &testutil.MockModel{Responses: []*genai.Content{
+				{Role: genai.RoleModel, Parts: []*genai.Part{
+					genai.NewPartFromFunctionCall("earlier", map[string]any{}),
+					genai.NewPartFromFunctionCall("later", map[string]any{}),
+				}},
+				genai.NewContentFromText("done", genai.RoleModel),
+			}}
+			a, err := llmagent.New(llmagent.Config{Name: "agent", Model: mockModel, Tools: []tool.Tool{earlier, later}})
+			if err != nil {
+				t.Fatalf("llmagent.New failed: %v", err)
+			}
+			sessions := session.InMemoryService()
+			created, err := sessions.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+			if err != nil {
+				t.Fatalf("Create session failed: %v", err)
+			}
+			r, err := runner.New(runner.Config{
+				AppName:        "app",
+				Agent:          a,
+				SessionService: sessions,
+				PluginConfig:   runner.PluginConfig{Plugins: []*plugin.Plugin{probe, newPlugin(t, retention)}},
+			})
+			if err != nil {
+				t.Fatalf("runner.New failed: %v", err)
+			}
+
+			_, err = testutil.CollectEvents(r.Run(ctx, "user", created.Session.ID(), genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}))
+
+			if ctx.Err() != nil {
+				t.Fatalf("Run did not end within %v (err %v)", runLimit, err)
+			}
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if len(mockModel.Requests) != 2 {
+				t.Fatalf("model requests = %d, want 2", len(mockModel.Requests))
+			}
+			var texts []string
+			for _, p := range tail(mockModel.Requests[1]) {
+				if p.Text != "" {
+					texts = append(texts, p.Text)
+				}
+			}
+			sort.Strings(texts)
+			if diff := cmp.Diff([]string{"from earlier", "from later"}, texts); diff != "" {
+				t.Errorf("text parts of the second request's last content mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// A call's after-tool callback saves its parts at once while an earlier call
+// of its model response still runs. Fails if the callback waits for the
+// earlier calls of its model response before it saves.
+func TestAfterToolSavesWhileAnEarlierCallRuns(t *testing.T) {
+	for _, tc := range []struct {
+		retention multimodaltoolresults.Retention
+		key       string
+	}{
+		{multimodaltoolresults.RetentionNextModelCall, multimodaltoolresults.PartsReturnedByToolsKey},
+		{multimodaltoolresults.RetentionSession, currentTurnKey},
+	} {
+		t.Run(string(tc.retention), func(t *testing.T) {
+			p := newPlugin(t, tc.retention)
+			// Call 1 of 2; call 0 never returns.
+			callCtx, cancel := context.WithCancel(adkcontext.WithCallPlace(t.Context(), adkcontext.NewCallOrder(2), 1))
+			defer cancel()
+			invCtx := icontext.NewInvocationContext(callCtx, icontext.InvocationContextParams{Session: newSession(t)})
+			toolCtx := agent.NewToolContext(invCtx, "1", &session.EventActions{StateDelta: map[string]any{}}, nil)
+			type callbackResult struct {
+				got map[string]any
+				err error
+			}
+			returned := make(chan callbackResult, 1)
+
+			go func() {
+				got, err := p.AfterToolCallback()(toolCtx, nil, map[string]any{}, map[string]any{"result": []*genai.Part{{Text: "a"}}}, nil)
+				returned <- callbackResult{got, err}
+			}()
+
+			var r callbackResult
+			select {
+			case r = <-returned:
+			case <-time.After(2 * time.Second):
+				cancel()
+				r = <-returned
+				t.Fatalf("AfterToolCallback() did not return within 2s; after its context was canceled it returned (%v, %v)", r.got, r.err)
+			}
+			if r.got != nil || r.err != nil {
+				t.Errorf("AfterToolCallback() = (%v, %v), want (nil, nil)", r.got, r.err)
+			}
+			if diff := cmp.Diff([]any{&genai.Part{Text: "a"}}, getState(t, toolCtx, tc.key)); diff != "" {
+				t.Errorf("saved parts mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }

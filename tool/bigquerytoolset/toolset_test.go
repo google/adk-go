@@ -37,6 +37,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/exp/feature"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
@@ -514,6 +515,37 @@ func TestToolset_MissingRequiredArgIsRejected(t *testing.T) {
 	_, err := toolByName(t, ts, "get_dataset_info").Run(newToolContext(t, t.Context(), nil), map[string]any{"project_id": "p"})
 	if err == nil {
 		t.Fatal("Run() without dataset_id succeeded, want a validation error")
+	}
+}
+
+// TestToolset_RunRawRejectsInvalidArgs checks that the LLM flow's entry point,
+// RunRaw, refuses a missing required argument and a null argument without a
+// default with the input schema's validation error, as Run does. It fails if
+// RunRaw skips the schema validation: the wrapped function tool would answer
+// the missing argument with an error result instead.
+func TestToolset_RunRawRejectsInvalidArgs(t *testing.T) {
+	f := newFakeBigQuery(t, nil)
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "missing dataset", args: map[string]any{"project_id": "p"}},
+		{name: "null dataset without a default", args: map[string]any{"project_id": "p", "dataset_id": nil}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, ok := toolByName(t, ts, "get_dataset_info").(toolinternal.RawResultTool)
+			if !ok {
+				t.Fatal("get_dataset_info does not implement toolinternal.RawResultTool")
+			}
+
+			got, err := raw.RunRaw(newToolContext(t, t.Context(), nil), tc.args)
+
+			if err == nil || !strings.Contains(err.Error(), "validat") {
+				t.Errorf("RunRaw(%v) = %v, %v; want a validation error", tc.args, got, err)
+			}
+		})
 	}
 }
 
@@ -1375,5 +1407,52 @@ func TestTools_ExternalAccessTokenKeepsClientTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("Run() took %v, want the client's 50ms timeout to apply", elapsed)
+	}
+}
+
+type projectArgs struct {
+	ProjectID string `json:"project_id"`
+}
+
+// TestNullDefaultsTool_NilResultAndRequestDeclaration checks that the wrapper
+// of a BigQuery tool keeps what a function tool gives the LLM flow: the
+// handler's nil result unconverted, so the flow answers {"result": null}, and
+// the declaration the request's typed-declaration switch asks for.
+func TestNullDefaultsTool_NilResultAndRequestDeclaration(t *testing.T) {
+	b := &bigQuery{defaultProjectID: "my-project"}
+	tl, err := newTool(b, "nil_tool", "Returns nothing.", func(agent.Context, projectArgs) (any, error) { return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, ok := tl.(toolinternal.RawResultTool)
+	if !ok {
+		t.Fatalf("%T does not implement toolinternal.RawResultTool", tl)
+	}
+	got, err := raw.RunRaw(newToolContext(t, t.Context(), nil), map[string]any{"project_id": nil})
+	if err != nil {
+		t.Fatalf("RunRaw() error = %v", err)
+	}
+	if got != nil {
+		t.Errorf("RunRaw() = %#v, want untyped nil", got)
+	}
+
+	req := &model.LLMRequest{}
+	ctx := newToolContext(t, feature.WithLegacyFunctionDeclarationSchema(t.Context(), true), nil)
+	if err := tl.(toolinternal.RequestProcessor).ProcessRequest(ctx, req); err != nil {
+		t.Fatalf("ProcessRequest() error = %v", err)
+	}
+	want := &genai.FunctionDeclaration{
+		Name:        "nil_tool",
+		Description: "Returns nothing.",
+		Parameters: &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{
+			"project_id": {Type: genai.TypeString, Description: "Defaults to 'my-project' when not provided."},
+		}},
+	}
+	if diff := cmp.Diff(want, req.Config.Tools[0].FunctionDeclarations[0]); diff != "" {
+		t.Errorf("packed declaration mismatch (-want +got):\n%s", diff)
+	}
+	if req.Tools["nil_tool"] != any(tl) {
+		t.Errorf("req.Tools[%q] = %T, want the BigQuery tool itself", "nil_tool", req.Tools["nil_tool"])
 	}
 }

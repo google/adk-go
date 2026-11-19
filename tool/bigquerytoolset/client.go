@@ -148,7 +148,7 @@ func (c *client) httpClientFor(ctx agent.Context) (*http.Client, error) {
 
 func accessToken(ctx agent.Context, key string) (string, error) {
 	missing := fmt.Errorf("no access token found in the session state under the key %q set as ExternalAccessTokenKey", key)
-	v, err := ctx.State().Get(key)
+	v, err := readToken(ctx, key)
 	if errors.Is(err, session.ErrStateKeyNotExist) {
 		return "", missing
 	}
@@ -160,6 +160,17 @@ func accessToken(ctx agent.Context, key string) (string, error) {
 		return "", missing
 	}
 	return token, nil
+}
+
+// readToken returns what ctx.State().Get(key) returns: the call's own state
+// delta first and then the session state.
+func readToken(ctx agent.Context, key string) (any, error) {
+	if a := ctx.Actions(); a != nil {
+		if v, ok := a.StateDelta[key]; ok {
+			return v, nil
+		}
+	}
+	return ctx.ReadonlyState().Get(key)
 }
 
 // pathSegment escapes a model-supplied id for use as one segment of a

@@ -67,6 +67,20 @@ type Config struct {
 	// where ToolArgs is the input type of your go function
 	// Returning true means confirmation is required.
 	RequireConfirmationProvider any
+
+	// ResponseScheduling is copied onto every function response of the tool.
+	// See tool.ResponseScheduler. The zero value sets none. It applies to tools
+	// built with New and with NewStreaming.
+	ResponseScheduling genai.FunctionResponseScheduling
+
+	// Sequential makes each call of the tool start after every earlier call of
+	// its model turn has returned. Set it when the tool's calls must see the
+	// writes of the earlier calls of their turn, whether or not the tool also
+	// takes a lock of its own; see tool.SequentialRunner, which also says what
+	// a user sees when a call's wait outlives the run's context. The zero
+	// value leaves the calls of one turn concurrent. NewStreaming returns an
+	// error that wraps ErrInvalidArgument when it is set.
+	Sequential bool
 }
 
 // Func represents a Go function that can be wrapped in a tool.
@@ -78,6 +92,26 @@ var ErrInvalidArgument = errors.New("invalid argument")
 
 // New creates a new tool with a name, description, and the provided handler.
 // Input schema is automatically inferred from the input and output types.
+//
+// When the model calls the tool, the tool handles the call's arguments before
+// the handler runs. If the input schema forbids properties it does not
+// declare, as the schema inferred for a struct TArgs does, it drops every
+// argument the schema does not declare. If an argument the schema requires
+// is missing, the handler does not run, and the call is answered with an
+// "error" result that names the missing parameters, so that the model can
+// call again; in a schema inferred from a struct, a field whose json tag has
+// omitempty or omitzero is not required. The remaining arguments are then
+// validated against the schema and converted to TArgs, and a value the
+// schema refuses fails the call with the validation error.
+//
+// The handler's result is the function response: a result that converts to
+// a JSON object is that object, and any other result is wrapped as
+// {"result": <value>}. A result that holds a *genai.Part or a genai.Part, at
+// any depth of maps, slices and arrays, is passed to the flow unconverted.
+// The flow moves each part that has inline data or a file URI, and a MIME
+// type, out of the result itself or out of a map, slice or array directly
+// inside it, into the Parts of the function response, where the model
+// receives it as media.
 func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.Tool, error) {
 	// TODO: How can we improve UX for functions that does not require an argument, returns a simple type value, or returns a no result?
 	// https://github.com/modelcontextprotocol/go-sdk/discussions/37
@@ -153,9 +187,28 @@ func (f *functionTool[TArgs, TResults]) IsLongRunning() bool {
 	return f.cfg.IsLongRunning
 }
 
-// ProcessRequest packs the function tool's declaration into the LLM request.
+// RunsSequentially implements tool.SequentialRunner.
+func (f *functionTool[TArgs, TResults]) RunsSequentially() bool {
+	return f.cfg.Sequential
+}
+
+// ResponseScheduling implements tool.ResponseScheduler.
+func (f *functionTool[TArgs, TResults]) ResponseScheduling() genai.FunctionResponseScheduling {
+	return f.cfg.ResponseScheduling
+}
+
+// ProcessRequest packs the function tool's declaration into the LLM request,
+// in the form the request's typed-declaration switch and backend ask for.
 func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	return toolutils.PackTool(req, f)
+	base := f.Declaration()
+	decl, err := requestDeclaration(ctx, base, schemaOf(f.inputSchema), schemaOf(f.outputSchema))
+	if err != nil {
+		return fmt.Errorf("function tool %q declaration: %w", f.Name(), err)
+	}
+	if decl == base {
+		return toolutils.PackTool(req, f)
+	}
+	return toolutils.PackTool(req, &declaredFunctionTool[TArgs, TResults]{functionTool: f, decl: decl})
 }
 
 // Declaration implements interfaces.FunctionTool.
@@ -185,25 +238,95 @@ func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration
 
 // Run executes the tool with the provided context and yields events.
 func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result map[string]any, err error) {
-	// TODO: Handle function call request from tc.InvocationContext.
 	defer func() {
 		if r := recover(); r != nil {
 			err = toolinternal.NewPanicError(f.Name(), r, debug.Stack())
 		}
 	}()
 
+	output, early, err := f.invoke(ctx, args)
+	if err != nil || early != nil {
+		return early, err
+	}
+	if toolinternal.CarriesPart(output) {
+		if m, ok := partMap(output); ok {
+			return m, nil
+		}
+		return map[string]any{"result": output}, nil
+	}
+	resp, converted, err := f.convert(output)
+	if err != nil || converted {
+		return resp, err
+	}
+	// Specs requires the result to be a map (dict in python). python impl allows basic types when building response event
+	// functions.py __build_response_event does the following
+	// if not isinstance(function_result, dict):
+	// 		function_result = {'result': function_result}
+	return map[string]any{"result": output}, nil
+}
+
+// RunRaw implements toolinternal.RawResultTool. It handles the arguments as
+// Run does and returns the handler's output without wrapping a non-map value:
+// an output holding a *genai.Part at any depth of maps, slices and arrays as
+// it is (a map with string keys copied into a new map[string]any), a nil
+// output as an untyped nil, an output that converts to a JSON object as that
+// map[string]any, and any other output as it is.
+func (f *functionTool[TArgs, TResults]) RunRaw(ctx agent.Context, args any) (result any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = toolinternal.NewPanicError(f.Name(), r, debug.Stack())
+		}
+	}()
+
+	output, early, err := f.invoke(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	if early != nil {
+		return early, nil
+	}
+	if toolinternal.CarriesPart(output) {
+		if m, ok := partMap(output); ok {
+			return m, nil
+		}
+		return output, nil
+	}
+	if isNil(output) {
+		return nil, nil
+	}
+	resp, converted, err := f.convert(output)
+	if err != nil {
+		return nil, err
+	}
+	if converted {
+		return resp, nil
+	}
+	return output, nil
+}
+
+// invoke runs everything up to and including the handler: argument handling,
+// confirmation and the handler itself. early is the result to answer with
+// instead of running the handler, when mandatory arguments are missing.
+func (f *functionTool[TArgs, TResults]) invoke(ctx agent.Context, args any) (output TResults, early map[string]any, err error) {
 	m, ok := args.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("unexpected args type, got: %T", args)
+		return output, nil, fmt.Errorf("unexpected args type, got: %T", args)
+	}
+	// A nil map keeps the validator's refusal of a JSON null.
+	if m != nil {
+		m = dropUndeclared(schemaOf(f.inputSchema), m)
+		if missing := missingMandatory(schemaOf(f.inputSchema), m); len(missing) > 0 {
+			return output, map[string]any{"error": missingArgsText(f.Name(), missing)}, nil
+		}
 	}
 	input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
 	if err != nil {
-		return nil, err
+		return output, nil, err
 	}
 
 	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 		if !confirmation.Confirmed {
-			return nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected)
+			return output, nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected)
 		}
 	} else {
 		requireConfirmation := f.requireConfirmation
@@ -219,40 +342,65 @@ func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result
 				fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 					f.Name()), nil)
 			if err != nil {
-				return nil, err
+				return output, nil, err
 			}
 			ctx.Actions().SkipSummarization = true
-			return nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired)
+			return output, nil, fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired)
 		}
 	}
 
-	output, err := f.handler(ctx, input)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := typeutil.ConvertToWithJSONSchema[TResults, map[string]any](output, f.outputSchema)
-	if err == nil { // all good
-		return resp, nil
-	}
+	output, err = f.handler(ctx, input)
+	return output, nil, err
+}
 
-	// Specs requires the result to be a map (dict in python). python impl allows basic types when building response event
-	// functions.py __build_response_event does the following
-	// if not isinstance(function_result, dict):
-	// 		function_result = {'result': function_result}
-	// Diverges from the python impl above: a result encoding/json cannot represent
-	// must not be wrapped, because it cannot be sent.
+// convert converts an output that holds no *genai.Part to a map[string]any
+// through its JSON form. converted is false when the output is not a JSON
+// object; the caller then answers with the output itself. An output
+// encoding/json cannot represent is an error, because it cannot be sent, and
+// so is one an explicit OutputSchema rejects.
+func (f *functionTool[TArgs, TResults]) convert(output TResults) (resp map[string]any, converted bool, err error) {
+	resp, err = typeutil.ConvertToWithJSONSchema[TResults, map[string]any](output, f.outputSchema)
+	if err == nil {
+		return resp, true, nil
+	}
 	if _, mErr := json.Marshal(output); mErr != nil {
-		return nil, mErr
+		return nil, false, mErr
 	}
 	// A schema inferred from TResults describes the type, not what encoding/json
 	// emits for it.
 	if f.cfg.OutputSchema != nil {
 		if err1 := typeutil.ValidateWithJSONSchema(output, f.outputSchema); err1 != nil {
-			return resp, err // if it fails propagate original err.
+			return resp, false, err // if it fails propagate original err.
 		}
 	}
-	wrappedOutput := map[string]any{"result": output}
-	return wrappedOutput, nil
+	return nil, false, nil
+}
+
+// partMap returns a map with string keys as a new map[string]any holding the
+// same values, so that *genai.Part values inside it survive.
+func partMap(v any) (map[string]any, bool) {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Map || rv.Type().Key().Kind() != reflect.String {
+		return nil, false
+	}
+	m := make(map[string]any, rv.Len())
+	for it := rv.MapRange(); it.Next(); {
+		m[it.Key().String()] = it.Value().Interface()
+	}
+	return m, true
+}
+
+// isNil reports whether v is nil, or a nil pointer, map, slice or interface.
+func isNil(v any) bool {
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return true
+	}
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface:
+		return rv.IsNil()
+	}
+	return false
 }
 
 // ** NOTE FOR REVIEWERS **

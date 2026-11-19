@@ -165,6 +165,35 @@ type Context interface {
 	InvocationContext
 
 	// Callback context
+
+	// State returns this context's view of the session state: a read sees the
+	// writes made through this context first, then the session's state; a write
+	// goes to this context's state delta and to the session's state.
+	//
+	// When a model turn holds several function calls, ADK runs the calls
+	// concurrently, and State does not order them: Get, Set and All never wait
+	// for another call, and a call reads what the calls that have already
+	// written put there. A tool whose calls must see the writes of the earlier
+	// calls of their turn, such as one that reads a key and writes a value
+	// computed from it while its sibling calls write the same key, declares
+	// itself sequential (tool.SequentialRunner, functiontool.Config.Sequential),
+	// whether or not it also takes a lock of its own. A call of a sequential
+	// tool starts only after every earlier call of the turn has returned,
+	// whether those calls are sequential or not, so it sees all of their
+	// writes. A lock of the tool's own, which it may hold across State, does
+	// not order the calls.
+	//
+	// When several calls write one key, the event that merges the turn's
+	// responses takes the value of the later call in the model's response. A
+	// lock alone therefore keeps each read-modify-write atomic but can leave a
+	// scalar one update short: two calls that each read n and write n+1 under
+	// the lock leave n+1 when the later call takes the lock first. A
+	// sequential tool's calls leave n+2. Use of State after the call has
+	// returned (a streaming tool's goroutine in live mode) is not ordered.
+	//
+	// The returned State, like the call's context, belongs to one call at a
+	// time: Set writes the call's state delta, a plain map, so a call must not
+	// use it from several goroutines at once.
 	State() session.State
 
 	// Tool context section

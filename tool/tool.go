@@ -47,6 +47,68 @@ type Tool interface {
 	IsLongRunning() bool
 }
 
+// ResponseScheduler is implemented by a tool that asks the model to treat its
+// function responses in a particular way. The LLM flow copies the value onto
+// the Scheduling field of every genai.FunctionResponse it builds for the tool,
+// whatever produced the result: the tool, a before-tool, after-tool or
+// on-tool-error callback, or the confirmation gate. An empty value means unset:
+// the field stays empty and is omitted from the response's JSON.
+//
+// Only models that support asynchronous function calling read the value (the
+// Gemini Live API); others ignore it. In a Live run a set value also makes the
+// tool non-blocking, which the Live flow decides, not this interface.
+//
+// tool.WithConfirmation and tool.WithToolNamePrefix keep the value of the tools
+// they wrap.
+type ResponseScheduler interface {
+	// ResponseScheduling returns the tool's scheduling, or "" for none. It must
+	// return the same value on every call and be safe for concurrent use.
+	ResponseScheduling() genai.FunctionResponseScheduling
+}
+
+// SequentialRunner is implemented by a tool that wants each of its calls to
+// start only after the calls before it in the same model turn have returned.
+// ADK runs the calls of one model turn concurrently, and State has no
+// ordering. A tool whose calls must see the writes of the earlier calls of
+// their turn, such as one that reads a key and writes a value computed from
+// it while its sibling calls write the same key, declares itself sequential,
+// whether or not it guards the update with a lock of its own. A lock keeps
+// each read-modify-write atomic but does not order the calls: the later call
+// in the model's response can take the lock first, and the event that merges
+// the turn's responses then stores that call's value, so two calls that each
+// add one to a counter leave it one higher, not two.
+//
+// Before a sequential call's callbacks and the tool run, the flow waits until
+// every earlier call of the turn has returned, whether those calls are
+// sequential or not. The wait happens before any code of the tool, so a lock
+// the tool takes cannot be held across it. If the call's context is done
+// first, the call is answered with the error "wait for earlier function
+// calls: context deadline exceeded" (or "... context canceled"), and neither
+// its callbacks nor the tool run. With the default task runner (see
+// platform.TaskRunner) the call's context is the context of its model turn,
+// which the flow derives from the run's context. So when the run's context
+// ends during the wait, that answer reaches neither the model nor the
+// session: the run ends with the context's error, and the session keeps the
+// model's function calls without their responses. The turn's context also
+// ends when another call of the turn pauses or fails the run; the waiting
+// call then runs nothing, and the step ends with that pause or failure and
+// no function response for any call of the turn. Otherwise, under a run
+// context that never ends, the wait ends only when the earlier calls return.
+//
+// No call of a turn, sequential or not, may wait for something that a later
+// sequential call of the same turn does: the sequential call waits for the
+// earlier call first, so both wait until the context ends. Only calls of a
+// tool run through ADK's function-call path are sequenced; the calls of a
+// streaming tool are not.
+//
+// tool.WithConfirmation and tool.WithToolNamePrefix keep the value of the
+// tools they wrap.
+type SequentialRunner interface {
+	// RunsSequentially reports whether the tool's calls are sequential. It must
+	// return the same value on every call and be safe for concurrent use.
+	RunsSequentially() bool
+}
+
 // Toolset is an interface for a collection of tools. It allows grouping
 // related tools together and providing them to an agent.
 //
@@ -92,7 +154,10 @@ func AllowedToolsPredicate(allowedTools []string) Predicate {
 
 // FilterToolset returns a Toolset that filters the tools in the given Toolset
 // using the given predicate. Close on the returned toolset closes toolset when
-// that implements [io.Closer].
+// that implements [io.Closer]. When toolset has a request hook, a
+// ProcessRequest(agent.Context, *model.LLMRequest) error method, the returned
+// toolset has one that calls it, so filtering keeps the toolset's own request
+// processing.
 func FilterToolset(toolset Toolset, predicate Predicate) Toolset {
 	if toolset == nil {
 		panic("toolset must not be nil")
@@ -134,6 +199,71 @@ func (f *filteredToolset) Close() error { return utils.CloseIfCloser(f.toolset) 
 
 func (f *filteredToolset) Unwrap() Toolset { return f.toolset }
 
+func (f *filteredToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	return processToolsetRequest(f.toolset, ctx, req)
+}
+
+// processToolsetRequest runs the request hook of ts when ts has one, and does
+// nothing otherwise. A toolset wrapper forwards its own ProcessRequest here, so
+// the flow, which looks for the hook on the outermost toolset, still reaches
+// the wrapped toolset's hook.
+func processToolsetRequest(ts Toolset, ctx agent.Context, req *model.LLMRequest) error {
+	rp, ok := ts.(requestProcessor)
+	if !ok {
+		return nil
+	}
+	return rp.ProcessRequest(ctx, req)
+}
+
+// defersResponse reports what t's DefersResponse answers, and false when t has
+// no such method. A tool wrapper forwards the method through it, because the
+// flow looks for it on the tool it dispatches to.
+func defersResponse(t Tool) bool {
+	d, ok := t.(interface{ DefersResponse() bool })
+	return ok && d.DefersResponse()
+}
+
+// displaysResultOnSkipSummarization reports what t's
+// DisplayResultOnSkipSummarization answers, and false when t has no such method.
+func displaysResultOnSkipSummarization(t Tool) bool {
+	d, ok := t.(interface{ DisplayResultOnSkipSummarization() bool })
+	return ok && d.DisplayResultOnSkipSummarization()
+}
+
+// runsSequentially reports what t's RunsSequentially answers, and false when t
+// is not a SequentialRunner.
+func runsSequentially(t Tool) bool {
+	s, ok := t.(SequentialRunner)
+	return ok && s.RunsSequentially()
+}
+
+// responseScheduling reports what t's ResponseScheduling answers, and "" when
+// t is not a ResponseScheduler.
+func responseScheduling(t Tool) genai.FunctionResponseScheduling {
+	if s, ok := t.(ResponseScheduler); ok {
+		return s.ResponseScheduling()
+	}
+	return ""
+}
+
+// rawResultRunner mirrors adk/internal/toolinternal.RawResultTool. It is
+// declared here rather than imported because toolinternal imports this
+// package.
+type rawResultRunner interface {
+	RunRaw(ctx agent.Context, args any) (any, error)
+}
+
+// runRaw runs t through its RunRaw method when it has one, and through Run
+// otherwise. A tool wrapper forwards RunRaw through it, because the flow calls
+// RunRaw on the tool it dispatches to so that a function tool's *genai.Part
+// and nil results are not converted.
+func runRaw(t runnableTool, ctx agent.Context, args any) (any, error) {
+	if r, ok := t.(rawResultRunner); ok {
+		return r.RunRaw(ctx, args)
+	}
+	return t.Run(ctx, args)
+}
+
 // ConfirmationProvider defines a function that dynamically determines whether
 // a specific tool execution requires user confirmation.
 //
@@ -153,6 +283,10 @@ type ConfirmationProvider func(toolName string, toolInput any) bool
 // confirmed and are included in the returned Toolset without modification.
 //
 // Close on the returned toolset closes ts when that implements [io.Closer].
+// The returned toolset's request hook calls the request hook of ts, when ts has
+// one. A wrapped tool keeps the DefersResponse,
+// DisplayResultOnSkipSummarization, ResponseScheduling and RunsSequentially
+// answers of the tool it wraps.
 //
 // EXPERIMENTAL: WithConfirmation is experimental and not currently in scope for the v1.0 API.
 func WithConfirmation(ts Toolset, requireConfirmation bool, requireConfirmationProvider ConfirmationProvider) Toolset {
@@ -174,6 +308,10 @@ func (c *confirmationToolset) Name() string { return c.toolset.Name() }
 func (c *confirmationToolset) Close() error { return utils.CloseIfCloser(c.toolset) }
 
 func (c *confirmationToolset) Unwrap() Toolset { return c.toolset }
+
+func (c *confirmationToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	return processToolsetRequest(c.toolset, ctx, req)
+}
 
 func (c *confirmationToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
 	tools, err := c.toolset.Tools(ctx)
@@ -281,6 +419,12 @@ func (t *confirmationTool) ProcessRequest(ctx agent.Context, req *model.LLMReque
 	return toolutils.PackTool(req, t)
 }
 
+func (t *confirmationTool) DefersResponse() bool { return defersResponse(t.runnableTool) }
+
+func (t *confirmationTool) DisplayResultOnSkipSummarization() bool {
+	return displaysResultOnSkipSummarization(t.runnableTool)
+}
+
 func (t *confirmationTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	// Check for Human-in-the-Loop confirmation.
 	if err := confirmCall(ctx, t, args, t.requireConfirmation, t.provider); err != nil {
@@ -288,6 +432,21 @@ func (t *confirmationTool) Run(ctx agent.Context, args any) (map[string]any, err
 	}
 	return t.runnableTool.Run(ctx, args)
 }
+
+// RunRaw applies the confirmation gate, then runs the wrapped tool's RunRaw,
+// or its Run when it has none.
+func (t *confirmationTool) RunRaw(ctx agent.Context, args any) (any, error) {
+	if err := confirmCall(ctx, t, args, t.requireConfirmation, t.provider); err != nil {
+		return nil, err
+	}
+	return runRaw(t.runnableTool, ctx, args)
+}
+
+func (t *confirmationTool) ResponseScheduling() genai.FunctionResponseScheduling {
+	return responseScheduling(t.runnableTool)
+}
+
+func (t *confirmationTool) RunsSequentially() bool { return runsSequentially(t.runnableTool) }
 
 // confirmationStreamingTool is the streaming counterpart of confirmationTool.
 // It embeds the streamingRunnableTool interface rather than the concrete tool so
@@ -320,6 +479,18 @@ func (t *confirmationStreamingTool) ProcessRequest(ctx agent.Context, req *model
 		}
 	}
 	return toolutils.PackTool(req, t)
+}
+
+func (t *confirmationStreamingTool) DefersResponse() bool {
+	return defersResponse(t.streamingRunnableTool)
+}
+
+func (t *confirmationStreamingTool) DisplayResultOnSkipSummarization() bool {
+	return displaysResultOnSkipSummarization(t.streamingRunnableTool)
+}
+
+func (t *confirmationStreamingTool) ResponseScheduling() genai.FunctionResponseScheduling {
+	return responseScheduling(t.streamingRunnableTool)
 }
 
 func (t *confirmationStreamingTool) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {

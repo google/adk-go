@@ -462,9 +462,10 @@ type Config struct {
 	// call of a run the toolsets are listed again, concurrently, so a toolset
 	// may answer differently per step. A toolset's Tools method must be safe
 	// for concurrent use, including with itself: a toolset placed here twice
-	// has Tools called twice at the same time. A toolset whose listing fails is
-	// skipped for that step: it contributes no tools, and the run goes on
-	// without an error or a log line, unless the run's context is
+	// (for example ts and tool.WithToolNamePrefix(ts, "p")) has Tools called
+	// twice at the same time. A toolset whose listing fails is skipped for that
+	// step: it contributes no tools, its own request hook still runs, and the
+	// run goes on without an error or a log line, unless the run's context is
 	// done, which ends the step with the listing error. CanonicalTools returns
 	// the same list outside a run.
 	Toolsets []tool.Toolset

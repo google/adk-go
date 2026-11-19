@@ -15,12 +15,14 @@
 package transfertoagenttool_test
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/toolinternal"
@@ -99,5 +101,51 @@ func TestNew_DuplicateRegistrationIsRefused(t *testing.T) {
 	}
 	if got := len(req.Config.Tools[0].FunctionDeclarations); got != 1 {
 		t.Errorf("function declarations = %d, want 1", got)
+	}
+}
+
+func TestNew_PublicToolOfSubAgentTransfersToRoot(t *testing.T) {
+	childLLM := &testutil.MockModel{Responses: []*genai.Content{
+		transferCall(map[string]any{"agent_name": "root"}),
+	}}
+	// child may transfer neither to its parent nor to peers, so the flow gives
+	// it no transfer tool of its own and the public tool is its only one.
+	child, err := llmagent.New(llmagent.Config{
+		Name:                     "child",
+		Model:                    childLLM,
+		DisallowTransferToParent: true,
+		DisallowTransferToPeers:  true,
+		Tools:                    []tool.Tool{transfertoagenttool.New(transfertoagenttool.Config{AgentNames: []string{"helper"}})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootLLM := &testutil.MockModel{Responses: []*genai.Content{
+		transferCall(map[string]any{"agent_name": "child"}),
+	}}
+	root, err := llmagent.New(llmagent.Config{Name: "root", Model: rootLLM, SubAgents: []agent.Agent{child}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := testutil.NewTestAgentRunner(t, root)
+
+	_, err = testutil.CollectEvents(r.Run(t, "s", "hi"))
+	// The tool accepts root, an agent of child's tree; the flow then refuses
+	// the transfer because root is not one of child's transfer targets.
+	if !errors.Is(err, agent.ErrInvalidTransferTarget) {
+		t.Errorf("run error = %v, want the flow's refusal matching agent.ErrInvalidTransferTarget", err)
+	}
+	resp, getErr := r.SessionService().Get(t.Context(), &session.GetRequest{AppName: "test_app", UserID: "test_user", SessionID: "s"})
+	if getErr != nil {
+		t.Fatalf("Get() error = %v", getErr)
+	}
+	var childTransfer string
+	for ev := range resp.Session.Events().All() {
+		if ev.Author == "child" && ev.Actions.TransferToAgent != "" {
+			childTransfer = ev.Actions.TransferToAgent
+		}
+	}
+	if childTransfer != "root" {
+		t.Errorf("child's function response event has TransferToAgent = %q, want %q", childTransfer, "root")
 	}
 }

@@ -15,6 +15,7 @@
 package functiontool
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"reflect"
@@ -34,7 +35,8 @@ import (
 // StreamingFunc represents a Go function that streams results.
 type StreamingFunc[TArgs any] func(agent.Context, TArgs) iter.Seq2[string, error]
 
-// NewStreaming creates a new streaming tool.
+// NewStreaming creates a new streaming tool. It returns an error that wraps
+// [ErrInvalidArgument] when cfg.Sequential is set.
 func NewStreaming[TArgs any](cfg Config, handler StreamingFunc[TArgs]) (tool.Tool, error) {
 	var zeroArgs TArgs
 	argsType := reflect.TypeOf(zeroArgs)
@@ -43,6 +45,10 @@ func NewStreaming[TArgs any](cfg Config, handler StreamingFunc[TArgs]) (tool.Too
 	}
 	if argsType == nil || (argsType.Kind() != reflect.Struct && argsType.Kind() != reflect.Map) {
 		return nil, fmt.Errorf("input must be a struct or a map or a pointer to those types, but received: %v: %w", argsType, ErrInvalidArgument)
+	}
+
+	if cfg.Sequential {
+		return nil, fmt.Errorf("Config.Sequential is not supported by NewStreaming: the calls of a streaming tool are not sequenced: %w", ErrInvalidArgument)
 	}
 
 	ischema, err := resolvedSchema[TArgs](cfg.InputSchema)
@@ -99,9 +105,23 @@ func (f *streamingFunctionTool[TArgs]) IsLongRunning() bool {
 	return f.cfg.IsLongRunning
 }
 
-// ProcessRequest packs the function tool's declaration into the LLM request.
+// ResponseScheduling implements tool.ResponseScheduler.
+func (f *streamingFunctionTool[TArgs]) ResponseScheduling() genai.FunctionResponseScheduling {
+	return f.cfg.ResponseScheduling
+}
+
+// ProcessRequest packs the function tool's declaration into the LLM request,
+// in the form the request's typed-declaration switch and backend ask for.
 func (f *streamingFunctionTool[TArgs]) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	return toolutils.PackTool(req, f)
+	base := f.Declaration()
+	decl, err := requestDeclaration(ctx, base, schemaOf(f.inputSchema), nil)
+	if err != nil {
+		return fmt.Errorf("function tool %q declaration: %w", f.Name(), err)
+	}
+	if decl == base {
+		return toolutils.PackTool(req, f)
+	}
+	return toolutils.PackTool(req, &declaredStreamingTool[TArgs]{streamingFunctionTool: f, decl: decl})
 }
 
 // Declaration implements toolinternal.StreamingFunctionTool.
@@ -150,6 +170,14 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 		if !ok {
 			yield("", fmt.Errorf("unexpected args type, got: %T", args))
 			return
+		}
+		// A nil map keeps the validator's refusal of a JSON null.
+		if m != nil {
+			m = dropUndeclared(schemaOf(f.inputSchema), m)
+			if missing := missingMandatory(schemaOf(f.inputSchema), m); len(missing) > 0 {
+				yield("", errors.New(missingArgsText(f.Name(), missing)))
+				return
+			}
 		}
 		input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
 		if err != nil {

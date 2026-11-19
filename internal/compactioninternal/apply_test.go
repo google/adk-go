@@ -331,7 +331,8 @@ func TestContentlessCompactionIsNeverConversation(t *testing.T) {
 // whole basis of the gate. Recovery is deliberately not widened: an orphan with
 // no long-running call is a genuine inconsistency, and guessing at it would hide
 // a bug rather than surface one. Note that such an orphan is later dropped from
-// the prompt silently by rearrangeEventsForFunctionResponsesInHistory.
+// the prompt silently by dropOrphanedFunctionResponses unless it is the final
+// event.
 func TestApplyRecoveryBoundary(t *testing.T) {
 	t.Parallel()
 

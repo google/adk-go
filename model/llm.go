@@ -147,12 +147,38 @@ type LLMResponse struct {
 	TurnComplete bool `json:"turnComplete,omitempty"`
 	// Flag indicating that LLM was interrupted when generating the content.
 	// Usually it is due to user interruption during a bidi streaming.
-	Interrupted             bool               `json:"interrupted,omitempty"`
-	SessionResumptionHandle string             `json:"sessionResumptionHandle,omitempty"`
-	ErrorCode               string             `json:"errorCode,omitempty"`
-	ErrorMessage            string             `json:"errorMessage,omitempty"`
-	FinishReason            genai.FinishReason `json:"finishReason,omitempty"`
-	AvgLogprobs             float64            `json:"avgLogprobs,omitempty"`
+	Interrupted             bool   `json:"interrupted,omitempty"`
+	SessionResumptionHandle string `json:"sessionResumptionHandle,omitempty"`
+	// LiveSessionID is the identifier the Live API gave the connection that
+	// produced this response. It is opaque: compare it for equality, never
+	// parse it. The empty string means the response came from no live
+	// connection, or from a connection the server gave no identifier.
+	//
+	// In a live run, every response a live connection returns carries the
+	// connection's identifier, and so does the model event built from it,
+	// except an event for an input or output transcription or for a session
+	// resumption update that has no content and neither a turn-complete nor
+	// an interrupted signal, which carries none. After a reconnection,
+	// responses carry the identifier of the new connection.
+	//
+	// The function response event built for the function calls of a live
+	// model event carries that model event's identifier, whether it answers
+	// one call or merges the responses of several, and carries "" when the
+	// model event has none. A run without a live connection builds its
+	// function response events without one, whatever the model returned.
+	//
+	// A response that an after-model callback replaced does not carry the id
+	// unless the replacement sets it. A plugin's replacement event replaces
+	// the identifier only when it sets one; otherwise the original's stays.
+	//
+	// The in-memory, Redis and database session services and the REST event
+	// keep the field. The Vertex AI session service keeps it in the event's
+	// raw_event, since its SessionEvent has no column for it.
+	LiveSessionID string             `json:"liveSessionId,omitempty"`
+	ErrorCode     string             `json:"errorCode,omitempty"`
+	ErrorMessage  string             `json:"errorMessage,omitempty"`
+	FinishReason  genai.FinishReason `json:"finishReason,omitempty"`
+	AvgLogprobs   float64            `json:"avgLogprobs,omitempty"`
 }
 
 // FunctionCalls returns the FunctionCall of each part of r.Content that has
