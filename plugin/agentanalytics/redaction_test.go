@@ -2062,7 +2062,7 @@ func TestLegacyRegexCompositeParity(t *testing.T) {
 }
 
 // TestAdversarialScaling checks that redactErrorMessage, sanitizeRawText and
-// SmartTruncate stay linear on repeated adversarial shapes that stress each
+// smartTruncate stay linear on repeated adversarial shapes that stress each
 // step added for the inputs of
 // TestCompoundKeyDifferentialAndIdempotencyRegressions and
 // TestCompoundKeyReviewLeakRegressions: the delimiters of a redacted

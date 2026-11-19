@@ -559,7 +559,7 @@ func TestBarePlaceholderHeaderCompoundAndContainerRegressions(t *testing.T) {
 		assertAllEntryPoints(t, in, in, unparseableJSONPlaceholder)
 	}
 	// With none, it is prose to redactErrorMessage and sanitizeRawText, and
-	// malformed JSON text to SmartTruncate.
+	// malformed JSON text to smartTruncate.
 	assertTextKeptAndValueFailsClosed(t, `"S0:password="[REDACTED]""`)
 }
 
@@ -1033,10 +1033,10 @@ func TestURIComponentsCheckedAsText(t *testing.T) {
 		assertAllEntryPoints(t, tc.label, tc.uri, redactedSensitiveTextPlaceholder, s1, s2)
 		got := formatURI(tc.uri)
 		if got != tc.wantFormatted {
-			t.Errorf("[%s] FormatContentParts file URI %q = %q, want %q", tc.label, tc.uri, got, tc.wantFormatted)
+			t.Errorf("[%s] formatContentParts file URI %q = %q, want %q", tc.label, tc.uri, got, tc.wantFormatted)
 		}
 		if again := formatURI(got); again != got {
-			t.Errorf("[%s] FormatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
+			t.Errorf("[%s] formatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
 		}
 	}
 
@@ -1051,10 +1051,10 @@ func TestURIComponentsCheckedAsText(t *testing.T) {
 	} {
 		got := formatURI(tc.uri)
 		if got != tc.want {
-			t.Errorf("FormatContentParts file URI %q = %q, want %q", tc.uri, got, tc.want)
+			t.Errorf("formatContentParts file URI %q = %q, want %q", tc.uri, got, tc.want)
 		}
 		if again := formatURI(got); again != got {
-			t.Errorf("FormatContentParts second pass(%q) = %q, want unchanged", got, again)
+			t.Errorf("formatContentParts second pass(%q) = %q, want unchanged", got, again)
 		}
 	}
 	for _, in := range []string{
@@ -1140,7 +1140,7 @@ func TestKnownSentinelLengths(t *testing.T) {
 // padded line-start keys, glued placeholder runs with many delimiters, URI
 // components checked as text, and over-budget values whose nested containers
 // close at the end of the text after dangling key quotes stay linear through
-// all three entry points, and through FormatContentParts for URIs.
+// all three entry points, and through formatContentParts for URIs.
 func TestAdversarialScalingContainerGluedAndURIShapes(t *testing.T) {
 	runInParallel(t)
 	a135 := strings.Repeat("a", 135)
@@ -1312,7 +1312,7 @@ func TestGluedPlaceholderBeforeUnredactedValues(t *testing.T) {
 	} {
 		assertAllEntryPoints(t, tc.in, tc.in, tc.want, tc.forbidden...)
 		if got := formatContentTextPart(t, tc.in); got != tc.want {
-			t.Errorf("FormatContentParts(%q) = %q, want %q", tc.in, got, tc.want)
+			t.Errorf("formatContentParts(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 		if got := scrubErrorText(tc.in); got != tc.want {
 			t.Errorf("scrubErrorText(%q) = %q, want %q", tc.in, got, tc.want)
@@ -1359,18 +1359,18 @@ func TestPlusPaddedQueryKeys(t *testing.T) {
 	} {
 		assertAllEntryPoints(t, tc.label, tc.uri, tc.want, s1)
 		if got := formatURI(tc.uri); got != tc.want {
-			t.Errorf("[%s] FormatContentParts file URI %q = %q, want %q", tc.label, tc.uri, got, tc.want)
+			t.Errorf("[%s] formatContentParts file URI %q = %q, want %q", tc.label, tc.uri, got, tc.want)
 		} else if again := formatURI(got); again != got {
-			t.Errorf("[%s] FormatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
+			t.Errorf("[%s] formatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
 		}
 	}
 
 	// An escaped "+" before a key fails the error text closed as a whole, as
-	// on main, and FormatContentParts redacts the value.
+	// on main, and formatContentParts redacts the value.
 	escapedPlus := "https://example.com/cb?%2Btoken=" + s1
 	assertAllEntryPoints(t, "escaped_plus_before_key", escapedPlus, redactedSensitiveTextPlaceholder, s1)
 	if got, want := formatURI(escapedPlus), "https://example.com/cb?%2Btoken=%5BREDACTED%5D"; got != want {
-		t.Errorf("FormatContentParts file URI %q = %q, want %q", escapedPlus, got, want)
+		t.Errorf("formatContentParts file URI %q = %q, want %q", escapedPlus, got, want)
 	}
 
 	for _, uri := range []string{
@@ -1381,7 +1381,7 @@ func TestPlusPaddedQueryKeys(t *testing.T) {
 	} {
 		assertUnchangedAllEntryPoints(t, uri)
 		if got := formatURI(uri); got != uri {
-			t.Errorf("FormatContentParts file URI %q = %q, want unchanged", uri, got)
+			t.Errorf("formatContentParts file URI %q = %q, want unchanged", uri, got)
 		}
 	}
 
@@ -1420,7 +1420,7 @@ func TestPlusPaddedQueryKeys(t *testing.T) {
 // unquoted keys with quoted values, header values after glued placeholders,
 // long words after a placeholder, chains that the scrub leaves as they are,
 // and "+"-padded query keys stay linear through all three entry points, and
-// through FormatContentParts for URIs.
+// through formatContentParts for URIs.
 func TestAdversarialScalingSpacedContainersAndRedactedValues(t *testing.T) {
 	runInParallel(t)
 	a135 := strings.Repeat("a", 135)
@@ -1514,9 +1514,9 @@ func TestDelimSpaceTrimmedQueryKeys(t *testing.T) {
 	} {
 		assertAllEntryPoints(t, tc.label, tc.uri, tc.wantText, s1)
 		if got := formatURI(tc.uri); got != tc.wantURI {
-			t.Errorf("[%s] FormatContentParts file URI %q = %q, want %q", tc.label, tc.uri, got, tc.wantURI)
+			t.Errorf("[%s] formatContentParts file URI %q = %q, want %q", tc.label, tc.uri, got, tc.wantURI)
 		} else if again := formatURI(got); again != got {
-			t.Errorf("[%s] FormatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
+			t.Errorf("[%s] formatContentParts second pass(%q) = %q, want unchanged", tc.label, got, again)
 		}
 	}
 
@@ -1528,7 +1528,7 @@ func TestDelimSpaceTrimmedQueryKeys(t *testing.T) {
 	} {
 		assertUnchangedAllEntryPoints(t, uri)
 		if got := formatURI(uri); got != uri {
-			t.Errorf("FormatContentParts file URI %q = %q, want unchanged", uri, got)
+			t.Errorf("formatContentParts file URI %q = %q, want unchanged", uri, got)
 		}
 	}
 
@@ -1671,7 +1671,7 @@ func TestOpenerScanBudgetLinearScaling(t *testing.T) {
 					}
 				}
 				if again := formatContentTextPart(t, got); again != got {
-					t.Errorf("FormatContentParts second pass(%.80q) = %.80q, want unchanged", got, again)
+					t.Errorf("formatContentParts second pass(%.80q) = %.80q, want unchanged", got, again)
 				}
 			}
 		})
@@ -1885,7 +1885,7 @@ func largeTextEntryPoints(t *testing.T) []struct {
 		{"scrubErrorText", scrubErrorText},
 		{"redactErrorMessage", redactErrorMessage},
 		{"sanitizeRawText", func(s string) string { out, _ := sanitizeRawText(s); return out }},
-		{"SmartTruncate", func(s string) string {
+		{"smartTruncate", func(s string) string {
 			raw, _, err := smartTruncate(s, -1, true)
 			var out string
 			if err != nil || json.Unmarshal(raw, &out) != nil {
@@ -1893,7 +1893,7 @@ func largeTextEntryPoints(t *testing.T) []struct {
 			}
 			return out
 		}},
-		{"FormatContentParts", func(s string) string { return formatContentTextPart(t, s) }},
+		{"formatContentParts", func(s string) string { return formatContentTextPart(t, s) }},
 	}
 }
 
@@ -1910,7 +1910,7 @@ func assertSecondCall(t *testing.T, name string, f func(string) string, got stri
 	}
 	trimmed := trimBOMAndSpace(got)
 	malformed := trimmed != "" && (trimmed[0] == '{' || trimmed[0] == '[') && !isKnownSentinel(trimmed) && !json.Valid([]byte(trimmed))
-	if name == "SmartTruncate" && malformed && again != unparseableJSONPlaceholder {
+	if name == "smartTruncate" && malformed && again != unparseableJSONPlaceholder {
 		t.Errorf("%s second call(%q) = %q, want %q", name, got, again, unparseableJSONPlaceholder)
 	}
 }
@@ -1951,7 +1951,7 @@ func TestJSONDocumentValuesKeepNoSecret(t *testing.T) {
 				t.Errorf("%s(%q) = %q kept a secret", ep.name, in, got)
 			}
 			assertSecondCall(t, ep.name, ep.f, got)
-			if (ep.name == "SmartTruncate" || ep.name == "FormatContentParts") && got != srt {
+			if (ep.name == "smartTruncate" || ep.name == "formatContentParts") && got != srt {
 				t.Errorf("%s(%q) = %q, sanitizeRawText = %q, want the same", ep.name, in, got, srt)
 			}
 		}
@@ -2163,7 +2163,7 @@ func TestLegacyURIKeysAsOnMain(t *testing.T) {
 	}
 	assertAllEntryPoints(t, in, in, redactedSensitiveTextPlaceholder, "URISECRET1", "URISECRET2")
 	if got := formatContentTextPart(t, in); got != redactedSensitiveTextPlaceholder {
-		t.Errorf("FormatContentParts(%q) = %q, want %q", in, got, redactedSensitiveTextPlaceholder)
+		t.Errorf("formatContentParts(%q) = %q, want %q", in, got, redactedSensitiveTextPlaceholder)
 	}
 }
 
@@ -2460,7 +2460,7 @@ func TestAdversarialScalingURIRewrites(t *testing.T) {
 // JSON text; a leaf that is the JSON text of another document; a JSON string
 // literal that holds a document; and a leaf whose text scrub takes its
 // closing quote with the value. No entry point keeps a credential and a
-// second call changes nothing but what SmartTruncate fails closed as
+// second call changes nothing but what smartTruncate fails closed as
 // malformed JSON text (see assertSecondCall), JSON that does not parse fails
 // closed, a credential that the scrub of the text reads across strings is not
 // kept, and documents nested in strings 12 levels deep stay fast.
@@ -2524,7 +2524,7 @@ func TestJSONValuesInStringsKeepNoSecret(t *testing.T) {
 	}
 	// The scrub of the text reads the header value of the first string on
 	// into the next, and the credentials in the keys; sanitizeRawText,
-	// SmartTruncate and FormatContentParts keep none of them, as on main,
+	// smartTruncate and formatContentParts keep none of them, as on main,
 	// while redactErrorMessage redacts the leaves of a JSON document one by
 	// one, as it did on main.
 	for _, in := range []string{
@@ -2586,7 +2586,7 @@ func TestJSONValuesInStringsKeepNoSecret(t *testing.T) {
 // leaf, which the expressions of main without compound keys read on past the
 // leaf. No entry point keeps a secret that main removes from the text,
 // redactErrorMessage keeps one only where main scrubs the string that holds
-// it on its own, and a second call changes nothing but what SmartTruncate
+// it on its own, and a second call changes nothing but what smartTruncate
 // fails closed as malformed JSON text (see assertSecondCall), also for a URL
 // leaf in a document in a string and a document whose sensitive keys may run
 // on into the placeholders of their values.
@@ -2730,14 +2730,14 @@ func TestExpressionsKeepStringsApartChecks(t *testing.T) {
 // redacts; a bearer credential that an escaped quote opens, in a JSON string
 // literal once and twice; and a quoted placeholder that a word follows after
 // the escape \n. No entry point keeps the credential, and a second call
-// changes nothing but what SmartTruncate fails closed as malformed JSON text
-// (see assertSecondCall). SmartTruncate keeps what sanitizeRawText keeps of a
+// changes nothing but what smartTruncate fails closed as malformed JSON text
+// (see assertSecondCall). smartTruncate keeps what sanitizeRawText keeps of a
 // document whose scrub takes the closing quote of a header value, as main
 // did, rather than failing it closed, and a large array of strings, whose
 // last strings the scrub reads as one credential, goes through the node
 // budget once, as on main. Text that starts with "{" or "[" and is no JSON
-// is prose to redactErrorMessage, sanitizeRawText and FormatContentParts
-// when it holds nothing to redact, and fails closed in SmartTruncate
+// is prose to redactErrorMessage, sanitizeRawText and formatContentParts
+// when it holds nothing to redact, and fails closed in smartTruncate
 // whatever it holds, as on main.
 func TestJSONDocumentsScrubbedAsText(t *testing.T) {
 	runInParallel(t)
@@ -2806,7 +2806,7 @@ func TestJSONDocumentsScrubbedAsText(t *testing.T) {
 		in := marshal(append(slices.Clone(items), tail...))
 		got := eps[3].f(in)
 		if strings.Contains(got, sanitizeBudgetPlaceholder) || !strings.Contains(got, `"item 39999"`) || strings.Contains(got, "SECRETZQ") {
-			t.Errorf("SmartTruncate(%d strings and %q) = %.60q...%.60q, want every string and no secret", len(items), tail, got, got[max(0, len(got)-60):])
+			t.Errorf("smartTruncate(%d strings and %q) = %.60q...%.60q, want every string and no secret", len(items), tail, got, got[max(0, len(got)-60):])
 		}
 	}
 	// Malformed and valid JSON strings with Unicode-escaped case-folded
@@ -3028,7 +3028,7 @@ func TestJSONDocumentsScrubbedAsText(t *testing.T) {
 		// it, and smartTruncate fails it closed, as on main.
 		for _, ep := range eps[1:] {
 			want := prose
-			if ep.name == "SmartTruncate" {
+			if ep.name == "smartTruncate" {
 				want = unparseableJSONPlaceholder
 			}
 			if got := ep.f(prose); got != want {
@@ -3081,7 +3081,7 @@ func TestNestedJSONTextDepthScaling(t *testing.T) {
 		return doc
 	}
 	// runAll and the subtests build the entry points with the t of the
-	// subtest, whose Fatalf the SmartTruncate and FormatContentParts entry
+	// subtest, whose Fatalf the smartTruncate and formatContentParts entry
 	// points call.
 	runAll := func(t *testing.T, in string) func() {
 		eps := largeTextEntryPoints(t)
@@ -4286,8 +4286,8 @@ func TestSensitiveKeyContainerValuesKeepDocument(t *testing.T) {
 // TestMalformedJSONProseKeptAsOnMain covers text that starts with "{", "["
 // or a quote and is no JSON, in which a scheme word or a key name stands next
 // to an escape, a non-ASCII space, a quote or a path and no credential does.
-// redactErrorMessage, sanitizeRawText and FormatContentParts keep it, as on
-// main, and SmartTruncate, which keeps no malformed JSON text, fails it
+// redactErrorMessage, sanitizeRawText and formatContentParts keep it, as on
+// main, and smartTruncate, which keeps no malformed JSON text, fails it
 // closed. The same words in text that starts otherwise are kept by every
 // entry point.
 func TestMalformedJSONProseKeptAsOnMain(t *testing.T) {
@@ -4308,7 +4308,7 @@ func TestMalformedJSONProseKeptAsOnMain(t *testing.T) {
 	} {
 		assertTextKeptAndValueFailsClosed(t, in)
 		if got := formatContentTextPart(t, in); got != in {
-			t.Errorf("FormatContentParts(%q) = %q, want unchanged", in, got)
+			t.Errorf("formatContentParts(%q) = %q, want unchanged", in, got)
 		}
 	}
 	for _, in := range []string{
@@ -4404,7 +4404,7 @@ func TestURITokenSpansMatchExpression(t *testing.T) {
 // TestLargeMalformedJSONProseScaling covers a megabyte of text that starts
 // with "[" and is no JSON, with a URI, an escaped tab and a no-break space on
 // each line and no credential. redactErrorMessage and sanitizeRawText keep
-// it, SmartTruncate fails it closed, and the time that they take grows
+// it, smartTruncate fails it closed, and the time that they take grows
 // linearly with the text and stays within a wall-clock limit: what tells
 // such prose from JSON reads the text a fixed number of times, and finds its
 // URIs without trying an expression from every letter (see uriTokenSpans).

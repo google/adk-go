@@ -633,7 +633,7 @@ func TestBatchProcessor_CloseDrainsAndRejectsNewAppends(t *testing.T) {
 	bp.Append(map[string]any{"event_type": "before_close"})
 	bp.Close()
 
-	// Appends after Close must be ignored and counted in ShutdownDrops.
+	// Appends after bp.Close stops accepting rows must be ignored and counted in ShutdownDrops.
 	bp.Append(map[string]any{"event_type": "after_close"})
 	if len(bp.queue) != 0 {
 		t.Errorf("queue len after Close = %d, want 0", len(bp.queue))

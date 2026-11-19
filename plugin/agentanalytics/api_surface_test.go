@@ -20,14 +20,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
 	"iter"
 	"net/http"
+	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -276,6 +283,111 @@ func checkGuardLayout(gs guardedStruct) error {
 	return fmt.Errorf("%s has no exported fields after the guard", gs.name)
 }
 
+var realAgentAnalyticsExportPkg = sync.OnceValues(func() (*types.Package, error) {
+	goBin := "go"
+	if goroot := runtime.GOROOT(); goroot != "" {
+		candidate := filepath.Join(goroot, "bin", "go")
+		if _, err := os.Stat(candidate); err == nil {
+			goBin = candidate
+		}
+	}
+	cmd := exec.Command(goBin, "list", "-mod=readonly", "-export", "-deps", "-json", ".")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("go list -export: %w\n%s", err, stderr.String())
+	}
+	exports := make(map[string]string)
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for dec.More() {
+		var p struct {
+			ImportPath string
+			Export     string
+		}
+		if err := dec.Decode(&p); err != nil {
+			return nil, fmt.Errorf("decoding go list -json output: %w", err)
+		}
+		if p.ImportPath != "" && p.Export != "" {
+			exports[p.ImportPath] = p.Export
+		}
+	}
+	lookup := func(importPath string) (io.ReadCloser, error) {
+		exportFile, ok := exports[importPath]
+		if !ok {
+			return nil, fmt.Errorf("no export data recorded for %q", importPath)
+		}
+		return os.Open(exportFile)
+	}
+	imp := importer.ForCompiler(token.NewFileSet(), "gc", lookup)
+	if imp == nil {
+		return nil, fmt.Errorf("importer.ForCompiler(\"gc\") returned nil")
+	}
+	return imp.Import(agentAnalyticsPkgPath)
+})
+
+func loadRealAgentAnalyticsExportPkg(t *testing.T) *types.Package {
+	t.Helper()
+	pkg, err := realAgentAnalyticsExportPkg()
+	if err != nil {
+		t.Fatalf("loading real export data for %s: %v", agentAnalyticsPkgPath, err)
+	}
+	return pkg
+}
+
+// typecheckExternalRef type-checks a snippet in package external importing pkg
+// under the identifier agentanalytics and returns any type-checker errors.
+func typecheckExternalRef(pkg *types.Package, decl string) []error {
+	src := fmt.Sprintf("package external\n\nimport %q\n\n%s\n", pkg.Path(), decl)
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "external.go", src, 0)
+	if err != nil {
+		return []error{fmt.Errorf("parsing %q: %w", src, err)}
+	}
+	var errs []error
+	conf := types.Config{
+		Importer: probeImporter{pkg},
+		Error:    func(err error) { errs = append(errs, err) },
+	}
+	_, _ = conf.Check("external", fset, []*ast.File{file}, nil)
+	return errs
+}
+
+func TestRemovedExports_RejectedAgainstExportData(t *testing.T) {
+	exportPkg := loadRealAgentAnalyticsExportPkg(t)
+
+	// Positive sanity check: kept value and type exports compile cleanly against
+	// the real package export data, proving typecheckExternalRef only fails when
+	// an export is genuinely absent or invalid.
+	if errs := typecheckExternalRef(exportPkg, "var _ = agentanalytics.EventsSchema"); len(errs) != 0 {
+		t.Fatalf("kept value export EventsSchema failed to type-check: %v", errs)
+	}
+	if errs := typecheckExternalRef(exportPkg, "var _ agentanalytics.Config"); len(errs) != 0 {
+		t.Fatalf("kept type export Config failed to type-check: %v", errs)
+	}
+
+	for _, name := range []string{
+		"ArrowSchema",
+		"SerializedArrowSchema",
+		"BatchProcessor",
+		"NewBatchProcessor",
+		"FormatContentParts",
+		"SmartTruncate",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if obj := exportPkg.Scope().Lookup(name); obj != nil {
+				t.Errorf("%s is still present in %s export scope: %v", name, agentAnalyticsPkgPath, obj)
+			}
+			if errs := typecheckExternalRef(exportPkg, "var _ = agentanalytics."+name); len(errs) == 0 {
+				t.Errorf("value reference agentanalytics.%s compiled without error against export data, want rejection", name)
+			}
+			if errs := typecheckExternalRef(exportPkg, "var _ agentanalytics."+name); len(errs) == 0 {
+				t.Errorf("type reference agentanalytics.%s compiled without error against export data, want rejection", name)
+			}
+		})
+	}
+}
+
 func TestStructLiterals_ExternalPositionalRejected(t *testing.T) {
 	structs := guardedStructs()
 	for _, gs := range structs {
@@ -286,16 +398,45 @@ func TestStructLiterals_ExternalPositionalRejected(t *testing.T) {
 		})
 	}
 
-	// The probes type-check against the struct types compiled into this
-	// binary, read through reflect, so they also see a change supplied with
-	// `go test -overlay`.
-	pkg, err := probePackage(structs)
+	// Drive external keyed-literal and positional-literal checks from the real
+	// compiled package's export data so a typo in guardedStructs().name fails
+	// immediately instead of declaring a synthetic stand-in type.
+	exportPkg := loadRealAgentAnalyticsExportPkg(t)
+	for _, gs := range structs {
+		t.Run(gs.name+"_ExportDataLiterals", func(t *testing.T) {
+			obj := exportPkg.Scope().Lookup(gs.name)
+			tn, ok := obj.(*types.TypeName)
+			if !ok {
+				t.Fatalf("%s is not an exported type in %s export data (got %v)", gs.name, agentAnalyticsPkgPath, obj)
+			}
+			if _, ok := tn.Type().Underlying().(*types.Struct); !ok {
+				t.Fatalf("%s underlying type in export data = %T, want *types.Struct", gs.name, tn.Type().Underlying())
+			}
+			for _, problem := range checkExternalPositional(exportPkg, gs) {
+				t.Error(problem)
+			}
+		})
+	}
+	t.Run("TypoNameRejectedAgainstExportData", func(t *testing.T) {
+		typo := guardedStruct{name: "DropStatz", typ: reflect.TypeFor[agentanalytics.DropStats]()}
+		if obj := exportPkg.Scope().Lookup(typo.name); obj != nil {
+			t.Fatalf("unexpected export %s in %s: %v", typo.name, agentAnalyticsPkgPath, obj)
+		}
+		if problems := checkExternalPositional(exportPkg, typo); len(problems) == 0 {
+			t.Fatal("checkExternalPositional(exportPkg, DropStatz) succeeded, want failure on undefined exported type")
+		}
+	})
+
+	// Also type-check against the struct types compiled into this test binary
+	// via reflect, so an in-memory `go test -overlay` edit that does not touch
+	// disk is caught as well.
+	probePkg, err := probePackage(structs)
 	if err != nil {
 		t.Fatalf("probePackage() failed: %v", err)
 	}
 	for _, gs := range structs {
 		t.Run(gs.name+"_ExternalLiterals", func(t *testing.T) {
-			for _, problem := range checkExternalPositional(pkg, gs) {
+			for _, problem := range checkExternalPositional(probePkg, gs) {
 				t.Error(problem)
 			}
 		})
@@ -617,7 +758,9 @@ type syntheticUnexportedGuarded struct {
 	Value string
 }
 
-type syntheticGuardedAlias = syntheticUnexportedGuarded
+// SyntheticGuardedAlias exports the exact identifier imported by the external
+// literal probe over unexported syntheticUnexportedGuarded.
+type SyntheticGuardedAlias = syntheticUnexportedGuarded
 
 type syntheticNamedPrivateFirst struct {
 	cache int
@@ -731,9 +874,10 @@ func TestStructLiterals_SyntheticGuardedStruct(t *testing.T) {
 		}
 	}
 
-	// An exported alias over an unexported struct type works when guardedStruct
-	// records the explicit exported identifier rather than rt.Name().
-	aliasGS := guardedStruct{name: "SyntheticGuardedAlias", typ: reflect.TypeFor[syntheticGuardedAlias]()}
+	// An exported alias over an unexported struct type works both when
+	// guardedStruct records the explicit exported identifier rather than
+	// rt.Name() and when go/types imports a real source-checked type alias.
+	aliasGS := guardedStruct{name: "SyntheticGuardedAlias", typ: reflect.TypeFor[SyntheticGuardedAlias]()}
 	if err := checkGuardLayout(aliasGS); err != nil {
 		t.Errorf("checkGuardLayout(%s) = %v, want nil", aliasGS.name, err)
 	}
@@ -743,6 +887,26 @@ func TestStructLiterals_SyntheticGuardedStruct(t *testing.T) {
 	}
 	if problems := checkExternalPositional(aliasPkg, aliasGS); len(problems) != 0 {
 		t.Errorf("checkExternalPositional(%s) reported problems: %v", aliasGS.name, problems)
+	}
+	aliasFset := token.NewFileSet()
+	aliasFile, err := parser.ParseFile(aliasFset, "alias_fixture.go", `package agentanalytics
+
+type syntheticUnexportedGuarded struct {
+	_     struct{}
+	Value string
+}
+
+type SyntheticGuardedAlias = syntheticUnexportedGuarded
+`, 0)
+	if err != nil {
+		t.Fatalf("parsing alias_fixture.go: %v", err)
+	}
+	realAliasPkg, err := (&types.Config{}).Check(agentAnalyticsPkgPath, aliasFset, []*ast.File{aliasFile}, nil)
+	if err != nil {
+		t.Fatalf("type-checking alias_fixture.go: %v", err)
+	}
+	if problems := checkExternalPositional(realAliasPkg, aliasGS); len(problems) != 0 {
+		t.Errorf("checkExternalPositional(%s against source-checked alias package) reported problems: %v", aliasGS.name, problems)
 	}
 
 	// On a Config-like struct that is not compared with plain cmp.Equal,
