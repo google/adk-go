@@ -290,6 +290,13 @@ func setupTestPlugin(t *testing.T) (*baseplugin.Plugin, chan *storagepb.AppendRo
 	return setupTestPluginWithConfig(t, nil)
 }
 
+func setupTestPluginWithTraces(t *testing.T) (*baseplugin.Plugin, *traceManager, chan *storagepb.AppendRowsRequest, *mockInvocationContext) {
+	t.Helper()
+	p, tm, requestsChan, mCtx := newTestPluginWithConfigAndTraces(t, nil)
+	t.Cleanup(func() { _ = p.Close() })
+	return p, tm, requestsChan, mCtx
+}
+
 // setupTestPluginWithConfig creates a plugin that writes to a fake BigQuery
 // Storage Write server, whose requests are delivered on the returned channel.
 // mutate, if set, adjusts the test configuration first. The plugin is closed
@@ -304,6 +311,12 @@ func setupTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.
 // newTestPluginWithConfig is setupTestPluginWithConfig for tests that close
 // the plugin themselves.
 func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Plugin, chan *storagepb.AppendRowsRequest, *mockInvocationContext) {
+	t.Helper()
+	p, _, requestsChan, mCtx := newTestPluginWithConfigAndTraces(t, mutate)
+	return p, requestsChan, mCtx
+}
+
+func newTestPluginWithConfigAndTraces(t *testing.T, mutate func(*Config)) (*baseplugin.Plugin, *traceManager, chan *storagepb.AppendRowsRequest, *mockInvocationContext) {
 	t.Helper()
 	ctx := context.Background()
 	config := DefaultConfig()
@@ -356,7 +369,7 @@ func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Pl
 		t.Fatalf("Failed to create bigquery client: %v", err)
 	}
 
-	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+	p, traces, err := newBigQueryAgentAnalyticsPluginWithTraces(ctx, config, bqClient, writeClient, false)
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
 	}
@@ -369,7 +382,7 @@ func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Pl
 		userID:       "user-id",
 	}
 
-	return p, requestsChan, mCtx
+	return p, traces, requestsChan, mCtx
 }
 
 func TestOnEventCallback_AppendsToWriter(t *testing.T) {
@@ -9256,6 +9269,103 @@ func TestPlugin_RecoveredToolError_FinishTaskCall0Reuse(t *testing.T) {
 			t.Errorf("got %d TOOL_COMPLETED rows, want 2; events=%v", got, eventTypes(rows))
 		}
 	})
+}
+
+func TestPlugin_FinishTask_Call0ReuseCoordinatorForwardsHeldRun1SuccessBeforeRun2ValidationFailure(t *testing.T) {
+	const sharedCall = "call_0"
+	fixedNow := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return fixedNow })
+
+	p, requests, _ := setupTestPluginWithConfig(t, nil)
+	worker, err := llmagent.New(llmagent.Config{
+		Name: "worker",
+		Mode: llmagent.ModeTask,
+		OutputSchema: &genai.Schema{
+			Type:       genai.TypeObject,
+			Properties: map[string]*genai.Schema{"answer": {Type: genai.TypeString}},
+			Required:   []string{"answer"},
+		},
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			finishTaskCall(map[string]any{"answer": "run 1 ok"}, sharedCall),
+			finishTaskCall(map[string]any{"wrong_field": "bad"}, sharedCall),
+			finishTaskCall(map[string]any{"answer": "run 2 ok"}, sharedCall),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(worker): %v", err)
+	}
+
+	isValidationErrEvent := func(ev *session.Event) bool {
+		if ev == nil || ev.Content == nil {
+			return false
+		}
+		for _, part := range ev.Content.Parts {
+			if fr := part.FunctionResponse; fr != nil && fr.Name == finishTaskToolName {
+				errText, _ := fr.Response["error"].(string)
+				if errText != "" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	var forwardedBeforeValidationErr atomic.Bool
+	root, err := agent.New(agent.Config{
+		Name: "coordinator",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				var held []*session.Event
+				nodeCtx := agent.PromoteWithDelta(ic, &agent.CommonContextDelta{})
+				for runIdx := range 2 {
+					for ev, runErr := range llmagent.RunLLMAgentAsNode(worker, nodeCtx, "work") {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if runIdx == 0 {
+							if out := classifyTaskResponses(ev.Content); out.ends && !out.failed {
+								held = append(held, ev)
+								continue
+							}
+						} else if len(held) > 0 && isValidationErrEvent(ev) {
+							forwardedBeforeValidationErr.Store(true)
+							for _, h := range held {
+								if !yield(h, nil) {
+									return
+								}
+							}
+							held = nil
+						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+				for _, h := range held {
+					if !yield(h, nil) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(coordinator): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(ctx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+	if !forwardedBeforeValidationErr.Load() {
+		t.Fatal("coordinator did not observe Run 2 finish_task validation failure while holding Run 1 completion")
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	requireInvocationCompletedOK(t, rows)
+	requireTaskSpansInOrder(t, rows)
 }
 
 func TestPlugin_RecoveredToolError_ToolResultOKDoesNotOverrideRetryAndReflect(t *testing.T) {

@@ -46,6 +46,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
@@ -5609,7 +5612,7 @@ func TestRunningAgentChildren(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := runningAgentChildren(tc.ctx, tc.agentName)
+			got := runningAgentChildren(tc.ctx, tc.agentName, nil)
 			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(agentChildren{})); diff != "" {
 				t.Errorf("runningAgentChildren mismatch (-want +got):\n%s", diff)
 			}
@@ -30101,6 +30104,802 @@ func (c *lockedEmbeddedContext) Value(key any) any {
 	return p.Value(key)
 }
 
+func newNoopAnalyticsPluginForTest(t *testing.T, name string) *baseplugin.Plugin {
+	t.Helper()
+	p, err := baseplugin.New(baseplugin.Config{
+		Name: name,
+		AfterAgentCallback: func(_ agent.Context) (*genai.Content, error) {
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New(%s): %v", name, err)
+	}
+	return p
+}
+
+func captureRunnerCallbackContext(t *testing.T, parentCtx context.Context, plugins ...*baseplugin.Plugin) context.Context {
+	t.Helper()
+	var captured context.Context
+	root, err := agent.New(agent.Config{
+		Name: "capture",
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(ctx agent.Context) (*genai.Content, error) {
+				captured = ctx
+				return nil, nil
+			},
+		},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "capture"
+				ev.Content = textContent("model", "ok")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(capture): %v", err)
+	}
+	for _, err := range newTestRunner(t, root, plugins...).Run(parentCtx, "u1", "s-ctx-capture", textContent("user", "go"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("runner.Run error = %v", err)
+		}
+	}
+	if captured == nil {
+		t.Fatal("BeforeAgentCallback did not capture context")
+	}
+	return captured
+}
+
+func TestContextHasAfterAgentPlugin(t *testing.T) {
+	t.Run("later plugin with AfterAgentCallback returns true", func(t *testing.T) {
+		p := newNoopAnalyticsPluginForTest(t, pluginName)
+		tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
+		ctx := captureRunnerCallbackContext(t, t.Context(), p, tail)
+		if !contextHasAfterAgentPlugin(ctx, p) {
+			t.Fatal("contextHasAfterAgentPlugin = false, want true")
+		}
+		if !contextHasAfterAgentPlugin(context.WithoutCancel(ctx), p) {
+			t.Fatal("contextHasAfterAgentPlugin(WithoutCancel) = false, want true")
+		}
+		if !contextHasAfterAgentPlugin(ctx, nil) {
+			t.Fatal("contextHasAfterAgentPlugin(nil self) = false, want true via pluginName fallback")
+		}
+	})
+
+	t.Run("earlier state-writing AfterAgentCallback plugin before analyticsPlugin sets hasAfterAgentCallbacks true", func(t *testing.T) {
+		realPlugin, tm, requests, _ := setupTestPluginWithTraces(t)
+		earlierStateWriter, err := baseplugin.New(baseplugin.Config{
+			Name: "earlier_state_writer",
+			AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+				if setErr := ctx.State().Set("from_earlier_plugin", "v1"); setErr != nil {
+					return nil, setErr
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(earlier_state_writer): %v", err)
+		}
+
+		var observedHasAfterCB bool
+		var sawSpan bool
+		bot, err := agent.New(agent.Config{
+			Name: "bot",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					tm.mu.Lock()
+					inv := tm.invocations[ic.InvocationID()]
+					tm.mu.Unlock()
+					if inv != nil {
+						inv.mu.Lock()
+						if len(inv.agentStack) > 1 {
+							sawSpan = true
+							observedHasAfterCB = inv.agentStack[len(inv.agentStack)-1].hasAfterAgentCallbacks
+						}
+						inv.mu.Unlock()
+					}
+					ev := session.NewEvent(ic, ic.InvocationID())
+					ev.Author = "bot"
+					ev.Content = textContent("model", "ok")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(bot): %v", err)
+		}
+
+		var sawStateDeltaEvent bool
+		for ev, runErr := range newTestRunner(t, bot, earlierStateWriter, realPlugin).Run(t.Context(), "u1", "s-earlier", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+			if ev != nil && ev.Actions.StateDelta["from_earlier_plugin"] == "v1" {
+				sawStateDeltaEvent = true
+			}
+		}
+		if !sawSpan {
+			t.Fatal("did not observe live span on agentStack during Run")
+		}
+		if !observedHasAfterCB {
+			t.Fatal("spanRecord.hasAfterAgentCallbacks = false with earlier state-writing AfterAgentCallback plugin, want true")
+		}
+		if !sawStateDeltaEvent {
+			t.Fatal("runner did not emit post-agent StateDelta event from earlier AfterAgentCallback plugin")
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+	})
+
+	t.Run("analyticsPlugin wrapped inside composing plugin sets hasAfterAgentCallbacks true", func(t *testing.T) {
+		realPlugin, tm, requests, _ := setupTestPluginWithTraces(t)
+		composing, err := baseplugin.New(baseplugin.Config{
+			Name:                "composing_wrapper",
+			BeforeRunCallback:   realPlugin.BeforeRunCallback(),
+			AfterRunCallback:    realPlugin.AfterRunCallback(),
+			BeforeAgentCallback: realPlugin.BeforeAgentCallback(),
+			AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+				if content, cbErr := realPlugin.AfterAgentCallback()(ctx); content != nil || cbErr != nil {
+					return content, cbErr
+				}
+				if setErr := ctx.State().Set("from_composing", "v2"); setErr != nil {
+					return nil, setErr
+				}
+				return nil, nil
+			},
+			OnEventCallback: realPlugin.OnEventCallback(),
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(composing_wrapper): %v", err)
+		}
+
+		var observedHasAfterCB bool
+		var sawSpan bool
+		bot, err := agent.New(agent.Config{
+			Name: "bot",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					tm.mu.Lock()
+					inv := tm.invocations[ic.InvocationID()]
+					tm.mu.Unlock()
+					if inv != nil {
+						inv.mu.Lock()
+						if len(inv.agentStack) > 1 {
+							sawSpan = true
+							observedHasAfterCB = inv.agentStack[len(inv.agentStack)-1].hasAfterAgentCallbacks
+						}
+						inv.mu.Unlock()
+					}
+					ev := session.NewEvent(ic, ic.InvocationID())
+					ev.Author = "bot"
+					ev.Content = textContent("model", "ok")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(bot): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, bot, composing).Run(t.Context(), "u1", "s-composing", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		if !sawSpan {
+			t.Fatal("did not observe live span on agentStack during composed Run")
+		}
+		if !observedHasAfterCB {
+			t.Fatal("spanRecord.hasAfterAgentCallbacks = false when analyticsPlugin is wrapped inside composing plugin (selfIdx < 0), want true")
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+	})
+
+	t.Run("only analyticsPlugin or plugins without AfterAgentCallback returns false", func(t *testing.T) {
+		realPlugin, tm, requests, _ := setupTestPluginWithTraces(t)
+		var observedSolo bool
+		var sawSpan bool
+		bot, err := agent.New(agent.Config{
+			Name: "bot",
+			Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					tm.mu.Lock()
+					inv := tm.invocations[ic.InvocationID()]
+					tm.mu.Unlock()
+					if inv != nil {
+						inv.mu.Lock()
+						if len(inv.agentStack) > 1 {
+							sawSpan = true
+							observedSolo = inv.agentStack[len(inv.agentStack)-1].hasAfterAgentCallbacks
+						}
+						inv.mu.Unlock()
+					}
+					ev := session.NewEvent(ic, ic.InvocationID())
+					ev.Author = "bot"
+					ev.Content = textContent("model", "ok")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(bot): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, bot, realPlugin).Run(t.Context(), "u1", "s-solo", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		if !sawSpan {
+			t.Fatal("did not observe live span on agentStack during solo Run")
+		}
+		if observedSolo {
+			t.Fatal("spanRecord.hasAfterAgentCallbacks = true with only analyticsPlugin registered, want false")
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+
+		p := newNoopAnalyticsPluginForTest(t, pluginName)
+		earlierNoAfter, err := baseplugin.New(baseplugin.Config{
+			Name: "earlier_before_only",
+			BeforeAgentCallback: func(_ agent.Context) (*genai.Content, error) {
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(earlier_before_only): %v", err)
+		}
+		laterNoAfter, err := baseplugin.New(baseplugin.Config{
+			Name: "later_before_only",
+			BeforeAgentCallback: func(_ agent.Context) (*genai.Content, error) {
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(later_before_only): %v", err)
+		}
+		ctx := captureRunnerCallbackContext(t, t.Context(), earlierNoAfter, p, laterNoAfter)
+		if contextHasAfterAgentPlugin(ctx, p) {
+			t.Fatal("contextHasAfterAgentPlugin = true when other plugins have no AfterAgentCallback, want false")
+		}
+	})
+
+	t.Run("inner runner PluginManager shadows outer runner PluginManager", func(t *testing.T) {
+		outerP := newNoopAnalyticsPluginForTest(t, pluginName)
+		outerTail := newNoopAnalyticsPluginForTest(t, "outer_tail")
+		innerP := newNoopAnalyticsPluginForTest(t, pluginName)
+
+		var innerCaptured context.Context
+		innerAgent, err := agent.New(agent.Config{
+			Name: "inner",
+			BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+				func(ctx agent.Context) (*genai.Content, error) {
+					innerCaptured = ctx
+					return nil, nil
+				},
+			},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "inner"
+					ev.Content = textContent("model", "inner-ok")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(inner): %v", err)
+		}
+		innerRunner := newTestRunner(t, innerAgent, innerP)
+
+		outerAgent, err := agent.New(agent.Config{
+			Name: "outer",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for _, runErr := range innerRunner.Run(ctx, "u1", "s-inner", textContent("user", "go"), agent.RunConfig{}) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+					}
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "outer"
+					ev.Content = textContent("model", "outer-ok")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(outer): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, outerAgent, outerP, outerTail).Run(t.Context(), "u1", "s-outer", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("outer runner.Run error = %v", runErr)
+			}
+		}
+		if innerCaptured == nil {
+			t.Fatal("inner BeforeAgentCallback did not capture context")
+		}
+		if contextHasAfterAgentPlugin(innerCaptured, innerP) {
+			t.Fatal("inner runner leaked outer PluginManager AfterAgentCallback")
+		}
+		if contextHasAfterAgentPlugin(innerCaptured, nil) {
+			t.Fatal("inner runner leaked outer PluginManager with nil self fallback")
+		}
+	})
+
+	t.Run("cyclic context and empty context do not loop or panic", func(t *testing.T) {
+		p := newNoopAnalyticsPluginForTest(t, pluginName)
+		cyc := &cyclicContext{}
+		cyc.Context = cyc
+		if contextHasAfterAgentPlugin(cyc, nil) {
+			t.Fatal("contextHasAfterAgentPlugin(cyclic, nil) = true, want false")
+		}
+		if !contextHasAfterAgentPlugin(cyc, p) {
+			t.Fatal("contextHasAfterAgentPlugin(cyclic, p) = false, want conservative true")
+		}
+		if contextHasAfterAgentPlugin(context.Background(), nil) {
+			t.Fatal("contextHasAfterAgentPlugin(Background, nil) = true, want false")
+		}
+		if !contextHasAfterAgentPlugin(context.Background(), p) {
+			t.Fatal("contextHasAfterAgentPlugin(Background, p) = false, want conservative true")
+		}
+		var nilCtx context.Context
+		if contextHasAfterAgentPlugin(nilCtx, nil) {
+			t.Fatal("contextHasAfterAgentPlugin(nil, nil) = true, want false")
+		}
+		if !contextHasAfterAgentPlugin(nilCtx, p) {
+			t.Fatal("contextHasAfterAgentPlugin(nil, p) = false, want conservative true")
+		}
+	})
+
+	t.Run("unrelated context.WithValue plugin slice does not spoof or shadow PluginManager", func(t *testing.T) {
+		type fakePluginManager struct {
+			plugins []*baseplugin.Plugin
+		}
+		type userPMKey struct{}
+
+		p := newNoopAnalyticsPluginForTest(t, pluginName)
+		tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
+
+		spoofCtx := context.WithValue(context.Background(), userPMKey{}, &fakePluginManager{
+			plugins: []*baseplugin.Plugin{p, tail},
+		})
+		if contextHasAfterAgentPlugin(spoofCtx, nil) {
+			t.Fatal("contextHasAfterAgentPlugin(spoofCtx, nil) = true, want false")
+		}
+		// Over a real solo-plugin runner context, an unrelated userPMKey fake slice
+		// must not spoof extra plugins.
+		soloRealCtx := captureRunnerCallbackContext(t, t.Context(), p)
+		spoofOverRealCtx := context.WithValue(soloRealCtx, userPMKey{}, &fakePluginManager{
+			plugins: []*baseplugin.Plugin{p, tail},
+		})
+		if contextHasAfterAgentPlugin(spoofOverRealCtx, p) {
+			t.Fatal("contextHasAfterAgentPlugin(spoofOverRealCtx, p) = true, want false")
+		}
+
+		realCtx := captureRunnerCallbackContext(t, t.Context(), p, tail)
+		shadowNilCtx := context.WithValue(realCtx, userPMKey{}, (*fakePluginManager)(nil))
+		if !contextHasAfterAgentPlugin(shadowNilCtx, p) {
+			t.Fatal("unrelated typed-nil fakePluginManager shadowed real PluginManager")
+		}
+		shadowEmptyCtx := context.WithValue(realCtx, userPMKey{}, &fakePluginManager{})
+		if !contextHasAfterAgentPlugin(shadowEmptyCtx, p) {
+			t.Fatal("unrelated empty fakePluginManager shadowed real PluginManager")
+		}
+		// Even under the real PluginManagerCtxKey, an unrelated value type must
+		// not spoof a PluginManager (nil self returns false; non-nil self fails
+		// closed conservatively to true).
+		pmKey := discoverPluginManagerCtxKey()
+		if pmKey == nil {
+			t.Fatal("discoverPluginManagerCtxKey() = nil")
+		}
+		keySpoofCtx := context.WithValue(context.Background(), pmKey, &fakePluginManager{
+			plugins: []*baseplugin.Plugin{p, tail},
+		})
+		if contextHasAfterAgentPlugin(keySpoofCtx, nil) {
+			t.Fatal("contextHasAfterAgentPlugin(nil) spoofed via fakePluginManager under real key")
+		}
+		if !contextHasAfterAgentPlugin(keySpoofCtx, p) {
+			t.Fatal("contextHasAfterAgentPlugin(p) on invalid PluginManager value = false, want conservative true")
+		}
+		// Typed-nil *PluginManager under the real key shadows an outer PluginManager.
+		if raw := realCtx.Value(pmKey); raw != nil {
+			typedNilPM := reflect.Zero(reflect.TypeOf(raw)).Interface()
+			typedNilCtx := context.WithValue(realCtx, pmKey, typedNilPM)
+			if contextHasAfterAgentPlugin(typedNilCtx, nil) {
+				t.Fatal("typed-nil *PluginManager under real key failed to shadow outer PluginManager for nil self")
+			}
+			if !contextHasAfterAgentPlugin(typedNilCtx, p) {
+				t.Fatal("typed-nil *PluginManager under real key with non-nil self = false, want conservative true")
+			}
+		}
+	})
+
+	t.Run("selfPlugin identity distinguishes plugin instance from another plugin with the same name", func(t *testing.T) {
+		otherSameName := newNoopAnalyticsPluginForTest(t, pluginName)
+		ctx := captureRunnerCallbackContext(t, t.Context(), otherSameName)
+
+		realPlugin, tm, _, _ := setupTestPluginWithTraces(t)
+		if tm == nil {
+			t.Fatal("setupTestPluginWithTraces returned nil traceManager")
+		}
+		if got := tm.selfPlugin.Value(); got != realPlugin {
+			t.Fatalf("traces.selfPlugin.Value() = %p, want %p", got, realPlugin)
+		}
+		// For otherSameName itself, it is the sole registered plugin so no other
+		// plugin defines AfterAgentCallback. For realPlugin (same pluginName,
+		// distinct pointer not registered directly in ctx's PluginManager),
+		// pointer identity avoids matching otherSameName and conservatively
+		// reports true.
+		if contextHasAfterAgentPlugin(ctx, otherSameName) {
+			t.Fatal("contextHasAfterAgentPlugin(ctx, otherSameName) = true, want false")
+		}
+		if !contextHasAfterAgentPlugin(ctx, realPlugin) {
+			t.Fatal("contextHasAfterAgentPlugin(ctx, realPlugin) = false, want true (distinct instance)")
+		}
+		if ch := runningAgentChildren(ctx, "capture", tm.selfPlugin.Value()); !ch.hasAfterAgentCallbacks {
+			t.Fatal("runningAgentChildren.hasAfterAgentCallbacks = false for distinct same-name plugin instance, want true")
+		}
+	})
+
+	t.Run("nil or unreadable plugin element fails closed to conservative true", func(t *testing.T) {
+		p := newNoopAnalyticsPluginForTest(t, pluginName)
+		ctx := captureRunnerCallbackContext(t, t.Context(), p)
+		pmKey := discoverPluginManagerCtxKey()
+		if pmKey == nil {
+			t.Fatal("discoverPluginManagerCtxKey() = nil")
+		}
+		rawPM := ctx.Value(pmKey)
+		if rawPM == nil {
+			t.Fatal("expected PluginManager on captured runner context")
+		}
+		pmPtr := reflect.New(pluginManagerStructType)
+		pmPtr.Elem().Set(reflect.ValueOf(rawPM).Elem())
+		pf := pmPtr.Elem().Field(pluginManagerPluginsField)
+		corruptSlice := []*baseplugin.Plugin{p, nil}
+		reflect.NewAt(pf.Type(), pf.Addr().UnsafePointer()).Elem().Set(reflect.ValueOf(corruptSlice))
+
+		corruptCtx := context.WithValue(ctx, pmKey, pmPtr.Interface())
+		if !contextHasAfterAgentPlugin(corruptCtx, p) {
+			t.Fatal("contextHasAfterAgentPlugin(corrupt nil plugin, p) = false, want conservative true")
+		}
+		if !contextHasAfterAgentPlugin(corruptCtx, nil) {
+			t.Fatal("contextHasAfterAgentPlugin(corrupt nil plugin, nil) = false, want conservative true")
+		}
+	})
+}
+
+func TestDiscoverPluginManagerCtxKey(t *testing.T) {
+	key, structType, pluginsField := probePluginManagerCtxKey()
+	if key == nil || structType == nil || pluginsField < 0 {
+		t.Fatalf("probePluginManagerCtxKey() = (%v, %v, %d), want valid key, type, and field index", key, structType, pluginsField)
+	}
+	if !isPluginManagerType(structType) {
+		t.Fatalf("probePluginManagerCtxKey() structType = %v, want internal PluginManager", structType)
+	}
+	// Verify lazy sync.Once stability and equality with the uncached probe.
+	d1 := discoverPluginManagerCtxKey()
+	d2 := discoverPluginManagerCtxKey()
+	if d1 == nil || d1 != d2 || d1 != key {
+		t.Fatalf("discoverPluginManagerCtxKey() = (%v, %v), want %v", d1, d2, key)
+	}
+
+	p := newNoopAnalyticsPluginForTest(t, pluginName)
+	tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
+	noAfterTail, err := baseplugin.New(baseplugin.Config{
+		Name: "tail_before_only",
+		BeforeAgentCallback: func(_ agent.Context) (*genai.Content, error) {
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New(tail_before_only): %v", err)
+	}
+
+	// Verify the RunLive-discovered key resolves the exact PluginManager on both
+	// runner.Run and runner.RunLive contexts.
+	runCtx := captureRunnerCallbackContext(t, t.Context(), p, tail)
+	rawRunPM := runCtx.Value(key)
+	if rawRunPM == nil {
+		t.Fatal("runCtx.Value(discoveredKey) = nil, want *PluginManager")
+	}
+	if gotType := reflect.TypeOf(rawRunPM); gotType.Kind() != reflect.Pointer || gotType.Elem() != structType {
+		t.Fatalf("runCtx.Value(discoveredKey) type = %v, want *%v", gotType, structType)
+	}
+	if !contextHasAfterAgentPlugin(runCtx, p) {
+		t.Fatal("contextHasAfterAgentPlugin(runCtx, p) = false, want true")
+	}
+
+	baseLive, err := agent.New(agent.Config{Name: "live-pm-probe"})
+	if err != nil {
+		t.Fatalf("agent.New(live-pm-probe): %v", err)
+	}
+	var liveCtx context.Context
+	liveAgent := &probeLiveAgent{
+		Agent: baseLive,
+		onRunLive: func(ctx agent.InvocationContext) {
+			liveCtx = ctx
+		},
+	}
+	liveRunner, err := runner.New(runner.Config{
+		AppName:           "live-pm-probe",
+		Agent:             liveAgent,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+		PluginConfig:      runner.PluginConfig{Plugins: []*baseplugin.Plugin{p, tail}},
+	})
+	if err != nil {
+		t.Fatalf("runner.New(live-pm-probe): %v", err)
+	}
+	_, _, runLiveErr := liveRunner.RunLive(t.Context(), "u1", "s-live-pm", agent.LiveRunConfig{})
+	if !errors.Is(runLiveErr, errPluginManagerProbe) {
+		t.Fatalf("runner.RunLive error = %v, want %v", runLiveErr, errPluginManagerProbe)
+	}
+	if liveCtx == nil {
+		t.Fatal("RunLive did not invoke agent")
+	}
+	rawLivePM := liveCtx.Value(key)
+	if rawLivePM == nil {
+		t.Fatal("liveCtx.Value(discoveredKey) = nil, want *PluginManager")
+	}
+	if gotType := reflect.TypeOf(rawLivePM); gotType.Kind() != reflect.Pointer || gotType.Elem() != structType {
+		t.Fatalf("liveCtx.Value(discoveredKey) type = %v, want *%v", gotType, structType)
+	}
+	if !contextHasAfterAgentPlugin(liveCtx, p) {
+		t.Fatal("contextHasAfterAgentPlugin(liveCtx, p) = false, want true")
+	}
+	if !contextHasAfterAgentPlugin(liveCtx, tail) {
+		t.Fatal("contextHasAfterAgentPlugin(liveCtx, tail) = false, want true (earlier p has AfterAgentCallback)")
+	}
+
+	var soloLiveCtx context.Context
+	soloLiveRunner, err := runner.New(runner.Config{
+		AppName:           "live-pm-probe-solo",
+		Agent:             &probeLiveAgent{Agent: baseLive, onRunLive: func(ctx agent.InvocationContext) { soloLiveCtx = ctx }},
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+		PluginConfig:      runner.PluginConfig{Plugins: []*baseplugin.Plugin{p, noAfterTail}},
+	})
+	if err != nil {
+		t.Fatalf("runner.New(live-pm-probe-solo): %v", err)
+	}
+	_, _, _ = soloLiveRunner.RunLive(t.Context(), "u1", "s-live-pm-solo", agent.LiveRunConfig{})
+	if soloLiveCtx == nil {
+		t.Fatal("solo RunLive did not invoke agent")
+	}
+	if contextHasAfterAgentPlugin(soloLiveCtx, p) {
+		t.Fatal("contextHasAfterAgentPlugin(soloLiveCtx, p) = true, want false")
+	}
+}
+
+type swappableTracerProvider struct {
+	trace.TracerProvider
+	target atomic.Pointer[sdktrace.TracerProvider]
+}
+
+type swappableTracer struct {
+	trace.Tracer
+	provider *swappableTracerProvider
+	name     string
+	options  []trace.TracerOption
+}
+
+func (p *swappableTracerProvider) Tracer(name string, options ...trace.TracerOption) trace.Tracer {
+	return &swappableTracer{
+		Tracer:   p.TracerProvider.Tracer(name, options...),
+		provider: p,
+		name:     name,
+		options:  slices.Clone(options),
+	}
+}
+
+func (t *swappableTracer) Start(ctx context.Context, spanName string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
+	if tp := t.provider.target.Load(); tp != nil {
+		return tp.Tracer(t.name, t.options...).Start(ctx, spanName, opts...)
+	}
+	return t.Tracer.Start(ctx, spanName, opts...)
+}
+
+var (
+	testSwappableTP     = &swappableTracerProvider{TracerProvider: trace.NewNoopTracerProvider()}
+	testSwappableTPOnce sync.Once
+)
+
+func installTestTracerProvider(t *testing.T, tp *sdktrace.TracerProvider) {
+	t.Helper()
+	testSwappableTPOnce.Do(func() {
+		otel.SetTracerProvider(testSwappableTP)
+	})
+	testSwappableTP.target.Store(tp)
+	t.Cleanup(func() {
+		testSwappableTP.target.CompareAndSwap(tp, nil)
+		_ = tp.Shutdown(context.Background())
+	})
+}
+
+func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
+	spanExp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp))
+	installTestTracerProvider(t, tp)
+
+	resetProbeState := func() {
+		pluginManagerKeyOnce = sync.Once{}
+		pluginManagerCtxKey = nil
+		pluginManagerStructType = nil
+		pluginManagerPluginsField = -1
+	}
+	resetProbeState()
+	t.Cleanup(resetProbeState)
+
+	realPlugin, tm, requestsChan, _ := newTestPluginWithConfigAndTraces(t, func(cfg *Config) {
+		cfg.DisableCreateViews = true
+	})
+	t.Cleanup(func() { _ = realPlugin.Close() })
+	bqaap, ok := AsBigQueryAgentAnalyticsPlugin(realPlugin)
+	if !ok {
+		t.Fatal("AsBigQueryAgentAnalyticsPlugin(realPlugin) = false, want true")
+	}
+	// Setup runs ensureTableAndSchema against the BQ client, which emits client
+	// metadata/patch spans before any agent run; reset so only post-setup spans count.
+	spanExp.Reset()
+
+	assertZeroSideEffects := func(stage string) {
+		t.Helper()
+		if spans := spanExp.GetSpans(); len(spans) != 0 {
+			t.Fatalf("%s: got %d OTel spans, want 0 (%v)", stage, len(spans), spans)
+		}
+		if n := len(requestsChan); n != 0 {
+			t.Fatalf("%s: got %d queued BigQuery write requests, want 0", stage, n)
+		}
+		tm.mu.Lock()
+		active, completed, evicted := len(tm.invocations), len(tm.completed), len(tm.evicted)
+		tm.mu.Unlock()
+		if active != 0 || completed != 0 || evicted != 0 {
+			t.Fatalf("%s: traceManager has active=%d completed=%d evicted=%d, want all 0", stage, active, completed, evicted)
+		}
+		if drops := bqaap.DropStats().TotalDrops; drops != 0 {
+			t.Fatalf("%s: DropStats.TotalDrops = %d, want 0", stage, drops)
+		}
+	}
+
+	// Constructing BigQueryAgentAnalyticsPlugin must NOT eagerly trigger discovery.
+	if pluginManagerCtxKey != nil {
+		t.Fatalf("pluginManagerCtxKey = %v right after plugin construction, want nil (lazy)", pluginManagerCtxKey)
+	}
+	assertZeroSideEffects("after plugin construction")
+
+	// Direct uncached probe must not emit OTel spans, BQ rows, traceManager invocations, or drops.
+	key, structType, pluginsField := probePluginManagerCtxKey()
+	if key == nil || structType == nil || pluginsField < 0 {
+		t.Fatalf("probePluginManagerCtxKey() = (%v, %v, %d), want valid result", key, structType, pluginsField)
+	}
+	assertZeroSideEffects("after probePluginManagerCtxKey")
+
+	// Agent-level AfterAgentCallbacks short-circuits hasAfterAgentCallbacks without triggering discovery.
+	agentWithOwnCB, err := agent.New(agent.Config{
+		Name: "own-cb-agent",
+		AfterAgentCallbacks: []agent.AfterAgentCallback{
+			func(agent.Context) (*genai.Content, error) { return nil, nil },
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(own-cb-agent): %v", err)
+	}
+	if ch := runningAgentChildren(contextRunning(agentWithOwnCB), "own-cb-agent", realPlugin); !ch.hasAfterAgentCallbacks {
+		t.Fatal("runningAgentChildren(agentWithOwnCB).hasAfterAgentCallbacks = false, want true")
+	}
+	if pluginManagerCtxKey != nil {
+		t.Fatalf("pluginManagerCtxKey = %v after agentWithOwnCB short-circuit, want nil", pluginManagerCtxKey)
+	}
+	assertZeroSideEffects("after agentWithOwnCB check")
+
+	// First hasAfterAgentCallbacks check that inspects plugins triggers lazy discovery with zero side effects.
+	noopSelf := newNoopAnalyticsPluginForTest(t, pluginName)
+	tailPlugin := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
+	spanExp.Reset()
+	cbCtx := captureRunnerCallbackContext(t, t.Context(), noopSelf, tailPlugin)
+	if spans := spanExp.GetSpans(); len(spans) == 0 {
+		t.Fatal("control captureRunnerCallbackContext emitted 0 OTel spans; test exporter is not receiving ADK runner spans")
+	}
+	spanExp.Reset()
+	resetProbeState()
+
+	ch := runningAgentChildren(cbCtx, "capture", noopSelf)
+	if !ch.hasAfterAgentCallbacks {
+		t.Fatal("first plugin-inspecting runningAgentChildren.hasAfterAgentCallbacks = false, want true")
+	}
+	if pluginManagerCtxKey == nil || pluginManagerStructType == nil || pluginManagerPluginsField < 0 {
+		t.Fatal("first plugin-inspecting hasAfterAgentCallbacks did not lazily populate pluginManagerCtxKey")
+	}
+	assertZeroSideEffects("after first plugin-inspecting hasAfterAgentCallbacks check")
+
+	// Also verify the cached discoverPluginManagerCtxKey + fresh realPlugin's first BeforeAgentCallback:
+	// reset probe state so BeforeAgentCallback runs lazy discovery, and confirm zero OTel spans from the probe
+	// and zero probe rows/drops.
+	resetProbeState()
+	spanExp.Reset()
+	if gotKey := discoverPluginManagerCtxKey(); gotKey != key {
+		t.Fatalf("discoverPluginManagerCtxKey() = %v, want %v", gotKey, key)
+	}
+	assertZeroSideEffects("after discoverPluginManagerCtxKey")
+
+	// Control check: drive realPlugin through a real runner.Run invocation after
+	// resetting probe state so BeforeAgentCallback -> pushAgentSpan ->
+	// runningAgentChildren -> contextHasAfterAgentPlugin actually triggers lazy
+	// discovery, and verify zero probe OTel spans, zero leaked spans, and zero
+	// probe rows/drops.
+	resetProbeState()
+	spanExp.Reset()
+	if pluginManagerCtxKey != nil {
+		t.Fatalf("pluginManagerCtxKey = %v after resetProbeState, want nil", pluginManagerCtxKey)
+	}
+	var realInvID string
+	leaf, err := agent.New(agent.Config{
+		Name: "leaf",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				realInvID = ic.InvocationID()
+				ev := session.NewEvent(ic, ic.InvocationID())
+				ev.Author = "leaf"
+				ev.Content = textContent("model", "ok")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(leaf): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, leaf, realPlugin).Run(t.Context(), "u-real", "s-real", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+	if pluginManagerCtxKey == nil || discoverPluginManagerCtxKey() != key {
+		t.Fatalf("live runner.Run did not populate pluginManagerCtxKey: got %v, want %v", pluginManagerCtxKey, key)
+	}
+	spans := spanExp.GetSpans()
+	if len(spans) == 0 {
+		t.Fatal("real runner.Run emitted 0 OTel spans")
+	}
+	for _, s := range spans {
+		if strings.Contains(s.Name, "probe") {
+			t.Fatalf("unexpected probe OTel span recorded during real runner.Run: %q", s.Name)
+		}
+	}
+	if realInvID == "" {
+		t.Fatal("leaf agent did not capture real invocation ID")
+	}
+	tm.mu.Lock()
+	activeCount := len(tm.invocations)
+	_, hasProbeInv := tm.invocations["probe"]
+	_, hasProbeCompleted := tm.completed["probe"]
+	_, hasProbeEvicted := tm.evicted["probe"]
+	_, hasRealCompleted := tm.completed[realInvID]
+	tm.mu.Unlock()
+	if activeCount != 0 {
+		t.Fatalf("traceManager leaked %d active invocations after runner.Run, want 0", activeCount)
+	}
+	if hasProbeInv || hasProbeCompleted || hasProbeEvicted {
+		t.Fatal("traceManager unexpectedly recorded probe invocation")
+	}
+	if !hasRealCompleted {
+		t.Fatalf("traceManager did not record real invocation %q in completed cache", realInvID)
+	}
+	rows := collectRows(t, requestsChan, untilInvocationEnd)
+	requireInvocationCompletedOK(t, rows)
+	for _, r := range rows {
+		if r["invocation_id"] == "probe" || r["session_id"] == "probe-session" {
+			t.Fatalf("unexpected probe row emitted: %v", r)
+		}
+	}
+	if drops := bqaap.DropStats().TotalDrops; drops != 0 {
+		t.Fatalf("DropStats.TotalDrops = %d after real invocation, want 0", drops)
+	}
+}
+
 func TestContextHasCustomUUIDProviderAndProvenance(t *testing.T) {
 	var calls atomic.Int32
 	provider := func() string {
@@ -31024,7 +31823,10 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 		}
 	})
 
-	t.Run("NewContext and WithAgentContext(context.Background()) shadow outer UUID provider and callback actions", func(t *testing.T) {
+	t.Run("NewContext and WithAgentContext(context.Background()) shadow outer UUID provider, PluginManager, and callback actions", func(t *testing.T) {
+		p := newNoopAnalyticsPluginForTest(t, pluginName)
+		tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
+
 		var (
 			cbCtx     agent.Context
 			cbActions actionMaps
@@ -31059,7 +31861,7 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			t.Fatalf("agent.New(rebind): %v", err)
 		}
 		outerCtx := platform.WithUUIDProvider(t.Context(), func() string { return "outer-custom-id" })
-		for _, runErr := range newTestRunner(t, root).Run(outerCtx, "u1", "s-rebind", textContent("user", "go"), agent.RunConfig{}) {
+		for _, runErr := range newTestRunner(t, root, p, tail).Run(outerCtx, "u1", "s-rebind", textContent("user", "go"), agent.RunConfig{}) {
 			if runErr != nil {
 				t.Fatalf("runner.Run error = %v", runErr)
 			}
@@ -31070,16 +31872,20 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 		if cbActions.stateDelta == nil || cbActions.artifactDelta == nil {
 			t.Fatalf("cbActions = %+v, want non-nil maps", cbActions)
 		}
-		// NewContext(cbCtx) keeps cbCtx as its Context (so UUID provider stays
+		// NewContext(cbCtx) keeps cbCtx as its Context (so UUID provider and PluginManager stay
 		// visible) while creating a fresh commonContext with nil actions.
 		if !contextHasCustomUUIDProvider(plainCtx) {
 			t.Fatal("contextHasCustomUUIDProvider(NewContext(cbCtx)) = false, want true")
 		}
+		if !contextHasAfterAgentPlugin(plainCtx, p) || !contextHasAfterAgentPlugin(plainCtx, nil) {
+			t.Fatal("contextHasAfterAgentPlugin(NewContext(cbCtx)) = false, want true")
+		}
 		if am, keep := callbackAfterAgentActions(plainCtx); am != (actionMaps{}) || keep != nil {
 			t.Fatalf("callbackAfterAgentActions(NewContext(cbCtx)) = (%+v, %v), want zero", am, keep)
 		}
-		// WithAgentContext(Background) shadows the outer UUID provider on both
-		// plainCtx and a *commonContext retaining cbCtx's actions.
+		// WithAgentContext(Background) shadows the outer UUID provider and PluginManager on both
+		// plainCtx and a *commonContext retaining cbCtx's actions (so nil self reports false while
+		// non-nil p conservatively reports true when PluginManager is absent).
 		if contextHasCustomUUIDProvider(rebound) {
 			t.Fatal("contextHasCustomUUIDProvider(WithAgentContext(Background)) = true, want false")
 		}
@@ -31089,8 +31895,20 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 		if !hasNewEventUUID(platform.NewUUID(rebound)) {
 			t.Fatal("platform.NewUUID(WithAgentContext(Background)) did not fall back to UUIDv4")
 		}
+		if !contextHasAfterAgentPlugin(rebound, p) {
+			t.Fatal("contextHasAfterAgentPlugin(WithAgentContext(Background), p) = false, want conservative true")
+		}
+		if contextHasAfterAgentPlugin(rebound, nil) {
+			t.Fatal("contextHasAfterAgentPlugin(WithAgentContext(Background), nil) = true, want false")
+		}
 		if contextHasCustomUUIDProvider(cbWithBg) {
 			t.Fatal("contextHasCustomUUIDProvider(cbCtx.WithDelta(nil).WithAgentContext(Background)) = true, want false")
+		}
+		if !contextHasAfterAgentPlugin(cbWithBg, p) {
+			t.Fatal("contextHasAfterAgentPlugin(cbWithBg, p) = false, want conservative true")
+		}
+		if contextHasAfterAgentPlugin(cbWithBg, nil) {
+			t.Fatal("contextHasAfterAgentPlugin(cbWithBg, nil) = true, want false")
 		}
 		if got := callbackAfterAgentActionMaps(cbWithBg); got != cbActions {
 			t.Fatalf("callbackAfterAgentActionMaps(cbWithBg) = %+v, want %+v", got, cbActions)
@@ -31098,9 +31916,21 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 		if got := callbackAfterAgentActionMaps(innerCB); got != innerWant || got == cbActions {
 			t.Fatalf("callbackAfterAgentActionMaps(innerCB) = %+v, want %+v (distinct from %+v)", got, innerWant, cbActions)
 		}
+		// Generic wrapper with an unrelated invocationContext field holding cbCtx
+		// does not leak cbCtx's actions when Context is context.Background().
+		type shadowICWrapper struct {
+			context.Context
+			invocationContext agent.InvocationContext
+		}
+		shadowed := &shadowICWrapper{Context: context.Background(), invocationContext: cbCtx}
+		if am, keep := callbackAfterAgentActions(shadowed); am != (actionMaps{}) || keep != nil {
+			t.Fatalf("callbackAfterAgentActions(shadowICWrapper) = (%+v, %v), want zero", am, keep)
+		}
 	})
 
-	t.Run("contextHasCustomUUIDProvider and callbackAfterAgentActions leave the fields of mutex-guarded custom contexts unread", func(t *testing.T) {
+	t.Run("contextHasCustomUUIDProvider, contextHasAfterAgentPlugin, and callbackAfterAgentActions leave the fields of mutex-guarded custom contexts unread", func(t *testing.T) {
+		p := newNoopAnalyticsPluginForTest(t, pluginName)
+		tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
 		var cbCtx agent.Context
 		root, err := agent.New(agent.Config{
 			Name: "race-ctx",
@@ -31114,7 +31944,7 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			t.Fatalf("agent.New(race-ctx): %v", err)
 		}
 		outerUUIDCtx := platform.WithUUIDProvider(t.Context(), func() string { return "swapped-id" })
-		for _, runErr := range newTestRunner(t, root).Run(outerUUIDCtx, "u1", "s-race", textContent("user", "go"), agent.RunConfig{}) {
+		for _, runErr := range newTestRunner(t, root, p, tail).Run(outerUUIDCtx, "u1", "s-race", textContent("user", "go"), agent.RunConfig{}) {
 			if runErr != nil {
 				t.Fatalf("runner.Run error = %v", runErr)
 			}
@@ -31158,6 +31988,9 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			_ = contextHasCustomUUIDProvider(swappable)
 			_ = contextHasCustomUUIDProvider(embedded)
 			_ = contextHasCustomUUIDProvider(wrappedEmbedded)
+			_ = contextHasAfterAgentPlugin(swappable, p)
+			_ = contextHasAfterAgentPlugin(embedded, p)
+			_ = contextHasAfterAgentPlugin(wrappedEmbedded, p)
 			if am, keep := callbackAfterAgentActions(swappable); am != (actionMaps{}) || keep != nil {
 				t.Fatalf("callbackAfterAgentActions(swappable) = (%+v, %v), want zero", am, keep)
 			}
@@ -31173,13 +32006,18 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 	t.Run("deep stdlib nesting >250 layers succeeds without panic", func(t *testing.T) {
 		type testKey struct{}
 
-		baseCtx := platform.WithUUIDProvider(t.Context(), func() string { return "deep-id" })
+		p := newNoopAnalyticsPluginForTest(t, pluginName)
+		tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
+		baseCtx := platform.WithUUIDProvider(captureRunnerCallbackContext(t, t.Context(), p, tail), func() string { return "deep-id" })
 		deepCtx := baseCtx
 		for i := range 300 {
 			deepCtx = context.WithValue(deepCtx, testKey{}, i)
 		}
 		if !contextHasCustomUUIDProvider(deepCtx) {
 			t.Fatal("contextHasCustomUUIDProvider(deep) = false, want true")
+		}
+		if !contextHasAfterAgentPlugin(deepCtx, p) {
+			t.Fatal("contextHasAfterAgentPlugin(deep) = false, want true")
 		}
 
 		var gotActions actionMaps
@@ -31279,6 +32117,12 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 		bad := panickingValueContext{}
 		if contextHasCustomUUIDProvider(bad) {
 			t.Fatal("contextHasCustomUUIDProvider(panicking) = true, want false")
+		}
+		if contextHasAfterAgentPlugin(bad, nil) {
+			t.Fatal("contextHasAfterAgentPlugin(panicking, nil) = true, want false")
+		}
+		if !contextHasAfterAgentPlugin(bad, newNoopAnalyticsPluginForTest(t, pluginName)) {
+			t.Fatal("contextHasAfterAgentPlugin(panicking, p) = false, want conservative true")
 		}
 		if am, keep := callbackAfterAgentActions(bad); am != (actionMaps{}) || keep != nil {
 			t.Fatalf("callbackAfterAgentActions(panicking) = (%+v, %v), want zero", am, keep)
@@ -31555,6 +32399,272 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			t.Fatal("contextParentMap / contextPath / identityOf hung on cyclic ctx any or params any wrapper")
 		}
 	})
+}
+
+func TestAgentHasAfterAgentCallbacks(t *testing.T) {
+	if agentHasAfterAgentCallbacks(nil) {
+		t.Fatal("agentHasAfterAgentCallbacks(nil) = true, want false")
+	}
+	baseNoCB, err := agent.New(agent.Config{
+		Name: "base-no-cb",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(base-no-cb): %v", err)
+	}
+	if agentHasAfterAgentCallbacks(baseNoCB) {
+		t.Fatal("agentHasAfterAgentCallbacks(baseNoCB) = true, want false")
+	}
+	baseWithCB, err := agent.New(agent.Config{
+		Name: "base-with-cb",
+		AfterAgentCallbacks: []agent.AfterAgentCallback{
+			func(agent.Context) (*genai.Content, error) { return nil, nil },
+		},
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(base-with-cb): %v", err)
+	}
+	if !agentHasAfterAgentCallbacks(baseWithCB) {
+		t.Fatal("agentHasAfterAgentCallbacks(baseWithCB) = false, want true")
+	}
+	llmNoCB, err := llmagent.New(llmagent.Config{Name: "llm-no-cb"})
+	if err != nil {
+		t.Fatalf("llmagent.New(llm-no-cb): %v", err)
+	}
+	if agentHasAfterAgentCallbacks(llmNoCB) {
+		t.Fatal("agentHasAfterAgentCallbacks(llmNoCB) = true, want false")
+	}
+	llmWithCB, err := llmagent.New(llmagent.Config{
+		Name: "llm-with-cb",
+		AfterAgentCallbacks: []agent.AfterAgentCallback{
+			func(agent.Context) (*genai.Content, error) { return nil, nil },
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(llm-with-cb): %v", err)
+	}
+	if !agentHasAfterAgentCallbacks(llmWithCB) {
+		t.Fatal("agentHasAfterAgentCallbacks(llmWithCB) = false, want true")
+	}
+	type wrappedAgent struct{ agent.Agent }
+	if !agentHasAfterAgentCallbacks(wrappedAgent{Agent: baseWithCB}) {
+		t.Fatal("agentHasAfterAgentCallbacks(wrapped baseWithCB) = false, want true")
+	}
+	if agentHasAfterAgentCallbacks(wrappedAgent{Agent: baseNoCB}) {
+		t.Fatal("agentHasAfterAgentCallbacks(wrapped baseNoCB) = true, want false")
+	}
+	// Four wrapper hops exceed the 4-iteration unwrap cap, so conservative
+	// inspection reports true rather than treating unknown as no callbacks.
+	deep := agent.Agent(wrappedAgent{Agent: wrappedAgent{Agent: wrappedAgent{Agent: wrappedAgent{Agent: baseNoCB}}}})
+	if !agentHasAfterAgentCallbacks(deep) {
+		t.Fatal("agentHasAfterAgentCallbacks(depth 4 wrapper) = false, want conservative true")
+	}
+	// Custom layouts whose inner base agent cannot be unwrapped via exported
+	// Agent fields conservatively report true.
+	type hiddenEmbed struct{ agent.Agent }
+	type unexportedLayoutAgent struct{ hiddenEmbed }
+	if !agentHasAfterAgentCallbacks(unexportedLayoutAgent{hiddenEmbed{Agent: baseNoCB}}) {
+		t.Fatal("agentHasAfterAgentCallbacks(unexportedLayoutAgent) = false, want conservative true")
+	}
+	if !agentHasAfterAgentCallbacks(wrappedAgent{Agent: nil}) {
+		t.Fatal("agentHasAfterAgentCallbacks(wrappedAgent{Agent: nil}) = false, want conservative true")
+	}
+
+	// Custom agents mimicking ADK's any-typed internal.State.Config (without an
+	// afterAgentCallbacks slice) and concrete llmagent.Config fields.
+	type anyConfigAgent struct {
+		agent.Agent
+		Config any
+	}
+	type concreteConfigAgent struct {
+		agent.Agent
+		Config llmagent.Config
+	}
+	type otherConfig struct {
+		AfterAgentCallbacks []agent.AfterAgentCallback
+	}
+	cb := func(agent.Context) (*genai.Content, error) { return nil, nil }
+	if !agentHasAfterAgentCallbacks(&anyConfigAgent{
+		Agent:  baseNoCB,
+		Config: llmagent.Config{AfterAgentCallbacks: []agent.AfterAgentCallback{cb}},
+	}) {
+		t.Fatal("agentHasAfterAgentCallbacks(anyConfigAgent holding llmagent.Config with callbacks) = false, want true")
+	}
+	if !agentHasAfterAgentCallbacks(&anyConfigAgent{
+		Agent:  baseNoCB,
+		Config: &llmagent.Config{AfterAgentCallbacks: []agent.AfterAgentCallback{cb}},
+	}) {
+		t.Fatal("agentHasAfterAgentCallbacks(anyConfigAgent holding *llmagent.Config with callbacks) = false, want true")
+	}
+	if agentHasAfterAgentCallbacks(&anyConfigAgent{
+		Agent:  baseNoCB,
+		Config: llmagent.Config{},
+	}) {
+		t.Fatal("agentHasAfterAgentCallbacks(anyConfigAgent holding empty llmagent.Config) = true, want false")
+	}
+	if agentHasAfterAgentCallbacks(&anyConfigAgent{
+		Agent:  baseNoCB,
+		Config: (*llmagent.Config)(nil),
+	}) {
+		t.Fatal("agentHasAfterAgentCallbacks(anyConfigAgent holding typed-nil *llmagent.Config) = true, want false")
+	}
+	if agentHasAfterAgentCallbacks(&anyConfigAgent{
+		Agent:  baseNoCB,
+		Config: nil,
+	}) {
+		t.Fatal("agentHasAfterAgentCallbacks(anyConfigAgent holding nil) = true, want false")
+	}
+	if agentHasAfterAgentCallbacks(&anyConfigAgent{
+		Agent:  baseNoCB,
+		Config: otherConfig{AfterAgentCallbacks: []agent.AfterAgentCallback{cb}},
+	}) {
+		t.Fatal("agentHasAfterAgentCallbacks(anyConfigAgent holding unrelated config type) = true, want false")
+	}
+	if !agentHasAfterAgentCallbacks(&concreteConfigAgent{
+		Agent:  baseNoCB,
+		Config: llmagent.Config{AfterAgentCallbacks: []agent.AfterAgentCallback{cb}},
+	}) {
+		t.Fatal("agentHasAfterAgentCallbacks(concreteConfigAgent with callbacks) = false, want true")
+	}
+	if agentHasAfterAgentCallbacks(&concreteConfigAgent{
+		Agent:  baseNoCB,
+		Config: llmagent.Config{},
+	}) {
+		t.Fatal("agentHasAfterAgentCallbacks(concreteConfigAgent without callbacks) = true, want false")
+	}
+
+	// Opaque wrapper declaring its own empty afterAgentCallbacks slice while
+	// hiding a callback-bearing delegate in an unexported field (or holding a nil
+	// exported Agent) must fail closed conservatively to true.
+	type opaqueEmptyCBWrapper struct {
+		hiddenEmbed
+		afterAgentCallbacks []agent.AfterAgentCallback
+		delegate            agent.Agent
+	}
+	if !agentHasAfterAgentCallbacks(&opaqueEmptyCBWrapper{
+		hiddenEmbed:         hiddenEmbed{Agent: baseWithCB},
+		afterAgentCallbacks: nil,
+		delegate:            baseWithCB,
+	}) {
+		t.Fatal("agentHasAfterAgentCallbacks(opaqueEmptyCBWrapper with hidden delegate) = false, want conservative true")
+	}
+	type opaqueEmptyNilWrapper struct {
+		agent.Agent
+		afterAgentCallbacks []agent.AfterAgentCallback
+	}
+	if !agentHasAfterAgentCallbacks(&opaqueEmptyNilWrapper{
+		Agent:               nil,
+		afterAgentCallbacks: nil,
+	}) {
+		t.Fatal("agentHasAfterAgentCallbacks(opaqueEmptyNilWrapper with nil Agent) = false, want conservative true")
+	}
+	type typedNilPtrWrapper struct {
+		hiddenEmbed
+		Agent *wrappedAgent
+	}
+	if !agentHasAfterAgentCallbacks(wrappedAgent{Agent: (*wrappedAgent)(nil)}) {
+		t.Fatal("agentHasAfterAgentCallbacks(wrappedAgent holding typed-nil *wrappedAgent) = false, want conservative true")
+	}
+	if !agentHasAfterAgentCallbacks(&typedNilPtrWrapper{hiddenEmbed: hiddenEmbed{Agent: baseNoCB}, Agent: nil}) {
+		t.Fatal("agentHasAfterAgentCallbacks(typedNilPtrWrapper holding nil *wrappedAgent) = false, want conservative true")
+	}
+
+	t.Run("runningAgentChildren sets hasAfterAgentCallbacks", func(t *testing.T) {
+		got := runningAgentChildren(contextRunning(baseWithCB), "base-with-cb", nil)
+		if !got.hasAfterAgentCallbacks {
+			t.Fatal("runningAgentChildren(baseWithCB).hasAfterAgentCallbacks = false, want true")
+		}
+		p := newNoopAnalyticsPluginForTest(t, pluginName)
+		tail := newNoopAnalyticsPluginForTest(t, "tail")
+		var capturedChildren agentChildren
+		probe, err := agent.New(agent.Config{
+			Name: "probe-children",
+			BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+				func(c agent.Context) (*genai.Content, error) {
+					capturedChildren = runningAgentChildren(c, "probe-children", p)
+					return nil, nil
+				},
+			},
+			Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(probe-children): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, probe, p, tail).Run(t.Context(), "u1", "s-children-cb", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error = %v", runErr)
+			}
+		}
+		if !capturedChildren.hasAfterAgentCallbacks {
+			t.Fatal("runningAgentChildren with later AfterAgentCallback plugin = false, want true")
+		}
+	})
+}
+
+func TestLLMKeyAndParseLLMKey_NULBytesAndDelimiters(t *testing.T) {
+	for _, id := range []identity{
+		{},
+		{path: "wf@1/node@2", agentName: "worker", branch: "par.b1"},
+		{path: "p\x00a:1", agentName: "agent\x00with\x00nuls:2", branch: "br\x00:3"},
+		{path: "", agentName: "\x00", branch: "\x00:\x00"},
+	} {
+		k := llmKey(id)
+		gotPath, gotName, gotBranch, ok := parseLLMKey(k)
+		if !ok || gotPath != id.path || gotName != id.agentName || gotBranch != id.branch {
+			t.Fatalf("parseLLMKey(llmKey(%+v)) = (%q, %q, %q, %v), want (%q, %q, %q, true)",
+				id, gotPath, gotName, gotBranch, ok, id.path, id.agentName, id.branch)
+		}
+	}
+	for _, bad := range []string{"", "abc", "5:short", "-1:a:b", "1:ax:b", "1:a2:bx"} {
+		if _, _, _, ok := parseLLMKey(bad); ok {
+			t.Fatalf("parseLLMKey(%q) = ok, want false", bad)
+		}
+	}
+
+	// Verify soleOpenAuthorLocked and hasUnrespondedRetiredForLocked preserve
+	// exact agent identity when an agent name contains NUL bytes.
+	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+	nulName := "worker\x00peer"
+	k := llmKey(identity{path: "n@1", agentName: nulName, branch: "b\x001"})
+	openPeer := &spanRecord{
+		spanID:            "open-nul",
+		kind:              spanKindAgent,
+		name:              nulName,
+		branch:            "b\x001",
+		path:              "n@1",
+		seq:               2,
+		startPlatformTime: at(10),
+	}
+	inv := &invocationTrace{
+		agentStack:         []*spanRecord{{kind: spanKindInvocation}, openPeer},
+		unrespondedRetired: map[string]int{k: 1},
+		retiredPeerCount:   map[string]int{k: 1},
+		retiredActivations: []retiredActivation{{
+			swallower:             retiredSwallower{spanID: "ret-nul", seq: 1, name: nulName, branch: "b\x001", path: "n@1"},
+			retiredAtSeq:          1,
+			completedOrTask:       true,
+			joinedAtRetire:        true,
+			peerRetirement:        true,
+			afterAgentDone:        true,
+			afterAgentDoneAt:      at(5),
+			startPlatformTime:     at(1),
+			retiredAtPlatformTime: at(5),
+		}},
+	}
+	if !inv.hasUnrespondedRetiredForLocked(nulName, "b\x001", "n@1", false) {
+		t.Fatal("hasUnrespondedRetiredForLocked failed on agent name/branch with NUL bytes")
+	}
+	if got := inv.soleOpenAuthorLocked([]int{1}, "n@1", at(20), func(*spanRecord) bool { return true }, func(retiredActivation) bool { return true }); got != 1 {
+		t.Fatalf("soleOpenAuthorLocked with NUL-byte agent name = %d, want 1", got)
+	}
 }
 
 func TestRetiredSwallowerAndCause(t *testing.T) {
@@ -33733,6 +34843,24 @@ func TestWorkflowRetry_DeepBeforeAgentStackAtTracebackLimit_EmitsCompleted(t *te
 }
 
 func BenchmarkContextLookups(b *testing.B) {
+	p, err := baseplugin.New(baseplugin.Config{
+		Name: pluginName,
+		AfterAgentCallback: func(_ agent.Context) (*genai.Content, error) {
+			return nil, nil
+		},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	tail, err := baseplugin.New(baseplugin.Config{
+		Name: "tail_after_agent",
+		AfterAgentCallback: func(_ agent.Context) (*genai.Content, error) {
+			return nil, nil
+		},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
 	var (
 		cbCtx   agent.Context
 		wfCBCtx agent.Context
@@ -33776,6 +34904,7 @@ func BenchmarkContextLookups(b *testing.B) {
 		Agent:             root,
 		SessionService:    session.InMemoryService(),
 		AutoCreateSession: true,
+		PluginConfig:      runner.PluginConfig{Plugins: []*baseplugin.Plugin{p, tail}},
 	})
 	if err != nil {
 		b.Fatal(err)
@@ -33791,6 +34920,59 @@ func BenchmarkContextLookups(b *testing.B) {
 	b.Run("contextHasCustomUUIDProvider", func(b *testing.B) {
 		for b.Loop() {
 			if !contextHasCustomUUIDProvider(cbCtx) {
+				b.Fatal("expected true")
+			}
+		}
+	})
+	b.Run("contextHasAfterAgentPlugin", func(b *testing.B) {
+		for b.Loop() {
+			if !contextHasAfterAgentPlugin(cbCtx, p) {
+				b.Fatal("expected true")
+			}
+		}
+	})
+	b.Run("hasAfterAgentCallbacks", func(b *testing.B) {
+		for b.Loop() {
+			if !(agentHasAfterAgentCallbacks(root) || contextHasAfterAgentPlugin(cbCtx, p)) {
+				b.Fatal("expected true")
+			}
+		}
+	})
+	type benchAnyConfigAgent struct {
+		agent.Agent
+		Config any
+	}
+	type benchConcreteConfigAgent struct {
+		agent.Agent
+		Config llmagent.Config
+	}
+	cb := func(agent.Context) (*genai.Content, error) { return nil, nil }
+	anyCfgAgent := &benchAnyConfigAgent{
+		Agent:  root,
+		Config: llmagent.Config{AfterAgentCallbacks: []agent.AfterAgentCallback{cb}},
+	}
+	concreteCfgAgent := &benchConcreteConfigAgent{
+		Agent:  root,
+		Config: llmagent.Config{AfterAgentCallbacks: []agent.AfterAgentCallback{cb}},
+	}
+	b.Run("agentHasAfterAgentCallbacks/anyConfig", func(b *testing.B) {
+		for b.Loop() {
+			if !agentHasAfterAgentCallbacks(anyCfgAgent) {
+				b.Fatal("expected true")
+			}
+		}
+	})
+	b.Run("agentHasAfterAgentCallbacks/concreteConfig", func(b *testing.B) {
+		for b.Loop() {
+			if !agentHasAfterAgentCallbacks(concreteCfgAgent) {
+				b.Fatal("expected true")
+			}
+		}
+	})
+	b.Run("runningAgentChildren", func(b *testing.B) {
+		for b.Loop() {
+			ch := runningAgentChildren(cbCtx, "bench", p)
+			if !ch.hasAfterAgentCallbacks {
 				b.Fatal("expected true")
 			}
 		}
@@ -33822,5 +35004,912 @@ func BenchmarkContextLookups(b *testing.B) {
 				b.Fatalf("contextParentMap = %v", m)
 			}
 		}
+	})
+}
+
+// TestRetiredActivationSettlementAndHullConjuncts pins each condition of the
+// settlement and compaction of retired activations with a pair of cases that
+// differ only in that condition.
+func TestRetiredActivationSettlementAndHullConjuncts(t *testing.T) {
+	ctx := t.Context()
+	t0 := time.Unix(1_700_000_000, 0)
+	rootID := identity{invocationID: "inv-conjuncts", agentName: "root"}
+	errChild := errors.New("child failure")
+
+	// setup returns the locked trace of an invocation whose custom root is
+	// open, which guards the retired activations that a case records, so
+	// that pruning keeps them for inspection.
+	setup := func(t *testing.T) (*invocationTrace, *spanRecord) {
+		t.Helper()
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		t.Cleanup(inv.mu.Unlock)
+		return inv, inv.agentStack[1]
+	}
+	retired := func(t *testing.T, inv *invocationTrace, spanID string) retiredActivation {
+		t.Helper()
+		idx := inv.findRetiredActivationIndexLocked(spanID)
+		if idx < 0 {
+			t.Fatalf("no retired activation %q", spanID)
+		}
+		return inv.retiredActivations[idx]
+	}
+
+	t.Run("a surviving swallower of a retired cause is not settled", func(t *testing.T) {
+		for _, surviving := range []bool{false, true} {
+			t.Run(fmt.Sprintf("surviving swallower %v", surviving), func(t *testing.T) {
+				inv, root := setup(t)
+				if surviving {
+					root.retiredCauses = []retiredCause{{
+						err:        errChild,
+						name:       "child",
+						swallowers: []retiredSwallower{{spanID: "inner-1", seq: 2, name: "inner"}},
+					}}
+				}
+				inv.retiredActivations = []retiredActivation{{
+					swallower:       retiredSwallower{spanID: "inner-1", seq: 2, name: "inner"},
+					parentSpanID:    root.spanID,
+					guardSpanIDs:    []string{root.spanID},
+					ancestorSpanIDs: []string{"recovering", root.spanID},
+					joinedAtRetire:  true,
+				}}
+				inv.markSettledRetiredActivationsLocked("recovering", false)
+				if got := retired(t, inv, "inner-1").settledByParent; got == surviving {
+					t.Fatalf("settledByParent = %v, want %v", got, !surviving)
+				}
+			})
+		}
+	})
+
+	t.Run("settlement reaches only the subtree of the recovering activation", func(t *testing.T) {
+		for _, underRecovering := range []bool{false, true} {
+			t.Run(fmt.Sprintf("under recovering activation %v", underRecovering), func(t *testing.T) {
+				inv, root := setup(t)
+				ancestors := []string{"unrelated-parent"}
+				if underRecovering {
+					ancestors = []string{"recovering"}
+				}
+				inv.retiredActivations = []retiredActivation{{
+					swallower:       retiredSwallower{spanID: "other-1", seq: 2, name: "other"},
+					parentSpanID:    root.spanID,
+					guardSpanIDs:    []string{root.spanID},
+					ancestorSpanIDs: ancestors,
+					joinedAtRetire:  true,
+				}}
+				inv.markSettledRetiredActivationsLocked("recovering", false)
+				if got := retired(t, inv, "other-1").settledByParent; got != underRecovering {
+					t.Fatalf("settledByParent = %v, want %v", got, underRecovering)
+				}
+			})
+		}
+	})
+
+	t.Run("a retiring parent drops its child's callback maps only once nothing needs them", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			// active makes the child a swallower of a recorded cause.
+			active bool
+			// runOver makes mid retire once its run returned, so that every
+			// after-agent event of the child that can still be delivered was
+			// created by then, whether or not mid waited for the child.
+			runOver bool
+			// guarded keeps root, which may hold the child's events, open.
+			guarded bool
+			// peerOpen keeps another activation of the child's agent open.
+			peerOpen bool
+			// unresponded makes the child retire without a response, and
+			// credit makes it leave a credit for one.
+			unresponded, credit bool
+			kept                bool
+		}{
+			{name: "callbacks returned and nothing else needs them", runOver: true, guarded: true, kept: false},
+			{name: "callbacks may still run while root may hold their event", guarded: true, kept: true},
+			{name: "callbacks may still run and no ancestor can hold their event", kept: false},
+			{name: "active swallower", active: true, runOver: true, guarded: true, kept: true},
+			{name: "callbacks returned while another activation of the agent is open", runOver: true, guarded: true, peerOpen: true, kept: true},
+			{name: "callbacks returned after the child retired without a response", runOver: true, guarded: true, unresponded: true, kept: false},
+			{name: "callbacks returned while the child's credit is outstanding", runOver: true, guarded: true, unresponded: true, credit: true, kept: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv, root := setup(t)
+				if tc.active {
+					root.retiredCauses = []retiredCause{{
+						err:        errChild,
+						name:       "child",
+						swallowers: []retiredSwallower{{spanID: "inner-1", seq: 3, name: "inner"}},
+					}}
+				}
+				if tc.peerOpen {
+					inv.agentStack = append(inv.agentStack, &spanRecord{spanID: "inner-2", parentSpanID: root.spanID, parent: root, kind: spanKindAgent, name: "inner", seq: 4})
+				}
+				callbackDelta := map[string]any{}
+				callbackActions := actionMaps{stateDelta: mapPointer(reflect.ValueOf(callbackDelta))}
+				// The activation responded before it retired, so only what the
+				// case names keeps the callback maps.
+				ra := retiredActivation{
+					swallower:            retiredSwallower{spanID: "inner-1", seq: 3, name: "inner"},
+					parentSpanID:         "mid-1",
+					joinedAtRetire:       true,
+					unrespondedAtPop:     tc.unresponded,
+					afterAgentCredit:     tc.credit,
+					afterAgentActions:    callbackActions,
+					afterAgentActionsRef: callbackDelta,
+				}
+				if tc.credit {
+					inv.unrespondedRetired = map[string]int{llmKey(identity{agentName: "inner"}): 1}
+				}
+				if tc.guarded {
+					ra.guardSpanIDs = []string{root.spanID}
+				}
+				inv.retiredActivations = []retiredActivation{ra}
+				mid := &spanRecord{spanID: "mid-1", parentSpanID: root.spanID, parent: root, kind: spanKindAgent, name: "mid", seq: 2, completed: tc.runOver}
+				inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), t0, mid)
+				idx := inv.findRetiredActivationIndexLocked("inner-1")
+				kept := idx >= 0 && inv.retiredActivations[idx].afterAgentActions == callbackActions && inv.retiredActivations[idx].afterAgentActionsRef != nil
+				if kept != tc.kept {
+					t.Fatalf("callback maps kept = %v, want %v", kept, tc.kept)
+				}
+				if done := idx >= 0 && inv.retiredActivations[idx].afterAgentDone; idx >= 0 && done != tc.runOver {
+					t.Fatalf("afterAgentDone = %v, want %v", done, tc.runOver)
+				}
+			})
+		}
+	})
+
+	t.Run("a compacted hull keeps only the ancestors that all its members share", func(t *testing.T) {
+		inv, root := setup(t)
+		// The first and the last entry stay as they are, and the three in
+		// between become one hull.
+		for i, ancestors := range [][]string{{"a", "b", "c"}, {"a", "b", "c"}, {"a", "c"}, {"c", "d"}, {"c"}} {
+			inv.retiredActivations = append(inv.retiredActivations, retiredActivation{
+				swallower:       retiredSwallower{spanID: fmt.Sprintf("bot-%d", i), seq: uint64(2*i + 1), name: "bot"},
+				parentSpanID:    root.spanID,
+				guardSpanIDs:    []string{root.spanID},
+				ancestorSpanIDs: ancestors,
+				retiredAtSeq:    uint64(2*i + 2),
+				joinedAtRetire:  true,
+			})
+		}
+		inv.pruneSettledRetiredActivationsLocked("bot", "")
+		if len(inv.retiredActivations) != 3 || !inv.retiredActivations[1].compactedHull {
+			t.Fatalf("after compaction: %d entries (hull at 1: %v), want 3 with a hull at 1", len(inv.retiredActivations), len(inv.retiredActivations) > 1 && inv.retiredActivations[1].compactedHull)
+		}
+		if got := inv.retiredActivations[1].ancestorSpanIDs; !slices.Equal(got, []string{"c"}) {
+			t.Fatalf("hull ancestorSpanIDs = %v, want [c]", got)
+		}
+		// A hull must never be found, mutated, or promoted to settledByParent
+		// via its aliased spanID or intersected ancestors.
+		hullID := inv.retiredActivations[1].swallower.spanID
+		if idx := inv.findRetiredActivationIndexLocked(hullID); idx != -1 {
+			t.Fatalf("findRetiredActivationIndexLocked(%q) = %d, want -1 for compactedHull", hullID, idx)
+		}
+		inv.agentStack = append(inv.agentStack, &spanRecord{
+			spanID:        "b",
+			kind:          spanKindAgent,
+			name:          "mid",
+			retiredCauses: []retiredCause{{err: errChild, name: "child"}},
+		})
+		inv.markSettledRetiredActivationsLocked("c", false)
+		if inv.retiredActivations[1].settledByParent {
+			t.Fatal("compacted hull settled despite unshared intermediate ancestor failure on b")
+		}
+		inv.agentStack[len(inv.agentStack)-1].retiredCauses = nil
+		inv.unrecoveredErrors = map[string]recordedError{"err-bot1": {spanID: "bot-1", err: errChild}}
+		inv.markSettledRetiredActivationsLocked("c", false)
+		if inv.retiredActivations[1].settledByParent {
+			t.Fatal("compacted hull settled despite failure on non-winning member bot-1")
+		}
+		inv.unrecoveredErrors = nil
+		inv.markSettledRetiredActivationsLocked(hullID, true)
+		if inv.retiredActivations[1].settledByParent {
+			t.Fatal("includeSelf settled compacted hull")
+		}
+		beforeLen := len(inv.retiredActivations)
+		inv.recordRetiredActivationEntryLocked(retiredActivation{
+			swallower:       retiredSwallower{spanID: hullID, name: "bot"},
+			guardSpanIDs:    []string{"extra-g"},
+			ancestorSpanIDs: []string{"extra-a"},
+			settledByParent: true,
+		})
+		if len(inv.retiredActivations) != beforeLen+1 {
+			t.Fatalf("recordRetiredActivationEntryLocked mutated hull instead of appending: len=%d, want %d", len(inv.retiredActivations), beforeLen+1)
+		}
+		if inv.retiredActivations[1].settledByParent || slices.Contains(inv.retiredActivations[1].guardSpanIDs, "extra-g") {
+			t.Fatalf("compacted hull was mutated by recordRetiredActivationEntryLocked: %+v", inv.retiredActivations[1])
+		}
+	})
+
+	// A hull keeps joinedAtRetire and settledByParent of its first member,
+	// which is sound because compaction never merges entries that differ in
+	// either of them.
+	for _, field := range []string{"joinedAtRetire", "settledByParent"} {
+		t.Run("entries that differ in "+field+" never share a hull", func(t *testing.T) {
+			inv, root := setup(t)
+			flag := func(ra *retiredActivation) *bool {
+				if field == "joinedAtRetire" {
+					return &ra.joinedAtRetire
+				}
+				return &ra.settledByParent
+			}
+			for i := range 8 {
+				ra := retiredActivation{
+					swallower:      retiredSwallower{spanID: fmt.Sprintf("bot-%d", i), seq: uint64(2*i + 1), name: "bot"},
+					parentSpanID:   root.spanID,
+					guardSpanIDs:   []string{root.spanID},
+					retiredAtSeq:   uint64(2*i + 2),
+					joinedAtRetire: true,
+				}
+				*flag(&ra) = i%2 == 1
+				inv.retiredActivations = append(inv.retiredActivations, ra)
+			}
+			inv.pruneSettledRetiredActivationsLocked("bot", "")
+			// Each group of four compacts on its own into its first entry,
+			// a hull of its two middle ones and its last entry.
+			hulls, set := 0, 0
+			for i := range inv.retiredActivations {
+				ra := &inv.retiredActivations[i]
+				if ra.compactedHull {
+					hulls++
+				}
+				if *flag(ra) {
+					set++
+				}
+			}
+			if len(inv.retiredActivations) != 6 || hulls != 2 || set != 3 {
+				t.Fatalf("after compaction: %d entries, %d hulls, %d with %s set, want 6, 2 and 3", len(inv.retiredActivations), hulls, set, field)
+			}
+		})
+	}
+}
+
+// TestSoleOpenAuthor pins each condition under which soleOpenAuthorLocked
+// takes an event for the only open activation that can have created it: a
+// first activation of inner retired at t2 as a concurrent peer of a second
+// one that started at t1 and is still open.
+func TestSoleOpenAuthor(t *testing.T) {
+	ctx := t.Context()
+	t0 := time.Unix(1_700_000_000, 0)
+	t1 := t0.Add(10 * time.Millisecond)
+	t2 := t0.Add(20 * time.Millisecond)
+	t3 := t0.Add(30 * time.Millisecond)
+	rootID := identity{invocationID: "inv-sole-open-author", agentName: "root"}
+	innerID := identity{invocationID: "inv-sole-open-author", agentName: "inner"}
+	withID := func(*spanRecord) bool { return true }
+	withRetiredID := func(retiredActivation) bool { return true }
+	type state struct {
+		inv    *invocationTrace
+		root   *spanRecord
+		inner2 *spanRecord
+		ra     *retiredActivation
+	}
+	setup := func(t *testing.T, callbacks bool) state {
+		t.Helper()
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, innerID)
+		tm.pushAgentSpan(ctx, innerID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		t.Cleanup(inv.mu.Unlock)
+		root, inner1, inner2 := inv.agentStack[1], inv.agentStack[2], inv.agentStack[3]
+		inner1.startPlatformTime, inner2.startPlatformTime = t0, t1
+		inner1.hasAfterAgentCallbacks = callbacks
+		inner1.hasResponse, inner1.ownResponse = true, true
+		inner1.completed = true
+		inner1.popRetirement = &popRetirement{peerRetirement: true}
+		inv.agentStack = append(inv.agentStack[:2], inv.agentStack[3])
+		k := llmKey(innerID)
+		if inv.retiredPeerCount == nil {
+			inv.retiredPeerCount = map[string]int{}
+		}
+		inv.retiredPeerCount[k]++
+		inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), t2, inner1)
+		idx := inv.findRetiredActivationIndexLocked(inner1.spanID)
+		if idx < 0 || !inv.retiredActivations[idx].peerRetirement {
+			t.Fatalf("first inner retired with entry %d; want an entry with peerRetirement=true", idx)
+		}
+		return state{inv: inv, root: root, inner2: inner2, ra: &inv.retiredActivations[idx]}
+	}
+	sole := func(s state, evCreatedAt time.Time, hasIDFor func(*spanRecord) bool) int {
+		var peers []int
+		for j := len(s.inv.agentStack) - 1; j > 0; j-- {
+			if rec := s.inv.agentStack[j]; rec.name == "inner" {
+				peers = append(peers, j)
+			}
+		}
+		return s.inv.soleOpenAuthorLocked(peers, "", evCreatedAt, hasIDFor, withRetiredID)
+	}
+	isInner2 := func(s state, j int) bool { return j > 0 && s.inv.agentStack[j] == s.inner2 }
+
+	t.Run("event created after a peer without after-agent callbacks retired", func(t *testing.T) {
+		s := setup(t, false)
+		if j := sole(s, t3, withID); !isInner2(s, j) {
+			t.Fatalf("author = %d, want the open activation", j)
+		}
+	})
+	t.Run("after-agent event of the retired peer may still come", func(t *testing.T) {
+		s := setup(t, true)
+		if j := sole(s, t3, withID); j != -1 {
+			t.Fatalf("author = %d, want none", j)
+		}
+		s.ra.afterAgentEventSeen = true
+		if j := sole(s, t3, withID); !isInner2(s, j) {
+			t.Fatalf("once the after-agent event arrived: author = %d, want the open activation", j)
+		}
+	})
+	t.Run("event created while the retired peer ran", func(t *testing.T) {
+		s := setup(t, false)
+		if j := sole(s, t1.Add(time.Millisecond), withID); j != -1 {
+			t.Fatalf("author = %d, want none", j)
+		}
+	})
+	t.Run("event without creation evidence", func(t *testing.T) {
+		s := setup(t, false)
+		if j := sole(s, time.Time{}, withID); j != -1 {
+			t.Fatalf("zero timestamp: author = %d, want none", j)
+		}
+		if j := sole(s, t3, func(*spanRecord) bool { return false }); j != -1 {
+			t.Fatalf("no event ID: author = %d, want none", j)
+		}
+		if j := s.inv.soleOpenAuthorLocked([]int{2}, "", t3, nil, withRetiredID); j != -1 {
+			t.Fatalf("nil hasIDFor: author = %d, want none", j)
+		}
+		if j := s.inv.soleOpenAuthorLocked([]int{2}, "", t3, withID, nil); j != -1 {
+			t.Fatalf("nil hasIDForRetired: author = %d, want none", j)
+		}
+		// With no retired activation left to rule out and no start time to
+		// compare with, the timestamp alone decides.
+		s.inv.retiredActivations, s.inv.retiredPeerCount = nil, nil
+		s.inner2.startPlatformTime = time.Time{}
+		if j := sole(s, time.Time{}, withID); j != -1 {
+			t.Fatalf("zero timestamp, nothing retired: author = %d, want none", j)
+		}
+		if j := sole(s, t3, withID); !isInner2(s, j) {
+			t.Fatalf("nothing retired: author = %d, want the open activation", j)
+		}
+	})
+	t.Run("retired peer without an entry of its own", func(t *testing.T) {
+		for _, how := range []string{"pruned", "compacted"} {
+			t.Run(how, func(t *testing.T) {
+				s := setup(t, false)
+				if how == "pruned" {
+					s.inv.retiredActivations = nil
+				} else {
+					s.ra.compactedHull = true
+				}
+				if j := sole(s, t3, withID); j != -1 {
+					t.Fatalf("author = %d, want none", j)
+				}
+			})
+		}
+	})
+	t.Run("another open activation", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			start time.Time
+			want  bool
+		}{
+			{"started before the event", t1, false},
+			{"started after the event", t3.Add(time.Millisecond), true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				s := setup(t, false)
+				s.inv.agentStack = append(s.inv.agentStack, &spanRecord{
+					spanID: "inner-3", parentSpanID: s.root.spanID, parent: s.root, kind: spanKindAgent,
+					name: "inner", startPlatformTime: tc.start, seq: s.inv.nextSeqLocked(),
+				})
+				if j := sole(s, t3, withID); isInner2(s, j) != tc.want {
+					t.Fatalf("author = %d, want the second activation %v", j, tc.want)
+				}
+			})
+		}
+	})
+	t.Run("a swallower of a recorded cause", func(t *testing.T) {
+		s := setup(t, false)
+		s.root.retiredCauses = []retiredCause{{err: errors.New("child failure"), name: "child", swallowers: []retiredSwallower{{name: "inner"}}}}
+		if j := sole(s, t3, withID); j != -1 {
+			t.Fatalf("author = %d, want none", j)
+		}
+	})
+	t.Run("custom UUID provider on open peer does not apply to retired peer without one", func(t *testing.T) {
+		for _, retiredCustom := range []bool{false, true} {
+			t.Run(fmt.Sprintf("retiredCustom=%v", retiredCustom), func(t *testing.T) {
+				s := setup(t, false)
+				s.inner2.hasCustomUUIDProvider = true
+				s.ra.hasCustomUUIDProvider = retiredCustom
+				hasEventID := false
+				evNonEmptyID := true
+				hasOpen := func(r *spanRecord) bool { return hasEventID || (evNonEmptyID && r.hasCustomUUIDProvider) }
+				hasRetired := func(ra retiredActivation) bool { return hasEventID || (evNonEmptyID && ra.hasCustomUUIDProvider) }
+				var peers []int
+				for j := len(s.inv.agentStack) - 1; j > 0; j-- {
+					if rec := s.inv.agentStack[j]; rec.name == "inner" {
+						peers = append(peers, j)
+					}
+				}
+				got := s.inv.soleOpenAuthorLocked(peers, "", t3, hasOpen, hasRetired)
+				if retiredCustom {
+					if !isInner2(s, got) {
+						t.Fatalf("soleOpenAuthorLocked = %d, want open peer when retired peer also has custom UUID provider", got)
+					}
+				} else if got != -1 {
+					t.Fatalf("soleOpenAuthorLocked = %d, want -1 when retired peer lacks custom UUID provider", got)
+				}
+			})
+		}
+	})
+}
+
+// TestAfterAgentCreditSettlesOnlyItsOwnActivation records two concurrent
+// activations of inner under a custom root, one retired unresponded with an
+// afterAgentCredit and one responded without a credit, and pins that
+// consumeAfterAgentCreditLocked settles only the credit-holding activation's
+// own credit while leaving other credits and unrespondedRetiredTools untouched.
+func TestAfterAgentCreditSettlesOnlyItsOwnActivation(t *testing.T) {
+	ctx := t.Context()
+	t0 := time.Unix(1_700_000_000, 0)
+	rootID := identity{invocationID: "inv-after-agent-credit", agentName: "root"}
+	innerID := identity{invocationID: "inv-after-agent-credit", agentName: "inner"}
+	k := llmKey(innerID)
+	tm := newTraceManager()
+	tm.pushAgentSpan(ctx, rootID)
+	tm.pushAgentSpan(ctx, innerID)
+	tm.pushAgentSpan(ctx, innerID)
+	inv := tm.invocation(ctx, rootID)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	inner1, inner2 := inv.agentStack[2], inv.agentStack[3]
+	inner1.hasAfterAgentCallbacks, inner2.hasAfterAgentCallbacks = true, true
+	inner1.startPlatformTime, inner2.startPlatformTime = t0, t0
+	inner1.completed, inner2.completed = true, true
+	inner2.hasResponse, inner2.ownResponse = true, true
+	delta1, delta2 := map[string]any{}, map[string]any{}
+	inner1.popRetirement = &popRetirement{
+		peerRetirement:       true,
+		afterAgentCredit:     true,
+		afterAgentActions:    actionMaps{stateDelta: mapPointer(reflect.ValueOf(delta1))},
+		afterAgentActionsRef: delta1,
+	}
+	inner2.popRetirement = &popRetirement{
+		peerRetirement:       false,
+		afterAgentCredit:     false,
+		afterAgentActions:    actionMaps{stateDelta: mapPointer(reflect.ValueOf(delta2))},
+		afterAgentActionsRef: delta2,
+	}
+	inv.agentStack = inv.agentStack[:2]
+	inv.unrespondedRetired = map[string]int{k: 1}
+	inv.unrespondedRetiredTools = map[string]int{k: 2}
+	inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), t0.Add(time.Millisecond), inner1)
+	inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), t0.Add(2*time.Millisecond), inner2)
+
+	idx1 := inv.findRetiredActivationIndexLocked(inner1.spanID)
+	idx2 := inv.findRetiredActivationIndexLocked(inner2.spanID)
+	if idx1 < 0 || idx2 < 0 {
+		t.Fatalf("missing retired entries: idx1=%d idx2=%d", idx1, idx2)
+	}
+
+	// Out-of-bounds and non-credit-holding activation indices are no-ops.
+	inv.consumeAfterAgentCreditLocked(-1)
+	inv.consumeAfterAgentCreditLocked(len(inv.retiredActivations))
+	inv.consumeAfterAgentCreditLocked(idx2)
+	if inv.unrespondedRetired[k] != 1 || inv.unrespondedRetiredTools[k] != 2 || !inv.retiredActivations[idx1].afterAgentCredit || inv.retiredActivations[idx2].creditSettled {
+		t.Fatalf("no-op calls mutated credits: retired=%d tools=%d ra1=%+v ra2=%+v",
+			inv.unrespondedRetired[k], inv.unrespondedRetiredTools[k], inv.retiredActivations[idx1], inv.retiredActivations[idx2])
+	}
+
+	// Consuming idx1's credit settles only idx1 and leaves unrespondedRetiredTools intact.
+	inv.consumeAfterAgentCreditLocked(idx1)
+	if inv.unrespondedRetired[k] != 0 || inv.unrespondedRetiredTools[k] != 2 || inv.retiredActivations[idx1].afterAgentCredit || !inv.retiredActivations[idx1].creditSettled {
+		t.Fatalf("after consuming idx1: retired=%d tools=%d ra1=%+v",
+			inv.unrespondedRetired[k], inv.unrespondedRetiredTools[k], inv.retiredActivations[idx1])
+	}
+	// Calling again is idempotent.
+	inv.consumeAfterAgentCreditLocked(idx1)
+	if inv.unrespondedRetired[k] != 0 || inv.unrespondedRetiredTools[k] != 2 {
+		t.Fatalf("duplicate consume mutated counts: retired=%d tools=%d", inv.unrespondedRetired[k], inv.unrespondedRetiredTools[k])
+	}
+}
+
+// TestProvenAfterAllRetiredLockedAndExclusionEdges covers direct edge cases
+// across provenAfterAllRetiredLocked, excludedByEventTimestamp,
+// markSettledRetiredActivationsLocked, recordRetiredActivationEntryLocked,
+// customGuardSpanIDsLocked, needsAfterAgentActionsLocked, and
+// canOwnEventCreatedAt.
+func TestProvenAfterAllRetiredLockedAndExclusionEdges(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+
+	t.Run("provenAfterAllRetiredLocked", func(t *testing.T) {
+		root := &spanRecord{spanID: "root-1", kind: spanKindAgent, name: "root", seq: 1}
+		bot2 := &spanRecord{spanID: "bot-2", kind: spanKindAgent, name: "bot", seq: 10, goroutineID: 7, startPlatformTime: at(20), parent: root, parentSpanID: root.spanID}
+		inv := &invocationTrace{agentStack: []*spanRecord{{kind: spanKindInvocation}, root, bot2}}
+		if inv.provenAfterAllRetiredLocked(nil, "", at(25), true, true) {
+			t.Fatal("nil rec returned true")
+		}
+		if inv.provenAfterAllRetiredLocked(&spanRecord{kind: spanKindLLM}, "", at(25), true, true) {
+			t.Fatal("non-agent rec returned true")
+		}
+		if inv.provenAfterAllRetiredLocked(bot2, "", at(25), true, true) {
+			t.Fatal("empty retiredActivations returned true")
+		}
+		// Add an unmatched entry first: still returns false because sawMatch is false.
+		inv.retiredActivations = []retiredActivation{{
+			swallower:             retiredSwallower{spanID: "other-1", seq: 2, name: "other"},
+			retiredAtSeq:          3,
+			completedOrTask:       true,
+			joinedAtRetire:        true,
+			startPlatformTime:     at(1),
+			retiredAtPlatformTime: at(5),
+		}}
+		if inv.provenAfterAllRetiredLocked(bot2, "", at(25), true, true) {
+			t.Fatal("no matching retired activation returned true")
+		}
+		// Add a matching retired activation excluded by event timestamp.
+		inv.retiredActivations = append(inv.retiredActivations, retiredActivation{
+			swallower:             retiredSwallower{spanID: "bot-1", seq: 4, name: "bot"},
+			retiredAtSeq:          5,
+			completedOrTask:       true,
+			joinedAtRetire:        true,
+			goroutineID:           7,
+			startPlatformTime:     at(1),
+			retiredAtPlatformTime: at(10),
+		})
+		if !inv.provenAfterAllRetiredLocked(bot2, "", at(25), true, true) {
+			t.Fatal("expected provenAfterAllRetiredLocked=true after bot-1 retired cleanly before bot-2")
+		}
+		// Non-UUID ID with custom UUID provider only on open activation must not exclude retired peer.
+		bot2.hasCustomUUIDProvider = true
+		if inv.provenAfterAllRetiredLocked(bot2, "", at(25), false, true) {
+			t.Fatal("custom-UUID-only open activation excluded retired peer without custom UUID provider")
+		}
+		inv.retiredActivations[1].hasCustomUUIDProvider = true
+		if !inv.provenAfterAllRetiredLocked(bot2, "", at(25), false, true) {
+			t.Fatal("expected provenAfterAllRetiredLocked=true when both open and retired peers have custom UUID providers")
+		}
+		bot2.hasCustomUUIDProvider = false
+		// Pre-bot2 event timestamp is not excluded.
+		if inv.provenAfterAllRetiredLocked(bot2, "", at(15), true, true) {
+			t.Fatal("pre-bot2 timestamp returned true")
+		}
+		// Surviving swallower on agentStack blocks provenance.
+		root.retiredCauses = []retiredCause{{err: errors.New("boom"), swallowers: []retiredSwallower{{spanID: "bot-1", name: "bot"}}}}
+		if inv.provenAfterAllRetiredLocked(bot2, "", at(25), true, true) {
+			t.Fatal("surviving swallower allowed provenAfterAllRetiredLocked=true")
+		}
+	})
+
+	t.Run("excludedByEventTimestamp_coarseClockTieBreakAndGuards", func(t *testing.T) {
+		ra := retiredActivation{
+			swallower:             retiredSwallower{spanID: "r-1", seq: 2, name: "bot"},
+			retiredAtSeq:          3,
+			joinedAtRetire:        true,
+			settledByParent:       true,
+			goroutineID:           9,
+			startPlatformTime:     at(1),
+			retiredAtPlatformTime: at(5),
+		}
+		// Coarse clock tie: evCreatedAt == laterStartPlatformTime (at(10)) and ra retired at at(5) without callbacks.
+		if !ra.excludedByEventTimestamp("r-2", 5, 9, false, at(10), at(10), true) {
+			t.Fatal("expected coarse-clock tie-break to exclude settled joined activation")
+		}
+		// Same span ID or unjoined/unresponded without settledByParent must return false.
+		if ra.excludedByEventTimestamp("r-1", 5, 9, false, at(10), at(11), true) {
+			t.Fatal("same spanID must not exclude itself")
+		}
+		raUnsettled := ra
+		raUnsettled.settledByParent = false
+		raUnsettled.unrespondedAtPop = true
+		if raUnsettled.excludedByEventTimestamp("r-2", 5, 9, false, at(10), at(11), true) {
+			t.Fatal("unsettled unresponded activation must not be excluded")
+		}
+		// Non-joined completedOrTask requires matching non-zero goroutineID.
+		raTask := retiredActivation{
+			swallower:       retiredSwallower{spanID: "t-1", seq: 2, name: "bot"},
+			retiredAtSeq:    3,
+			completedOrTask: true,
+			goroutineID:     9,
+		}
+		if raTask.excludedByEventTimestamp("t-2", 5, 0, false, at(10), at(11), true) {
+			t.Fatal("zero laterGoroutineID must not exclude unjoined task")
+		}
+		if !raTask.excludedByEventTimestamp("t-2", 5, 9, false, at(10), at(11), true) {
+			t.Fatal("matching goroutineID should exclude unjoined task for strictly later event")
+		}
+	})
+
+	t.Run("recordRetiredActivationEntryLocked_mergeAndRunEndSeq", func(t *testing.T) {
+		root := &spanRecord{spanID: "root-1", kind: spanKindAgent, name: "root", seq: 1}
+		wf := &spanRecord{spanID: "wf-1", kind: spanKindAgent, name: "wf", seq: 2, isWorkflow: true, propagatesChildError: true, parent: root, parentSpanID: root.spanID}
+		child := &spanRecord{
+			spanID:             "c-1",
+			kind:               spanKindAgent,
+			name:               "child",
+			seq:                3,
+			goroutineID:        42,
+			parent:             wf,
+			parentSpanID:       wf.spanID,
+			runEndSeq:          4,
+			runEndPlatformTime: at(8),
+		}
+		if got := customGuardSpanIDsLocked(nil, map[string]bool{"root-1": true}); got != nil {
+			t.Fatalf("customGuardSpanIDsLocked(nil) = %v, want nil", got)
+		}
+		inv := &invocationTrace{agentStack: []*spanRecord{{kind: spanKindInvocation}, root, wf}, lastSeq: 10}
+		// Empty spanID is ignored.
+		inv.recordRetiredActivationEntryLocked(retiredActivation{})
+		if len(inv.retiredActivations) != 0 {
+			t.Fatal("empty spanID should not be recorded")
+		}
+		inv.recordRetiredActivationLocked(child, inv.openSpanSetLocked(), nil, at(20))
+		idx := inv.findRetiredActivationIndexLocked("c-1")
+		if idx < 0 {
+			t.Fatal("c-1 not recorded")
+		}
+		ra := inv.retiredActivations[idx]
+		if ra.retiredAtSeq != 4 || !ra.retiredAtPlatformTime.Equal(at(8)) {
+			t.Fatalf("runEndSeq/Time not applied: seq=%d at=%v", ra.retiredAtSeq, ra.retiredAtPlatformTime)
+		}
+		if !slices.Contains(ra.guardSpanIDs, "root-1") || !slices.Contains(ra.guardSpanIDs, "wf-1") {
+			t.Fatalf("expected both root-1 and non-node wf-1 in guardSpanIDs, got %v", ra.guardSpanIDs)
+		}
+		// Merging duplicate entry appends new guards/ancestors and sets popGoroutineID/actions.
+		m := map[string]any{}
+		inv.recordRetiredActivationEntryLocked(retiredActivation{
+			swallower:            retiredSwallower{spanID: "c-1", name: "child"},
+			guardSpanIDs:         []string{"extra-guard"},
+			ancestorSpanIDs:      []string{"extra-anc"},
+			popGoroutineID:       77,
+			afterAgentActions:    actionMaps{stateDelta: mapPointer(reflect.ValueOf(m))},
+			afterAgentActionsRef: m,
+		})
+		if len(inv.retiredActivations) != 1 {
+			t.Fatalf("duplicate entry not merged: len=%d", len(inv.retiredActivations))
+		}
+		merged := inv.retiredActivations[0]
+		if merged.popGoroutineID != 77 || !slices.Contains(merged.guardSpanIDs, "extra-guard") || !slices.Contains(merged.ancestorSpanIDs, "extra-anc") || merged.afterAgentActionsRef == nil {
+			t.Fatalf("merged entry missing fields: %+v", merged)
+		}
+	})
+
+	t.Run("recordRetiredActivationEntryLocked_completedOrTaskAndSettledCreditMerge", func(t *testing.T) {
+		inv := &invocationTrace{}
+		inv.recordRetiredActivationEntryLocked(retiredActivation{
+			swallower:       retiredSwallower{spanID: "dup-1", name: "worker"},
+			completedOrTask: false,
+			creditSettled:   true,
+		})
+		inv.recordRetiredActivationEntryLocked(retiredActivation{
+			swallower:        retiredSwallower{spanID: "dup-1", name: "worker"},
+			completedOrTask:  true,
+			afterAgentCredit: true,
+			modelCredits:     2,
+		})
+		if len(inv.retiredActivations) != 1 {
+			t.Fatalf("expected 1 merged entry, got %d", len(inv.retiredActivations))
+		}
+		ra := inv.retiredActivations[0]
+		if !ra.completedOrTask {
+			t.Fatal("duplicate merge dropped completedOrTask=true")
+		}
+		if ra.afterAgentCredit || ra.modelCredits != 0 || !ra.creditSettled {
+			t.Fatalf("duplicate merge re-armed settled credits: afterAgentCredit=%v modelCredits=%d creditSettled=%v", ra.afterAgentCredit, ra.modelCredits, ra.creditSettled)
+		}
+	})
+
+	t.Run("recordRetiredActivationEntryLocked_mergesJoinedTimestampsAndFlags", func(t *testing.T) {
+		inv := &invocationTrace{}
+		inv.recordRetiredActivationEntryLocked(retiredActivation{
+			swallower:             retiredSwallower{spanID: "dup-join", name: "worker"},
+			completedOrTask:       true,
+			joinedAtRetire:        false,
+			retiredAtSeq:          5,
+			unrespondedAtPop:      true,
+			startPlatformTime:     at(2),
+			retiredAtPlatformTime: at(5),
+		})
+		inv.recordRetiredActivationEntryLocked(retiredActivation{
+			swallower:                   retiredSwallower{spanID: "dup-join", name: "worker"},
+			completedOrTask:             true,
+			joinedAtRetire:              true,
+			retiredAtSeq:                12,
+			unrespondedAtPop:            false,
+			afterAgentDone:              true,
+			afterAgentDoneAt:            at(14),
+			hasAfterAgentCallbacks:      true,
+			hasCustomUUIDProvider:       true,
+			startPlatformTime:           at(3),
+			retiredAtPlatformTime:       at(12),
+			parentRetiredAtPlatformTime: at(13),
+		})
+		if len(inv.retiredActivations) != 1 {
+			t.Fatalf("expected 1 merged entry, got %d", len(inv.retiredActivations))
+		}
+		ra := inv.retiredActivations[0]
+		if ra.retiredAtSeq != 12 || !ra.startPlatformTime.Equal(at(2)) || !ra.retiredAtPlatformTime.Equal(at(12)) || !ra.parentRetiredAtPlatformTime.Equal(at(13)) {
+			t.Fatalf("merged timestamps unexpected: %+v", ra)
+		}
+		if ra.unrespondedAtPop || !ra.hasAfterAgentCallbacks || !ra.hasCustomUUIDProvider {
+			t.Fatalf("merged flags unexpected: unresponded=%v callbacks=%v customUUID=%v", ra.unrespondedAtPop, ra.hasAfterAgentCallbacks, ra.hasCustomUUIDProvider)
+		}
+		if !ra.createdInRun(at(10), true) {
+			t.Fatal("merged entry rejected event at at(10) within updated retiredAtPlatformTime at(12)")
+		}
+		if !ra.canOwnEventCreatedAt(at(13), true) {
+			t.Fatal("merged entry rejected event at at(13) before afterAgentDoneAt at(14)")
+		}
+		if ra.canOwnEventCreatedAt(at(15), true) {
+			t.Fatal("merged entry falsely owned event at at(15) after afterAgentDoneAt at(14)")
+		}
+	})
+
+	t.Run("markSettledRetiredActivationsLocked_includeSelfAndBlockers", func(t *testing.T) {
+		root := &spanRecord{spanID: "root-1", kind: spanKindAgent, name: "root", seq: 1}
+		inv := &invocationTrace{
+			agentStack: []*spanRecord{{kind: spanKindInvocation}, root},
+			retiredActivations: []retiredActivation{{
+				swallower:       retiredSwallower{spanID: "self-1", name: "self"},
+				guardSpanIDs:    []string{"root-1"},
+				ancestorSpanIDs: []string{"root-1"},
+				joinedAtRetire:  true,
+			}},
+		}
+		// Empty recoveringSpanID is a no-op.
+		inv.markSettledRetiredActivationsLocked("", true)
+		if inv.retiredActivations[0].settledByParent {
+			t.Fatal("empty recoveringSpanID settled entry")
+		}
+		// Open call owned by self-1 blocks settlement.
+		inv.toolSpans = map[string]*spanRecord{"k": {spanID: "t1", parentSpanID: "self-1"}}
+		inv.markSettledRetiredActivationsLocked("self-1", true)
+		if inv.retiredActivations[0].settledByParent {
+			t.Fatal("open call failed to block settlement")
+		}
+		delete(inv.toolSpans, "k")
+		// Non-collateral unrecoveredError on self-1 blocks settlement.
+		inv.unrecoveredErrors = map[string]recordedError{"e": {spanID: "self-1", err: errors.New("fail")}}
+		inv.markSettledRetiredActivationsLocked("self-1", true)
+		if inv.retiredActivations[0].settledByParent {
+			t.Fatal("unrecovered error failed to block settlement")
+		}
+		delete(inv.unrecoveredErrors, "e")
+		// Surviving ancestor retiredCauses block settlement of descendant.
+		root.retiredCauses = []retiredCause{{err: errors.New("ancestor err")}}
+		inv.retiredActivations = append(inv.retiredActivations, retiredActivation{
+			swallower:       retiredSwallower{spanID: "desc-1", name: "desc"},
+			guardSpanIDs:    []string{"root-1"},
+			ancestorSpanIDs: []string{"root-1"},
+			joinedAtRetire:  true,
+		})
+		inv.markSettledRetiredActivationsLocked("root-1", false)
+		if inv.retiredActivations[1].settledByParent {
+			t.Fatal("ancestor retiredCause failed to block descendant settlement")
+		}
+		root.retiredCauses = nil
+		// Now includeSelf settles self-1.
+		inv.markSettledRetiredActivationsLocked("self-1", true)
+		if !inv.retiredActivations[0].settledByParent {
+			t.Fatal("expected includeSelf to settle self-1 once blockers cleared")
+		}
+	})
+
+	t.Run("canOwnEventAt_parentRetiredAndNeedsAfterAgentActionsBounds", func(t *testing.T) {
+		ra := retiredActivation{
+			startPlatformTime:           at(5),
+			retiredAtPlatformTime:       at(10),
+			parentRetiredAtPlatformTime: at(15),
+		}
+		if !ra.canOwnEventAt(time.Time{}, false, false) {
+			t.Fatal("zero evCreatedAt should be ownable")
+		}
+		if ra.canOwnEventAt(at(7), false, false) {
+			t.Fatal("non-zero evCreatedAt without event ID should not be owned")
+		}
+		if ra.canOwnEventCreatedAt(at(4), true) {
+			t.Fatal("event before startPlatformTime should not be owned")
+		}
+		if ra.canOwnEventCreatedAt(at(16), true) {
+			t.Fatal("event after parentRetiredAtPlatformTime should not be owned")
+		}
+		if ra.canOwnEventCreatedAt(at(12), true) {
+			t.Fatal("event after retiredAtPlatformTime without after-agent callbacks should not be owned")
+		}
+		if !ra.canOwnEventAt(at(16), true, true) {
+			t.Fatal("after-agent event matched via actionMaps should remain ownable after post-retirement bounds")
+		}
+		if got := (&invocationTrace{}).findRetiredActivationIndexLocked(""); got != -1 {
+			t.Fatalf("findRetiredActivationIndexLocked empty = %d, want -1", got)
+		}
+		root := &spanRecord{spanID: "root-1", kind: spanKindAgent, name: "root", seq: 1}
+		bot := &spanRecord{spanID: "bot-2", kind: spanKindAgent, name: "bot", seq: 2, parent: root, parentSpanID: root.spanID}
+		inv := &invocationTrace{agentStack: []*spanRecord{{kind: spanKindInvocation}, root, bot}}
+		if inv.hasGuardedRetiredPeerForEventLocked(nil, "", at(10), true, true) {
+			t.Fatal("nil rec should return false")
+		}
+		root.retiredCauses = []retiredCause{{err: errors.New("fail"), swallowers: []retiredSwallower{{spanID: "bot-1", name: "bot"}}}}
+		if !inv.hasGuardedRetiredPeerForEventLocked(bot, "", at(10), true, true) {
+			t.Fatal("surviving swallower token on agentStack should guard peer")
+		}
+		if inv.needsAfterAgentActionsLocked(-1, afterAgentState{}) || inv.needsAfterAgentActionsLocked(0, afterAgentState{}) {
+			t.Fatal("out-of-bounds idx returned true")
+		}
+		inv.settleAfterAgentActionsLocked(nil)
+		inv.settleAfterAgentActionsOnLocked(0)
+		m := map[string]any{}
+		inv.retiredActivations = []retiredActivation{{
+			swallower:            retiredSwallower{spanID: "a-1", name: "a"},
+			afterAgentDone:       true,
+			afterAgentActions:    actionMaps{stateDelta: mapPointer(reflect.ValueOf(m))},
+			afterAgentActionsRef: m,
+		}}
+		inv.unrespondedRetiredTools = map[string]int{llmKey(identity{agentName: "a"}): 1}
+		if !inv.needsAfterAgentActionsLocked(0, inv.afterAgentStateLocked()) {
+			t.Fatal("expected unrespondedRetiredTools > 0 to keep after-agent action maps")
+		}
+		inv.afterAgentCallbacksReturnedOnLocked(0, at(1), 0)
+		if inv.markAfterAgentCallbacksReturnedOnLocked(7, at(1), -1) {
+			t.Fatal("empty pending with negative running should return false")
+		}
+		// hasGuardedRetiredPeerForEventLocked: custom UUID provider on open peer
+		// must not exclude a retired peer without custom UUID provider on non-UUID IDs.
+		rootGuard := &spanRecord{spanID: "root-g", kind: spanKindAgent, name: "root", seq: 1}
+		botGuard := &spanRecord{
+			spanID:                "bot-g2",
+			kind:                  spanKindAgent,
+			name:                  "bot",
+			seq:                   2,
+			parent:                rootGuard,
+			parentSpanID:          rootGuard.spanID,
+			hasCustomUUIDProvider: true,
+			startPlatformTime:     at(12),
+		}
+		invGuard := &invocationTrace{
+			agentStack: []*spanRecord{{kind: spanKindInvocation}, rootGuard, botGuard},
+			retiredActivations: []retiredActivation{{
+				swallower:             retiredSwallower{spanID: "bot-g1", name: "bot", seq: 1},
+				guardSpanIDs:          []string{rootGuard.spanID},
+				retiredAtSeq:          1,
+				completedOrTask:       true,
+				joinedAtRetire:        true,
+				startPlatformTime:     at(1),
+				retiredAtPlatformTime: at(10),
+			}},
+		}
+		if !invGuard.hasGuardedRetiredPeerForEventLocked(botGuard, "", at(15), false, true) {
+			t.Fatal("expected retired peer without custom UUID provider to remain guarded on non-UUID event")
+		}
+		invGuard.retiredActivations[0].hasCustomUUIDProvider = true
+		if invGuard.hasGuardedRetiredPeerForEventLocked(botGuard, "", at(15), false, true) {
+			t.Fatal("expected retired peer with custom UUID provider to be excluded on post-retirement non-UUID event")
+		}
+		// needsAfterAgentActionsLocked: path-wildcard credit lookup on both
+		// widened hull (path=="") and concrete path ("p0").
+		checkWildcard := func(entryPath, creditPath string, tools, want bool) {
+			t.Helper()
+			delta := map[string]any{}
+			raW := retiredActivation{
+				swallower:            retiredSwallower{spanID: "w-1", name: "w", path: entryPath},
+				afterAgentDone:       true,
+				afterAgentActions:    actionMaps{stateDelta: mapPointer(reflect.ValueOf(delta))},
+				afterAgentActionsRef: delta,
+			}
+			invW := &invocationTrace{retiredActivations: []retiredActivation{raW}}
+			key := llmKey(identity{path: creditPath, agentName: "w"})
+			if tools {
+				invW.unrespondedRetiredTools = map[string]int{key: 1}
+			} else {
+				invW.unrespondedRetired = map[string]int{key: 1}
+			}
+			if got := invW.needsAfterAgentActionsLocked(0, invW.afterAgentStateLocked()); got != want {
+				t.Fatalf("needsAfterAgentActionsLocked(entryPath=%q, creditPath=%q, tools=%v) = %v, want %v", entryPath, creditPath, tools, got, want)
+			}
+		}
+		checkWildcard("", "p0", false, true)
+		checkWildcard("", "p0", true, true)
+		checkWildcard("p0", "", false, true)
+		checkWildcard("p0", "", true, true)
+		checkWildcard("p0", "p1", false, false)
+		checkWildcard("p0", "p1", true, false)
 	})
 }
