@@ -789,7 +789,7 @@ func parseVersion(blobName, prefix string) (int64, bool) {
 	if !ok || suffix == "" {
 		return 0, false
 	}
-	for i := 0; i < len(suffix); i++ {
+	for i := range len(suffix) {
 		if suffix[i] < '0' || suffix[i] > '9' {
 			return 0, false
 		}
