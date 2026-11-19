@@ -90,14 +90,12 @@ type RunConfig struct {
 	// request, so neither the caller's HTTPOptions nor the agent's is mutated
 	// by request assembly or by BeforeModelCallback.
 	//
-	// Run does not copy HTTPOptions, unlike CustomMetadata and
-	// GetSessionConfig, which Run copies before it returns. ADK reads the
-	// struct HTTPOptions points to, and its nested maps, each time it builds a
-	// model request, and it builds them while the sequence returned by Run is
-	// iterated. A change made through the pointer after Run returns therefore
-	// applies to every request built after the change. Set HTTPOptions before
-	// calling Run, and leave the struct and its maps unchanged until the
-	// iteration ends.
+	// Run does not copy HTTPOptions. ADK reads the struct HTTPOptions points
+	// to, and its nested maps, each time it builds a model request, and it
+	// builds them while the sequence returned by Run is iterated. A change
+	// made through the pointer after Run returns therefore applies to every
+	// request built after the change. Set HTTPOptions before calling Run, and
+	// leave the struct and its maps unchanged until the iteration ends.
 	//
 	// The model connectors in model/anthropicmodel and model/openaimodel
 	// accept only the Timeout and Headers fields of a request's HTTPOptions:
@@ -121,17 +119,17 @@ type RunConfig struct {
 	// "adk_agent_name" entry in Labels is preserved and not overwritten by
 	// ADK's default agent-name attribution label.
 	//
-	// Nil or empty (the zero value) leaves each request's Labels as configured
-	// on the agent. ADK copies Labels into a fresh map per request, so neither
-	// the caller's map nor the agent's map is mutated.
+	// Labels is a pointer so that RunConfig stays comparable and usable as a
+	// map key. Nil (the zero value) or a pointer to an empty map leaves each
+	// request's Labels as configured on the agent. ADK copies Labels into a
+	// fresh map per request, so neither the caller's map nor the agent's map
+	// is mutated.
 	//
-	// Run does not copy Labels, unlike CustomMetadata and GetSessionConfig,
-	// which Run copies before it returns. ADK reads the map each time it
-	// builds a model request, and it builds them while the sequence returned
-	// by Run is iterated. A change to the map's entries after Run returns
-	// therefore applies to every request built after the change. Set Labels
-	// before calling Run, and leave the map unchanged until the iteration
-	// ends.
+	// Run does not copy Labels. ADK reads the map each time it builds a model
+	// request, and it builds them while the sequence returned by Run is
+	// iterated. A change to the map's entries after Run returns therefore
+	// applies to every request built after the change. Set Labels before
+	// calling Run, and leave the map unchanged until the iteration ends.
 	//
 	// The model connectors in model/anthropicmodel and model/openaimodel have
 	// no request labels to send. They drop the "adk_agent_name" label, and
@@ -140,5 +138,5 @@ type RunConfig struct {
 	// openaimodel.ErrLabelsNotSupported). An invocation that sets any key
 	// other than "adk_agent_name" in Labels therefore fails every model call
 	// of an agent whose model uses one of these connectors.
-	Labels map[string]string
+	Labels *map[string]string
 }
