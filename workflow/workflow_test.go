@@ -1111,3 +1111,43 @@ func TestWorkflow_NodeRootWrapper_RequiresSingleEdge(t *testing.T) {
 		t.Errorf("New with two edges = (%v, %v), want (nil, error)", w, err)
 	}
 }
+
+func TestWorkflow_JoinWithStartAndPausedPredecessor_Resume(t *testing.T) {
+	asker := newHitlNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+		yield(NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "approval"}), nil)
+	})
+	join := NewJoinNode("join")
+	w := mustNew(t, []Edge{
+		{From: Start, To: join},
+		{From: Start, To: asker},
+		{From: asker, To: join},
+	})
+
+	turn1 := newMockCtx(t)
+	invID := turn1.InvocationID()
+	userEvent := &session.Event{Author: "user", InvocationID: invID}
+	userEvent.Content = &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "hello"}}}
+	turn1.userContent = userEvent.Content
+	history := append(sliceEvents{userEvent}, drain(t, w.Run(turn1))...)
+
+	answer := genai.NewContentFromFunctionResponse(WorkflowInputFunctionCallName, map[string]any{"result": "approved"}, genai.RoleUser)
+	answer.Parts[0].FunctionResponse.ID = "approval"
+	answerEvent := &session.Event{Author: "user", InvocationID: invID}
+	answerEvent.Content = answer
+	history = append(history, answerEvent)
+
+	state, err := w.ReconstructRunState(fakeSession{events: history}, invID)
+	if err != nil {
+		t.Fatalf("ReconstructRunState: %v", err)
+	}
+	turn2 := newMockCtx(t)
+	turn2.userContent = answer
+	events := drain(t, w.Resume(agent.Promote(turn2), state, map[string]any{"approval": "approved"}))
+	if len(events) != 1 {
+		t.Fatalf("Resume yielded %d events, want 1 (the join output)", len(events))
+	}
+	want := map[string]any{"START": "hello", "asker": "approved"}
+	if diff := cmp.Diff(want, events[0].Output); diff != "" {
+		t.Errorf("join output (-want +got):\n%s", diff)
+	}
+}

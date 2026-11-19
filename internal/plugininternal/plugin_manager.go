@@ -16,6 +16,7 @@ package plugininternal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -45,10 +46,19 @@ type PluginManager struct {
 	closeTimeout time.Duration
 }
 
+// defaultPluginCloseTimeout bounds one plugin's Close when PluginConfig leaves
+// CloseTimeout unset, matching adk-python's 5-second default
+// (runners.py plugin_close_timeout=5.0).
+const defaultPluginCloseTimeout = 5 * time.Second
+
 // NewPluginManager creates a new PluginManager.
 func NewPluginManager(cfg PluginConfig) (*PluginManager, error) {
+	timeout := cfg.CloseTimeout
+	if timeout <= 0 {
+		timeout = defaultPluginCloseTimeout
+	}
 	pm := &PluginManager{
-		closeTimeout: cfg.CloseTimeout,
+		closeTimeout: timeout,
 		plugins:      make([]*plugin.Plugin, 0, len(cfg.Plugins)),
 	}
 
@@ -306,18 +316,43 @@ func (pm *PluginManager) RunOnModelErrorCallback(cctx agent.Context, llmRequest 
 	return nil, nil
 }
 
-// Close calls the CloseFunc on all registered plugins.
+// Close calls the CloseFunc on all registered plugins sequentially, bounding
+// each plugin's Close by closeTimeout as adk-python's PluginManager.close does.
 func (pm *PluginManager) Close() error {
-	var errors []error
-	for _, plugin := range pm.plugins {
-		if err := plugin.Close(); err != nil {
-			errors = append(errors, fmt.Errorf("error closing plugin '%s': %w", plugin.Name(), err))
+	timeout := pm.closeTimeout
+	if timeout <= 0 {
+		timeout = defaultPluginCloseTimeout
+	}
+	var closeErrs []error
+	for _, p := range pm.plugins {
+		if err := closePlugin(p, timeout); err != nil {
+			closeErrs = append(closeErrs, fmt.Errorf("error closing plugin '%s': %w", p.Name(), err))
 		}
 	}
-	if len(errors) > 0 {
-		return fmt.Errorf("failed to close plugins: %v", errors)
+	if len(closeErrs) > 0 {
+		return fmt.Errorf("failed to close plugins: %w", errors.Join(closeErrs...))
 	}
 	return nil
+}
+
+func closePlugin(p *plugin.Plugin, timeout time.Duration) error {
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("panic of type %T", r)
+			}
+		}()
+		done <- p.Close()
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return fmt.Errorf("no result after %v: %w", timeout, context.DeadlineExceeded)
+	}
 }
 
 func ToContext(ctx context.Context, cfg *PluginManager) context.Context {

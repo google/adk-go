@@ -693,3 +693,39 @@ func TestRunner_Close_AbandonedCloseGoroutineEndsWhenCloseReturns(t *testing.T) 
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestRunner_Close_HonorsPluginCloseTimeout(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	var nextCloses atomic.Int32
+	plugins := []*plugin.Plugin{
+		newClosePlugin(t, "hanging", func() error {
+			<-release
+			return nil
+		}),
+		newClosePlugin(t, "next", func() error {
+			nextCloses.Add(1)
+			return nil
+		}),
+	}
+	root := newCloseTestLLM(t, "root", nil)
+	r := newCloseTestRunner(t, Config{
+		Agent: root,
+		PluginConfig: PluginConfig{
+			Plugins:      plugins,
+			CloseTimeout: 30 * time.Millisecond,
+		},
+	})
+
+	elapsed, err := closeWithin(t, r, 500*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("errors.Is(Close(), context.DeadlineExceeded) = false, want true; err = %v", err)
+	}
+	if elapsed < 30*time.Millisecond {
+		t.Errorf("Close() returned after %v, want at least 30ms", elapsed)
+	}
+	if got := nextCloses.Load(); got != 1 {
+		t.Errorf("closes of next plugin = %d, want 1", got)
+	}
+}

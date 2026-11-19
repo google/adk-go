@@ -46,6 +46,8 @@ const workflowNodeResumeCompletedKey = "adk.workflow.node_resume_completed"
 
 const workflowBasePathPrefix = "adk.workflow.base_path."
 
+const workflowSubNodeOutputPrefix = "adk.workflow.sub_node_output."
+
 const workflowFailedChildPathsKey = "adk.workflow.failed_child_paths"
 
 const (
@@ -189,7 +191,7 @@ func (s *nodeScanState) addInterrupt(id string) {
 // share it. Empty invocationID disables the filter (scan all history).
 // Mirrors adk-python _reconstruct_node_states' invocation_id gate.
 func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string) (*RunState, error) {
-	if sess == nil {
+	if sess == nil || sess.Events() == nil {
 		return nil, nil
 	}
 	nodesByName := buildNodesByName(w.graph)
@@ -216,6 +218,8 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 	// Restore completed predecessors as well as interrupted nodes. Join
 	// barriers consult Nodes, not the completed set used to skip replayed
 	// successors, and need the predecessors' outputs after a resume.
+	state.Nodes[Start.Name()] = &NodeState{Status: NodeCompleted, Input: workflowInput}
+	completed[Start.Name()] = true
 	for name, output := range nodeOutputs {
 		if _, exists := state.Nodes[name]; !exists {
 			ns := &NodeState{Status: NodeCompleted, Output: output}
@@ -441,6 +445,11 @@ func graphHistoryEvent(ev *session.Event, workflowName string) *session.Event {
 		return ev
 	}
 	copy := *ev
+	if copy.Output == nil && workflowName != "" {
+		if subOut, ok := ev.CustomMetadata[workflowSubNodeOutputPrefix+workflowName]; ok {
+			copy.Output = subOut
+		}
+	}
 	info := *ev.NodeInfo
 	info.Path = strings.TrimPrefix(info.Path, base+"/")
 	info.OutputFor = make([]string, len(ev.NodeInfo.OutputFor))

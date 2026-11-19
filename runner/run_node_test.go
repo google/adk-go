@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2888,4 +2889,109 @@ func TestRunner_BareNodeRoot_RunsOnRootBranch(t *testing.T) {
 	if diff := cmp.Diff([]string{"", ""}, branches); diff != "" {
 		t.Errorf("node root branch per turn (-want +got):\n%s", diff)
 	}
+}
+
+func TestRunner_WorkflowNodeRoot_MultiNodeResume(t *testing.T) {
+	t.Run("handoff", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+
+		var step1Runs atomic.Int32
+		step1 := workflow.NewFunctionNode("step1", func(_ agent.Context, in string) (string, error) {
+			step1Runs.Add(1)
+			return in + "-prepared", nil
+		}, workflow.NodeConfig{})
+		asker := newFuncNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+			yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "approval"}), nil)
+		})
+		step2 := workflow.NewFunctionNode("step2", func(_ agent.Context, in string) (string, error) {
+			return "final:" + in, nil
+		}, workflow.NodeConfig{})
+
+		wfNode, err := workflow.NewWorkflowNode("wf", workflow.Chain(workflow.Start, step1, asker, step2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := newNodeRootRunner(t, wfNode, svc)
+
+		if _, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{})); len(errs) > 0 {
+			t.Fatalf("turn 1 errors = %v", errs)
+		}
+
+		answer := genai.NewContentFromFunctionResponse(workflow.WorkflowInputFunctionCallName, map[string]any{"result": "approved"}, genai.RoleUser)
+		answer.Parts[0].FunctionResponse.ID = "approval"
+		events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, answer, agent.RunConfig{}))
+		if len(errs) > 0 {
+			t.Fatalf("turn 2 errors = %v", errs)
+		}
+		if got := step1Runs.Load(); got != 1 {
+			t.Errorf("step1 ran %d times across pause+resume, want 1", got)
+		}
+		var outputs []any
+		for _, ev := range events {
+			if ev.Output != nil {
+				outputs = append(outputs, ev.Output)
+			}
+		}
+		if diff := cmp.Diff([]any{"final:approved"}, outputs); diff != "" {
+			t.Errorf("turn 2 outputs (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("reentry_preserves_predecessor_output", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+
+		var step1Runs atomic.Int32
+		step1 := workflow.NewFunctionNode("step1", func(_ agent.Context, in string) (string, error) {
+			step1Runs.Add(1)
+			return in + "-prepared", nil
+		}, workflow.NodeConfig{})
+		rerun := true
+		var askerInputs []any
+		asker := workflow.NewDynamicNode("asker", func(ctx agent.Context, in any, emit func(*session.Event) error) (any, error) {
+			askerInputs = append(askerInputs, in)
+			if v, ok := ctx.ResumedInput("approval"); ok {
+				return fmt.Sprintf("%v:%v", in, v), nil
+			}
+			return nil, emit(workflow.NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "approval"}))
+		}, workflow.NodeConfig{RerunOnResume: &rerun})
+		step2 := workflow.NewFunctionNode("step2", func(_ agent.Context, in string) (string, error) {
+			return "final:" + in, nil
+		}, workflow.NodeConfig{})
+
+		wfNode, err := workflow.NewWorkflowNode("wf", workflow.Chain(workflow.Start, step1, asker, step2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := newNodeRootRunner(t, wfNode, svc)
+
+		if _, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{})); len(errs) > 0 {
+			t.Fatalf("turn 1 errors = %v", errs)
+		}
+
+		answer := genai.NewContentFromFunctionResponse(workflow.WorkflowInputFunctionCallName, map[string]any{"result": "approved"}, genai.RoleUser)
+		answer.Parts[0].FunctionResponse.ID = "approval"
+		events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, answer, agent.RunConfig{}))
+		if len(errs) > 0 {
+			t.Fatalf("turn 2 errors = %v", errs)
+		}
+		if got := step1Runs.Load(); got != 1 {
+			t.Errorf("step1 ran %d times across pause+resume, want 1", got)
+		}
+		if diff := cmp.Diff([]any{"go-prepared", "go-prepared"}, askerInputs); diff != "" {
+			t.Errorf("asker inputs across pause+resume (-want +got):\n%s", diff)
+		}
+		var outputs []any
+		for _, ev := range events {
+			if ev.Output != nil {
+				outputs = append(outputs, ev.Output)
+			}
+		}
+		if diff := cmp.Diff([]any{"final:go-prepared:approved"}, outputs); diff != "" {
+			t.Errorf("turn 2 outputs (-want +got):\n%s", diff)
+		}
+	})
 }
