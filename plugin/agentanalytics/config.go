@@ -113,14 +113,15 @@ type DropStats struct {
 	// QueueFullDrops counts events dropped because QueueMaxSize was reached.
 	QueueFullDrops int64 `json:"queue_full_drops"`
 	// AppendFailureDrops counts events dropped because a plugin callback or row
-	// construction panicked (each recovered callback panic counts as at most 1
-	// failed event write; counts are approximate under rare logger panics), a
-	// batch write was skipped before sending because its write deadline had
-	// already expired or its desynchronized committed stream could not be
-	// replaced (including while stream rotation is in cooldown), or a BigQuery
-	// Storage Write append was rejected by the server or exhausted its retries.
-	// If the last attempt's outcome was unknown (sent, but no response), the
-	// rows may in fact have been written, so this is an upper bound.
+	// construction panicked (a panic in both afterRun and one of its cleanup
+	// fallbacks can count the same run more than once), a batch write was
+	// skipped before sending because its write deadline had already expired or
+	// its desynchronized committed stream could not be replaced (including
+	// while stream rotation is in cooldown), or a BigQuery Storage Write append
+	// was rejected by the server or exhausted its retries. Because fallback
+	// panics in afterRun can increment alongside the callback panic and an
+	// unknown last-attempt outcome (sent, but no response) may in fact have
+	// been written, this is an upper bound.
 	AppendFailureDrops int64 `json:"append_failure_drops"`
 	// RowErrorDrops counts individual rows rejected by BigQuery Storage Write
 	// AppendRowsResponse.RowErrors and isolated from their batch so the
@@ -252,7 +253,8 @@ type GCSContentOffloader interface {
 // logging, redaction of sensitive keys and credentials, run-end flushing,
 // additive schema upgrades, and per-event view creation are enabled by default;
 // DisableSessionMetadata, DisableSensitiveKeyRedaction, DisableFlushOnRunEnd,
-// DisableSchemaUpgrade, and DisableCreateViews opt out of each. Created and
+// DisableSchemaUpgrade, and DisableCreateViews opt out of each, while
+// CreateEvalViews opts in to creating the pre-built evaluation views. Created and
 // upgraded tables carry label adk_schema_version="2" ([SchemaVersion]), while
 // attributes.adk.schema_version on each row is "1". Recursive payload
 // sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
@@ -382,7 +384,8 @@ type Config struct {
 	DisableSensitiveKeyRedaction bool
 
 	// ContentFormatter, if set, is applied to each event's raw payload before
-	// the content column is built.
+	// the content column is built. The evaluation views (see CreateEvalViews)
+	// need it to keep the content keys that they read.
 	ContentFormatter ContentFormatter
 	// DebugContentFormatterErrors includes error-shape metadata (such as error
 	// byte length) in the warning logged when ContentFormatter fails, without
@@ -390,13 +393,16 @@ type Config struct {
 	DebugContentFormatterErrors bool
 
 	// EventAllowlist, if non-empty, limits logging to the listed event types.
-	// The legacy umbrella name "EVENT" matches all session-event rows
-	// (such as STATE_DELTA, AGENT_TRANSFER, and AGENT_RESPONSE).
+	// The legacy umbrella name "EVENT" matches session-event emitters
+	// (STATE_DELTA, AGENT_TRANSFER, TOOL_PAUSED, HITL_*, OnEventCallback
+	// AGENT_RESPONSE, and resumed TOOL_COMPLETED); it does not match primary
+	// TOOL_COMPLETED rows or FinalResponseToolNames AGENT_RESPONSE rows.
 	EventAllowlist []string
 	// EventDenylist stops the listed event types from being logged. It takes
 	// precedence over EventAllowlist, including when "EVENT" is listed in
-	// EventAllowlist. The legacy umbrella name "EVENT" suppresses all
-	// session-event rows.
+	// EventAllowlist. The legacy umbrella name "EVENT" suppresses
+	// session-event emitters (including resumed TOOL_COMPLETED rows, though not
+	// primary TOOL_COMPLETED or FinalResponseToolNames AGENT_RESPONSE rows).
 	EventDenylist []string
 
 	// PayloadColumnDenylist names payload columns that are omitted from newly
@@ -581,6 +587,48 @@ type Config struct {
 	// that start many instances may set DisableCreateViews and call SyncViews
 	// once at deploy time.
 	DisableCreateViews bool
+	// CreateEvalViews creates or replaces the two pre-built agent evaluation
+	// BigQuery views (see [Config.EvalViewDefinitions]), named
+	// "<ViewPrefix>_eval_session" and "<ViewPrefix>_eval_turn" (for example
+	// v_eval_session and v_eval_turn), in the dataset of the events table.
+	// When true (the default is false) and the plugin has a BigQuery client,
+	// the views are created in the background once the table is ready, after
+	// the per-event views when DisableCreateViews is false or on their own
+	// when DisableCreateViews is true; [BigQueryAgentAnalyticsPlugin.SyncEvalViews]
+	// creates or replaces the two evaluation views synchronously and returns
+	// the error even when CreateEvalViews is false, and
+	// [BigQueryAgentAnalyticsPlugin.SyncViews] also includes them when
+	// CreateEvalViews is true.
+	//
+	// Both views reconstruct Vertex AI GenAI Evaluation AgentData trajectories
+	// (trace) and per-turn / per-session guardrail metrics from the content
+	// column and require USER_MESSAGE_RECEIVED, AGENT_STARTING, LLM_REQUEST,
+	// TOOL_STARTING, TOOL_COMPLETED, TOOL_PAUSED, AGENT_TRANSFER,
+	// HITL_CREDENTIAL_REQUEST, HITL_CONFIRMATION_REQUEST, HITL_INPUT_REQUEST,
+	// HITL_CREDENTIAL_REQUEST_COMPLETED, HITL_CONFIRMATION_REQUEST_COMPLETED,
+	// HITL_INPUT_REQUEST_COMPLETED, AGENT_RESPONSE, and INVOCATION_COMPLETED
+	// events. Enabling CreateEvalViews when "content" is in
+	// PayloadColumnDenylist or when EventDenylist / EventAllowlist filters out
+	// any active emitter of these required events (including "EVENT" in
+	// EventAllowlist without explicit AGENT_RESPONSE when FinalResponseToolNames
+	// is non-empty, or "EVENT" in EventDenylist) is a configuration error.
+	//
+	// A custom ContentFormatter must keep the content keys that the views read
+	// ($.text_summary, $.response, $.tool, $.args, and $.result, as well as
+	// $.from_agent and $.to_agent of AGENT_TRANSFER rows and $.usage of
+	// LLM_RESPONSE rows). Setting ContentFormatter also stops AGENT_RESPONSE
+	// rows from writing content_parts, so the views then take the reply text
+	// from $.response alone.
+	//
+	// A user message with a text part offloaded to Cloud Storage (see
+	// GCSBucketName and MaxInlineTextSize) has only a 200-rune preview of that
+	// part in the table, so the views reconstruct no user text for the
+	// message: its turn is not eval_ready, and neither is its session.
+	//
+	// Because the evaluation views aggregate per session or turn, filtering on
+	// session_start_timestamp or turn_start_timestamp does not prune the
+	// events table's timestamp partitions.
+	CreateEvalViews bool
 	// ViewPrefix is the name prefix of the created views. Empty means "v".
 	// It may contain only letters, digits, '_' and '-'. Give each events
 	// table that shares a dataset its own prefix.

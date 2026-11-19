@@ -251,16 +251,20 @@ type pluginState struct {
 	enabled bool
 	// defs and defsErr are the views of the plugin's Config, or why it has
 	// none, from [Config.ViewDefinitions].
-	defs           []ViewDefinition
-	defsErr        error
-	runner         viewRunner
-	viewGate       chan struct{}
-	viewsMu        sync.Mutex
-	lifeCtx        context.Context
-	lifeCancel     context.CancelFunc
-	viewsCancel    context.CancelFunc
-	asyncViewsDone chan struct{}
-	closed         bool
+	defs            []ViewDefinition
+	defsErr         error
+	evalDefs        []ViewDefinition
+	evalDefsErr     error
+	evalConfigErr   error
+	createEvalViews bool
+	runner          viewRunner
+	viewGate        chan struct{}
+	viewsMu         sync.Mutex
+	lifeCtx         context.Context
+	lifeCancel      context.CancelFunc
+	viewsCancel     context.CancelFunc
+	asyncViewsDone  chan struct{}
+	closed          bool
 }
 
 // BigQueryAgentAnalyticsPlugin wraps an ADK [baseplugin.Plugin] and exposes
@@ -331,7 +335,10 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 // config.Enabled is false, and before it returns any error, such as an invalid
 // config or a table that cannot be read, created or upgraded. bqClient and a
 // supplied GCSOffloader remain caller-owned, and the caller is responsible for
-// closing them.
+// closing them. Closing the plugin is idempotent across concurrent and repeated
+// calls: shutdown runs once, converts any panic on the calling goroutine in a
+// cleanup step into an error so remaining cleanup still executes, and returns
+// the cached error result on every call.
 //
 // Register the plugin before any plugin whose callbacks return replacement
 // events, model responses, tool results or agent content. ADK runs the
@@ -465,14 +472,20 @@ func newBigQueryAgentAnalyticsPlugin(
 
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	defs, defsErr := config.ViewDefinitions()
+	evalDefs, evalDefsErr := config.EvalViewDefinitions()
+	evalConfigErr := validateEvalViewConfig(config, deniedColumns, false)
 	state := &pluginState{
-		counters:   processor.counters,
-		enabled:    true,
-		defs:       defs,
-		defsErr:    defsErr,
-		viewGate:   make(chan struct{}, 1),
-		lifeCtx:    lifeCtx,
-		lifeCancel: lifeCancel,
+		counters:        processor.counters,
+		enabled:         true,
+		defs:            defs,
+		defsErr:         defsErr,
+		evalDefs:        evalDefs,
+		evalDefsErr:     evalDefsErr,
+		evalConfigErr:   evalConfigErr,
+		createEvalViews: config.CreateEvalViews,
+		viewGate:        make(chan struct{}, 1),
+		lifeCtx:         lifeCtx,
+		lifeCancel:      lifeCancel,
 	}
 	state.viewGate <- struct{}{}
 	if bqClient != nil {
@@ -499,31 +512,60 @@ func newBigQueryAgentAnalyticsPlugin(
 		AfterToolCallback:   p.afterTool,
 		OnToolErrorCallback: p.onToolError,
 
-		CloseFunc: func() error {
-			state.stopAsyncViewCreation()
-			// The processor uploads while it flushes, so it goes first.
-			processor.Close()
+		CloseFunc: sync.OnceValue(func() (err error) {
 			var closeErrs []error
-			if ownedOffloader != nil {
-				if err := ownedOffloader.Close(); err != nil {
-					closeErrs = append(closeErrs, fmt.Errorf("failed to close GCS offloader: %w", err))
+			defer func() {
+				// The view runner refers to bqClient only weakly, so this function,
+				// which the plugin holds, keeps the client alive for the plugin.
+				runtime.KeepAlive(bqClient)
+				err = errors.Join(closeErrs...)
+			}()
+			runCloseStep := func(step string, fn func() error) {
+				defer func() {
+					if r := recover(); r != nil {
+						panicType := fmt.Sprintf("%T", r)
+						closeErrs = append(closeErrs, fmt.Errorf("agentanalytics: %s panicked of type %s", step, panicType))
+					}
+				}()
+				if stepErr := fn(); stepErr != nil {
+					closeErrs = append(closeErrs, stepErr)
 				}
+			}
+			runCloseStep("stop async view creation", func() error {
+				state.stopAsyncViewCreation()
+				return nil
+			})
+			// The processor uploads while it flushes, so it goes first.
+			runCloseStep("close batch processor", func() error {
+				processor.Close()
+				return nil
+			})
+			if ownedOffloader != nil {
+				runCloseStep("close GCS offloader", func() error {
+					if err := ownedOffloader.Close(); err != nil {
+						return fmt.Errorf("failed to close GCS offloader: %w", err)
+					}
+					return nil
+				})
 			}
 			if writeClient != nil {
-				if err := writeClient.Close(); err != nil {
-					closeErrs = append(closeErrs, fmt.Errorf("failed to close BigQuery write client: %w", err))
-				}
+				runCloseStep("close BigQuery write client", func() error {
+					if err := writeClient.Close(); err != nil {
+						return fmt.Errorf("failed to close BigQuery write client: %w", err)
+					}
+					return nil
+				})
 			}
 			if ownBQClient && bqClient != nil {
-				if err := closeBQClient(bqClient); err != nil {
-					closeErrs = append(closeErrs, fmt.Errorf("failed to close BigQuery client: %w", err))
-				}
+				runCloseStep("close BigQuery client", func() error {
+					if err := closeBQClient(bqClient); err != nil {
+						return fmt.Errorf("failed to close BigQuery client: %w", err)
+					}
+					return nil
+				})
 			}
-			// The view runner refers to bqClient only weakly, so this function,
-			// which the plugin holds, keeps the client alive for the plugin.
-			runtime.KeepAlive(bqClient)
-			return errors.Join(closeErrs...)
-		},
+			return nil
+		}),
 	})
 	if err != nil {
 		processor.Close()
@@ -533,15 +575,36 @@ func newBigQueryAgentAnalyticsPlugin(
 
 	registerPlugin(adkPlugin, state)
 
-	if config.createViews() && state.runner != nil {
+	if (config.createViews() || config.CreateEvalViews) && state.runner != nil {
 		logf := config.viewLogf()
-		if defsErr != nil {
-			if logf != nil {
-				logf("agentanalytics: skipping view creation: %v", defsErr)
+		var startupDefs []ViewDefinition
+		hasPerEventViews := false
+		if config.createViews() {
+			if defsErr != nil {
+				if logf != nil {
+					logf("agentanalytics: skipping view creation: %v", defsErr)
+				}
+			} else {
+				startupDefs = append(startupDefs, defs...)
+				hasPerEventViews = true
 			}
-		} else {
+		}
+		if config.CreateEvalViews {
+			if evalErr := cmp.Or(evalConfigErr, evalDefsErr); evalErr != nil {
+				if logf != nil {
+					logf("agentanalytics: skipping view creation: %v", evalErr)
+				}
+			} else {
+				startupDefs = append(startupDefs, evalDefs...)
+			}
+		}
+		if len(startupDefs) > 0 {
+			retryMethod := "SyncViews"
+			if !hasPerEventViews {
+				retryMethod = "SyncEvalViews"
+			}
 			// Pass only the non-default Logger hook so the goroutine does not retain Config.
-			state.startAsyncViewCreation(ctx, defs, logf, bqClient)
+			state.startAsyncViewCreationWithRetryHint(ctx, startupDefs, logf, retryMethod, bqClient)
 		}
 	}
 	return adkPlugin, nil
@@ -580,6 +643,11 @@ func validateConfig(c Config) (map[string]struct{}, error) {
 	}
 	if c.ViewPrefix != "" && !isValidIdentifier(c.ViewPrefix) {
 		return nil, fmt.Errorf("invalid config: invalid ViewPrefix %q", c.ViewPrefix)
+	}
+	if c.CreateEvalViews {
+		if err := validateEvalViewConfig(c, denied, true); err != nil {
+			return nil, err
+		}
 	}
 	return denied, nil
 }
@@ -695,14 +763,22 @@ func (p *analyticsPlugin) denied(column string) bool {
 	return ok
 }
 
+func (p *analyticsPlugin) recordPanic(format string, args ...any) {
+	if p.config.Enabled && p.processor != nil {
+		p.processor.recordAppendFailureDrop(1)
+	}
+	func() {
+		defer func() { _ = recover() }()
+		p.config.logf(format, args...)
+	}()
+}
+
 // recoverCallback logs and suppresses panics raised inside plugin callbacks so
 // that analytics logging never breaks the agent run.
 func (p *analyticsPlugin) recoverCallback(eventType string) {
 	if r := recover(); r != nil {
-		if p.config.Enabled && p.processor != nil {
-			p.processor.recordAppendFailureDrop(1)
-		}
-		p.config.logf("agentanalytics: dropped %s event: recovered panic of type %T", eventType, r)
+		panicType := fmt.Sprintf("%T", r)
+		p.recordPanic("agentanalytics: dropped %s event: recovered panic of type %s", eventType, panicType)
 	}
 }
 
@@ -734,9 +810,8 @@ func (p *analyticsPlugin) logSessionEvent(ctx context.Context, id identity, even
 
 // logSessionSpanEvent runs spanFn before consulting shouldLogSessionEvent, so
 // session-event rows emitted outside OnEventCallback (such as user-message HITL
-// completions, resumed TOOL_COMPLETED rows, and finalResponseTools
-// AGENT_RESPONSE rows) honor the legacy "EVENT" filter alias while keeping
-// trace manager span side effects intact.
+// completions and resumed TOOL_COMPLETED rows) honor the legacy "EVENT" filter
+// alias while keeping trace manager span side effects intact.
 func (p *analyticsPlugin) logSessionSpanEvent(ctx context.Context, id identity, eventType string, spanFn func() rowSpan, build func(*eventData)) {
 	defer p.recoverCallback(eventType)
 	var span rowSpan
@@ -826,7 +901,23 @@ func (p *analyticsPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content
 func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 	defer p.recoverCallback(EventInvocationCompleted)
 	id := identityOf(ctx)
+	target := p.traces.captureRunEndTarget(id.invocationID)
+	var terminalEnded, flushed bool
+	// Register the run-end flush before endInvocationSafe so LIFO defer order
+	// runs endInvocationSafe first while still running flushRunEndSafe even if
+	// afterRun panics before reaching the terminal logEvent.
+	defer func() {
+		if p.config.flushOnRunEnd() && !flushed {
+			p.flushRunEndSafe()
+		}
+	}()
+	defer func() {
+		if !terminalEnded {
+			p.endInvocationSafe(ctx, id, target)
+		}
+	}()
 	unclosed, unrecErr := p.traces.popUnclosedAgentSpans(ctx, id)
+	target = p.traces.refreshRunEndTarget(id.invocationID, target)
 	if unrecErr == nil && ctx != nil {
 		// A canceled invocation failed even when no span is left open, for
 		// example when canceled before any agent started or while post-run
@@ -837,7 +928,9 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 
 	if unrecErr != nil || len(unclosed) > 0 {
 		p.logEvent(ctx, id, EventInvocationError, func() rowSpan {
-			return p.traces.endInvocation(ctx, id)
+			span := p.traces.endInvocationTarget(ctx, id, &target)
+			terminalEnded = true
+			return span
 		}, func(d *eventData) {
 			d.failed = true
 			if unrecErr != nil {
@@ -847,12 +940,49 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 		})
 	} else {
 		p.logEvent(ctx, id, EventInvocationCompleted, func() rowSpan {
-			return p.traces.endInvocation(ctx, id)
+			span := p.traces.endInvocationTarget(ctx, id, &target)
+			terminalEnded = true
+			return span
 		}, nil)
+	}
+	if !terminalEnded {
+		terminalEnded = true
+		p.endInvocationSafe(ctx, id, target)
 	}
 
 	if p.config.flushOnRunEnd() {
-		p.processor.flushRunEnd() // flush queue synchronously under ShutdownTimeout
+		flushed = true
+		p.flushRunEndSafe() // flush queue synchronously under ShutdownTimeout
+	}
+}
+
+func (p *analyticsPlugin) endInvocationSafe(ctx context.Context, id identity, target runEndTarget) {
+	defer func() {
+		if r := recover(); r != nil {
+			if id.invocationID != "" && p.traces != nil {
+				func() {
+					defer func() { _ = recover() }()
+					p.traces.forceEndInvocationTarget(id, target)
+				}()
+			}
+			panicType := fmt.Sprintf("%T", r)
+			p.recordPanic("agentanalytics: endInvocation fallback: recovered panic of type %s", panicType)
+		}
+	}()
+	if p.traces != nil {
+		p.traces.endInvocationRetry(ctx, id, target)
+	}
+}
+
+func (p *analyticsPlugin) flushRunEndSafe() {
+	defer func() {
+		if r := recover(); r != nil {
+			panicType := fmt.Sprintf("%T", r)
+			p.recordPanic("agentanalytics: flushRunEnd fallback: recovered panic of type %s", panicType)
+		}
+	}()
+	if p.processor != nil {
+		p.processor.flushRunEnd()
 	}
 }
 
@@ -968,7 +1098,9 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 // path, the parent of the event's node path, under its workflow agent's name
 // (see workflowBasePathPrefix), as it does on the events of the nodes that it
 // runs, which therefore also carry the base paths of enclosing workflows. An
-// event whose node path has no unique such workflow is not attributed.
+// event whose node path has no unique such workflow is not attributed. The
+// record that the scheduler writes when a resumed run ends with an output
+// carries adk.workflow.node_resume_completed instead, and is not counted.
 func nodeCompletion(ev *session.Event) (workflowName string, failed, ok bool) {
 	if ev == nil || ev.Partial || ev.NodeInfo == nil || ev.NodeInfo.Path == "" {
 		return "", false, false
