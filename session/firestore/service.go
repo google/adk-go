@@ -1196,6 +1196,15 @@ func encodeEventData(event *session.Event) (any, error) {
 	}
 	out = convertEventMapKeyCase(out, camelToSnake)
 	out["timestamp"] = timeToEpochSeconds(event.Timestamp)
+	// adk-python dumps a cache's times as floats, so a whole second stays a
+	// Firestore double rather than becoming an integer.
+	if cm, ok := out["cache_metadata"].(map[string]any); ok {
+		for _, k := range []string{"expire_time", "created_at"} {
+			if i, ok := cm[k].(int64); ok {
+				cm[k] = float64(i)
+			}
+		}
+	}
 	if c := event.Actions.Compaction; c != nil {
 		if err := encodeCompactionForPython(out, c); err != nil {
 			return nil, fmt.Errorf("firestore: encoding compaction of event %q: %w", event.ID, err)
@@ -1488,7 +1497,9 @@ func convertEventMapKeyCase(m map[string]any, keyFn func(string) string) map[str
 	for k, v := range m {
 		nk := keyFn(k)
 		switch nk {
-		case "customMetadata", "custom_metadata", "output":
+		case "customMetadata", "custom_metadata", "output",
+			// model.CacheMetadata reads only its snake_case keys.
+			"cacheMetadata", "cache_metadata":
 			out[nk] = v
 		case "actions":
 			if am, ok := v.(map[string]any); ok {

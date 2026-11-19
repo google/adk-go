@@ -1574,7 +1574,7 @@ func TestFirestoreService_AppendEvent_EncodesPythonCompatibleEventData(t *testin
 	  "timestamp": 1793882096.000789
 	}`
 	var got, want map[string]any
-	if err := json.Unmarshal([]byte(rawEvent), &got); err != nil {
+	if err := json.Unmarshal(rawEvent, &got); err != nil {
 		t.Fatalf("event_data is not JSON: %v", err)
 	}
 	if err := json.Unmarshal([]byte(wantEventData), &want); err != nil {
@@ -2215,6 +2215,101 @@ func TestEncodeEventData_KeepsRequestedAuthConfigsVerbatim(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("requested_auth_configs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestFirestoreService_AppendEvent_CacheMetadataRoundTrip guards that context
+// cache state survives storage in adk-python's shape. Without it the next
+// invocation cannot find the cache the last one created, and creates another.
+func TestFirestoreService_AppendEvent_CacheMetadataRoundTrip(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata *model.CacheMetadata
+		// wantStored is event_data's cache_metadata as adk-python dumps it,
+		// or nil when the key must be absent.
+		wantStored map[string]any
+	}{
+		{
+			name: "active cache",
+			metadata: &model.CacheMetadata{
+				CacheName:       "cachedContents/1",
+				ExpireTime:      time.Date(2026, 1, 1, 12, 30, 0, 500000000, time.UTC),
+				InvocationsUsed: 2,
+				CreatedAt:       time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+				Fingerprint:     "abc",
+				ContentsCount:   4,
+			},
+			wantStored: map[string]any{
+				"cache_name":       "cachedContents/1",
+				"expire_time":      1767270600.5,
+				"invocations_used": int64(2),
+				"created_at":       float64(1767268800),
+				"fingerprint":      "abc",
+				"contents_count":   int64(4),
+			},
+		},
+		{
+			name:       "fingerprint only with no contents",
+			metadata:   &model.CacheMetadata{Fingerprint: "abc"},
+			wantStored: map[string]any{"fingerprint": "abc", "contents_count": int64(0)},
+		},
+		{name: "no cache state"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			svc, _ := newTestService(t, Config{})
+			created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s1"})
+			if err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			event := &session.Event{ID: "model_event", Author: "agent", Timestamp: time.Unix(1733040002, 0)}
+			event.CacheMetadata = tt.metadata
+			if err := svc.AppendEvent(ctx, created.Session, event); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+
+			snap, err := svc.client.Doc("adk-session/app/users/user/sessions/s1/events/model_event").Get(ctx)
+			if err != nil {
+				t.Fatalf("reading event document: %v", err)
+			}
+			stored, ok := snap.Data()["event_data"].(map[string]any)
+			if !ok {
+				t.Fatalf("event_data is not stored as a map")
+			}
+			gotStored, present := stored["cache_metadata"]
+			if tt.wantStored == nil {
+				if present {
+					t.Errorf("event_data has cache_metadata %v, want none", gotStored)
+				}
+			} else if diff := cmp.Diff(any(tt.wantStored), gotStored); diff != "" {
+				t.Errorf("stored cache_metadata mismatch (-want +got):\n%s", diff)
+			}
+
+			got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s1"})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if got.Session.Events().Len() != 1 {
+				t.Fatalf("Get() returned %d events, want 1", got.Session.Events().Len())
+			}
+			if diff := cmp.Diff(tt.metadata, got.Session.Events().At(0).CacheMetadata); diff != "" {
+				t.Errorf("CacheMetadata after Get mismatch (-want +got):\n%s", diff)
+			}
+
+			// adk-python's main branch stores event_data as a JSON string.
+			asString, err := json.Marshal(stored)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fromString, err := decodeEventData(string(asString))
+			if err != nil {
+				t.Fatalf("decodeEventData(string) error = %v", err)
+			}
+			if diff := cmp.Diff(tt.metadata, fromString.CacheMetadata); diff != "" {
+				t.Errorf("CacheMetadata from a string mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
