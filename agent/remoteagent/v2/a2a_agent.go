@@ -290,6 +290,9 @@ type A2AConfig struct {
 	BeforeRequestCallbacks []BeforeA2ARequestCallback
 	// Converter is used to convert a2a.Event to session.Event. If not provided, adka2a.ToSessionEvent
 	// is used as the default implementation and transport and conversion errors are returned from Run.
+	// The default also drops the thought parts that sit beside the answer, unless the remote agent
+	// marks its responses with adka2a.ADKExtensionURI. Events from a custom Converter are not
+	// filtered, so one that wraps adka2a.ToSessionEvent keeps those thoughts.
 	Converter A2AEventConverter
 	// AfterRequestCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil result or error. Then
