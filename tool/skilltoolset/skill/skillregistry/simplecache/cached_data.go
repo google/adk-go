@@ -106,7 +106,7 @@ func loadFrontmatters(c skillregistry.Client, nWorkers int, dc *dataCache) error
 	close(toProcess)
 
 	// return for all workers to finish
-	for i := 0; i < len(dc.skills); i++ {
+	for range len(dc.skills) {
 		res := <-done
 		if res.err != nil {
 			// fail on the first failure
