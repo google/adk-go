@@ -37,8 +37,9 @@ func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 	if err != nil {
 		return nil, err
 	}
+	rerun := true
 	return &WorkflowNode{
-		BaseNode:    NewBaseNode(name, "", NodeConfig{}),
+		BaseNode:    NewBaseNode(name, "", NodeConfig{RerunOnResume: &rerun}),
 		subWorkflow: wf,
 	}, nil
 }
@@ -76,7 +77,7 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 		ctx = ctx.WithAgentContext(subCtx)
 
 		var subEvents iter.Seq2[*session.Event, error]
-		if state, responses, err := n.resumeState(ctx); err != nil {
+		if state, responses, err := n.resumeState(ctx, input); err != nil {
 			yield(nil, err)
 			return
 		} else if len(responses) > 0 {
@@ -180,11 +181,11 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 	}
 }
 
-func (n *WorkflowNode) resumeState(ctx agent.Context) (*RunState, map[string]any, error) {
+func (n *WorkflowNode) resumeState(ctx agent.Context, input any) (*RunState, map[string]any, error) {
 	if ctx.Session() == nil {
 		return nil, nil, nil
 	}
-	state, err := n.subWorkflow.ReconstructRunState(ctx.Session(), ctx.InvocationID())
+	state, err := n.subWorkflow.reconstructRunState(ctx.Session(), ctx.InvocationID(), input, true)
 	if err != nil {
 		return nil, nil, err
 	}

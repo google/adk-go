@@ -2994,4 +2994,60 @@ func TestRunner_WorkflowNodeRoot_MultiNodeResume(t *testing.T) {
 			t.Errorf("turn 2 outputs (-want +got):\n%s", diff)
 		}
 	})
+
+	t.Run("nested_under_outer_predecessor", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+
+		outerPrep := workflow.NewFunctionNode("outer_prep", func(_ agent.Context, in string) (string, error) {
+			return in + "-outer-prep", nil
+		}, workflow.NodeConfig{})
+		rerun := true
+		var askerInputs []any
+		asker := workflow.NewDynamicNode("asker", func(ctx agent.Context, in any, emit func(*session.Event) error) (any, error) {
+			askerInputs = append(askerInputs, in)
+			if v, ok := ctx.ResumedInput("approval"); ok {
+				return fmt.Sprintf("%v:%v", in, v), nil
+			}
+			return nil, emit(workflow.NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "approval"}))
+		}, workflow.NodeConfig{RerunOnResume: &rerun})
+		innerFinal := workflow.NewFunctionNode("inner_final", func(_ agent.Context, in string) (string, error) {
+			return "inner:" + in, nil
+		}, workflow.NodeConfig{})
+		sub, err := workflow.NewWorkflowNode("sub", workflow.Chain(workflow.Start, asker, innerFinal))
+		if err != nil {
+			t.Fatal(err)
+		}
+		outerFinal := workflow.NewFunctionNode("outer_final", func(_ agent.Context, in string) (string, error) {
+			return "outer:" + in, nil
+		}, workflow.NodeConfig{})
+		outer, err := workflow.NewWorkflowNode("outer", workflow.Chain(workflow.Start, outerPrep, sub, outerFinal))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := newNodeRootRunner(t, outer, svc)
+
+		if _, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{})); len(errs) > 0 {
+			t.Fatalf("turn 1 errors = %v", errs)
+		}
+		answer := genai.NewContentFromFunctionResponse(workflow.WorkflowInputFunctionCallName, map[string]any{"result": "approved"}, genai.RoleUser)
+		answer.Parts[0].FunctionResponse.ID = "approval"
+		events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, answer, agent.RunConfig{}))
+		if len(errs) > 0 {
+			t.Fatalf("turn 2 errors = %v", errs)
+		}
+		if diff := cmp.Diff([]any{"go-outer-prep", "go-outer-prep"}, askerInputs); diff != "" {
+			t.Errorf("asker inputs across pause+resume (-want +got):\n%s", diff)
+		}
+		var outputs []any
+		for _, ev := range events {
+			if ev.Output != nil {
+				outputs = append(outputs, ev.Output)
+			}
+		}
+		if diff := cmp.Diff([]any{"outer:inner:go-outer-prep:approved"}, outputs); diff != "" {
+			t.Errorf("turn 2 outputs (-want +got):\n%s", diff)
+		}
+	})
 }

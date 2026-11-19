@@ -191,6 +191,10 @@ func (s *nodeScanState) addInterrupt(id string) {
 // share it. Empty invocationID disables the filter (scan all history).
 // Mirrors adk-python _reconstruct_node_states' invocation_id gate.
 func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string) (*RunState, error) {
+	return w.reconstructRunState(sess, invocationID, nil, false)
+}
+
+func (w *Workflow) reconstructRunState(sess session.Session, invocationID string, seedOverride any, hasSeedOverride bool) (*RunState, error) {
 	if sess == nil || sess.Events() == nil {
 		return nil, nil
 	}
@@ -205,7 +209,10 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 	// re-entry node's input: every node's cached output, the set of
 	// nodes that ran, and the workflow's seed input.
 	nodeOutputs, completed := collectNodeOutputs(events, nodesByName, invocationID, w.name)
-	workflowInput := firstUserSeed(events, invocationID)
+	workflowInput := seedOverride
+	if !hasSeedOverride {
+		workflowInput = firstUserSeed(events, invocationID)
+	}
 
 	// Stage 3: turn each interrupted node's scan into a NodeState.
 	state, err := w.buildRunState(scans, nodesByName, nodeOutputs, workflowInput)
@@ -434,21 +441,34 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 // Older history has no base metadata; Run's conventional prefix is the
 // best available fallback, while Resume and RunNode can be unprefixed.
 func graphHistoryEvent(ev *session.Event, workflowName string) *session.Event {
+	var subOut any
+	hasSubOut := false
+	if ev.Output == nil && workflowName != "" {
+		subOut, hasSubOut = ev.CustomMetadata[workflowSubNodeOutputPrefix+workflowName]
+	}
 	if ev.NodeInfo == nil {
-		return ev
+		if !hasSubOut {
+			return ev
+		}
+		copy := *ev
+		copy.Output = subOut
+		return &copy
 	}
 	base, known := ev.CustomMetadata[workflowBasePathPrefix+workflowName].(string)
 	if !known && workflowName != "" {
 		base = workflowName + "@1"
 	}
 	if base == "" {
-		return ev
+		if !hasSubOut {
+			return ev
+		}
+		copy := *ev
+		copy.Output = subOut
+		return &copy
 	}
 	copy := *ev
-	if copy.Output == nil && workflowName != "" {
-		if subOut, ok := ev.CustomMetadata[workflowSubNodeOutputPrefix+workflowName]; ok {
-			copy.Output = subOut
-		}
+	if hasSubOut {
+		copy.Output = subOut
 	}
 	info := *ev.NodeInfo
 	info.Path = strings.TrimPrefix(info.Path, base+"/")
