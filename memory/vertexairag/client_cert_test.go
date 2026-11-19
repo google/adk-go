@@ -16,6 +16,7 @@ package vertexairag
 
 import (
 	"bytes"
+	"crypto/tls"
 	"io"
 	"net/http"
 	"os"
@@ -186,6 +187,30 @@ func TestNewVertexRAGClientFollowsTheCertificateRule(t *testing.T) {
 		for _, h := range got {
 			if h != plain {
 				t.Errorf("request went to %q, want %q", h, plain)
+			}
+		}
+	})
+
+	t.Run("a certificate from the caller wins", func(t *testing.T) {
+		clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", clientcerttest.Unset)
+		t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", workload)
+		callerCert, callerDER := clientcerttest.Certificate(t)
+		callerSource := func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &callerCert, nil }
+		c, err := newVertexRAGClient(t.Context(), "us-central1", option.WithoutAuthentication(), option.WithEndpoint(srv.URL), option.WithClientCertSource(callerSource))
+		if err != nil {
+			t.Fatalf("newVertexRAGClient() error = %v", err)
+		}
+		before := len(peers())
+		if upload, list, retrieve := callAll(t, c); upload != nil || list != nil || retrieve != nil {
+			t.Fatalf("calls = %v, %v, %v, want no error", upload, list, retrieve)
+		}
+		got := peers()[before:]
+		if len(got) != 3 {
+			t.Fatalf("server saw %d client certificates, want one from each of the three clients", len(got))
+		}
+		for _, c := range got {
+			if !bytes.Equal(c, callerDER) {
+				t.Error("server saw a certificate other than the caller's")
 			}
 		}
 	})
