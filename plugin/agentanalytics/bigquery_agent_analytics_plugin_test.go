@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"iter"
 	"maps"
 	"math"
@@ -34,6 +35,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,6 +45,7 @@ import (
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
 	"cloud.google.com/go/bigquery/storage/apiv1/storagepb"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
@@ -50,12 +53,15 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 type mockTransport struct {
@@ -760,7 +766,7 @@ func TestCallbacks_WriteRows(t *testing.T) {
 		Contents: []*genai.Content{textContent("user", "hello")},
 		Config: &genai.GenerateContentConfig{
 			SystemInstruction: textContent("", "be brief"),
-			Temperature:       genai.Ptr[float32](0.5),
+			Temperature:       new(float32(0.5)),
 			Labels:            map[string]string{"env": "test"},
 		},
 	}
@@ -1148,7 +1154,8 @@ func TestSensitiveKeyRedaction(t *testing.T) {
 			row := onlyRowOfType(t, rows, EventToolStarting)
 			checkJSONAt(t, jsonObjectColumn(t, row, "content"), fmt.Sprintf(
 				`{"api_key":%[1]q,"query":"weather","headers":{"Authorization":%[1]q,"Accept":"json"},"items":[{"client-secret":%[1]q}],"json":%[2]q}`,
-				tt.want, fmt.Sprintf(`{"api_key":%q}`, tt.want)), "args")
+				tt.want, fmt.Sprintf(`{"api_key":%q}`, tt.want),
+			), "args")
 			checkJSONAt(t, jsonObjectColumn(t, row, "attributes"),
 				fmt.Sprintf(`{"temp:token":%q,"theme":"dark"}`, tt.want), "session_metadata", "state")
 
@@ -3664,6 +3671,30 @@ func TestFileDataURICredentialsAreRedacted(t *testing.T) {
 			uri:  "https://example.com/a?a=1;access_token=SECRET123",
 			want: "https://example.com/a?a=1%3Baccess_token%3D%5BREDACTED%5D",
 		},
+		{
+			uri:  "https://h/secret_key/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://h/signing_key/token/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://h/user:temp:a/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://h/%5Cu00a0api_key/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://h/api_key%5Cu00a0/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://h/api_%5Cu212aey/password/SECRET123",
+			want: "https://h/%5BREDACTED%5D/%5BREDACTED%5D/%5BREDACTED%5D",
+		},
 	}
 	p, requests, mCtx := setupTestPlugin(t)
 	content := &genai.Content{Role: "user"}
@@ -5032,4 +5063,2511 @@ func TestNewBigQueryAgentAnalyticsPluginWithConfig_BQClientLifecycle(t *testing.
 			t.Errorf("closeBQClient called %d times after closing WithClients plugin, want 2 (caller owns bqClient)", closeCount)
 		}
 	})
+}
+
+type callbackTestLLM struct {
+	name string
+	gen  func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error]
+}
+
+func (m *callbackTestLLM) Name() string { return m.name }
+
+func (m *callbackTestLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return m.gen(ctx, req, stream)
+}
+
+func TestPlugin_ToolResultIsError(t *testing.T) {
+	t.Run("top-level boolean true isError and is_error emit TOOL_ERROR", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			result map[string]any
+		}{
+			{
+				name:   "isError true",
+				result: map[string]any{"isError": true, "details": "upstream error"},
+			},
+			{
+				name:   "is_error true",
+				result: map[string]any{"is_error": true, "details": "upstream error"},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+					c.FinalResponseToolNames = []string{"submit_answer"}
+				})
+				mCtx.functionCallID = "call-err-flag"
+				submitTool := &fakeTool{name: "submit_answer"}
+				args := map[string]any{"answer": "draft"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeToolCallback()(mCtx, submitTool, args))
+				errs.add(p.AfterToolCallback()(mCtx, submitTool, args, tc.result, nil))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				wantTypes := []string{EventToolStarting, EventToolError, EventInvocationCompleted}
+				if diff := cmp.Diff(wantTypes, eventTypes(rows)); diff != "" {
+					t.Fatalf("event types mismatch (-want +got):\n%s", diff)
+				}
+				row := onlyRowOfType(t, rows, EventToolError)
+				if got := row["status"]; got != "ERROR" {
+					t.Errorf("status = %v, want ERROR", got)
+				}
+				if got := row["error_message"]; got != "Tool returned an MCP result with isError=true." {
+					t.Errorf("error_message = %v, want %q", got, "Tool returned an MCP result with isError=true.")
+				}
+				content := jsonObjectColumn(t, row, "content")
+				checkJSON(t, "TOOL_ERROR content", content,
+					`{"tool":"submit_answer","args":{"answer":"draft"},"tool_origin":"UNKNOWN"}`)
+				if _, hasResult := content["result"]; hasResult {
+					t.Errorf("TOOL_ERROR content unexpectedly has result field: %v", content)
+				}
+				checkJSONAt(t, jsonObjectColumn(t, row, "attributes"), `"call-err-flag"`, "adk", "function_call_id")
+				if got, want := row["span_id"], onlyRowOfType(t, rows, EventToolStarting)["span_id"]; got != want {
+					t.Errorf("TOOL_ERROR span_id = %v, want TOOL_STARTING span_id %v", got, want)
+				}
+				if _, ok := row[columnLatencyMS]; !ok {
+					t.Error("TOOL_ERROR row missing latency_ms")
+				}
+			})
+		}
+	})
+
+	t.Run("runner functiontool returning is_error true emits TOOL_ERROR and suppresses AGENT_RESPONSE", func(t *testing.T) {
+		type toolArgs struct {
+			Query string `json:"query"`
+		}
+		fnTool, err := functiontool.New(
+			functiontool.Config{Name: "final_lookup", Description: "Looks up final answer"},
+			func(_ agent.Context, in toolArgs) (map[string]any, error) {
+				return map[string]any{"is_error": true, "query": in.Query}, nil
+			},
+		)
+		if err != nil {
+			t.Fatalf("functiontool.New: %v", err)
+		}
+		p, requests, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.FinalResponseToolNames = []string{"final_lookup"}
+		})
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Tools: []tool.Tool{fnTool},
+			Model: &scriptedLLM{
+				responses: []*model.LLMResponse{
+					{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{{
+								FunctionCall: &genai.FunctionCall{
+									ID:   "call-fn-1",
+									Name: "final_lookup",
+									Args: map[string]any{"query": "status"},
+								},
+							}},
+						},
+					},
+					{Content: textContent("model", "handled failure"), TurnComplete: true},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		for _, runErr := range newTestRunner(t, bot, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if got := len(rowsOfType(rows, EventToolCompleted)); got != 0 {
+			t.Fatalf("got %d TOOL_COMPLETED rows, want 0; events: %v", got, eventTypes(rows))
+		}
+		errRow := onlyRowOfType(t, rows, EventToolError)
+		if got := errRow["error_message"]; got != "Tool returned an MCP result with isError=true." {
+			t.Errorf("error_message = %v, want %q", got, "Tool returned an MCP result with isError=true.")
+		}
+		// Only the final model turn text should emit AGENT_RESPONSE, not final_lookup.
+		agentResp := onlyRowOfType(t, rows, EventAgentResponse)
+		if _, hasSourceTool := lookup(jsonObjectColumn(t, agentResp, "attributes"), "source_tool"); hasSourceTool {
+			t.Errorf("AGENT_RESPONSE unexpectedly emitted for failed FinalResponseToolNames tool: %v", agentResp["attributes"])
+		}
+	})
+
+	t.Run("isTaskCompletedResult and hasTaskCompletedResponse reject mixed error maps", func(t *testing.T) {
+		finishResp := func(m map[string]any) *genai.Content {
+			return &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       "call-1",
+						Name:     finishTaskToolName,
+						Response: m,
+					},
+				}},
+			}
+		}
+		for _, tc := range []struct {
+			name string
+			resp map[string]any
+			want bool
+			// wantEnds reports that ADK ends the task on resp, which it does
+			// on the sentinel alone; wantFailed that resp also fails it.
+			wantEnds, wantFailed bool
+		}{
+			{name: "genuine sentinel", resp: map[string]any{"result": "Task completed."}, want: true, wantEnds: true},
+			{name: "isError false", resp: map[string]any{"result": "Task completed.", "isError": false}, want: true, wantEnds: true},
+			{name: "is_error false", resp: map[string]any{"result": "Task completed.", "is_error": false}, want: true, wantEnds: true},
+			{name: "isError non-boolean string true", resp: map[string]any{"result": "Task completed.", "isError": "true"}, want: true, wantEnds: true},
+			{name: "mixed sentinel and isError true", resp: map[string]any{"result": "Task completed.", "isError": true}, wantEnds: true, wantFailed: true},
+			{name: "mixed sentinel and is_error true", resp: map[string]any{"result": "Task completed.", "is_error": true}, wantEnds: true, wantFailed: true},
+			{name: "isError true without sentinel", resp: map[string]any{"isError": true}},
+			{name: "error map without sentinel", resp: map[string]any{"error": "bad"}},
+			{name: "nil map", resp: nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := isTaskCompletedResult(tc.resp); got != tc.want {
+					t.Errorf("isTaskCompletedResult(%v) = %v, want %v", tc.resp, got, tc.want)
+				}
+				if got := hasTaskCompletedResponse(finishResp(tc.resp)); got != tc.want {
+					t.Errorf("hasTaskCompletedResponse(%v) = %v, want %v", tc.resp, got, tc.want)
+				}
+				wantMsg := ""
+				if tc.wantFailed {
+					wantMsg = mcpToolErrorMessage
+				}
+				ends, failed, msg := taskEndResponse(finishResp(tc.resp))
+				if ends != tc.wantEnds || failed != tc.wantFailed || msg != wantMsg {
+					t.Errorf("taskEndResponse(%v) = (%v, %v, %q), want (%v, %v, %q)", tc.resp, ends, failed, msg, tc.wantEnds, tc.wantFailed, wantMsg)
+				}
+			})
+		}
+		if hasTaskCompletedResponse(nil) {
+			t.Error("hasTaskCompletedResponse(nil) = true, want false")
+		}
+		if hasTaskCompletedResponse(&genai.Content{
+			Role: "user",
+			Parts: []*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{
+					ID:       "call-other",
+					Name:     "other_tool",
+					Response: map[string]any{"result": "Task completed."},
+				},
+			}},
+		}) {
+			t.Error("hasTaskCompletedResponse(other_tool) = true, want false")
+		}
+	})
+
+	t.Run("failed finish_task call ends only its own activation", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			// fail rewrites the result of Run 2's first finish_task call.
+			fail func(result map[string]any)
+			// endsRun2 reports that ADK ends Run 2 on that result, which
+			// keeps the completion sentinel.
+			endsRun2    bool
+			wantToolErr int
+		}{
+			{
+				name: "is_error_without_sentinel",
+				fail: func(result map[string]any) {
+					delete(result, "result")
+					result["is_error"] = true
+				},
+				wantToolErr: 1,
+			},
+			{
+				name:        "is_error_with_Task_completed_sentinel",
+				fail:        func(result map[string]any) { result["is_error"] = true },
+				endsRun2:    true,
+				wantToolErr: 1,
+			},
+			{
+				// The shape of the result with which finish_task reports
+				// arguments that fail validation: the call fails without
+				// isError, and the model retries it.
+				name: "validation_error_without_is_error",
+				fail: func(result map[string]any) {
+					delete(result, "result")
+					result["error"] = "Invoking `finish_task()` failed due to validation errors:\nmissing properties: \"answer\""
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p, requests, _ := setupTestPlugin(t)
+				var runCount atomic.Int32
+				injectErrPlugin, err := baseplugin.New(baseplugin.Config{
+					Name: "inject_finish_task_failure",
+					AfterToolCallback: func(ctx agent.Context, tl tool.Tool, _, result map[string]any, err error) (map[string]any, error) {
+						if err == nil && tl != nil && tl.Name() == "finish_task" && ctx.FunctionCallID() == "call-shared" && runCount.Load() == 2 {
+							tc.fail(result)
+						}
+						return nil, nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("baseplugin.New: %v", err)
+				}
+
+				// Run 1 calls finish_task("call-shared") and succeeds.
+				// Run 2 (started while Run 1's finish_task response event is still held back,
+				// so Run 2 sits above Run 1 on agentStack) first calls finish_task("call-shared")
+				// whose result injectErrPlugin turns into a failure, and then, unless that
+				// failure kept the sentinel that ends Run 2, calls finish_task("call-second")
+				// which succeeds. If Run 2's failed "call-shared" were noted as a completed
+				// call, both activations would claim "call-shared" and finishedTaskLocked
+				// would fall back to the top-of-stack activation (Run 2) instead of closing
+				// Run 1's span on Run 1's event.
+				var turn atomic.Int32
+				taskModel := &callbackTestLLM{
+					name: "task-model",
+					gen: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+						return func(yield func(*model.LLMResponse, error) bool) {
+							n := turn.Add(1)
+							callID := "call-shared"
+							if n == 3 {
+								callID = "call-second"
+							}
+							yield(&model.LLMResponse{
+								Content: &genai.Content{
+									Role: "model",
+									Parts: []*genai.Part{{
+										FunctionCall: &genai.FunctionCall{
+											ID:   callID,
+											Name: "finish_task",
+											Args: map[string]any{"result": "done"},
+										},
+									}},
+								},
+							}, nil)
+						}
+					},
+				}
+				taskAgent, err := llmagent.New(llmagent.Config{
+					Name:  "task",
+					Mode:  llmagent.ModeTask,
+					Model: taskModel,
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New(task): %v", err)
+				}
+				root, err := agent.New(agent.Config{
+					Name: "root",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							var held []*session.Event
+							nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
+							for range 2 {
+								runCount.Add(1)
+								for ev, err := range llmagent.RunLLMAgentAsNode(taskAgent, nodeCtx, "work") {
+									if err != nil {
+										yield(nil, err)
+										return
+									}
+									if hasTaskCompletedResponse(ev.Content) {
+										held = append(held, ev)
+										continue
+									}
+									if !yield(ev, nil) {
+										return
+									}
+								}
+							}
+							for _, ev := range held {
+								if !yield(ev, nil) {
+									return
+								}
+							}
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(root): %v", err)
+				}
+
+				for _, runErr := range newTestRunner(t, root, injectErrPlugin, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						t.Fatalf("runner.Run error: %v", runErr)
+					}
+				}
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				wantAgentErrCounts := map[string]int{}
+				if tc.endsRun2 {
+					wantAgentErrCounts["task"] = 1
+				}
+				requireInvocationCompletedOKWithAgentErrors(t, rows, wantAgentErrCounts)
+				toolErrs := rowsOfType(rows, EventToolError)
+				if len(toolErrs) != tc.wantToolErr {
+					t.Fatalf("got %d TOOL_ERROR rows, want %d; events: %v", len(toolErrs), tc.wantToolErr, eventTypes(rows))
+				}
+				for _, row := range toolErrs {
+					if got := row["error_message"]; got != mcpToolErrorMessage {
+						t.Errorf("TOOL_ERROR error_message = %v, want %q", got, mcpToolErrorMessage)
+					}
+				}
+				// Run 1's call and Run 2's two calls complete, except that a
+				// classified failure is a TOOL_ERROR row, and that ModeTask exits
+				// Run 2 after a failure that keeps "result": "Task completed.",
+				// without the call-second call.
+				wantToolCompleted := 3 - tc.wantToolErr
+				wantEnds := 2
+				wantAgentErrs := 0
+				if tc.endsRun2 {
+					wantToolCompleted--
+					wantEnds = 1
+					wantAgentErrs = 1
+				}
+				if got := len(rowsOfType(rows, EventToolCompleted)); got != wantToolCompleted {
+					t.Fatalf("got %d TOOL_COMPLETED rows, want %d; events: %v", got, wantToolCompleted, eventTypes(rows))
+				}
+				starts := agentRowsOfType(rows, EventAgentStarting, "task")
+				ends := agentRowsOfType(rows, EventAgentCompleted, "task")
+				agentErrs := agentRowsOfType(rows, EventAgentError, "task")
+				if len(starts) != 2 || len(ends) != wantEnds || len(agentErrs) != wantAgentErrs {
+					t.Fatalf("task rows: %d AGENT_STARTING (want 2), %d AGENT_COMPLETED (want %d), and %d AGENT_ERROR (want %d); events: %v",
+						len(starts), len(ends), wantEnds, len(agentErrs), wantAgentErrs, eventTypes(rows))
+				}
+				if got, want := ends[0]["span_id"], starts[0]["span_id"]; got != want {
+					t.Errorf("first AGENT_COMPLETED span_id = %v, want Run 1 span_id %v (Run 2 span_id = %v)", got, want, starts[1]["span_id"])
+				}
+				if wantEnds == 2 {
+					if got, want := ends[1]["span_id"], starts[1]["span_id"]; got != want {
+						t.Errorf("second AGENT_COMPLETED span_id = %v, want Run 2 span_id %v", got, want)
+					}
+				}
+				if wantAgentErrs == 1 {
+					if got, want := agentErrs[0]["span_id"], starts[1]["span_id"]; got != want {
+						t.Errorf("AGENT_ERROR span_id = %v, want Run 2 span_id %v (Run 1 span_id = %v)", got, want, starts[0]["span_id"])
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("false, non-boolean, and nested is_error values emit TOOL_COMPLETED", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			result map[string]any
+		}{
+			{name: "isError false", result: map[string]any{"isError": false}},
+			{name: "is_error false", result: map[string]any{"is_error": false}},
+			{name: "is_error string true", result: map[string]any{"is_error": "true"}},
+			{name: "isError string true", result: map[string]any{"isError": "true"}},
+			{name: "is_error int 1", result: map[string]any{"is_error": 1}},
+			{name: "isError int 1", result: map[string]any{"isError": 1}},
+			{name: "nested is_error true", result: map[string]any{"nested": map[string]any{"is_error": true, "isError": true}}},
+			{name: "nil result", result: nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+					c.FinalResponseToolNames = []string{"submit_answer"}
+				})
+				mCtx.functionCallID = "call-ok"
+				submitTool := &fakeTool{name: "submit_answer"}
+				args := map[string]any{"answer": "ok"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeToolCallback()(mCtx, submitTool, args))
+				errs.add(p.AfterToolCallback()(mCtx, submitTool, args, tc.result, nil))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				wantTypes := []string{EventToolStarting, EventToolCompleted, EventAgentResponse, EventInvocationCompleted}
+				if diff := cmp.Diff(wantTypes, eventTypes(rows)); diff != "" {
+					t.Fatalf("event types mismatch (-want +got):\n%s", diff)
+				}
+				if got := onlyRowOfType(t, rows, EventToolCompleted)["status"]; got != "OK" {
+					t.Errorf("TOOL_COMPLETED status = %v, want OK", got)
+				}
+			})
+		}
+	})
+}
+
+type emptyMsgErr struct{}
+
+func (emptyMsgErr) Error() string { return "" }
+
+func TestPlugin_ToolErrorEmptyMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		wantMsg string
+	}{
+		{
+			name:    "value error with empty message falls back to bare type name",
+			err:     emptyMsgErr{},
+			wantMsg: "emptyMsgErr",
+		},
+		{
+			name:    "pointer error with empty message falls back to bare type name",
+			err:     &emptyMsgErr{},
+			wantMsg: "emptyMsgErr",
+		},
+		{
+			name:    "non-empty error message is preserved",
+			err:     errors.New("boom"),
+			wantMsg: "boom",
+		},
+		{
+			name:    "error whose Error method panics falls back to bare type name",
+			err:     (*valueErr)(nil),
+			wantMsg: "valueErr",
+		},
+		{
+			name:    "anonymous error with empty message falls back to type string",
+			err:     &struct{ emptyMsgErr }{},
+			wantMsg: "struct { agentanalytics.emptyMsgErr }",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("onToolError and afterTool", func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				mCtx.functionCallID = "call-empty-1"
+				tl := &fakeTool{name: "lookup"}
+				args := map[string]any{"q": "test"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+				errs.add(p.OnToolErrorCallback()(mCtx, tl, args, tc.err))
+				errs.add(p.AfterToolCallback()(mCtx, tl, args, nil, tc.err))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				row := onlyRowOfType(t, rows, EventToolError)
+				if got := row["status"]; got != "ERROR" {
+					t.Errorf("status = %v, want ERROR", got)
+				}
+				if got := row["error_message"]; got != tc.wantMsg {
+					t.Errorf("error_message = %v (%T), want %q", got, got, tc.wantMsg)
+				}
+			})
+
+			t.Run("afterTool fallback when OnToolErrorCallback was short-circuited", func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				mCtx.functionCallID = "call-empty-2"
+				tl := &fakeTool{name: "lookup"}
+				args := map[string]any{"q": "test"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+				errs.add(p.AfterToolCallback()(mCtx, tl, args, nil, tc.err))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				row := onlyRowOfType(t, rows, EventToolError)
+				if got := row["status"]; got != "ERROR" {
+					t.Errorf("status = %v, want ERROR", got)
+				}
+				if got := row["error_message"]; got != tc.wantMsg {
+					t.Errorf("error_message = %v (%T), want %q", got, got, tc.wantMsg)
+				}
+			})
+		})
+	}
+}
+
+func TestPlugin_ToolErrorTypedNilPathError(t *testing.T) {
+	var pathErr *fs.PathError
+	if isToolConfirmationOutcome(pathErr) {
+		t.Fatal("isToolConfirmationOutcome((*fs.PathError)(nil)) = true, want false")
+	}
+
+	t.Run("onToolError and afterTool", func(t *testing.T) {
+		p, requests, mCtx := setupTestPlugin(t)
+		mCtx.functionCallID = "call-path-err-1"
+		tl := &fakeTool{name: "read_file"}
+		args := map[string]any{"path": "/tmp/missing"}
+
+		var errs callbackErrors
+		errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+		errs.add(p.OnToolErrorCallback()(mCtx, tl, args, pathErr))
+		errs.add(p.AfterToolCallback()(mCtx, tl, args, nil, pathErr))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		row := onlyRowOfType(t, rows, EventToolError)
+		if got := row["status"]; got != "ERROR" {
+			t.Errorf("status = %v, want ERROR", got)
+		}
+		if got := row["error_message"]; got != "PathError" {
+			t.Errorf("error_message = %v (%T), want %q", got, got, "PathError")
+		}
+		for _, r := range rows {
+			if r["event_type"] == EventToolCompleted {
+				t.Errorf("unexpected %s row emitted for typed-nil *fs.PathError", EventToolCompleted)
+			}
+		}
+	})
+
+	t.Run("afterTool fallback when OnToolErrorCallback was short-circuited", func(t *testing.T) {
+		p, requests, mCtx := setupTestPlugin(t)
+		mCtx.functionCallID = "call-path-err-2"
+		tl := &fakeTool{name: "read_file"}
+		args := map[string]any{"path": "/tmp/missing"}
+
+		var errs callbackErrors
+		errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+		errs.add(p.AfterToolCallback()(mCtx, tl, args, nil, pathErr))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		row := onlyRowOfType(t, rows, EventToolError)
+		if got := row["status"]; got != "ERROR" {
+			t.Errorf("status = %v, want ERROR", got)
+		}
+		if got := row["error_message"]; got != "PathError" {
+			t.Errorf("error_message = %v (%T), want %q", got, got, "PathError")
+		}
+		for _, r := range rows {
+			if r["event_type"] == EventToolCompleted {
+				t.Errorf("unexpected %s row emitted for typed-nil *fs.PathError", EventToolCompleted)
+			}
+		}
+	})
+}
+
+// isTaskCompletedResult reports whether a finish_task response map carries the
+// successful completion sentinel ("result": "Task completed.") without a
+// classified tool result error (see taskEndResult).
+func isTaskCompletedResult(resp map[string]any) bool {
+	ends, failed, _ := taskEndResult(resp)
+	return ends && !failed
+}
+
+// hasTaskCompletedResponse reports whether c carries a successful
+// finish_task function response ("result": "Task completed." without a
+// classified tool result error), which ends a task-mode LLM agent in ADK
+// without running its AfterAgentCallback.
+func hasTaskCompletedResponse(c *genai.Content) bool {
+	ends, failed, _ := taskEndResponse(c)
+	return ends && !failed
+}
+
+// requireInvocationCompletedOKWithAgentErrors is requireInvocationCompletedOK
+// for a run that completes even though ADK ended some of its agent
+// activations with the AGENT_ERROR rows that want counts per agent.
+func requireInvocationCompletedOKWithAgentErrors(t *testing.T, rows []map[string]any, want map[string]int) {
+	t.Helper()
+	if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+		t.Fatalf("got INVOCATION_ERROR, want INVOCATION_COMPLETED; event types: %v", eventTypes(rows))
+	}
+	if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+		t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+	}
+	if diff := cmp.Diff(want, agentErrorCounts(rows)); diff != "" {
+		t.Errorf("AGENT_ERROR rows per agent mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// valueErr has a value receiver Error method, so calling Error on a nil
+// *valueErr panics.
+type valueErr struct{ msg string }
+
+func (e valueErr) Error() string { return e.msg }
+
+type (
+	recErr  *recErr
+	recPtrA *recPtrB
+	recPtrB *recPtrA
+)
+
+type selfRefEmptyErr struct {
+	next *selfRefEmptyErr
+}
+
+func (*selfRefEmptyErr) Error() string { return "" }
+
+func TestErrorTypeName_SelfReferentialPointer(t *testing.T) {
+	var (
+		directCycle recErr
+		mutualCycle recPtrA
+	)
+	if got := valueTypeName(nil); got != "" {
+		t.Errorf("valueTypeName(nil) = %q, want empty", got)
+	}
+	if got := valueTypeName(directCycle); got != "recErr" {
+		t.Errorf("valueTypeName(recErr) = %q, want %q", got, "recErr")
+	}
+	if got := valueTypeName(mutualCycle); got != "recPtrB" {
+		t.Errorf("valueTypeName(recPtrA) = %q, want %q", got, "recPtrB")
+	}
+	if got := errorTypeName(&struct{ error }{}); got != "struct { error }" {
+		t.Errorf("errorTypeName(unnamed) = %q, want %q", got, "struct { error }")
+	}
+
+	cyclicErr := &selfRefEmptyErr{}
+	cyclicErr.next = cyclicErr
+	if got := errorTypeName(cyclicErr); got != "selfRefEmptyErr" {
+		t.Errorf("errorTypeName(cyclicErr) = %q, want %q", got, "selfRefEmptyErr")
+	}
+
+	type toolArgs struct {
+		Query string `json:"query"`
+	}
+	p, requests, _ := setupTestPluginWithConfig(t, nil)
+	recovery, err := baseplugin.New(baseplugin.Config{
+		Name: "empty_error_recovery",
+		OnToolErrorCallback: func(agent.Context, tool.Tool, map[string]any, error) (map[string]any, error) {
+			return map[string]any{"isError": true}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+	fnTool, err := functiontool.New(
+		functiontool.Config{Name: "lookup", Description: "fails with a self-referential empty error"},
+		func(agent.Context, toolArgs) (map[string]any, error) {
+			e := &selfRefEmptyErr{}
+			e.next = e
+			return nil, e
+		},
+	)
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+	bot, err := llmagent.New(llmagent.Config{
+		Name:  "bot",
+		Tools: []tool.Tool{fnTool},
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "lookup", Args: map[string]any{"query": "x"}}}}}},
+			{Content: textContent("model", "done"), TurnComplete: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	for _, runErr := range newTestRunner(t, bot, p, recovery).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	row := onlyRowOfType(t, rows, EventToolError)
+	if got := row["error_message"]; got != "selfRefEmptyErr" {
+		t.Errorf("error_message = %v, want %q", got, "selfRefEmptyErr")
+	}
+}
+
+func TestPanickingErrorWithIsErrorRecovery(t *testing.T) {
+	type toolArgs struct {
+		Query string `json:"query"`
+	}
+	for _, tc := range []struct {
+		name string
+		// recoveryFirst registers the plugin that answers the tool error with
+		// {"isError": true} before this one rather than after it. An
+		// unrecovered error is not run here, as ADK itself formats it for the
+		// model; TestPlugin_ToolErrorEmptyMessage covers that path.
+		recoveryFirst bool
+		// wantMsg is the TOOL_ERROR error_message: the type name of the error
+		// when this plugin records it, or the fixed diagnostic of the result
+		// with which an earlier plugin answered it.
+		wantMsg string
+	}{
+		{name: "recovered by a later plugin", wantMsg: "valueErr"},
+		{name: "recovered by an earlier plugin", recoveryFirst: true, wantMsg: mcpToolErrorMessage},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPluginWithConfig(t, nil)
+			recovery, err := baseplugin.New(baseplugin.Config{
+				Name: "mcp_error_recovery",
+				OnToolErrorCallback: func(agent.Context, tool.Tool, map[string]any, error) (map[string]any, error) {
+					return map[string]any{"isError": true}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("baseplugin.New: %v", err)
+			}
+			plugins := []*baseplugin.Plugin{p, recovery}
+			if tc.recoveryFirst {
+				plugins = []*baseplugin.Plugin{recovery, p}
+			}
+			fnTool, err := functiontool.New(
+				functiontool.Config{Name: "lookup", Description: "fails with a typed nil error"},
+				func(agent.Context, toolArgs) (map[string]any, error) {
+					var e *valueErr
+					return nil, e
+				},
+			)
+			if err != nil {
+				t.Fatalf("functiontool.New: %v", err)
+			}
+			bot, err := llmagent.New(llmagent.Config{
+				Name:  "bot",
+				Tools: []tool.Tool{fnTool},
+				Model: &scriptedLLM{responses: []*model.LLMResponse{
+					{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "lookup", Args: map[string]any{"query": "x"}}}}}},
+					{Content: textContent("model", "done"), TurnComplete: true},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			for _, runErr := range newTestRunner(t, bot, plugins...).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if got := len(rowsOfType(rows, EventToolCompleted)); got != 0 {
+				t.Errorf("got %d TOOL_COMPLETED rows, want 0; events: %v", got, eventTypes(rows))
+			}
+			row := onlyRowOfType(t, rows, EventToolError)
+			if got := row["status"]; got != "ERROR" {
+				t.Errorf("TOOL_ERROR status = %v, want ERROR", got)
+			}
+			if got := row["error_message"]; got != tc.wantMsg {
+				t.Errorf("TOOL_ERROR error_message = %v, want %q", got, tc.wantMsg)
+			}
+		})
+	}
+}
+
+func TestMCPRecoverySingleToolError(t *testing.T) {
+	type toolArgs struct {
+		Query string `json:"query"`
+	}
+	for _, flagKey := range []string{"isError", "is_error"} {
+		for _, analyticsFirst := range []bool{true, false} {
+			orderName := "recovery_before_analytics"
+			if analyticsFirst {
+				orderName = "analytics_before_recovery"
+			}
+			t.Run(flagKey+"/"+orderName, func(t *testing.T) {
+				p, requests, _ := setupTestPluginWithConfig(t, func(c *Config) {
+					c.FinalResponseToolNames = []string{"final_lookup"}
+				})
+				recoveryPlugin, err := baseplugin.New(baseplugin.Config{
+					Name: "mcp_error_recovery",
+					OnToolErrorCallback: func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+						return map[string]any{flagKey: true, "details": "recovered mcp failure"}, nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("baseplugin.New: %v", err)
+				}
+				fnTool, err := functiontool.New(
+					functiontool.Config{Name: "final_lookup", Description: "Fails and recovers as MCP error"},
+					func(_ agent.Context, _ toolArgs) (map[string]any, error) {
+						return nil, errors.New("tool execution failed")
+					},
+				)
+				if err != nil {
+					t.Fatalf("functiontool.New: %v", err)
+				}
+				bot, err := llmagent.New(llmagent.Config{
+					Name:  "bot",
+					Tools: []tool.Tool{fnTool},
+					Model: &scriptedLLM{
+						responses: []*model.LLMResponse{
+							{
+								Content: &genai.Content{
+									Role: "model",
+									Parts: []*genai.Part{{
+										FunctionCall: &genai.FunctionCall{
+											ID:   "call-recover-1",
+											Name: "final_lookup",
+											Args: map[string]any{"query": "status"},
+										},
+									}},
+								},
+							},
+							{Content: textContent("model", "handled failure"), TurnComplete: true},
+						},
+					},
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New: %v", err)
+				}
+				plugins := []*baseplugin.Plugin{recoveryPlugin, p}
+				if analyticsFirst {
+					plugins = []*baseplugin.Plugin{p, recoveryPlugin}
+				}
+				for _, runErr := range newTestRunner(t, bot, plugins...).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						t.Fatalf("runner.Run error: %v", runErr)
+					}
+				}
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				requireInvocationCompletedOK(t, rows)
+				if got := len(rowsOfType(rows, EventToolStarting)); got != 1 {
+					t.Fatalf("got %d TOOL_STARTING rows, want 1; events: %v", got, eventTypes(rows))
+				}
+				if got := len(rowsOfType(rows, EventToolError)); got != 1 {
+					t.Fatalf("got %d TOOL_ERROR rows, want 1; events: %v", got, eventTypes(rows))
+				}
+				if got := len(rowsOfType(rows, EventToolCompleted)); got != 0 {
+					t.Fatalf("got %d TOOL_COMPLETED rows, want 0; events: %v", got, eventTypes(rows))
+				}
+				for _, row := range rowsOfType(rows, EventAgentResponse) {
+					if _, hasSourceTool := lookup(jsonObjectColumn(t, row, "attributes"), "source_tool"); hasSourceTool {
+						t.Errorf("AGENT_RESPONSE unexpectedly emitted for recovered FinalResponseToolNames tool: %v", row["attributes"])
+					}
+				}
+				startRow := onlyRowOfType(t, rows, EventToolStarting)
+				errRow := onlyRowOfType(t, rows, EventToolError)
+				if errRow["span_id"] != startRow["span_id"] {
+					t.Errorf("TOOL_ERROR span_id = %v, want TOOL_STARTING span_id %v", errRow["span_id"], startRow["span_id"])
+				}
+			})
+		}
+	}
+
+	for _, flagKey := range []string{"isError", "is_error"} {
+		for _, buffered := range []bool{false, true} {
+			delivery := "unbuffered"
+			if buffered {
+				delivery = "buffered"
+			}
+			t.Run(flagKey+"/"+delivery+"/finish_task with Task completed and error flag does not complete task", func(t *testing.T) {
+				p, requests, _ := setupTestPlugin(t)
+				var runCount atomic.Int32
+				injectErrPlugin, err := baseplugin.New(baseplugin.Config{
+					Name: "inject_finish_task_error_preserving_result",
+					AfterToolCallback: func(_ agent.Context, tl tool.Tool, _, result map[string]any, err error) (map[string]any, error) {
+						if err == nil && tl != nil && tl.Name() == finishTaskToolName && runCount.Load() == 1 {
+							result[flagKey] = true
+						}
+						return nil, nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("baseplugin.New: %v", err)
+				}
+
+				// Both task activations reuse the same function call ID ("call-0").
+				// Activation 1 gets {"result": "Task completed.", flagKey: true} and
+				// must emit TOOL_ERROR with zero AGENT_COMPLETED rows; Activation 2
+				// gets a genuine {"result": "Task completed."} and must complete its
+				// task span cleanly.
+				taskModel := &callbackTestLLM{
+					name: "task-model",
+					gen: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+						return func(yield func(*model.LLMResponse, error) bool) {
+							yield(&model.LLMResponse{
+								Content: &genai.Content{
+									Role: "model",
+									Parts: []*genai.Part{{
+										FunctionCall: &genai.FunctionCall{
+											ID:   "call-0",
+											Name: finishTaskToolName,
+											Args: map[string]any{"result": "done"},
+										},
+									}},
+								},
+							}, nil)
+						}
+					},
+				}
+				taskAgent, err := llmagent.New(llmagent.Config{
+					Name:  "task",
+					Mode:  llmagent.ModeTask,
+					Model: taskModel,
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New(task): %v", err)
+				}
+				hasFinishTaskResponse := func(c *genai.Content) bool {
+					if c == nil {
+						return false
+					}
+					for _, part := range c.Parts {
+						if part != nil && part.FunctionResponse != nil && part.FunctionResponse.Name == finishTaskToolName {
+							return true
+						}
+					}
+					return false
+				}
+				root, err := agent.New(agent.Config{
+					Name: "root",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							var held []*session.Event
+							nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
+							for range 2 {
+								runCount.Add(1)
+								for ev, err := range llmagent.RunLLMAgentAsNode(taskAgent, nodeCtx, "work") {
+									if err != nil {
+										yield(nil, err)
+										return
+									}
+									// Match FunctionResponse.Name rather than hasTaskCompletedResponse
+									// so even the rejected finish_task event reaches OnEventCallback.
+									if buffered && hasFinishTaskResponse(ev.Content) {
+										held = append(held, ev)
+										continue
+									}
+									if !yield(ev, nil) {
+										return
+									}
+								}
+							}
+							for _, ev := range held {
+								if !yield(ev, nil) {
+									return
+								}
+							}
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(root): %v", err)
+				}
+
+				for _, runErr := range newTestRunner(t, root, injectErrPlugin, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						t.Fatalf("runner.Run error: %v", runErr)
+					}
+				}
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				requireInvocationCompletedOKWithAgentErrors(t, rows, map[string]int{"task": 1})
+
+				starts := agentRowsOfType(rows, EventAgentStarting, "task")
+				ends := agentRowsOfType(rows, EventAgentCompleted, "task")
+				if len(starts) != 2 {
+					t.Fatalf("got %d task AGENT_STARTING rows, want 2", len(starts))
+				}
+				if len(ends) != 1 {
+					t.Fatalf("got %d task AGENT_COMPLETED rows, want 1 (failed finish_task must not emit AGENT_COMPLETED); ends=%v", len(ends), ends)
+				}
+				if got, want := ends[0]["span_id"], starts[1]["span_id"]; got != want {
+					t.Errorf("task AGENT_COMPLETED span_id = %v, want Activation 2 span_id %v (Activation 1 span_id = %v)", got, want, starts[0]["span_id"])
+				}
+				// ADK ends Activation 1 on the sentinel alone, so the activation
+				// gets AGENT_ERROR as its terminal row.
+				agentErr := onlyRowOfType(t, rows, EventAgentError)
+				if got, want := agentErr["span_id"], starts[0]["span_id"]; got != want {
+					t.Errorf("AGENT_ERROR span_id = %v, want Activation 1 span_id %v (Activation 2 span_id = %v)", got, want, starts[1]["span_id"])
+				}
+				if got, want := agentErr["agent"], "task"; got != want {
+					t.Errorf("AGENT_ERROR agent = %v, want %q", got, want)
+				}
+				if got, want := agentErr["status"], "ERROR"; got != want {
+					t.Errorf("AGENT_ERROR status = %v, want %q", got, want)
+				}
+				if got, want := agentErr["error_message"], taskFailedPrefix+mcpToolErrorMessage; got != want {
+					t.Errorf("AGENT_ERROR error_message = %v, want %q", got, want)
+				}
+
+				toolStarts := rowsOfType(rows, EventToolStarting)
+				if len(toolStarts) != 2 {
+					t.Fatalf("got %d TOOL_STARTING rows, want 2", len(toolStarts))
+				}
+				toolErr := onlyRowOfType(t, rows, EventToolError)
+				if got := toolErr["error_message"]; got != mcpToolErrorMessage {
+					t.Errorf("TOOL_ERROR error_message = %v, want %q", got, mcpToolErrorMessage)
+				}
+				if got, want := toolErr["span_id"], toolStarts[0]["span_id"]; got != want {
+					t.Errorf("TOOL_ERROR span_id = %v, want Activation 1 TOOL_STARTING span_id %v", got, want)
+				}
+				if got, want := toolErr["parent_span_id"], starts[0]["span_id"]; got != want {
+					t.Errorf("TOOL_ERROR parent_span_id = %v, want Activation 1 AGENT_STARTING span_id %v", got, want)
+				}
+
+				toolDone := onlyRowOfType(t, rows, EventToolCompleted)
+				if got, want := toolDone["span_id"], toolStarts[1]["span_id"]; got != want {
+					t.Errorf("TOOL_COMPLETED span_id = %v, want Activation 2 TOOL_STARTING span_id %v", got, want)
+				}
+				if got, want := toolDone["parent_span_id"], starts[1]["span_id"]; got != want {
+					t.Errorf("TOOL_COMPLETED parent_span_id = %v, want Activation 2 AGENT_STARTING span_id %v", got, want)
+				}
+			})
+
+			t.Run(flagKey+"/"+delivery+"/agent AfterToolCallback error flag on finish_task closes matching activation", func(t *testing.T) {
+				p, requests, _ := setupTestPlugin(t)
+				var runCount atomic.Int32
+				var callSeq atomic.Int32
+
+				// Agent-level AfterToolCallbacks run after plugin AfterToolCallbacks, so
+				// noteTaskFinished records "call-1" in finishedTasks before the callback
+				// adds flagKey to Activation 1's response. Even when both responses are
+				// buffered, AGENT_ERROR must close Activation 1 and AGENT_COMPLETED must
+				// close Activation 2 rather than swapping spans.
+				taskModel := &callbackTestLLM{
+					name: "task-model",
+					gen: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+						return func(yield func(*model.LLMResponse, error) bool) {
+							yield(&model.LLMResponse{
+								Content: &genai.Content{
+									Role: "model",
+									Parts: []*genai.Part{{
+										FunctionCall: &genai.FunctionCall{
+											ID:   fmt.Sprintf("call-%d", callSeq.Add(1)),
+											Name: finishTaskToolName,
+											Args: map[string]any{"result": "done"},
+										},
+									}},
+								},
+							}, nil)
+						}
+					},
+				}
+				taskAgent, err := llmagent.New(llmagent.Config{
+					Name:  "task",
+					Mode:  llmagent.ModeTask,
+					Model: taskModel,
+					AfterToolCallbacks: []llmagent.AfterToolCallback{
+						func(_ agent.Context, tl tool.Tool, _, result map[string]any, err error) (map[string]any, error) {
+							if err == nil && tl != nil && tl.Name() == finishTaskToolName && runCount.Load() == 1 {
+								altered := maps.Clone(result)
+								altered[flagKey] = true
+								return altered, nil
+							}
+							return nil, nil
+						},
+					},
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New(task): %v", err)
+				}
+				hasFinishTaskResponse := func(c *genai.Content) bool {
+					if c == nil {
+						return false
+					}
+					for _, part := range c.Parts {
+						if part != nil && part.FunctionResponse != nil && part.FunctionResponse.Name == finishTaskToolName {
+							return true
+						}
+					}
+					return false
+				}
+				root, err := agent.New(agent.Config{
+					Name: "root",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							var held []*session.Event
+							nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
+							for range 2 {
+								runCount.Add(1)
+								for ev, err := range llmagent.RunLLMAgentAsNode(taskAgent, nodeCtx, "work") {
+									if err != nil {
+										yield(nil, err)
+										return
+									}
+									if buffered && hasFinishTaskResponse(ev.Content) {
+										held = append(held, ev)
+										continue
+									}
+									if !yield(ev, nil) {
+										return
+									}
+								}
+							}
+							for _, ev := range held {
+								if !yield(ev, nil) {
+									return
+								}
+							}
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(root): %v", err)
+				}
+
+				for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						t.Fatalf("runner.Run error: %v", runErr)
+					}
+				}
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				requireInvocationCompletedOKWithAgentErrors(t, rows, map[string]int{"task": 1})
+
+				starts := agentRowsOfType(rows, EventAgentStarting, "task")
+				ends := agentRowsOfType(rows, EventAgentCompleted, "task")
+				if len(starts) != 2 {
+					t.Fatalf("got %d task AGENT_STARTING rows, want 2", len(starts))
+				}
+				if len(ends) != 1 {
+					t.Fatalf("got %d task AGENT_COMPLETED rows, want 1; ends=%v", len(ends), ends)
+				}
+				if got, want := ends[0]["span_id"], starts[1]["span_id"]; got != want {
+					t.Errorf("task AGENT_COMPLETED span_id = %v, want Activation 2 span_id %v (Activation 1 span_id = %v)", got, want, starts[0]["span_id"])
+				}
+				agentErr := onlyRowOfType(t, rows, EventAgentError)
+				if got, want := agentErr["span_id"], starts[0]["span_id"]; got != want {
+					t.Errorf("AGENT_ERROR span_id = %v, want Activation 1 span_id %v (Activation 2 span_id = %v)", got, want, starts[1]["span_id"])
+				}
+				if got, want := agentErr["agent"], "task"; got != want {
+					t.Errorf("AGENT_ERROR agent = %v, want %q", got, want)
+				}
+				if got, want := agentErr["status"], "ERROR"; got != want {
+					t.Errorf("AGENT_ERROR status = %v, want %q", got, want)
+				}
+				if got, want := agentErr["error_message"], taskFailedPrefix+mcpToolErrorMessage; got != want {
+					t.Errorf("AGENT_ERROR error_message = %v, want %q", got, want)
+				}
+
+				toolStarts := rowsOfType(rows, EventToolStarting)
+				toolDones := rowsOfType(rows, EventToolCompleted)
+				if len(toolStarts) != 2 || len(toolDones) != 2 {
+					t.Fatalf("got %d TOOL_STARTING and %d TOOL_COMPLETED rows, want 2 and 2", len(toolStarts), len(toolDones))
+				}
+				if errs := rowsOfType(rows, EventToolError); len(errs) != 0 {
+					t.Errorf("got %d TOOL_ERROR rows, want 0: %v", len(errs), errs)
+				}
+			})
+		}
+	}
+}
+
+func TestPlugin_CloseOnceAndAfterRunPanic(t *testing.T) {
+	t.Run("Close executes shutdown once across concurrent and repeated calls", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		okHTTPClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"type":"TABLE","labels":{"adk_schema_version":"2"}}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			},
+		}
+
+		var closeCalls atomic.Int32
+		sentinelErr := errors.New("simulated bq close failure")
+		origClose := closeBQClient
+		closeBQClient = func(c *bq.Client) error {
+			closeCalls.Add(1)
+			_ = origClose(c)
+			return sentinelErr
+		}
+		t.Cleanup(func() { closeBQClient = origClose })
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test-dataset"
+		cfg.TableName = "agent_events"
+		cfg.DisableCreateViews = true
+
+		bqClient, err := bq.NewClient(ctx, cfg.ProjectID, option.WithHTTPClient(okHTTPClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient() error = %v", err)
+		}
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+
+		adkPlugin, err := newBigQueryAgentAnalyticsPlugin(ctx, cfg, bqClient, writeClient, true)
+		if err != nil {
+			t.Fatalf("newBigQueryAgentAnalyticsPlugin() error = %v", err)
+		}
+
+		const workers = 16
+		errs := make([]error, workers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range workers {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				<-start
+				errs[idx] = adkPlugin.Close()
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		repeatErr := adkPlugin.Close()
+		if got := closeCalls.Load(); got != 1 {
+			t.Fatalf("closeBQClient called %d times across %d concurrent + 1 sequential Close() calls, want 1", got, workers)
+		}
+		for i, cErr := range errs {
+			if !errors.Is(cErr, sentinelErr) {
+				t.Errorf("concurrent Close()[%d] error = %v, want %v", i, cErr, sentinelErr)
+			}
+			if cErr != repeatErr {
+				t.Errorf("concurrent Close()[%d] returned distinct error value %v vs sequential Close() %v", i, cErr, repeatErr)
+			}
+		}
+	})
+
+	t.Run("afterRun panic before terminal span still ends invocation and flushes run-end batch", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		requests := make(chan *storagepb.AppendRowsRequest, 100)
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: requests})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "test-tbl"
+		cfg.BatchSize = 100
+		cfg.BatchFlushIntv = time.Hour
+		cfg.DisableCreateViews = true
+
+		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(processor.Close)
+
+		tm := newTraceManager()
+		ap := &analyticsPlugin{
+			config:    cfg,
+			processor: processor,
+			traces:    tm,
+		}
+
+		mCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "test-agent",
+			sessionID:    "sess-1",
+			invocationID: "inv-afterrun-panic",
+			userID:       "user-1",
+		}
+		if _, err := ap.beforeRun(mCtx); err != nil {
+			t.Fatalf("beforeRun() error = %v", err)
+		}
+		if _, err := ap.onUserMessage(mCtx, textContent("user", "hello")); err != nil {
+			t.Fatalf("onUserMessage() error = %v", err)
+		}
+
+		tm.mu.Lock()
+		_, liveBefore := tm.invocations["inv-afterrun-panic"]
+		tm.mu.Unlock()
+		if !liveBefore {
+			t.Fatal("expected invocation trace to be active before afterRun")
+		}
+
+		var panickedOnce atomic.Bool
+		tm.now = func() time.Time {
+			if panickedOnce.CompareAndSwap(false, true) {
+				panic("boom inside popUnclosedAgentSpans")
+			}
+			return time.Now()
+		}
+
+		ap.afterRun(mCtx)
+
+		tm.mu.Lock()
+		_, stillLive := tm.invocations["inv-afterrun-panic"]
+		_, inCompleted := tm.completed["inv-afterrun-panic"]
+		tm.mu.Unlock()
+		if stillLive {
+			t.Error("invocation remained in traces.invocations after panic in afterRun; want endInvocation cleanup")
+		}
+		if !inCompleted {
+			t.Error("invocation missing from traces.completed after panic in afterRun; want endInvocation completion record")
+		}
+
+		select {
+		case req := <-requests:
+			rows := decodeArrowRows(t, req)
+			if len(rows) < 2 {
+				t.Fatalf("flushed %d rows on afterRun panic, want >= 2 queued rows; event types: %v", len(rows), eventTypes(rows))
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for flushRunEnd batch after panic in afterRun")
+		}
+
+		if got := processor.DropStats().AppendFailureDrops; got != 1 {
+			t.Errorf("AppendFailureDrops = %d, want 1 from recovered afterRun panic", got)
+		}
+	})
+
+	t.Run("Close panic in earlier shutdown step still runs remaining cleanup and caches error", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		srv := &failingFinalizeWriteServer{
+			committedStreamTestServer: &committedStreamTestServer{
+				createdStreamName: "projects/test-project/datasets/test-dataset/tables/agent_events/streams/committed-1",
+			},
+			finalizeErr: errors.New("simulated finalize failure"),
+		}
+		storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		okHTTPClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"type":"TABLE","labels":{"adk_schema_version":"2"}}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			},
+		}
+
+		var closeCalls atomic.Int32
+		sentinelBQErr := errors.New("simulated bq close failure after panic")
+		origClose := closeBQClient
+		closeBQClient = func(c *bq.Client) error {
+			closeCalls.Add(1)
+			_ = origClose(c)
+			return sentinelBQErr
+		}
+		t.Cleanup(func() { closeBQClient = origClose })
+
+		fs := newFakeStorage(t)
+		gcsOpts, _ := storageClientOptions(fs)
+		logger := &hookRecordingLogger{
+			recordingLogger: &recordingLogger{},
+			beforeRecord: func(msg string) {
+				if strings.Contains(msg, "failed to finalize write stream") {
+					panic("secret-finalize-panic-payload")
+				}
+			},
+		}
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test-dataset"
+		cfg.TableName = "agent_events"
+		cfg.DisableCreateViews = true
+		cfg.ExactlyOnceDelivery = true
+		cfg.GCSBucketName = "test-bucket"
+		cfg.GCSClientOptions = gcsOpts
+		cfg.Logger = logger
+
+		bqClient, err := bq.NewClient(ctx, cfg.ProjectID, option.WithHTTPClient(okHTTPClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient() error = %v", err)
+		}
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+
+		adkPlugin, err := newBigQueryAgentAnalyticsPlugin(ctx, cfg, bqClient, writeClient, true)
+		if err != nil {
+			t.Fatalf("newBigQueryAgentAnalyticsPlugin() error = %v", err)
+		}
+
+		firstErr := adkPlugin.Close()
+		if firstErr == nil {
+			t.Fatal("first Close() error = nil, want joined panic + close error")
+		}
+		if !strings.Contains(firstErr.Error(), "close batch processor panicked of type string") {
+			t.Errorf("first Close() error = %v, want panic type summary", firstErr)
+		}
+		if strings.Contains(firstErr.Error(), "secret-finalize-panic-payload") {
+			t.Errorf("first Close() error leaked panic value: %v", firstErr)
+		}
+		if !errors.Is(firstErr, sentinelBQErr) {
+			t.Errorf("first Close() error = %v, want joined %v from later shutdown step", firstErr, sentinelBQErr)
+		}
+		if got := closeCalls.Load(); got != 1 {
+			t.Errorf("closeBQClient calls = %d, want 1 even after earlier step panicked", got)
+		}
+		if err := writeClient.Close(); err == nil {
+			t.Error("writeClient.Close() succeeded after plugin Close(), want error proving plugin closed writeClient after panic")
+		}
+
+		secondErr := adkPlugin.Close()
+		if secondErr != firstErr {
+			t.Errorf("second Close() error = %v, want cached %v without re-panicking", secondErr, firstErr)
+		}
+		if got := closeCalls.Load(); got != 1 {
+			t.Errorf("closeBQClient calls after second Close() = %d, want 1", got)
+		}
+	})
+
+	t.Run("endInvocationSafe double-panic publishes completed record clears evicted and logs drop", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		logger := &recordingLogger{}
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "test-tbl"
+		cfg.BatchSize = 100
+		cfg.BatchFlushIntv = time.Hour
+		cfg.DisableCreateViews = true
+		cfg.Logger = logger
+
+		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(processor.Close)
+
+		tm := newTraceManager()
+		ap := &analyticsPlugin{
+			config:    cfg,
+			processor: processor,
+			traces:    tm,
+		}
+
+		activeCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "test-agent",
+			sessionID:    "sess-1",
+			invocationID: "inv-double-panic-active",
+			userID:       "user-1",
+		}
+		if _, err := ap.beforeRun(activeCtx); err != nil {
+			t.Fatalf("beforeRun() error = %v", err)
+		}
+
+		// Also seed an evicted trace entry to verify the fallback clears tm.evicted
+		// while preserving its saved identity in tm.completed.
+		const evictedInvID = "inv-double-panic-evicted"
+		tm.mu.Lock()
+		tm.evicted[evictedInvID] = evictedTrace{
+			traceID:       "0123456789abcdef0123456789abcdef",
+			spanID:        "0123456789abcdef",
+			rootAgentName: "evicted-root",
+		}
+		tm.mu.Unlock()
+		evictedCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "test-agent",
+			sessionID:    "sess-1",
+			invocationID: evictedInvID,
+			userID:       "user-1",
+		}
+
+		tm.now = func() time.Time { panic("secret-double-panic-now") }
+		ap.afterRun(activeCtx)
+		ap.afterRun(evictedCtx)
+		tm.now = time.Now
+
+		tm.mu.Lock()
+		_, stillActive := tm.invocations["inv-double-panic-active"]
+		_, stillEvicted := tm.evicted[evictedInvID]
+		activeCompleted := tm.completed["inv-double-panic-active"]
+		evictedCompleted := tm.completed[evictedInvID]
+		tm.mu.Unlock()
+
+		if stillActive {
+			t.Error("active invocation remained in traces.invocations after double panic")
+		}
+		if stillEvicted {
+			t.Error("evicted invocation remained in traces.evicted after double panic")
+		}
+		if activeCompleted == nil {
+			t.Fatal("active invocation missing from traces.completed after double panic")
+		}
+		if evictedCompleted == nil || evictedCompleted.identity.traceID != "0123456789abcdef0123456789abcdef" {
+			t.Fatalf("evicted completed entry = %+v, want restored traceID", evictedCompleted)
+		}
+
+		// A late callback after the double-panic fallback must take the late path
+		// rather than lookupInvocation's create-active path.
+		lateInv := tm.lookupInvocation(ctx, identityOf(activeCtx), false, false)
+		if !lateInv.isLate {
+			t.Error("late callback lookupInvocation.isLate = false, want true")
+		}
+		tm.mu.Lock()
+		_, recreatedActive := tm.invocations["inv-double-panic-active"]
+		tm.mu.Unlock()
+		if recreatedActive {
+			t.Error("late callback recreated active entry in traces.invocations after double-panic fallback")
+		}
+
+		if !logger.contains("agentanalytics: endInvocation fallback: recovered panic of type string") {
+			t.Errorf("missing endInvocation fallback panic log in:\n%s", logger.String())
+		}
+		if !logger.contains("agentanalytics: dropped INVOCATION_COMPLETED event: recovered panic of type string") {
+			t.Errorf("missing INVOCATION_COMPLETED drop log in:\n%s", logger.String())
+		}
+		if logger.contains("secret-double-panic-now") {
+			t.Errorf("logger leaked panic value in:\n%s", logger.String())
+		}
+		if got := processor.DropStats().AppendFailureDrops; got != 4 {
+			t.Errorf("AppendFailureDrops = %d, want 4 (2 invocations x [endInvocationSafe + recoverCallback])", got)
+		}
+	})
+
+	t.Run("flushRunEndSafe logs panic type and counts drop in DropStats", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		srv := &committedStreamTestServer{
+			createdStreamName:  "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/committed-1",
+			failAppendAttemptN: 1,
+		}
+		storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		recLog := &recordingLogger{}
+		logger := &hookRecordingLogger{
+			recordingLogger: recLog,
+			beforeRecord: func(msg string) {
+				if strings.Contains(msg, "Failed to write batch") {
+					panic("secret-flush-panic-payload")
+				}
+			},
+		}
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "test-tbl"
+		cfg.BatchSize = 100
+		cfg.BatchFlushIntv = time.Hour
+		cfg.DisableCreateViews = true
+		cfg.RetryConfig.MaxRetries = 0
+		cfg.Logger = logger
+
+		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(processor.Close)
+
+		tm := newTraceManager()
+		ap := &analyticsPlugin{
+			config:    cfg,
+			processor: processor,
+			traces:    tm,
+		}
+
+		mCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "test-agent",
+			sessionID:    "sess-1",
+			invocationID: "inv-flush-panic",
+			userID:       "user-1",
+		}
+		if _, err := ap.onUserMessage(mCtx, textContent("user", "hello")); err != nil {
+			t.Fatalf("onUserMessage() error = %v", err)
+		}
+
+		var panickedOnce atomic.Bool
+		tm.now = func() time.Time {
+			if panickedOnce.CompareAndSwap(false, true) {
+				panic("boom inside popUnclosedAgentSpans")
+			}
+			return time.Now()
+		}
+
+		ap.afterRun(mCtx)
+
+		if !recLog.contains("agentanalytics: flushRunEnd fallback: recovered panic of type string") {
+			t.Errorf("missing flushRunEnd fallback panic log in:\n%s", recLog.String())
+		}
+		if !recLog.contains("agentanalytics: dropped INVOCATION_COMPLETED event: recovered panic of type string") {
+			t.Errorf("missing INVOCATION_COMPLETED drop log in:\n%s", recLog.String())
+		}
+		if recLog.contains("secret-flush-panic-payload") {
+			t.Errorf("logger leaked flush panic value in:\n%s", recLog.String())
+		}
+		// 1 failed batch row + 1 flushRunEndSafe panic + 1 afterRun recoverCallback = 3.
+		if got := processor.DropStats().AppendFailureDrops; got != 3 {
+			t.Errorf("AppendFailureDrops = %d, want 3 (failed row + flushRunEndSafe + recoverCallback)", got)
+		}
+	})
+
+	t.Run("afterRun fallback with panicking Logger still ends invocation and flushes queued rows", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		requests := make(chan *storagepb.AppendRowsRequest, 100)
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: requests})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		tm := newTraceManager()
+		const invID = "inv-afterrun-panicking-logger"
+		var sawEndFallbackLog atomic.Bool
+		logger := &hookRecordingLogger{
+			recordingLogger: &recordingLogger{},
+			beforeRecord: func(msg string) {
+				if strings.Contains(msg, "endInvocation fallback") {
+					sawEndFallbackLog.Store(true)
+					// Verify endInvocationSafe runs before flushRunEndSafe and
+					// forceEndInvocation completed before recordPanic logged.
+					if len(requests) != 0 {
+						t.Errorf("flush ran before endInvocationSafe finished: len(requests) = %d, want 0", len(requests))
+					}
+					tm.mu.Lock()
+					_, stillLive := tm.invocations[invID]
+					_, inCompleted := tm.completed[invID]
+					tm.mu.Unlock()
+					if stillLive || !inCompleted {
+						t.Errorf("invocation state during endInvocation fallback log: stillLive=%t inCompleted=%t, want false/true", stillLive, inCompleted)
+					}
+					panic("boom inside endInvocation fallback logger")
+				}
+				if strings.Contains(msg, "dropped INVOCATION_COMPLETED") {
+					panic("boom inside recoverCallback logger")
+				}
+			},
+		}
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "test-tbl"
+		cfg.BatchSize = 100
+		cfg.BatchFlushIntv = time.Hour
+		cfg.DisableCreateViews = true
+		cfg.Logger = logger
+
+		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(processor.Close)
+
+		ap := &analyticsPlugin{
+			config:    cfg,
+			processor: processor,
+			traces:    tm,
+		}
+
+		mCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "test-agent",
+			sessionID:    "sess-1",
+			invocationID: invID,
+			userID:       "user-1",
+		}
+		if _, err := ap.beforeRun(mCtx); err != nil {
+			t.Fatalf("beforeRun() error = %v", err)
+		}
+		if _, err := ap.onUserMessage(mCtx, textContent("user", "hello")); err != nil {
+			t.Fatalf("onUserMessage() error = %v", err)
+		}
+
+		// Panic in popUnclosedAgentSpans and in endInvocationSafe's tm.endInvocation
+		// so endInvocationSafe invokes forceEndInvocation + recordPanic (panicking Logger).
+		tm.now = func() time.Time { panic("boom inside afterRun and endInvocation") }
+		ap.afterRun(mCtx)
+		tm.now = time.Now
+
+		if !sawEndFallbackLog.Load() {
+			t.Fatal("expected endInvocation fallback log attempt")
+		}
+
+		tm.mu.Lock()
+		_, stillLive := tm.invocations[invID]
+		_, inCompleted := tm.completed[invID]
+		tm.mu.Unlock()
+		if stillLive {
+			t.Error("invocation remained in traces.invocations after panicking Logger fallback")
+		}
+		if !inCompleted {
+			t.Error("invocation missing from traces.completed after panicking Logger fallback")
+		}
+
+		select {
+		case req := <-requests:
+			rows := decodeArrowRows(t, req)
+			if len(rows) < 2 {
+				t.Fatalf("flushed %d rows on panicking Logger fallback, want >= 2 queued rows; event types: %v", len(rows), eventTypes(rows))
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for flushRunEnd batch when Logger panicked in endInvocation fallback")
+		}
+
+		// 1 endInvocationSafe panic + 1 afterRun recoverCallback panic = 2,
+		// counted before each Logger.Printf call panicked.
+		if got := processor.DropStats().AppendFailureDrops; got != 2 {
+			t.Errorf("AppendFailureDrops = %d, want 2", got)
+		}
+	})
+}
+
+type failingFinalizeWriteServer struct {
+	*committedStreamTestServer
+	finalizeErr error
+}
+
+func (s *failingFinalizeWriteServer) FinalizeWriteStream(_ context.Context, req *storagepb.FinalizeWriteStreamRequest) (*storagepb.FinalizeWriteStreamResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.finalizeReqs = append(s.finalizeReqs, req)
+	return nil, s.finalizeErr
+}
+
+func TestClose_SecondCallAfterCleanCloseSucceeds(t *testing.T) {
+	p, _, _ := newTestPluginWithConfig(t, nil)
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("first Close() error = %v, want nil", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("second Close() error = %v, want nil", err)
+	}
+}
+
+type hookAppendWriteServer struct {
+	storagepb.UnimplementedBigQueryWriteServer
+	requests chan *storagepb.AppendRowsRequest
+	onAppend func(*storagepb.AppendRowsRequest)
+}
+
+func (s *hookAppendWriteServer) AppendRows(stream storagepb.BigQueryWrite_AppendRowsServer) error {
+	for {
+		if err := stream.Context().Err(); err != nil {
+			return err
+		}
+		req, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if s.onAppend != nil {
+			s.onAppend(req)
+		}
+		if s.requests != nil {
+			s.requests <- req
+		}
+		if err := stream.Send(&storagepb.AppendRowsResponse{}); err != nil {
+			return err
+		}
+	}
+}
+
+type rawPanicPayload struct {
+	secret string
+}
+
+type recordedLogCall struct {
+	format    string
+	args      []any
+	formatted string
+}
+
+type argCapturingLogger struct {
+	mu       sync.Mutex
+	calls    []recordedLogCall
+	onPrintf func(format string, v []any)
+}
+
+func (l *argCapturingLogger) Printf(format string, v ...any) {
+	copied := slices.Clone(v)
+	if l.onPrintf != nil {
+		l.onPrintf(format, copied)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls = append(l.calls, recordedLogCall{
+		format:    format,
+		args:      copied,
+		formatted: fmt.Sprintf(format, copied...),
+	})
+}
+
+func (l *argCapturingLogger) Println(v ...any) {
+	copied := slices.Clone(v)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls = append(l.calls, recordedLogCall{
+		args:      copied,
+		formatted: fmt.Sprintln(copied...),
+	})
+}
+
+func (l *argCapturingLogger) snapshot() []recordedLogCall {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.calls)
+}
+
+func TestAfterRun_TerminalClockPanicAndResumedRunSafety(t *testing.T) {
+	t.Run("terminal clock panic ends trace before flush so late agent keeps span and latency", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		requests := make(chan *storagepb.AppendRowsRequest, 100)
+		var flushHookOnce atomic.Bool
+		var onFirstFlush func()
+		srv := &hookAppendWriteServer{
+			requests: requests,
+			onAppend: func(*storagepb.AppendRowsRequest) {
+				if flushHookOnce.CompareAndSwap(false, true) && onFirstFlush != nil {
+					onFirstFlush()
+				}
+			},
+		}
+		storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "test-tbl"
+		cfg.BatchSize = 100
+		cfg.BatchFlushIntv = time.Hour
+		cfg.DisableCreateViews = true
+		cfg.Logger = &recordingLogger{}
+
+		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(processor.Close)
+
+		tm := newTraceManager()
+		baseTime := time.Unix(1_700_000_000, 0)
+		var tick atomic.Int64
+		tm.now = func() time.Time {
+			return baseTime.Add(time.Duration(tick.Add(1)) * 10 * time.Millisecond)
+		}
+		ap := &analyticsPlugin{
+			config:    cfg,
+			processor: processor,
+			traces:    tm,
+		}
+
+		const invID = "inv-terminal-clock-panic"
+		rootCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "root-agent",
+			sessionID:    "sess-1",
+			invocationID: invID,
+			userID:       "user-1",
+		}
+		lateCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "late-agent",
+			sessionID:    "sess-1",
+			invocationID: invID,
+			userID:       "user-1",
+		}
+
+		if _, err := ap.onUserMessage(rootCtx, textContent("user", "hello")); err != nil {
+			t.Fatalf("onUserMessage() error = %v", err)
+		}
+		if _, err := ap.beforeRun(rootCtx); err != nil {
+			t.Fatalf("beforeRun() error = %v", err)
+		}
+		if _, err := ap.beforeAgent(rootCtx); err != nil {
+			t.Fatalf("beforeAgent(root) error = %v", err)
+		}
+		if _, err := ap.afterAgent(rootCtx); err != nil {
+			t.Fatalf("afterAgent(root) error = %v", err)
+		}
+
+		var flushSawCompleted atomic.Bool
+		onFirstFlush = func() {
+			tm.mu.Lock()
+			_, stillActive := tm.invocations[invID]
+			_, inCompleted := tm.completed[invID]
+			tm.mu.Unlock()
+			if stillActive {
+				t.Errorf("invocation %q still in traces.invocations during flushRunEnd; want ended before flush", invID)
+			}
+			if inCompleted {
+				flushSawCompleted.Store(true)
+			}
+			if _, err := ap.beforeAgent(lateCtx); err != nil {
+				t.Errorf("beforeAgent(late) error = %v", err)
+			}
+		}
+
+		// Call 1 in afterRun is lookupInvocation inside popUnclosedAgentSpans,
+		// call 2 is popUnclosedAgentSpans itself, and call 3 is the terminal
+		// endInvocationTarget clock read inside logEvent, which panics once.
+		var afterRunClockCalls atomic.Int32
+		tm.now = func() time.Time {
+			if afterRunClockCalls.Add(1) == 3 {
+				panic("terminal clock read failed once")
+			}
+			return baseTime.Add(time.Duration(tick.Add(1)) * 10 * time.Millisecond)
+		}
+
+		ap.afterRun(rootCtx)
+		if _, err := ap.afterAgent(lateCtx); err != nil {
+			t.Fatalf("afterAgent(late) error = %v", err)
+		}
+		processor.Close()
+
+		if got := afterRunClockCalls.Load(); got < 4 {
+			t.Fatalf("afterRunClockCalls = %d, want >= 4 (popUnclosedAgentSpans + failed terminal logEvent + retry + late callbacks)", got)
+		}
+		if got := processor.DropStats().AppendFailureDrops; got != 1 {
+			t.Errorf("AppendFailureDrops = %d, want 1 (dropped terminal logEvent only)", got)
+		}
+		if !flushSawCompleted.Load() {
+			t.Error("flushRunEnd did not observe invocation in traces.completed")
+		}
+
+		var allRows []map[string]any
+		for len(requests) > 0 {
+			allRows = append(allRows, decodeArrowRows(t, <-requests)...)
+		}
+		lateStarts := agentRowsOfType(allRows, EventAgentStarting, "late-agent")
+		lateEnds := agentRowsOfType(allRows, EventAgentCompleted, "late-agent")
+		if len(lateStarts) != 1 || len(lateEnds) != 1 {
+			t.Fatalf("got %d late AGENT_STARTING and %d late AGENT_COMPLETED rows, want 1 and 1", len(lateStarts), len(lateEnds))
+		}
+		startSpanID, _ := lateStarts[0]["span_id"].(string)
+		endSpanID, _ := lateEnds[0]["span_id"].(string)
+		if startSpanID == "" || endSpanID != startSpanID {
+			t.Errorf("late AGENT_COMPLETED span_id = %q, want late AGENT_STARTING span_id %q", endSpanID, startSpanID)
+		}
+		if lateEnds[0][columnLatencyMS] == nil {
+			t.Errorf("late AGENT_COMPLETED latency_ms = nil, want non-nil latency on late trace")
+		}
+	})
+
+	t.Run("retry bound to original trace leaves resumed run untouched", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		requests := make(chan *storagepb.AppendRowsRequest, 100)
+		var flushHookOnce atomic.Bool
+		var onFirstFlush func()
+		srv := &hookAppendWriteServer{
+			requests: requests,
+			onAppend: func(*storagepb.AppendRowsRequest) {
+				if flushHookOnce.CompareAndSwap(false, true) && onFirstFlush != nil {
+					onFirstFlush()
+				}
+			},
+		}
+		storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		var startResumeOnDrop func()
+		logger := &hookRecordingLogger{
+			recordingLogger: &recordingLogger{},
+			beforeRecord: func(msg string) {
+				if strings.Contains(msg, "dropped INVOCATION_COMPLETED") && startResumeOnDrop != nil {
+					fn := startResumeOnDrop
+					startResumeOnDrop = nil
+					fn()
+				}
+			},
+		}
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "test-tbl"
+		cfg.BatchSize = 100
+		cfg.BatchFlushIntv = time.Hour
+		cfg.DisableCreateViews = true
+		cfg.Logger = logger
+
+		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(processor.Close)
+
+		tm := newTraceManager()
+		baseTime := time.Unix(1_700_000_000, 0)
+		var tick atomic.Int64
+		tm.now = func() time.Time {
+			return baseTime.Add(time.Duration(tick.Add(1)) * 10 * time.Millisecond)
+		}
+		ap := &analyticsPlugin{
+			config:    cfg,
+			processor: processor,
+			traces:    tm,
+		}
+
+		const invID = "inv-resumed-same-id"
+		run1Ctx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "root-agent",
+			sessionID:    "sess-1",
+			invocationID: invID,
+			userID:       "user-1",
+		}
+		resumeCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "root-agent",
+			sessionID:    "sess-1",
+			invocationID: invID,
+			userID:       "user-1",
+		}
+
+		if _, err := ap.beforeRun(run1Ctx); err != nil {
+			t.Fatalf("beforeRun(run1) error = %v", err)
+		}
+		tm.mu.Lock()
+		origInv := tm.invocations[invID]
+		// Seed completed entries with a nil sentinel so pruneWaitingLocked panics
+		// after rememberCompletedAtLocked has already unlinked origInv and
+		// published completion for run 1.
+		tm.maxTracked = 1
+		for i := range 64 {
+			cid := fmt.Sprintf("completed-%d", i)
+			tm.completed[cid] = &completedTrace{position: tm.completionOrder.PushBack(cid)}
+		}
+		stalePos := tm.completionOrder.PushBack("stale-nil")
+		tm.completed["stale-nil"] = nil
+		tm.mu.Unlock()
+
+		// Start the resumed root inside recoverCallback's Logger hook — right
+		// after endInvocationTarget panicked (with origInv already unlinked and
+		// finished) and strictly BEFORE afterRun's inline endInvocationSafe runs.
+		var resumedBeforeRetry *invocationTrace
+		startResumeOnDrop = func() {
+			tm.mu.Lock()
+			delete(tm.completed, "stale-nil")
+			tm.completionOrder.Remove(stalePos)
+			tm.maxTracked = maxTrackedInvocations
+			tm.mu.Unlock()
+
+			if _, err := ap.beforeRun(resumeCtx); err != nil {
+				t.Errorf("beforeRun(resume) error = %v", err)
+			}
+			if _, err := ap.beforeAgent(resumeCtx); err != nil {
+				t.Errorf("beforeAgent(resume) error = %v", err)
+			}
+			tm.mu.Lock()
+			resumedBeforeRetry = tm.invocations[invID]
+			tm.mu.Unlock()
+		}
+
+		var flushSawResumedActive atomic.Bool
+		onFirstFlush = func() {
+			tm.mu.Lock()
+			cur := tm.invocations[invID]
+			tm.mu.Unlock()
+			if cur == resumedBeforeRetry && cur != nil {
+				flushSawResumedActive.Store(true)
+			}
+		}
+
+		ap.afterRun(run1Ctx)
+
+		if resumedBeforeRetry == nil {
+			t.Fatal("resumed run was not registered in traces.invocations before endInvocationSafe retry")
+		}
+		if resumedBeforeRetry == origInv {
+			t.Fatal("resumed run reused original invocationTrace pointer, want fresh root trace")
+		}
+		if !flushSawResumedActive.Load() {
+			t.Fatal("afterRun's endInvocationSafe finished the resumed trace instead of leaving it active")
+		}
+
+		// Also verify forceEndInvocationTarget bound to origInv leaves the resumed
+		// run untouched.
+		tm.forceEndInvocationTarget(identityOf(run1Ctx), runEndTarget{inv: origInv, bound: true})
+
+		tm.mu.Lock()
+		curActive := tm.invocations[invID]
+		tm.mu.Unlock()
+		if curActive != resumedBeforeRetry {
+			t.Fatalf("traces.invocations[%q] = %p after bound retry, want resumed trace %p", invID, curActive, resumedBeforeRetry)
+		}
+		resumedBeforeRetry.mu.Lock()
+		resumedFinished := resumedBeforeRetry.finished
+		resumedLate := resumedBeforeRetry.isLate
+		resumedBeforeRetry.mu.Unlock()
+		if resumedFinished || resumedLate {
+			t.Fatalf("resumed trace state finished=%t isLate=%t, want false/false", resumedFinished, resumedLate)
+		}
+
+		if _, err := ap.afterAgent(resumeCtx); err != nil {
+			t.Fatalf("afterAgent(resume) error = %v", err)
+		}
+		ap.afterRun(resumeCtx)
+		processor.Close()
+
+		var allRows []map[string]any
+		for len(requests) > 0 {
+			allRows = append(allRows, decodeArrowRows(t, <-requests)...)
+		}
+		invCompleted := rowsOfType(allRows, EventInvocationCompleted)
+		if len(invCompleted) != 1 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 1 (from resumed run)", len(invCompleted))
+		}
+		if got, want := invCompleted[0]["span_id"], resumedBeforeRetry.rootSpanID; got != want {
+			t.Errorf("resumed INVOCATION_COMPLETED span_id = %v, want %q", got, want)
+		}
+		if invCompleted[0][columnLatencyMS] == nil {
+			t.Errorf("resumed INVOCATION_COMPLETED latency_ms = nil, want non-nil latency")
+		}
+	})
+
+	t.Run("evicted run afterRun with failing clock and UUID source clears evicted without panicking", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "test-tbl"
+		cfg.BatchSize = 100
+		cfg.BatchFlushIntv = time.Hour
+		cfg.DisableCreateViews = true
+		cfg.Logger = &recordingLogger{}
+
+		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(processor.Close)
+
+		tm := newTraceManager()
+		tm.maxTracked = 1
+		ap := &analyticsPlugin{
+			config:    cfg,
+			processor: processor,
+			traces:    tm,
+		}
+
+		evictedCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "evicted-agent",
+			sessionID:    "sess-1",
+			invocationID: "inv-evicted-uuid-down",
+			userID:       "user-1",
+		}
+		keepCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "keep-agent",
+			sessionID:    "sess-2",
+			invocationID: "inv-keep-at-cap",
+			userID:       "user-1",
+		}
+		if _, err := ap.beforeRun(evictedCtx); err != nil {
+			t.Fatalf("beforeRun(evicted) error = %v", err)
+		}
+		tm.mu.Lock()
+		wantSpanID := tm.invocations["inv-evicted-uuid-down"].rootSpanID
+		wantTraceID := tm.invocations["inv-evicted-uuid-down"].traceID
+		tm.mu.Unlock()
+
+		// Evict inv-evicted-uuid-down by starting inv-keep-at-cap at maxTracked=1.
+		if _, err := ap.beforeRun(keepCtx); err != nil {
+			t.Fatalf("beforeRun(keep) error = %v", err)
+		}
+
+		uuid.SetRand(panickingRandReader{})
+		defer uuid.SetRand(nil)
+		t.Cleanup(func() { uuid.SetRand(nil) })
+		tm.now = func() time.Time { panic("clock down during evicted afterRun") }
+
+		ap.afterRun(evictedCtx)
+
+		uuid.SetRand(nil)
+		tm.now = time.Now
+
+		tm.mu.Lock()
+		_, stillEvicted := tm.evicted["inv-evicted-uuid-down"]
+		completed := tm.completed["inv-evicted-uuid-down"]
+		_, keepStillActive := tm.invocations["inv-keep-at-cap"]
+		tm.mu.Unlock()
+
+		if stillEvicted {
+			t.Fatal("evicted run remained in traces.evicted after forced completion with failing UUID source")
+		}
+		if completed == nil {
+			t.Fatal("evicted run missing from traces.completed after forced completion")
+		}
+		if completed.identity.spanID != wantSpanID || completed.identity.traceID != wantTraceID {
+			t.Errorf("completed identity = %+v, want spanID=%q traceID=%q", completed.identity, wantSpanID, wantTraceID)
+		}
+
+		// A later late callback for the finished evicted run must use the late path
+		// and leave inv-keep-at-cap undisturbed in traces.invocations.
+		lateInv := tm.lookupInvocation(ctx, identityOf(evictedCtx), false, false)
+		if !lateInv.isLate {
+			t.Error("later callback for force-ended evicted run created active trace instead of late trace")
+		}
+		tm.mu.Lock()
+		_, keepAfterLate := tm.invocations["inv-keep-at-cap"]
+		tm.mu.Unlock()
+		if !keepStillActive || !keepAfterLate {
+			t.Errorf("active invocation at capacity displaced: before=%t after=%t, want true/true", keepStillActive, keepAfterLate)
+		}
+	})
+}
+
+func TestPlugin_PanicSitesNeverPassRawPanicValueToLogger(t *testing.T) {
+	ctx := context.Background()
+	lis := bufconn.Listen(1 << 20)
+	gSrv := grpc.NewServer()
+	srv := &committedStreamTestServer{
+		createdStreamName:  "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/committed-1",
+		failAppendAttemptN: 1,
+	}
+	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(
+		"passthrough:///bufnet",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+	}
+	t.Cleanup(func() { _ = writeClient.Close() })
+
+	logger := &argCapturingLogger{
+		onPrintf: func(format string, _ []any) {
+			if strings.Contains(format, "Failed to write batch") {
+				panic(rawPanicPayload{secret: "raw-flush-panic-secret"})
+			}
+		},
+	}
+
+	cfg := DefaultConfig()
+	cfg.ProjectID = "test-proj"
+	cfg.DatasetID = "test-ds"
+	cfg.TableName = "test-tbl"
+	cfg.BatchSize = 100
+	cfg.BatchFlushIntv = time.Hour
+	cfg.DisableCreateViews = true
+	cfg.RetryConfig.MaxRetries = 0
+	cfg.Logger = logger
+
+	processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor() error = %v", err)
+	}
+	t.Cleanup(processor.Close)
+
+	tm := newTraceManager()
+	ap := &analyticsPlugin{
+		config:    cfg,
+		processor: processor,
+		traces:    tm,
+	}
+
+	mCtx := &mockInvocationContext{
+		ctx:          ctx,
+		agentName:    "test-agent",
+		sessionID:    "sess-1",
+		invocationID: "inv-raw-panic-args",
+		userID:       "user-1",
+	}
+	// Queue one row before injecting panics so flushRunEndSafe triggers a write
+	// failure log whose logger callback panics with rawPanicPayload.
+	if _, err := ap.onUserMessage(mCtx, textContent("user", "hello")); err != nil {
+		t.Fatalf("onUserMessage() error = %v", err)
+	}
+
+	// Trigger recoverCallback in beforeAgent, then both endInvocationSafe and
+	// flushRunEndSafe (plus afterRun's recoverCallback) in afterRun.
+	tm.now = func() time.Time {
+		panic(rawPanicPayload{secret: "raw-callback-panic-secret"})
+	}
+	if _, err := ap.beforeAgent(mCtx); err != nil {
+		t.Fatalf("beforeAgent() error = %v", err)
+	}
+	ap.afterRun(mCtx)
+	tm.now = time.Now
+
+	calls := logger.snapshot()
+	var sawCallbackDrop, sawEndFallback, sawFlushFallback bool
+	for _, call := range calls {
+		if strings.Contains(call.formatted, "raw-callback-panic-secret") || strings.Contains(call.formatted, "raw-flush-panic-secret") {
+			t.Errorf("formatted log leaked secret panic payload: %q", call.formatted)
+		}
+		isPanicLog := false
+		switch {
+		case strings.Contains(call.formatted, "dropped AGENT_STARTING event: recovered panic of type agentanalytics.rawPanicPayload"):
+			sawCallbackDrop = true
+			isPanicLog = true
+		case strings.Contains(call.formatted, "dropped INVOCATION_COMPLETED event: recovered panic of type agentanalytics.rawPanicPayload"):
+			isPanicLog = true
+		case strings.Contains(call.formatted, "endInvocation fallback: recovered panic of type agentanalytics.rawPanicPayload"):
+			sawEndFallback = true
+			isPanicLog = true
+		case strings.Contains(call.formatted, "flushRunEnd fallback: recovered panic of type agentanalytics.rawPanicPayload"):
+			sawFlushFallback = true
+			isPanicLog = true
+		}
+		for idx, arg := range call.args {
+			switch arg.(type) {
+			case rawPanicPayload, *rawPanicPayload:
+				t.Errorf("Logger.Printf(%q) arg[%d] received raw panic value %#v", call.format, idx, arg)
+			}
+			if isPanicLog {
+				s, ok := arg.(string)
+				if !ok {
+					t.Errorf("panic log Logger.Printf(%q) arg[%d] has type %T, want string", call.format, idx, arg)
+				} else if strings.Contains(s, "secret") {
+					t.Errorf("panic log Logger.Printf(%q) arg[%d] leaked %q", call.format, idx, s)
+				}
+			}
+		}
+	}
+	if !sawCallbackDrop || !sawEndFallback || !sawFlushFallback {
+		t.Fatalf("missing expected panic log sites: callback=%t endFallback=%t flushFallback=%t; calls=%+v", sawCallbackDrop, sawEndFallback, sawFlushFallback, calls)
+	}
 }

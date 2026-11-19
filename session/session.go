@@ -410,8 +410,7 @@ func (c *EventCompaction) clone() *EventCompaction {
 			if p == nil {
 				continue
 			}
-			part := *p
-			content.Parts[i] = &part
+			content.Parts[i] = new(*p)
 		}
 		out.CompactedContent = &content
 	}

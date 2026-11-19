@@ -441,9 +441,8 @@ func TestEmptyDeltaCostsASessionlessForwarderItsUnwrap(t *testing.T) {
 	w := sessionlessForwarder{inner: Promote(inner)}
 
 	// A non-zero delta reaches WithICDelta, which forwards, so the user survives.
-	branch := "br"
 	withDelta := PromoteWithDelta(InvocationContext(w),
-		&CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: &branch}})
+		&CommonContextDelta{InvocationContextDelta: &InvocationContextDelta{Branch: new("br")}})
 	if id, ok := IdentityFromContext(withDelta); !ok || id.UserID != "u" {
 		t.Errorf("non-zero delta: IdentityFromContext() = %+v, %v; want %q — the forward should "+
 			"still unwrap to the inner invocation", id, ok, "u")
