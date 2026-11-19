@@ -553,6 +553,12 @@ func (s *dynamicSubScheduler) runAttempt(c *childCall, n int) (r attemptResult) 
 			childFailure = timeout.attribute(childCtx, evErr)
 			break
 		}
+		// An event the child yields after its context is done is dropped
+		// unread, as adk-python cancels the child at its deadline; the
+		// context's error then ends the attempt below.
+		if childCtx.Err() != nil {
+			break
+		}
 		if ev == nil {
 			continue
 		}
