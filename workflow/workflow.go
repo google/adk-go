@@ -57,8 +57,19 @@ import (
 // invalidate the custom node's subtree and repeat completed descendants.
 // Use RunNode within a DynamicNode to track child activations explicitly.
 type Node interface {
+	// Name identifies the node in its workflow: two distinct nodes of one
+	// workflow may not share it (ErrDuplicateNodeName). It is the node's
+	// segment of a node path, "<name>@<run id>", and the key of the node's
+	// output in a JoinNode's map.
 	Name() string
+	// Description is a human-readable summary of the node. The scheduler
+	// does not read it. An AgentNode or ToolNode takes it from its agent or
+	// tool, and a node that is runner.Config.Node gives it to the runner's
+	// root agent.
 	Description() string
+	// Config returns the node's settings, such as RetryConfig, Timeout and
+	// StateSchema. The workflow calls it at several points of a run, so it
+	// should return the same value on every call.
 	Config() NodeConfig
 	// InputSchema returns the JSON schema for the node's input.
 	// If it returns nil, it indicates there is no schema and no input validation is performed.
@@ -74,6 +85,13 @@ type Node interface {
 	// It returns the validated output (which might be coerced/parsed/transformed) or an error.
 	// The scheduler invokes it on every yielded event with a non-nil output, before forwarding it to the consumer.
 	ValidateOutput(output any) (any, error)
+	// Run runs one attempt of the node on its validated input. The node
+	// yields events: Event.Output carries its output, and Event.Routes
+	// selects its routed edges (at most one event of an activation may set
+	// Routes; a second fails the node with ErrMultipleRoutingEvents). A
+	// non-nil error ends the attempt as a failure, which RetryConfig may
+	// retry. When yield returns false the node must return. An event the
+	// node yields once ctx is done is dropped, and its yield returns false.
 	Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error]
 }
 
@@ -81,11 +99,19 @@ type Node interface {
 // from ctx.state. Used by Workflow's static state-schema validation
 // to detect mismatches between declared state fields and node consumers.
 type StateParamsAware interface {
+	// StateFieldNames returns the state keys the node reads its parameters
+	// from. New refuses a workflow with a state schema that does not declare
+	// one of them, other than a key with a colon, with a *StateSchemaError.
 	StateFieldNames() []string
 }
 
 // Route defines the interface for matching execution results to edges.
 type Route interface {
+	// Matches reports whether the edge fires for event, the one event of
+	// the source node's activation whose Routes is non-nil. It is not
+	// called when no event of the activation set Routes, and never for the
+	// Default route, which fires when no other routed edge of the node
+	// matched.
 	Matches(event *session.Event) bool
 }
 

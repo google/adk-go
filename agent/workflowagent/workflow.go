@@ -36,12 +36,25 @@ import (
 
 // Config is the configuration for creating a new Workflow agent.
 type Config struct {
-	Name                 string
-	Description          string
-	SubAgents            []agent.Agent
+	// Name is the agent's name, unique within the agent tree, and the name
+	// of its workflow: the first segment of its nodes' paths.
+	Name string
+	// Description is the agent's description, as in agent.Config.
+	Description string
+	// SubAgents are the agent's sub-agents in the agent tree, as in
+	// agent.Config. Listing an agent here does not put it in the graph:
+	// only Edges does. On a resumed turn the runner may run a listed agent
+	// on its own; see New.
+	SubAgents []agent.Agent
+	// BeforeAgentCallbacks are called before the workflow starts, as in
+	// agent.Config; see agent.BeforeAgentCallback for how their return
+	// values affect the run.
 	BeforeAgentCallbacks []agent.BeforeAgentCallback
-	AfterAgentCallbacks  []agent.AfterAgentCallback
-	Edges                []workflow.Edge
+	// AfterAgentCallbacks are called after the workflow ends, as in
+	// agent.Config; see agent.AfterAgentCallback.
+	AfterAgentCallbacks []agent.AfterAgentCallback
+	// Edges is the workflow's graph, validated by workflow.New.
+	Edges []workflow.Edge
 
 	// InputSchema, when non-nil, validates the workflow's input. See workflow.WithInputSchema.
 	InputSchema *jsonschema.Resolved
