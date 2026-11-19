@@ -82,7 +82,7 @@ func convertMessageToLLMResponse(msg *anthropic.Message, unwrapOutput bool) (*mo
 		},
 		UsageMetadata:  usageMeta,
 		FinishReason:   finishReason,
-		ModelVersion:   string(msg.Model),
+		ModelVersion:   msg.Model,
 		Partial:        false,
 		TurnComplete:   true,
 		CustomMetadata: customMeta,

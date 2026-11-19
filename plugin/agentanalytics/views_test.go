@@ -786,7 +786,7 @@ func splitJSONPathSegments(s string) []string {
 	var segs []string
 	var cur strings.Builder
 	inQuotes := false
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		ch := s[i]
 		switch {
 		case ch == '"':

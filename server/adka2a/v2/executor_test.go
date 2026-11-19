@@ -570,7 +570,7 @@ func TestExecutor_Cancel_AfterEvent(t *testing.T) {
 
 	msgId := a2a.NewMessageID()
 	result, sendErr := client.SendMessage(t.Context(), &a2a.SendMessageRequest{
-		Message: &a2a.Message{ID: string(msgId), Parts: a2a.ContentParts{a2a.NewTextPart("TEST")}, Role: a2a.MessageRoleUser},
+		Message: &a2a.Message{ID: msgId, Parts: a2a.ContentParts{a2a.NewTextPart("TEST")}, Role: a2a.MessageRoleUser},
 		Config:  &a2a.SendMessageConfig{ReturnImmediately: true},
 	})
 

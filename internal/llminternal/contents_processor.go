@@ -19,9 +19,9 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"maps"
 	"reflect"
 	"slices"
-	"sort"
 
 	"google.golang.org/genai"
 
@@ -201,8 +201,7 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	var accumulatedInputTranscription string
 	var accumulatedOutputTranscription string
 
-	for i := 0; i < len(filtered); i++ {
-		ev := filtered[i]
+	for i, ev := range filtered {
 		content := utils.Content(ev)
 		if content == nil || len(content.Parts) == 0 {
 			if ev.LLMResponse.InputTranscription != nil && ev.LLMResponse.InputTranscription.Text != "" {
@@ -667,11 +666,7 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 			// moves to the tail.
 			//
 			// Collect and sort the indices to process events in order.
-			var sortedIndices []int
-			for index := range responseEventIndicesSet {
-				sortedIndices = append(sortedIndices, index)
-			}
-			sort.Ints(sortedIndices)
+			sortedIndices := slices.Sorted(maps.Keys(responseEventIndicesSet))
 
 			// Collect the actual event objects to be merged.
 			eventsToMerge := make([]*session.Event, len(sortedIndices))

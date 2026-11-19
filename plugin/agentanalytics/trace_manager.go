@@ -5865,8 +5865,7 @@ func (inv *invocationTrace) nextSeqLocked() uint64 {
 // (bareKey, seq, key) so that primaryErr and firstErr selection is
 // deterministic and independent of the %p pointer prefix in callKey.
 func (inv *invocationTrace) sortedErrorKeysLocked() []string {
-	keys := slices.Collect(maps.Keys(inv.unrecoveredErrors))
-	slices.SortFunc(keys, func(a, b string) int {
+	keys := slices.SortedFunc(maps.Keys(inv.unrecoveredErrors), func(a, b string) int {
 		ea, eb := inv.unrecoveredErrors[a], inv.unrecoveredErrors[b]
 		return cmp.Or(
 			cmp.Compare(ea.bareKey, eb.bareKey),
