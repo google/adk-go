@@ -73,6 +73,12 @@ type NodeRunError struct {
 	// RunID is the per-invocation identifier, auto-counter or
 	// user-supplied via WithRunID.
 	RunID string
+	// Cause is why the child did not return an output. For a child that
+	// failed it wraps ErrNodeFailed and the child's own error; for a call
+	// refused before the child started it is an error such as one that
+	// wraps ErrInputValidation, ErrInvalidRunID or ErrOutputAlreadyDelegated;
+	// for a child that paused it is a pause sentinel such as
+	// ErrNodeInterrupted. The workflow always sets it.
 	Cause error
 }
 
@@ -91,6 +97,9 @@ func (e *NodeRunError) Error() string {
 	return fmt.Sprintf("workflow: dynamic child %s: %v", path, e.Cause)
 }
 
+// Unwrap returns Cause, so errors.Is and errors.As look through a
+// NodeRunError to the sentinel and the child's own error. It returns nil for
+// a nil e.
 func (e *NodeRunError) Unwrap() error {
 	if e == nil {
 		return nil
