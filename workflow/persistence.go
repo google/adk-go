@@ -17,6 +17,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -267,8 +268,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 		return s
 	}
 
-	for i := range events.Len() {
-		ev := events.At(i)
+	for _, ev := range utils.ApplyRewinds(slices.Collect(events.All())) {
 		if ev == nil {
 			continue
 		}
@@ -369,8 +369,7 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 	completed = map[string]bool{}
 	interruptOwner := map[string]string{}
 	resolved := map[string]bool{}
-	for i := range events.Len() {
-		ev := events.At(i)
+	for _, ev := range utils.ApplyRewinds(slices.Collect(events.All())) {
 		if ev == nil {
 			continue
 		}

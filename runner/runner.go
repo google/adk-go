@@ -2019,11 +2019,17 @@ func (r *Runner) restoreBranchFromHistory(sess session.Session, agentToRun agent
 // It ports adk-python's find_agent_to_run (agents/_agent_router.py) with
 // Runner._session_for_routing (runners.py).
 func (r *Runner) findAgentToRun(sess session.Session, msg *genai.Content) (agent.Agent, error) {
+	if r.outermostGraphWorkflow(r.rootAgent) != nil {
+		return r.rootAgent, nil
+	}
 	events := utils.ApplyRewinds(slices.Collect(sess.Events().All()))
 	if len(utils.FunctionResponses(msg)) > 0 {
 		events = append(events, &session.Event{Author: "user", LLMResponse: model.LLMResponse{Content: msg}})
 	}
 	if subAgent := r.answeredCallAgent(events); subAgent != nil {
+		if wf := r.outermostGraphWorkflow(subAgent); wf != nil {
+			return wf, nil
+		}
 		return subAgent, nil
 	}
 
@@ -2104,7 +2110,7 @@ func resumedUserContent(sess session.Session, msg *genai.Content, invocationID s
 // (agents/invocation_context.py).
 func rebuildAgentStates(events session.Events, invocationID string) (states map[string]map[string]any, ended map[string]bool) {
 	states, ended = map[string]map[string]any{}, map[string]bool{}
-	for ev := range events.All() {
+	for _, ev := range utils.ApplyRewinds(slices.Collect(events.All())) {
 		if ev.InvocationID != invocationID {
 			continue
 		}
@@ -2143,12 +2149,19 @@ func (r *Runner) resumedAgentToRun(sess session.Session, invocationID string, en
 // isInGraphWorkflow reports whether a or one of its ancestors is a graph
 // workflow agent built by workflowagent.New.
 func (r *Runner) isInGraphWorkflow(a agent.Agent) bool {
+	return r.outermostGraphWorkflow(a) != nil
+}
+
+// outermostGraphWorkflow returns the highest graph workflow agent
+// (workflowagent.New) enclosing a, or nil when none does.
+func (r *Runner) outermostGraphWorkflow(a agent.Agent) agent.Agent {
+	var outermost agent.Agent
 	for cur := a; cur != nil; cur = r.parents[cur.Name()] {
 		if ia, ok := cur.(agentinternal.Agent); ok && agentinternal.Reveal(ia).AgentType == agentinternal.TypeWorkflowAgent {
-			return true
+			outermost = cur
 		}
 	}
-	return false
+	return outermost
 }
 
 // checks if the agent and its parent chain allow transfer up the tree.

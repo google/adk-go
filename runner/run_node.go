@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"slices"
 
 	"google.golang.org/genai"
 
@@ -145,21 +146,40 @@ func (r *Runner) runNode(
 		yield(nil, err)
 		return
 	}
-	if replaced && r.usesLegacySubAgentPicker(rootMode) {
-		// The agent is picked again from the session that now holds the
-		// replacement, which may answer a sub-agent's call. Its branch is
-		// restored from the invocation's own events only, as adk-python
-		// does, so it never takes a branch of an earlier invocation.
-		agentToRun, err = r.findAgentToRun(storedSession, ictx.UserContent())
-		if err != nil {
-			yield(nil, err)
-			return
+	if replaced {
+		// When a callback replaces a resume message (or turns a message into
+		// one), recover the invocation's stored user prompt as UserContent
+		// while keeping the replacement for turnMessage, matching adk-python's
+		// workflow/_node_runner_utils.py.
+		newMsg := ictx.UserContent()
+		if len(utils.FunctionResponses(newMsg)) > 0 && ictx.InvocationID() != "" {
+			if stored := utils.FindUserMessageForInvocation(storedSession.Events(), ictx.InvocationID()); stored != nil {
+				baseCtx := context.WithValue(ictx, turnMessageKey{}, restoredTurn{message: newMsg, restored: stored})
+				ictx = ictx.WithDelta(&agent.CommonContextDelta{
+					InvocationContextDelta: &agent.InvocationContextDelta{
+						Context:     &baseCtx,
+						UserContent: &stored,
+					},
+				})
+				invocationCtx = ictx
+			}
 		}
-		branch := r.restoreBranchFromHistory(storedSession, agentToRun, ictx.InvocationID())
-		ictx = ictx.WithDelta(&agent.CommonContextDelta{
-			InvocationContextDelta: &agent.InvocationContextDelta{Agent: &agentToRun, Branch: &branch},
-		})
-		invocationCtx = ictx
+		if r.usesLegacySubAgentPicker(rootMode) {
+			// The agent is picked again from the session that now holds the
+			// replacement, which may answer a sub-agent's call. Its branch is
+			// restored from the invocation's own events only, as adk-python
+			// does, so it never takes a branch of an earlier invocation.
+			agentToRun, err = r.findAgentToRun(storedSession, turnMessage(ictx))
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			branch := r.restoreBranchFromHistory(storedSession, agentToRun, ictx.InvocationID())
+			ictx = ictx.WithDelta(&agent.CommonContextDelta{
+				InvocationContextDelta: &agent.InvocationContextDelta{Agent: &agentToRun, Branch: &branch},
+			})
+			invocationCtx = ictx
+		}
 	}
 
 	// Plugin lifecycle: after_run is deferred before the user message is
@@ -453,13 +473,11 @@ func buildResumeResponses(msg *genai.Content, state *workflow.RunState, sess ses
 // the interrupts still awaiting a human answer.
 func openLongRunningCallIDs(sess session.Session) map[string]struct{} {
 	open := map[string]struct{}{}
-	if sess == nil {
+	if sess == nil || sess.Events() == nil {
 		return open
 	}
 	answered := map[string]struct{}{}
-	events := sess.Events()
-	for i := range events.Len() {
-		ev := events.At(i)
+	for _, ev := range utils.ApplyRewinds(slices.Collect(sess.Events().All())) {
 		for _, id := range ev.LongRunningToolIDs {
 			open[id] = struct{}{}
 		}
@@ -559,12 +577,10 @@ func resolveInvocationID(sess session.Session, msg *genai.Content) (id string, s
 // carries a FunctionCall with the given id, or nil. Go analog of
 // adk-python functions.find_event_by_function_call_id (reverse scan).
 func findEventByFunctionCallID(sess session.Session, id string) *session.Event {
-	if sess == nil || id == "" {
+	if sess == nil || sess.Events() == nil || id == "" {
 		return nil
 	}
-	events := sess.Events()
-	for i := events.Len() - 1; i >= 0; i-- {
-		ev := events.At(i)
+	for _, ev := range slices.Backward(utils.ApplyRewinds(slices.Collect(sess.Events().All()))) {
 		if ev == nil {
 			continue
 		}

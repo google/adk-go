@@ -23,6 +23,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
@@ -232,7 +233,7 @@ func stamp(ctx context.Context, ev *session.Event) *session.Event {
 	return ev
 }
 
-// collect materializes a session's events into a slice.
+// collect returns the live events of sess as a slice (see utils.ApplyRewinds).
 func collect(sess session.Session) []*session.Event {
 	all := sess.Events()
 	if all == nil {
@@ -242,7 +243,7 @@ func collect(sess session.Session) []*session.Event {
 	for ev := range all.All() {
 		events = append(events, ev)
 	}
-	return events
+	return utils.ApplyRewinds(events)
 }
 
 // snapshotForSummarizer returns copies of the events to hand to third-party

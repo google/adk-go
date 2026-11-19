@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -413,7 +414,7 @@ func extractTaskDelegationFCs(ev *session.Event, toolsDict map[string]tool.Tool)
 // hide the coordinator's own FC from a prior turn. Author + tool-name
 // filtering is sufficient.
 func findUnresolvedTaskDelegations(sess session.Session, owner string, toolsDict map[string]tool.Tool) []*genai.FunctionCall {
-	if sess == nil {
+	if sess == nil || sess.Events() == nil {
 		return nil
 	}
 	// pendingFCs preserves discovery order (the order the LLM emitted
@@ -423,7 +424,7 @@ func findUnresolvedTaskDelegations(sess session.Session, owner string, toolsDict
 	fcOrder := map[string]int{}
 	resolvedIDs := map[string]struct{}{}
 
-	for ev := range sess.Events().All() {
+	for _, ev := range utils.ApplyRewinds(slices.Collect(sess.Events().All())) {
 		if ev == nil || ev.Content == nil {
 			continue
 		}

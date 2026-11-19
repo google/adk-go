@@ -21,6 +21,7 @@ package runner
 
 import (
 	"encoding/json"
+	"slices"
 
 	"google.golang.org/genai"
 
@@ -166,7 +167,7 @@ func runGenericAgentBody(
 // the current user turn's FunctionResponses reference.
 // Non-empty means this activation is a HITL resume.
 func answeredInterrupts(sess session.Session, userContent *genai.Content) map[string]bool {
-	if sess == nil {
+	if sess == nil || sess.Events() == nil {
 		return nil
 	}
 	responses := utils.FunctionResponses(userContent)
@@ -174,9 +175,7 @@ func answeredInterrupts(sess session.Session, userContent *genai.Content) map[st
 		return nil
 	}
 	longRunning := map[string]struct{}{}
-	events := sess.Events()
-	for i := range events.Len() {
-		ev := events.At(i)
+	for _, ev := range utils.ApplyRewinds(slices.Collect(sess.Events().All())) {
 		for _, id := range ev.LongRunningToolIDs {
 			longRunning[id] = struct{}{}
 		}

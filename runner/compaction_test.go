@@ -1895,3 +1895,49 @@ func TestBeforeRunPluginCannotPlantACompactionRecord(t *testing.T) {
 		}
 	}
 }
+
+type rewindEchoSummarizer struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+func (s *rewindEchoSummarizer) SummarizeEvents(_ context.Context, events []*session.Event) (compaction.SummarizeResult, error) {
+	var sb strings.Builder
+	for _, ev := range events {
+		if ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p != nil && p.Text != "" {
+				sb.WriteString(p.Text)
+				sb.WriteString(" | ")
+			}
+		}
+	}
+	s.mu.Lock()
+	s.seen = append(s.seen, sb.String())
+	s.mu.Unlock()
+	return compaction.SummarizeResult{Content: genai.NewContentFromText("SUMMARY: "+sb.String(), genai.RoleModel)}, nil
+}
+
+func TestCompaction_TailRetentionSkipsRewoundTurns(t *testing.T) {
+	const userID, sessionID = "u", "s"
+	m := &usageModel{promptTokens: 5000}
+	summ := &rewindEchoSummarizer{}
+	r, svc := newCompactionRunner(t, m, &compaction.Config{
+		TokenThreshold:     1000,
+		EventRetentionSize: 1,
+		Summarizer:         summ,
+	})
+
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("SECRET-TURN", genai.RoleUser), agent.RunConfig{}))
+	sess := getSession(t, svc, userID, sessionID)
+	inv1 := sess.Events().At(0).InvocationID
+	if err := r.Rewind(t.Context(), userID, sessionID, inv1, nil); err != nil {
+		t.Fatalf("Rewind: %v", err)
+	}
+	drain(t, r.Run(t.Context(), userID, sessionID, genai.NewContentFromText("q2", genai.RoleUser), agent.RunConfig{}))
+	if prompt := promptText(m.lastPrompt()); strings.Contains(prompt, "SECRET-TURN") {
+		t.Errorf("rewound turn leaked into tail-retention prompt:\n%s", prompt)
+	}
+}
