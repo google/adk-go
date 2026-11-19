@@ -393,12 +393,12 @@ func isLegacyLetterAt(s string, i int) bool {
 // legacyFoldPrefixEnd returns where word, in lowercase ASCII, ends if it
 // starts at s[i], ignoring case as legacyFoldAt does, or -1.
 func legacyFoldPrefixEnd(s string, i int, word string) int {
-	for k := 0; k < len(word); k++ {
+	for _, w := range []byte(word) {
 		if i >= len(s) {
 			return -1
 		}
 		c, size := legacyFoldAt(s, i)
-		if c != word[k] {
+		if c != w {
 			return -1
 		}
 		i += size

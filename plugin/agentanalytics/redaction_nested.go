@@ -15,6 +15,7 @@
 package agentanalytics
 
 import (
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -714,12 +715,7 @@ func hasValidCompoundPrefix(prefix string) bool {
 	if prefix == "" || isWordByte(prefix[len(prefix)-1]) {
 		return false
 	}
-	for i := 0; i < len(prefix); i++ {
-		if isDelimSpace(prefix[i]) {
-			return false
-		}
-	}
-	return true
+	return !slices.ContainsFunc([]byte(prefix), isDelimSpace)
 }
 
 func isControlDelimSpace(c byte) bool {
@@ -747,12 +743,12 @@ func isStackedBareTempKey(s string) bool {
 		return false
 	}
 	hasInnerColon := false
-	for i := 0; i < len(rest); i++ {
-		if rest[i] == ':' {
+	for _, c := range []byte(rest) {
+		if c == ':' {
 			hasInnerColon = true
 			continue
 		}
-		if !isTempKeyBodyByte(rest[i]) || isDelimSpace(rest[i]) {
+		if !isTempKeyBodyByte(c) || isDelimSpace(c) {
 			return false
 		}
 	}
@@ -861,8 +857,8 @@ func nestedKeyNameStrip(name string, at int, lineStart, stripQuotes bool) (neste
 // hasSpaceOrControl reports whether s holds whitespace, a control character
 // or another Unicode space.
 func hasSpaceOrControl(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if c := s[i]; isDelimSpace(c) {
+	for i, c := range []byte(s) {
+		if isDelimSpace(c) {
 			return true
 		} else if c >= utf8.RuneSelf {
 			return strings.IndexFunc(s[i:], func(r rune) bool { return unicode.IsSpace(r) || unicode.In(r, unicode.Z) }) >= 0
@@ -1391,8 +1387,7 @@ func isClosingPunctByte(c byte) bool {
 // optional text-value stop byte that is neither delimiter whitespace nor
 // closingPunctuation.
 func hasNonEmptyTextValue(s string, stopOnTextStop bool) bool {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
+	for _, c := range []byte(s) {
 		if stopOnTextStop && isTextValueStop(c) {
 			return false
 		}
@@ -1481,8 +1476,8 @@ func isQuoteGapBeforeNextString(s string, qPos, qEnd int, openQ openQuoteState, 
 	if quote == "" {
 		return false
 	}
-	for i := 0; i < len(inner); i++ {
-		if !isDelimSpace(inner[i]) {
+	for _, c := range []byte(inner) {
+		if !isDelimSpace(c) {
 			return false
 		}
 	}
