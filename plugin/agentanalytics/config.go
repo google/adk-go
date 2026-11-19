@@ -113,14 +113,15 @@ type DropStats struct {
 	// QueueFullDrops counts events dropped because QueueMaxSize was reached.
 	QueueFullDrops int64 `json:"queue_full_drops"`
 	// AppendFailureDrops counts events dropped because a plugin callback or row
-	// construction panicked (each recovered callback panic counts as at most 1
-	// failed event write; counts are approximate under rare logger panics), a
-	// batch write was skipped before sending because its write deadline had
-	// already expired or its desynchronized committed stream could not be
-	// replaced (including while stream rotation is in cooldown), or a BigQuery
-	// Storage Write append was rejected by the server or exhausted its retries.
-	// If the last attempt's outcome was unknown (sent, but no response), the
-	// rows may in fact have been written, so this is an upper bound.
+	// construction panicked (a panic in both afterRun and one of its cleanup
+	// fallbacks can count the same run more than once), a batch write was
+	// skipped before sending because its write deadline had already expired or
+	// its desynchronized committed stream could not be replaced (including
+	// while stream rotation is in cooldown), or a BigQuery Storage Write append
+	// was rejected by the server or exhausted its retries. Because fallback
+	// panics in afterRun can increment alongside the callback panic and an
+	// unknown last-attempt outcome (sent, but no response) may in fact have
+	// been written, this is an upper bound.
 	AppendFailureDrops int64 `json:"append_failure_drops"`
 	// RowErrorDrops counts individual rows rejected by BigQuery Storage Write
 	// AppendRowsResponse.RowErrors and isolated from their batch so the
