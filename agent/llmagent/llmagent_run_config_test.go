@@ -50,7 +50,8 @@ func TestRunConfig_Labels_RunConfigWinsOnConflict(t *testing.T) {
 		t.Fatalf("llmagent.New: %v", err)
 	}
 	runner := testutil.NewTestAgentRunner(t, a)
-	cfg := agent.RunConfig{Labels: map[string]string{"shared": "run-val", "adk_agent_name": "custom-owner"}}
+	runLabels := map[string]string{"shared": "run-val", "adk_agent_name": "custom-owner"}
+	cfg := agent.RunConfig{Labels: &runLabels}
 
 	if _, err := testutil.CollectEvents(runner.RunContentWithConfig(t, "session", genai.NewContentFromText("hi", genai.RoleUser), cfg)); err != nil {
 		t.Fatalf("run failed: %v", err)

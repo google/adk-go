@@ -314,14 +314,41 @@ func TestBasicProcessor_RunConfigHTTPOptions_CanonicalHeaderNames(t *testing.T) 
 }
 
 // TestBasicProcessor_RunConfigLabels_AgentWithoutLabels pins that RunConfig
-// labels reach the request when the agent configures no labels at all.
+// labels reach the request when the agent configures no labels at all, in a
+// map of the request's own.
 func TestBasicProcessor_RunConfigLabels_AgentWithoutLabels(t *testing.T) {
 	t.Parallel()
 
-	req := runBasicRequestProcessor(t, &State{}, &agent.RunConfig{Labels: map[string]string{"team": "billing"}})
+	labels := map[string]string{"team": "billing"}
+	req := runBasicRequestProcessor(t, &State{}, &agent.RunConfig{Labels: &labels})
 
 	if diff := cmp.Diff(map[string]string{"team": "billing"}, req.Config.Labels); diff != "" {
 		t.Errorf("req.Config.Labels mismatch (-want +got):\n%s", diff)
+	}
+	req.Config.Labels["written"] = "by callback"
+	if diff := cmp.Diff(map[string]string{"team": "billing"}, labels); diff != "" {
+		t.Errorf("RunConfig labels changed (-want +got):\n%s", diff)
+	}
+}
+
+// TestBasicProcessor_RunConfigLabels_NotWritten pins that writes into the
+// request's labels, as a BeforeModelCallback can make, reach neither the
+// caller's RunConfig.Labels nor the agent's labels.
+func TestBasicProcessor_RunConfigLabels_NotWritten(t *testing.T) {
+	t.Parallel()
+
+	runLabels := map[string]string{"team": "billing"}
+	agentLabels := map[string]string{"env": "prod"}
+	state := &State{GenerateContentConfig: &genai.GenerateContentConfig{Labels: agentLabels}}
+
+	req := runBasicRequestProcessor(t, state, &agent.RunConfig{Labels: &runLabels})
+	req.Config.Labels["written"] = "by callback"
+
+	if diff := cmp.Diff(map[string]string{"team": "billing"}, runLabels); diff != "" {
+		t.Errorf("RunConfig labels changed (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]string{"env": "prod"}, agentLabels); diff != "" {
+		t.Errorf("agent labels changed (-want +got):\n%s", diff)
 	}
 }
 

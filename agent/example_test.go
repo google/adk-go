@@ -88,7 +88,7 @@ func ExampleRunConfig_labels() {
 	}
 
 	runOnce(a, agent.RunConfig{
-		Labels: map[string]string{"team": "billing", "customer": "acme"},
+		Labels: &map[string]string{"team": "billing", "customer": "acme"},
 	})
 
 	labels := llm.lastReq.Config.Labels

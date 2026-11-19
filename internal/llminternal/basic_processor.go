@@ -50,11 +50,11 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 			if rc.HTTPOptions != nil {
 				mergeRunConfigHTTPOptions(req.Config, rc.HTTPOptions)
 			}
-			if len(rc.Labels) > 0 {
+			if rc.Labels != nil && len(*rc.Labels) > 0 {
 				if req.Config.Labels == nil {
-					req.Config.Labels = make(map[string]string, len(rc.Labels))
+					req.Config.Labels = make(map[string]string, len(*rc.Labels))
 				}
-				maps.Copy(req.Config.Labels, rc.Labels)
+				maps.Copy(req.Config.Labels, *rc.Labels)
 			}
 		}
 
