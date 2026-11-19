@@ -26,11 +26,26 @@ import (
 	"weak"
 
 	bq "cloud.google.com/go/bigquery"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-const viewDDLTimeout = 30 * time.Second
+const (
+	viewDDLTimeout                      = 30 * time.Second
+	defaultConflictVerifyInitialBackoff = 10 * time.Millisecond
+	defaultConflictVerifyMaxBackoff     = 250 * time.Millisecond
+)
+
+// conflictVerifyInitialBackoff and conflictVerifyMaxDuration allow unit tests
+// to shorten 409 conflict-verification polling without waiting out the 30s
+// per-view DDL budget. In production conflictVerifyMaxDuration is zero, so
+// resolveDDLConflict uses ctx's deadline directly (falling back to
+// viewDDLTimeout only when ctx carries no deadline).
+var (
+	conflictVerifyInitialBackoff = defaultConflictVerifyInitialBackoff
+	conflictVerifyMaxDuration    time.Duration
+)
 
 // maxBigQueryIdentifierLen is the longest dataset ID, and table or view name
 // in bytes, that BigQuery accepts.
@@ -1624,9 +1639,78 @@ type bqViewRunner struct {
 	// as the plugin lives, and the client's transport or credentials can
 	// refer to an object that holds the plugin. The plugin keeps the client
 	// alive instead.
-	client    weak.Pointer[bq.Client]
-	projectID string
-	datasetID string
+	client                 weak.Pointer[bq.Client]
+	projectID              string
+	datasetID              string
+	conflictInitialBackoff time.Duration
+	conflictVerifyTimeout  time.Duration
+}
+
+// safeErrorStatus formats only structured status metadata (context
+// cancellation/deadline, HTTP status code, or gRPC status code) without echoing
+// raw server response bodies or arbitrary error text.
+func safeErrorStatus(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline exceeded"
+	}
+	if apiErr, ok := errors.AsType[*googleapi.Error](err); ok {
+		return fmt.Sprintf("HTTP %d", apiErr.Code)
+	}
+	if st, ok := status.FromError(err); ok && st.Code() != codes.Unknown {
+		return fmt.Sprintf("gRPC %s", st.Code().String())
+	}
+	return "unclassified error"
+}
+
+// unverifiedViewConflictError reports that a CREATE OR REPLACE VIEW DDL job
+// encountered an HTTP 409 / AlreadyExists conflict while the target view could
+// not be confirmed in place with its expected query. Error formats only
+// structured metadata (view name, operation, and HTTP/gRPC status code) so raw
+// response bodies are never written to logs, while Unwrap exposes the
+// underlying conflict and metadata-read errors to errors.Is and errors.As.
+type unverifiedViewConflictError struct {
+	viewName    string
+	reason      string
+	err         error
+	verifyErr   error
+	deadlineErr error
+}
+
+func (e *unverifiedViewConflictError) Error() string {
+	conflictStatus := safeErrorStatus(e.err)
+	if e.verifyErr != nil {
+		return fmt.Sprintf("view %q DDL conflict (%s) could not be verified via tables.get (%s)", e.viewName, conflictStatus, safeErrorStatus(e.verifyErr))
+	}
+	reason := e.reason
+	if reason == "" {
+		reason = "view is not ready"
+	}
+	return fmt.Sprintf("view %q DDL conflict (%s): %s", e.viewName, conflictStatus, reason)
+}
+
+func (e *unverifiedViewConflictError) Unwrap() []error {
+	errs := []error{e.err}
+	if e.verifyErr != nil {
+		errs = append(errs, e.verifyErr)
+	}
+	if e.deadlineErr != nil && (e.verifyErr == nil || !errors.Is(e.verifyErr, e.deadlineErr)) {
+		errs = append(errs, e.deadlineErr)
+	}
+	return errs
+}
+
+// isUnverifiedViewConflict reports whether err wraps an
+// unverifiedViewConflictError, distinguishing a 409 / AlreadyExists conflict
+// whose view is not yet ready from one whose target view was verified in place.
+func isUnverifiedViewConflict(err error) bool {
+	_, ok := errors.AsType[*unverifiedViewConflictError](err)
+	return ok
 }
 
 func (r bqViewRunner) RunViewDDL(ctx context.Context, viewName, query string) error {
@@ -1634,14 +1718,19 @@ func (r bqViewRunner) RunViewDDL(ctx context.Context, viewName, query string) er
 	if client == nil {
 		return errors.New("agentanalytics: BigQuery client is not configured for view creation")
 	}
+	var (
+		table         *bq.Table
+		selectBody    string
+		hasSelectBody bool
+	)
 	if r.datasetID != "" && viewName != "" {
-		if _, selectBody, ok := strings.Cut(query, " AS\n"); ok {
-			var table *bq.Table
-			if r.projectID != "" {
-				table = client.DatasetInProject(r.projectID, r.datasetID).Table(viewName)
-			} else {
-				table = client.Dataset(r.datasetID).Table(viewName)
-			}
+		if r.projectID != "" {
+			table = client.DatasetInProject(r.projectID, r.datasetID).Table(viewName)
+		} else {
+			table = client.Dataset(r.datasetID).Table(viewName)
+		}
+		if _, body, ok := strings.Cut(query, " AS\n"); ok {
+			selectBody, hasSelectBody = body, true
 			md, err := table.Metadata(ctx)
 			if err == nil && md != nil {
 				// CREATE OR REPLACE VIEW cannot replace a table that is not a
@@ -1660,16 +1749,142 @@ func (r bqViewRunner) RunViewDDL(ctx context.Context, viewName, query string) er
 	// BigQuery is not canceled on the server.
 	job, err := client.Query(query).Run(ctx)
 	if err != nil {
-		return err
+		return r.resolveDDLConflict(ctx, table, viewName, selectBody, hasSelectBody, err)
 	}
 	js := job.LastStatus()
 	if js == nil || !js.Done() {
 		js, err = job.Wait(ctx)
 		if err != nil {
-			return err
+			return r.resolveDDLConflict(ctx, table, viewName, selectBody, hasSelectBody, err)
 		}
 	}
-	return js.Err()
+	if err := js.Err(); err != nil {
+		return r.resolveDDLConflict(ctx, table, viewName, selectBody, hasSelectBody, err)
+	}
+	return nil
+}
+
+// resolveDDLConflict checks whether a 409 / AlreadyExists error left the
+// target view in place with its expected query. A retried jobs.insert can get
+// 409 for the existing job ID while that DDL job is still pending or has
+// failed, so table.Metadata is polled with short exponential backoff within
+// ctx's deadline (or viewDDLTimeout when ctx has no deadline) when the view is
+// not yet found, a transient metadata read error (429/5xx) occurs, or the view
+// still carries an older query. Permanent failures (an existing non-view
+// object or non-retryable 400/401/403 metadata errors) return immediately.
+func (r bqViewRunner) resolveDDLConflict(ctx context.Context, table *bq.Table, viewName, selectBody string, hasSelectBody bool, ddlErr error) error {
+	if !isConflictError(ddlErr) {
+		return ddlErr
+	}
+	if table == nil {
+		return &unverifiedViewConflictError{viewName: viewName, err: ddlErr}
+	}
+	backoff := r.conflictInitialBackoff
+	if backoff <= 0 {
+		backoff = conflictVerifyInitialBackoff
+	}
+	timeout := r.conflictVerifyTimeout
+	if timeout <= 0 {
+		timeout = conflictVerifyMaxDuration
+	}
+	verifyCtx := ctx
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		verifyCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	} else if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		verifyCtx, cancel = context.WithTimeout(ctx, viewDDLTimeout)
+		defer cancel()
+	}
+
+	var (
+		lastVerifyErr error
+		lastReason    string
+		timer         *time.Timer
+	)
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+
+	for {
+		md, err := table.Metadata(verifyCtx)
+		if err == nil && md != nil {
+			if md.Type != bq.ViewTable {
+				return &unverifiedViewConflictError{
+					viewName: viewName,
+					reason:   "existing BigQuery object is not a view",
+					err:      ddlErr,
+				}
+			}
+			if !hasSelectBody || strings.TrimSpace(md.ViewQuery) == strings.TrimSpace(selectBody) {
+				return nil
+			}
+			lastVerifyErr = nil
+			lastReason = "existing view query does not match"
+		} else if err != nil {
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return &unverifiedViewConflictError{viewName: viewName, err: ddlErr, verifyErr: ctx.Err()}
+			}
+			if verifyErr := verifyCtx.Err(); verifyErr != nil {
+				deadlineErr := verifyErr
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					deadlineErr = ctxErr
+				}
+				if lastVerifyErr != nil || lastReason != "" {
+					return &unverifiedViewConflictError{
+						viewName:    viewName,
+						reason:      lastReason,
+						err:         ddlErr,
+						verifyErr:   lastVerifyErr,
+						deadlineErr: deadlineErr,
+					}
+				}
+				return &unverifiedViewConflictError{viewName: viewName, err: ddlErr, verifyErr: deadlineErr}
+			}
+			if !isRetryableConflictVerifyError(err) {
+				return &unverifiedViewConflictError{viewName: viewName, err: ddlErr, verifyErr: err}
+			}
+			lastVerifyErr = err
+			lastReason = ""
+		} else {
+			lastVerifyErr = nil
+			lastReason = "view metadata is empty"
+		}
+
+		if timer == nil {
+			timer = time.NewTimer(backoff)
+		} else {
+			timer.Reset(backoff)
+		}
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.Canceled) || (lastVerifyErr == nil && lastReason == "") {
+				return &unverifiedViewConflictError{viewName: viewName, err: ddlErr, verifyErr: ctx.Err()}
+			}
+			return &unverifiedViewConflictError{
+				viewName:    viewName,
+				reason:      lastReason,
+				err:         ddlErr,
+				verifyErr:   lastVerifyErr,
+				deadlineErr: ctx.Err(),
+			}
+		case <-verifyCtx.Done():
+			if lastVerifyErr != nil || lastReason != "" {
+				return &unverifiedViewConflictError{
+					viewName:    viewName,
+					reason:      lastReason,
+					err:         ddlErr,
+					verifyErr:   lastVerifyErr,
+					deadlineErr: verifyCtx.Err(),
+				}
+			}
+			return &unverifiedViewConflictError{viewName: viewName, err: ddlErr, verifyErr: verifyCtx.Err()}
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, defaultConflictVerifyMaxBackoff)
+	}
 }
 
 // syncAnalyticsViews executes CREATE OR REPLACE VIEW for every definition in
@@ -1701,7 +1916,7 @@ func syncAnalyticsViewsWithRetryHint(ctx context.Context, runner viewRunner, def
 		ddlCtx, cancel := context.WithTimeout(ctx, viewDDLTimeout)
 		err := runner.RunViewDDL(ddlCtx, def.Name, def.Query)
 		cancel()
-		if err == nil || isConflictError(err) {
+		if err == nil || (isConflictError(err) && !isUnverifiedViewConflict(err)) {
 			created++
 			continue
 		}
@@ -1718,7 +1933,7 @@ func syncAnalyticsViewsWithRetryHint(ctx context.Context, runner viewRunner, def
 		}
 		failed++
 		if logf != nil && !errors.Is(err, context.Canceled) && status.Code(err) != codes.Canceled {
-			logf("agentanalytics: failed to create view %s: %v", def.Name, err)
+			logf("agentanalytics: failed to create view %s: %s", def.Name, err.Error())
 		}
 		errs = append(errs, fmt.Errorf("failed to create view %s: %w", def.Name, err))
 	}
@@ -1735,7 +1950,7 @@ var errPluginClosed = errors.New("agentanalytics: plugin is closed")
 // synchronously using ctx. It runs even when DisableCreateViews is set,
 // permanently cancels any in-flight startup view creation pass, and returns
 // the joined per-view errors with 409 Conflict / AlreadyExists responses
-// ignored. When one view group (per-event or evaluation) fails definition or
+// ignored once the view is confirmed to exist. When one view group (per-event or evaluation) fails definition or
 // configuration validation while the other group is valid, the valid views
 // still run and their result is joined with the group validation error; if no
 // valid views remain, SyncViews returns the validation error without
@@ -1769,7 +1984,7 @@ func (p *BigQueryAgentAnalyticsPlugin) SyncViews(ctx context.Context) error {
 // an error without canceling any in-flight startup view creation pass. Once
 // validated, it permanently cancels any in-flight startup pass and creates or
 // replaces only the two evaluation views (ignoring 409 Conflict / AlreadyExists
-// responses). If [Config.DisableCreateViews] is false and the canceled startup
+// responses once the view is confirmed to exist). If [Config.DisableCreateViews] is false and the canceled startup
 // pass had not finished creating the per-event views, call
 // [BigQueryAgentAnalyticsPlugin.SyncViews] afterwards to create the remaining
 // per-event views. It shares the view gate and Close preemption semantics of
@@ -1901,13 +2116,16 @@ func (s *pluginState) isClosed() bool {
 }
 
 // startAsyncViewCreation runs a view creation pass for defs in the background,
-// logging failures through logf if it is not nil. The pass keeps client
-// reachable until it ends, because the runner refers to it only weakly.
-func (s *pluginState) startAsyncViewCreation(parentCtx context.Context, defs []ViewDefinition, logf func(format string, args ...any), client *bq.Client) {
-	s.startAsyncViewCreationWithRetryHint(parentCtx, defs, logf, "SyncViews", client)
+// logging failures through logf if it is not nil, and calling onReady,
+// Config.OnSchemaReady, if it is not nil, once the pass has created every
+// view. The pass keeps client reachable until it ends, because the runner
+// refers to it only weakly, and holds onReady, which can refer to the
+// caller's objects, only until it ends.
+func (s *pluginState) startAsyncViewCreation(parentCtx context.Context, defs []ViewDefinition, logf func(format string, args ...any), client *bq.Client, onReady func()) {
+	s.startAsyncViewCreationWithRetryHint(parentCtx, defs, logf, "SyncViews", client, onReady)
 }
 
-func (s *pluginState) startAsyncViewCreationWithRetryHint(parentCtx context.Context, defs []ViewDefinition, logf func(format string, args ...any), retryMethod string, client *bq.Client) {
+func (s *pluginState) startAsyncViewCreationWithRetryHint(parentCtx context.Context, defs []ViewDefinition, logf func(format string, args ...any), retryMethod string, client *bq.Client, onReady func()) {
 	viewsCtx, viewsCancel := context.WithCancel(context.WithoutCancel(parentCtx))
 	done := make(chan struct{})
 	s.viewsMu.Lock()
@@ -1923,6 +2141,7 @@ func (s *pluginState) startAsyncViewCreationWithRetryHint(parentCtx context.Cont
 		// caller's objects, so the pass forgets it once it ends, before
 		// anyone waiting on done goes on.
 		defer func() {
+			onReady = nil
 			s.viewsMu.Lock()
 			s.viewsCancel = nil
 			s.asyncViewsDone = nil
@@ -1936,7 +2155,15 @@ func (s *pluginState) startAsyncViewCreationWithRetryHint(parentCtx context.Cont
 		if s.isClosed() || viewsCtx.Err() != nil {
 			return
 		}
-		_ = syncAnalyticsViewsWithRetryHint(viewsCtx, runner, defs, logf, retryMethod)
+		if err := syncAnalyticsViewsWithRetryHint(viewsCtx, runner, defs, logf, retryMethod); err != nil {
+			// A view that failed, or a pass that SyncViews or Close ended,
+			// leaves the schema not ready, as in adk-python.
+			return
+		}
+		if s.isClosed() || viewsCtx.Err() != nil {
+			return
+		}
+		notifySchemaReady(onReady, logf)
 	}()
 }
 

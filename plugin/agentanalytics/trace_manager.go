@@ -38,6 +38,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
@@ -286,22 +287,19 @@ type spanRecord struct {
 	// AfterAgentCallback, and an ancestor LLM agent under which a resumed
 	// nested task was parented is still active in its own runChat loop.
 	taskDelegated bool
-	// finishedTasks holds the function call IDs of the finish_task calls
-	// that the activation's own tool callbacks saw complete (see
-	// noteTaskFinished), so that the function response event that reports
-	// one of them ends this activation rather than another run of the same
-	// agent on the same branch, on another node path or, if no other run on
-	// the event's node path saw a call with that ID complete, on the same one
-	// (see finishedTaskLocked and popTaskAgentSpan).
-	finishedTasks []string
-	// failedTasks holds, likewise, the function call IDs of the finish_task
-	// calls that this plugin's tool callback saw end the activation with a
-	// classified tool result error (see noteTaskFinished). Keeping them apart
-	// from finishedTasks lets finishedTaskLocked disambiguate a failed call
-	// and a completed call that share a reused ID when both runs are open on
-	// the same path, while still matching across both lists when an
-	// agent-level AfterToolCallback alters the error flag afterwards.
-	failedTasks []string
+	// eventClockStart is platform.Now(ctx) read before inv.mu when a task-mode
+	// agent activation opens (zero for non-task agents so ordinary runs do not
+	// advance a custom platform TimeProvider), matching the clock with which
+	// session.NewEvent stamps events so an event created before this activation
+	// started cannot be attributed to it.
+	eventClockStart time.Time
+	// taskAttempts holds the finish_task calls that this activation's own tool
+	// callbacks observed, keeping observed completions (taskAttemptCompleted and
+	// taskAttemptFailedEnd) strictly separate from pending/non-ending attempts
+	// (taskAttemptPending) until the FunctionResponse event arrives (see
+	// noteTaskStart, noteTaskAttempt, retireFailedTaskAttempts, and
+	// finishedTaskLocked).
+	taskAttempts []taskAttempt
 	// nonLLM reports that the agent is a workflow agent, such as a sequential
 	// or loop agent, rather than an llmagent whose sub-agents can transfer to
 	// peers.
@@ -2921,6 +2919,10 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 			}
 			delete(tm.invocations, invocationID)
 		}
+		if existing.identity.spanID != "" && existing.identity.spanID == savedID.spanID {
+			savedID.traceID = cmp.Or(savedID.traceID, existing.identity.traceID)
+			savedID.rootAgentName = cmp.Or(savedID.rootAgentName, existing.identity.rootAgentName)
+		}
 		existing.identity = savedID
 		if inv.pendingSpans.Load() > 0 {
 			existing.livePending = inv.pendingSpans
@@ -3302,8 +3304,17 @@ func (tm *traceManager) endInvocationTarget(ctx context.Context, id identity, ta
 		func() {
 			tm.mu.Lock()
 			defer tm.mu.Unlock()
-			if cur := tm.invocations[id.invocationID]; cur != nil && cur != inv && cur.rootSpanID != inv.rootSpanID {
-				finishDetachedTrace(inv)
+			if cur := tm.invocations[id.invocationID]; cur != nil && cur != inv {
+				if cur.rootSpanID != inv.rootSpanID {
+					finishDetachedTrace(inv)
+					return
+				}
+				// The same root span was evicted and restored into cur between lookup
+				// and publication: publish inv first (keeping any adopted trace ID and
+				// calls from inv), then publish and unlink cur so cur does not remain
+				// active in tm.invocations or tm.evicted.
+				tm.rememberCompletedAtLocked(id.invocationID, id.agentName, inv, now)
+				tm.rememberCompletedAtLocked(id.invocationID, id.agentName, cur, now)
 				return
 			}
 			// Publish the final identity, including any trace adopted by rowSpan,
@@ -3399,7 +3410,12 @@ func (tm *traceManager) completeRunEndTarget(id identity, target runEndTarget, n
 			return
 		}
 		if cur := tm.invocations[id.invocationID]; cur != nil {
-			if cur == target.inv || (target.inv.rootSpanID != "" && cur.rootSpanID == target.inv.rootSpanID) {
+			if cur == target.inv {
+				tm.rememberCompletedAtLocked(id.invocationID, id.agentName, cur, now)
+				return
+			}
+			if target.inv.rootSpanID != "" && cur.rootSpanID == target.inv.rootSpanID {
+				tm.rememberCompletedAtLocked(id.invocationID, id.agentName, target.inv, now)
 				tm.rememberCompletedAtLocked(id.invocationID, id.agentName, cur, now)
 				return
 			}
@@ -3547,8 +3563,14 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	defer inv.pendingSpans.Add(-1)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
-	// SubAgents is user code, so it is read before mu is taken.
+	// SubAgents and any custom platform TimeProvider are user code, so both are
+	// read before mu is taken; non-task agents skip platform.Now so registering
+	// the plugin does not advance an application clock on ordinary runs.
 	children := runningAgentChildren(ctx, id.agentName)
+	var eventClockStart time.Time
+	if children.taskMode {
+		eventClockStart = platform.Now(ctx)
+	}
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	activation := activationKey(ctx)
 	ended := endedFunc(ctx)
@@ -3741,6 +3763,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		branch:               id.branch,
 		start:                now,
 		lastActivity:         now,
+		eventClockStart:      eventClockStart,
 		canceled:             canceledFunc(ctx),
 		ended:                ended,
 		goroutineID:          goid,
@@ -4059,6 +4082,102 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 	}
 }
 
+type taskAttemptKind uint8
+
+const (
+	// taskAttemptPending is a finish_task call that has started or whose
+	// observed result in afterTool did not carry the task-ending sentinel,
+	// which a later AfterToolCallback may still promote before the
+	// FunctionResponse event is emitted.
+	taskAttemptPending taskAttemptKind = iota
+	// taskAttemptCompleted is a finish_task call whose observed result in
+	// afterTool carried the task-ending sentinel without a classified tool
+	// result error.
+	taskAttemptCompleted
+	// taskAttemptFailedEnd is a finish_task call whose observed result in
+	// afterTool carried the task-ending sentinel together with a classified
+	// tool result error.
+	taskAttemptFailedEnd
+)
+
+// taskDispatchMaps holds weak references to the StateDelta and ArtifactDelta
+// map headers allocated for a tool call's EventActions. ADK copies EventActions
+// by struct value onto the resulting FunctionResponse session.Event
+// (ev.Actions = *toolCtx.Actions()), so both map headers remain reachable on
+// any buffered single-part or leading-part FunctionResponse event without
+// taskAttempt retaining user state payloads or risking recycled uintptr
+// addresses after garbage collection.
+type taskDispatchMaps struct {
+	stateDelta    weak.Pointer[byte]
+	artifactDelta weak.Pointer[byte]
+}
+
+func mapHeaderWeakPtr[K comparable, V any](m map[K]V) weak.Pointer[byte] {
+	if m == nil {
+		return weak.Pointer[byte]{}
+	}
+	p := (*byte)(reflect.ValueOf(m).UnsafePointer())
+	if p == nil {
+		return weak.Pointer[byte]{}
+	}
+	return weak.Make(p)
+}
+
+func dispatchMapsOf(actions *session.EventActions) taskDispatchMaps {
+	if actions == nil {
+		return taskDispatchMaps{}
+	}
+	return taskDispatchMaps{
+		stateDelta:    mapHeaderWeakPtr(actions.StateDelta),
+		artifactDelta: mapHeaderWeakPtr(actions.ArtifactDelta),
+	}
+}
+
+func (d taskDispatchMaps) hasLiveMap() bool {
+	return d.stateDelta.Value() != nil || d.artifactDelta.Value() != nil
+}
+
+func (d taskDispatchMaps) matches(other taskDispatchMaps) bool {
+	if d.stateDelta.Value() != nil && d.stateDelta == other.stateDelta {
+		return true
+	}
+	return d.artifactDelta.Value() != nil && d.artifactDelta == other.artifactDelta
+}
+
+type taskAttempt struct {
+	callID      string
+	kind        taskAttemptKind
+	startedOnly bool
+	recordedAt  time.Time
+	seq         uint64
+	dispatch    taskDispatchMaps
+}
+
+func isObservedEndingAttempt(kind taskAttemptKind) bool {
+	return kind == taskAttemptCompleted || kind == taskAttemptFailedEnd
+}
+
+type taskMatchStatus uint8
+
+const (
+	taskMatchUnobserved taskMatchStatus = iota
+	taskMatchFound
+	taskMatchAmbiguous
+)
+
+func earlierTaskAttempt(aTime time.Time, aSeq uint64, bTime time.Time, bSeq uint64) bool {
+	if !aTime.IsZero() && !bTime.IsZero() && !aTime.Equal(bTime) {
+		return aTime.Before(bTime)
+	}
+	if aSeq != bSeq && (aSeq == 0) == (bSeq == 0) {
+		return aSeq < bSeq
+	}
+	if aSeq != 0 && bSeq == 0 {
+		return true
+	}
+	return false
+}
+
 // popTaskAgentSpan ends the span of a task-mode sub-agent that completed via
 // a finish_task function response (which ADK does without running
 // AfterAgentCallback), and marks its delegating agent activation as having
@@ -4075,18 +4194,30 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 //
 // failed reports that the response also carries a classified tool result
 // error, with which ADK ends the activation as well, but which fails its task.
-// The response ends the activation on the event's node path whose finish_task
-// call with one of the call IDs in calls ended the activation (using failed to
-// disambiguate when two runs on that path share a call ID; see
-// finishedTaskLocked), and otherwise, when no such activation is open or more
-// than one is, as for a response whose call this plugin did not see complete,
-// the activation that findAgentForContext finds. OnEventCallback runs on the runner's goroutine
-// with the runner's context, and the event does not show that the run that
-// wrote it returned: a custom agent can forward the event of a sub-agent that
-// it runs on another goroutine and wait for that goroutine later. So the span
-// is retired without the activation's InvocationContext being read and
-// without its run being taken to be over (see retireAgentLocked).
-func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls []string, failed bool) (span rowSpan, ok bool) {
+// All ending call IDs on the event are evaluated together before any attempt is
+// consumed (see resolveFinishedTaskLocked): single-call ties resolve to the
+// earliest-recorded attempt so overlapping runs reusing call_0 all close
+// cleanly, while disjoint multi-call matches leave spans open rather than
+// guessing across conflicting call IDs. An unobserved call falls back to
+// unobservedTaskLocked. OnEventCallback runs on the runner's goroutine with
+// the runner's context, and the event does not show that the run that wrote it
+// returned: a custom agent can forward the event of a sub-agent that it runs
+// on another goroutine and wait for that goroutine later. So the span is
+// retired without the activation's InvocationContext being read and without
+// its run being taken to be over (see retireAgentLocked).
+func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, callID string, failed bool, eventTime time.Time) (span rowSpan, ok bool) {
+	var endingCallIDs []string
+	if callID != "" {
+		endingCallIDs = []string{callID}
+	}
+	return tm.popTaskAgentSpanForCalls(ctx, id, endingCallIDs, failed, eventTime)
+}
+
+func (tm *traceManager) popTaskAgentSpanForCalls(ctx context.Context, id identity, endingCallIDs []string, failed bool, eventTime time.Time) (span rowSpan, ok bool) {
+	return tm.popTaskAgentSpanForEvent(ctx, id, endingCallIDs, "", taskDispatchMaps{}, failed, len(endingCallIDs) > 1, eventTime)
+}
+
+func (tm *traceManager) popTaskAgentSpanForEvent(ctx context.Context, id identity, endingCallIDs []string, leadingActionCallID string, evDispatch taskDispatchMaps, failed, mergedResponse bool, eventTime time.Time) (span rowSpan, ok bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
@@ -4094,9 +4225,19 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	i := inv.finishedTaskLocked(id, calls, failed)
-	if i < 0 {
-		i = inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
+	i, status := inv.resolveFinishedTaskLocked(id, endingCallIDs, leadingActionCallID, evDispatch, failed, mergedResponse, eventTime)
+	switch status {
+	case taskMatchAmbiguous:
+		return rowSpan{}, false
+	case taskMatchUnobserved:
+		fallbackCallID := ""
+		for _, cid := range endingCallIDs {
+			if cid != "" {
+				fallbackCallID = cid
+				break
+			}
+		}
+		i = inv.unobservedTaskLocked(ctx, id, fallbackCallID, eventTime)
 	}
 	if i < 0 {
 		return rowSpan{}, false
@@ -4129,65 +4270,559 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	return span, true
 }
 
-// finishedTaskLocked returns the index in agentStack of the open activation
-// of the agent of id, on the node path of id, that saw one of the finish_task
-// calls in calls end the activation (see noteTaskFinished), or -1 if there is
-// none, or more than one. Both finishedTasks and failedTasks are searched
-// because agent-level AfterToolCallbacks run after this plugin and can add or
-// clear a tool result error flag before the FunctionResponse event is emitted.
-// A function call ID is scoped to the activation that made the call, not
-// unique: ADK keeps the ID that a model gives a call, and providers reuse IDs
-// such as "call_0" (see toolKey). When more than one open run on the event's
-// node path recorded the call ID, failed narrows the lookup to the list
-// matching the event's classification; if none or more than one still matches,
-// -1 is returned. As in findAgent, a node path that either side lacks matches
-// any. inv.mu must be held.
-func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string, failed bool) int {
-	const ambiguous = -2
-	anyFound := -1
-	matchedFound := -1
-	for i := len(inv.agentStack) - 1; i > 0; i-- {
+func (inv *invocationTrace) matchesTaskAgentLocked(rec *spanRecord, id identity) bool {
+	return rec.kind == spanKindAgent && rec.taskMode &&
+		rec.name == id.agentName && rec.branch == id.branch &&
+		(id.path == "" || rec.path == "" || rec.path == id.path)
+}
+
+// finishedTaskLocked resolves and consumes a single ending finish_task callID
+// on id, delegating to resolveFinishedTaskLocked. inv.mu must be held.
+func (inv *invocationTrace) finishedTaskLocked(id identity, callID string, failed bool, eventTime time.Time) (int, taskMatchStatus) {
+	if callID == "" {
+		return -1, taskMatchUnobserved
+	}
+	return inv.resolveFinishedTaskLocked(id, []string{callID}, "", taskDispatchMaps{}, failed, false, eventTime)
+}
+
+// resolveFinishedTaskLocked evaluates all non-empty endingCallIDs of a
+// finish_task completion event before consuming any attempt:
+//
+//  1. Leading-part EventActions map identity (weak references to StateDelta and
+//     ArtifactDelta on the first FunctionResponse part) selects the exact
+//     producing activation immediately when matched, and deprioritizes
+//     disproved attempts when another candidate or open activation exists.
+//  2. Timestamp plausibility (excluding activations started after eventTime, and
+//     excluding attempts recorded after eventTime on single-response events
+//     while keeping parallel merged-response attempts whose sibling part
+//     stamped an earlier event timestamp) and O(N log N) suffix-maximum causal
+//     supersession narrow candidates across all endingCallIDs.
+//  3. Across multiple observed call IDs in one merged event, an activation must
+//     account for every surviving observed call ID; disjoint matches across
+//     different activations return taskMatchAmbiguous without consuming any
+//     attempt. Same-set ties choose the highest tier (1: matching failed, 2:
+//     opposite terminal flag, 3: pending) and then the earliest-recorded
+//     attempt (recordedAt, seq, stack order) so overlapping call_0 runs all
+//     close cleanly.
+//
+// inv.mu must be held.
+func (inv *invocationTrace) resolveFinishedTaskLocked(id identity, endingCallIDs []string, leadingActionCallID string, evDispatch taskDispatchMaps, failed, mergedResponse bool, eventTime time.Time) (int, taskMatchStatus) {
+	var callIDs []string
+	for _, cid := range endingCallIDs {
+		if cid != "" && !slices.Contains(callIDs, cid) {
+			callIDs = append(callIDs, cid)
+		}
+	}
+	if len(callIDs) == 0 {
+		return -1, taskMatchUnobserved
+	}
+
+	wantKind := taskAttemptCompleted
+	altEndKind := taskAttemptFailedEnd
+	if failed {
+		wantKind = taskAttemptFailedEnd
+		altEndKind = taskAttemptCompleted
+	}
+
+	var matchingOpen []int
+	hasPlausibleOpenWithoutEnding := false
+	for i := 1; i < len(inv.agentStack); i++ {
 		rec := inv.agentStack[i]
-		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch ||
-			(id.path != "" && rec.path != "" && rec.path != id.path) {
+		if !inv.matchesTaskAgentLocked(rec, id) {
 			continue
 		}
-		inFinished := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.finishedTasks, call) })
-		inFailed := slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(rec.failedTasks, call) })
-		if !inFinished && !inFailed {
+		matchingOpen = append(matchingOpen, i)
+		if !eventTime.IsZero() && !rec.eventClockStart.IsZero() && eventTime.Before(rec.eventClockStart) {
 			continue
 		}
-		if anyFound == -1 {
-			anyFound = i
-		} else {
-			anyFound = ambiguous
+		hasEnding := slices.ContainsFunc(rec.taskAttempts, func(att taskAttempt) bool {
+			return isObservedEndingAttempt(att.kind)
+		})
+		if !hasEnding {
+			hasPlausibleOpenWithoutEnding = true
 		}
-		if (failed && inFailed) || (!failed && inFinished) {
-			if matchedFound == -1 {
-				matchedFound = i
-			} else {
-				matchedFound = ambiguous
+	}
+	if len(matchingOpen) == 0 {
+		return -1, taskMatchUnobserved
+	}
+
+	type tierChoice struct {
+		ok              bool
+		recordedAt      time.Time
+		seq             uint64
+		actionMatched   bool
+		actionDisproved bool
+	}
+	betterAttempt := func(cur, cand tierChoice) bool {
+		if !cur.ok {
+			return true
+		}
+		if cand.actionMatched != cur.actionMatched {
+			return cand.actionMatched
+		}
+		if cand.actionDisproved != cur.actionDisproved {
+			return !cand.actionDisproved
+		}
+		return earlierTaskAttempt(cand.recordedAt, cand.seq, cur.recordedAt, cur.seq)
+	}
+
+	type taskCandidate struct {
+		idx             int
+		callID          string
+		kind            taskAttemptKind
+		tier            uint8
+		recordedAt      time.Time
+		seq             uint64
+		actionMatched   bool
+		actionDisproved bool
+	}
+
+	var candidates []taskCandidate
+	for _, cid := range callIDs {
+		checkAction := cid == leadingActionCallID && evDispatch.hasLiveMap()
+		for _, i := range matchingOpen {
+			rec := inv.agentStack[i]
+			var wantC, altC, pendingC tierChoice
+			for _, att := range rec.taskAttempts {
+				if att.callID != cid {
+					continue
+				}
+				matched := checkAction && att.dispatch.matches(evDispatch)
+				disproved := checkAction && !matched && att.dispatch.hasLiveMap()
+				cand := tierChoice{
+					ok:              true,
+					recordedAt:      att.recordedAt,
+					seq:             att.seq,
+					actionMatched:   matched,
+					actionDisproved: disproved,
+				}
+				switch att.kind {
+				case wantKind:
+					if betterAttempt(wantC, cand) {
+						wantC = cand
+					}
+				case altEndKind:
+					if betterAttempt(altC, cand) {
+						altC = cand
+					}
+				case taskAttemptPending:
+					if betterAttempt(pendingC, cand) {
+						pendingC = cand
+					}
+				}
+			}
+			// An exact dispatch-map match on a lower tier outranks a stale
+			// non-matching attempt on the same activation; otherwise keep tier
+			// precedence (wantKind -> altEndKind -> pending).
+			switch {
+			case wantC.ok && (wantC.actionMatched || (!altC.actionMatched && !pendingC.actionMatched)):
+				candidates = append(candidates, taskCandidate{
+					idx: i, callID: cid, kind: wantKind, tier: 1,
+					recordedAt: wantC.recordedAt, seq: wantC.seq,
+					actionMatched: wantC.actionMatched, actionDisproved: wantC.actionDisproved,
+				})
+			case altC.ok && (altC.actionMatched || !pendingC.actionMatched):
+				candidates = append(candidates, taskCandidate{
+					idx: i, callID: cid, kind: altEndKind, tier: 2,
+					recordedAt: altC.recordedAt, seq: altC.seq,
+					actionMatched: altC.actionMatched, actionDisproved: altC.actionDisproved,
+				})
+			case pendingC.ok:
+				candidates = append(candidates, taskCandidate{
+					idx: i, callID: cid, kind: taskAttemptPending, tier: 3,
+					recordedAt: pendingC.recordedAt, seq: pendingC.seq,
+					actionMatched: pendingC.actionMatched, actionDisproved: pendingC.actionDisproved,
+				})
 			}
 		}
 	}
-	if anyFound >= 0 {
-		return anyFound
+	if len(candidates) == 0 {
+		return -1, taskMatchUnobserved
 	}
-	if matchedFound >= 0 {
-		return matchedFound
+
+	consumeWinner := func(winnerIdx int, source []taskCandidate) (int, taskMatchStatus) {
+		rec := inv.agentStack[winnerIdx]
+		for _, cid := range callIDs {
+			var wantConsumeKind taskAttemptKind
+			foundKind := false
+			for _, c := range source {
+				if c.idx == winnerIdx && c.callID == cid {
+					wantConsumeKind = c.kind
+					foundKind = true
+					break
+				}
+			}
+			if !foundKind {
+				continue
+			}
+			checkAction := cid == leadingActionCallID && evDispatch.hasLiveMap()
+			bestJ := -1
+			for j, att := range rec.taskAttempts {
+				if att.callID != cid || att.kind != wantConsumeKind {
+					continue
+				}
+				if checkAction && att.dispatch.matches(evDispatch) {
+					bestJ = j
+					break
+				}
+				if bestJ < 0 || earlierTaskAttempt(att.recordedAt, att.seq, rec.taskAttempts[bestJ].recordedAt, rec.taskAttempts[bestJ].seq) {
+					bestJ = j
+				}
+			}
+			if bestJ >= 0 {
+				rec.taskAttempts = slices.Delete(rec.taskAttempts, bestJ, bestJ+1)
+			}
+		}
+		return winnerIdx, taskMatchFound
 	}
-	return -1
+
+	// 1. Exact leading-part EventActions map match identifies the producing
+	// activation directly, even on frozen clocks.
+	var exactMatches []taskCandidate
+	for _, c := range candidates {
+		if c.actionMatched {
+			exactMatches = append(exactMatches, c)
+		}
+	}
+	if len(exactMatches) > 0 {
+		best := exactMatches[0]
+		for _, c := range exactMatches[1:] {
+			if c.tier < best.tier ||
+				(c.tier == best.tier && (earlierTaskAttempt(c.recordedAt, c.seq, best.recordedAt, best.seq) ||
+					(c.recordedAt.Equal(best.recordedAt) && c.seq == best.seq && c.idx < best.idx))) {
+				best = c
+			}
+		}
+		return consumeWinner(best.idx, candidates)
+	}
+
+	// 2. Drop candidates whose recorded live dispatch maps conflict with the
+	// event's leading-part maps when another candidate or an open activation
+	// without a recorded ending attempt explains the event.
+	hasDisproved := slices.ContainsFunc(candidates, func(c taskCandidate) bool { return c.actionDisproved })
+	if hasDisproved {
+		nonDisproved := make([]taskCandidate, 0, len(candidates))
+		for _, c := range candidates {
+			if !c.actionDisproved {
+				nonDisproved = append(nonDisproved, c)
+			}
+		}
+		if len(nonDisproved) > 0 {
+			candidates = nonDisproved
+		} else if hasPlausibleOpenWithoutEnding {
+			return -1, taskMatchUnobserved
+		}
+	}
+
+	// 3. Timestamp plausibility filter. For merged multi-part FunctionResponse
+	// events, ADK stamps ev.Timestamp from events[0], which can precede a
+	// concurrent sibling tool's AfterToolCallback recordedAt, so only
+	// rec.eventClockStart bounds merged events.
+	if !eventTime.IsZero() && (len(candidates) >= 2 || hasPlausibleOpenWithoutEnding) {
+		plausible := make([]taskCandidate, 0, len(candidates))
+		for _, c := range candidates {
+			rec := inv.agentStack[c.idx]
+			if !rec.eventClockStart.IsZero() && eventTime.Before(rec.eventClockStart) {
+				continue
+			}
+			if !mergedResponse && !c.recordedAt.IsZero() && eventTime.Before(c.recordedAt) {
+				continue
+			}
+			plausible = append(plausible, c)
+		}
+		if len(plausible) > 0 {
+			candidates = plausible
+		} else if len(candidates) == 1 && hasPlausibleOpenWithoutEnding {
+			return -1, taskMatchUnobserved
+		}
+	}
+
+	// 4. O(N log N) suffix-maximum causal supersession across all surviving
+	// candidates: a candidate cOld with a non-zero recordedAt is superseded when
+	// another activation idx != cOld.idx has a plausible strictly-later
+	// recordedAt and either started after cOld (recNew.seq > cOld.seq) or opened
+	// its event clock after cOld was recorded (cOld.recordedAt < recNew.eventClockStart).
+	if len(candidates) >= 2 && !eventTime.IsZero() {
+		order := make([]int, len(candidates))
+		for k := range order {
+			order[k] = k
+		}
+		slices.SortFunc(order, func(a, b int) int {
+			ta, tb := candidates[a].recordedAt, candidates[b].recordedAt
+			switch {
+			case ta.Equal(tb):
+				return cmp.Compare(a, b)
+			case ta.After(tb):
+				return -1
+			default:
+				return 1
+			}
+		})
+
+		type idxSeq struct {
+			idx int
+			seq uint64
+		}
+		type idxClk struct {
+			idx int
+			clk time.Time
+		}
+		var topSeq1, topSeq2 idxSeq
+		var topClk1, topClk2 idxClk
+		addWitness := func(c taskCandidate) {
+			if c.recordedAt.IsZero() {
+				return
+			}
+			recNew := inv.agentStack[c.idx]
+			if mergedResponse {
+				if !recNew.eventClockStart.IsZero() && eventTime.Before(recNew.eventClockStart) {
+					return
+				}
+			} else if eventTime.Before(c.recordedAt) {
+				return
+			}
+			if recNew.seq > 0 {
+				if topSeq1.idx == c.idx {
+					topSeq1.seq = max(topSeq1.seq, recNew.seq)
+				} else if recNew.seq > topSeq1.seq {
+					topSeq2 = topSeq1
+					topSeq1 = idxSeq{idx: c.idx, seq: recNew.seq}
+				} else if topSeq2.idx == c.idx {
+					topSeq2.seq = max(topSeq2.seq, recNew.seq)
+				} else if recNew.seq > topSeq2.seq {
+					topSeq2 = idxSeq{idx: c.idx, seq: recNew.seq}
+				}
+			}
+			if !recNew.eventClockStart.IsZero() {
+				if topClk1.idx == c.idx {
+					if recNew.eventClockStart.After(topClk1.clk) {
+						topClk1.clk = recNew.eventClockStart
+					}
+				} else if topClk1.clk.IsZero() || recNew.eventClockStart.After(topClk1.clk) {
+					topClk2 = topClk1
+					topClk1 = idxClk{idx: c.idx, clk: recNew.eventClockStart}
+				} else if topClk2.idx == c.idx {
+					if recNew.eventClockStart.After(topClk2.clk) {
+						topClk2.clk = recNew.eventClockStart
+					}
+				} else if topClk2.clk.IsZero() || recNew.eventClockStart.After(topClk2.clk) {
+					topClk2 = idxClk{idx: c.idx, clk: recNew.eventClockStart}
+				}
+			}
+		}
+
+		superseded := make([]bool, len(candidates))
+		for start := 0; start < len(order); {
+			batchTime := candidates[order[start]].recordedAt
+			end := start + 1
+			for end < len(order) && candidates[order[end]].recordedAt.Equal(batchTime) {
+				end++
+			}
+			if !batchTime.IsZero() {
+				for _, pos := range order[start:end] {
+					cOld := candidates[pos]
+					maxSeq := topSeq1.seq
+					if topSeq1.idx == cOld.idx {
+						maxSeq = topSeq2.seq
+					}
+					maxClk := topClk1.clk
+					if topClk1.idx == cOld.idx {
+						maxClk = topClk2.clk
+					}
+					if (maxSeq > 0 && cOld.seq < maxSeq) || (!maxClk.IsZero() && cOld.recordedAt.Before(maxClk)) {
+						superseded[pos] = true
+					}
+				}
+			}
+			for _, pos := range order[start:end] {
+				addWitness(candidates[pos])
+			}
+			start = end
+		}
+
+		unsuperseded := make([]taskCandidate, 0, len(candidates))
+		for k, c := range candidates {
+			if !superseded[k] {
+				unsuperseded = append(unsuperseded, c)
+			}
+		}
+		if len(unsuperseded) > 0 {
+			candidates = unsuperseded
+		}
+	}
+
+	// 5. Aggregate across observed call IDs in the event. Every call ID in one
+	// session.Event was emitted by a single activation; if surviving observed
+	// call IDs split across disjoint activations so no single activation covers
+	// all of them, leave spans open rather than guessing.
+	observedCallIDs := make(map[string]struct{}, len(callIDs))
+	type actSummary struct {
+		idx        int
+		matchCount int
+		bestTier   uint8
+		recordedAt time.Time
+		seq        uint64
+	}
+	var summaries []actSummary
+	summaryByIdx := make(map[int]int, len(candidates))
+	for _, c := range candidates {
+		observedCallIDs[c.callID] = struct{}{}
+		pos, ok := summaryByIdx[c.idx]
+		if !ok {
+			summaryByIdx[c.idx] = len(summaries)
+			summaries = append(summaries, actSummary{
+				idx:        c.idx,
+				matchCount: 1,
+				bestTier:   c.tier,
+				recordedAt: c.recordedAt,
+				seq:        c.seq,
+			})
+			continue
+		}
+		s := &summaries[pos]
+		s.matchCount++
+		if c.tier < s.bestTier || (c.tier == s.bestTier && earlierTaskAttempt(c.recordedAt, c.seq, s.recordedAt, s.seq)) {
+			s.bestTier = c.tier
+			s.recordedAt = c.recordedAt
+			s.seq = c.seq
+		}
+	}
+
+	wantMatches := len(observedCallIDs)
+	var fullMatches []actSummary
+	for _, s := range summaries {
+		if s.matchCount == wantMatches {
+			fullMatches = append(fullMatches, s)
+		}
+	}
+	if len(fullMatches) == 0 {
+		return -1, taskMatchAmbiguous
+	}
+
+	best := fullMatches[0]
+	for _, s := range fullMatches[1:] {
+		if s.bestTier < best.bestTier {
+			best = s
+			continue
+		}
+		if s.bestTier > best.bestTier {
+			continue
+		}
+		if earlierTaskAttempt(s.recordedAt, s.seq, best.recordedAt, best.seq) ||
+			(s.recordedAt.Equal(best.recordedAt) && s.seq == best.seq && s.idx < best.idx) {
+			best = s
+		}
+	}
+	return consumeWinner(best.idx, candidates)
 }
 
-// noteTaskFinished records that the finish_task call callID of the agent
-// activation that ctx and id identify completed, or, if failed is set, ended
-// the activation with a classified tool result error, so that the function
-// response event that reports it ends that activation (see popTaskAgentSpan).
-// The tool callbacks get the context of the activation that made the call,
-// which the event callback does not.
-func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callID string, failed bool) {
+// unobservedTaskLocked resolves the open task-mode activation of id for a
+// finish_task completion event whose callID was not observed by any open
+// activation's tool callbacks (for example, when an earlier plugin answered
+// BeforeToolCallback and AfterToolCallback, or in synthetic event-only tests
+// without call IDs). Activations that already hold an unconsumed observed
+// ending attempt for another call are skipped when another candidate exists,
+// eventTime excludes activations started after the event was created, and ties
+// fall back to ctx's activation (when in pool) or the newest plausible
+// matching activation as on main. inv.mu must be held.
+func (inv *invocationTrace) unobservedTaskLocked(ctx context.Context, id identity, _ string, eventTime time.Time) int {
+	var withoutEnding, allMatching []int
+	for i := 1; i < len(inv.agentStack); i++ {
+		rec := inv.agentStack[i]
+		if !inv.matchesTaskAgentLocked(rec, id) {
+			continue
+		}
+		allMatching = append(allMatching, i)
+		hasEnding := slices.ContainsFunc(rec.taskAttempts, func(att taskAttempt) bool {
+			return isObservedEndingAttempt(att.kind)
+		})
+		if !hasEnding {
+			withoutEnding = append(withoutEnding, i)
+		}
+	}
+	pool := withoutEnding
+	if len(pool) == 0 {
+		pool = allMatching
+	}
+	if len(pool) == 0 {
+		return -1
+	}
+	if len(pool) >= 2 && !eventTime.IsZero() {
+		plausible := make([]int, 0, len(pool))
+		for _, idx := range pool {
+			rec := inv.agentStack[idx]
+			if rec.eventClockStart.IsZero() || !eventTime.Before(rec.eventClockStart) {
+				plausible = append(plausible, idx)
+			}
+		}
+		if len(plausible) > 0 {
+			pool = plausible
+		}
+	}
+	if len(pool) == 1 {
+		return pool[0]
+	}
+	if ctxIdx := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); ctxIdx > 0 && slices.Contains(pool, ctxIdx) {
+		return ctxIdx
+	}
+	return pool[len(pool)-1]
+}
+
+// noteTaskStart records that the activation of ctx and id started a
+// finish_task call with callID, so the pending attempt is still attributed to
+// that activation if an earlier plugin's AfterToolCallback short-circuits
+// before noteTaskAttempt runs.
+func (tm *traceManager) noteTaskStart(ctx context.Context, id identity, callID string) {
 	if callID == "" {
 		return
+	}
+	recordedAt := platform.Now(ctx)
+	dispatch := dispatchMapsOf(toolActionsOf(ctx))
+	inv := tm.invocation(ctx, id)
+	for !inv.lockLive() {
+		inv = tm.invocation(ctx, id)
+	}
+	defer inv.mu.Unlock()
+	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+		rec := inv.agentStack[i]
+		for j := range rec.taskAttempts {
+			if rec.taskAttempts[j].callID == callID && rec.taskAttempts[j].startedOnly {
+				if dispatch.hasLiveMap() {
+					rec.taskAttempts[j].dispatch = dispatch
+				}
+				return
+			}
+		}
+		rec.taskAttempts = append(rec.taskAttempts, taskAttempt{
+			callID:      callID,
+			kind:        taskAttemptPending,
+			startedOnly: true,
+			recordedAt:  recordedAt,
+			seq:         inv.lastSeq,
+			dispatch:    dispatch,
+		})
+	}
+}
+
+// noteTaskAttempt records the outcome of a finish_task call on the agent
+// activation that ctx and id identify, distinguishing calls whose result
+// already ended the task in afterTool (ends), with a classified tool result
+// error or not (failed), from attempts that did not end it, which a later
+// AfterToolCallback may still promote before the FunctionResponse event is
+// emitted (see popTaskAgentSpan and retireFailedTaskAttempts).
+func (tm *traceManager) noteTaskAttempt(ctx context.Context, id identity, callID string, ends, failed bool) {
+	if callID == "" {
+		return
+	}
+	recordedAt := platform.Now(ctx)
+	dispatch := dispatchMapsOf(toolActionsOf(ctx))
+	kind := taskAttemptPending
+	if ends {
+		if failed {
+			kind = taskAttemptFailedEnd
+		} else {
+			kind = taskAttemptCompleted
+		}
 	}
 	inv := tm.invocation(ctx, id)
 	for !inv.lockLive() {
@@ -4196,10 +4831,207 @@ func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callI
 	defer inv.mu.Unlock()
 	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
 		rec := inv.agentStack[i]
-		if failed {
-			rec.failedTasks = append(rec.failedTasks, callID)
-		} else {
-			rec.finishedTasks = append(rec.finishedTasks, callID)
+		for j := range rec.taskAttempts {
+			if rec.taskAttempts[j].callID == callID && rec.taskAttempts[j].startedOnly {
+				rec.taskAttempts[j].kind = kind
+				rec.taskAttempts[j].startedOnly = false
+				rec.taskAttempts[j].recordedAt = recordedAt
+				rec.taskAttempts[j].seq = inv.lastSeq
+				if dispatch.hasLiveMap() {
+					rec.taskAttempts[j].dispatch = dispatch
+				}
+				return
+			}
+		}
+		rec.taskAttempts = append(rec.taskAttempts, taskAttempt{
+			callID:     callID,
+			kind:       kind,
+			recordedAt: recordedAt,
+			seq:        inv.lastSeq,
+			dispatch:   dispatch,
+		})
+	}
+}
+
+// retireFailedTaskAttempts removes pending (non-ending) finish_task attempts
+// for failedCalls once their FunctionResponse event arrives without ending the
+// task. Observed ending attempts (taskAttemptCompleted and
+// taskAttemptFailedEnd) are never deleted for failedCalls, so an unobserved
+// failure on a newer activation cannot wipe out another open activation's
+// observed completion; overruledEndingCalls (sentinel-bearing responses behind
+// a failed first finish_task response in the same merged event) are retired on
+// the activation where failedCalls matched, or when no pending failed ID
+// matched (for example when the first failed response had an empty call ID), on
+// a plausible matching activation holding an observed ending attempt for that ID.
+func (tm *traceManager) retireFailedTaskAttempts(ctx context.Context, id identity, failedCalls, overruledEndingCalls []string) {
+	tm.retireFailedTaskAttemptsForEvent(ctx, id, failedCalls, overruledEndingCalls, "", taskDispatchMaps{}, len(failedCalls)+len(overruledEndingCalls) > 1, time.Time{})
+}
+
+func (tm *traceManager) retireFailedTaskAttemptsForEvent(ctx context.Context, id identity, failedCalls, overruledEndingCalls []string, leadingActionCallID string, evDispatch taskDispatchMaps, mergedResponse bool, eventTime time.Time) {
+	if len(failedCalls) == 0 && len(overruledEndingCalls) == 0 {
+		return
+	}
+	remaining := make(map[string]int, len(failedCalls))
+	total := 0
+	for _, call := range failedCalls {
+		if call != "" {
+			remaining[call]++
+			total++
+		}
+	}
+	overruledTotal := 0
+	var overruled map[string]int
+	if len(overruledEndingCalls) > 0 {
+		overruled = make(map[string]int, len(overruledEndingCalls))
+		for _, call := range overruledEndingCalls {
+			if call != "" {
+				overruled[call]++
+				overruledTotal++
+			}
+		}
+	}
+	if total == 0 && overruledTotal == 0 {
+		return
+	}
+	inv := tm.invocation(ctx, id)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	inv.retireFailedTaskAttemptsAtLocked(ctx, id, remaining, total, overruled, overruledTotal, leadingActionCallID, evDispatch, mergedResponse, eventTime)
+}
+
+func (inv *invocationTrace) retireFailedTaskAttemptsLocked(ctx context.Context, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int) {
+	inv.retireFailedTaskAttemptsAtLocked(ctx, id, remaining, total, overruled, overruledTotal, "", taskDispatchMaps{}, total+overruledTotal > 1, time.Time{})
+}
+
+// retireFailedTaskAttemptsAtLocked compacts pending finish_task attempts
+// matching remaining across plausible open activations of id, preferring an
+// exact leading-part EventActions map match first, excluding activations and
+// single-call attempts recorded after eventTime so a delayed older failure
+// cannot erase a newer activation's pending attempt, and retiring
+// overruledEndingCalls on the activation where remaining matched or on a
+// plausible matching activation when remaining was empty. inv.mu must be held.
+func (inv *invocationTrace) retireFailedTaskAttemptsAtLocked(ctx context.Context, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int, leadingActionCallID string, evDispatch taskDispatchMaps, mergedResponse bool, eventTime time.Time) {
+	matchesAgent := func(rec *spanRecord) bool {
+		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch ||
+			(id.path != "" && rec.path != "" && rec.path != id.path) || len(rec.taskAttempts) == 0 {
+			return false
+		}
+		if !eventTime.IsZero() && !rec.eventClockStart.IsZero() && eventTime.Before(rec.eventClockStart) {
+			return false
+		}
+		return true
+	}
+	plausibleAttempt := func(att taskAttempt, skipDisproved bool) bool {
+		if !eventTime.IsZero() && !mergedResponse && !att.recordedAt.IsZero() && eventTime.Before(att.recordedAt) {
+			return false
+		}
+		if skipDisproved && att.callID == leadingActionCallID && evDispatch.hasLiveMap() && att.dispatch.hasLiveMap() && !att.dispatch.matches(evDispatch) {
+			return false
+		}
+		return true
+	}
+	retireOnRec := func(rec *spanRecord, skipDisproved bool) {
+		matchedFailedOnRec := false
+		for _, att := range rec.taskAttempts {
+			if att.kind == taskAttemptPending && remaining[att.callID] > 0 && plausibleAttempt(att, skipDisproved) {
+				matchedFailedOnRec = true
+				break
+			}
+		}
+		if !matchedFailedOnRec {
+			return
+		}
+		write := 0
+		for _, att := range rec.taskAttempts {
+			if total > 0 && att.kind == taskAttemptPending && remaining[att.callID] > 0 && plausibleAttempt(att, skipDisproved) {
+				remaining[att.callID]--
+				total--
+				continue
+			}
+			if overruledTotal > 0 && overruled[att.callID] > 0 && plausibleAttempt(att, false) {
+				overruled[att.callID]--
+				overruledTotal--
+				continue
+			}
+			rec.taskAttempts[write] = att
+			write++
+		}
+		clear(rec.taskAttempts[write:])
+		rec.taskAttempts = rec.taskAttempts[:write]
+	}
+
+	// Pass 1: exact leading-part EventActions map match identifies the
+	// activation that produced the failed response even on equal timestamps.
+	if total > 0 && leadingActionCallID != "" && remaining[leadingActionCallID] > 0 && evDispatch.hasLiveMap() {
+		for i := len(inv.agentStack) - 1; i > 0 && total > 0; i-- {
+			rec := inv.agentStack[i]
+			if !matchesAgent(rec) {
+				continue
+			}
+			hasExact := slices.ContainsFunc(rec.taskAttempts, func(att taskAttempt) bool {
+				return att.kind == taskAttemptPending && att.callID == leadingActionCallID && att.dispatch.matches(evDispatch)
+			})
+			if hasExact {
+				retireOnRec(rec, true)
+				break
+			}
+		}
+	}
+
+	// Pass 2: plausible non-disproved pending attempts, then fallback if needed.
+	for _, skipDisproved := range []bool{true, false} {
+		for i := len(inv.agentStack) - 1; i > 0 && total > 0; i-- {
+			rec := inv.agentStack[i]
+			if !matchesAgent(rec) {
+				continue
+			}
+			retireOnRec(rec, skipDisproved)
+		}
+		if total == 0 || !evDispatch.hasLiveMap() {
+			break
+		}
+	}
+
+	if overruledTotal <= 0 {
+		return
+	}
+	retireOverruledOn := func(rec *spanRecord) {
+		hasMatch := false
+		for _, att := range rec.taskAttempts {
+			if isObservedEndingAttempt(att.kind) && overruled[att.callID] > 0 && plausibleAttempt(att, false) {
+				hasMatch = true
+				break
+			}
+		}
+		if !hasMatch {
+			return
+		}
+		write := 0
+		for _, att := range rec.taskAttempts {
+			if overruledTotal > 0 && isObservedEndingAttempt(att.kind) && overruled[att.callID] > 0 && plausibleAttempt(att, false) {
+				overruled[att.callID]--
+				overruledTotal--
+				continue
+			}
+			rec.taskAttempts[write] = att
+			write++
+		}
+		clear(rec.taskAttempts[write:])
+		rec.taskAttempts = rec.taskAttempts[:write]
+	}
+	ctxIdx := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
+	if ctxIdx > 0 && activationKey(ctx) != nil && matchesAgent(inv.agentStack[ctxIdx]) {
+		retireOverruledOn(inv.agentStack[ctxIdx])
+	}
+	// When no concrete activation context matched, prefer the earliest-recorded
+	// plausible overruled attempt so a failed merged batch on an older open run
+	// retires its own overruled ending call before a concurrent newer run's.
+	for i := 1; i < len(inv.agentStack) && overruledTotal > 0; i++ {
+		if i == ctxIdx && activationKey(ctx) != nil {
+			continue
+		}
+		if rec := inv.agentStack[i]; matchesAgent(rec) {
+			retireOverruledOn(rec)
 		}
 	}
 }
