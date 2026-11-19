@@ -181,16 +181,22 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		return nil, fmt.Errorf("failed to create session for sub-agent %s: %w", t.agent.Name(), err)
 	}
 
-	// Forward the caller's model-call budget, as adk-python forwards its run
-	// config, so that MaxLLMCalls: -1 is not capped at the default inside the
-	// nested run and a small limit bounds the nested run too. The value is the
-	// already resolved one: tool contexts have no public run config, so it is
-	// read from the internal one. When there is none, because the calling agent
-	// was run directly rather than through a runner, zero gives the nested run
-	// the default.
+	// Forward the caller's model-call budget, HTTP options and labels, as
+	// adk-python forwards its run config, so that MaxLLMCalls: -1 is not
+	// capped at the default inside the nested run, a small limit bounds the
+	// nested run too, and the nested agent's model requests carry the run's
+	// HTTP options and labels. The budget is the already resolved one: tool
+	// contexts have no public run config, so all three are read from the
+	// internal one. When there is none, because the calling agent was run
+	// directly rather than through a runner, zero gives the nested run the
+	// default budget and no HTTP options or labels.
 	var maxLLMCalls int
+	var httpOptions *genai.HTTPOptions
+	var labels *map[string]string
 	if rc := runconfig.FromContext(toolCtx); rc != nil {
 		maxLLMCalls = rc.MaxLLMCalls
+		httpOptions = rc.HTTPOptions
+		labels = rc.Labels
 	}
 
 	// TODO(dpasiukevich): verify agent loop termination.
@@ -199,6 +205,8 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	eventCh := r.Run(plugininternal.WithInheritedPlugins(toolCtx), subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
 		StreamingMode: agent.StreamingModeSSE,
 		MaxLLMCalls:   maxLLMCalls,
+		HTTPOptions:   httpOptions,
+		Labels:        labels,
 	})
 
 	var lastEvent *session.Event
