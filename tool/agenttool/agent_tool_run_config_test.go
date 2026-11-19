@@ -148,3 +148,47 @@ func TestAgentTool_Run_ForwardsRunConfigLabels(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentTool_Run_ForwardsRunConfigCustomMetadata(t *testing.T) {
+	for name, newRoot := range rootBuilders {
+		t.Run(name, func(t *testing.T) {
+			var childSeen map[string]any
+			childModel := &recordingModel{name: "child-model", responses: []*genai.Content{genai.NewContentFromText("child answer", genai.RoleModel)}}
+			child, err := llmagent.New(llmagent.Config{
+				Name:        "child",
+				Description: "Answers.",
+				Model:       childModel,
+				BeforeModelCallbacks: []llmagent.BeforeModelCallback{func(ctx agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+					childSeen = agent.CustomMetadata(ctx)
+					return nil, nil
+				}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(child) error = %v", err)
+			}
+			parentModel := &recordingModel{name: "parent-model", responses: []*genai.Content{
+				{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "child", Args: map[string]any{"request": "go"}}}}},
+				genai.NewContentFromText("parent answer", genai.RoleModel),
+			}}
+			parent, err := llmagent.New(llmagent.Config{
+				Name:  "parent",
+				Model: parentModel,
+				Tools: []tool.Tool{agenttool.New(child, nil)},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(parent) error = %v", err)
+			}
+			r := testutil.NewTestAgentRunner(t, newRoot(t, parent))
+			meta := map[string]any{"tier": "gold", "__adk_internal_forged": true}
+			if _, err := testutil.CollectEvents(r.RunContentWithConfig(t, "session", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{
+				CustomMetadata: &meta,
+			})); err != nil {
+				t.Fatalf("run failed: %v", err)
+			}
+			want := map[string]any{"tier": "gold"}
+			if diff := cmp.Diff(want, childSeen); diff != "" {
+				t.Errorf("child agent.CustomMetadata(ctx) mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

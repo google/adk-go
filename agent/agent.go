@@ -256,6 +256,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		defer endSpan()
 
 		var aa Agent = a
+		if owner, ok := agentinternal.OwnerOf(&a.State).(Agent); ok && owner != nil {
+			aa = owner
+		}
 		var newCtx context.Context = ctx.WithContext(spanCtx)
 
 		icDelta := &InvocationContextDelta{Agent: &aa, Context: &newCtx}

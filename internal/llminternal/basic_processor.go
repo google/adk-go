@@ -46,11 +46,12 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 			req.Config = &genai.GenerateContentConfig{}
 		}
 
+		llm := processorModel(ctx, f)
 		if rc := ctx.RunConfig(); rc != nil {
-			if runHTTP := runHTTPOptionsFor(state.Model, rc.HTTPOptions); runHTTP != nil {
+			if runHTTP := runHTTPOptionsFor(llm, rc.HTTPOptions); runHTTP != nil {
 				mergeRunConfigHTTPOptions(req.Config, runHTTP)
 			}
-			if labels := runLabelsFor(state.Model, rc.Labels); len(labels) > 0 {
+			if labels := runLabelsFor(llm, rc.Labels); len(labels) > 0 {
 				if req.Config.Labels == nil {
 					req.Config.Labels = make(map[string]string, len(labels))
 				}
@@ -65,7 +66,7 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 		// structured output for tasks is collected via the FinishTaskTool's
 		// declaration (the model emits the value inside the finish_task
 		// FC args, not as a structured text response).
-		if state.Mode != ModeTask && !needOutputSchemaProcessor(state, processorModel(ctx, f)) {
+		if state.Mode != ModeTask && !needOutputSchemaProcessor(state, llm) {
 			if schema := outputSchemaFor(ctx, state); schema != nil {
 				req.Config.ResponseSchema = schema
 				req.Config.ResponseMIMEType = "application/json"

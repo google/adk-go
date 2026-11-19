@@ -316,3 +316,32 @@ func TestCallbackContextAgent_RemoteAgentRequestCallbacksReportTheRemoteAgent(t 
 		t.Errorf("ctx.Agent().Name() in the request callbacks = %q, want %q", got, want)
 	}
 }
+
+func TestCallbackContextAgent_PreservesWrapperIdentityAndCanonicalAccessors(t *testing.T) {
+	wantModel := &testutil.MockModel{Responses: []*genai.Content{genai.NewContentFromText("done", genai.RoleModel)}}
+	var helper agent.Agent
+	var sawBeforeSame, sawAfterSame bool
+	checkLLM := func(same *bool) func(agent.Context) (*genai.Content, error) {
+		return func(ctx agent.Context) (*genai.Content, error) {
+			*same = ctx.Agent() == helper
+			m, err := llmagent.CanonicalModel(ctx.Agent())
+			if err != nil {
+				return nil, err
+			}
+			if m != wantModel {
+				t.Errorf("CanonicalModel(ctx.Agent()) = %v, want %v", m, wantModel)
+			}
+			return nil, nil
+		}
+	}
+	helper = newTestLLMAgent(t, llmagent.Config{
+		Name:                 "helper",
+		Model:                wantModel,
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{checkLLM(&sawBeforeSame)},
+		AfterAgentCallbacks:  []agent.AfterAgentCallback{checkLLM(&sawAfterSame)},
+	})
+	runToEnd(t, helper)
+	if !sawBeforeSame || !sawAfterSame {
+		t.Errorf("wrapper identity in before/after agent callbacks = (%v, %v), want (true, true)", sawBeforeSame, sawAfterSame)
+	}
+}

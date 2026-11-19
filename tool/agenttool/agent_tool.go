@@ -201,20 +201,28 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	var maxLLMCalls int
 	var httpOptions *genai.HTTPOptions
 	var labels *map[string]string
+	var customMetadata *map[string]any
 	if rc := runconfig.FromContext(toolCtx); rc != nil {
 		maxLLMCalls = rc.MaxLLMCalls
 		httpOptions = rc.HTTPOptions
 		labels = rc.Labels
+		if len(rc.CustomMetadata) > 0 {
+			m := rc.CustomMetadata
+			customMetadata = &m
+		}
+	} else if pubRC := toolCtx.RunConfig(); pubRC != nil {
+		customMetadata = pubRC.CustomMetadata
 	}
 
 	// TODO(dpasiukevich): verify agent loop termination.
 	// Only this sub-runner keeps the calling run's plugins, so they also see
 	// the sub-agent's agents, models and tools.
 	eventCh := r.Run(plugininternal.WithInheritedPlugins(toolCtx), subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
-		StreamingMode: agent.StreamingModeSSE,
-		MaxLLMCalls:   maxLLMCalls,
-		HTTPOptions:   httpOptions,
-		Labels:        labels,
+		StreamingMode:  agent.StreamingModeSSE,
+		MaxLLMCalls:    maxLLMCalls,
+		HTTPOptions:    httpOptions,
+		Labels:         labels,
+		CustomMetadata: customMetadata,
 	})
 
 	var lastEvent *session.Event

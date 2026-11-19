@@ -67,20 +67,22 @@ func New(cfg Config) (agent.Agent, error) {
 	sequentialAgentImpl := &sequentialAgent{}
 	cfg.AgentConfig.Run = sequentialAgentImpl.Run
 
-	sequentialAgent, err := agent.New(cfg.AgentConfig)
+	baseAgent, link, err := agentinternal.NewUnlinked(cfg.AgentConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create base agent: %w", err)
 	}
 
-	internalAgent, ok := sequentialAgent.(agentinternal.Agent)
+	sequentialAgent, ok := baseAgent.(agent.Agent)
 	if !ok {
-		return nil, fmt.Errorf("internal error: failed to convert to internal agent")
+		return nil, fmt.Errorf("internal error: failed to convert to agent")
 	}
-	state := agentinternal.Reveal(internalAgent)
+	state := agentinternal.Reveal(baseAgent)
 	state.AgentType = agentinternal.TypeSequentialAgent
 	state.Config = cfg
 
-	return &seqAgent{Agent: sequentialAgent, State: state, impl: sequentialAgentImpl}, nil
+	s := &seqAgent{Agent: sequentialAgent, State: state, impl: sequentialAgentImpl}
+	link(s)
+	return s, nil
 }
 
 // Config defines the configuration for a SequentialAgent.
