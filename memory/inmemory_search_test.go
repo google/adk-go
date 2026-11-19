@@ -60,6 +60,14 @@ func Test_inMemoryService_SearchMemory_Ranking(t *testing.T) {
 			want:  []string{"1", "0", "2"},
 		},
 		{
+			// The query word python入門 counts once whole and once per run,
+			// python and 入門, so the second event scores 3 and the first 2.
+			name:  "runs of a mixed-script query word count separately",
+			texts: []string{"Python tutorial", "Python\u5165\u9580 guide", "unrelated"},
+			query: "Python\u5165\u9580 tutorial",
+			want:  []string{"1", "0"},
+		},
+		{
 			name:  "empty query",
 			texts: []string{"ready"},
 		},
@@ -275,7 +283,7 @@ func Test_inMemoryService_SearchMemory_TokenizationNFCAndScriptSplitting(t *test
 		{name: "embedded Latin word lowercase query", text: "私はPythonでADKを使っています", query: "adk", want: 1},
 		{name: "embedded underscore word", text: "私はmy_var_nameとcafé_1を使う", query: "my_var_name", want: 1},
 		{name: "embedded accented word", text: "私はmy_var_nameとcafé_1を使う", query: "café_1", want: 1},
-		{name: "query is not split", text: "Python", query: "私はPython", want: 0},
+		{name: "query is split", text: "Python", query: "私はPython", want: 1},
 		{name: "ordinal indicators are not Latin", text: "私はªPythonºを使う", query: "Python", want: 1},
 		{name: "NFD event NFC query", text: "私はCafe\u0301でADKを使っています", query: "Café", want: 1},
 		{name: "NFD event NFC lowercase query", text: "私はCafe\u0301でADKを使っています", query: "café", want: 1},
@@ -302,6 +310,37 @@ func Test_inMemoryService_SearchMemory_TokenizationNFCAndScriptSplitting(t *test
 	}
 }
 
+func Test_inMemoryService_SearchMemory_MixedScriptQuery(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		text  string
+		query string
+		want  int
+	}{
+		// From test_search_memory_non_latin in adk-python's
+		// tests/unittests/memory/test_in_memory_memory_service.py.
+		{name: "Latin word in Japanese query", text: "I write my backend in Python.", query: "Pythonについて教えて", want: 1},
+		{name: "Latin word in Chinese query", text: "I write my backend in Python.", query: "我用Python写代码", want: 1},
+		{name: "dotted capital I word in query", text: "I visited İstanbul last year.", query: "İstanbul旅行", want: 1},
+		{name: "other Latin word in query", text: "I write my backend in Python.", query: "Javaについて教えて", want: 0},
+		{name: "partial Latin word in query", text: "I write my backend in Python.", query: "thonについて教えて", want: 0},
+		{name: "run split from query word matches whole words only", text: "私と犬", query: "Pythonと", want: 0},
+		{name: "dotted capital I leaves no i in query", text: "I like cats.", query: "İstanbul旅行", want: 0},
+		// Stored text with İ.
+		{name: "dotted capital I leaves no partial word in event", text: "We flew to İstanbul.", query: "stanbul", want: 0},
+		{name: "dotted capital I leaves no i in event", text: "We flew to İstanbul.", query: "i", want: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := memory.InMemoryService()
+			addEvents(t, svc, "s1", memoryTextEvent("event", tt.text))
+
+			if got := search(t, svc, tt.query); len(got.Memories) != tt.want {
+				t.Errorf("SearchMemory() returned %d entries, want %d", len(got.Memories), tt.want)
+			}
+		})
+	}
+}
+
 func Test_inMemoryService_SearchMemory_FullUnicodeLowercasing(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
@@ -312,7 +351,8 @@ func Test_inMemoryService_SearchMemory_FullUnicodeLowercasing(t *testing.T) {
 		{name: "final sigma", text: "οδος", query: "ΟΔΟΣ", want: 1},
 		{name: "final sigma in event text matched as substring", text: "私はΟΔΟΣ", query: "οδος", want: 1},
 		{name: "dotted capital I", text: "İstanbul", query: "istanbul", want: 0},
-		{name: "dotted capital I splits a run in CJK text", text: "私はİstanbulに", query: "stanbul", want: 1},
+		{name: "dotted capital I stays in its run in CJK text", text: "私はİstanbulに", query: "İstanbul", want: 1},
+		{name: "dotted capital I leaves no partial word in CJK text", text: "私はİstanbulに", query: "stanbul", want: 0},
 		{name: "Kelvin sign lowercases to ASCII", text: "kiwi", query: "\u212a", want: 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
