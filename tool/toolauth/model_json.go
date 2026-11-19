@@ -114,28 +114,28 @@ func decode(data []byte, v any, extra *map[string]any, typeName string, pythonNa
 	known := make(map[string]json.RawMessage, len(raw))
 	var unknown map[string]any
 	for key, val := range raw {
-		alias := key
-		if !fields.aliases[key] {
-			name, isName := fields.names[key]
-			if !isName || !pythonNames {
-				dec := json.NewDecoder(bytes.NewReader(val))
-				dec.UseNumber()
-				var x any
-				if err := dec.Decode(&x); err != nil {
-					return decodeError(typeName, err)
-				}
-				if unknown == nil {
-					unknown = map[string]any{}
-				}
-				unknown[key] = x
-				continue
-			}
-			if _, both := raw[name]; both {
-				continue
-			}
-			alias = name
+		if fields.aliases[key] {
+			known[key] = val
+			continue
 		}
-		known[alias] = val
+		name, isName := fields.names[key]
+		if !isName || !pythonNames {
+			dec := json.NewDecoder(bytes.NewReader(val))
+			dec.UseNumber()
+			var x any
+			if err := dec.Decode(&x); err != nil {
+				return decodeError(typeName, err)
+			}
+			if unknown == nil {
+				unknown = map[string]any{}
+			}
+			unknown[key] = x
+			continue
+		}
+		if _, both := raw[name]; both {
+			continue
+		}
+		known[name] = val
 	}
 	for _, name := range required {
 		if val, ok := known[name]; !ok || bytes.Equal(bytes.TrimSpace(val), []byte("null")) {

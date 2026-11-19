@@ -177,7 +177,8 @@ var patternWordsByFirst2 = func() (m [128][128][]string) {
 // remove. It steps over a whole character at a time, as no word starts
 // inside one.
 func mayMatchTextPatterns(s string) bool {
-	for i, size := 0, 0; i < len(s); i += size {
+	var size int
+	for i := 0; i < len(s); i += size {
 		var c0 byte
 		c0, size = patternFoldAt(s, i)
 		if c0 >= utf8.RuneSelf || !patternWordsFirstByte[c0] {
@@ -260,8 +261,7 @@ func foldedHasPrefix(s string, i int, w string) bool {
 // as it reads it (see patternFoldAt), searches for patternWords.
 func foldPatternText(s string) string {
 	needsFold := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
+	for _, c := range []byte(s) {
 		if ('A' <= c && c <= 'Z') || c == '-' || c == '_' || c == '.' || c >= utf8.RuneSelf {
 			needsFold = true
 			break
@@ -458,8 +458,7 @@ func isSensitiveKey(k string) bool {
 // U+017F ("s") and U+212A ("k").
 func foldKeyASCII(k string) string {
 	hasUpperOrNonASCII := false
-	for i := 0; i < len(k); i++ {
-		c := k[i]
+	for _, c := range []byte(k) {
 		if ('A' <= c && c <= 'Z') || c >= utf8.RuneSelf {
 			hasUpperOrNonASCII = true
 			break
@@ -502,7 +501,7 @@ func hasFoldPrefix(s, prefix string) bool {
 		return false
 	}
 	hasNonASCII := false
-	for i := 0; i < len(prefix); i++ {
+	for i := range len(prefix) {
 		if s[i] >= utf8.RuneSelf {
 			hasNonASCII = true
 			break
@@ -512,7 +511,7 @@ func hasFoldPrefix(s, prefix string) bool {
 		return strings.EqualFold(s[:len(prefix)], prefix)
 	}
 	si := 0
-	for pi := 0; pi < len(prefix); pi++ {
+	for _, pc := range []byte(prefix) {
 		if si >= len(s) {
 			return false
 		}
@@ -538,7 +537,6 @@ func hasFoldPrefix(s, prefix string) bool {
 			}
 			si += size
 		}
-		pc := prefix[pi]
 		if 'A' <= pc && pc <= 'Z' {
 			pc += 'a' - 'A'
 		}

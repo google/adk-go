@@ -170,8 +170,8 @@ func hostName(u *url.URL) (string, bool) {
 }
 
 func isASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 0x80 {
+	for _, c := range []byte(s) {
+		if c >= 0x80 {
 			return false
 		}
 	}
