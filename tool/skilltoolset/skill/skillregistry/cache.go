@@ -33,7 +33,7 @@ type Cache interface {
 	// WarmUp loads what's needed at start.
 	WarmUp() error
 	// Refresh refreshes the cache. Blocking. The cache can be used during the refresh.
-	Refesh() error
+	Refresh() error
 	// ListFrontmatters returns the cached frontmatter of every skill.
 	ListFrontmatters() ([]*skill.Frontmatter, error)
 	// LoadFrontmatter returns the cached frontmatter of one skill, or

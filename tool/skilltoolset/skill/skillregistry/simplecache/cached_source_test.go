@@ -86,8 +86,8 @@ func (f *fakeCache) ListResources(name, subpath string) ([]string, error) {
 	return f.resourcePaths, f.listResErr
 }
 
-// Refesh implements [skillregistry.Cache].
-func (f *fakeCache) Refesh() error {
+// Refresh implements [skillregistry.Cache].
+func (f *fakeCache) Refresh() error {
 	return nil
 }
 

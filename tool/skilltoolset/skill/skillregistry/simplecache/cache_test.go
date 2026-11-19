@@ -598,7 +598,7 @@ func TestCacheRefesh(t *testing.T) {
 		c.byName[nameGamma] = &agentregistry.Skill{Name: nameGamma, DefaultRevision: revGamma, Frontmatter: &agentregistry.Frontmatter{Description: "Gamma."}}
 		c.mu.Unlock()
 
-		if err := ca.Refesh(); err != nil {
+		if err := ca.Refresh(); err != nil {
 			t.Fatalf("Refesh() error = %v", err)
 		}
 
@@ -620,7 +620,7 @@ func TestCacheRefesh(t *testing.T) {
 		c.listErr = boom
 		c.mu.Unlock()
 
-		if err := ca.Refesh(); !errors.Is(err, boom) {
+		if err := ca.Refresh(); !errors.Is(err, boom) {
 			t.Fatalf("Refesh() error = %v, want errors.Is %v", err, boom)
 		}
 
@@ -653,7 +653,7 @@ func TestCacheRefesh(t *testing.T) {
 
 		gc.gated.Store(true)
 		done := make(chan error, 1)
-		go func() { done <- ca.Refesh() }()
+		go func() { done <- ca.Refresh() }()
 
 		// The refresh is now blocked loading the new skill list.
 		<-gc.started

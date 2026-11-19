@@ -89,8 +89,8 @@ func NewCache(cfg CacheConfig) (skillregistry.Cache, error) {
 	return c, nil
 }
 
-// Refesh implements [skillregistry.Cache].
-func (c *cache) Refesh() error {
+// Refresh implements [skillregistry.Cache].
+func (c *cache) Refresh() error {
 	return c.preload()
 }
 
