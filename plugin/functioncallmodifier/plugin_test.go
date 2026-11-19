@@ -26,6 +26,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -168,6 +169,129 @@ func TestBeforeModelCallback(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A declaration that carries ParametersJsonSchema, as functiontool and
+// mcptoolset declarations do, gets the arguments in that schema, with its own
+// parameters kept and Parameters left unset: the two fields are mutually
+// exclusive, and the model connectors honor only one of them.
+func TestBeforeModelCallback_ParametersJsonSchema(t *testing.T) {
+	functionTool, err := functiontool.New(functiontool.Config{Name: "fn_tool"}, okFunc)
+	if err != nil {
+		t.Fatalf("functiontool.New failed: %v", err)
+	}
+	args := map[string]*genai.Schema{
+		"rationale": {Type: "STRING", Description: "Why."},
+		"tags":      {Type: "ARRAY", Items: &genai.Schema{Type: "STRING"}},
+		"priority":  {AnyOf: []*genai.Schema{{Type: "STRING"}, {Type: "INTEGER"}}},
+	}
+	wantArgs := map[string]any{
+		"rationale": map[string]any{"type": "string", "description": "Why."},
+		"tags":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"priority":  map[string]any{"anyOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "integer"}}},
+	}
+
+	testCases := []struct {
+		name       string
+		schema     func() any // returns the declaration's schema; called twice to check it is not modified
+		wantParams []string   // the tool's own parameters, kept beside the arguments
+	}{
+		{
+			name:       "functiontool schema",
+			schema:     func() any { return functionTool.(toolinternal.FunctionTool).Declaration().ParametersJsonSchema },
+			wantParams: []string{"Num"},
+		},
+		{
+			name: "decoded JSON schema",
+			schema: func() any {
+				return map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"query": map[string]any{"type": "string"}},
+					"required":   []any{"query"},
+				}
+			},
+			wantParams: []string{"query"},
+		},
+		{
+			name:   "schema without properties",
+			schema: func() any { return map[string]any{"type": "object"} },
+		},
+		{
+			name:   "typed-nil schema",
+			schema: func() any { return (*jsonschema.Schema)(nil) },
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			original := tc.schema()
+			req := &model.LLMRequest{
+				Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{
+					{Name: "fn_tool", ParametersJsonSchema: original},
+				}}}},
+				Tools: map[string]any{"fn_tool": functionTool},
+			}
+			p, err := functioncallmodifier.NewPlugin(functioncallmodifier.FunctionCallModifierConfig{
+				Predicate: func(string) bool { return true },
+				Args:      args,
+			})
+			if err != nil {
+				t.Fatalf("NewPlugin failed: %v", err)
+			}
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			if _, err := p.BeforeModelCallback()(icontext.NewCallbackContextWithDelta(invCtx, nil, nil), req); err != nil {
+				t.Fatalf("BeforeModelCallback failed: %v", err)
+			}
+
+			decl := findDeclaration(req, "fn_tool")
+			if decl.Parameters != nil {
+				t.Errorf("Parameters = %+v, want nil beside ParametersJsonSchema", decl.Parameters)
+			}
+			schema, ok := decl.ParametersJsonSchema.(map[string]any)
+			if !ok {
+				t.Fatalf("ParametersJsonSchema is %T, want map[string]any", decl.ParametersJsonSchema)
+			}
+			props, _ := schema["properties"].(map[string]any)
+			for name, want := range wantArgs {
+				if diff := cmp.Diff(want, props[name]); diff != "" {
+					t.Errorf("argument %q mismatch (-want +got):\n%s", name, diff)
+				}
+			}
+			for _, name := range tc.wantParams {
+				if _, ok := props[name]; !ok {
+					t.Errorf("tool parameter %q missing from properties %v", name, props)
+				}
+			}
+			if got, want := len(props), len(wantArgs)+len(tc.wantParams); got != want {
+				t.Errorf("properties has %d entries, want %d: %v", got, want, props)
+			}
+			// The declaration's own schema is not modified: the tool hands out
+			// the same one on every request.
+			if diff := cmp.Diff(tc.schema(), original); diff != "" {
+				t.Errorf("original schema modified (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestBeforeModelCallback_ParametersJsonSchemaNotAnObject(t *testing.T) {
+	req := &model.LLMRequest{
+		Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{
+			{Name: "fn_tool", ParametersJsonSchema: []any{"not", "an", "object"}},
+		}}}},
+		Tools: map[string]any{"fn_tool": nil},
+	}
+	p, err := functioncallmodifier.NewPlugin(functioncallmodifier.FunctionCallModifierConfig{
+		Predicate: func(string) bool { return true },
+		Args:      map[string]*genai.Schema{"rationale": {Type: "STRING"}},
+	})
+	if err != nil {
+		t.Fatalf("NewPlugin failed: %v", err)
+	}
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	if _, err := p.BeforeModelCallback()(icontext.NewCallbackContextWithDelta(invCtx, nil, nil), req); err == nil {
+		t.Error("BeforeModelCallback succeeded, want an error for a schema that is not a JSON object")
 	}
 }
 
