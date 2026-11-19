@@ -48,6 +48,10 @@ type fakeCacheAPI struct {
 	// every cache creation or generation gets.
 	createStatus   int
 	generateStatus int
+	// deleteStatus, when non-zero, is the error status every deletion gets.
+	deleteStatus int
+	// createNoName makes a cache creation succeed without naming the cache.
+	createNoName bool
 	// emptyReply makes generations answer with a STOP and no content, which
 	// the flow drops without storing an event.
 	emptyReply bool
@@ -116,6 +120,9 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp := map[string]any{"name": fmt.Sprintf("cachedContents/%d", len(f.creates))}
+		if f.createNoName {
+			delete(resp, "name")
+		}
 		if !f.expireTime.IsZero() {
 			resp["expireTime"] = f.expireTime.Format(time.RFC3339)
 		}
@@ -123,6 +130,10 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodDelete:
 		f.calls = append(f.calls, "delete "+path[strings.Index(path, "cachedContents/"):])
 		f.deleteHeaders = append(f.deleteHeaders, r.Header.Clone())
+		if f.deleteStatus != 0 {
+			fail(f.deleteStatus)
+			return
+		}
 		_, _ = fmt.Fprint(w, `{}`)
 	case strings.HasSuffix(path, ":streamGenerateContent"):
 		f.calls = append(f.calls, "generate")
