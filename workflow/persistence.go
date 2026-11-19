@@ -30,6 +30,19 @@ import (
 // success so a later resume does not repeat the node's side effects.
 const workflowNodeCompletedKey = "adk.workflow.node_completed"
 
+// An output event does not show that the activation completed. The node
+// can still pause again or fail after it. An activation that was resumed
+// with user responses and completed with output gets this record, so
+// rehydration can tell that the responses were used up. It has its own
+// key because readers take workflowNodeCompletedKey to mean a completion
+// without output and set the node's output to nil.
+//
+// adk-python does not need it: it gives every run of a node its own run
+// ID (ask@1, ask@2, ...) and scans each run separately. Go stamps every
+// visit of a static node as @1, so this record stands in for per-visit
+// run IDs and can go once Go assigns them.
+const workflowNodeResumeCompletedKey = "adk.workflow.node_resume_completed"
+
 const workflowBasePathPrefix = "adk.workflow.base_path."
 
 const workflowFailedChildPathsKey = "adk.workflow.failed_child_paths"
@@ -66,6 +79,21 @@ func workflowNodeOutcome(ev *session.Event) string {
 	return ""
 }
 
+// completionRecorded reports whether the scheduler recorded on ev that
+// an activation of the node completed. A dynamic node writes its
+// delegated output under workflowNodeCompletedKey before the scheduler
+// has seen the activation end, so that record alone is not one.
+func completionRecorded(ev *session.Event) bool {
+	if ev.CustomMetadata[workflowNodeResumeCompletedKey] == true {
+		return true
+	}
+	if ev.CustomMetadata[workflowNodeCompletedKey] != true {
+		return false
+	}
+	_, delegated := completedDelegatedOutput(ev)
+	return !delegated
+}
+
 func completedDelegatedOutput(ev *session.Event) (any, bool) {
 	if ev.CustomMetadata[workflowNodeCompletedKey] != true {
 		return nil, false
@@ -91,10 +119,40 @@ type nodeScanState struct {
 	resolvedCount map[string]int
 	// schemas maps an interrupt ID to its declared response schema,
 	// re-extracted from the pause FunctionCall args.
-	schemas  map[string]*jsonschema.Schema
+	schemas map[string]*jsonschema.Schema
+	// consumed holds the answered interrupts of activations that have
+	// since completed. Their responses went to those activations and
+	// must not be handed to a later visit of the node (reached via
+	// loop-back routing), and a repeated answer to one of them resumes
+	// nothing.
+	consumed map[string]struct{}
 	branch   string
 	finished bool
 	failed   bool
+}
+
+// consumeResolved marks every answered interrupt as consumed. Called
+// when history records that an activation of the node completed. Output
+// alone does not count: until the activation completes, a rerun after
+// its next pause or after a failure still needs the answers.
+func (s *nodeScanState) consumeResolved() {
+	for id := range s.resolved {
+		if s.consumed == nil {
+			s.consumed = map[string]struct{}{}
+		}
+		s.consumed[id] = struct{}{}
+	}
+}
+
+// reopen forgets the answer to an interrupt that the node raises again
+// under the same ID, so the new pause waits for its own answer. The
+// count goes too: the next answer is the first one for this pause.
+// Mirrors adk-python _reconstruct_node_states, which drops the resolved
+// response whenever an interrupt ID shows up again.
+func (s *nodeScanState) reopen(id string) {
+	delete(s.consumed, id)
+	delete(s.resolved, id)
+	delete(s.resolvedCount, id)
 }
 
 func (s *nodeScanState) addInterrupt(id string) {
@@ -263,11 +321,15 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 				// cancellation must not replace that pause with a failure.
 				sf.failed = outcome != workflowNodeCancelledOutcome || len(unresolvedInterrupts(sf)) == 0
 			}
+			if completionRecorded(ev) {
+				sf.consumeResolved()
+			}
 		}
 		for _, id := range ev.LongRunningToolIDs {
 			if id == "" {
 				continue
 			}
+			s.reopen(id)
 			s.addInterrupt(id)
 			s.finished = false
 			if s.branch == "" {
@@ -327,6 +389,9 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 		for _, id := range ev.LongRunningToolIDs {
 			if id != "" {
 				interruptOwner[id] = name
+				// Raised again, the ID waits for a new answer, and
+				// that first answer clears output emitted before it.
+				delete(resolved, id)
 			}
 		}
 		if own := ownEventNodeName(ev, nodesByName); own != "" {
@@ -433,10 +498,15 @@ func rerunsOnResume(node Node) bool {
 
 // validateResolved validates each surviving (last-wins) response
 // against its declared schema and returns the responses keyed by
-// interrupt ID. A superseded invalid payload never reaches here.
+// interrupt ID. A superseded invalid payload never reaches here, and
+// neither does a response that a completed activation of the node
+// consumed.
 func validateResolved(scan *nodeScanState) (map[string]any, error) {
 	resumed := map[string]any{}
 	for id, resp := range scan.resolved {
+		if _, done := scan.consumed[id]; done {
+			continue
+		}
 		if sc := scan.schemas[id]; sc != nil {
 			validated, err := validateResumeResponse(resp, sc)
 			if err != nil {
