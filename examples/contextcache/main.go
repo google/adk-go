@@ -107,8 +107,7 @@ func run(ctx context.Context) error {
 // explain renders a Gemini API failure as the part that identifies the fix,
 // rather than the service's whole response body.
 func explain(err error) string {
-	var apiErr genai.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[genai.APIError](err); ok {
 		return fmt.Sprintf("the Gemini API answered %d %s; check GOOGLE_API_KEY and that it can use model %q", apiErr.Code, apiErr.Status, *modelName)
 	}
 	return err.Error()
