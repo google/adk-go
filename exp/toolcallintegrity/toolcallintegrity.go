@@ -55,6 +55,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -127,18 +128,26 @@ type Config struct {
 //
 // Events without function calls are ignored. Events marked as restored (see
 // [PrepareRestoredEvent]) are not verified, and their function calls are never
-// executed. Tools that run as workflow nodes are not checked: their arguments
-// come from the workflow graph, and adk-go does not run plugin tool callbacks
-// for them.
+// executed. Some tool calls run without a BeforeToolCallback and so are not
+// checked at call time: tools that run as workflow nodes, whose arguments come
+// from the workflow graph; streaming function tools, which adk-go runs without
+// tool callbacks; and tools a sub-agent calls through agenttool, whose nested
+// run keeps the parent's plugins for tool callbacks but runs its own run-level
+// callbacks, so this plugin never stamped or verified that run's history. The
+// before-run check still verifies every stamped call stored in the run's own
+// session.
 //
-// adk-go differs from adk-python in two ways the plugin works around. A tool
+// adk-go differs from adk-python in three ways the plugin works around. A tool
 // context does not expose the session, so the before-tool check reads the
-// session the before-run check saw for the same invocation. And an error from
-// a BeforeToolCallback reaches the model as the tool's result rather than the
+// session the before-run check saw for the same invocation. An error from a
+// BeforeToolCallback reaches the model as the tool's result rather than the
 // caller of the run; so that a refused call stops the run as it does in
 // adk-python, the plugin returns the refusal from its OnEventCallback when the
-// refused call's response event is emitted, and ends the invocation. The
-// runner reports that error to the caller and does not store the event.
+// refused call's response event is emitted, so the runner reports that error to
+// the caller and does not store the event. And a context ended from
+// OnEventCallback does not reach the flow, which runs on a copy of it, so a
+// caller that keeps reading past that error would see the model called again;
+// the plugin's BeforeModelCallback blocks that call to stop the run.
 //
 // Register this plugin before other plugins. The plugin manager stops at the
 // first OnEventCallback that returns an event, and a later plugin must not
@@ -152,6 +161,7 @@ func New(cfg Config) (*plugin.Plugin, error) {
 		allowUnstamped: cfg.AllowUnstampedCalls,
 		sessions:       map[string]session.Session{},
 		refused:        map[refusal]error{},
+		ended:          map[string]error{},
 	}
 	if p.name == "" {
 		p.name = DefaultName
@@ -160,11 +170,12 @@ func New(cfg Config) (*plugin.Plugin, error) {
 		p.keys = append(p.keys, slices.Clone(k))
 	}
 	return plugin.New(plugin.Config{
-		Name:               p.name,
-		OnEventCallback:    p.onEvent,
-		BeforeRunCallback:  p.beforeRun,
-		AfterRunCallback:   p.afterRun,
-		BeforeToolCallback: p.beforeTool,
+		Name:                p.name,
+		OnEventCallback:     p.onEvent,
+		BeforeRunCallback:   p.beforeRun,
+		AfterRunCallback:    p.afterRun,
+		BeforeModelCallback: p.beforeModel,
+		BeforeToolCallback:  p.beforeTool,
 	})
 }
 
@@ -209,6 +220,9 @@ type integrityPlugin struct {
 	// refused holds the calls BeforeToolCallback refused and have not yet
 	// produced a response event, with the error to report for them.
 	refused map[refusal]error
+	// ended holds the error of each invocation a refusal has stopped, by
+	// invocation ID, so BeforeModelCallback can block a further model call.
+	ended map[string]error
 }
 
 // wrap names the plugin and the callback, as adk-python's plugin manager
@@ -249,9 +263,13 @@ func (p *integrityPlugin) unstamped(name, callID string) error {
 
 func (p *integrityPlugin) onEvent(ctx agent.InvocationContext, event *session.Event) (*session.Event, error) {
 	if err := p.takeRefusal(ctx.InvocationID(), event); err != nil {
-		// A tool context cannot end the invocation, so the refusal ends it
-		// here, before the model is called again.
-		ctx.EndInvocation()
+		// Returning the error stops a caller that stops its run on an error.
+		// Mark the invocation so BeforeModelCallback also stops a caller that
+		// keeps reading: ctx.EndInvocation() does not, because the flow runs
+		// on a copy of this context that never sees the flag.
+		p.mu.Lock()
+		p.ended[ctx.InvocationID()] = err
+		p.mu.Unlock()
 		return nil, err
 	}
 	var calls []*genai.FunctionCall
@@ -322,7 +340,20 @@ func (p *integrityPlugin) afterRun(ctx agent.InvocationContext) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.sessions, ctx.InvocationID())
+	delete(p.ended, ctx.InvocationID())
 	maps.DeleteFunc(p.refused, func(k refusal, _ error) bool { return k.invocationID == ctx.InvocationID() })
+}
+
+// beforeModel stops a model call for an invocation a refusal has already
+// stopped. A refused call's error, returned from OnEventCallback, stops a
+// caller that stops its run on an error; this stops a caller that keeps reading
+// after one, which would otherwise call the model again with the refused call's
+// error as the tool result.
+func (p *integrityPlugin) beforeModel(ctx agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+	p.mu.Lock()
+	err := p.ended[ctx.InvocationID()]
+	p.mu.Unlock()
+	return nil, err
 }
 
 func (p *integrityPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, error) {
@@ -415,15 +446,22 @@ func (p *integrityPlugin) session(ctx agent.Context) session.Session {
 }
 
 func (p *integrityPlugin) checkToolCall(ctx agent.Context, t tool.Tool, args map[string]any) error {
+	sess := p.session(ctx)
+	if sess == nil {
+		// BeforeRunCallback records the session of every run this plugin
+		// manages, so a missing session means the call runs in a nested run
+		// that agenttool started: it keeps the parent's plugins for tool
+		// callbacks but runs its own, pluginless, run-level callbacks. This
+		// plugin never stamped or verified that run's history, so it cannot
+		// check the call; let it through rather than refuse every tool a
+		// sub-agent calls.
+		return nil
+	}
 	callID := ctx.FunctionCallID()
 	// ADK gives every new call an ID before running it, so a call without one
 	// was replayed from the session and cannot be matched to its stamp.
 	if callID == "" {
 		return errorf("%s call has no ID, so its integrity cannot be checked.", t.Name())
-	}
-	sess := p.session(ctx)
-	if sess == nil {
-		return errorf("%s call %q cannot be checked: the session is not available.", t.Name(), callID)
 	}
 	type storedCall struct {
 		event *session.Event

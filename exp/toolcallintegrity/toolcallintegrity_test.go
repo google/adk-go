@@ -26,10 +26,12 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/exp/toolcallintegrity"
 	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/functiontool"
 )
 
@@ -87,6 +89,18 @@ func callEvent(calls ...*genai.FunctionCall) *session.Event {
 		c.Parts = append(c.Parts, &genai.Part{FunctionCall: fc})
 	}
 	ev.Content = c
+	return ev
+}
+
+// responseEvent is a function response event for callID, as the flow emits
+// after a tool runs.
+func responseEvent(callID string) *session.Event {
+	ev := session.NewEvent(context.TODO(), "inv")
+	ev.Author = "agent"
+	ev.Content = &genai.Content{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: callID, Name: "transfer"}}},
+	}
 	return ev
 }
 
@@ -347,6 +361,50 @@ func TestBeforeTool(t *testing.T) {
 	})
 }
 
+// A nested run started by agenttool keeps the parent's plugins for tool
+// callbacks but runs its own, pluginless, run-level callbacks, so this plugin
+// never recorded a session for it and a tool context exposes none. The call
+// must run rather than be refused.
+func TestBeforeToolAllowsCallWithoutSession(t *testing.T) {
+	p := newPlugin(t, toolcallintegrity.Config{})
+	if err := beforeTool(t, p, nil, "transfer", "fc-1", map[string]any{"amount": 10}); err != nil {
+		t.Errorf("BeforeToolCallback() error = %v, want nil for a sub-run call", err)
+	}
+}
+
+// BeforeModelCallback stops a model call for an invocation a refusal has
+// stopped, so a caller that keeps reading past the refusal error does not drive
+// another model call. ctx.EndInvocation() cannot do this: the flow runs on a
+// copy of the context it never reaches.
+func TestRefusalStopsFurtherModelCalls(t *testing.T) {
+	p := newPlugin(t, toolcallintegrity.Config{})
+	svc, sess := newSession(t)
+	appendStamped(t, p, svc, sess, callEvent(&genai.FunctionCall{ID: "fc-1", Name: "transfer", Args: map[string]any{"amount": 10}}))
+
+	// The tool call runs with tampered arguments, so the before-tool check
+	// refuses it and records the refusal.
+	wantIntegrityError(t, beforeTool(t, p, sess, "transfer", "fc-1", map[string]any{"amount": 5}), "arguments")
+
+	ctx := &fakeContext{StrictContextMock: agent.NewStrictContextMock(t.Context()), sess: sess}
+	// The refused call's response event surfaces the error and ends the
+	// invocation for this plugin.
+	_, err := p.OnEventCallback()(ctx, responseEvent("fc-1"))
+	wantIntegrityError(t, err, "arguments")
+
+	// A further model call in the same invocation is now blocked.
+	if _, err := p.BeforeModelCallback()(ctx, &model.LLMRequest{}); err == nil {
+		t.Error("BeforeModelCallback() error = nil, want the refusal error")
+	} else {
+		wantIntegrityError(t, err, "arguments")
+	}
+
+	// Once the run ends, the invocation is forgotten.
+	p.AfterRunCallback()(ctx)
+	if _, err := p.BeforeModelCallback()(ctx, &model.LLMRequest{}); err != nil {
+		t.Errorf("BeforeModelCallback() after run = %v, want nil", err)
+	}
+}
+
 func TestPrepareRestoredEvent(t *testing.T) {
 	p := newPlugin(t, toolcallintegrity.Config{})
 	_, sess := newSession(t)
@@ -432,5 +490,52 @@ func TestRunnerRefusedCallFailsRun(t *testing.T) {
 	wantIntegrityError(t, err, "'tool_call_integrity' during 'before_tool_callback'")
 	if *runs != 0 {
 		t.Errorf("tool ran %d times, want 0", *runs)
+	}
+}
+
+// A tool a sub-agent calls through agenttool must still run with the plugin
+// installed. The nested run keeps the parent's plugins for tool callbacks but
+// runs its own run-level callbacks, so the plugin never stamped the sub-run's
+// call and must let it through instead of refusing every sub-agent tool.
+func TestRunnerAgentToolSubAgentToolRuns(t *testing.T) {
+	subRuns := new(int)
+	inner, err := functiontool.New(functiontool.Config{Name: "inner", Description: "does work"},
+		func(_ agent.Context, _ struct{}) (map[string]any, error) {
+			*subRuns++
+			return map[string]any{"status": "ok"}, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := llmagent.New(llmagent.Config{
+		Name:        "sub_agent",
+		Description: "does the work",
+		Model: &testutil.MockModel{Responses: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "sub-fc", Name: "inner"}}}},
+			genai.NewContentFromText("sub done", genai.RoleModel),
+		}},
+		Tools: []tool.Tool{inner},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := llmagent.New(llmagent.Config{
+		Name: "parent",
+		Model: &testutil.MockModel{Responses: []*genai.Content{
+			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "sub_agent", Args: map[string]any{"request": "go"}}}}},
+			genai.NewContentFromText("done", genai.RoleModel),
+		}},
+		Tools: []tool.Tool{agenttool.New(sub, nil)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newPlugin(t, toolcallintegrity.Config{})
+	r := testutil.NewTestAgentRunnerWithPluginManager(t, parent, runner.PluginConfig{Plugins: []*plugin.Plugin{p}})
+	if _, err := testutil.CollectEvents(r.Run(t, "s", "start")); err != nil {
+		t.Fatalf("run error = %v", err)
+	}
+	if *subRuns != 1 {
+		t.Errorf("sub-agent tool ran %d times, want 1", *subRuns)
 	}
 }
