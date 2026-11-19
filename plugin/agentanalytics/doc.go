@@ -59,7 +59,13 @@
 // [Config.DisableSchemaUpgrade] is set, and creates 25 per-event SQL views
 // (such as v_llm_request, v_llm_response, and v_tool_completed; see
 // [Config.ViewDefinitions]) in the background unless [Config.DisableCreateViews]
-// is set. Pre-provisioned append-only deployments that lack table-read
+// is set. Table setup failures invoke [Config.OnSchemaError] before construction
+// returns the error; once table setup (and startup view creation when enabled)
+// succeeds, [Config.OnSchemaReady] is invoked, whereas a failed startup view
+// logs a warning (through a non-default [Config.Logger]) and returns without
+// invoking either [Config.OnSchemaReady] or [Config.OnSchemaError]
+// ([BigQueryAgentAnalyticsPlugin.SyncViews] returns view errors directly).
+// Pre-provisioned append-only deployments that lack table-read
 // permissions can pass a nil BigQuery client to
 // [NewBigQueryAgentAnalyticsPluginWithClients].
 //
@@ -130,6 +136,34 @@
 //     TestSessionEvents_EmitRichLifecycleTypes in events_test.go, and
 //     TestDocParity_PausedLongRunningToolWritesTwoToolCompletedRows in
 //     doc_test.go).
+//   - [Config.ToolResultClassifier] has no built-in reflect-and-retry rule:
+//     Unlike adk-python, which records reflect-and-retry responses as
+//     TOOL_ERROR before its classifier runs, when
+//     [Config.ToolResultClassifier] is nil, abstains, panics, or returns an
+//     undefined decision, Go records plugin/retryandreflect guidance maps from
+//     a function tool that ran as [EventToolCompleted]; recording them as
+//     [EventToolError] requires a custom classifier. Top-level boolean
+//     "isError" or "is_error" maps are recorded as [EventToolError] when the
+//     classifier is nil, abstains, panics, or returns an undefined decision,
+//     as in adk-python. (Pinned by
+//     TestDocParity_ToolResultClassifierBuiltInRules in
+//     schema_callbacks_test.go and
+//     TestPlugin_ToolResultClassifier_FailuresAreSkipped in
+//     tool_result_classifier_test.go).
+//   - [Config.OnSchemaReady] and [Config.OnSchemaError] run at most once per
+//     plugin: Unlike adk-python, which runs schema and view setup lazily on
+//     events and may retry across events, Go runs table setup eagerly and
+//     synchronously at plugin construction followed by a single background view
+//     sync when views are enabled. Only table setup failures invoke
+//     [Config.OnSchemaError]; a failed startup view logs a warning (through a
+//     non-default [Config.Logger]) and returns without invoking either
+//     [Config.OnSchemaReady] or [Config.OnSchemaError] (while
+//     [BigQueryAgentAnalyticsPlugin.SyncViews] returns view errors directly),
+//     [Config.OnSchemaReady] runs once when table setup (and startup view
+//     creation when enabled) succeeds, and both callback references are
+//     released once startup settles. (Pinned by
+//     TestDocParity_SchemaCallbacksAtMostOnce and
+//     TestPlugin_SchemaCallbacks_ClosuresReleased in schema_callbacks_test.go).
 //   - [EventAgentResponse] on final events carrying function responses: Go's
 //     final-response check excludes FunctionCall parts, LongRunningToolIDs, and
 //     compaction events, and accepts final events (including events with
