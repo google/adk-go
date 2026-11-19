@@ -506,7 +506,10 @@ func TestScheduler_CallerBreakStopsScheduling(t *testing.T) {
 	})
 
 	// Caller breaks immediately after the first event.
-	for range w.Run(mockCtx) {
+	for _, err := range w.Run(mockCtx) {
+		if err != nil {
+			t.Fatalf("run failed: %v", err)
+		}
 		break
 	}
 
@@ -1179,7 +1182,7 @@ func TestScheduler_ValidateOutput_NoOutputSkipsValidation(t *testing.T) {
 	if got, want := len(events), 4; got != want {
 		t.Fatalf("event count = %d, want %d", got, want)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if events[i].Output != nil {
 			t.Errorf("event %d Output = %v, want nil (progress)", i, events[i].Output)
 		}

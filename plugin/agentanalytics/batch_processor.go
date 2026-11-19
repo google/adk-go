@@ -79,6 +79,7 @@ func createCommittedWriteStream(ctx context.Context, writeClient *bqstorage.BigQ
 type dropCounters struct {
 	queueFullDrops        atomic.Int64
 	appendFailureDrops    atomic.Int64
+	rowErrorDrops         atomic.Int64
 	formatterFailureDrops atomic.Int64
 	shutdownDrops         atomic.Int64
 }
@@ -89,14 +90,16 @@ func (c *dropCounters) DropStats() DropStats {
 	}
 	q := c.queueFullDrops.Load()
 	a := c.appendFailureDrops.Load()
+	r := c.rowErrorDrops.Load()
 	f := c.formatterFailureDrops.Load()
 	s := c.shutdownDrops.Load()
 	return DropStats{
 		QueueFullDrops:        q,
 		AppendFailureDrops:    a,
+		RowErrorDrops:         r,
 		FormatterFailureDrops: f,
 		ShutdownDrops:         s,
-		TotalDrops:            q + a + s,
+		TotalDrops:            q + a + r + s,
 	}
 }
 
@@ -396,12 +399,18 @@ func (b *BatchProcessor) recordAppendFailureDrop(n int64) {
 	}
 }
 
+func (b *BatchProcessor) recordRowErrorDrop(n int64) {
+	if b != nil && b.counters != nil {
+		b.counters.rowErrorDrops.Add(n)
+	}
+}
+
 // DropStats returns cumulative event-drop and formatter-failure counts.
 // TotalDrops sums locally discarded events and writes whose success could not
-// be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops); it can
-// include rows committed before an acknowledgment was lost, so it is an upper
-// bound. FormatterFailureDrops separately counts payload replacement or
-// omission, which does not itself discard a row.
+// be confirmed (QueueFullDrops + AppendFailureDrops + RowErrorDrops +
+// ShutdownDrops); it can include rows committed before an acknowledgment was
+// lost, so it is an upper bound. FormatterFailureDrops separately counts
+// payload replacement or omission, which does not itself discard a row.
 func (b *BatchProcessor) DropStats() DropStats {
 	if b == nil || b.counters == nil {
 		return DropStats{}
@@ -416,14 +425,11 @@ func (b *BatchProcessor) drainQueue() []map[string]any {
 		return nil
 	}
 
-	size := queueLen
-	if size > b.config.BatchSize {
-		size = b.config.BatchSize
-	}
+	size := min(queueLen, b.config.BatchSize)
 
 	batch := make([]map[string]any, 0, size)
 Loop:
-	for i := 0; i < size; i++ {
+	for range size {
 		select {
 		case row := <-b.queue:
 			batch = append(batch, row)
@@ -440,8 +446,8 @@ func (b *BatchProcessor) writeAndLogBatch(uploadCtx, writeCtx context.Context, p
 	if len(batch) == 0 {
 		return
 	}
-	if err := b.writeBatchWithContexts(uploadCtx, writeCtx, pauseOnCallerDeadline, batch); err != nil && b.config.Logger != nil {
-		b.config.Logger.Printf("ERROR: Failed to write batch to BigQuery: %v", err)
+	if err := b.writeBatchWithContexts(uploadCtx, writeCtx, pauseOnCallerDeadline, batch); err != nil {
+		b.logAppendError(err)
 	}
 }
 
@@ -552,7 +558,10 @@ func (b *BatchProcessor) flushRunEnd() {
 // retry, the rows that BigQuery has not confirmed are kept in deferredBatch
 // with their deferred uploads requeued, and writeRunEndBatchLocked reports
 // true; the rows of the requests that BigQuery confirmed before that are
-// written, so their deferred uploads are dropped as for a written batch.
+// written, so their deferred uploads are dropped as for a written batch. The
+// rows of a request that BigQuery may have committed without confirming it are
+// never kept: tryAppendBatch counts them as dropped (see
+// errDroppedToPreventDuplicates), and their deferred uploads are dropped too.
 // Otherwise the unconfirmed rows of a batch whose append failed are dropped,
 // and the deferred uploads are dropped either way. If the append panics, as a
 // panicking Logger makes it do, the deferred uploads are dropped without being
@@ -562,22 +571,28 @@ func (b *BatchProcessor) writeRunEndBatchLocked(flushCtx context.Context, retry 
 	// A deferred batch is counted in DropStats only if a later flush drops
 	// it, so that a batch that the next flush writes is not reported as
 	// dropped, and one that fails again is not counted twice.
-	confirmed, err := b.tryAppendBatch(flushCtx, batch)
+	unconfirmed, settled, rowErrDrops, err := b.tryAppendBatch(flushCtx, batch)
 	if err != nil {
-		written, unconfirmed := batch[:confirmed], batch[confirmed:]
 		if flushCtx.Err() != nil && !retry && len(unconfirmed) > 0 {
 			// Kept before requeueDeferredUploads logs, so that a
 			// panicking Logger cannot lose the rows. Resending the
-			// confirmed rows would write them twice under
-			// ExactlyOnceDelivery, so only the rest is retried.
+			// confirmed or RowErrors-rejected rows would write them twice
+			// under ExactlyOnceDelivery or replay permanent row rejections,
+			// and the rows that BigQuery may have committed are settled as
+			// dropped, so only the unconfirmed rows are retried.
 			b.deferredBatch = unconfirmed
 			b.requeueDeferredUploads(unconfirmed)
-			b.clearDeferredUploads(written)
+			b.clearDeferredUploads(settled)
+			if errors.Is(err, errDroppedToPreventDuplicates) {
+				b.config.logf("ERROR: Failed to write batch to BigQuery, keeping %d unsent row(s) for the next flush: %v", len(unconfirmed), err)
+			}
 			return true
 		}
 		b.recordAppendFailureDrop(int64(len(unconfirmed)))
 		b.releaseBatchUploads(unconfirmed)
 		b.config.logf("ERROR: Failed to write batch to BigQuery: %v", err)
+	} else if rowErrDrops > 0 {
+		b.logAppendError(&rowErrorsOnlyError{rejected: rowErrDrops})
 	}
 	b.clearDeferredUploads(batch)
 	return false
@@ -648,7 +663,7 @@ func (b *BatchProcessor) flushAndWaitForInflightBatch() time.Duration {
 			writeLeft = 0
 		}
 		if err != nil {
-			b.config.logf("ERROR: Failed to write batch to BigQuery: %v", err)
+			b.logAppendError(err)
 		}
 	}
 	return writeLeft
@@ -679,104 +694,339 @@ func (b *BatchProcessor) writeBatchWithContexts(uploadCtx, writeCtx context.Cont
 
 // appendBatch appends batch, whose uploads are resolved, to BigQuery under
 // writeCtx, and counts the rows of the batch that BigQuery did not confirm in
-// DropStats if the append fails. A writeCtx without a deadline gets one of
+// DropStats if the append fails. Rows isolated via AppendRowsResponse.RowErrors
+// are counted under RowErrorDrops rather than AppendFailureDrops; when they are
+// the only rows that BigQuery did not write, appendBatch reports the partial
+// write as a *rowErrorsOnlyError. A writeCtx without a deadline gets one of
 // ShutdownTimeout.
 func (b *BatchProcessor) appendBatch(writeCtx context.Context, batch []map[string]any) error {
-	confirmed, err := b.tryAppendBatch(writeCtx, batch)
+	unconfirmed, _, rowErrDrops, err := b.tryAppendBatch(writeCtx, batch)
 	if err != nil {
-		b.recordAppendFailureDrop(int64(len(batch) - confirmed))
+		b.recordAppendFailureDrop(int64(len(unconfirmed)))
+		return err
 	}
-	return err
+	if rowErrDrops > 0 {
+		return &rowErrorsOnlyError{rejected: rowErrDrops}
+	}
+	return nil
 }
 
-// tryAppendBatch is appendBatch without the drop accounting: a caller that
-// keeps a batch whose append failed, to retry it later, counts the batch only
-// once it gives up on it. It reports how many leading rows of batch BigQuery
-// confirmed, which is len(batch) when it returns no error.
-func (b *BatchProcessor) tryAppendBatch(writeCtx context.Context, batch []map[string]any) (confirmed int, err error) {
+// tryAppendBatch is appendBatch without AppendFailureDrops accounting for the
+// rows that it leaves unconfirmed: a caller that keeps a batch whose append
+// failed, to retry it later, counts the unconfirmed rows only once it gives up
+// on them. It reports the unconfirmed rows remaining to retry, the settled rows
+// (confirmed, isolated via RowErrors, or dropped because BigQuery may have
+// committed them; see appendChunkRows), and the count of rows counted under
+// RowErrorDrops.
+func (b *BatchProcessor) tryAppendBatch(writeCtx context.Context, batch []map[string]any) (unconfirmed, settled []map[string]any, rowErrDrops int, err error) {
 	if _, ok := writeCtx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		writeCtx, cancel = context.WithTimeout(writeCtx, b.shutdownTimeout())
 		defer cancel()
 	}
 	if err := writeCtx.Err(); err != nil {
-		return 0, err
+		return batch, nil, 0, err
 	}
 
 	// A batch is cut into requests that stay under the Write API's request size
 	// limit. The requests are sent in order; if one fails, the rest are not
 	// sent, and the rows of the requests that BigQuery confirmed before it are
 	// reported, so that a caller that keeps the batch to retry it later resends
-	// only the rows that follow them. All chunks of a single batch share one
+	// only the rows that follow them, less those of a failed request that
+	// BigQuery may have committed. All chunks of a single batch share one
 	// rotatedInBatch budget so ExactlyOnceDelivery rotates the committed write
 	// stream at most once per batch.
 	rotatedInBatch := false
-	for _, chunk := range splitBatchByEstimatedBytes(batch, b.appendRequestByteLimit()) {
-		n, err := b.appendChunkWithRotationBudget(writeCtx, chunk, &rotatedInBatch)
-		confirmed += n
-		if err != nil {
-			return confirmed, err
+	chunks := splitBatchByEstimatedBytes(batch, b.appendRequestByteLimit())
+	for i, chunk := range chunks {
+		u, s, d, chunkErr := b.appendChunkRows(writeCtx, chunk, &rotatedInBatch)
+		rowErrDrops += d
+		settled = append(settled, s...)
+		if chunkErr != nil {
+			rem := append([]map[string]any(nil), u...)
+			for _, rest := range chunks[i+1:] {
+				rem = append(rem, rest...)
+			}
+			if rowErrDrops > 0 {
+				chunkErr = fmt.Errorf("after %d row(s) rejected by RowErrors: %w", rowErrDrops, chunkErr)
+			}
+			return rem, settled, rowErrDrops, chunkErr
 		}
 	}
-	return confirmed, nil
+	return nil, settled, rowErrDrops, nil
 }
 
-// appendChunk builds an Arrow record batch from batch and appends it. If a
-// multi-row batch serializes to an AppendRowsRequest larger than
-// b.serializedAppendRequestByteLimit(), appendChunk halves the batch and
+// maxRowErrorIsolationPasses bounds how many RowErrors isolation passes
+// appendChunkRows will run for a single chunk (or each half of a chunk split
+// for serialized size) when BigQuery repeatedly rejects subsets of rows via
+// RowErrors. Each pass calls streamWriter.append, which may retry transient
+// errors up to RetryConfig.MaxRetries times (and rotate at most once per batch
+// under ExactlyOnceDelivery). Once the cap is reached, any remaining
+// unconfirmed rows are returned as append failures so a pathological input
+// cannot monopolize flushMu and the write stream.
+const maxRowErrorIsolationPasses = 8
+
+// maxLoggedRejectedEventIDs bounds how many event_ids of the rows that one
+// RowErrors response rejected are logged.
+const maxLoggedRejectedEventIDs = 5
+
+// errDroppedToPreventDuplicates marks the failure of an AppendRows request
+// whose rows BigQuery may have committed without confirming it: an earlier
+// attempt of the request had an unknown outcome, or the response carried an
+// AppendResult along with RowErrors. Sending the rows again, even on a new
+// stream, could write them twice, so appendChunkRows counts them as dropped at
+// once and no caller keeps them for a later flush.
+var errDroppedToPreventDuplicates = errors.New("dropped to prevent duplicate delivery")
+
+// statusCodeError stands for a gRPC status of the Write API in an error that
+// is returned and logged. BigQuery fills the message of a status that rejects
+// a request with details that can quote the request's rows, so Error reports
+// only the code and the length of the message. Unwrap returns the error that
+// carries the status, so that status.Code, errors.Is and errors.As classify
+// the failure as before.
+type statusCodeError struct {
+	code     codes.Code
+	msgBytes int
+	err      error
+}
+
+func (e *statusCodeError) Error() string {
+	return fmt.Sprintf("code=%s (%d-byte message omitted)", e.code, e.msgBytes)
+}
+
+func (e *statusCodeError) Unwrap() error { return e.err }
+
+// withoutStatusMessage returns err with the message of the gRPC status that
+// it carries left out of its text, or err itself if it carries no status.
+func withoutStatusMessage(err error) error {
+	if err == nil {
+		return nil
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return err
+	}
+	return &statusCodeError{code: st.Code(), msgBytes: len(st.Message()), err: err}
+}
+
+// rowErrorsOnlyError is what appendBatch returns when BigQuery wrote every row
+// of a batch except the rows that it rejected through RowErrors, which are
+// counted in RowErrorDrops: a partial write rather than a failed one.
+type rowErrorsOnlyError struct {
+	rejected int
+}
+
+func (e *rowErrorsOnlyError) Error() string {
+	return fmt.Sprintf("batch append error from BigQuery: %d row(s) rejected by RowErrors", e.rejected)
+}
+
+// logAppendError logs err, which appendBatch returned for a batch. A batch
+// that BigQuery wrote except for the rows that it rejected through RowErrors
+// is logged as a partial write, not as a failed one.
+func (b *BatchProcessor) logAppendError(err error) {
+	if partial, ok := errors.AsType[*rowErrorsOnlyError](err); ok {
+		b.config.logf("WARNING: Wrote batch to BigQuery except %d row(s) rejected by RowErrors", partial.rejected)
+		return
+	}
+	b.config.logf("ERROR: Failed to write batch to BigQuery: %v", err)
+}
+
+// rejectedEventIDs formats the event_ids of the first
+// maxLoggedRejectedEventIDs rows for a log line, followed by how many rows
+// there are besides. The plugin generates the event_ids, so they carry no
+// user data.
+func rejectedEventIDs(rows []map[string]any) string {
+	n := min(len(rows), maxLoggedRejectedEventIDs)
+	ids := make([]string, n)
+	for i, row := range rows[:n] {
+		ids[i], _ = row[eventIDField].(string)
+	}
+	if more := len(rows) - n; more > 0 {
+		return fmt.Sprintf("%q +%d more", ids, more)
+	}
+	return fmt.Sprintf("%q", ids)
+}
+
+// settleMaybeCommitted counts rows, which BigQuery may have committed without
+// confirming it, in AppendFailureDrops and adds them to settled, so that no
+// caller sends them again (see errDroppedToPreventDuplicates).
+func (b *BatchProcessor) settleMaybeCommitted(settled, rows []map[string]any) []map[string]any {
+	b.recordAppendFailureDrop(int64(len(rows)))
+	return append(settled, rows...)
+}
+
+// appendChunkRows writes batch with a shared rotation budget, isolating
+// row-level RowErrors failures (when AppendResult is unset and Error is nil or
+// InvalidArgument) and resending the remaining valid rows. If a multi-row batch
+// serializes to an AppendRowsRequest larger than
+// b.serializedAppendRequestByteLimit(), appendChunkRows halves the batch and
 // appends each half in order; a singleton row is sent as-is so splitting
-// always terminates.
-func (b *BatchProcessor) appendChunk(writeCtx context.Context, batch []map[string]any) error {
-	rotatedInBatch := false
-	_, err := b.appendChunkWithRotationBudget(writeCtx, batch, &rotatedInBatch)
-	return err
-}
-
-// appendChunkWithRotationBudget is appendChunk with a rotation budget shared
-// with the other chunks of the batch. It reports how many leading rows of
-// batch BigQuery confirmed: when the second half of a halved chunk fails,
-// the rows of the first half are confirmed.
-func (b *BatchProcessor) appendChunkWithRotationBudget(writeCtx context.Context, batch []map[string]any, rotatedInBatch *bool) (confirmed int, err error) {
+// always terminates. Per-row RowErrors isolation is a deliberate divergence
+// from adk-python, which drops the entire batch when the response status is
+// InvalidArgument and treats a response with no status set as committed
+// without inspecting row_errors.
+//
+// It returns the unconfirmed rows, which BigQuery did not acknowledge and
+// which can be sent again, the settled rows, the count of RowErrors drops, and
+// any terminal append error. Settled rows need nothing more: BigQuery
+// committed them, rejected them through RowErrors (counted in RowErrorDrops),
+// or may have committed them without confirming it, in which case
+// appendChunkRows counts them in AppendFailureDrops (see
+// errDroppedToPreventDuplicates). The returned error never carries the
+// message of an AppendRows status, which can quote row content, only its code
+// (see statusCodeError).
+func (b *BatchProcessor) appendChunkRows(writeCtx context.Context, batch []map[string]any, rotatedInBatch *bool) (unconfirmed, settled []map[string]any, rowErrDrops int, err error) {
 	if rotatedInBatch == nil {
 		rotatedInBatch = new(bool)
 	}
-	record := b.buildRecordBatch(batch)
-	var batchBytes []byte
+	firstRec := b.buildRecordBatch(batch)
+	defer func() {
+		if firstRec != nil {
+			firstRec.Release()
+		}
+	}()
+	var firstBytes []byte
 	if len(batch) > 1 {
-		batchBytes = serializeRecord(record, b.config.Logger)
-		if batchBytes != nil && b.streamWriter.serializedRequestSize(batchBytes, record.NumRows()) > b.serializedAppendRequestByteLimit() {
-			record.Release()
+		firstBytes = serializeRecord(firstRec, b.config.Logger)
+		if firstBytes != nil && b.streamWriter.serializedRequestSize(firstBytes, firstRec.NumRows()) > b.serializedAppendRequestByteLimit() {
+			firstRec.Release()
+			firstRec = nil
 			mid := len(batch) / 2
-			n, err := b.appendChunkWithRotationBudget(writeCtx, batch[:mid], rotatedInBatch)
-			if err != nil {
-				return n, err
+			u1, s1, d1, err1 := b.appendChunkRows(writeCtx, batch[:mid], rotatedInBatch)
+			if err1 != nil {
+				rem := make([]map[string]any, 0, len(u1)+len(batch)-mid)
+				rem = append(rem, u1...)
+				rem = append(rem, batch[mid:]...)
+				return rem, s1, d1, err1
 			}
-			m, err := b.appendChunkWithRotationBudget(writeCtx, batch[mid:], rotatedInBatch)
-			return n + m, err
-		}
-	}
-	defer record.Release()
-
-	res, err := b.streamWriter.append(writeCtx, record, batchBytes, rotatedInBatch)
-	if err != nil {
-		return 0, fmt.Errorf("streamWriter append error: %w", err)
-	}
-
-	if res.GetError() != nil || len(res.GetRowErrors()) > 0 {
-		if b.config.Logger != nil {
-			b.config.Logger.Printf("BigQuery response: %s", res.String())
+			u2, s2, d2, err2 := b.appendChunkRows(writeCtx, batch[mid:], rotatedInBatch)
+			allSettled := make([]map[string]any, 0, len(s1)+len(s2))
+			allSettled = append(allSettled, s1...)
+			allSettled = append(allSettled, s2...)
+			if err2 != nil {
+				return u2, allSettled, d1 + d2, err2
+			}
+			return nil, allSettled, d1 + d2, nil
 		}
 	}
 
-	if res.GetError() != nil {
-		return 0, fmt.Errorf("batch append error from BigQuery: %v", res.GetError().GetMessage())
-	}
+	cur := batch
+	for iter := 0; ; iter++ {
+		res, appendErr := func() (*storagepb.AppendRowsResponse, error) {
+			rec := firstRec
+			preSerialized := firstBytes
+			if rec != nil {
+				firstRec = nil
+				firstBytes = nil
+			} else {
+				rec = b.buildRecordBatch(cur)
+			}
+			defer rec.Release()
+			return b.streamWriter.append(writeCtx, rec, preSerialized, rotatedInBatch)
+		}()
+		if appendErr != nil {
+			wrapped := fmt.Errorf("streamWriter append error: %w", appendErr)
+			if errors.Is(appendErr, errDroppedToPreventDuplicates) {
+				return nil, b.settleMaybeCommitted(settled, cur), rowErrDrops, wrapped
+			}
+			return cur, settled, rowErrDrops, wrapped
+		}
 
-	if len(res.GetRowErrors()) > 0 {
-		return 0, fmt.Errorf("batch append error from BigQuery: %d row errors found", len(res.GetRowErrors()))
-	}
+		rowErrs := res.GetRowErrors()
+		if len(rowErrs) > 0 && res.GetAppendResult() == nil && (res.GetError() == nil || codes.Code(res.GetError().GetCode()) == codes.InvalidArgument) {
+			badSet := make(map[int]struct{}, min(len(rowErrs), len(cur)))
+			var firstBad *storagepb.RowError
+			var outOfRangeCount int
+			var firstOutOfRange int64
+			for _, re := range rowErrs {
+				if re == nil {
+					continue
+				}
+				idx := re.GetIndex()
+				if idx < 0 || idx >= int64(len(cur)) {
+					if outOfRangeCount == 0 {
+						firstOutOfRange = idx
+					}
+					outOfRangeCount++
+					continue
+				}
+				if firstBad == nil {
+					firstBad = re
+				}
+				badSet[int(idx)] = struct{}{}
+			}
+			if len(badSet) == 0 {
+				if outOfRangeCount == 0 {
+					// Wire-decoded protobuf repeated message fields never contain nil
+					// elements; this guards hand-built RowErrors slices in Go fakes.
+					return cur, settled, rowErrDrops, fmt.Errorf("batch append error from BigQuery: RowErrors contained only nil entries")
+				}
+				b.config.logf(
+					"WARNING: BigQuery RowErrors reported %d out-of-range row index(es) (first index=%d, batch_size=%d)",
+					outOfRangeCount, firstOutOfRange, len(cur),
+				)
+				return cur, settled, rowErrDrops, fmt.Errorf("batch append error from BigQuery: row error index %d out of range [0, %d)", firstOutOfRange, len(cur))
+			}
 
-	return len(batch), nil
+			next := make([]map[string]any, 0, len(cur)-len(badSet))
+			rejected := len(settled)
+			for idx, row := range cur {
+				if _, bad := badSet[idx]; bad {
+					settled = append(settled, row)
+					continue
+				}
+				next = append(next, row)
+			}
+			// Record isolated row drops before logging so a panicking Logger
+			// cannot lose drop accounting.
+			b.recordRowErrorDrop(int64(len(badSet)))
+			rowErrDrops += len(badSet)
+			b.config.logf(
+				"WARNING: Dropping %d/%d row(s) rejected by BigQuery RowErrors (first index=%d, code=%s, out_of_range=%d, message_bytes=%d, event_ids=%s)",
+				len(badSet), len(cur), firstBad.GetIndex(), firstBad.GetCode().String(), outOfRangeCount, len(firstBad.GetMessage()), rejectedEventIDs(settled[rejected:]),
+			)
+			if len(next) == 0 {
+				return nil, settled, rowErrDrops, nil
+			}
+			if iter+1 >= maxRowErrorIsolationPasses {
+				return next, settled, rowErrDrops, fmt.Errorf(
+					"batch append error from BigQuery: exceeded max RowErrors isolation passes (%d) with %d row(s) unconfirmed",
+					maxRowErrorIsolationPasses, len(next),
+				)
+			}
+			cur = next
+			continue
+		}
+
+		if inBand := res.GetError(); inBand != nil {
+			st := status.FromProto(inBand)
+			b.config.logf(
+				"BigQuery response error (code=%s, row_errors=%d, message_bytes=%d)",
+				st.Code(), len(rowErrs), len(st.Message()),
+			)
+			return cur, settled, rowErrDrops, fmt.Errorf("batch append error from BigQuery: %w, row_errors=%d",
+				&statusCodeError{code: st.Code(), msgBytes: len(st.Message()), err: st.Err()}, len(rowErrs))
+		}
+
+		if len(rowErrs) > 0 {
+			// The response says both that BigQuery committed the request and
+			// that it rejected rows of it. Resending any of the rows could
+			// write them twice, so all of them are dropped.
+			settled = b.settleMaybeCommitted(settled, cur)
+			hasOffset := res.GetAppendResult().GetOffset() != nil
+			b.config.logf(
+				"WARNING: BigQuery response carried both AppendResult (has_offset=%t) and %d RowErrors (batch_size=%d); dropping the rows without resending them",
+				hasOffset, len(rowErrs), len(cur),
+			)
+			return nil, settled, rowErrDrops, fmt.Errorf(
+				"batch append error from BigQuery: contradictory response with AppendResult and %d RowErrors; %w",
+				len(rowErrs), errDroppedToPreventDuplicates,
+			)
+		}
+
+		settled = append(settled, cur...)
+		return nil, settled, rowErrDrops, nil
+	}
 }
 
 func (b *BatchProcessor) buildRecordBatch(batch []map[string]any) arrow.RecordBatch {
@@ -1360,7 +1610,7 @@ func (s *streamWriter) handleExactlyOnceError(
 			if s.freshlyRotated {
 				s.rotateRetryAt = s.nowOrDefault().Add(s.rotateTimeoutOrDefault())
 			}
-			return false, nil, fmt.Errorf("batch outcome unknown on stream (%v); dropped to prevent duplicate delivery", code)
+			return false, nil, fmt.Errorf("batch outcome unknown on stream (%v); %w", code, errDroppedToPreventDuplicates)
 		}
 		if *rotatedInBatch || s.freshlyRotated {
 			s.offsetDesynced = true
@@ -1436,7 +1686,7 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			}
 			// Not reachable today: every place that sets offsetDesynced also
 			// fails the chunk, and tryAppendBatch and the halving in
-			// appendChunkWithRotationBudget stop at the first error, so no
+			// appendChunkRows stop at the first error, so no
 			// later chunk of the batch enters append with it set. The check
 			// keeps a batch to one rotation if either is changed to go on
 			// after a failed chunk.
@@ -1450,7 +1700,8 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			s.offsetDesynced = false
 		}
 		defer func() {
-			if hadAmbiguousSend && (err != nil || res.GetError() != nil || len(res.GetRowErrors()) > 0) {
+			contradictoryResult := res.GetAppendResult() != nil && len(res.GetRowErrors()) > 0
+			if contradictoryResult || (hadAmbiguousSend && (err != nil || res.GetError() != nil || len(res.GetRowErrors()) > 0)) {
 				s.offsetDesynced = true
 				if s.freshlyRotated {
 					s.rotateRetryAt = s.nowOrDefault().Add(s.rotateTimeoutOrDefault())
@@ -1478,10 +1729,7 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(delay):
-				delay = time.Duration(float64(delay) * s.config.RetryConfig.Multiplier)
-				if delay > s.config.RetryConfig.MaxDelay {
-					delay = s.config.RetryConfig.MaxDelay
-				}
+				delay = min(time.Duration(float64(delay)*s.config.RetryConfig.Multiplier), s.config.RetryConfig.MaxDelay)
 			}
 		}
 
@@ -1512,12 +1760,12 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 				if streamErr == nil {
 					streamErr = ctx.Err()
 				}
-				lastErr = fmt.Errorf("failed to open append rows stream: %w", streamErr)
+				lastErr = fmt.Errorf("failed to open append rows stream: %w", withoutStatusMessage(streamErr))
 				continue
 			}
 			if streamErr != nil {
 				streamCancel()
-				lastErr = fmt.Errorf("failed to open append rows stream: %w", streamErr)
+				lastErr = fmt.Errorf("failed to open append rows stream: %w", withoutStatusMessage(streamErr))
 				if s.isPermanentWriteError(status.Code(streamErr)) {
 					return nil, lastErr
 				}
@@ -1578,7 +1826,7 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 					attempt--
 				}
 			}
-			lastErr = fmt.Errorf("failed to send row batch: %w", sendErr)
+			lastErr = fmt.Errorf("failed to send row batch: %w", withoutStatusMessage(sendErr))
 			if !reusedStream && s.isPermanentWriteError(status.Code(sendErr)) {
 				if !sendEOF || freshStreamRetried {
 					return nil, lastErr
@@ -1606,7 +1854,7 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 					attempt--
 				}
 			}
-			lastErr = fmt.Errorf("failed to receive response for row batch: %w", recvErr)
+			lastErr = fmt.Errorf("failed to receive response for row batch: %w", withoutStatusMessage(recvErr))
 			if !reusedStream && s.isPermanentWriteError(status.Code(recvErr)) {
 				if freshStreamRetried {
 					return nil, lastErr
@@ -1614,6 +1862,19 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 				freshStreamRetried = true
 			}
 			continue
+		}
+
+		// Under ExactlyOnceDelivery, if an earlier attempt had an ambiguous send,
+		// returning RowErrors to the caller without error would let
+		// appendChunkRows strip the bad rows and replay the surviving rows onto a
+		// rotated write stream, bypassing offset deduplication for rows that the
+		// ambiguous attempt may already have committed. Check this before
+		// handleExactlyOnceError so a contradictory AlreadyExists + RowErrors
+		// response cannot take the confirmation shortcut and advance streamOffset.
+		// errDroppedToPreventDuplicates keeps every caller from sending the
+		// rows again, a run-end flush that runs out of time included.
+		if s.config.ExactlyOnceDelivery && hadAmbiguousSend && len(recvRes.GetRowErrors()) > 0 {
+			return nil, fmt.Errorf("row errors received after ambiguous send on stream; outcome uncertain; %w", errDroppedToPreventDuplicates)
 		}
 
 		if s.config.ExactlyOnceDelivery && recvRes.GetError() != nil {
@@ -1633,16 +1894,14 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 				attempt--
 			}
 			if code == codes.AlreadyExists || code == codes.OutOfRange || code == codes.NotFound {
-				lastErr = fmt.Errorf("batch append error from BigQuery: %s", recvRes.GetError().GetMessage())
 				continue
 			}
 		}
 
 		// A transient status in the response is resent like the same status on
 		// the stream. Once the retries are used up, the response is returned
-		// as it is, so that the caller reports BigQuery's message.
+		// as it is, so that the caller reports BigQuery's status code.
 		if inBand := recvRes.GetError(); inBand != nil && attempt < maxRetries && isTransientInBandError(codes.Code(inBand.GetCode())) {
-			lastErr = fmt.Errorf("batch append error from BigQuery: %s", inBand.GetMessage())
 			continue
 		}
 

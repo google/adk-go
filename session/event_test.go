@@ -128,3 +128,36 @@ func TestIsFinalResponseNilParts(t *testing.T) {
 		})
 	}
 }
+
+func TestIsFinalResponseErrorEvent(t *testing.T) {
+	functionCall := &genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}}
+	functionResponse := &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "f"}}
+	codeResult := &genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{}}
+	tests := []struct {
+		name      string
+		errorCode string
+		partial   bool
+		parts     []*genai.Part
+		want      bool
+	}{
+		{"error with a function response is final", "SOME_ERROR", false, []*genai.Part{functionResponse}, true},
+		{"error with a trailing code execution result is final", "SOME_ERROR", false, []*genai.Part{codeResult}, true},
+		{"error without content is final", "SOME_ERROR", false, nil, true},
+		{"error with a function call is not final", "SOME_ERROR", false, []*genai.Part{functionCall}, false},
+		{"partial error is not final", "SOME_ERROR", true, []*genai.Part{{Text: "partial"}}, false},
+		{"function response without error is not final", "", false, []*genai.Part{functionResponse}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			event := &session.Event{LLMResponse: model.LLMResponse{
+				Content:      &genai.Content{Parts: tc.parts},
+				ErrorCode:    tc.errorCode,
+				ErrorMessage: "Something went wrong",
+				Partial:      tc.partial,
+			}}
+			if got := event.IsFinalResponse(); got != tc.want {
+				t.Errorf("IsFinalResponse() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

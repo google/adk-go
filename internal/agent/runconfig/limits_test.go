@@ -66,7 +66,7 @@ func TestIncrementAndEnforceLLMCallsLimit(t *testing.T) {
 	t.Run("non-positive limits do not bound", func(t *testing.T) {
 		for _, limit := range []int{0, -1} {
 			c := &RunConfig{MaxLLMCalls: limit}
-			for i := 0; i < 100; i++ {
+			for i := range 100 {
 				if err := c.IncrementAndEnforceLLMCallsLimit(); err != nil {
 					t.Fatalf("limit %d bounded the run at call %d: %v", limit, i, err)
 				}
@@ -90,16 +90,14 @@ func TestIncrementAndEnforceLLMCallsLimit(t *testing.T) {
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		allowed := 0
-		for i := 0; i < limit*2; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range limit * 2 {
+			wg.Go(func() {
 				if err := c.IncrementAndEnforceLLMCallsLimit(); err == nil {
 					mu.Lock()
 					allowed++
 					mu.Unlock()
 				}
-			}()
+			})
 		}
 		wg.Wait()
 

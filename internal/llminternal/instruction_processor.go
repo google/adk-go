@@ -252,24 +252,44 @@ func hasTextFileExtension(name string) bool {
 	return false
 }
 
-// isIdentifier checks if a string is a valid Go identifier.
-// This is the equivalent of Python's `str.isidentifier()`.
+// isIdentifier reports whether s is an identifier under the Unicode ID_Start
+// and ID_Continue properties (UAX #31): an underscore or an ID_Start
+// character, followed by ID_Continue characters. ID_Continue adds combining
+// marks, so names written in scripts such as Devanagari or Thai qualify.
+//
+// The one difference from ID_* is that U+309B and U+309C are rejected. They
+// are ID_Start only through Other_ID_Start and are not XID_Start or
+// XID_Continue, so str.isidentifier, which adk-python's _is_valid_state_name
+// calls and which uses the XID_* properties, rejects them as well. A few
+// other compatibility characters that are not stable under NFKC, such as
+// U+037A, are ID_* but not XID_* and are still accepted here.
 func isIdentifier(s string) bool {
 	if s == "" {
 		return false
 	}
 	for i, r := range s {
 		if i == 0 {
-			if !unicode.IsLetter(r) && r != '_' {
+			if r != '_' && !isIDStart(r) {
 				return false
 			}
-		} else {
-			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
-				return false
-			}
+		} else if !isIDContinue(r) {
+			return false
 		}
 	}
 	return true
+}
+
+func isIDStart(r rune) bool {
+	if r == '\u309b' || r == '\u309c' {
+		return false
+	}
+	return unicode.In(r, unicode.L, unicode.Nl, unicode.Other_ID_Start) &&
+		!unicode.Is(unicode.Pattern_Syntax, r)
+}
+
+func isIDContinue(r rune) bool {
+	return isIDStart(r) ||
+		unicode.In(r, unicode.Mn, unicode.Mc, unicode.Nd, unicode.Pc, unicode.Other_ID_Continue)
 }
 
 // isValidStateName checks if the variable name is a valid state name.
