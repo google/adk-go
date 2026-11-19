@@ -150,9 +150,12 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 			}
 			if lastEvent.IsFinalResponse() {
 				// A thought-only ("thinking") turn reports as final but has no
-				// answer; don't stop on it — call the model again. Give up once
-				// the model has produced only thoughts too many times in a row,
-				// leaving the last thinking event as the result.
+				// answer; don't stop on it — call the model again. A
+				// thought-only turn that finished with STOP is not one of these:
+				// applyEmptyResponsePolicy gave it an error code, and it ends
+				// the run. Give up once the model has produced only thoughts too
+				// many times in a row, leaving the last thinking event as the
+				// result.
 				if !isThoughtOnlyTurn(lastEvent) {
 					return
 				}
@@ -184,32 +187,22 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 // Thought signatures ride on substantive parts (text, function calls), which
 // are not Thought, so any such part makes the turn non-thought-only. A turn
 // with an error code is never thought-only: it is a final response, as in
-// adk-python (Event.is_final_response), whatever its parts are.
+// adk-python (Event.is_final_response), whatever its parts are. This is what
+// ends the run on a thought-only STOP turn that applyEmptyResponsePolicy marked.
 func isThoughtOnlyTurn(ev *session.Event) bool {
 	if ev == nil || ev.LLMResponse.Partial || ev.LLMResponse.ErrorCode != "" {
 		return false
 	}
-	return isThoughtOnlyResponse(&ev.LLMResponse)
-}
-
-// isThoughtOnlyResponse reports whether resp holds at least one thought part
-// and no part that is not a thought. Nil parts are ignored, so a response
-// whose parts are all nil is not thought-only.
-func isThoughtOnlyResponse(resp *model.LLMResponse) bool {
-	if resp == nil || resp.Content == nil {
+	content := ev.LLMResponse.Content
+	if content == nil || len(content.Parts) == 0 {
 		return false
 	}
-	sawThought := false
-	for _, p := range resp.Content.Parts {
-		if p == nil {
-			continue
-		}
-		if !p.Thought {
+	for _, p := range content.Parts {
+		if p != nil && !p.Thought {
 			return false
 		}
-		sawThought = true
 	}
-	return sawThought
+	return true
 }
 
 // isPythonWhitespace reports whether r is whitespace for Python's str.strip,
@@ -272,18 +265,18 @@ const (
 )
 
 // applyEmptyResponsePolicy marks a completed response that finished with STOP
-// but holds no meaningful content as an error, so that the turn ends with an
-// error event the caller can act on instead of a silent empty answer. It sets
-// resp.ErrorCode to MODEL_RETURNED_NO_CONTENT and, unless resp already has an
-// error message, a message that says whether the response had no parts or only
-// thought or whitespace parts.
+// but holds no meaningful content (no parts, only thought parts, or only
+// whitespace text) as an error, so that the turn ends with an error event the
+// caller can act on instead of a silent empty answer. It sets resp.ErrorCode
+// to MODEL_RETURNED_NO_CONTENT and, unless resp already has an error message,
+// a message that says whether the response had no parts or only thought or
+// whitespace parts. It follows adk-python's apply_empty_response_policy
+// (flows/llm_flows/core/_model_call.py).
 //
 // It leaves resp unchanged when resp is partial, already has an error code, or
 // finished for another reason. Under SSE streaming it also leaves a response
 // without parts unchanged: the streaming aggregator ends a turn with a
-// finish-only chunk, which adk-python does not mark either. A thought-only
-// response is left unchanged, because Flow.Run calls the model again after it
-// where adk-python ends the run.
+// finish-only chunk, which adk-python does not mark either.
 //
 // It must run after the after-model callbacks and before the response
 // processors: emptiness is a property of what the model returned, and a
@@ -295,9 +288,6 @@ func applyEmptyResponsePolicy(ctx agent.InvocationContext, resp *model.LLMRespon
 	}
 	withParts := hasParts(resp)
 	if !withParts && streamingMode(ctx) == agent.StreamingModeSSE {
-		return
-	}
-	if isThoughtOnlyResponse(resp) {
 		return
 	}
 	resp.ErrorCode = noContentErrorCode

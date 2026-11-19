@@ -716,6 +716,55 @@ func TestAfterModelCallback_PartialSetAndInheritance(t *testing.T) {
 	})
 }
 
+// TestThoughtOnlyStopAfterToolCallSurfacesErrorEvent follows adk-python's
+// test_thought_only_stop_after_tool_call_surfaces_error_event
+// (flows/llm_flows/test_base_llm_flow.py): the tool from the first turn runs,
+// and a second turn that finishes with STOP holding only a thought becomes the
+// run's last event, with error code MODEL_RETURNED_NO_CONTENT.
+func TestThoughtOnlyStopAfterToolCallSurfacesErrorEvent(t *testing.T) {
+	type args struct {
+		X int `json:"x"`
+	}
+	toolCalls := 0
+	increaseByOne, err := functiontool.New(functiontool.Config{
+		Name:        "increase_by_one",
+		Description: "Adds one to x.",
+	}, func(_ agent.Context, a args) (int, error) {
+		toolCalls++
+		return a.X + 1, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+	a := newTestAgent(t, llmagent.Config{
+		Name: "root_agent",
+		Model: &scriptedModel{responses: []*model.LLMResponse{
+			{
+				Content:      &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "increase_by_one", Args: map[string]any{"x": 1}}}}},
+				FinishReason: genai.FinishReasonStop,
+			},
+			{
+				Content:      &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "I have processed the tool result...", Thought: true}}},
+				FinishReason: genai.FinishReasonStop,
+			},
+		}},
+		Tools: []tool.Tool{increaseByOne},
+	})
+
+	run := runAgentOnce(t, a)
+
+	if run.err != nil {
+		t.Fatalf("run error: %v", run.err)
+	}
+	if toolCalls != 1 {
+		t.Errorf("tool called %d times, want 1", toolCalls)
+	}
+	want := []eventError{{}, {}, {"MODEL_RETURNED_NO_CONTENT", noActionableContentMessage}}
+	if diff := cmp.Diff(want, errorsOf(run.events)); diff != "" {
+		t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestToolCallback(t *testing.T) {
 	type Args struct {
 		Seed int `json:"seed"`
@@ -1732,15 +1781,16 @@ func (m *mockInvocationContext) WithContext(ctx context.Context) agent.Invocatio
 	return &cp
 }
 
-// TestThoughtOnlyTurnDoesNotEndInvocation guards against a thought-only model
-// turn ending the run before the answer is produced. Such a turn has no
-// function call/response and is not partial, so IsFinalResponse() reports it as
-// final; the flow must instead call the model again. adk-python parity.
-func TestThoughtOnlyTurnDoesNotEndInvocation(t *testing.T) {
+// TestThoughtOnlyStopTurnEndsInvocation pins adk-python's behavior for a
+// model turn that finishes with STOP holding only thought parts: it becomes an
+// error event with code MODEL_RETURNED_NO_CONTENT that ends the run, and the
+// model is not called again (flows/llm_flows/core/_model_call.py,
+// apply_empty_response_policy).
+func TestThoughtOnlyStopTurnEndsInvocation(t *testing.T) {
 	m := &testutil.MockModel{Responses: []*genai.Content{
 		// Turn 1: the model is "thinking" — a thought-only part, no answer.
 		{Role: "model", Parts: []*genai.Part{{Thought: true, Text: "let me think"}}},
-		// Turn 2: the real answer.
+		// Turn 2: never requested.
 		genai.NewContentFromText("the answer", genai.RoleModel),
 	}}
 
@@ -1750,24 +1800,18 @@ func TestThoughtOnlyTurnDoesNotEndInvocation(t *testing.T) {
 	}
 	runner := testutil.NewTestAgentRunner(t, a)
 
-	var got strings.Builder
+	var events []*session.Event
 	for ev, err := range runner.Run(t, "session_id", "hi") {
 		if err != nil {
 			t.Fatalf("run error: %v", err)
 		}
-		if ev.LLMResponse.Content != nil {
-			for _, p := range ev.LLMResponse.Content.Parts {
-				if !p.Thought {
-					got.WriteString(p.Text)
-				}
-			}
-		}
+		events = append(events, ev)
 	}
 
-	if n := len(m.Requests); n != 2 {
-		t.Errorf("model called %d time(s), want 2: a thought-only turn ended the invocation early", n)
+	if n := len(m.Requests); n != 1 {
+		t.Errorf("model called %d time(s), want 1", n)
 	}
-	if !strings.Contains(got.String(), "the answer") {
-		t.Errorf("surfaced text = %q, want it to contain %q", got.String(), "the answer")
+	if diff := cmp.Diff([]eventError{{"MODEL_RETURNED_NO_CONTENT", noActionableContentMessage}}, errorsOf(events)); diff != "" {
+		t.Errorf("event errors mismatch (-want +got):\n%s", diff)
 	}
 }
