@@ -63,10 +63,35 @@ const (
 	// non-partial response. Streamed chunks with Partial set only feed
 	// latency_ms.time_to_first_token_ms on that final row, and only the
 	// first chunk with generated content does.
-	EventLLMResponse   = "LLM_RESPONSE"
-	EventLLMError      = "LLM_ERROR"
-	EventToolStarting  = "TOOL_STARTING"
+	EventLLMResponse  = "LLM_RESPONSE"
+	EventLLMError     = "LLM_ERROR"
+	EventToolStarting = "TOOL_STARTING"
+	// EventToolCompleted is written when a tool call finishes without an error
+	// (or with a tool confirmation request/rejection). It is not written for
+	// a call whose failure OnToolErrorCallback already recorded as TOOL_ERROR
+	// (for example, when an agent OnToolErrorCallback or a later plugin
+	// recovers the error), nor for a call whose result is classified as a
+	// failure (see Config.ToolResultClassifier), such as one answered by
+	// plugin/retryandreflect.
 	EventToolCompleted = "TOOL_COMPLETED"
+	// EventToolError is written when a tool call fails, including when the
+	// failure is recovered by an agent OnToolErrorCallback, a later plugin, or
+	// plugin/retryandreflect (except when plugin/retryandreflect is registered
+	// first and a call to a non-FunctionTool, or to a missing tool that no
+	// BeforeToolCallback answered, fails: ADK then skips AfterToolCallback and
+	// plugin/retryandreflect answers in OnToolErrorCallback before this plugin
+	// runs; if a BeforeToolCallback answers a missing-tool lookup with a
+	// non-nil error, ADK dispatches the error and after-tool callbacks so
+	// TOOL_ERROR is still written), and when a tool returns a result that is
+	// classified as a failure (see Config.ToolResultClassifier). An
+	// AfterToolCallback that runs after OnToolErrorCallback already recorded
+	// the failure adds no second row. When plugin/retryandreflect is
+	// registered before this plugin, any tool result carrying the reserved
+	// response_type "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN" is classified
+	// as TOOL_ERROR before Config.ToolResultClassifier runs; its error_message
+	// comes from error_details or error_type unless Config.ContentFormatter is
+	// set or "content" is in Config.PayloadColumnDenylist, in which case a
+	// fixed fallback diagnostic is written instead.
 	EventToolError     = "TOOL_ERROR"
 	EventStateDelta    = "STATE_DELTA"
 	EventAgentTransfer = "AGENT_TRANSFER"
@@ -138,6 +163,26 @@ var knownEventTypes = newSet(
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// Tool errors handled by plugin/retryandreflect are recognized from its
+// reserved response_type ("ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") before
+// Config.ToolResultClassifier runs and logged as TOOL_ERROR in either
+// registration order, except when plugin/retryandreflect is registered first
+// for a call to a tool that is not a FunctionTool or to a missing tool that no
+// BeforeToolCallback answered: ADK skips AfterToolCallback for those calls and
+// plugin/retryandreflect answers in OnToolErrorCallback, so this plugin never
+// receives the error and logs no outcome row. (If a BeforeToolCallback answers
+// a missing-tool lookup with a non-nil error, ADK runs the error and
+// after-tool callbacks, so TOOL_ERROR is written.) When Config.ContentFormatter
+// is set or "content" is in Config.PayloadColumnDenylist, the TOOL_ERROR row
+// of a plugin/retryandreflect recovery payload writes a fixed fallback
+// error_message rather than copying error_details or error_type from the map.
+// Recoveries by other plugins registered before this plugin emit
+// TOOL_COMPLETED when AfterToolCallback runs (such as BeforeToolCallback map
+// answers or FunctionTool OnToolErrorCallback map recoveries, unless classified
+// as a failure by Config.ToolResultClassifier), whereas OnToolErrorCallback map
+// recoveries on a missing tool (that no BeforeToolCallback answered) or a
+// non-FunctionTool skip AfterToolCallback and write no outcome row.
 func NewBigQueryAgentAnalyticsPlugin(
 	ctx context.Context,
 	projectID string,
@@ -164,6 +209,26 @@ func NewBigQueryAgentAnalyticsPlugin(
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// Tool errors handled by plugin/retryandreflect are recognized from its
+// reserved response_type ("ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") before
+// Config.ToolResultClassifier runs and logged as TOOL_ERROR in either
+// registration order, except when plugin/retryandreflect is registered first
+// for a call to a tool that is not a FunctionTool or to a missing tool that no
+// BeforeToolCallback answered: ADK skips AfterToolCallback for those calls and
+// plugin/retryandreflect answers in OnToolErrorCallback, so this plugin never
+// receives the error and logs no outcome row. (If a BeforeToolCallback answers
+// a missing-tool lookup with a non-nil error, ADK runs the error and
+// after-tool callbacks, so TOOL_ERROR is written.) When Config.ContentFormatter
+// is set or "content" is in Config.PayloadColumnDenylist, the TOOL_ERROR row
+// of a plugin/retryandreflect recovery payload writes a fixed fallback
+// error_message rather than copying error_details or error_type from the map.
+// Recoveries by other plugins registered before this plugin emit
+// TOOL_COMPLETED when AfterToolCallback runs (such as BeforeToolCallback map
+// answers or FunctionTool OnToolErrorCallback map recoveries, unless classified
+// as a failure by Config.ToolResultClassifier), whereas OnToolErrorCallback map
+// recoveries on a missing tool (that no BeforeToolCallback answered) or a
+// non-FunctionTool skip AfterToolCallback and write no outcome row.
 func NewBigQueryAgentAnalyticsPluginWithConfig(
 	ctx context.Context,
 	config Config,
@@ -351,6 +416,26 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// Tool errors handled by plugin/retryandreflect are recognized from its
+// reserved response_type ("ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") before
+// Config.ToolResultClassifier runs and logged as TOOL_ERROR in either
+// registration order, except when plugin/retryandreflect is registered first
+// for a call to a tool that is not a FunctionTool or to a missing tool that no
+// BeforeToolCallback answered: ADK skips AfterToolCallback for those calls and
+// plugin/retryandreflect answers in OnToolErrorCallback, so this plugin never
+// receives the error and logs no outcome row. (If a BeforeToolCallback answers
+// a missing-tool lookup with a non-nil error, ADK runs the error and
+// after-tool callbacks, so TOOL_ERROR is written.) When Config.ContentFormatter
+// is set or "content" is in Config.PayloadColumnDenylist, the TOOL_ERROR row
+// of a plugin/retryandreflect recovery payload writes a fixed fallback
+// error_message rather than copying error_details or error_type from the map.
+// Recoveries by other plugins registered before this plugin emit
+// TOOL_COMPLETED when AfterToolCallback runs (such as BeforeToolCallback map
+// answers or FunctionTool OnToolErrorCallback map recoveries, unless classified
+// as a failure by Config.ToolResultClassifier), whereas OnToolErrorCallback map
+// recoveries on a missing tool (that no BeforeToolCallback answered) or a
+// non-FunctionTool skip AfterToolCallback and write no outcome row.
 func NewBigQueryAgentAnalyticsPluginWithClients(
 	ctx context.Context,
 	config Config,
@@ -789,6 +874,13 @@ func (p *analyticsPlugin) denied(column string) bool {
 	return ok
 }
 
+// suppressesToolPayload reports whether content controls omit or transform raw
+// tool result payloads so payload fields must not be copied verbatim into
+// error_message.
+func (p *analyticsPlugin) suppressesToolPayload() bool {
+	return p.denied(columnContent) || p.config.ContentFormatter != nil
+}
+
 func (p *analyticsPlugin) recordPanic(format string, args ...any) {
 	if p.config.Enabled && p.processor != nil {
 		p.processor.recordAppendFailureDrop(1)
@@ -1076,7 +1168,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.Partial {
 			p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil)
 		} else if ev.Content != nil || ev.Output != nil {
-			p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content))
+			p.traces.completeResponseWithActions(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content), &ev.Actions)
 		} else {
 			p.traces.clearLastPartial(ctx, evID)
 		}
@@ -1088,7 +1180,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 			taskID := evID
 			taskID.agentName = ev.Author
 			taskID.branch = ev.Branch
-			taskOut := classifyTaskResponses(ev.Content)
+			taskOut := classifyTaskResponsesWithPolicy(ev.Content, p.suppressesToolPayload())
 			evDispatch := dispatchMapsOf(&ev.Actions)
 			if len(taskOut.retiredCallIDs) > 0 || len(taskOut.overruledEndingCallIDs) > 0 {
 				p.traces.retireFailedTaskAttemptsForEvent(ctx, taskID, taskOut.retiredCallIDs, taskOut.overruledEndingCallIDs, taskOut.leadingActionCallID, evDispatch, taskOut.mergedResponse, ev.Timestamp)
@@ -1185,10 +1277,17 @@ func isTaskEndingResult(resp map[string]any) bool {
 // is_error), with its diagnostic. A task that ends with such an error has
 // failed rather than completed.
 func taskEndResult(resp map[string]any) (ends, failed bool, errMsg string) {
+	return taskEndResultWithPolicy(resp, false)
+}
+
+func taskEndResultWithPolicy(resp map[string]any, suppressPayload bool) (ends, failed bool, errMsg string) {
 	if !isTaskEndingResult(resp) {
 		return false, false, ""
 	}
-	errMsg, failed = classifyToolResultError(resp)
+	if msg, ok := retryAnswerError(resp, suppressPayload); ok {
+		return true, true, msg
+	}
+	errMsg, failed = mcpResultError(resp)
 	return true, failed, errMsg
 }
 
@@ -1222,7 +1321,11 @@ type taskResponseOutcome struct {
 	overruledEndingCallIDs []string
 }
 
-func classifyTaskResponses(c *genai.Content) (out taskResponseOutcome) {
+func classifyTaskResponses(c *genai.Content) taskResponseOutcome {
+	return classifyTaskResponsesWithPolicy(c, false)
+}
+
+func classifyTaskResponsesWithPolicy(c *genai.Content, suppressPayload bool) (out taskResponseOutcome) {
 	if c == nil {
 		return out
 	}
@@ -1242,7 +1345,7 @@ func classifyTaskResponses(c *genai.Content) (out taskResponseOutcome) {
 		}
 		if !seenFirst {
 			seenFirst = true
-			out.ends, out.failed, out.errMsg = taskEndResult(fr.Response)
+			out.ends, out.failed, out.errMsg = taskEndResultWithPolicy(fr.Response, suppressPayload)
 			if out.ends {
 				out.endingCallID = fr.ID
 				if fr.ID != "" {
@@ -1456,6 +1559,39 @@ func (p *analyticsPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[st
 	return nil, nil
 }
 
+const (
+	// reflectAndRetryResponseType matches the unexported response_type marker
+	// emitted by plugin/retryandreflect (and adk-python's ReflectAndRetryToolPlugin)
+	// when it recovers a tool error into retry guidance. Kept here because
+	// plugin/agentanalytics requires google.golang.org/adk/v2 v2.0.0.
+	reflectAndRetryResponseType         = "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN"
+	reflectAndRetryFallbackErrorMessage = "Tool raised an error that ReflectAndRetryToolPlugin handled."
+)
+
+// retryAnswerError reports whether result is a recovery payload produced by
+// plugin/retryandreflect, returning the extracted error message and true.
+// Only exact string values on "error_details" and "error_type" are accepted;
+// non-string values are ignored and fall back to
+// reflectAndRetryFallbackErrorMessage. When suppressPayload is true (because
+// ContentFormatter is set or "content" is in PayloadColumnDenylist), it returns
+// reflectAndRetryFallbackErrorMessage directly rather than copying fields from
+// the recovery map into error_message.
+func retryAnswerError(result map[string]any, suppressPayload bool) (string, bool) {
+	rt, ok := result["response_type"].(string)
+	if !ok || rt != reflectAndRetryResponseType {
+		return "", false
+	}
+	if suppressPayload {
+		return reflectAndRetryFallbackErrorMessage, true
+	}
+	for _, k := range []string{"error_details", "error_type"} {
+		if s, ok := result[k].(string); ok && s != "" {
+			return s, true
+		}
+	}
+	return reflectAndRetryFallbackErrorMessage, true
+}
+
 // isToolConfirmationOutcome reports whether err is a tool confirmation request
 // or rejection. Both outcomes complete the tool call in adk-python rather than
 // logging TOOL_ERROR. If inspecting err panics (for example, Unwrap on a typed
@@ -1502,14 +1638,16 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		}
 		p.traces.noteTaskAttempt(ctx, id, callID, ends, failed)
 	}
+	if closedByError {
+		// onToolError already wrote TOOL_ERROR; even when an agent
+		// OnToolErrorCallback or a later plugin recovered or replaced the error,
+		// suppress TOOL_COMPLETED and AGENT_RESPONSE.
+		return nil, nil
+	}
 	if err != nil && !confirmationOutcome {
-		// OnToolErrorCallback normally owns the TOOL_ERROR row and sets
-		// closedByError; when an earlier plugin short-circuited
-		// OnToolErrorCallback before onToolError ran, emit TOOL_ERROR here so
-		// the failed call still gets its terminal row.
-		if !closedByError {
-			p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, err)
-		}
+		// When an earlier plugin short-circuited OnToolErrorCallback before
+		// onToolError ran and passed the error through, emit TOOL_ERROR here.
+		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, err)
 		return nil, nil
 	}
 	if confirmationOutcome {
@@ -1518,16 +1656,11 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		// and the classifier sees it, as it does there.
 		result = map[string]any{"error": err.Error()}
 	}
-	if closedByError {
-		// A call whose failure OnToolErrorCallback already recorded has its
-		// TOOL_ERROR row; the classifier is not asked about the result that a
-		// later plugin recovered it into, and a recovered result that the
-		// built-in rules still classify as an error writes no TOOL_COMPLETED
-		// row.
-		if _, failed := classifyToolResultError(result); failed {
-			return nil, nil
-		}
-	} else if msg, failed := p.classifyToolResultError(ctx, t, args, result); failed {
+	if msg, failed := p.classifyToolResultError(ctx, t, args, result); failed {
+		// This includes the answer of a plugin/retryandreflect registered
+		// before this plugin, which short-circuits OnToolErrorCallback and
+		// returns a recovery payload with err == nil: it is logged as
+		// TOOL_ERROR, without TOOL_COMPLETED and AGENT_RESPONSE.
 		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
 		return nil, nil
 	}
@@ -1627,15 +1760,6 @@ func valueTypeName(v any) string {
 	return cmp.Or(t.Name(), t.String())
 }
 
-// classifyToolResultError reports whether a tool result map that came without
-// a Go error marks a failure, and if so the diagnostic to record for it. A
-// result fails when its top-level isError or is_error key is the boolean true,
-// as an MCP CallToolResult reports a failed tool call. The diagnostic is a
-// fixed message, so the result's payload is not copied into error_message.
-func classifyToolResultError(result map[string]any) (string, bool) {
-	return mcpResultError(result)
-}
-
 func mcpResultError(result map[string]any) (string, bool) {
 	if len(result) == 0 {
 		return "", false
@@ -1650,14 +1774,19 @@ func mcpResultError(result map[string]any) (string, bool) {
 
 // classifyToolResultError returns the error_message of the TOOL_ERROR row of a
 // result that a tool returned without an error, and true, or false to record
-// the result as TOOL_COMPLETED. Config.ToolResultClassifier decides first: its
+// the result as TOOL_COMPLETED. A plugin/retryandreflect recovery payload is
+// recorded as TOOL_ERROR first (honoring content controls on error_message),
+// matching adk-python regardless of registration order or classifier verdicts.
+// For other results, Config.ToolResultClassifier decides next: its
 // ToolResultError verdict records the row, with the classifier's ErrorMessage,
 // or classifiedToolErrorMessage when that is empty, as the error_message, and
 // its ToolResultOK verdict completes the call, whatever the result holds. When
 // the classifier is nil, abstains, panics or returns a decision that is not
-// defined, the package-level classifyToolResultError decides with the
-// plugin's built-in rules.
+// defined, mcpResultError decides with the remaining built-in rules.
 func (p *analyticsPlugin) classifyToolResultError(ctx agent.Context, t tool.Tool, args, result map[string]any) (string, bool) {
+	if msg, ok := retryAnswerError(result, p.suppressesToolPayload()); ok {
+		return msg, true
+	}
 	if p.config.ToolResultClassifier != nil {
 		switch verdict := p.runToolResultClassifier(ctx, t, args, result); verdict.Decision {
 		case ToolResultOK:
@@ -1666,7 +1795,7 @@ func (p *analyticsPlugin) classifyToolResultError(ctx agent.Context, t tool.Tool
 			return cmp.Or(verdict.ErrorMessage, classifiedToolErrorMessage), true
 		}
 	}
-	return classifyToolResultError(result)
+	return mcpResultError(result)
 }
 
 // runToolResultClassifier calls Config.ToolResultClassifier and returns its

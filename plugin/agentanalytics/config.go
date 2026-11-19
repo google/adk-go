@@ -111,12 +111,13 @@ type ContentFormatter func(payload any, eventType string) (any, error)
 type ToolResultDecision int
 
 const (
-	// ToolResultAbstain leaves the result to the plugin's built-in rule,
-	// which records a result that a tool returned without an error as
-	// TOOL_ERROR when its top-level "isError" or "is_error" is true, as an
-	// MCP CallToolResult reports a failed call, and as TOOL_COMPLETED
-	// otherwise. It is the zero value, so a classifier abstains by returning
-	// ToolResultVerdict{}.
+	// ToolResultAbstain leaves the result to the plugin's built-in rules,
+	// which record a result that a tool returned without an error as
+	// TOOL_ERROR when it is the answer with which a plugin/retryandreflect
+	// plugin registered before this one replaces a tool error, or when its
+	// top-level "isError" or "is_error" is true, as an MCP CallToolResult
+	// reports a failed call, and as TOOL_COMPLETED otherwise. It is the zero
+	// value, so a classifier abstains by returning ToolResultVerdict{}.
 	ToolResultAbstain ToolResultDecision = iota
 	// ToolResultOK records the call as TOOL_COMPLETED, whatever the result
 	// holds.
@@ -165,8 +166,10 @@ type ToolResultVerdict struct {
 // without an error reports a failure. It is called from the plugin's
 // AfterToolCallback with the context, the tool, the arguments and the result
 // that the callback receives, after the checks that it cannot override: a tool
-// error that OnToolErrorCallback already recorded and an error that reached
-// AfterToolCallback unrecovered are recorded as TOOL_ERROR without it. A tool
+// error that OnToolErrorCallback already recorded, an error that reached
+// AfterToolCallback unrecovered, and a plugin/retryandreflect recovery payload
+// (response_type == "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") are recorded
+// as TOOL_ERROR without calling it. A tool
 // call that waits for or was rejected by the user's confirmation reaches the
 // classifier with the result that ADK sends the model, a map with the
 // confirmation outcome under "error", as it does in adk-python. The classifier
@@ -176,9 +179,8 @@ type ToolResultVerdict struct {
 // that returns a Decision that is not one of the defined decisions, is skipped
 // for that call: the call is recorded as it is without a classifier, and the
 // warning logged to Config.Logger reports only the panic type or unusable
-// decision, omitting the tool name and result. [Config] describes the rule
-// that adk-python applies before its tool_result_classifier and this plugin
-// does not.
+// decision, omitting the tool name and result. [Config] describes the built-in
+// rules and their interaction with content controls.
 type ToolResultClassifier func(ctx agent.Context, t tool.Tool, args, result map[string]any) ToolResultVerdict
 
 // DropStats reports cumulative event-drop and formatter-failure counts across
@@ -328,23 +330,14 @@ type GCSContentOffloader interface {
 // [DefaultConfig] when a plugin or batch processor is constructed.
 //
 // ToolResultClassifier maps to adk-python's tool_result_classifier. As there,
-// a result whose top-level "isError" or "is_error" is true is recorded as a
-// tool error unless the classifier returns ToolResultOK for it. But adk-python
-// applies a rule of its own before its classifier that this plugin does not
-// have, so the same classifier can record a different row here: adk-python
-// records an answer of its ReflectAndRetryToolPlugin as a tool error before
-// the classifier runs. Here, when a plugin/retryandreflect plugin registered
-// before this one answers an error from a function tool that ran, the answer
-// reaches ToolResultClassifier in AfterToolCallback like any other result (for
-// a missing tool or a non-function tool answered by retryandreflect in
-// OnToolErrorCallback, ADK skips AfterToolCallback so the classifier does not
-// run). For a function tool that ran, that retryandreflect answer is recorded
-// as TOOL_COMPLETED when the classifier is nil, fails, or returns ToolResultOK
-// or ToolResultAbstain, while a top-level boolean "isError" or "is_error"
-// result is recorded as TOOL_ERROR when the classifier is nil, fails, or
-// returns ToolResultAbstain; a classifier ported from adk-python must
-// therefore return ToolResultError for retryandreflect answers itself to keep
-// them recorded as TOOL_ERROR.
+// an answer with which plugin/retryandreflect replaces a tool error
+// (response_type == "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN") is recorded
+// as TOOL_ERROR before ToolResultClassifier runs, without calling it (using a
+// fixed fallback error_message when ContentFormatter is set or "content" is in
+// PayloadColumnDenylist, rather than copying error_details or error_type from
+// the recovery map), and any other result whose top-level "isError" or
+// "is_error" is true is recorded as TOOL_ERROR when the classifier is nil,
+// fails, or abstains, and as TOOL_COMPLETED when it returns ToolResultOK.
 //
 // OnSchemaReady and OnSchemaError map to adk-python's on_schema_ready and
 // on_schema_error. adk-python runs its table readiness pass, which creates the
@@ -533,18 +526,19 @@ type Config struct {
 	FinalResponseToolNames []string
 
 	// ToolResultClassifier, if set, decides whether a tool result that was
-	// returned without an error reports a failure; see
-	// [ToolResultClassifier]. A ToolResultError verdict records the call as
-	// TOOL_ERROR instead of TOOL_COMPLETED, which also leaves out the
-	// AGENT_RESPONSE row of a tool in FinalResponseToolNames (while a
-	// runtime-successful finish_task completion still completes the task span
-	// because classification leaves the agent-facing result unchanged); a
-	// ToolResultOK verdict records TOOL_COMPLETED, whatever the result holds
-	// (while a finish_task completion whose top-level "isError" or
+	// returned without an error (and is not a plugin/retryandreflect recovery
+	// answer, which is recorded as TOOL_ERROR before the classifier runs)
+	// reports a failure; see [ToolResultClassifier]. A ToolResultError verdict
+	// records the call as TOOL_ERROR instead of TOOL_COMPLETED, which also
+	// leaves out the AGENT_RESPONSE row of a tool in FinalResponseToolNames
+	// (while a runtime-successful finish_task completion still completes the
+	// task span because classification leaves the agent-facing result
+	// unchanged); a ToolResultOK verdict records TOOL_COMPLETED, whatever the
+	// result holds (while a finish_task completion whose top-level "isError" or
 	// "is_error" is true still ends the task span with AGENT_ERROR, for the
 	// same reason); and a ToolResultAbstain verdict (the zero value) leaves
-	// the result to the plugin's built-in rule (see [ToolResultAbstain]).
-	// When nil, the built-in rule decides for every result that a tool
+	// the result to the remaining built-in rules (see [ToolResultAbstain]).
+	// When nil, the built-in rules decide for every result that a tool
 	// returned without an error. The classifier is called even when
 	// EventAllowlist or EventDenylist drops the TOOL_COMPLETED and TOOL_ERROR
 	// rows, since its verdict also decides the AGENT_RESPONSE row of a tool in
