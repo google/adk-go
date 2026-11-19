@@ -44,7 +44,7 @@ func (declarationModel) GenerateContent(_ context.Context, req *model.LLMRequest
 			if d.Name != "set_model_response" {
 				continue
 			}
-			form, params := "ParametersJsonSchema", any(d.ParametersJsonSchema)
+			form, params := "ParametersJsonSchema", d.ParametersJsonSchema
 			if d.Parameters != nil {
 				form, params = "Parameters", d.Parameters
 			}
