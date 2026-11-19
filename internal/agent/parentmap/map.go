@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 )
 
 type Map map[string]agent.Agent
@@ -80,6 +81,4 @@ func FromContext(ctx context.Context) Map {
 	return m
 }
 
-type ctxKey int
-
-const mapCtxKey ctxKey = 0
+const mapCtxKey = adkcontext.ParentMapKey

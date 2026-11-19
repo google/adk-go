@@ -66,6 +66,9 @@ func (c *ReadonlyContext) Value(key any) any {
 		}
 		return agent.Promote(c.InvocationContext).Value(key)
 	}
+	if (adkcontext.IsLineageKey(key) || adkcontext.IsPathKey(key) || adkcontext.IsParentMapKey(key)) && c.Context == nil && c.InvocationContext != nil {
+		return c.InvocationContext.Value(key)
+	}
 	if c.Context == nil {
 		return nil
 	}

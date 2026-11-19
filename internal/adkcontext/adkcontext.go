@@ -18,6 +18,11 @@
 // by the agent and internal/context packages to avoid an import cycle.
 package adkcontext
 
+import (
+	"context"
+	"weak"
+)
+
 type ctxKey int
 
 // IdentityKey is the context value key for the agent.Identity of an ADK context.
@@ -42,6 +47,14 @@ type ctxKey int
 // authentication boundary. agent.IdentityFromContext states the full rule, and
 // both limits above are pinned by tests in package agent.
 const IdentityKey ctxKey = 0
+
+// PathKey is the private context value key under which an ADK context exposes
+// its non-empty workflow node path.
+const PathKey ctxKey = 1
+
+// ParentMapKey is the private context value key under which ADK's runner
+// attaches the child-to-parent agent map.
+const ParentMapKey ctxKey = 2
 
 // Recovered returns what read produced, and whether it returned at all.
 //
@@ -111,3 +124,196 @@ type Source interface{ adkIdentitySource() }
 type Marker struct{}
 
 func (Marker) adkIdentitySource() {}
+
+// contextToken wraps a weak pointer in an unexported struct with an unexported
+// field and no methods. Unlike a bare weak.Pointer[T], which exports Value(),
+// contextToken gives reflect callers zero methods and an unexported field
+// (CanInterface() == false) while remaining comparable with == and usable as a
+// map key.
+type contextToken struct {
+	ptr any
+}
+
+type lineageKey uint8
+
+// LineageKey is the starting private context key for walking the chain of ADK
+// contexts from which a context.Context derives. Its type is unexported and
+// declared in this internal package, so application context keys cannot collide
+// with or be intercepted by lineage lookups. Each ADK context decrements the
+// remaining hop budget when delegating to its parent and returns a newly
+// allocated slice of opaque tokens, keeping concurrent multi-parent Value
+// lookups free of shared mutable state and bounding cyclic Value chains.
+const LineageKey lineageKey = 64
+
+// IsLineageKey reports whether key is an ADK lineage lookup key.
+func IsLineageKey(key any) bool {
+	_, ok := key.(lineageKey)
+	return ok
+}
+
+// Token returns an opaque, comparable identity token for heap-allocated ADK
+// context c, or nil when c is nil.
+func Token[T any](c *T) any {
+	if c == nil {
+		return nil
+	}
+	return contextToken{ptr: weak.Make(c)}
+}
+
+type lineageNode struct {
+	tok   any
+	extra []any
+	next  *lineageNode
+}
+
+func countLineageNodes(node *lineageNode, limit int) int {
+	n := 0
+	for node != nil && n < limit {
+		if node.tok != nil {
+			n++
+		}
+		for _, item := range node.extra {
+			if n >= limit {
+				break
+			}
+			if sub, ok := item.(*lineageNode); ok {
+				n += countLineageNodes(sub, limit-n)
+			} else {
+				n++
+			}
+		}
+		node = node.next
+	}
+	return min(n, limit)
+}
+
+func appendLineageNodes(dst []any, node *lineageNode, limit int) []any {
+	for node != nil && len(dst) < limit {
+		if node.tok != nil {
+			dst = append(dst, node.tok)
+		}
+		for _, item := range node.extra {
+			if len(dst) >= limit {
+				break
+			}
+			if sub, ok := item.(*lineageNode); ok {
+				dst = appendLineageNodes(dst, sub, limit)
+			} else {
+				dst = append(dst, item)
+			}
+		}
+		node = node.next
+	}
+	return dst
+}
+
+// LineageStep handles an ADK lineage lookup on heap-allocated ADK context c
+// with embedded parent context parent. When key is not a lineage lookup key, it
+// returns (nil, false) so the caller delegates key unchanged. Inner recursive
+// hops return an immutable linked node in O(1) without copying ancestor tails,
+// and the outermost LineageKey hop flattens the chain once into []any in O(D).
+func LineageStep[T any](key any, c *T, parent context.Context) (any, bool) {
+	rem, ok := key.(lineageKey)
+	if !ok {
+		return nil, false
+	}
+	if c == nil {
+		return nil, true
+	}
+	tok := contextToken{ptr: weak.Make(c)}
+	var tail *lineageNode
+	if rem > 0 && parent != nil {
+		nextVal, _ := Recovered(func() any { return parent.Value(rem - 1) })
+		switch v := nextVal.(type) {
+		case *lineageNode:
+			tail = v
+		case []any:
+			if len(v) > 0 {
+				tail = &lineageNode{extra: v}
+			}
+		}
+	}
+	if rem < LineageKey {
+		return &lineageNode{tok: tok, next: tail}, true
+	}
+	if tail == nil {
+		return []any{tok}, true
+	}
+	head := &lineageNode{tok: tok, next: tail}
+	limit := int(rem) + 1
+	out := make([]any, 0, countLineageNodes(head, limit))
+	return appendLineageNodes(out, head, limit), true
+}
+
+// WalkLineage returns the slice of opaque ADK context tokens observed along ctx
+// via Value(LineageKey), or nil if ctx is nil, panics, or carries none.
+func WalkLineage(ctx context.Context) []any {
+	if ctx == nil {
+		return nil
+	}
+	v, _ := Recovered(func() any { return ctx.Value(LineageKey) })
+	switch t := v.(type) {
+	case []any:
+		return t
+	case *lineageNode:
+		limit := int(LineageKey) + 1
+		out := make([]any, 0, countLineageNodes(t, limit))
+		return appendLineageNodes(out, t, limit)
+	default:
+		return nil
+	}
+}
+
+// IsPathKey reports whether key is the private ADK node-path key.
+func IsPathKey(key any) bool {
+	return key == PathKey
+}
+
+// IsParentMapKey reports whether key is the private ADK parent-map key.
+func IsParentMapKey(key any) bool {
+	return key == ParentMapKey
+}
+
+// PathStep answers a Value(PathKey) lookup for an ADK context. When path is
+// non-empty it returns path immediately; otherwise it delegates to parent when
+// non-nil, returning nil if no ancestor carries a path.
+func PathStep(key any, path string, parent context.Context) (any, bool) {
+	if key != PathKey {
+		return nil, false
+	}
+	if path != "" {
+		return path, true
+	}
+	if parent == nil {
+		return nil, true
+	}
+	v, _ := Recovered(func() any { return parent.Value(key) })
+	return v, true
+}
+
+// ReadPath returns the workflow node path recovered from ctx via Value(PathKey),
+// or "" if ctx is nil, panics, or carries no node path.
+func ReadPath(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, ok := Recovered(func() any { return ctx.Value(PathKey) })
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// ReadParentMap returns the child-to-parent map recovered from ctx via
+// Value(ParentMapKey), or nil if ctx is nil, panics, or carries none.
+func ReadParentMap(ctx context.Context) any {
+	if ctx == nil {
+		return nil
+	}
+	v, ok := Recovered(func() any { return ctx.Value(ParentMapKey) })
+	if !ok {
+		return nil
+	}
+	return v
+}

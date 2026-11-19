@@ -29368,14 +29368,7 @@ func TestRunner_ConcurrentLookalike_DispatchedChildRunsUnderSubmitter(t *testing
 	}
 }
 
-// lineageContext is a context whose activation chain parentForRunLocked
-// follows: like the contexts that ADK derives for each agent run, it embeds
-// the context that it was derived from.
-type lineageContext struct {
-	context.Context
-}
-
-// lineageKey is the key of a value that a test adds to a lineageContext.
+// lineageKey is the key of a value that a test adds to an ADK or stdlib context.
 type lineageKey struct{}
 
 // TestParentForRunLocked_LaunchLineage pins that the activation on the
@@ -29385,12 +29378,21 @@ type lineageKey struct{}
 // derives from that activation.
 func TestParentForRunLocked_LaunchLineage(t *testing.T) {
 	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-launch-lineage", time.Unix(1_700_000_000, 0))
-	rootAct := &lineageContext{Context: context.Background()}
-	w1Act := &lineageContext{Context: rootAct}
-	w2Act := &lineageContext{Context: rootAct}
-	root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100, activation: rootAct}
-	w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 101, activation: w1Act}
-	w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 102, activation: w2Act}
+	mkADKCtx := func(parent context.Context, agentName, invID string) agent.InvocationContext {
+		return agent.Promote(&mockInvocationContext{
+			ctx:          parent,
+			agentName:    agentName,
+			sessionID:    "s1",
+			invocationID: invID,
+			userID:       "u1",
+		})
+	}
+	rootAct := mkADKCtx(context.Background(), "root", "inv-ll-root")
+	w1Act := mkADKCtx(rootAct, "worker", "inv-ll-w1")
+	w2Act := mkADKCtx(rootAct, "worker", "inv-ll-w2")
+	root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100, activation: rootAct, activationTokens: activationTokensOf(rootAct, rootAct)}
+	w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 101, activation: w1Act, activationTokens: activationTokensOf(w1Act, w1Act)}
+	w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 102, activation: w2Act, activationTokens: activationTokensOf(w2Act, w2Act)}
 	inv.agentStack = append(inv.agentStack, root, w1, w2)
 	leaf := identity{agentName: "leaf"}
 	for _, tc := range []struct {
@@ -29406,15 +29408,20 @@ func TestParentForRunLocked_LaunchLineage(t *testing.T) {
 		{name: "run through a derived context of worker 1", from: context.WithValue(w1Act, lineageKey{}, 1), goid: 102, origin: goroutineOrigin{parent: 100}, want: w1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			act := &lineageContext{Context: tc.from}
-			if got := inv.parentForRunLocked(leaf, nil, tc.goid, tc.origin, act); got != tc.want {
+			if lineageWalkerOnce() == nil {
+				t.Skip("Value-based lineage requires ADK core with ADKWalkLineage")
+			}
+			act := mkADKCtx(tc.from, "leaf", "inv-ll-leaf")
+			lin := observeLaunchLineage(act, act, activationTokensOf(act, act))
+			if got := inv.parentForRunLocked(leaf, nil, tc.goid, tc.origin, lin); got != tc.want {
 				t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, tc.want.spanID)
 			}
 		})
 	}
 	t.Run("no activation on the chain falls back to goroutine evidence", func(t *testing.T) {
-		act := &lineageContext{Context: context.Background()}
-		if got := inv.parentForRunLocked(leaf, nil, 102, goroutineOrigin{parent: 100}, act); got != w2 {
+		act := mkADKCtx(context.Background(), "leaf", "inv-ll-bg")
+		lin := observeLaunchLineage(act, act, activationTokensOf(act, act))
+		if got := inv.parentForRunLocked(leaf, nil, 102, goroutineOrigin{parent: 100}, lin); got != w2 {
 			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, w2.spanID)
 		}
 	})
@@ -32268,20 +32275,28 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			var selfParams any
 			selfParams = &selfParams
 
+			hasValueKeys := contextPathReaderOnce() != nil && parentMapReaderOnce() != nil
+			wantPath := ""
+			if hasValueKeys {
+				wantPath = "wf_cycle@1/leaf@1"
+			}
+
 			roWrapped := &cyclicReadonlyWrapper{
 				ReadonlyContext:   agent.NewCallbackContext(capturedIC, nil),
 				params:            &selfParams,
 				ctx:               &selfCtx,
 				invocationContext: capturedIC,
 			}
-			if parents := contextParentMap(roWrapped); parents != nil {
+			if parents := contextParentMap(roWrapped); hasValueKeys && parents["wf_cycle"] != parentRoot {
+				t.Errorf("contextParentMap(roWrapped)[wf_cycle] = %v, want %v (via Value)", parents["wf_cycle"], parentRoot)
+			} else if !hasValueKeys && parents != nil {
 				t.Errorf("contextParentMap(roWrapped) = %v, want nil (non-ADK wrapper ignored)", parents)
 			}
-			if got := contextPath(roWrapped); got != "" {
-				t.Errorf("contextPath(roWrapped) = %q, want empty (non-ADK wrapper ignored)", got)
+			if got := contextPath(roWrapped); got != wantPath {
+				t.Errorf("contextPath(roWrapped) = %q, want %q", got, wantPath)
 			}
-			if got := identityOf(roWrapped); got.path != "" || got.agentName != "leaf" {
-				t.Errorf("identityOf(roWrapped) = %+v, want agentName=leaf path=\"\"", got)
+			if got := identityOf(roWrapped); got.path != wantPath || got.agentName != "leaf" {
+				t.Errorf("identityOf(roWrapped) = %+v, want agentName=leaf path=%q", got, wantPath)
 			}
 
 			icWrapped := &cyclicInvocationWrapper{
@@ -32289,14 +32304,16 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 				params:            &selfParams,
 				ctx:               &selfCtx,
 			}
-			if got := contextParentMap(icWrapped); got != nil {
+			if got := contextParentMap(icWrapped); hasValueKeys && got["wf_cycle"] != parentRoot {
+				t.Errorf("contextParentMap(icWrapped)[wf_cycle] = %v, want %v (via Value)", got["wf_cycle"], parentRoot)
+			} else if !hasValueKeys && got != nil {
 				t.Errorf("contextParentMap(icWrapped) = %v, want nil (non-ADK wrapper ignored)", got)
 			}
-			if got := contextPath(icWrapped); got != "" {
-				t.Errorf("contextPath(icWrapped) = %q, want empty (non-ADK wrapper ignored)", got)
+			if got := contextPath(icWrapped); got != wantPath {
+				t.Errorf("contextPath(icWrapped) = %q, want %q", got, wantPath)
 			}
-			if got := identityOf(icWrapped); got.path != "" || got.agentName != "leaf" {
-				t.Errorf("identityOf(icWrapped) = %+v, want agentName=leaf path=\"\"", got)
+			if got := identityOf(icWrapped); got.path != wantPath || got.agentName != "leaf" {
+				t.Errorf("identityOf(icWrapped) = %+v, want agentName=leaf path=%q", got, wantPath)
 			}
 
 			// Purely cyclic wrapper with embedded mockInvocationContext keeps empty path.
@@ -32317,7 +32334,13 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 		}()
 
 		// Mutex-guarded application contexts with fields concurrently mutated under -race
-		// must never be read by contextPath or contextParentMap.
+		// never have their struct fields reflected by contextPath or contextParentMap; when
+		// the ADK core provides private Value keys, Value delegation reads them race-free.
+		hasValueKeys := contextPathReaderOnce() != nil && parentMapReaderOnce() != nil
+		wantRacePath := ""
+		if hasValueKeys {
+			wantRacePath = "wf_cycle@1/leaf@1"
+		}
 		type concurrentAppInvocationWrapper struct {
 			agent.InvocationContext
 			mu              sync.Mutex
@@ -32375,16 +32398,20 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			}
 		})
 		for range 200 {
-			if got := contextPath(appInv); got != "" {
-				t.Errorf("contextPath(concurrentAppInvocationWrapper) = %q, want empty", got)
+			if got := contextPath(appInv); got != wantRacePath {
+				t.Errorf("contextPath(concurrentAppInvocationWrapper) = %q, want %q", got, wantRacePath)
 			}
-			if got := contextParentMap(appInv); got != nil {
+			if got := contextParentMap(appInv); hasValueKeys && got["wf_cycle"] != parentRoot {
+				t.Errorf("contextParentMap(concurrentAppInvocationWrapper)[wf_cycle] = %v, want %v", got["wf_cycle"], parentRoot)
+			} else if !hasValueKeys && got != nil {
 				t.Errorf("contextParentMap(concurrentAppInvocationWrapper) = %v, want nil", got)
 			}
-			if got := contextPath(appRO); got != "" {
-				t.Errorf("contextPath(concurrentAppReadonlyWrapper) = %q, want empty", got)
+			if got := contextPath(appRO); got != wantRacePath {
+				t.Errorf("contextPath(concurrentAppReadonlyWrapper) = %q, want %q", got, wantRacePath)
 			}
-			if got := contextParentMap(appRO); got != nil {
+			if got := contextParentMap(appRO); hasValueKeys && got["wf_cycle"] != parentRoot {
+				t.Errorf("contextParentMap(concurrentAppReadonlyWrapper)[wf_cycle] = %v, want %v", got["wf_cycle"], parentRoot)
+			} else if !hasValueKeys && got != nil {
 				t.Errorf("contextParentMap(concurrentAppReadonlyWrapper) = %v, want nil", got)
 			}
 		}
@@ -35912,4 +35939,3392 @@ func TestProvenAfterAllRetiredLockedAndExclusionEdges(t *testing.T) {
 		checkWildcard("p0", "p1", false, false)
 		checkWildcard("p0", "p1", true, false)
 	})
+}
+
+type delegatedContext interface {
+	context.Context
+}
+
+type embeddedValueContext struct {
+	context.Context
+}
+
+type optionalContextMetadata struct {
+	Context context.Context
+}
+
+type optionalMetadataContext struct {
+	delegatedContext
+	*optionalContextMetadata
+}
+
+type exportedOptionalMetadataContext struct {
+	*optionalContextMetadata
+	context.Context
+}
+
+type sideFieldContext struct {
+	delegatedContext
+	Context context.Context
+}
+
+type unexportedParentContext struct {
+	parent context.Context
+}
+
+func (c unexportedParentContext) Deadline() (time.Time, bool) { return c.parent.Deadline() }
+func (c unexportedParentContext) Done() <-chan struct{}       { return c.parent.Done() }
+func (c unexportedParentContext) Err() error                  { return c.parent.Err() }
+func (c unexportedParentContext) Value(key any) any           { return c.parent.Value(key) }
+
+type noValueContext struct {
+	parent context.Context
+}
+
+func (c noValueContext) Deadline() (time.Time, bool) { return c.parent.Deadline() }
+func (c noValueContext) Done() <-chan struct{}       { return c.parent.Done() }
+func (c noValueContext) Err() error                  { return c.parent.Err() }
+func (c noValueContext) Value(key any) any {
+	if key != nil && reflect.TypeOf(key).Kind() == reflect.Uint8 {
+		return nil
+	}
+	return c.parent.Value(key)
+}
+
+type rwMutexNamedContext struct {
+	mu      sync.RWMutex
+	Context context.Context
+}
+
+func (c *rwMutexNamedContext) Deadline() (time.Time, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Deadline()
+}
+
+func (c *rwMutexNamedContext) Done() <-chan struct{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Done()
+}
+
+func (c *rwMutexNamedContext) Err() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Err()
+}
+
+func (c *rwMutexNamedContext) Value(key any) any {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Value(key)
+}
+
+type rwMutexEmbeddedContext struct {
+	mu sync.RWMutex
+	context.Context
+}
+
+func (c *rwMutexEmbeddedContext) Deadline() (time.Time, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Deadline()
+}
+
+func (c *rwMutexEmbeddedContext) Done() <-chan struct{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Done()
+}
+
+func (c *rwMutexEmbeddedContext) Err() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Err()
+}
+
+func (c *rwMutexEmbeddedContext) Value(key any) any {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Context.Value(key)
+}
+
+func wrapLineageShape(target, distraction context.Context, shape string) context.Context {
+	type deepLineageKey int
+	switch shape {
+	case "direct":
+		return target
+	case "pointer_wrapper":
+		return &embeddedValueContext{Context: target}
+	case "value_wrapper":
+		return embeddedValueContext{Context: target}
+	case "nil_optional_embedded_pointer":
+		return &optionalMetadataContext{delegatedContext: target}
+	case "exported_nil_optional_embedded_pointer":
+		return &exportedOptionalMetadataContext{Context: target}
+	case "unrelated_context_side_field":
+		return &sideFieldContext{delegatedContext: target, Context: distraction}
+	case "deep_with_value_chain":
+		cur := target
+		for step := range 80 {
+			cur = context.WithValue(cur, deepLineageKey(step), step)
+		}
+		return cur
+	case "without_cancel_single_hop":
+		return context.WithoutCancel(target)
+	case "without_cancel_two_hop":
+		return context.WithoutCancel(context.WithoutCancel(target))
+	case "unexported_parent_wrapper":
+		return unexportedParentContext{parent: target}
+	default:
+		panic("unknown wrapper shape: " + shape)
+	}
+}
+
+// TestRunner_ConcurrentLookalike_DispatchedWrapperShapes covers a central
+// dispatcher goroutine running leaf while an earlier activation of worker stays
+// open on root's goroutine, across custom and stdlib context.Context wrappers
+// passed via either worker 2's WithContext or root's WithContext.
+func TestRunner_ConcurrentLookalike_DispatchedWrapperShapes(t *testing.T) {
+	shapes := []string{
+		"direct",
+		"pointer_wrapper",
+		"value_wrapper",
+		"nil_optional_embedded_pointer",
+		"exported_nil_optional_embedded_pointer",
+		"unrelated_context_side_field",
+		"deep_with_value_chain",
+		"without_cancel_single_hop",
+		"without_cancel_two_hop",
+		"unexported_parent_wrapper",
+	}
+	carriers := []struct {
+		name      string
+		viaWorker bool
+	}{
+		{name: "via_worker_with_context", viaWorker: true},
+		{name: "via_root_with_context", viaWorker: false},
+	}
+
+	for _, shape := range shapes {
+		for _, carrier := range carriers {
+			t.Run(shape+"/"+carrier.name, func(t *testing.T) {
+				if lineageWalkerOnce() == nil && shape != "direct" {
+					t.Skip("custom-wrapper Value lineage across goroutines requires ADK core > v2.8.0")
+				}
+				p, requests, _ := setupTestPlugin(t)
+				leaf := newOneEventAgent(t, "leaf", nil)
+				type item struct {
+					ev  *session.Event
+					err error
+				}
+				var dispatch chan<- func()
+				var rootInvocationCtx agent.InvocationContext
+				var workerCalls atomic.Int32
+				worker, err := agent.New(agent.Config{
+					Name:      "worker",
+					SubAgents: []agent.Agent{leaf},
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							if workerCalls.Add(1) == 1 {
+								ev := session.NewEvent(ctx, ctx.InvocationID())
+								ev.Author = "worker"
+								ev.Branch = ctx.Branch()
+								ev.Content = textContent("model", "worker 1 ok")
+								yield(ev, nil)
+								return
+							}
+							wrapped := wrapLineageShape(ctx, rootInvocationCtx, shape)
+							runCtx := rootInvocationCtx.WithContext(wrapped)
+							if carrier.viaWorker {
+								runCtx = ctx.WithContext(wrapped)
+							}
+							leafEvents := make(chan item, 4)
+							job := func() {
+								defer close(leafEvents)
+								for ev, runErr := range leaf.Run(runCtx) {
+									leafEvents <- item{ev: ev, err: runErr}
+								}
+							}
+							select {
+							case dispatch <- job:
+							case <-ctx.Done():
+								yield(nil, ctx.Err())
+								return
+							}
+							for it := range leafEvents {
+								if !yield(it.ev, it.err) || it.err != nil {
+									return
+								}
+							}
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(worker): %v", err)
+				}
+				root, err := agent.New(agent.Config{
+					Name: "root",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							rootInvocationCtx = ctx
+							jobs := make(chan func())
+							dispatcherDone := make(chan struct{})
+							go func() {
+								defer close(dispatcherDone)
+								for job := range jobs {
+									job()
+								}
+							}()
+							defer func() {
+								close(jobs)
+								<-dispatcherDone
+							}()
+							dispatch = jobs
+							for ev, runErr := range worker.Run(ctx) {
+								worker2Events := make(chan item, 8)
+								go func() {
+									defer close(worker2Events)
+									for ev2, runErr2 := range worker.Run(ctx) {
+										worker2Events <- item{ev: ev2, err: runErr2}
+									}
+								}()
+								for it := range worker2Events {
+									if !yield(it.ev, it.err) {
+										return
+									}
+								}
+								if !yield(ev, runErr) {
+									return
+								}
+							}
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(root): %v", err)
+				}
+				for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						t.Fatalf("runner.Run error: %v", runErr)
+					}
+				}
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				onlyRowOfType(t, rows, EventInvocationCompleted)
+				rootSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "root")["span_id"].(string)
+				workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+				if len(workerStarts) != 2 {
+					t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+				}
+				w1Span, _ := workerStarts[0]["span_id"].(string)
+				w2Span, _ := workerStarts[1]["span_id"].(string)
+				leafStart := onlyAgentRow(t, rows, EventAgentStarting, "leaf")
+				onlyAgentRow(t, rows, EventAgentCompleted, "leaf")
+				if got, _ := leafStart["parent_span_id"].(string); got != w2Span {
+					t.Errorf("leaf parent_span_id = %q, want %q (worker 2, not worker 1 %q or root %q)", got, w2Span, w1Span, rootSpan)
+				}
+			})
+		}
+	}
+}
+
+// TestRunner_ConcurrentLookalike_SynchronizedContextLineage verifies that a
+// custom context.Context guarding its parent Context field with an RWMutex can
+// be mutated concurrently under Lock while pushAgentSpan resolves launch
+// lineage without a data race, attributing the child to the launching worker.
+func TestRunner_ConcurrentLookalike_SynchronizedContextLineage(t *testing.T) {
+	type swapKey int
+	for _, tc := range []struct {
+		name      string
+		embedded  bool
+		viaWorker bool
+	}{
+		{name: "named_field_via_worker_with_context", embedded: false, viaWorker: true},
+		{name: "embedded_field_via_root_with_context", embedded: true, viaWorker: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if lineageWalkerOnce() == nil {
+				t.Skip("custom-wrapper Value lineage across goroutines requires ADK core with ADKWalkLineage")
+			}
+			p, requests, _ := setupTestPlugin(t)
+			leaf := newOneEventAgent(t, "leaf", nil)
+			type item struct {
+				ev  *session.Event
+				err error
+			}
+			var dispatch chan<- func()
+			var rootInvocationCtx agent.InvocationContext
+			var workerCalls atomic.Int32
+			worker, err := agent.New(agent.Config{
+				Name:      "worker",
+				SubAgents: []agent.Agent{leaf},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						if workerCalls.Add(1) == 1 {
+							ev := session.NewEvent(ctx, ctx.InvocationID())
+							ev.Author = "worker"
+							ev.Branch = ctx.Branch()
+							ev.Content = textContent("model", "worker 1 ok")
+							yield(ev, nil)
+							return
+						}
+						altA := context.WithValue(ctx, swapKey(1), "a")
+						altB := context.WithValue(ctx, swapKey(2), "b")
+
+						var wrapped context.Context
+						var mutateOnce func(toggle bool)
+						if tc.embedded {
+							sc := &rwMutexEmbeddedContext{Context: altA}
+							wrapped = sc
+							mutateOnce = func(toggle bool) {
+								sc.mu.Lock()
+								if toggle {
+									sc.Context = altB
+								} else {
+									sc.Context = altA
+								}
+								sc.mu.Unlock()
+							}
+						} else {
+							sc := &rwMutexNamedContext{Context: altA}
+							wrapped = sc
+							mutateOnce = func(toggle bool) {
+								sc.mu.Lock()
+								if toggle {
+									sc.Context = altB
+								} else {
+									sc.Context = altA
+								}
+								sc.mu.Unlock()
+							}
+						}
+
+						writerReady := make(chan struct{})
+						stopWriter := make(chan struct{})
+						writerDone := make(chan struct{})
+						go func() {
+							defer close(writerDone)
+							mutateOnce(true)
+							close(writerReady)
+							toggle := false
+							for {
+								select {
+								case <-stopWriter:
+									return
+								default:
+									mutateOnce(toggle)
+									toggle = !toggle
+									runtime.Gosched()
+								}
+							}
+						}()
+						<-writerReady
+						defer func() {
+							close(stopWriter)
+							<-writerDone
+						}()
+
+						runCtx := rootInvocationCtx.WithContext(wrapped)
+						if tc.viaWorker {
+							runCtx = ctx.WithContext(wrapped)
+						}
+						leafEvents := make(chan item, 4)
+						job := func() {
+							defer close(leafEvents)
+							for ev, runErr := range leaf.Run(runCtx) {
+								leafEvents <- item{ev: ev, err: runErr}
+							}
+						}
+						select {
+						case dispatch <- job:
+						case <-ctx.Done():
+							yield(nil, ctx.Err())
+							return
+						}
+						for it := range leafEvents {
+							if !yield(it.ev, it.err) || it.err != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(worker): %v", err)
+			}
+			root, err := agent.New(agent.Config{
+				Name: "root",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						rootInvocationCtx = ctx
+						jobs := make(chan func())
+						dispatcherDone := make(chan struct{})
+						go func() {
+							defer close(dispatcherDone)
+							for job := range jobs {
+								job()
+							}
+						}()
+						defer func() {
+							close(jobs)
+							<-dispatcherDone
+						}()
+						dispatch = jobs
+						for ev, runErr := range worker.Run(ctx) {
+							worker2Events := make(chan item, 8)
+							go func() {
+								defer close(worker2Events)
+								for ev2, runErr2 := range worker.Run(ctx) {
+									worker2Events <- item{ev: ev2, err: runErr2}
+								}
+							}()
+							for it := range worker2Events {
+								if !yield(it.ev, it.err) {
+									return
+								}
+							}
+							if !yield(ev, runErr) {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+			for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			onlyRowOfType(t, rows, EventInvocationCompleted)
+			workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+			if len(workerStarts) != 2 {
+				t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+			}
+			w1Span, _ := workerStarts[0]["span_id"].(string)
+			w2Span, _ := workerStarts[1]["span_id"].(string)
+			if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf")["parent_span_id"].(string); got != w2Span {
+				t.Errorf("leaf parent_span_id = %q, want %q (worker 2, not worker 1 %q)", got, w2Span, w1Span)
+			}
+		})
+	}
+}
+
+// TestParentForRunLocked_LaunchLineageWrapperShapes pins direct
+// parentForRunLocked launch-lineage resolution on non-ADK test activations
+// across struct value wrappers, nil optional embedded struct pointers,
+// unrelated Context side fields, >64 WithValue hops, and lock-bearing structs.
+func TestParentForRunLocked_LaunchLineageWrapperShapes(t *testing.T) {
+	mkADKCtx := func(parent context.Context, agentName, invID string) agent.InvocationContext {
+		return agent.Promote(&mockInvocationContext{
+			ctx:          parent,
+			agentName:    agentName,
+			sessionID:    "s1",
+			invocationID: invID,
+			userID:       "u1",
+		})
+	}
+	rootAct := mkADKCtx(context.Background(), "root", "inv-ws-root")
+	w1Act := mkADKCtx(context.WithValue(rootAct, lineageKey{}, "w1"), "worker", "inv-ws-w1")
+	w2Act := mkADKCtx(context.WithValue(rootAct, lineageKey{}, "w2"), "worker", "inv-ws-w2")
+
+	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-lineage-wrapper-shapes", time.Unix(1_700_000_000, 0))
+	root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100, activation: rootAct, activationTokens: activationTokensOf(rootAct, rootAct)}
+	w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 100, activation: w1Act, activationTokens: activationTokensOf(w1Act, w1Act)}
+	w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 102, activation: w2Act, activationTokens: activationTokensOf(w2Act, w2Act)}
+	inv.agentStack = append(inv.agentStack, root, w1, w2)
+
+	leaf := identity{agentName: "leaf"}
+	for _, shape := range []string{
+		"pointer_wrapper",
+		"value_wrapper",
+		"exported_nil_optional_embedded_pointer",
+		"deep_with_value_chain",
+	} {
+		t.Run(shape, func(t *testing.T) {
+			if lineageWalkerOnce() == nil {
+				t.Skip("Value-based lineage requires ADK core > v2.8.0")
+			}
+			wrapped := wrapLineageShape(w2Act, rootAct, shape)
+			child := mkADKCtx(wrapped, "leaf", "inv-ws-leaf")
+			lin := observeLaunchLineage(child, child, activationTokensOf(child, child))
+			got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 100}, lin)
+			if got != w2 {
+				t.Fatalf("parentForRunLocked(%s) = %s, want %s", shape, got.spanID, w2.spanID)
+			}
+		})
+	}
+
+	t.Run("nil_optional_embedded_pointer", func(t *testing.T) {
+		// Without external-struct reflection, stepEmbeddedContext stops at the
+		// external wrapper without dereferencing *optionalContextMetadata, falling
+		// back to goroutine evidence (goid=102 -> w2).
+		wrapped := wrapLineageShape(w2Act, rootAct, "nil_optional_embedded_pointer")
+		if got := inv.parentForRunLocked(leaf, nil, 102, goroutineOrigin{parent: 100}, embeddedValueContext{Context: wrapped}); got != w2 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, w2.spanID)
+		}
+	})
+
+	t.Run("unrelated_context_side_field", func(t *testing.T) {
+		wrapped := wrapLineageShape(w2Act, rootAct, "unrelated_context_side_field")
+		if got := inv.parentForRunLocked(leaf, nil, 102, goroutineOrigin{parent: 100}, embeddedValueContext{Context: wrapped}); got != w2 {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, w2.spanID, root.spanID)
+		}
+	})
+
+	t.Run("synchronized_wrapper_does_not_reflect_unlocked_fields", func(t *testing.T) {
+		sc := &rwMutexNamedContext{Context: w2Act}
+		ready := make(chan struct{})
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			sc.mu.Lock()
+			sc.Context = w1Act
+			sc.mu.Unlock()
+			close(ready)
+			toggle := false
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					sc.mu.Lock()
+					if toggle {
+						sc.Context = w2Act
+					} else {
+						sc.Context = w1Act
+					}
+					sc.mu.Unlock()
+					toggle = !toggle
+					runtime.Gosched()
+				}
+			}
+		}()
+		<-ready
+		defer func() {
+			close(stop)
+			<-done
+		}()
+		// On synthetic non-ADK contexts, launcherLocked never calls Value under
+		// inv.mu and stepEmbeddedContext stops at sc without touching sc.Context,
+		// falling back to goroutine evidence (goid=102 -> w2).
+		if got := inv.parentForRunLocked(leaf, nil, 102, goroutineOrigin{parent: 100}, embeddedValueContext{Context: sc}); got != w2 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, w2.spanID)
+		}
+	})
+
+	t.Run("never_calls_value_under_inv_mu", func(t *testing.T) {
+		var valueCalled bool
+		wrapped := &forbidValueContext{Context: w1Act, called: &valueCalled}
+		if got := inv.parentForRunLocked(leaf, nil, 102, goroutineOrigin{parent: 100}, wrapped); got != w2 {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, w2.spanID)
+		}
+		if valueCalled {
+			t.Fatal("parentForRunLocked called Context.Value while holding inv.mu")
+		}
+		cancelWrapped, cancelFn := context.WithCancel(w1Act)
+		defer cancelFn()
+		if got := inv.parentForRunLocked(leaf, nil, 102, goroutineOrigin{parent: 100}, cancelWrapped); got != w1 {
+			t.Fatalf("parentForRunLocked(context.WithCancel(w1Act)) = %s, want %s", got.spanID, w1.spanID)
+		}
+		var nilCtx context.Context
+		if observeLaunchLineage(nilCtx, nil, [3]any{}) != nil {
+			t.Fatal("observeLaunchLineage(nilCtx, nil) returned non-nil")
+		}
+		lin := observeLaunchLineage(w1Act, w1Act, [3]any{})
+		if !reflect.TypeOf(any(lin)).Comparable() {
+			t.Fatalf("observeLaunchLineage returned uncomparable type %T", lin)
+		}
+	})
+
+	t.Run("uncomparable_dynamic_slice_value_wrapper", func(t *testing.T) {
+		invSlice := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-lineage-uncomparable-slice", time.Unix(1_700_000_000, 0))
+		rootSlice := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invSlice.agentStack[0], goroutineID: 100, activation: rootAct, activationTokens: activationTokensOf(rootAct, rootAct)}
+		w1Slice := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: rootSlice, goroutineID: 100, activation: w1Act, activationTokens: activationTokensOf(w1Act, w1Act)}
+		w2Slice := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: rootSlice, goroutineID: 102, activation: w2Act, activationTokens: activationTokensOf(w2Act, w2Act)}
+		wPeerUncomp := &spanRecord{
+			spanID:      "worker-3",
+			kind:        spanKindAgent,
+			name:        "worker",
+			nonLLM:      true,
+			children:    []string{"leaf"},
+			parent:      rootSlice,
+			goroutineID: 103,
+			activation: embeddedValueContext{
+				Context: uncomparableMetaContext{Context: rootAct, meta: []string{"open-peer"}},
+			},
+		}
+		invSlice.agentStack = append(invSlice.agentStack, rootSlice, w1Slice, w2Slice, wPeerUncomp)
+
+		wrapped := embeddedValueContext{
+			Context: embeddedValueContext{
+				Context: uncomparableMetaContext{
+					Context: sliceFieldContext{Context: w2Act, tags: []string{"leaf"}},
+					meta:    []string{"dynamic-slice"},
+				},
+			},
+		}
+		// Raw uncomparable wrapper never panics and falls back to goroutine evidence when unobserved.
+		if got := invSlice.parentForRunLocked(leaf, nil, 102, goroutineOrigin{parent: 100}, wrapped); got != w2Slice {
+			t.Fatalf("parentForRunLocked(raw uncomparable wrapper) = %s, want %s", got.spanID, w2Slice.spanID)
+		}
+		unobserved := &launchLineage{selfActivation: wrapped, observed: false}
+		if got := invSlice.parentForRunLocked(leaf, nil, 102, goroutineOrigin{parent: 100}, unobserved); got != w2Slice {
+			t.Fatalf("parentForRunLocked(unobserved launchLineage) = %s, want %s", got.spanID, w2Slice.spanID)
+		}
+		if lineageWalkerOnce() != nil {
+			child := mkADKCtx(wrapped, "leaf", "inv-ws-uncomp-child")
+			observedLin := observeLaunchLineage(child, child, activationTokensOf(child, child))
+			if got := invSlice.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 100}, observedLin); got != w2Slice {
+				t.Fatalf("parentForRunLocked(observed uncomparable wrapper) = %s, want %s", got.spanID, w2Slice.spanID)
+			}
+		}
+	})
+
+	t.Run("observed_lineage_excludes_self_tokens", func(t *testing.T) {
+		if lineageWalkerOnce() == nil {
+			t.Skip("Value-based lineage requires ADK core > v2.8.0")
+		}
+		rootPromoted := agent.Promote(&mockInvocationContext{
+			ctx:          t.Context(),
+			agentName:    "root",
+			sessionID:    "s1",
+			invocationID: "inv-self-tok",
+			userID:       "u1",
+		})
+		w1Promoted := agent.Promote(&mockInvocationContext{
+			ctx:          rootPromoted,
+			agentName:    "worker",
+			sessionID:    "s1",
+			invocationID: "inv-self-tok",
+			userID:       "u1",
+		})
+		w2Promoted := agent.Promote(&mockInvocationContext{
+			ctx:          rootPromoted,
+			agentName:    "worker",
+			sessionID:    "s1",
+			invocationID: "inv-self-tok",
+			userID:       "u1",
+		})
+		rootCb := agent.NewCallbackContext(rootPromoted, nil)
+		w1Cb := agent.NewCallbackContext(w1Promoted, nil)
+		w2Cb := agent.NewCallbackContext(w2Promoted, nil)
+
+		rootCbAct := activationKey(rootCb)
+		w1CbAct := activationKey(w1Cb)
+		w2CbAct := activationKey(w2Cb)
+		rootToks := activationTokensOf(rootCb, rootCbAct)
+		w1Toks := activationTokensOf(w1Cb, w1CbAct)
+		w2Toks := activationTokensOf(w2Cb, w2CbAct)
+		lin := observeLaunchLineage(w1Cb, w1CbAct, w1Toks)
+		if lin == nil || !lin.observed {
+			t.Fatalf("observeLaunchLineage(w1Cb) = %+v, want observed ADK lineage", lin)
+		}
+
+		invObs := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-self-token-exclusion", time.Unix(1_700_000_000, 0))
+		rootObs := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", nonLLM: true, children: []string{"worker"}, parent: invObs.agentStack[0], goroutineID: 100, activation: rootCbAct, activationTokens: rootToks}
+		w1Obs := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"worker"}, parent: rootObs, goroutineID: 101, activation: w1CbAct, activationTokens: w1Toks}
+		w2Obs := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"worker"}, parent: rootObs, goroutineID: 102, activation: w2CbAct, activationTokens: w2Toks}
+		invObs.agentStack = append(invObs.agentStack, rootObs, w1Obs, w2Obs)
+
+		workerID := identity{agentName: "worker"}
+		if got := invObs.parentForRunLocked(workerID, nil, 102, goroutineOrigin{parent: 100}, lin); got != rootObs {
+			t.Fatalf("parentForRunLocked(re-entrant ADK callback lineage) = %s, want %s (not self %s)", got.spanID, rootObs.spanID, w1Obs.spanID)
+		}
+
+		selfSlots := [3]any{"self-tok-0", "self-tok-1", "self-tok-2"}
+		invSlots := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-self-token-slots", time.Unix(1_700_000_000, 0))
+		rootSlot := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", nonLLM: true, children: []string{"worker"}, parent: invSlots.agentStack[0], goroutineID: 100, activationTokens: [3]any{"root-tok"}}
+		w1Slot := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"worker"}, parent: rootSlot, goroutineID: 101, activationTokens: selfSlots}
+		w2Slot := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"worker"}, parent: rootSlot, goroutineID: 102, activationTokens: [3]any{"peer-tok"}}
+		invSlots.agentStack = append(invSlots.agentStack, rootSlot, w1Slot, w2Slot)
+
+		for slot, selfTok := range selfSlots {
+			slotLin := &launchLineage{
+				selfTokens: selfSlots,
+				tokens:     []any{selfTok, "root-tok"},
+				observed:   true,
+			}
+			if got := invSlots.parentForRunLocked(workerID, nil, 102, goroutineOrigin{parent: 100}, slotLin); got != rootSlot {
+				t.Fatalf("slot %d: parentForRunLocked = %s, want %s (must skip selfTokens[%d])", slot, got.spanID, rootSlot.spanID, slot)
+			}
+		}
+	})
+}
+
+type uncomparableMetaContext struct {
+	context.Context
+	meta any
+}
+
+type sliceFieldContext struct {
+	context.Context
+	tags []string
+}
+
+type forbidValueContext struct {
+	context.Context
+	called *bool
+}
+
+func (c *forbidValueContext) Value(any) any {
+	*c.called = true
+	return nil
+}
+
+// TestParentForRunLocked_NestedLookalikePossibleOwners pins that a nested
+// lookalike chain (worker_2 -> mid -> worker_3 -> selected) alongside an open
+// sibling worker_1 does not treat worker_2 and worker_3 as two competing
+// owners of selected when launch lineage and goroutine evidence are absent,
+// while preserving genuine cross-goroutine ambiguity when worker_2 also holds
+// a direct qualifying witness outside worker_3.
+func TestParentForRunLocked_NestedLookalikePossibleOwners(t *testing.T) {
+	leaf := identity{agentName: "leaf", branch: "selected", path: "selected/wf@1/leaf@1"}
+
+	t.Run("nested chain with idle sibling keeps selected parent", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-owners-unique", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w2, goroutineID: 102}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid, goroutineID: 103}
+		selected := &spanRecord{spanID: "selected", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 104}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, mid, w3, selected)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != selected {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, selected.spanID, root.spanID)
+		}
+	})
+
+	t.Run("three-level nested chain with idle sibling keeps selected parent", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-owners-3deep", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		mid1 := &spanRecord{spanID: "mid-1", kind: spanKindAgent, name: "mid_1", parent: w2, goroutineID: 102}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid1, goroutineID: 103}
+		mid2 := &spanRecord{spanID: "mid-2", kind: spanKindAgent, name: "mid_2", parent: w3, goroutineID: 103}
+		w4 := &spanRecord{spanID: "worker-4", kind: spanKindAgent, name: "worker", parent: mid2, goroutineID: 104}
+		selected := &spanRecord{spanID: "selected", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "selected/wf@1", parent: w4, goroutineID: 105}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, mid1, w3, mid2, w4, selected)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != selected {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, selected.spanID)
+		}
+	})
+
+	t.Run("sibling also hosting matching span demotes to root", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-owners-sibling-ambig", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		sel1 := &spanRecord{spanID: "selected-1", kind: spanKindAgent, name: "wf_alt", branch: "selected", path: "selected/wf@1", parent: w1, goroutineID: 106}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w2, goroutineID: 102}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid, goroutineID: 103}
+		sel3 := &spanRecord{spanID: "selected-3", kind: spanKindAgent, name: "wf", branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 104}
+		inv.agentStack = append(inv.agentStack, root, w1, sel1, w2, mid, w3, sel3)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != root {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, root.spanID)
+		}
+	})
+
+	t.Run("outer witness and single nested inner witness with idle worker_1 demote to worker_2", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-owners-single-inner-lca", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		selOuter := &spanRecord{spanID: "selected-outer", kind: spanKindAgent, name: "wf_outer", branch: "selected", path: "selected/wf@1", parent: w2, goroutineID: 103}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w2, goroutineID: 104}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid, goroutineID: 104}
+		selA := &spanRecord{spanID: "selected-a", kind: spanKindAgent, name: "wf_a", branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 105}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, selOuter, mid, w3, selA)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != w2 {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s or %s)", got.spanID, w2.spanID, selA.spanID, root.spanID)
+		}
+
+		if !raceEnabled {
+			tree := inv.buildOpenSpanTreeLocked(nil)
+			recs := []*spanRecord{w1, w2, w3}
+			dst := make([]*spanRecord, 0, 4)
+			if allocs := testing.AllocsPerRun(100, func() {
+				out := inv.appendPossibleOwnersLocked(dst[:0], tree, nil, recs, leaf, selA)
+				if len(out) != 2 || out[0] != selOuter || out[1] != w3 {
+					t.Fatalf("appendPossibleOwnersLocked = %v, want [selected-outer worker-3]", out)
+				}
+			}); allocs != 0 {
+				t.Errorf("appendPossibleOwnersLocked allocated %v times per call, want 0", allocs)
+			}
+		}
+	})
+
+	t.Run("same-goroutine nested chain without concurrent sibling keeps inner selected parent", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-owners-same-goid", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		selOuter := &spanRecord{spanID: "selected-outer", kind: spanKindAgent, name: "wf_outer", branch: "selected", path: "selected/wf@1", parent: w2, goroutineID: 103}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w2, goroutineID: 102}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid, goroutineID: 102}
+		selA := &spanRecord{spanID: "selected-a", kind: spanKindAgent, name: "wf_a", branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 105}
+		inv.agentStack = append(inv.agentStack, root, w2, selOuter, mid, w3, selA)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != selA {
+			t.Fatalf("parentForRunLocked = %s, want %s", got.spanID, selA.spanID)
+		}
+	})
+
+	t.Run("two inner siblings under worker_2 with idle worker_1 demote to worker_2", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-owners-inner-lca", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		selOuter := &spanRecord{spanID: "selected-outer", kind: spanKindAgent, name: "wf_outer", branch: "selected", path: "selected/wf@1", parent: w2, goroutineID: 103}
+		midA := &spanRecord{spanID: "mid-a", kind: spanKindAgent, name: "mid_a", parent: w2, goroutineID: 104}
+		w3a := &spanRecord{spanID: "worker-3a", kind: spanKindAgent, name: "worker", parent: midA, goroutineID: 104}
+		selA := &spanRecord{spanID: "selected-a", kind: spanKindAgent, name: "wf_a", branch: "selected", path: "selected/wf@1", parent: w3a, goroutineID: 105}
+		midB := &spanRecord{spanID: "mid-b", kind: spanKindAgent, name: "mid_b", parent: w2, goroutineID: 106}
+		w3b := &spanRecord{spanID: "worker-3b", kind: spanKindAgent, name: "worker", parent: midB, goroutineID: 106}
+		selB := &spanRecord{spanID: "selected-b", kind: spanKindAgent, name: "wf_b", branch: "selected", path: "selected/wf@1", parent: w3b, goroutineID: 107}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, selOuter, midA, w3a, selA, midB, w3b, selB)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != w2 {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s)", got.spanID, w2.spanID, root.spanID)
+		}
+	})
+
+	t.Run("outer lookalike owning two disjoint witnesses demotes above both", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-owners-two-outer-witnesses", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		inter := &spanRecord{spanID: "inter", kind: spanKindAgent, name: "inter", parent: w2, goroutineID: 102}
+		selC := &spanRecord{spanID: "selected-c", kind: spanKindAgent, name: "wf_c", branch: "selected", path: "selected/wf@1", parent: inter, goroutineID: 103}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: inter, goroutineID: 104}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid, goroutineID: 104}
+		selA := &spanRecord{spanID: "selected-a", kind: spanKindAgent, name: "wf_a", branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 105}
+		selZ := &spanRecord{spanID: "selected-z", kind: spanKindAgent, name: "wf_z", branch: "selected", path: "selected/wf@1", parent: w2, goroutineID: 106}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, inter, selC, mid, w3, selA, selZ)
+
+		if got := inv.parentFor(leaf); got != selZ {
+			t.Fatalf("parentFor = %s, want %s", got.spanID, selZ.spanID)
+		}
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != w2 {
+			t.Fatalf("parentForRunLocked = %s, want %s (must enclose selected-z, not %s or %s)", got.spanID, w2.spanID, inter.spanID, root.spanID)
+		}
+
+		if !raceEnabled {
+			tree := inv.buildOpenSpanTreeLocked(nil)
+			recs := []*spanRecord{w1, w2, w3}
+			dst := make([]*spanRecord, 0, 4)
+			if allocs := testing.AllocsPerRun(100, func() {
+				out := inv.appendPossibleOwnersLocked(dst[:0], tree, nil, recs, leaf, selZ)
+				if len(out) != 3 || out[0] != selC || out[1] != selZ || out[2] != w3 {
+					t.Fatalf("appendPossibleOwnersLocked = %v, want [selected-c selected-z worker-3]", out)
+				}
+			}); allocs != 0 {
+				t.Errorf("appendPossibleOwnersLocked allocated %v times per call, want 0", allocs)
+			}
+		}
+	})
+
+	t.Run("interleaved sibling before nested lookalike keeps selected parent", func(t *testing.T) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-owners-interleaved", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 101}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: root, goroutineID: 102}
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w1, goroutineID: 101}
+		w3 := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: mid, goroutineID: 103}
+		selected := &spanRecord{spanID: "selected", kind: spanKindAgent, name: "wf", isWorkflow: true, nonLLM: true, branch: "selected", path: "selected/wf@1", parent: w3, goroutineID: 104}
+		inv.agentStack = append(inv.agentStack, root, w1, w2, mid, w3, selected)
+
+		if got := inv.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != selected {
+			t.Fatalf("parentForRunLocked = %s, want %s (not %s or %s)", got.spanID, selected.spanID, w3.spanID, root.spanID)
+		}
+
+		tree := inv.buildOpenSpanTreeLocked(nil)
+		dst := make([]*spanRecord, 0, 4)
+		for _, recs := range [][]*spanRecord{
+			{w1, w2, w3},
+			{w2, w3, w1},
+		} {
+			if out := inv.appendPossibleOwnersLocked(dst[:0], tree, nil, recs, leaf, selected); len(out) != 0 {
+				t.Fatalf("appendPossibleOwnersLocked(%v) = %v, want empty", recs, out)
+			}
+		}
+		if !raceEnabled {
+			recs := []*spanRecord{w1, w2, w3}
+			if allocs := testing.AllocsPerRun(100, func() {
+				if out := inv.appendPossibleOwnersLocked(dst[:0], tree, nil, recs, leaf, selected); len(out) != 0 {
+					t.Fatalf("appendPossibleOwnersLocked = %v, want empty", out)
+				}
+			}); allocs != 0 {
+				t.Errorf("appendPossibleOwnersLocked allocated %v times per call, want 0", allocs)
+			}
+		}
+
+		invOuter := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-nested-owners-interleaved-outer", time.Unix(1_700_000_000, 0))
+		rootOuter := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invOuter.agentStack[0], goroutineID: 100}
+		w1Outer := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", parent: rootOuter, goroutineID: 101}
+		w2Outer := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", parent: rootOuter, goroutineID: 102}
+		selOuter := &spanRecord{spanID: "selected-outer", kind: spanKindAgent, name: "wf_outer", branch: "selected", path: "selected/wf@1", parent: w1Outer, goroutineID: 103}
+		midOuter := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: w1Outer, goroutineID: 104}
+		w3Outer := &spanRecord{spanID: "worker-3", kind: spanKindAgent, name: "worker", parent: midOuter, goroutineID: 104}
+		selA := &spanRecord{spanID: "selected-a", kind: spanKindAgent, name: "wf_a", branch: "selected", path: "selected/wf@1", parent: w3Outer, goroutineID: 105}
+		invOuter.agentStack = append(invOuter.agentStack, rootOuter, w1Outer, w2Outer, selOuter, midOuter, w3Outer, selA)
+
+		if got := invOuter.parentForRunLocked(leaf, nil, 500, goroutineOrigin{parent: 499}, nil); got != w1Outer {
+			t.Fatalf("parentForRunLocked(outer+nested interleaved) = %s, want %s (not %s or %s)", got.spanID, w1Outer.spanID, selA.spanID, rootOuter.spanID)
+		}
+		treeOuter := invOuter.buildOpenSpanTreeLocked(nil)
+		for _, recs := range [][]*spanRecord{
+			{w1Outer, w2Outer, w3Outer},
+			{w3Outer, w1Outer, w2Outer},
+		} {
+			out := invOuter.appendPossibleOwnersLocked(dst[:0], treeOuter, nil, recs, leaf, selA)
+			if len(out) != 2 || out[0] != selOuter || out[1] != w3Outer {
+				t.Fatalf("appendPossibleOwnersLocked(%v) = %v, want [selected-outer worker-3]", recs, out)
+			}
+		}
+	})
+
+	t.Run("16_17_and_24_lookalike_sibling_workers_no_slice_panic", func(t *testing.T) {
+		for _, workerCount := range []int{16, 17, 24} {
+			t.Run(fmt.Sprintf("workers=%d", workerCount), func(t *testing.T) {
+				inv := newInvocationTraceWithSpan(trace.SpanContext{}, fmt.Sprintf("trace-skipbuf-%d", workerCount), time.Unix(1_700_000_000, 0))
+				root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 1}
+				inv.agentStack = append(inv.agentStack, root)
+				workers := make([]*spanRecord, 0, workerCount)
+				for i := range workerCount {
+					w := &spanRecord{
+						spanID:      fmt.Sprintf("worker-%d", i),
+						kind:        spanKindAgent,
+						name:        "worker",
+						nonLLM:      true,
+						children:    []string{"leaf"},
+						parent:      root,
+						goroutineID: uint64(100 + i),
+					}
+					workers = append(workers, w)
+					inv.agentStack = append(inv.agentStack, w)
+				}
+				// Add extra spans on workerCount >= 17 to also exercise the len(dfsSeq) > 32 qual path.
+				if workerCount >= 17 {
+					for i := range 20 {
+						extra := &spanRecord{
+							spanID:      fmt.Sprintf("pad-%d", i),
+							kind:        spanKindAgent,
+							name:        "pad",
+							parent:      root,
+							goroutineID: uint64(1000 + i),
+						}
+						inv.agentStack = append(inv.agentStack, extra)
+					}
+				}
+				selected := &spanRecord{
+					spanID:      "selected-target",
+					kind:        spanKindAgent,
+					name:        "wf",
+					isWorkflow:  true,
+					nonLLM:      true,
+					branch:      "selected",
+					path:        "selected/wf@1",
+					children:    []string{"leaf"},
+					parent:      workers[workerCount-1],
+					goroutineID: uint64(500 + workerCount),
+				}
+				inv.agentStack = append(inv.agentStack, selected)
+
+				// 17+ lookalike siblings must not panic when slicing skipAfter in appendPossibleOwnersWithQualLocked.
+				if got := inv.parentForRunLocked(leaf, nil, 99999, goroutineOrigin{parent: 88888}, nil); got != selected {
+					t.Fatalf("parentForRunLocked(%d workers) = %s, want %s", workerCount, got.spanID, selected.spanID)
+				}
+				// Now make all workers qualify directly for identity{agentName: "leaf"} without selected.
+				invDirect := newInvocationTraceWithSpan(trace.SpanContext{}, fmt.Sprintf("trace-skipbuf-direct-%d", workerCount), time.Unix(1_700_000_000, 0))
+				rootDirect := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invDirect.agentStack[0], goroutineID: 1}
+				invDirect.agentStack = append(invDirect.agentStack, rootDirect)
+				for i := range workerCount {
+					invDirect.agentStack = append(invDirect.agentStack, &spanRecord{
+						spanID:      fmt.Sprintf("dw-%d", i),
+						kind:        spanKindAgent,
+						name:        "worker",
+						nonLLM:      true,
+						children:    []string{"leaf"},
+						parent:      rootDirect,
+						goroutineID: uint64(200 + i),
+					})
+				}
+				if got := invDirect.parentForRunLocked(identity{agentName: "leaf"}, nil, 99999, goroutineOrigin{parent: 88888}, nil); got != rootDirect {
+					t.Fatalf("parentForRunLocked(direct %d workers) = %s, want %s", workerCount, got.spanID, rootDirect.spanID)
+				}
+			})
+		}
+	})
+}
+
+// TestRunner_ConcurrentNestedLookalike_HelperGoroutineKeepsSelectedParent
+// covers root running an open sibling worker alongside worker -> mid -> worker
+// -> selected (on branch "selected"), where selected starts leaf agents across
+// two intermediate helper goroutines both via multi-hop context.WithoutCancel
+// and via a context that drops Value lookups. Both leaves run under selected
+// rather than demoting to root.
+func TestRunner_ConcurrentNestedLookalike_HelperGoroutineKeepsSelectedParent(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	leafDetached := newOneEventAgent(t, "leaf_detached", nil)
+	leafOpaque := newOneEventAgent(t, "leaf_opaque", nil)
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+
+	selectedAgent, err := agent.New(agent.Config{
+		Name:      "selected_agent",
+		SubAgents: []agent.Agent{leafDetached, leafOpaque},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				out := make(chan item, 8)
+				go func() {
+					// Hop through a second helper goroutine so neither goid nor
+					// origin.parent matches any open agent span.
+					go func() {
+						defer close(out)
+						detachedCtx := ctx.WithContext(context.WithoutCancel(context.WithoutCancel(ctx)))
+						for ev, runErr := range leafDetached.Run(detachedCtx) {
+							out <- item{ev: ev, err: runErr}
+						}
+						opaqueCtx := ctx.WithContext(noValueContext{parent: ctx})
+						for ev, runErr := range leafOpaque.Run(opaqueCtx) {
+							out <- item{ev: ev, err: runErr}
+						}
+					}()
+				}()
+				for it := range out {
+					if !yield(it.ev, it.err) || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(selected_agent): %v", err)
+	}
+
+	var worker agent.Agent
+	mid, err := agent.New(agent.Config{
+		Name: "mid",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for ev, runErr := range worker.Run(ctx) {
+					if !yield(ev, runErr) || runErr != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(mid): %v", err)
+	}
+
+	var workerCalls atomic.Int32
+	worker, err = agent.New(agent.Config{
+		Name: "worker",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				switch workerCalls.Add(1) {
+				case 1:
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "worker 1 open")
+					yield(ev, nil)
+				case 2:
+					for ev, runErr := range mid.Run(ctx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				default:
+					selectedBranch := "selected"
+					branchedCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Branch: &selectedBranch})
+					for ev, runErr := range selectedAgent.Run(branchedCtx) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for ev, runErr := range worker.Run(ctx) {
+					// Keep worker 1 open in yield while worker 2 -> mid -> worker 3 -> selected_agent runs.
+					worker2Events := make(chan item, 16)
+					go func() {
+						defer close(worker2Events)
+						for ev2, runErr2 := range worker.Run(ctx) {
+							worker2Events <- item{ev: ev2, err: runErr2}
+						}
+					}()
+					for it := range worker2Events {
+						if !yield(it.ev, it.err) {
+							return
+						}
+					}
+					if !yield(ev, runErr) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	rootSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "root")["span_id"].(string)
+	if got := len(agentRowsOfType(rows, EventAgentStarting, "worker")); got != 3 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 3", got)
+	}
+	selectedSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "selected_agent")["span_id"].(string)
+	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf_detached")["parent_span_id"].(string); got != selectedSpan {
+		t.Errorf("leaf_detached parent_span_id = %q, want %q (selected_agent, not root %q)", got, selectedSpan, rootSpan)
+	}
+	if got, _ := onlyAgentRow(t, rows, EventAgentStarting, "leaf_opaque")["parent_span_id"].(string); got != selectedSpan {
+		t.Errorf("leaf_opaque parent_span_id = %q, want %q (selected_agent, not root %q)", got, selectedSpan, rootSpan)
+	}
+}
+
+type nilEmbeddedWalkerFields struct {
+	path      string
+	params    struct{ Path string }
+	key       any
+	val       map[string]agent.Agent
+	Context   context.Context
+	Config    any
+	AgentType string
+}
+
+type nilEmbeddedContextWrapper struct {
+	*nilEmbeddedWalkerFields
+	delegatedContext
+}
+
+type outerEmbeddedLockedPtrContext struct {
+	*rwMutexNamedContext
+}
+
+type ptrLockerContext struct {
+	Mu *sync.RWMutex
+	context.Context
+}
+
+type ptrMutexContext struct {
+	Mu *sync.Mutex
+	context.Context
+}
+
+type loggerBearingContext struct {
+	context.Context
+	logger *log.Logger
+	path   string
+}
+
+type syncOnceContext struct {
+	Once sync.Once
+	context.Context
+}
+
+type syncMapContext struct {
+	M sync.Map
+	context.Context
+}
+
+type atomicValueContext struct {
+	Val atomic.Value
+	context.Context
+}
+
+type nestedPtrLockedContext struct {
+	Inner *rwMutexNamedContext
+	context.Context
+}
+
+type cyclicParamsContext struct {
+	context.Context
+	ctx    any
+	params any
+}
+
+type nilEmbeddedAgentWrapper struct {
+	*nilEmbeddedWalkerFields
+	agent.Agent
+}
+
+type syncedAgentWrapper struct {
+	mu        sync.RWMutex
+	Config    any
+	AgentType string
+	agent.Agent
+}
+
+func captureRunnerContextWithParentMap(t *testing.T, root agent.Agent) context.Context {
+	t.Helper()
+	// Wrap the agent tree under a lightweight runner invocation so internal/agent/parentmap
+	// populates adkcontext.ParentMapKey without duplicating internal keys in this module.
+	var captured context.Context
+	var captureMu sync.Mutex
+	proxyName := root.Name()
+	proxy, err := agent.New(agent.Config{
+		Name:      proxyName,
+		SubAgents: root.SubAgents(),
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				captureMu.Lock()
+				captured = ctx
+				captureMu.Unlock()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(capture proxy %q): %v", proxyName, err)
+	}
+	p, _, _ := setupTestPlugin(t)
+	for _, runErr := range newTestRunner(t, proxy, p).Run(t.Context(), "u1", "s-cap", textContent("user", "cap"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("captureRunnerContextWithParentMap run error: %v", runErr)
+		}
+	}
+	captureMu.Lock()
+	defer captureMu.Unlock()
+	if captured == nil {
+		t.Fatalf("failed to capture runner context for %q", proxyName)
+	}
+	return captured
+}
+
+// TestContextWalkers_SafeReflection pins that contextPath, contextParentMap,
+// stepEmbeddedContext, agentConfig, and agentTypeOf:
+//  1. carry contextPath and contextParentMap via private Context.Value lookups
+//     and restrict reflected context reads to known immutable layouts (stdlib
+//     "context" and built-in ADK packages — never arbitrary external user
+//     structs);
+//  2. inspect direct fields rather than calling reflect.Value.FieldByName, so
+//     nil optional embedded struct pointers never panic; and
+//  3. preserve built-in ADK Config and AgentType through mutex-bearing and
+//     nested agent decorators without reading user Config/AgentType fields,
+//     resolving promoted field ambiguity by reflect.Type first.
+func TestContextWalkers_SafeReflection(t *testing.T) {
+	if contextPathReaderOnce() == nil || parentMapReaderOnce() == nil {
+		t.Skip("Value-based path and parent-map lookups require ADK core > v2.8.0")
+	}
+	leaf := newOneEventAgent(t, "leaf", nil)
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{leaf},
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	pmBase := captureRunnerContextWithParentMap(t, root)
+	wfNodePath := "wf/node_a"
+	pathBase := agent.Promote(&mockInvocationContext{
+		ctx:          pmBase,
+		agentName:    "root",
+		sessionID:    "s1",
+		invocationID: "inv-safe-reflect",
+		userID:       "u1",
+	}).WithDelta(&agent.CommonContextDelta{Path: &wfNodePath}).WithAgentContext(pmBase)
+
+	t.Run("nil_embedded_struct_pointer_preserves_walk", func(t *testing.T) {
+		var zero nilEmbeddedWalkerFields
+		if zero.path != "" || zero.params.Path != "" || zero.key != nil || zero.val != nil {
+			t.Fatalf("unexpected non-zero nilEmbeddedWalkerFields: %+v", zero)
+		}
+
+		wrapped := nilEmbeddedContextWrapper{delegatedContext: pathBase}
+		if got := contextPath(wrapped); got != "wf/node_a" {
+			t.Errorf("contextPath(nilEmbeddedContextWrapper) = %q, want %q", got, "wf/node_a")
+		}
+		pm := contextParentMap(wrapped)
+		if pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+			t.Errorf("contextParentMap(nilEmbeddedContextWrapper)[leaf] = %v, want root", pm["leaf"])
+		}
+
+		// External structs with user params.Path must NOT be reflected by contextPath.
+		paramsCtx := nilEmbeddedContextWrapper{
+			delegatedContext: cyclicParamsContext{
+				Context: pmBase,
+				params:  struct{ Path string }{Path: "wf/from_params"},
+			},
+		}
+		if got := contextPath(paramsCtx); got != "" {
+			t.Errorf("contextPath(external paramsCtx) = %q, want empty", got)
+		}
+
+		// A broken struct whose nil embedded *embeddedValueContext panics on Value()
+		// fails closed without reflecting external user fields.
+		optAlongsideNamed := struct {
+			*embeddedValueContext
+			Context context.Context
+		}{embeddedValueContext: nil, Context: pathBase}
+		if got := contextPath(optAlongsideNamed); got != "" {
+			t.Errorf("contextPath(broken nil embedded + named Context) = %q, want empty", got)
+		}
+		if pm := contextParentMap(optAlongsideNamed); pm != nil {
+			t.Errorf("contextParentMap(broken nil embedded + named Context) = %v, want nil", pm)
+		}
+		ptrOptAlongsideNamed := &struct {
+			*embeddedValueContext
+			Context context.Context
+		}{embeddedValueContext: nil, Context: pathBase}
+		if next, ok := stepEmbeddedContext(ptrOptAlongsideNamed); ok || next != nil {
+			t.Errorf("stepEmbeddedContext(external struct) = (%v, %v), want (nil, false)", next, ok)
+		}
+	})
+
+	t.Run("stdlib_cancel_and_timeout_contexts_preserve_walk", func(t *testing.T) {
+		cancelMid, cancel := context.WithCancel(pathBase)
+		defer cancel()
+		timeoutMid, cancelTimeout := context.WithTimeout(cancelMid, time.Minute)
+		defer cancelTimeout()
+		cbOverTimeout := agent.NewCallbackContext(agent.Promote(&mockInvocationContext{
+			ctx:          context.WithoutCancel(timeoutMid),
+			agentName:    "leaf",
+			sessionID:    "s1",
+			invocationID: "inv-safe-reflect",
+			userID:       "u1",
+		}).WithContext(context.WithoutCancel(timeoutMid)), nil)
+		child := embeddedValueContext{Context: context.WithoutCancel(timeoutMid)}
+
+		for _, tc := range []struct {
+			name string
+			ctx  context.Context
+		}{
+			{name: "WithCancel", ctx: cancelMid},
+			{name: "WithTimeout_over_WithCancel", ctx: timeoutMid},
+			{name: "CallbackContext_over_WithoutCancel_WithTimeout", ctx: cbOverTimeout},
+			{name: "value_child_over_WithoutCancel_WithTimeout_WithCancel", ctx: child},
+		} {
+			if got := contextPath(tc.ctx); got != "wf/node_a" {
+				t.Errorf("%s: contextPath = %q, want %q", tc.name, got, "wf/node_a")
+			}
+			if pm := contextParentMap(tc.ctx); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+				t.Errorf("%s: contextParentMap[leaf] = %v, want root", tc.name, pm["leaf"])
+			}
+		}
+	})
+
+	t.Run("unrelated_context_side_field_ignored", func(t *testing.T) {
+		altRoot, altErr := agent.New(agent.Config{
+			Name:      "alt_parent",
+			SubAgents: []agent.Agent{leaf},
+			Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {}
+			},
+		})
+		if altErr != nil {
+			t.Fatalf("agent.New(alt_parent): %v", altErr)
+		}
+		distractionPM := captureRunnerContextWithParentMap(t, altRoot)
+		wrongPath := "wf/wrong"
+		distraction := agent.Promote(&mockInvocationContext{
+			ctx:          distractionPM,
+			agentName:    "leaf",
+			sessionID:    "s1",
+			invocationID: "inv-safe-reflect",
+			userID:       "u1",
+		}).WithDelta(&agent.CommonContextDelta{Path: &wrongPath}).WithAgentContext(distractionPM)
+		wrapped := sideFieldContext{delegatedContext: pathBase, Context: distraction}
+		if got := contextPath(wrapped); got != "wf/node_a" {
+			t.Errorf("contextPath(sideFieldContext) = %q, want %q", got, "wf/node_a")
+		}
+		if pm := contextParentMap(wrapped); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+			t.Errorf("contextParentMap(sideFieldContext)[leaf] = %v, want root", pm["leaf"])
+		}
+	})
+
+	t.Run("cyclic_pointer_chains_terminate", func(t *testing.T) {
+		type selfPtr *selfPtr
+		var cyc selfPtr
+		cyc = &cyc
+		wrapped := cyclicParamsContext{
+			Context: pathBase,
+			ctx:     cyc,
+			params:  cyc,
+		}
+		if got := contextPath(wrapped); got != "wf/node_a" {
+			t.Errorf("contextPath(cyclicParamsContext) = %q, want %q", got, "wf/node_a")
+		}
+		if pm := contextParentMap(wrapped); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+			t.Errorf("contextParentMap(cyclicParamsContext)[leaf] = %v, want root", pm["leaf"])
+		}
+	})
+
+	t.Run("synchronized_contexts_do_not_race", func(t *testing.T) {
+		pathA := "wf/a"
+		pathB := "wf/b"
+		altA := agent.Promote(&mockInvocationContext{ctx: pmBase, agentName: "root", sessionID: "s1", invocationID: "inv-a", userID: "u1"}).
+			WithDelta(&agent.CommonContextDelta{Path: &pathA}).WithAgentContext(pmBase)
+		altB := agent.Promote(&mockInvocationContext{ctx: pmBase, agentName: "root", sessionID: "s1", invocationID: "inv-b", userID: "u1"}).
+			WithDelta(&agent.CommonContextDelta{Path: &pathB}).WithAgentContext(pmBase)
+
+		named := &rwMutexNamedContext{Context: altA}
+		embedded := &rwMutexEmbeddedContext{Context: altA}
+		outerPtr := &outerEmbeddedLockedPtrContext{rwMutexNamedContext: named}
+		ptrMu := &ptrLockerContext{Mu: &sync.RWMutex{}, Context: pathBase}
+		ptrMutex := &ptrMutexContext{Mu: &sync.Mutex{}, Context: pathBase}
+		onceCtx := &syncOnceContext{Context: pathBase}
+		mapCtx := &syncMapContext{Context: pathBase}
+		atomicCtx := &atomicValueContext{Context: pathBase}
+		nestedPtrCtx := &nestedPtrLockedContext{Inner: named, Context: pathBase}
+
+		for _, tc := range []struct {
+			name string
+			ctx  context.Context
+		}{
+			{name: "ptr_rwmutex", ctx: ptrMu},
+			{name: "ptr_mutex", ctx: ptrMutex},
+			{name: "sync_once", ctx: onceCtx},
+			{name: "sync_map", ctx: mapCtx},
+			{name: "atomic_value", ctx: atomicCtx},
+			{name: "nested_ptr_locked", ctx: nestedPtrCtx},
+		} {
+			if got := contextPath(tc.ctx); got != "wf/node_a" {
+				t.Errorf("%s: contextPath = %q, want %q", tc.name, got, "wf/node_a")
+			}
+			if pm := contextParentMap(tc.ctx); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+				t.Errorf("%s: contextParentMap[leaf] = %v, want root", tc.name, pm["leaf"])
+			}
+			if next, ok := stepEmbeddedContext(tc.ctx); ok || next != nil {
+				t.Errorf("%s: stepEmbeddedContext = (%v, %v), want (nil, false)", tc.name, next, ok)
+			}
+		}
+
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			toggle := false
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					named.mu.Lock()
+					if toggle {
+						named.Context = altB
+					} else {
+						named.Context = altA
+					}
+					named.mu.Unlock()
+
+					embedded.mu.Lock()
+					if toggle {
+						embedded.Context = altB
+					} else {
+						embedded.Context = altA
+					}
+					embedded.mu.Unlock()
+					toggle = !toggle
+					runtime.Gosched()
+				}
+			}
+		}()
+		defer func() {
+			close(stop)
+			<-done
+		}()
+
+		for range 200 {
+			for _, c := range []context.Context{named, embedded, outerPtr} {
+				if got := contextPath(c); got != pathA && got != pathB {
+					t.Fatalf("contextPath(%T) = %q, want %q or %q", c, got, pathA, pathB)
+				}
+				if pm := contextParentMap(c); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+					t.Fatalf("contextParentMap(%T)[leaf] = %v, want root", c, pm["leaf"])
+				}
+				if next, ok := stepEmbeddedContext(c); ok || next != nil {
+					t.Fatalf("stepEmbeddedContext(%T) = (%v, %v), want (nil, false)", c, next, ok)
+				}
+			}
+		}
+	})
+
+	t.Run("unrelated_stdlib_handle_pointer_field_preserves_walk", func(t *testing.T) {
+		logger := log.New(io.Discard, "", 0)
+		inherited := loggerBearingContext{
+			Context: pathBase,
+			logger:  logger,
+			path:    "wf/ignored_user_field",
+		}
+		if got := contextPath(inherited); got != "wf/node_a" {
+			t.Errorf("contextPath(loggerBearingContext) = %q, want %q", got, "wf/node_a")
+		}
+		if pm := contextParentMap(inherited); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+			t.Errorf("contextParentMap(loggerBearingContext)[leaf] = %v, want root", pm["leaf"])
+		}
+
+		inheritedPtr := &loggerBearingContext{
+			Context: pathBase,
+			logger:  logger,
+		}
+		if got := contextPath(inheritedPtr); got != "wf/node_a" {
+			t.Errorf("contextPath(&loggerBearingContext) = %q, want %q", got, "wf/node_a")
+		}
+		if next, ok := stepEmbeddedContext(inheritedPtr); ok || next != nil {
+			t.Errorf("stepEmbeddedContext(&loggerBearingContext) = (%v, %v), want (nil, false)", next, ok)
+		}
+	})
+
+	t.Run("agent_inspectors_handle_nil_embedded_locked_and_nested_decorators", func(t *testing.T) {
+		llmAg, err := llmagent.New(llmagent.Config{
+			Name:        "llm_inner",
+			Instruction: "be helpful",
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		seqAg, err := sequentialagent.New(sequentialagent.Config{
+			AgentConfig: agent.Config{Name: "seq_inner"},
+		})
+		if err != nil {
+			t.Fatalf("sequentialagent.New: %v", err)
+		}
+		parAg, err := parallelagent.New(parallelagent.Config{
+			AgentConfig: agent.Config{Name: "par_inner"},
+		})
+		if err != nil {
+			t.Fatalf("parallelagent.New: %v", err)
+		}
+		loopAg, err := loopagent.New(loopagent.Config{
+			AgentConfig:   agent.Config{Name: "loop_inner"},
+			MaxIterations: 2,
+		})
+		if err != nil {
+			t.Fatalf("loopagent.New: %v", err)
+		}
+		noopNode := workflow.NewFunctionNode("noop", func(agent.Context, any) (string, error) {
+			return "ok", nil
+		}, workflow.NodeConfig{})
+		wfAg, err := workflowagent.New(workflowagent.Config{
+			Name:  "wf_inner",
+			Edges: workflow.Chain(workflow.Start, noopNode),
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New: %v", err)
+		}
+		customAg, err := agent.New(agent.Config{
+			Name: "custom_inner",
+			Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New: %v", err)
+		}
+
+		if got := agentTypeOf(llmAg); got != "LLMAgent" {
+			t.Errorf("agentTypeOf(llmagent) = %q, want %q", got, "LLMAgent")
+		}
+		if _, ok := agentConfig(llmAg).(llmagent.Config); !ok {
+			t.Errorf("agentConfig(llmagent) = %T, want llmagent.Config", agentConfig(llmAg))
+		}
+		if got := agentTypeOf(seqAg); got != "SequentialAgent" {
+			t.Errorf("agentTypeOf(sequentialagent) = %q, want %q", got, "SequentialAgent")
+		}
+		if _, ok := agentConfig(seqAg).(sequentialagent.Config); !ok {
+			t.Errorf("agentConfig(sequentialagent) = %T, want sequentialagent.Config", agentConfig(seqAg))
+		}
+		if got := agentTypeOf(parAg); got != "ParallelAgent" {
+			t.Errorf("agentTypeOf(parallelagent) = %q, want %q", got, "ParallelAgent")
+		}
+		if _, ok := agentConfig(parAg).(parallelagent.Config); !ok {
+			t.Errorf("agentConfig(parallelagent) = %T, want parallelagent.Config", agentConfig(parAg))
+		}
+		if got := agentTypeOf(loopAg); got != "LoopAgent" {
+			t.Errorf("agentTypeOf(loopagent) = %q, want %q", got, "LoopAgent")
+		}
+		if _, ok := agentConfig(loopAg).(loopagent.Config); !ok {
+			t.Errorf("agentConfig(loopagent) = %T, want loopagent.Config", agentConfig(loopAg))
+		}
+		if got := agentTypeOf(wfAg); got != "WorkflowAgent" {
+			t.Errorf("agentTypeOf(workflowagent) = %q, want %q", got, "WorkflowAgent")
+		}
+		if _, ok := agentConfig(wfAg).(workflowagent.Config); !ok {
+			t.Errorf("agentConfig(workflowagent) = %T, want workflowagent.Config", agentConfig(wfAg))
+		}
+		if got := agentTypeOf(customAg); got != "CustomAgent" {
+			t.Errorf("agentTypeOf(agent.New) = %q, want %q", got, "CustomAgent")
+		}
+		if got := agentConfig(customAg); got != nil {
+			t.Errorf("agentConfig(agent.New) = %v, want nil", got)
+		}
+
+		wrappedNil := &nilEmbeddedAgentWrapper{Agent: llmAg}
+		if _, ok := agentConfig(wrappedNil).(llmagent.Config); !ok {
+			t.Errorf("agentConfig(nilEmbeddedAgentWrapper) = %T, want llmagent.Config", agentConfig(wrappedNil))
+		}
+		if got := agentTypeOf(wrappedNil); got != "LLMAgent" {
+			t.Errorf("agentTypeOf(nilEmbeddedAgentWrapper) = %q, want %q", got, "LLMAgent")
+		}
+
+		// A mutex-bearing decorator (including one with its own mutable Config
+		// and AgentType fields) must preserve the inner ADK agent's Config and
+		// AgentType without reading the decorator's mutable fields.
+		synced := &syncedAgentWrapper{Config: "unsynchronized", AgentType: "Unsynchronized", Agent: llmAg}
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+					synced.mu.Lock()
+					synced.Config = i
+					synced.AgentType = "Mutating"
+					synced.mu.Unlock()
+					runtime.Gosched()
+				}
+			}
+		}()
+		defer func() {
+			close(stop)
+			<-done
+		}()
+
+		for range 200 {
+			if _, ok := agentConfig(synced).(llmagent.Config); !ok {
+				t.Fatalf("agentConfig(syncedAgentWrapper) = %T, want llmagent.Config", agentConfig(synced))
+			}
+			if got := agentTypeOf(synced); got != "LLMAgent" {
+				t.Fatalf("agentTypeOf(syncedAgentWrapper) = %q, want %q", got, "LLMAgent")
+			}
+		}
+	})
+
+	t.Run("lock_free_pointer_wrapper_preserves_path_and_parent_map", func(t *testing.T) {
+		type lockFreeCtxPtrWrapper struct {
+			context.Context
+		}
+		leftLeafPath := "wf/left/leaf@1"
+		leftNodeCtx := agent.Promote(&mockInvocationContext{
+			ctx:          pmBase,
+			agentName:    "root",
+			sessionID:    "s1",
+			invocationID: "inv-lockfree-ptr",
+			userID:       "u1",
+		}).WithDelta(&agent.CommonContextDelta{Path: &leftLeafPath}).WithAgentContext(pmBase)
+
+		ptrWrapped := &lockFreeCtxPtrWrapper{Context: leftNodeCtx}
+		if got := contextPath(ptrWrapped); got != leftLeafPath {
+			t.Errorf("contextPath(&lockFreeCtxPtrWrapper) = %q, want %q", got, leftLeafPath)
+		}
+		if pm := contextParentMap(ptrWrapped); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+			t.Errorf("contextParentMap(&lockFreeCtxPtrWrapper)[leaf] = %v, want root", pm["leaf"])
+		}
+		// Filtering wrapper passed as pointer must also preserve contextPath & contextParentMap.
+		filteredPtrWrapped := &lineageFilteringNamedContext{Context: leftNodeCtx}
+		if got := contextPath(filteredPtrWrapped); got != leftLeafPath {
+			t.Errorf("contextPath(&lineageFilteringNamedContext) = %q, want %q", got, leftLeafPath)
+		}
+		if pm := contextParentMap(filteredPtrWrapped); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+			t.Errorf("contextParentMap(&lineageFilteringNamedContext)[leaf] = %v, want root", pm["leaf"])
+		}
+	})
+
+	t.Run("promoted_struct_field_ignores_concurrently_swapped_unrelated_pointers", func(t *testing.T) {
+		llmAg, err := llmagent.New(llmagent.Config{
+			Name:        "llm_swap",
+			Instruction: "keep safe",
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		type swappedCounters struct {
+			hits int
+		}
+		type swappedUserConfig struct {
+			Config    string
+			AgentType string
+		}
+		type swappingAgentDecorator struct {
+			agent.Agent
+			*swappedCounters
+			*swappedUserConfig
+			mu sync.Mutex
+		}
+		dec := &swappingAgentDecorator{
+			Agent:             llmAg,
+			swappedCounters:   &swappedCounters{hits: 1},
+			swappedUserConfig: &swappedUserConfig{Config: "user", AgentType: "User"},
+		}
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+					dec.mu.Lock()
+					dec.swappedCounters = &swappedCounters{hits: i}
+					dec.swappedUserConfig = &swappedUserConfig{Config: fmt.Sprintf("u-%d", i), AgentType: "Mutating"}
+					dec.mu.Unlock()
+					runtime.Gosched()
+				}
+			}
+		}()
+		defer func() {
+			close(stop)
+			<-done
+		}()
+		for range 300 {
+			if cfg, ok := agentConfig(dec).(llmagent.Config); !ok || cfg.Instruction != "keep safe" {
+				t.Fatalf("agentConfig(swappingAgentDecorator) = (%T, %v), want llmagent.Config keep safe", agentConfig(dec), ok)
+			}
+			if got := agentTypeOf(dec); got != "LLMAgent" {
+				t.Fatalf("agentTypeOf(swappingAgentDecorator) = %q, want LLMAgent", got)
+			}
+			content, _ := agentStartingData(dec)
+			if content != "keep safe" {
+				t.Fatalf("agentStartingData(swappingAgentDecorator).content = %v, want keep safe", content)
+			}
+		}
+	})
+
+	t.Run("container_sync_primitives_flagged_and_race_free", func(t *testing.T) {
+		type sliceRWMutexWrapper struct {
+			locks []*sync.RWMutex
+			context.Context
+		}
+		type mapMutexWrapper struct {
+			locks map[string]*sync.Mutex
+			context.Context
+		}
+		type lockerSliceWrapper struct {
+			locks []sync.Locker
+			context.Context
+		}
+		type chanSemaphoreWrapper struct {
+			sem chan struct{}
+			context.Context
+		}
+
+		rw := &sync.RWMutex{}
+		sliceMu := &sliceRWMutexWrapper{locks: []*sync.RWMutex{rw}, Context: pathBase}
+		mapMuKey := &sync.Mutex{}
+		mapMu := &mapMutexWrapper{locks: map[string]*sync.Mutex{"k": mapMuKey}, Context: pathBase}
+		lockerSliceMu := &sync.Mutex{}
+		lockerSlice := &lockerSliceWrapper{locks: []sync.Locker{lockerSliceMu}, Context: pathBase}
+		sem := make(chan struct{}, 1)
+		sem <- struct{}{}
+		chanSem := &chanSemaphoreWrapper{sem: sem, Context: pathBase}
+
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			altCtx := context.Background()
+			var baseCtx context.Context = pathBase
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+					target := baseCtx
+					if i%2 == 0 {
+						target = altCtx
+					}
+					rw.Lock()
+					sliceMu.Context = target
+					rw.Unlock()
+
+					mapMuKey.Lock()
+					mapMu.Context = target
+					mapMuKey.Unlock()
+
+					lockerSliceMu.Lock()
+					lockerSlice.Context = target
+					lockerSliceMu.Unlock()
+
+					<-sem
+					chanSem.Context = target
+					sem <- struct{}{}
+					runtime.Gosched()
+				}
+			}
+		}()
+		defer func() {
+			close(stop)
+			<-done
+		}()
+
+		for range 200 {
+			for _, c := range []context.Context{sliceMu, mapMu, lockerSlice, chanSem} {
+				if next, ok := stepEmbeddedContext(c); ok || next != nil {
+					t.Fatalf("stepEmbeddedContext(%T) = (%v, %v), want (nil, false)", c, next, ok)
+				}
+			}
+		}
+	})
+
+	t.Run("typed_nil_embedded_context_does_not_shadow_live_named_Context", func(t *testing.T) {
+		type typedNilEmbeddedAndNamed struct {
+			delegatedContext
+			Context context.Context
+		}
+		wrapped := typedNilEmbeddedAndNamed{
+			delegatedContext: (*lineageFilteringNamedContext)(nil),
+			Context:          pathBase,
+		}
+		// External user structs are never inspected by stepEmbeddedContext; broken
+		// Value() dereferencing a typed-nil embedded interface fails closed.
+		if got := contextPath(wrapped); got != "" {
+			t.Errorf("contextPath(typedNilEmbeddedAndNamed) = %q, want empty", got)
+		}
+		if pm := contextParentMap(wrapped); pm != nil {
+			t.Errorf("contextParentMap(typedNilEmbeddedAndNamed) = %v, want nil", pm)
+		}
+		if next, ok := stepEmbeddedContext(wrapped); ok || next != nil {
+			t.Errorf("stepEmbeddedContext(typedNilEmbeddedAndNamed) = (%v, %v), want (nil, false)", next, ok)
+		}
+		// Direct stepEmbeddedContextValue skips typed-nil embedded field and yields live named Context.
+		if next := stepEmbeddedContextValue(reflect.ValueOf(wrapped), 0); next != pathBase {
+			t.Errorf("stepEmbeddedContextValue(typedNilEmbeddedAndNamed) = %v, want pathBase", next)
+		}
+	})
+}
+
+type pointerKeyFilteringContext struct {
+	Context context.Context
+}
+
+func (c *pointerKeyFilteringContext) Deadline() (time.Time, bool) { return c.Context.Deadline() }
+func (c *pointerKeyFilteringContext) Done() <-chan struct{}       { return c.Context.Done() }
+func (c *pointerKeyFilteringContext) Err() error                  { return c.Context.Err() }
+func (c *pointerKeyFilteringContext) Value(key any) any {
+	if key != nil && reflect.TypeOf(key).Kind() == reflect.Pointer {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+type lineageFilteringNamedContext struct {
+	Context context.Context
+}
+
+func (c *lineageFilteringNamedContext) Deadline() (time.Time, bool) { return c.Context.Deadline() }
+func (c *lineageFilteringNamedContext) Done() <-chan struct{}       { return c.Context.Done() }
+func (c *lineageFilteringNamedContext) Err() error                  { return c.Context.Err() }
+func (c *lineageFilteringNamedContext) Value(key any) any {
+	if key != nil && reflect.TypeOf(key).Kind() == reflect.Uint8 {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+type dualParentConcurrentContext struct {
+	left  context.Context
+	right context.Context
+}
+
+func (c *dualParentConcurrentContext) Deadline() (time.Time, bool) { return c.left.Deadline() }
+func (c *dualParentConcurrentContext) Done() <-chan struct{}       { return c.left.Done() }
+func (c *dualParentConcurrentContext) Err() error                  { return c.left.Err() }
+func (c *dualParentConcurrentContext) Value(key any) any {
+	var leftVal, rightVal any
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		leftVal = c.left.Value(key)
+	}()
+	go func() {
+		defer wg.Done()
+		rightVal = c.right.Value(key)
+	}()
+	wg.Wait()
+	if leftVal != nil {
+		return leftVal
+	}
+	return rightVal
+}
+
+type separateLockState struct {
+	mu sync.RWMutex
+}
+
+type separateStateLockedContext struct {
+	st *separateLockState
+	delegatedContext
+}
+
+func (c *separateStateLockedContext) Deadline() (time.Time, bool) {
+	c.st.mu.RLock()
+	defer c.st.mu.RUnlock()
+	return c.delegatedContext.Deadline()
+}
+
+func (c *separateStateLockedContext) Done() <-chan struct{} {
+	c.st.mu.RLock()
+	defer c.st.mu.RUnlock()
+	return c.delegatedContext.Done()
+}
+
+func (c *separateStateLockedContext) Err() error {
+	c.st.mu.RLock()
+	defer c.st.mu.RUnlock()
+	return c.delegatedContext.Err()
+}
+
+func (c *separateStateLockedContext) Value(key any) any {
+	c.st.mu.RLock()
+	defer c.st.mu.RUnlock()
+	return c.delegatedContext.Value(key)
+}
+
+type unhashableTokenContext struct {
+	parent context.Context
+}
+
+func (c *unhashableTokenContext) Deadline() (time.Time, bool) { return c.parent.Deadline() }
+func (c *unhashableTokenContext) Done() <-chan struct{}       { return c.parent.Done() }
+func (c *unhashableTokenContext) Err() error                  { return c.parent.Err() }
+func (c *unhashableTokenContext) Value(key any) any {
+	if key != nil && reflect.TypeOf(key).Kind() == reflect.Uint8 {
+		v := c.parent.Value(key)
+		out := make([]any, 0, 3)
+		out = append(out, []string{"unhashable-slice"}, map[string]int{"unhashable-map": 1})
+		if tail, ok := v.([]any); ok {
+			out = append(out, tail...)
+		} else if v != nil {
+			out = append(out, v)
+		}
+		return out
+	}
+	return c.parent.Value(key)
+}
+
+type appObserveKeyForRunner struct{}
+
+func (appObserveKeyForRunner) ObserveADKContext(any) bool {
+	return true
+}
+
+type innerAgentDecorator struct {
+	agent.Agent
+}
+
+type midAgentDecorator struct {
+	*nilEmbeddedWalkerFields
+	*innerAgentDecorator
+}
+
+type outerAgentDecorator struct {
+	mu sync.Mutex
+	*midAgentDecorator
+}
+
+type externalEmbeddedInvocationContext struct {
+	agent.InvocationContext
+}
+
+type valPtrIfaceWrapper struct {
+	mu  *sync.Mutex
+	ctx *context.Context
+}
+
+func (w valPtrIfaceWrapper) Deadline() (time.Time, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return (*w.ctx).Deadline()
+}
+
+func (w valPtrIfaceWrapper) Done() <-chan struct{} {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return (*w.ctx).Done()
+}
+
+func (w valPtrIfaceWrapper) Err() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return (*w.ctx).Err()
+}
+
+func (w valPtrIfaceWrapper) Value(key any) any {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return (*w.ctx).Value(key)
+}
+
+func TestLaunchLineage_FilteringDualParentLockAndDecoratorRegressions(t *testing.T) {
+	runConcurrentWorkers := func(t *testing.T, wrap func(workerCtx, rootCtx agent.InvocationContext) (context.Context, func())) {
+		t.Helper()
+		p, requests, _ := setupTestPlugin(t)
+		leaf := newOneEventAgent(t, "leaf", nil)
+		type item struct {
+			ev  *session.Event
+			err error
+		}
+		var dispatch chan<- func()
+		var rootInvocationCtx agent.InvocationContext
+		var workerCalls atomic.Int32
+		worker, err := agent.New(agent.Config{
+			Name:      "worker",
+			SubAgents: []agent.Agent{leaf},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					if workerCalls.Add(1) == 1 {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "worker"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "worker 1 ok")
+						yield(ev, nil)
+						return
+					}
+					wrapped, cleanup := wrap(ctx, rootInvocationCtx)
+					if cleanup != nil {
+						defer cleanup()
+					}
+					runCtx := rootInvocationCtx.WithContext(wrapped)
+					leafEvents := make(chan item, 4)
+					dispatch <- func() {
+						defer close(leafEvents)
+						for ev, runErr := range leaf.Run(runCtx) {
+							leafEvents <- item{ev: ev, err: runErr}
+						}
+					}
+					for it := range leafEvents {
+						if !yield(it.ev, it.err) || it.err != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(worker): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name: "root",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					rootInvocationCtx = ctx
+					jobs := make(chan func())
+					dispatcherDone := make(chan struct{})
+					go func() {
+						defer close(dispatcherDone)
+						for job := range jobs {
+							job()
+						}
+					}()
+					defer func() {
+						close(jobs)
+						<-dispatcherDone
+					}()
+					dispatch = jobs
+					for ev, runErr := range worker.Run(ctx) {
+						worker2Events := make(chan item, 8)
+						go func() {
+							defer close(worker2Events)
+							for ev2, runErr2 := range worker.Run(ctx) {
+								worker2Events <- item{ev: ev2, err: runErr2}
+							}
+						}()
+						for it := range worker2Events {
+							if !yield(it.ev, it.err) {
+								return
+							}
+						}
+						if !yield(ev, runErr) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+		baseCtx := context.WithValue(t.Context(), appObserveKeyForRunner{}, "app-value-ok")
+		for _, runErr := range newTestRunner(t, root, p).Run(baseCtx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+		if len(workerStarts) != 2 {
+			t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+		}
+		w1Span, _ := workerStarts[0]["span_id"].(string)
+		w2Span, _ := workerStarts[1]["span_id"].(string)
+		leafStart := onlyAgentRow(t, rows, EventAgentStarting, "leaf")
+		if got, _ := leafStart["parent_span_id"].(string); got != w2Span {
+			t.Errorf("leaf parent_span_id = %q, want %q (worker 2, not worker 1 %q)", got, w2Span, w1Span)
+		}
+	}
+
+	t.Run("filtering_pointer_wrappers_preserve_worker2_parent", func(t *testing.T) {
+		if lineageWalkerOnce() == nil {
+			t.Skip("Value-based lineage requires ADK core > v2.8.0")
+		}
+		runConcurrentWorkers(t, func(workerCtx, _ agent.InvocationContext) (context.Context, func()) {
+			return &pointerKeyFilteringContext{Context: workerCtx}, nil
+		})
+	})
+
+	t.Run("dual_parent_concurrent_value_lookup_has_no_data_race", func(t *testing.T) {
+		if lineageWalkerOnce() == nil {
+			t.Skip("Value-based lineage requires ADK core > v2.8.0")
+		}
+		type branchKey int
+		runConcurrentWorkers(t, func(workerCtx, _ agent.InvocationContext) (context.Context, func()) {
+			p1 := context.WithValue(workerCtx, branchKey(1), "left")
+			p2 := context.WithValue(workerCtx, branchKey(2), "right")
+			return &dualParentConcurrentContext{left: p1, right: p2}, nil
+		})
+	})
+
+	t.Run("separate_state_mutex_parent_swap_has_no_reflection_race", func(t *testing.T) {
+		if lineageWalkerOnce() == nil {
+			t.Skip("Value-based lineage requires ADK core > v2.8.0")
+		}
+		type swapKey int
+		runConcurrentWorkers(t, func(workerCtx, _ agent.InvocationContext) (context.Context, func()) {
+			if got := workerCtx.Value(appObserveKeyForRunner{}); got != "app-value-ok" {
+				t.Errorf("workerCtx.Value(appObserveKeyForRunner{}) = %v, want %q", got, "app-value-ok")
+			}
+			altA := context.WithValue(workerCtx, swapKey(1), "a")
+			altB := context.WithValue(workerCtx, swapKey(2), "b")
+			st := &separateLockState{}
+			sc := &separateStateLockedContext{st: st, delegatedContext: altA}
+			ready := make(chan struct{})
+			stop := make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				st.mu.Lock()
+				sc.delegatedContext = altB
+				st.mu.Unlock()
+				close(ready)
+				toggle := false
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						st.mu.Lock()
+						if toggle {
+							sc.delegatedContext = altB
+						} else {
+							sc.delegatedContext = altA
+						}
+						st.mu.Unlock()
+						toggle = !toggle
+						runtime.Gosched()
+					}
+				}
+			}()
+			<-ready
+			return sc, func() {
+				close(stop)
+				<-done
+			}
+		})
+	})
+
+	t.Run("unhashable_tokens_do_not_panic_or_drop_agent_starting", func(t *testing.T) {
+		if lineageWalkerOnce() == nil {
+			t.Skip("Value-based lineage requires ADK core > v2.8.0")
+		}
+		runConcurrentWorkers(t, func(workerCtx, _ agent.InvocationContext) (context.Context, func()) {
+			return &unhashableTokenContext{parent: workerCtx}, nil
+		})
+	})
+
+	t.Run("tagged_adk_fallback_follows_named_context_and_timeout_timer_ctx", func(t *testing.T) {
+		mkADKCtx := func(parent context.Context, agentName, invID string) agent.InvocationContext {
+			return agent.Promote(&mockInvocationContext{
+				ctx:          parent,
+				agentName:    agentName,
+				sessionID:    "s1",
+				invocationID: invID,
+				userID:       "u1",
+			})
+		}
+		rootAct := mkADKCtx(context.Background(), "root", "inv-adk-fb-root")
+		w1Act := rootAct.WithContext(rootAct)
+		w2Act := rootAct.WithContext(rootAct)
+		timeoutCtx, cancel := context.WithTimeout(w2Act, time.Minute)
+		defer cancel()
+		leafAct := rootAct.WithContext(timeoutCtx)
+
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-tagged-fallback", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100, activation: rootAct}
+		w1 := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 100, activation: w1Act}
+		w2 := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: root, goroutineID: 102, activation: w2Act}
+		inv.agentStack = append(inv.agentStack, root, w1, w2)
+
+		unobserved := &launchLineage{selfActivation: leafAct, observed: false}
+		if got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 500, goroutineOrigin{parent: 100}, unobserved); got != w2 {
+			t.Fatalf("parentForRunLocked(ADK + WithTimeout fallback) = %s, want %s", got.spanID, w2.spanID)
+		}
+	})
+
+	t.Run("nested_and_mutex_agent_decorators_preserve_config_and_type", func(t *testing.T) {
+		llmAg, err := llmagent.New(llmagent.Config{
+			Name:        "decorated_llm",
+			Instruction: "decorated instruction",
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		parAg, err := parallelagent.New(parallelagent.Config{
+			AgentConfig: agent.Config{Name: "decorated_par"},
+		})
+		if err != nil {
+			t.Fatalf("parallelagent.New: %v", err)
+		}
+
+		mutexWrapped := &struct {
+			agent.Agent
+			mu sync.Mutex
+		}{Agent: llmAg}
+		_ = &mutexWrapped.mu
+		if _, ok := agentConfig(mutexWrapped).(llmagent.Config); !ok {
+			t.Fatalf("agentConfig(struct{agent.Agent; sync.Mutex}) = %T, want llmagent.Config", agentConfig(mutexWrapped))
+		}
+		if got := agentTypeOf(mutexWrapped); got != "LLMAgent" {
+			t.Fatalf("agentTypeOf(struct{agent.Agent; sync.Mutex}) = %q, want %q", got, "LLMAgent")
+		}
+
+		nestedLLM := &outerAgentDecorator{
+			midAgentDecorator: &midAgentDecorator{
+				innerAgentDecorator: &innerAgentDecorator{Agent: llmAg},
+			},
+		}
+		_ = &nestedLLM.mu
+		if _, ok := agentConfig(nestedLLM).(llmagent.Config); !ok {
+			t.Fatalf("agentConfig(nestedLLM) = %T, want llmagent.Config", agentConfig(nestedLLM))
+		}
+		if got := agentTypeOf(nestedLLM); got != "LLMAgent" {
+			t.Fatalf("agentTypeOf(nestedLLM) = %q, want %q", got, "LLMAgent")
+		}
+
+		nestedPar := &outerAgentDecorator{
+			midAgentDecorator: &midAgentDecorator{
+				innerAgentDecorator: &innerAgentDecorator{Agent: parAg},
+			},
+		}
+		if _, ok := agentConfig(nestedPar).(parallelagent.Config); !ok {
+			t.Fatalf("agentConfig(nestedPar) = %T, want parallelagent.Config", agentConfig(nestedPar))
+		}
+		if got := agentTypeOf(nestedPar); got != "ParallelAgent" {
+			t.Fatalf("agentTypeOf(nestedPar) = %q, want %q", got, "ParallelAgent")
+		}
+	})
+
+	t.Run("guards_pinned_against_removal", func(t *testing.T) {
+		// 1. adkContextToken must reject external structs embedding agent.InvocationContext
+		// so leaf's selfTokens do not claim the embedded parent's token.
+		rootPromoted := agent.Promote(&mockInvocationContext{ctx: t.Context(), agentName: "root", sessionID: "s1", invocationID: "inv-guard", userID: "u1"})
+		w1Promoted := agent.Promote(&mockInvocationContext{ctx: rootPromoted, agentName: "worker", sessionID: "s1", invocationID: "inv-guard", userID: "u1"})
+		w2Promoted := agent.Promote(&mockInvocationContext{ctx: rootPromoted, agentName: "worker", sessionID: "s1", invocationID: "inv-guard", userID: "u1"})
+		extChild := &externalEmbeddedInvocationContext{InvocationContext: w2Promoted}
+		if tok := adkContextToken(extChild); tok != nil {
+			t.Fatalf("adkContextToken(externalEmbeddedInvocationContext) = %#v, want nil", tok)
+		}
+		extSelfToks := [3]any{adkContextToken(extChild)}
+		lin := observeLaunchLineage(extChild, extChild, extSelfToks)
+
+		if lineageWalkerOnce() != nil {
+			inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-guard-pkg", time.Unix(1_700_000_000, 0))
+			rootSpan := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: 100, activation: rootPromoted, activationTokens: activationTokensOf(rootPromoted, rootPromoted)}
+			w1Span := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: rootSpan, goroutineID: 100, activation: w1Promoted, activationTokens: activationTokensOf(w1Promoted, w1Promoted)}
+			w2Span := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"leaf"}, parent: rootSpan, goroutineID: 102, activation: w2Promoted, activationTokens: activationTokensOf(w2Promoted, w2Promoted)}
+			inv.agentStack = append(inv.agentStack, rootSpan, w1Span, w2Span)
+
+			if got := inv.parentForRunLocked(identity{agentName: "leaf"}, nil, 500, goroutineOrigin{parent: 100}, lin); got != w2Span {
+				t.Fatalf("parentForRunLocked(externalEmbeddedInvocationContext) = %s, want %s", got.spanID, w2Span.spanID)
+			}
+		}
+
+		// 2. stepEmbeddedContext guards on typed-nil pointers and external-state locks.
+		if next, ok := stepEmbeddedContext((*lineageFilteringNamedContext)(nil)); ok || next != nil {
+			t.Fatalf("stepEmbeddedContext(typed nil) = (%v, %v), want (nil, false)", next, ok)
+		}
+		lockedSep := &separateStateLockedContext{st: &separateLockState{}, delegatedContext: context.Background()}
+		if next, ok := stepEmbeddedContext(lockedSep); ok || next != nil {
+			t.Fatalf("stepEmbeddedContext(separateStateLockedContext) = (%v, %v), want (nil, false)", next, ok)
+		}
+		type lockedNamedHolder struct {
+			mu      sync.Mutex
+			Context context.Context
+		}
+		valHoldingLockedPtr := struct{ *lockedNamedHolder }{lockedNamedHolder: &lockedNamedHolder{Context: context.Background()}}
+		_ = &valHoldingLockedPtr.mu
+		if next, ok := stepEmbeddedContext(valHoldingLockedPtr); ok || next != nil {
+			t.Fatalf("stepEmbeddedContext(value struct embedding *lockedNamedHolder) = (%v, %v), want (nil, false)", next, ok)
+		}
+
+		// 3. Value wrapper embedding *lockedMidStruct -> innerCtxField{Context} must not race.
+		type innerCtxField struct {
+			Context context.Context
+		}
+		type lockedMidStruct struct {
+			mu sync.Mutex
+			innerCtxField
+		}
+		mid := &lockedMidStruct{innerCtxField: innerCtxField{Context: context.Background()}}
+		valOverLockedMid := struct{ *lockedMidStruct }{lockedMidStruct: mid}
+
+		// 4. Value wrapper with st *separateLockState + *parentHolder must not race on *parentHolder.
+		type parentHolder struct {
+			Context context.Context
+		}
+		sepSt := &separateLockState{}
+		ph := &parentHolder{Context: context.Background()}
+		valWithSepLockAndPtr := struct {
+			st *separateLockState
+			*parentHolder
+		}{st: sepSt, parentHolder: ph}
+
+		type mutCtxKey struct{}
+		stopRace := make(chan struct{})
+		var mutWG sync.WaitGroup
+		mutWG.Go(func() {
+			alt := context.WithValue(context.Background(), mutCtxKey{}, 1)
+			for i := 0; ; i++ {
+				select {
+				case <-stopRace:
+					return
+				default:
+					mid.mu.Lock()
+					if i%2 == 0 {
+						mid.Context = alt
+					} else {
+						mid.Context = context.Background()
+					}
+					mid.mu.Unlock()
+
+					sepSt.mu.Lock()
+					if i%2 == 0 {
+						ph.Context = alt
+					} else {
+						ph.Context = context.Background()
+					}
+					sepSt.mu.Unlock()
+					runtime.Gosched()
+				}
+			}
+		})
+		for range 200 {
+			if next, ok := stepEmbeddedContext(valOverLockedMid); ok || next != nil {
+				close(stopRace)
+				mutWG.Wait()
+				t.Fatalf("stepEmbeddedContext(valOverLockedMid) = (%v, %v), want (nil, false)", next, ok)
+			}
+			if next, ok := stepEmbeddedContext(valWithSepLockAndPtr); ok || next != nil {
+				close(stopRace)
+				mutWG.Wait()
+				t.Fatalf("stepEmbeddedContext(valWithSepLockAndPtr) = (%v, %v), want (nil, false)", next, ok)
+			}
+		}
+		close(stopRace)
+		mutWG.Wait()
+
+		// 5. stepEmbeddedContext skips external structs with [1]sync.Mutex arrays and diamond pointer structures.
+		type arrayLockWrapper struct {
+			locks   [1]sync.Mutex
+			Context context.Context
+		}
+		alw := &arrayLockWrapper{Context: context.Background()}
+		_ = &alw.locks
+		if next, ok := stepEmbeddedContext(alw); ok || next != nil {
+			t.Fatalf("stepEmbeddedContext(arrayLockWrapper) = (%v, %v), want (nil, false)", next, ok)
+		}
+
+		type twoHopLeaf struct {
+			mu sync.Mutex
+		}
+		type twoHopMid struct {
+			leaf *twoHopLeaf
+		}
+		type diamondShared struct {
+			mid *twoHopMid
+		}
+		type deepBranchA struct {
+			shared *diamondShared
+		}
+		type deepBranchB struct {
+			a *deepBranchA
+		}
+		type diamondRoot struct {
+			deep    *deepBranchB
+			shallow *diamondShared
+			Context context.Context
+		}
+		shared := &diamondShared{mid: &twoHopMid{leaf: &twoHopLeaf{}}}
+		_ = &shared.mid.leaf.mu
+		dr := &diamondRoot{
+			deep:    &deepBranchB{a: &deepBranchA{shared: shared}},
+			shallow: shared,
+			Context: context.Background(),
+		}
+		if next, ok := stepEmbeddedContext(dr); ok || next != nil {
+			t.Fatalf("stepEmbeddedContext(diamondRoot) = (%v, %v), want (nil, false)", next, ok)
+		}
+
+		// 6. Recursive pointer and [1]*ring types terminate immediately in stepEmbeddedContext (fail-closed).
+		type selfPtr *selfPtr
+		type ring [1]*ring
+		type recursiveTypeHolder struct {
+			p       selfPtr
+			r       ring
+			Context context.Context
+		}
+		var cycPtr selfPtr
+		cycPtr = &cycPtr
+		var cycRing ring
+		cycRing[0] = &cycRing
+		recHolder := &recursiveTypeHolder{p: cycPtr, r: cycRing, Context: context.Background()}
+		if next, ok := stepEmbeddedContext(recHolder); ok || next != nil {
+			t.Fatalf("stepEmbeddedContext(recursiveTypeHolder) = (%v, %v), want (nil, false)", next, ok)
+		}
+
+		// 7. Value wrapper holding mu *sync.Mutex + ctx *context.Context preserves path and parent map via Value with zero races.
+		if contextPathReaderOnce() != nil && parentMapReaderOnce() != nil {
+			var valMu sync.Mutex
+			wfPathA := "wf/val_ptr_a"
+			wfPathB := "wf/val_ptr_b"
+			leafCap := newOneEventAgent(t, "leaf", nil)
+			rootCap, capErr := agent.New(agent.Config{
+				Name:      "root",
+				SubAgents: []agent.Agent{leafCap},
+				Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(func(*session.Event, error) bool) {}
+				},
+			})
+			if capErr != nil {
+				t.Fatalf("agent.New(rootCap): %v", capErr)
+			}
+			pmA := captureRunnerContextWithParentMap(t, rootCap)
+			ctxA := agent.Promote(&mockInvocationContext{ctx: pmA, agentName: "root", sessionID: "s1", invocationID: "inv-vp-a", userID: "u1"}).
+				WithDelta(&agent.CommonContextDelta{Path: &wfPathA}).WithAgentContext(pmA)
+			ctxB := agent.Promote(&mockInvocationContext{ctx: pmA, agentName: "root", sessionID: "s1", invocationID: "inv-vp-b", userID: "u1"}).
+				WithDelta(&agent.CommonContextDelta{Path: &wfPathB}).WithAgentContext(pmA)
+			var sharedCtx context.Context = ctxA
+			wPtrIface := valPtrIfaceWrapper{mu: &valMu, ctx: &sharedCtx}
+
+			stopVP := make(chan struct{})
+			var vpWG sync.WaitGroup
+			vpWG.Go(func() {
+				for i := 0; ; i++ {
+					select {
+					case <-stopVP:
+						return
+					default:
+						valMu.Lock()
+						if i%2 == 0 {
+							sharedCtx = ctxB
+						} else {
+							sharedCtx = ctxA
+						}
+						valMu.Unlock()
+						runtime.Gosched()
+					}
+				}
+			})
+			for range 200 {
+				if got := contextPath(wPtrIface); got != wfPathA && got != wfPathB {
+					close(stopVP)
+					vpWG.Wait()
+					t.Fatalf("contextPath(valPtrIfaceWrapper) = %q, want %q or %q", got, wfPathA, wfPathB)
+				}
+				if pm := contextParentMap(wPtrIface); pm["leaf"] == nil || pm["leaf"].Name() != rootCap.Name() {
+					close(stopVP)
+					vpWG.Wait()
+					t.Fatalf("contextParentMap(valPtrIfaceWrapper) = %v, want leaf->root", pm)
+				}
+				if next, ok := stepEmbeddedContext(wPtrIface); ok || next != nil {
+					close(stopVP)
+					vpWG.Wait()
+					t.Fatalf("stepEmbeddedContext(valPtrIfaceWrapper) = (%v, %v), want (nil, false)", next, ok)
+				}
+			}
+			close(stopVP)
+			vpWG.Wait()
+		}
+	})
+
+	t.Run("nested_4096_workers_linear_scan", func(t *testing.T) {
+		const numWorkers = 4096
+		// Topology A: 4,096 nested activations of the same lookalike group.
+		invSingle := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-4096-single", time.Unix(1_700_000_000, 0))
+		rootSingle := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invSingle.agentStack[0], goroutineID: 1}
+		invSingle.agentStack = append(invSingle.agentStack, rootSingle)
+		curParent := rootSingle
+		for i := range numWorkers {
+			w := &spanRecord{
+				spanID:      fmt.Sprintf("w-%d", i),
+				kind:        spanKindAgent,
+				name:        "worker",
+				branch:      "other",
+				parent:      curParent,
+				goroutineID: uint64(10 + i),
+			}
+			invSingle.agentStack = append(invSingle.agentStack, w)
+			curParent = w
+		}
+		leafOwnerA := &spanRecord{spanID: "sel-a", kind: spanKindAgent, name: "sel", branch: "target", nonLLM: true, children: []string{"leaf"}, parent: invSingle.agentStack[1], goroutineID: 9000}
+		leafOwnerB := &spanRecord{spanID: "sel-b", kind: spanKindAgent, name: "sel", branch: "target", nonLLM: true, children: []string{"leaf"}, parent: curParent, goroutineID: 9001}
+		invSingle.agentStack = append(invSingle.agentStack, leafOwnerA, leafOwnerB)
+
+		startSingle := time.Now()
+		gotSingle := invSingle.parentForRunLocked(identity{agentName: "leaf", branch: "target"}, nil, 99999, goroutineOrigin{parent: 88888}, nil)
+		durSingle := time.Since(startSingle)
+		if gotSingle != rootSingle {
+			t.Fatalf("parentForRunLocked(4096 single group) = %s, want %s", gotSingle.spanID, rootSingle.spanID)
+		}
+
+		// Topology B: 2,048 distinct nested 2-worker groups (4,096 workers total).
+		invMulti := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-4096-multi", time.Unix(1_700_000_000, 0))
+		rootMulti := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: invMulti.agentStack[0], goroutineID: 1}
+		invMulti.agentStack = append(invMulti.agentStack, rootMulti)
+		chainParent := rootMulti
+		const numPairs = numWorkers / 2
+		for g := range numPairs {
+			gName := fmt.Sprintf("grp-%d", g)
+			peer := &spanRecord{
+				spanID:      fmt.Sprintf("p-%d", g),
+				kind:        spanKindAgent,
+				name:        gName,
+				branch:      "other",
+				parent:      chainParent,
+				goroutineID: uint64(10000 + 2*g),
+			}
+			spine := &spanRecord{
+				spanID:      fmt.Sprintf("s-%d", g),
+				kind:        spanKindAgent,
+				name:        gName,
+				branch:      "other",
+				parent:      chainParent,
+				goroutineID: uint64(10000 + 2*g + 1),
+			}
+			invMulti.agentStack = append(invMulti.agentStack, peer, spine)
+			chainParent = spine
+		}
+		selPeer := &spanRecord{spanID: "sel-peer", kind: spanKindAgent, name: "sel", branch: "target", nonLLM: true, children: []string{"leaf"}, parent: invMulti.agentStack[1], goroutineID: 50000}
+		selDeep := &spanRecord{spanID: "sel-deep", kind: spanKindAgent, name: "sel", branch: "target", nonLLM: true, children: []string{"leaf"}, parent: chainParent, goroutineID: 50001}
+		invMulti.agentStack = append(invMulti.agentStack, selPeer, selDeep)
+
+		startMulti := time.Now()
+		gotMulti := invMulti.parentForRunLocked(identity{agentName: "leaf", branch: "target"}, nil, 99999, goroutineOrigin{parent: 88888}, nil)
+		durMulti := time.Since(startMulti)
+		if gotMulti != rootMulti {
+			t.Fatalf("parentForRunLocked(2048 nested groups) = %s, want %s", gotMulti.spanID, rootMulti.spanID)
+		}
+		t.Logf("4096-worker parentForRunLocked: singleGroup=%v multiGroup=%v", durSingle, durMulti)
+	})
+}
+
+// TestRunner_ConcurrentLookalike_17SiblingWorkersDispatchedChild verifies that
+// 17+ simultaneous lookalike sibling workers alongside a dispatched child that
+// has no launch lineage or goroutine match never panic in skipBuf slicing and
+// capture all 17 worker starts plus the child's AGENT_STARTING row.
+func TestRunner_ConcurrentLookalike_17SiblingWorkersDispatchedChild(t *testing.T) {
+	const numWorkers = 17
+	p, requests, _ := setupTestPlugin(t)
+	leaf := newOneEventAgent(t, "leaf", nil)
+
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+	var dispatchMu sync.Mutex
+	var dispatch chan func()
+	var rootCtx atomic.Pointer[agent.InvocationContext]
+	var ready sync.WaitGroup
+	ready.Add(numWorkers)
+	releaseWorkers := make(chan struct{})
+	var releaseOnce sync.Once
+	var workerCount atomic.Int32
+
+	worker, err := agent.New(agent.Config{
+		Name:      "worker",
+		SubAgents: []agent.Agent{leaf},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				idx := workerCount.Add(1)
+				ready.Done()
+				ready.Wait()
+				if idx == 1 {
+					rCtx := *rootCtx.Load()
+					opaqueRootCtx := rCtx.WithContext(&noValueContext{parent: rCtx})
+					leafEvents := make(chan item, 4)
+					job := func() {
+						defer close(leafEvents)
+						for ev, runErr := range leaf.Run(opaqueRootCtx) {
+							leafEvents <- item{ev: ev, err: runErr}
+						}
+					}
+					dispatchMu.Lock()
+					d := dispatch
+					dispatchMu.Unlock()
+					d <- job
+					for it := range leafEvents {
+						if !yield(it.ev, it.err) || it.err != nil {
+							releaseOnce.Do(func() { close(releaseWorkers) })
+							return
+						}
+					}
+					releaseOnce.Do(func() { close(releaseWorkers) })
+				} else {
+					<-releaseWorkers
+				}
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "worker"
+				ev.Branch = ctx.Branch()
+				ev.Content = textContent("model", "worker-ok")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				rootCtx.Store(&ctx)
+				jobs := make(chan func())
+				dispatcherDone := make(chan struct{})
+				go func() {
+					defer close(dispatcherDone)
+					for job := range jobs {
+						job()
+					}
+				}()
+				dispatchMu.Lock()
+				dispatch = jobs
+				dispatchMu.Unlock()
+				defer func() {
+					close(jobs)
+					<-dispatcherDone
+				}()
+
+				ch := make(chan item, numWorkers*4)
+				var wg sync.WaitGroup
+				for range numWorkers {
+					wg.Go(func() {
+						for ev, runErr := range worker.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+				}
+				go func() {
+					wg.Wait()
+					close(ch)
+				}()
+				for it := range ch {
+					if !yield(it.ev, it.err) || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+	if len(workerStarts) != numWorkers {
+		t.Fatalf("worker AGENT_STARTING count = %d, want %d", len(workerStarts), numWorkers)
+	}
+	onlyAgentRow(t, rows, EventAgentStarting, "leaf")
+	onlyAgentRow(t, rows, EventAgentCompleted, "leaf")
+}
+
+// TestRunner_ConcurrentLookalike_LockFreePointerWrapperPicksLeftOverSibling
+// verifies that wrapping a child's context in a lock-free *wrapper pointer
+// (even one that blocks LineageKey lookup) preserves contextPath and
+// contextParentMap so pushAgentSpan selects the left branch over an open
+// sibling worker.
+func TestRunner_ConcurrentLookalike_LockFreePointerWrapperPicksLeftOverSibling(t *testing.T) {
+	if contextPathReaderOnce() == nil || parentMapReaderOnce() == nil {
+		t.Skip("Value-based path and parent-map lookups require ADK core > v2.8.0")
+	}
+	type lockFreePtrWrapper struct {
+		context.Context
+	}
+	p, requests, _ := setupTestPlugin(t)
+	leaf := newOneEventAgent(t, "leaf", nil)
+
+	var dispatchMu sync.Mutex
+	var dispatch chan func()
+	leftCtxCh := make(chan agent.InvocationContext, 1)
+	rightReady := make(chan struct{})
+	releaseRight := make(chan struct{})
+
+	worker, err := agent.New(agent.Config{
+		Name:      "worker",
+		SubAgents: []agent.Agent{leaf},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if contextPath(ctx) == "wf/left" {
+					leftCtxCh <- ctx
+				} else {
+					close(rightReady)
+				}
+				<-releaseRight
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "worker"
+				ev.Branch = ctx.Branch()
+				ev.Content = textContent("model", "worker-done")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{worker},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				jobs := make(chan func())
+				dispatcherDone := make(chan struct{})
+				go func() {
+					defer close(dispatcherDone)
+					for job := range jobs {
+						job()
+					}
+				}()
+				dispatchMu.Lock()
+				dispatch = jobs
+				dispatchMu.Unlock()
+				defer func() {
+					close(jobs)
+					<-dispatcherDone
+				}()
+
+				type item struct {
+					ev  *session.Event
+					err error
+				}
+				ch := make(chan item, 8)
+				var wg sync.WaitGroup
+				wg.Go(func() {
+					leftPath := "wf/left"
+					lCtx := ctx.WithContext(agent.Promote(ctx).WithDelta(&agent.CommonContextDelta{Path: &leftPath}))
+					for ev, runErr := range worker.Run(lCtx) {
+						ch <- item{ev: ev, err: runErr}
+					}
+				})
+				lCtx := <-leftCtxCh
+				wg.Go(func() {
+					rightPath := "wf/right"
+					rCtx := ctx.WithContext(agent.Promote(ctx).WithDelta(&agent.CommonContextDelta{Path: &rightPath}))
+					for ev, runErr := range worker.Run(rCtx) {
+						ch <- item{ev: ev, err: runErr}
+					}
+				})
+				<-rightReady
+				// Wrap left branch context in a lock-free *wrapper pointer that
+				// blocks LineageKey so preserved Value-based contextPath and
+				// contextParentMap identify left over right on a neutral goroutine.
+				leafPath := "wf/left/leaf@1"
+				lLeafCarrier := agent.Promote(lCtx).WithDelta(&agent.CommonContextDelta{Path: &leafPath}).WithAgentContext(lCtx)
+				ptrWrapped := ctx.WithContext(&lockFreePtrWrapper{Context: &lineageFilteringNamedContext{Context: lLeafCarrier}})
+				leafDone := make(chan struct{})
+				dispatchMu.Lock()
+				d := dispatch
+				dispatchMu.Unlock()
+				d <- func() {
+					defer close(leafDone)
+					for ev, runErr := range leaf.Run(ptrWrapped) {
+						ch <- item{ev: ev, err: runErr}
+					}
+				}
+				<-leafDone
+				close(releaseRight)
+
+				go func() {
+					wg.Wait()
+					close(ch)
+				}()
+				for it := range ch {
+					if !yield(it.ev, it.err) || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+	if len(workerStarts) != 2 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+	}
+	leftSpan, _ := workerStarts[0]["span_id"].(string)
+	rightSpan, _ := workerStarts[1]["span_id"].(string)
+	rootSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "root")["span_id"].(string)
+	leafStart := onlyAgentRow(t, rows, EventAgentStarting, "leaf")
+	if got, _ := leafStart["parent_span_id"].(string); got != leftSpan || got == rightSpan || got == rootSpan {
+		t.Fatalf("leaf parent_span_id = %q, want %q (left, not right %q or root %q)", got, leftSpan, rightSpan, rootSpan)
+	}
+}
+
+// TestAgentMetadata_AmbiguousOptionalEmbeddedStructsIgnoreUnusedAgent verifies
+// promotedStructField resolves ambiguity purely by reflect.Type first rather
+// than runtime nilness so a nil optional pointer never lets a live sibling
+// embedded agent's unused Config/instruction leak onto AGENT_STARTING rows.
+func TestAgentMetadata_AmbiguousOptionalEmbeddedStructsIgnoreUnusedAgent(t *testing.T) {
+	unusedAg, err := llmagent.New(llmagent.Config{
+		Name:        "unused_agent",
+		Instruction: "UNUSED_AGENT_INSTRUCTION_MUST_NOT_LEAK",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(unused): %v", err)
+	}
+	type innerAgentDelegate struct {
+		agent.Agent
+	}
+	type optBranchA struct {
+		Agent agent.Agent
+	}
+	type optBranchB struct {
+		Agent agent.Agent
+	}
+	type dualOptionalAgent struct {
+		innerAgentDelegate
+		*optBranchA
+		*optBranchB
+	}
+	type dualOptionalNested struct {
+		*optBranchA
+		*optBranchB
+	}
+	nestedOnly := &dualOptionalNested{
+		optBranchA: nil,
+		optBranchB: &optBranchB{Agent: unusedAg},
+	}
+	if f, owner := promotedStructField(reflect.ValueOf(nestedOnly).Elem(), "Agent"); f.IsValid() || owner != nil {
+		t.Fatalf("promotedStructField(dualOptionalNested, Agent) = (%v, %v), want invalid/nil due to depth-1 type ambiguity", f, owner)
+	}
+
+	// Verify also that an agent decorator whose real Agent is at depth 1 inside
+	// innerAgentDelegate (alongside depth-1 *optBranchA == nil and *optBranchB
+	// holding unusedAg) treats Agent as ambiguous rather than picking *optBranchB
+	// or leaking unusedAg's instruction into AGENT_STARTING.
+	realAg := newOneEventAgent(t, "real_agent", nil)
+	wrappedAg := &dualOptionalAgent{
+		innerAgentDelegate: innerAgentDelegate{Agent: realAg},
+		optBranchA:         nil,
+		optBranchB:         &optBranchB{Agent: unusedAg},
+	}
+	if cfg := agentConfig(wrappedAg); cfg != nil {
+		t.Fatalf("agentConfig(dualOptionalAgent) = %#v, want nil on ambiguous promoted Agent", cfg)
+	}
+	p, requests, _ := setupTestPlugin(t)
+	for _, runErr := range newTestRunner(t, wrappedAg, p).Run(t.Context(), "u1", "s-ambig", textContent("user", "hi"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	startRow := onlyAgentRow(t, rows, EventAgentStarting, "real_agent")
+	if contentJSON, _ := startRow["content"].(string); strings.Contains(contentJSON, "UNUSED_AGENT_INSTRUCTION_MUST_NOT_LEAK") {
+		t.Fatalf("AGENT_STARTING content leaked unused instruction: %s", contentJSON)
+	}
+}
+
+type CancelOnlyEmbeddedHolder struct {
+	context.Context
+}
+
+type ambiguousCancelAndNamedContext struct {
+	*CancelOnlyEmbeddedHolder
+	Context context.Context
+}
+
+func (c *ambiguousCancelAndNamedContext) Deadline() (time.Time, bool) {
+	return c.CancelOnlyEmbeddedHolder.Deadline()
+}
+
+func (c *ambiguousCancelAndNamedContext) Done() <-chan struct{} {
+	return c.CancelOnlyEmbeddedHolder.Done()
+}
+
+func (c *ambiguousCancelAndNamedContext) Err() error { return c.CancelOnlyEmbeddedHolder.Err() }
+
+func (c *ambiguousCancelAndNamedContext) Value(key any) any {
+	if key != nil && reflect.TypeOf(key).Kind() == reflect.Uint8 {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+// TestStepEmbeddedContextValue_AmbiguousLiveContextsAndRunnerFallback pins that
+// when a struct carries multiple live context.Context fields (e.g. a
+// cancellation-only embedded context plus a named Context), stepEmbeddedContextValue
+// treats the parent as ambiguous and returns nil rather than guessing the first
+// field, and concurrent lookalike runs fall back to the enclosing span rather
+// than attributing the child to worker 1.
+func TestStepEmbeddedContextValue_AmbiguousLiveContextsAndRunnerFallback(t *testing.T) {
+	c1 := context.WithValue(context.Background(), struct{ id int }{1}, "w1")
+	c2 := context.WithValue(context.Background(), struct{ id int }{2}, "w2")
+	dual := &ambiguousCancelAndNamedContext{
+		CancelOnlyEmbeddedHolder: &CancelOnlyEmbeddedHolder{Context: c1},
+		Context:                  c2,
+	}
+	if got := stepEmbeddedContextValue(reflect.ValueOf(dual).Elem(), 0); got != nil {
+		t.Fatalf("stepEmbeddedContextValue(ambiguous cancel + named Context) = %v, want nil", got)
+	}
+	type dualAnonIfaces struct {
+		context.Context
+		delegatedContext
+	}
+	bothAnon := dualAnonIfaces{Context: c1, delegatedContext: c2}
+	if got := stepEmbeddedContextValue(reflect.ValueOf(bothAnon), 0); got != nil {
+		t.Fatalf("stepEmbeddedContextValue(dual anonymous live contexts) = %v, want nil", got)
+	}
+
+	p, requests, _ := setupTestPlugin(t)
+	leaf := newOneEventAgent(t, "leaf", nil)
+	type item struct {
+		ev  *session.Event
+		err error
+	}
+	var dispatch chan<- func()
+	var rootInvocationCtx agent.InvocationContext
+	w1Ready := make(chan context.Context, 1)
+	releaseW1 := make(chan struct{})
+	var workerCalls atomic.Int32
+
+	worker, err := agent.New(agent.Config{
+		Name:      "worker",
+		SubAgents: []agent.Agent{leaf},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if workerCalls.Add(1) == 1 {
+					w1CancelCtx, cancel := context.WithCancel(ctx)
+					defer cancel()
+					w1Ready <- w1CancelCtx
+					<-releaseW1
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "w1 ok")
+					yield(ev, nil)
+					return
+				}
+				w1Cancel := <-w1Ready
+				ambig := &ambiguousCancelAndNamedContext{
+					CancelOnlyEmbeddedHolder: &CancelOnlyEmbeddedHolder{Context: w1Cancel},
+					Context:                  ctx,
+				}
+				runCtx := rootInvocationCtx.WithContext(ambig)
+				leafEvents := make(chan item, 4)
+				dispatch <- func() {
+					defer close(leafEvents)
+					for ev, runErr := range leaf.Run(runCtx) {
+						leafEvents <- item{ev: ev, err: runErr}
+					}
+				}
+				for it := range leafEvents {
+					if !yield(it.ev, it.err) || it.err != nil {
+						close(releaseW1)
+						return
+					}
+				}
+				close(releaseW1)
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "worker"
+				ev.Branch = ctx.Branch()
+				ev.Content = textContent("model", "w2 ok")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{worker},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				rootInvocationCtx = ctx
+				jobs := make(chan func())
+				dispatcherDone := make(chan struct{})
+				go func() {
+					defer close(dispatcherDone)
+					for job := range jobs {
+						job()
+					}
+				}()
+				defer func() {
+					close(jobs)
+					<-dispatcherDone
+				}()
+				dispatch = jobs
+
+				ch := make(chan item, 8)
+				var wg sync.WaitGroup
+				for range 2 {
+					wg.Go(func() {
+						for ev, runErr := range worker.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+				}
+				go func() {
+					wg.Wait()
+					close(ch)
+				}()
+				for it := range ch {
+					if !yield(it.ev, it.err) || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-ambig-ctx", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	rootSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "root")["span_id"].(string)
+	workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+	if len(workerStarts) != 2 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+	}
+	leafStart := onlyAgentRow(t, rows, EventAgentStarting, "leaf")
+	if got, _ := leafStart["parent_span_id"].(string); got != rootSpan {
+		t.Fatalf("leaf parent_span_id = %q, want enclosing root %q (must not guess worker 1 %q or worker 2 %q)",
+			got, rootSpan, workerStarts[0]["span_id"], workerStarts[1]["span_id"])
+	}
+}
+
+var pkgLevelWrapperMu sync.Mutex
+
+type pkgLevelLockedWrapper struct {
+	context.Context
+}
+
+func (w *pkgLevelLockedWrapper) Deadline() (time.Time, bool) {
+	pkgLevelWrapperMu.Lock()
+	defer pkgLevelWrapperMu.Unlock()
+	return w.Context.Deadline()
+}
+
+func (w *pkgLevelLockedWrapper) Done() <-chan struct{} {
+	pkgLevelWrapperMu.Lock()
+	defer pkgLevelWrapperMu.Unlock()
+	return w.Context.Done()
+}
+
+func (w *pkgLevelLockedWrapper) Err() error {
+	pkgLevelWrapperMu.Lock()
+	defer pkgLevelWrapperMu.Unlock()
+	return w.Context.Err()
+}
+
+func (w *pkgLevelLockedWrapper) Value(key any) any {
+	pkgLevelWrapperMu.Lock()
+	defer pkgLevelWrapperMu.Unlock()
+	return w.Context.Value(key)
+}
+
+// TestContextWalkers_PackageLevelMutexWrapperPreservesPathAndParentMapRaceFree
+// pins that an external wrapper synchronized solely by a package-level mutex
+// (no mutex field inside the struct) never races under concurrent mutation,
+// preserves contextPath and contextParentMap via Value, and is never reflected
+// by stepEmbeddedContext.
+func TestContextWalkers_PackageLevelMutexWrapperPreservesPathAndParentMapRaceFree(t *testing.T) {
+	if contextPathReaderOnce() == nil || parentMapReaderOnce() == nil {
+		t.Skip("Value-based path and parent-map lookups require ADK core > v2.8.0")
+	}
+	leaf := newOneEventAgent(t, "leaf", nil)
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{leaf},
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+	pmBase := captureRunnerContextWithParentMap(t, root)
+	pathA, pathB := "wf/left", "wf/left2"
+	ctxA := agent.Promote(&mockInvocationContext{ctx: pmBase, agentName: "root", sessionID: "s1", invocationID: "inv-pkgmu-a", userID: "u1"}).
+		WithDelta(&agent.CommonContextDelta{Path: &pathA}).WithAgentContext(pmBase)
+	ctxB := agent.Promote(&mockInvocationContext{ctx: pmBase, agentName: "root", sessionID: "s1", invocationID: "inv-pkgmu-b", userID: "u1"}).
+		WithDelta(&agent.CommonContextDelta{Path: &pathB}).WithAgentContext(pmBase)
+
+	w := &pkgLevelLockedWrapper{Context: ctxA}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				pkgLevelWrapperMu.Lock()
+				if i%2 == 0 {
+					w.Context = ctxB
+				} else {
+					w.Context = ctxA
+				}
+				pkgLevelWrapperMu.Unlock()
+				runtime.Gosched()
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+
+	for range 300 {
+		if got := contextPath(w); got != pathA && got != pathB {
+			t.Fatalf("contextPath(pkgLevelLockedWrapper) = %q, want %q or %q", got, pathA, pathB)
+		}
+		if pm := contextParentMap(w); pm["leaf"] == nil || pm["leaf"].Name() != root.Name() {
+			t.Fatalf("contextParentMap(pkgLevelLockedWrapper) = %v, want leaf->root", pm)
+		}
+		if next, ok := stepEmbeddedContext(w); ok || next != nil {
+			t.Fatalf("stepEmbeddedContext(pkgLevelLockedWrapper) = (%v, %v), want (nil, false)", next, ok)
+		}
+		_ = observeLaunchLineage(w, nil, [3]any{})
+	}
+}
+
+type plainNamedContextHolder struct {
+	Context context.Context
+}
+
+func (h plainNamedContextHolder) Deadline() (time.Time, bool) { return h.Context.Deadline() }
+func (h plainNamedContextHolder) Done() <-chan struct{}       { return h.Context.Done() }
+func (h plainNamedContextHolder) Err() error                  { return h.Context.Err() }
+func (h plainNamedContextHolder) Value(key any) any           { return h.Context.Value(key) }
+
+type embeddedPlainHolderWrapper struct {
+	plainNamedContextHolder
+}
+
+// TestRunner_ConcurrentLookalike_EmbeddedPlainHolderNamedContextPicksLeftOverSibling
+// verifies that a wrapper embedding a plain holder struct with a named Context
+// field that forwards Value preserves both path and parent map (even when an
+// inner intermediary blocks LineageKey), picking the left branch over an open
+// right sibling and root.
+func TestRunner_ConcurrentLookalike_EmbeddedPlainHolderNamedContextPicksLeftOverSibling(t *testing.T) {
+	if contextPathReaderOnce() == nil || parentMapReaderOnce() == nil {
+		t.Skip("Value-based path and parent-map lookups require ADK core > v2.8.0")
+	}
+	p, requests, _ := setupTestPlugin(t)
+	leaf := newOneEventAgent(t, "leaf", nil)
+
+	var dispatchMu sync.Mutex
+	var dispatch chan func()
+	leftCtxCh := make(chan agent.InvocationContext, 1)
+	rightReady := make(chan struct{})
+	releaseRight := make(chan struct{})
+
+	worker, err := agent.New(agent.Config{
+		Name:      "worker",
+		SubAgents: []agent.Agent{leaf},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if contextPath(ctx) == "wf/left" {
+					leftCtxCh <- ctx
+				} else {
+					close(rightReady)
+				}
+				<-releaseRight
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "worker"
+				ev.Branch = ctx.Branch()
+				ev.Content = textContent("model", "worker-done")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{worker},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				jobs := make(chan func())
+				dispatcherDone := make(chan struct{})
+				go func() {
+					defer close(dispatcherDone)
+					for job := range jobs {
+						job()
+					}
+				}()
+				dispatchMu.Lock()
+				dispatch = jobs
+				dispatchMu.Unlock()
+				defer func() {
+					close(jobs)
+					<-dispatcherDone
+				}()
+
+				type item struct {
+					ev  *session.Event
+					err error
+				}
+				ch := make(chan item, 8)
+				var wg sync.WaitGroup
+				wg.Go(func() {
+					leftPath := "wf/left"
+					lCtx := ctx.WithContext(agent.Promote(ctx).WithDelta(&agent.CommonContextDelta{Path: &leftPath}))
+					for ev, runErr := range worker.Run(lCtx) {
+						ch <- item{ev: ev, err: runErr}
+					}
+				})
+				lCtx := <-leftCtxCh
+				wg.Go(func() {
+					rightPath := "wf/right"
+					rCtx := ctx.WithContext(agent.Promote(ctx).WithDelta(&agent.CommonContextDelta{Path: &rightPath}))
+					for ev, runErr := range worker.Run(rCtx) {
+						ch <- item{ev: ev, err: runErr}
+					}
+				})
+				<-rightReady
+
+				leafPath := "wf/left/leaf@1"
+				lLeafCarrier := agent.Promote(lCtx).WithDelta(&agent.CommonContextDelta{Path: &leafPath}).WithAgentContext(lCtx)
+				holderWrapped := embeddedPlainHolderWrapper{
+					plainNamedContextHolder: plainNamedContextHolder{
+						Context: &lineageFilteringNamedContext{Context: lLeafCarrier},
+					},
+				}
+				if got := contextPath(holderWrapped); got != leafPath {
+					t.Errorf("contextPath(embeddedPlainHolderWrapper) = %q, want %q", got, leafPath)
+				}
+				if pm := contextParentMap(holderWrapped); pm["leaf"] == nil || pm["leaf"].Name() != worker.Name() {
+					t.Errorf("contextParentMap(embeddedPlainHolderWrapper)[leaf] = %v, want worker", pm["leaf"])
+				}
+				runCtx := ctx.WithContext(holderWrapped)
+				leafDone := make(chan struct{})
+				dispatchMu.Lock()
+				d := dispatch
+				dispatchMu.Unlock()
+				d <- func() {
+					defer close(leafDone)
+					for ev, runErr := range leaf.Run(runCtx) {
+						ch <- item{ev: ev, err: runErr}
+					}
+				}
+				<-leafDone
+				close(releaseRight)
+
+				go func() {
+					wg.Wait()
+					close(ch)
+				}()
+				for it := range ch {
+					if !yield(it.ev, it.err) || it.err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-holder", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+	if len(workerStarts) != 2 {
+		t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+	}
+	leftSpan, _ := workerStarts[0]["span_id"].(string)
+	rightSpan, _ := workerStarts[1]["span_id"].(string)
+	rootSpan, _ := onlyAgentRow(t, rows, EventAgentStarting, "root")["span_id"].(string)
+	leafStart := onlyAgentRow(t, rows, EventAgentStarting, "leaf")
+	if got, _ := leafStart["parent_span_id"].(string); got != leftSpan || got == rightSpan || got == rootSpan {
+		t.Fatalf("leaf parent_span_id = %q, want %q (left, not right %q or root %q)", got, leftSpan, rightSpan, rootSpan)
+	}
 }

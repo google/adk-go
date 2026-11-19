@@ -61,7 +61,10 @@ const (
 	sweepInterval = 128
 )
 
-var agentInterfaceType = reflect.TypeFor[agent.Agent]()
+var (
+	agentInterfaceType   = reflect.TypeFor[agent.Agent]()
+	contextInterfaceType = reflect.TypeFor[context.Context]()
+)
 
 // agentPkgPath and workflowPkgPath are the import paths of ADK's agent and
 // workflow packages, and adkPkgPrefix is the import path prefix that all of
@@ -402,6 +405,9 @@ type spanRecord struct {
 	// previously issued or settled credits.
 	recordedAfterAgentCredit bool
 	recordedModelCredits     int
+	// activationTokens holds the opaque weak tokens reported by the ADK
+	// contexts of the agent run that started the span (see activationTokensOf).
+	activationTokens [3]any
 }
 
 // popRetirement carries per-retirement metadata into
@@ -4222,23 +4228,18 @@ func isBuiltInWorkflowAgent(a agent.Agent) bool {
 }
 
 func agentTypeOf(a agent.Agent) string {
-	for range 4 {
-		v := reflect.ValueOf(a)
-		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
-			if v.IsNil() {
-				return ""
-			}
-			v = v.Elem()
-		}
-		if v.Kind() != reflect.Struct {
+	for range 8 {
+		var seen map[visitedContextStruct]bool
+		v, ok := derefContextStructValueLazy(reflect.ValueOf(a), &seen, true)
+		if !ok {
 			return ""
 		}
-		if f := v.FieldByName("AgentType"); f.IsValid() && f.Kind() == reflect.String {
+		if f, owner := promotedStructFieldOwned(v, "AgentType", isADKStructPkgType); f.IsValid() && isADKStructPkg(owner.PkgPath()) && f.Kind() == reflect.String {
 			if s := f.String(); s != "" {
 				return s
 			}
 		}
-		inner := v.FieldByName("Agent")
+		inner, _ := promotedStructField(v, "Agent")
 		if !inner.IsValid() || !inner.CanInterface() {
 			return ""
 		}
@@ -4533,22 +4534,302 @@ func (inv *invocationTrace) syncLookalikesLocked() {
 	inv.lookalikesLen = len(inv.agentStack)
 }
 
-// maxLaunchLineage bounds the chain of contexts that launcherLocked follows.
-const maxLaunchLineage = 64
+// maxLaunchLineage bounds the chain of contexts that launcherLocked and
+// observeLaunchLineage follow so a cyclic custom context terminates.
+const maxLaunchLineage = 4096
+
+var lineageWalkerOnce = sync.OnceValue(func() func(context.Context) []any {
+	if w, ok := any(agent.Promote(nil)).(interface {
+		ADKWalkLineage(context.Context) []any
+	}); ok {
+		return w.ADKWalkLineage
+	}
+	return nil
+})
+
+func isComparableToken(tok any) bool {
+	return tok != nil && reflect.ValueOf(tok).Comparable()
+}
+
+// adkContextToken returns the opaque identity token reported by an ADK context
+// struct via ADKContextToken, or nil when x is not one of ADK's concrete
+// context structs. Checking the defining ADK context packages ensures an
+// external struct embedding an ADK context interface or pointer does not
+// promote and report an enclosing ADK context's token as its own.
+func adkContextToken(x any) any {
+	if x == nil {
+		return nil
+	}
+	return orZero(func() any {
+		v := reflect.ValueOf(x)
+		if v.Kind() != reflect.Pointer || v.IsNil() || v.Elem().Kind() != reflect.Struct {
+			return nil
+		}
+		pkg := v.Elem().Type().PkgPath()
+		if pkg != agentPkgPath && pkg != adkPkgPrefix+"internal/context" {
+			return nil
+		}
+		tc, ok := x.(interface{ ADKContextToken() any })
+		if !ok {
+			return nil
+		}
+		tok := tc.ADKContextToken()
+		if !isComparableToken(tok) {
+			return nil
+		}
+		return tok
+	})
+}
+
+// activationTokensOf returns the opaque ADK context tokens identifying the run
+// of ctx (its underlying activation key, its promoted node context, and its
+// unwrapped commonContext; WithICDelta(nil) returns commonContext directly
+// without allocating).
+func activationTokensOf(ctx context.Context, act any) [3]any {
+	var out [3]any
+	out[0] = adkContextToken(act)
+	if c, ok := ctx.(interface {
+		WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext
+	}); ok {
+		cc := orZero(func() agent.InvocationContext { return c.WithICDelta(nil) })
+		if tok := adkContextToken(cc); tok != out[0] {
+			out[2] = tok
+		}
+		if ic, ok := cc.(interface {
+			InvocationContext() agent.InvocationContext
+		}); ok {
+			node := orZero(func() any { return ic.InvocationContext() })
+			if tok := adkContextToken(node); tok != out[0] && tok != out[2] {
+				out[1] = tok
+			}
+		}
+	}
+	return out
+}
+
+// launchLineage holds the ADK context tokens observed along a starting run's
+// context chain before inv.mu is acquired, paired with the run's own
+// activation key and tokens.
+type launchLineage struct {
+	selfActivation any
+	selfTokens     [3]any
+	tokens         []any
+	observed       bool
+}
+
+// observeLaunchLineage collects the ADK context lineage of ctx through ADK's
+// private lineage key before inv.mu is acquired so wrapper synchronization is
+// respected, concurrent multi-parent Value lookups share no mutable observer,
+// and no user code runs under inv.mu.
+func observeLaunchLineage(ctx context.Context, act any, selfTokens [3]any) *launchLineage {
+	if ctx == nil && act == nil {
+		return nil
+	}
+	var tokens []any
+	var observed bool
+	if ctx != nil {
+		if walk := lineageWalkerOnce(); walk != nil {
+			raw := orZero(func() []any { return walk(ctx) })
+			if len(raw) > 0 {
+				observed = true
+				tokens = make([]any, 0, min(len(raw), maxLaunchLineage))
+				for _, tok := range raw {
+					if !isComparableToken(tok) {
+						continue
+					}
+					tokens = append(tokens, tok)
+					if len(tokens) >= maxLaunchLineage {
+						break
+					}
+				}
+			}
+		}
+	}
+	return &launchLineage{
+		selfActivation: act,
+		selfTokens:     selfTokens,
+		tokens:         tokens,
+		observed:       observed,
+	}
+}
+
+var selfPkgPath = reflect.TypeFor[traceManager]().PkgPath()
+
+func isADKStructPkg(pkg string) bool {
+	// selfPkgPath defines no ADK context or agent types in production, so
+	// excluding it keeps white-box test wrappers in package agentanalytics
+	// subject to the same rules as external user types.
+	return pkg != selfPkgPath && (pkg == adkModulePath || strings.HasPrefix(pkg, adkPkgPrefix))
+}
+
+func isImmutableContextOrAgentPkg(pkg string) bool {
+	return pkg == "context" || isADKStructPkg(pkg)
+}
+
+func stepEmbeddedContextStrict(v reflect.Value, depth int) (context.Context, bool) {
+	if depth >= 8 || !v.IsValid() || v.Kind() != reflect.Struct {
+		return nil, false
+	}
+	t := v.Type()
+	n := t.NumField()
+	liveCount := 0
+	var candidate context.Context
+	recordLive := func(c context.Context) bool {
+		liveCount++
+		if liveCount > 1 {
+			return true
+		}
+		candidate = c
+		return false
+	}
+	for i := range n {
+		sf := t.Field(i)
+		fv := v.Field(i)
+		if sf.Anonymous {
+			if sf.Type.Implements(contextInterfaceType) {
+				if !isNilContextField(fv) {
+					var c context.Context
+					if fv.CanInterface() {
+						if tc, ok := reflect.TypeAssert[context.Context](fv); ok {
+							c = tc
+						}
+					}
+					if recordLive(c) {
+						return nil, true
+					}
+				}
+				continue
+			}
+			switch sf.Type.Kind() {
+			case reflect.Struct:
+				if reflect.PointerTo(sf.Type).Implements(contextInterfaceType) && fv.CanAddr() && fv.Addr().CanInterface() {
+					if c, ok := reflect.TypeAssert[context.Context](fv.Addr()); ok && c != nil {
+						if recordLive(c) {
+							return nil, true
+						}
+						continue
+					}
+				}
+				c, ambig := stepEmbeddedContextStrict(fv, depth+1)
+				if ambig || (c != nil && recordLive(c)) {
+					return nil, true
+				}
+			case reflect.Pointer:
+				if sf.Type.Elem().Kind() != reflect.Struct || !isImmutableContextOrAgentPkg(sf.Type.Elem().PkgPath()) || fv.IsNil() {
+					continue
+				}
+				c, ambig := stepEmbeddedContextStrict(fv.Elem(), depth+1)
+				if ambig || (c != nil && recordLive(c)) {
+					return nil, true
+				}
+			}
+			continue
+		}
+		if ((t.PkgPath() == "context" && sf.Name == "c") || sf.Name == "Context") && sf.Type.Implements(contextInterfaceType) {
+			if !isNilContextField(fv) {
+				var c context.Context
+				if fv.CanInterface() {
+					if tc, ok := reflect.TypeAssert[context.Context](fv); ok {
+						c = tc
+					}
+				}
+				if recordLive(c) {
+					return nil, true
+				}
+			}
+		}
+	}
+	return candidate, false
+}
+
+func stepEmbeddedContextValue(v reflect.Value, depth int) context.Context {
+	c, ambig := stepEmbeddedContextStrict(v, depth)
+	if ambig {
+		return nil
+	}
+	return c
+}
+
+// stepEmbeddedContext returns the parent context.Context carried by cur when
+// cur is a known immutable stdlib "context" or built-in ADK framework struct
+// (never arbitrary external user structs), and returns (nil, false) when absent
+// or ambiguous across multiple live context.Context fields.
+func stepEmbeddedContext(cur any) (context.Context, bool) {
+	if cur == nil {
+		return nil, false
+	}
+	next := orZero(func() context.Context {
+		v := reflect.ValueOf(cur)
+		if v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return nil
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct || !isImmutableContextOrAgentPkg(v.Type().PkgPath()) {
+			return nil
+		}
+		return stepEmbeddedContextValue(v, 0)
+	})
+	return next, next != nil
+}
 
 // launcherLocked returns the index in agentStack of the open agent activation,
-// not excluded, whose context the agent run with activation key act (see
-// activationKey) was started with, or 0 if no such activation is known. ADK
-// derives the context of each agent run from the context passed to its Run,
-// and each of its contexts, like the context package's own, embeds the
-// context that it derives from, so the chain of embedded Context fields from
-// act passes through the activation key of every run that the new run's
-// context derives from, nearest first. The first one of an open activation
-// tells which activation started the run, whichever goroutine runs it. The
-// chain is read through exported fields alone, so no user code runs while
-// inv.mu is held.
+// not excluded, whose context the starting agent run was started with, or 0 if
+// no such activation is known. In pushAgentSpan, observeLaunchLineage walks
+// ADK's private lineage key via Value before inv.mu is acquired and passes a
+// *launchLineage pointer, so custom wrappers (value structs,
+// context.WithoutCancel, mutex-guarded wrappers, optional embedded pointers,
+// and deep WithValue chains) are followed through their Value methods without
+// calling Value under inv.mu. When no token matches (for example after a
+// Value-filtering wrapper, in synthetic unit tests, or against an older ADK
+// build without the lineage key), lookup falls through to walking embedded and
+// named Context fields on lock-free structs.
 func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 	if act == nil {
+		return 0
+	}
+	var lin launchLineage
+	switch v := act.(type) {
+	case *launchLineage:
+		if v == nil {
+			return 0
+		}
+		lin = *v
+	default:
+		lin = launchLineage{selfActivation: act}
+	}
+
+	if lin.observed {
+		var byToken map[any]int
+		for i, rec := range inv.agentStack {
+			if i == 0 || excluded[i] || rec.kind != spanKindAgent {
+				continue
+			}
+			for _, tok := range rec.activationTokens {
+				if !isComparableToken(tok) {
+					continue
+				}
+				if byToken == nil {
+					byToken = make(map[any]int)
+				}
+				byToken[tok] = i
+			}
+		}
+		if len(byToken) > 0 {
+			for _, tok := range lin.tokens {
+				if !isComparableToken(tok) || tok == lin.selfTokens[0] || tok == lin.selfTokens[1] || tok == lin.selfTokens[2] {
+					continue
+				}
+				if i, ok := byToken[tok]; ok {
+					return i
+				}
+			}
+		}
+	}
+
+	cur := lin.selfActivation
+	if cur == nil {
 		return 0
 	}
 	byActivation := make(map[any]int)
@@ -4556,29 +4837,24 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 		if i == 0 || excluded[i] || rec.kind != spanKindAgent || rec.activation == nil {
 			continue
 		}
-		if reflect.ValueOf(rec.activation).Kind() == reflect.Pointer {
+		if isComparableToken(rec.activation) {
 			byActivation[rec.activation] = i
 		}
 	}
-	cur := act
+	if len(byActivation) == 0 {
+		return 0
+	}
 	for step := range maxLaunchLineage {
-		v := reflect.ValueOf(cur)
-		if v.Kind() != reflect.Pointer || v.IsNil() {
-			return 0
-		}
-		if step > 0 {
+		if step > 0 && isComparableToken(cur) {
 			if i, ok := byActivation[cur]; ok {
 				return i
 			}
 		}
-		if v = v.Elem(); v.Kind() != reflect.Struct {
+		next, ok := stepEmbeddedContext(cur)
+		if !ok {
 			return 0
 		}
-		next := v.FieldByName("Context")
-		if !next.IsValid() || next.Kind() != reflect.Interface || next.IsNil() || !next.CanInterface() {
-			return 0
-		}
-		cur = next.Interface()
+		cur = next
 	}
 	return 0
 }
@@ -4671,6 +4947,7 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 	selected := parent
 	var seenAmbiguous map[*spanRecord]bool
 	var ambiguous []*spanRecord
+	var qual *possibleOwnerQual
 	for parent != nil && parent.kind == spanKindAgent && len(unmatched) > 0 {
 		ambiguous = ambiguous[:0]
 		for cur := parent; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
@@ -4679,7 +4956,7 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 					seenAmbiguous = make(map[*spanRecord]bool)
 				}
 				seenAmbiguous[recs[0]] = true
-				ambiguous = inv.appendPossibleOwnersLocked(ambiguous, tree, exclude, recs, id, selected)
+				ambiguous = inv.appendPossibleOwnersWithQualLocked(ambiguous, tree, exclude, recs, id, selected, &qual)
 			}
 		}
 		if len(ambiguous) == 0 {
@@ -4690,35 +4967,183 @@ func (inv *invocationTrace) parentForRunLocked(id identity, exclude map[string]b
 	return parent
 }
 
-// appendPossibleOwnersLocked appends to dst the members of the unmatched
-// lookalike group recs that could hold a child agent starting with id whose
-// parent would otherwise be selected: the members with an open span, not
-// excluded, in their subtree (themselves included) that id's branch and node
-// path fit as they fit a parent (see parentFor) at or below selected's branch
-// and node path. A child cannot run under a member without such a span, so
-// when fewer than two members have one, their branch and node path already
-// tell which member holds the child, and nothing is appended. inv.mu must be
-// held.
-func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord) []*spanRecord {
-	start := len(dst)
-	for _, m := range recs {
-		mIdx, ok := tree.stackIdx[m]
-		if !ok {
-			continue
+type possibleOwnerQual struct {
+	next []int
+	prev []int
+}
+
+func (inv *invocationTrace) buildPossibleOwnerQualLocked(tree *openSpanTree, exclude map[string]bool, id identity, selected *spanRecord) *possibleOwnerQual {
+	n := len(tree.dfsSeq)
+	buf := make([]int, 2*n+1)
+	next := buf[:n+1]
+	prev := buf[n+1:]
+	last := -1
+	for pos := range n {
+		rec := inv.agentStack[tree.dfsSeq[pos]]
+		if !exclude[rec.spanID] &&
+			withinBranch(id.branch, rec.branch) && withinPath(id.path, rec.path, rec.name == id.agentName) &&
+			withinBranch(rec.branch, selected.branch) && atOrBelowPath(rec.path, selected.path) {
+			last = pos
 		}
-		for _, u := range tree.dfsSeq[tree.tin[mIdx]-1 : tree.tout[mIdx]] {
-			rec := inv.agentStack[u]
-			if exclude[rec.spanID] ||
-				!withinBranch(id.branch, rec.branch) || !withinPath(id.path, rec.path, rec.name == id.agentName) ||
-				!withinBranch(rec.branch, selected.branch) || !atOrBelowPath(rec.path, selected.path) {
-				continue
-			}
-			dst = append(dst, m)
+		prev[pos] = last
+	}
+	nxt := n
+	next[n] = n
+	for pos := n - 1; pos >= 0; pos-- {
+		if prev[pos] == pos {
+			nxt = pos
+		}
+		next[pos] = nxt
+	}
+	return &possibleOwnerQual{next: next, prev: prev}
+}
+
+// appendPossibleOwnersLocked appends to dst the spans representing the members
+// of the unmatched lookalike group recs that directly hold a non-excluded open
+// span (outside any nested descendant member of recs) that id's branch and node
+// path fit as they fit a parent (see parentFor) at or below selected's branch
+// and node path, provided at least two qualifying owners match. Skipping nested
+// members' subtrees ensures an ancestor lookalike claims only direct qualifying
+// witnesses outside nested lookalikes, and emitting both the first and last
+// direct witness of an outer owner ensures tree.enclosing encloses every
+// qualifying witness in its disjoint region (including selected). inv.mu must
+// be held.
+func (inv *invocationTrace) appendPossibleOwnersLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord) []*spanRecord {
+	var qual *possibleOwnerQual
+	return inv.appendPossibleOwnersWithQualLocked(dst, tree, exclude, recs, id, selected, &qual)
+}
+
+func (inv *invocationTrace) appendPossibleOwnersWithQualLocked(dst []*spanRecord, tree *openSpanTree, exclude map[string]bool, recs []*spanRecord, id identity, selected *spanRecord, qual **possibleOwnerQual) []*spanRecord {
+	var mIdxBuf [16]int
+	mIdxs := mIdxBuf[:0]
+	if len(recs) > len(mIdxBuf) {
+		mIdxs = make([]int, 0, len(recs))
+	}
+	for _, m := range recs {
+		if mIdx, ok := tree.stackIdx[m]; ok {
+			mIdxs = append(mIdxs, mIdx)
+		}
+	}
+	if len(mIdxs) < 2 {
+		return dst
+	}
+	sorted := true
+	for i := 1; i < len(mIdxs); i++ {
+		if tree.tin[mIdxs[i-1]] > tree.tin[mIdxs[i]] {
+			sorted = false
 			break
 		}
 	}
-	if len(dst)-start < 2 {
-		return dst[:start]
+	if !sorted {
+		slices.SortFunc(mIdxs, func(a, b int) int {
+			return cmp.Compare(tree.tin[a], tree.tin[b])
+		})
+	}
+	var skipBuf [16]int
+	var skipAfter []int
+	if len(mIdxs) <= len(skipBuf) {
+		skipAfter = skipBuf[:len(mIdxs)]
+	} else {
+		skipAfter = make([]int, len(mIdxs))
+	}
+	for d := len(mIdxs) - 1; d >= 0; d-- {
+		endD := tree.tout[mIdxs[d]]
+		j := d + 1
+		for j < len(mIdxs) && tree.tin[mIdxs[j]] <= endD {
+			j = skipAfter[j]
+		}
+		skipAfter[d] = j
+	}
+	if *qual == nil && len(tree.dfsSeq) > 32 {
+		*qual = inv.buildPossibleOwnerQualLocked(tree, exclude, id, selected)
+	}
+	q := *qual
+
+	var ownerBuf [16]int
+	var firstBuf [16]*spanRecord
+	var lastBuf [16]*spanRecord
+	ownerIdxs := ownerBuf[:0]
+	firstWitnesses := firstBuf[:0]
+	lastWitnesses := lastBuf[:0]
+	if len(mIdxs) > len(ownerBuf) {
+		ownerIdxs = make([]int, 0, len(mIdxs))
+		firstWitnesses = make([]*spanRecord, 0, len(mIdxs))
+		lastWitnesses = make([]*spanRecord, 0, len(mIdxs))
+	}
+	for i, mIdx := range mIdxs {
+		subEnd := skipAfter[i]
+		hasDescMember := subEnd > i+1
+		end := tree.tout[mIdx]
+		var firstMatch, lastMatch *spanRecord
+		scanGap := func(lo, hi int) bool {
+			if lo >= hi {
+				return false
+			}
+			if q != nil {
+				firstPos := q.next[lo]
+				if firstPos >= hi {
+					return false
+				}
+				if firstMatch == nil {
+					firstMatch = inv.agentStack[tree.dfsSeq[firstPos]]
+					if !hasDescMember || firstMatch == inv.agentStack[mIdx] {
+						lastMatch = firstMatch
+						return true
+					}
+				}
+				lastMatch = inv.agentStack[tree.dfsSeq[q.prev[hi-1]]]
+				return false
+			}
+			for pos := lo; pos < hi; pos++ {
+				rec := inv.agentStack[tree.dfsSeq[pos]]
+				if exclude[rec.spanID] ||
+					!withinBranch(id.branch, rec.branch) || !withinPath(id.path, rec.path, rec.name == id.agentName) ||
+					!withinBranch(rec.branch, selected.branch) || !atOrBelowPath(rec.path, selected.path) {
+					continue
+				}
+				if firstMatch == nil {
+					firstMatch = rec
+					if !hasDescMember || firstMatch == inv.agentStack[mIdx] {
+						lastMatch = firstMatch
+						return true
+					}
+				}
+				lastMatch = rec
+			}
+			return false
+		}
+
+		gapLo := tree.tin[mIdx] - 1
+		stopped := false
+		for d := i + 1; d < subEnd; d = skipAfter[d] {
+			if scanGap(gapLo, tree.tin[mIdxs[d]]-1) {
+				stopped = true
+				break
+			}
+			gapLo = tree.tout[mIdxs[d]]
+		}
+		if !stopped {
+			scanGap(gapLo, end)
+		}
+		if firstMatch != nil {
+			ownerIdxs = append(ownerIdxs, mIdx)
+			firstWitnesses = append(firstWitnesses, firstMatch)
+			lastWitnesses = append(lastWitnesses, lastMatch)
+		}
+	}
+	if len(ownerIdxs) < 2 {
+		return dst
+	}
+	for i, mIdx := range ownerIdxs {
+		hasDescOwner := i+1 < len(ownerIdxs) && tree.tout[ownerIdxs[i+1]] <= tree.tout[mIdx]
+		if hasDescOwner && firstWitnesses[i] != inv.agentStack[mIdx] {
+			dst = append(dst, firstWitnesses[i])
+			if lastWitnesses[i] != firstWitnesses[i] {
+				dst = append(dst, lastWitnesses[i])
+			}
+		} else {
+			dst = append(dst, inv.agentStack[mIdx])
+		}
 	}
 	return dst
 }
@@ -4957,6 +5382,45 @@ func (t *openSpanTree) enclosing(inv *invocationTrace, recs []*spanRecord) *span
 	return inv.agentStack[0]
 }
 
+// countEffectivePeers counts how many concurrent peer branches liveByTin
+// (sorted in ascending tin order) represents after dropping earlier
+// activations superseded on the same non-zero goroutine and collapsing nested
+// ancestor chains.
+func (t *openSpanTree) countEffectivePeers(inv *invocationTrace, liveByTin, scratch []int) (int, []int) {
+	if len(liveByTin) <= 1 {
+		return len(liveByTin), scratch
+	}
+	var lastForGoid map[uint64]int
+	for _, u := range liveByTin {
+		if g := inv.agentStack[u].goroutineID; g != 0 {
+			if lastForGoid == nil {
+				lastForGoid = make(map[uint64]int, len(liveByTin))
+			}
+			if prev, ok := lastForGoid[g]; !ok || u > prev {
+				lastForGoid[g] = u
+			}
+		}
+	}
+	compacted := scratch[:0]
+	for _, u := range liveByTin {
+		if g := inv.agentStack[u].goroutineID; g != 0 && lastForGoid[g] != u {
+			continue
+		}
+		compacted = append(compacted, u)
+	}
+	if len(compacted) <= 1 {
+		return len(compacted), compacted
+	}
+	effective := 0
+	for i, u := range compacted {
+		if i+1 < len(compacted) && t.tout[compacted[i+1]] <= t.tout[u] {
+			continue
+		}
+		effective++
+	}
+	return effective, compacted
+}
+
 // pushIntMinHeap pushes v onto a binary min-heap stored in h.
 func pushIntMinHeap(h []int, v int) []int {
 	h = append(h, v)
@@ -5048,8 +5512,9 @@ func (s maxSegTree) query(l, r int) int {
 // inv.agentStack[1:] grouped by lookalikeKey in O(N log N) worst-case time
 // (O(N + G log G) when no witness node is excluded mid-pass), and in O(1)
 // time without allocating while no two open activations share a lookalikeKey
-// (see lookalikes). When an open activation is on the context chain of the
-// run whose activation key is activation (see launcherLocked), every member
+// (see lookalikes). When an open activation matches activation (a
+// *launchLineage collected before inv.mu is acquired, or a raw activation
+// context; see launcherLocked), every member
 // of every group that neither is nor encloses it is excluded with the agents
 // under it, and no group is left unmatched: the context that the run was
 // started with tells the members apart better than any goroutine does, as a
@@ -5410,39 +5875,9 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool,
 
 	var effectiveScratch []int
 	countEffectivePeers := func(liveByTin []int) int {
-		if len(liveByTin) <= 1 {
-			return len(liveByTin)
-		}
-		var lastForGoid map[uint64]int
-		for _, u := range liveByTin {
-			if g := inv.agentStack[u].goroutineID; g != 0 {
-				if lastForGoid == nil {
-					lastForGoid = make(map[uint64]int, len(liveByTin))
-				}
-				if prev, ok := lastForGoid[g]; !ok || u > prev {
-					lastForGoid[g] = u
-				}
-			}
-		}
-		compacted := effectiveScratch[:0]
-		for _, u := range liveByTin {
-			if g := inv.agentStack[u].goroutineID; g != 0 && lastForGoid[g] != u {
-				continue
-			}
-			compacted = append(compacted, u)
-		}
-		effectiveScratch = compacted
-		if len(compacted) <= 1 {
-			return len(compacted)
-		}
-		effective := 0
-		for i, u := range compacted {
-			if i+1 < len(compacted) && tree.tout[compacted[i+1]] <= tree.tout[u] {
-				continue
-			}
-			effective++
-		}
-		return effective
+		var nEff int
+		nEff, effectiveScratch = tree.countEffectivePeers(inv, liveByTin, effectiveScratch)
+		return nEff
 	}
 
 	excludeLosers := func(liveIdxs []int, winnerIdx, bm int, matchGoid uint64) bool {
@@ -6910,6 +7345,11 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	}
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	activation := activationKey(ctx)
+	actTokens := activationTokensOf(ctx, activation)
+	var launch any
+	if l := observeLaunchLineage(ctx, activation, actTokens); l != nil {
+		launch = l
+	}
 	ended := endedFunc(ctx)
 	var goid uint64
 	var origin goroutineOrigin
@@ -6951,7 +7391,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	// Register concurrent peers before the workflow-retry completion-inference
 	// loop so the retry guard can check !rec.concurrentPeer. Only peers that
 	// are NOT earlier attempts of the node are marked (see laterAttempt).
-	parent := inv.parentForRunLocked(id, nil, goid, origin, activation)
+	parent := inv.parentForRunLocked(id, nil, goid, origin, launch)
 	var concurrentPeer bool
 	isSyntheticRetry := func(other *spanRecord) bool {
 		return activation == nil && other.activation == nil && other.parent != nil && other.parent.activation == nil
@@ -7053,7 +7493,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		// whether they failed is read here.
 		later, synced := laterAttempt(rec)
 		sameWorker := attempt == attemptWorker && rec.attempt == attemptWorker && goid != 0 && rec.goroutineID == goid
-		if !later || (!sameWorker && (rec.concurrentPeer || rec.parent != inv.parentForRunLocked(id, inv.subtreeLocked(i), goid, origin, activation))) {
+		if !later || (!sameWorker && (rec.concurrentPeer || rec.parent != inv.parentForRunLocked(id, inv.subtreeLocked(i), goid, origin, launch))) {
 			continue
 		}
 		if synced {
@@ -7083,7 +7523,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	// Mark concurrent peers on any remaining matching spans (workflow
 	// children that did not fail and were not purged by the retry loop).
 	if didPurge {
-		parent = inv.parentForRunLocked(id, nil, goid, origin, activation)
+		parent = inv.parentForRunLocked(id, nil, goid, origin, launch)
 	}
 	for _, other := range inv.agentStack[1:] {
 		if other.kind == spanKindAgent &&
@@ -7108,6 +7548,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		origin:                 origin,
 		attempt:                attempt,
 		activation:             activation,
+		activationTokens:       actTokens,
 		parent:                 parent,
 		stopPoint:              parent.kind == spanKindInvocation || id.path != parent.path || id.branch != parent.branch,
 		nonLLM:                 children.nonLLM,
@@ -10143,12 +10584,10 @@ func activationKey(ctx context.Context) any {
 			cur = inner
 		}
 		if key != nil {
-			if v := reflect.ValueOf(key); v.Kind() == reflect.Pointer && !v.IsNil() && v.Elem().Kind() == reflect.Struct {
-				if f := v.Elem().FieldByName("Context"); f.IsValid() && f.CanInterface() {
-					if inner, ok := reflect.TypeAssert[agent.InvocationContext](f); ok && inner != nil {
-						if iv := reflect.ValueOf(inner); iv.Kind() == reflect.Pointer && !iv.IsNil() {
-							return inner
-						}
+			if innerCtx, ok := stepEmbeddedContext(key); ok {
+				if inner, ok := innerCtx.(agent.InvocationContext); ok && inner != nil {
+					if iv := reflect.ValueOf(inner); iv.Kind() == reflect.Pointer && !iv.IsNil() {
+						return inner
 					}
 				}
 			}
@@ -11455,6 +11894,46 @@ func adkContextChildren(v reflect.Value) (reflect.Value, reflect.Value) {
 	return reflect.Value{}, reflect.Value{}
 }
 
+var parentMapReaderOnce = sync.OnceValue(func() func(context.Context) any {
+	p := any(agent.Promote(nil))
+	if r, ok := p.(interface{ ADKParentMap(context.Context) any }); ok {
+		return r.ADKParentMap
+	}
+	return nil
+})
+
+func convertAgentParentMap(raw any) (map[string]agent.Agent, bool) {
+	if raw == nil {
+		return nil, false
+	}
+	if m, ok := raw.(map[string]agent.Agent); ok {
+		if m == nil {
+			return nil, false
+		}
+		return m, true
+	}
+	rv := reflect.ValueOf(raw)
+	if !rv.IsValid() || rv.Kind() != reflect.Map || rv.IsNil() ||
+		rv.Type().Key().Kind() != reflect.String ||
+		rv.Type().Elem() != agentInterfaceType {
+		return nil, false
+	}
+	if rv.Type().ConvertibleTo(reflect.TypeFor[map[string]agent.Agent]()) {
+		return rv.Convert(reflect.TypeFor[map[string]agent.Agent]()).Interface().(map[string]agent.Agent), true
+	}
+	if !rv.CanInterface() {
+		return nil, false
+	}
+	out := make(map[string]agent.Agent, rv.Len())
+	iter := rv.MapRange()
+	for iter.Next() {
+		if a, ok := reflect.TypeAssert[agent.Agent](iter.Value()); ok && a != nil {
+			out[iter.Key().String()] = a
+		}
+	}
+	return out, true
+}
+
 // contextParentMap returns the child-to-parent agent map that ADK's runner
 // attaches to ctx via internal/agent/parentmap, or nil if ctx does not carry
 // one. Only Go stdlib and ADK context wrappers are unwrapped; fields of
@@ -11467,6 +11946,11 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 	}()
 	if ctx == nil {
 		return nil
+	}
+	if read := parentMapReaderOnce(); read != nil {
+		if out, ok := convertAgentParentMap(read(ctx)); ok {
+			return out
+		}
 	}
 	var q contextStructQueue
 	q.push(reflect.ValueOf(ctx))
@@ -11496,14 +11980,7 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 							}
 						}
 						if raw := orZero(func() any { return lookupCtx.Value(keyVal) }); raw != nil {
-							if m := reflect.ValueOf(raw); m.IsValid() && m.Kind() == reflect.Map && m.CanInterface() {
-								out := make(map[string]agent.Agent, m.Len())
-								iter := m.MapRange()
-								for iter.Next() {
-									if a, ok := reflect.TypeAssert[agent.Agent](iter.Value()); ok && a != nil {
-										out[iter.Key().String()] = a
-									}
-								}
+							if out, ok := convertAgentParentMap(raw); ok {
 								return out
 							}
 						}
@@ -11519,7 +11996,6 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 }
 
 var (
-	contextInterfaceType = reflect.TypeFor[context.Context]()
 	pluginPtrType        = reflect.TypeFor[*baseplugin.Plugin]()
 	uuidProviderType     = reflect.TypeFor[platform.UUIDProvider]()
 	pluginManagerPkgPath = adkPkgPrefix + "internal/plugininternal"
@@ -11550,18 +12026,6 @@ func (a *probeLiveAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession
 func isContextField(f reflect.Value) bool {
 	return f.IsValid() && (f.Type().Implements(contextInterfaceType) ||
 		(f.Kind() == reflect.Struct && reflect.PointerTo(f.Type()).Implements(contextInterfaceType)))
-}
-
-// directStructField returns the direct field of v named name without traversing
-// embedded struct pointers, so a nil embedded pointer cannot panic.
-func directStructField(v reflect.Value, name string) reflect.Value {
-	t := v.Type()
-	for i, n := 0, t.NumField(); i < n; i++ {
-		if t.Field(i).Name == name {
-			return v.Field(i)
-		}
-	}
-	return reflect.Value{}
 }
 
 func isPluginManagerType(t reflect.Type) bool {

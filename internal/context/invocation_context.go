@@ -150,10 +150,32 @@ func (c *InvocationContext) Value(key any) any {
 		}
 		return nil
 	}
+	if v, ok := adkcontext.LineageStep(key, c, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.PathStep(key, c.params.Path, c.Context); ok {
+		return v
+	}
 	if c.Context == nil {
 		return nil
 	}
 	return c.Context.Value(key)
+}
+
+func (c *InvocationContext) ADKContextToken() any {
+	return adkcontext.Token(c)
+}
+
+func (*InvocationContext) ADKWalkLineage(ctx context.Context) []any {
+	return adkcontext.WalkLineage(ctx)
+}
+
+func (*InvocationContext) ADKContextPath(ctx context.Context) string {
+	return adkcontext.ReadPath(ctx)
+}
+
+func (*InvocationContext) ADKParentMap(ctx context.Context) any {
+	return adkcontext.ReadParentMap(ctx)
 }
 
 // ResumedInput always returns (nil, false) for the base

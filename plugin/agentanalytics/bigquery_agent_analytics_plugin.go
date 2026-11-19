@@ -2276,30 +2276,29 @@ func agentStartingData(a agent.Agent) (content any, attrs map[string]any) {
 	return content, attrs
 }
 
+func isADKStructPkgType(owner reflect.Type) bool {
+	return isADKStructPkg(owner.PkgPath())
+}
+
 // agentConfig returns the configuration that ADK keeps in the base agent of
 // a, such as the llmagent.Config of an LLM agent, or nil. ADK exposes no
 // accessor for it, so it is read with reflection from the exported Config
-// field of the base agent's embedded state. An agent that embeds its base
-// agent in an exported agent.Agent field, as LLM agents do, is unwrapped
-// when its own Config is zero. Agents without a readable Config field yield nil.
+// field of the base agent's embedded ADK state. User decorators embedding an
+// agent.Agent (directly or through nested anonymous structs or non-nil struct
+// pointers, without holding concurrent-swap locks over Agent) are unwrapped
+// safely; Config is read only when declared on an ADK struct so mutable user
+// fields named Config are never touched.
 func agentConfig(a agent.Agent) any {
-	// One unwrapping reaches the base agent of the ADK agents; the bound
-	// stops agents that wrap themselves.
-	for range 4 {
-		v := reflect.ValueOf(a)
-		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
-			if v.IsNil() {
-				return nil
-			}
-			v = v.Elem()
-		}
-		if v.Kind() != reflect.Struct {
+	for range 8 {
+		var seen map[visitedContextStruct]bool
+		v, ok := derefContextStructValueLazy(reflect.ValueOf(a), &seen, true)
+		if !ok {
 			return nil
 		}
-		if f := v.FieldByName("Config"); f.IsValid() && f.CanInterface() && !f.IsZero() {
+		if f, owner := promotedStructFieldOwned(v, "Config", isADKStructPkgType); f.IsValid() && isADKStructPkg(owner.PkgPath()) && f.CanInterface() && !f.IsZero() {
 			return f.Interface()
 		}
-		inner := v.FieldByName("Agent")
+		inner, _ := promotedStructField(v, "Agent")
 		if !inner.IsValid() || !inner.CanInterface() {
 			return nil
 		}
@@ -2495,11 +2494,174 @@ type visitedContextStruct struct {
 	typ reflect.Type
 }
 
+// directStructField returns the direct field of struct v named name, or the
+// zero reflect.Value if v has no direct field with that name. Looking up
+// t.Field(i) / v.Field(i) directly avoids reflect.Value.FieldByName, which
+// chases promoted fields and panics on nil embedded struct pointers.
+func directStructField(v reflect.Value, name string) reflect.Value {
+	t := v.Type()
+	for i := range t.NumField() {
+		if t.Field(i).Name == name {
+			return v.Field(i)
+		}
+	}
+	return reflect.Value{}
+}
+
+// promotedStructField looks up a field named name on struct v or promoted
+// through nested anonymous structs and non-nil struct pointers (up to 8
+// embedding levels), returning the matching field value and the struct type
+// that declares it, or the zero Value when absent or ambiguous at the shallowest
+// matching depth. Walking anonymous fields level by level matches Go's selector
+// promotion rules without calling reflect.Value.FieldByName, which panics when
+// an unrelated nil embedded struct pointer shares or precedes the lookup.
+func promotedStructField(v reflect.Value, name string) (reflect.Value, reflect.Type) {
+	return promotedStructFieldOwned(v, name, nil)
+}
+
+func directStructFieldIndex(t reflect.Type, name string) (int, bool) {
+	for i := range t.NumField() {
+		if t.Field(i).Name == name {
+			return i, true
+		}
+	}
+	return -1, false
+}
+
+func findPromotedFieldPath(t reflect.Type, name string, maxDepth int, allowOwner func(reflect.Type) bool) ([]int, reflect.Type, bool) {
+	type typeNode struct {
+		typ  reflect.Type
+		path []int
+	}
+	minDepth := map[reflect.Type]int{t: 0}
+	curLevel := []typeNode{{typ: t}}
+	for depth := range maxDepth {
+		nextDepth := depth + 1
+		var nextLevel []typeNode
+		levelCount := make(map[reflect.Type]int)
+		matches := 0
+		var matchPath []int
+		var matchOwner reflect.Type
+		for _, node := range curLevel {
+			for i := range node.typ.NumField() {
+				sf := node.typ.Field(i)
+				if !sf.Anonymous {
+					continue
+				}
+				var subType reflect.Type
+				switch sf.Type.Kind() {
+				case reflect.Struct:
+					subType = sf.Type
+				case reflect.Pointer:
+					if sf.Type.Elem().Kind() != reflect.Struct {
+						continue
+					}
+					subType = sf.Type.Elem()
+				default:
+					continue
+				}
+				if prev, seen := minDepth[subType]; seen && prev < nextDepth {
+					continue
+				}
+				if allowOwner == nil || allowOwner(subType) {
+					if idx, ok := directStructFieldIndex(subType, name); ok {
+						matches++
+						if matches > 1 {
+							return nil, nil, false
+						}
+						matchPath = make([]int, len(node.path)+2)
+						copy(matchPath, node.path)
+						matchPath[len(node.path)] = i
+						matchPath[len(node.path)+1] = idx
+						matchOwner = subType
+					}
+				}
+				levelCount[subType]++
+				if levelCount[subType] <= 2 {
+					minDepth[subType] = nextDepth
+					nextPath := make([]int, len(node.path)+1)
+					copy(nextPath, node.path)
+					nextPath[len(node.path)] = i
+					nextLevel = append(nextLevel, typeNode{typ: subType, path: nextPath})
+				}
+			}
+		}
+		if matches == 1 {
+			return matchPath, matchOwner, true
+		}
+		if len(nextLevel) == 0 {
+			break
+		}
+		curLevel = nextLevel
+	}
+	return nil, nil, false
+}
+
+func promotedStructFieldOwned(v reflect.Value, name string, allowOwner func(reflect.Type) bool) (reflect.Value, reflect.Type) {
+	if allowOwner == nil || allowOwner(v.Type()) {
+		if f := directStructField(v, name); f.IsValid() {
+			return f, v.Type()
+		}
+	}
+	const maxPromoDepth = 8
+	hasAnonStruct := false
+	vt := v.Type()
+	for sf := range vt.Fields() {
+		if sf.Anonymous && (sf.Type.Kind() == reflect.Struct || (sf.Type.Kind() == reflect.Pointer && sf.Type.Elem().Kind() == reflect.Struct)) {
+			hasAnonStruct = true
+			break
+		}
+	}
+	if !hasAnonStruct {
+		return reflect.Value{}, nil
+	}
+	path, owner, ok := findPromotedFieldPath(vt, name, maxPromoDepth, allowOwner)
+	if !ok {
+		return reflect.Value{}, nil
+	}
+	cur := v
+	for _, idx := range path[:len(path)-1] {
+		cur = cur.Field(idx)
+		if cur.Kind() == reflect.Pointer {
+			if cur.IsNil() {
+				return reflect.Value{}, nil
+			}
+			cur = cur.Elem()
+		}
+	}
+	return cur.Field(path[len(path)-1]), owner
+}
+
+func isNilContextField(v reflect.Value) bool {
+	for v.IsValid() && v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return true
+		}
+		v = v.Elem()
+	}
+	if !v.IsValid() {
+		return true
+	}
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+var contextPathReaderOnce = sync.OnceValue(func() func(context.Context) string {
+	p := any(agent.Promote(nil))
+	if r, ok := p.(interface{ ADKContextPath(context.Context) string }); ok {
+		return r.ADKContextPath
+	}
+	return nil
+})
+
 // contextPath returns the execution node path carried by ctx, or "".
-// ADK's callbackContextWrapper.Path logs an error and returns "", and
-// NewCallbackContext wraps the inner InvocationContext without copying its
-// path onto the outer commonContext, so contextPath inspects the wrapped
-// context chain directly before falling back to Path() on non-wrapper types.
+// It first queries ADK's private path key via ctx.Value (when running against an
+// ADK core that exposes it), then falls back to allowlisted ADK and Go stdlib
+// context layouts and Path() on non-wrapper types.
 func contextPath(ctx context.Context) (path string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -2508,6 +2670,11 @@ func contextPath(ctx context.Context) (path string) {
 	}()
 	if ctx == nil {
 		return ""
+	}
+	if read := contextPathReaderOnce(); read != nil {
+		if s := read(ctx); s != "" {
+			return s
+		}
 	}
 	var q contextStructQueue
 	q.push(reflect.ValueOf(ctx))

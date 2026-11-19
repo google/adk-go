@@ -583,10 +583,40 @@ func (c *commonContext) Value(key any) any {
 	if key == adkcontext.IdentityKey {
 		return c.identity()
 	}
+	if v, ok := adkcontext.LineageStep(key, c, c.Context); ok {
+		return v
+	}
+	pathParent := c.Context
+	if pathParent == nil {
+		pathParent = c.invocationContext
+	}
+	if v, ok := adkcontext.PathStep(key, c.path, pathParent); ok {
+		return v
+	}
 	if c.Context == nil {
+		if adkcontext.IsParentMapKey(key) && c.invocationContext != nil {
+			v, _ := adkcontext.Recovered(func() any { return c.invocationContext.Value(key) })
+			return v
+		}
 		return nil
 	}
 	return c.Context.Value(key)
+}
+
+func (c *commonContext) ADKContextToken() any {
+	return adkcontext.Token(c)
+}
+
+func (*commonContext) ADKWalkLineage(ctx context.Context) []any {
+	return adkcontext.WalkLineage(ctx)
+}
+
+func (*commonContext) ADKContextPath(ctx context.Context) string {
+	return adkcontext.ReadPath(ctx)
+}
+
+func (*commonContext) ADKParentMap(ctx context.Context) any {
+	return adkcontext.ReadParentMap(ctx)
 }
 
 // identity answers the ADK identity key, as an any so it can report "none".

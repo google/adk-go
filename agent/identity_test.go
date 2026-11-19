@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"log"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -460,5 +461,92 @@ func TestEmptyDeltaCostsASessionlessForwarderItsUnwrap(t *testing.T) {
 	if id.UserID == "enclosing" {
 		t.Fatalf("empty delta reported the ENCLOSING user, which is the outcome the whole "+
 			"procedure exists to prevent: %+v", id)
+	}
+}
+
+type appObserveMethodKey struct{}
+
+func (appObserveMethodKey) ObserveADKContext(any) bool {
+	panic("application context key method must not be called by ADK Value")
+}
+
+func TestLineageWalksWithoutExposingContextOrInterceptingAppKeys(t *testing.T) {
+	base := context.WithValue(t.Context(), appObserveMethodKey{}, "stored-app-value")
+	outer := &invocationContext{Context: base, session: &identityTestSession{}}
+	promoted := Promote(outer)
+	detached := context.WithoutCancel(promoted)
+	child := Promote(outer).WithContext(detached)
+
+	// Application keys defining ObserveADKContext(any) bool must pass through untouched.
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"invocationContext", outer},
+		{"commonContext", promoted},
+		{"childWithDetachedParent", child},
+	} {
+		if got := tc.ctx.Value(appObserveMethodKey{}); got != "stored-app-value" {
+			t.Fatalf("%s.Value(appObserveMethodKey{}) = %v, want %q", tc.name, got, "stored-app-value")
+		}
+	}
+
+	tokens := adkcontext.WalkLineage(child)
+	if len(tokens) != 3 {
+		t.Fatalf("len(tokens) = %d, want 3 (child, promoted, outer)", len(tokens))
+	}
+	if tokens[0] == tokens[1] || tokens[1] == tokens[2] || tokens[0] == tokens[2] {
+		t.Fatalf("expected distinct tokens along lineage, got %#v", tokens)
+	}
+	for i, tok := range tokens {
+		if _, ok := tok.(context.Context); ok {
+			t.Fatalf("token[%d] implements context.Context (%T); must remain opaque", i, tok)
+		}
+		if _, ok := tok.(InvocationContext); ok {
+			t.Fatalf("token[%d] implements InvocationContext (%T); must remain opaque", i, tok)
+		}
+		rv := reflect.ValueOf(tok)
+		if rv.NumMethod() != 0 || rv.MethodByName("Value").IsValid() {
+			t.Fatalf("token[%d] exposes methods (NumMethod=%d); weak.Pointer.Value must not be reachable", i, rv.NumMethod())
+		}
+		if rv.Kind() != reflect.Struct || rv.NumField() != 1 || rv.Field(0).CanInterface() {
+			t.Fatalf("token[%d] must be a single-field unexported struct (Kind=%v, NumField=%d)", i, rv.Kind(), rv.NumField())
+		}
+		if _, ok := adkcontext.Recovered(func() any {
+			return rv.Field(0).Elem().MethodByName("Value").Call(nil)[0].Interface()
+		}); ok {
+			t.Fatalf("token[%d] allowed reflection recovery of underlying context", i)
+		}
+	}
+
+	if got := promoted.(interface{ ADKContextToken() any }).ADKContextToken(); got != tokens[1] {
+		t.Fatalf("promoted.ADKContextToken() = %#v, want %#v", got, tokens[1])
+	}
+
+	var nilInv *invocationContext
+	var nilCommon *commonContext
+	if nilInv.Value(adkcontext.LineageKey) != nil || nilCommon.Value(adkcontext.LineageKey) != nil {
+		t.Fatal("typed-nil Value returned non-nil")
+	}
+	if nilInv.ADKContextToken() != nil || nilCommon.ADKContextToken() != nil {
+		t.Fatal("typed-nil ADKContextToken returned non-nil")
+	}
+	panickingMid := Promote(outer).WithContext(panickingIntermediary{Context: promoted})
+	if got := adkcontext.WalkLineage(panickingMid); len(got) != 1 || got[0] != panickingMid.(interface{ ADKContextToken() any }).ADKContextToken() {
+		t.Fatalf("WalkLineage across panicking intermediary = %#v, want single outer token", got)
+	}
+
+	pathA := "wf/left"
+	pmVal := map[string]string{"leaf": "worker"}
+	pmCtx := context.WithValue(context.Background(), adkcontext.ParentMapKey, pmVal)
+	withPath := Promote(outer).WithAgentContext(pmCtx).WithDelta(&CommonContextDelta{Path: &pathA})
+	cbCtx := NewCallbackContext(withPath, nil)
+	pathReader := Promote(nil).(interface{ ADKContextPath(context.Context) string })
+	pmReader := Promote(nil).(interface{ ADKParentMap(context.Context) any })
+	if got := pathReader.ADKContextPath(cbCtx); got != "wf/left" {
+		t.Fatalf("ADKContextPath(cbCtx) = %q, want wf/left", got)
+	}
+	if got, ok := pmReader.ADKParentMap(cbCtx).(map[string]string); !ok || got["leaf"] != "worker" {
+		t.Fatalf("ADKParentMap(cbCtx) = %#v, want leaf->worker", got)
 	}
 }

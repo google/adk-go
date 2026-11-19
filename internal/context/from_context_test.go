@@ -16,6 +16,7 @@ package context_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
@@ -497,5 +498,54 @@ func TestIdentityDecisionMatrixCrossPackage(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type appObserveContextKey struct{}
+
+func (appObserveContextKey) ObserveADKContext(any) bool {
+	panic("application context key method must not be called by InvocationContext.Value")
+}
+
+func TestLineageWalksBaseInvocationContextWithoutInterceptingAppKeys(t *testing.T) {
+	base := context.WithValue(t.Context(), appObserveContextKey{}, "preserved")
+	outer := icontext.NewInvocationContext(base, icontext.InvocationContextParams{})
+	inner := icontext.NewInvocationContext(context.WithoutCancel(outer), icontext.InvocationContextParams{})
+	ro := icontext.NewReadonlyContext(inner)
+
+	if got := inner.Value(appObserveContextKey{}); got != "preserved" {
+		t.Fatalf("inner.Value(appObserveContextKey{}) = %v, want %q", got, "preserved")
+	}
+	if got := ro.Value(appObserveContextKey{}); got != "preserved" {
+		t.Fatalf("ro.Value(appObserveContextKey{}) = %v, want %q", got, "preserved")
+	}
+
+	tokens := adkcontext.WalkLineage(inner)
+	if len(tokens) != 2 || tokens[0] == tokens[1] {
+		t.Fatalf("observed tokens = %#v, want 2 distinct tokens", tokens)
+	}
+	for i, tok := range tokens {
+		if _, ok := tok.(context.Context); ok {
+			t.Fatalf("token[%d] implements context.Context (%T); must remain opaque", i, tok)
+		}
+	}
+	roNoEmbed := &icontext.ReadonlyContext{InvocationContext: inner}
+	if got := adkcontext.WalkLineage(roNoEmbed); !slices.Equal(got, tokens) {
+		t.Fatalf("WalkLineage(ReadonlyContext without Context) = %#v, want %#v", got, tokens)
+	}
+
+	var nilIC *icontext.InvocationContext
+	if nilIC.Value(adkcontext.LineageKey) != nil || nilIC.ADKContextToken() != nil {
+		t.Fatal("typed-nil InvocationContext returned non-nil")
+	}
+
+	pmBase := context.WithValue(t.Context(), adkcontext.ParentMapKey, map[string]string{"leaf": "root"})
+	withPath := icontext.NewInvocationContext(pmBase, icontext.InvocationContextParams{Path: "wf/ic"})
+	roNoCtx := &icontext.ReadonlyContext{InvocationContext: withPath}
+	if got := adkcontext.ReadPath(roNoCtx); got != "wf/ic" {
+		t.Fatalf("ReadPath(ReadonlyContext without Context) = %q, want wf/ic", got)
+	}
+	if pm, ok := adkcontext.ReadParentMap(roNoCtx).(map[string]string); !ok || pm["leaf"] != "root" {
+		t.Fatalf("ReadParentMap(ReadonlyContext without Context) = %#v, want leaf->root", adkcontext.ReadParentMap(roNoCtx))
 	}
 }

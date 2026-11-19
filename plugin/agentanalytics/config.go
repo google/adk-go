@@ -371,14 +371,20 @@ type GCSContentOffloader interface {
 // path are open, an agent that one of them runs is placed under that
 // activation's span (parent_span_id): the activation whose context, or a
 // context derived from it, was passed to the agent's Run, whichever goroutine
-// runs the agent. If the context does not show the activation that it derives
-// from, as when it was derived through a context type that does not embed its
-// parent as an exported Context field, goroutines decide instead: a child agent
-// that runs on an activation's goroutine, or on a goroutine that the activation
-// starts directly, is placed under that activation, and one launched across an
-// intermediate goroutine that runs no ADK callback is placed under the nearest
-// open span enclosing the concurrent activations that hold an open span its
-// branch and node path fit (or the invocation span if none encloses them).
+// runs the agent. Cross-goroutine lineage, workflow node path, and parent-map
+// lookups through custom context.Context wrappers (as well as launch-lineage
+// propagation through context.WithoutCancel) rely on Value delegation and
+// require an adk/v2 core that provides the private Value-based lookups (added
+// after v2.8.0 and probed at run time). Against earlier core versions, or when
+// a custom context.Context blocks or omits Value delegation, only built-in ADK
+// layouts and standard-library context wrappers with exported parent fields
+// (WithCancel, WithTimeout, WithValue) are inspected and goroutines decide
+// instead: a child agent that runs on an activation's goroutine, or on a
+// goroutine that the activation starts directly, is placed under that activation,
+// and one launched across an intermediate goroutine that runs no ADK callback is
+// placed under the nearest open span enclosing the concurrent activations that
+// directly hold an open span its branch and node path fit (or the invocation
+// span if none encloses them).
 type Config struct {
 	// _ prevents unkeyed literals, which adding a field would break.
 	_ struct{} `json:"-"`
