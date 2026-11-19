@@ -519,13 +519,16 @@ type invocationTrace struct {
 	lastSeq uint64
 	// completedTools holds the tool calls that OnToolErrorCallback ended,
 	// so that the AfterToolCallback that ADK runs next for the same call
-	// finds its span instead of ending another one. ADK runs
-	// OnToolErrorCallback alone for a call of a tool that does not exist;
-	// such records last as long as the invocation, or until the next call
-	// with the same key starts. A record answers only the AfterToolCallback
-	// of the attempt that it ended (see toolAttempt): a later call that
-	// reuses the function call ID, and whose start an earlier plugin hid
-	// from this one, is a call of its own.
+	// finds its span instead of ending another one. ADK skips
+	// AfterToolCallback when an unanswered missing-tool lookup or a
+	// non-FunctionTool fails; completeResponseWithActions clears any matching
+	// entry whose live attempt matches the response's EventActions maps (or
+	// whose tool context is no longer live), pushToolSpan clears any remaining
+	// entry when a later call starts, and popToolSpan consumes any entry read
+	// by AfterToolCallback. A stored record answers only the AfterToolCallback
+	// of the attempt that it ended (see toolAttempt): a later call that reuses
+	// the function call ID, and whose start an earlier plugin hid from this
+	// one, is a call of its own.
 	completedTools map[string]*spanRecord
 	// unrecoveredErrors tracks unhandled errors encountered during the
 	// invocation keyed by activation / call identity (e.g. llmKey), together
@@ -5599,6 +5602,10 @@ type unclosedAgentSpan struct {
 // branch and node path while the callback of the event that called the tool
 // runs, which would be taken for the activation that the agent runs under.
 func (tm *traceManager) completeResponse(ctx context.Context, id identity, author, branch string, calls []string) {
+	tm.completeResponseWithActions(ctx, id, author, branch, calls, nil)
+}
+
+func (tm *traceManager) completeResponseWithActions(ctx context.Context, id identity, author, branch string, calls []string, eventActions *session.EventActions) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	inv.mu.Lock()
@@ -5674,6 +5681,11 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 			delete(inv.toolSpans, key)
 		}
 	}
+	for key, rec := range inv.completedTools {
+		if rec.parentSpanID == owner.spanID && slices.Contains(calls, toolKeyCall(key)) && eventActionsMatchLiveAttempt(eventActions, rec.errorAttempt.Value()) {
+			delete(inv.completedTools, key)
+		}
+	}
 	inv.syncOpenCallsLocked()
 	inv.markRespondedLocked(inv.lineageLocked(i))
 	inv.markRespondedLocked(under)
@@ -5688,6 +5700,27 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 	// calls made returned, so none is marked as finished here (see
 	// markToolRunsDoneLocked).
 	inv.settleFinishedLocked()
+}
+
+func sameMapPtr[K comparable, V any](a, b map[K]V) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return reflect.ValueOf(a).UnsafePointer() == reflect.ValueOf(b).UnsafePointer()
+}
+
+func eventActionsMatchLiveAttempt(eventActions, live *session.EventActions) bool {
+	if live == nil {
+		return true
+	}
+	if live.StateDelta != nil || live.ArtifactDelta != nil {
+		if eventActions == nil {
+			return false
+		}
+		return sameMapPtr(eventActions.StateDelta, live.StateDelta) ||
+			sameMapPtr(eventActions.ArtifactDelta, live.ArtifactDelta)
+	}
+	return eventActions == nil || (eventActions.StateDelta == nil && eventActions.ArtifactDelta == nil)
 }
 
 // retireDrainedDescendantsLocked removes healthy open agent spans that stayed

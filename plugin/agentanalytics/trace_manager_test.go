@@ -1326,13 +1326,13 @@ func TestToolAttempt_WeakAndNeverReused(t *testing.T) {
 	}
 }
 
-// TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse replays a
-// failed tool call that a subsequent OnToolErrorCallback recovers (err == nil
-// in AfterToolCallback). TOOL_STARTING, TOOL_ERROR, and TOOL_COMPLETED share
-// the tool call's span under the agent span (with latency_ms reported once on
-// TOOL_ERROR), while AGENT_RESPONSE (when in FinalResponseToolNames) is placed
-// on the enclosing agent span.
-func TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse(t *testing.T) {
+// TestTraceManager_RecoveredToolErrorEmitsOnlyToolError replays a failed tool
+// call that a subsequent OnToolErrorCallback recovers (err == nil in
+// AfterToolCallback). TOOL_STARTING and TOOL_ERROR share the tool call's span
+// under the agent span (with latency_ms reported on TOOL_ERROR), while
+// TOOL_COMPLETED and AGENT_RESPONSE (even when in FinalResponseToolNames) are
+// suppressed.
+func TestTraceManager_RecoveredToolErrorEmitsOnlyToolError(t *testing.T) {
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"final_answer"} })
 	toolCtx := withFunctionCall(mCtx, "call-recovered")
 	final := &fakeTool{name: "final_answer"}
@@ -1352,8 +1352,6 @@ func TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse(t *testin
 		EventAgentStarting,
 		EventToolStarting,
 		EventToolError,
-		EventToolCompleted,
-		EventAgentResponse,
 		EventAgentCompleted,
 		EventInvocationCompleted,
 	}
@@ -1365,23 +1363,17 @@ func TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse(t *testin
 	if toolStart.parent != agentStart.span {
 		t.Errorf("TOOL_STARTING parent_span_id = %q, want agent span %q", toolStart.parent, agentStart.span)
 	}
-	for _, evType := range []string{EventToolError, EventToolCompleted} {
-		row := onlyRowOfType(t, rows, evType)
-		if got := placeOf(row); got != toolStart {
-			t.Errorf("%s is at %+v, want %+v", evType, got, toolStart)
-		}
+	errRow := onlyRowOfType(t, rows, EventToolError)
+	if got := placeOf(errRow); got != toolStart {
+		t.Errorf("TOOL_ERROR is at %+v, want %+v", got, toolStart)
 	}
-	if got := placeOf(onlyRowOfType(t, rows, EventAgentResponse)); got != agentStart {
-		t.Errorf("AGENT_RESPONSE is at %+v, want agent span %+v", got, agentStart)
+	mustLatency(t, errRow)
+	if errRow["status"] != "ERROR" {
+		t.Errorf("TOOL_ERROR status = %v, want ERROR", errRow["status"])
 	}
-	mustLatency(t, onlyRowOfType(t, rows, EventToolError))
-	for _, evType := range []string{EventToolCompleted, EventAgentResponse} {
-		if latency, ok := rowLatency(t, onlyRowOfType(t, rows, evType)); ok {
-			t.Errorf("%s after OnToolErrorCallback has latency_ms %v, want none", evType, latency)
-		}
+	if errRow["error_message"] != "transient error" {
+		t.Errorf("TOOL_ERROR error_message = %v, want %q", errRow["error_message"], "transient error")
 	}
-	checkJSON(t, "TOOL_COMPLETED content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolCompleted), "content"),
-		`{"tool":"final_answer","result":{"answer":"fallback-42"},"tool_origin":"UNKNOWN"}`)
 	if got := placeOf(onlyRowOfType(t, rows, EventAgentCompleted)); got != agentStart {
 		t.Errorf("AGENT_COMPLETED is at %+v, want %+v", got, agentStart)
 	}
@@ -30575,4 +30567,80 @@ func TestResolveFinishedTaskLocked_512OverlappingActivationsEquivalence(t *testi
 			t.Errorf("at +%dms: 512-activation lookup took %v, want O(N log N) << 50ms", ms, elapsed)
 		}
 	}
+}
+
+func TestCompleteResponseWithActions_CompletedToolsGuards(t *testing.T) {
+	t.Run("different parentSpanID does not clear parent completedTools", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		parentID := identity{invocationID: "inv-ct-parent", agentName: "parent"}
+		childID := identity{invocationID: "inv-ct-parent", agentName: "child"}
+		tm.invocationSpan(ctx, parentID, nil)
+		tm.pushAgentSpan(ctx, parentID)
+		tm.pushToolSpan(ctx, parentID, toolKey(parentID, "call_0", "lookup"))
+		_, _, _ = tm.popToolSpan(ctx, parentID, toolKey(parentID, "call_0", "lookup"), true)
+
+		tm.pushAgentSpan(ctx, childID)
+		tm.completeResponseWithActions(ctx, childID, "child", "", []string{"call_0"}, nil)
+
+		_, _, closedByError := tm.popToolSpan(ctx, parentID, toolKey(parentID, "call_0", "lookup"), false)
+		if !closedByError {
+			t.Fatal("child completeResponse cleared parent completedTools entry; want parent entry preserved")
+		}
+	})
+
+	t.Run("response for call_1 on same owner does not clear completedTools call_0", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-ct-call", agentName: "worker"}
+		tm.invocationSpan(ctx, id, nil)
+		tm.pushAgentSpan(ctx, id)
+		tm.pushToolSpan(ctx, id, toolKey(id, "call_0", "lookup"))
+		_, _, _ = tm.popToolSpan(ctx, id, toolKey(id, "call_0", "lookup"), true)
+
+		tm.completeResponseWithActions(ctx, id, "worker", "", []string{"call_1"}, nil)
+
+		_, _, closedByError := tm.popToolSpan(ctx, id, toolKey(id, "call_0", "lookup"), false)
+		if !closedByError {
+			t.Fatal("completeResponse for call_1 cleared completedTools[call_0]; want call_0 entry preserved")
+		}
+	})
+
+	t.Run("buffered other-dispatch EventActions preserves live errorAttempt while matching dispatch clears it", func(t *testing.T) {
+		baseCtx := context.Background()
+		tm := newTraceManager()
+		ic := newAttemptInvocationContext()
+		id := identity{invocationID: ic.InvocationID(), agentName: "worker"}
+		tm.invocationSpan(baseCtx, id, nil)
+		tm.pushAgentSpan(baseCtx, id)
+
+		actions1 := &session.EventActions{StateDelta: map[string]any{"k": 1}, ArtifactDelta: map[string]int64{}}
+		actions2 := &session.EventActions{StateDelta: map[string]any{"k": 2}, ArtifactDelta: map[string]int64{}}
+		ctx2 := agent.NewToolContext(ic, "call_0", actions2, nil)
+
+		tm.pushToolSpan(ctx2, id, toolKey(id, "call_0", "lookup"))
+		_, _, _ = tm.popToolSpan(ctx2, id, toolKey(id, "call_0", "lookup"), true)
+
+		// Delivering Call 1's buffered EventActions while Call 2 is between
+		// OnToolErrorCallback and AfterToolCallback must leave Call 2's
+		// completedTools record intact.
+		tm.completeResponseWithActions(baseCtx, id, "worker", "", []string{"call_0"}, actions1)
+
+		_, _, closedByError := tm.popToolSpan(ctx2, id, toolKey(id, "call_0", "lookup"), false)
+		if !closedByError {
+			t.Fatal("buffered Call 1 EventActions cleared active Call 2 completedTools record")
+		}
+
+		// Re-record Call 2 and deliver Call 2's own EventActions (missing/non-FunctionTool path):
+		// completeResponseWithActions must clear it so a later nil-actions reuse cannot collide.
+		tm.pushToolSpan(ctx2, id, toolKey(id, "call_0", "lookup"))
+		_, _, _ = tm.popToolSpan(ctx2, id, toolKey(id, "call_0", "lookup"), true)
+		tm.completeResponseWithActions(baseCtx, id, "worker", "", []string{"call_0"}, actions2)
+
+		_, _, closedAfterOwn := tm.popToolSpan(ctx2, id, toolKey(id, "call_0", "lookup"), false)
+		if closedAfterOwn {
+			t.Fatal("Call 2's own EventActions did not clear its completedTools record")
+		}
+		runtime.KeepAlive(ctx2)
+	})
 }
