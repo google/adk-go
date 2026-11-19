@@ -313,6 +313,26 @@ func TestBasicProcessor_RunConfigHTTPOptions_CanonicalHeaderNames(t *testing.T) 
 	}
 }
 
+// TestBasicProcessor_RunConfigHTTPOptions_AgentTimeoutOnlyKeepsRunHeaders
+// pins the merge into agent HTTPOptions that set only a Timeout: the run's
+// headers are added and the agent's Timeout is kept.
+func TestBasicProcessor_RunConfigHTTPOptions_AgentTimeoutOnlyKeepsRunHeaders(t *testing.T) {
+	t.Parallel()
+
+	state := &State{GenerateContentConfig: &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: genai.Ptr(1000 * time.Millisecond)}}}
+	rc := &agent.RunConfig{HTTPOptions: &genai.HTTPOptions{Headers: http.Header{"X-Run": {"run"}}}}
+
+	req := runBasicRequestProcessor(t, state, rc)
+
+	want := &genai.HTTPOptions{
+		Timeout: genai.Ptr(1000 * time.Millisecond),
+		Headers: http.Header{"X-Run": {"run"}},
+	}
+	if diff := cmp.Diff(want, req.Config.HTTPOptions); diff != "" {
+		t.Errorf("req.Config.HTTPOptions mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // timeoutOnlyLLM is a model whose connector accepts only the Timeout of a
 // run's HTTP options, as a RunHTTPOptionsFilter.
 type timeoutOnlyLLM struct {
