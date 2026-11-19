@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"unicode/utf8"
 
 	"google.golang.org/genai"
@@ -174,7 +175,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 	// Recording the attempt disarmed compaction for the rest of the invocation
 	// with nothing stored in exchange. Moving it past the summarizer fixed the
 	// transient-error case and left four others: the caller can still discard
-	// the result because the turn was cancelled, a re-read failed, a competing
+	// the result because the turn was canceled, a re-read failed, a competing
 	// compaction landed, or the append failed. Each left the gate closed on a
 	// summary that never existed, and Recovered cannot reopen it because the
 	// prompt never drops.
@@ -244,14 +245,14 @@ func jsonChars(v map[string]any) int {
 // The second result is false when no count could be determined, which callers
 // treat as "do not compact yet".
 func promptTokenCount(events []*session.Event, scope TurnScope, estimate TokenCounter) (int, bool) {
-	for i := len(events) - 1; i >= 0; i-- {
+	for i, event := range slices.Backward(events) {
 		// Only what this turn can see. The count is read to decide whether this
 		// turn's prompt is too large, and that prompt is assembled with the
 		// same branch and isolation-scope filtering, so a reading from a
 		// sibling branch describes a different conversation. A sub-agent whose
 		// own prompt is a couple of tokens read its parent's 200,000 and
 		// compacted history it had no business compacting.
-		if !scope.visible(events[i]) {
+		if !scope.visible(event) {
 			continue
 		}
 		// Skip compaction events. A summary carries the usage metadata of the
@@ -259,10 +260,10 @@ func promptTokenCount(events []*session.Event, scope TurnScope, estimate TokenCo
 		// rather than the agent's prompt. Reading it latches compaction on: the
 		// summarizer's count is typically far above the threshold, so every
 		// later turn sees the threshold crossed and compacts again.
-		if hasCompaction(events[i]) {
+		if hasCompaction(event) {
 			continue
 		}
-		if usage := events[i].UsageMetadata; usage != nil && usage.PromptTokenCount > 0 {
+		if usage := event.UsageMetadata; usage != nil && usage.PromptTokenCount > 0 {
 			// Add an estimate for everything appended since that count was
 			// reported. The reported number describes the prompt of an earlier
 			// call, so on its own it lags by however much the turn has grown:
@@ -296,7 +297,7 @@ func promptTokenCount(events []*session.Event, scope TurnScope, estimate TokenCo
 // It counts only text parts, so it under-counts a prompt dominated by inline
 // data, and it sees nothing outside contents -- notably not the system
 // instruction or tool declarations, which for an agent with many tools or a
-// large skills catalogue can dominate. It is therefore a floor, not an
+// large skills catalog can dominate. It is therefore a floor, not an
 // estimate, and is consulted only until the first model response reports a real
 // prompt token count.
 func EstimateTokensFromContents(contents []*genai.Content) int {
@@ -466,7 +467,7 @@ func selectTailRetentionWindow(events []*session.Event, retentionSize int, scope
 	// make every summary built on top of it universally visible.
 	prev := latest.Actions.Compaction
 	seed := &session.Event{
-		// Labelled as the previous summary rather than left anonymous. Without
+		// Labeled as the previous summary rather than left anonymous. Without
 		// it the seed is indistinguishable from an ordinary model turn, so the
 		// transcript renders a summary as if the agent had said it, and nothing
 		// downstream can tell how many times content has been re-summarized.

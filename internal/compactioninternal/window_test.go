@@ -109,6 +109,27 @@ func TestLongestSelfContainedPrefix(t *testing.T) {
 			want: []string{"a", "b", "c"},
 		},
 		{
+			// The request rides on the tool's own response, which must not
+			// close the call the request is about.
+			name: "unresolved credential request blocks the prefix",
+			events: []*session.Event{
+				textEvent("a", "inv1", 1, "hi"),
+				callEvent("b", "inv1", 2, "c1"),
+				withAuthRequest(responseEvent("c", "inv1", 3, "c1"), "c1"),
+			},
+			want: []string{"a"},
+		},
+		{
+			name: "credential request resolved by the rerun is fine",
+			events: []*session.Event{
+				textEvent("a", "inv1", 1, "hi"),
+				callEvent("b", "inv1", 2, "c1"),
+				withAuthRequest(responseEvent("c", "inv1", 3, "c1"), "c1"),
+				responseEvent("d", "inv1", 4, "c1"),
+			},
+			want: []string{"a", "b", "c", "d"},
+		},
+		{
 			name: "response within the same event as its call still opens the obligation",
 			events: []*session.Event{
 				callAndResponseEvent("a", "inv1", 1, "c1"),
@@ -531,7 +552,7 @@ func TestSelectSlidingWindowCoversEverythingInItsRange(t *testing.T) {
 	}
 }
 
-// TestSelectSlidingWindowIncludesIDlessEvents pins the specific behaviour the
+// TestSelectSlidingWindowIncludesIDlessEvents pins the specific behavior the
 // invariant depends on, so a future refactor that starts filtering again fails
 // loudly rather than silently dropping events.
 func TestSelectSlidingWindowIncludesIDlessEvents(t *testing.T) {
@@ -587,6 +608,30 @@ func TestSelectSlidingWindowSurvivesBlockedHead(t *testing.T) {
 				textEvent("b", "inv3", 3, "q3"),
 			},
 			want: []string{"a", "b"},
+		},
+		{
+			name:     "unanswered credential request at the head is stepped over",
+			interval: 3,
+			events: []*session.Event{
+				withAuthRequest(newEvent("stuck", "inv1", 1, "model"), "c1"),
+				textEvent("a", "inv2", 2, "q2"),
+				textEvent("b", "inv3", 3, "q3"),
+			},
+			want: []string{"a", "b"},
+		},
+		{
+			// c0 never answers, so only stepping over the head can compact
+			// here, and the rerun that answers c1 must stay with its request.
+			name:     "a tail answering a credential request left in the head is refused",
+			interval: 3,
+			events: []*session.Event{
+				multiCallEvent("calls", "inv1", 1, "c0", "c1"),
+				withAuthRequest(responseEvent("ask", "inv1", 2, "c1"), "c1"),
+				textEvent("a", "inv2", 3, "q2"),
+				responseEvent("rerun", "inv2", 4, "c1"),
+				textEvent("b", "inv3", 5, "q3"),
+			},
+			want: []string{"b"},
 		},
 		{
 			name: "still nil when nothing after the blockage is self-contained",

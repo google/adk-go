@@ -1,0 +1,261 @@
+{
+  "root_span": {
+    "name": "invoke_workflow my_workflow",
+    "attributes": {
+      "gen_ai.conversation.id": "PRESENT",
+      "gen_ai.operation.name": "invoke_workflow",
+      "gen_ai.workflow.name": "my_workflow"
+    },
+    "status": "UNSET",
+    "children": [
+      {
+        "name": "invoke_node static_node",
+        "attributes": {
+          "gen_ai.conversation.id": "PRESENT",
+          "gen_ai.node.name": "static_node",
+          "gen_ai.operation.name": "invoke_node"
+        },
+        "status": "UNSET",
+        "children": [],
+        "logs": []
+      },
+      {
+        "name": "invoke_node router_node",
+        "attributes": {
+          "gen_ai.conversation.id": "PRESENT",
+          "gen_ai.node.name": "router_node",
+          "gen_ai.operation.name": "invoke_node"
+        },
+        "status": "UNSET",
+        "children": [
+          {
+            "name": "invoke_agent task_agent",
+            "attributes": {
+              "gcp.vertex.agent.invocation_id": "PRESENT",
+              "gen_ai.agent.description": "collaborative task_agent",
+              "gen_ai.agent.name": "task_agent",
+              "gen_ai.conversation.id": "PRESENT",
+              "gen_ai.operation.name": "invoke_agent"
+            },
+            "status": "UNSET",
+            "children": [
+              {
+                "name": "generate_content mock",
+                "attributes": {
+                  "gcp.vertex.agent.event_id": "PRESENT",
+                  "gcp.vertex.agent.invocation_id": "PRESENT",
+                  "gen_ai.input.messages": [
+                    {
+                      "parts": [
+                        {
+                          "content": "hello",
+                          "type": "text"
+                        }
+                      ],
+                      "role": "user"
+                    }
+                  ],
+                  "gen_ai.operation.name": "generate_content",
+                  "gen_ai.output.messages": [
+                    {
+                      "finish_reason": "stop",
+                      "parts": [
+                        {
+                          "content": "task complete",
+                          "type": "text"
+                        }
+                      ],
+                      "role": "assistant"
+                    }
+                  ],
+                  "gen_ai.request.model": "mock",
+                  "gen_ai.response.finish_reasons": [
+                    "stop"
+                  ],
+                  "gen_ai.system_instructions": [
+                    {
+                      "content": "you are helpful\n\nYou are an agent. Your internal name is \"task_agent\". The description about you is \"collaborative task_agent\".\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n",
+                      "type": "text"
+                    }
+                  ]
+                },
+                "status": "UNSET",
+                "children": [],
+                "logs": [
+                  {
+                    "event_name": "gen_ai.client.inference.operation.details",
+                    "body": null,
+                    "attributes": {
+                      "gcp.vertex.agent.event_id": "PRESENT",
+                      "gcp.vertex.agent.invocation_id": "PRESENT",
+                      "gen_ai.input.messages": [
+                        {
+                          "parts": [
+                            {
+                              "content": "hello",
+                              "type": "text"
+                            }
+                          ],
+                          "role": "user"
+                        }
+                      ],
+                      "gen_ai.operation.name": "generate_content",
+                      "gen_ai.output.messages": [
+                        {
+                          "finish_reason": "stop",
+                          "parts": [
+                            {
+                              "content": "task complete",
+                              "type": "text"
+                            }
+                          ],
+                          "role": "assistant"
+                        }
+                      ],
+                      "gen_ai.request.model": "mock",
+                      "gen_ai.response.finish_reasons": [
+                        "stop"
+                      ],
+                      "gen_ai.system_instructions": [
+                        {
+                          "content": "you are helpful\n\nYou are an agent. Your internal name is \"task_agent\". The description about you is \"collaborative task_agent\".\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n",
+                          "type": "text"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ],
+            "logs": []
+          },
+          {
+            "name": "invoke_agent single_turn_agent",
+            "attributes": {
+              "gcp.vertex.agent.invocation_id": "PRESENT",
+              "gen_ai.agent.description": "collaborative single_turn_agent",
+              "gen_ai.agent.name": "single_turn_agent",
+              "gen_ai.conversation.id": "PRESENT",
+              "gen_ai.operation.name": "invoke_agent"
+            },
+            "status": "UNSET",
+            "children": [
+              {
+                "name": "generate_content mock",
+                "attributes": {
+                  "gcp.vertex.agent.event_id": "PRESENT",
+                  "gcp.vertex.agent.invocation_id": "PRESENT",
+                  "gen_ai.input.messages": [
+                    {
+                      "parts": [
+                        {
+                          "content": "HELLO",
+                          "type": "text"
+                        }
+                      ],
+                      "role": "user"
+                    }
+                  ],
+                  "gen_ai.operation.name": "generate_content",
+                  "gen_ai.output.messages": [
+                    {
+                      "finish_reason": "stop",
+                      "parts": [
+                        {
+                          "content": "single turn complete",
+                          "type": "text"
+                        }
+                      ],
+                      "role": "assistant"
+                    }
+                  ],
+                  "gen_ai.request.model": "mock",
+                  "gen_ai.response.finish_reasons": [
+                    "stop"
+                  ],
+                  "gen_ai.system_instructions": [
+                    {
+                      "content": "you are helpful",
+                      "type": "text"
+                    }
+                  ]
+                },
+                "status": "UNSET",
+                "children": [],
+                "logs": [
+                  {
+                    "event_name": "gen_ai.client.inference.operation.details",
+                    "body": null,
+                    "attributes": {
+                      "gcp.vertex.agent.event_id": "PRESENT",
+                      "gcp.vertex.agent.invocation_id": "PRESENT",
+                      "gen_ai.input.messages": [
+                        {
+                          "parts": [
+                            {
+                              "content": "HELLO",
+                              "type": "text"
+                            }
+                          ],
+                          "role": "user"
+                        }
+                      ],
+                      "gen_ai.operation.name": "generate_content",
+                      "gen_ai.output.messages": [
+                        {
+                          "finish_reason": "stop",
+                          "parts": [
+                            {
+                              "content": "single turn complete",
+                              "type": "text"
+                            }
+                          ],
+                          "role": "assistant"
+                        }
+                      ],
+                      "gen_ai.request.model": "mock",
+                      "gen_ai.response.finish_reasons": [
+                        "stop"
+                      ],
+                      "gen_ai.system_instructions": [
+                        {
+                          "content": "you are helpful",
+                          "type": "text"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ],
+            "logs": []
+          },
+          {
+            "name": "invoke_node echo_node",
+            "attributes": {
+              "gen_ai.conversation.id": "PRESENT",
+              "gen_ai.node.name": "echo_node",
+              "gen_ai.operation.name": "invoke_node"
+            },
+            "status": "UNSET",
+            "children": [],
+            "logs": []
+          },
+          {
+            "name": "invoke_node echo_node",
+            "attributes": {
+              "gen_ai.conversation.id": "PRESENT",
+              "gen_ai.node.name": "echo_node",
+              "gen_ai.operation.name": "invoke_node"
+            },
+            "status": "UNSET",
+            "children": [],
+            "logs": []
+          }
+        ],
+        "logs": []
+      }
+    ],
+    "logs": []
+  }
+}

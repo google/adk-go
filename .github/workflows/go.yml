@@ -7,7 +7,7 @@ name: Go
 
 on:
   push:
-    branches: [ "main", "v1" ]
+    branches: [ "main", "v1", "v3" ]
 
   # Deliberately unfiltered by base branch. A stacked PR targets the branch
   # below it rather than main, so any allow-list here silently skips build,
@@ -51,6 +51,8 @@ jobs:
     
     - name: Setup
       uses: ./.github/actions/setup
+      with:
+        cache-key: ${{ github.job }}-${{ matrix.module }}
 
     - name: Initialize workspace
       run: go work init && go work use -r .
@@ -79,6 +81,8 @@ jobs:
     
     - name: Setup
       uses: ./.github/actions/setup
+      with:
+        cache-key: ${{ github.job }}-${{ matrix.module }}
 
     - name: Initialize workspace
       run: go work init && go work use -r .
@@ -88,7 +92,7 @@ jobs:
       with:
         working-directory: ${{ matrix.module }}
         install-mode: goinstall
-        version: 5256574b81bcedfbcae9099f745f6aee9335da10 # v2.3.1
+        version: 25c5369a93aacb8cccea0d46e1569ca4a194564d # v2.15.0
         # golangci-lint's analysis cache stores the facts analyzers derive about
         # dependencies, and its key does not track the toolchain. Restoring one
         # written by an older Go leaves staticcheck without the runtime.Goexit

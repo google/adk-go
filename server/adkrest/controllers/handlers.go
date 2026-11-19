@@ -44,11 +44,7 @@ func NewErrorHandler(fn errorHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		err := fn(w, r)
 		if err != nil {
-			if statusErr, ok := err.(statusError); ok {
-				http.Error(w, statusErr.Error(), statusErr.Status())
-			} else {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-			}
+			http.Error(w, err.Error(), statusOf(err))
 		}
 	}
 }

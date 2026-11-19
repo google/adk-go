@@ -144,7 +144,6 @@ type Context interface {
 	InvocationContext
 
 	// Callback context
-	Artifacts() Artifacts
 	State() session.State
 
 	// Tool context section
@@ -202,10 +201,6 @@ type Context interface {
 	RequestConfirmation(hint string, payload any) error
 
 	// Workflow node section
-
-	// ResumedInput returns the response payload for a re-entry resume
-	// activation keyed by InterruptID, or (nil, false) otherwise.
-	ResumedInput(interruptID string) (any, bool)
 
 	// Path returns the composite path of the currently-executing node.
 	// Empty for top-level static nodes; "<parent_path>/<child_name>@<run_id>"

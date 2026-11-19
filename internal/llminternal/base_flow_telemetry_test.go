@@ -33,6 +33,7 @@ import (
 	"google.golang.org/genai"
 
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -59,6 +60,9 @@ func (m *mockModelForTest) Backend() genai.Backend {
 var (
 	testExporter *tracetest.InMemoryExporter
 	initTracer   sync.Once
+
+	testLogExporter *inMemoryLogExporter
+	initLogger      sync.Once
 )
 
 func TestGenerateContentTracing(t *testing.T) {
@@ -68,29 +72,29 @@ func TestGenerateContentTracing(t *testing.T) {
 		name: "test-model",
 		generateContent: func(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 			return func(yield func(*model.LLMResponse, error) bool) {
-				// Yield partial response.
+				// A chunk from a model with no aggregator: Partial unset, no
+				// finish reason yet.
 				if !yield(&model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
 						PromptTokenCount:     1,
 						CandidatesTokenCount: 2,
 					},
-					Partial: true,
 				}, nil) {
 					return
 				}
 				// Verify span NOT ended.
 				gotSpans := testExporter.GetSpans()
 				if len(gotSpans) != 0 {
-					t.Errorf("expected 0 spans after partial response, got %d", len(gotSpans))
+					t.Errorf("expected 0 spans after a chunk with no finish reason, got %d", len(gotSpans))
 				}
 
-				// Yield final response.
+				// The chunk that reports why generation stopped.
 				if !yield(&model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
 						PromptTokenCount:     10,
 						CandidatesTokenCount: 20,
 					},
-					Partial: false,
+					FinishReason: genai.FinishReasonStop,
 				}, nil) {
 					return
 				}
@@ -121,7 +125,10 @@ func TestGenerateContentTracing(t *testing.T) {
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 
-	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+	for _, err := range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+		if err != nil {
+			t.Fatalf("generateContent() error = %v", err)
+		}
 	}
 
 	// Verify that there is only single span.
@@ -174,13 +181,20 @@ func TestGenerateContentTracingNoFinalResponse(t *testing.T) {
 				if len(gotSpans) != 0 {
 					t.Errorf("expected 0 spans after partial response, got %d", len(gotSpans))
 				}
+
+				// A trailing empty response must not replace the partial response used
+				// when the deferred span records token usage.
+				yield(nil, nil)
 			}
 		},
 	}
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 
-	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+	for _, err := range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+		if err != nil {
+			t.Fatalf("generateContent() error = %v", err)
+		}
 	}
 
 	// Verify that there is only single span.
@@ -240,7 +254,7 @@ func TestGenerateContentTracingError(t *testing.T) {
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 
-	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) {
+	for range generateContent(ctx, modelMock, &model.LLMRequest{}, true) { //nolint:errcheck // the model yields an error by design; the span above records it
 	}
 
 	// Verify that there is only single span.
@@ -293,6 +307,9 @@ func (e *inMemoryLogExporter) Shutdown(ctx context.Context) error   { return nil
 func (e *inMemoryLogExporter) ForceFlush(ctx context.Context) error { return nil }
 
 func TestLoggingSpanIDPropagation(t *testing.T) {
+	t.Cleanup(telemetry.ApplyEnv)
+	t.Setenv("ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN", "otel_semconv_1_44")
+	telemetry.ApplyEnv()
 	setupTestTracer(t)
 	logExporter := setupLoggerProvider(t)
 
@@ -340,17 +357,15 @@ func TestLoggingSpanIDPropagation(t *testing.T) {
 	}
 
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
-	for range generateContent(ctx, modelMock, req, true) {
+	for _, err := range generateContent(ctx, modelMock, req, true) {
+		if err != nil {
+			t.Fatalf("generateContent() error = %v", err)
+		}
 	}
 
-	if len(logExporter.records) != 3 {
-		t.Fatalf("expected 3 log records, got %d", len(logExporter.records))
-	}
-
-	wantEvents := []string{
-		"gen_ai.system.message",
-		"gen_ai.user.message",
-		"gen_ai.choice",
+	wantEvents := []string{"gen_ai.client.inference.operation.details"}
+	if len(logExporter.records) != len(wantEvents) {
+		t.Fatalf("expected %d log records, got %d", len(wantEvents), len(logExporter.records))
 	}
 
 	for i, record := range logExporter.records {
@@ -364,14 +379,72 @@ func TestLoggingSpanIDPropagation(t *testing.T) {
 }
 
 func setupLoggerProvider(t *testing.T) *inMemoryLogExporter {
-	logExporter := &inMemoryLogExporter{}
-	provider := sdklog.NewLoggerProvider(
-		sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExporter)),
-	)
-	originalProvider := global.GetLoggerProvider()
-	global.SetLoggerProvider(provider)
-	t.Cleanup(func() {
-		global.SetLoggerProvider(originalProvider)
+	t.Helper()
+	initLogger.Do(func() {
+		// internal/telemetry resolves its logger from the global provider at package init.
+		// The global delegate only forwards to the first provider set, so we can override only once.
+		testLogExporter = &inMemoryLogExporter{}
+		global.SetLoggerProvider(sdklog.NewLoggerProvider(
+			sdklog.WithProcessor(sdklog.NewSimpleProcessor(testLogExporter)),
+		))
 	})
-	return logExporter
+	// Reset the exporter before each test so records from earlier runs don't leak in.
+	testLogExporter.records = nil
+	t.Cleanup(func() {
+		testLogExporter.records = nil
+	})
+	return testLogExporter
+}
+
+// The Gemini model appends to the request while handling it. The span and the
+// event both describe the request as the model left it.
+func TestInferenceEventDescribesTheRequestTheSpanDoes(t *testing.T) {
+	t.Cleanup(telemetry.ApplyEnv)
+	t.Setenv("ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN", "otel_semconv_1_44")
+	t.Setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "SPAN_AND_EVENT")
+	telemetry.ApplyEnv()
+	spanExporter := tracetest.NewInMemoryExporter()
+	telemetry.OverrideTracerForTesting(t, sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExporter)))
+	logExporter := &inMemoryLogExporter{}
+	telemetry.OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExporter))))
+
+	modelMock := &mockModelForTest{
+		name: "test-model",
+		generateContent: func(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+			req.Contents = append(req.Contents, genai.NewContentFromText("appended by the model", genai.RoleUser))
+			return func(yield func(*model.LLMResponse, error) bool) {
+				yield(&model.LLMResponse{Content: genai.NewContentFromText("Response", genai.RoleModel)}, nil)
+			}
+		},
+	}
+	req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("Hello", genai.RoleUser)}}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	for _, err := range generateContent(ctx, modelMock, req, false) {
+		if err != nil {
+			t.Fatalf("generateContent() error = %v", err)
+		}
+	}
+
+	var spanMessages int
+	for _, kv := range spanExporter.GetSpans()[0].Attributes {
+		if kv.Key == "gen_ai.input.messages" {
+			spanMessages = len(kv.Value.AsSlice())
+		}
+	}
+	if spanMessages != 2 {
+		t.Errorf("span gen_ai.input.messages holds %d messages, want 2", spanMessages)
+	}
+	if len(logExporter.records) != 1 {
+		t.Fatalf("expected 1 log record, got %d", len(logExporter.records))
+	}
+	var eventMessages int
+	logExporter.records[0].WalkAttributes(func(kv attribute.KeyValue) bool {
+		if kv.Key == "gen_ai.input.messages" {
+			eventMessages = len(kv.Value.AsSlice())
+		}
+		return true
+	})
+	if eventMessages != 2 {
+		t.Errorf("event gen_ai.input.messages holds %d messages, want 2", eventMessages)
+	}
 }

@@ -17,6 +17,8 @@ package workflow
 import (
 	"iter"
 	"reflect"
+	"slices"
+	"sync"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
@@ -27,6 +29,7 @@ func TestEdgeBuilder(t *testing.T) {
 	nodeA := &dummyNode{BaseNode: NewBaseNode("A", "", NodeConfig{})}
 	nodeB := &dummyNode{BaseNode: NewBaseNode("B", "", NodeConfig{})}
 	nodeC := &dummyNode{BaseNode: NewBaseNode("C", "", NodeConfig{})}
+	nodeD := &dummyNode{BaseNode: NewBaseNode("D", "", NodeConfig{})}
 
 	tests := []struct {
 		name     string
@@ -77,13 +80,19 @@ func TestEdgeBuilder(t *testing.T) {
 		{
 			name: "AddRoutes",
 			build: func(b *EdgeBuilder) *EdgeBuilder {
+				// Three keys in reverse-sorted order, for the reason given on
+				// TestEdgeBuilder_AddRoutesSortsByRoute. The two keys this
+				// case used to carry let the unfixed code through 46 times
+				// in 300 runs.
 				return b.AddRoutes(nodeA, map[string]Node{
-					"42":         nodeB,
 					"workflow_C": nodeC,
+					"beta":       nodeD,
+					"42":         nodeB,
 				})
 			},
 			expected: []Edge{
 				{From: nodeA, To: nodeB, Route: StringRoute("42")},
+				{From: nodeA, To: nodeD, Route: StringRoute("beta")},
 				{From: nodeA, To: nodeC, Route: StringRoute("workflow_C")},
 			},
 		},
@@ -94,22 +103,148 @@ func TestEdgeBuilder(t *testing.T) {
 			edges := tc.build(NewEdgeBuilder()).Build()
 
 			if len(edges) != len(tc.expected) {
-				t.Fatalf("expected %d edges, got %d", len(tc.expected), len(edges))
+				t.Fatalf("got %d edges, want %d", len(edges), len(tc.expected))
 			}
-
-			for _, exp := range tc.expected {
-				found := false
-				for _, actual := range edges {
-					if actual.From == exp.From && actual.To == exp.To && reflect.DeepEqual(actual.Route, exp.Route) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("expected edge not found: From %s, To %s, Route %v", exp.From.Name(), exp.To.Name(), exp.Route)
+			for i, want := range tc.expected {
+				if got := edges[i]; got.From != want.From || got.To != want.To || !reflect.DeepEqual(got.Route, want.Route) {
+					t.Errorf("edge %d = %s→%s (route %v), want %s→%s (route %v)",
+						i, got.From.Name(), got.To.Name(), got.Route,
+						want.From.Name(), want.To.Name(), want.Route)
 				}
 			}
 		})
+	}
+}
+
+func TestEdgeBuilder_AddRoutesSortsByRoute(t *testing.T) {
+	from := newDummyNode("router")
+	// Keep the literal in reverse-sorted order, and keep at least three keys.
+	// A map small enough to fit one group iterates as a rotation of its
+	// insertion order and nothing else, so a test only separates sorted from
+	// unsorted where the sorted sequence is outside that set of rotations.
+	// Reversing achieves it for three keys or more, and for two it does not,
+	// because there the reverse is itself a rotation.
+	//
+	// Those rotations are not equally likely, which makes tidying this
+	// literal worse than it looks. Iteration starts at one of the group's
+	// eight slots, and with four entries the four empty slots all fall
+	// through to the first entry, so insertion order comes up five times in
+	// eight and each other rotation once in eight. Sorting the literal, the
+	// obvious tidy-up, would leave the test passing against the unfixed code
+	// about five runs in eight. Measured on go1.26.6 over a million draws:
+	// 0.625 for sorted, 0.125 for any other rotation.
+	routes := map[string]Node{
+		"tech":    newDummyNode("tech_node"),
+		"sales":   newDummyNode("sales_node"),
+		"billing": newDummyNode("billing_node"),
+		"abuse":   newDummyNode("abuse_node"),
+	}
+
+	edges := NewEdgeBuilder().AddRoutes(from, routes).Build()
+
+	if len(edges) != len(routes) {
+		t.Fatalf("got %d edges, want %d", len(edges), len(routes))
+	}
+	got := make([]string, len(edges))
+	for i, e := range edges {
+		route, ok := e.Route.(StringRoute)
+		if !ok {
+			t.Fatalf("edge %d route = %T, want StringRoute", i, e.Route)
+		}
+		got[i] = string(route)
+		if e.From != from {
+			t.Errorf("edge %d from = %s, want %s", i, e.From.Name(), from.Name())
+		}
+		want, ok := routes[got[i]]
+		if !ok {
+			t.Errorf("edge %d has route %q, which is not one of the routes built", i, got[i])
+			continue
+		}
+		if e.To != want {
+			t.Errorf("edge %d route %q points at %s, want %s", i, got[i], e.To.Name(), want.Name())
+		}
+	}
+	if want := []string{"abuse", "billing", "sales", "tech"}; !slices.Equal(got, want) {
+		t.Errorf("route order = %v, want %v", got, want)
+	}
+}
+
+func TestEdgeBuilder_AddRoutesSortsBytewise(t *testing.T) {
+	// Keys and target names chosen so byte order differs from numeric,
+	// case-folded and by-target-name order. Each of those alternatives would
+	// otherwise satisfy TestEdgeBuilder_AddRoutesSortsByRoute. The literal is
+	// reverse-sorted for the reason given on that test.
+	routes := map[string]Node{
+		"alpha": newDummyNode("a"),
+		"Beta":  newDummyNode("b"),
+		"2":     newDummyNode("d"),
+		"10":    newDummyNode("c"),
+	}
+
+	edges := NewEdgeBuilder().AddRoutes(newDummyNode("router"), routes).Build()
+
+	got := make([]string, len(edges))
+	for i, e := range edges {
+		route, ok := e.Route.(StringRoute)
+		if !ok {
+			t.Fatalf("edge %d route = %T, want StringRoute", i, e.Route)
+		}
+		got[i] = string(route)
+	}
+	if want := []string{"10", "2", "Beta", "alpha"}; !slices.Equal(got, want) {
+		t.Errorf("route order = %v, want %v", got, want)
+	}
+}
+
+// TestEdgeBuilder_AddRoutesDispatchOrder runs a graph built by AddRoutes
+// through the scheduler, which is the only thing that makes the edge order an
+// observable property rather than a detail of the builder. The router emits
+// every route, so all four edges match one event and edge order alone decides
+// who runs. WithMaxConcurrency(1) turns that into an assertable sequence: the
+// first successor dispatches, the rest queue, and the queue drains FIFO.
+func TestEdgeBuilder_AddRoutesDispatchOrder(t *testing.T) {
+	// Reverse-sorted, for the reason given on
+	// TestEdgeBuilder_AddRoutesSortsByRoute.
+	declared := []string{"alpha", "Beta", "2", "10"}
+
+	var mu sync.Mutex
+	var started []string
+	routes := make(map[string]Node, len(declared))
+	for _, r := range declared {
+		routes[r] = NewFunctionNode("target_"+r,
+			func(ctx agent.Context, input any) (string, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				started = append(started, r)
+				return "ok", nil
+			}, defaultNodeConfig)
+	}
+
+	router := &CustomRouteNode{
+		BaseNode: NewBaseNode("router", "", defaultNodeConfig),
+		route:    declared,
+	}
+	// The four targets would otherwise all be terminal and all produce
+	// output, which Run rejects with ErrMultipleTerminalOutputs when the
+	// scheduler finalizes. New does not: it validates graph shape and cannot
+	// know which nodes produce output. A JoinNode downstream leaves the graph
+	// with a single terminal node.
+	join := NewJoinNode("join")
+	b := NewEdgeBuilder().Add(Start, router).AddRoutes(router, routes)
+	for _, r := range declared {
+		b.Add(routes[r], join)
+	}
+
+	w, err := New("", b.Build(), WithMaxConcurrency(1))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	drain(t, w.Run(newSeededMockCtx(t)))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"10", "2", "Beta", "alpha"}; !slices.Equal(started, want) {
+		t.Errorf("dispatch order = %v, want %v", started, want)
 	}
 }
 

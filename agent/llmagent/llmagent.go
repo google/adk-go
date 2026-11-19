@@ -21,6 +21,7 @@ package llmagent
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -80,17 +81,16 @@ func New(cfg Config) (agent.Agent, error) {
 		outputSchema:          cfg.OutputSchema,
 
 		State: llminternal.State{
-			Model:                    cfg.Model,
-			Mode:                     cfg.Mode,
-			GenerateContentConfig:    cfg.GenerateContentConfig,
-			Tools:                    cfg.Tools,
-			Toolsets:                 cfg.Toolsets,
-			DisallowTransferToParent: cfg.DisallowTransferToParent,
-			DisallowTransferToPeers:  cfg.DisallowTransferToPeers,
-			InputSchema:              cfg.InputSchema,
-			OutputSchema:             cfg.OutputSchema,
-			// TODO: internal type for includeContents
-			IncludeContents:           string(cfg.IncludeContents),
+			Model:                     cfg.Model,
+			Mode:                      cfg.Mode,
+			GenerateContentConfig:     cfg.GenerateContentConfig,
+			Tools:                     slices.Clone(cfg.Tools),
+			Toolsets:                  slices.Clone(cfg.Toolsets),
+			DisallowTransferToParent:  cfg.DisallowTransferToParent,
+			DisallowTransferToPeers:   cfg.DisallowTransferToPeers,
+			InputSchema:               cfg.InputSchema,
+			OutputSchema:              cfg.OutputSchema,
+			IncludeContents:           llminternal.IncludeContents(cfg.IncludeContents),
 			Instruction:               cfg.Instruction,
 			InstructionProvider:       llminternal.InstructionProvider(cfg.InstructionProvider),
 			GlobalInstruction:         cfg.GlobalInstruction,
@@ -128,6 +128,9 @@ func New(cfg Config) (agent.Agent, error) {
 	state := agentinternal.Reveal(internalAgent)
 	state.AgentType = agentinternal.TypeLLMAgent
 	state.Config = cfg
+	// A before-agent callback that returns content short-circuits the run, so its
+	// event never reaches llmAgent.run. Give it the same output_key handling.
+	state.OnBeforeAgentCallbackEvent = a.maybeSaveOutputToState
 
 	if err := installTaskTools(a); err != nil {
 		return nil, err
@@ -195,19 +198,12 @@ type Config struct {
 	// allow agent transferring across the tree.
 	SubAgents []agent.Agent
 
-	// BeforeAgentCallbacks is a list of callbacks that are called sequentially
-	// before the agent starts its run.
-	//
-	// If any callback returns non-nil content or error, then the agent run and
-	// the remaining callbacks will be skipped, and a new event will be created
-	// from the content or error of that callback.
+	// BeforeAgentCallbacks are called sequentially before the agent starts its
+	// run. See [agent.BeforeAgentCallback] for how return values affect execution.
 	BeforeAgentCallbacks []agent.BeforeAgentCallback
-	// AfterAgentCallbacks is a list of callbacks that are called sequentially
-	// after the agent has completed its run.
-	//
-	// If any callback returns non-nil content or error, then a new event will be
-	// created from the content or error of that callback and the remaining
-	// callbacks will be skipped.
+	// AfterAgentCallbacks are called sequentially after the agent completes its
+	// run. See [agent.AfterAgentCallback] for when they are skipped and how return
+	// values affect execution.
 	AfterAgentCallbacks []agent.AfterAgentCallback
 
 	// GenerateContentConfig is for the additional content generation
@@ -245,10 +241,14 @@ type Config struct {
 	// The string is treated as a template:
 	//  - There can be placeholders like {key_name} that will be resolved by ADK
 	//    at runtime using session state and context.
-	//  - key_name must match "^[a-zA-Z_][a-zA-Z0-9_]*$", otherwise it will be
-	//    treated as a literal.
+	//  - key_name must be an underscore or a Unicode ID_Start character
+	//    followed by Unicode ID_Continue characters, optionally after an
+	//    app:, user: or temp: prefix; otherwise the placeholder is left
+	//    as literal text.
 	//  - {artifact.key_name} can be used to insert the text content of the
 	//    artifact named key_name.
+	//  - A placeholder directly preceded by $ or \ is treated as a literal,
+	//    so "${key_name}", "${{key_name}}" and "\{key_name}" are left as is.
 	//
 	// If the state variable or artifact does not exist, the agent will raise an
 	// error. If you want to ignore the error, you can append a ? to the
@@ -274,10 +274,14 @@ type Config struct {
 	// The string is treated as a template:
 	//  - There can be placeholders like {key_name} that will be resolved by ADK
 	//    at runtime using session state and context.
-	//  - key_name must match "^[a-zA-Z_][a-zA-Z0-9_]*$", otherwise it will be
-	//    treated as a literal.
+	//  - key_name must be an underscore or a Unicode ID_Start character
+	//    followed by Unicode ID_Continue characters, optionally after an
+	//    app:, user: or temp: prefix; otherwise the placeholder is left
+	//    as literal text.
 	//  - {artifact.key_name} can be used to insert the text content of the
 	//    artifact named key_name.
+	//  - A placeholder directly preceded by $ or \ is treated as a literal,
+	//    so "${key_name}", "${{key_name}}" and "\{key_name}" are left as is.
 	//
 	// If the state variable or artifact does not exist, the agent will raise an
 	// error. If you want to ignore the error, you can append a ? to the
@@ -376,7 +380,10 @@ type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (
 // AfterModelCallback that is called after receiving a response from the model.
 //
 // If it returns non-nil LLMResponse or error, the actual model response/error
-// is replaced with the returned response/error.
+// is replaced with the returned response/error. A replacement keeps the
+// Partial, TurnComplete and UsageMetadata of the response it replaces unless
+// it sets them itself; since Partial and TurnComplete are bools, setting them
+// to false has no effect.
 type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 // OnModelErrorCallback that is called when receiving an error response from the llm model.
@@ -395,6 +402,9 @@ type OnModelErrorCallback func(ctx agent.Context, llmRequest *model.LLMRequest, 
 //
 // To modify tool arguments and still run the tool,
 // update args in place and return (nil, nil).
+// The edits reach the tool and the callbacks that run after this one for the
+// same call. They do not reach the function call event, which keeps the
+// arguments the model sent in the session and in later model requests.
 type BeforeToolCallback func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error)
 
 // AfterToolCallback is a function type executed after a tool's Run method has completed,
@@ -525,6 +535,16 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 	}
 	if event.Author != a.Name() {
 		// TODO: log "Skipping output save for agent %s: event authored by %s"
+		return
+	}
+	// A task agent delivers its result through finish_task, which runTask writes
+	// to OutputKey. Its text turns (a clarification question, a greeting) are
+	// not the result. runTask runs only when the task agent is entered as a node
+	// (its RunNode method or RunLLMAgentAsNode), whichever agent sits above it.
+	// When it is run through Run (as SequentialAgent, LoopAgent and
+	// ParallelAgent do) or RunLive, nothing writes the finish_task output, so
+	// OutputKey stays unset. Matches adk-python's __maybe_save_output_to_state.
+	if llminternal.Reveal(a).Mode == llminternal.ModeTask {
 		return
 	}
 	if a.OutputKey != "" && event.IsFinalResponse() && event.Content != nil && len(event.Content.Parts) > 0 {

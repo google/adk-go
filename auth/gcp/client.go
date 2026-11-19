@@ -17,18 +17,24 @@ package gcp
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
+	"cloud.google.com/go/auth/credentials"
+	"cloud.google.com/go/auth/httptransport"
 
+	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
 )
 
@@ -48,6 +54,11 @@ const (
 // routed to the Agent Identity service (same split as adk-python).
 var connectorResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/connectors/[^/]+$`)
 
+// authProviderResourceRE matches an Agent Identity resource name. Together with
+// connectorResourceRE it is the full set [NewProvider] accepts. The client
+// itself is looser, routing any non-connector name to Agent Identity.
+var authProviderResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/authProviders/[^/]+$`)
+
 // resourceNameRE bounds a resource name to the characters GCP resource names
 // use. It cannot inject a query, a fragment, an authority or a percent-escape
 // into the request URL the name is interpolated into. Extra path segments are
@@ -60,7 +71,9 @@ var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~:/-]+$`)
 // validateResource rejects a resource name that cannot be safely interpolated
 // into a request URL, or that would not survive path normalization — an empty,
 // "." or ".." segment blocks traversal, and also keeps the name the caller
-// validated identical to the one connectorResourceRE routes on.
+// validated identical to the one connectorResourceRE routes on. [NewProvider]
+// applies it at wiring time too, so a malformed name fails once rather than on
+// every request.
 func validateResource(name string) error {
 	if !resourceNameRE.MatchString(name) {
 		return fmt.Errorf("resource %q has invalid characters", name)
@@ -105,13 +118,13 @@ type APIError struct {
 	// StatusCode is the HTTP status code of the response.
 	StatusCode int
 	// Body is the response body, prepared for an error rather than verbatim: the
-	// request's own UserID and ContinueURI are removed WHERE THE SCRUB CAN MATCH
-	// THEM and replaced with "[redacted]", the text is lowercased wherever
-	// anything matched, and only the first kilobyte of the response is drawn on,
-	// with "..." marking that the rest was dropped. A kilobyte is also the ceiling
-	// on Body itself, which is not the same promise: one matched run becomes a
-	// ten-byte marker whatever it replaced, so bounding the source alone left the
-	// result several times larger.
+	// request's own UserID and ContinueURI, and its PriorToken on the route that
+	// sends it, are removed WHERE THE SCRUB CAN MATCH THEM and replaced with
+	// "[redacted]", the text is lowercased wherever anything matched, and only
+	// the first kilobyte of the response is drawn on, with "..." marking that the
+	// rest was dropped. A kilobyte is also the ceiling on Body itself, which is
+	// not the same promise: one matched run becomes a ten-byte marker whatever it
+	// replaced, so bounding the source alone left the result several times larger.
 	//
 	// Removal is best effort, and the guarantee is narrower than removal: no value
 	// this package was given is recoverable from Body by this package's own
@@ -161,6 +174,45 @@ type Client struct {
 	connectorURL     string
 	pollTimeout      time.Duration
 	initialBackoff   time.Duration
+	// cacheSlot names this Client for the credential cache. What the services
+	// return depends on the endpoint asked and on the identity the ask is
+	// authenticated as, so two providers sharing one store must not share an
+	// entry unless their Clients agree on both.
+	//
+	// It is one value per Client, not one per identity, because this package
+	// cannot observe the identity a Client authenticates as. A caller-supplied
+	// HTTPClient is opaque by construction. So is Application Default
+	// Credentials: NewClient resolves it afresh on every call, so two ADC clients
+	// in one process need not be the same principal — the credentials file, or
+	// GOOGLE_APPLICATION_CREDENTIALS itself, can be rewritten between them.
+	// Erring towards a false miss costs a round trip; erring the other way
+	// discloses one principal's token to another.
+	//
+	// The converse is a precondition this package cannot enforce and states on
+	// Config.HTTPClient: one Client must not authenticate as several identities.
+	//
+	// The value is unique per process as well as within one, so a store that
+	// outlives the process — or is shared by two — misses rather than serving an
+	// entry written by a Client that no longer exists and cannot be identified.
+	cacheSlot string
+}
+
+// clientSeq numbers Clients within this process, and clientNonce separates one
+// process's numbering from another's. See the cacheSlot field.
+var (
+	clientSeq   atomic.Uint64
+	clientNonce = newClientNonce()
+)
+
+// nonceBytes is the width of clientNonce. 128 bits makes a collision between two
+// processes not worth reasoning about.
+const nonceBytes = 16
+
+func newClientNonce() string {
+	var b [nonceBytes]byte
+	// Documented never to fail, and it panics rather than returning short.
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // Config configures a [Client]. A nil *Config, or any zero-valued field, uses
@@ -170,6 +222,17 @@ type Config struct {
 	// from Application Default Credentials (cloud-platform scope). If set, it is
 	// used verbatim and ADC is not applied, so it must carry its own credentials
 	// and should refuse redirects for the reason [NewClient] describes.
+	//
+	// It must authenticate as one identity for the Client's whole life. A Client
+	// is a credential-cache dimension precisely because it is assumed to fix who
+	// the credential service mints on behalf of, and a transport that picks its
+	// credentials out of the request context breaks that assumption without this
+	// package being able to see it: every tenant would share one cache entry.
+	// Build a Client per identity instead.
+	//
+	// Two Clients are two cache dimensions even when built from one HTTPClient,
+	// so build a Client once per identity and share it. One per request resolves
+	// nothing from cache and leaves an entry behind per request.
 	HTTPClient *http.Client
 	// AgentIdentityEndpoint overrides the Agent Identity base URL (scheme+host).
 	// It is used as given, not parsed: an http:// value would send the ADC token
@@ -182,20 +245,50 @@ type Config struct {
 	// It caps the retry loop, not an individual request; bound a single stalled
 	// request via ctx (or an HTTPClient with its own Timeout).
 	//
-	// To bound requests without giving up ADC, put an [http.Client] carrying a
-	// Timeout in the context passed to [NewClient] under [oauth2.HTTPClient]:
-	// its Timeout is carried through to the ADC-backed client.
+	// To bound requests without giving up ADC, build the client the way
+	// [NewClient] does and pass it as HTTPClient: [httptransport.NewClient] with
+	// DetectOpts naming the cloud-platform scope and a fresh, non-nil Headers map
+	// per client (the transport writes the quota project into the map it is
+	// given and drops it with a nil one, so a shared map carries the first
+	// client's quota project to the next), a Logger that discards (the default
+	// one writes token requests and responses to stderr when
+	// GOOGLE_SDK_GO_LOGGING_LEVEL=debug), DisableTelemetry, CheckRedirect
+	// returning [http.ErrUseLastResponse], and then the Timeout.
 	PollTimeout time.Duration
 }
 
 // NewClient builds a Client from cfg; a nil cfg (or any zero field) uses
 // defaults. Unless cfg.HTTPClient is set, it discovers Application Default
-// Credentials (cloud-platform scope) to authenticate calls to the services.
+// Credentials (cloud-platform scope) to authenticate calls to the services,
+// through the same transport the Google Cloud client libraries use: it sends the
+// quota project, when there is one, as X-Goog-User-Project, caches tokens and
+// refreshes them ahead of expiry, and is configured with the client certificate
+// the environment provides, if any (a workload certificate config, an enterprise
+// certificate proxy, or SecureConnect, unless GOOGLE_API_USE_CLIENT_CERTIFICATE=false
+// opts out). A certificate is only presented to an endpoint that requests one,
+// and the default endpoints do not. For now the services' mTLS endpoints have to
+// be set through [Config.AgentIdentityEndpoint] and [Config.ConnectorEndpoint].
+// The token request is the exception: with a certificate, gcloud user
+// credentials fetch their tokens from oauth2.mtls.googleapis.com, which requests
+// it. A service-account key keeps its token_uri.
+// A credentials file naming a universe domain other than the client's —
+// googleapis.com, or GOOGLE_CLOUD_UNIVERSE_DOMAIN when set — fails every request.
 //
-// ctx is used for credential discovery only, and its cancellation is not
-// honored: the token source backing the returned client is detached from ctx,
-// so a Client built inside a request-scoped context keeps refreshing its token
-// after that request ends.
+// The quota project is GOOGLE_CLOUD_QUOTA_PROJECT when set, and otherwise the
+// credentials file's quota_project_id. The variable is not tied to the
+// credentials, so the header can name a project they do not, as it does for
+// metadata-server credentials, which name none.
+//
+// ctx does not bound the returned Client and nothing is read from it:
+// credential discovery reads the environment, and tokens are minted as requests
+// need them rather than on ctx, so a Client built inside a request-scoped
+// context keeps working after that request ends. Through v2.8.0 the ADC-backed
+// client took its transport and Timeout from an [http.Client] stored in ctx under
+// oauth2.HTTPClient, as the PollTimeout doc then advised. That value is no longer
+// read. Passing that same plain client as [Config.HTTPClient] is not the
+// replacement: HTTPClient is used as given, so it would send no credentials.
+// To keep a Timeout together with ADC, build the client the [Config.PollTimeout]
+// doc describes.
 //
 // The ADC-backed client refuses redirects. A credentials:retrieve call has no
 // reason to redirect, and following one would re-sign the request and hand the
@@ -221,15 +314,35 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		c.pollTimeout = cfg.PollTimeout
 	}
 	if c.httpClient == nil {
-		// The token source captures this context and reuses it for every later
-		// refresh, so it must outlive the call; discovery itself needs no
-		// cancellation (its only network probe bounds itself).
-		creds, err := google.FindDefaultCredentials(context.WithoutCancel(ctx), cloudPlatformScope)
+		// The auth library's transport rather than a hand-written bearer header,
+		// so client certificates, the quota project header and token caching
+		// come from it. See the NewClient doc.
+		hc, err := httptransport.NewClient(&httptransport.Options{
+			DetectOpts: &credentials.DetectOptions{Scopes: []string{cloudPlatformScope}},
+			// Non-nil on purpose: the transport adds the quota project header to
+			// this map, and with a nil map it allocates a private one that its
+			// round-tripper never sees (cloud.google.com/go/auth through v0.24.4).
+			Headers: http.Header{},
+			// Discarded: the library's default logger answers
+			// GOOGLE_SDK_GO_LOGGING_LEVEL=debug by writing each token request and
+			// response to stderr, signed assertion and minted token included.
+			// Credential detection inherits this logger.
+			Logger: slog.New(slog.DiscardHandler),
+			// Off, as through v2.8.0. Left on, the library opens a client span for
+			// every call, and with GOOGLE_SDK_GO_EXPERIMENTAL_TRACING=true records
+			// on it the service's error message, which APIError.Body carries only
+			// scrubbed.
+			DisableTelemetry: true,
+		})
 		if err != nil {
-			return nil, fmt.Errorf("gcp: find default credentials: %w", err)
+			// Not "find default credentials": the same call fails on a malformed
+			// client certificate config, before discovery runs. The library
+			// resolves the certificate source once per process and keeps the
+			// outcome, so fixing the file does not clear that failure for a
+			// process that already hit it.
+			return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
 		}
-		hc := oauth2.NewClient(ctx, creds.TokenSource)
-		// oauth2.Transport re-signs every hop, below the layer where net/http
+		// The transport re-signs every hop, below the layer where net/http
 		// strips credentials on a cross-host redirect, so a redirect would leak
 		// the token to whatever host it names.
 		hc.CheckRedirect = func(*http.Request, []*http.Request) error {
@@ -237,7 +350,43 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		}
 		c.httpClient = hc
 	}
+	c.cacheSlot = joinFields(clientNonce, strconv.FormatUint(clientSeq.Add(1), 10))
 	return c, nil
+}
+
+// CacheKey returns the key a credential for scheme, retrieved through c on
+// behalf of id, is cached under — the key to hand
+// [auth.CredentialStore.Delete] to invalidate that credential ahead of its
+// expiry, on a consent revocation or a logout. It is the key the provider
+// itself files under, built from the same [agent.Identity] the provider reads
+// off the invocation. Only id.AppName and id.UserID take part: a credential
+// is shared across a user's sessions.
+//
+// Pass the same [ProviderScheme] the provider was built with, as it was then.
+// [NewProvider] copies Scopes, so changing the caller's slice afterwards changes
+// the key this computes but not the one the provider files under. A scheme
+// differing in any field names a different entry, and Delete of a key nothing
+// is filed under succeeds silently, so a mistake here reads as "already gone".
+//
+// It is meaningful only to the process that produced c, and only for as long as
+// c is alive: a Client is one cache dimension, so rebuilding it strands whatever
+// the old one cached. A Client that did not come from [NewClient] has no cache
+// dimension at all, names an entry nothing ever writes, and must not be used.
+func (c *Client) CacheKey(scheme ProviderScheme, id agent.Identity) auth.CredentialKey {
+	return auth.CredentialKey{AppName: id.AppName, UserID: id.UserID, Key: cacheSlot(c, scheme)}
+}
+
+// joinFields encodes fields as one unambiguous string, each prefixed with its
+// byte length. No delimiter occurring inside a field can then make two different
+// field lists encode alike, which joining on a separator alone allowed.
+func joinFields(fields ...string) string {
+	var b strings.Builder
+	for _, f := range fields {
+		b.WriteString(strconv.Itoa(len(f)))
+		b.WriteByte(':')
+		b.WriteString(f)
+	}
+	return b.String()
 }
 
 // Request identifies the resource and acting user for a credential retrieval.
@@ -271,6 +420,26 @@ type Request struct {
 	// ContinueURI is the developer-hosted URI used to finalize managed-OAuth
 	// (3-legged) flows. Unused by non-interactive flows.
 	ContinueURI string
+	// PriorToken is the previously issued, now rejected, token. Setting it asks
+	// the service to mint a fresh credential rather than return the one it
+	// already has. Empty on a normal fetch.
+	//
+	// The two services spell the ask differently on the wire and this one field
+	// covers both — Agent Identity is sent the token, the IAM Connector a
+	// boolean. See the request types below.
+	PriorToken string
+}
+
+// Retrieval is the result of [Client.RetrieveCredential].
+type Retrieval struct {
+	// Credential authenticates outbound requests as the end user.
+	Credential auth.Credential
+	// ExpiresAt is the credential's expiry, or the zero time when the lifetime is
+	// unknown: the service reports none when the token may be permanent or when
+	// it cannot say, and one it reports that cannot be parsed arrives here the
+	// same way. A caller must not read the zero value as "expires now", and must
+	// not cache a credential carrying it.
+	ExpiresAt time.Time
 }
 
 // RetrieveCredential retrieves a credential for req, polling while the service
@@ -283,13 +452,23 @@ type Request struct {
 // Wrapped with %w throughout, so [ErrConsentRejected], [ErrPollTimeout] and
 // [auth.ConsentRequiredError] stay matchable.
 //
+// It returns a [*Retrieval] where v2.3.0 and v2.4.0 returned the
+// [auth.Credential] alone, so a caller written against either release stops
+// compiling and reads [Retrieval.Credential] instead.
+//
 // Matchable with [errors.Is] and [errors.As], and only with those. Naming the
 // resource wraps every error past validation, so a direct == against any of those
 // sentinels, or a bare type assertion to [*APIError], stops being true where it
 // was true in v2.3.0. A decode failure is now [ErrMalformedResponse] and no
 // longer carries the [encoding/json] error behind it, so [errors.As] against
-// *json.SyntaxError stops finding one.
-func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ auth.Credential, err error) {
+// *json.SyntaxError stops finding one. On the ADC-backed client the error
+// behind a rejected cloud-platform token request is whatever the
+// cloud.google.com/go/auth credential for that source reports, where releases
+// through v2.8.0 reported golang.org/x/oauth2's. For a service-account key
+// that is a *cloud.google.com/go/auth.Error where it was an
+// *oauth2.RetrieveError. Which type the other credential sources wrap, if any,
+// is the library's choice, not this package's promise.
+func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ *Retrieval, err error) {
 	if req.Resource == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a Resource")
 	}
@@ -344,7 +523,11 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ auth.Cr
 		}
 		switch o := res.(type) {
 		case credOutcome:
-			return mapCredential(o.header, o.token, req.UserID, req.ContinueURI)
+			cred, err := mapCredential(o.header, o.token, req.UserID, req.ContinueURI, req.PriorToken)
+			if err != nil {
+				return nil, err
+			}
+			return &Retrieval{Credential: cred, ExpiresAt: o.expiresAt}, nil
 		case consentOutcome:
 			return nil, &auth.ConsentRequiredError{AuthURI: o.authURI, Nonce: o.nonce}
 		case rejectedOutcome:
@@ -376,8 +559,12 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ auth.Cr
 type outcome interface{ isOutcome() }
 
 type (
-	// credOutcome carries a successfully retrieved {header, token} credential.
-	credOutcome struct{ header, token string }
+	// credOutcome carries a successfully retrieved {header, token} credential and
+	// its expiry (zero when the service does not report one).
+	credOutcome struct {
+		header, token string
+		expiresAt     time.Time
+	}
 	// pendingOutcome means retrieval is still pending; poll again.
 	pendingOutcome struct{}
 	// consentOutcome means interactive consent is required at authURI.
@@ -394,20 +581,86 @@ func (pendingOutcome) isOutcome()  {}
 func (consentOutcome) isOutcome()  {}
 func (rejectedOutcome) isOutcome() {}
 
-// credentialPayload is the {header, token} success shape shared by both services
-// (under "success" for Agent Identity, "response" for the IAM Connector operation).
+// credentialPayload is the success shape shared by both services (under
+// "success" for Agent Identity, "response" for the IAM Connector operation): the
+// {header, token} pair plus the token's expiry. An empty expireTime means the
+// service can't say when the token expires (possibly permanent), so callers must
+// not treat it as "expires now".
 type credentialPayload struct {
 	Token  string `json:"token"`
 	Header string `json:"header"`
+	// ExpireTime is RFC 3339, and empty when the service reports no expiry.
+	//
+	// For Agent Identity the name is the one in the published API surface
+	// (https://agentidentitycredentials.googleapis.com/$discovery/rest?version=v1,
+	// Success.expireTime), which also warns that the token may be revoked, or
+	// expire slightly early through clock skew, before the time it names. The IAM
+	// Connector service publishes no discovery document to anonymous callers, so
+	// its field is assumed to be the same name and shape; if it is not, a
+	// connector credential reports no lifetime and is never cached.
+	ExpireTime lenientTime `json:"expireTime"`
 }
 
-// retrieveRequest is the JSON body for both services' credentials:retrieve RPC
-// (the auth provider / connector is bound to the URL path, not the body).
-type retrieveRequest struct {
-	UserID      string   `json:"userId,omitempty"`
-	Scopes      []string `json:"scopes,omitempty"`
-	ContinueURI string   `json:"continueUri,omitempty"`
+// lenientTime is a JSON string that declines to fail. Only the cache reads this
+// field, and the IAM Connector's shape for it is an assumption, so a value of an
+// unexpected type must cost a cache entry rather than the whole retrieval — the
+// credential itself is perfectly usable without an expiry.
+type lenientTime string
+
+func (t *lenientTime) UnmarshalJSON(b []byte) error {
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		*t = lenientTime(s)
+	}
+	return nil
 }
+
+// parseExpireTime parses the service's expiry into a time.Time, collapsing an
+// absent one and an unparseable one to the same zero time. Callers read that as
+// "lifetime unknown" and decline to cache, which is the safe reading of both:
+// the service omits the field when the token may be permanent or when it cannot
+// say, and a value it sent but we cannot read tells us no more than silence.
+func parseExpireTime(v lenientTime) time.Time {
+	if v == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, string(v))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// The two services agree on the retrieval body except for how a caller forces a
+// refresh, so that one field is all these types do not share.
+//
+// Agent Identity takes the rejected token itself, and documents that a caller
+// seeing a PERMISSION_DENIED should retry with it set
+// (https://agentidentitycredentials.googleapis.com/$discovery/rest?version=v1,
+// RetrieveCredentialsRequest.forceRefreshToken). The IAM Connector takes a
+// boolean instead — it publishes no discovery document to anonymous callers, but
+// adk-python's generated client fills the field in, as force_refresh
+// (integrations/agent_identity/_iam_connector_credentials_provider.py). Sending
+// one service the other's field would leave the refresh unforced at best, and
+// rejected as an unknown field at worst.
+type (
+	// agentIdentityRequest is the JSON body for Agent Identity's
+	// credentials:retrieve (the auth provider is bound to the URL path, not the
+	// body).
+	agentIdentityRequest struct {
+		UserID            string   `json:"userId,omitempty"`
+		Scopes            []string `json:"scopes,omitempty"`
+		ContinueURI       string   `json:"continueUri,omitempty"`
+		ForceRefreshToken string   `json:"forceRefreshToken,omitempty"`
+	}
+	// connectorRequest is the same for the IAM Connector.
+	connectorRequest struct {
+		UserID       string   `json:"userId,omitempty"`
+		Scopes       []string `json:"scopes,omitempty"`
+		ContinueURI  string   `json:"continueUri,omitempty"`
+		ForceRefresh bool     `json:"forceRefresh,omitempty"`
+	}
+)
 
 // mapCredential maps the service's {header, token} tuple to an [auth.Credential]:
 // an "Authorization: Bearer" header becomes a bearer credential. Any other header

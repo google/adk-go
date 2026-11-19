@@ -19,6 +19,7 @@ package workflow
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -32,6 +33,11 @@ import (
 // Custom nodes typically embed BaseNode (constructed via NewBaseNode)
 // to inherit Name, Description, and Config implementations, and
 // supply only Run.
+//
+// A custom node that calls another node's Run directly does not forward
+// its private recovery inventory. On failure, retries may conservatively
+// invalidate the custom node's subtree and repeat completed descendants.
+// Use RunNode within a DynamicNode to track child activations explicitly.
 type Node interface {
 	Name() string
 	Description() string
@@ -66,12 +72,7 @@ type Route interface {
 }
 
 func matchRoute(routeValue string, event *session.Event) bool {
-	for _, v := range event.Routes {
-		if v == routeValue {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(event.Routes, routeValue)
 }
 
 // StringRoute is a route defined by a string value.
@@ -150,9 +151,14 @@ func (s *startNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 type Workflow struct {
 	graph *graph
 
-	// name is the per-session-unique identifier under which this
-	// workflow's RunState is persisted in session.State. Empty
-	// disables persistence. Set at construction by New.
+	// name labels this workflow's nodes on the paths Run records: Run
+	// prefixes the node path with it, except for a root wrapper.
+	// RunNode and Resume add no prefix. The prefix is a label, not a
+	// namespace - history is attributed to a run by invocation ID, not
+	// by this name, so the only thing keeping two workflows that
+	// share a node name apart is that their runs carry different
+	// invocation IDs.
+	// Empty leaves the workflow unnamed. Set at construction by New.
 	name string
 
 	// maxConcurrency caps the number of graph-scheduled nodes that
@@ -221,19 +227,24 @@ func WithStateSchema(s *jsonschema.Resolved) Option {
 
 // New creates a new Workflow engine with the given name and edges.
 //
-// The name forms part of the session.State key under which this
-// workflow's RunState is persisted (see RunStateSessionKey for
-// the exact key shape). It must be unique within any session that
-// runs more than one workflow: two workflows sharing a name and a
-// session will silently overwrite each other's RunState, leading
-// to corrupted resume behaviour. The same workflow may safely
-// share a name across different sessions.
+// The name labels this workflow's nodes on the paths Run records: Run
+// prefixes the node path it records with it, except for a root
+// wrapper. RunNode and Resume add no prefix. The same workflow may
+// safely share a name across different sessions.
 //
-// An empty name disables persistence: the workflow runs normally
-// but its RunState is neither saved nor loaded, so Resume on a
-// follow-up turn will find nothing to resume from.
+// The prefix is a label, not a namespace. ReconstructRunState scopes
+// history to a run by invocation ID; attributing an event to a node
+// goes through eventNodeName, which matches the first path segment
+// naming one of this workflow's nodes and ignores the workflow-name
+// segment. A name therefore does not keep two workflows' histories
+// apart, and two workflows that share a node name resolve to that
+// name regardless of what they are called. With an empty invocation
+// ID they collide whatever their names are.
 //
-// Optional Option values configure engine behaviour
+// An empty name adds no prefix, so this workflow's nodes are recorded
+// under the bare node path.
+//
+// Optional Option values configure engine behavior
 // (concurrency cap, etc.); see WithMaxConcurrency.
 func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	if err := validateNodes(edges); err != nil {
@@ -243,12 +254,11 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 		return nil, err
 	}
 	// TODO(wolo): sanity-check name (reject whitespace-only,
-	// reject characters that break the session.State key shape).
+	// reject characters that break the event node-path shape).
 	// TODO(wolo): record a graph fingerprint (e.g. sorted node
-	// names hash) on the Workflow and verify it against any
-	// loaded RunState in Resume; today a name collision or a
-	// graph evolution between deploys silently corrupts the
-	// resume path.
+	// names hash) on the Workflow and verify it against the
+	// RunState reconstructed in Resume; today a graph evolution
+	// between deploys silently corrupts the resume path.
 	var o workflowOptions
 	for _, opt := range opts {
 		opt(&o)
@@ -267,9 +277,9 @@ func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	}, nil
 }
 
-// Name returns the workflow's persistence-namespacing name as set
-// by New. Empty when the workflow is anonymous (does not persist
-// its RunState).
+// Name returns the workflow's node-path namespacing name as set by
+// New. Empty when the workflow is anonymous and adds no path
+// prefix.
 func (w *Workflow) Name() string {
 	return w.name
 }
@@ -317,12 +327,13 @@ func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 func (w *Workflow) RunNode(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		s := newScheduler(ctx, w.graph, w.maxConcurrency)
+		s.workflowName = w.name
 		// Seed: schedule START with the supplied input.
 		startState := s.state.EnsureNode(Start.Name())
 		startState.Input = input
 		s.scheduleNode(Start, input, "", ctx.Branch())
 
-		s.run(yield)
+		s.run(yield, false)
 
 		// All goroutines have returned; ensure no leak.
 		s.wg.Wait()

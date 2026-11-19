@@ -44,7 +44,7 @@ import (
 // declares nothing runs chat here, where it ran single_turn before the
 // placement was made per-invocation.
 //
-// Per-mode behaviour:
+// Per-mode behavior:
 //
 //   - single_turn: the wrapper binds the mode to the agent for this
 //     invocation, so the contents processor scopes history to the
@@ -64,7 +64,7 @@ import (
 //     Agent.Run on each iteration it scans the session for unresolved
 //     task delegations (task FCs from this coordinator without a
 //     matching FR), dispatches each via workflow.RunNode under a
-//     stable WithRunID(fc.ID), and synthesises a user-role FR event so
+//     stable WithRunID(fc.ID), and synthesizes a user-role FR event so
 //     the LLM sees the task result on the next round. The loop ends
 //     when the LLM finishes without delegating. transfer_to_agent is
 //     handled in-process by llmagent.Run (forwarded through the same
@@ -246,7 +246,10 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 //     per-event delta into session state on AppendEvent, so the two
 //     paths converge);
 //   - stash the parsed value on event.Output for the node's terminal
-//     output.
+//     output;
+//   - mark the message as the node's output (NodeInfo.MessageAsOutput),
+//     except when the OutputSchema produced a non-null parsed value, which
+//     is the output in its own right.
 //
 // Returns an error iff OutputSchema validation fails on a non-empty
 // model reply; the caller (runSingleTurn) propagates it.
@@ -281,11 +284,15 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 	text := b.String()
 
 	var output any
+	// parsed stays nil for a reply of literal null, which validates as a nil
+	// map when the schema has no required fields.
+	var parsed map[string]any
 	if state.OutputSchema != nil {
 		if strings.TrimSpace(text) == "" {
 			output = nil
 		} else {
-			parsed, err := utils.ValidateOutputSchema(text, state.OutputSchema)
+			var err error
+			parsed, err = utils.ValidateOutputSchema(text, state.OutputSchema)
 			if err != nil {
 				return fmt.Errorf("LlmAgent %q output validation failed: %w", a.Name(), err)
 			}
@@ -304,6 +311,15 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 
 	ev.Output = output
 
+	// The runner drops Output from events flagged MessageAsOutput, which
+	// would discard a non-null parsed value, so that case skips the flag. For a
+	// null reply Output holds a nil map. The database and Vertex AI session
+	// services write it as JSON null and read back no output, so the flag
+	// keeps the reply text as the node output once the event is stored. The
+	// in-memory service keeps the nil map as it is.
+	if parsed != nil {
+		return nil
+	}
 	if ev.NodeInfo == nil {
 		ev.NodeInfo = &session.NodeInfo{}
 	}
@@ -485,7 +501,7 @@ func dispatchTaskFC(parentAgent agent.Agent, fc *genai.FunctionCall, ctx agent.C
 	return out, nil
 }
 
-// synthesizeTaskFREvent builds the synthesised FR event for a completed
+// synthesizeTaskFREvent builds the synthesized FR event for a completed
 // task delegation.
 func synthesizeTaskFREvent(ctx context.Context, invocationID string, fc *genai.FunctionCall, output any) *session.Event {
 	var response map[string]any
@@ -558,7 +574,7 @@ func runSingleTurn(a agent.Agent, ic agent.InvocationContext, yield func(*sessio
 //  1. Pre-LLM scan: replay any unresolved task FCs from prior turns.
 //     Their dispatched sub-agents may complete or pause (HITL).
 //  2. Run Agent.Run; on every fresh task FC, dispatch via RunNode and
-//     synthesise an FR event so the LLM sees the result on the next
+//     synthesize an FR event so the LLM sees the result on the next
 //     round.
 //  3. Re-enter Agent.Run after each dispatch round; the loop ends when
 //     the LLM finishes without delegating.
@@ -572,7 +588,7 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 				// Task sub-agent paused on a long-running tool
 				// (e.g. its tool called ctx.RequestConfirmation
 				// and is awaiting the user's reply). Do NOT
-				// synthesise a delegation-closing FR: leaving
+				// synthesize a delegation-closing FR: leaving
 				// the delegation unresolved makes
 				// findUnresolvedTaskDelegations re-dispatch it on
 				// the next user turn, where the
@@ -602,7 +618,7 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 			// observes a successful finish_task FR, so out==nil
 			// means the task did not actually finish.
 			//
-			// Treating this as a completion would (a) synthesise
+			// Treating this as a completion would (a) synthesize
 			// a misleading delegation-closing FR, and (b) route
 			// the user's next message to the coordinator instead
 			// of back into the paused task, causing the
@@ -640,11 +656,11 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 			if !yield(ev, nil) {
 				return
 			}
-			// Only act on non-partial (finalised) events. Streaming
+			// Only act on non-partial (finalized) events. Streaming
 			// flows emit partial events with the same content as the
 			// eventual final aggregated event; partials are not
 			// persisted to the session, so dispatching off a partial
-			// would synthesise an FR whose matching FC is absent from
+			// would synthesize an FR whose matching FC is absent from
 			// history, breaking the next LLM turn's content rearrange.
 			if ev == nil || ev.LLMResponse.Partial {
 				continue
@@ -657,7 +673,7 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 			}
 			if len(taskFCs) > 0 {
 				// Close this inner iteration; outer loop re-enters
-				// Agent.Run so the LLM sees the synthesised FR(s).
+				// Agent.Run so the LLM sees the synthesized FR(s).
 				hadTaskFC = true
 				break
 			}
@@ -710,6 +726,12 @@ func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Even
 			} else {
 				ev.Output = pendingFCArgs
 			}
+			if key := outputKeyOf(a); key != "" && ev.Output != nil {
+				if ev.Actions.StateDelta == nil {
+					ev.Actions.StateDelta = map[string]any{}
+				}
+				ev.Actions.StateDelta[key] = ev.Output
+			}
 			yield(ev, nil)
 			return
 		}
@@ -717,6 +739,15 @@ func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Even
 			return
 		}
 	}
+}
+
+// outputKeyOf returns the OutputKey of an LlmAgent, or "" for any other agent.
+func outputKeyOf(a agent.Agent) string {
+	llmA, ok := a.(llminternal.Agent)
+	if !ok || llmA == nil {
+		return ""
+	}
+	return llminternal.Reveal(llmA).OutputKey
 }
 
 // TODO: The current approach of using wrappedSession to inject the user input
@@ -750,7 +781,7 @@ type wrappedSession struct {
 	// FC/FR rounds). Putting the seed at the tail instead would let the
 	// backward-scan in buildContentsCurrentTurnContextOnly pivot on the
 	// seed and drop the agent's own tool history between rounds; see
-	// adk-python's behaviour (which appends to session.events before
+	// adk-python's behavior (which appends to session.events before
 	// run_async, achieving the same ordering for free).
 	insertAt int
 }

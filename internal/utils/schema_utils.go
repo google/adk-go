@@ -31,7 +31,7 @@ func matchType(value any, schema *genai.Schema, isInput bool) (bool, error) {
 	}
 
 	if value == nil {
-		return false, nil
+		return schema.Nullable != nil && *schema.Nullable, nil
 	}
 
 	// Convert type to upper case to match the type in the schema.

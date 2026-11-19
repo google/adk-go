@@ -72,11 +72,20 @@ func (t *preloadMemoryTool) IsLongRunning() bool {
 // current query and injecting relevant past conversations into system instructions.
 func (t *preloadMemoryTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	userContent := ctx.UserContent()
-	if userContent == nil || len(userContent.Parts) == 0 ||
-		userContent.Parts[0] == nil || userContent.Parts[0].Text == "" {
+	if userContent == nil {
 		return nil
 	}
-	userQuery := userContent.Parts[0].Text
+	var queryParts []string
+	for _, part := range userContent.Parts {
+		if part == nil || part.Text == "" {
+			continue
+		}
+		queryParts = append(queryParts, part.Text)
+	}
+	userQuery := strings.Join(queryParts, " ")
+	if userQuery == "" {
+		return nil
+	}
 
 	searchResponse, err := ctx.SearchMemory(ctx, userQuery)
 	if err != nil {
@@ -122,7 +131,7 @@ func extractText(mem memory.Entry) string {
 
 	var b strings.Builder
 	for _, part := range mem.Content.Parts {
-		if part == nil || part.Text == "" {
+		if part == nil || part.Text == "" || part.Thought {
 			continue
 		}
 		if b.Len() > 0 {

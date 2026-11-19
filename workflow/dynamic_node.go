@@ -91,8 +91,7 @@ func newDynamicNodeWithResolvedSchemas[IN, OUT any](
 
 func applyDynamicDefaults(cfg NodeConfig) NodeConfig {
 	if cfg.RerunOnResume == nil {
-		t := true
-		cfg.RerunOnResume = &t
+		cfg.RerunOnResume = new(true)
 	}
 	return cfg
 }
@@ -132,6 +131,7 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 			if errors.Is(err, ErrNodeInterrupted) {
 				return
 			}
+			publishFailureInventory(ctx, n, sub.(*dynamicSubScheduler).childFailures())
 			yield(nil, err)
 			return
 		}
@@ -139,7 +139,19 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 		// A WithUseAsOutput child already emitted this output on its own
 		// event (stamped for this node), so emit no duplicate terminal
 		// event. Mirrors adk-python's _output_delegated.
-		if _, delegated := sub.DelegatedOutput(); delegated {
+		if value, delegated := sub.DelegatedOutput(); delegated {
+			if value == nil && waitsForOutput(n) {
+				return
+			}
+			// A cache hit does not re-emit its child's output. Record the
+			// successful delegation without duplicating that content event.
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.NodeInfo = &session.NodeInfo{Path: sub.ParentPath()}
+			ev.CustomMetadata = map[string]any{
+				workflowNodeCompletedKey:   true,
+				workflowDelegatedOutputKey: value,
+			}
+			yield(ev, nil)
 			return
 		}
 

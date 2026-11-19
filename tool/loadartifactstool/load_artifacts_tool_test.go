@@ -15,6 +15,8 @@
 package loadartifactstool_test
 
 import (
+	"errors"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -39,11 +41,16 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 		t.Fatal("loadArtifactsTool does not implement FunctionTool")
 	}
 
+	// Arguments the model can correct get an error result, not a Go error.
+	invalidArtifactNamesResult := map[string]any{
+		"error":      "'artifact_names' must be a list of strings.",
+		"error_code": "INVALID_ARGUMENTS",
+	}
+
 	tests := []struct {
-		name    string
-		args    map[string]any
-		want    map[string]any
-		wantErr bool
+		name string
+		args map[string]any
+		want map[string]any
 	}{
 		{
 			name: "basic string slice",
@@ -102,25 +109,45 @@ func TestLoadArtifactsTool_Run(t *testing.T) {
 			args: map[string]any{
 				"artifact_names": "not a slice",
 			},
-			wantErr: true,
+			want: invalidArtifactNamesResult,
+		},
+		{
+			name: "incorrect type (object)",
+			args: map[string]any{
+				"artifact_names": map[string]any{"name": "fileA"},
+			},
+			want: invalidArtifactNamesResult,
 		},
 		{
 			name: "any slice with non-string",
 			args: map[string]any{
 				"artifact_names": []any{"fileA", 123},
 			},
-			wantErr: true,
+			want: invalidArtifactNamesResult,
+		},
+		{
+			name: "any slice with empty string",
+			args: map[string]any{
+				"artifact_names": []any{"fileA", ""},
+			},
+			want: map[string]any{
+				"artifact_names": []string{"fileA", ""},
+			},
+		},
+		{
+			name: "any slice with null",
+			args: map[string]any{
+				"artifact_names": []any{"fileA", nil},
+			},
+			want: invalidArtifactNamesResult,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := toolImpl.Run(tc, tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("Run() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil", err)
 			}
 
 			if diff := cmp.Diff(tt.want, result); diff != "" {
@@ -492,6 +519,61 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_MultiPartFunctionResponse(t 
 			}
 			if appendedContent.Parts[1].Text != "This is the content of doc1.txt" {
 				t.Errorf("Second part of appended content: got %v, want 'This is the content of doc1.txt'", appendedContent.Parts[1].Text)
+			}
+		})
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_LoadError(t *testing.T) {
+	tests := []struct {
+		name          string
+		artifactNames []string
+	}{
+		{
+			name:          "missing artifact",
+			artifactNames: []string{"missing.txt"},
+		},
+		{
+			name:          "missing artifact alongside a saved one",
+			artifactNames: []string{"doc1.txt", "missing.txt"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loadArtifactsTool := loadartifactstool.New()
+			tc := createToolContext(t)
+			if _, err := tc.Artifacts().Save(t.Context(), "doc1.txt", &genai.Part{Text: "This is the content of doc1.txt"}); err != nil {
+				t.Fatalf("Failed to save artifact: %v", err)
+			}
+
+			llmRequest := &model.LLMRequest{
+				Contents: []*genai.Content{
+					{
+						Role: genai.RoleUser,
+						Parts: []*genai.Part{
+							genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+								"artifact_names": tt.artifactNames,
+							}),
+						},
+					},
+				},
+			}
+
+			requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+			if !ok {
+				t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+			}
+
+			err := requestProcessor.ProcessRequest(tc, llmRequest)
+			if err == nil {
+				t.Fatal("ProcessRequest should return an error when an artifact cannot be loaded, but got nil")
+			}
+			if got := strings.Count(err.Error(), "failed to load artifact"); got != 1 {
+				t.Errorf("error names the failure %d times, want once: %v", got, err)
+			}
+			if !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("errors.Is(err, fs.ErrNotExist) = false, want true, got: %v", err)
 			}
 		})
 	}

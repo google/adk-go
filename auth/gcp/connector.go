@@ -54,7 +54,7 @@ func (o connectorOperation) result(req Request) (outcome, error) {
 		if o.Response == nil {
 			return nil, errors.New("gcp: connector operation done but returned no credential")
 		}
-		return credOutcome{header: o.Response.Header, token: o.Response.Token}, nil
+		return credOutcome{header: o.Response.Header, token: o.Response.Token, expiresAt: parseExpireTime(o.Response.ExpireTime)}, nil
 	}
 	if md := o.Metadata; md != nil {
 		switch {
@@ -75,7 +75,13 @@ func (o connectorOperation) result(req Request) (outcome, error) {
 // Operation-wrapped response.
 func (c *Client) retrieveConnector(ctx context.Context, req Request) (outcome, error) {
 	url := fmt.Sprintf("%s/v1alpha/%s/credentials:retrieve", c.connectorURL, req.Resource)
-	body := retrieveRequest{UserID: req.UserID, Scopes: req.Scopes, ContinueURI: req.ContinueURI}
+	body := connectorRequest{
+		UserID:      req.UserID,
+		Scopes:      req.Scopes,
+		ContinueURI: req.ContinueURI,
+		// A boolean here, not the token: see the request types in client.go.
+		ForceRefresh: req.PriorToken != "",
+	}
 
 	var op connectorOperation
 	if err := c.doPost(ctx, url, body, &op, req.UserID, req.ContinueURI); err != nil {

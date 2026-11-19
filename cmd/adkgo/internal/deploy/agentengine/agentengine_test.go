@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGoVersionFromModFile(t *testing.T) {
@@ -317,6 +318,55 @@ func TestComputeFlags_RejectionLeavesNoTempDir(t *testing.T) {
 	}
 }
 
+// TestMemoryBankContextSpec_GenerationModel pins which generation model a
+// --mem_deploy deployment asks Memory Bank for. The default case reads the
+// value cobra registers for --mem_model, so it covers what users get without
+// the flag.
+func TestMemoryBankContextSpec_GenerationModel(t *testing.T) {
+	tests := []struct {
+		name     string
+		memModel string
+		// wantModel is the model sent in GenerationConfig, or "" when
+		// GenerationConfig must be left unset.
+		wantModel string
+	}{
+		{
+			name:     "default leaves the model to Memory Bank",
+			memModel: agentEngineCmd.PersistentFlags().Lookup("mem_model").DefValue,
+		},
+		{
+			name:      "explicit model is prefixed with project and region",
+			memModel:  "publishers/google/models/some-model",
+			wantModel: "projects/my-project/locations/us-central1/publishers/google/models/some-model",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetFlags(t, "main.go")
+			flags.gcloud.projectName = "my-project"
+			flags.gcloud.region = "us-central1"
+			flags.agentEngine.memoryBank.model = tt.memModel
+			flags.agentEngine.memoryBank.ttl = 24 * time.Hour
+
+			if err := flags.computeFlags(); err != nil {
+				t.Fatalf("computeFlags() = %v, want no error", err)
+			}
+			cfg := flags.memoryBankContextSpec().GetMemoryBankConfig()
+
+			gotModel := cfg.GetGenerationConfig().GetModel()
+			if tt.wantModel == "" && cfg.GetGenerationConfig() != nil {
+				t.Errorf("GenerationConfig = {Model: %q}, want it unset so Memory Bank uses its default model", gotModel)
+			}
+			if gotModel != tt.wantModel {
+				t.Errorf("GenerationConfig.Model = %q, want %q", gotModel, tt.wantModel)
+			}
+			if got := cfg.GetTtlConfig().GetDefaultTtl().AsDuration(); got != 24*time.Hour {
+				t.Errorf("TtlConfig.DefaultTtl = %v, want %v", got, 24*time.Hour)
+			}
+		})
+	}
+}
+
 // TestPrepareDockerfile_EntryPointReachesRUNLine pins the reason
 // origEntryPointPath exists at all, and the reason it takes the stronger
 // validator: it is the raw --entry_point_path value, not the absolutised one,
@@ -343,7 +393,7 @@ func TestPrepareDockerfile_EntryPointReachesRUNLine(t *testing.T) {
 		t.Fatalf("cannot read the generated Dockerfile: %v", err)
 	}
 	var runLine string
-	for _, line := range strings.Split(string(content), "\n") {
+	for line := range strings.SplitSeq(string(content), "\n") {
 		if rest, ok := strings.CutPrefix(line, "RUN "); ok {
 			runLine = rest
 		}

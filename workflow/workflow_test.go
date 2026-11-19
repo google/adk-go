@@ -60,7 +60,7 @@ func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) age
 }
 
 // newMockCtx returns a fresh MockInvocationContext backed by
-// t.Context(), which is automatically cancelled when the test ends
+// t.Context(), which is automatically canceled when the test ends
 // — preventing leaked scheduler goroutines from outliving the test.
 func newMockCtx(t *testing.T) *MockInvocationContext {
 	t.Helper()
@@ -277,7 +277,7 @@ func (n *CustomRouteNode) Run(ctx agent.Context, input any) iter.Seq2[*session.E
 func TestWorkflowRouting(t *testing.T) {
 	// testTracker collects the names of nodes that ran. The
 	// scheduler runs sibling nodes concurrently, so appends must be
-	// serialised.
+	// serialized.
 	type testTracker struct {
 		mu       sync.Mutex
 		executed []string
@@ -388,7 +388,7 @@ func TestWorkflowRouting(t *testing.T) {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a, Route: StringRoute("branchA")},
-					{From: x, To: b, Route: (Default)},
+					{From: x, To: b, Route: Default},
 				}
 			},
 			expectedExec: []string{"B"},
@@ -412,7 +412,7 @@ func TestWorkflowRouting(t *testing.T) {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a},
-					{From: x, To: b, Route: (Default)},
+					{From: x, To: b, Route: Default},
 				}
 			},
 			expectedExec: []string{"A", "B"},
@@ -672,6 +672,37 @@ func TestWorkflowRunSkipsNilUserContentParts(t *testing.T) {
 
 			if got != tc.want {
 				t.Errorf("seed input = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A workflow with no edges builds, and running it ends without an
+// error or any event, matching adk-python's Workflow(edges=[]).
+func TestWorkflowWithNoEdgesRunsToCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		edges []Edge
+	}{
+		{"nil", nil},
+		{"empty", []Edge{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, err := New("wf", tc.edges)
+			if err != nil {
+				t.Fatalf("New() error = %v, want nil", err)
+			}
+
+			var events []*session.Event
+			for ev, err := range w.Run(newSeededMockCtx(t)) {
+				if err != nil {
+					t.Fatalf("Run() error = %v", err)
+				}
+				events = append(events, ev)
+			}
+
+			if len(events) != 0 {
+				t.Errorf("Run() yielded %d events, want none: %+v", len(events), events)
 			}
 		})
 	}

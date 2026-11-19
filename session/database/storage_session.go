@@ -97,6 +97,9 @@ type storageEvent struct {
 	UsageMetadata     dynamicJSON
 	CitationMetadata  dynamicJSON
 
+	InputTranscription  dynamicJSON
+	OutputTranscription dynamicJSON
+
 	Partial      *bool
 	TurnComplete *bool
 	ErrorCode    *string
@@ -226,6 +229,18 @@ func createStorageEvent(session session.Session, event *session.Event) (*storage
 			return nil, fmt.Errorf("failed to marshal citation metadata: %w", err)
 		}
 	}
+	if event.InputTranscription != nil {
+		storageEv.InputTranscription, err = json.Marshal(event.InputTranscription)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal input transcription: %w", err)
+		}
+	}
+	if event.OutputTranscription != nil {
+		storageEv.OutputTranscription, err = json.Marshal(event.OutputTranscription)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal output transcription: %w", err)
+		}
+	}
 
 	return storageEv, nil
 }
@@ -282,6 +297,20 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 	if len(se.CitationMetadata) > 0 {
 		if err := json.Unmarshal(se.CitationMetadata, &citationMetadata); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal citation metadata: %w", err)
+		}
+	}
+
+	var inputTranscription *genai.Transcription
+	if len(se.InputTranscription) > 0 {
+		if err := json.Unmarshal(se.InputTranscription, &inputTranscription); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal input transcription: %w", err)
+		}
+	}
+
+	var outputTranscription *genai.Transcription
+	if len(se.OutputTranscription) > 0 {
+		if err := json.Unmarshal(se.OutputTranscription, &outputTranscription); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal output transcription: %w", err)
 		}
 	}
 
@@ -346,16 +375,18 @@ func createEventFromStorageEvent(se *storageEvent) (*session.Event, error) {
 		NodeInfo:           nodeInfo,
 		RequestedInput:     requestedInput,
 		LLMResponse: model.LLMResponse{
-			Content:           content,
-			GroundingMetadata: groundingMetadata,
-			CustomMetadata:    customMetadata,
-			UsageMetadata:     usageMetadata,
-			CitationMetadata:  citationMetadata,
-			ErrorCode:         errorCode,
-			ErrorMessage:      errorMessage,
-			Partial:           partial,
-			TurnComplete:      turnComplete,
-			Interrupted:       interrupted,
+			Content:             content,
+			GroundingMetadata:   groundingMetadata,
+			CustomMetadata:      customMetadata,
+			UsageMetadata:       usageMetadata,
+			CitationMetadata:    citationMetadata,
+			InputTranscription:  inputTranscription,
+			OutputTranscription: outputTranscription,
+			ErrorCode:           errorCode,
+			ErrorMessage:        errorMessage,
+			Partial:             partial,
+			TurnComplete:        turnComplete,
+			Interrupted:         interrupted,
 		},
 	}
 

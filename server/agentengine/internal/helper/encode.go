@@ -15,8 +15,11 @@
 package helper
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"reflect"
 	"strings"
 	"time"
@@ -30,7 +33,7 @@ import (
 func ConvertSnake(o any) any {
 	res, err := convertSnake("", "", o)
 	if err != nil {
-		log.Printf("Failed to convert: %+v of type %T: %v", o, o, err)
+		log.Printf("Failed to convert: %+v of type %T: %v", o, o, err) //nolint:forbidigo // pre-slog call site
 		// better to return an original version than nothing
 		return o
 	}
@@ -57,9 +60,9 @@ func convertSnake(path, indent string, o any) (any, error) {
 	case reflect.Struct:
 		vt := v.Type()
 		// handle time.Time in a special way
-		if vt == reflect.TypeOf(time.Time{}) {
+		if vt == reflect.TypeFor[time.Time]() {
 			t := o.(time.Time)
-			return t.UnixMilli() / 1000.0, nil // returns a number of seconds "Unix-way"
+			return float64(t.UnixMicro()) / 1e6, nil // returns a number of seconds "Unix-way"
 		}
 
 		// this map will hold all the fields
@@ -84,9 +87,7 @@ func convertSnake(path, indent string, o any) (any, error) {
 					return nil, fmt.Errorf("failed to convert embedded struct with name:%v o: %+v %T err: %w", name, fv.Interface(), fv.Interface(), err)
 				}
 				// merge them to m
-				for k, v := range embed.(map[string]any) {
-					m[k] = v
-				}
+				maps.Copy(m, embed.(map[string]any))
 				continue
 			}
 
@@ -120,6 +121,15 @@ func convertSnake(path, indent string, o any) (any, error) {
 		}
 		return m, nil
 	case reflect.Slice:
+		if rm, ok := o.(json.RawMessage); ok {
+			if len(rm) == 0 {
+				return nil, nil
+			}
+			return rm, nil
+		}
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return base64.StdEncoding.EncodeToString(v.Bytes()), nil
+		}
 		res := []any{}
 		for i := 0; i < v.Len(); i++ {
 			elem, err := convertSnake(path+".[]", indent+"    ", v.Index(i).Interface())

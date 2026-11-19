@@ -1,0 +1,632 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package completions
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
+)
+
+// testRig serves one canned body and records the path and body it was asked
+// for, which is how the tests below prove which endpoint was called.
+type testRig struct {
+	server   *httptest.Server
+	paths    []string
+	requests []string
+}
+
+func newTestRig(t *testing.T, handler func(w http.ResponseWriter, r *http.Request)) *testRig {
+	t.Helper()
+	rig := &testRig{}
+	rig.server = newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// ReadAll rather than one Read, which may return part of the body.
+		body, _ := io.ReadAll(r.Body)
+		rig.paths = append(rig.paths, r.URL.Path)
+		rig.requests = append(rig.requests, string(body))
+		handler(w, r)
+	}))
+	return rig
+}
+
+func (r *testRig) model(t *testing.T) model.LLM {
+	t.Helper()
+	return newTestModel(t, r.server)
+}
+
+func serveJSON(body string) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, body)
+	}
+}
+
+// serveSSE serves the frames as a Chat Completions stream, closed the way the
+// API closes one.
+func serveSSE(frames ...string) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, frame := range frames {
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", frame)
+		}
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}
+}
+
+func ask(t *testing.T, llm model.LLM, stream bool) ([]*model.LLMResponse, error) {
+	t.Helper()
+	req := &model.LLMRequest{Contents: []*genai.Content{
+		genai.NewContentFromText("weather?", genai.RoleUser),
+	}}
+	var (
+		got      []*model.LLMResponse
+		firstErr error
+	)
+	for resp, err := range llm.GenerateContent(t.Context(), req, stream) {
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		got = append(got, resp)
+	}
+	return got, firstErr
+}
+
+func TestModel_GenerateContent_NilRequest(t *testing.T) {
+	rig := newTestRig(t, serveJSON(`{}`))
+	for _, err := range rig.model(t).GenerateContent(t.Context(), nil, false) {
+		if !errors.Is(err, shared.ErrRequestNil) {
+			t.Fatalf("err = %v, want %v", err, shared.ErrRequestNil)
+		}
+		return
+	}
+	t.Fatal("no response yielded")
+}
+
+func TestModel_GenerateContent_Text(t *testing.T) {
+	rig := newTestRig(t, serveJSON(`{"id":"c1","model":"gpt-4o-mini",
+		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"sunny"}}],
+		"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`))
+	got, err := ask(t, rig.model(t), false)
+	if err != nil {
+		t.Fatalf("GenerateContent() err = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("responses = %d, want 1", len(got))
+	}
+	if text := responseText(got[0]); text != "sunny" {
+		t.Errorf("text = %q, want sunny", text)
+	}
+	if got[0].CustomMetadata["openai_response_id"] != "c1" {
+		t.Errorf("response id metadata = %v", got[0].CustomMetadata["openai_response_id"])
+	}
+	// Recorded as a plain string, which is what this key has always been
+	// documented to carry.
+	if _, ok := got[0].CustomMetadata["openai_model"].(string); !ok {
+		t.Errorf("model metadata = %T, want string", got[0].CustomMetadata["openai_model"])
+	}
+}
+
+func TestModel_GenerateContent_ServerError(t *testing.T) {
+	rig := newTestRig(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = fmt.Fprint(w, `{"error":{"message":"slow down"}}`)
+	})
+	_, err := ask(t, rig.model(t), false)
+	var apiErr *openai.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("err = %v, want the provider's 429 surfaced as an *openai.Error", err)
+	}
+}
+
+func TestModel_GenerateStream_TextDeltas(t *testing.T) {
+	rig := newTestRig(t, serveSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hail "}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"at -7 C"}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}`,
+	))
+	got, err := ask(t, rig.model(t), true)
+	if err != nil {
+		t.Fatalf("GenerateContent() err = %v", err)
+	}
+	if len(got) < 2 {
+		t.Fatalf("responses = %d, want partials plus a final", len(got))
+	}
+	final := got[len(got)-1]
+	if !final.TurnComplete {
+		t.Error("last response does not close the turn")
+	}
+	if text := responseText(final); text != "hail at -7 C" {
+		t.Errorf("final text = %q", text)
+	}
+	if final.FinishReason != genai.FinishReasonStop {
+		t.Errorf("finish reason = %v, want STOP", final.FinishReason)
+	}
+	// Usage arrives only on the trailing chunk, and only because the request
+	// asked for it.
+	if final.UsageMetadata == nil || final.UsageMetadata.TotalTokenCount != 12 {
+		t.Errorf("usage = %#v, want 12 total tokens", final.UsageMetadata)
+	}
+	if !strings.Contains(rig.requests[0], `"include_usage":true`) {
+		t.Errorf("request did not ask for streamed usage: %s", rig.requests[0])
+	}
+}
+
+// TestModel_GenerateStream_ToolArgumentsAcrossChunks covers the shape this
+// endpoint has no event for: arguments arrive in fragments and the call is
+// complete only once the stream ends.
+func TestModel_GenerateStream_ToolArgumentsAcrossChunks(t *testing.T) {
+	rig := newTestRig(t, serveSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Lisbon\"}"}}]}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	))
+	got, err := ask(t, rig.model(t), true)
+	if err != nil {
+		t.Fatalf("GenerateContent() err = %v", err)
+	}
+	final := got[len(got)-1]
+	var call *genai.FunctionCall
+	for _, part := range final.Content.Parts {
+		if part.FunctionCall != nil {
+			call = part.FunctionCall
+		}
+	}
+	if call == nil {
+		t.Fatalf("no function call on the final response: %#v", final.Content.Parts)
+	}
+	if call.Name != "get_weather" || call.ID != "call_1" {
+		t.Errorf("call = %#v", call)
+	}
+	if call.Args["city"] != "Lisbon" {
+		t.Errorf("args = %#v, want the fragments reassembled", call.Args)
+	}
+}
+
+func TestModel_GenerateStream_RefusalDeltas(t *testing.T) {
+	rig := newTestRig(t, serveSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I cannot "}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"refusal":"help"}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	))
+	got, err := ask(t, rig.model(t), true)
+	if err != nil {
+		t.Fatalf("GenerateContent() err = %v", err)
+	}
+	if text := responseText(got[len(got)-1]); text != "I cannot help" {
+		t.Errorf("final text = %q, want the refusal as text", text)
+	}
+}
+
+func TestModel_GenerateStream_EmptyStream(t *testing.T) {
+	rig := newTestRig(t, serveSSE())
+	_, err := ask(t, rig.model(t), true)
+	if !errors.Is(err, shared.ErrNoChoices) {
+		t.Fatalf("err = %v, want %v", err, shared.ErrNoChoices)
+	}
+}
+
+// TestModel_GenerateStream_UsageIsTheLatestReport covers a provider that
+// resends the running usage on every chunk. Summing those reports would count
+// the prompt once per chunk.
+func TestModel_GenerateStream_UsageIsTheLatestReport(t *testing.T) {
+	rig := newTestRig(t, serveSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hail "}}],"usage":{"prompt_tokens":8,"completion_tokens":1,"total_tokens":9}}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"at -7 C"}}],"usage":{"prompt_tokens":8,"completion_tokens":3,"total_tokens":11}}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}`,
+	))
+	got, err := ask(t, rig.model(t), true)
+	if err != nil {
+		t.Fatalf("GenerateContent() err = %v", err)
+	}
+	usage := got[len(got)-1].UsageMetadata
+	if usage == nil || usage.PromptTokenCount != 8 || usage.CandidatesTokenCount != 4 || usage.TotalTokenCount != 12 {
+		t.Errorf("usage = %#v, want the last report: 8 prompt, 4 candidates, 12 total", usage)
+	}
+}
+
+// TestModel_NoUsageReportedLeavesUsageUnset covers a provider that reports
+// no usage, as one ignoring stream_options.include_usage does. Zeros would
+// report a turn that did real work as having cost nothing. The streamed
+// tool-call turn matters most: its final response is rebuilt from the
+// snapshot, whose usage is zero.
+func TestModel_NoUsageReportedLeavesUsageUnset(t *testing.T) {
+	for name, frames := range map[string][]string{
+		"text": {
+			`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"sunny"}}]}`,
+			`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		},
+		"tool call": {
+			`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]}}]}`,
+			`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newTestRig(t, serveSSE(frames...))
+			got, err := ask(t, rig.model(t), true)
+			if err != nil {
+				t.Fatalf("GenerateContent() err = %v", err)
+			}
+			if usage := got[len(got)-1].UsageMetadata; usage != nil {
+				t.Errorf("usage = %#v, want nil when the provider reported none", usage)
+			}
+		})
+	}
+	// Blocking agrees, so one provider does not read differently by mode.
+	t.Run("blocking", func(t *testing.T) {
+		rig := newTestRig(t, serveJSON(`{"id":"c","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"sunny"}}]}`))
+		got, err := ask(t, rig.model(t), false)
+		if err != nil {
+			t.Fatalf("GenerateContent() err = %v", err)
+		}
+		if usage := got[0].UsageMetadata; usage != nil {
+			t.Errorf("usage = %#v, want nil when the provider reported none", usage)
+		}
+	})
+}
+
+// TestModel_GenerateStream_UnparseableCallFailsAsBlocking pins that a turn
+// whose streamed text survived still fails when its tool call cannot be read,
+// because only the snapshot states the calls and blocking rejects the same
+// body.
+func TestModel_GenerateStream_UnparseableCallFailsAsBlocking(t *testing.T) {
+	rig := newTestRig(t, serveSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"looking"}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	))
+	_, err := ask(t, rig.model(t), true)
+	if !errors.Is(err, shared.ErrFunctionCallArgs) {
+		t.Fatalf("err = %v, want %v", err, shared.ErrFunctionCallArgs)
+	}
+}
+
+// TestModel_GenerateStream_EmptySnapshotKeepsStreamedText covers a delta
+// the accumulator refuses, here for a choice index past its bound, while the
+// text it carried still reached the caller as a partial.
+func TestModel_GenerateStream_EmptySnapshotKeepsStreamedText(t *testing.T) {
+	rig := newTestRig(t, serveSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":500,"delta":{"role":"assistant","content":"sunny"}}]}`,
+	))
+	got, err := ask(t, rig.model(t), true)
+	if err != nil {
+		t.Fatalf("GenerateContent() err = %v", err)
+	}
+	final := got[len(got)-1]
+	if text := responseText(final); text != "sunny" {
+		t.Errorf("final text = %q, want the streamed text", text)
+	}
+	// Nothing states why the turn ended, which must not read as a clean stop.
+	if final.FinishReason != genai.FinishReasonUnspecified {
+		t.Errorf("finish reason = %v, want UNSPECIFIED", final.FinishReason)
+	}
+}
+
+// TestModel_GenerateStream_ChunkIDsDiffer covers a provider that gives each
+// chunk of one stream its own id. The accumulator refuses a chunk whose id is
+// not the first one's, which would lose the call's arguments, or the call.
+func TestModel_GenerateStream_ChunkIDsDiffer(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		frames   []string
+		wantText string
+		wantID   string
+	}{
+		{
+			name: "arguments under changing ids",
+			frames: []string{
+				`{"id":"a1","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+				`{"id":"a2","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}`,
+				`{"id":"a3","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}}]}}]}`,
+				`{"id":"a4","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			},
+			wantID: "a1",
+		},
+		{
+			// Opens with a chunk that has no id, so the id to keep is the first
+			// non-empty one rather than the first one.
+			name: "text then a call under a new id",
+			frames: []string{
+				`{"id":"","object":"chat.completion.chunk","model":"m","choices":[]}`,
+				`{"id":"a1","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"looking"}}]}`,
+				`{"id":"a2","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]}}]}`,
+				`{"id":"a3","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+			},
+			wantText: "looking",
+			wantID:   "a1",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rig := newTestRig(t, serveSSE(tt.frames...))
+			got, err := ask(t, rig.model(t), true)
+			if err != nil {
+				t.Fatalf("GenerateContent() err = %v", err)
+			}
+			final := got[len(got)-1]
+			if text := responseText(final); text != tt.wantText {
+				t.Errorf("final text = %q, want %q", text, tt.wantText)
+			}
+			if id := final.CustomMetadata["openai_response_id"]; id != tt.wantID {
+				t.Errorf("response id = %v, want %q from the first non-empty chunk id", id, tt.wantID)
+			}
+			call := onlyCall(t, final)
+			if call.ID != "call_1" || call.Args["city"] != "Paris" {
+				t.Errorf("call = %#v, want call_1 with city Paris", call)
+			}
+			if final.FinishReason != genai.FinishReasonStop {
+				t.Errorf("finish reason = %v, want STOP", final.FinishReason)
+			}
+		})
+	}
+}
+
+// TestModel_GenerateStream_RejectedToolCallChunkFails pins that a tool-call
+// delta the accumulator refuses fails the turn, since only the snapshot states
+// the calls and dropping one would pass the turn off as whole.
+func TestModel_GenerateStream_RejectedToolCallChunkFails(t *testing.T) {
+	rig := newTestRig(t, serveSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"looking"}}]}`,
+		// A tool-call index this far ahead grows the choice past the bound the
+		// accumulator allows in one step.
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":1000,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	))
+	got, err := ask(t, rig.model(t), true)
+	if !errors.Is(err, errToolCallChunkRejected) {
+		t.Fatalf("err = %v, want %v", err, errToolCallChunkRejected)
+	}
+	for _, resp := range got {
+		if resp.TurnComplete {
+			t.Errorf("a response closed the turn without its call: %#v", resp.Content)
+		}
+	}
+}
+
+// TestModel_GenerateStream_UnsupersededSnapshotKeepsCalls covers a snapshot
+// whose text cannot replace the streamed text, because the refusal and content
+// deltas interleaved. The streamed text stands, but the calls exist only in the
+// snapshot, so they must still reach the final response.
+func TestModel_GenerateStream_UnsupersededSnapshotKeepsCalls(t *testing.T) {
+	rig := newTestRig(t, serveSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","refusal":"no"}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"x"}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Lisbon\"}"}}]}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	))
+	got, err := ask(t, rig.model(t), true)
+	if err != nil {
+		t.Fatalf("GenerateContent() err = %v", err)
+	}
+	final := got[len(got)-1]
+	if text := responseText(final); text != "nox" {
+		t.Errorf("final text = %q, want the streamed text", text)
+	}
+	if call := onlyCall(t, final); call.ID != "call_1" || call.Args["city"] != "Lisbon" {
+		t.Errorf("call = %#v, want call_1 with city Lisbon", call)
+	}
+}
+
+// TestModel_GenerateStream_SparseToolIndex covers a stream whose first
+// tool-call delta uses index 1. The accumulator pads index 0 with an empty
+// entry, which must not reach the caller as a call with no name.
+func TestModel_GenerateStream_SparseToolIndex(t *testing.T) {
+	rig := newTestRig(t, serveSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":1,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Lisbon\"}"}}]}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	))
+	got, err := ask(t, rig.model(t), true)
+	if err != nil {
+		t.Fatalf("GenerateContent() err = %v", err)
+	}
+	final := got[len(got)-1]
+	if n := len(final.Content.Parts); n != 1 {
+		t.Fatalf("parts = %d, want only the get_weather call", n)
+	}
+	if call := onlyCall(t, final); call.ID != "call_1" || call.Name != "get_weather" {
+		t.Errorf("call = %#v, want call_1 to get_weather", call)
+	}
+}
+
+func TestModel_GenerateStream_ErrorMidStream(t *testing.T) {
+	rig := newTestRig(t, serveSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hail "}}]}`,
+		`{"error":{"message":"overloaded","type":"server_error"}}`,
+	))
+	got, err := ask(t, rig.model(t), true)
+	if err == nil {
+		t.Fatal("err = nil, want the stream error surfaced")
+	}
+	if len(got) == 0 || responseText(got[0]) != "hail " {
+		t.Errorf("responses = %d, want the partial that streamed before the error", len(got))
+	}
+	for _, resp := range got {
+		if resp.TurnComplete {
+			t.Error("a response closed the turn, but the stream failed")
+		}
+	}
+}
+
+// TestModel_GenerateStream_EarlyBreakClosesTheStream pins that a consumer
+// leaving the range releases the connection rather than leaving the provider
+// streaming into a reader that is gone.
+func TestModel_GenerateStream_EarlyBreakClosesTheStream(t *testing.T) {
+	released := make(chan struct{})
+	rig := newTestRig(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, `data: {"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hail "}}]}`+"\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		close(released)
+	})
+	for resp, err := range rig.model(t).GenerateContent(t.Context(), toolReq(nil), true) {
+		if err != nil {
+			t.Fatalf("GenerateContent() err = %v", err)
+		}
+		if resp.Partial {
+			break
+		}
+	}
+	select {
+	case <-released:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the connection was still open after the consumer stopped")
+	}
+}
+
+func TestModel_GenerateStream_HonoursTimeout(t *testing.T) {
+	rig := newTestRig(t, func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})
+	timeout := time.Nanosecond
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+		Config:   &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}},
+	}
+	var gotErr error
+	for _, err := range rig.model(t).GenerateContent(t.Context(), req, true) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if !errors.Is(gotErr, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want a deadline error", gotErr)
+	}
+}
+
+// TestModel_GenerateStream_MatchesBlocking is the guard that keeps the two
+// paths from drifting: the same turn must read the same whether it streamed.
+func TestModel_GenerateStream_MatchesBlocking(t *testing.T) {
+	blockingRig := newTestRig(t, serveJSON(`{"id":"c","model":"m",
+		"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":"looking",
+		"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Lisbon\"}"}}]}}],
+		"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}`))
+	streamRig := newTestRig(t, serveSSE(
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"looking"}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Lisbon\"}"}}]}}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`{"id":"c","model":"m","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12}}`,
+	))
+
+	blocking, err := ask(t, blockingRig.model(t), false)
+	if err != nil {
+		t.Fatalf("blocking err = %v", err)
+	}
+	streamed, err := ask(t, streamRig.model(t), true)
+	if err != nil {
+		t.Fatalf("streamed err = %v", err)
+	}
+
+	want, got := blocking[0], streamed[len(streamed)-1]
+	if responseText(want) != responseText(got) {
+		t.Errorf("text: blocking %q, streamed %q", responseText(want), responseText(got))
+	}
+	if want.FinishReason != got.FinishReason {
+		t.Errorf("finish reason: blocking %v, streamed %v", want.FinishReason, got.FinishReason)
+	}
+	if want.UsageMetadata.TotalTokenCount != got.UsageMetadata.TotalTokenCount {
+		t.Errorf("usage: blocking %d, streamed %d",
+			want.UsageMetadata.TotalTokenCount, got.UsageMetadata.TotalTokenCount)
+	}
+	wantCall, gotCall := onlyCall(t, want), onlyCall(t, got)
+	if wantCall.Name != gotCall.Name || wantCall.ID != gotCall.ID {
+		t.Errorf("call: blocking %#v, streamed %#v", wantCall, gotCall)
+	}
+	if wantCall.Args["city"] != gotCall.Args["city"] {
+		t.Errorf("args: blocking %#v, streamed %#v", wantCall.Args, gotCall.Args)
+	}
+}
+
+func TestModel_HonoursTimeout(t *testing.T) {
+	rig := newTestRig(t, func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	})
+	timeout := time.Nanosecond
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+		Config:   &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}},
+	}
+	var gotErr error
+	for _, err := range rig.model(t).GenerateContent(t.Context(), req, false) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if !errors.Is(gotErr, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want a deadline error", gotErr)
+	}
+}
+
+func onlyCall(t *testing.T, resp *model.LLMResponse) *genai.FunctionCall {
+	t.Helper()
+	for _, part := range resp.Content.Parts {
+		if part.FunctionCall != nil {
+			return part.FunctionCall
+		}
+	}
+	t.Fatalf("no function call on %#v", resp.Content.Parts)
+	return nil
+}
+
+func responseText(resp *model.LLMResponse) string {
+	if resp == nil || resp.Content == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, part := range resp.Content.Parts {
+		if part != nil && !part.Thought {
+			b.WriteString(part.Text)
+		}
+	}
+	return b.String()
+}
+
+// newLoopbackServer starts handler on a loopback port and closes it when the
+// test ends. httptest binds 127.0.0.1 before trying IPv6, so a sandbox refusing
+// IPv6 is served as well.
+func newLoopbackServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return server
+}
+
+// newTestModel builds a model pointed at the test server, the way
+// openaimodel.NewModel does for APIChatCompletions.
+func newTestModel(t *testing.T, server *httptest.Server) model.LLM {
+	t.Helper()
+	client := openai.NewClient(
+		option.WithAPIKey("test"),
+		option.WithBaseURL(server.URL+"/v1"),
+		option.WithHTTPClient(server.Client()),
+	)
+	return New(&client, "gpt-4o-mini")
+}

@@ -20,10 +20,18 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -32,10 +40,12 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/auth"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
 	"google.golang.org/adk/v2/session"
@@ -253,6 +263,77 @@ func TestToolFilter(t *testing.T) {
 
 	if diff := cmp.Diff(wantToolNames, gotToolNames); diff != "" {
 		t.Errorf("tools mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestMCPToolSetClose(t *testing.T) {
+	for _, connected := range []bool{false, true} {
+		t.Run(fmt.Sprintf("connected=%t", connected), func(t *testing.T) {
+			server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "1"}, nil)
+			mcp.AddTool(server, &mcp.Tool{Name: "get_weather"}, weatherFunc)
+			transport := &spyTransport{Transport: &reconnectableTransport{server: server}}
+			ts, err := mcptoolset.New(mcptoolset.Config{Transport: transport})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				for session := range server.Sessions() {
+					_ = session.Close()
+				}
+			})
+			closer, ok := ts.(io.Closer)
+			if !ok {
+				t.Fatal("MCP toolset does not implement io.Closer")
+			}
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			ctx := icontext.NewReadonlyContext(invCtx)
+			var tools []tool.Tool
+			var sessionClosed <-chan struct{}
+			if connected {
+				tools, err = ts.Tools(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for session := range server.Sessions() {
+					done := make(chan struct{})
+					sessionClosed = done
+					go func() {
+						_ = session.Wait()
+						close(done)
+					}()
+				}
+			}
+			var wg sync.WaitGroup
+			for range 2 {
+				wg.Go(func() {
+					if err := closer.Close(); err != nil {
+						t.Errorf("Close() failed: %v", err)
+					}
+				})
+			}
+			wg.Wait()
+			if connected {
+				select {
+				case <-sessionClosed:
+				case <-time.After(5 * time.Second):
+					t.Fatal("Close() left the MCP session open")
+				}
+				fnTool := tools[0].(toolinternal.FunctionTool)
+				if _, err := fnTool.Run(agent.NewToolContext(invCtx, "", nil, nil), map[string]any{"city": "Paris"}); !errors.Is(err, mcp.ErrConnectionClosed) {
+					t.Errorf("Run() after Close() error = %v, want ErrConnectionClosed", err)
+				}
+			}
+			if _, err := ts.Tools(ctx); !errors.Is(err, mcp.ErrConnectionClosed) {
+				t.Errorf("Tools() after Close() error = %v, want ErrConnectionClosed", err)
+			}
+			wantConnections := 0
+			if connected {
+				wantConnections = 1
+			}
+			if transport.connectCount != wantConnections {
+				t.Errorf("Connect() called %d times, want %d", transport.connectCount, wantConnections)
+			}
+		})
 	}
 }
 
@@ -911,5 +992,1025 @@ func TestMCPTool_NonTextContentRoundTrip(t *testing.T) {
 		"[MCP audio: mimeType=\"audio/wav\", size=3 bytes]"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("Run() result mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// metaCapture records the `_meta` an MCP server received on tool calls.
+type metaCapture struct {
+	called bool
+	meta   map[string]any
+	metas  []map[string]any
+}
+
+// mcpClientMetaKeys are the `_meta` entries the MCP client puts on every
+// outgoing request. They are not what a MetadataProvider contributed, so the
+// tests below filter them out before comparing.
+var mcpClientMetaKeys = []string{
+	mcp.MetaKeyProtocolVersion,
+	mcp.MetaKeyClientInfo,
+	mcp.MetaKeyClientCapabilities,
+}
+
+// providerMeta returns the received `_meta` without the client's own entries.
+func providerMeta(meta map[string]any) map[string]any {
+	got := maps.Clone(meta)
+	for _, k := range mcpClientMetaKeys {
+		delete(got, k)
+	}
+	return got
+}
+
+// startMetaEchoServer runs an in-memory MCP server with a single tool that
+// records the `_meta` of each call, and returns a toolset wired to it.
+func startMetaEchoServer(t *testing.T, provider mcptoolset.MetadataProvider) (tool.Toolset, *metaCapture) {
+	t.Helper()
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+	got := &metaCapture{}
+	server := mcp.NewServer(&mcp.Implementation{Name: "meta_server", Version: "v1.0.0"}, nil)
+	mcp.AddTool(server,
+		&mcp.Tool{Name: "get_weather", Description: "returns weather in the given city"},
+		func(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, Output, error) {
+			got.called = true
+			got.meta = req.Params.Meta
+			got.metas = append(got.metas, req.Params.Meta)
+			return nil, Output{WeatherSummary: "sunny"}, nil
+		})
+	if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+		t.Fatalf("server.Connect() err = %v", err)
+	}
+
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Transport:        clientTransport,
+		MetadataProvider: provider,
+	})
+	if err != nil {
+		t.Fatalf("mcptoolset.New() err = %v", err)
+	}
+	return ts, got
+}
+
+// runSingleTool invokes the toolset's only tool with a fixed argument.
+func runSingleTool(t *testing.T, ctx context.Context, ts tool.Toolset) (agent.InvocationContext, error) {
+	t.Helper()
+	invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{})
+	tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+	if err != nil {
+		t.Fatalf("Tools() err = %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("Tools() returned %d tools, want 1", len(tools))
+	}
+	fnTool, ok := tools[0].(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatalf("tool is %T, want toolinternal.FunctionTool", tools[0])
+	}
+	_, err = fnTool.Run(agent.NewToolContext(invCtx, "", nil, nil), map[string]any{"city": "Paris"})
+	return invCtx, err
+}
+
+func TestMetadataProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider mcptoolset.MetadataProvider
+		wantMeta map[string]any
+	}{
+		{
+			name: "provider metadata reaches the server",
+			provider: func(ctx agent.Context) (map[string]any, error) {
+				return map[string]any{"trace_id": "abc-123", "tenant": "acme"}, nil
+			},
+			wantMeta: map[string]any{"trace_id": "abc-123", "tenant": "acme"},
+		},
+		{
+			name:     "no provider configured sends no metadata",
+			provider: nil,
+			wantMeta: nil,
+		},
+		{
+			name: "provider returning nil sends no metadata",
+			provider: func(ctx agent.Context) (map[string]any, error) {
+				return nil, nil
+			},
+			wantMeta: nil,
+		},
+		{
+			name: "provider returning an empty map sends no metadata",
+			provider: func(ctx agent.Context) (map[string]any, error) {
+				return map[string]any{}, nil
+			},
+			wantMeta: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, got := startMetaEchoServer(t, tc.provider)
+			if _, err := runSingleTool(t, t.Context(), ts); err != nil {
+				t.Fatalf("Run() err = %v, want nil", err)
+			}
+			if !got.called {
+				t.Fatal("the MCP tool was never invoked")
+			}
+			if diff := cmp.Diff(tc.wantMeta, providerMeta(got.meta), cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("server-side _meta mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestMetadataProviderError checks that a provider failure aborts the call
+// rather than silently sending the tool request without its metadata, which
+// would defeat the point for auth- or tenant-scoped metadata.
+func TestMetadataProviderError(t *testing.T) {
+	wantErr := errors.New("no trace id in context")
+	ts, got := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+		return nil, wantErr
+	})
+
+	_, err := runSingleTool(t, t.Context(), ts)
+	if err == nil {
+		t.Fatal("Run() err = nil, want the provider error")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("Run() err = %v, want it to wrap %v", err, wantErr)
+	}
+	if !strings.Contains(err.Error(), "get_weather") {
+		t.Errorf("Run() err = %q, want it to name the tool", err)
+	}
+	if got.called {
+		t.Error("the MCP tool ran despite the metadata provider failing")
+	}
+}
+
+func TestMetadataProviderRejectsReservedKeys(t *testing.T) {
+	tests := []struct {
+		key string
+		val any
+	}{
+		{key: "progressToken", val: "spoofed"},
+		{key: mcp.MetaKeyProtocolVersion, val: "2025-06-18"},
+		{key: mcp.MetaKeyClientInfo, val: map[string]any{"name": "spoofed", "version": "0.0.1"}},
+		{key: mcp.MetaKeyClientCapabilities, val: map[string]any{}},
+		{key: "io.modelcontextprotocol/custom", val: "spoofed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.key, func(t *testing.T) {
+			ts, got := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+				return map[string]any{
+					"trace_id": "abc-123",
+					tc.key:     tc.val,
+				}, nil
+			})
+
+			_, err := runSingleTool(t, t.Context(), ts)
+			if err == nil {
+				t.Fatalf("Run() err = nil, want error for reserved key %q", tc.key)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("Run() err = %q, want it to name reserved key %q", err, tc.key)
+			}
+			if !strings.Contains(err.Error(), "get_weather") {
+				t.Errorf("Run() err = %q, want it to name the tool", err)
+			}
+			if got.called {
+				t.Error("the MCP tool ran despite the metadata provider returning a reserved key")
+			}
+		})
+	}
+}
+
+func TestMetadataProviderAllowsNonReservedKeys(t *testing.T) {
+	tests := []struct {
+		key string
+		val any
+	}{
+		{key: "com.example/tenant", val: "acme"},
+		{key: "io.modelcontextprotocolx", val: "custom"},
+		{key: "ProgressToken", val: "tok-1"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.key, func(t *testing.T) {
+			wantMeta := map[string]any{tc.key: tc.val}
+			ts, got := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+				return wantMeta, nil
+			})
+
+			if _, err := runSingleTool(t, t.Context(), ts); err != nil {
+				t.Fatalf("Run() err = %v, want nil", err)
+			}
+			if !got.called {
+				t.Fatal("the MCP tool was never invoked")
+			}
+			if diff := cmp.Diff(wantMeta, providerMeta(got.meta)); diff != "" {
+				t.Errorf("server-side _meta mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestMetadataProviderKeepsClientMeta checks that the server receives both the
+// provider's metadata and the `_meta` entries the MCP client sets for itself,
+// including the adk-mcp-client implementation info.
+func TestMetadataProviderKeepsClientMeta(t *testing.T) {
+	ts, got := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+		return map[string]any{"trace_id": "abc-123"}, nil
+	})
+	if _, err := runSingleTool(t, t.Context(), ts); err != nil {
+		t.Fatalf("Run() err = %v", err)
+	}
+	if diff := cmp.Diff(map[string]any{"trace_id": "abc-123"}, providerMeta(got.meta)); diff != "" {
+		t.Errorf("provider _meta mismatch (-want +got):\n%s", diff)
+	}
+	for _, key := range mcpClientMetaKeys {
+		if _, ok := got.meta[key]; !ok {
+			t.Errorf("received _meta is missing the client's own %q, got keys %v", key, slices.Sorted(maps.Keys(got.meta)))
+		}
+	}
+	wantClientInfo := map[string]any{
+		"name":    "adk-mcp-client",
+		"version": version.Version,
+	}
+	if diff := cmp.Diff(wantClientInfo, got.meta[mcp.MetaKeyClientInfo]); diff != "" {
+		t.Errorf("received _meta[%q] mismatch (-want +got):\n%s", mcp.MetaKeyClientInfo, diff)
+	}
+}
+
+// TestMetadataProviderMapIsCopied checks the map a provider returns is not
+// written to, so a provider may hand back one it reuses between invocations.
+func TestMetadataProviderMapIsCopied(t *testing.T) {
+	reused := map[string]any{"trace_id": "abc-123"}
+	ts, _ := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+		return reused, nil
+	})
+	if _, err := runSingleTool(t, t.Context(), ts); err != nil {
+		t.Fatalf("Run() err = %v", err)
+	}
+	if diff := cmp.Diff(map[string]any{"trace_id": "abc-123"}, reused); diff != "" {
+		t.Errorf("the provider's own map was modified (-want +got):\n%s", diff)
+	}
+}
+
+func TestMetadataProviderPerCall(t *testing.T) {
+	calls := 0
+	ts, got := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+		calls++
+		return map[string]any{"trace_id": fmt.Sprintf("call-%d", calls)}, nil
+	})
+
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+	if err != nil {
+		t.Fatalf("Tools() err = %v", err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("Tools() returned %d tools, want 1", len(tools))
+	}
+	fnTool, ok := tools[0].(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatalf("tool is %T, want toolinternal.FunctionTool", tools[0])
+	}
+
+	for i := 1; i <= 2; i++ {
+		if _, err := fnTool.Run(agent.NewToolContext(invCtx, "", nil, nil), map[string]any{"city": "Paris"}); err != nil {
+			t.Fatalf("Run() call %d err = %v", i, err)
+		}
+	}
+
+	if calls != 2 {
+		t.Errorf("provider called %d times, want 2", calls)
+	}
+	if len(got.metas) != 2 {
+		t.Fatalf("server received %d calls, want 2", len(got.metas))
+	}
+	gotMetas := []map[string]any{
+		providerMeta(got.metas[0]),
+		providerMeta(got.metas[1]),
+	}
+	wantMetas := []map[string]any{
+		{"trace_id": "call-1"},
+		{"trace_id": "call-2"},
+	}
+	if diff := cmp.Diff(wantMetas, gotMetas); diff != "" {
+		t.Errorf("server-side _meta across calls mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestMetadataProviderReceivesToolContext checks the provider is handed the
+// live invocation's context, including values set on the request context.
+func TestMetadataProviderReceivesToolContext(t *testing.T) {
+	type traceKey struct{}
+	var gotInvocationID string
+	ts, got := startMetaEchoServer(t, func(ctx agent.Context) (map[string]any, error) {
+		gotInvocationID = ctx.InvocationID()
+		traceID, _ := ctx.Value(traceKey{}).(string)
+		return map[string]any{"trace_id": traceID}, nil
+	})
+	reqCtx := context.WithValue(t.Context(), traceKey{}, "abc-123")
+	invCtx, err := runSingleTool(t, reqCtx, ts)
+	if err != nil {
+		t.Fatalf("Run() err = %v", err)
+	}
+	if gotInvocationID != invCtx.InvocationID() {
+		t.Errorf("provider got invocation ID %q, want %q", gotInvocationID, invCtx.InvocationID())
+	}
+	wantMeta := map[string]any{"trace_id": "abc-123"}
+	if diff := cmp.Diff(wantMeta, providerMeta(got.meta)); diff != "" {
+		t.Errorf("server-side _meta mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestMetadataProviderConfirmation(t *testing.T) {
+	tests := []struct {
+		name               string
+		confirmation       *toolconfirmation.ToolConfirmation
+		providerErr        error
+		wantErr            error
+		wantProviderCalled bool
+		wantServerCalled   bool
+		wantMeta           map[string]any
+	}{
+		{
+			name:               "no confirmation",
+			confirmation:       nil,
+			providerErr:        errors.New("provider ran before confirmation"),
+			wantErr:            tool.ErrConfirmationRequired,
+			wantProviderCalled: false,
+			wantServerCalled:   false,
+		},
+		{
+			name:               "rejected confirmation",
+			confirmation:       &toolconfirmation.ToolConfirmation{Confirmed: false},
+			providerErr:        errors.New("provider ran on rejected confirmation"),
+			wantErr:            tool.ErrConfirmationRejected,
+			wantProviderCalled: false,
+			wantServerCalled:   false,
+		},
+		{
+			name:               "approved confirmation",
+			confirmation:       &toolconfirmation.ToolConfirmation{Confirmed: true},
+			wantErr:            nil,
+			wantProviderCalled: true,
+			wantServerCalled:   true,
+			wantMeta:           map[string]any{"trace_id": "abc-123"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+			got := &metaCapture{}
+			server := mcp.NewServer(&mcp.Implementation{Name: "meta_server", Version: "v1.0.0"}, nil)
+			mcp.AddTool(server,
+				&mcp.Tool{Name: "get_weather", Description: "returns weather in the given city"},
+				func(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, Output, error) {
+					got.called = true
+					got.meta = req.Params.Meta
+					return nil, Output{WeatherSummary: "sunny"}, nil
+				})
+			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+				t.Fatalf("server.Connect() err = %v", err)
+			}
+
+			providerCalled := false
+			ts, err := mcptoolset.New(mcptoolset.Config{
+				Transport:           clientTransport,
+				RequireConfirmation: true,
+				MetadataProvider: func(ctx agent.Context) (map[string]any, error) {
+					providerCalled = true
+					if tc.providerErr != nil {
+						return nil, tc.providerErr
+					}
+					return map[string]any{"trace_id": "abc-123"}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("mcptoolset.New() err = %v", err)
+			}
+
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+			if err != nil {
+				t.Fatalf("Tools() err = %v", err)
+			}
+			if len(tools) != 1 {
+				t.Fatalf("Tools() returned %d tools, want 1", len(tools))
+			}
+			fnTool, ok := tools[0].(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatalf("tool is %T, want toolinternal.FunctionTool", tools[0])
+			}
+
+			_, err = fnTool.Run(agent.NewToolContext(invCtx, "", nil, tc.confirmation), map[string]any{"city": "Paris"})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Run() err = %v, want %v", err, tc.wantErr)
+			}
+			if providerCalled != tc.wantProviderCalled {
+				t.Errorf("providerCalled = %v, want %v", providerCalled, tc.wantProviderCalled)
+			}
+			if got.called != tc.wantServerCalled {
+				t.Errorf("server called = %v, want %v", got.called, tc.wantServerCalled)
+			}
+			if tc.wantServerCalled {
+				if diff := cmp.Diff(tc.wantMeta, providerMeta(got.meta)); diff != "" {
+					t.Errorf("server-side _meta mismatch (-want +got):\n%s", diff)
+				}
+			}
+		})
+	}
+}
+
+// TestAuthRedirectPolicy covers where a Config.Auth credential may follow a
+// redirect. auth.Transport applies the credential on every hop, below the layer
+// where net/http strips Authorization on a cross-host redirect, so the
+// toolset's CheckRedirect is the only thing bounding where it travels.
+func TestAuthRedirectPolicy(t *testing.T) {
+	const token = "user-tok"
+	allowAll := func(*http.Request, []*http.Request) error { return nil }
+	tests := []struct {
+		name string
+		// crossHost makes the endpoint redirect every request to a server
+		// on another host. Otherwise the endpoint redirects /mcp to /mcp/
+		// and serves MCP there itself.
+		crossHost     bool
+		checkRedirect func(*http.Request, []*http.Request) error
+		// retarget installs a caller CheckRedirect that points the next hop
+		// at the target server, editing the request alone or the whole
+		// chain net/http hands it.
+		retarget string
+		noAuth   bool
+		wantErr  string
+		// wantTargetHit expects the target to be reached, with the
+		// credential unless noAuth is set.
+		wantTargetHit bool
+	}{
+		{
+			// The target is addressed by a different host name than the
+			// endpoint, so net/http itself would treat the hop as cross-host.
+			name:      "cross host",
+			crossHost: true,
+			wantErr:   "refusing redirect",
+		},
+		{
+			// A caller's own CheckRedirect may stop more redirects, never
+			// let the credential through to more hosts.
+			name:          "cross host with a permissive caller CheckRedirect",
+			crossHost:     true,
+			checkRedirect: allowAll,
+			wantErr:       "refusing redirect",
+		},
+		{
+			// What Starlette and FastMCP send for a mount at /mcp.
+			name:          "same origin trailing slash",
+			wantTargetHit: true,
+		},
+		{
+			// A caller's hook that allows the hop leaves it followed.
+			name:          "same origin with a permissive caller CheckRedirect",
+			checkRedirect: allowAll,
+			wantTargetHit: true,
+		},
+		{
+			// net/http hands the hook a request with Host unset. A hook
+			// that pins it to the URL's host changes nothing on the wire.
+			name: "same origin with a caller CheckRedirect copying Host from the URL",
+			checkRedirect: func(req *http.Request, _ []*http.Request) error {
+				req.Host = req.URL.Host
+				return nil
+			},
+			wantTargetHit: true,
+		},
+		{
+			name: "caller CheckRedirect still applies",
+			checkRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("caller refused")
+			},
+			wantErr: "caller refused",
+		},
+		{
+			// The policy decides before the caller's CheckRedirect does, so
+			// a caller asking for the 3xx itself still gets the refusal.
+			name:      "cross host with a caller CheckRedirect returning ErrUseLastResponse",
+			crossHost: true,
+			checkRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+			wantErr: "refusing redirect",
+		},
+		{
+			// On a hop the policy allows, the caller's sentinel reaches
+			// net/http as is and the 3xx comes back unfollowed.
+			name: "same origin with a caller CheckRedirect returning ErrUseLastResponse",
+			checkRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+			wantErr: "Temporary Redirect",
+		},
+		{
+			// net/http sends the request as CheckRedirect leaves it, so a
+			// caller hook that edits the URL after the policy passed it
+			// must be judged again.
+			name:     "same origin, caller CheckRedirect retargets the request",
+			retarget: "request",
+			wantErr:  "refusing redirect",
+		},
+		{
+			// The hook also sees the chain the policy compares against.
+			name:     "same origin, caller CheckRedirect retargets the request and the chain",
+			retarget: "request and chain",
+			wantErr:  "refusing redirect",
+		},
+		{
+			// Without Auth nothing is installed: net/http follows the hop
+			// and strips nothing, because nothing set Authorization.
+			name:          "cross host without Auth",
+			crossHost:     true,
+			noAuth:        true,
+			wantTargetHit: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var targetAuth []string
+			mcpServer := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+			mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil)
+			record := func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					mu.Lock()
+					targetAuth = append(targetAuth, r.Header.Get("Authorization"))
+					mu.Unlock()
+					next.ServeHTTP(w, r)
+				})
+			}
+
+			target := httptest.NewServer(record(mcpHandler))
+			defer target.Close()
+			mux := http.NewServeMux()
+			endpoint := httptest.NewServer(mux)
+			defer endpoint.Close()
+			// httptest listens on 127.0.0.1; naming the endpoint localhost
+			// makes the hop to target cross-host to net/http.
+			endpointURL := strings.Replace(endpoint.URL, "127.0.0.1", "localhost", 1) + "/mcp"
+			if tc.crossHost {
+				mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+					// Shaped like an SSO bounce: the refusal must not echo it.
+					http.Redirect(w, r, target.URL+"/mcp?code=SECRET-CODE&state=xyz", http.StatusTemporaryRedirect)
+				})
+			} else {
+				mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, "/mcp/", http.StatusTemporaryRedirect)
+				})
+				mux.Handle("/mcp/", record(mcpHandler))
+			}
+
+			checkRedirect := tc.checkRedirect
+			if tc.retarget != "" {
+				targetHost := strings.TrimPrefix(target.URL, "http://")
+				checkRedirect = func(req *http.Request, via []*http.Request) error {
+					req.URL.Host = targetHost
+					if tc.retarget == "request and chain" {
+						for _, v := range via {
+							v.URL.Host = targetHost
+						}
+					}
+					return nil
+				}
+			}
+			var provider auth.CredentialProvider
+			if !tc.noAuth {
+				provider = auth.StaticToken(token)
+			}
+			ts, err := mcptoolset.New(mcptoolset.Config{
+				Transport: &mcp.StreamableClientTransport{
+					Endpoint:   endpointURL,
+					HTTPClient: &http.Client{CheckRedirect: checkRedirect},
+				},
+				Auth: provider,
+			})
+			if err != nil {
+				t.Fatalf("mcptoolset.New() error = %v", err)
+			}
+			defer func() {
+				if err := ts.(io.Closer).Close(); err != nil {
+					t.Errorf("Close() error = %v", err)
+				}
+			}()
+			_, err = ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})))
+			if tc.wantErr == "" && err != nil {
+				t.Errorf("Tools() error = %v, want nil", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Errorf("Tools() error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			// net/http puts the raw Location into the *url.Error it wraps a
+			// CheckRedirect error in, and a cross-host Location is often an
+			// SSO bounce carrying a code or a token.
+			if err != nil && strings.Contains(err.Error(), "SECRET-CODE") {
+				t.Errorf("Tools() error = %v, want it not to carry the Location's query string", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if !tc.wantTargetHit {
+				if len(targetAuth) != 0 {
+					t.Errorf("redirect target received Authorization %q, want no request", targetAuth)
+				}
+				return
+			}
+			wantAuth := "Bearer " + token
+			if tc.noAuth {
+				wantAuth = ""
+			}
+			if len(targetAuth) == 0 || targetAuth[0] != wantAuth {
+				t.Errorf("redirect target received Authorization %q, want %q first", targetAuth, wantAuth)
+			}
+		})
+	}
+}
+
+// TestAuthRedirectStandaloneStream covers a redirect on go-sdk's optional
+// server-to-client stream. On protocol versions before 2026-07-28 the SDK
+// opens it with a GET after initialize, retries a failed GET with growing
+// delays, and then fails the whole session, while an answer that is not
+// text/event-stream only means the server offers no stream. A refused
+// redirect there must read as the latter, and the other host must still see
+// nothing. A 3xx the server labels text/event-stream gets past that check in
+// the SDK and fails the session on its status, at once rather than after the
+// retries.
+func TestAuthRedirectStandaloneStream(t *testing.T) {
+	const token = "user-tok"
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		wantErr     string
+		wantTools   int
+	}{
+		{name: "3xx not labeled as a stream", wantTools: 1},
+		{name: "3xx labeled text/event-stream", contentType: "text/event-stream", wantErr: "Found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var otherAuth []string
+			var gets int
+			other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				otherAuth = append(otherAuth, r.Method+" "+r.Header.Get("Authorization"))
+				mu.Unlock()
+				w.Header().Set("Content-Type", "text/html")
+				if _, err := io.WriteString(w, "<html>docs</html>"); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer other.Close()
+			mcpServer := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+			mcp.AddTool(mcpServer, &mcp.Tool{Name: "ping", Description: "ping"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+				return &mcp.CallToolResult{}, nil, nil
+			})
+			mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil)
+			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					mu.Lock()
+					gets++
+					mu.Unlock()
+					if tc.contentType != "" {
+						// http.Redirect keeps a Content-Type set before it.
+						w.Header().Set("Content-Type", tc.contentType)
+					}
+					http.Redirect(w, r, other.URL+"/docs", http.StatusFound)
+					return
+				}
+				mcpHandler.ServeHTTP(w, r)
+			}))
+			defer endpoint.Close()
+
+			ts, err := mcptoolset.New(mcptoolset.Config{
+				Endpoint: strings.Replace(endpoint.URL, "127.0.0.1", "localhost", 1) + "/mcp",
+				Auth:     auth.StaticToken(token),
+			})
+			if err != nil {
+				t.Fatalf("mcptoolset.New() error = %v", err)
+			}
+			defer func() {
+				if err := ts.(io.Closer).Close(); err != nil {
+					t.Errorf("Close() error = %v", err)
+				}
+			}()
+			start := time.Now()
+			tools, err := ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})))
+			if tc.wantErr == "" && (err != nil || len(tools) != tc.wantTools) {
+				t.Errorf("Tools() = %d tools, %v, want %d tools and no error", len(tools), err, tc.wantTools)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Errorf("Tools() error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			// The SDK's retry delays add up to well over this.
+			if took := time.Since(start); took > 5*time.Second {
+				t.Errorf("Tools() took %v, want it not to wait out the stream's retries", took)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if gets == 0 {
+				t.Fatal("the SDK opened no standalone stream, so this test exercised nothing")
+			}
+			if len(otherAuth) != 0 {
+				t.Errorf("redirect target received %q, want no request", otherAuth)
+			}
+		})
+	}
+}
+
+// TestAuthRedirectLocationStaysOut covers the exits from the toolset other
+// than a first call's error: Close, which sends a DELETE through the same
+// client, the log line a reconnect writes when the old session's Close
+// fails, a call on a session that is already up, and the error of a
+// reconnect that is itself redirected. A refused redirect on any of them
+// must not carry the server's Location.
+func TestAuthRedirectLocationStaysOut(t *testing.T) {
+	const token = "user-tok"
+	var mu sync.Mutex
+	var otherHits int
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		otherHits++
+		mu.Unlock()
+		http.Error(w, "x", http.StatusTeapot)
+	}))
+	defer other.Close()
+	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	mcp.AddTool(mcpServer, &mcp.Tool{Name: "ping", Description: "ping"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{}, nil, nil
+	})
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil)
+	var deletes atomic.Int32
+	// While dropPosts is set, the server drops every connection on a POST. A
+	// call then fails with a connection error the toolset answers by
+	// reconnecting, and the reconnect first closes the dead session, which
+	// sends the DELETE. That DELETE clears dropPosts, so the new session can
+	// start. With redirectAfterDrop set it also sets redirectPosts, and the
+	// reconnect's own POSTs are redirected to the other host.
+	var dropPosts, redirectAfterDrop, redirectPosts atomic.Bool
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes.Add(1)
+			dropPosts.Store(false)
+			redirectPosts.Store(redirectAfterDrop.Load())
+			http.Redirect(w, r, other.URL+"/sso?code=SECRET-CODE&state=xyz", http.StatusTemporaryRedirect)
+			return
+		}
+		if redirectPosts.Load() && r.Method == http.MethodPost {
+			http.Redirect(w, r, other.URL+"/sso?code=SECRET-CODE&state=xyz", http.StatusTemporaryRedirect)
+			return
+		}
+		if dropPosts.Load() && r.Method == http.MethodPost {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := conn.Close(); err != nil {
+				t.Error(err)
+			}
+			return
+		}
+		mcpHandler.ServeHTTP(w, r)
+	}))
+	defer endpoint.Close()
+
+	t.Run("Close", func(t *testing.T) {
+		ts, err := mcptoolset.New(mcptoolset.Config{Endpoint: endpoint.URL + "/mcp", Auth: auth.StaticToken(token)})
+		if err != nil {
+			t.Fatalf("mcptoolset.New() error = %v", err)
+		}
+		if _, err := ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}))); err != nil {
+			t.Fatalf("Tools() error = %v", err)
+		}
+		err = ts.(io.Closer).Close()
+		if err == nil || !strings.Contains(err.Error(), "refusing redirect") {
+			t.Errorf("Close() error = %v, want the refusal", err)
+		}
+		if err != nil && strings.Contains(err.Error(), "SECRET-CODE") {
+			t.Errorf("Close() error = %v, want it not to carry the Location's query string", err)
+		}
+	})
+
+	t.Run("reconnect log line", func(t *testing.T) {
+		var logged strings.Builder
+		prev := log.Writer()
+		log.SetOutput(&logged)
+		defer log.SetOutput(prev)
+		ts, err := mcptoolset.New(mcptoolset.Config{Endpoint: endpoint.URL + "/mcp", Auth: auth.StaticToken(token)})
+		if err != nil {
+			t.Fatalf("mcptoolset.New() error = %v", err)
+		}
+		defer func() { _ = ts.(io.Closer).Close() }()
+		inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+		if _, err := ts.Tools(icontext.NewReadonlyContext(inv)); err != nil {
+			t.Fatalf("Tools() error = %v", err)
+		}
+		dropPosts.Store(true)
+		if _, err := ts.Tools(icontext.NewReadonlyContext(inv)); err != nil {
+			t.Fatalf("Tools() across the dropped connection: error = %v", err)
+		}
+		if got := logged.String(); !strings.Contains(got, "failed to close MCP session") {
+			t.Fatalf("log = %q, want the reconnect's close failure, so the test exercised the line", got)
+		} else if strings.Contains(got, "SECRET-CODE") {
+			t.Errorf("log = %q, want it not to carry the Location's query string", got)
+		}
+	})
+	t.Run("call on an established session", func(t *testing.T) {
+		ts, err := mcptoolset.New(mcptoolset.Config{Endpoint: endpoint.URL + "/mcp", Auth: auth.StaticToken(token)})
+		if err != nil {
+			t.Fatalf("mcptoolset.New() error = %v", err)
+		}
+		defer func() { _ = ts.(io.Closer).Close() }()
+		inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+		if _, err := ts.Tools(icontext.NewReadonlyContext(inv)); err != nil {
+			t.Fatalf("Tools() error = %v", err)
+		}
+		redirectPosts.Store(true)
+		defer redirectPosts.Store(false)
+		_, err = ts.Tools(icontext.NewReadonlyContext(inv))
+		if err == nil || !strings.Contains(err.Error(), "refusing redirect") {
+			t.Errorf("Tools() error = %v, want the refusal", err)
+		}
+		if err != nil && strings.Contains(err.Error(), "SECRET-CODE") {
+			t.Errorf("Tools() error = %v, want it not to carry the Location's query string", err)
+		}
+	})
+
+	t.Run("reconnect redirected to another host", func(t *testing.T) {
+		ts, err := mcptoolset.New(mcptoolset.Config{Endpoint: endpoint.URL + "/mcp", Auth: auth.StaticToken(token)})
+		if err != nil {
+			t.Fatalf("mcptoolset.New() error = %v", err)
+		}
+		defer func() { _ = ts.(io.Closer).Close() }()
+		inv := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+		if _, err := ts.Tools(icontext.NewReadonlyContext(inv)); err != nil {
+			t.Fatalf("Tools() error = %v", err)
+		}
+		redirectAfterDrop.Store(true)
+		defer func() {
+			redirectAfterDrop.Store(false)
+			redirectPosts.Store(false)
+		}()
+		dropPosts.Store(true)
+		_, err = ts.Tools(icontext.NewReadonlyContext(inv))
+		for _, want := range []string{"reconnection also failed", "refusing redirect"} {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("Tools() error = %v, want it to contain %q", err, want)
+			}
+		}
+		if err != nil && strings.Contains(err.Error(), "SECRET-CODE") {
+			t.Errorf("Tools() error = %v, want it not to carry the Location's query string", err)
+		}
+	})
+	if deletes.Load() == 0 {
+		t.Error("no DELETE reached the endpoint, so the redirect under test never happened")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if otherHits != 0 {
+		t.Errorf("redirect target received %d requests, want none", otherHits)
+	}
+}
+
+// TestAuthRedirectHookRewritesTarget covers a caller CheckRedirect that
+// leaves the URL's host alone and points the request elsewhere another way:
+// through the Host header, an opaque URL or a path without a leading slash.
+// Through an HTTP forward proxy each of those decides the request target.
+func TestAuthRedirectHookRewritesTarget(t *testing.T) {
+	const token = "user-tok"
+	for _, tc := range []struct {
+		name     string
+		location string // what the endpoint's /mcp answers with
+		hook     func(*http.Request, []*http.Request) error
+	}{
+		{"sets req.Host", "/mcp/", func(req *http.Request, _ []*http.Request) error { req.Host = "evil.test"; return nil }},
+		{"sets req.URL.Opaque", "/mcp/", func(req *http.Request, _ []*http.Request) error { req.URL.Opaque = "//evil.test/mcp/"; return nil }},
+		{"sets a path without a leading slash", "/mcp/", func(req *http.Request, _ []*http.Request) error { req.URL.Path = ".evil.test/mcp/"; return nil }},
+		{"sets a path that makes the host userinfo", "/mcp/", func(req *http.Request, _ []*http.Request) error { req.URL.Path = "@evil.test/mcp/"; return nil }},
+		// A prefix-trimming hook meets a same-origin Location shaped so that
+		// the trimmed path starts with a dot.
+		{"trims a prefix off the path", "/api.evil.test/mcp/", func(req *http.Request, _ []*http.Request) error {
+			req.URL.Path = strings.TrimPrefix(req.URL.Path, "/api")
+			return nil
+		}},
+		// net/http sends the Host header as given, so a respelling of the
+		// endpoint's own name reaches a front end as another name.
+		{"brackets the Host", "/mcp/", func(req *http.Request, _ []*http.Request) error { req.Host = "[endpoint.test]"; return nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			type seen struct{ target, host, authz string }
+			var mu sync.Mutex
+			var got []seen
+			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				got = append(got, seen{r.RequestURI, r.Host, r.Header.Get("Authorization")})
+				mu.Unlock()
+				if r.Host == "endpoint.test" && r.URL.Path == "/mcp" {
+					http.Redirect(w, r, tc.location, http.StatusTemporaryRedirect)
+					return
+				}
+				http.Error(w, "not the endpoint", http.StatusTeapot)
+			}))
+			defer proxy.Close()
+			proxyURL, err := url.Parse(proxy.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ts, err := mcptoolset.New(mcptoolset.Config{
+				Transport: &mcp.StreamableClientTransport{
+					Endpoint: "http://endpoint.test/mcp",
+					HTTPClient: &http.Client{
+						Transport:     &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+						CheckRedirect: tc.hook,
+					},
+				},
+				Auth: auth.StaticToken(token),
+			})
+			if err != nil {
+				t.Fatalf("mcptoolset.New() error = %v", err)
+			}
+			defer func() {
+				if err := ts.(io.Closer).Close(); err != nil {
+					t.Errorf("Close() error = %v", err)
+				}
+			}()
+			_, err = ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})))
+			if err == nil || !strings.Contains(err.Error(), "refusing redirect") {
+				t.Errorf("Tools() error = %v, want it to contain %q", err, "refusing redirect")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, s := range got {
+				if s.host != "endpoint.test" || strings.Contains(s.target, "evil.test") || strings.Contains(s.target, "[") {
+					t.Errorf("proxy received target %q host %q with Authorization %q, want only endpoint.test", s.target, s.host, s.authz)
+				}
+			}
+		})
+	}
+}
+
+// TestAuthRedirectCap pins the hop limit. Installing a CheckRedirect replaces
+// net/http's default cap rather than extending it, so without a caller hook
+// the toolset restores it, and with one the hook alone governs the chain.
+func TestAuthRedirectCap(t *testing.T) {
+	// The server ends the chain past the cap under test, so a missing cap
+	// fails the hop count instead of hanging the package.
+	const serverStops = 15
+	allowAll := func(*http.Request, []*http.Request) error { return nil }
+	for _, tc := range []struct {
+		name          string
+		checkRedirect func(*http.Request, []*http.Request) error
+		wantErr       string
+		wantMaxHop    int32
+	}{
+		// The literals, not credredirect.MaxRedirects: net/http's own default
+		// is 10 requests per chain, the original and nine redirects.
+		{name: "no caller CheckRedirect", wantErr: "stopped after 10 redirects", wantMaxHop: 9},
+		{name: "permissive caller CheckRedirect", checkRedirect: allowAll, wantErr: "Loop Detected", wantMaxHop: serverStops + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Count the longest chain rather than requests.
+			var maxHop atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hop, _ := strconv.Atoi(r.URL.Query().Get("hop"))
+				if int32(hop) > maxHop.Load() {
+					maxHop.Store(int32(hop))
+				}
+				if hop > serverStops {
+					http.Error(w, "redirect loop", http.StatusLoopDetected)
+					return
+				}
+				http.Redirect(w, r, fmt.Sprintf("%s?hop=%d", r.URL.Path, hop+1), http.StatusTemporaryRedirect)
+			}))
+			defer srv.Close()
+
+			ts, err := mcptoolset.New(mcptoolset.Config{
+				Transport: &mcp.StreamableClientTransport{
+					Endpoint:   srv.URL + "/mcp",
+					HTTPClient: &http.Client{CheckRedirect: tc.checkRedirect},
+				},
+				Auth: auth.StaticToken("tok"),
+			})
+			if err != nil {
+				t.Fatalf("mcptoolset.New() error = %v", err)
+			}
+			defer func() {
+				if err := ts.(io.Closer).Close(); err != nil {
+					t.Errorf("Close() error = %v", err)
+				}
+			}()
+			_, err = ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Tools() error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			if got := maxHop.Load(); got != tc.wantMaxHop {
+				t.Errorf("longest chain reached hop %d, want %d", got, tc.wantMaxHop)
+			}
+		})
 	}
 }

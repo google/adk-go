@@ -15,20 +15,23 @@
 package workflow
 
 import (
+	"context"
 	"errors"
 	"iter"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/session"
 )
 
 func TestRunNode_ErrInvalidRunNodeContext_OnStaticContext(t *testing.T) {
-	t.Skip()
 	ctx := agent.NewContext(newMockCtx(t)) // no subScheduler attached
 	_, err := RunNode[string](ctx, newStubNode("c", "x"), nil)
 	if !errors.Is(err, ErrInvalidRunNodeContext) {
@@ -395,6 +398,382 @@ func TestRunNode_WithRunID_IdempotentReplay(t *testing.T) {
 	}
 }
 
+// gatedRunCountNode counts Run invocations and blocks until release is
+// closed, so a test can hold the leader inside Run while another caller
+// reaches the single-flight gate. outErr fails the run; out, when
+// non-nil, is emitted as the child's output.
+type gatedRunCountNode struct {
+	BaseNode
+	runs    atomic.Int64
+	release chan struct{}
+	out     any
+	outErr  error
+}
+
+func (n *gatedRunCountNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		n.runs.Add(1)
+		<-n.release
+		if n.outErr != nil {
+			yield(nil, n.outErr)
+			return
+		}
+		if n.out != nil {
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Output = n.out
+			yield(ev, nil)
+		}
+	}
+}
+
+// gatedInterruptNode is gatedRunCountNode's HITL counterpart: it blocks
+// until release is closed, then asks for input.
+type gatedInterruptNode struct {
+	BaseNode
+	runs    atomic.Int64
+	release chan struct{}
+}
+
+func (n *gatedInterruptNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		n.runs.Add(1)
+		<-n.release
+		yield(&session.Event{
+			RequestedInput: &session.RequestInput{InterruptID: "iid", Message: "ask"},
+		}, nil)
+	}
+}
+
+// runConcurrentDup issues two RunNode calls sharing one WithRunID against
+// child, holding the leader inside Run until the second caller is durably
+// parked on the gate, then releases both. Results are indexed leader-first.
+// synctest.Wait is what makes the overlap a rendezvous instead of a race
+// against a deadline.
+func runConcurrentDup(t *testing.T, child *gatedRunCountNode) (outs [2]string, errs [2]error) {
+	t.Helper()
+	n := NewDynamicNode[string, string](
+		"orch",
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				outs[0], errs[0] = RunNode[string](ctx, child, "x", WithRunID("dup"))
+			})
+			synctest.Wait() // leader is inside child.Run, parked on release
+
+			wg.Go(func() {
+				outs[1], errs[1] = RunNode[string](ctx, child, "x", WithRunID("dup"))
+			})
+			synctest.Wait() // second caller is parked on the gate, not merely started
+
+			close(child.release)
+			wg.Wait()
+			return "", nil
+		},
+		NodeConfig{},
+	)
+	if _, err := drainDynamicWithErr(t, n, ""); err != nil {
+		t.Fatalf("orchestrator Run error: %v", err)
+	}
+	return outs, errs
+}
+
+// TestRunNode_WithRunID_ConcurrentSingleFlight: two concurrent RunNode
+// calls sharing one WithRunID resolve the same childPath, so the child
+// runs once and both callers receive its output.
+func TestRunNode_WithRunID_ConcurrentSingleFlight(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		child := &gatedRunCountNode{
+			BaseNode: NewBaseNode("dupchild", "", NodeConfig{}),
+			release:  make(chan struct{}),
+			out:      "shared_value",
+		}
+		outs, errs := runConcurrentDup(t, child)
+
+		if got := child.runs.Load(); got != 1 {
+			t.Errorf("child ran %d times, want exactly 1", got)
+		}
+		for i := range outs {
+			if errs[i] != nil {
+				t.Errorf("caller %d: unexpected error: %v", i, errs[i])
+			}
+			if outs[i] != "shared_value" {
+				t.Errorf("caller %d: output = %q, want %q", i, outs[i], "shared_value")
+			}
+		}
+	})
+}
+
+// TestRunNode_WithRunID_ConcurrentSharesInterrupt: concurrent callers of
+// one HITL child produce a single RequestedInput, so the user is asked to
+// approve once rather than once per caller.
+func TestRunNode_WithRunID_ConcurrentSharesInterrupt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		child := &gatedInterruptNode{
+			BaseNode: NewBaseNode("dupchild", "", NodeConfig{}),
+			release:  make(chan struct{}),
+		}
+		var errs [2]error
+		n := NewDynamicNode[string, string](
+			"orch",
+			func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
+				var wg sync.WaitGroup
+				wg.Go(func() {
+					_, errs[0] = RunNode[string](ctx, child, "x", WithRunID("dup"))
+				})
+				synctest.Wait()
+
+				wg.Go(func() {
+					_, errs[1] = RunNode[string](ctx, child, "x", WithRunID("dup"))
+				})
+				synctest.Wait()
+
+				close(child.release)
+				wg.Wait()
+				return "", nil
+			},
+			NodeConfig{},
+		)
+		events, _ := drainDynamicWithErr(t, n, "")
+
+		if got := child.runs.Load(); got != 1 {
+			t.Errorf("child ran %d times, want exactly 1 (an interrupt is shared, not re-run)", got)
+		}
+		var asks int
+		for _, ev := range events {
+			if ev.RequestedInput != nil {
+				asks++
+			}
+		}
+		if asks != 1 {
+			t.Errorf("emitted %d RequestedInput events, want exactly 1", asks)
+		}
+		for i, err := range errs {
+			if !errors.Is(err, ErrNodeInterrupted) {
+				t.Errorf("caller %d: error = %v, want ErrNodeInterrupted", i, err)
+			}
+		}
+	})
+}
+
+// TestRunNode_WithRunID_ConcurrentSharesFailure: a caller waiting on a
+// leader whose child fails receives the leader's error instead of running
+// the child again, so side effects are not repeated on the failure path.
+func TestRunNode_WithRunID_ConcurrentSharesFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		child := &gatedRunCountNode{
+			BaseNode: NewBaseNode("dupchild", "", NodeConfig{}),
+			release:  make(chan struct{}),
+			outErr:   errors.New("boom"),
+		}
+		_, errs := runConcurrentDup(t, child)
+
+		if got := child.runs.Load(); got != 1 {
+			t.Errorf("child ran %d times, want exactly 1 (a failure is shared, not re-run)", got)
+		}
+		for i, err := range errs {
+			if !errors.Is(err, ErrNodeFailed) {
+				t.Errorf("caller %d: error = %v, want ErrNodeFailed", i, err)
+			}
+		}
+	})
+}
+
+// TestRunNode_WithRunID_SequentialRerunAfterFailure: sharing is scoped to
+// one run. A failure is not cached, so a later sequential call with
+// the same WithRunID runs the child again.
+func TestRunNode_WithRunID_SequentialRerunAfterFailure(t *testing.T) {
+	child := &gatedRunCountNode{
+		BaseNode: NewBaseNode("dupchild", "", NodeConfig{}),
+		release:  make(chan struct{}),
+		outErr:   errors.New("boom"),
+	}
+	close(child.release)
+
+	n := NewDynamicNode[string, string](
+		"orch",
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
+			for range 2 {
+				if _, err := RunNode[string](ctx, child, "x", WithRunID("dup")); !errors.Is(err, ErrNodeFailed) {
+					t.Errorf("error = %v, want ErrNodeFailed", err)
+				}
+			}
+			return "", nil
+		},
+		NodeConfig{},
+	)
+	if _, err := drainDynamicWithErr(t, n, ""); err != nil {
+		t.Fatalf("orchestrator Run error: %v", err)
+	}
+	if got := child.runs.Load(); got != 2 {
+		t.Errorf("child ran %d times, want 2 (a failure must not be cached)", got)
+	}
+}
+
+// TestRunNode_WithRunID_WaiterUnblocksOnCancel: a caller parked on the gate
+// is released when the invocation is canceled, rather than waiting out a
+// leader whose child is still working.
+func TestRunNode_WithRunID_WaiterUnblocksOnCancel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		child := &gatedRunCountNode{
+			BaseNode: NewBaseNode("dupchild", "", NodeConfig{}),
+			release:  make(chan struct{}),
+			out:      "shared_value",
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		var waiterErr error
+		n := NewDynamicNode[string, string](
+			"orch",
+			func(nc agent.Context, _ string, _ func(*session.Event) error) (string, error) {
+				var wg sync.WaitGroup
+				wg.Go(func() {
+					_, _ = RunNode[string](nc, child, "x", WithRunID("dup"))
+				})
+				synctest.Wait()
+
+				wg.Go(func() {
+					_, waiterErr = RunNode[string](nc, child, "x", WithRunID("dup"))
+				})
+				synctest.Wait()
+
+				cancel()
+				synctest.Wait() // the waiter returns without the leader finishing
+
+				if !errors.Is(waiterErr, context.Canceled) {
+					t.Errorf("waiter error = %v, want context.Canceled", waiterErr)
+				}
+				close(child.release)
+				wg.Wait()
+				return "", nil
+			},
+			NodeConfig{},
+		)
+		for range n.Run(agent.NewContext(&MockInvocationContext{Context: ctx}), "") { //nolint:errcheck // the node body holds the assertions and cancels its own context
+		}
+	})
+}
+
+// gatedPanicNode blocks until release is closed, then panics. out, when
+// non-nil, is emitted as an output event before the panic, so a test can
+// check that a partial output is not mistaken for a completed run.
+type gatedPanicNode struct {
+	BaseNode
+	runs    atomic.Int64
+	release chan struct{}
+	out     any
+}
+
+func (n *gatedPanicNode) Run(ctx agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		n.runs.Add(1)
+		<-n.release
+		if n.out != nil {
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Output = n.out
+			yield(ev, nil)
+		}
+		panic("child exploded")
+	}
+}
+
+// TestRunNode_WithRunID_PanicNotCachedAsSuccess: a child that panics did
+// not complete, so nothing is cached for its childPath and a later call
+// with the same WithRunID runs it again. The outcome is published from a
+// defer, which a panic also runs, so a guard is what stops a partial
+// output being replayed as a finished run.
+func TestRunNode_WithRunID_PanicNotCachedAsSuccess(t *testing.T) {
+	child := &gatedPanicNode{
+		BaseNode: NewBaseNode("boom", "", NodeConfig{}),
+		release:  make(chan struct{}),
+		out:      "partial_value",
+	}
+	close(child.release)
+
+	var (
+		secondOut      string
+		secondErr      error
+		secondPanicked bool
+	)
+	n := NewDynamicNode[string, string](
+		"orch",
+		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
+			func() {
+				defer func() { _ = recover() }()
+				_, _ = RunNode[string](ctx, child, "x", WithRunID("dup"))
+			}()
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						secondPanicked = true
+					}
+				}()
+				secondOut, secondErr = RunNode[string](ctx, child, "x", WithRunID("dup"))
+			}()
+			return "", nil
+		},
+		NodeConfig{},
+	)
+	if _, err := drainDynamicWithErr(t, n, ""); err != nil {
+		t.Fatalf("orchestrator Run error: %v", err)
+	}
+	if got := child.runs.Load(); got != 2 {
+		t.Errorf("child ran %d times, want 2 (a panic must not be cached)", got)
+	}
+	// The re-run panics again, so the second call never returns.
+	if !secondPanicked {
+		t.Errorf("second call returned (%q, %v) instead of re-running the child", secondOut, secondErr)
+	}
+}
+
+// TestRunNode_WithRunID_ConcurrentSharesPanicAsFailure: a caller waiting
+// on a leader whose child panics is handed a failure. Without the guard
+// it receives the leader's named results as they stood when the panic
+// hit, and reports success with the partial output.
+func TestRunNode_WithRunID_ConcurrentSharesPanicAsFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		child := &gatedPanicNode{
+			BaseNode: NewBaseNode("boom", "", NodeConfig{}),
+			release:  make(chan struct{}),
+			out:      "partial_value",
+		}
+		var (
+			waiterOut string
+			waiterErr error
+		)
+		n := NewDynamicNode[string, string](
+			"orch",
+			func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
+				var wg sync.WaitGroup
+				wg.Go(func() {
+					defer func() { _ = recover() }()
+					_, _ = RunNode[string](ctx, child, "x", WithRunID("dup"))
+				})
+				synctest.Wait() // leader is inside child.Run, parked on release
+
+				wg.Go(func() {
+					waiterOut, waiterErr = RunNode[string](ctx, child, "x", WithRunID("dup"))
+				})
+				synctest.Wait() // waiter is parked on the gate
+
+				close(child.release)
+				wg.Wait()
+				return "", nil
+			},
+			NodeConfig{},
+		)
+		if _, err := drainDynamicWithErr(t, n, ""); err != nil {
+			t.Fatalf("orchestrator Run error: %v", err)
+		}
+		if got := child.runs.Load(); got != 1 {
+			t.Errorf("child ran %d times, want exactly 1", got)
+		}
+		if !errors.Is(waiterErr, ErrNodeFailed) {
+			t.Errorf("waiter got (%q, %v), want an ErrNodeFailed outcome", waiterOut, waiterErr)
+		}
+	})
+}
+
 func TestRunNode_WithRunID_AndUseAsOutput_IdempotentReplay(t *testing.T) {
 	child := newCountingStubNode("c", "delegated_value")
 	n := NewDynamicNode[string, string](
@@ -548,8 +927,7 @@ func TestRunNode_IsolationScope_DistinctPerNodePath(t *testing.T) {
 // isolationScopeAtPath returns the IsolationScope of the last event
 // stamped with nodePath.
 func isolationScopeAtPath(events []*session.Event, nodePath string) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
+	for _, ev := range slices.Backward(events) {
 		if ev.NodeInfo != nil && ev.NodeInfo.Path == nodePath {
 			return ev.IsolationScope
 		}
@@ -613,8 +991,7 @@ func outputBearingPaths(events []*session.Event) []string {
 // stamped with parentPath.
 // outputForAtPath returns NodeInfo.OutputFor of the event at nodePath.
 func outputForAtPath(events []*session.Event, nodePath string) []string {
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
+	for _, ev := range slices.Backward(events) {
 		if ev.NodeInfo != nil && ev.NodeInfo.Path == nodePath {
 			return ev.NodeInfo.OutputFor
 		}
@@ -625,8 +1002,7 @@ func outputForAtPath(events []*session.Event, nodePath string) []string {
 // derivedOutputAtPath returns the output the event at nodePath carries,
 // via childEventOutput (explicit Output or MessageAsOutput-derived).
 func derivedOutputAtPath(events []*session.Event, nodePath string) (any, bool) {
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
+	for _, ev := range slices.Backward(events) {
 		if ev.NodeInfo != nil && ev.NodeInfo.Path == nodePath {
 			return childEventOutput(ev)
 		}
@@ -636,8 +1012,7 @@ func derivedOutputAtPath(events []*session.Event, nodePath string) (any, bool) {
 
 func parentTerminalOutput(t *testing.T, events []*session.Event, parentPath string) any {
 	t.Helper()
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
+	for _, ev := range slices.Backward(events) {
 		if ev.NodeInfo != nil && ev.NodeInfo.Path == parentPath {
 			return ev.Output
 		}
@@ -692,14 +1067,13 @@ func TestRunNode_ConcurrentChildren_NoRace(t *testing.T) {
 		func(ctx agent.Context, _ string, _ func(*session.Event) error) (string, error) {
 			start := make(chan struct{})
 			var wg sync.WaitGroup
-			wg.Add(n)
-			for i := 0; i < n; i++ {
-				// Distinct child + run-id per goroutine so the only shared
-				// mutable state is the parent yield path; a shared run-id
-				// would instead exercise the idempotency-cache race.
+			for i := range n {
+				// Distinct run-id per goroutine so every child actually
+				// runs and the only shared mutable state is the parent
+				// yield path; a shared run-id would collapse the goroutines
+				// into one execution.
 				child := newStubNode("child", "out")
-				go func(i int) {
-					defer wg.Done()
+				wg.Go(func() {
 					defer func() {
 						if r := recover(); r != nil {
 							mu.Lock()
@@ -710,7 +1084,7 @@ func TestRunNode_ConcurrentChildren_NoRace(t *testing.T) {
 					<-start
 					_, errs[i] = RunNode[string](ctx, child, nil,
 						WithUseSubBranch(), WithRunID("c"+strconv.Itoa(i)))
-				}(i)
+				})
 			}
 			close(start)
 			wg.Wait()
@@ -750,8 +1124,7 @@ func TestRunNode_ConcurrentChildren_NoRace(t *testing.T) {
 type waitForOutputNode struct{ BaseNode }
 
 func newWaitForOutputNode(name string) *waitForOutputNode {
-	t := true
-	return &waitForOutputNode{BaseNode: NewBaseNode(name, "", NodeConfig{WaitForOutput: &t})}
+	return &waitForOutputNode{BaseNode: NewBaseNode(name, "", NodeConfig{WaitForOutput: new(true)})}
 }
 
 func (n *waitForOutputNode) Run(agent.Context, any) iter.Seq2[*session.Event, error] {
@@ -768,9 +1141,8 @@ type waitForOutputWithValueNode struct {
 }
 
 func newWaitForOutputWithValueNode(name string, out any) *waitForOutputWithValueNode {
-	t := true
 	return &waitForOutputWithValueNode{
-		BaseNode: NewBaseNode(name, "", NodeConfig{WaitForOutput: &t}),
+		BaseNode: NewBaseNode(name, "", NodeConfig{WaitForOutput: new(true)}),
 		out:      out,
 	}
 }

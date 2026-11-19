@@ -16,27 +16,38 @@ package artifact
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"iter"
 	"maps"
 	"math"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/genai"
 	"rsc.io/omap"
 	"rsc.io/ordered"
+
+	"google.golang.org/adk/v2/platform"
 )
+
+type artifactEntry struct {
+	part           *genai.Part
+	createTime     time.Time
+	customMetadata map[string]any
+}
 
 // inMemoryService is an in-memory implementation of the Service.
 // It is primarily for testing and demonstration purposes.
 type inMemoryService struct {
 	mu sync.RWMutex
 	// ordered(appName, userID, sessionID) -> session
-	artifacts omap.Map[string, *genai.Part]
+	artifacts omap.Map[string, *artifactEntry]
 }
 
 // InMemoryService returns a new in-memory artifact service.
@@ -80,8 +91,8 @@ func (ak *artifactKey) Decode(key string) error {
 // scan returns an iterator over all key-value pairs
 // in the range begin ≤ key ≤ end.
 // TODO: add a concurrent tests.
-func (s *inMemoryService) scan(lo, hi string) iter.Seq2[artifactKey, *genai.Part] {
-	return func(yield func(key artifactKey, val *genai.Part) bool) {
+func (s *inMemoryService) scan(lo, hi string) iter.Seq2[artifactKey, *artifactEntry] {
+	return func(yield func(key artifactKey, val *artifactEntry) bool) {
 		for k, val := range s.artifacts.Scan(lo, hi) {
 			var key artifactKey
 			if err := key.Decode(k); err != nil {
@@ -95,7 +106,7 @@ func (s *inMemoryService) scan(lo, hi string) iter.Seq2[artifactKey, *genai.Part
 	}
 }
 
-func (s *inMemoryService) find(appName, userID, sessionID, fileName string) (int64, *genai.Part, bool) {
+func (s *inMemoryService) find(appName, userID, sessionID, fileName string) (int64, *artifactEntry, bool) {
 	lo := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: math.MaxInt64}.Encode()
 	hi := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName, Version: 0}.Encode()
 	for key, val := range s.scan(lo, hi) {
@@ -105,7 +116,7 @@ func (s *inMemoryService) find(appName, userID, sessionID, fileName string) (int
 	return 0, nil, false
 }
 
-func (s *inMemoryService) get(appName, userID, sessionID, fileName string, version int64) (*genai.Part, bool) {
+func (s *inMemoryService) get(appName, userID, sessionID, fileName string, version int64) (*artifactEntry, bool) {
 	key := artifactKey{
 		AppName:   appName,
 		UserID:    userID,
@@ -116,7 +127,7 @@ func (s *inMemoryService) get(appName, userID, sessionID, fileName string, versi
 	return s.artifacts.Get(key)
 }
 
-func (s *inMemoryService) set(appName, userID, sessionID, fileName string, version int64, artifact *genai.Part) {
+func (s *inMemoryService) set(appName, userID, sessionID, fileName string, version int64, entry *artifactEntry) {
 	key := artifactKey{
 		AppName:   appName,
 		UserID:    userID,
@@ -124,7 +135,7 @@ func (s *inMemoryService) set(appName, userID, sessionID, fileName string, versi
 		FileName:  fileName,
 		Version:   version,
 	}.Encode()
-	s.artifacts.Set(key, artifact)
+	s.artifacts.Set(key, entry)
 }
 
 func (s *inMemoryService) delete(appName, userID, sessionID, fileName string, version int64) {
@@ -140,16 +151,40 @@ func (s *inMemoryService) delete(appName, userID, sessionID, fileName string, ve
 
 // Save implements [artifact.Service]
 func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error) {
-	err := req.Validate()
-	if err != nil {
+	// Allow artifact reference parts, which carry neither text nor inline data
+	// and are only understood by this service; the scope check below re-validates
+	// that a reference stays within the caller's app/user/session.
+	if err := req.validate(true); err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
-	artifact := req.Part
+	if isArtifactRef(req.Part) {
+		parsed, ok := parseArtifactURI(req.Part.FileData.FileURI)
+		if !ok {
+			// Do not echo the URI: it carries app, user, session, and file
+			// identifiers, which are caller data.
+			return nil, errors.New("invalid artifact reference URI")
+		}
+		// Check the caller's session before the user-scope rewrite, so the scope
+		// is validated against the caller, matching Load's per-hop rule.
+		if err := validateArtifactReferenceScope(appName, userID, sessionID, parsed); err != nil {
+			return nil, fmt.Errorf("invalid artifact reference: %w", err)
+		}
+	}
 	// If file is user scoped, store it under user scope path
 	if fileHasUserNamespace(fileName) {
 		sessionID = userScopedArtifactKey
 	}
+	customMetadata := make(map[string]any, len(req.CustomMetadata))
+	for key, value := range req.CustomMetadata {
+		customMetadata[key] = fmt.Sprint(value)
+	}
+	// Read the caller-provided clock outside the service lock. A provider may
+	// call back into the service, so invoking it while locked could deadlock.
+	createTime := platform.Now(ctx)
+	// Copy before taking the lock. The copy only reads the caller's part, and
+	// inline data can be large.
+	part := clonePart(req.Part)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -158,7 +193,11 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	if internalVer, _, ok := s.find(appName, userID, sessionID, fileName); ok {
 		nextVersion = internalVer + 1
 	}
-	s.set(appName, userID, sessionID, fileName, nextVersion, artifact)
+	s.set(appName, userID, sessionID, fileName, nextVersion, &artifactEntry{
+		part:           part,
+		createTime:     createTime,
+		customMetadata: customMetadata,
+	})
 	return &SaveResponse{Version: nextVersion}, nil
 }
 
@@ -198,27 +237,76 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
 	version := req.Version
-	// If file is user scoped, adjust artifactKey part
-	if fileHasUserNamespace(fileName) {
-		sessionID = userScopedArtifactKey
-	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	entry, err := s.resolve(appName, userID, sessionID, fileName, version)
+	s.mu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	// Copy after unlocking. A stored entry never changes after Save, and inline
+	// data can be large.
+	return &LoadResponse{Part: clonePart(entry.part)}, nil
+}
 
-	if version > 0 {
-		artifact, ok := s.get(appName, userID, sessionID, fileName, version)
+// resolve returns the entry Load reports for the named artifact, following
+// artifact references. The caller must hold s.mu for reading.
+func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, version int64) (*artifactEntry, error) {
+	// An artifact part may be a reference (its FileData.FileURI uses the
+	// "artifact://" scheme), pointing at another artifact rather than storing
+	// data. Resolve it here, re-validating scope at each hop so a reference can
+	// never escape the app/user/session it was saved under. maxArtifactRefDepth
+	// bounds resolution against cycles and counts reference hops only, so the
+	// requested artifact does not consume one. This mirrors adk-python's cap of 5
+	// (artifact_util._MAX_ARTIFACT_REFERENCE_DEPTH).
+	const maxArtifactRefDepth = 5
+	remainingDepth := maxArtifactRefDepth
+	for {
+		// User-scoped artifacts are stored under the shared user key, but the
+		// scope check below must use the caller's scope (threaded through as
+		// appName/userID/sessionID), never the storage key; keep the two distinct.
+		lookupSession := sessionID
+		if fileHasUserNamespace(fileName) {
+			lookupSession = userScopedArtifactKey
+		}
+
+		var (
+			entry *artifactEntry
+			ok    bool
+		)
+		if version > 0 {
+			entry, ok = s.get(appName, userID, lookupSession, fileName, version)
+		} else {
+			// pick the latest version
+			_, entry, ok = s.find(appName, userID, lookupSession, fileName)
+		}
 		if !ok {
 			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 		}
-		return &LoadResponse{Part: artifact}, nil
+
+		if !isArtifactRef(entry.part) {
+			return entry, nil
+		}
+
+		parsed, ok := parseArtifactURI(entry.part.FileData.FileURI)
+		if !ok {
+			// Do not echo the URI: it carries app, user, session, and file
+			// identifiers, which are caller data.
+			return nil, errors.New("invalid artifact reference URI")
+		}
+		if err := validateArtifactReferenceScope(appName, userID, sessionID, parsed); err != nil {
+			return nil, fmt.Errorf("invalid artifact reference: %w", err)
+		}
+
+		remainingDepth--
+		if remainingDepth < 0 {
+			return nil, fmt.Errorf("artifact reference resolution exceeded maximum depth of %d", maxArtifactRefDepth)
+		}
+
+		// Follow the reference: the next hop is validated against the session it
+		// just followed, as adk-python resolves each hop against the URI it reached.
+		appName, userID, sessionID, fileName, version = parsed.AppName, parsed.UserID, parsed.SessionID, parsed.FileName, parsed.Version
 	}
-	// pick the latest version
-	_, artifact, ok := s.find(appName, userID, sessionID, fileName)
-	if !ok {
-		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
-	}
-	return &LoadResponse{Part: artifact}, nil
 }
 
 // List implements [artifact.Service]
@@ -248,6 +336,12 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 	// TODO: extend omap to search key only and skip value decoding.
 	for key := range s.scan(userScopeLo, userScopeHi) {
 		if key.SessionID != userScopedArtifactKey { // scan includes key matching `userScopeHi`
+			continue
+		}
+		// Session ID "user" shares this key range with user-scoped artifacts,
+		// so skip that session's private files. Python rejects the ID instead,
+		// but Go already accepts it.
+		if !fileHasUserNamespace(key.FileName) {
 			continue
 		}
 		files[key.FileName] = true
@@ -292,34 +386,51 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName, version := req.AppName, req.UserID, req.SessionID, req.FileName, req.Version
-	if fileHasUserNamespace(fileName) {
+	userScoped := fileHasUserNamespace(fileName)
+	if userScoped {
 		sessionID = userScopedArtifactKey
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var artifact *genai.Part
+	var entry *artifactEntry
 	var ok bool
 	if version > 0 {
-		artifact, ok = s.get(appName, userID, sessionID, fileName, version)
+		entry, ok = s.get(appName, userID, sessionID, fileName, version)
 	} else {
-		version, artifact, ok = s.find(appName, userID, sessionID, fileName)
+		version, entry, ok = s.find(appName, userID, sessionID, fileName)
 	}
 
 	if !ok {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
 
-	mimeType := "text/plain"
-	if artifact != nil && artifact.InlineData != nil {
-		mimeType = artifact.InlineData.MIMEType
+	escapedAppName := url.PathEscape(appName)
+	escapedUserID := url.PathEscape(userID)
+	escapedFileName := url.PathEscape(fileName)
+	canonicalURI := fmt.Sprintf("memory://apps/%s/users/%s/sessions/%s/artifacts/%s/versions/%d", escapedAppName, escapedUserID, url.PathEscape(sessionID), escapedFileName, version)
+	if userScoped {
+		canonicalURI = fmt.Sprintf("memory://apps/%s/users/%s/artifacts/%s/versions/%d", escapedAppName, escapedUserID, escapedFileName, version)
+	}
+	// Report the media type the same way adk-python's in-memory service does:
+	// inline data carries its own, text is text/plain, and a reference has no
+	// media type until it is loaded.
+	var mimeType string
+	switch {
+	case entry.part.InlineData != nil:
+		mimeType = entry.part.InlineData.MIMEType
+	case entry.part.Text != "":
+		mimeType = "text/plain"
 	}
 
 	return &GetArtifactVersionResponse{
 		ArtifactVersion: &ArtifactVersion{
-			Version:  version,
-			MimeType: mimeType,
+			Version:        version,
+			CanonicalURI:   canonicalURI,
+			CustomMetadata: maps.Clone(entry.customMetadata),
+			CreateTime:     entry.createTime,
+			MimeType:       mimeType,
 		},
 	}, nil
 }

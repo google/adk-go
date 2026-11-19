@@ -17,9 +17,13 @@ package auth
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
+	"cloud.google.com/go/auth/credentials"
+	"cloud.google.com/go/auth/oauth2adapt"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/idtoken"
@@ -33,15 +37,54 @@ type CredentialProvider interface {
 	// and deadlines.
 	//
 	// A provider that needs the acting user's identity (for example the GCP
-	// provider, which keys on the user) recovers the ADK context from ctx via a
-	// shared helper introduced together with the first provider that needs it —
-	// so identity rides on the one ADK context rather than an auth-specific key.
+	// provider, which keys on the user) recovers it from ctx via
+	// IdentityFromContext in the agent package — so identity rides on the one
+	// ADK context rather than an auth-specific key.
 	//
 	// When interactive (3-legged) consent is required and cannot be completed
-	// non-interactively, Credential returns a *ConsentRequiredError carrying the
-	// authorization URI; the tool layer turns that into a human-in-the-loop
+	// non-interactively, Credential returns an error wrapping a
+	// *ConsentRequiredError that carries the authorization URI — find it with
+	// errors.As, since a provider may wrap it. The tool layer turns that into a
+	// human-in-the-loop
 	// consent round-trip. Non-interactive providers never return it.
 	Credential(ctx context.Context) (Credential, error)
+}
+
+// RefreshingProvider is an optional [CredentialProvider] capability. After a
+// credential is rejected downstream (HTTP 401/403) — and the request body can be
+// replayed — [Transport] calls Refresh to obtain a fresh credential and retries
+// the request once. Providers without a cache, or that self-refresh (e.g. an
+// oauth2.TokenSource), need not implement it.
+//
+// adk-python's equivalent seam is BaseCredentialRefresher, whose refresh() also
+// takes the credential rather than re-deriving it
+// (auth/refresher/base_credential_refresher.py). The retry itself has no
+// adk-python counterpart.
+type RefreshingProvider interface {
+	CredentialProvider
+
+	// Refresh resolves a replacement for rejected. It must not return rejected,
+	// and must not leave rejected where a later call will find it.
+	//
+	// Minting is not required. An implementation that finds another request has
+	// already replaced the credential should return what that request fetched,
+	// and one that is rate-limiting itself should return an error rather than
+	// mint again — a forced refresh typically invalidates a live token, so a
+	// downstream returning 401 to everything must not set the rate at which that
+	// happens.
+	//
+	// rejected is the credential [Transport] applied to the request the
+	// downstream turned down — passed in rather than looked up, because between
+	// the rejection and this call another request may already have replaced the
+	// cached value, and force-refreshing a credential that is working destroys a
+	// good token. It is never nil.
+	//
+	// Returning an error leaves [Transport] to surface the downstream's original
+	// rejection, so a provider that cannot refresh should say so rather than
+	// return the credential it was given. The exception is
+	// [ConsentRequiredError], which Transport propagates: it is the one refusal
+	// the caller can act on.
+	Refresh(ctx context.Context, rejected Credential) (Credential, error)
 }
 
 // ProviderFunc adapts an ordinary function to a [CredentialProvider].
@@ -68,7 +111,9 @@ type ConsentRequiredError struct {
 	// Nonce is an opaque value echoed back to correlate the consent response.
 	// Sensitive on the same terms as AuthURI, which embeds it.
 	Nonce string
-	// Key is the credential-store key to resume the flow under.
+	// Key is an opaque, caller-defined identifier for the credential this flow
+	// will produce, for a consumer that has to resume the flow later. It is not a
+	// [CredentialKey], which identifies a [CredentialStore] entry.
 	Key string
 }
 
@@ -110,23 +155,33 @@ func TokenSourceProvider(ts oauth2.TokenSource) CredentialProvider {
 // scopeCloudPlatform is the default ADC scope, matching adk-python and gcloud.
 const scopeCloudPlatform = "https://www.googleapis.com/auth/cloud-platform"
 
-func adcTokenSource(ctx context.Context, scopes []string) (oauth2.TokenSource, error) {
+// adcTokenSource discovers Application Default Credentials. Discovery reads the
+// environment and takes no context, and the returned source mints tokens on
+// its own context, so nothing here is bound to the caller's.
+func adcTokenSource(scopes []string) (oauth2.TokenSource, error) {
 	if len(scopes) == 0 {
 		scopes = []string{scopeCloudPlatform}
 	}
-	creds, err := google.FindDefaultCredentials(ctx, scopes...)
+	// The compute credential keeps the slice and reads it on every refresh.
+	creds, err := credentials.DetectDefault(&credentials.DetectOptions{
+		Scopes: slices.Clone(scopes),
+		// Discarded: the library's default logger answers
+		// GOOGLE_SDK_GO_LOGGING_LEVEL=debug by writing each token request and
+		// response to stderr, signed assertion and minted token included.
+		Logger: slog.New(slog.DiscardHandler),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("auth: find default credentials: %w", err)
 	}
-	return creds.TokenSource, nil
+	return oauth2adapt.TokenSourceFromTokenProvider(creds), nil
 }
 
 // ADC returns a provider backed by Google Application Default Credentials.
 // Credentials are discovered lazily on first use and reused thereafter; with no
 // scopes the cloud-platform scope is used.
 func ADC(scopes ...string) CredentialProvider {
-	return lazyTokenSource(func(ctx context.Context) (oauth2.TokenSource, error) {
-		return adcTokenSource(ctx, scopes)
+	return lazyTokenSource(func(context.Context) (oauth2.TokenSource, error) {
+		return adcTokenSource(scopes)
 	})
 }
 
@@ -152,7 +207,10 @@ type ServiceAccountConfig struct {
 func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 	return lazyTokenSource(func(ctx context.Context) (oauth2.TokenSource, error) {
 		if cfg.Audience != "" {
-			var opts []option.ClientOption
+			// Discarded: the auth library's default logger answers
+			// GOOGLE_SDK_GO_LOGGING_LEVEL=debug by writing the token request and
+			// response to stderr, signed assertion and minted ID token included.
+			opts := []option.ClientOption{option.WithLogger(slog.New(slog.DiscardHandler))}
 			if len(cfg.JSONKey) > 0 {
 				opts = append(opts, option.WithAuthCredentialsJSON(option.ServiceAccount, cfg.JSONKey))
 			}
@@ -163,8 +221,12 @@ func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 			return ts, nil
 		}
 		if len(cfg.JSONKey) > 0 {
-			// Stricter than adk-python (scopes optional there): an explicit-key
-			// access token is scope-bound, so no scopes = unusable — fail fast.
+			// An explicit-key access token is scope-bound, so no scopes = unusable.
+			// This runs on the first Credential call, not in ServiceAccount, which
+			// returns no error and so cannot fail at construction. adk-python
+			// rejects the same case at the same point, when it first exchanges the
+			// key (service_account_exchanger.py), and defaults scopes only for
+			// default credentials, as adcTokenSource does below.
 			if len(cfg.Scopes) == 0 {
 				return nil, fmt.Errorf("auth: scopes are required for a service-account access token")
 			}
@@ -174,7 +236,7 @@ func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 			}
 			return creds.TokenSource, nil
 		}
-		return adcTokenSource(ctx, cfg.Scopes)
+		return adcTokenSource(cfg.Scopes)
 	})
 }
 
@@ -207,9 +269,25 @@ func lazyTokenSource(init func(context.Context) (oauth2.TokenSource, error)) Cre
 			cur = a
 			// Detach from the caller's cancellation (keep values); initTimeout bounds it.
 			go func() {
-				dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), initTimeout)
-				defer cancel()
-				a.ts, a.err = init(dctx)
+				// ictx is left live after a timely init because the source may keep
+				// it. The explicit-key source does, for the HTTP client it carries,
+				// and ADC discovery ignores it. A timer bounds init instead of a
+				// deadline because it can be stopped.
+				ictx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+				timer := time.AfterFunc(initTimeout, cancel)
+				a.ts, a.err = init(ictx)
+				if !timer.Stop() {
+					// The attempt overran its bound, so it is reported as failed
+					// and a source it returned is dropped, ADC's included, which
+					// does not depend on the now canceled ictx.
+					bound := fmt.Errorf("auth: credential initialization exceeded %v: %w", initTimeout, context.DeadlineExceeded)
+					if a.err != nil {
+						// %v: init's error wraps context.Canceled, which callers
+						// treat as cancellation rather than failure.
+						bound = fmt.Errorf("%w: %v", bound, a.err)
+					}
+					a.err = bound
+				}
 				mu.Lock()
 				if a.err == nil {
 					ts = a.ts

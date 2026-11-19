@@ -80,6 +80,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	})
 
 	router := mux.NewRouter().StrictSlash(true)
+
+	// Apply request-body size limit to mitigate memory-exhaustion DoS before
+	// any routes (including /health) are registered. A MaxPayloadSize of 0 or
+	// less selects DefaultMaxPayloadSize.
+	router.Use(MaxBytesMiddleware(cfg.MaxPayloadSize))
+
 	router.HandleFunc("/health", healthHandler).Methods(http.MethodGet, http.MethodHead)
 	// TODO: Allow taking a prefix to allow customizing the path
 	// where the ADK REST API will be served.
@@ -110,19 +116,27 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			// upgrader would then apply gorilla's default check on top and
 			// refuse an origin we just allowed. Giving it ours settles both
 			// with one rule.
-			CheckOrigin: policy.CheckOrigin,
+			CheckOrigin:          policy.CheckOrigin,
+			MaxLiveMessageBytes:  cfg.MaxLiveMessageBytes,
+			LiveKeepaliveTimeout: cfg.LiveKeepaliveTimeout,
+			MaxLiveSessions:      cfg.MaxLiveSessions,
 		})),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
 		routers.NewArtifactsAPIRouter(artifactsController),
 		routers.NewVersionAPIRouter(controllers.NewVersionAPIController()),
-		routers.NewAgentGraphAPIRouter(controllers.NewAgentGraphAPIController(cfg.AgentLoader)),
+		&routers.AgentBuilderAPIRouter{}, // Ungated on purpose; see its doc comment.
 		&routers.TestsAPIRouter{},
 		&routers.EvalAPIRouter{},
 	}
+	// Opt-in: traces carry tool-call arguments and responses, and the agent
+	// graph names every tool the agent can call.
 	if cfg.DebugAPIConfig.IncludeDebugAPI {
 		debugController := controllers.NewDebugAPIController(cfg.SessionService, cfg.AgentLoader, debugTelemetry)
 		debugController.WithAuthorizer(authorizer)
-		subrouters = append(subrouters, routers.NewDebugAPIRouter(debugController))
+		subrouters = append(subrouters,
+			routers.NewDebugAPIRouter(debugController),
+			routers.NewAgentGraphAPIRouter(controllers.NewAgentGraphAPIController(cfg.AgentLoader)),
+		)
 	}
 
 	authenticator := cfg.Authenticator
@@ -151,6 +165,9 @@ type ServerConfig struct {
 	MemoryService   memory.Service
 	AgentLoader     agent.Loader
 	ArtifactService artifact.Service
+	// SSEWriteTimeout is the write deadline for a /run_sse response, measured
+	// from when the request arrives. Zero means 120 seconds. Negative means
+	// no deadline, which also clears the http.Server's WriteTimeout.
 	SSEWriteTimeout time.Duration
 	PluginConfig    runner.PluginConfig
 	DebugConfig     DebugTelemetryConfig
@@ -249,11 +266,41 @@ type ServerConfig struct {
 	// different applications need different compaction, or must not share a
 	// summarizer, run them on separate servers.
 	Compaction *compaction.Config
+	// MaxPayloadSize limits request body size in bytes. If <= 0,
+	// DefaultMaxPayloadSize is used.
+	MaxPayloadSize int64
+
+	// MaxLiveMessageBytes caps one client message on a /run_live connection. A
+	// larger message closes the connection with close code 1009. See
+	// [controllers.RuntimeAPIControllerConfig.MaxLiveMessageBytes].
+	//
+	// optional; zero means 16 MiB, negative means no cap
+	MaxLiveMessageBytes int64
+
+	// LiveKeepaliveTimeout drops a /run_live peer that has stopped responding:
+	// one that for this long neither answers a ping nor sends a message, or
+	// that takes longer than this to accept one event. A quiet client that
+	// still answers pings stays connected. See
+	// [controllers.RuntimeAPIControllerConfig.LiveKeepaliveTimeout].
+	//
+	// optional; zero means 40s, negative turns the keepalive off
+	LiveKeepaliveTimeout time.Duration
+
+	// MaxLiveSessions caps how many /run_live connections this server carries
+	// at once. Past the cap the handshake is refused with 503. See
+	// [controllers.RuntimeAPIControllerConfig.MaxLiveSessions].
+	//
+	// optional; zero or negative means no cap
+	MaxLiveSessions int
 }
 
 // DebugAPIConfig contains parameters for the debug API.
 type DebugAPIConfig struct {
-	// Controls if [routers.NewDebugAPIRouter] is included
+	// IncludeDebugAPI serves [routers.NewDebugAPIRouter] and
+	// [routers.NewAgentGraphAPIRouter], which expose tool-call arguments,
+	// responses and tool names. The web UI's Traces and agent structure
+	// panels need them.
+	//
 	// WARNING: do not use debug api on PROD environment
 	IncludeDebugAPI bool
 }

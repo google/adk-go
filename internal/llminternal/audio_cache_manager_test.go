@@ -39,6 +39,7 @@ func (m *audioMockArtifacts) Save(ctx context.Context, name string, data *genai.
 }
 
 func (m *audioMockArtifacts) List(context.Context) (*artifact.ListResponse, error) { return nil, nil }
+
 func (m *audioMockArtifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) {
 	return nil, nil
 }

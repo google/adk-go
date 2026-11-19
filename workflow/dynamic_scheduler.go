@@ -15,6 +15,7 @@
 package workflow
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -37,7 +38,8 @@ type dynamicSubScheduler struct {
 	// Context._output_for_ancestors.
 	outputForAncestors []string
 
-	// mu guards everything below. Never held across child.Run.
+	// mu guards everything below. Never held across child.Run, nor
+	// across the wait in awaitOrLead.
 	mu sync.Mutex
 	// runCountByChild seeds the auto-counter per child name; the
 	// n-th invocation gets runID strconv.Itoa(n).
@@ -46,8 +48,37 @@ type dynamicSubScheduler struct {
 	// childPath ("<parentPath>/<name>@<runID>"). Failures and HITL
 	// interrupts are not cached.
 	resultByPath map[string]any
-	delegation   outputDelegation
+	// inflightByPath holds the run currently in progress for a
+	// childPath, so concurrent callers with the same WithRunID share its
+	// outcome instead of running the child again.
+	inflightByPath map[string]*inflightRun
+	delegation     outputDelegation
+	failedPaths    map[string]struct{}
 }
+
+// runResult is one child run's outcome, shared by every caller that
+// overlapped it. Exactly one of out and err is meaningful.
+type runResult struct {
+	out any
+	err error
+}
+
+// inflightRun is a childPath's run in progress. The leader stores res
+// and closes done; waiters read res only after done is closed, so the
+// close/receive pair carries the write.
+type inflightRun struct {
+	done chan struct{}
+	res  runResult
+}
+
+// publish hands res to the waiters. Called once, by the leader.
+func (r *inflightRun) publish(res runResult) {
+	r.res = res
+	close(r.done)
+}
+
+// result reports the published outcome; valid only once done is closed.
+func (r *inflightRun) result() runResult { return r.res }
 
 // ResolveByRunID implements [agent.DynamicSubScheduler].
 func (s *dynamicSubScheduler) ResolveByRunID(childName, custom string) (string, error) {
@@ -139,6 +170,8 @@ func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func
 		outputForAncestors: ancestors,
 		runCountByChild:    map[string]int{},
 		resultByPath:       map[string]any{},
+		inflightByPath:     map[string]*inflightRun{},
+		failedPaths:        map[string]struct{}{},
 	}
 	s.rehydrateCache()
 	return s
@@ -167,17 +200,58 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ev := range sess.Events().All() {
-		if ev == nil || ev.Output == nil || ev.NodeInfo == nil {
+		if ev == nil || ev.Partial || ev.NodeInfo == nil {
 			continue
 		}
 		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
+		// The parent records child failures even when cancellation stops
+		// a child from emitting its own marker through makeEmit.
+		knownPaths := false
+		if paths, ok := ev.CustomMetadata[workflowFailedChildPathsKey].([]any); ok {
+			// An explicit empty array records a completed inventory with no
+			// uncertain children. Absent/null metadata still means unknown.
+			knownPaths = paths != nil && len(paths) == 0
+			for _, value := range paths {
+				if path, ok := value.(string); ok && path != "" {
+					knownPaths = true
+					s.invalidateCachePath(path)
+				}
+			}
+		}
+		if _, hasOutput := childEventOutput(ev); !knownPaths && !hasOutput && workflowNodeOutcome(ev) != "" {
+			// Cancellation may stop the producer before it reports which
+			// child was in flight. With no completion evidence for that
+			// attempt, conservatively retry rather than replay partial data.
+			s.invalidateCachePath(ev.NodeInfo.Path)
+		}
 		if !strings.HasPrefix(ev.NodeInfo.Path, prefix) {
 			continue
 		}
-		// Last write wins, matching live execution order.
-		s.resultByPath[ev.NodeInfo.Path] = ev.Output
+		// A partial result followed by failure or a pause is not a
+		// cached success. Last outcome wins, as in live execution.
+		if len(ev.LongRunningToolIDs) > 0 || ev.RequestedInput != nil {
+			delete(s.resultByPath, ev.NodeInfo.Path)
+		} else if out, ok := childEventOutput(ev); ok {
+			s.resultByPath[ev.NodeInfo.Path] = out
+		} else if out, delegated := completedDelegatedOutput(ev); delegated {
+			if _, exists := s.resultByPath[ev.NodeInfo.Path]; out != nil || !exists {
+				s.resultByPath[ev.NodeInfo.Path] = out
+			}
+		} else if workflowNodeOutcome(ev) != "" {
+			delete(s.resultByPath, ev.NodeInfo.Path)
+		}
+	}
+}
+
+// A failure of this scheduler's producer invalidates every cached child;
+// a known descendant failure invalidates only that subtree. Called under mu.
+func (s *dynamicSubScheduler) invalidateCachePath(path string) {
+	for cachedPath := range s.resultByPath {
+		if cachedPath == path || strings.HasPrefix(cachedPath, path+"/") {
+			delete(s.resultByPath, cachedPath)
+		}
 	}
 }
 
@@ -187,6 +261,11 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 // call with the same stable WithRunID returns the cached output
 // without re-running the child; auto-counter ids never collide so
 // the cache is effectively bypassed for them.
+//
+// Calls sharing a WithRunID are gated per childPath by awaitOrLead, so
+// overlapping callers share one run's outcome instead of each
+// running the child. A child re-entering its own childPath therefore
+// waits on itself; see WithRunID for the caller-facing rule.
 //
 // Session, invocation metadata, and cancellation come from
 // s.parentCtx. opts carries the resolved RunNodeOption arguments.
@@ -242,23 +321,56 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 	defer span.end()
 	childCtx = spanCtx
 
-	// rawErr is the unwrapped child/emit error. The returned err wraps
-	// the cause with "%w: %v", dropping context.Canceled from the chain,
-	// so span status is classified on rawErr rather than err.
+	// rawErr preserves the original child/emit error for span classification.
 	var rawErr error
 	defer func() { span.recordError(err, rawErr) }()
 
-	// Cached (WithRunID replay): the child already ran, so publish its
-	// output for the delegation immediately. The span opened above still
-	// records the cache hit.
-	if cached, ok := s.lookupCachedOutput(childPath); ok {
-		s.commitDelegation(childPath, cached)
-		return cached, nil
+	// The child already ran (WithRunID replay), or another caller is
+	// running it right now and we shared its outcome. On success, publish
+	// the output for the delegation immediately. The span opened above
+	// still records the hit.
+	if res, hasResult := s.awaitOrLead(childPath); hasResult {
+		if res.err != nil {
+			return nil, res.err
+		}
+		s.commitDelegation(childPath, res.out)
+		return res.out, nil
 	}
+	childCtx, inventoryRecorder := withFailureInventory(childCtx, child)
+	// This caller leads: hand the outcome to every waiter, on every exit
+	// path, so overlapping callers never start a second run. completed is
+	// set at the single success return below; a panic or runtime.Goexit
+	// unwinds past it leaving err nil, which would otherwise publish and
+	// cache that non-completion as a success carrying whatever output the
+	// child had emitted before it stopped.
+	var completed bool
+	var inventory failureInventory
+	defer func() {
+		res := runResult{out: out, err: err}
+		if err == nil && !completed {
+			res = runResult{err: &NodeRunError{
+				ChildName: name, ChildPath: childPath, RunID: runID,
+				Cause: fmt.Errorf("%w: child did not complete", ErrNodeFailed),
+			}}
+		}
+		failureRecorded := false
+		if res.err != nil && !errors.Is(res.err, ErrNodeInterrupted) {
+			// The parent's failure record cannot invalidate this child's
+			// path-keyed cache on a later re-entry. Record the child failure
+			// too, without including the child's error text.
+			ev := session.NewEvent(childCtx, childCtx.InvocationID())
+			ev.NodeInfo = &session.NodeInfo{Path: childPath}
+			ev.CustomMetadata = map[string]any{workflowNodeOutcomeKey: workflowNodeFailureOutcome}
+			recordFailedChildPaths(ev.CustomMetadata, inventory)
+			failureRecorded = s.emitUp(ev) == nil
+		}
+		s.finishRun(childPath, res, failureRecorded, inventory)
+	}()
 
 	var (
-		hasOutput   bool
-		interrupted bool
+		hasOutput    bool
+		interrupted  bool
+		childFailure error
 		// pendingLongRunningIDs collects FunctionCall IDs the child
 		// emitted as long-running (listed in the emitting event's
 		// LongRunningToolIDs). Each is removed when we later see a
@@ -273,10 +385,8 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		if evErr != nil {
 			// Child error wins over any prior interrupt.
 			rawErr = evErr
-			return nil, &NodeRunError{
-				ChildName: name, ChildPath: childPath, RunID: runID,
-				Cause: fmt.Errorf("%w: %v", ErrNodeFailed, evErr),
-			}
+			childFailure = evErr
+			break
 		}
 		if ev == nil {
 			continue
@@ -334,7 +444,13 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 				}
 			}
 		}
-		if childOut, ok := childEventOutput(ev); ok {
+		childOut, hasChildOutput := childEventOutput(ev)
+		delegatedCompletion := false
+		if !hasChildOutput && ev.NodeInfo.Path == childPath {
+			childOut, delegatedCompletion = completedDelegatedOutput(ev)
+			hasChildOutput = delegatedCompletion && childOut != nil
+		}
+		if hasChildOutput {
 			validated, err := validateAndStampOutput(child, childOut, ev)
 			if err != nil {
 				return nil, &NodeRunError{
@@ -344,12 +460,15 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			}
 			out = validated
 			hasOutput = true
+			if delegatedCompletion {
+				ev.CustomMetadata[workflowDelegatedOutputKey] = validated
+			}
 			// Stamp OutputFor so resume can attribute the output: the
 			// emitter's own path plus, under delegation, this parent and
 			// its ancestors (the parent then suppresses its own terminal
 			// event). Mirrors adk-python _enrich_event. A nested child
 			// that already stamped its chain keeps it.
-			if ev.NodeInfo.OutputFor == nil {
+			if !delegatedCompletion && ev.NodeInfo.OutputFor == nil {
 				outputFor := []string{ev.NodeInfo.Path}
 				if opts.useAsOutput {
 					outputFor = append(outputFor, s.parentPath)
@@ -362,9 +481,21 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			rawErr = emitErr
 			return nil, &NodeRunError{
 				ChildName: name, ChildPath: childPath, RunID: runID,
-				Cause: fmt.Errorf("%w: emitUp: %v", ErrNodeFailed, emitErr),
+				Cause: fmt.Errorf("%w: emitUp: %w", ErrNodeFailed, emitErr),
 			}
 		}
+	}
+	if childFailure != nil {
+		// The iterator must finish unwinding before its failure evidence is
+		// trusted: a cleanup panic supersedes the error it yielded earlier.
+		inventory = inventoryRecorder.snapshot()
+		return nil, &NodeRunError{
+			ChildName: name, ChildPath: childPath, RunID: runID,
+			Cause: fmt.Errorf("%w: %w", ErrNodeFailed, childFailure),
+		}
+	}
+	if ctxErr := childCtx.Err(); ctxErr != nil {
+		return nil, &NodeRunError{ChildName: name, ChildPath: childPath, RunID: runID, Cause: fmt.Errorf("%w: %w", ErrNodeFailed, ctxErr)}
 	}
 
 	if opts.raiseOnWait && len(pendingLongRunningIDs) > 0 {
@@ -384,8 +515,8 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		return nil, s.pause(name, childPath, runID, ErrNodeWaitingForOutput)
 	}
 
-	s.storeCachedOutput(childPath, out)
 	s.commitDelegation(childPath, out) // no-op unless this child claimed the delegation
+	completed = true
 	return out, nil
 }
 
@@ -406,17 +537,115 @@ func waitsForOutput(node Node) bool {
 	return w != nil && *w
 }
 
-func (s *dynamicSubScheduler) lookupCachedOutput(childPath string) (any, bool) {
+// awaitOrLead reports the outcome of childPath's run when one is
+// already available, and otherwise makes this caller the leader, which
+// must run the child and publish the outcome via finishRun.
+//
+// A caller arriving while a leader runs blocks until the leader publishes
+// and then shares that outcome — including a failure or a HITL interrupt
+// — instead of running the child again. So overlapping callers never
+// start a second run, whatever the outcome, not just on success.
+// Mirrors adk-python's _check_existing_run, which awaits the in-flight
+// task and hands every concurrent caller the same result.
+//
+// Sharing is confined to callers that overlap one run: nothing is
+// cached for a failure or an interrupt, so a later sequential call finds
+// no entry and re-runs the child, as before.
+//
+// A blocked caller is released early if s.parentCtx is canceled, and its
+// outcome is then that cancellation — the leader keeps the slot and
+// finishes on its own.
+func (s *dynamicSubScheduler) awaitOrLead(childPath string) (runResult, bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	out, ok := s.resultByPath[childPath]
-	return out, ok
+	if out, ok := s.resultByPath[childPath]; ok {
+		s.mu.Unlock()
+		return runResult{out: out}, true
+	}
+	if leader, inflight := s.inflightByPath[childPath]; inflight {
+		s.mu.Unlock()
+		select {
+		case <-leader.done:
+			return leader.result(), true
+		case <-s.parentCtx.Done():
+			return runResult{err: s.parentCtx.Err()}, true
+		}
+	}
+	s.inflightByPath[childPath] = &inflightRun{done: make(chan struct{})}
+	s.mu.Unlock()
+	return runResult{}, false
 }
 
-func (s *dynamicSubScheduler) storeCachedOutput(childPath string, out any) {
+// finishRun publishes res to everyone waiting on childPath and clears the
+// in-flight slot. A successful outcome is also cached so a later call
+// replays it; failures and interrupts are not, matching the pre-existing
+// replay semantics.
+func (s *dynamicSubScheduler) finishRun(childPath string, res runResult, failureRecorded bool, inventory failureInventory) {
+	s.mu.Lock()
+	leader := s.inflightByPath[childPath]
+	delete(s.inflightByPath, childPath)
+	clearFailures := func() {
+		for path := range s.failedPaths {
+			if path == childPath || strings.HasPrefix(path, childPath+"/") {
+				delete(s.failedPaths, path)
+			}
+		}
+	}
+	if res.err == nil {
+		s.resultByPath[childPath] = res.out
+		clearFailures()
+	} else if !errors.Is(res.err, ErrNodeInterrupted) {
+		if failureRecorded && inventory.known {
+			// The child's marker already invalidates its own result. Keep
+			// its latest inventory rather than widening it to the subtree
+			// or retaining failures recovered by a later run of the child.
+			clearFailures()
+			for _, path := range inventory.paths {
+				s.failedPaths[path] = struct{}{}
+			}
+		} else {
+			// Without a recorded child outcome, even its own partial result
+			// may remain in history. Preserve the conservative fallback.
+			s.failedPaths[childPath] = struct{}{}
+		}
+	}
+	s.mu.Unlock()
+	if leader != nil {
+		leader.publish(res)
+	}
+}
+
+func (s *dynamicSubScheduler) childFailures() failureInventory {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.resultByPath[childPath] = out
+	paths := make([]string, 0, len(s.failedPaths)+len(s.inflightByPath))
+	for path := range s.failedPaths {
+		paths = append(paths, path)
+	}
+	for path := range s.inflightByPath {
+		paths = append(paths, path)
+	}
+	// Preserve a known empty inventory so a body-only failure does not
+	// invalidate completed children on retry, as in adk-python's runs cache.
+	return failureInventory{known: true, paths: paths}
+}
+
+// A known inventory is authoritative, including an empty one. Adding a
+// containing NodeRunError path would discard completed nested children.
+func recordFailedChildPaths(metadata map[string]any, inventory failureInventory) {
+	// An error path does not prove a complete inventory: the body may have
+	// returned one sibling's error while another failed after emitting output.
+	if !inventory.known {
+		return
+	}
+	paths := []any{}
+	seen := map[string]bool{}
+	for _, path := range inventory.paths {
+		if path != "" && !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+	}
+	metadata[workflowFailedChildPathsKey] = paths
 }
 
 // claimDelegation reserves the at-most-one output delegation when

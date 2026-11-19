@@ -159,7 +159,10 @@ func TestToSessionEvent_EventActions(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			src := Event{Actions: tc.actions}
-			got := ToSessionEvent(src)
+			got, err := ToSessionEvent(src)
+			if err != nil {
+				t.Fatalf("ToSessionEvent() failed: %v", err)
+			}
 			if diff := cmp.Diff(tc.want, got.Actions); diff != "" {
 				t.Errorf("ToSessionEvent().Actions mismatch (-want +got):\n%s", diff)
 			}
@@ -186,7 +189,10 @@ func TestFromSessionEvent_RoundTrip(t *testing.T) {
 		},
 	}
 
-	got := ToSessionEvent(FromSessionEvent(original))
+	got, err := ToSessionEvent(FromSessionEvent(original))
+	if err != nil {
+		t.Fatalf("ToSessionEvent() failed: %v", err)
+	}
 
 	if diff := cmp.Diff(original.Actions, got.Actions); diff != "" {
 		t.Errorf("round-trip EventActions mismatch (-want +got):\n%s", diff)

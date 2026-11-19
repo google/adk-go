@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
@@ -249,6 +250,65 @@ func TestRunSSEHandler(t *testing.T) {
 	}
 }
 
+func TestRunHandlersAutoCreateSession(t *testing.T) {
+	tests := []struct {
+		name              string
+		streaming         bool
+		autoCreateSession bool
+		wantStatus        int
+		wantSession       bool
+	}{
+		{name: "run creates the session", autoCreateSession: true, wantStatus: http.StatusOK, wantSession: true},
+		{name: "run_sse creates the session", streaming: true, autoCreateSession: true, wantStatus: http.StatusOK, wantSession: true},
+		{name: "run without auto-create", wantStatus: http.StatusNotFound},
+		{name: "run_sse without auto-create", streaming: true, wantStatus: http.StatusNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeAgent, err := agent.New(agent.Config{
+				Name: "testApp",
+				Run:  testAgent([]testAgentResult{{event: makeEvent("invocation-1", "testApp", "Hello")}}),
+			})
+			if err != nil {
+				t.Fatalf("agent.New failed: %v", err)
+			}
+			sessionService := session.InMemoryService()
+			controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+				SessionService:    sessionService,
+				AgentLoader:       agent.NewSingleLoader(fakeAgent),
+				SSETimeout:        10 * time.Second,
+				AutoCreateSession: tt.autoCreateSession,
+			})
+
+			reqBytes, err := json.Marshal(models.RunAgentRequest{
+				AppName:    "testApp",
+				UserId:     "testUser",
+				SessionId:  "newSession",
+				Streaming:  tt.streaming,
+				NewMessage: genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "Hello"}}},
+			})
+			if err != nil {
+				t.Fatalf("json.Marshal failed: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBuffer(reqBytes))
+			rr := httptest.NewRecorder()
+			if tt.streaming {
+				controller.RunSSEHandler(&recorderWithDeadline{rr}, req)
+			} else {
+				NewErrorHandler(controller.RunHandler)(rr, req)
+			}
+
+			if rr.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d; body: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+			_, err = sessionService.Get(t.Context(), &session.GetRequest{AppName: "testApp", UserID: "testUser", SessionID: "newSession"})
+			if gotSession := err == nil; gotSession != tt.wantSession {
+				t.Errorf("session exists after the run = %v, want %v (Get error: %v)", gotSession, tt.wantSession, err)
+			}
+		})
+	}
+}
+
 func TestDecodeRequestBody_AcceptsFunctionCallEventID(t *testing.T) {
 	body := `{
 		"appName": "a",
@@ -319,6 +379,40 @@ func TestNewRuntimeAPIControllerCarriesCompaction(t *testing.T) {
 	}
 }
 
+func TestRunHandlerNoEventsReturnsEmptyList(t *testing.T) {
+	quietAgent, err := agent.New(agent.Config{Name: "testApp", Run: testAgent(nil)})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+	sessionService := session.InMemoryService()
+	if _, err := sessionService.Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+		SessionService: sessionService,
+		AgentLoader:    agent.NewSingleLoader(quietAgent),
+	})
+
+	reqBytes, err := json.Marshal(models.RunAgentRequest{
+		AppName:    "testApp",
+		UserId:     "testUser",
+		SessionId:  "testSession",
+		NewMessage: genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "Hello"}}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	NewErrorHandler(controller.RunHandler)(rr, httptest.NewRequest(http.MethodPost, "/run", bytes.NewBuffer(reqBytes)))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got, want := strings.TrimSpace(rr.Body.String()), "[]"; got != want {
+		t.Errorf("body = %s, want %s", got, want)
+	}
+}
+
 // TestRunLiveHandlerUsesConfiguredCheckOrigin pins that the configured hook
 // replaces gorilla/websocket's default same-origin check, which would reject an
 // Origin the operator allowed.
@@ -347,5 +441,69 @@ func TestRunLiveHandlerUsesConfiguredCheckOrigin(t *testing.T) {
 	}
 	if want := http.StatusForbidden; rr.Code != want {
 		t.Errorf("status = %d, want %d (body %q)", rr.Code, want, rr.Body.String())
+	}
+}
+
+// failingGetSessionService is a session service whose Get fails for a reason
+// other than a missing session.
+type failingGetSessionService struct {
+	session.Service
+}
+
+func (failingGetSessionService) Get(context.Context, *session.GetRequest) (*session.GetResponse, error) {
+	return nil, errors.New("session store unavailable")
+}
+
+func TestRunHandlersSessionLookupStatus(t *testing.T) {
+	tests := []struct {
+		name           string
+		streaming      bool
+		sessionService session.Service
+		sessionID      string
+		wantStatus     int
+	}{
+		{name: "run, missing session", sessionService: session.InMemoryService(), sessionID: "testSession", wantStatus: http.StatusNotFound},
+		{name: "run_sse, missing session", streaming: true, sessionService: session.InMemoryService(), sessionID: "testSession", wantStatus: http.StatusNotFound},
+		// The services reject an empty ID with a validation error rather than
+		// session.ErrNotFound; a request that names no session is still a 404.
+		{name: "run, no session ID", sessionService: session.InMemoryService(), wantStatus: http.StatusNotFound},
+		{name: "run_sse, no session ID", streaming: true, sessionService: session.InMemoryService(), wantStatus: http.StatusNotFound},
+		{name: "run, failing session service", sessionService: failingGetSessionService{session.InMemoryService()}, sessionID: "testSession", wantStatus: http.StatusInternalServerError},
+		{name: "run_sse, failing session service", streaming: true, sessionService: failingGetSessionService{session.InMemoryService()}, sessionID: "testSession", wantStatus: http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeAgent, err := agent.New(agent.Config{Name: "testApp", Run: testAgent(nil)})
+			if err != nil {
+				t.Fatalf("agent.New failed: %v", err)
+			}
+			controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+				SessionService: tt.sessionService,
+				AgentLoader:    agent.NewSingleLoader(fakeAgent),
+				SSETimeout:     10 * time.Second,
+			})
+
+			reqBytes, err := json.Marshal(models.RunAgentRequest{
+				AppName:    "testApp",
+				UserId:     "testUser",
+				SessionId:  tt.sessionID,
+				Streaming:  tt.streaming,
+				NewMessage: genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "Hello"}}},
+			})
+			if err != nil {
+				t.Fatalf("json.Marshal failed: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBuffer(reqBytes))
+			rr := httptest.NewRecorder()
+			if tt.streaming {
+				controller.RunSSEHandler(&recorderWithDeadline{rr}, req)
+			} else {
+				NewErrorHandler(controller.RunHandler)(rr, req)
+			}
+
+			if rr.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d; body: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+		})
 	}
 }

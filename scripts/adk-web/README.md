@@ -61,7 +61,7 @@ That is for trying a candidate. It does not change what anyone else builds.
 1.  Choose a revision. Pick a release tag from
     [the tag list](https://github.com/google/adk-web/tags), then pin its commit
     SHA rather than the tag name, because upstream can move a tag. Name the tag
-    in the comment above `ADK_WEB_REF` so the SHA stays readable.
+    in the commit message, so the SHA stays readable.
 2.  Read the upstream changes between the current pin and your candidate, at
     `https://github.com/google/adk-web/compare/<old>...<new>`. Look for changed
     API paths, methods and request bodies.

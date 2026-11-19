@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/functiontool"
 )
@@ -38,6 +39,15 @@ type seqAgent struct {
 
 func (s *seqAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	return s.impl.RunLive(ctx)
+}
+
+// FindAgent returns the agent with the given name in s and its descendants.
+// For s's own name it returns s, not the embedded base agent.
+func (s *seqAgent) FindAgent(name string) agent.Agent {
+	if s.Name() == name {
+		return s
+	}
+	return s.FindSubAgent(name)
 }
 
 // New creates a SequentialAgent.
@@ -83,10 +93,15 @@ type liveRunner interface {
 
 func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		for _, subAgent := range ctx.Agent().SubAgents() {
+		subAgents := ctx.Agent().SubAgents()
+		if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+			subAgents = subAgents[indexes[0]:]
+		}
+		for _, subAgent := range subAgents {
 			for event, err := range subAgent.Run(ctx) {
-				// TODO: ensure consistency -- if there's an error, return and close iterator, verify everywhere in ADK.
-				if !yield(event, err) {
+				// A failed sub-agent ends the sequence, as in adk-python: later
+				// sub-agents would run without the output they depend on.
+				if !yield(event, err) || err != nil {
 					return
 				}
 			}
@@ -160,18 +175,31 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 			visited[subAgent] = true
 			if llmAgent, ok := subAgent.(llminternal.Agent); ok {
 				state := llminternal.Reveal(llmAgent)
-				hasTaskCompleted := false
-				for _, t := range state.Tools {
-					if t.Name() == "task_completed" {
-						hasTaskCompleted = true
-						break
+				// Live callers must observe the completed injection before using
+				// the shared tool slice and instruction.
+				state.LiveModeInjection.Do(func() {
+					for _, t := range state.Tools {
+						if t.Name() == "task_completed" {
+							return
+						}
 					}
-				}
-				if !hasTaskCompleted {
 					state.Tools = append(state.Tools, taskCompletedTool)
 					instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
-					state.Instruction += instructionSuffix
-				}
+					// InstructionProvider takes over Instruction when both are set,
+					// so the suffix goes on whichever one the agent's requests use,
+					// as in adk-python's _append_instruction.
+					if provider := state.InstructionProvider; provider != nil {
+						state.InstructionProvider = func(ctx agent.ReadonlyContext) (string, error) {
+							instruction, err := provider(ctx)
+							if err != nil {
+								return instruction, err
+							}
+							return instruction + instructionSuffix, nil
+						}
+					} else {
+						state.Instruction += instructionSuffix
+					}
+				})
 			} else if _, live := subAgent.(liveRunner); live && len(subAgent.SubAgents()) > 0 {
 				injectSubAgents(subAgent.SubAgents())
 			}
@@ -203,15 +231,16 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 			seqSess.setActiveSession(subSess)
 
 			for ev, err := range innerIter {
-				if !yield(ev, err) {
+				// A failed sub-agent ends the sequence, as in Run.
+				if !yield(ev, err) || err != nil {
 					if err := subSess.Close(); err != nil {
-						log.Printf("error closing sub-session: %v\n", err)
+						log.Printf("error closing sub-session: %v\n", err) //nolint:forbidigo // pre-slog call site
 					}
 					return
 				}
 			}
 			if err := subSess.Close(); err != nil {
-				log.Printf("error closing sub-session: %v\n", err)
+				log.Printf("error closing sub-session: %v\n", err) //nolint:forbidigo // pre-slog call site
 			}
 		}
 	}

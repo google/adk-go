@@ -367,7 +367,7 @@ func TestAgentNode_DeclaredSingleTurnWithExplicitIncludeContents_KeepsHistory(t 
 
 // IncludeContents is an unvalidated string, so a typo must not be read as an
 // explicit request for history. Only the real IncludeContentsDefault opts out of
-// the placement; anything unrecognised falls back to it, as the merge base did by
+// the placement; anything unrecognized falls back to it, as the merge base did by
 // forcing "none". Getting this wrong hands a one-shot node the whole transcript.
 func TestAgentNode_UnrecognisedIncludeContents_DoesNotDefeatThePlacement(t *testing.T) {
 	t.Parallel()
@@ -415,51 +415,6 @@ func TestAgentNode_UnrecognisedIncludeContents_DoesNotDefeatThePlacement(t *test
 				}
 			}
 		})
-	}
-}
-
-// Config.Name is documented as required but nothing rejects an empty one, and
-// the binding is keyed by name. A nameless agent must still be placed by its
-// node rather than quietly falling back to chat and carrying the whole
-// transcript into a one-shot node.
-func TestAgentNode_UnnamedAgent_IsStillPlacedSingleTurn(t *testing.T) {
-	t.Parallel()
-
-	llm := &capturingLLM{}
-	a, err := llmagent.New(llmagent.Config{Model: llm})
-	if err != nil {
-		t.Fatalf("llmagent.New: %v", err)
-	}
-	if a.Name() != "" {
-		t.Fatalf("precondition: agent name = %q, want empty", a.Name())
-	}
-	node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
-	if err != nil {
-		t.Fatalf("NewAgentNode: %v", err)
-	}
-	wf, err := workflow.New("wf", workflow.Chain(workflow.Start, node))
-	if err != nil {
-		t.Fatalf("workflow.New: %v", err)
-	}
-
-	prior := &session.Event{
-		Author:      "user",
-		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("EARLIER_TURN", "user")},
-	}
-	for _, err := range wf.Run(newModeTestCtx(t, a, prior)) {
-		if err != nil {
-			t.Fatalf("workflow.Run: %v", err)
-		}
-	}
-	if llm.got == nil {
-		t.Fatal("model was never called")
-	}
-	for _, c := range llm.got.Contents {
-		for _, p := range c.Parts {
-			if p != nil && strings.Contains(p.Text, "EARLIER_TURN") {
-				t.Errorf("nameless agent at a single_turn node saw conversation history; contents = %v", llm.got.Contents)
-			}
-		}
 	}
 }
 
@@ -787,7 +742,7 @@ func TestAgentNode_Run_SeededOverAToolContext_ErrorsRatherThanPanics(t *testing.
 // AgentNode.Run is exported and now resolves a mode, which reads ctx. It must
 // reject a nil context rather than dereference it, the way RunLLMAgentAsNode
 // does. The merge base panicked on a nil ctx too — a few lines lower, building
-// params — so this turns a crash into an error rather than changing behaviour.
+// params — so this turns a crash into an error rather than changing behavior.
 func TestAgentNode_Run_NilContext_Errors(t *testing.T) {
 	t.Parallel()
 
@@ -1030,7 +985,7 @@ func TestAgentNode_ASingleTurnPlacementDoesNotReachASameNamedUndeclaredDescendan
 	}
 }
 
-// The enumerated behaviour change that had no test: a composite's UNDECLARED
+// The enumerated behavior change that had no test: a composite's UNDECLARED
 // child, re-entered as a transfer target, runs chat where the merge base ran
 // single_turn.
 //

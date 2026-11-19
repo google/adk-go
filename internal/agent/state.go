@@ -14,6 +14,8 @@
 
 package agent
 
+import "google.golang.org/adk/v2/session"
+
 // holds Agent internal state
 type Agent interface {
 	internal() *State
@@ -22,6 +24,11 @@ type Agent interface {
 type State struct {
 	AgentType Type
 	Config    any
+
+	// OnBeforeAgentCallbackEvent, if set, is called with the event produced by
+	// the before-agent callbacks, before it is yielded. It lets an agent type
+	// give a short-circuit response the same handling as one from its own run.
+	OnBeforeAgentCallbackEvent func(*session.Event)
 }
 
 type Type string

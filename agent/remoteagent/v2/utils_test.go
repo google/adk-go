@@ -29,6 +29,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 	"google.golang.org/adk/v2/session"
@@ -49,16 +50,31 @@ func newTestInvocationContext(t *testing.T, agentName string, events ...*session
 			return nil
 		}
 	}
-	agent, err := agent.New(agent.Config{Name: agentName})
+	name := agentName
+	if name == "" {
+		name = "anonymous"
+	}
+	a, err := agent.New(agent.Config{Name: name})
 	if err != nil {
 		t.Errorf("agent.New() error = %v", err)
 		return nil
 	}
+	if agentName == "" {
+		a = anonymousAgent{a}
+	}
 	return icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
-		Agent:   agent,
+		Agent:   a,
 		Session: resp.Session,
 	})
 }
+
+// anonymousAgent reports an empty name. agent.New rejects one, but a wrapper
+// that embeds an agent and overrides Name can still run with it.
+type anonymousAgent struct {
+	agent.Agent
+}
+
+func (anonymousAgent) Name() string { return "" }
 
 func newEventFromParts(author string, parts ...*genai.Part) *session.Event {
 	var role genai.Role = genai.RoleModel
@@ -170,6 +186,60 @@ func TestGetUserFunctionCallAt(t *testing.T) {
 			}
 			if tc.success && got == nil {
 				t.Error("getUserFunctionCallAt() = nil, want non-nil")
+			}
+		})
+	}
+}
+
+func TestGetUserFunctionCallAtMixedResponseTasks(t *testing.T) {
+	const remoteName = "remote-agent"
+	remoteCall := func(id string, taskID a2a.TaskID) *session.Event {
+		event := newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: id}})
+		event.CustomMetadata = adka2a.ToCustomMetadata(taskID, "remote-context")
+		return event
+	}
+	cachedCall := newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "reused"}})
+	cachedCall.CustomMetadata = map[string]any{plugininternal.BeforeRunReplyKey: true}
+	for _, tc := range []struct {
+		name       string
+		events     []*session.Event
+		wantTaskID string
+	}{
+		{
+			name: "first matching response keeps task priority",
+			events: []*session.Event{
+				remoteCall("first", "first-task"),
+				remoteCall("second", "second-task"),
+				newEventFromParts("user",
+					&genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "first"}},
+					&genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "second"}},
+				),
+			},
+			wantTaskID: "first-task",
+		},
+		{
+			name: "cached response does not hide later peer response",
+			events: []*session.Event{
+				remoteCall("reused", "completed-task"),
+				remoteCall("current", "current-task"),
+				cachedCall,
+				newEventFromParts("user",
+					&genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "reused"}},
+					&genai.Part{FunctionResponse: &genai.FunctionResponse{ID: "current"}},
+				),
+			},
+			wantTaskID: "current-task",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newTestInvocationContext(t, remoteName, tc.events...)
+			events := ctx.Session().Events()
+			got := getUserFunctionCallAt(events, events.Len()-1, remoteName, "")
+			if got == nil {
+				t.Fatal("getUserFunctionCallAt() = nil, want a peer response")
+			}
+			if got.taskID != a2a.TaskID(tc.wantTaskID) || got.contextID != "remote-context" {
+				t.Error("mixed responses selected the wrong remote task or context")
 			}
 		})
 	}
@@ -639,6 +709,43 @@ func TestNewMessage_ResumeKeepsMixedFunctionResponsesAsData(t *testing.T) {
 			b, _ := json.Marshal(p)
 			t.Fatalf("part[%d] = %s, want function_response data", i, b)
 		}
+	}
+}
+
+func TestNewMessage_BeforeRunCallReusesRemoteCallID(t *testing.T) {
+	const remoteName = "remote-agent"
+	remoteCall := newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "reused", Name: "lookup"}})
+	remoteCall.CustomMetadata = adka2a.ToCustomMetadata("completed-task", "remote-context")
+	completed := newEventFromParts(remoteName, genai.NewPartFromText("completed reply"))
+	completed.CustomMetadata = adka2a.ToCustomMetadata("completed-task", "remote-context")
+	response := func() *session.Event {
+		return newEventFromParts("user", &genai.Part{FunctionResponse: &genai.FunctionResponse{
+			ID: "reused", Name: "lookup", Response: map[string]any{"ok": true},
+		}})
+	}
+	cachedCall := newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "reused", Name: "lookup"}})
+	cachedCall.CustomMetadata = map[string]any{plugininternal.BeforeRunReplyKey: true}
+	ctx := newTestInvocationContext(t, remoteName,
+		remoteCall, response(), completed,
+		newEventFromParts("user", genai.NewPartFromText("cached question")),
+		cachedCall,
+		response(),
+	)
+	msg, err := newMessage(ctx, A2AConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.TaskID != "" || msg.ContextID != "remote-context" {
+		t.Error("local call resumed a completed task or lost the remote context")
+	}
+	want := []*a2a.Part{
+		a2a.NewTextPart("cached question"),
+		a2a.NewTextPart("For context:"),
+		a2a.NewTextPart("[remote-agent] called tool lookup with parameters: map[]"),
+		a2a.NewTextPart(`Tool lookup returned: {"ok":true}`),
+	}
+	if !cmp.Equal(msg.Parts, a2a.ContentParts(want)) {
+		t.Error("local call and response were not replayed as contextual text")
 	}
 }
 

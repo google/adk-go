@@ -67,7 +67,7 @@ func (c *DebugAPIController) EventSpanHandler(rw http.ResponseWriter, req *http.
 	// Return only generate content and execute tool spans.
 	wantedOperations := []string{"execute_tool", "generate_content"}
 	for _, span := range spans {
-		opName := span.Attributes[key]
+		opName, _ := span.Attributes[key].(string)
 		if slices.Contains(wantedOperations, opName) {
 			response := convertEventSpan(span)
 			// Return the first span that matches the wanted operations - single event should contain only a single generate content or execute tool span.
@@ -187,6 +187,13 @@ func (c *DebugAPIController) EventGraphHandler(rw http.ResponseWriter, req *http
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// A Loader may return a nil agent with a nil error. The generator would
+	// answer 200 with an empty digraph, which reads as "this agent has no
+	// structure" rather than "no such agent".
+	if agent == nil {
+		http.Error(rw, "agent "+sessionID.AppName+" not found", http.StatusNotFound)
+		return
+	}
 	graph, err := services.GetAgentGraph(req.Context(), agent, highlightedPairs)
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
@@ -201,7 +208,7 @@ func functionalCalls(event *session.Event) []*genai.FunctionCall {
 	}
 	fc := []*genai.FunctionCall{}
 	for _, part := range event.LLMResponse.Content.Parts {
-		if part.FunctionCall != nil {
+		if part != nil && part.FunctionCall != nil {
 			fc = append(fc, part.FunctionCall)
 		}
 	}
@@ -214,7 +221,7 @@ func functionalResponses(event *session.Event) []*genai.FunctionResponse {
 	}
 	fr := []*genai.FunctionResponse{}
 	for _, part := range event.LLMResponse.Content.Parts {
-		if part.FunctionResponse != nil {
+		if part != nil && part.FunctionResponse != nil {
 			fr = append(fr, part.FunctionResponse)
 		}
 	}

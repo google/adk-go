@@ -33,7 +33,11 @@ import (
 // difference: it decodes to a default value with no error.
 func TestRawEventWireKeysAreCamelCase(t *testing.T) {
 	event := &session.Event{
-		LLMResponse:        model.LLMResponse{Content: genai.NewContentFromText("hi", genai.RoleModel)},
+		LLMResponse: model.LLMResponse{
+			Content:             genai.NewContentFromText("hi", genai.RoleModel),
+			InputTranscription:  &genai.Transcription{Text: "hello"},
+			OutputTranscription: &genai.Transcription{Text: "hi"},
+		},
 		ID:                 "evt-1",
 		Timestamp:          time.Unix(1733040000, 0).UTC(),
 		InvocationID:       "inv-1",
@@ -59,9 +63,9 @@ func TestRawEventWireKeysAreCamelCase(t *testing.T) {
 	sort.Strings(got)
 
 	want := []string{
-		"actions", "author", "branch", "content", "id", "invocationId",
-		"isolationScope", "longRunningToolIds", "nodeInfo", "output",
-		"requestedInput", "routes", "timestamp",
+		"actions", "author", "branch", "content", "id", "inputTranscription",
+		"invocationId", "isolationScope", "longRunningToolIds", "nodeInfo",
+		"output", "outputTranscription", "requestedInput", "routes", "timestamp",
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("raw_event wire keys mismatch (-want +got):\n%s", diff)

@@ -71,7 +71,7 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 		if errText != nil {
 			// cannot unmarshall to models.StreamQueryRequest and models.StreamQueryTextRequest
 			err = fmt.Errorf("json.Unmarshal() failed both for models.StreamQueryRequest (%w) and models.StreamQueryTextRequest (%w)", err, errText)
-			log.Print(err.Error())
+			log.Print(err.Error()) //nolint:forbidigo // pre-slog call site
 			return err
 		}
 		// got text, create a full content based on that text
@@ -88,7 +88,7 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 	events, err := s.run(ctx, &req, &req.Input.Message, s.config)
 	if err != nil {
 		err = fmt.Errorf("s.run() failed: %w", err)
-		log.Print(err.Error())
+		log.Print(err.Error()) //nolint:forbidigo // pre-slog call site
 		return err
 	}
 
@@ -98,7 +98,7 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 	// from this moment on we must not return error. Instead, it should be handled by using helper.EmitJSONError
 
 	for event, err := range events {
-		log.Printf("Processing event: %+v err: %+v\n", event, err)
+		log.Printf("Processing event: %+v err: %+v\n", event, err) //nolint:forbidigo // pre-slog call site
 		if err != nil {
 			// A compaction failure is bookkeeping, not the turn. The events are
 			// already persisted and the agent has already answered, so emitting
@@ -107,14 +107,14 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 			// that a later prompt will be larger. The other three serving
 			// surfaces log and carry on, and this one was the outlier.
 			if errors.Is(err, compaction.ErrCompaction) {
-				log.Printf("agentengine: %v", err)
+				log.Printf("agentengine: %v", err) //nolint:forbidigo // pre-slog call site
 				continue
 			}
-			log.Printf("error in events: %v\n", err)
+			log.Printf("error in events: %v\n", err) //nolint:forbidigo // pre-slog call site
 			e := helper.EmitJSONError(rw, err)
 			if e != nil {
 				e = fmt.Errorf("helper.EmitJSONError() failed: %w", e)
-				log.Print(e.Error())
+				log.Print(e.Error()) //nolint:forbidigo // pre-slog call site
 			}
 			break
 		}
@@ -128,11 +128,11 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 		err = helper.EmitJSON(rw, *event)
 		if err != nil {
 			e := fmt.Errorf("helper.EmitJSON() failed: %w", err)
-			log.Print(e.Error())
+			log.Print(e.Error()) //nolint:forbidigo // pre-slog call site
 			e = helper.EmitJSONError(rw, e)
 			if e != nil {
 				e = fmt.Errorf("helper.EmitJSONError() failed: %w", e)
-				log.Print(e.Error())
+				log.Print(e.Error()) //nolint:forbidigo // pre-slog call site
 			}
 			break
 		}

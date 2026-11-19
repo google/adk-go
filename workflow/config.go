@@ -34,16 +34,16 @@ func defaultShouldRetry(err error) bool {
 }
 
 // DefaultRetryConfig returns a copy of the default retry policy
-// (5 attempts, 1s initial delay, 60s cap, 2x backoff, full jitter,
-// retry every error). Override fields on the returned value to
-// customise:
+// (5 attempts, 1s initial delay, 60s cap, 2x backoff, full jitter).
+// Every error is retried except ErrInputValidation, which a retry
+// cannot fix because the input is deterministic. Override fields on
+// the returned value to customize:
 //
 //	rc := workflow.DefaultRetryConfig()
 //	rc.MaxAttempts = 10
 //	cfg := workflow.NodeConfig{RetryConfig: rc}
 func DefaultRetryConfig() *RetryConfig {
-	cfg := defaultRetryConfig
-	return &cfg
+	return new(defaultRetryConfig)
 }
 
 // NodeConfig defines the configuration for a node.
@@ -58,7 +58,7 @@ type NodeConfig struct {
 	// outputs and emits a single aggregate output event.
 	ParallelWorker bool
 
-	// RerunOnResume controls human-in-the-loop resume behaviour:
+	// RerunOnResume controls human-in-the-loop resume behavior:
 	// &true re-runs the interrupted node from scratch on resume
 	// (re-entry mode), &false routes the resume payload to the
 	// node's successor as input (handoff mode), and nil defers to

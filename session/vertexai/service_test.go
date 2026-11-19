@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
@@ -53,6 +55,7 @@ func Test_vertexaiService(t *testing.T) {
 	opts := sessiontestsuite.SuiteOptions{
 		SupportsUserProvidedSessionID: true,
 		ProvidesServerAssignedEventID: true,
+		ChecksRequestedAuthConfigs:    true,
 		AppName:                       EngineID,
 	} // VertexAI forbids custom IDs
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
@@ -81,6 +84,16 @@ var casesWithoutReplay = map[string]string{
 	// TestAppendEvent_stripsTempKeysBeforePersist until a maintainer re-records
 	// with UPDATE_REPLAYS=true.
 	"Test_vertexaiService_StateManagement_temp_state_is_not_persisted": "append_event_temp_state_test.go",
+	// Pinned offline against the in-process fake backend, in both directions
+	// and against adk-python's wire value, by
+	// TestVertexAiClientRequestedAuthConfigsMatchPython in vertexai_test.go.
+	"Test_vertexaiService_AppendEvent_requested_auth_configs_round_trip": "vertexai_test.go",
+	// Pinned offline against the in-process fake backends, with the same
+	// configs, by TestVertexAiClientRejectsRequestedAuthConfigThatDoesNotEncode
+	// and, for the caller's session, by
+	// TestAppendEvent_requestedAuthConfigThatDoesNotDecode_leavesSessionUntouched,
+	// both in vertexai_test.go.
+	"Test_vertexaiService_AppendEvent_requested_auth_config_that_does_not_decode_is_refused": "vertexai_test.go",
 }
 
 func Test_vertexaiService_AppendEvent_StructuralValidation(t *testing.T) {
@@ -161,7 +174,7 @@ func emptyService(t *testing.T, name string, offline bool) (session.Service, map
 			// and are recorded now. Recording them answered two open questions
 			// about this backend: a compaction record does survive the round
 			// trip, and a hole still names its event afterwards, so the
-			// microsecond normalisation holds here.
+			// microsecond normalization holds here.
 			if errors.Is(err, os.ErrNotExist) {
 				t.Skipf("no replay recording at testdata/%s. Regenerate with: UPDATE_REPLAYS=true go test ./session/vertexai/...", replayFile)
 			}
@@ -239,6 +252,7 @@ func deleteSessionRPC(ctx context.Context, v session.Service, appName, sessionID
 func setupReplay(t *testing.T, filename string) ([]option.ClientOption, func(), error) {
 	filePath := filepath.Join("testdata", filename)
 	var grpcOpts []grpc.DialOption
+	var clientOpts []option.ClientOption
 	var teardown func() error
 
 	if os.Getenv("UPDATE_REPLAYS") == "true" {
@@ -256,16 +270,16 @@ func setupReplay(t *testing.T, filename string) ([]option.ClientOption, func(), 
 		if err != nil {
 			return nil, nil, err
 		}
-		grpcOpts = rep.DialOptions()
+		conn, err := rep.Connection()
+		if err != nil {
+			return nil, nil, err
+		}
+		clientOpts = append(clientOpts, option.WithGRPCConn(conn))
 		teardown = rep.Close
 	}
 
-	var clientOpts []option.ClientOption
 	for _, opt := range grpcOpts {
 		clientOpts = append(clientOpts, option.WithGRPCDialOption(opt))
-		if os.Getenv("UPDATE_REPLAYS") != "true" {
-			clientOpts = append(clientOpts, option.WithoutAuthentication())
-		}
 	}
 
 	return clientOpts, func() {
@@ -306,5 +320,47 @@ func Test_trimTempDeltaState_PreservesInputEvent(t *testing.T) {
 	}
 	if trimmed.Actions.StateDelta["sk"] != "v2" {
 		t.Errorf("expected non-temp key sk on trimmed event, got: %v", trimmed.Actions.StateDelta)
+	}
+}
+
+func TestSetupReplay_InitializesWithoutExternalNetwork(t *testing.T) {
+	t.Setenv("UPDATE_REPLAYS", "")
+	opts, teardown, err := setupReplay(t, "Test_vertexaiService_Create_full_key.replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(teardown)
+	dialAttempts := make(chan struct{}, 1)
+	opts = append(opts, option.WithGRPCDialOption(grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+		select {
+		case dialAttempts <- struct{}{}:
+		default:
+		}
+		return nil, errors.New("network disabled during replay")
+	})))
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	client, err := newVertexAiClient(ctx, Location, ProjectID, EngineID, opts...)
+	if err != nil {
+		t.Fatalf("replay client must initialize without a network connection: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	conn := client.rpcClient.Connection()
+	conn.Connect()
+	for state := conn.GetState(); state != connectivity.Shutdown && state != connectivity.Ready; state = conn.GetState() {
+		select {
+		case <-dialAttempts:
+			t.Fatal("replay client attempted a network connection")
+		default:
+		}
+		if !conn.WaitForStateChange(ctx, state) {
+			t.Fatal("replay connection did not settle before the deadline")
+		}
+	}
+	select {
+	case <-dialAttempts:
+		t.Fatal("replay client attempted a network connection")
+	default:
 	}
 }

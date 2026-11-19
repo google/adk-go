@@ -15,9 +15,13 @@
 package helper
 
 import (
+	"encoding/json"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
@@ -163,6 +167,155 @@ func TestEventLogProbs(t *testing.T) {
 	}
 }
 
+func TestByteSlice(t *testing.T) {
+	event := session.Event{
+		ID: "1",
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Parts: []*genai.Part{
+					{
+						Text:             "hi",
+						ThoughtSignature: []byte{0xDE, 0xAD, 0xBE, 0xEF},
+					},
+				},
+			},
+		},
+	}
+	o, err := convertSnake("", "", event)
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+	m, ok := o.(map[string]any)
+	if !ok {
+		t.Fatalf("o is not a map: %T", o)
+	}
+	content, ok := m["content"].(map[string]any)
+	if !ok {
+		t.Fatalf("content is not a map: %T", m["content"])
+	}
+	parts, ok := content["parts"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("parts is not a 1-element slice: %v", content["parts"])
+	}
+	part, ok := parts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("part is not a map: %T", parts[0])
+	}
+	want := "3q2+7w=="
+	if got, _ := part["thought_signature"].(string); got != want {
+		t.Errorf("thought_signature = %q, want %q", got, want)
+	}
+}
+
+func TestByteSliceOmitEmpty(t *testing.T) {
+	type A struct {
+		Sig []byte `json:"sig,omitempty"`
+	}
+	got, err := convertSnake("", "", A{})
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+	m, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("got is not a map: %T", got)
+	}
+	if _, present := m["sig"]; present {
+		t.Errorf("sig should be omitted for an empty []byte, got: %v", m["sig"])
+	}
+}
+
+func TestRawMessage(t *testing.T) {
+	type A struct {
+		Default json.RawMessage `json:"default,omitempty"`
+	}
+	a := A{Default: json.RawMessage(`{"approved":false}`)}
+	got, err := convertSnake("", "", a)
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("json.Marshal() failed: %v", err)
+	}
+	want := `{"default":{"approved":false}}`
+	if string(b) != want {
+		t.Errorf("marshaled output = %s, want %s", b, want)
+	}
+}
+
+func TestRawMessageOmitEmpty(t *testing.T) {
+	type A struct {
+		Default json.RawMessage `json:"default,omitempty"`
+	}
+	got, err := convertSnake("", "", A{})
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+	m, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("got is not a map: %T", got)
+	}
+	if _, present := m["default"]; present {
+		t.Errorf("default should be omitted for an empty json.RawMessage, got: %v", m["default"])
+	}
+}
+
+// TestEmitJSONSchemaSnakeCase drives public EmitJSON with a real session.Event
+// carrying a jsonschema.Schema, so a json.RawMessage field can no longer make
+// ConvertSnake fall back to its camelCase input unnoticed.
+func TestEmitJSONSchemaSnakeCase(t *testing.T) {
+	event := session.Event{
+		ID: "1",
+		RequestedInput: &session.RequestInput{
+			InterruptID: "abc",
+			ResponseSchema: &jsonschema.Schema{
+				Default: json.RawMessage(`{"approved":false}`),
+				Properties: map[string]*jsonschema.Schema{
+					"approved": {
+						Default: json.RawMessage(`true`),
+					},
+				},
+			},
+		},
+	}
+
+	rw := httptest.NewRecorder()
+	if err := EmitJSON(rw, event); err != nil {
+		t.Fatalf("EmitJSON() failed: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(rw.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json.Unmarshal(%s) failed: %v", rw.Body.String(), err)
+	}
+
+	if _, present := got["requestedInput"]; present {
+		t.Errorf("output fell back to camelCase key requestedInput: %v", got)
+	}
+	requestedInput, ok := got["requested_input"].(map[string]any)
+	if !ok {
+		t.Fatalf("requested_input missing or not an object: %v", got)
+	}
+	responseSchema, ok := requestedInput["response_schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("response_schema missing or not an object: %v", requestedInput)
+	}
+	if diff := cmp.Diff(responseSchema["default"], map[string]any{"approved": false}); diff != "" {
+		t.Errorf("response_schema.default mismatch (-got +want):\n%s", diff)
+	}
+	properties, ok := responseSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties missing or not an object: %v", responseSchema)
+	}
+	approved, ok := properties["approved"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties.approved missing or not an object: %v", properties)
+	}
+	if approved["default"] != true {
+		t.Errorf("properties.approved.default = %v, want true", approved["default"])
+	}
+}
+
 func TestEmbedded(t *testing.T) {
 	type A struct {
 		anInteger int
@@ -249,5 +402,57 @@ func TestOmitEmpty(t *testing.T) {
 			t.Errorf("convertSnake() = %v, want %v, diff: \n%v", got, tc.want, diff)
 		}
 
+	}
+}
+
+func TestTimeFractionalSeconds(t *testing.T) {
+	// Verify microsecond resolution is preserved (e.g., matching adkrest UnixMicro / 1e6)
+	tm := time.UnixMicro(1733040000123456) // 1733040000.123456
+	got, err := convertSnake("", "", tm)
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+
+	gotFloat, ok := got.(float64)
+	if !ok {
+		t.Fatalf("convertSnake(time.Time) returned %T (%v), want float64", got, got)
+	}
+
+	want := 1733040000.123456
+	if gotFloat != want {
+		t.Errorf("convertSnake(time.Time) = %v, want %v", gotFloat, want)
+	}
+
+	// Verify whole-second timestamps
+	tmWhole := time.Unix(1700000000, 0)
+	gotWhole, err := convertSnake("", "", tmWhole)
+	if err != nil {
+		t.Fatalf("convertSnake() failed for whole second: %v", err)
+	}
+	if gotFloatWhole, ok := gotWhole.(float64); !ok || gotFloatWhole != 1700000000.0 {
+		t.Errorf("convertSnake(whole second) = %v, want 1700000000.0", gotWhole)
+	}
+
+	// Verify EmitJSON serialization output
+	event := session.Event{
+		ID:        "event-1",
+		Timestamp: time.UnixMicro(1733040000123456),
+	}
+	rw := httptest.NewRecorder()
+	if err := EmitJSON(rw, event); err != nil {
+		t.Fatalf("EmitJSON() failed: %v", err)
+	}
+
+	var jsonMap map[string]any
+	if err := json.Unmarshal(rw.Body.Bytes(), &jsonMap); err != nil {
+		t.Fatalf("json.Unmarshal(%s) failed: %v", rw.Body.String(), err)
+	}
+
+	ts, ok := jsonMap["timestamp"].(float64)
+	if !ok {
+		t.Fatalf("timestamp missing or not float64 in JSON: %v", jsonMap)
+	}
+	if ts != want {
+		t.Errorf("EmitJSON timestamp = %v, want %v", ts, want)
 	}
 }

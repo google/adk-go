@@ -274,8 +274,7 @@ func (c *countingSummarizer) count() int {
 // difference between "compaction ran and its failure was tolerated" and
 // "compaction never ran".
 func TestPubSubTriggerActuallyRunsCompaction(t *testing.T) {
-	runCount := 0
-	testAgent := createMockAgent(t, nil, &runCount, nil)
+	testAgent := createMockAgent(t, nil, new(0), nil)
 	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
 	summarizer := &countingSummarizer{}
 
@@ -313,5 +312,153 @@ func TestPubSubTriggerActuallyRunsCompaction(t *testing.T) {
 	}
 	if got := summarizer.count(); got == 0 {
 		t.Error("the summarizer was never called, so this surface accepts a compaction config and does nothing with it")
+	}
+}
+
+func buildPubSubRequest(t *testing.T, data string) *http.Request {
+	t.Helper()
+	reqObj := models.PubSubTriggerRequest{
+		Message:      models.PubSubMessage{Data: []byte(base64.StdEncoding.EncodeToString([]byte(data)))},
+		Subscription: "test-sub",
+	}
+	reqBytes, err := json.Marshal(reqObj)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "/apps/test-agent/triggers/pubsub", bytes.NewBuffer(reqBytes))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	return mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+}
+
+// TestPubSubTriggerHandler_EnforcesMaxConcurrentRuns is a behavioral test: with
+// MaxConcurrentRuns=N, firing N+1 concurrent requests at a blocking agent must
+// leave exactly N runs in flight (the extra request waits on the semaphore).
+// Before the fix the semaphore was nil and all N+1 ran at once.
+func TestPubSubTriggerHandler_EnforcesMaxConcurrentRuns(t *testing.T) {
+	const limit = 2
+	started := make(chan struct{}, limit+1)
+	release := make(chan struct{})
+	blockingAgent, err := agent.New(agent.Config{
+		Name: "test-agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				started <- struct{}{}
+				<-release
+				yield(&session.Event{ID: "success-event"}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	cfg := defaultTriggerConfig
+	cfg.MaxConcurrentRuns = limit
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	ctrl := triggers.NewPubSubController(sessionService, agent.NewSingleLoader(blockingAgent), nil, nil, runner.PluginConfig{}, cfg)
+
+	var wg sync.WaitGroup
+	for range limit + 1 {
+		wg.Go(func() {
+			ctrl.PubSubTriggerHandler(httptest.NewRecorder(), buildPubSubRequest(t, "hello"))
+		})
+	}
+
+	for i := range limit {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d of %d runs started", i, limit)
+		}
+	}
+	// The (limit+1)th request must be blocked on the semaphore, not running.
+	select {
+	case <-started:
+		t.Fatalf("a run beyond MaxConcurrentRuns=%d started; limit not enforced", limit)
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(release)
+	wg.Wait()
+}
+
+// TestPubSubTriggerHandler_ZeroMaxConcurrentRunsIsUnlimited guards the edge case
+// from review: MaxConcurrentRuns<=0 must mean "no limit" (nil semaphore), not a
+// zero-capacity channel that would block every request forever.
+func TestPubSubTriggerHandler_ZeroMaxConcurrentRunsIsUnlimited(t *testing.T) {
+	testAgent := createMockAgent(t, nil, new(0), nil)
+	cfg := defaultTriggerConfig
+	cfg.MaxConcurrentRuns = 0
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	ctrl := triggers.NewPubSubController(sessionService, agent.NewSingleLoader(testAgent), nil, nil, runner.PluginConfig{}, cfg)
+
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		ctrl.PubSubTriggerHandler(rr, buildPubSubRequest(t, "hello"))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler blocked with MaxConcurrentRuns=0; must be treated as no limit")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+}
+
+func TestPubSubTriggerHandler_CancelDuringBackoff(t *testing.T) {
+	throttled := make(chan struct{}, 1)
+	runCount := 0
+	throttledAgent, err := agent.New(agent.Config{
+		Name: "test-agent",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				runCount++
+				throttled <- struct{}{}
+				yield(nil, fmt.Errorf("429 ResourceExhausted"))
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	ctrl := triggers.NewPubSubController(sessionService, agent.NewSingleLoader(throttledAgent), nil, nil, runner.PluginConfig{}, triggers.TriggerConfig{
+		MaxConcurrentRuns: 1,
+		MaxRetries:        3,
+		BaseDelay:         time.Minute,
+		MaxDelay:          time.Minute,
+	})
+
+	req := buildPubSubRequest(t, "hello")
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctrl.PubSubTriggerHandler(rr, req)
+	}()
+
+	// Cancel once the handler is waiting out the backoff, as when the
+	// client goes away during it.
+	<-throttled
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler still waiting out the backoff after its request was cancelled")
+	}
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d so the message is not acknowledged", rr.Code, http.StatusInternalServerError)
+	}
+	if runCount != 1 {
+		t.Errorf("run attempts = %d, want 1", runCount)
 	}
 }

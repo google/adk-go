@@ -16,6 +16,7 @@ package compactioninternal
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"google.golang.org/genai"
@@ -144,7 +145,7 @@ func newSummaryEvent(events, all []*session.Event, summary *genai.Content, usage
 	// visible and recoverable. A reference matching nothing does not fall back
 	// to anything: coverage is the range minus the exclusions, so a hole that
 	// fails to match stops being a hole, and the event it named is dropped in
-	// favour of a summary that never described it. Over-naming is the direction
+	// favor of a summary that never described it. Over-naming is the direction
 	// to prefer, and under-naming is the one that loses conversation.
 	//
 	// Window membership is therefore decided by identity rather than by the
@@ -230,12 +231,7 @@ func hasProse(c *genai.Content) bool {
 	if c == nil {
 		return false
 	}
-	for _, p := range c.Parts {
-		if utils.IsProsePart(p) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(c.Parts, utils.IsProsePart)
 }
 
 // SanitizeSummary strips anything from a compaction record that must not reach
@@ -261,8 +257,7 @@ func SanitizeSummary(ev *session.Event) bool {
 	kept := make([]*genai.Part, 0, len(c.Parts))
 	for _, p := range c.Parts {
 		if utils.IsProsePart(p) {
-			part := *p
-			kept = append(kept, &part)
+			kept = append(kept, new(*p))
 		}
 	}
 	if len(kept) == 0 {

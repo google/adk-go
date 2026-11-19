@@ -81,8 +81,26 @@ func TestValidate(t *testing.T) {
 			wantErr:     true,
 		},
 		{
+			name:        "description at unicode character limit",
+			frontmatter: &Frontmatter{Name: "valid-name", Description: strings.Repeat("技", 1024)},
+		},
+		{
+			name:        "description exceeds unicode character limit",
+			frontmatter: &Frontmatter{Name: "valid-name", Description: strings.Repeat("技", 1025)},
+			wantErr:     true,
+		},
+		{
 			name:        "compatibility too long",
 			frontmatter: &Frontmatter{Name: "valid-name", Description: "Valid.", Compatibility: strings.Repeat("a", 501)},
+			wantErr:     true,
+		},
+		{
+			name:        "compatibility at unicode character limit",
+			frontmatter: &Frontmatter{Name: "valid-name", Description: "Valid.", Compatibility: strings.Repeat("é", 500)},
+		},
+		{
+			name:        "compatibility exceeds unicode character limit",
+			frontmatter: &Frontmatter{Name: "valid-name", Description: "Valid.", Compatibility: strings.Repeat("é", 501)},
 			wantErr:     true,
 		},
 	}

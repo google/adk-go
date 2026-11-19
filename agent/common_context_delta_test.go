@@ -295,9 +295,8 @@ func TestDiscardWithNothingToReport(t *testing.T) {
 func TestNilDeltaStillReachesTheInvocation(t *testing.T) {
 	inner := &invocationContext{Context: t.Context(), agent: &agent{name: "parent"}}
 	wrapped := NewToolContext(inner, "fc-1", nil, nil).(InvocationContext)
-	path := "wf/n@1"
 
-	c := Promote(wrapped).WithDelta(&CommonContextDelta{Path: &path})
+	c := Promote(wrapped).WithDelta(&CommonContextDelta{Path: new("wf/n@1")})
 
 	got := c.(InvocationContext).Agent()
 	if got == nil || got.Name() != "parent" {

@@ -13,6 +13,17 @@
 // limitations under the License.
 
 // Package telemetry contains OpenTelemetry related functionality for ADK.
+//
+// # Telemetry format
+//
+// ADK follows the experimental OpenTelemetry GenAI semantic conventions, as of
+// semantic conventions v1.44.0. Message content is recorded only when
+// OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT is SPAN_ONLY, EVENT_ONLY or
+// SPAN_AND_EVENT ("true" or "1" mean EVENT_ONLY).
+//
+// ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN=otel_semconv_1_36 (or 1) restores the
+// format of earlier releases, until at least March 31, 2027.
+// otel_semconv_1_44 (or 2) names the default. Values are case-insensitive.
 package telemetry
 
 import (
@@ -22,6 +33,7 @@ import (
 	"go.opentelemetry.io/otel"
 	logglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -31,6 +43,8 @@ type Providers struct {
 	TracerProvider *sdktrace.TracerProvider
 	// LoggerProvider is the configured LoggerProvider or nil.
 	LoggerProvider *sdklog.LoggerProvider
+	// MeterProvider is the configured MeterProvider or nil.
+	MeterProvider *sdkmetric.MeterProvider
 }
 
 // Shutdown shuts down underlying OTel providers.
@@ -46,6 +60,14 @@ func (t *Providers) Shutdown(ctx context.Context) error {
 			err = errors.Join(err, lpErr)
 		}
 	}
+	if t.MeterProvider != nil {
+		// The tracer and logger providers return nil on a repeated Shutdown;
+		// the meter provider returns the bare ErrReaderShutdown. Not errors.Is:
+		// on the first Shutdown a reader's own error can come joined with it.
+		if mpErr := t.MeterProvider.Shutdown(ctx); mpErr != nil && mpErr != sdkmetric.ErrReaderShutdown {
+			err = errors.Join(err, mpErr)
+		}
+	}
 	return err
 }
 
@@ -56,6 +78,9 @@ func (t *Providers) SetGlobalOtelProviders() {
 	}
 	if t.LoggerProvider != nil {
 		logglobal.SetLoggerProvider(t.LoggerProvider)
+	}
+	if t.MeterProvider != nil {
+		otel.SetMeterProvider(t.MeterProvider)
 	}
 }
 

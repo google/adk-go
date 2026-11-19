@@ -71,7 +71,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		// session down to each child.
 		before := compactioninternal.KnownEventIDs(sess)
 
-		// Compaction is an optimisation, so a cancelled or expired turn should
+		// Compaction is an optimisation, so a canceled or expired turn should
 		// not spend a model call on it.
 		if ctx.Err() != nil {
 			return
@@ -113,7 +113,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		}
 		if compactioninternal.RangeRacedSince(latest, before, summary) {
 			finish(nil, "another compaction covering the same events landed while summarizing")
-			log.Printf("adk: discarding a tail-retention summary because the session changed inside its range while summarizing")
+			log.Printf("adk: discarding a tail-retention summary because the session changed inside its range while summarizing") //nolint:forbidigo // pre-slog call site
 			return
 		}
 
@@ -124,15 +124,15 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		//
 		// The plugin pipeline itself is still not run here. A redaction plugin
 		// therefore sees every sliding-window summary and none of these, which
-		// is a real gap and a behaviour change to close rather than a bug to
+		// is a real gap and a behavior change to close rather than a bug to
 		// patch quietly. ADK Kotlin, which this design was adapted from, runs
 		// no plugin hook on either of its compaction paths, so the gap is
 		// consistent with the reference; that is a statement about consistency
-		// rather than a defence of the behaviour. It is documented on the
+		// rather than a defense of the behavior. It is documented on the
 		// exported surface at compaction.Config.TokenThreshold.
 		if !compactioninternal.SanitizeSummary(summary) {
 			finish(nil, "the summary held nothing usable")
-			log.Printf("adk: discarding a tail-retention summary because it held no usable content")
+			log.Printf("adk: discarding a tail-retention summary because it held no usable content") //nolint:forbidigo // pre-slog call site
 			return
 		}
 
@@ -164,12 +164,12 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		repairCtx, cancelRepair := compactioninternal.RepairContext(ctx)
 		defer cancelRepair()
 		if latest, err := compactioninternal.ReloadSession(repairCtx, rt.SessionService(), sess); err != nil {
-			log.Printf("adk: could not re-read the session to check a stored compaction for stragglers: %v", err)
+			log.Printf("adk: could not re-read the session to check a stored compaction for stragglers: %v", err) //nolint:forbidigo // pre-slog call site
 		} else if repair := compactioninternal.RepairAfterAppend(summary, before, latest); repair != nil {
 			if err := rt.SessionService().AppendEvent(repairCtx, sess, repair); err != nil {
-				log.Printf("adk: could not store a corrected compaction record: %v", err)
+				log.Printf("adk: could not store a corrected compaction record: %v", err) //nolint:forbidigo // pre-slog call site
 			} else {
-				log.Printf("adk: corrected a tail-retention record that would have covered %d event(s) it did not summarize",
+				log.Printf("adk: corrected a tail-retention record that would have covered %d event(s) it did not summarize", //nolint:forbidigo // pre-slog call site
 					len(repair.Actions.Compaction.ExcludedEvents)-len(summary.Actions.Compaction.ExcludedEvents))
 			}
 		}
@@ -196,7 +196,7 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 // rather than only in an aborted turn. The post-invocation pass still surfaces
 // its own failures to the caller, since nothing is mid-flight there.
 func degrade(ctx context.Context, stage string, err error) {
-	log.Printf("adk: %v; continuing with an uncompacted prompt", compactionFailure(stage, err))
+	log.Printf("adk: %v; continuing with an uncompacted prompt", compactionFailure(stage, err)) //nolint:forbidigo // pre-slog call site
 }
 
 // compactionFailure marks err as a compaction failure at the named stage.
@@ -205,7 +205,7 @@ func degrade(ctx context.Context, stage string, err error) {
 // error is yielded into the flow's error channel, which reaches the workflow
 // scheduler, and the scheduler tests for a context.Canceled chain before
 // anything else and drops the error when it finds one. A summarizer that failed
-// because its own context was cancelled would therefore end the turn with no
+// because its own context was canceled would therefore end the turn with no
 // answer, no events and no error at all: the most confusing outcome available.
 //
 // Cutting the chain keeps the cause in the message and keeps the error matchable

@@ -98,7 +98,10 @@ func buildSessionPrefix(appName, userID, sessionID string) string {
 }
 
 func buildUserPrefix(appName, userID string) string {
-	return fmt.Sprintf("%s/%s/user/", appName, userID)
+	// Session ID "user" shares this path with user-scoped artifacts, so include
+	// the filename namespace to exclude its private files. Python rejects the
+	// ID instead, but Go already accepts it.
+	return fmt.Sprintf("%s/%s/user/user:", appName, userID)
 }
 
 const (
@@ -134,6 +137,13 @@ func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (*arti
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
 	appName, userID, sessionID, fileName := req.AppName, req.UserID, req.SessionID, req.FileName
+	var customMetadata map[string]string
+	if req.CustomMetadata != nil {
+		customMetadata = make(map[string]string, len(req.CustomMetadata))
+		for key, value := range req.CustomMetadata {
+			customMetadata[key] = fmt.Sprint(value)
+		}
+	}
 
 	var lastErr error
 	for attempt := range maxSaveAttempts {
@@ -150,7 +160,7 @@ func (s *gcsService) Save(ctx context.Context, req *artifact.SaveRequest) (*arti
 
 		blobName := buildBlobName(appName, userID, sessionID, fileName, nextVersion)
 		obj := s.bucket.object(blobName).ifNotExist()
-		err = writeArtifact(ctx, obj, req.Part)
+		err = writeArtifact(ctx, obj, req.Part, customMetadata)
 		if err == nil {
 			return &artifact.SaveResponse{Version: nextVersion}, nil
 		}
@@ -202,13 +212,14 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 
 // writeArtifact streams part to obj. A precondition on obj surfaces as an error
 // from Close, not Write.
-func writeArtifact(ctx context.Context, obj gcsObject, part *genai.Part) (err error) {
+func writeArtifact(ctx context.Context, obj gcsObject, part *genai.Part, metadata map[string]string) (err error) {
 	writer := obj.newWriter(ctx)
 	defer func() {
 		if closeErr := writer.Close(); closeErr != nil && err == nil {
 			err = fmt.Errorf("failed to close blob writer: %w", closeErr)
 		}
 	}()
+	writer.SetMetadata(metadata)
 
 	if part.InlineData != nil {
 		writer.SetContentType(part.InlineData.MIMEType)
@@ -228,8 +239,7 @@ func writeArtifact(ctx context.Context, obj gcsObject, part *genai.Part) (err er
 // 412 (*googleapi.Error) on the JSON API, or codes.FailedPrecondition on the
 // gRPC transport. Both status.FromError and errors.As unwrap wrapped errors.
 func isPreconditionFailed(err error) bool {
-	var apiErr *googleapi.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*googleapi.Error](err); ok {
 		return apiErr.Code == http.StatusPreconditionFailed
 	}
 	return status.Code(err) == codes.FailedPrecondition
@@ -480,10 +490,12 @@ func (s *gcsService) GetArtifactVersion(ctx context.Context, req *artifact.GetAr
 		return nil, fmt.Errorf("could not get blob attributes: %w", err)
 	}
 
-	// Always the gs:// form, matching adk-python's GCS artifact service. The
+	// Always use the gs:// form, matching adk-python's GCS artifact service. The
 	// object's MediaLink is an authenticated JSON API download URL, which a
 	// consumer handed the URI cannot fetch: a model given it as the file_uri of
-	// a file_data part treats it as a web page and fails to read it.
+	// a file_data part treats it as a web page and fails to read it. Keep the
+	// object name literal so the URI names the object Save wrote, including any
+	// spaces or non-ASCII characters.
 	canonicalURI := fmt.Sprintf("gs://%s/%s", s.bucketName, blobName)
 
 	customMeta := make(map[string]any)

@@ -23,7 +23,14 @@
 // Default Credentials ([ADC]), and service accounts ([ServiceAccount]) — and a
 // context-aware [Transport] applies a provider per outgoing request.
 //
-// Token exchange and refresh are delegated to golang.org/x/oauth2 rather than
-// reimplemented here. Heavier, provider-specific integrations (for example GCP
-// agent identity) live in subpackages so this package stays dependency-light.
+// A provider that has to reach the network to resolve a credential can cache
+// what it resolved in a [CredentialStore], keyed per app, per end user, and per
+// whatever else decides which credential comes back; [InMemoryCredentialStore]
+// is the process-local implementation. Providers backed by a token source
+// refresh themselves and need none.
+//
+// Token exchange and refresh are delegated to cloud.google.com/go/auth and
+// golang.org/x/oauth2 rather than reimplemented here. Heavier,
+// provider-specific integrations (for example GCP agent identity) live in
+// subpackages so this package stays dependency-light.
 package auth

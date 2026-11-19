@@ -34,6 +34,9 @@ import (
 type mockMemory struct {
 	memories []memory.Entry
 	err      error
+
+	searchCalls int
+	lastQuery   string
 }
 
 func (m *mockMemory) AddSessionToMemory(ctx context.Context, s session.Session) error {
@@ -41,6 +44,8 @@ func (m *mockMemory) AddSessionToMemory(ctx context.Context, s session.Session) 
 }
 
 func (m *mockMemory) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	m.searchCalls++
+	m.lastQuery = query
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -68,28 +73,49 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 		memories         []memory.Entry
 		searchErr        error
 		wantErr          bool
+		wantNoSearch     bool
+		wantQuery        string
 		wantInstruction  bool
 		wantTextContains []string
+		wantTextOmits    []string
 	}{
 		{
 			name:            "nil user content",
 			userContent:     nil,
+			wantNoSearch:    true,
 			wantInstruction: false,
 		},
 		{
 			name:            "empty user content parts",
 			userContent:     &genai.Content{Parts: []*genai.Part{}},
+			wantNoSearch:    true,
 			wantInstruction: false,
 		},
 		{
 			name:            "user content with no text",
 			userContent:     &genai.Content{Parts: []*genai.Part{{InlineData: &genai.Blob{}}}},
+			wantNoSearch:    true,
 			wantInstruction: false,
 		},
 		{
-			name:            "text in later part is ignored",
-			userContent:     &genai.Content{Parts: []*genai.Part{{InlineData: &genai.Blob{}}, genai.NewPartFromText("later text")}},
-			wantInstruction: false,
+			name:        "text after an image is searched",
+			userContent: &genai.Content{Parts: []*genai.Part{{InlineData: &genai.Blob{}}, genai.NewPartFromText("later text")}},
+			memories: []memory.Entry{
+				{Author: "user", Content: genai.NewContentFromText("a memory", genai.RoleUser)},
+			},
+			wantQuery:        "later text",
+			wantInstruction:  true,
+			wantTextContains: []string{"a memory"},
+		},
+		{
+			name:        "multiple text parts are joined",
+			userContent: &genai.Content{Parts: []*genai.Part{genai.NewPartFromText("my"), genai.NewPartFromText("preferences")}},
+			memories: []memory.Entry{
+				{Author: "user", Content: genai.NewContentFromText("a memory", genai.RoleUser)},
+			},
+			wantQuery:        "my preferences",
+			wantInstruction:  true,
+			wantTextContains: []string{"a memory"},
 		},
 		{
 			name:            "no memories found",
@@ -123,8 +149,26 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 			},
 			wantInstruction: true,
 			wantTextContains: []string{
-				"user: valid memory",
+				"user: valid memory\n", // The newline catches a trailing separator.
 			},
+		},
+		{
+			name:        "empty text between text parts adds no extra separator",
+			userContent: genai.NewContentFromText("test query", genai.RoleUser),
+			memories: []memory.Entry{
+				{
+					Author: "user",
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{Text: "valid"},
+							{Text: ""},
+							{Text: "memory"},
+						},
+					},
+				},
+			},
+			wantInstruction:  true,
+			wantTextContains: []string{"user: valid memory"},
 		},
 		{
 			name:        "single memory entry",
@@ -182,6 +226,75 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 			wantTextContains: []string{"user: No timestamp"},
 		},
 		{
+			name:        "thought parts are omitted",
+			userContent: genai.NewContentFromText("test", genai.RoleUser),
+			memories: []memory.Entry{
+				{
+					Author: "model",
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{Text: "private reasoning", Thought: true},
+							{Text: "visible answer"},
+						},
+					},
+				},
+			},
+			wantInstruction:  true,
+			wantTextContains: []string{"model: visible answer"},
+			wantTextOmits:    []string{"private reasoning"},
+		},
+		{
+			name:        "thought between text parts adds no separator",
+			userContent: genai.NewContentFromText("test", genai.RoleUser),
+			memories: []memory.Entry{
+				{
+					Author: "model",
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{Text: "visible"},
+							{Text: "private reasoning", Thought: true},
+							{Text: "answer"},
+						},
+					},
+				},
+			},
+			wantInstruction:  true,
+			wantTextContains: []string{"\nmodel: visible answer\n"},
+			wantTextOmits:    []string{"private reasoning"},
+		},
+		{
+			name:        "thought after text adds no trailing separator",
+			userContent: genai.NewContentFromText("test", genai.RoleUser),
+			memories: []memory.Entry{
+				{
+					Author: "model",
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{Text: "visible answer"},
+							{Text: "private reasoning", Thought: true},
+						},
+					},
+				},
+			},
+			wantInstruction:  true,
+			wantTextContains: []string{"\nmodel: visible answer\n"},
+			wantTextOmits:    []string{"private reasoning"},
+		},
+		{
+			name:        "thought-only memory entry",
+			userContent: genai.NewContentFromText("test", genai.RoleUser),
+			memories: []memory.Entry{
+				{
+					Author:    "model",
+					Timestamp: time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC),
+					Content: &genai.Content{
+						Parts: []*genai.Part{{Text: "private reasoning", Thought: true}},
+					},
+				},
+			},
+			wantInstruction: false,
+		},
+		{
 			name:        "memory entry with empty content",
 			userContent: genai.NewContentFromText("test", genai.RoleUser),
 			memories: []memory.Entry{
@@ -197,7 +310,8 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tc := createToolContext(t, &mockMemory{memories: tt.memories, err: tt.searchErr}, tt.userContent)
+			mem := &mockMemory{memories: tt.memories, err: tt.searchErr}
+			tc := createToolContext(t, mem, tt.userContent)
 			llmRequest := &model.LLMRequest{}
 
 			pmt := preloadmemorytool.New()
@@ -211,6 +325,18 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 				t.Fatalf("ProcessRequest failed: %v", err)
 			}
 
+			if tt.wantNoSearch {
+				if mem.searchCalls != 0 {
+					t.Errorf("SearchMemory() called %d times, want 0", mem.searchCalls)
+				}
+			} else if tt.wantQuery != "" {
+				if mem.searchCalls != 1 {
+					t.Errorf("SearchMemory() called %d times, want 1", mem.searchCalls)
+				} else if mem.lastQuery != tt.wantQuery {
+					t.Errorf("SearchMemory() query = %q, want %q", mem.lastQuery, tt.wantQuery)
+				}
+			}
+
 			hasInstruction := llmRequest.Config != nil && llmRequest.Config.SystemInstruction != nil
 			if hasInstruction != tt.wantInstruction {
 				t.Errorf("hasInstruction = %v, want %v", hasInstruction, tt.wantInstruction)
@@ -218,9 +344,14 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 
 			if tt.wantInstruction && hasInstruction {
 				instruction := llmRequest.Config.SystemInstruction.Parts[0].Text
-				for _, want := range tt.wantTextContains {
+				for i, want := range tt.wantTextContains {
 					if !strings.Contains(instruction, want) {
-						t.Errorf("Instruction should contain %q, got: %v", want, instruction)
+						t.Errorf("instruction is missing expected text at index %d", i)
+					}
+				}
+				for i, omit := range tt.wantTextOmits {
+					if strings.Contains(instruction, omit) {
+						t.Errorf("instruction contains omitted text at index %d", i)
 					}
 				}
 			}

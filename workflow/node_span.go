@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
@@ -59,8 +58,7 @@ func (s nodeSpan) recordError(recordErr, classifyErr error) {
 	if isNodeControlFlow(classifyErr) {
 		return
 	}
-	s.span.RecordError(recordErr)
-	s.span.SetStatus(codes.Error, recordErr.Error())
+	telemetry.RecordError(s.span, recordErr)
 }
 
 func (s nodeSpan) end() { s.span.End() }
