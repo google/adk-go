@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/sessionutils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/tool/toolauth"
@@ -53,6 +55,40 @@ type Session interface {
 	Events() Events
 	// LastUpdateTime returns the time of the last update.
 	LastUpdateTime() time.Time
+}
+
+// CloneSession returns a deep copy of s that shares no mutable state or event
+// values with s.
+//
+// If s is nil, CloneSession returns nil. Otherwise, the returned [Session] has
+// the same [Session.ID], [Session.AppName], [Session.UserID], [Session.State]
+// entries, [Session.Events], and [Session.LastUpdateTime] as s at the time of
+// the call. Subsequent [Service.AppendEvent] or [State.Set] calls on either s
+// or the clone do not affect the other.
+//
+// The returned [Session] can be passed to [Service.AppendEvent] of any
+// [Service] that holds the session. The implementations in this module then
+// add the event to the clone and update its state and last update time, as
+// they do for a session they returned. CloneSession is safe for concurrent
+// use if s's methods are safe for concurrent use.
+func CloneSession(s Session) Session {
+	if s == nil {
+		return nil
+	}
+	clone := &session{
+		id:        id{appName: s.AppName(), userID: s.UserID(), sessionID: s.ID()},
+		updatedAt: s.LastUpdateTime(),
+		state:     map[string]any{},
+	}
+	if st := s.State(); st != nil {
+		clone.state = sessionutils.CloneStateMap(maps.Collect(st.All()))
+	}
+	if evs := s.Events(); evs != nil {
+		for ev := range evs.All() {
+			clone.events = append(clone.events, sessionutils.CloneValue(ev))
+		}
+	}
+	return clone
 }
 
 // State defines a standard interface for a key-value store.

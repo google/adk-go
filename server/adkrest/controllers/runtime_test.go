@@ -309,6 +309,62 @@ func TestRunHandlersAutoCreateSession(t *testing.T) {
 	}
 }
 
+func TestRunHandlersRejectMissingUserID(t *testing.T) {
+	tests := []struct {
+		name      string
+		streaming bool
+	}{
+		{name: "run"},
+		{name: "run_sse", streaming: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeAgent, err := agent.New(agent.Config{
+				Name: "testApp",
+				Run:  testAgent([]testAgentResult{{event: makeEvent("invocation-1", "testApp", "Hello")}}),
+			})
+			if err != nil {
+				t.Fatalf("agent.New failed: %v", err)
+			}
+			sessionService := session.InMemoryService()
+			controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+				SessionService:    sessionService,
+				AgentLoader:       agent.NewSingleLoader(fakeAgent),
+				SSETimeout:        10 * time.Second,
+				AutoCreateSession: true,
+			})
+			reqBytes, err := json.Marshal(models.RunAgentRequest{
+				AppName:    "testApp",
+				SessionId:  "newSession",
+				Streaming:  tt.streaming,
+				NewMessage: genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "Hello"}}},
+			})
+			if err != nil {
+				t.Fatalf("json.Marshal failed: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBuffer(reqBytes))
+			rr := httptest.NewRecorder()
+
+			if tt.streaming {
+				controller.RunSSEHandler(&recorderWithDeadline{rr}, req)
+			} else {
+				NewErrorHandler(controller.RunHandler)(rr, req)
+			}
+
+			if rr.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d; body: %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+			}
+			resp, err := sessionService.List(t.Context(), &session.ListRequest{AppName: "testApp"})
+			if err != nil {
+				t.Fatalf("List failed: %v", err)
+			}
+			if got := len(resp.Sessions); got != 0 {
+				t.Errorf("List returned %d sessions, want 0", got)
+			}
+		})
+	}
+}
+
 func TestDecodeRequestBody_AcceptsFunctionCallEventID(t *testing.T) {
 	body := `{
 		"appName": "a",

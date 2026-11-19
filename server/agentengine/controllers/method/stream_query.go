@@ -43,6 +43,10 @@ type streamQueryHandler struct {
 }
 
 // NewStreamQueryHandler creates a new streamQueryHandler. It can be used to serve "async_stream_query" method
+//
+// Its Handle returns an error that says "user_id is required" for a payload whose
+// user_id is missing or empty, before the session service or the agent is
+// called.
 func NewStreamQueryHandler(config *launcher.Config, agentEngineID, methodName, apiMode string) *streamQueryHandler {
 	return &streamQueryHandler{config: config, agentEngineID: agentEngineID, methodName: methodName, apiMode: apiMode}
 }
@@ -83,6 +87,9 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 				Message:   *genai.NewContentFromText(reqText.Input.Message, genai.RoleUser),
 			},
 		}
+	}
+	if req.Input.UserID == "" {
+		return fmt.Errorf("user_id is required")
 	}
 
 	events, err := s.run(ctx, &req, &req.Input.Message, s.config)

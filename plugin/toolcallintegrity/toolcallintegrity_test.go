@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"log/slog"
 	"math"
@@ -1150,10 +1151,11 @@ func TestRun_RepeatedCallIDEndsRunAndSessionStaysUsable(t *testing.T) {
 
 func newDatabaseService(t *testing.T) session.Service {
 	t.Helper()
-	svc, err := database.NewSessionService(sqlite.Open(filepath.Join(t.TempDir(), "sessions.db")))
+	svc, err := database.New(database.Config{Dialector: sqlite.Open(filepath.Join(t.TempDir(), "sessions.db"))})
 	if err != nil {
-		t.Fatalf("database.NewSessionService() error = %v", err)
+		t.Fatalf("database.New() error = %v", err)
 	}
+	t.Cleanup(func() { _ = svc.(io.Closer).Close() })
 	if err := database.AutoMigrate(svc); err != nil {
 		t.Fatalf("AutoMigrate() error = %v", err)
 	}

@@ -241,6 +241,11 @@ func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeA
 }
 
 // RunHandler executes a non-streaming agent run for a given session and message.
+//
+// When the server has an authorizer, it checks the userId first and a
+// refusal is answered with 403. A request it lets through whose userId is
+// missing or empty is answered with 400 "userId is required" before the
+// session is looked up or the agent runs.
 func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Request) error {
 	runAgentRequest, err := decodeRequestBody(req)
 	if err != nil {
@@ -270,6 +275,9 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 
 // RunAgent executes a non-streaming agent run for a given session and message.
 func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest models.RunAgentRequest) ([]*session.Event, error) {
+	if runAgentRequest.UserId == "" {
+		return nil, newStatusError(errors.New("userId is required"), http.StatusBadRequest)
+	}
 	err := c.validateSessionExists(ctx, runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
 		return nil, err
@@ -305,6 +313,11 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 }
 
 // RunSSEHandler executes an agent run and streams the resulting events using Server-Sent Events (SSE).
+//
+// When the server has an authorizer, it checks the userId first and a
+// refusal is answered with 403. A request it lets through whose userId is
+// missing or empty is answered with 400 "userId is required" before any
+// event is streamed.
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) {
 	// set custom deadlines for this request - it overrides server-wide timeouts
 	rc := http.NewResponseController(rw)
@@ -329,6 +342,11 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 			authz.WriteHTTPStatusForAuthError(rw, err)
 			return
 		}
+	}
+
+	if runAgentRequest.UserId == "" {
+		http.Error(rw, "userId is required", http.StatusBadRequest)
+		return
 	}
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)

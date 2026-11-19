@@ -34,6 +34,9 @@ type deleteSessionHandler struct {
 }
 
 // NewDeleteSessionHandler creates a new deleteSessionHandler. It can be used to serve "async_delete_session" method
+//
+// Its Handle returns an error that says "user_id is required" for a payload whose
+// user_id is missing or empty, before the session service is called.
 func NewDeleteSessionHandler(sessionservice session.Service, agentEngineID, methodName, apiMode string) *deleteSessionHandler {
 	return &deleteSessionHandler{sessionservice: sessionservice, agentEngineID: agentEngineID, methodName: methodName, apiMode: apiMode}
 }
@@ -84,6 +87,9 @@ func (g *deleteSessionHandler) Handle(ctx context.Context, rw http.ResponseWrite
 	err := json.Unmarshal(payload, &req)
 	if err != nil {
 		return fmt.Errorf("json.Unmarshal() failed: %w", err)
+	}
+	if req.Input.UserID == "" {
+		return fmt.Errorf("user_id is required")
 	}
 
 	ssReq := &session.DeleteRequest{

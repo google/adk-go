@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/adk/v2/internal/sessionutils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -88,6 +89,27 @@ func (s *localSession) appendEvent(event *session.Event) error {
 	processedEvent := trimTempDeltaState(event)
 	s.events = append(s.events, processedEvent)
 	return nil
+}
+
+// CommitAppend implements [sessionutils.MutableSession]. trimmedEvent must be
+// a *session.Event, and it is appended as is: s holds the caller's event, or
+// its copy without temp: keys, as adk-python's session holds the event object
+// it is given, so a change the caller makes to that event later shows in s.
+// The stored row is unaffected. rawStateDelta is applied to s's state with its
+// temp: keys, which stay readable for the rest of the invocation.
+func (s *localSession) CommitAppend(trimmedEvent any, rawStateDelta map[string]any, updatedAt time.Time) {
+	ev := trimmedEvent.(*session.Event)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(rawStateDelta) > 0 {
+		if s.state == nil {
+			s.state = make(map[string]any)
+		}
+		maps.Copy(s.state, rawStateDelta)
+	}
+	s.events = append(s.events, ev)
+	s.updatedAt = updatedAt
 }
 
 type events []*session.Event
@@ -196,7 +218,8 @@ func updateSessionState(sess *localSession, event *session.Event) error {
 }
 
 var (
-	_ session.Session = (*localSession)(nil)
-	_ session.Events  = (*events)(nil)
-	_ session.State   = (*state)(nil)
+	_ session.Session             = (*localSession)(nil)
+	_ sessionutils.MutableSession = (*localSession)(nil)
+	_ session.Events              = (*events)(nil)
+	_ session.State               = (*state)(nil)
 )

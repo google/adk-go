@@ -43,6 +43,10 @@ type streamingAgentRunWithEventsHandler struct {
 }
 
 // NewStreamingAgentRunWithEventsHandler creates a new handler for streaming_agent_run_with_events.
+//
+// Its Handle returns an error that says "user_id is required" for a request_json whose
+// user_id is missing or empty, before the session service or the agent is
+// called.
 func NewStreamingAgentRunWithEventsHandler(config *launcher.Config, agentEngineID, methodName, apiMode string) *streamingAgentRunWithEventsHandler {
 	return &streamingAgentRunWithEventsHandler{config: config, agentEngineID: agentEngineID, methodName: methodName, apiMode: apiMode}
 }
@@ -72,6 +76,9 @@ func (s *streamingAgentRunWithEventsHandler) streamJSONL(ctx context.Context, rw
 		err = fmt.Errorf("decodeStreamingAgentRunWithEventsRequest() failed: %w", err)
 		log.Print(err.Error()) //nolint:forbidigo // pre-slog call site
 		return err
+	}
+	if runReq.UserID == "" {
+		return fmt.Errorf("user_id is required")
 	}
 	if err := s.ensureBackendSession(ctx, runReq, requestedSessionID); err != nil {
 		err = fmt.Errorf("s.ensureBackendSession() failed: %w", err)

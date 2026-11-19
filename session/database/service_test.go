@@ -16,10 +16,17 @@ package database
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"io"
+	"iter"
+	"maps"
 	"math"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -307,6 +314,208 @@ func TestDatabaseService_DeleteRemovesSessionEvents(t *testing.T) {
 	}
 }
 
+// GORM leaves a zero-valued field out of a struct condition, and Save turns a
+// row with a zero primary-key field into an INSERT, so the user "" must be
+// named explicitly in every query. adk-python's DatabaseSessionService treats
+// "" as an ordinary user (database_session_service.py:823, :876-880).
+func TestDatabaseService_EmptyUserID_DoesNotTouchOtherUsers(t *testing.T) {
+	s := emptyService(t)
+	const app = "app-empty-u"
+	at := func(sec int64) context.Context {
+		return platform.WithTimeProvider(t.Context(), func() time.Time { return time.Unix(sec, 0).UTC() })
+	}
+	create := func(sec int64, userID, sessionID string, state map[string]any) session.Session {
+		t.Helper()
+		resp, err := s.Create(at(sec), &session.CreateRequest{AppName: app, UserID: userID, SessionID: sessionID, State: state})
+		if err != nil {
+			t.Fatalf("Create(%q, %q) error = %v", userID, sessionID, err)
+		}
+		return resp.Session
+	}
+	appendDelta := func(sess session.Session, id string, sec int64, delta map[string]any) {
+		t.Helper()
+		ev := &session.Event{ID: id, Author: "user", Timestamp: time.Unix(sec, 0).UTC(), Actions: session.EventActions{StateDelta: delta}}
+		if err := s.AppendEvent(t.Context(), sess, ev); err != nil {
+			t.Fatalf("AppendEvent(%q) error = %v", id, err)
+		}
+	}
+	get := func(userID, sessionID string) (session.Session, error) {
+		resp, err := s.Get(t.Context(), &session.GetRequest{AppName: app, UserID: userID, SessionID: sessionID})
+		if err != nil {
+			return nil, err
+		}
+		return resp.Session, nil
+	}
+	type row struct {
+		UserID, ID string
+		State      map[string]any
+	}
+	list := func(req *session.ListRequest) []row {
+		t.Helper()
+		resp, err := s.List(t.Context(), req)
+		if err != nil {
+			t.Fatalf("List(%+v) error = %v", req, err)
+		}
+		var rows []row
+		for _, sess := range resp.Sessions {
+			rows = append(rows, row{sess.UserID(), sess.ID(), maps.Collect(sess.State().All())})
+		}
+		return rows
+	}
+
+	anonS1 := create(10, "", "s1", map[string]any{"app:a": "av", "user:role": "anon", "sk": "anon_s1"})
+	create(20, "", "s2", map[string]any{"user:extra": "v2", "sk": "anon_s2"})
+	u1S1 := create(30, "u1", "s1", map[string]any{"user:role": "member", "sk": "u1_s1"})
+	appendDelta(anonS1, "e_anon", 40, map[string]any{"user:role": "anon_updated", "sk": "anon_s1_v2"})
+	appendDelta(u1S1, "e_u1", 50, map[string]any{"sk": "u1_s1_v2"})
+
+	anon, err := get("", "s1")
+	if err != nil {
+		t.Fatalf("Get(\"\", s1) error = %v", err)
+	}
+	if anon.UserID() != "" || anon.ID() != "s1" {
+		t.Errorf("Get(\"\", s1) = user %q, id %q; want user \"\", id \"s1\"", anon.UserID(), anon.ID())
+	}
+	if diff := cmp.Diff([]string{"e_anon"}, eventIDs(anon)); diff != "" {
+		t.Errorf("Get(\"\", s1) events mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]any{"app:a": "av", "user:role": "anon_updated", "user:extra": "v2", "sk": "anon_s1_v2"}, maps.Collect(anon.State().All())); diff != "" {
+		t.Errorf("Get(\"\", s1) state mismatch (-want +got):\n%s", diff)
+	}
+
+	u1State := map[string]any{"app:a": "av", "user:role": "member", "sk": "u1_s1_v2"}
+	wantAnon := []row{
+		{"", "s2", map[string]any{"app:a": "av", "user:role": "anon_updated", "user:extra": "v2", "sk": "anon_s2"}},
+		{"", "s1", map[string]any{"app:a": "av", "user:role": "anon_updated", "user:extra": "v2", "sk": "anon_s1_v2"}},
+	}
+	if diff := cmp.Diff(wantAnon, list(&session.ListRequest{AppName: app, UserID: "", FilterEmptyUserID: true})); diff != "" {
+		t.Errorf("List(UserID: \"\", FilterEmptyUserID: true) mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(append(wantAnon, row{"u1", "s1", u1State}), list(&session.ListRequest{AppName: app, UserID: ""})); diff != "" {
+		t.Errorf("List(UserID: \"\") mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]row{{"u1", "s1", u1State}}, list(&session.ListRequest{AppName: app, UserID: "u1", FilterEmptyUserID: true})); diff != "" {
+		t.Errorf("List(UserID: \"u1\", FilterEmptyUserID: true) mismatch (-want +got):\n%s", diff)
+	}
+
+	if err := s.Delete(t.Context(), &session.DeleteRequest{AppName: app, UserID: "", SessionID: "s1"}); err != nil {
+		t.Fatalf("Delete(\"\", s1) error = %v", err)
+	}
+
+	if _, err := get("", "s1"); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(\"\", s1) after Delete error = %v, want one wrapping session.ErrNotFound", err)
+	}
+	late := &session.Event{ID: "e_late", Author: "user", Timestamp: time.Unix(60, 0).UTC(), Actions: session.EventActions{StateDelta: map[string]any{"sk": "late"}}}
+	if err := s.AppendEvent(t.Context(), anonS1, late); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("AppendEvent(\"\", s1) after Delete error = %v, want one wrapping session.ErrNotFound", err)
+	}
+	kept, err := get("u1", "s1")
+	if err != nil {
+		t.Fatalf("Get(u1, s1) after Delete(\"\", s1) error = %v", err)
+	}
+	if diff := cmp.Diff([]string{"e_u1"}, eventIDs(kept)); diff != "" {
+		t.Errorf("Get(u1, s1) after Delete(\"\", s1) events mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(u1State, maps.Collect(kept.State().All())); diff != "" {
+		t.Errorf("Get(u1, s1) after Delete(\"\", s1) state mismatch (-want +got):\n%s", diff)
+	}
+	s2, err := get("", "s2")
+	if err != nil {
+		t.Fatalf("Get(\"\", s2) after Delete(\"\", s1) error = %v", err)
+	}
+	if diff := cmp.Diff(wantAnon[0].State, maps.Collect(s2.State().All())); diff != "" {
+		t.Errorf("Get(\"\", s2) after Delete(\"\", s1) state mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDatabaseService_Get_OmitEventsAndNegativeNumRecentEvents(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	sess := createAt(t, s, "app-omit-db", "s1", appendTS, map[string]any{"app:a": "av", "user:u": "uv", "sk": "sv"})
+	for i, id := range []string{"e1", "e2"} {
+		ev := &session.Event{ID: id, Author: "user", Timestamp: appendTS.Add(time.Duration(i+1) * time.Second)}
+		if err := s.AppendEvent(ctx, sess, ev); err != nil {
+			t.Fatalf("AppendEvent(%q) error = %v", id, err)
+		}
+	}
+	eventsQueries := 0
+	if err := s.db.Callback().Query().Before("gorm:query").Register("test:count_events", func(tx *gorm.DB) {
+		if tx.Statement.Table == "events" {
+			eventsQueries++
+		}
+	}); err != nil {
+		t.Fatalf("register query callback: %v", err)
+	}
+	t.Cleanup(func() { _ = s.db.Callback().Query().Remove("test:count_events") })
+
+	resp, err := s.Get(ctx, &session.GetRequest{AppName: "app-omit-db", UserID: "u1", SessionID: "s1", OmitEvents: true, NumRecentEvents: 1, After: appendTS.Add(time.Second)})
+	if err != nil {
+		t.Fatalf("Get(OmitEvents: true) error = %v", err)
+	}
+	if n := resp.Session.Events().Len(); n != 0 {
+		t.Errorf("Get(OmitEvents: true) returned %d events, want 0", n)
+	}
+	if eventsQueries != 0 {
+		t.Errorf("Get(OmitEvents: true) ran %d queries on events, want 0", eventsQueries)
+	}
+	if diff := cmp.Diff(map[string]any{"app:a": "av", "user:u": "uv", "sk": "sv"}, maps.Collect(resp.Session.State().All())); diff != "" {
+		t.Errorf("Get(OmitEvents: true) state mismatch (-want +got):\n%s", diff)
+	}
+	if got := eventIDs(getStored(t, s, "app-omit-db", "s1", 0)); !cmp.Equal(got, []string{"e1", "e2"}) || eventsQueries != 1 {
+		t.Errorf("Get() = events %v after %d queries on events; want [e1 e2] after 1", got, eventsQueries)
+	}
+
+	if _, err := s.Get(ctx, &session.GetRequest{AppName: "app-omit-db", UserID: "u1", SessionID: "missing", OmitEvents: true}); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(missing, OmitEvents: true) error = %v, want one wrapping session.ErrNotFound", err)
+	}
+
+	for _, omit := range []bool{false, true} {
+		_, err := s.Get(ctx, &session.GetRequest{AppName: "app-omit-db", UserID: "u1", SessionID: "s1", NumRecentEvents: -1, OmitEvents: omit})
+		if err == nil || err.Error() != "num_recent_events must not be negative, got -1" || errors.Is(err, session.ErrNotFound) {
+			t.Errorf("Get(NumRecentEvents: -1, OmitEvents: %t) error = %v, want \"num_recent_events must not be negative, got -1\" not wrapping session.ErrNotFound", omit, err)
+		}
+	}
+}
+
+// adk-python's DatabaseSessionService stores the session ID as given
+// (database_session_service.py:654-668); only the in-memory service strips it.
+func TestDatabaseService_SessionIDKeptVerbatim(t *testing.T) {
+	s := emptyService(t)
+	createAt(t, s, "app-ws-db", "s1", appendTS, map[string]any{"k": "plain"})
+	createAt(t, s, "app-ws-db", "  s1  ", appendTS, map[string]any{"k": "padded"})
+
+	for _, tc := range []struct{ id, want string }{{"s1", "plain"}, {"  s1  ", "padded"}} {
+		got := getStored(t, s, "app-ws-db", tc.id, 0)
+		if got.ID() != tc.id {
+			t.Errorf("Get(%q) ID = %q, want %q", tc.id, got.ID(), tc.id)
+		}
+		if diff := cmp.Diff(map[string]any{"k": tc.want}, maps.Collect(got.State().All())); diff != "" {
+			t.Errorf("Get(%q) state mismatch (-want +got):\n%s", tc.id, diff)
+		}
+	}
+}
+
+// adk-python looks an empty session ID up like any other: get_session finds
+// no row and delete_session deletes none.
+func TestDatabaseService_EmptySessionID_GetNotFoundDeleteNoOp(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	createAt(t, s, "app", "s1", appendTS, nil)
+
+	if _, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: ""}); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(SessionID: \"\") error = %v, want one wrapping session.ErrNotFound", err)
+	}
+	if err := s.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "u1", SessionID: ""}); err != nil {
+		t.Errorf("Delete(SessionID: \"\") error = %v, want nil", err)
+	}
+	if got := getStored(t, s, "app", "s1", 0); got.ID() != "s1" {
+		t.Errorf("Get(s1) after Delete(SessionID: \"\") ID = %q, want \"s1\"", got.ID())
+	}
+	if _, err := s.Get(ctx, &session.GetRequest{AppName: "", UserID: "u1", SessionID: "s1"}); err == nil || errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(AppName: \"\") error = %v, want a validation error that does not wrap session.ErrNotFound", err)
+	}
+}
+
 func TestNewSessionServiceFromDB(t *testing.T) {
 	t.Run("nil db returns error", func(t *testing.T) {
 		_, err := NewSessionServiceFromDB(nil)
@@ -403,12 +612,34 @@ func emptyService(t *testing.T) *databaseService {
 	if err != nil {
 		t.Fatalf("Failed to create session service: %v", err)
 	}
+	return migratedService(t, service)
+}
+
+// appendOrderService is emptyService built with [New] and
+// Config.AppendOrderTiebreak set. It opens the same shared database.
+func appendOrderService(t *testing.T) *databaseService {
+	t.Helper()
+	service, err := New(Config{
+		Dialector:           sqlite.Open("file::memory:?cache=shared"),
+		AppendOrderTiebreak: true,
+		GORMOptions:         []gorm.Option{&gorm.Config{PrepareStmt: true}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return migratedService(t, service)
+}
+
+// migratedService migrates service's tables and deletes every row and closes
+// the connection when t ends.
+func migratedService(t *testing.T, service session.Service) *databaseService {
+	t.Helper()
 	dbservice, ok := service.(*databaseService)
 	if !ok {
 		t.Fatalf("invalid session service type")
 	}
 
-	err = AutoMigrate(service)
+	err := AutoMigrate(service)
 	if err != nil {
 		t.Fatalf("Failed to AutoMigrate db: %v", err)
 	}
@@ -926,5 +1157,934 @@ func TestDatabaseService_ListTieBreaksByUserThenID(t *testing.T) {
 	}
 	if want := []string{"u1/a", "u1/b", "u2/a"}; !slices.Equal(got, want) {
 		t.Errorf("List() order = %v, want %v", got, want)
+	}
+}
+
+// getUserState reads the user state of (appName, userID) through
+// session.GetUserState and fails the test on an error.
+func getUserState(t *testing.T, svc session.Service, appName, userID string) map[string]any {
+	t.Helper()
+	resp, err := session.GetUserState(t.Context(), svc, &session.GetUserStateRequest{AppName: appName, UserID: userID})
+	if err != nil {
+		t.Fatalf("GetUserState(%q, %q) error = %v", appName, userID, err)
+	}
+	return resp.State
+}
+
+// The user-state read returns only the user: keys of exactly the requested
+// (app, user) pair, unprefixed and with a stored nil kept, keeps them after
+// the session is deleted, and never matches another row when an id is empty.
+func TestDatabaseService_GetUserState_ScopesAndEmptyIDs(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	created, err := s.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "u1",
+		SessionID: "s1",
+		State:     map[string]any{"app:a": "av", "user:k1": "v1", "sk": "sv"},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	event := session.NewEvent(ctx, "inv")
+	event.Actions.StateDelta = map[string]any{"user:nil_val": nil}
+	if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	for _, id := range [][2]string{{"app", ""}, {"", "u1"}, {"", ""}} {
+		if diff := cmp.Diff(map[string]any{}, getUserState(t, s, id[0], id[1])); diff != "" {
+			t.Errorf("GetUserState(%q, %q) mismatch (-want +got):\n%s", id[0], id[1], diff)
+		}
+	}
+	wantU1 := map[string]any{"k1": "v1", "nil_val": nil}
+	if diff := cmp.Diff(wantU1, getUserState(t, s, "app", "u1")); diff != "" {
+		t.Errorf("GetUserState(app, u1) mismatch (-want +got):\n%s", diff)
+	}
+
+	if err := s.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "u1", SessionID: "s1"}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if diff := cmp.Diff(wantU1, getUserState(t, s, "app", "u1")); diff != "" {
+		t.Errorf("GetUserState(app, u1) after Delete mismatch (-want +got):\n%s", diff)
+	}
+	s2, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u1", SessionID: "s2"})
+	if err != nil {
+		t.Fatalf("Create(s2) error = %v", err)
+	}
+	wantS2 := map[string]any{"app:a": "av", "user:k1": "v1", "user:nil_val": nil}
+	if diff := cmp.Diff(wantS2, maps.Collect(s2.Session.State().All())); diff != "" {
+		t.Errorf("Create(s2) state mismatch (-want +got):\n%s", diff)
+	}
+
+	// Create rejects empty ids, so these rows can only be inserted directly.
+	for _, row := range []*storageUserState{
+		{AppName: "app", UserID: "", State: stateMap{"k": "empty_user"}},
+		{AppName: "", UserID: "u1", State: stateMap{"k": "empty_app"}},
+	} {
+		if err := s.db.Create(row).Error; err != nil {
+			t.Fatalf("insert user_states row (%q, %q): %v", row.AppName, row.UserID, err)
+		}
+	}
+	if diff := cmp.Diff(map[string]any{"k": "empty_user"}, getUserState(t, s, "app", "")); diff != "" {
+		t.Errorf("GetUserState(app, \"\") mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(map[string]any{"k": "empty_app"}, getUserState(t, s, "", "u1")); diff != "" {
+		t.Errorf("GetUserState(\"\", u1) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Mutating the map a user-state read returns, at any depth, changes nothing
+// stored.
+func TestDatabaseService_GetUserState_DeepCopyNoAliasing(t *testing.T) {
+	s := emptyService(t)
+	if _, err := s.Create(t.Context(), &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "u1",
+		SessionID: "s1",
+		State: map[string]any{
+			"user:profile": map[string]any{"name": "Alice", "roles": []any{"admin", map[string]any{"dept": "eng"}}},
+			"user:empty":   nil,
+		},
+	}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	want := map[string]any{
+		"profile": map[string]any{"name": "Alice", "roles": []any{"admin", map[string]any{"dept": "eng"}}},
+		"empty":   nil,
+	}
+
+	got := getUserState(t, s, "app", "u1")
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("first GetUserState(app, u1) mismatch (-want +got):\n%s", diff)
+	}
+	profile := got["profile"].(map[string]any)
+	profile["name"] = "Mallory"
+	roles := profile["roles"].([]any)
+	roles[0] = "guest"
+	roles[1].(map[string]any)["dept"] = "sales"
+	got["empty"] = "full"
+	got["extra"] = true
+
+	if diff := cmp.Diff(want, getUserState(t, s, "app", "u1")); diff != "" {
+		t.Errorf("second GetUserState(app, u1) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A state column holding JSON null, which another writer of the table can
+// leave, reads as an empty map rather than a nil one.
+func TestDatabaseService_GetUserState_NullStateColumn(t *testing.T) {
+	s := emptyService(t)
+	if err := s.db.Exec("INSERT INTO user_states (app_name, user_id, state, update_time) VALUES (?, ?, ?, ?)",
+		"app", "u1", "null", time.Date(2026, time.March, 15, 12, 30, 0, 0, time.UTC)).Error; err != nil {
+		t.Fatalf("insert user_states row: %v", err)
+	}
+	if diff := cmp.Diff(map[string]any{}, getUserState(t, s, "app", "u1")); diff != "" {
+		t.Errorf("GetUserState(app, u1) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDatabaseService_GetUserState_NilRequest(t *testing.T) {
+	s := emptyService(t)
+	resp, err := s.GetUserState(t.Context(), nil)
+	if err == nil || resp != nil {
+		t.Errorf("GetUserState(nil) = %v, %v; want nil and an error", resp, err)
+	}
+}
+
+// Fixtures of the event-appending tests below. Each test uses its own app
+// name, since every emptyService opens one shared database.
+var (
+	appendT0 = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	appendT1 = appendT0.Add(1 * time.Minute)
+	appendT2 = appendT0.Add(2 * time.Minute)
+	appendT3 = appendT0.Add(3 * time.Minute)
+	// appendTS is the one timestamp the tie-order tests give every event.
+	appendTS = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
+// createAt creates session sessionID of user "u1" in appName, with creation
+// time when and the given initial state.
+func createAt(t *testing.T, svc session.Service, appName, sessionID string, when time.Time, state map[string]any) session.Session {
+	t.Helper()
+	ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return when })
+	resp, err := svc.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "u1", SessionID: sessionID, State: state})
+	if err != nil {
+		t.Fatalf("Create(%q, %q) error = %v", appName, sessionID, err)
+	}
+	return resp.Session
+}
+
+// getStored reads session sessionID of user "u1" back from svc, limited to
+// the numRecent most recent events when numRecent is positive.
+func getStored(t *testing.T, svc session.Service, appName, sessionID string, numRecent int) session.Session {
+	t.Helper()
+	resp, err := svc.Get(t.Context(), &session.GetRequest{AppName: appName, UserID: "u1", SessionID: sessionID, NumRecentEvents: numRecent})
+	if err != nil {
+		t.Fatalf("Get(%q, %q) error = %v", appName, sessionID, err)
+	}
+	return resp.Session
+}
+
+func eventIDs(s session.Session) []string {
+	var ids []string
+	for ev := range s.Events().All() {
+		ids = append(ids, ev.ID)
+	}
+	return ids
+}
+
+func appendTied(t *testing.T, svc session.Service, held session.Session, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		ev := &session.Event{ID: id, InvocationID: "inv1", Author: "user", Timestamp: appendTS}
+		if err := svc.AppendEvent(t.Context(), held, ev); err != nil {
+			t.Fatalf("AppendEvent(%q) error = %v", id, err)
+		}
+	}
+}
+
+// foreignSession is a session.Session that no service created.
+type foreignSession struct {
+	appName, userID, id string
+	updatedAt           time.Time
+	state               foreignState
+}
+
+func (f *foreignSession) ID() string                { return f.id }
+func (f *foreignSession) AppName() string           { return f.appName }
+func (f *foreignSession) UserID() string            { return f.userID }
+func (f *foreignSession) State() session.State      { return f.state }
+func (f *foreignSession) Events() session.Events    { return foreignEvents{} }
+func (f *foreignSession) LastUpdateTime() time.Time { return f.updatedAt }
+
+type foreignState map[string]any
+
+func (s foreignState) Get(key string) (any, error) {
+	v, ok := s[key]
+	if !ok {
+		return nil, session.ErrStateKeyNotExist
+	}
+	return v, nil
+}
+
+func (s foreignState) Set(key string, value any) error {
+	s[key] = value
+	return nil
+}
+
+func (s foreignState) All() iter.Seq2[string, any] { return maps.All(s) }
+
+type foreignEvents struct{}
+
+func (foreignEvents) All() iter.Seq[*session.Event] { return func(func(*session.Event) bool) {} }
+func (foreignEvents) Len() int                      { return 0 }
+func (foreignEvents) At(int) *session.Event         { return nil }
+
+func foreignEvent() *session.Event {
+	return &session.Event{ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT1, Actions: session.EventActions{StateDelta: map[string]any{"k": "v"}}}
+}
+
+func TestCloneSession_SharesNothingWithDatabaseSession(t *testing.T) {
+	ctx := t.Context()
+	svc := emptyService(t)
+	held := createAt(t, svc, "app-clone-db", "s-clone", appendT0, map[string]any{
+		"k":      "v1",
+		"nested": map[string]any{"inner": "orig"},
+		"slice":  []any{"a"},
+	})
+	e1 := &session.Event{
+		ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT1,
+		Actions: session.EventActions{
+			StateDelta:    map[string]any{"d": "orig"},
+			ArtifactDelta: map[string]int64{"f": 1},
+			Compaction: &session.EventCompaction{
+				StartTimestamp:   appendT0,
+				EndTimestamp:     appendT0,
+				CompactedContent: genai.NewContentFromText("summary", genai.RoleModel),
+			},
+		},
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleUser)},
+	}
+	if err := svc.AppendEvent(ctx, held, e1); err != nil {
+		t.Fatalf("AppendEvent(e1) error = %v", err)
+	}
+
+	cloned := session.CloneSession(held)
+
+	if err := held.State().Set("k", "v2"); err != nil {
+		t.Fatalf("State().Set() error = %v", err)
+	}
+	nested, err := held.State().Get("nested")
+	if err != nil {
+		t.Fatalf("State().Get(nested) error = %v", err)
+	}
+	nested.(map[string]any)["inner"] = "mutated"
+	slice, err := held.State().Get("slice")
+	if err != nil {
+		t.Fatalf("State().Get(slice) error = %v", err)
+	}
+	slice.([]any)[0] = "mutated"
+	heldEv := held.Events().At(0)
+	heldEv.Actions.StateDelta["d"] = "mutated"
+	heldEv.Actions.ArtifactDelta["f"] = 99
+	heldEv.Content.Parts[0].Text = "mutated"
+	heldEv.Actions.Compaction.CompactedContent.Parts[0].Text = "mutated"
+	e2 := &session.Event{ID: "e2", InvocationID: "inv2", Author: "user", Timestamp: appendT2, Actions: session.EventActions{StateDelta: map[string]any{"k2": "v2"}}}
+	if err := svc.AppendEvent(ctx, held, e2); err != nil {
+		t.Fatalf("AppendEvent(e2) error = %v", err)
+	}
+
+	if cloned.ID() != "s-clone" || cloned.AppName() != "app-clone-db" || cloned.UserID() != "u1" {
+		t.Errorf("cloned identity = (%q, %q, %q), want (app-clone-db, u1, s-clone)", cloned.AppName(), cloned.UserID(), cloned.ID())
+	}
+	wantState := map[string]any{"k": "v1", "nested": map[string]any{"inner": "orig"}, "slice": []any{"a"}, "d": "orig"}
+	if diff := cmp.Diff(wantState, maps.Collect(cloned.State().All())); diff != "" {
+		t.Errorf("cloned.State() mismatch (-want +got):\n%s", diff)
+	}
+	if got := cloned.Events().Len(); got != 1 {
+		t.Fatalf("cloned.Events().Len() = %d, want 1", got)
+	}
+	ev := cloned.Events().At(0)
+	if got := ev.Actions.StateDelta["d"]; got != "orig" {
+		t.Errorf("cloned event StateDelta[d] = %v, want orig", got)
+	}
+	if got := ev.Actions.ArtifactDelta["f"]; got != 1 {
+		t.Errorf("cloned event ArtifactDelta[f] = %d, want 1", got)
+	}
+	if got := ev.Content.Parts[0].Text; got != "hello" {
+		t.Errorf("cloned event content text = %q, want hello", got)
+	}
+	if got := ev.Actions.Compaction.CompactedContent.Parts[0].Text; got != "summary" {
+		t.Errorf("cloned event compaction text = %q, want summary", got)
+	}
+	if got := cloned.LastUpdateTime(); !got.Equal(appendT1) {
+		t.Errorf("cloned.LastUpdateTime() = %v, want %v", got, appendT1)
+	}
+}
+
+func TestDatabaseService_AppendEvent_ThroughCloneUpdatesOnlyClone(t *testing.T) {
+	svc := emptyService(t)
+	s2 := createAt(t, svc, "app-clone-append-db", "s2", appendT0, nil)
+	c2 := session.CloneSession(s2)
+
+	e3 := &session.Event{ID: "e3", InvocationID: "inv3", Author: "user", Timestamp: appendT3, Actions: session.EventActions{StateDelta: map[string]any{"k3": "v3"}}}
+	if err := svc.AppendEvent(t.Context(), c2, e3); err != nil {
+		t.Fatalf("AppendEvent(clone) error = %v", err)
+	}
+
+	if diff := cmp.Diff([]string{"e3"}, eventIDs(c2)); diff != "" {
+		t.Errorf("clone event IDs mismatch (-want +got):\n%s", diff)
+	}
+	if got := c2.LastUpdateTime(); !got.Equal(appendT3) {
+		t.Errorf("clone LastUpdateTime() = %v, want %v", got, appendT3)
+	}
+	if got, err := c2.State().Get("k3"); err != nil || got != "v3" {
+		t.Errorf("clone State().Get(k3) = %v, %v; want v3, nil", got, err)
+	}
+	if got := s2.Events().Len(); got != 0 {
+		t.Errorf("original Events().Len() = %d, want 0", got)
+	}
+	if got := s2.LastUpdateTime(); !got.Equal(appendT0) {
+		t.Errorf("original LastUpdateTime() = %v, want %v", got, appendT0)
+	}
+	if _, err := s2.State().Get("k3"); !errors.Is(err, session.ErrStateKeyNotExist) {
+		t.Errorf("original State().Get(k3) error = %v, want ErrStateKeyNotExist", err)
+	}
+	if got := getStored(t, svc, "app-clone-append-db", "s2", 0).Events().Len(); got != 1 {
+		t.Errorf("stored Events().Len() = %d, want 1", got)
+	}
+}
+
+// The database service does not deduplicate a re-delivered event: the
+// driver rejects the duplicate primary key, and nothing changes.
+func TestDatabaseService_AppendEvent_DuplicateEventIDFails(t *testing.T) {
+	svc := emptyService(t)
+	held := createAt(t, svc, "app-dup-db", "s1", appendT0, nil)
+	newEvent := func() *session.Event {
+		return &session.Event{ID: "dup-id", InvocationID: "inv1", Author: "user", Timestamp: appendT1}
+	}
+	if err := svc.AppendEvent(t.Context(), held, newEvent()); err != nil {
+		t.Fatalf("first AppendEvent() error = %v", err)
+	}
+
+	err := svc.AppendEvent(t.Context(), held, newEvent())
+
+	if err == nil {
+		t.Fatal("second AppendEvent() error = nil, want a duplicate key error")
+	}
+	if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		t.Errorf("second AppendEvent() error = %v, want the driver's UNIQUE constraint error", err)
+	}
+	if errors.Is(err, session.ErrNotFound) || errors.Is(err, session.ErrStaleSession) {
+		t.Errorf("second AppendEvent() error = %v, want neither ErrNotFound nor ErrStaleSession", err)
+	}
+	if got := held.Events().Len(); got != 1 {
+		t.Errorf("held Events().Len() = %d, want 1", got)
+	}
+	if got := getStored(t, svc, "app-dup-db", "s1", 0).Events().Len(); got != 1 {
+		t.Errorf("stored Events().Len() = %d, want 1", got)
+	}
+}
+
+func TestDatabaseService_Get_AppendOrderTiebreakReadsAppendOrder(t *testing.T) {
+	if _, err := New(Config{}); err == nil {
+		t.Error("New(Config{}) error = nil, want an error for the nil dialector")
+	}
+
+	svc := appendOrderService(t)
+	held := createAt(t, svc, "app-tie-append", "s1", appendT0, nil)
+	appendTied(t, svc, held, "event_z", "event_m", "event_a")
+
+	if diff := cmp.Diff([]string{"event_z", "event_m", "event_a"}, eventIDs(getStored(t, svc, "app-tie-append", "s1", 0))); diff != "" {
+		t.Errorf("Get() event IDs mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"event_m", "event_a"}, eventIDs(getStored(t, svc, "app-tie-append", "s1", 2))); diff != "" {
+		t.Errorf("Get(NumRecentEvents: 2) event IDs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDatabaseService_Get_DefaultConstructorsReadIDOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		service func(*testing.T) *databaseService
+	}{
+		{name: "NewSessionService", service: emptyService},
+		{name: "NewSessionServiceFromDB", service: emptyServiceFromDB},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := tc.service(t)
+			held := createAt(t, svc, "app-tie-default", "s1", appendT0, nil)
+			appendTied(t, svc, held, "event_z", "event_m", "event_a")
+
+			if diff := cmp.Diff([]string{"event_a", "event_m", "event_z"}, eventIDs(getStored(t, svc, "app-tie-default", "s1", 0))); diff != "" {
+				t.Errorf("Get() event IDs mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff([]string{"event_m", "event_z"}, eventIDs(getStored(t, svc, "app-tie-default", "s1", 2))); diff != "" {
+				t.Errorf("Get(NumRecentEvents: 2) event IDs mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// Rows written before the seq column existed hold seq 0. On an append-order
+// service they fall back to the id order, and a later append at the same
+// timestamp sorts after them.
+func TestDatabaseService_Get_AppendOrderTiebreakFallsBackToIDForRowsWithoutSeq(t *testing.T) {
+	svc := appendOrderService(t)
+	held := createAt(t, svc, "app-tie-legacy", "s1", appendT0, nil)
+	appendTied(t, svc, held, "event_a", "event_z")
+	if err := svc.db.Exec("UPDATE events SET seq = 0 WHERE app_name = ? AND id IN ?", "app-tie-legacy", []string{"event_a", "event_z"}).Error; err != nil {
+		t.Fatalf("resetting seq: %v", err)
+	}
+
+	if diff := cmp.Diff([]string{"event_a", "event_z"}, eventIDs(getStored(t, svc, "app-tie-legacy", "s1", 0))); diff != "" {
+		t.Errorf("Get() of legacy rows mismatch (-want +got):\n%s", diff)
+	}
+	appendTied(t, svc, held, "event_b")
+	if diff := cmp.Diff([]string{"event_a", "event_z", "event_b"}, eventIDs(getStored(t, svc, "app-tie-legacy", "s1", 0))); diff != "" {
+		t.Errorf("Get() after a new append mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDatabaseService_AppendEvent_PersistsPartialSet(t *testing.T) {
+	svc := emptyService(t)
+	held := createAt(t, svc, "app-partialset-db", "s1", appendT0, nil)
+	e1 := &session.Event{ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT1, LLMResponse: model.LLMResponse{Partial: false, PartialSet: true}}
+	e2 := &session.Event{ID: "e2", InvocationID: "inv1", Author: "user", Timestamp: appendT2, LLMResponse: model.LLMResponse{Partial: false, PartialSet: false}}
+	for _, ev := range []*session.Event{e1, e2} {
+		if err := svc.AppendEvent(t.Context(), held, ev); err != nil {
+			t.Fatalf("AppendEvent(%q) error = %v", ev.ID, err)
+		}
+	}
+
+	type partial struct{ Partial, PartialSet bool }
+	want := []partial{{false, true}, {false, false}}
+	for name, s := range map[string]session.Session{"held": held, "stored": getStored(t, svc, "app-partialset-db", "s1", 0)} {
+		var got []partial
+		for ev := range s.Events().All() {
+			got = append(got, partial{ev.Partial, ev.PartialSet})
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("%s (Partial, PartialSet) per event mismatch (-want +got):\n%s", name, diff)
+		}
+	}
+}
+
+// Every row written before PartialSet was stored has a non-NULL partial
+// column, so it reads back as explicitly set.
+func TestDatabaseService_Get_ReadsPartialColumnAsPartialSet(t *testing.T) {
+	svc := emptyService(t)
+	held := createAt(t, svc, "app-partial-legacy", "s1", appendT0, nil)
+	for _, ev := range []*session.Event{
+		{ID: "legacy-false", InvocationID: "inv1", Author: "user", Timestamp: appendT1},
+		{ID: "legacy-null", InvocationID: "inv1", Author: "user", Timestamp: appendT2},
+	} {
+		if err := svc.AppendEvent(t.Context(), held, ev); err != nil {
+			t.Fatalf("AppendEvent(%q) error = %v", ev.ID, err)
+		}
+	}
+	if err := svc.db.Exec("UPDATE events SET partial = ? WHERE app_name = ? AND id = ?", false, "app-partial-legacy", "legacy-false").Error; err != nil {
+		t.Fatalf("setting partial: %v", err)
+	}
+
+	stored := getStored(t, svc, "app-partial-legacy", "s1", 0)
+
+	type partial struct {
+		ID                  string
+		Partial, PartialSet bool
+	}
+	var got []partial
+	for ev := range stored.Events().All() {
+		got = append(got, partial{ev.ID, ev.Partial, ev.PartialSet})
+	}
+	want := []partial{{"legacy-false", false, true}, {"legacy-null", false, false}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("stored (ID, Partial, PartialSet) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Two appends through two current copies of one session race: exactly one
+// wins and the other is stale, as adk-python's
+// test_append_event_concurrent_stale_sessions_reject_stale_writer asserts
+// (tests/unittests/sessions/test_session_service.py:2115). On SQLite only the
+// service's in-process session lock makes the loser see the winner's commit
+// instead of failing with "database is locked".
+func TestDatabaseService_AppendEvent_ConcurrentStaleWriterGetsErrStaleSession(t *testing.T) {
+	svc := emptyService(t)
+	const appName = "app-concurrent"
+	createAt(t, svc, appName, "s1", appendT0, nil)
+
+	for i := range 8 {
+		latest := getStored(t, svc, appName, "s1", 0)
+		before := latest.LastUpdateTime()
+		clones := []session.Session{session.CloneSession(latest), session.CloneSession(latest)}
+		events := make([]*session.Event, 2)
+		keys := make([]string, 2)
+		for j := range 2 {
+			keys[j] = fmt.Sprintf("sk%d-%d", i, j+1)
+			events[j] = &session.Event{
+				InvocationID: fmt.Sprintf("inv%d-%d", i, j+1),
+				Author:       "user",
+				Timestamp:    appendT0.Add(time.Duration(2*i+j+1) * time.Second),
+				Actions:      session.EventActions{StateDelta: map[string]any{keys[j]: fmt.Sprintf("v%d-%d", i, j+1)}},
+			}
+		}
+
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		for j := range 2 {
+			wg.Go(func() { errs[j] = svc.AppendEvent(t.Context(), clones[j], events[j]) })
+		}
+		wg.Wait()
+
+		var winner, loser int
+		switch {
+		case errs[0] == nil && errors.Is(errs[1], session.ErrStaleSession):
+			winner, loser = 0, 1
+		case errs[1] == nil && errors.Is(errs[0], session.ErrStaleSession):
+			winner, loser = 1, 0
+		default:
+			t.Fatalf("iteration %d: AppendEvent errors = [%v, %v], want one nil and one ErrStaleSession", i, errs[0], errs[1])
+		}
+		if got := clones[loser].Events().Len(); got != i {
+			t.Errorf("iteration %d: losing clone Events().Len() = %d, want %d", i, got, i)
+		}
+		if got := clones[loser].LastUpdateTime(); !got.Equal(before) {
+			t.Errorf("iteration %d: losing clone LastUpdateTime() = %v, want %v", i, got, before)
+		}
+		if _, err := clones[loser].State().Get(keys[loser]); !errors.Is(err, session.ErrStateKeyNotExist) {
+			t.Errorf("iteration %d: losing clone State().Get(%q) error = %v, want ErrStateKeyNotExist", i, keys[loser], err)
+		}
+		stored := getStored(t, svc, appName, "s1", 0)
+		if got := stored.Events().Len(); got != i+1 {
+			t.Errorf("iteration %d: stored Events().Len() = %d, want %d", i, got, i+1)
+		}
+		if _, err := stored.State().Get(keys[winner]); err != nil {
+			t.Errorf("iteration %d: stored State().Get(%q) error = %v, want the winner's key", i, keys[winner], err)
+		}
+		if _, err := stored.State().Get(keys[loser]); !errors.Is(err, session.ErrStateKeyNotExist) {
+			t.Errorf("iteration %d: stored State().Get(%q) error = %v, want ErrStateKeyNotExist", i, keys[loser], err)
+		}
+	}
+}
+
+func TestDatabaseService_AppendEvent_AbsentForeignSessionIsNotFound(t *testing.T) {
+	svc := emptyService(t)
+	foreign := &foreignSession{appName: "app-foreign-db", userID: "u1", id: "s1", state: foreignState{}}
+
+	err := svc.AppendEvent(t.Context(), foreign, foreignEvent())
+
+	if !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("AppendEvent() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDatabaseService_AppendEvent_CurrentForeignSessionStoresEvent(t *testing.T) {
+	svc := emptyService(t)
+	createAt(t, svc, "app-foreign-db", "s-current", appendT0, nil)
+	foreign := &foreignSession{appName: "app-foreign-db", userID: "u1", id: "s-current", updatedAt: appendT0, state: foreignState{}}
+
+	if err := svc.AppendEvent(t.Context(), foreign, foreignEvent()); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	if diff := cmp.Diff([]string{"e1"}, eventIDs(getStored(t, svc, "app-foreign-db", "s-current", 0))); diff != "" {
+		t.Errorf("stored event IDs mismatch (-want +got):\n%s", diff)
+	}
+	if got, err := foreign.State().Get("k"); err != nil || got != "v" {
+		t.Errorf("foreign State().Get(k) = %v, %v; want v, nil", got, err)
+	}
+}
+
+// A session value the service did not create carries no update time unless
+// its author gives it one, and the zero time is older than any stored session.
+func TestDatabaseService_AppendEvent_ForeignSessionWithZeroUpdateTimeIsStale(t *testing.T) {
+	svc := emptyService(t)
+	createAt(t, svc, "app-foreign-db", "s-zero", appendT0, nil)
+	foreign := &foreignSession{appName: "app-foreign-db", userID: "u1", id: "s-zero", state: foreignState{}}
+
+	err := svc.AppendEvent(t.Context(), foreign, foreignEvent())
+
+	if !errors.Is(err, session.ErrStaleSession) {
+		t.Errorf("AppendEvent() error = %v, want ErrStaleSession", err)
+	}
+	if got := getStored(t, svc, "app-foreign-db", "s-zero", 0).Events().Len(); got != 0 {
+		t.Errorf("stored Events().Len() = %d, want 0", got)
+	}
+}
+
+func TestDatabaseService_AppendEvent_PartialEventLeavesStateAndUpdateTime(t *testing.T) {
+	svc := emptyService(t)
+	held := createAt(t, svc, "app-partial-state-db", "s1", appendT0, nil)
+	ev := &session.Event{
+		ID: "p1", InvocationID: "inv1", Author: "agent", Timestamp: appendT0.Add(10 * time.Minute),
+		LLMResponse: model.LLMResponse{Partial: true},
+		Actions:     session.EventActions{StateDelta: map[string]any{"temp:t": "tv", "app:a": "av", "user:u": "uv", "sk": "sv"}},
+	}
+
+	if err := svc.AppendEvent(t.Context(), held, ev); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	for name, s := range map[string]session.Session{"held": held, "stored": getStored(t, svc, "app-partial-state-db", "s1", 0)} {
+		if got := s.Events().Len(); got != 0 {
+			t.Errorf("%s Events().Len() = %d, want 0", name, got)
+		}
+		if got := s.LastUpdateTime(); !got.Equal(appendT0) {
+			t.Errorf("%s LastUpdateTime() = %v, want %v", name, got, appendT0)
+		}
+		for _, key := range []string{"temp:t", "app:a", "user:u", "sk"} {
+			if _, err := s.State().Get(key); !errors.Is(err, session.ErrStateKeyNotExist) {
+				t.Errorf("%s State().Get(%q) error = %v, want ErrStateKeyNotExist", name, key, err)
+			}
+		}
+	}
+}
+
+func TestDatabaseService_AppendEvent_OlderEventMovesLastUpdateTimeBack(t *testing.T) {
+	svc := emptyService(t)
+	held := createAt(t, svc, "app-backdated-db", "s1", appendT0, nil)
+	for _, ev := range []*session.Event{
+		{ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT0.Add(10 * time.Minute)},
+		{ID: "e2", InvocationID: "inv1", Author: "user", Timestamp: appendT0.Add(2 * time.Minute)},
+	} {
+		if err := svc.AppendEvent(t.Context(), held, ev); err != nil {
+			t.Fatalf("AppendEvent(%q) error = %v", ev.ID, err)
+		}
+	}
+
+	want := time.Date(2026, 1, 1, 12, 2, 0, 0, time.UTC)
+	for name, s := range map[string]session.Session{"held": held, "stored": getStored(t, svc, "app-backdated-db", "s1", 0)} {
+		if got := s.LastUpdateTime(); !got.Equal(want) {
+			t.Errorf("%s LastUpdateTime() = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// A temp: key reaches the held session's state, so later steps of the same
+// invocation can read it, but not storage (database_session_service.py:906-910).
+func TestDatabaseService_AppendEvent_TempStateReachesOnlyHeldSession(t *testing.T) {
+	svc := emptyService(t)
+	held := createAt(t, svc, "app-temp-db", "s1", appendT0, nil)
+
+	err := svc.AppendEvent(t.Context(), held, &session.Event{
+		ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT1,
+		Actions: session.EventActions{StateDelta: map[string]any{"temp:t": "tv", "sk": "sv"}},
+	})
+	if err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	if got, err := held.State().Get("temp:t"); err != nil || got != "tv" {
+		t.Errorf("held State().Get(temp:t) = %v, %v; want tv", got, err)
+	}
+	if _, err := getStored(t, svc, "app-temp-db", "s1", 0).State().Get("temp:t"); !errors.Is(err, session.ErrStateKeyNotExist) {
+		t.Errorf("stored State().Get(temp:t) error = %v, want ErrStateKeyNotExist", err)
+	}
+}
+
+// Regression test: a rejected append leaves the held session as it was,
+// temp: keys included. adk-python applies temp: keys to the session before it
+// checks the session exists (database_session_service.py:908).
+func TestDatabaseService_AppendEvent_RejectedAppendDoesNotMutateHeldSession(t *testing.T) {
+	ctx := t.Context()
+	svc := emptyService(t)
+	held := createAt(t, svc, "app-rejected-db", "s1", appendT0, nil)
+	e1 := &session.Event{ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT1, Actions: session.EventActions{StateDelta: map[string]any{"sk1": "v1"}}}
+	if err := svc.AppendEvent(ctx, held, e1); err != nil {
+		t.Fatalf("AppendEvent(e1) error = %v", err)
+	}
+	if err := svc.Delete(ctx, &session.DeleteRequest{AppName: "app-rejected-db", UserID: "u1", SessionID: "s1"}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+
+	eDel := &session.Event{ID: "e_del", InvocationID: "inv2", Author: "user", Timestamp: appendT2, Actions: session.EventActions{StateDelta: map[string]any{"temp:leak": "bad", "sk3": "bad"}}}
+	err := svc.AppendEvent(ctx, held, eDel)
+
+	if !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("AppendEvent() error = %v, want ErrNotFound", err)
+	}
+	if got := held.Events().Len(); got != 1 {
+		t.Errorf("held Events().Len() = %d, want 1", got)
+	}
+	if got := held.LastUpdateTime(); !got.Equal(appendT1) {
+		t.Errorf("held LastUpdateTime() = %v, want %v", got, appendT1)
+	}
+	for _, key := range []string{"temp:leak", "sk3"} {
+		if _, err := held.State().Get(key); !errors.Is(err, session.ErrStateKeyNotExist) {
+			t.Errorf("held State().Get(%q) error = %v, want ErrStateKeyNotExist", key, err)
+		}
+	}
+}
+
+// The held session holds the event the caller passed, as adk-python's
+// session holds the event object it is given (base_session_service.py:185),
+// while the stored row stays as appended: a caller that changes its event
+// after AppendEvent changes what the held session shows, not what Get returns.
+func TestDatabaseService_AppendEvent_HeldSessionHoldsCallerEvent(t *testing.T) {
+	svc := emptyService(t)
+	held := createAt(t, svc, "app-held-event-db", "s1", appendT0, nil)
+	ev := &session.Event{
+		ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT1,
+		Actions:     session.EventActions{StateDelta: map[string]any{"k": "v"}},
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("hello", genai.RoleUser)},
+	}
+	if err := svc.AppendEvent(t.Context(), held, ev); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	if got := held.Events().At(0); got != ev {
+		t.Errorf("held.Events().At(0) = %p, want the appended event %p", got, ev)
+	}
+
+	ev.Actions.StateDelta["k"] = "mutated"
+	ev.Content.Parts[0].Text = "mutated"
+
+	stored := getStored(t, svc, "app-held-event-db", "s1", 0).Events().At(0)
+	if v := stored.Actions.StateDelta["k"]; v != "v" {
+		t.Errorf("stored event StateDelta[k] = %v, want v", v)
+	}
+	if text := stored.Content.Parts[0].Text; text != "hello" {
+		t.Errorf("stored event content text = %q, want hello", text)
+	}
+}
+
+// A nil session or a nil event is an error, not a panic, and stores nothing.
+func TestDatabaseService_AppendEvent_NilArgumentIsError(t *testing.T) {
+	svc := emptyService(t)
+	held := createAt(t, svc, "app-nil-arg-db", "s1", appendT0, nil)
+	ev := &session.Event{ID: "e1", InvocationID: "inv1", Author: "user", Timestamp: appendT1}
+	tests := []struct {
+		name    string
+		session session.Session
+		event   *session.Event
+	}{
+		{name: "nil session", session: nil, event: ev},
+		{name: "nil event", session: held, event: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := svc.AppendEvent(t.Context(), tc.session, tc.event); err == nil {
+				t.Error("AppendEvent() error = nil, want an error")
+			}
+			if got := getStored(t, svc, "app-nil-arg-db", "s1", 0).Events().Len(); got != 0 {
+				t.Errorf("stored Events().Len() = %d, want 0", got)
+			}
+		})
+	}
+}
+
+// errStateSet is the error failingState.Set returns.
+var errStateSet = errors.New("state set failed")
+
+// failingState is a session.State whose Set always fails.
+type failingState struct{ foreignState }
+
+func (failingState) Set(string, any) error { return errStateSet }
+
+// failingStateSession is a foreignSession whose State().Set fails.
+type failingStateSession struct{ *foreignSession }
+
+func (f failingStateSession) State() session.State { return failingState{f.state} }
+
+// The event is committed before the caller's own State().Set runs, so its
+// failure is returned while the event stays stored.
+func TestDatabaseService_AppendEvent_ForeignStateSetErrorIsReturned(t *testing.T) {
+	svc := emptyService(t)
+	createAt(t, svc, "app-foreign-db", "s-set-fails", appendT0, nil)
+	foreign := failingStateSession{&foreignSession{appName: "app-foreign-db", userID: "u1", id: "s-set-fails", updatedAt: appendT0, state: foreignState{}}}
+
+	err := svc.AppendEvent(t.Context(), foreign, foreignEvent())
+
+	if !errors.Is(err, errStateSet) {
+		t.Errorf("AppendEvent() error = %v, want it to wrap %v", err, errStateSet)
+	}
+	if diff := cmp.Diff([]string{"e1"}, eventIDs(getStored(t, svc, "app-foreign-db", "s-set-fails", 0))); diff != "" {
+		t.Errorf("stored event IDs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// Each constructor's Close closes exactly the connection the service opened:
+// the pool behind a dialector that opens its own connection, and never a
+// *gorm.DB or *sql.DB the caller passed in.
+func TestClose_OwnershipByConstructor(t *testing.T) {
+	listReq := &session.ListRequest{AppName: "app"}
+	for _, tc := range []struct {
+		name string
+		// build returns the service and, when the caller owns the
+		// connection, the *sql.DB that must stay open.
+		build     func(t *testing.T, file string) (session.Service, *sql.DB)
+		wantOwned bool
+	}{
+		{
+			name: "NewSessionService over sqlite.Open",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				svc, err := NewSessionService(sqlite.Open(file))
+				if err != nil {
+					t.Fatalf("NewSessionService() error = %v", err)
+				}
+				return svc, nil
+			},
+			wantOwned: true,
+		},
+		{
+			name: "New over sqlite.Open",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				svc, err := New(Config{Dialector: sqlite.Open(file)})
+				if err != nil {
+					t.Fatalf("New() error = %v", err)
+				}
+				return svc, nil
+			},
+			wantOwned: true,
+		},
+		{
+			name: "NewSessionServiceFromDB",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				gormDB, err := gorm.Open(sqlite.Open(file))
+				if err != nil {
+					t.Fatalf("gorm.Open() error = %v", err)
+				}
+				sqlDB, err := gormDB.DB()
+				if err != nil {
+					t.Fatalf("gormDB.DB() error = %v", err)
+				}
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				svc, err := NewSessionServiceFromDB(gormDB)
+				if err != nil {
+					t.Fatalf("NewSessionServiceFromDB() error = %v", err)
+				}
+				return svc, sqlDB
+			},
+		},
+		{
+			name: "New over a dialector with an existing connection",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				sqlDB, err := sql.Open(sqlite.DriverName, file)
+				if err != nil {
+					t.Fatalf("sql.Open() error = %v", err)
+				}
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				svc, err := New(Config{Dialector: &sqlite.Dialector{DSN: file, Conn: sqlDB}})
+				if err != nil {
+					t.Fatalf("New() error = %v", err)
+				}
+				return svc, sqlDB
+			},
+		},
+		{
+			name: "NewSessionService over a dialector with an existing connection",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				sqlDB, err := sql.Open(sqlite.DriverName, file)
+				if err != nil {
+					t.Fatalf("sql.Open() error = %v", err)
+				}
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				svc, err := NewSessionService(&sqlite.Dialector{DSN: file, Conn: sqlDB})
+				if err != nil {
+					t.Fatalf("NewSessionService() error = %v", err)
+				}
+				return svc, sqlDB
+			},
+		},
+		{
+			name: "New over a dialector value with an existing connection",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				sqlDB, err := sql.Open(sqlite.DriverName, file)
+				if err != nil {
+					t.Fatalf("sql.Open() error = %v", err)
+				}
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				svc, err := New(Config{Dialector: sqlite.Dialector{DSN: file, Conn: sqlDB}})
+				if err != nil {
+					t.Fatalf("New() error = %v", err)
+				}
+				return svc, sqlDB
+			},
+		},
+		{
+			name: "NewSessionService over a dialector value with an existing connection",
+			build: func(t *testing.T, file string) (session.Service, *sql.DB) {
+				sqlDB, err := sql.Open(sqlite.DriverName, file)
+				if err != nil {
+					t.Fatalf("sql.Open() error = %v", err)
+				}
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				svc, err := NewSessionService(sqlite.Dialector{DSN: file, Conn: sqlDB})
+				if err != nil {
+					t.Fatalf("NewSessionService() error = %v", err)
+				}
+				return svc, sqlDB
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, callerDB := tc.build(t, filepath.Join(t.TempDir(), "own.db"))
+			if err := AutoMigrate(svc); err != nil {
+				t.Fatalf("AutoMigrate() error = %v", err)
+			}
+			closer, ok := svc.(io.Closer)
+			if !ok {
+				t.Fatalf("%T does not implement io.Closer", svc)
+			}
+
+			if err := closer.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+
+			_, err := svc.List(t.Context(), listReq)
+			if tc.wantOwned && err == nil {
+				t.Error("List() after Close() succeeded, want an error from the closed connection")
+			}
+			if !tc.wantOwned && err != nil {
+				t.Errorf("List() after Close() error = %v, want the caller's connection to stay open", err)
+			}
+			if callerDB != nil {
+				if err := callerDB.Ping(); err != nil {
+					t.Errorf("caller's sqlDB.Ping() after Close() error = %v, want nil", err)
+				}
+			}
+		})
 	}
 }

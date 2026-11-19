@@ -81,10 +81,10 @@ func RequestCredential(ctx agent.Context, cfg *toolauth.Config) error {
 // cfg's key ([toolauth.Config.Key]), where GetAuthResponse looks next.
 //
 // The exchanged tokens are written through ctx's state, so they also appear
-// in the state delta of the tool call's response event, where plugins and code
-// reading the runner's events see them. No session service persists "temp:"
-// keys, and the REST server strips credential secrets from the events it
-// returns.
+// in the state delta of the tool call's response event, where the OnEvent
+// plugin callbacks see them before the event is stored. No session service
+// persists "temp:" keys, and the events the runner yields do not carry them.
+// The REST server strips credential secrets from the events it returns.
 func GetAuthResponse(ctx agent.Context, cfg *toolauth.Config) (*toolauth.Credential, error) {
 	return authhandler.GetAuthResponse(ctx, ctx.State(), cfg)
 }

@@ -18,6 +18,7 @@ import (
 	"maps"
 	"reflect"
 	"strings"
+	"time"
 )
 
 const (
@@ -74,15 +75,32 @@ func MergeStates(appState, userState, sessionState map[string]any) map[string]an
 	return mergedState
 }
 
-// CloneValue returns a deep copy of v that shares no mutable memory with v at
-// any depth.
+// CloneStateMap returns a deep copy of state that shares no mutable memory
+// with state at any depth.
 //
-// Maps, slices, arrays, pointers and the exported fields of structs are copied
-// at every depth, and values keep their dynamic types. Every map, pointer and
-// slice of nonzero capacity is copied once, so a value that refers to itself
-// comes back as a copy that refers to the copy. A nil map, slice, pointer or
-// interface stays nil. The unexported fields of a struct are copied by value,
-// and func and channel values cannot be copied and stay shared.
+// The result is never nil: a nil or empty state gives an empty map. Maps,
+// slices, arrays, pointers and the exported fields of structs are copied at
+// every depth, and values keep their dynamic types, so an int stays an int and
+// a named slice type keeps its name. Every map, pointer and slice of nonzero
+// capacity is copied once, so a value that refers to itself comes back as a
+// copy that refers to the copy, and two references to one value come back as
+// two references to one copy. A nil map, slice, pointer or interface stays
+// nil, and a key whose value is nil stays present.
+//
+// The unexported fields of a struct are copied by value, so a struct such as
+// time.Time survives intact, and func and channel values cannot be copied and
+// stay shared. The caller must keep writers off state and everything reachable
+// from it until CloneStateMap returns.
+func CloneStateMap(state map[string]any) map[string]any {
+	if state == nil {
+		return make(map[string]any)
+	}
+	c := cloner{memo: make(map[visitKey]reflect.Value)}
+	return c.copy(reflect.ValueOf(state)).Interface().(map[string]any)
+}
+
+// CloneValue returns a deep copy of v that shares no mutable memory with v at
+// any depth, using the same reflection cloner as [CloneStateMap].
 func CloneValue[T any](v T) T {
 	c := cloner{memo: make(map[visitKey]reflect.Value)}
 	// Go through pointers so that an interface-typed T holding nil stays a
@@ -90,6 +108,15 @@ func CloneValue[T any](v T) T {
 	var out T
 	reflect.ValueOf(&out).Elem().Set(c.copy(reflect.ValueOf(&v).Elem()))
 	return out
+}
+
+// MutableSession is implemented by service-created and cloned [session.Session]
+// values (*session.session in package session and *database.localSession in
+// package session/database) so that [session.Service.AppendEvent] can atomically
+// apply state deltas, append the temp-trimmed event, and update the session's
+// last update time after storage validation and persistence succeed.
+type MutableSession interface {
+	CommitAppend(trimmedEvent any, rawStateDelta map[string]any, updatedAt time.Time)
 }
 
 // visitKey identifies a map, pointer or slice already copied by a cloner. The
