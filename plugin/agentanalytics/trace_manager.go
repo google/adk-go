@@ -31,6 +31,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 	"weak"
 
 	"github.com/google/uuid"
@@ -63,9 +64,13 @@ var agentInterfaceType = reflect.TypeFor[agent.Agent]()
 // workflow packages, and adkPkgPrefix is the import path prefix that all of
 // ADK's packages share, as runtime.Stack names their functions.
 var (
-	agentPkgPath    = agentInterfaceType.PkgPath()
-	workflowPkgPath = reflect.TypeFor[workflow.Edge]().PkgPath()
-	adkPkgPrefix    = agentPkgPath[:strings.LastIndexByte(agentPkgPath, '/')+1]
+	agentPkgPath           = agentInterfaceType.PkgPath()
+	workflowPkgPath        = reflect.TypeFor[workflow.Edge]().PkgPath()
+	adkPkgPrefix           = agentPkgPath[:strings.LastIndexByte(agentPkgPath, '/')+1]
+	internalContextPkgPath = adkPkgPrefix + "internal/context"
+	internalLLMPkgPath     = adkPkgPrefix + "internal/llminternal"
+	remoteAgentPkgPath     = adkPkgPrefix + "agent/remoteagent/v2"
+	a2aServerPkgPath       = adkPkgPrefix + "server/adka2a/v2"
 )
 
 // schedulerCreator and errgroupCreator are the functions that runtime.Stack
@@ -363,18 +368,397 @@ type spanRecord struct {
 	activation any
 }
 
+// retiredSwallower identifies a retired custom ancestor that drained a child
+// failure without its own context failing, so recovery content from that
+// activation's AfterAgentCallback may clear the cause without clearing causes
+// owned by other activations of the same agent.
+type retiredSwallower struct {
+	spanID string
+	seq    uint64
+	name   string
+	branch string
+	path   string
+}
+
+// matches reports whether recovery content authored by (name, branch, path)
+// matches this swallower's identity. An empty path on either side matches any
+// path, as in findAgent.
+func (s retiredSwallower) matches(name, branch, path string) bool {
+	return s.name == name && s.branch == branch && (path == "" || s.path == "" || s.path == path)
+}
+
 // retiredCause is the failure cause of an activation that retired under an
 // open span (see spanRecord.retiredCauses), with the name, branch and node
 // path of the retired activation. swallowableBySelf reports that the retired
 // activation drained an inherited child failure without its own context
 // failing and is not a built-in workflow agent, so recovery content from its
-// own AfterAgentCallback may clear the cause.
+// own AfterAgentCallback may clear the cause. swallowers holds the retired
+// custom swallower activations whose recovery responses may clear this cause.
 type retiredCause struct {
 	err               error
 	name              string
 	branch            string
 	path              string
 	swallowableBySelf bool
+	swallowers        []retiredSwallower
+	swallowerShared   *atomic.Int64
+}
+
+// addSwallower records rec as a retired custom swallower eligible to clear c on
+// a later recovery response from that specific activation of rec.
+//
+// swallowerShared tracks how many slots of the backing array have been claimed
+// so linear ancestor chains grow geometrically, reducing backing-array slice
+// copies across an N-ancestor chain from O(N^2) to O(N) while duplicate
+// checking remains O(N^2) comparisons across chain length N. Value-copied
+// branches allocate a fresh backing array instead of overwriting a sibling's
+// elements.
+func (c *retiredCause) addSwallower(rec *spanRecord) {
+	if rec == nil {
+		return
+	}
+	if rec.spanID != "" {
+		for _, s := range c.swallowers {
+			if s.spanID == rec.spanID {
+				return
+			}
+		}
+	} else {
+		for _, s := range c.swallowers {
+			if s.spanID == "" && s.name == rec.name && s.branch == rec.branch && s.path == rec.path {
+				return
+			}
+		}
+	}
+	elem := retiredSwallower{
+		spanID: rec.spanID,
+		seq:    rec.seq,
+		name:   rec.name,
+		branch: rec.branch,
+		path:   rec.path,
+	}
+	n := len(c.swallowers)
+	if c.swallowerShared != nil && n < cap(c.swallowers) && c.swallowerShared.CompareAndSwap(int64(n), int64(n+1)) {
+		c.swallowers = append(c.swallowers, elem)
+		return
+	}
+	next := make([]retiredSwallower, n+1, max(4, 2*(n+1)))
+	copy(next, c.swallowers)
+	next[n] = elem
+	shared := new(atomic.Int64)
+	shared.Store(int64(n + 1))
+	c.swallowers = next
+	c.swallowerShared = shared
+}
+
+func (c retiredCause) hasSwallowerSpan(spanID string) bool {
+	if spanID == "" {
+		return false
+	}
+	for _, s := range c.swallowers {
+		if s.spanID == spanID {
+			return true
+		}
+	}
+	return false
+}
+
+// uuidProviderState is what the agent activations under one key of a
+// uuidProviderLedger started with: a custom platform.UUIDProvider on their
+// context, the default generator (no provider, or a nil one installed with
+// platform.WithUUIDProvider(ctx, nil), which shadows any provider further up
+// ctx, so that session.NewEvent falls back to a UUIDv4), or a mix of both.
+type uuidProviderState uint8
+
+const (
+	uuidProviderUnseen uuidProviderState = iota
+	uuidProviderCustom
+	uuidProviderDefault
+	uuidProviderMixed
+)
+
+// with returns the state of a key that saw both s and o.
+func (s uuidProviderState) with(o uuidProviderState) uuidProviderState {
+	switch {
+	case s == uuidProviderUnseen || s == o:
+		return o
+	case o == uuidProviderUnseen:
+		return s
+	default:
+		return uuidProviderMixed
+	}
+}
+
+// uuidProviderKey is a key of a uuidProviderLedger: the agent name, branch and
+// node path of the activations it covers, where anyBranch and anyPath make it
+// cover the activations of the name on every branch or at every path.
+type uuidProviderKey struct {
+	name, branch, path string
+	anyBranch, anyPath bool
+}
+
+const (
+	// maxUUIDProviderEntries bounds the number of keys recorded in a live
+	// uuidProviderLedger. Once reached, new path-specific keys fold into
+	// author/branch summary keys without growing states.
+	maxUUIDProviderEntries = 512
+	// maxCompletedUUIDProviderEntries bounds the number of summary keys
+	// retained on a completedTrace after compactForCompleted drops
+	// per-path entries.
+	maxCompletedUUIDProviderEntries = 32
+	// maxUUIDProviderAncestorSteps bounds the number of node-path prefix
+	// lookups in eventUUIDProviderFor before falling back to anyPath.
+	maxUUIDProviderAncestorSteps = 8
+)
+
+// uuidProviderLedger records, for the agent activations of one invocation,
+// whether each started with a custom platform.UUIDProvider on its context (see
+// traceManager.eventUUIDProvider). An invocation gets one only once a custom
+// provider is seen in it, so one that never sees a custom provider records
+// nothing. The invocation's live trace, its evicted identity, its completed
+// entry and its late state share it, and mu guards it.
+type uuidProviderLedger struct {
+	mu sync.Mutex
+	// runCustom reports that the context of the run's BeforeRunCallback or
+	// OnUserMessageCallback carried a custom provider.
+	runCustom bool
+	// compacted reports that compactForCompleted dropped per-path keys for
+	// completedTrace retention and lowered the states cap to
+	// maxCompletedUUIDProviderEntries.
+	compacted bool
+	// pathOverflowed reports that at least one path-specific (!anyPath)
+	// entry was omitted or compacted into the anyPath summary keys.
+	pathOverflowed bool
+	// branchOverflowed reports that at least one per-branch (anyPath &&
+	// !anyBranch) entry was omitted or compacted into the author-wide
+	// (anyBranch && anyPath) summary key.
+	branchOverflowed bool
+	// authorOverflow aggregates observations whose author-wide summary key
+	// could not fit in states.
+	authorOverflow uuidProviderState
+	// branchSummaryOverflow aggregates branch-wide provider observations that
+	// could not fit in branchStates.
+	branchSummaryOverflow uuidProviderState
+	states                map[uuidProviderKey]uuidProviderState
+	// branchStates summarizes per-branch provider state across all authors on
+	// non-empty branches, bounded separately at capEntries so states retains its
+	// author/branch summary budget cleanly.
+	branchStates map[string]uuidProviderState
+}
+
+// note records that an activation of name on branch at path started with
+// (custom) or without a custom provider, under its own key and under the keys
+// that cover any branch, any path, or both. Once states reaches its entry cap,
+// new finer-grained keys fold conservatively into coarser summary keys without
+// growing states.
+func (l *uuidProviderLedger) note(name, branch, path string, custom bool) {
+	s := uuidProviderDefault
+	if custom {
+		s = uuidProviderCustom
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	capEntries := maxUUIDProviderEntries
+	if l.compacted {
+		capEntries = maxCompletedUUIDProviderEntries
+	}
+
+	if branch != "" {
+		if cur, ok := l.branchStates[branch]; ok {
+			l.branchStates[branch] = cur.with(s)
+		} else if l.branchSummaryOverflow == uuidProviderUnseen && len(l.branchStates) < capEntries {
+			if l.branchStates == nil {
+				l.branchStates = map[string]uuidProviderState{}
+			}
+			l.branchStates[branch] = s
+		} else {
+			l.branchSummaryOverflow = l.branchSummaryOverflow.with(s)
+		}
+	}
+
+	authorKey := uuidProviderKey{name: name, anyBranch: true, anyPath: true}
+	if cur, ok := l.states[authorKey]; ok {
+		l.states[authorKey] = cur.with(s)
+	} else if l.authorOverflow == uuidProviderUnseen && len(l.states) < capEntries {
+		l.states[authorKey] = s
+	} else {
+		l.authorOverflow = l.authorOverflow.with(s)
+		l.branchOverflowed = true
+		l.pathOverflowed = true
+		return
+	}
+
+	branchKey := uuidProviderKey{name: name, branch: branch, anyPath: true}
+	if cur, ok := l.states[branchKey]; ok {
+		l.states[branchKey] = cur.with(s)
+	} else if !l.branchOverflowed && len(l.states) < capEntries {
+		l.states[branchKey] = s
+	} else {
+		l.branchOverflowed = true
+		l.pathOverflowed = true
+		return
+	}
+
+	if l.pathOverflowed {
+		return
+	}
+
+	exact := uuidProviderKey{name: name, branch: branch, path: path}
+	anyBranchPath := uuidProviderKey{name: name, path: path, anyBranch: true}
+	needed := 0
+	if _, ok := l.states[exact]; !ok {
+		needed++
+	}
+	if _, ok := l.states[anyBranchPath]; !ok && anyBranchPath != exact {
+		needed++
+	}
+	if len(l.states)+needed > capEntries {
+		l.pathOverflowed = true
+		return
+	}
+	l.states[exact] = l.states[exact].with(s)
+	l.states[anyBranchPath] = l.states[anyBranchPath].with(s)
+}
+
+// compactForCompleted drops per-path entries and caps retained summary entries
+// in a freshly allocated small map so a completedTrace holds < 1 KB even after
+// tens of thousands of distinct workflow node paths.
+func (l *uuidProviderLedger) compactForCompleted() *uuidProviderLedger {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.compacted = true
+	l.pathOverflowed = true
+	summaryCount := 0
+	for k := range l.states {
+		if k.anyPath {
+			summaryCount++
+		}
+	}
+	compact := make(map[uuidProviderKey]uuidProviderState, min(summaryCount, maxCompletedUUIDProviderEntries))
+	for k, s := range l.states {
+		if !k.anyPath || !k.anyBranch {
+			continue
+		}
+		if len(compact) < maxCompletedUUIDProviderEntries {
+			compact[k] = s
+		} else {
+			l.authorOverflow = l.authorOverflow.with(s)
+			l.branchOverflowed = true
+		}
+	}
+	for k, s := range l.states {
+		if !k.anyPath || k.anyBranch {
+			continue
+		}
+		// Retain a branch key only when its author-wide key also fit in compact.
+		authorKey := uuidProviderKey{name: k.name, anyBranch: true, anyPath: true}
+		if _, ok := compact[authorKey]; ok && len(compact) < maxCompletedUUIDProviderEntries {
+			compact[k] = s
+		} else {
+			l.branchOverflowed = true
+		}
+	}
+	l.states = compact
+	if len(l.branchStates) > 0 {
+		compactBranches := make(map[string]uuidProviderState, min(len(l.branchStates), maxCompletedUUIDProviderEntries))
+		for b, s := range l.branchStates {
+			if len(compactBranches) < maxCompletedUUIDProviderEntries {
+				compactBranches[b] = s
+			} else {
+				l.branchSummaryOverflow = l.branchSummaryOverflow.with(s)
+			}
+		}
+		l.branchStates = compactBranches
+	}
+	return l
+}
+
+func (l *uuidProviderLedger) branchState(branch string) uuidProviderState {
+	if l == nil || branch == "" {
+		return uuidProviderUnseen
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.branchStates[branch]
+}
+
+func (l *uuidProviderLedger) branchOverflow() uuidProviderState {
+	if l == nil {
+		return uuidProviderUnseen
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.branchSummaryOverflow
+}
+
+// stateAt returns the state of k, which is uuidProviderUnseen when l is nil.
+// When finer-grained keys have overflowed or been compacted, stateAt falls back
+// conservatively to the corresponding summary tier so mixed custom/default
+// histories return uuidProviderMixed while pure custom histories stay custom.
+func (l *uuidProviderLedger) stateAt(k uuidProviderKey) uuidProviderState {
+	if l == nil {
+		return uuidProviderUnseen
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !k.anyPath {
+		if l.pathOverflowed {
+			return uuidProviderUnseen
+		}
+		return l.states[k]
+	}
+	if s := l.states[k]; s != uuidProviderUnseen {
+		return s
+	}
+	if !k.anyBranch && l.branchOverflowed {
+		authorKey := uuidProviderKey{name: k.name, anyBranch: true, anyPath: true}
+		if s := l.states[authorKey]; s != uuidProviderUnseen {
+			return s
+		}
+	}
+	if l.authorOverflow != uuidProviderUnseen {
+		eff := l.authorOverflow
+		if !l.runCustom {
+			eff = eff.with(uuidProviderDefault)
+		}
+		return eff
+	}
+	return uuidProviderUnseen
+}
+
+// isRunCustom reports l.runCustom, which is false when l is nil.
+func (l *uuidProviderLedger) isRunCustom() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.runCustom
+}
+
+// actionMaps holds pointers to the StateDelta and ArtifactDelta maps of a
+// session.EventActions, nil for a nil map. Storing unsafe.Pointer rather than
+// a uintptr address keeps each captured map reachable for as long as the
+// actionMaps value is, so the GC can neither free the map nor give its address
+// to a new map that an unrelated event would then appear to share. ADK
+// initializes the callback context's EventActions with both maps and yields the
+// event of an after-agent callback's content with a copy of EventActions.
+// Unless a callback replaces both map fields on the live EventActions via
+// ctx.WithDelta(nil).Actions(), the yielded event shares at least one of the
+// captured maps (and an earlier plugin's OnEventCallback that copies only one
+// map leaves the other in place).
+type actionMaps struct {
+	stateDelta, artifactDelta unsafe.Pointer
+}
+
+// shares reports whether a and b hold a common non-nil map.
+func (a actionMaps) shares(b actionMaps) bool {
+	return (a.stateDelta != nil && a.stateDelta == b.stateDelta) ||
+		(a.artifactDelta != nil && a.artifactDelta == b.artifactDelta)
 }
 
 // firstRetiredCause returns the first failure cause that an activation that
@@ -485,6 +869,12 @@ type invocationTrace struct {
 	// from other runners, which may have run the same agent instance as a
 	// sub-agent, does not replace it.
 	ancestryFromContext bool
+	// uuidProviders is nil until the run or one of its agent activations
+	// starts with a custom platform.UUIDProvider (see noteUUIDProviderLocked),
+	// except that a late state starts with the ledger of the finished run (see
+	// lateLocked). noteUUIDProviderLocked sets it with mu held, and it is read
+	// without mu (see traceManager.eventUUIDProvider).
+	uuidProviders atomic.Pointer[uuidProviderLedger]
 	// agentStack holds the invocation span, followed by the spans of the
 	// running agents in the order they started. Agents that run
 	// concurrently, such as the sub-agents of a parallel agent or
@@ -699,8 +1089,9 @@ func (inv *invocationTrace) setRootAgentLocked(name string) {
 	}
 }
 
-// restoreEvicted restores the root span identity and trace metadata saved when
-// inv was previously evicted or completed, before it is returned to a callback.
+// restoreEvicted restores the root span identity, trace metadata and UUID
+// provider ledger saved when inv was previously evicted or completed, before it
+// is returned to a callback.
 func (inv *invocationTrace) restoreEvicted(ev evictedTrace) {
 	inv.evicted = true
 	if ev.traceID != "" {
@@ -713,6 +1104,9 @@ func (inv *invocationTrace) restoreEvicted(ev evictedTrace) {
 	inv.rootParentSpanID = ev.parentSpanID
 	inv.agentStack[0].parentSpanID = ev.parentSpanID
 	inv.setRootAgentLocked(ev.rootAgentName)
+	if ev.uuidProviders != nil && inv.uuidProviders.Load() == nil {
+		inv.uuidProviders.Store(ev.uuidProviders)
+	}
 }
 
 // ambientSpanContext returns the OpenTelemetry SpanContext that ctx carries,
@@ -879,6 +1273,187 @@ func (inv *invocationTrace) applyEdgesLocked(edges []agentEdge) {
 			inv.sequentialParent[e.child] = e.parent
 		}
 	}
+}
+
+// noteUUIDProviderLocked records in inv's uuidProviderLedger whether the agent
+// activation of id started with a custom platform.UUIDProvider on its context
+// (custom), or, when run is true, whether the run did. Until a custom provider
+// is seen, inv has no ledger and this records nothing: without one, every
+// event of the invocation is taken to have been created without a custom
+// provider anyway. Because uuidProviders stays nil until a custom
+// platform.UUIDProvider appears in the invocation, any activation of an author
+// A that started earlier in the invocation under the default provider left no
+// ledger entry; if another activation of A later starts with a custom provider
+// in the same invocation (either re-running on the same (name, branch, path) or
+// running concurrently or later on another path or branch), a hand-built
+// non-UUIDv4 event from that earlier unrecorded activation evaluated once the
+// custom activation has started can match uuidProviderCustom either on the
+// shared key or through eventUUIDProvider fallback keys (non-empty ancestor
+// paths, anyPath, and anyBranch when ev.Branch == ""). inv.mu must be held.
+func (inv *invocationTrace) noteUUIDProviderLocked(id identity, custom, run bool) {
+	l := inv.uuidProviders.Load()
+	if l == nil {
+		if !custom {
+			return
+		}
+		l = &uuidProviderLedger{
+			compacted:      inv.isLate,
+			pathOverflowed: inv.isLate,
+			states:         map[uuidProviderKey]uuidProviderState{},
+		}
+		inv.uuidProviders.Store(l)
+	}
+	switch {
+	case run:
+		l.mu.Lock()
+		l.runCustom = l.runCustom || custom
+		l.mu.Unlock()
+	case id.agentName != "":
+		l.note(id.agentName, id.branch, id.path, custom)
+	}
+}
+
+// isTrackedInvocation reports whether invID is currently tracked in
+// tm.invocations, tm.completed, or tm.evicted.
+//
+// isTrackedInvocation acquires tm.mu, so callers must not hold tm.mu.
+func (tm *traceManager) isTrackedInvocation(invID string) bool {
+	if tm == nil || invID == "" {
+		return false
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.invocations[invID] != nil || tm.completed[invID] != nil {
+		return true
+	}
+	_, evicted := tm.evicted[invID]
+	return evicted
+}
+
+// eventUUIDProvider reports whether an event that author created in the
+// invocation invID, on branch at the node path path, was created under a
+// custom platform.UUIDProvider, judging by what the activations of author in
+// that invocation started with (see uuidProviderLedger). It looks at the
+// activations on branch, or on any branch when branch is empty, as a custom
+// agent's session.NewEvent leaves the event's branch empty; and at path, or
+// else at the nearest non-empty '/' ancestor of path (up to
+// maxUUIDProviderAncestorSteps lookups, stopping before "" so a nested workflow
+// path such as wf@1/fn@1 never falls back to a direct top-level activation at
+// path == ""), as the events of function and dynamic workflow nodes carry the
+// node's path and the name of the workflow agent that runs them, or else at
+// any path, as the events of a nested workflow agent carry paths that start at
+// it (inner@1/fn@1) while its own path is that of its node (outer@1/inner@1).
+// The first of these that has any recorded activation decides, and only if all
+// recorded activations under that key started alike: a key that covers
+// recorded activations with and without a custom provider, as of a worker that
+// ran on the same branch and path once with a custom provider and once
+// without, gives false, so that an ID that one activation built by hand is not
+// taken for one that the other's provider made. Because uuidProviders stays
+// nil until a custom platform.UUIDProvider appears in the invocation, any
+// activation of author A that started earlier in the invocation under the
+// default provider left no ledger entry; if another activation of A later
+// starts with a custom provider in the same invocation (either re-running on
+// the same (name, branch, path) or running concurrently or later on another
+// path or branch), a hand-built non-UUIDv4 event from that earlier unrecorded
+// activation evaluated once the custom activation has started can match
+// uuidProviderCustom either on the shared key or through the fallback keys
+// above (non-empty ancestor paths, anyPath, and anyBranch when branch == "").
+// An event of no recorded activation is judged by how the run started. tracked
+// reports that invID is a live, evicted or completed invocation; custom is
+// false when it is not.
+//
+// eventUUIDProvider acquires tm.mu, so callers must not hold tm.mu.
+func (tm *traceManager) eventUUIDProvider(invID, author, branch, path string) (custom, tracked bool) {
+	return tm.eventUUIDProviderFor(invID, author, branch, path, "", "")
+}
+
+// eventUUIDProviderFor is eventUUIDProvider with an optional fallbackAuthor and
+// fallbackBranch from the delivering context's identity. When author is empty
+// or "user" (such as a synthesized task response or user-role content yielded
+// by a worker activation), fallbackAuthor is checked before falling back to how
+// the run started so a worker that called platform.WithUUIDProvider(ctx, nil)
+// fails closed rather than inheriting run.isRunCustom().
+//
+// eventUUIDProviderFor acquires tm.mu, so callers must not hold tm.mu.
+func (tm *traceManager) eventUUIDProviderFor(invID, author, branch, path, fallbackAuthor, fallbackBranch string) (custom, tracked bool) {
+	if tm == nil || invID == "" {
+		return false, false
+	}
+	var run, late *uuidProviderLedger
+	tm.mu.Lock()
+	if inv := tm.invocations[invID]; inv != nil {
+		tracked = true
+		run = inv.uuidProviders.Load()
+	} else if c := tm.completed[invID]; c != nil {
+		tracked = true
+		run = c.uuidProviders
+		if c.late != nil {
+			late = c.late.uuidProviders.Load()
+		}
+	} else if ev, ok := tm.evicted[invID]; ok {
+		tracked = true
+		run = ev.uuidProviders
+	}
+	tm.mu.Unlock()
+	if late == run {
+		late = nil
+	}
+	if run == nil && late == nil {
+		return false, tracked
+	}
+	stateAt := func(k uuidProviderKey) uuidProviderState {
+		return run.stateAt(k).with(late.stateAt(k))
+	}
+	lookupAuthor := func(name, br, p string) uuidProviderState {
+		if name == "" {
+			return uuidProviderUnseen
+		}
+		k := uuidProviderKey{name: name, branch: br, path: p, anyBranch: br == ""}
+		for range maxUUIDProviderAncestorSteps {
+			if s := stateAt(k); s != uuidProviderUnseen {
+				return s
+			}
+			slash := strings.LastIndexByte(k.path, '/')
+			if slash <= 0 {
+				break
+			}
+			k.path = k.path[:slash]
+		}
+		k.path = ""
+		k.anyPath = true
+		return stateAt(k)
+	}
+	if s := lookupAuthor(author, branch, path); s != uuidProviderUnseen {
+		return s == uuidProviderCustom, true
+	}
+	if (author == "" || author == userAuthor) && fallbackAuthor != "" && fallbackAuthor != author {
+		if s := lookupAuthor(fallbackAuthor, cmp.Or(branch, fallbackBranch), path); s != uuidProviderUnseen {
+			return s == uuidProviderCustom, true
+		}
+	}
+	if effectiveBranch := cmp.Or(branch, fallbackBranch); effectiveBranch != "" {
+		cur := effectiveBranch
+		var branchHit uuidProviderState
+		for {
+			if bs := run.branchState(cur).with(late.branchState(cur)); bs != uuidProviderUnseen {
+				branchHit = bs
+				break
+			}
+			dot := strings.LastIndexByte(cur, '.')
+			if dot <= 0 {
+				break
+			}
+			cur = cur[:dot]
+		}
+		if branchHit != uuidProviderUnseen {
+			if branchHit != uuidProviderCustom {
+				return false, true
+			}
+		} else if ov := run.branchOverflow().with(late.branchOverflow()); ov != uuidProviderUnseen && ov != uuidProviderCustom {
+			return false, true
+		}
+	}
+	return run.isRunCustom() || late.isRunCustom(), true
 }
 
 // noteRootAgentLocked records the invocation's root agent and agent hierarchy
@@ -2495,6 +3070,7 @@ type evictedTrace struct {
 	parentSpanID  string
 	rootAgentName string
 	lastActive    int64
+	uuidProviders *uuidProviderLedger
 }
 
 // completedTrace is what the callbacks that run after a run ended need of it.
@@ -2516,7 +3092,11 @@ type completedTrace struct {
 	// AfterModelCallback or AfterToolCallback that ADK may still run for them
 	// (see popLLMSpan and popToolSpan). They are nil when there are none.
 	endedModels, endedTools map[string]*spanRecord
-	position                *list.Element
+	// uuidProviders is the compacted uuidProviderLedger of the finished run,
+	// nil if it had none. The late state starts with the same ledger (see
+	// lateLocked).
+	uuidProviders *uuidProviderLedger
+	position      *list.Element
 }
 
 func (c *completedTrace) hasPendingOrOpenLateSpans() bool {
@@ -2632,10 +3212,17 @@ func (tm *traceManager) invocation(ctx context.Context, id identity) *invocation
 // that is derived from the invocation ID. Other callbacks after AfterRun use
 // the completed identity without restarting active tracking.
 func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start, reserveSpan bool) *invocationTrace {
+	return tm.lookupInvocationWithUUID(ctx, id, start, reserveSpan, false)
+}
+
+func (tm *traceManager) lookupInvocationWithUUID(ctx context.Context, id identity, start, reserveSpan, customUUIDs bool) *invocationTrace {
 	now := tm.now()
 	sc := ambientSpanContext(ctx)
 	if id.invocationID == "" {
 		inv := newInvocationTraceWithSpan(sc, "", now)
+		if customUUIDs {
+			inv.uuidProviders.Store(&uuidProviderLedger{states: map[uuidProviderKey]uuidProviderState{}})
+		}
 		if reserveSpan {
 			inv.pendingSpans.Add(1)
 		}
@@ -2654,6 +3241,13 @@ func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start
 					late := tm.lateLocked(completed, sc, tm.traceIDFor(id.invocationID), now)
 					late.lastActive.Store(now.UnixNano())
 					tm.completionOrder.MoveToBack(completed.position)
+					if customUUIDs && late.uuidProviders.Load() == nil {
+						late.uuidProviders.Store(&uuidProviderLedger{
+							compacted:      late.isLate,
+							pathOverflowed: late.isLate,
+							states:         map[uuidProviderKey]uuidProviderState{},
+						})
+					}
 					if reserveSpan {
 						late.pendingSpans.Add(1)
 					}
@@ -2672,6 +3266,13 @@ func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start
 			warnIDs = tm.evictLocked(now, id.invocationID)
 			maxTracked = tm.maxTracked
 			logf = tm.logf
+		}
+		if customUUIDs && inv.uuidProviders.Load() == nil {
+			inv.uuidProviders.Store(&uuidProviderLedger{
+				compacted:      inv.isLate,
+				pathOverflowed: inv.isLate,
+				states:         map[uuidProviderKey]uuidProviderState{},
+			})
 		}
 		inv.lastActive.Store(now.UnixNano())
 		if reserveSpan {
@@ -2752,8 +3353,14 @@ func (tm *traceManager) markEvictedLocked(now time.Time, invocationID string, in
 	var ev evictedTrace
 	if inv != nil {
 		ev = inv.savedIdentity()
+		if ev.uuidProviders != nil {
+			ev.uuidProviders = ev.uuidProviders.compactForCompleted()
+		}
 	} else {
 		ev.lastActive = now.UnixNano()
+	}
+	if prev, ok := tm.evicted[invocationID]; ok && ev.uuidProviders == nil {
+		ev.uuidProviders = prev.uuidProviders
 	}
 	tm.evicted[invocationID] = ev
 }
@@ -2766,6 +3373,7 @@ func (inv *invocationTrace) savedIdentity() evictedTrace {
 		parentSpanID:  inv.rootParentSpanID,
 		rootAgentName: rootAgent,
 		lastActive:    inv.lastActive.Load(),
+		uuidProviders: inv.uuidProviders.Load(),
 	}
 }
 
@@ -2841,6 +3449,18 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 		defer inv.mu.Unlock()
 		_ = inv.agentStack[0]
 		lastSeq := inv.lastSeq
+		// A completed entry has a ledger already only if AfterRun ran again for an
+		// invocation that endInvocation had removed, or forceEndInvocation ran for
+		// one after endInvocation had removed it. Then inv is a fresh trace that
+		// recorded nothing (or restored completed.identity), so the compacted
+		// ledger of the earlier run stays.
+		var compactedProviders *uuidProviderLedger
+		if existing != nil && existing.uuidProviders != nil {
+			compactedProviders = existing.uuidProviders
+		} else {
+			compactedProviders = inv.uuidProviders.Load().compactForCompleted()
+		}
+		savedID.uuidProviders = compactedProviders
 		models, endedModels := startedCalls(inv.llmSpans), startedCalls(inv.completedModels)
 		maps.DeleteFunc(models, func(_ string, rec *spanRecord) bool { return rec.streamed || rec.endedWithRun(runner) })
 		tools, endedTools := startedCalls(inv.toolSpans), startedCalls(inv.completedTools)
@@ -2867,10 +3487,14 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 			}
 			if existing != nil && existing.late != nil {
 				preparedLate = existing.late
+				if preparedLate.uuidProviders.Load() == nil && compactedProviders != nil {
+					preparedLate.uuidProviders.Store(compactedProviders)
+				}
 			} else {
 				preparedLate = newInvocationTraceWithKnownSpan(trace.SpanContext{}, savedID.traceID, savedID.spanID, now)
 				preparedLate.isLate = true
 				preparedLate.restoreEvicted(savedID)
+				preparedLate.uuidProviders.Store(compactedProviders)
 				if existing != nil {
 					maps.Copy(preparedLate.completedModels, existing.endedModels)
 					maps.Copy(preparedLate.completedTools, existing.endedTools)
@@ -2878,6 +3502,9 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 			}
 		} else if existing != nil && existing.late != nil {
 			preparedLate = existing.late
+			if preparedLate.uuidProviders.Load() == nil && compactedProviders != nil {
+				preparedLate.uuidProviders.Store(compactedProviders)
+			}
 		}
 
 		if preparedLate != nil {
@@ -2926,6 +3553,7 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 			savedID.traceID = cmp.Or(savedID.traceID, existing.identity.traceID)
 			savedID.rootAgentName = cmp.Or(savedID.rootAgentName, existing.identity.rootAgentName)
 		}
+		existing.uuidProviders = compactedProviders
 		existing.identity = savedID
 		if inv.pendingSpans.Load() > 0 {
 			existing.livePending = inv.pendingSpans
@@ -2942,6 +3570,10 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 
 		inv.agentStack[0].dropContexts()
 		inv.runnerAgent = nil
+		// The late state keeps no context of the run's callbacks: the calls that
+		// are open drop theirs here, and those that ended did when they ended.
+		// The open ones are marked as handed over, so that the run waits for late
+		// calls only while one of them is open (see waitsForLateCalls).
 		for _, rec := range models {
 			rec.dropContexts()
 		}
@@ -2974,6 +3606,10 @@ func (tm *traceManager) publishCompletedIdentityLocked(invocationID string, save
 			completed.livePending = nil
 		}
 	}
+	if completed.uuidProviders == nil && saved.uuidProviders != nil {
+		completed.uuidProviders = saved.uuidProviders.compactForCompleted()
+	}
+	saved.uuidProviders = completed.uuidProviders
 	completed.identity = saved
 }
 
@@ -2995,6 +3631,9 @@ func (tm *traceManager) lateLocked(completed *completedTrace, sc trace.SpanConte
 		late := newInvocationTraceWithKnownSpan(sc, cmp.Or(traceID, completed.identity.traceID), completed.identity.spanID, now)
 		late.isLate = true
 		late.restoreEvicted(completed.identity)
+		// Sharing the run's ledger lets the activations that start after
+		// AfterRun mark the keys they reuse as mixed (see eventUUIDProvider).
+		late.uuidProviders.Store(completed.uuidProviders)
 		maps.Copy(late.completedModels, completed.endedModels)
 		maps.Copy(late.completedTools, completed.endedTools)
 		completed.endedModels, completed.endedTools = nil, nil
@@ -3142,7 +3781,8 @@ func (p *spanRecord) joinsOnceReturned(c *spanRecord) bool {
 // agent that the runner runs, runner, which is used to record the root
 // agent.
 func (tm *traceManager) invocationSpan(ctx context.Context, id identity, runner agent.Agent) rowSpan {
-	inv := tm.lookupInvocation(ctx, id, true, false)
+	customUUIDs := contextHasCustomUUIDProvider(ctx)
+	inv := tm.lookupInvocationWithUUID(ctx, id, true, false, customUUIDs)
 	now := tm.now()
 	rememberedRoot := tm.rememberAgentTree(runner)
 	ambient := ambientTraceID(ctx)
@@ -3150,6 +3790,7 @@ func (tm *traceManager) invocationSpan(ctx context.Context, id identity, runner 
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.started = true
+	inv.noteUUIDProviderLocked(id, customUUIDs, true)
 	inv.noteRootAgentLocked(id, rootIn, false)
 	inv.agentStack[0].canceled = canceledFunc(ctx)
 	span := inv.rowSpan(inv.agentStack[0], nil, ambient)
@@ -3562,7 +4203,8 @@ func (tm *traceManager) popDelegatingAgentSpan(ctx context.Context, id identity)
 // the earlier attempt's InvocationContext is not read on its strength (see
 // spanRecord.nodeRunEnded).
 func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan, []unclosedAgentSpan) {
-	inv := tm.lookupInvocation(ctx, id, false, true)
+	customUUIDs := contextHasCustomUUIDProvider(ctx)
+	inv := tm.lookupInvocationWithUUID(ctx, id, false, true, customUUIDs)
 	defer inv.pendingSpans.Add(-1)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
@@ -3613,6 +4255,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
+	inv.noteUUIDProviderLocked(id, customUUIDs, false)
 	// Register concurrent peers before the workflow-retry completion-inference
 	// loop so the retry guard can check !rec.concurrentPeer. Only peers that
 	// are NOT earlier attempts of the node are marked (see laterAttempt).
@@ -6932,21 +7575,10 @@ func attemptSiteOfTrace(trace []byte, complete bool) attemptSite {
 	// "function(arguments)" line followed by a tab-indented "file:line" one,
 	// and ends with a "created by" line for the goroutine.
 	var names []string
-	for line := range strings.SplitSeq(frames, "\n") {
-		if line == "" || line[0] == '\t' {
-			continue
-		}
-		if strings.HasPrefix(line, "created by ") {
-			break
-		}
-		if strings.HasPrefix(line, "...") {
-			return attemptNone
-		}
-		paren := strings.LastIndexByte(line, '(')
-		if paren <= 0 {
-			return attemptNone
-		}
-		names = append(names, line[:paren])
+	if !visitTraceFrameNames(frames, func(name string) {
+		names = append(names, name)
+	}) {
+		return attemptNone
 	}
 	agentRun := agentPkgPath + ".(*agent).Run"
 	i := len(names) - 1
@@ -7012,17 +7644,189 @@ const maxGoroutineTraceSize = 1 << 20
 // BeforeAgentCallback, the attempt site of the agent activation that starts
 // (see attemptSiteOfTrace), or zero values for what the stack trace does not
 // show.
+//
+// runtime.Stack is called directly here rather than through
+// currentGoroutineTrace so that no extra helper frame pushes a stack right at
+// Go's 100-frame traceback limit into "...frames elided...".
 func currentGoroutine() (uint64, goroutineOrigin, attemptSite) {
+	buf := make([]byte, 8<<10)
+	var n int
+	for {
+		n = runtime.Stack(buf, false)
+		if n < len(buf) || len(buf) >= maxGoroutineTraceSize {
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	trace, complete := buf[:n], n < len(buf)
+	id, origin := parseGoroutineTrace(trace, complete)
+	return id, origin, attemptSiteOfTrace(trace, complete)
+}
+
+// currentGoroutineTrace returns the stack trace of the caller's goroutine as
+// runtime.Stack(buf, false) writes it, and whether it fit in the buffer.
+func currentGoroutineTrace() (trace []byte, complete bool) {
 	buf := make([]byte, 8<<10)
 	for {
 		n := runtime.Stack(buf, false)
 		if n < len(buf) || len(buf) >= maxGoroutineTraceSize {
-			complete := n < len(buf)
-			id, origin := parseGoroutineTrace(buf[:n], complete)
-			return id, origin, attemptSiteOfTrace(buf[:n], complete)
+			return buf[:n], n < len(buf)
 		}
 		buf = make([]byte, 2*len(buf))
 	}
+}
+
+// visitTraceFrameNames parses frames written by runtime.Stack (lines after the
+// goroutine header) up to "created by ", calling visit with each frame's
+// function name. It returns false if frames were elided by the runtime or a
+// frame line is malformed.
+func visitTraceFrameNames(frames string, visit func(name string)) bool {
+	for line := range strings.SplitSeq(frames, "\n") {
+		if line == "" || line[0] == '\t' {
+			continue
+		}
+		if strings.HasPrefix(line, "created by ") {
+			break
+		}
+		if strings.HasPrefix(line, "...") {
+			return false
+		}
+		paren := strings.LastIndexByte(line, '(')
+		if paren <= 0 {
+			return false
+		}
+		visit(line[:paren])
+	}
+	return true
+}
+
+// isGoroutineTraceHeader reports whether header is the line with which
+// runtime.Stack starts the trace of a goroutine:
+//
+//	goroutine 7 [chan receive, 2 minutes]:
+//	goroutine 7 gp=0xc000002380 m=0 mp=0x5b7e60 [running]:
+//	goroutine 7 [running labels:{"k": "v"}]:
+//	goroutine 7 [running] {k: "v w"}:
+//
+// The second form is that of GOTRACEBACK=system and above. The last two show
+// pprof labels: Go 1.26 prints them inside the bracket when
+// GODEBUG=tracebacklabels=1, and Go 1.27 after it, by default in a main module
+// that declares go 1.27 or later. A label key or value can hold brackets and
+// braces, which the runtime then quotes (Go 1.26 quotes every one), so labels
+// are read as quoted strings rather than searched for delimiters.
+func isGoroutineTraceHeader(header string) bool {
+	rest, ok := strings.CutPrefix(header, "goroutine ")
+	if !ok {
+		return false
+	}
+	// A header with no space after the ID has no bracket either, and so
+	// fails below, as does one with no bracket.
+	idText, rest, _ := strings.Cut(rest, " ")
+	if _, err := strconv.ParseUint(idText, 10, 64); err != nil {
+		return false
+	}
+	fields, rest, _ := strings.Cut(rest, "[")
+	if (fields != "" && !strings.HasSuffix(fields, " ")) || strings.ContainsAny(fields, `]{}"`) {
+		return false
+	}
+	// The status, such as "chan receive, 2 minutes", runs up to the closing
+	// bracket, or up to the labels that Go 1.26 prints inside it.
+	end := strings.IndexAny(rest, `[]{}"`)
+	if end <= 0 {
+		return false
+	}
+	if status, ok := strings.CutSuffix(rest[:end], " labels:"); ok {
+		return status != "" && cutTracebackLabels(rest[end:], true) == "]:"
+	}
+	if labels, ok := strings.CutPrefix(rest[end:], "] "); ok {
+		return cutTracebackLabels(labels, false) == ":"
+	}
+	return rest[end:] == "]:"
+}
+
+// cutTracebackLabels returns what follows the pprof labels that s starts with
+// in a goroutine header (see isGoroutineTraceHeader), "{" and "}" around
+// "key: value" pairs that ", " separates, or "" if s does not start with
+// labels. quoted requires every key and value to be quoted, as in Go 1.26.
+func cutTracebackLabels(s string, quoted bool) string {
+	s, ok := strings.CutPrefix(s, "{")
+	if !ok {
+		return ""
+	}
+	for {
+		if s, ok = strings.CutPrefix(cutTracebackLabelString(s, quoted), ": "); !ok {
+			return ""
+		}
+		s = cutTracebackLabelString(s, quoted)
+		if rest, ok := strings.CutPrefix(s, "}"); ok {
+			return rest
+		}
+		if s, ok = strings.CutPrefix(s, ", "); !ok {
+			return ""
+		}
+	}
+}
+
+// cutTracebackLabelString returns what follows the label key or value that s
+// starts with: a string in double quotes, in which a backslash escapes the
+// character after it, or, unless quoted is true, a possibly empty run of the
+// letters, digits, '.', '/' and '_' that Go 1.27 leaves unquoted. It returns
+// "" if s starts with a quote that is not closed, or with no quote although
+// quoted is true.
+func cutTracebackLabelString(s string, quoted bool) string {
+	if s, ok := strings.CutPrefix(s, `"`); ok {
+		for i := 0; i < len(s); i++ {
+			switch s[i] {
+			case '\\':
+				i++
+			case '"':
+				return s[i+1:]
+			}
+		}
+		return ""
+	}
+	if quoted {
+		return ""
+	}
+	return strings.TrimLeftFunc(s, func(r rune) bool {
+		return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' || r == '.' || r == '/' || r == '_'
+	})
+}
+
+// afterAgentCallbackRunsOfTrace returns how many runs of after-agent
+// callbacks the goroutine whose stack trace runtime.Stack(buf, false) wrote is
+// in, complete reporting whether the trace fit in buf: the frames of
+// agent.runAfterAgentCallbacks, which runs an activation's plugin and agent
+// after-agent callbacks on the goroutine that ran the activation until all
+// callbacks finish or one returns non-nil content or an error (skipping later
+// callbacks, including this plugin's AfterAgentCallback when an earlier plugin
+// returns content or an error). An agent run started synchronously on that
+// same goroutine (such as a custom agent.New runner) runs inside that frame,
+// whereas a runner-driven llmagent executes as a workflow node on its own
+// scheduler goroutine and therefore sees 0 outer runAfterAgentCallbacks frames
+// during BeforeAgentCallbacks/Run and 1 (its own) during its
+// AfterAgentCallback rather than 2. The second result is false when the trace
+// is not a valid goroutine stack trace (including "goroutine N [...]:" or
+// "goroutine N [...] {...}:"), is incomplete, or had frames elided by the
+// runtime.
+func afterAgentCallbackRunsOfTrace(trace []byte, complete bool) (int, bool) {
+	if !complete {
+		return 0, false
+	}
+	header, frames, ok := strings.Cut(string(trace), "\n")
+	if !ok || !isGoroutineTraceHeader(header) {
+		return 0, false
+	}
+	fn := agentPkgPath + ".runAfterAgentCallbacks"
+	runs := 0
+	if !visitTraceFrameNames(frames, func(name string) {
+		if name == fn {
+			runs++
+		}
+	}) {
+		return 0, false
+	}
+	return runs, true
 }
 
 // parseGoroutineTrace parses the stack trace of one goroutine as
@@ -7805,9 +8609,129 @@ func toolKeyCall(key string) string {
 	return key[strings.LastIndexByte(key, 0)+1:]
 }
 
+type contextStructQueue struct {
+	inline   [16]reflect.Value
+	head     int
+	tail     int
+	count    int
+	overflow []reflect.Value
+	overHead int
+}
+
+func (q *contextStructQueue) push(v reflect.Value) {
+	if !v.IsValid() || ((v.Kind() == reflect.Interface || v.Kind() == reflect.Pointer) && v.IsNil()) {
+		return
+	}
+	if q.overflow != nil {
+		q.overflow = append(q.overflow, v)
+		return
+	}
+	if q.count == len(q.inline) {
+		q.overflow = make([]reflect.Value, len(q.inline)+1, len(q.inline)*2)
+		for i := range q.count {
+			idx := (q.head + i) & (len(q.inline) - 1)
+			q.overflow[i] = q.inline[idx]
+			q.inline[idx] = reflect.Value{}
+		}
+		q.overflow[q.count] = v
+		q.head, q.tail, q.count = 0, 0, 0
+		return
+	}
+	q.inline[q.tail] = v
+	q.tail = (q.tail + 1) & (len(q.inline) - 1)
+	q.count++
+}
+
+func (q *contextStructQueue) pop() (reflect.Value, bool) {
+	if q.overflow != nil {
+		if q.overHead >= len(q.overflow) {
+			return reflect.Value{}, false
+		}
+		v := q.overflow[q.overHead]
+		q.overflow[q.overHead] = reflect.Value{}
+		q.overHead++
+		return v, true
+	}
+	if q.count == 0 {
+		return reflect.Value{}, false
+	}
+	v := q.inline[q.head]
+	q.inline[q.head] = reflect.Value{}
+	q.head = (q.head + 1) & (len(q.inline) - 1)
+	q.count--
+	return v, true
+}
+
+func sameContextChild(a, b reflect.Value) bool {
+	if !a.IsValid() || !b.IsValid() {
+		return false
+	}
+	if a.Kind() == reflect.Interface && !a.IsNil() {
+		a = a.Elem()
+	}
+	if b.Kind() == reflect.Interface && !b.IsNil() {
+		b = b.Elem()
+	}
+	return a.Kind() == reflect.Pointer && b.Kind() == reflect.Pointer && a.Pointer() == b.Pointer() && a.Type() == b.Type()
+}
+
+// adkContextChildren returns up to two inner context fields from allowlisted
+// Go stdlib and ADK context wrapper structs, ignoring application-owned types.
+func adkContextChildren(v reflect.Value) (reflect.Value, reflect.Value) {
+	vt := v.Type()
+	switch vt.PkgPath() {
+	case "context":
+		if f := directStructField(v, "Context"); f.IsValid() {
+			return f, reflect.Value{}
+		}
+		if f := directStructField(v, "cancelCtx"); f.IsValid() {
+			return f, reflect.Value{}
+		}
+		return directStructField(v, "c"), reflect.Value{}
+	case agentPkgPath:
+		switch vt.Name() {
+		case "commonContext":
+			c1, c2 := directStructField(v, "Context"), directStructField(v, "invocationContext")
+			if sameContextChild(c1, c2) {
+				return c1, reflect.Value{}
+			}
+			return c1, c2
+		case "invocationContext":
+			return directStructField(v, "Context"), reflect.Value{}
+		case "callbackContextWrapper", "toolContextWrapper":
+			return directStructField(v, "context"), reflect.Value{}
+		}
+	case internalContextPkgPath:
+		switch vt.Name() {
+		case "InvocationContext":
+			return directStructField(v, "Context"), reflect.Value{}
+		case "ReadonlyContext":
+			c1, c2 := directStructField(v, "Context"), directStructField(v, "InvocationContext")
+			if sameContextChild(c1, c2) {
+				return c1, reflect.Value{}
+			}
+			return c1, c2
+		}
+	case internalLLMPkgPath:
+		if vt.Name() == "cancelledToolContext" {
+			return directStructField(v, "Context"), directStructField(v, "cancelCtx")
+		}
+	case remoteAgentPkgPath:
+		if vt.Name() == "authContext" {
+			return directStructField(v, "InvocationContext"), directStructField(v, "ctx")
+		}
+	case a2aServerPkgPath:
+		if vt.Name() == "executorContext" {
+			return directStructField(v, "Context"), reflect.Value{}
+		}
+	}
+	return reflect.Value{}, reflect.Value{}
+}
+
 // contextParentMap returns the child-to-parent agent map that ADK's runner
 // attaches to ctx via internal/agent/parentmap, or nil if ctx does not carry
-// one.
+// one. Only Go stdlib and ADK context wrappers are unwrapped; fields of
+// third-party or user context types are never read.
 func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -7817,68 +8741,261 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 	if ctx == nil {
 		return nil
 	}
-	queue := []reflect.Value{reflect.ValueOf(ctx)}
-	seen := map[visitedContextStruct]bool{}
-	for steps := 0; len(queue) > 0 && steps < 512; steps++ {
-		v := queue[0]
-		queue = queue[1:]
-		var ptr uintptr
-		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
-			if v.IsNil() {
-				v = reflect.Value{}
-				break
-			}
-			if v.Kind() == reflect.Pointer {
-				ptr = v.Pointer()
-			}
-			v = v.Elem()
+	var q contextStructQueue
+	q.push(reflect.ValueOf(ctx))
+	var seen map[visitedContextStruct]bool
+	for steps := range 512 {
+		item, ok := q.pop()
+		if !ok {
+			break
 		}
-		if !v.IsValid() || v.Kind() != reflect.Struct {
+		v, ok := derefContextStructValueLazy(item, &seen, steps >= 32)
+		if !ok {
 			continue
 		}
-		if ptr != 0 {
-			visitKey := visitedContextStruct{ptr: ptr, typ: v.Type()}
-			if seen[visitKey] {
-				continue
-			}
-			seen[visitKey] = true
-		}
-		if key, val := v.FieldByName("key"), v.FieldByName("val"); key.IsValid() && val.IsValid() {
-			if val.Kind() == reflect.Interface && !val.IsNil() {
-				val = val.Elem()
-			}
-			if val.IsValid() && val.Kind() == reflect.Map &&
-				val.Type().Key().Kind() == reflect.String &&
-				val.Type().Elem() == agentInterfaceType {
-				if keyVal, ok := exportContextKey(key); ok {
-					lookupCtx := ctx
-					if v.CanAddr() && v.Addr().CanInterface() {
-						if c, ok := reflect.TypeAssert[context.Context](v.Addr()); ok {
-							lookupCtx = c
-						}
-					}
-					if raw := orZero(func() any { return lookupCtx.Value(keyVal) }); raw != nil {
-						if m := reflect.ValueOf(raw); m.IsValid() && m.Kind() == reflect.Map && m.CanInterface() {
-							out := make(map[string]agent.Agent, m.Len())
-							iter := m.MapRange()
-							for iter.Next() {
-								if a, ok := reflect.TypeAssert[agent.Agent](iter.Value()); ok && a != nil {
-									out[iter.Key().String()] = a
-								}
+		if v.Type().PkgPath() == "context" {
+			if key, val := directStructField(v, "key"), directStructField(v, "val"); key.IsValid() && val.IsValid() {
+				if val.Kind() == reflect.Interface && !val.IsNil() {
+					val = val.Elem()
+				}
+				if val.IsValid() && val.Kind() == reflect.Map &&
+					val.Type().Key().Kind() == reflect.String &&
+					val.Type().Elem() == agentInterfaceType {
+					if keyVal, ok := exportContextKey(key); ok {
+						lookupCtx := ctx
+						if v.CanAddr() && v.Addr().CanInterface() {
+							if c, ok := reflect.TypeAssert[context.Context](v.Addr()); ok {
+								lookupCtx = c
 							}
-							return out
+						}
+						if raw := orZero(func() any { return lookupCtx.Value(keyVal) }); raw != nil {
+							if m := reflect.ValueOf(raw); m.IsValid() && m.Kind() == reflect.Map && m.CanInterface() {
+								out := make(map[string]agent.Agent, m.Len())
+								iter := m.MapRange()
+								for iter.Next() {
+									if a, ok := reflect.TypeAssert[agent.Agent](iter.Value()); ok && a != nil {
+										out[iter.Key().String()] = a
+									}
+								}
+								return out
+							}
 						}
 					}
 				}
 			}
 		}
-		for _, field := range []string{"context", "Context", "ctx", "invocationContext"} {
-			if next := v.FieldByName(field); next.IsValid() {
-				queue = append(queue, next)
-			}
-		}
+		c1, c2 := adkContextChildren(v)
+		q.push(c1)
+		q.push(c2)
 	}
 	return nil
+}
+
+var (
+	uuidProviderType    = reflect.TypeFor[platform.UUIDProvider]()
+	uuidProviderKeyOnce sync.Once
+	uuidProviderCtxKey  any
+)
+
+// directStructField returns the direct field of v named name without traversing
+// embedded struct pointers, so a nil embedded pointer cannot panic.
+func directStructField(v reflect.Value, name string) reflect.Value {
+	t := v.Type()
+	for i, n := 0, t.NumField(); i < n; i++ {
+		if t.Field(i).Name == name {
+			return v.Field(i)
+		}
+	}
+	return reflect.Value{}
+}
+
+func discoverUUIDProviderCtxKey() any {
+	uuidProviderKeyOnce.Do(func() {
+		probe := platform.WithUUIDProvider(context.Background(), func() string { return "" })
+		cur := reflect.ValueOf(probe)
+		for cur.IsValid() {
+			for cur.Kind() == reflect.Pointer || cur.Kind() == reflect.Interface {
+				if cur.IsNil() {
+					return
+				}
+				cur = cur.Elem()
+			}
+			if !cur.IsValid() || cur.Kind() != reflect.Struct {
+				return
+			}
+			if key, val := directStructField(cur, "key"), directStructField(cur, "val"); key.IsValid() && val.IsValid() {
+				if val.Kind() == reflect.Interface && !val.IsNil() {
+					val = val.Elem()
+				}
+				if val.IsValid() && val.Type() == uuidProviderType {
+					if k, ok := exportContextKey(key); ok {
+						uuidProviderCtxKey = k
+						return
+					}
+				}
+			}
+			cur = directStructField(cur, "Context")
+		}
+	})
+	return uuidProviderCtxKey
+}
+
+// contextHasCustomUUIDProvider queries ctx for ADK's platform.WithUUIDProvider
+// entry using the once-discovered context key and reports whether the active
+// provider is non-nil without invoking it.
+func contextHasCustomUUIDProvider(ctx context.Context) (res bool) {
+	if ctx == nil {
+		return false
+	}
+	key := discoverUUIDProviderCtxKey()
+	if key == nil {
+		return false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			res = false
+		}
+	}()
+	p, ok := ctx.Value(key).(platform.UUIDProvider)
+	return ok && p != nil
+}
+
+// callbackAfterAgentActionMaps returns the action maps of the EventActions of
+// ADK's callback context ctx (see actionMaps), so that onEvent can recognize
+// the event that runAfterAgentCallbacks builds from that EventActions.
+// On a callback context, Actions() logs that it is unsupported and returns nil;
+// a callback can still reach the live *session.EventActions via
+// ctx.WithDelta(nil).Actions() and replace StateDelta or ArtifactDelta (in
+// which case the yielded event carries the replacement map rather than the one
+// captured here). Only immutable Go stdlib context and ADK agent context
+// structs are unwrapped—never fields of arbitrary user-defined context types.
+func callbackAfterAgentActionMaps(ctx context.Context) actionMaps {
+	am, _ := extractCallbackAfterAgentActions(ctx)
+	return am
+}
+
+// callbackAfterAgentActions returns callbackAfterAgentActionMaps(ctx) and, when
+// they are not zero, a value that keeps the captured StateDelta and
+// ArtifactDelta maps reachable directly (as [2]unsafe.Pointer, referring to
+// nothing of ctx or the EventActions struct). Retaining keep prevents garbage
+// collection and address reuse of those captured map objects while keep is held
+// (see actionMaps), even if a callback subsequently replaces StateDelta or
+// ArtifactDelta on ctx.WithDelta(nil).Actions() with new maps (in which case the
+// yielded event carries the replacement maps rather than the captured ones).
+func callbackAfterAgentActions(ctx context.Context) (actionMaps, any) {
+	am, pins := extractCallbackAfterAgentActions(ctx)
+	if am == (actionMaps{}) {
+		return actionMaps{}, nil
+	}
+	return am, pins
+}
+
+func extractCallbackAfterAgentActions(ctx context.Context) (actionMaps, [2]unsafe.Pointer) {
+	if ctx == nil {
+		return actionMaps{}, [2]unsafe.Pointer{}
+	}
+	return extractCallbackAfterAgentActionsValue(reflect.ValueOf(ctx))
+}
+
+func extractCallbackAfterAgentActionsValue(cur reflect.Value) (am actionMaps, pins [2]unsafe.Pointer) {
+	defer func() {
+		if r := recover(); r != nil {
+			am = actionMaps{}
+			pins = [2]unsafe.Pointer{}
+		}
+	}()
+	var seen map[visitedContextStruct]bool
+	for steps := 0; cur.IsValid() && steps < 512; steps++ {
+		var ok bool
+		cur, ok = derefContextStructValueLazy(cur, &seen, steps >= 32)
+		if !ok {
+			return actionMaps{}, [2]unsafe.Pointer{}
+		}
+		vt := cur.Type()
+		if vt.PkgPath() == agentPkgPath && vt.Name() == "commonContext" {
+			actions, ok := derefContextStructValueLazy(directStructField(cur, "actions"), &seen, steps >= 32)
+			if !ok {
+				return actionMaps{}, [2]unsafe.Pointer{}
+			}
+			pins = [2]unsafe.Pointer{
+				mapPointer(directStructField(actions, "StateDelta")),
+				mapPointer(directStructField(actions, "ArtifactDelta")),
+			}
+			return actionMaps{
+				stateDelta:    pins[0],
+				artifactDelta: pins[1],
+			}, pins
+		}
+		var next reflect.Value
+		switch vt.PkgPath() {
+		case "context":
+			if f := directStructField(cur, "Context"); f.IsValid() {
+				next = f
+			} else if f := directStructField(cur, "cancelCtx"); f.IsValid() {
+				next = f
+			} else if f := directStructField(cur, "c"); f.IsValid() {
+				next = f
+			}
+		case agentPkgPath:
+			if f := directStructField(cur, "context"); f.IsValid() {
+				next = f
+			}
+		default:
+			// Never read fields of third-party or user context structs without
+			// their synchronization.
+			return actionMaps{}, [2]unsafe.Pointer{}
+		}
+		cur = next
+	}
+	return actionMaps{}, [2]unsafe.Pointer{}
+}
+
+func derefContextStructValue(v reflect.Value, seen map[visitedContextStruct]bool) (reflect.Value, bool) {
+	return derefContextStructValueLazy(v, &seen, seen != nil)
+}
+
+func derefContextStructValueLazy(v reflect.Value, seen *map[visitedContextStruct]bool, track bool) (reflect.Value, bool) {
+	for derefs := 0; v.IsValid() && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface); derefs++ {
+		if derefs >= 512 || v.IsNil() {
+			return reflect.Value{}, false
+		}
+		if v.Kind() == reflect.Pointer && (*seen != nil || track || derefs >= 4) {
+			if *seen == nil {
+				*seen = make(map[visitedContextStruct]bool, 8)
+			}
+			visitKey := visitedContextStruct{ptr: v.Pointer(), typ: v.Type()}
+			if (*seen)[visitKey] {
+				return reflect.Value{}, false
+			}
+			(*seen)[visitKey] = true
+		}
+		v = v.Elem()
+	}
+	if !v.IsValid() || v.Kind() != reflect.Struct {
+		return reflect.Value{}, false
+	}
+	return v, true
+}
+
+// mapPointer returns an unsafe.Pointer to the map that v holds, or nil when v
+// is not a non-nil map. Storing it keeps the map object live for the GC.
+func mapPointer(v reflect.Value) unsafe.Pointer {
+	if !v.IsValid() || v.Kind() != reflect.Map || v.IsNil() {
+		return nil
+	}
+	return v.UnsafePointer()
+}
+
+// eventActionMaps returns the action maps of ev (see actionMaps), zero when ev
+// is nil.
+func eventActionMaps(ev *session.Event) actionMaps {
+	if ev == nil {
+		return actionMaps{}
+	}
+	return actionMaps{
+		stateDelta:    mapPointer(reflect.ValueOf(ev.Actions.StateDelta)),
+		artifactDelta: mapPointer(reflect.ValueOf(ev.Actions.ArtifactDelta)),
+	}
 }
 
 func exportContextKey(key reflect.Value) (any, bool) {
