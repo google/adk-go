@@ -167,3 +167,64 @@ func TestShouldRetry(t *testing.T) {
 		})
 	}
 }
+
+// TestCalculateDelay_JitterNeverExceedsMaxDelay checks that with a MaxDelay
+// the delay is capped at MaxDelay / (1 + Jitter) before the jitter is drawn
+// and at MaxDelay after it, as adk-python's _get_retry_delay does.
+//
+// Fails if either cap is removed: the draws then reach above MaxDelay, or
+// never go below the jittered uncapped range.
+func TestCalculateDelay_JitterNeverExceedsMaxDelay(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *RetryConfig
+		// Every draw lies in [lo, hi]; some draw is below below and some
+		// above above.
+		lo, hi, below, above time.Duration
+	}{
+		{
+			// Capped at 10s / 2 = 5s before the jitter, so draws spread
+			// over [0s, 10s] around 5s.
+			name:  "full_jitter",
+			cfg:   &RetryConfig{InitialDelay: 20 * time.Second, MaxDelay: 10 * time.Second, BackoffFactor: 2, Jitter: 1.0},
+			lo:    0,
+			hi:    10 * time.Second,
+			below: 5 * time.Second,
+			above: 5 * time.Second,
+		},
+		{
+			// Capped at 10s / 1.5 before the jitter, so draws spread over
+			// [3.33s, 10s]; an 8s delay jittered without the cap would stay
+			// in [4s, 12s].
+			name:  "half_jitter",
+			cfg:   &RetryConfig{InitialDelay: 8 * time.Second, MaxDelay: 10 * time.Second, BackoffFactor: 2, Jitter: 0.5},
+			lo:    3333333333 * time.Nanosecond,
+			hi:    10 * time.Second,
+			below: 4 * time.Second,
+			above: 6 * time.Second,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var atMax int
+			sawBelow, sawAbove := false, false
+			for range 2000 {
+				d := CalculateDelay(tt.cfg, 1)
+				if d < tt.lo || d > tt.hi {
+					t.Fatalf("CalculateDelay() = %v, want within [%v, %v]", d, tt.lo, tt.hi)
+				}
+				if d == tt.hi {
+					atMax++
+				}
+				sawBelow = sawBelow || d < tt.below
+				sawAbove = sawAbove || d > tt.above
+			}
+			if atMax >= 50 {
+				t.Errorf("%d of 2000 draws equal %v, want fewer than 50", atMax, tt.hi)
+			}
+			if !sawBelow || !sawAbove {
+				t.Errorf("draws below %v: %v, above %v: %v; want both", tt.below, sawBelow, tt.above, sawAbove)
+			}
+		})
+	}
+}

@@ -332,7 +332,9 @@ func AddSessionToMemory(ctx Context) error {
 // carrying run ids.
 //
 // A parallel worker's item reads that item's own attempt. A dynamic child run
-// with RunNode reads 1, because a failed dynamic child is not retried. A tool
+// with RunNode reads the number of its attempt within that call: 1 on the
+// first, and 1 again when a retry of its parent, a resume or a new call runs
+// it. A tool
 // run by a ToolNode reads the number of the node attempt that runs it, and so
 // does every context derived from that tool context (WithDelta, WithICDelta,
 // WithAgentCancel, WithAgentTimeout). Every context inside an agent's run

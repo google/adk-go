@@ -149,8 +149,8 @@ func WithRaiseOnWait() RunNodeOption {
 // runs under run id "1", a numeric WithRunID is accepted, and no cached
 // output or run in flight is shared with another call.
 //
-// When ctx carries none, the child runs once under a scheduler built for this
-// call and not attached to ctx: run id "1" or the WithRunID value (numeric
+// When ctx carries none, the child runs under a scheduler built for this
+// call, retries included, and not attached to ctx: run id "1" or the WithRunID value (numeric
 // ids accepted), node path ctx.Path() + "/<child>@<id>" (no leading "/" when
 // ctx.Path() is empty), no cached output. The child's events cannot reach the
 // user: the state and artifact deltas of its non-partial events are merged
@@ -161,16 +161,32 @@ func WithRaiseOnWait() RunNodeOption {
 // child, the context a workflow node that is not a dynamic node runs under,
 // and a context that is neither a tool context nor carries a session.
 //
-// When the child set Actions().SkipSummarization on its own context, RunNode
-// sets it on ctx.Actions() before it returns, whether the child succeeded or
-// failed.
+// The call runs the child up to child.Config().RetryConfig.MaxAttempts times,
+// as ShouldRetry allows, waits CalculateDelay between attempts, and returns
+// the output of the first attempt that succeeds. Every attempt has the
+// child's path and run id, a fresh context and Timeout, and reads
+// agent.AttemptCount 1, 2, 3 in turn. Each failed attempt leaves a failure
+// record at the child's path, after the state writes the attempt made; the
+// caller sees no other trace of a retry. Retried like any failure: an error
+// the child returned, a timeout, a refusal of its state writes by a state
+// schema, and a refusal of its output by its output schema. Not retried: a
+// pause for input, a WaitForOutput park, a refused input (the child does not
+// start) and a failure to forward an event. A nil RetryConfig, or a
+// MaxAttempts of 0 or 1, means one attempt. Calls that overlap in time
+// with one WithRunID share one run, all its attempts included. When ctx
+// ends during the wait between attempts, the call returns a *NodeRunError
+// wrapping ErrNodeFailed and ctx.Err() and starts no further attempt.
+//
+// When the final attempt set Actions().SkipSummarization on its own context,
+// RunNode sets it on ctx.Actions() before it returns, whether the child
+// succeeded or failed.
 //
 // On failure:
 //   - errors.Is(err, ErrNodeInterrupted): child paused for HITL. A tool
 //     returns this error as it is, so its flow ends the step.
-//   - errors.Is(err, ErrNodeFailed): child errored after retries;
-//     errors.As recovers *NodeRunError with diagnostics (*NodeTimeoutError
-//     for a timeout).
+//   - errors.Is(err, ErrNodeFailed): child errored after retries; the cause
+//     is the last attempt's error, and errors.As recovers *NodeRunError with
+//     diagnostics (*NodeTimeoutError for a timeout).
 //   - ErrInputValidation inside a *NodeRunError: input violates the
 //     child's input schema; the child does not run.
 //   - ErrInvalidRunNodeContext, ErrInvalidRunID: misuse.

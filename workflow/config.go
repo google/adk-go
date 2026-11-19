@@ -75,8 +75,14 @@ type NodeConfig struct {
 	// means "use the engine default" — false for most node kinds.
 	WaitForOutput *bool
 
-	// RetryConfig, when non-nil, makes the scheduler retry this node
-	// on failure per the policy. nil means "no retries".
+	// RetryConfig, when non-nil, retries a failed attempt of this node
+	// per the policy, in a graph and as a child started by RunNode (the
+	// child's attempts share its path and run id; see RunNode). A node
+	// whose output its output schema refuses fails that attempt like an
+	// error the node returned, so the policy may run it again; the refused
+	// output is never sent, and what the attempt wrote to state is. A
+	// refusal of the node's input is not retried: the node does not start.
+	// nil means "no retries".
 	RetryConfig *RetryConfig
 
 	// Timeout, when > 0, bounds each attempt of the node: when it
@@ -85,8 +91,7 @@ type NodeConfig struct {
 	// node retried per RetryConfig gets the whole Timeout. It applies
 	// wherever the node runs: in a graph, as a child started by
 	// RunNode, and to each item of a ParallelWorker that wraps the
-	// node. RunNode does not retry a child, so a child's timed-out
-	// attempt fails RunNode. Zero (the default) or a negative value
+	// node. Zero (the default) or a negative value
 	// means the node is bounded only by the parent context's deadline,
 	// if any.
 	Timeout time.Duration
@@ -164,6 +169,9 @@ type NodeConfig struct {
 // to DefaultRetryConfig's value. The zero RetryConfig is a valid
 // "no retry, no backoff, no jitter" policy.
 //
+// A child started by RunNode reads the same fields in the same way as a
+// node in a graph.
+//
 // The struct shape is deliberately a flat set of plain values: no
 // dependency on cenkalti/backoff/v5.
 type RetryConfig struct {
@@ -174,6 +182,7 @@ type RetryConfig struct {
 	InitialDelay time.Duration
 
 	// Maximum delay between retries, in fractions of a second. If not specified, default to 60 seconds.
+	// It bounds every delay, jitter included.
 	MaxDelay time.Duration
 
 	// BackoffFactor is the per-attempt multiplier applied to the
@@ -183,8 +192,10 @@ type RetryConfig struct {
 	BackoffFactor float64
 
 	// Jitter is a randomness factor in [0.0, 1.0]. The actual delay
-	// is sampled from delay * (1 ± Jitter). Zero means deterministic
-	// delays.
+	// is sampled from delay * (1 ± Jitter); with a MaxDelay the sample
+	// never exceeds it, because the delay is capped at
+	// MaxDelay / (1 + Jitter) before it is sampled. Zero means
+	// deterministic delays.
 	Jitter float64
 
 	// Predicate that defines when to retry (true means retry). If not specified, default to true.
