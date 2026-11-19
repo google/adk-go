@@ -17,6 +17,7 @@ package bigquerytoolset
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -111,6 +112,8 @@ func TestExecuteSQL_Select(t *testing.T) {
 	if diff := cmp.Diff(want, roundTrip(t, got)); diff != "" {
 		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
 	}
+	gotBodies := f.requestBodies()
+	popJobID(t, gotBodies[0])
 	wantBodies := []any{
 		decodeJSON(t, `{
 			"jobReference": {"projectId": "p"},
@@ -121,7 +124,7 @@ func TestExecuteSQL_Select(t *testing.T) {
 			"maxResults": 50, "labels": {"adk-bigquery-tool": "execute_sql"}
 		}`),
 	}
-	if diff := cmp.Diff(wantBodies, f.requestBodies()); diff != "" {
+	if diff := cmp.Diff(wantBodies, gotBodies); diff != "" {
 		t.Errorf("request bodies mismatch (-want +got):\n%s", diff)
 	}
 	if diff := cmp.Diff([]string{dryRunPath, queryPath}, requestKeys(f)); diff != "" {
@@ -266,6 +269,8 @@ func TestExecuteSQL_ConfigInRequests(t *testing.T) {
 		queryPath:  {body: page(oneColumn("1"), "")},
 	}, map[string]any{"project_id": "p", "query": "SELECT 1"})
 
+	gotBodies := f.requestBodies()
+	popJobID(t, gotBodies[0])
 	wantLabels := `{"team": "data", "adk-bigquery-tool": "execute_sql", "adk-bigquery-application-name": "my-agent"}`
 	wantBodies := []any{
 		decodeJSON(t, `{
@@ -277,7 +282,7 @@ func TestExecuteSQL_ConfigInRequests(t *testing.T) {
 			"maxResults": 7, "labels": `+wantLabels+`, "maximumBytesBilled": "20971520", "location": "EU"
 		}`),
 	}
-	if diff := cmp.Diff(wantBodies, f.requestBodies()); diff != "" {
+	if diff := cmp.Diff(wantBodies, gotBodies); diff != "" {
 		t.Errorf("request bodies mismatch (-want +got):\n%s", diff)
 	}
 	if diff := cmp.Diff(map[string]string{"team": "data"}, labels); diff != "" {
@@ -319,6 +324,37 @@ func TestExecuteSQL_ApplicationNameLabel(t *testing.T) {
 				t.Errorf("User-Agent = %q, want it to contain %q unchanged", ua, tc.appName)
 			}
 		})
+	}
+}
+
+// popJobID removes the generated job id from a dry run request body and
+// checks its form.
+func popJobID(t *testing.T, body any) string {
+	t.Helper()
+	ref, _ := body.(map[string]any)["jobReference"].(map[string]any)
+	id, _ := ref["jobId"].(string)
+	if !regexp.MustCompile(`^adk_[A-Z2-7]{26}$`).MatchString(id) {
+		t.Errorf("dry run jobId = %q, want adk_ and 26 random base32 characters", id)
+	}
+	delete(ref, "jobId")
+	return id
+}
+
+// TestExecuteSQL_DryRunJobID checks that each dry run gets its own job id,
+// since jobs.insert requires one and BigQuery rejects a reused id.
+func TestExecuteSQL_DryRunJobID(t *testing.T) {
+	f := newFakeBigQuery(t, map[string]fakeResponse{dryRunPath: {body: selectDryRun}})
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
+	for range 2 {
+		run(t, toolByName(t, ts, "execute_sql"), map[string]any{"project_id": "p", "query": "SELECT 1", "dry_run": true})
+	}
+
+	bodies := f.requestBodies()
+	if len(bodies) != 2 {
+		t.Fatalf("got %d requests, want 2", len(bodies))
+	}
+	if first, second := popJobID(t, bodies[0]), popJobID(t, bodies[1]); first == second {
+		t.Errorf("both dry runs used job id %q", first)
 	}
 }
 
@@ -691,6 +727,9 @@ func TestNew_RejectsInvalidQueryConfig(t *testing.T) {
 		{name: "reserved label key", cfg: Config{JobLabels: map[string]string{"adk-bigquery-tool": "v"}}, wantErr: "reserved"},
 		{name: "uppercase label key", cfg: Config{JobLabels: map[string]string{"Team": "v"}}, wantErr: `key "Team"`},
 		{name: "label key starting with a digit", cfg: Config{JobLabels: map[string]string{"1team": "v"}}, wantErr: `key "1team"`},
+		{name: "label key starting with an underscore", cfg: Config{JobLabels: map[string]string{"_team": "v"}}, wantErr: `key "_team"`},
+		{name: "label key starting with a non-ASCII digit", cfg: Config{JobLabels: map[string]string{"\u0663k": "v"}}, wantErr: "\u0663k"},
+		{name: "label key with a modifier letter", cfg: Config{JobLabels: map[string]string{"\u30c1\u30fc\u30e0": "v"}}, wantErr: "\u30c1\u30fc\u30e0"},
 		{name: "label key with a colon", cfg: Config{JobLabels: map[string]string{"team:": "v"}}, wantErr: `key "team:"`},
 		{name: "label key too long", cfg: Config{JobLabels: map[string]string{"k" + strings.Repeat("a", 63): "v"}}, wantErr: "at most 63"},
 		{name: "invalid label value", cfg: Config{JobLabels: map[string]string{"team": "Data/Eng"}}, wantErr: `value "Data/Eng"`},
@@ -710,9 +749,11 @@ func TestNew_AcceptsQueryConfigLimits(t *testing.T) {
 	labels := map[string]string{
 		"k" + strings.Repeat("a", 62): strings.Repeat("a", 63),
 		"équipe":                      "données_1-x",
+		"部署":                          "東京_2",
+		"n":                           "\u0663",
 		"empty":                       "",
 	}
-	for i := range 17 {
+	for i := range 15 {
 		labels[string(rune('a'+i))] = "v"
 	}
 	f := newFakeBigQuery(t, nil)

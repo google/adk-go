@@ -83,8 +83,9 @@ type Config struct {
 	// themselves: adk-bigquery-tool with the tool name, and
 	// adk-bigquery-application-name with ApplicationName when it is set.
 	// Keys and values must follow BigQuery's label rules, which New checks:
-	// at most 63 characters, each a lowercase letter, a digit, '_' or '-',
-	// and keys start with a lowercase letter. In its own label,
+	// at most 63 characters, each a lowercase letter, a letter without case
+	// (as in CJK), a number, '_' or '-', and keys start with a lowercase or
+	// caseless letter. In its own label,
 	// ApplicationName is lowercased, other characters become '_' and it is
 	// cut to 63 characters: "MyAgent/1.0" becomes "myagent_1_0".
 	JobLabels map[string]string
@@ -137,11 +138,11 @@ func (c Config) validate() error {
 		if strings.HasPrefix(key, reservedLabelPrefix) {
 			return fmt.Errorf("bigquerytoolset: Config.JobLabels key %q starts with %q, which is reserved for the labels the tools add", key, reservedLabelPrefix)
 		}
-		if first, _ := utf8.DecodeRuneInString(key); !unicode.IsLower(first) || !validLabel(key) {
-			return fmt.Errorf("bigquerytoolset: Config.JobLabels key %q must start with a lowercase letter and have at most %d characters, each a lowercase letter, a digit, '_' or '-'", key, maxLabelLen)
+		if first, _ := utf8.DecodeRuneInString(key); !labelLetter(first) || !validLabel(key) {
+			return fmt.Errorf("bigquerytoolset: Config.JobLabels key %q must start with a lowercase or caseless letter and have at most %d characters, each a lowercase or caseless letter, a number, '_' or '-'", key, maxLabelLen)
 		}
 		if !validLabel(value) {
-			return fmt.Errorf("bigquerytoolset: Config.JobLabels value %q of key %q must have at most %d characters, each a lowercase letter, a digit, '_' or '-'", value, key, maxLabelLen)
+			return fmt.Errorf("bigquerytoolset: Config.JobLabels value %q of key %q must have at most %d characters, each a lowercase or caseless letter, a number, '_' or '-'", value, key, maxLabelLen)
 		}
 	}
 	return nil
@@ -151,15 +152,22 @@ func (c Config) validate() error {
 const maxLabelLen = 63
 
 // validLabel reports whether s follows BigQuery's rules for the characters
-// and length of a label: BigQuery rejects the whole job for an invalid label.
+// and length of a label, [\p{Ll}\p{Lo}\p{N}_-]{0,63}: BigQuery rejects the
+// whole job for an invalid label.
 func validLabel(s string) bool {
 	if utf8.RuneCountInString(s) > maxLabelLen {
 		return false
 	}
 	for _, r := range s {
-		if !unicode.IsLower(r) && !unicode.IsDigit(r) && r != '_' && r != '-' {
+		if !labelLetter(r) && !unicode.IsNumber(r) && r != '_' && r != '-' {
 			return false
 		}
 	}
 	return true
+}
+
+// labelLetter reports whether r is a letter BigQuery allows in a label: a
+// lowercase letter or one without case, as in CJK.
+func labelLetter(r rune) bool {
+	return unicode.In(r, unicode.Ll, unicode.Lo)
 }

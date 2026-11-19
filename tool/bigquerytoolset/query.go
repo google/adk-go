@@ -15,6 +15,7 @@
 package bigquerytoolset
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"maps"
@@ -106,10 +107,13 @@ func labelValue(s string) string {
 func (b *bigQuery) dryRun(ctx agent.Context, project, projectID, query string, labels map[string]string) (map[string]any, error) {
 	type jobReference struct {
 		ProjectID string `json:"projectId"`
+		JobID     string `json:"jobId"`
 		Location  string `json:"location,omitempty"`
 	}
+	// jobs.insert lists jobId as required, and the BigQuery client libraries
+	// adk-python uses always generate one.
 	body := map[string]any{
-		"jobReference": jobReference{ProjectID: projectID, Location: b.location},
+		"jobReference": jobReference{ProjectID: projectID, JobID: "adk_" + rand.Text(), Location: b.location},
 		"configuration": map[string]any{
 			"dryRun": true,
 			"labels": labels,
