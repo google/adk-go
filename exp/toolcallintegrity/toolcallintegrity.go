@@ -573,7 +573,7 @@ func eventStamps(event *session.Event) (map[string]string, error) {
 		return nil, malformed
 	}
 	for _, v := range out {
-		for i := 0; i < len(v); i++ {
+		for i := range len(v) {
 			if v[i] >= 0x80 {
 				return nil, malformed
 			}
