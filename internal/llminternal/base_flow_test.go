@@ -1171,6 +1171,10 @@ func TestIsThoughtOnlyTurn(t *testing.T) {
 		{"thought_then_signed_call", event(false, &genai.Part{Thought: true, Text: "t"}, &genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}, ThoughtSignature: []byte("sig")}), false},
 		{"thought_plus_signature_only_part", event(false, &genai.Part{Thought: true, Text: "t"}, &genai.Part{ThoughtSignature: []byte("sig")}), false},
 		{"partial_thought", event(true, &genai.Part{Thought: true, Text: "t"}), false},
+		{"thought_with_error_code", &session.Event{LLMResponse: model.LLMResponse{
+			Content:   &genai.Content{Role: "model", Parts: []*genai.Part{{Thought: true, Text: "t"}}},
+			ErrorCode: "MODEL_RETURNED_NO_CONTENT",
+		}}, false},
 		{"empty_content", event(false), false},
 		{"nil_event", nil, false},
 	}
@@ -2053,6 +2057,44 @@ func errorsOf(events []*session.Event) []eventError {
 	return got
 }
 
+// TestHasMeaningfulContent follows adk-python's has_meaningful_content tests
+// (flows/llm_flows/core/test_finalizer.py), among them
+// test_has_meaningful_content_thought_only and
+// test_has_meaningful_content_multiple_thoughts_only.
+func TestHasMeaningfulContent(t *testing.T) {
+	content := func(parts ...*genai.Part) *model.LLMResponse {
+		return &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: parts}}
+	}
+	tests := []struct {
+		name string
+		resp *model.LLMResponse
+		want bool
+	}{
+		{"nil_response", nil, false},
+		{"nil_content", &model.LLMResponse{}, false},
+		{"empty_parts", content(), false},
+		{"thought_only", content(&genai.Part{Text: "thinking", Thought: true}), false},
+		{"multiple_thoughts_only", content(&genai.Part{Text: "step 1", Thought: true}, &genai.Part{Text: "step 2", Thought: true}), false},
+		{"whitespace_only", content(&genai.Part{Text: " \n\t "}), false},
+		{"thought_and_whitespace", content(&genai.Part{Text: "thinking", Thought: true}, &genai.Part{Text: "  "}), false},
+		{"text", content(&genai.Part{Text: "answer"}), true},
+		{"thought_and_text", content(&genai.Part{Text: "thinking", Thought: true}, &genai.Part{Text: "answer"}), true},
+		{"function_call", content(&genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}}), true},
+		{"function_response", content(&genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "f"}}), true},
+		{"executable_code", content(&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "x"}}), true},
+		{"code_execution_result", content(&genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Output: "1"}}), true},
+		{"inline_data", content(&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png"}}), true},
+		{"file_data", content(&genai.Part{FileData: &genai.FileData{FileURI: "gs://b/o"}}), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasMeaningfulContent(tc.resp); got != tc.want {
+				t.Errorf("hasMeaningfulContent() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEmptyResponsePolicy_MeaningfulContentParts(t *testing.T) {
 	t.Run("function_response_is_meaningful", func(t *testing.T) {
 		events, _ := runScriptedFlow(t, &Flow{}, nil,
@@ -2074,6 +2116,80 @@ func TestEmptyResponsePolicy_MeaningfulContentParts(t *testing.T) {
 			t.Errorf("event errors mismatch (-want +got):\n%s", diff)
 		}
 	})
+}
+
+// TestEmptyResponsePolicy_ThoughtOnlyStopEndsRun follows adk-python's
+// test_apply_empty_response_policy_marks_thought_only_stop[StreamingMode.NONE]
+// (flows/llm_flows/core/test_model_call.py): a completed STOP turn that holds
+// only thoughts becomes an error event, and the model is not called again.
+func TestEmptyResponsePolicy_ThoughtOnlyStopEndsRun(t *testing.T) {
+	events, calls := runScriptedFlow(t, &Flow{}, nil,
+		stopTurn(&genai.Part{Text: "thinking...", Thought: true}),
+		stopTurn(&genai.Part{Text: "answer"}),
+	)
+	if calls != 1 {
+		t.Errorf("model called %d times, want 1", calls)
+	}
+	want := []eventError{{"MODEL_RETURNED_NO_CONTENT", wantNoActionableContentMessage}}
+	if diff := cmp.Diff(want, errorsOf(events)); diff != "" {
+		t.Errorf("event errors mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestEmptyResponsePolicy_ThoughtOnlyStopUnderSSE follows adk-python's
+// test_thought_only_stop_in_sse_streaming_surfaces_error_event
+// (flows/llm_flows/test_base_llm_flow.py): under SSE, the partial thought
+// chunk carries no error, and the aggregated thought-only STOP response
+// becomes the one error event.
+func TestEmptyResponsePolicy_ThoughtOnlyStopUnderSSE(t *testing.T) {
+	thought := func() *genai.Content {
+		return &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "Thinking step 1...", Thought: true}}}
+	}
+	calls := 0
+	f := &Flow{Model: &mockModelForTest{
+		name: "thought-stream",
+		generateContent: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+			return func(yield func(*model.LLMResponse, error) bool) {
+				calls++
+				if !yield(&model.LLMResponse{Content: thought(), Partial: true}, nil) {
+					return
+				}
+				yield(&model.LLMResponse{Content: thought(), FinishReason: genai.FinishReasonStop}, nil)
+			}
+		},
+	}}
+	ctx := icontext.NewInvocationContext(
+		runconfig.ToContext(t.Context(), &runconfig.RunConfig{StreamingMode: runconfig.StreamingModeSSE}),
+		icontext.InvocationContextParams{
+			InvocationID: "inv_1",
+			Agent:        &mockAgent{name: "agent_1"},
+			RunConfig:    &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+		},
+	)
+	type eventSummary struct {
+		Partial bool
+		Err     eventError
+	}
+	var got []eventSummary
+	for ev, err := range f.Run(ctx) {
+		if err != nil {
+			t.Fatalf("Run() yielded error: %v", err)
+		}
+		got = append(got, eventSummary{Partial: ev.Partial, Err: eventError{ev.ErrorCode, ev.ErrorMessage}})
+		if len(got) > 4 {
+			break
+		}
+	}
+	want := []eventSummary{
+		{Partial: true},
+		{Partial: false, Err: eventError{"MODEL_RETURNED_NO_CONTENT", wantNoActionableContentMessage}},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("events mismatch (-want +got):\n%s", diff)
+	}
+	if calls != 1 {
+		t.Errorf("model called %d times, want 1", calls)
+	}
 }
 
 // TestEmptyResponsePolicy_UnicodeFileInfoRecordUnitSeparators pins Python's
