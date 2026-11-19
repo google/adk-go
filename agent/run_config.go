@@ -95,7 +95,8 @@ type RunConfig struct {
 	// builds them while the sequence returned by Run is iterated. A change
 	// made through the pointer after Run returns therefore applies to every
 	// request built after the change. Set HTTPOptions before calling Run, and
-	// leave the struct and its maps unchanged until the iteration ends.
+	// leave the struct and its maps unchanged until the iteration ends. An
+	// agent run through tool/agenttool gets the same HTTPOptions.
 	//
 	// The model connectors in model/anthropicmodel and model/openaimodel
 	// accept only the Timeout and Headers fields of a request's HTTPOptions:
@@ -127,7 +128,8 @@ type RunConfig struct {
 	// request, and it builds them while the sequence returned by Run is
 	// iterated. A change to the map's entries after Run returns therefore
 	// applies to every request built after the change. Set Labels before
-	// calling Run, and leave the map unchanged until the iteration ends.
+	// calling Run, and leave the map unchanged until the iteration ends. An
+	// agent run through tool/agenttool gets the same Labels.
 	//
 	// The model connectors in model/anthropicmodel and model/openaimodel have
 	// no request labels to send. For an agent whose model uses one of these
