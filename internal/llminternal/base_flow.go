@@ -97,6 +97,10 @@ var (
 		// appends is reflected in the history assembled for this very request.
 		CompactionRequestProcessor,
 		ContentsRequestProcessor,
+		// The same position as in adk-python's single flow. The model fingerprints
+		// the finished request when it is called, so processors after this one
+		// still count towards the cached prefix.
+		ContextCacheRequestProcessor,
 		// Some implementations of NL Planning mark planning contents as thoughts in the post processor.
 		// Since these need to be unmarked, NL Planning should be after contentsRequestProcessor.
 		nlPlanningRequestProcessor,
@@ -1207,14 +1211,21 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 // streamed delta looks final: SSE clients render each delta as a complete
 // turn and the runner persists each one as a separate session event. If it
 // drops TurnComplete, clients never see the turn end. If it drops
-// UsageMetadata, the call disappears from token accounting.
+// UsageMetadata, the call disappears from token accounting, and context
+// caching, which sizes a cache from the previous prompt's token count, never
+// creates one. If it drops CacheMetadata, the session loses track of the cache
+// the call used: the next turn creates another instead of reusing it.
 //
 // Partial and TurnComplete are plain bools, so an unset value cannot be told
 // apart from an explicit false; a delta is never final while the stream
 // continues, so a partial original keeps its replacement partial, and a
 // response that ended the turn keeps its replacement ending it. UsageMetadata
-// set on the replacement is respected. The replacement is copied rather than
-// modified, and returned as is when nothing needs filling.
+// and CacheMetadata set on the replacement are respected. The replacement is
+// copied rather than modified, and returned as is when nothing needs filling.
+//
+// adk-python carries the first three fields but not the cache state
+// (flows/llm_flows/core/_finalizer.py, _inherit_unset_model_fields), so a
+// callback that replaces every reply leaves it caching nothing.
 func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResponse {
 	if original == nil {
 		return replacement
@@ -1222,7 +1233,8 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 	inheritPartial := original.Partial && !replacement.Partial
 	inheritTurnComplete := original.TurnComplete && !replacement.TurnComplete
 	inheritUsage := original.UsageMetadata != nil && replacement.UsageMetadata == nil
-	if !inheritPartial && !inheritTurnComplete && !inheritUsage {
+	inheritCache := original.CacheMetadata != nil && replacement.CacheMetadata == nil
+	if !inheritPartial && !inheritTurnComplete && !inheritUsage && !inheritCache {
 		return replacement
 	}
 	merged := *replacement
@@ -1234,6 +1246,9 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 	}
 	if inheritUsage {
 		merged.UsageMetadata = original.UsageMetadata
+	}
+	if inheritCache {
+		merged.CacheMetadata = original.CacheMetadata
 	}
 	return &merged
 }
