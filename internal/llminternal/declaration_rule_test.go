@@ -85,7 +85,7 @@ func (m *callThenAnswerModel) Name() string { return "call-then-answer" }
 func (m *callThenAnswerModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		first := len(m.requests) == 0
-		m.requests = append(m.requests, record(req))
+		m.requests = append(m.requests, recordDeclRequest(req))
 		if first && m.call != "" {
 			yield(&model.LLMResponse{Content: &genai.Content{
 				Role:  genai.RoleModel,
@@ -97,7 +97,7 @@ func (m *callThenAnswerModel) GenerateContent(_ context.Context, req *model.LLMR
 	}
 }
 
-func record(req *model.LLMRequest) recordedRequest {
+func recordDeclRequest(req *model.LLMRequest) recordedRequest {
 	r := recordedRequest{toolKeys: slices.Sorted(func(yield func(string) bool) {
 		for k := range req.Tools {
 			if !yield(k) {
@@ -160,7 +160,7 @@ func TestRun_UndeclaredToolIsNotCallable(t *testing.T) {
 		t.Errorf("no_decl Run called %d times, want 0", got)
 	}
 	errText, _ := resp["error"].(string)
-	if want := "tool 'no_decl' not found.\nAvailable tools: \n"; !strings.HasPrefix(errText, want) {
+	if want := "Invoking `no_decl()` failed as no tool with that name is available. The tools you can call are: none."; !strings.HasPrefix(errText, want) {
 		t.Errorf("function response error = %q, want prefix %q", errText, want)
 	}
 }
@@ -207,7 +207,7 @@ func TestRun_ToolPackedByCallbackWithoutDeclarationIsNotCallable(t *testing.T) {
 		t.Errorf("cb_tool Run called %d times, want 0", got)
 	}
 	errText, _ := resp["error"].(string)
-	if want := "tool 'cb_tool' not found.\nAvailable tools: \n"; !strings.HasPrefix(errText, want) {
+	if want := "Invoking `cb_tool()` failed as no tool with that name is available. The tools you can call are: none."; !strings.HasPrefix(errText, want) {
 		t.Errorf("function response error = %q, want prefix %q", errText, want)
 	}
 }
@@ -236,7 +236,7 @@ func TestPreprocess_DropsOnlyEntriesThatReportNoDeclaration(t *testing.T) {
 		}
 	}
 
-	if diff := cmp.Diff([]string{"declared", "opaque"}, record(req).toolKeys); diff != "" {
+	if diff := cmp.Diff([]string{"declared", "opaque"}, recordDeclRequest(req).toolKeys); diff != "" {
 		t.Errorf("req.Tools keys mismatch (-want +got):\n%s", diff)
 	}
 }

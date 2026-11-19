@@ -53,7 +53,7 @@ func TestPreprocess_ValueTypedEntriesFollowTheirDeclaration(t *testing.T) {
 		}
 	}
 
-	if diff := cmp.Diff([]string{"value_declared"}, record(req).toolKeys); diff != "" {
+	if diff := cmp.Diff([]string{"value_declared"}, recordDeclRequest(req).toolKeys); diff != "" {
 		t.Errorf("req.Tools keys mismatch (-want +got):\n%s", diff)
 	}
 }

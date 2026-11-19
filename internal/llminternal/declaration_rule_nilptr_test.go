@@ -58,7 +58,7 @@ func TestPreprocess_KeepsNilPointerEntry(t *testing.T) {
 		}
 	}()
 
-	if diff := cmp.Diff([]string{"nil_ptr"}, record(req).toolKeys); diff != "" {
+	if diff := cmp.Diff([]string{"nil_ptr"}, recordDeclRequest(req).toolKeys); diff != "" {
 		t.Errorf("req.Tools keys mismatch (-want +got):\n%s", diff)
 	}
 }
