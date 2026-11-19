@@ -91,9 +91,13 @@ type NodeConfig struct {
 	// node retried per RetryConfig gets the whole Timeout. It applies
 	// wherever the node runs: in a graph, as a child started by
 	// RunNode, and to each item of a ParallelWorker that wraps the
-	// node. Zero (the default) or a negative value
-	// means the node is bounded only by the parent context's deadline,
-	// if any.
+	// node. Timeout does not stop the node's code: a node that ignores its
+	// context runs until it returns. Events the attempt yields after its
+	// context is done, its output included, are dropped: the caller and
+	// the node's successors never see them, and the node's yield returns
+	// false. State writes the attempt made are still sent. Zero (the
+	// default) or a negative value means the node is bounded only by the
+	// parent context's deadline, if any.
 	Timeout time.Duration
 
 	// EmitsOwnSpan, when true, tells the scheduler not to wrap the node

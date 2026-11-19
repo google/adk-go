@@ -68,10 +68,18 @@ var (
 type NodeRunError struct {
 	// ChildName is the child's Node.Name(), e.g. "fixer_agent".
 	ChildName string
-	// ChildPath is the composite path, e.g. "code_workflow/fixer_agent@2".
+	// ChildPath is the child's node path: the path of the node that called
+	// RunNode, "/", the child's name, "@" and its run ID, for example
+	// "code_workflow@1/coder@1/fixer_agent@2". Every segment, the
+	// workflow's included, ends in "@" and a run ID. It is empty for a call
+	// refused because the child's input schema refuses the input, the run
+	// ID is invalid (ErrInvalidRunID), or the child's state schema cannot
+	// be checked (ErrStateSchemaUnusable). A second WithUseAsOutput call,
+	// refused with ErrOutputAlreadyDelegated, sets it.
 	ChildPath string
-	// RunID is the per-invocation identifier, auto-counter or
-	// user-supplied via WithRunID.
+	// RunID is the child's run ID, counted per child name or given with
+	// WithRunID. It is empty for every call refused before the child
+	// started, including a second WithUseAsOutput call.
 	RunID string
 	// Cause is why the child did not return an output. For a child that
 	// failed it wraps ErrNodeFailed and the child's own error; for a call
@@ -125,6 +133,13 @@ func (e *NodeRunError) Unwrap() error {
 // and returns an error matching context.DeadlineExceeded before its own
 // timeout elapses also fails with a NodeTimeoutError, because the timeout it
 // reports is taken to be its own.
+//
+// A node that ignores its context runs on past its timeout. Every event it
+// yields after the timeout elapsed, its output included, is dropped: it never
+// reaches the caller or the node's successors, the node's yield returns
+// false, and the attempt fails with this error when the node returns. State
+// writes the attempt made are still sent. A node whose output must count has
+// to return before its timeout.
 //
 // errors.Is(err, context.DeadlineExceeded) is true for every NodeTimeoutError,
 // so code that checks for a deadline keeps working. Unwrap returns the error
