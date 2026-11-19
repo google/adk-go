@@ -542,20 +542,21 @@ func TestLoadArtifactsTool_ParallelCalls(t *testing.T) {
 	)
 	backendError := errors.New("storage unavailable")
 	for _, tc := range []struct {
-		name       string
-		firstArgs  []any
-		secondFile string
-		loadErr    error
-		wantBodies []string
-		wantErr    error
+		name        string
+		firstArgs   []any
+		secondFile  string
+		failLoadFor string
+		loadErr     error
+		wantBodies  []string
+		wantErr     error
 	}{
 		{name: "two successful calls", firstArgs: []any{"january.txt"}, secondFile: "february.txt", wantBodies: []string{january, february}},
 		{name: "invalid arguments before successful call", firstArgs: []any{123}, secondFile: "february.txt", wantBodies: []string{february}},
 		{name: "missing file follows successful call", firstArgs: []any{"january.txt"}, secondFile: "missing.txt", wantBodies: []string{january}},
 		{name: "missing file precedes successful call", firstArgs: []any{"missing.txt"}, secondFile: "february.txt", wantBodies: []string{february}},
 		{name: "invalid filename follows successful call", firstArgs: []any{"january.txt"}, secondFile: "dir/february.txt", wantBodies: []string{january}},
-		{name: "file disappears after listing", firstArgs: []any{"january.txt"}, secondFile: "february.txt", loadErr: fs.ErrNotExist, wantBodies: []string{january}},
-		{name: "backend failure", firstArgs: []any{"january.txt"}, secondFile: "february.txt", loadErr: backendError, wantErr: backendError},
+		{name: "file disappears after listing", firstArgs: []any{"january.txt"}, secondFile: "february.txt", failLoadFor: "january.txt", loadErr: fs.ErrNotExist, wantBodies: []string{february}},
+		{name: "backend failure", firstArgs: []any{"january.txt"}, secondFile: "february.txt", failLoadFor: "february.txt", loadErr: backendError, wantErr: backendError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -587,7 +588,7 @@ func TestLoadArtifactsTool_ParallelCalls(t *testing.T) {
 				t.Fatalf("Create() error = %v", err)
 			}
 			if tc.loadErr != nil {
-				artifacts = &failingArtifactLoad{Service: artifacts, name: tc.secondFile, err: tc.loadErr}
+				artifacts = &failingArtifactLoad{Service: artifacts, name: tc.failLoadFor, err: tc.loadErr}
 			}
 			r, err := runner.New(runner.Config{
 				AppName: app, Agent: a, SessionService: sessions, ArtifactService: artifacts,
@@ -676,7 +677,7 @@ func TestLoadArtifactsTool_ProcessRequest_MalformedResponse(t *testing.T) {
 				}
 			})
 			t.Run("parallel", func(t *testing.T) {
-				req := &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{valid, malformed}}}}
+				req := &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{malformed, valid}}}}
 				if err := processor.ProcessRequest(ctx, req); err != nil {
 					t.Fatalf("ProcessRequest() returned an error of type %T", err)
 				}
