@@ -1764,9 +1764,10 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fA
 // turn that are still running. ADK Go fails only this call, because an error
 // from a tool callback already becomes the call's function response.
 //
-// The error is also recorded on the tool's span, because callbacks are
-// optional. A panic recovered inside a tool built with functiontool, or inside
-// recoverStreamPanic, does not reach this function and is not recorded here.
+// The error is also recorded on the tool's span when content capture on spans
+// is enabled, because callbacks are optional. A panic recovered inside a tool
+// built with functiontool, or inside recoverStreamPanic, does not reach this
+// function and is not recorded here.
 func recoverToolPanic(toolCtx agent.Context, toolName, callback string, step func() (map[string]any, error)) (result map[string]any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -1777,7 +1778,7 @@ func recoverToolPanic(toolCtx agent.Context, toolName, callback string, step fun
 			} else {
 				panicErr = toolinternal.NewCallbackPanicError(callback, toolName, r, stack)
 			}
-			trace.SpanFromContext(toolCtx).RecordError(panicErr)
+			telemetry.RecordPanic(trace.SpanFromContext(toolCtx), panicErr)
 			result, err = nil, panicErr
 		}
 	}()

@@ -691,6 +691,9 @@ func TestCallToolPanics(t *testing.T) {
 		// than to the agent.
 		step   string
 		plugin bool
+		// noCapture runs the call without content capture on spans, so the
+		// tool's span must not record the panic error.
+		noCapture bool
 		// wantErr is how the panic error starts.
 		wantErr string
 		// wantSeen lists the callbacks that are handed the panic error.
@@ -714,6 +717,13 @@ func TestCallToolPanics(t *testing.T) {
 			step:     "Run",
 			wantErr:  `panic in tool "testTool": interface conversion: interface {} is float64, not string`,
 			wantSeen: []string{"OnToolError", "AfterTool"},
+		},
+		{
+			name:      "tool not built with functiontool, without content capture",
+			step:      "Run",
+			noCapture: true,
+			wantErr:   `panic in tool "testTool": interface conversion: interface {} is float64, not string`,
+			wantSeen:  []string{"OnToolError", "AfterTool"},
 		},
 		{
 			name:     "on tool error callback",
@@ -742,6 +752,13 @@ func TestCallToolPanics(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spans.Reset()
+			capture := "SPAN_ONLY"
+			if tc.noCapture {
+				capture = ""
+			}
+			t.Cleanup(telemetry.ApplyEnv)
+			t.Setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", capture)
+			telemetry.ApplyEnv()
 			// The agent's callbacks and the tool panic with a runtime error, the
 			// plugin's callbacks with a string.
 			args := map[string]any{"order_id": 12345.0}
@@ -824,8 +841,8 @@ func TestCallToolPanics(t *testing.T) {
 					}
 				}
 			}
-			if !recorded {
-				t.Error("the tool's span does not record the panic error")
+			if want := !tc.noCapture; recorded != want {
+				t.Errorf("the tool's span records the panic error = %t, want %t", recorded, want)
 			}
 		})
 	}
