@@ -96,3 +96,60 @@ func TestNew(t *testing.T) {
 		})
 	}
 }
+
+func TestNew_RejectsBothAfterRunForms(t *testing.T) {
+	errCleanup := errors.New("cleanup failed")
+	afterRun := func(agent.InvocationContext) {}
+	failableAfterRun := func(agent.InvocationContext) error { return errCleanup }
+
+	tests := []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{
+			name: "both forms set",
+			cfg: Config{
+				Name:                     "both",
+				AfterRunCallback:         afterRun,
+				FailableAfterRunCallback: failableAfterRun,
+			},
+			wantErr: "plugin: AfterRunCallback and FailableAfterRunCallback are both set",
+		},
+		{
+			name: "only the failable form set",
+			cfg: Config{
+				Name:                     "failable",
+				FailableAfterRunCallback: failableAfterRun,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := New(tt.cfg)
+
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("New() error = %v, want %q", err, tt.wantErr)
+				}
+				if p != nil {
+					t.Errorf("New() plugin = %v, want nil", p)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("New() error = %v, want nil", err)
+			}
+			if p.AfterRunCallback() != nil {
+				t.Error("AfterRunCallback() = non-nil, want nil")
+			}
+			callback := p.FailableAfterRunCallback()
+			if callback == nil {
+				t.Fatal("FailableAfterRunCallback() = nil, want the configured callback")
+			}
+			if got := callback(nil); got != errCleanup {
+				t.Errorf("FailableAfterRunCallback()(nil) = %v, want %v", got, errCleanup)
+			}
+		})
+	}
+}

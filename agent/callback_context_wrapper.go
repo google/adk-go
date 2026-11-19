@@ -176,6 +176,11 @@ func (c *callbackContextWrapper) RenderUIWidget(widget session.UIWidget) error {
 	return RenderUIWidget(c.context, widget)
 }
 
+// mergeArtifactDelta forwards [MergeArtifactDelta] to the wrapped context.
+func (c *callbackContextWrapper) mergeArtifactDelta(delta map[string]int64) error {
+	return MergeArtifactDelta(c.context, delta)
+}
+
 // SearchMemory implements [Context]. Without a memory service it reports the
 // missing service, as every context does; with one it refuses.
 func (c *callbackContextWrapper) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {

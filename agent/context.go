@@ -284,20 +284,16 @@ func AddSessionToMemory(ctx Context) error {
 // Context is asked through Value too.
 func invocationSession(ctx Context) session.Session {
 	if _, ours := ctx.(adkcontext.Source); ours {
-		if s, ok := ctx.Value(invocationSessionKey{}).(session.Session); ok {
+		if s, ok := ctx.Value(adkcontext.InvocationSessionKey).(session.Session); ok {
 			return s
 		}
 	}
 	if s := ctx.Session(); s != nil {
 		return s
 	}
-	s, _ := ctx.Value(invocationSessionKey{}).(session.Session)
+	s, _ := ctx.Value(adkcontext.InvocationSessionKey).(session.Session)
 	return s
 }
-
-// invocationSessionKey is the context key under which a commonContext answers
-// with the session of the invocation it wraps. Only this package can name it.
-type invocationSessionKey struct{}
 
 // eventAdder is the method of a Memory that can add events, such as the
 // memory the runner builds over a [memory.EventAdder].

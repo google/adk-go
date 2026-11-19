@@ -1269,6 +1269,9 @@ type completedTrace struct {
 	// (see popLLMSpan and popToolSpan). They are nil when there are none.
 	endedModels, endedTools map[string]*spanRecord
 	position                *list.Element
+	// runErrorRow records that OnRunErrorCallback wrote the run's terminal
+	// row (see noteRunErrorRow).
+	runErrorRow bool
 }
 
 func (c *completedTrace) hasPendingOrOpenLateSpans() bool {
@@ -1632,6 +1635,32 @@ func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv
 	tm.pruneWaitingLocked(limit, limit/2)
 	tm.pruneCompletedLocked(limit, func(c *completedTrace) bool { return !c.hasPendingOrOpenLateSpans() })
 	tm.pruneCompletedLocked(limit, func(c *completedTrace) bool { return !c.hasPendingSpans() })
+}
+
+// terminalRow reports whether the run of invocationID has ended with a
+// terminal row (written), and whether OnRunErrorCallback wrote it
+// (byRunError). A later run that reuses the invocation ID, such as a resumed
+// invocation, starts with neither: the callbacks that start a run drop the
+// completed entry (see lookupInvocation).
+func (tm *traceManager) terminalRow(invocationID string) (written, byRunError bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	completed := tm.completed[invocationID]
+	if completed == nil {
+		return false, false
+	}
+	return true, completed.runErrorRow
+}
+
+// noteRunErrorRow records that OnRunErrorCallback wrote the terminal row of
+// the run of invocationID, which must have ended. It does nothing when the
+// completed entry was pruned or never existed.
+func (tm *traceManager) noteRunErrorRow(invocationID string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if completed := tm.completed[invocationID]; completed != nil {
+		completed.runErrorRow = true
+	}
 }
 
 // lateLocked returns the late state of completed, and makes it, with the

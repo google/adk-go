@@ -16,6 +16,7 @@ package recordplugin_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -422,6 +423,67 @@ func TestRecordPlugin(t *testing.T) {
 }
 
 // --- Mock Implementations ---
+
+// TestRecordPlugin_OnRunErrorSavesRecordingsAndClearsState covers an
+// invocation that a run error ends: the runner calls no after-run callback
+// for it, so the on-run-error callback saves the turn's recordings and drops
+// the invocation's state.
+func TestRecordPlugin_OnRunErrorSavesRecordingsAndClearsState(t *testing.T) {
+	tempDir := t.TempDir()
+	p := recordplugin.MustNew(tempDir)
+	mockSession := &MockSession{state: &MockState{data: map[string]any{}}}
+	if err := mockSession.State().Set("_adk_recordings_config", map[string]any{
+		"dir":                tempDir,
+		"user_message_index": 0,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	invContext := &MockInvocationContext{session: mockSession, invocationID: "failed-invocation"}
+	cbContext := &MockCallbackContext{state: mockSession.State(), invocationID: "failed-invocation", agentName: "test_agent"}
+	if _, err := p.BeforeRunCallback()(invContext); err != nil {
+		t.Fatalf("beforeRun failed: %v", err)
+	}
+	req := &model.LLMRequest{
+		Model:    "gemini-2.0-flash",
+		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "Hello agent"}}}},
+	}
+	if _, err := p.BeforeModelCallback()(cbContext, req); err != nil {
+		t.Fatalf("beforeModel failed: %v", err)
+	}
+	resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "Hello user"}}}}
+	if _, err := p.AfterModelCallback()(cbContext, resp, nil); err != nil {
+		t.Fatalf("afterModel failed: %v", err)
+	}
+	onRunError := p.OnRunErrorCallback()
+	if onRunError == nil {
+		t.Fatal("OnRunErrorCallback is nil, want the plugin to register one")
+	}
+
+	onRunError(invContext, errors.New("boom"))
+
+	filePath := filepath.Join(tempDir, "generated-recordings.yaml")
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("after on-run-error: failed to read recordings file: %v", err)
+	}
+	var recordings recording.Recordings
+	if err := yaml.Unmarshal(data, &recordings); err != nil {
+		t.Fatalf("failed to unmarshal yaml recordings: %v", err)
+	}
+	if len(recordings.Recordings) != 1 {
+		t.Fatalf("after on-run-error: file holds %d recordings, want 1", len(recordings.Recordings))
+	}
+
+	// With the invocation's state dropped, a later after-run call has nothing
+	// to save and writes no file.
+	if err := os.Remove(filePath); err != nil {
+		t.Fatalf("failed to remove recordings file: %v", err)
+	}
+	p.AfterRunCallback()(invContext)
+	if _, err := os.Stat(filePath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("after-run following on-run-error wrote the recordings file again (stat error %v), want no file", err)
+	}
+}
 
 type MockState struct {
 	data map[string]any

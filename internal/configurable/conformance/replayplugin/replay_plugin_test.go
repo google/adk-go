@@ -16,6 +16,7 @@ package replayplugin_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -428,6 +429,57 @@ recordings:
 }
 
 // --- Helpers & Mocks ---
+
+// TestReplayPlugin_OnRunErrorClearsState covers an invocation that a run
+// error ends: the runner calls no after-run callback for it, so the
+// on-run-error callback drops the invocation's replay state.
+func TestReplayPlugin_OnRunErrorClearsState(t *testing.T) {
+	p := replayplugin.MustNew("/")
+	mockSession := &MockSession{state: &MockState{data: map[string]any{}}}
+	tempDir := t.TempDir()
+	createRecordingsFile(t, tempDir, `
+recordings:
+  - user_message_index: 0
+    agent_name: "test_agent"
+    llm_recording:
+      llm_request:
+        model: "gemini-2.0-flash"
+        contents:
+          - role: "user"
+            parts:
+              - text: "Hello"
+      llm_responses:
+        - content:
+            role: "model"
+            parts:
+              - text: "Recorded response"
+`)
+	if err := mockSession.State().Set("_adk_replay_config", map[string]any{
+		"dir":                tempDir,
+		"user_message_index": 0,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	invContext := &MockInvocationContext{session: mockSession, invocationID: "failed-invocation"}
+	if _, err := p.BeforeRunCallback()(invContext); err != nil {
+		t.Fatalf("beforeRun failed: %v", err)
+	}
+	onRunError := p.OnRunErrorCallback()
+	if onRunError == nil {
+		t.Fatal("OnRunErrorCallback is nil, want the plugin to register one")
+	}
+
+	onRunError(invContext, errors.New("boom"))
+
+	cbContext := &MockCallbackContext{state: mockSession.State(), invocationID: "failed-invocation", agentName: "test_agent"}
+	req := &model.LLMRequest{
+		Model:    "gemini-2.0-flash",
+		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "Hello"}}}},
+	}
+	if resp, err := p.BeforeModelCallback()(cbContext, req); err == nil {
+		t.Errorf("BeforeModelCallback after on-run-error = %v, nil error; want an error because the invocation has no replay state", resp)
+	}
+}
 
 func createRecordingsFile(t *testing.T, dir, content string) {
 	path := filepath.Join(dir, "generated-recordings.yaml")

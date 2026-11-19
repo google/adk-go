@@ -49,6 +49,7 @@ func New(allowedBaseDir string) (*plugin.Plugin, error) {
 		Name:                "record_plugin",
 		BeforeRunCallback:   p.beforeRun,
 		AfterRunCallback:    p.afterRun,
+		OnRunErrorCallback:  p.onRunError,
 		BeforeModelCallback: p.beforeModel,
 		AfterModelCallback:  p.afterModel,
 		BeforeToolCallback:  p.beforeTool,
@@ -166,6 +167,15 @@ func (p *recordPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result ma
 
 	state.CompleteToolRecording(ctx.FunctionCallID(), ctx.AgentName(), resp)
 	return nil, nil
+}
+
+// onRunError saves the recordings of an invocation that a run error ended and
+// drops its state, as afterRun does for a run that completed. The runner
+// calls no after-run callback for such a run, so without it the turn's
+// recordings would be lost and its state kept for the life of the plugin.
+// afterRun finds no state afterwards, so a run that gets both saves once.
+func (p *recordPlugin) onRunError(ctx agent.InvocationContext, _ error) {
+	p.afterRun(ctx)
 }
 
 func (p *recordPlugin) afterRun(ctx agent.InvocationContext) {

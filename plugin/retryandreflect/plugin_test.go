@@ -17,8 +17,11 @@ package retryandreflect
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -214,6 +217,38 @@ func TestRetryAndReflect_ErrorIfRetryExceeded(t *testing.T) {
 	if gotErr != err {
 		t.Errorf("expected error %v, got %v", err, gotErr)
 	}
+}
+
+func TestRetryAndReflect_ConfirmationErrorsAreNotCounted(t *testing.T) {
+	p, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	onToolError := p.OnToolErrorCallback()
+	ctx := &mockContext{invocationID: "inv1"}
+	tl := &mockTool{name: "pay"}
+
+	res, gotErr := onToolError(ctx, tl, nil, tool.ErrConfirmationRequired)
+	if res != nil || gotErr != nil {
+		t.Errorf("ErrConfirmationRequired: onToolError() = %v, %v, want nil, nil", res, gotErr)
+	}
+	res, gotErr = onToolError(ctx, tl, nil, tool.ErrConfirmationRejected)
+	if res != nil || gotErr != nil {
+		t.Errorf("ErrConfirmationRejected: onToolError() = %v, %v, want nil, nil", res, gotErr)
+	}
+	res, gotErr = onToolError(ctx, tl, nil, fmt.Errorf("tool pay: %w", tool.ErrConfirmationRequired))
+	if res != nil || gotErr != nil {
+		t.Errorf("wrapped ErrConfirmationRequired: onToolError() = %v, %v, want nil, nil", res, gotErr)
+	}
+
+	res, gotErr = onToolError(ctx, tl, nil, errors.New("card declined"))
+	if gotErr != nil {
+		t.Fatalf("ordinary error: onToolError() error = %v, want nil", gotErr)
+	}
+	checkFields(t, res, map[string]any{
+		"response_type": "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN",
+		"retry_count":   1,
+	})
 }
 
 func TestRetryAndReflect_Scopes(t *testing.T) {
@@ -747,4 +782,412 @@ func TestRetryAndReflect_RunnerContinuesCountsOfAnsweredRun(t *testing.T) {
 	if count, ok := failureCount(invocationID); ok {
 		t.Errorf("after the answering run: count %d kept, want the counts dropped", count)
 	}
+}
+
+func TestNew_RegistersOnRunErrorCallback(t *testing.T) {
+	p, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	if p.OnRunErrorCallback() == nil {
+		t.Error("New() registered no OnRunErrorCallback, want one")
+	}
+	if p.AfterRunCallback() == nil {
+		t.Error("New() registered no AfterRunCallback, want one")
+	}
+}
+
+// TestRetryAndReflect_FailedRunDropsInvocationCounts runs the plugin through
+// runner.Run on a run that a model failure ends after a tool failure. The
+// runner skips the after-run callbacks of such a run, so the counts are
+// dropped by the on-run-error callback.
+func TestRetryAndReflect_FailedRunDropsInvocationCounts(t *testing.T) {
+	flaky, err := functiontool.New(functiontool.Config{Name: "flaky", Description: "fails"},
+		func(agent.Context, noArgs) (map[string]any, error) {
+			return nil, errors.New("backend unavailable")
+		})
+	if err != nil {
+		t.Fatalf("Failed to create the flaky tool: %v", err)
+	}
+	// The second model call has no response left and fails.
+	mockModel := &testutil.MockModel{Responses: []*genai.Content{
+		genai.NewContentFromFunctionCall("flaky", map[string]any{}, genai.RoleModel),
+	}}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "agent",
+		Model: mockModel,
+		Tools: []tool.Tool{flaky},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create the agent: %v", err)
+	}
+	r := &retryAndReflect{
+		maxRetries:            3,
+		scope:                 Invocation,
+		scopedFailureCounters: make(map[string]map[string]int),
+	}
+	p, err := plugin.New(plugin.Config{
+		Name:                "RetryAndReflectPlugin",
+		AfterToolCallback:   r.afterTool,
+		OnToolErrorCallback: r.onToolError,
+		AfterRunCallback:    r.afterRun,
+		OnRunErrorCallback:  r.onRunError,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create the plugin: %v", err)
+	}
+	testRunner := testutil.NewTestAgentRunnerWithPluginManager(t, a, runner.PluginConfig{Plugins: []*plugin.Plugin{p}})
+	failureCount := func(invocationID string) (int, bool) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		counts, ok := r.scopedFailureCounters[invocationID]
+		return counts["flaky"], ok
+	}
+
+	var invocationID string
+	var runErr error
+	for ev, err := range testRunner.Run(t, "ses1", "start") {
+		if err != nil {
+			runErr = err
+			break
+		}
+		if ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if fr := part.FunctionResponse; fr != nil && fr.Name == "flaky" {
+				invocationID = ev.InvocationID
+				if count, ok := failureCount(invocationID); !ok || count != 1 {
+					t.Errorf("after the tool failure: count %d (kept %t), want 1 kept", count, ok)
+				}
+			}
+		}
+	}
+	if runErr == nil {
+		t.Fatal("run ended without an error, want the model failure")
+	}
+	if invocationID == "" {
+		t.Fatal("run yielded no response of the flaky tool")
+	}
+	if count, ok := failureCount(invocationID); ok {
+		t.Errorf("after the failed run: count %d kept, want the counts dropped", count)
+	}
+}
+
+// mustAfterTool returns the AfterToolCallback of a plugin built with opts.
+func mustAfterTool(t *testing.T, opts ...PluginOption) llmagent.AfterToolCallback {
+	t.Helper()
+	p, err := New(opts...)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return p.AfterToolCallback()
+}
+
+// checkFields reports every key of want whose value in got differs.
+func checkFields(t *testing.T, got, want map[string]any) {
+	t.Helper()
+	for key, w := range want {
+		if g := got[key]; g != w {
+			t.Errorf("response[%q] = %#v, want %#v", key, g, w)
+		}
+	}
+}
+
+// checkGuidance reports each of has that got's reflection_guidance lacks and
+// each of lacks that it holds.
+func checkGuidance(t *testing.T, got map[string]any, has, lacks []string) {
+	t.Helper()
+	guidance, _ := got["reflection_guidance"].(string)
+	for _, s := range has {
+		if !strings.Contains(guidance, s) {
+			t.Errorf("reflection_guidance lacks %q:\n%s", s, guidance)
+		}
+	}
+	for _, s := range lacks {
+		if strings.Contains(guidance, s) {
+			t.Errorf("reflection_guidance holds %q:\n%s", s, guidance)
+		}
+	}
+}
+
+// statusExtractor reports a nil result and a result whose status is "error"
+// as failures.
+func statusExtractor(_ agent.Context, _ tool.Tool, _, result map[string]any) error {
+	if result == nil {
+		return errors.New("empty result")
+	}
+	if result["status"] == "error" {
+		return fmt.Errorf("status=error: %v", result["msg"])
+	}
+	return nil
+}
+
+func TestRetryAndReflect_ResultErrorExtractorReflectionAndExceed(t *testing.T) {
+	ctx := &mockContext{invocationID: "inv1"}
+	search := &mockTool{name: "search"}
+	args := map[string]any{"q": "a"}
+
+	t.Run("reflection, exceed and reset", func(t *testing.T) {
+		type call struct {
+			tool         string
+			args, result map[string]any
+		}
+		var calls []call
+		afterTool := mustAfterTool(t, WithMaxRetries(1), WithResultErrorExtractor(func(ctx agent.Context, tl tool.Tool, args, result map[string]any) error {
+			calls = append(calls, call{tool: tl.Name(), args: args, result: result})
+			return statusExtractor(ctx, tl, args, result)
+		}))
+
+		res, err := afterTool(ctx, search, args, map[string]any{"status": "error", "msg": "bad input"}, nil)
+		if err != nil {
+			t.Fatalf("first failure: error = %v, want nil", err)
+		}
+		if len(calls) != 1 || calls[0].tool != "search" || calls[0].args["q"] != "a" || calls[0].result["status"] != "error" {
+			t.Errorf("extractor calls = %+v, want one call of search with the call's args and result", calls)
+		}
+		checkFields(t, res, map[string]any{
+			"response_type": "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN",
+			"error_type":    "ToolError",
+			"error_details": "status=error: bad input",
+			"retry_count":   1,
+		})
+		checkGuidance(t, res, []string{
+			"The call to tool `search` failed.",
+			"**Error Details:**\n```\nstatus=error: bad input\n```",
+			`"q": "a"`,
+			"retry attempt **1 of 1**",
+		}, []string{"ToolError:"})
+
+		res, err = afterTool(ctx, search, args, nil, nil)
+		if err != nil {
+			t.Fatalf("second failure: error = %v, want nil", err)
+		}
+		if len(calls) != 2 || calls[1].result != nil {
+			t.Errorf("extractor calls = %+v, want a second call with a nil result", calls)
+		}
+		checkFields(t, res, map[string]any{
+			"response_type": "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN",
+			"error_type":    "ToolError",
+			"error_details": "empty result",
+			"retry_count":   1,
+		})
+		checkGuidance(t, res, []string{
+			"the retry limit has been exceeded",
+			"**Last Error:**\n```\nempty result\n```",
+			"Do not attempt to use the `search` tool again for this task.",
+		}, []string{"ToolError:"})
+
+		res, err = afterTool(ctx, search, args, map[string]any{"status": "ok"}, nil)
+		if res != nil || err != nil {
+			t.Errorf("success: afterTool() = %v, %v, want nil, nil", res, err)
+		}
+
+		// With the count reset, the next failure gets the reflection response
+		// again rather than the exceed response.
+		res, _ = afterTool(ctx, search, args, map[string]any{"status": "error", "msg": "again"}, nil)
+		checkFields(t, res, map[string]any{"error_details": "status=error: again", "retry_count": 1})
+		checkGuidance(t, res, []string{"The call to tool `search` failed."}, nil)
+	})
+
+	t.Run("max retries 0", func(t *testing.T) {
+		afterTool := mustAfterTool(t, WithMaxRetries(0), WithResultErrorExtractor(statusExtractor))
+
+		res, err := afterTool(ctx, search, args, map[string]any{"status": "error", "msg": "bad input"}, nil)
+		if err != nil {
+			t.Fatalf("error = %v, want nil", err)
+		}
+		checkFields(t, res, map[string]any{
+			"response_type": "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN",
+			"error_type":    "ToolError",
+			"error_details": "status=error: bad input",
+			"retry_count":   0,
+		})
+		checkGuidance(t, res, []string{
+			"the retry limit has been exceeded",
+			"**Last Error:**\n```\nstatus=error: bad input\n```",
+		}, []string{"ToolError:"})
+	})
+
+	t.Run("last option nil", func(t *testing.T) {
+		afterTool := mustAfterTool(t, WithResultErrorExtractor(statusExtractor), WithResultErrorExtractor(nil))
+
+		res, err := afterTool(ctx, search, args, map[string]any{"status": "error"}, nil)
+		if res != nil || err != nil {
+			t.Errorf("afterTool() = %v, %v, want nil, nil", res, err)
+		}
+	})
+
+	t.Run("last option set", func(t *testing.T) {
+		afterTool := mustAfterTool(t, WithResultErrorExtractor(nil), WithResultErrorExtractor(func(agent.Context, tool.Tool, map[string]any, map[string]any) error {
+			return errors.New("from second")
+		}))
+
+		res, _ := afterTool(ctx, search, args, map[string]any{"status": "error"}, nil)
+		checkFields(t, res, map[string]any{"error_details": "from second"})
+	})
+}
+
+func TestRetryAndReflect_ResultErrorExtractorEmptyErrorString(t *testing.T) {
+	afterTool := mustAfterTool(t, WithResultErrorExtractor(func(agent.Context, tool.Tool, map[string]any, map[string]any) error {
+		return errors.New("")
+	}))
+	ctx := &mockContext{invocationID: "inv1"}
+	tl := &mockTool{name: "search"}
+
+	res, err := afterTool(ctx, tl, nil, map[string]any{}, nil)
+	if err != nil {
+		t.Fatalf("first failure: error = %v, want nil", err)
+	}
+	checkFields(t, res, map[string]any{
+		"response_type": "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN",
+		"error_type":    "ToolError",
+		"error_details": "",
+		"retry_count":   1,
+	})
+
+	res, _ = afterTool(ctx, tl, nil, map[string]any{}, nil)
+	checkFields(t, res, map[string]any{"retry_count": 2})
+}
+
+type customExtractErr struct {
+	code int
+	msg  string
+}
+
+func (e *customExtractErr) Error() string { return e.msg }
+
+func TestRetryAndReflect_ResultErrorExtractorErrorIfRetryExceeded(t *testing.T) {
+	wantErr := &customExtractErr{code: 503, msg: "upstream down"}
+	extract := WithResultErrorExtractor(func(agent.Context, tool.Tool, map[string]any, map[string]any) error {
+		return wantErr
+	})
+	ctx := &mockContext{invocationID: "inv1"}
+	tl := &mockTool{name: "search"}
+
+	t.Run("max retries 1", func(t *testing.T) {
+		afterTool := mustAfterTool(t, WithMaxRetries(1), WithErrorIfRetryExceeded(true), extract)
+
+		res, err := afterTool(ctx, tl, nil, map[string]any{}, nil)
+		if err != nil {
+			t.Fatalf("first failure: error = %v, want nil", err)
+		}
+		checkFields(t, res, map[string]any{"retry_count": 1})
+
+		res, err = afterTool(ctx, tl, nil, map[string]any{}, nil)
+		if res != nil {
+			t.Errorf("second failure: response = %v, want nil", res)
+		}
+		if err == nil || err.Error() != "upstream down" {
+			t.Fatalf("second failure: error = %v, want %q", err, "upstream down")
+		}
+		if !errors.Is(err, wantErr) {
+			t.Errorf("errors.Is(%v, wantErr) = false, want true", err)
+		}
+		var target *customExtractErr
+		if !errors.As(err, &target) || target.code != 503 {
+			t.Errorf("errors.As(%v) found %+v, want code 503", err, target)
+		}
+	})
+
+	t.Run("max retries 0", func(t *testing.T) {
+		afterTool := mustAfterTool(t, WithMaxRetries(0), WithErrorIfRetryExceeded(true), extract)
+
+		res, err := afterTool(ctx, tl, nil, map[string]any{}, nil)
+		if res != nil || !errors.Is(err, wantErr) {
+			t.Errorf("afterTool() = %v, %v, want nil and the extractor's error", res, err)
+		}
+	})
+}
+
+func TestRetryAndReflect_ResultErrorExtractorSkipsToolErrorAndReflectionAndHandlesSpecialErrors(t *testing.T) {
+	ctx := &mockContext{invocationID: "inv1"}
+	tl := &mockTool{name: "search"}
+
+	t.Run("not called for a tool error or a reflection response", func(t *testing.T) {
+		calls := 0
+		afterTool := mustAfterTool(t, WithResultErrorExtractor(func(agent.Context, tool.Tool, map[string]any, map[string]any) error {
+			calls++
+			return errors.New("should not run")
+		}))
+
+		res, err := afterTool(ctx, tl, nil, nil, errors.New("tool failed"))
+		if res != nil || err != nil {
+			t.Errorf("tool error: afterTool() = %v, %v, want nil, nil", res, err)
+		}
+		res, err = afterTool(ctx, tl, nil, map[string]any{"response_type": "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN"}, nil)
+		if res != nil || err != nil {
+			t.Errorf("reflection response: afterTool() = %v, %v, want nil, nil", res, err)
+		}
+		if calls != 0 {
+			t.Errorf("extractor calls = %d, want 0", calls)
+		}
+	})
+
+	t.Run("confirmation errors from the extractor count", func(t *testing.T) {
+		results := []error{tool.ErrConfirmationRequired, tool.ErrConfirmationRejected}
+		afterTool := mustAfterTool(t, WithResultErrorExtractor(func(agent.Context, tool.Tool, map[string]any, map[string]any) error {
+			err := results[0]
+			results = results[1:]
+			return err
+		}))
+
+		res, _ := afterTool(ctx, tl, nil, map[string]any{}, nil)
+		checkFields(t, res, map[string]any{
+			"response_type": "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN",
+			"error_type":    "ToolError",
+			"retry_count":   1,
+		})
+		res, _ = afterTool(ctx, tl, nil, map[string]any{}, nil)
+		checkFields(t, res, map[string]any{"error_type": "ToolError", "retry_count": 2})
+	})
+}
+
+func TestRetryAndReflect_ResultErrorExtractorConcurrency(t *testing.T) {
+	var barrier sync.WaitGroup
+	barrier.Add(2)
+	afterTool := mustAfterTool(t, WithMaxRetries(10), WithTrackingScope(Global), WithResultErrorExtractor(func(_ agent.Context, _ tool.Tool, _, result map[string]any) error {
+		switch result["phase"] {
+		case "parallel":
+			// Each of the two calls waits here for the other, which both
+			// reach only if the plugin holds no lock while it calls the
+			// extractor.
+			barrier.Done()
+			barrier.Wait()
+		case "ok":
+			return nil
+		}
+		return errors.New("boom")
+	}))
+	ctx := &mockContext{invocationID: "inv1"}
+	tl := &mockTool{name: "search"}
+
+	counts := make(chan any, 2)
+	for range 2 {
+		go func() {
+			res, _ := afterTool(ctx, tl, nil, map[string]any{"phase": "parallel"}, nil)
+			counts <- res["retry_count"]
+		}()
+	}
+	var got []int
+	timeout := time.After(30 * time.Second)
+	for range 2 {
+		select {
+		case c := <-counts:
+			n, _ := c.(int)
+			got = append(got, n)
+		case <-timeout:
+			t.Fatal("the two parallel calls did not both return; the plugin holds a lock while it calls the extractor")
+		}
+	}
+	slices.Sort(got)
+	if want := []int{1, 2}; !slices.Equal(got, want) {
+		t.Errorf("retry counts of the parallel calls = %v, want %v", got, want)
+	}
+
+	if res, err := afterTool(ctx, tl, nil, map[string]any{"phase": "ok"}, nil); res != nil || err != nil {
+		t.Errorf("success: afterTool() = %v, %v, want nil, nil", res, err)
+	}
+	res, _ := afterTool(ctx, tl, nil, map[string]any{"phase": "after reset"}, nil)
+	checkFields(t, res, map[string]any{"retry_count": 1})
 }

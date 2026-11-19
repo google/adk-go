@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"sync"
 	"time"
 
@@ -582,14 +583,15 @@ func (c *commonContext) UserID() string {
 
 // Value implements context.Context. For the ADK identity key it returns the
 // [Identity] of the invocation this context speaks for (so [IdentityFromContext]
-// can recover it from a derived context). For this package's session key it
+// can recover it from a derived context). For adkcontext.InvocationSessionKey it
 // returns the session of the invocation it wraps, so [AddSessionToMemory] finds
 // it through any ADK context that wraps this one. Every other key delegates to
 // the embedded context, preserving existing behavior.
 //
 // Only those two keys touch the invocation, so no other key is affected by its
 // state, and a session that panics costs the identity, not the process. The
-// session key is read only by [AddSessionToMemory], on the caller's goroutine.
+// session key is read by [AddSessionToMemory] and by the before-tool gate of
+// plugin/toolcallintegrity, both on the caller's goroutine.
 func (c *commonContext) Value(key any) any {
 	if c == nil {
 		return nil
@@ -597,7 +599,7 @@ func (c *commonContext) Value(key any) any {
 	if key == adkcontext.IdentityKey {
 		return c.identity()
 	}
-	if key == (invocationSessionKey{}) {
+	if key == adkcontext.InvocationSessionKey {
 		return c.invocationContext.Session()
 	}
 	if c.Context == nil {
@@ -744,6 +746,23 @@ func (c *commonContext) RequestConfirmation(hint string, payload any) error {
 // ErrUnsupportedContext.
 func (c *commonContext) RenderUIWidget(widget session.UIWidget) error {
 	return appendUIWidget(c.actions, widget)
+}
+
+// mergeArtifactDelta implements the contract of [MergeArtifactDelta]. A
+// context without event actions, such as one built by NewContext or Promote,
+// cannot record.
+func (c *commonContext) mergeArtifactDelta(delta map[string]int64) error {
+	if c.actions == nil {
+		return fmt.Errorf("context of type %T cannot record an artifact delta: %w", c, errors.ErrUnsupported)
+	}
+	if len(delta) == 0 {
+		return nil
+	}
+	if c.actions.ArtifactDelta == nil {
+		c.actions.ArtifactDelta = make(map[string]int64, len(delta))
+	}
+	maps.Copy(c.actions.ArtifactDelta, delta)
+	return nil
 }
 
 func (c *commonContext) InvocationContext() InvocationContext {
