@@ -45,6 +45,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/httprr"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/anthropicmodel"
@@ -4020,6 +4021,73 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 		"MCPServers":            true,
 		"ExaAISearch":           true,
 	})
+}
+
+// TestRunHTTPOptions_KeepsTimeoutAndHeaders checks that the agent flow is
+// given only the fields of a run's HTTP options that this connector accepts,
+// so that RetryOptions or ExtraBody set for every agent of a run do not make a
+// Claude request fail, as adk-python's AnthropicLlm ignores HTTP options.
+func TestRunHTTPOptions_KeepsTimeoutAndHeaders(t *testing.T) {
+	m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{APIKey: "test-key"})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	filter, ok := m.(llminternal.RunHTTPOptionsFilter)
+	if !ok {
+		t.Fatalf("NewModel() returned %T, which does not implement llminternal.RunHTTPOptionsFilter", m)
+	}
+	tests := []struct {
+		name string
+		opts *genai.HTTPOptions
+		want *genai.HTTPOptions
+	}{
+		{
+			name: "drops_unsendable_fields",
+			opts: &genai.HTTPOptions{
+				Timeout:      genai.Ptr(2 * time.Second),
+				Headers:      http.Header{"X-Run": {"run"}},
+				BaseURL:      "https://proxy.example",
+				APIVersion:   "v1beta",
+				RetryOptions: &genai.HTTPRetryOptions{Attempts: genai.Ptr[int32](3)},
+				ExtraBody:    map[string]any{"k": "v"},
+			},
+			want: &genai.HTTPOptions{Timeout: genai.Ptr(2 * time.Second), Headers: http.Header{"X-Run": {"run"}}},
+		},
+		{
+			name: "nothing_left",
+			opts: &genai.HTTPOptions{RetryOptions: &genai.HTTPRetryOptions{Attempts: genai.Ptr[int32](3)}},
+			want: nil,
+		},
+		{
+			name: "nil",
+			opts: nil,
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if diff := cmp.Diff(tt.want, filter.RunHTTPOptions(tt.opts)); diff != "" {
+				t.Errorf("RunHTTPOptions() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestRunLabels_DropsAll checks that the agent flow is given none of a run's
+// labels for a Claude agent, so labels set for every agent of a run do not
+// make a Claude request fail, as adk-python's AnthropicLlm ignores labels.
+func TestRunLabels_DropsAll(t *testing.T) {
+	m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{APIKey: "test-key"})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+	filter, ok := m.(llminternal.RunLabelsFilter)
+	if !ok {
+		t.Fatalf("NewModel() returned %T, which does not implement llminternal.RunLabelsFilter", m)
+	}
+	if got := filter.RunLabels(map[string]string{"cost_center": "x"}); got != nil {
+		t.Errorf("RunLabels() = %v, want nil", got)
+	}
 }
 
 // TestNewModel_DeclaresNoOutputSchemaWithTools checks that an Anthropic model

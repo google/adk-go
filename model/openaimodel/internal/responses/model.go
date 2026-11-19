@@ -54,6 +54,17 @@ func (m *Model) Capabilities() model.Capabilities { return model.Capabilities{} 
 
 var _ model.CapabilitiesProvider = (*Model)(nil)
 
+// RunHTTPOptions returns the fields of a run's HTTP options the Responses
+// endpoint accepts; see shared.RunHTTPOptions.
+func (m *Model) RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions {
+	return shared.RunHTTPOptions(opts)
+}
+
+// RunLabels returns no labels, because the Responses API has no request
+// labels. The agent flow therefore merges none of a run's labels into a
+// request (see agent.RunConfig.Labels).
+func (m *Model) RunLabels(map[string]string) map[string]string { return nil }
+
 // GenerateContent converts a generic LLMRequest into an OpenAI-specific request,
 // then calls the OpenAI API. It handles both streaming and non-streaming responses.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {

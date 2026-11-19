@@ -30,6 +30,26 @@ import (
 	"google.golang.org/adk/v2/internal/version"
 )
 
+// RunHTTPOptions returns the fields of a run's HTTP options this connector
+// accepts, Timeout and Headers, or nil when opts sets neither. The agent flow
+// merges only these into a request (see agent.RunConfig.HTTPOptions), so an
+// option set for every agent of a run, such as RetryOptions, does not make
+// this connector refuse the request.
+func (m *anthropicModel) RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions {
+	if opts == nil || (opts.Timeout == nil && opts.Headers == nil) {
+		return nil
+	}
+	return &genai.HTTPOptions{Timeout: opts.Timeout, Headers: opts.Headers}
+}
+
+// RunLabels returns no labels, because Anthropic has no request labels. The
+// agent flow therefore merges none of a run's labels into a request (see
+// agent.RunConfig.Labels), so labels set for every agent of a run do not make
+// this connector refuse the request.
+func (m *anthropicModel) RunLabels(map[string]string) map[string]string {
+	return nil
+}
+
 // DefaultMaxTokens is the default max_tokens value sent to Claude when neither
 // [genai.GenerateContentConfig.MaxOutputTokens] nor [ClientConfig.MaxTokens] is set.
 const DefaultMaxTokens = 8192

@@ -100,14 +100,12 @@ type RunConfig struct {
 	// The model connectors in model/anthropicmodel and model/openaimodel
 	// accept only the Timeout and Headers fields of a request's HTTPOptions:
 	// they apply a positive Timeout as the request timeout and send none of
-	// the Headers. Any other field set on the request, such as RetryOptions or
-	// ExtraBody, makes the connector return an error without sending the
-	// request (wrapping anthropicmodel.ErrInvalidConfig or
-	// openaimodel.ErrUnsupportedConfigField); so does a negative Timeout, and
-	// with model/openaimodel a zero Timeout. An invocation whose HTTPOptions
-	// puts such a field on the request, for example a non-nil RetryOptions or
-	// ExtraBody, therefore fails every model call of an agent whose model uses
-	// one of these connectors.
+	// the Headers. For an agent whose model uses one of these connectors, ADK
+	// drops the other fields of HTTPOptions before the merge, as adk-python's
+	// connectors ignore HTTP options, so an invocation that sets RetryOptions
+	// or ExtraBody for its Gemini agents does not fail on that agent. HTTP
+	// options set on that agent's own GenerateContentConfig are not dropped:
+	// the connector returns an error for a field it cannot send.
 	HTTPOptions *genai.HTTPOptions
 
 	// Labels holds per-invocation key-value labels (for example, for billing
@@ -132,11 +130,10 @@ type RunConfig struct {
 	// calling Run, and leave the map unchanged until the iteration ends.
 	//
 	// The model connectors in model/anthropicmodel and model/openaimodel have
-	// no request labels to send. They drop the "adk_agent_name" label, and
-	// return an error without sending the request when the request carries any
-	// other label (wrapping anthropicmodel.ErrInvalidConfig, or
-	// openaimodel.ErrLabelsNotSupported). An invocation that sets any key
-	// other than "adk_agent_name" in Labels therefore fails every model call
-	// of an agent whose model uses one of these connectors.
+	// no request labels to send. For an agent whose model uses one of these
+	// connectors, ADK drops Labels, as adk-python's connectors ignore labels,
+	// so an invocation that sets Labels for its Gemini agents does not fail on
+	// that agent. Labels other than "adk_agent_name" set on that agent's own
+	// GenerateContentConfig still make the connector return an error.
 	Labels *map[string]string
 }

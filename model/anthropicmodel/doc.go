@@ -147,6 +147,12 @@
 //	| AudioTranscriptionConfig     | Rejected |
 //	| ContinuationToken            | Rejected |
 //
+// The rejections of HTTPOptions fields and Labels apply to values set on the
+// agent's GenerateContentConfig. From agent.RunConfig.HTTPOptions, which
+// applies to every agent of a run, the agent flow passes only Timeout and
+// Headers to this connector and drops the other fields; it drops
+// agent.RunConfig.Labels whole.
+//
 // Claude 4.5 and later reject requests that set both `temperature` and `top_p`;
 // setting both on [genai.GenerateContentConfig] when thinking and
 // [ClientConfig.Effort] are off fails with [ErrInvalidConfig] before any

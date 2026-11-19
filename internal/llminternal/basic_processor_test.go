@@ -313,6 +313,68 @@ func TestBasicProcessor_RunConfigHTTPOptions_CanonicalHeaderNames(t *testing.T) 
 	}
 }
 
+// timeoutOnlyLLM is a model whose connector accepts only the Timeout of a
+// run's HTTP options, as a RunHTTPOptionsFilter.
+type timeoutOnlyLLM struct {
+	model.LLM
+}
+
+func (*timeoutOnlyLLM) RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions {
+	if opts.Timeout == nil {
+		return nil
+	}
+	return &genai.HTTPOptions{Timeout: opts.Timeout}
+}
+
+// TestBasicProcessor_RunConfigHTTPOptions_FilteredForModel pins that a model
+// implementing RunHTTPOptionsFilter receives only the run HTTP options it
+// keeps, while HTTP options set on the agent reach the request whole.
+func TestBasicProcessor_RunConfigHTTPOptions_FilteredForModel(t *testing.T) {
+	t.Parallel()
+
+	runHTTP := &genai.HTTPOptions{
+		Timeout:      genai.Ptr(2000 * time.Millisecond),
+		Headers:      http.Header{"X-Run": {"run"}},
+		RetryOptions: &genai.HTTPRetryOptions{Attempts: genai.Ptr[int32](3)},
+		ExtraBody:    map[string]any{"k": "v"},
+	}
+	tests := []struct {
+		name     string
+		agentCfg *genai.GenerateContentConfig
+		runHTTP  *genai.HTTPOptions
+		want     *genai.HTTPOptions
+	}{
+		{
+			name:    "agent_without_http_options",
+			runHTTP: runHTTP,
+			want:    &genai.HTTPOptions{Timeout: genai.Ptr(2000 * time.Millisecond)},
+		},
+		{
+			name:     "agent_options_kept_whole",
+			agentCfg: &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{ExtraBody: map[string]any{"agent": "set"}}},
+			runHTTP:  runHTTP,
+			want:     &genai.HTTPOptions{Timeout: genai.Ptr(2000 * time.Millisecond), ExtraBody: map[string]any{"agent": "set"}},
+		},
+		{
+			name:    "nothing_left",
+			runHTTP: &genai.HTTPOptions{RetryOptions: &genai.HTTPRetryOptions{Attempts: genai.Ptr[int32](3)}},
+			want:    nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			state := &State{Model: &timeoutOnlyLLM{}, GenerateContentConfig: tc.agentCfg}
+
+			req := runBasicRequestProcessor(t, state, &agent.RunConfig{HTTPOptions: tc.runHTTP})
+
+			if diff := cmp.Diff(tc.want, req.Config.HTTPOptions); diff != "" {
+				t.Errorf("req.Config.HTTPOptions mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestBasicProcessor_RunConfigLabels_AgentWithoutLabels pins that RunConfig
 // labels reach the request when the agent configures no labels at all, in a
 // map of the request's own.
@@ -328,6 +390,36 @@ func TestBasicProcessor_RunConfigLabels_AgentWithoutLabels(t *testing.T) {
 	req.Config.Labels["written"] = "by callback"
 	if diff := cmp.Diff(map[string]string{"team": "billing"}, labels); diff != "" {
 		t.Errorf("RunConfig labels changed (-want +got):\n%s", diff)
+	}
+}
+
+// labelDroppingLLM is a model whose connector sends no labels, as a
+// RunLabelsFilter.
+type labelDroppingLLM struct {
+	model.LLM
+}
+
+func (*labelDroppingLLM) RunLabels(map[string]string) map[string]string { return nil }
+
+// TestBasicProcessor_RunConfigLabels_FilteredForModel pins that a model
+// implementing RunLabelsFilter receives none of the run's labels, while labels
+// set on the agent reach the request, and that neither the caller's map nor
+// the agent's map is written.
+func TestBasicProcessor_RunConfigLabels_FilteredForModel(t *testing.T) {
+	t.Parallel()
+
+	runLabels := map[string]string{"team": "billing"}
+	agentLabels := map[string]string{"env": "prod"}
+	state := &State{Model: &labelDroppingLLM{}, GenerateContentConfig: &genai.GenerateContentConfig{Labels: agentLabels}}
+
+	req := runBasicRequestProcessor(t, state, &agent.RunConfig{Labels: &runLabels})
+
+	if diff := cmp.Diff(map[string]string{"env": "prod"}, req.Config.Labels); diff != "" {
+		t.Errorf("req.Config.Labels mismatch (-want +got):\n%s", diff)
+	}
+	req.Config.Labels["written"] = "by callback"
+	if diff := cmp.Diff(map[string]string{"env": "prod"}, agentLabels); diff != "" {
+		t.Errorf("agent labels changed (-want +got):\n%s", diff)
 	}
 }
 
