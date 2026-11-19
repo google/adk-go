@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -555,4 +556,130 @@ func TestCacheConcurrentReads(t *testing.T) {
 	if _, getZip := c.calls(); getZip != 1 {
 		t.Errorf("GetZip called %d times under concurrency, want exactly 1", getZip)
 	}
+}
+
+// gatedListClient wraps a [fullClient] and, once gated, blocks every ListSkills
+// call until the test releases it. It lets a test hold a Refesh mid-flight — the
+// refresh stuck loading the new skill list, before it swaps anything in — and
+// observe that the old cache is still readable, the contract Refesh documents
+// ("Blocking. The cache can be used during the refresh.").
+type gatedListClient struct {
+	*fullClient
+	gated   atomic.Bool
+	started chan struct{} // ListSkills sends here before blocking, once gated,
+	release chan struct{} // ...then blocks receiving here until the test closes it.
+}
+
+var _ skillregistry.Client = (*gatedListClient)(nil)
+
+func (c *gatedListClient) ListSkills() ([]*agentregistry.Skill, error) {
+	if c.gated.Load() {
+		c.started <- struct{}{}
+		<-c.release
+	}
+	return c.fullClient.ListSkills()
+}
+
+func TestCacheRefesh(t *testing.T) {
+	t.Run("swaps in the newly fetched skill set", func(t *testing.T) {
+		const (
+			nameGamma = "projects/p/locations/global/skills/gamma"
+			revGamma  = "rev-gamma"
+		)
+		c := newFullClient(t)
+		ca := newWarmCache(t, c)
+
+		// The registry now drops beta and adds gamma, so Refesh must apply both.
+		c.mu.Lock()
+		c.listed = []*agentregistry.Skill{
+			{Name: nameAlpha, DefaultRevision: revAlpha},
+			{Name: nameGamma, DefaultRevision: revGamma},
+		}
+		c.byName[nameGamma] = &agentregistry.Skill{Name: nameGamma, DefaultRevision: revGamma, Frontmatter: &agentregistry.Frontmatter{Description: "Gamma."}}
+		c.mu.Unlock()
+
+		if err := ca.Refesh(); err != nil {
+			t.Fatalf("Refesh() error = %v", err)
+		}
+
+		got, err := ca.ListFrontmatters()
+		if err != nil {
+			t.Fatalf("ListFrontmatters() error = %v", err)
+		}
+		if diff := cmp.Diff([]string{"alpha", "gamma"}, frontmatterNames(got)); diff != "" {
+			t.Errorf("after Refesh, frontmatter names diff (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("a failed Refesh keeps the previous cache", func(t *testing.T) {
+		c := newFullClient(t)
+		ca := newWarmCache(t, c)
+
+		boom := errors.New("registry down")
+		c.mu.Lock()
+		c.listErr = boom
+		c.mu.Unlock()
+
+		if err := ca.Refesh(); !errors.Is(err, boom) {
+			t.Fatalf("Refesh() error = %v, want errors.Is %v", err, boom)
+		}
+
+		// The old two-skill cache must still serve reads.
+		got, err := ca.ListFrontmatters()
+		if err != nil {
+			t.Fatalf("ListFrontmatters() error = %v", err)
+		}
+		if diff := cmp.Diff([]string{"alpha", "beta"}, frontmatterNames(got)); diff != "" {
+			t.Errorf("after a failed Refesh, frontmatter names diff (-want +got):\n%s", diff)
+		}
+	})
+
+	// Refesh loads the whole new skill set before taking the write lock to swap
+	// it in, so reads keep hitting the old data until the swap completes. The gate
+	// holds the refresh at that load stage to prove the old cache stays readable.
+	t.Run("serves the old cache while a refresh is in flight", func(t *testing.T) {
+		c := newFullClient(t)
+		gc := &gatedListClient{
+			fullClient: c,
+			started:    make(chan struct{}),
+			release:    make(chan struct{}),
+		}
+		ca := newWarmCache(t, gc) // warm-up runs before gating, so it is not blocked.
+
+		// A completed refresh would drop beta, leaving only alpha.
+		c.mu.Lock()
+		c.listed = []*agentregistry.Skill{{Name: nameAlpha, DefaultRevision: revAlpha}}
+		c.mu.Unlock()
+
+		gc.gated.Store(true)
+		done := make(chan error, 1)
+		go func() { done <- ca.Refesh() }()
+
+		// The refresh is now blocked loading the new skill list.
+		<-gc.started
+
+		// The old two-skill cache is still readable mid-refresh.
+		got, err := ca.ListFrontmatters()
+		if err != nil {
+			t.Fatalf("ListFrontmatters() during refresh error = %v", err)
+		}
+		if diff := cmp.Diff([]string{"alpha", "beta"}, frontmatterNames(got)); diff != "" {
+			t.Errorf("during refresh, frontmatter names diff (-want +got):\n%s", diff)
+		}
+
+		// Let the refresh finish and swap in the one-skill set.
+		gc.gated.Store(false)
+		close(gc.release)
+		if err := <-done; err != nil {
+			t.Fatalf("Refesh() error = %v", err)
+		}
+
+		got, err = ca.ListFrontmatters()
+		if err != nil {
+			t.Fatalf("ListFrontmatters() after refresh error = %v", err)
+		}
+		if diff := cmp.Diff([]string{"alpha"}, frontmatterNames(got)); diff != "" {
+			t.Errorf("after refresh, frontmatter names diff (-want +got):\n%s", diff)
+		}
+	})
 }
