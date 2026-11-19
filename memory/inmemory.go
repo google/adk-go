@@ -18,7 +18,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"maps"
+	"iter"
 	"slices"
 	"strings"
 	"sync"
@@ -53,11 +53,14 @@ const maxSearchResults = 10
 //
 // A query and the stored text are split into words: runs of letters, numbers
 // and underscores, taken after Unicode NFC normalization and lowercased with
-// full Unicode case mapping. An event matches a query word when it has that
-// word. A query word with non-ASCII characters also matches anywhere inside
-// the event's text, and a stored word that mixes Latin and other scripts,
-// such as the Python in 私はPythonを使う, also yields each single-script run
-// as a word. A query with no words returns no entries.
+// full Unicode case mapping. A word that mixes Latin and other scripts, such
+// as the Python in 私はPythonを使う, also yields each single-script run as a
+// word, in the query as in the stored text; ASCII digits and underscores
+// count as Latin. Each such run is a query word of its own, so it adds to the
+// ranking as any other query word does. An event matches a query word
+// when it has that word. A whole query word with non-ASCII characters also
+// matches anywhere inside the event's text; a run split out of a query word
+// does not. A query with no words returns no entries.
 //
 // Returned entries carry the stored event's ID, Author, Timestamp and
 // CustomMetadata. They share the event's parts and metadata with the service
@@ -237,8 +240,15 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 		return nil, errors.New("memory: SearchRequest must not be nil")
 	}
 
-	// A true value allows substring matching for that non-ASCII query word.
+	// The query is split into words like the stored text, so a Latin word
+	// inside Japanese or Chinese query text matches on its own. A true value
+	// allows substring matching, which only a whole non-ASCII query word gets:
+	// a run split out of one, such as と from Pythonと, would match nearly any
+	// Japanese text.
 	queryWords := make(map[string]bool)
+	for word := range extractSearchableWords(req.Query) {
+		queryWords[word] = false
+	}
 	for word := range extractWordsLower(req.Query) {
 		queryWords[word] = hasNonASCII(word)
 	}
@@ -316,21 +326,35 @@ func extractWordsLower(text string) map[string]struct{} {
 	// A Caser may be stateful, so each call builds its own.
 	lower := cases.Lower(language.Und)
 	res := make(map[string]struct{})
-	for word := range strings.FieldsFuncSeq(norm.NFC.String(text), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_'
-	}) {
+	for word := range tokens(text) {
 		res[lower.String(word)] = struct{}{}
 	}
 	return res
 }
 
-// extractSearchableWords returns the words an event can be matched on: the
-// tokens of extractWordsLower plus, for each non-ASCII token, its runs of
-// Latin and of non-Latin characters. Japanese and Chinese are written without
-// spaces, so in 私はPythonを使う the run python becomes a word of its own.
+// tokens returns the \w+ tokens of the NFC form of text, in their original
+// case.
+func tokens(text string) iter.Seq[string] {
+	return strings.FieldsFuncSeq(norm.NFC.String(text), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_'
+	})
+}
+
+// extractSearchableWords returns the words a query or an event is matched on,
+// as adk-python's _extract_searchable_words does: the tokens of
+// extractWordsLower plus, for each token with non-ASCII characters, its runs
+// of Latin and of non-Latin characters. Japanese and Chinese are written
+// without spaces, so in 私はPythonを使う the run python becomes a word of its
+// own.
+//
+// A token is split before it is lowercased. Lowercasing turns İ into i and
+// U+0307, which is not Latin, so splitting afterwards would make words of
+// that i and of the rest of the run, such as stanbul.
 func extractSearchableWords(text string) map[string]struct{} {
-	words := extractWordsLower(text)
-	for _, word := range slices.Collect(maps.Keys(words)) {
+	lower := cases.Lower(language.Und)
+	words := make(map[string]struct{})
+	for word := range tokens(text) {
+		words[lower.String(word)] = struct{}{}
 		if !hasNonASCII(word) {
 			continue
 		}
@@ -338,12 +362,12 @@ func extractSearchableWords(text string) map[string]struct{} {
 		for i, r := range word {
 			latin := isLatin(r)
 			if i > 0 && latin != runLatin {
-				words[word[start:i]] = struct{}{}
+				words[lower.String(word[start:i])] = struct{}{}
 				start = i
 			}
 			runLatin = latin
 		}
-		words[word[start:]] = struct{}{}
+		words[lower.String(word[start:])] = struct{}{}
 	}
 	return words
 }
