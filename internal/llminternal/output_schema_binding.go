@@ -43,8 +43,9 @@ func WithBoundOutputSchema(ctx context.Context, agentName string, state *State, 
 }
 
 // outputSchemaFor returns the output schema for the current agent's next
-// request: its declared OutputSchema, else a copy of the schema bound by
-// [WithBoundOutputSchema], else nil. state is the current agent's.
+// request: a copy of its declared OutputSchema, else a copy of the schema bound
+// by [WithBoundOutputSchema], else nil. state is the current agent's. A schema
+// that cannot be copied returns an error.
 //
 // A bound schema is a placement's request, not the agent's own, so it gives way
 // whenever applying it would change a request that works without it:
@@ -65,20 +66,21 @@ func WithBoundOutputSchema(ctx context.Context, agentName string, state *State, 
 //
 // The copy keeps a request callback that edits the schema from reaching the
 // node's other runs, including concurrent ones.
-func outputSchemaFor(ctx agent.InvocationContext, state *State) *genai.Schema {
+func outputSchemaFor(ctx agent.InvocationContext, state *State) (*genai.Schema, error) {
 	if state.OutputSchema != nil {
-		return state.OutputSchema
+		// Unlike Python, isolate schema mutations made by model callbacks.
+		return CloneSchema(state.OutputSchema)
 	}
 	cur := ctx.Agent()
 	schema, _ := ctx.Value(boundOutputSchemaKey{agent: cur.Name(), state: state}).(*genai.Schema)
 	if schema == nil || ModeFor(ctx, cur.Name(), state) != ModeSingleTurn {
-		return nil
+		return nil, nil
 	}
 	if cfg := state.GenerateContentConfig; cfg != nil && (cfg.ResponseSchema != nil || cfg.ResponseJsonSchema != nil || cfg.ResponseMIMEType != "") {
-		return nil
+		return nil, nil
 	}
 	if shouldUseAutoFlow(cur) && len(transferTargets(cur, parentmap.FromContext(ctx)[cur.Name()])) > 0 {
-		return nil
+		return nil, nil
 	}
-	return clone(schema)
+	return CloneSchema(schema)
 }

@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -132,7 +133,10 @@ func TestOutputSchemaFor(t *testing.T) {
 				icontext.InvocationContextParams{Agent: a},
 			)
 
-			got := outputSchemaFor(ctx, tc.state)
+			got, err := outputSchemaFor(ctx, tc.state)
+			if err != nil {
+				t.Fatal(err)
+			}
 
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("outputSchemaFor mismatch (-want +got):\n%s", diff)
@@ -152,10 +156,16 @@ func TestOutputSchemaForCopiesBoundSchema(t *testing.T) {
 		icontext.InvocationContextParams{Agent: a},
 	)
 
-	first := outputSchemaFor(ctx, state)
+	first, err := outputSchemaFor(ctx, state)
+	if err != nil {
+		t.Fatal(err)
+	}
 	first.Properties["a"].Description = "edited"
 	first.Properties["b"] = &genai.Schema{Type: genai.TypeString}
-	second := outputSchemaFor(ctx, state)
+	second, err := outputSchemaFor(ctx, state)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	want := &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{"a": {Type: genai.TypeString}}}
 	if diff := cmp.Diff(want, second); diff != "" {
@@ -175,7 +185,31 @@ func TestWithBoundOutputSchemaNilShadowsOuter(t *testing.T) {
 		icontext.InvocationContextParams{Agent: a},
 	)
 
-	if got := outputSchemaFor(ctx, state); got != nil {
-		t.Errorf("outputSchemaFor = %v under a nil inner binding, want nil", got)
+	got, err := outputSchemaFor(ctx, state)
+	if err != nil || got != nil {
+		t.Fatal("outputSchemaFor did not return a nil schema under a nil inner binding")
+	}
+}
+
+func TestOutputSchemaForCloneError(t *testing.T) {
+	for _, source := range []string{"declared", "bound"} {
+		t.Run(source, func(t *testing.T) {
+			schema := &genai.Schema{Type: genai.TypeArray}
+			schema.Items = schema
+			state := &State{}
+			if source == "declared" {
+				state.OutputSchema = schema
+			}
+			a := &mockLLMAgent{Agent: utils.Must(agent.New(agent.Config{Name: "self"})), s: state}
+			ctx := icontext.NewInvocationContext(
+				WithBoundOutputSchema(WithBoundMode(t.Context(), "self", state, ModeSingleTurn), "self", state, schema),
+				icontext.InvocationContextParams{Agent: a},
+			)
+
+			got, err := outputSchemaFor(ctx, state)
+			if got != nil || !errors.Is(err, errCloneDepth) {
+				t.Fatal("outputSchemaFor did not return the expected clone error")
+			}
+		})
 	}
 }

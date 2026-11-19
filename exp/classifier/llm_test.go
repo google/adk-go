@@ -433,6 +433,9 @@ func TestLLMClassifierRequestConstruction(t *testing.T) {
 			SafetySettings:   []*genai.SafetySetting{{Category: genai.HarmCategoryHarassment, Threshold: genai.HarmBlockThresholdBlockLowAndAbove}},
 			HTTPOptions: &genai.HTTPOptions{
 				Headers: http.Header{"X-Env": []string{"test"}},
+				ExtraBody: map[string]any{
+					"metadata": map[string]any{"tags": []string{"original"}},
+				},
 			},
 		}
 		llm := &fakeLLM{reply: `{"risky":{"probability":0.5}}`}
@@ -448,6 +451,7 @@ func TestLLMClassifierRequestConstruction(t *testing.T) {
 		callerCfg.Labels["env"] = "mutated"
 		callerCfg.SafetySettings[0].Threshold = genai.HarmBlockThresholdBlockNone
 		callerCfg.HTTPOptions.Headers.Set("X-Env", "mutated")
+		callerCfg.HTTPOptions.ExtraBody["metadata"].(map[string]any)["tags"].([]string)[0] = "caller mutation"
 
 		// 1. JSON map input -> rendered as JSON user text.
 		if _, err := clf.Classify(t.Context(), map[string]any{"tool": "pay", "amount": 5}, map[string]classifier.Question{
@@ -481,12 +485,19 @@ func TestLLMClassifierRequestConstruction(t *testing.T) {
 		if got := llm.requests[0].Config.HTTPOptions.Headers.Get("X-Env"); got != "test" {
 			t.Errorf("Config.HTTPOptions.Headers[X-Env] = %q, want %q", got, "test")
 		}
+		if llm.requests[0].Config.HTTPOptions.ExtraBody["metadata"].(map[string]any)["tags"].([]string)[0] != "original" {
+			t.Error("caller mutation reached the classifier's nested config")
+		}
 		if callerCfg.SystemInstruction != nil || callerCfg.ResponseSchema != nil {
 			t.Errorf("caller GenerateContentConfig was mutated: %+v", callerCfg)
 		}
 		// Mutate first request's Config in place (simulating provider adapters) to
 		// verify subsequent Classify calls get a fresh deep clone.
 		llm.requests[0].Config.Labels["env"] = "mutated_by_provider"
+		llm.requests[0].Config.HTTPOptions.ExtraBody["metadata"].(map[string]any)["tags"].([]string)[0] = "provider mutation"
+		if callerCfg.HTTPOptions.ExtraBody["metadata"].(map[string]any)["tags"].([]string)[0] != "caller mutation" {
+			t.Error("request mutation reached the caller's nested config")
+		}
 
 		// 2. Multimodal *genai.Content and genai.Content -> sent with Role "user" and original parts.
 		imgPart := genai.NewPartFromBytes([]byte("png"), "image/png")
@@ -502,6 +513,9 @@ func TestLLMClassifierRequestConstruction(t *testing.T) {
 			lastReq := llm.requests[len(llm.requests)-1]
 			if lastReq.Config.Labels["env"] != "test" {
 				t.Errorf("per-request Config clone missing: Labels[env] = %q, want test", lastReq.Config.Labels["env"])
+			}
+			if lastReq.Config.HTTPOptions.ExtraBody["metadata"].(map[string]any)["tags"].([]string)[0] != "original" {
+				t.Error("request mutation reached a later request's nested config")
 			}
 			last := lastReq.Contents[0]
 			if last.Role != genai.RoleUser || len(last.Parts) != 1 || last.Parts[0] != imgPart {
