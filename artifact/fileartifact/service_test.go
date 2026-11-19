@@ -22,8 +22,10 @@ import (
 	"os/user"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1281,5 +1283,50 @@ func TestFileService_RejectsEmptyFileName(t *testing.T) {
 	}
 	if diff := cmp.Diff([]int64{1}, versions.Versions); diff != "" {
 		t.Errorf("Versions(artifact) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestList_ConcurrentDelete(t *testing.T) {
+	ctx := t.Context()
+	srv, err := fileartifact.NewService(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("NewService() failed: %v", err)
+	}
+	var listErrs atomic.Int64
+	var firstErr atomic.Value
+	for range 25 {
+		const n = 40
+		for i := range n {
+			fileName := "f" + strconv.Itoa(i)
+			if _, err := srv.Save(ctx, &artifact.SaveRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: fileName, Part: genai.NewPartFromText("x")}); err != nil {
+				t.Fatalf("Save(%s) failed: %v", fileName, err)
+			}
+		}
+		var wg sync.WaitGroup
+		stop := make(chan struct{})
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if _, err := srv.List(ctx, &artifact.ListRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+					listErrs.Add(1)
+					firstErr.CompareAndSwap(nil, err.Error())
+				}
+			}
+		})
+		for i := range n {
+			fileName := "f" + strconv.Itoa(i)
+			if err := srv.Delete(ctx, &artifact.DeleteRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: fileName}); err != nil {
+				t.Fatalf("Delete(%s) failed: %v", fileName, err)
+			}
+		}
+		close(stop)
+		wg.Wait()
+	}
+	if listErrs.Load() > 0 {
+		t.Errorf("List() failed %d times while artifacts were deleted concurrently; first error: %v", listErrs.Load(), firstErr.Load())
 	}
 }

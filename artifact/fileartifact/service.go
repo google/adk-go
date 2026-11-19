@@ -886,6 +886,11 @@ func (s *service) collectNames(names map[string]bool, scopeRel, prefix string) e
 	var dirs []string
 	err = fs.WalkDir(scope.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// A concurrent Delete can remove an artifact directory between
+			// reading its parent and opening it.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		if d.Name() != versionsDirName || p == "." {
@@ -904,9 +909,12 @@ func (s *service) collectNames(names map[string]bool, scopeRel, prefix string) e
 		return ioError("list artifacts", err)
 	}
 	for _, rel := range dirs {
-		name, err := s.artifactName(scope, target{scopeRel: scopeRel, scopeAbs: scopeAbs, rel: rel})
+		name, exists, err := s.artifactName(scope, target{scopeRel: scopeRel, scopeAbs: scopeAbs, rel: rel})
 		if err != nil {
 			return err
+		}
+		if !exists {
+			continue
 		}
 		if name == "" {
 			name = prefix + filepath.ToSlash(rel)
@@ -917,18 +925,21 @@ func (s *service) collectNames(names map[string]bool, scopeRel, prefix string) e
 }
 
 // artifactName returns the file name the latest version of t was saved
-// under, or "" when the artifact has no version or its metadata is
-// unreadable.
-func (s *service) artifactName(scope *os.Root, t target) (string, error) {
+// under, "" when the artifact has no version or its metadata is unreadable,
+// and exists == false when a concurrent Delete removed its versions entry.
+func (s *service) artifactName(scope *os.Root, t target) (name string, exists bool, err error) {
 	defer s.locks.rlock(t.abs())()
+	if _, statErr := scope.Stat(t.versionsRel()); errors.Is(statErr, fs.ErrNotExist) {
+		return "", false, nil
+	}
 	versions, err := readVersions(scope, t)
 	if err != nil || len(versions) == 0 {
-		return "", err
+		return "", true, err
 	}
 	if meta := readMetadata(scope, t, versions[len(versions)-1]); meta != nil {
-		return meta.FileName, nil
+		return meta.FileName, true, nil
 	}
-	return "", nil
+	return "", true, nil
 }
 
 // Versions implements [artifact.Service].
