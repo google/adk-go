@@ -44,6 +44,9 @@ import (
 //   - an edge has a nil From or To node, including a nil pointer or func
 //     held in a non-nil [Node];
 //   - [Concat] was given an item that is neither an [Edge] nor a []Edge;
+//   - the edges come from an [EdgeBuilder] whose [EdgeBuilder.AddRoutes]
+//     recorded an error, in which case the error also wraps
+//     [ErrEmptyRoutingMap] or [ErrNilRoutingTarget];
 //   - two distinct nodes share a name;
 //   - the edge list is not empty and no edge has [Start] at either end;
 //   - an edge from [Start] has a route;
@@ -65,7 +68,8 @@ import (
 // It does not match a mismatch with the state schema given by
 // [WithStateSchema], an error returned by a node's own validator of its
 // outgoing edges, the error for edges that do not suit [WithNodeRootWrapper],
-// or an error that [EdgeBuilder.Err] reports.
+// or the error value that [EdgeBuilder.Err] returns (New's error for the
+// edges of that builder does match).
 //
 // ErrGraphValidation is the counterpart of adk-python's GraphValidationError.
 var ErrGraphValidation = errors.New("graph validation failed")
