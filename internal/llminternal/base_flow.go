@@ -302,12 +302,14 @@ func applyEmptyResponsePolicy(ctx agent.InvocationContext, resp *model.LLMRespon
 
 // stampAgentNameLabel records the name of the invocation's agent in
 // req.Config.Labels under version.AgentNameLabel, so that billing reports can
-// be split per agent. It keeps a value already set under the key. Neither the
-// config nor the labels map found in the request is ever modified: the label
-// is added to a copy of the map, set on a shallow copy of the config (a new
-// config when req.Config is nil), and that copy replaces req.Config, because a
-// before-model callback may have attached a config or map it shares with
-// other invocations. Without an agent it does nothing.
+// be split per agent, as adk-python's call_llm_async does
+// (flows/llm_flows/core/_model_call.py). The name is used as it is, without
+// sanitizing, as in adk-python. It keeps a value already set under the key.
+// Neither the config nor the labels map found in the request is ever
+// modified: the label is added to a copy of the map, set on a shallow copy of
+// the config (a new config when req.Config is nil), and that copy replaces
+// req.Config, because a before-model callback may have attached a config or
+// map it shares with other invocations. Without an agent it does nothing.
 func stampAgentNameLabel(ctx agent.InvocationContext, req *model.LLMRequest) {
 	name := agentName(ctx)
 	if name == "" {
