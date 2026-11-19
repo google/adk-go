@@ -56,6 +56,63 @@ func (d *dynamicTestToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, erro
 	return nil, nil
 }
 
+func TestToolProcessor_LiveInjectionAddsToolWithoutMutatingState(t *testing.T) {
+	baseTool := &toolsProcessorMockTool{name: "base_tool"}
+	injectedTool := &toolsProcessorMockTool{name: "task_completed"}
+
+	baseAgent := utils.Must(agent.New(agent.Config{Name: "test_agent"}))
+	mockAgent := &mockLLMAgent{
+		Agent: baseAgent,
+		s:     &State{Tools: []tool.Tool{baseTool}},
+	}
+
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent: mockAgent,
+	})
+
+	f := &Flow{LiveInjection: &LiveInjection{Tool: injectedTool}}
+	for _, err := range toolProcessor(ctx, &model.LLMRequest{}, f) {
+		if err != nil {
+			t.Fatalf("toolProcessor error: %v", err)
+		}
+	}
+
+	if len(f.Tools) != 2 || f.Tools[0] != baseTool || f.Tools[1] != injectedTool {
+		t.Fatalf("flow tools = %v, want [%v %v]", f.Tools, baseTool, injectedTool)
+	}
+	if len(mockAgent.s.Tools) != 1 || mockAgent.s.Tools[0] != baseTool {
+		t.Errorf("agent state tools = %v, want only %v", mockAgent.s.Tools, baseTool)
+	}
+}
+
+func TestToolProcessor_NoLiveInjectionLeavesToolsUnchanged(t *testing.T) {
+	baseTool := &toolsProcessorMockTool{name: "base_tool"}
+
+	baseAgent := utils.Must(agent.New(agent.Config{Name: "test_agent"}))
+	mockAgent := &mockLLMAgent{
+		Agent: baseAgent,
+		s:     &State{Tools: []tool.Tool{baseTool}},
+	}
+
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent: mockAgent,
+	})
+
+	injections := []*LiveInjection{nil, {InstructionSuffix: "suffix"}}
+	for _, injection := range injections {
+		f := &Flow{LiveInjection: injection}
+		for _, err := range toolProcessor(ctx, &model.LLMRequest{}, f) {
+			if err != nil {
+				t.Fatalf("toolProcessor error: %v", err)
+			}
+		}
+
+		if len(f.Tools) != 1 || f.Tools[0] != baseTool {
+			t.Errorf("flow tools with injection %+v = %v, want [%v]", injection, f.Tools, baseTool)
+		}
+	}
+}
+
 func TestToolProcessor_SpareCapacityNotCorrupted(t *testing.T) {
 	baseTool := &toolsProcessorMockTool{name: "base_tool"}
 	toolA := &toolsProcessorMockTool{name: "tool_a"}

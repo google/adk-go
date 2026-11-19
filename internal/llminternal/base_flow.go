@@ -83,6 +83,10 @@ type Flow struct {
 	// reconnect bounds RunLive's reconnect attempts. Nil means the defaults;
 	// only tests set it, to shrink the delays.
 	reconnect *liveReconnectPolicy
+
+	// LiveInjection holds additions that apply only to this live invocation.
+	// RunLiveWithInjection sets it; other flows leave it nil.
+	LiveInjection *LiveInjection
 }
 
 var (

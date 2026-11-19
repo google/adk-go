@@ -37,6 +37,9 @@ func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) 
 			return
 		}
 		tools := slices.Clip(Reveal(llmAgent).Tools)
+		if f.LiveInjection != nil && f.LiveInjection.Tool != nil {
+			tools = append(tools, f.LiveInjection.Tool)
+		}
 		for _, toolSet := range Reveal(llmAgent).Toolsets {
 			tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
 			if err != nil {

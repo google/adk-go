@@ -149,7 +149,8 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 		return nil, nil, fmt.Errorf("sequential agent has no sub-agents")
 	}
 
-	// Inject task_completed tool into sub LLM agents
+	// Build the tool and instruction additions that every sub-agent applies to
+	// its own live invocation.
 	type taskCompletedArgs struct{}
 	type taskCompletedResults struct {
 		Result string `json:"result"`
@@ -165,54 +166,25 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 		return nil, nil, fmt.Errorf("failed to create task_completed tool: %w", err)
 	}
 
-	visited := make(map[agent.Agent]bool)
-	var injectSubAgents func(agents []agent.Agent)
-	injectSubAgents = func(agents []agent.Agent) {
-		for _, subAgent := range agents {
-			if visited[subAgent] {
-				continue
-			}
-			visited[subAgent] = true
-			if llmAgent, ok := subAgent.(llminternal.Agent); ok {
-				state := llminternal.Reveal(llmAgent)
-				// Live callers must observe the completed injection before using
-				// the shared tool slice and instruction.
-				state.LiveModeInjection.Do(func() {
-					for _, t := range state.Tools {
-						if t.Name() == "task_completed" {
-							return
-						}
-					}
-					state.Tools = append(state.Tools, taskCompletedTool)
-					instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
-					// InstructionProvider takes over Instruction when both are set,
-					// so the suffix goes on whichever one the agent's requests use,
-					// as in adk-python's _append_instruction.
-					if provider := state.InstructionProvider; provider != nil {
-						state.InstructionProvider = func(ctx agent.ReadonlyContext) (string, error) {
-							instruction, err := provider(ctx)
-							if err != nil {
-								return instruction, err
-							}
-							return instruction + instructionSuffix, nil
-						}
-					} else {
-						state.Instruction += instructionSuffix
-					}
-				})
-			} else if _, live := subAgent.(liveRunner); live && len(subAgent.SubAgents()) > 0 {
-				injectSubAgents(subAgent.SubAgents())
-			}
-		}
+	// The additions ride on each sub-agent's live invocation instead of its
+	// shared state, so concurrent Run and RunLive calls do not race and later
+	// non-live runs are unaffected.
+	injection := llminternal.LiveInjection{
+		Tool:              taskCompletedTool,
+		InstructionSuffix: "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call.",
 	}
-	injectSubAgents(subAgents)
 
 	seqSess := &sequentialLiveSession{}
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
 		for _, subAgent := range subAgents {
-			liveAgent, ok := subAgent.(liveRunner)
-			if !ok {
+			// A composite that runs its own live sub-agents applies its own
+			// additions and needs none here; a composite from outside this
+			// module cannot implement LiveRunnerWithInjection, so its LLM
+			// descendants receive no additions.
+			runnerWithInjection, hasInjection := subAgent.(llminternal.LiveRunnerWithInjection)
+			liveAgent, isLive := subAgent.(liveRunner)
+			if !hasInjection && !isLive {
 				if !yield(nil, fmt.Errorf("sub-agent %s does not support Live Run", subAgent.Name())) {
 					return
 				}
@@ -220,7 +192,16 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 			}
 
 			subCtx := ctx.WithICDelta(&agent.InvocationContextDelta{Agent: &subAgent})
-			subSess, innerIter, err := liveAgent.RunLive(subCtx)
+			var (
+				subSess   agent.LiveSession
+				innerIter iter.Seq2[*session.Event, error]
+				err       error
+			)
+			if hasInjection {
+				subSess, innerIter, err = runnerWithInjection.RunLiveWithInjection(subCtx, injection)
+			} else {
+				subSess, innerIter, err = liveAgent.RunLive(subCtx)
+			}
 			if err != nil {
 				if !yield(nil, fmt.Errorf("sub-agent %s RunLive failed: %w", subAgent.Name(), err)) {
 					return
