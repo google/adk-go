@@ -19,9 +19,9 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"maps"
 	"reflect"
 	"slices"
-	"sort"
 
 	"google.golang.org/genai"
 
@@ -201,8 +201,7 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	var accumulatedInputTranscription string
 	var accumulatedOutputTranscription string
 
-	for i := 0; i < len(filtered); i++ {
-		ev := filtered[i]
+	for i, ev := range filtered {
 		content := utils.Content(ev)
 		if content == nil || len(content.Parts) == 0 {
 			if ev.LLMResponse.InputTranscription != nil && ev.LLMResponse.InputTranscription.Text != "" {
@@ -667,11 +666,7 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 			// moves to the tail.
 			//
 			// Collect and sort the indices to process events in order.
-			var sortedIndices []int
-			for index := range responseEventIndicesSet {
-				sortedIndices = append(sortedIndices, index)
-			}
-			sort.Ints(sortedIndices)
+			sortedIndices := slices.Sorted(maps.Keys(responseEventIndicesSet))
 
 			// Collect the actual event objects to be merged.
 			eventsToMerge := make([]*session.Event, len(sortedIndices))
@@ -738,7 +733,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 	// 2. Create an index (map) of function_response parts by their ID
 	partIndicesInMergedEvent := make(map[string]int)
 	for idx, part := range partsInMergedEvent {
-		if part.FunctionResponse != nil {
+		if part != nil && part.FunctionResponse != nil {
 			functionCallID := part.FunctionResponse.ID
 			partIndicesInMergedEvent[functionCallID] = idx
 		}
@@ -752,7 +747,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 
 		// 4. Update or Append parts
 		for _, part := range event.LLMResponse.Content.Parts {
-			if part.FunctionResponse != nil {
+			if part != nil && part.FunctionResponse != nil {
 				functionCallID := part.FunctionResponse.ID
 				// If we've seen this response ID before, replace it
 				if idx, found := partIndicesInMergedEvent[functionCallID]; found {
@@ -844,8 +839,10 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		}
 		// An event that gives the model nothing to read is left out of the
 		// contents, so it cannot start the turn either: it would slice out
-		// the input before it (matching adk-python's
-		// _should_include_event_in_context gate here).
+		// the input before it. This matches adk-python's
+		// _should_include_event_in_context gate for an event with no content,
+		// role or parts. An event whose parts are all empty still starts the
+		// turn here, because isEmptyEvent does not look inside the parts.
 		if isEmptyEvent(event) {
 			continue
 		}
@@ -939,8 +936,8 @@ func answersOtherAgentCall(currentAgentName string, ev *session.Event, callAutho
 // This is to provide another agent's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
 // the previous agent's reply, etc.
-// Thought parts and standalone metadata are omitted. A non-empty event with no
-// remaining payload returns nil.
+// Thought parts, nil parts and standalone metadata are omitted. A non-empty
+// event with no remaining payload returns nil.
 func ConvertForeignEvent(ev *session.Event) *session.Event {
 	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {
@@ -952,6 +949,9 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		Parts: []*genai.Part{{Text: "For context:"}},
 	}
 	for _, p := range content.Parts {
+		if p == nil {
+			continue
+		}
 		// Never replay another agent's private reasoning into the current
 		// agent's context. Matches adk-python's _present_other_agent_message,
 		// which drops thought parts as the first step of its per-part loop.
@@ -1027,6 +1027,12 @@ func shouldExcludeEvent(ev *session.Event) bool {
 		return false
 	}
 	for _, p := range c.Parts {
+		// adk-python rejects a null part when decoding a request or building
+		// Content, but here a nil part can already be in the session, for
+		// example from an SDK caller.
+		if p == nil {
+			continue
+		}
 		if p.FunctionCall != nil {
 			switch p.FunctionCall.Name {
 			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:

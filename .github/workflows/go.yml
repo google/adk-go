@@ -7,7 +7,7 @@ name: Go
 
 on:
   push:
-    branches: [ "main", "v1" ]
+    branches: [ "main", "v1", "v3" ]
 
   # Deliberately unfiltered by base branch. A stacked PR targets the branch
   # below it rather than main, so any allow-list here silently skips build,

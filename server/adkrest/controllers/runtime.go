@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"time"
 	"unicode/utf8"
 
@@ -487,6 +488,11 @@ func decodeRequestBody(req *http.Request) (models.RunAgentRequest, error) {
 	if err := d.Decode(&runAgentRequest); err != nil {
 		return runAgentRequest, newStatusError(fmt.Errorf("failed to decode request: %w", err), http.StatusBadRequest)
 	}
+	// A null part carries no content, so it is dropped; adk-python rejects the
+	// request instead.
+	runAgentRequest.NewMessage.Parts = slices.DeleteFunc(runAgentRequest.NewMessage.Parts, func(p *genai.Part) bool {
+		return p == nil
+	})
 	return runAgentRequest, nil
 }
 
@@ -586,8 +592,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	}()
 	// Once the keepalive gives up, neither a reader blocked in Send nor the
 	// loop below waiting on the agent would see the socket close. Closing the
-	// session returns both, except on a sequentialagent root, whose Close
-	// waits on the mutex a blocked Send holds (issue #1749).
+	// session returns both.
 	defer context.AfterFunc(peerGone, func() { _ = liveSession.Close() })()
 
 	// Spawning goroutine for reading from the client over WebSocket and pushing it to Runner
