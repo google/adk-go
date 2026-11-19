@@ -86,9 +86,10 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 
 	aid1, aid2 := a2a.NewArtifactID(), a2a.NewArtifactID()
 	tests := []struct {
-		name       string
-		events     []a2a.Event
-		wantEvents []*session.Event
+		name         string
+		events       []a2a.Event
+		adkExtension bool
+		wantEvents   []*session.Event
 	}{
 		{
 			name: "do not aggregate when ADK events",
@@ -253,6 +254,7 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("done")),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
 			},
+			adkExtension: true,
 			wantEvents: []*session.Event{
 				{LLMResponse: model.LLMResponse{
 					Partial: true,
@@ -281,6 +283,7 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("text2")),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
 			},
+			adkExtension: true,
 			wantEvents: []*session.Event{
 				{LLMResponse: model.LLMResponse{
 					Partial: true,
@@ -310,6 +313,7 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("lo")),
 				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
 			},
+			adkExtension: true,
 			wantEvents: []*session.Event{
 				newPartialThoughtEvent("think"),
 				newPartialThoughtEvent("ing"),
@@ -319,6 +323,38 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 					&genai.Part{Thought: true, Text: "thinking"},
 					&genai.Part{Text: "Hello"},
 				),
+				newCompletedEvent(),
+			},
+		},
+		{
+			name: "thoughts beside text dropped from the aggregated event without the ADK extension key",
+			events: []a2a.Event{
+				newThoughtUpdate("think"),
+				newThoughtUpdate("ing"),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("Hel")),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("lo")),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				newPartialThoughtEvent("think"),
+				newPartialThoughtEvent("ing"),
+				newPartialEvent("Hel"),
+				newPartialEvent("lo"),
+				newEvent(&genai.Part{Text: "Hello"}),
+				newCompletedEvent(),
+			},
+		},
+		{
+			name: "aggregated event made only of thoughts keeps them without the ADK extension key",
+			events: []a2a.Event{
+				newThoughtUpdate("think"),
+				newThoughtUpdate("ing"),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				newPartialThoughtEvent("think"),
+				newPartialThoughtEvent("ing"),
+				newEvent(&genai.Part{Thought: true, Text: "thinking"}),
 				newCompletedEvent(),
 			},
 		},
@@ -359,6 +395,7 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 			})
 
 			p := newRunProcessor(A2AConfig{}, nil)
+			p.adkExtension = tc.adkExtension
 			var gotEvents []*session.Event
 
 			for _, event := range tc.events {
@@ -383,6 +420,34 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.wantEvents, gotEvents, opts...); diff != "" {
 				t.Errorf("mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestTruthy(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  bool
+	}{
+		{name: "null", value: nil, want: false},
+		{name: "false", value: false, want: false},
+		{name: "true", value: true, want: true},
+		{name: "zero", value: 0.0, want: false},
+		{name: "number", value: 0.5, want: true},
+		{name: "empty string", value: "", want: false},
+		{name: "string", value: "yes", want: true},
+		{name: "empty array", value: []any{}, want: false},
+		{name: "array", value: []any{false}, want: true},
+		{name: "empty object", value: map[string]any{}, want: false},
+		{name: "object", value: map[string]any{"adk_agent_executor_v2": true}, want: true},
+		{name: "other type", value: 1, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := truthy(tc.value); got != tc.want {
+				t.Errorf("truthy(%#v) = %v, want %v", tc.value, got, tc.want)
 			}
 		})
 	}

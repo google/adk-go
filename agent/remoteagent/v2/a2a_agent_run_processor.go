@@ -47,6 +47,13 @@ type a2aAgentRunProcessor struct {
 	partConverter adka2a.A2APartConverter
 	request       *a2a.SendMessageRequest
 
+	// adkExtension is set once the remote agent sends a response whose
+	// [adka2a.ADKExtensionURI] metadata value is truthy: true from
+	// [adka2a.Executor], an object from adk-python's executor. adk-python
+	// filters thought parts only from responses without a truthy value there,
+	// so thoughts beside an answer are dropped only while this is false.
+	adkExtension bool
+
 	// partial event contents emitted before the terminal event
 	aggregations map[a2a.ArtifactID]*artifactAggregation
 	// used to emit aggregations in the order of last update
@@ -187,6 +194,13 @@ func (p *a2aAgentRunProcessor) buildNonPartialAggregation(ctx agent.InvocationCo
 	parts := agg.parts
 	result := adka2a.NewRemoteAgentEvent(ctx)
 	result.Content = genai.NewContentFromParts(parts, genai.RoleModel)
+	// A thought sent in a chunk of its own survives dropThoughtsBesideAnswer,
+	// so the artifact is filtered again once it is whole. Events from a custom
+	// Converter are never filtered, and neither is the artifact reassembled
+	// from them.
+	if p.config.Converter == nil && !p.adkExtension {
+		dropThoughtParts(result.Content)
+	}
 	result.CustomMetadata = agg.customMeta
 	result.GroundingMetadata = agg.grounding
 	result.CitationMetadata = agg.citations
@@ -200,6 +214,13 @@ func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext
 		return nil, err
 	}
 
+	// The key is read before converting. A keyed response that fails to convert
+	// can still be recovered by an AfterRequestCallback, and the run goes on
+	// with a remote agent that has marked itself as an ADK server.
+	if a2aEvent != nil && truthy(a2aEvent.Meta()[adka2a.ADKExtensionURI]) {
+		p.adkExtension = true
+	}
+
 	event, err := adka2a.ToSessionEventWithParts(ctx, a2aEvent, p.partConverter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert a2aEvent: %w", err)
@@ -207,9 +228,34 @@ func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext
 
 	if event != nil {
 		p.updateCustomMetadata(event, a2aEvent)
+		if !p.adkExtension {
+			dropThoughtsBesideAnswer(a2aEvent, event)
+		}
 	}
 
 	return event, nil
+}
+
+// truthy reports whether a metadata value counts as true the way Python's
+// bool() reads a JSON value: false, null, 0, "" and empty arrays and objects
+// do not.
+func truthy(v any) bool {
+	switch v := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return v
+	case float64:
+		return v != 0
+	case string:
+		return v != ""
+	case []any:
+		return len(v) > 0
+	case map[string]any:
+		return len(v) > 0
+	default:
+		return true
+	}
 }
 
 func (p *a2aAgentRunProcessor) runBeforeA2ARequestCallbacks(ctx agent.InvocationContext) (*session.Event, error) {
@@ -260,5 +306,49 @@ func (p *a2aAgentRunProcessor) updateCustomMetadata(event *session.Event, respon
 		} else {
 			event.CustomMetadata[adka2a.ToADKMetaKey(k+"_codec_error")] = err.Error()
 		}
+	}
+}
+
+// dropThoughtsBesideAnswer removes the thought parts of an event that also
+// carries parts that are not thoughts, so only the answer reaches the user.
+// An event made only of thoughts is kept as it is.
+//
+// Interim status updates are skipped: every state except the terminal ones and
+// input-required. adka2a marks the text parts of such an update as thoughts to
+// report progress, but not its function call and data parts, so filtering
+// would drop that text. adk-python marks every part of a submitted or working
+// update as a thought, so its filter keeps the update whole. It does filter
+// auth-required and unspecified updates, which adk-go skips because adka2a
+// marks their text parts the same way.
+//
+// Submitted and working task snapshots are kept whole to match adk-python,
+// which marks every part of such a snapshot as a thought.
+//
+// Every artifact update is filtered on its own, streamed chunks included, as
+// in adk-python. A thought sent in a chunk of its own stays in that chunk, so
+// buildNonPartialAggregation filters the artifact it reassembles as well.
+func dropThoughtsBesideAnswer(a2aEvent a2a.Event, event *session.Event) {
+	switch e := a2aEvent.(type) {
+	case *a2a.TaskStatusUpdateEvent:
+		if !e.Status.State.Terminal() && e.Status.State != a2a.TaskStateInputRequired {
+			return
+		}
+	case *a2a.Task:
+		if e.Status.State == a2a.TaskStateSubmitted || e.Status.State == a2a.TaskStateWorking {
+			return
+		}
+	}
+	dropThoughtParts(event.Content)
+}
+
+// dropThoughtParts removes the thought parts of content that also has parts
+// that are not thoughts. Content made only of thoughts is left as it is.
+func dropThoughtParts(content *genai.Content) {
+	if content == nil {
+		return
+	}
+	answer := slices.DeleteFunc(slices.Clone(content.Parts), func(p *genai.Part) bool { return p.Thought })
+	if len(answer) > 0 {
+		content.Parts = answer
 	}
 }
