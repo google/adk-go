@@ -809,7 +809,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		var memoryImpl agent.Memory = nil
+		var memoryImpl agent.Memory
 		if r.memoryService != nil {
 			memoryImpl = &imemory.Memory{
 				Service:   r.memoryService,
@@ -1111,7 +1111,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		}
 	}
 
-	var memoryImpl agent.Memory = nil
+	var memoryImpl agent.Memory
 	if r.memoryService != nil {
 		memoryImpl = &imemory.Memory{
 			Service:   r.memoryService,

@@ -90,7 +90,17 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 		cfg.logProcessors = append(cfg.logProcessors, sdklog.NewBatchProcessor(e))
 	}
 	for _, m := range exp.metricExporters {
-		cfg.metricReaders = append(cfg.metricReaders, newPeriodicReader(m.exporter, m.opts...))
+		var reader sdkmetric.Reader
+		if m.exportOnShutdown {
+			// adk-python disables automatic meter-provider shutdown at exit.
+			// Explicit Go shutdown flushes the env-configured OTLP endpoint,
+			// which is not assumed to enforce Cloud Monitoring's minimum interval.
+			// Google Cloud readers still skip the final export.
+			reader = sdkmetric.NewPeriodicReader(&guardedExporter{Exporter: m.exporter}, m.opts...)
+		} else {
+			reader = newNoFinalExportReader(m.exporter, m.opts...)
+		}
+		cfg.metricReaders = append(cfg.metricReaders, reader)
 	}
 	return cfg, nil
 }
@@ -218,8 +228,9 @@ type exporters struct {
 // metricExporter is a metric exporter and the options of the periodic reader
 // that will drive it.
 type metricExporter struct {
-	exporter sdkmetric.Exporter
-	opts     []sdkmetric.PeriodicReaderOption
+	exporter         sdkmetric.Exporter
+	opts             []sdkmetric.PeriodicReaderOption
+	exportOnShutdown bool
 }
 
 func (e *exporters) add(other exporters) {
@@ -274,7 +285,7 @@ func otlpExporters(ctx context.Context, own ownProviders) (exporters, error) {
 		if err != nil {
 			return exporters{}, fmt.Errorf("failed to create OTLP HTTP metric exporter: %w", err)
 		}
-		exp.metricExporters = append(exp.metricExporters, metricExporter{exporter: exporter})
+		exp.metricExporters = append(exp.metricExporters, metricExporter{exporter: exporter, exportOnShutdown: true})
 	}
 	if own.logger && endpointSet("LOGS") {
 		exporter, err := otlploghttp.New(ctx)

@@ -1547,8 +1547,7 @@ func isValidProjectID(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		b := s[i]
+	for _, b := range []byte(s) {
 		if !isIdentChar(b) && b != '-' && b != '.' && b != ':' {
 			return false
 		}
@@ -1560,8 +1559,7 @@ func isValidIdentifier(s string) bool {
 	if s == "" {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		b := s[i]
+	for _, b := range []byte(s) {
 		if !isIdentChar(b) && b != '-' {
 			return false
 		}
@@ -1573,8 +1571,8 @@ func isValidDatasetID(s string) bool {
 	if s == "" || len(s) > maxBigQueryIdentifierLen {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		if !isIdentChar(s[i]) {
+	for _, b := range []byte(s) {
+		if !isIdentChar(b) {
 			return false
 		}
 	}
