@@ -205,7 +205,7 @@ var reservedURISegments = []string{"apps", "users", "sessions", "artifacts", "ve
 // may hold "/" and may start with a reserved word ("apps/sub"), but may not
 // contain "/{reserved}/" anywhere, its closing "/" included ("sub/apps").
 func cutSegment(s string) (segment, rest, next string) {
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] != '/' {
 			continue
 		}
@@ -225,7 +225,7 @@ func parseASCIIDigits(s string) (int64, bool) {
 	if s == "" {
 		return 0, false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] < '0' || s[i] > '9' {
 			return 0, false
 		}

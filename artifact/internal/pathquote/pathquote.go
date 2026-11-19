@@ -26,7 +26,7 @@ import "strings"
 func Quote(s string) string {
 	const hexDigits = "0123456789ABCDEF"
 	var b strings.Builder
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || strings.IndexByte("-._~/", c) >= 0 {
 			b.WriteByte(c)
