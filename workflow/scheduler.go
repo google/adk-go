@@ -203,14 +203,17 @@ type nodeRun struct {
 	output       any            // single Event.Output; nil if hasOutput is false
 	hasOutput    bool           // distinguishes "no output yet" from "output was nil"
 	err          error          // set on duplicate output or duplicate routing event
+	outputErr    error          // the first refusal of the node's output by its schema; RetryConfig may retry it when it is also err
 	branch       string         // composite branch assigned at scheduling; used to stamp Event.Branch when the node leaves it empty
 	nodePath     string         // hierarchical path assigned at scheduling (e.g. "parent/child@1" or "child@1")
 	runID        string         // the activation's run id; a retry of the activation reuses it
 
-	// interruptIDs are unresolved long-running tool call IDs raised by
-	// the node's events. A non-empty set at completion parks the node
-	// in NodeWaiting. Mirrors adk-python's Context._interrupt_ids.
-	interruptIDs map[string]struct{}
+	// interruptIDs maps each unresolved long-running tool call ID raised
+	// by the node's events, its dynamic children's included, to the path
+	// of the event that raised it ("" when the event had none). A
+	// non-empty map at completion parks the node in NodeWaiting. Mirrors
+	// adk-python's Context._interrupt_ids.
+	interruptIDs map[string]string
 
 	// usedResponses is set at completion when the activation held user
 	// responses from a resume. completionEvent records that completion
@@ -243,7 +246,8 @@ func (nr *nodeRun) setRoutingEvent(ev *session.Event, nodeName string) {
 	nr.routingEvent = ev
 }
 
-// trackInterrupts accumulates the node's long-running tool call IDs.
+// trackInterrupts records the long-running tool call IDs ev raises, with
+// ev's path.
 //
 // It does NOT resolve an interrupt from a FunctionResponse seen in the
 // same run: that is the tool's own initial "pending" response, not the
@@ -255,15 +259,69 @@ func (nr *nodeRun) trackInterrupts(ev *session.Event) {
 	if ev == nil {
 		return
 	}
+	var path string
+	if ev.NodeInfo != nil {
+		path = ev.NodeInfo.Path
+	}
 	for _, id := range ev.LongRunningToolIDs {
 		if id == "" {
 			continue
 		}
 		if nr.interruptIDs == nil {
-			nr.interruptIDs = map[string]struct{}{}
+			nr.interruptIDs = map[string]string{}
 		}
-		nr.interruptIDs[id] = struct{}{}
+		nr.interruptIDs[id] = path
 	}
+}
+
+// dropInterrupts forgets the IDs raised by events at path or below it. A
+// failed attempt of a dynamic child at path calls it: adk-python gives each
+// attempt a context of its own and hands the caller only the IDs of the
+// attempt the child returns with (workflow/_node_runner.py run).
+func (nr *nodeRun) dropInterrupts(path string) {
+	for id, at := range nr.interruptIDs {
+		if at == path || strings.HasPrefix(at, path+"/") {
+			delete(nr.interruptIDs, id)
+		}
+	}
+}
+
+// rejectOutput records err, a refusal of ev's output by the node's schema,
+// as nr.outputErr and, unless an earlier error was recorded, as the
+// activation's failure. It replaces ev with an event that carries the
+// attempt's pending state and artifact deltas and nothing of ev's own, as
+// adk-python drops an event whose output fails validation whole
+// (workflow/_base_node.py). The replacement keeps only ev's identity: ID,
+// Timestamp, InvocationID, Author, Branch, IsolationScope, NodeInfo.Path
+// and the workflow base-path metadata. It reports whether the replacement
+// carries something to send, that is whether pending is non-empty.
+func (nr *nodeRun) rejectOutput(ev *session.Event, err error, pending *session.EventActions) bool {
+	nr.recordErr(err)
+	if nr.outputErr == nil {
+		nr.outputErr = err
+	}
+	writes := session.Event{
+		ID:             ev.ID,
+		Timestamp:      ev.Timestamp,
+		InvocationID:   ev.InvocationID,
+		Author:         ev.Author,
+		Branch:         ev.Branch,
+		IsolationScope: ev.IsolationScope,
+	}
+	if ev.NodeInfo != nil {
+		writes.NodeInfo = &session.NodeInfo{Path: ev.NodeInfo.Path}
+	}
+	for k, v := range ev.CustomMetadata {
+		if strings.HasPrefix(k, workflowBasePathPrefix) {
+			if writes.CustomMetadata == nil {
+				writes.CustomMetadata = map[string]any{}
+			}
+			writes.CustomMetadata[k] = v
+		}
+	}
+	mergeDelta(&writes.Actions, pending)
+	*ev = writes
+	return len(ev.Actions.StateDelta) > 0 || len(ev.Actions.ArtifactDelta) > 0
 }
 
 // setOutput stores out as the node's single output value. A second
@@ -303,6 +361,7 @@ type eventItem struct {
 	nodeName  string
 	ev        *session.Event
 	processed chan struct{}
+	pending   *session.EventActions // snapshotPending of ev, taken before admit; nil when admit moved nothing
 }
 
 func (eventItem) isQueueItem() {}
@@ -624,6 +683,10 @@ func runNode(
 			completion.inventory = inventoryRecorder.snapshot()
 			return
 		}
+		// The consumer validates the output after admit has moved the
+		// pending writes onto ev; a refused event gives them back from
+		// this snapshot.
+		pending := writes.snapshotPending(ev)
 		// An event whose state delta the schema refuses is not sent; its
 		// error fails the node unwrapped, so errors.As reaches it.
 		if aerr := writes.admit(ev); aerr != nil {
@@ -646,7 +709,7 @@ func runNode(
 			}
 		}
 		select {
-		case out <- eventItem{nodeName: name, ev: sendEv, processed: processed}:
+		case out <- eventItem{nodeName: name, ev: sendEv, processed: processed, pending: pending}:
 		case <-ctx.Done():
 			completion.err = ctx.Err()
 			return
@@ -763,8 +826,7 @@ func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
 
 		switch it := item.(type) {
 		case eventItem:
-			s.handleEvent(it)
-			if !draining {
+			if forward := s.handleEvent(it); forward && !draining {
 				if !yield(it.ev, nil) {
 					draining = true
 					consumerGone = true
@@ -974,7 +1036,9 @@ func (s *scheduler) terminalAncestors(nodeName string) []string {
 
 // handleEvent updates the per-node accumulator. The event has
 // already been read from the queue and will be yielded to the
-// caller by the consumer loop.
+// caller by the consumer loop when handleEvent reports forward; it
+// reports false only for an event whose refused output left it with
+// nothing to send.
 //
 // Descendant events (NodeInfo.Path != it.nodeName) are dynamic-node
 // children forwarded by the sub-scheduler. Their Output/Routes
@@ -984,15 +1048,15 @@ func (s *scheduler) terminalAncestors(nodeName string) []string {
 // orchestrator (dynamic_scheduler.go runNode), and Workflow.Resume
 // matches InterruptID against the parent's NodeState.Interrupts,
 // so the parent must transition to NodeWaiting on a descendant pause.
-func (s *scheduler) handleEvent(it eventItem) {
+func (s *scheduler) handleEvent(it eventItem) (forward bool) {
 	nr := s.runsByName[it.nodeName]
 	if nr == nil {
 		// Defensive: completion already processed for this node;
 		// shouldn't happen if producer goroutines preserve send order.
-		return
+		return true
 	}
 	if it.ev == nil {
-		return
+		return true
 	}
 	if !s.graph.isRootWrapper && !s.graph.isNodeRootWrapper {
 		metadata := maps.Clone(it.ev.CustomMetadata)
@@ -1029,13 +1093,22 @@ func (s *scheduler) handleEvent(it eventItem) {
 		path = it.ev.NodeInfo.Path
 	}
 	isDescendant := path != "" && path != expectedPath && path != it.nodeName
-	// Track long-running interrupts before the descendant
-	// short-circuit so a dynamic child's pause is promoted to the
-	// parent node (a RequestInput pause rides on LongRunningToolIDs).
-	nr.trackInterrupts(it.ev)
-	if isDescendant {
-		return
+	// Track a dynamic child's long-running interrupts before the
+	// descendant short-circuit so its pause is promoted to the parent
+	// node (a RequestInput pause rides on LongRunningToolIDs). A dynamic
+	// child's failure record ends that attempt, and with it the
+	// interrupts raised in it.
+	if isDescendant && it.ev.CustomMetadata[workflowNodeOutcomeKey] == workflowNodeFailureOutcome {
+		nr.dropInterrupts(path)
 	}
+	if isDescendant {
+		nr.trackInterrupts(it.ev)
+		return true
+	}
+	// The node's own interrupts are tracked once its output is
+	// validated: rejectOutput replaces a refused event with one that
+	// raises none.
+	defer nr.trackInterrupts(it.ev)
 	// Stamp the node name onto the event so history rehydration can
 	// attribute it back to this node. Static nodes leave Path empty
 	// (the node name is not otherwise on the event — Author is the
@@ -1050,36 +1123,51 @@ func (s *scheduler) handleEvent(it eventItem) {
 	}
 	if value, delegated := completedDelegatedOutput(it.ev); delegated {
 		if value == nil {
-			return
+			return true
 		}
 		// The dynamic body completed with a delegated (possibly cached)
 		// result. It is now safe to use it as this activation's output.
 		validated, err := validateAndStampOutput(s.nodesByName[it.nodeName], value, it.ev)
 		if err != nil {
-			nr.recordErr(err)
-			return
+			// The attempt ends at the refusal, before the producer resumes,
+			// unless an earlier error already decides the activation.
+			if forward = nr.rejectOutput(it.ev, err, it.pending); nr.err == err {
+				s.runCancels[it.nodeName]()
+			}
+			return forward
 		}
 		it.ev.CustomMetadata[workflowDelegatedOutputKey] = validated
 		nr.setOutput(validated, it.nodeName)
-		return
+		return true
 	}
-	if it.ev.Routes != nil {
-		nr.setRoutingEvent(it.ev, it.nodeName)
-	}
-	if out, ok := childEventOutput(it.ev); ok {
+	// The output is validated before the routes are read: the routes of an
+	// event whose output the schema refuses do not count.
+	out, hasOutput := childEventOutput(it.ev)
+	var validated any
+	if hasOutput {
 		n := s.nodesByName[it.nodeName]
 		if n == nil {
 			// handleEvent only runs for registered nodes; a miss means
 			// the registry is out of sync. Fail rather than forward
 			// unvalidated.
 			nr.recordErr(fmt.Errorf("%w: output validation: node %q not found in graph", ErrNodeFailed, it.nodeName))
-			return
+			return true
 		}
-		validated, err := validateAndStampOutput(n, out, it.ev)
+		var err error
+		validated, err = validateAndStampOutput(n, out, it.ev)
 		if err != nil {
-			nr.recordErr(err)
-			return
+			// The attempt ends at the refusal, before the producer resumes,
+			// unless an earlier error already decides the activation.
+			if forward = nr.rejectOutput(it.ev, err, it.pending); nr.err == err {
+				s.runCancels[it.nodeName]()
+			}
+			return forward
 		}
+	}
+	if it.ev.Routes != nil {
+		nr.setRoutingEvent(it.ev, it.nodeName)
+	}
+	if hasOutput {
 		nr.setOutput(validated, it.nodeName)
 		outputFor := append([]string{path}, s.terminalAncestors(it.nodeName)...)
 		if it.ev.NodeInfo == nil {
@@ -1087,6 +1175,7 @@ func (s *scheduler) handleEvent(it eventItem) {
 		}
 		it.ev.NodeInfo.OutputFor = outputFor
 	}
+	return true
 }
 
 // handleCompletion finalizes a node's run: transitions its lifecycle
@@ -1148,6 +1237,13 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) er
 		// (_workflow.py _cleanup_all_tasks, run from a finally).
 		ns.Status = NodeCancelled
 		return nil
+	}
+	// The schema's refusal of the node's output is the attempt's error, so
+	// RetryConfig may run the node again. It also stands for the
+	// cancellation the refusal caused.
+	if nr != nil && nr.outputErr != nil && nr.err == nr.outputErr &&
+		(it.err == nil || errors.Is(it.err, context.Canceled)) {
+		it.err = nr.err
 	}
 	if errors.Is(it.err, context.Canceled) {
 		ns.Status = NodeCancelled

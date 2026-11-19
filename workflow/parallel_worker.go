@@ -20,7 +20,6 @@ import (
 	"reflect"
 	"strconv"
 	"sync"
-	"time"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/session"
@@ -271,15 +270,8 @@ func (n *ParallelWorker) runWorker(ctx agent.Context, idx int, item any, sem cha
 		// If so, follow the retry logic and repeat the execution of the wrapped node on failed input.
 		failedAttempts++
 		if ShouldRetry(retryCfg, runErr, failedAttempts) {
-			delay := CalculateDelay(retryCfg, failedAttempts)
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-			}
-			// A two-case select picks at random when the delay has elapsed and ctx
-			// is done, so decide on ctx itself: a canceled item must not start the
-			// wrapped node again.
-			if err := ctx.Err(); err != nil {
+			// A canceled item must not start the wrapped node again.
+			if err := waitRetryDelay(ctx, CalculateDelay(retryCfg, failedAttempts)); err != nil {
 				// Cancellation while parked in the retry delay is a real
 				// failure too: report it before releasing sem, exactly
 				// like the exhausted-attempts path below. Without this,

@@ -122,6 +122,24 @@ func (w *nodeWrites) admit(ev *session.Event) error {
 	return nil
 }
 
+// snapshotPending returns a copy of the pending state and artifact deltas
+// that admit(ev) is about to move onto ev, or nil when admit moves nothing:
+// ev is nil, partial or already checked by a deeper runner (registered in
+// w.mine, not consumed here), w.actions is nil, or nothing is pending. Call
+// it immediately before admit(ev), from the goroutine that drives the
+// iterator.
+func (w *nodeWrites) snapshotPending(ev *session.Event) *session.EventActions {
+	if ev == nil || ev.Partial || w.actions == nil || w.mine.has(ev) {
+		return nil
+	}
+	if len(w.actions.StateDelta) == 0 && len(w.actions.ArtifactDelta) == 0 {
+		return nil
+	}
+	snapshot := &session.EventActions{}
+	mergeDelta(snapshot, w.actions)
+	return snapshot
+}
+
 // forwardUp registers ev as checked in the enclosing activation's registry.
 // It does nothing at the root, nor when the activation has no validator: a
 // runner that checked nothing leaves ev to the enclosing activation's admit.
@@ -235,6 +253,18 @@ func (f *forwardedEvents) take(ev *session.Event) bool {
 	defer f.mu.Unlock()
 	_, ok := f.seen[ev]
 	delete(f.seen, ev)
+	return ok
+}
+
+// has reports whether ev is registered, without forgetting it. A nil
+// receiver reports false.
+func (f *forwardedEvents) has(ev *session.Event) bool {
+	if f == nil || ev == nil {
+		return false
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.seen[ev]
 	return ok
 }
 
