@@ -32,11 +32,12 @@ import (
 
 var errScriptExhausted = errors.New("scripted model: no response left")
 
-// scriptedModel is a model.LLM double that returns its responses in order and
-// fails once the script runs out.
+// scriptedModel is a model.LLM double that returns its responses in order,
+// records every request it receives, and fails once the script runs out.
 type scriptedModel struct {
 	mu        sync.Mutex
 	responses []*model.LLMResponse
+	requests  []*model.LLMRequest
 }
 
 func (m *scriptedModel) Name() string { return "scripted" }
@@ -44,6 +45,7 @@ func (m *scriptedModel) Name() string { return "scripted" }
 func (m *scriptedModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.mu.Lock()
+		m.requests = append(m.requests, req)
 		if len(m.responses) == 0 {
 			m.mu.Unlock()
 			yield(nil, errScriptExhausted)
@@ -54,6 +56,12 @@ func (m *scriptedModel) GenerateContent(ctx context.Context, req *model.LLMReque
 		m.mu.Unlock()
 		yield(resp, nil)
 	}
+}
+
+func (m *scriptedModel) recorded() []*model.LLMRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.requests
 }
 
 func textResponse(text string) *model.LLMResponse {

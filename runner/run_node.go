@@ -132,6 +132,10 @@ func (r *Runner) runNode(
 		}
 	}()
 
+	if err := r.checkCFCModel(ctx, cfg); err != nil {
+		yield(nil, err)
+		return
+	}
 	// UserContent is read by Workflow.Run as the workflow's seed input.
 	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg, runMetadata, opts.invocationID)
 	invocationCtx = ictx

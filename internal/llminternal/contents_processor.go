@@ -36,9 +36,57 @@ import (
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
-// ContentRequestProcessor populates the LLMRequest's Contents based on
-// the InvocationContext that includes the previous events.
+// continuationTurnText is the text of the synthetic user turn that ends a
+// request whose contents end on another turn (adk-python
+// BaseLlm._maybe_append_user_content).
+const continuationTurnText = "Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed."
+
+// ContentsRequestProcessor populates the LLMRequest's Contents based on the
+// InvocationContext that includes the previous events. When the contents then
+// end on a turn whose role is not user, it appends a user turn that asks the
+// model to continue.
 func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if asLLMAgent(ctx.Agent()) == nil {
+			return
+		}
+		for _, err := range historyRequestProcessor(ctx, req, f) {
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+		}
+		appendContinuationTurn(req)
+	}
+}
+
+// continuationTurnRequestProcessor appends the continuation turn to req when
+// its contents are not empty and end on a turn whose role is not user. It is
+// the last request processor, so it sees the contents the model gets, as
+// adk-python decides the turn in the model layer.
+func continuationTurnRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		appendContinuationTurn(req)
+	}
+}
+
+// appendContinuationTurn appends a new user content with continuationTurnText
+// to req.Contents when they are not empty and the last one is not nil and not
+// a user turn, so the model keeps producing output rather than returning an
+// empty response. It never edits an existing content.
+func appendContinuationTurn(req *model.LLMRequest) {
+	if len(req.Contents) == 0 {
+		return
+	}
+	if last := req.Contents[len(req.Contents)-1]; last != nil && last.Role != genai.RoleUser {
+		req.Contents = append(req.Contents, genai.NewContentFromText(continuationTurnText, genai.RoleUser))
+	}
+}
+
+// historyRequestProcessor populates req.Contents from the session events of
+// ctx's agent; it yields only errors. It does nothing for an agent that is
+// not an LLM agent.
+func historyRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// TODO: implement (adk-python src/google/adk/flows/llm_flows/contents.py) - extract function call results, etc.
 		llmAgent := asLLMAgent(ctx.Agent())
@@ -111,15 +159,6 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 			return
 		}
 		req.Contents = append(req.Contents, contents...)
-		// If the conversation history concludes on a model turn, inject a synthetic user
-		// continuation turn so the model keeps producing output rather than returning an
-		// empty response. (Mirrors maybeAppendUserContent in model/gemini and
-		// adk-python's _maybe_append_user_content.)
-		if len(req.Contents) > 0 {
-			if last := req.Contents[len(req.Contents)-1]; last != nil && last.Role != "user" {
-				req.Contents = append(req.Contents, genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"))
-			}
-		}
 	}
 }
 

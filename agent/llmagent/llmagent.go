@@ -54,6 +54,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/codeexecutor"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -136,6 +137,7 @@ func New(cfg Config) (agent.Agent, error) {
 			GlobalInstruction:         cfg.GlobalInstruction,
 			GlobalInstructionProvider: llminternal.InstructionProvider(cfg.GlobalInstructionProvider),
 			OutputKey:                 cfg.OutputKey,
+			CodeExecutor:              cfg.CodeExecutor,
 		},
 	}
 
@@ -505,6 +507,62 @@ type Config struct {
 	//
 	// Default value is ModeChat as a sub-agent, ModeSingleTurn as a node in a workflow.
 	Mode Mode
+
+	// CodeExecutor lets the agent run code that the model writes.
+	//
+	// When nil (the default), the request is not changed and no code is run.
+	//
+	// A codeexecutor.BuiltIn, such as codeexecutor.NewBuiltInExecutor(), lets
+	// the model run the code itself. The agent adds the model's built-in
+	// code-execution tool to every request, as its own entry of the request's
+	// tools ahead of the agent's function declarations, and needs a Gemini
+	// model name: any other name fails the step before the model is called
+	// with "Gemini code execution tool is not supported for model <name>". Set
+	// ADK_DISABLE_GEMINI_MODEL_ID_CHECK to true or 1 to skip that check for
+	// the whole process; the variable is read on every request. Each image
+	// part of a model response is saved as an artifact and replaced by the
+	// text "Saved as artifact: <name>. ".
+	//
+	// The agent runs any other executor itself, in its own process. In each
+	// model response it looks for the first code block: the first
+	// executable-code part that no code execution result part follows, or else
+	// the earliest block in the response's text fenced by one of the executor's
+	// Settings().CodeBlockDelimiters. When it finds one, it yields an event
+	// with the response's parts up to that block (a fenced block becomes an
+	// executable-code part), calls ExecuteCode with the code, yields an event
+	// with one code execution result part, and calls the model again instead of
+	// yielding the response. Output files are saved as artifacts. A response
+	// without a code block is handled as it would be without an executor. In
+	// later requests the code is sent as text fenced by the first pair of
+	// CodeBlockDelimiters, and the result as user text fenced by
+	// ExecutionResultDelimiters. After ErrorRetryAttempts consecutive
+	// executions with a non-empty Stderr, the agent runs no more code in that
+	// invocation and handles responses as it would without an executor.
+	//
+	// For such an executor the request tells the model how to write code only
+	// when Settings().OptimizeDataFile is true. Then the agent appends to the
+	// system instruction an instruction to write code in a block fenced by the
+	// first pair of CodeBlockDelimiters (with no pair, only a warning against
+	// executable-code parts), and turns the text/csv inline data of user
+	// messages into input files: it runs exploration code on each new file
+	// through the executor, yielding a code and a result event, and passes the
+	// files to every execution. Otherwise the agent's own instruction has to
+	// tell the model how to fence its code.
+	//
+	// Running an executor that is not a codeexecutor.BuiltIn needs an
+	// artifact service (runner.Config.ArtifactService). Without one, the run
+	// fails with "artifact service is not initialized" after the first
+	// execution, and under a codeexecutor.BuiltIn a response with an image
+	// part fails the same way.
+	//
+	// When agent.RunConfig.SupportCFC is set, an agent without a parent agent
+	// uses a built-in executor for that invocation in place of its own
+	// executor, also when it has none; the doc comment of that field gives the
+	// conditions.
+	//
+	// The executor is shared by every invocation of the agent and must be
+	// safe for concurrent use.
+	CodeExecutor codeexecutor.CodeExecutor
 }
 
 // Mode is the delegation mode of an LLMAgent. See [Config.Mode] for details.

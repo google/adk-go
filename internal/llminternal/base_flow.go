@@ -79,7 +79,7 @@ type Flow struct {
 
 	Tools                 []tool.Tool
 	RequestProcessors     []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]
-	ResponseProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error
+	ResponseProcessors    []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error]
 	BeforeModelCallbacks  []BeforeModelCallback
 	AfterModelCallbacks   []AfterModelCallback
 	OnModelErrorCallbacks []OnModelErrorCallback
@@ -100,21 +100,24 @@ var (
 		RequestConfirmationRequestProcessor,
 		instructionsRequestProcessor,
 		identityRequestProcessor,
-		// Compaction must run before contentsRequestProcessor so a summary it
+		// Compaction must run before historyRequestProcessor so a summary it
 		// appends is reflected in the history assembled for this very request.
 		CompactionRequestProcessor,
-		ContentsRequestProcessor,
+		historyRequestProcessor,
 		// Some implementations of NL Planning mark planning contents as thoughts in the post processor.
-		// Since these need to be unmarked, NL Planning should be after contentsRequestProcessor.
+		// Since these need to be unmarked, NL Planning should be after historyRequestProcessor.
 		nlPlanningRequestProcessor,
-		// Code execution should be after contentsRequestProcessor as it mutates the contents
+		// Code execution should be after historyRequestProcessor as it mutates the contents
 		// to optimize data files.
 		codeExecutionRequestProcessor,
 		outputSchemaRequestProcessor,
 		AgentTransferRequestProcessor,
 		removeDisplayNameIfExists,
+		// The continuation turn depends on the role of the last content, which
+		// code execution changes when it turns a result into a user turn.
+		continuationTurnRequestProcessor,
 	}
-	DefaultResponseProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error{
+	DefaultResponseProcessors = []func(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error]{
 		nlPlanningResponseProcessor,
 		codeExecutionResponseProcessor,
 	}
@@ -603,6 +606,7 @@ func isEmptyLiveResponse(r *model.LLMResponse) bool {
 }
 
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	opts := liveOptionsFrom(ctx, f)
 	if err := f.setStepModel(ctx, ResolveLiveModel); err != nil {
 		return nil, nil, err
 	}
@@ -617,9 +621,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		return nil, nil, fmt.Errorf("agent %q: model %q has no live client; check the model's credentials and configuration", ctx.Agent().Name(), f.stepModel.Name())
 	}
 
-	runCfg := runconfig.FromContext(ctx)
-	if runCfg == nil || runCfg.Live == nil {
-		return nil, nil, fmt.Errorf("live run config not found")
+	live := opts.live
+	if live == nil {
+		runCfg := runconfig.FromContext(ctx)
+		if runCfg == nil || runCfg.Live == nil {
+			return nil, nil, fmt.Errorf("live run config not found")
+		}
+		live = runCfg.Live
 	}
 
 	sess := newLiveSessionImpl()
@@ -649,20 +657,20 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 
 		// The reconnect loop writes the resumption handle into this config, so
 		// it needs its own copy: the caller may reuse its LiveRunConfig.
-		sessionResumption := runCfg.Live.SessionResumption
+		sessionResumption := live.SessionResumption
 		if sessionResumption != nil {
 			sessionResumption = new(*sessionResumption)
 		}
 
 		liveConnectConfig := &genai.LiveConnectConfig{
-			ResponseModalities:       runCfg.Live.ResponseModalities,
-			SpeechConfig:             runCfg.Live.SpeechConfig,
+			ResponseModalities:       live.ResponseModalities,
+			SpeechConfig:             live.SpeechConfig,
 			SystemInstruction:        nreq.Config.SystemInstruction,
 			Tools:                    nreq.Config.Tools,
 			SessionResumption:        sessionResumption,
-			InputAudioTranscription:  runCfg.Live.InputAudioTranscription,
-			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
-			RealtimeInputConfig:      runCfg.Live.RealtimeInputConfig,
+			InputAudioTranscription:  live.InputAudioTranscription,
+			OutputAudioTranscription: live.OutputAudioTranscription,
+			RealtimeInputConfig:      live.RealtimeInputConfig,
 		}
 		// Leave affective dialog and proactivity unset for the models
 		// IsGemini3xLive matches. Affective dialog is not supported on them,
@@ -671,10 +679,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		// (Gemini 3.1 Flash Live). Live Translate is excluded by
 		// IsGemini3xLive and still gets both.
 		if !googlellm.IsGemini3xLive(f.stepModel.Name()) {
-			if runCfg.Live.EnableAffectiveDialog {
+			if live.EnableAffectiveDialog {
 				liveConnectConfig.EnableAffectiveDialog = new(true)
 			}
-			liveConnectConfig.Proactivity = runCfg.Live.Proactivity
+			liveConnectConfig.Proactivity = live.Proactivity
 		}
 
 		iCtx, isIContext := ctx.(*icontext.InvocationContext)
@@ -818,7 +826,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
 							}
 						}
-						if runCfg.Live.SaveLiveBlob && resp.Content != nil {
+						if live.SaveLiveBlob && resp.Content != nil {
 							for _, part := range resp.Content.Parts {
 								if part.InlineData != nil {
 									sess.audioMgr.CacheOutput(ctx, part.InlineData.Data, part.InlineData.MIMEType)
@@ -901,6 +909,24 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				}
 				select {
 				case ev := <-eventCase:
+					// The response processors may rewrite ev's parts, and the
+					// events they emit belong before ev, as in adk-python's
+					// live flow. Their errors end the session the way a request
+					// processor error does.
+					for pev, err := range f.postprocess(ctx, nreq, &ev.LLMResponse) {
+						if err != nil {
+							sess.pushError(err)
+							cleanup()
+							return
+						}
+						if pev != nil && !sess.pushEvent(pev) {
+							cleanup()
+							return
+						}
+					}
+					if opts.dropEmptyResponses && isEmptyLiveResponse(&ev.LLMResponse) {
+						continue
+					}
 					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
 					var tools map[string]tool.Tool
 					if len(fnCalls) > 0 {
@@ -943,7 +969,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						currentBackoff = policy.initialBackoff
 					}
 					// Flush caches if needed
-					if runCfg.Live.SaveLiveBlob {
+					if live.SaveLiveBlob {
 						var flushUser, flushModel bool
 						if ev.LLMResponse.Interrupted {
 							flushModel = true
@@ -1126,16 +1152,36 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		// Create event to pass to callback state delta
 		stateDelta := make(map[string]any)
 		artifactDelta := make(map[string]int64)
+		// liveTransfer names the agent that a live event of a CFC model call
+		// transfers to. The call ends after that event (callLLMOverLive).
+		liveTransfer := ""
 		// Calls the LLM.
 		for resp, err := range f.callLLM(ctx, req, stateDelta, artifactDelta) {
 			if err != nil {
 				yield(nil, err)
 				return
 			}
+			// RunLive has already post-processed a live event and run its
+			// function calls, as adk-python's live flow does, so it is passed
+			// on as it is.
+			if resp.liveEvent != nil {
+				if !yield(resp.liveEvent, nil) {
+					return
+				}
+				if resp.liveEvent.Actions.TransferToAgent != "" {
+					liveTransfer = resp.liveEvent.Actions.TransferToAgent
+				}
+				continue
+			}
 			applyEmptyResponsePolicy(ctx, resp.LLMResponse)
-			if err := f.postprocess(ctx, req, resp); err != nil {
-				yield(nil, err)
-				return
+			for ev, err := range f.postprocess(ctx, req, resp.LLMResponse) {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if ev != nil && !yield(ev, nil) {
+					return
+				}
 			}
 			// Skip the model response event if it carries no content, error code,
 			// interruption or grounding metadata.
@@ -1163,6 +1209,13 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			if !f.postprocessFunctionCalls(ctx, tools, modelResponseEvent, yield) {
 				return
 			}
+		}
+		// The target runs once the CFC model call has ended, so that the
+		// transferring agent's live connection is closed first, as
+		// adk-python's live flow closes it before the transfer
+		// (live/_live_llm_flow.py).
+		if liveTransfer != "" {
+			f.runTransfer(ctx, liveTransfer, yield)
 		}
 	}
 }
@@ -1241,9 +1294,20 @@ func (f *Flow) postprocessFunctionCalls(ctx agent.InvocationContext, tools map[s
 	if ev.Actions.TransferToAgent == "" {
 		return false
 	}
-	nextAgent := f.agentToRun(ctx, ev.Actions.TransferToAgent)
+	return f.runTransfer(ctx, ev.Actions.TransferToAgent, yield)
+}
+
+// runTransfer runs the agent that a transfer from ctx's agent to the agent
+// named agentName runs (see agentToRun) and yields its events. A unary model
+// call and a CFC model call both transfer through it.
+//
+// It reports whether the target ran to its end: false when no agent may run,
+// in which case the error is yielded, when the target yielded an error, or
+// when the consumer stopped.
+func (f *Flow) runTransfer(ctx agent.InvocationContext, agentName string, yield func(*session.Event, error) bool) bool {
+	nextAgent := f.agentToRun(ctx, agentName)
 	if nextAgent == nil {
-		yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
+		yield(nil, fmt.Errorf("failed to find agent: %s", agentName))
 		return false
 	}
 	// On a resumable run on the node path, the transferring agent ends
@@ -1402,7 +1466,6 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 
 		stampAgentNameLabel(ctx, req)
 
-		// TODO: RunLive mode when invocation_context.run_config.support_cfc is true.
 		// Streaming mode comes from the invocation context's RunConfig rather than
 		// the runconfig context value: agent.Run() may be invoked directly (outside
 		// the runner), in which case no runconfig is stored in the Go context and
@@ -1417,6 +1480,11 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		// the runner (issue #586), and that imposes no limit.
 		if err := runconfig.FromContext(ctx).IncrementAndEnforceLLMCallsLimit(); err != nil {
 			yield(nil, err)
+			return
+		}
+
+		if rc := ctx.RunConfig(); rc != nil && rc.SupportCFC {
+			f.callLLMOverLive(ctx, req, actions, yield)
 			return
 		}
 
@@ -1524,6 +1592,9 @@ type responseWithEventID struct {
 	// uiWidgets are the widgets the model callbacks of the call rendered
 	// before this response was yielded, for its model response event.
 	uiWidgets []session.UIWidget
+	// liveEvent is set only by a CFC model call. It is the live event itself,
+	// already post-processed by RunLive; runOneStep yields it as it is.
+	liveEvent *session.Event
 }
 
 // generateContent wraps the LLM call with tracing and logging.
@@ -1610,14 +1681,25 @@ func (f *Flow) runOnModelErrorCallbacks(ctx agent.InvocationContext, llmReq *mod
 	return nil, nil
 }
 
-func (f *Flow) postprocess(ctx agent.InvocationContext, req *model.LLMRequest, resp *responseWithEventID) error {
-	// apply response processor functions to the response in the configured order.
-	for _, processor := range f.ResponseProcessors {
-		if err := processor(ctx, req, resp.LLMResponse); err != nil {
-			return err
+// postprocess applies the response processors to resp in the configured
+// order and yields the events they emit, which belong before the model
+// response event. It stops at the first error.
+func (f *Flow) postprocess(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if resp == nil {
+			return
+		}
+		for _, processor := range f.ResponseProcessors {
+			for ev, err := range processor(ctx, req, resp) {
+				if !yield(ev, err) {
+					return
+				}
+				if err != nil {
+					return
+				}
+			}
 		}
 	}
-	return nil
 }
 
 func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.Agent {
