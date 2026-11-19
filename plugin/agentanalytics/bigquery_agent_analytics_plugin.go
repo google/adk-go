@@ -452,6 +452,17 @@ func newBigQueryAgentAnalyticsPlugin(
 	writeClient *bqstorage.BigQueryWriteClient,
 	ownBQClient bool,
 ) (*baseplugin.Plugin, error) {
+	adkPlugin, _, err := newBigQueryAgentAnalyticsPluginWithTraces(ctx, config, bqClient, writeClient, ownBQClient)
+	return adkPlugin, err
+}
+
+func newBigQueryAgentAnalyticsPluginWithTraces(
+	ctx context.Context,
+	config Config,
+	bqClient *bq.Client,
+	writeClient *bqstorage.BigQueryWriteClient,
+	ownBQClient bool,
+) (*baseplugin.Plugin, *traceManager, error) {
 	closeClients := func() {
 		closeWriteClient(writeClient, config)
 		if ownBQClient && bqClient != nil {
@@ -463,16 +474,17 @@ func newBigQueryAgentAnalyticsPlugin(
 	if !config.Enabled {
 		// The disabled plugin never writes, so it does not keep the clients.
 		closeClients()
-		return newDisabledPlugin()
+		adkPlugin, err := newDisabledPlugin()
+		return adkPlugin, nil, err
 	}
 	config = applyDefaults(config)
 	deniedColumns, err := validateConfig(config)
 	if err != nil {
 		closeClients()
-		return nil, err
+		return nil, nil, err
 	}
 	if writeClient == nil {
-		return nil, errors.New("agentanalytics: writeClient must not be nil when plugin is enabled")
+		return nil, nil, errors.New("agentanalytics: writeClient must not be nil when plugin is enabled")
 	}
 	validateEventFilterLists(config)
 
@@ -493,7 +505,7 @@ func newBigQueryAgentAnalyticsPlugin(
 			o, err := newGCSOffloader(ctx, config.GCSBucketName, gcsOpts...)
 			if err != nil {
 				closeClients()
-				return nil, fmt.Errorf("failed to create GCS offloader: %w", err)
+				return nil, nil, fmt.Errorf("failed to create GCS offloader: %w", err)
 			}
 			ownedOffloader = o
 			config.GCSOffloader = o
@@ -535,7 +547,7 @@ func newBigQueryAgentAnalyticsPlugin(
 		if err := ensureTableAndSchema(ctx, bqTableAdapter{table: tableRef}, config, deniedColumns); err != nil {
 			notifySchemaError(onSchemaError, err, config.logf)
 			closeOwnedResources()
-			return nil, err
+			return nil, nil, err
 		}
 		tableChecked = true
 	}
@@ -550,7 +562,7 @@ func newBigQueryAgentAnalyticsPlugin(
 	processor, err := NewBatchProcessor(ctx, writeClient, streamName, config)
 	if err != nil {
 		closeOwnedResources()
-		return nil, fmt.Errorf("failed to initialize batch processor: %w", err)
+		return nil, nil, fmt.Errorf("failed to initialize batch processor: %w", err)
 	}
 	processor.Start()
 
@@ -667,9 +679,10 @@ func newBigQueryAgentAnalyticsPlugin(
 	if err != nil {
 		processor.Close()
 		closeOwnedResources()
-		return nil, err
+		return nil, nil, err
 	}
 
+	traces.selfPlugin = weak.Make(adkPlugin)
 	registerPlugin(adkPlugin, state)
 
 	if (config.createViews() || config.CreateEvalViews) && state.runner != nil {
@@ -718,7 +731,7 @@ func newBigQueryAgentAnalyticsPlugin(
 		// No view pass runs, so the schema is ready once the table is.
 		notifySchemaReady(onSchemaReady, config.logf)
 	}
-	return adkPlugin, nil
+	return adkPlugin, traces, nil
 }
 
 // closeWriteClient closes a write client that the plugin will not use,
@@ -2289,6 +2302,134 @@ func agentConfig(a agent.Agent) any {
 		a = next
 	}
 	return nil
+}
+
+type agentAfterCBLayout struct {
+	configIndex  []int
+	afterCBIndex []int
+	agentIndex   []int
+}
+
+var agentAfterCBLayouts sync.Map // map[reflect.Type]agentAfterCBLayout
+
+func fieldPathExported(t reflect.Type, idx []int) bool {
+	if len(idx) == 0 {
+		return false
+	}
+	for _, i := range idx {
+		if t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		if t.Kind() != reflect.Struct {
+			return false
+		}
+		sf := t.Field(i)
+		if !sf.IsExported() {
+			return false
+		}
+		t = sf.Type
+	}
+	return true
+}
+
+func lookupAgentAfterCBLayout(t reflect.Type) agentAfterCBLayout {
+	if cached, ok := agentAfterCBLayouts.Load(t); ok {
+		return cached.(agentAfterCBLayout)
+	}
+	var layout agentAfterCBLayout
+	if sf, ok := t.FieldByName("Config"); ok && fieldPathExported(t, sf.Index) {
+		layout.configIndex = sf.Index
+	}
+	if sf, ok := t.FieldByName("afterAgentCallbacks"); ok {
+		layout.afterCBIndex = sf.Index
+	}
+	if sf, ok := t.FieldByName("Agent"); ok && fieldPathExported(t, sf.Index) {
+		layout.agentIndex = sf.Index
+	}
+	actual, _ := agentAfterCBLayouts.LoadOrStore(t, layout)
+	return actual.(agentAfterCBLayout)
+}
+
+func safeFieldByIndex(v reflect.Value, idx []int) (reflect.Value, bool) {
+	if len(idx) == 0 {
+		return reflect.Value{}, false
+	}
+	for _, i := range idx {
+		if v.Kind() == reflect.Pointer {
+			if v.IsNil() {
+				return reflect.Value{}, false
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			return reflect.Value{}, false
+		}
+		v = v.Field(i)
+	}
+	return v, true
+}
+
+// agentHasAfterAgentCallbacks reports whether a configures (or conservatively
+// may configure, when a's concrete layout cannot be unwrapped to ADK's base
+// agent within the bounded hop limit) agent-level AfterAgentCallbacks, which
+// ADK invokes after plugins' AfterAgentCallback hooks finish.
+func agentHasAfterAgentCallbacks(a agent.Agent) (res bool) {
+	if a == nil {
+		return false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			res = true
+		}
+	}()
+	for hop := range 4 {
+		v := reflect.ValueOf(a)
+		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+			if v.IsNil() {
+				return hop > 0
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			return true
+		}
+		vt := v.Type()
+		layout := lookupAgentAfterCBLayout(vt)
+		if vt.PkgPath() == agentPkgPath && vt.Name() == "agent" {
+			if len(layout.afterCBIndex) == 0 {
+				return true
+			}
+			cb, ok := safeFieldByIndex(v, layout.afterCBIndex)
+			if !ok || cb.Kind() != reflect.Slice {
+				return true
+			}
+			return cb.Len() > 0
+		}
+		if f, ok := safeFieldByIndex(v, layout.configIndex); ok && f.CanInterface() {
+			if cfg, ok := reflect.TypeAssert[llmagent.Config](f); ok && len(cfg.AfterAgentCallbacks) > 0 {
+				return true
+			}
+			if cfg, ok := reflect.TypeAssert[*llmagent.Config](f); ok && cfg != nil && len(cfg.AfterAgentCallbacks) > 0 {
+				return true
+			}
+		}
+		if len(layout.afterCBIndex) > 0 {
+			cb, ok := safeFieldByIndex(v, layout.afterCBIndex)
+			if !ok || cb.Kind() != reflect.Slice || cb.Len() > 0 {
+				return true
+			}
+		}
+		inner, ok := safeFieldByIndex(v, layout.agentIndex)
+		if !ok || !inner.CanInterface() {
+			return true
+		}
+		next, ok := reflect.TypeAssert[agent.Agent](inner)
+		if !ok || next == nil {
+			return true
+		}
+		a = next
+	}
+	return true
 }
 
 // identity holds the invocation fields of a row.
