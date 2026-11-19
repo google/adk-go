@@ -251,22 +251,22 @@ func guardedStructs() []guardedStruct {
 }
 
 // checkGuardLayout returns an error unless field 0 of gs is the unexported
-// blank `_ struct{}` guard of gs's own package at byte offset 0 and gs has
-// at least one exported field after it. Additional unexported fields after
-// field 0 are permitted here for non-value structs such as Config (which
-// already carries function and interface fields); the plain value structs
-// (RetryConfig, DropStats, GCSUploadRequest, and ViewDefinition) are pinned
-// separately with cmp.Equal so named unexported fields cannot break caller
-// comparisons.
+// blank `_ struct{}` guard of gs's own package at byte offset 0 tagged with
+// `json:"-"` and gs has at least one exported field after it. Additional
+// unexported fields after field 0 are permitted here for non-value structs such
+// as Config (which already carries function and interface fields); the plain
+// value structs (RetryConfig, DropStats, GCSUploadRequest, and ViewDefinition)
+// are pinned separately with cmp.Equal so named unexported fields cannot break
+// caller comparisons.
 func checkGuardLayout(gs guardedStruct) error {
 	rt := gs.typ
 	if rt.NumField() == 0 {
-		return fmt.Errorf("%s has no fields, want `_ struct{}` guard at field 0", gs.name)
+		return fmt.Errorf("%s has no fields, want `_ struct{} `json:\"-\"`` guard at field 0", gs.name)
 	}
 	guard := rt.Field(0)
-	if guard.Name != "_" || guard.Anonymous || guard.IsExported() || guard.PkgPath != rt.PkgPath() || guard.Type != reflect.TypeFor[struct{}]() || guard.Offset != 0 {
-		return fmt.Errorf("%s field 0 = {Name:%q PkgPath:%q Type:%v Offset:%d Anonymous:%v}, want unexported `_ struct{}` of %q at offset 0",
-			gs.name, guard.Name, guard.PkgPath, guard.Type, guard.Offset, guard.Anonymous, rt.PkgPath())
+	if guard.Name != "_" || guard.Anonymous || guard.IsExported() || guard.PkgPath != rt.PkgPath() || guard.Type != reflect.TypeFor[struct{}]() || guard.Offset != 0 || guard.Tag.Get("json") != "-" {
+		return fmt.Errorf("%s field 0 = {Name:%q PkgPath:%q Type:%v Offset:%d Anonymous:%v JSONTag:%q}, want unexported `_ struct{}` of %q at offset 0 with `json:\"-\"`",
+			gs.name, guard.Name, guard.PkgPath, guard.Type, guard.Offset, guard.Anonymous, guard.Tag.Get("json"), rt.PkgPath())
 	}
 	for i := 1; i < rt.NumField(); i++ {
 		if rt.Field(i).IsExported() {
@@ -345,6 +345,101 @@ func TestRetryConfig_ValidationErrorIncludesAllExportedFields(t *testing.T) {
 		if !strings.Contains(msg, sf.Name+":") {
 			t.Errorf("RetryConfig validation error %q does not include exported field %q", msg, sf.Name)
 		}
+	}
+}
+
+func TestGuardedStructs_JSONTagAndReflectionEncoderOmitsGuard(t *testing.T) {
+	// Mirror reflection encoders (such as Agent Engine streaming's ConvertSnake)
+	// that iterate all struct fields including unexported ones and only skip
+	// fields carrying `json:"-"`.
+	reflectEncodeKeys := func(v any) ([]string, error) {
+		rt := reflect.TypeOf(v)
+		var keys []string
+		for sf := range rt.Fields() {
+			if sf.Tag.Get("json") == "-" {
+				continue
+			}
+			if !sf.IsExported() {
+				return nil, fmt.Errorf("%s includes unexported field %q without `json:\"-\"`", rt.Name(), sf.Name)
+			}
+			keys = append(keys, sf.Name)
+		}
+		return keys, nil
+	}
+
+	for _, gs := range guardedStructs() {
+		t.Run(gs.name+"_ReflectEncoderSkipsGuard", func(t *testing.T) {
+			if got := gs.typ.Field(0).Tag.Get("json"); got != "-" {
+				t.Fatalf("%s field 0 json tag = %q, want %q", gs.name, got, "-")
+			}
+			v := reflect.Zero(gs.typ).Interface()
+			keys, err := reflectEncodeKeys(v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, k := range keys {
+				if k == "_" {
+					t.Fatalf("%s reflection encoder emitted %q key", gs.name, k)
+				}
+			}
+		})
+	}
+
+	// Verify encoding/json marshaling produces no "_" key and decodes cleanly
+	// with DisallowUnknownFields into structs matching the exported fields.
+	retry := agentanalytics.RetryConfig{
+		MaxRetries:   3,
+		InitialDelay: 100 * time.Millisecond,
+		MaxDelay:     10 * time.Second,
+		Multiplier:   2.0,
+	}
+	drops := agentanalytics.DropStats{
+		QueueFullDrops:        1,
+		AppendFailureDrops:    2,
+		RowErrorDrops:         3,
+		FormatterFailureDrops: 4,
+		ShutdownDrops:         5,
+		TotalDrops:            11,
+	}
+	upload := agentanalytics.GCSUploadRequest{
+		Path:        "prefix/obj.txt",
+		Data:        []byte("payload"),
+		ContentType: "text/plain",
+	}
+	view := agentanalytics.ViewDefinition{
+		Name:      "v_llm_request",
+		EventType: agentanalytics.EventLLMRequest,
+		Query:     "SELECT 1",
+	}
+
+	for _, tc := range []struct {
+		name string
+		val  any
+		dst  any
+	}{
+		{name: "RetryConfig", val: retry, dst: &agentanalytics.RetryConfig{}},
+		{name: "DropStats", val: drops, dst: &agentanalytics.DropStats{}},
+		{name: "GCSUploadRequest", val: upload, dst: &agentanalytics.GCSUploadRequest{}},
+		{name: "ViewDefinition", val: view, dst: &agentanalytics.ViewDefinition{}},
+	} {
+		t.Run(tc.name+"_StrictJSON", func(t *testing.T) {
+			raw, err := json.Marshal(tc.val)
+			if err != nil {
+				t.Fatalf("json.Marshal(%s) failed: %v", tc.name, err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatalf("json.Unmarshal(%s to map) failed: %v", tc.name, err)
+			}
+			if _, hasGuard := m["_"]; hasGuard {
+				t.Fatalf("json.Marshal(%s) emitted %q key in %s", tc.name, "_", raw)
+			}
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(tc.dst); err != nil {
+				t.Fatalf("strict json.Decode(%s) failed: %v (payload %s)", tc.name, err, raw)
+			}
+		})
 	}
 }
 
@@ -632,7 +727,7 @@ func unguardedFields(rt reflect.Type) reflect.Type {
 // probes as they do, which shows that adding fields like these to one of them
 // leaves those checks working.
 type syntheticGuardedStruct struct {
-	_ struct{}
+	_ struct{} `json:"-"`
 	*bytes.Buffer
 	Client   *http.Client
 	Done     chan struct{}
@@ -651,7 +746,7 @@ type syntheticGuardedStruct struct {
 // construction working and positional literals rejected (note that named
 // unexported fields would make cmp.Equal panic on plain value structs).
 type syntheticGuardedWithPrivateCache struct {
-	_     struct{}
+	_     struct{} `json:"-"`
 	Name  string
 	cache map[string]int
 	Count int
@@ -659,7 +754,7 @@ type syntheticGuardedWithPrivateCache struct {
 }
 
 type syntheticUnexportedGuarded struct {
-	_     struct{}
+	_     struct{} `json:"-"`
 	Value string
 }
 
@@ -670,6 +765,11 @@ type SyntheticGuardedAlias = syntheticUnexportedGuarded
 type syntheticNamedPrivateFirst struct {
 	cache int
 	Name  string
+}
+
+type syntheticMissingJSONTag struct {
+	_    struct{}
+	Name string
 }
 
 func TestStructLiterals_SyntheticGuardedStruct(t *testing.T) {
@@ -783,6 +883,14 @@ func TestStructLiterals_SyntheticGuardedStruct(t *testing.T) {
 	// guardedStruct records the explicit exported identifier rather than
 	// rt.Name() and when go/types imports a real source-checked type alias.
 	aliasGS := guardedStruct{name: "SyntheticGuardedAlias", typ: reflect.TypeFor[SyntheticGuardedAlias]()}
+	testPkgPath := reflect.TypeFor[syntheticGuardedStruct]().PkgPath()
+	if aliasGS.typ.PkgPath() != testPkgPath || aliasGS.typ.Name() != "syntheticUnexportedGuarded" {
+		t.Errorf("reflect.TypeFor[SyntheticGuardedAlias] = %q.%q, want %q.%q",
+			aliasGS.typ.PkgPath(), aliasGS.typ.Name(), testPkgPath, "syntheticUnexportedGuarded")
+	}
+	if err := checkGuardStructName(aliasGS); err == nil {
+		t.Errorf("checkGuardStructName(%s) = nil, want mismatch error for alias over unexported target", aliasGS.name)
+	}
 	if err := checkGuardLayout(aliasGS); err != nil {
 		t.Errorf("checkGuardLayout(%s) = %v, want nil", aliasGS.name, err)
 	}
@@ -797,7 +905,7 @@ func TestStructLiterals_SyntheticGuardedStruct(t *testing.T) {
 	aliasFile, err := parser.ParseFile(aliasFset, "alias_fixture.go", `package agentanalytics
 
 type syntheticUnexportedGuarded struct {
-	_     struct{}
+	_     struct{} `+"`json:\"-\"`"+`
 	Value string
 }
 
@@ -848,5 +956,11 @@ type SyntheticGuardedAlias = syntheticUnexportedGuarded
 	namedFirst := guardedStruct{name: "SyntheticNamedPrivateFirst", typ: reflect.TypeFor[syntheticNamedPrivateFirst]()}
 	if err := checkGuardLayout(namedFirst); err == nil {
 		t.Errorf("checkGuardLayout(%s) = nil, want an error", namedFirst.name)
+	}
+
+	// A guard field missing the `json:"-"` tag fails checkGuardLayout.
+	missingTag := guardedStruct{name: "SyntheticMissingJSONTag", typ: reflect.TypeFor[syntheticMissingJSONTag]()}
+	if err := checkGuardLayout(missingTag); err == nil {
+		t.Errorf("checkGuardLayout(%s) = nil, want an error", missingTag.name)
 	}
 }

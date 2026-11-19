@@ -87,7 +87,7 @@ type Logger interface {
 // batches during background or Close flushes are dropped directly.
 type RetryConfig struct {
 	// _ prevents unkeyed literals, which adding a field would break.
-	_            struct{}
+	_            struct{} `json:"-"`
 	MaxRetries   int
 	InitialDelay time.Duration
 	MaxDelay     time.Duration
@@ -113,7 +113,7 @@ type ContentFormatter func(payload any, eventType string) (any, error)
 // payload replacement or omission, which does not itself discard a row.
 type DropStats struct {
 	// _ prevents unkeyed literals, which adding a field would break.
-	_ struct{}
+	_ struct{} `json:"-"`
 	// QueueFullDrops counts events dropped because QueueMaxSize was reached.
 	QueueFullDrops int64 `json:"queue_full_drops"`
 	// AppendFailureDrops counts events dropped because a plugin callback or row
@@ -149,7 +149,7 @@ type DropStats struct {
 // GCSUploadRequest describes one payload to upload to Cloud Storage.
 type GCSUploadRequest struct {
 	// _ prevents unkeyed literals, which adding a field would break.
-	_ struct{}
+	_ struct{} `json:"-"`
 	// Path is the object name within the bucket. When Config.GCSPathPrefix is
 	// non-empty after trimming leading and trailing '/', Path begins with the
 	// effective prefix followed by "/" — either the '/'-trimmed
@@ -279,7 +279,7 @@ type GCSContentOffloader interface {
 // branch and node path fit (or the invocation span if none encloses them).
 type Config struct {
 	// _ prevents unkeyed literals, which adding a field would break.
-	_ struct{}
+	_ struct{} `json:"-"`
 
 	Enabled        bool
 	ProjectID      string
