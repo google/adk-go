@@ -38,9 +38,9 @@
 //	defer bqPlugin.Close()
 //
 // Calling Close on the returned plugin is idempotent across concurrent and
-// repeated calls: shutdown runs once, recovers any panic in an individual
-// cleanup step as an error so subsequent cleanup steps still run, and returns
-// the cached error result on every call.
+// repeated calls: shutdown runs once, recovers any panic on the calling
+// goroutine in an individual cleanup step as an error so subsequent cleanup
+// steps still run, and returns the cached error result on every call.
 //
 // Register this plugin before any plugin whose callbacks return replacement
 // events, model responses, tool results, or agent content. ADK invokes plugin

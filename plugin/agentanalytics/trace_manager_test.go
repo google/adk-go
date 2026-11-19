@@ -23533,7 +23533,7 @@ func TestHalfEndedInvocation(t *testing.T) {
 		tm.now = time.Now
 
 		if got := n.Load(); got != 1 {
-			t.Errorf("endInvocation called tm.now %d times, want 1", got)
+			t.Fatalf("endInvocation called tm.now %d times, want 1", got)
 		}
 		popped := tm.popLLMSpan(ctx, id, true)
 		if popped.spanID != started.spanID {
@@ -29478,5 +29478,240 @@ func TestTraceManager_LookalikeCountFollowsPushAndPop(t *testing.T) {
 	tm.popAgentSpan(ctx, id("root"))
 	if got := dups(); got != 0 {
 		t.Fatalf("after every agent ends: lookalikeDups = %d, want 0", got)
+	}
+}
+
+func TestRememberCompletedAtLocked_PrepareLateBeforeUnlinkAndClear(t *testing.T) {
+	t.Run("panic allocating late leaves active trace and open calls intact", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-prepare-late-panic", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		startedLLM := tm.pushLLMSpan(ctx, id)
+		startedTool := tm.pushToolSpan(ctx, id, "call-1")
+
+		tm.mu.Lock()
+		inv := tm.invocations[id.invocationID]
+		origRootSpanID := inv.rootSpanID
+		// Force late destination creation to require newSpanID() so panickingRandReader
+		// panics while allocating the late trace.
+		inv.rootSpanID = ""
+		tm.mu.Unlock()
+
+		uuid.SetRand(panickingRandReader{})
+		defer uuid.SetRand(nil)
+		t.Cleanup(func() { uuid.SetRand(nil) })
+
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			tm.endInvocation(ctx, id)
+		}()
+		uuid.SetRand(nil)
+
+		if recovered == nil {
+			t.Fatal("expected endInvocation to panic while allocating late trace with empty rootSpanID")
+		}
+
+		tm.mu.Lock()
+		stillActive := tm.invocations[id.invocationID]
+		inv.rootSpanID = origRootSpanID
+		tm.mu.Unlock()
+		if stillActive != inv {
+			t.Fatalf("tm.invocations[%q] = %p after late-allocation panic, want original active trace %p", id.invocationID, stillActive, inv)
+		}
+		inv.mu.Lock()
+		finished := inv.finished
+		inv.mu.Unlock()
+		if finished {
+			t.Fatal("inv.finished = true after late-allocation panic, want false")
+		}
+
+		poppedLLM := tm.popLLMSpan(ctx, id, true)
+		if poppedLLM.spanID != startedLLM.spanID {
+			t.Errorf("popLLMSpan spanID = %q, want started spanID %q", poppedLLM.spanID, startedLLM.spanID)
+		}
+		if poppedLLM.latency == nil {
+			t.Error("popLLMSpan latency = nil, want non-nil latency")
+		}
+
+		poppedTool, _, closedByError := tm.popToolSpan(ctx, id, "call-1", false)
+		if closedByError {
+			t.Error("popToolSpan closedByError = true, want false")
+		}
+		if poppedTool.spanID != startedTool.spanID {
+			t.Errorf("popToolSpan spanID = %q, want started spanID %q", poppedTool.spanID, startedTool.spanID)
+		}
+		if poppedTool.latency == nil {
+			t.Error("popToolSpan latency = nil, want non-nil latency")
+		}
+	})
+
+	t.Run("normal handover reuses saved rootSpanID without calling UUID generator", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-prepare-late-reuse-id", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		startedLLM := tm.pushLLMSpan(ctx, id)
+		startedTool := tm.pushToolSpan(ctx, id, "call-1")
+
+		uuid.SetRand(panickingRandReader{})
+		defer uuid.SetRand(nil)
+		t.Cleanup(func() { uuid.SetRand(nil) })
+
+		tm.endInvocation(ctx, id)
+		uuid.SetRand(nil)
+
+		poppedLLM := tm.popLLMSpan(ctx, id, true)
+		if poppedLLM.spanID != startedLLM.spanID || poppedLLM.latency == nil {
+			t.Errorf("popLLMSpan = (%q, %v), want (%q, non-nil)", poppedLLM.spanID, poppedLLM.latency, startedLLM.spanID)
+		}
+		poppedTool, _, _ := tm.popToolSpan(ctx, id, "call-1", false)
+		if poppedTool.spanID != startedTool.spanID || poppedTool.latency == nil {
+			t.Errorf("popToolSpan = (%q, %v), want (%q, non-nil)", poppedTool.spanID, poppedTool.latency, startedTool.spanID)
+		}
+	})
+}
+
+func TestForceEndInvocation_EvictedRunNeedsNoUUIDAndDeletesEvicted(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	tm.maxTracked = 2
+
+	evictedID := identity{invocationID: "inv-force-evicted", agentName: "evicted-root"}
+	origSpan := tm.invocationSpan(ctx, evictedID, nil)
+
+	keep1 := identity{invocationID: "inv-force-keep-1", agentName: "root-1"}
+	keep2 := identity{invocationID: "inv-force-keep-2", agentName: "root-2"}
+	tm.invocationSpan(ctx, keep1, nil)
+	tm.invocationSpan(ctx, keep2, nil)
+
+	tm.mu.Lock()
+	_, inEvictedBefore := tm.evicted[evictedID.invocationID]
+	tm.mu.Unlock()
+	if !inEvictedBefore {
+		t.Fatal("expected inv-force-evicted to be in tm.evicted before forceEndInvocation")
+	}
+
+	uuid.SetRand(panickingRandReader{})
+	defer uuid.SetRand(nil)
+	t.Cleanup(func() { uuid.SetRand(nil) })
+	tm.now = func() time.Time { panic("clock failing during forceEndInvocation") }
+
+	tm.forceEndInvocation(evictedID)
+
+	uuid.SetRand(nil)
+	tm.now = time.Now
+
+	tm.mu.Lock()
+	_, stillEvicted := tm.evicted[evictedID.invocationID]
+	completed := tm.completed[evictedID.invocationID]
+	_, keep1Active := tm.invocations[keep1.invocationID]
+	_, keep2Active := tm.invocations[keep2.invocationID]
+	tm.mu.Unlock()
+
+	if stillEvicted {
+		t.Fatal("inv-force-evicted remained in tm.evicted after forceEndInvocation")
+	}
+	if completed == nil {
+		t.Fatal("inv-force-evicted missing from tm.completed after forceEndInvocation")
+	}
+	if completed.identity.traceID != origSpan.traceID || completed.identity.spanID != origSpan.spanID {
+		t.Errorf("completed.identity = %+v, want traceID=%q spanID=%q", completed.identity, origSpan.traceID, origSpan.spanID)
+	}
+	if !keep1Active || !keep2Active {
+		t.Fatalf("active invocations displaced: keep1=%t keep2=%t, want true/true", keep1Active, keep2Active)
+	}
+
+	// A subsequent late callback must enter late state rather than recreating an
+	// active invocation that would displace keep1 or keep2 at capacity.
+	lateInv := tm.lookupInvocation(ctx, evictedID, false, false)
+	if !lateInv.isLate {
+		t.Fatal("lookupInvocation after forceEndInvocation returned non-late trace")
+	}
+	tm.mu.Lock()
+	_, keep1After := tm.invocations[keep1.invocationID]
+	_, keep2After := tm.invocations[keep2.invocationID]
+	tm.mu.Unlock()
+	if !keep1After || !keep2After {
+		t.Errorf("late callback displaced active runs at capacity: keep1=%t keep2=%t, want true/true", keep1After, keep2After)
+	}
+
+	if !raceEnabled {
+		// Re-seed tm.evicted while the completed slot exists to verify publishing
+		// the saved identity allocates zero throwaway traces or UUIDs.
+		allocs := testing.AllocsPerRun(50, func() {
+			tm.mu.Lock()
+			tm.evicted[evictedID.invocationID] = evictedTrace{
+				traceID:       origSpan.traceID,
+				spanID:        origSpan.spanID,
+				rootAgentName: evictedID.agentName,
+			}
+			tm.mu.Unlock()
+			tm.forceEndInvocation(evictedID)
+		})
+		if allocs != 0 {
+			t.Errorf("forceEndInvocation on evicted run allocated %v objects/op, want 0", allocs)
+		}
+	}
+}
+
+func TestRetireLateSettledLocked_FastSkipWith2048LiveActivations(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-late-2048-fast-skip"
+	lateReviewEnded(tm, invID)
+
+	for i := range 2048 {
+		aid := identity{
+			invocationID: invID,
+			agentName:    "worker",
+			path:         fmt.Sprintf("pw[%d]", i),
+		}
+		tm.pushAgentSpan(ctx, aid)
+	}
+	late := lateReviewTrace(t, tm, invID)
+	late.mu.Lock()
+	if got := len(late.agentStack) - 1; got != 2048 {
+		late.mu.Unlock()
+		t.Fatalf("live late activations = %d, want 2048", got)
+	}
+	// Mark partial states (runDone without contextEnded, and contextEnded without
+	// runDone) to verify neither triggers a full retirement scan on its own.
+	late.agentStack[1].runDone = true
+	late.agentStack[2].contextEnded = true
+	late.mu.Unlock()
+
+	if !raceEnabled {
+		late.mu.Lock()
+		allocs := testing.AllocsPerRun(50, func() {
+			late.retireLateSettledLocked()
+		})
+		late.mu.Unlock()
+		if allocs != 0 {
+			t.Errorf("retireLateSettledLocked with 2048 unsettled activations allocated %v objects/op, want 0", allocs)
+		}
+	}
+
+	// Unmatched late LLM and agent completions must leave all 2048 unsettled
+	// activations untouched.
+	tm.popLLMSpan(ctx, identity{invocationID: invID, agentName: "unmatched", path: "other"}, true)
+	tm.popAgentSpan(ctx, identity{invocationID: invID, agentName: "unmatched", path: "other"})
+	if got := len(lateReviewStack(t, tm, invID)); got != 2048 {
+		t.Fatalf("late activations after unmatched pops = %d, want 2048", got)
+	}
+
+	// Once a leaf activation has both runDone and contextEnded (and responded so
+	// it is not held as unresponded), an unmatched popLLMSpan still retires it.
+	late.mu.Lock()
+	leaf := late.agentStack[len(late.agentStack)-1]
+	leaf.hasResponse = true
+	leaf.runDone = true
+	leaf.contextEnded = true
+	late.mu.Unlock()
+
+	tm.popLLMSpan(ctx, identity{invocationID: invID, agentName: "unmatched", path: "other"}, true)
+	if got := len(lateReviewStack(t, tm, invID)); got != 2047 {
+		t.Fatalf("late activations after settling one leaf = %d, want 2047", got)
 	}
 }

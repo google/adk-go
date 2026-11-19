@@ -603,9 +603,19 @@ type recordedError struct {
 }
 
 func newInvocationTraceWithSpan(sc trace.SpanContext, traceID string, now time.Time) *invocationTrace {
-	root := &spanRecord{spanID: newSpanID(), kind: spanKindInvocation, start: now}
+	return newInvocationTraceWithKnownSpan(sc, traceID, "", now)
+}
+
+func newInvocationTraceWithKnownSpan(sc trace.SpanContext, traceID, spanID string, now time.Time) *invocationTrace {
+	if spanID == "" {
+		spanID = newSpanID()
+	}
+	if traceID == "" && !sc.IsValid() {
+		traceID = newTraceID()
+	}
+	root := &spanRecord{spanID: spanID, kind: spanKindInvocation, start: now}
 	inv := &invocationTrace{
-		traceID:           cmp.Or(traceID, newTraceID()),
+		traceID:           traceID,
 		rootSpanID:        root.spanID,
 		pendingSpans:      new(atomic.Int64),
 		parentAgent:       map[string]string{},
@@ -2820,51 +2830,119 @@ func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv
 // task-local state and RunLive tool goroutines can outlive
 // AfterRunCallback, so open calls are handed to the late state instead.
 func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, inv *invocationTrace, now time.Time) {
-	// Unlink active and evicted entries before marking inv finished so a panic
-	// during handover can never leave a finished invocation reachable from
-	// tm.invocations.
-	delete(tm.evicted, invocationID)
-	delete(tm.invocations, invocationID)
+	savedID := inv.savedIdentity()
+	existing := tm.completed[invocationID]
+	var panicVal any
+	var panicked bool
 
-	completed := tm.completed[invocationID]
-	if completed == nil {
-		completed = &completedTrace{position: tm.completionOrder.PushBack(invocationID)}
-		tm.completed[invocationID] = completed
-	} else {
-		tm.completionOrder.MoveToBack(completed.position)
-	}
-	completed.identity = inv.savedIdentity()
-	if inv.pendingSpans.Load() > 0 {
-		completed.livePending = inv.pendingSpans
-	} else if completed.livePending != nil && completed.livePending.Load() == 0 {
-		completed.livePending = nil
-	}
-	var lastSeq uint64
-	var models, endedModels, tools, endedTools map[string]*spanRecord
 	func() {
 		inv.mu.Lock()
 		defer inv.mu.Unlock()
+		_ = inv.agentStack[0]
+		lastSeq := inv.lastSeq
+		models, endedModels := startedCalls(inv.llmSpans), startedCalls(inv.completedModels)
+		maps.DeleteFunc(models, func(_ string, rec *spanRecord) bool { return rec.streamed || rec.endedWithRun(runner) })
+		tools, endedTools := startedCalls(inv.toolSpans), startedCalls(inv.completedTools)
+		maps.DeleteFunc(tools, func(_ string, rec *spanRecord) bool { return rec.endedWithRun(runner) })
+
+		// Prepare and populate the late destination (or merged ended-call maps)
+		// before unlinking inv from tm or clearing inv's call maps, so a panic
+		// while allocating or populating late leaves the active trace and its open
+		// calls intact.
+		var preparedLate *invocationTrace
+		var nextEndedModels, nextEndedTools map[string]*spanRecord
+		if len(models)+len(tools) > 0 {
+			if now.IsZero() {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							panicVal = r
+							panicked = true
+							now = time.Now()
+						}
+					}()
+					now = tm.now()
+				}()
+			}
+			if existing != nil && existing.late != nil {
+				preparedLate = existing.late
+			} else {
+				preparedLate = newInvocationTraceWithKnownSpan(trace.SpanContext{}, savedID.traceID, savedID.spanID, now)
+				preparedLate.isLate = true
+				preparedLate.restoreEvicted(savedID)
+				if existing != nil {
+					maps.Copy(preparedLate.completedModels, existing.endedModels)
+					maps.Copy(preparedLate.completedTools, existing.endedTools)
+				}
+			}
+		} else if existing != nil && existing.late != nil {
+			preparedLate = existing.late
+		}
+
+		if preparedLate != nil {
+			func() {
+				preparedLate.mu.Lock()
+				defer preparedLate.mu.Unlock()
+				preparedLate.lastSeq = max(preparedLate.lastSeq, lastSeq)
+				maps.Copy(preparedLate.llmSpans, models)
+				maps.Copy(preparedLate.completedModels, endedModels)
+				maps.Copy(preparedLate.toolSpans, tools)
+				maps.Copy(preparedLate.completedTools, endedTools)
+				for _, rec := range models {
+					rec.handedOver = true
+				}
+				for _, rec := range tools {
+					rec.handedOver = true
+				}
+				preparedLate.syncOpenCallsLocked()
+			}()
+		} else {
+			var prevModels, prevTools map[string]*spanRecord
+			if existing != nil {
+				prevModels, prevTools = existing.endedModels, existing.endedTools
+			}
+			nextEndedModels = withCalls(prevModels, endedModels)
+			nextEndedTools = withCalls(prevTools, endedTools)
+		}
+
+		if existing == nil {
+			existing = &completedTrace{position: tm.completionOrder.PushBack(invocationID)}
+			tm.completed[invocationID] = existing
+		} else {
+			tm.completionOrder.MoveToBack(existing.position)
+		}
+
+		// Unlink active and evicted entries before marking inv finished so a panic
+		// after handover can never leave a finished invocation reachable from
+		// tm.invocations.
+		if cur := tm.invocations[invocationID]; cur == nil || cur == inv {
+			if ev, ok := tm.evicted[invocationID]; ok && (cur == inv || savedID.spanID == "" || ev.spanID == "" || ev.spanID == savedID.spanID) {
+				delete(tm.evicted, invocationID)
+			}
+			delete(tm.invocations, invocationID)
+		}
+		existing.identity = savedID
+		if inv.pendingSpans.Load() > 0 {
+			existing.livePending = inv.pendingSpans
+		} else if existing.livePending != nil && existing.livePending.Load() == 0 {
+			existing.livePending = nil
+		}
+		if preparedLate != nil {
+			existing.endedModels, existing.endedTools = nil, nil
+			existing.late = preparedLate
+		} else {
+			existing.endedModels = nextEndedModels
+			existing.endedTools = nextEndedTools
+		}
+
 		inv.agentStack[0].dropContexts()
 		inv.runnerAgent = nil
-		lastSeq = inv.lastSeq
-		models, endedModels = startedCalls(inv.llmSpans), startedCalls(inv.completedModels)
-		maps.DeleteFunc(models, func(_ string, rec *spanRecord) bool { return rec.streamed || rec.endedWithRun(runner) })
-		tools, endedTools = startedCalls(inv.toolSpans), startedCalls(inv.completedTools)
-		maps.DeleteFunc(tools, func(_ string, rec *spanRecord) bool { return rec.endedWithRun(runner) })
-		// The late state keeps no context of the run's callbacks: the calls that
-		// are open drop theirs here, and those that ended did when they ended.
-		// The open ones are marked as handed over, so that the run waits for late
-		// calls only while one of them is open (see waitsForLateCalls).
 		for _, rec := range models {
 			rec.dropContexts()
-			rec.handedOver = true
 		}
 		for _, rec := range tools {
 			rec.dropContexts()
-			rec.handedOver = true
 		}
-		// Mark inv finished and clear its call maps last, once nothing left in
-		// this critical section can panic, so no half-cleared state is left.
 		inv.finished = true
 		clear(inv.llmSpans)
 		clear(inv.completedModels)
@@ -2872,49 +2950,33 @@ func (tm *traceManager) rememberCompletedAtLocked(invocationID, runner string, i
 		clear(inv.completedTools)
 		inv.syncOpenCallsLocked()
 	}()
-	var panicVal any
-	var panicked bool
-	if len(models)+len(tools) > 0 {
-		if now.IsZero() {
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						panicVal = r
-						panicked = true
-						now = time.Now()
-					}
-				}()
-				now = tm.now()
-			}()
-		}
-		tm.lateLocked(completed, trace.SpanContext{}, completed.identity.traceID, now)
-	}
-	handoverCompletedCalls(completed, lastSeq, models, endedModels, tools, endedTools)
 	if panicked {
 		panic(panicVal)
 	}
+	tm.pruneCompletedToLimitLocked()
+}
+
+func (tm *traceManager) publishCompletedIdentityLocked(invocationID string, saved evictedTrace) {
+	delete(tm.evicted, invocationID)
+	delete(tm.invocations, invocationID)
+	completed := tm.completed[invocationID]
+	if completed == nil {
+		completed = &completedTrace{position: tm.completionOrder.PushBack(invocationID)}
+		tm.completed[invocationID] = completed
+	} else {
+		tm.completionOrder.MoveToBack(completed.position)
+		if completed.livePending != nil && completed.livePending.Load() == 0 {
+			completed.livePending = nil
+		}
+	}
+	completed.identity = saved
+}
+
+func (tm *traceManager) pruneCompletedToLimitLocked() {
 	limit := max(tm.maxTracked, 64)
 	tm.pruneWaitingLocked(limit, limit/2)
 	tm.pruneCompletedLocked(limit, func(c *completedTrace) bool { return !c.hasPendingOrOpenLateSpans() })
 	tm.pruneCompletedLocked(limit, func(c *completedTrace) bool { return !c.hasPendingSpans() })
-}
-
-func handoverCompletedCalls(completed *completedTrace, lastSeq uint64, models, endedModels, tools, endedTools map[string]*spanRecord) {
-	if late := completed.late; late != nil {
-		func() {
-			late.mu.Lock()
-			defer late.mu.Unlock()
-			late.lastSeq = max(late.lastSeq, lastSeq)
-			maps.Copy(late.llmSpans, models)
-			maps.Copy(late.completedModels, endedModels)
-			maps.Copy(late.toolSpans, tools)
-			maps.Copy(late.completedTools, endedTools)
-			late.syncOpenCallsLocked()
-		}()
-		return
-	}
-	completed.endedModels = withCalls(completed.endedModels, endedModels)
-	completed.endedTools = withCalls(completed.endedTools, endedTools)
 }
 
 // lateLocked returns the late state of completed, and makes it, with the
@@ -2925,7 +2987,7 @@ func (tm *traceManager) lateLocked(completed *completedTrace, sc trace.SpanConte
 		completed.livePending = nil
 	}
 	if completed.late == nil {
-		late := newInvocationTraceWithSpan(sc, traceID, now)
+		late := newInvocationTraceWithKnownSpan(sc, cmp.Or(traceID, completed.identity.traceID), completed.identity.spanID, now)
 		late.isLate = true
 		late.restoreEvicted(completed.identity)
 		maps.Copy(late.completedModels, completed.endedModels)
@@ -3090,12 +3152,92 @@ func (tm *traceManager) invocationSpan(ctx context.Context, id identity, runner 
 	return span
 }
 
+// runEndTarget binds afterRun's completion and fallback cleanup to the
+// invocation trace (or saved evicted identity) of the run being ended, so a
+// retry after a recovered panic cannot finish a resumed run that started under
+// the same invocation ID in the meantime.
+type runEndTarget struct {
+	inv        *invocationTrace
+	evicted    evictedTrace
+	hasEvicted bool
+	bound      bool
+}
+
+func (t runEndTarget) rootSpanID() string {
+	if t.inv != nil {
+		return t.inv.rootSpanID
+	}
+	if t.hasEvicted {
+		return t.evicted.spanID
+	}
+	return ""
+}
+
+func (tm *traceManager) captureRunEndTarget(invocationID string) runEndTarget {
+	if tm == nil || invocationID == "" {
+		return runEndTarget{}
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if inv := tm.invocations[invocationID]; inv != nil {
+		return runEndTarget{inv: inv, bound: true}
+	}
+	if ev, ok := tm.evicted[invocationID]; ok {
+		return runEndTarget{evicted: ev, hasEvicted: true, bound: true}
+	}
+	return runEndTarget{}
+}
+
+func (tm *traceManager) refreshRunEndTarget(invocationID string, cur runEndTarget) runEndTarget {
+	if tm == nil || invocationID == "" {
+		return cur
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	inv := tm.invocations[invocationID]
+	if inv == nil {
+		return cur
+	}
+	if !cur.bound || inv == cur.inv || (cur.rootSpanID() != "" && inv.rootSpanID == cur.rootSpanID()) {
+		return runEndTarget{inv: inv, bound: true}
+	}
+	return cur
+}
+
+func finishDetachedTrace(inv *invocationTrace) {
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	if inv.finished {
+		return
+	}
+	if len(inv.agentStack) > 0 && inv.agentStack[0] != nil {
+		inv.agentStack[0].dropContexts()
+	}
+	inv.runnerAgent = nil
+	for _, rec := range inv.llmSpans {
+		rec.dropContexts()
+	}
+	for _, rec := range inv.toolSpans {
+		rec.dropContexts()
+	}
+	inv.finished = true
+	clear(inv.llmSpans)
+	clear(inv.completedModels)
+	clear(inv.toolSpans)
+	clear(inv.completedTools)
+	inv.syncOpenCallsLocked()
+}
+
 // endInvocation stops tracking the invocation and returns the place of its
 // INVOCATION_COMPLETED row, with the invocation latency if the invocation
 // was tracked from its start without being evicted mid-run. Its identity stays
 // in a separate bounded cache for late callbacks. A new run with the same ID
 // discards that completed state; capacity pruning can remove idle entries earlier.
 func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan {
+	return tm.endInvocationTarget(ctx, id, nil)
+}
+
+func (tm *traceManager) endInvocationTarget(ctx context.Context, id identity, target *runEndTarget) rowSpan {
 	now := tm.now()
 	sc := ambientSpanContext(ctx)
 	ambient := ""
@@ -3108,12 +3250,34 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 			tm.mu.Lock()
 			defer tm.mu.Unlock()
 			inv = tm.invocations[id.invocationID]
+			if inv != nil && target != nil && target.bound {
+				wantSpanID := target.rootSpanID()
+				if inv != target.inv && (wantSpanID == "" || inv.rootSpanID != wantSpanID) {
+					inv = target.inv
+				}
+			}
+			if inv == nil && target != nil && target.inv != nil {
+				inv = target.inv
+			}
 			if inv == nil {
-				inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
 				if ev, ok := tm.evicted[id.invocationID]; ok {
+					inv = newInvocationTraceWithKnownSpan(sc, cmp.Or(ev.traceID, tm.traceIDFor(id.invocationID)), ev.spanID, now)
 					inv.restoreEvicted(ev)
+				} else if target != nil && target.hasEvicted {
+					inv = newInvocationTraceWithKnownSpan(sc, cmp.Or(target.evicted.traceID, tm.traceIDFor(id.invocationID)), target.evicted.spanID, now)
+					inv.restoreEvicted(target.evicted)
 				} else if completed := tm.completed[id.invocationID]; completed != nil {
+					inv = newInvocationTraceWithKnownSpan(sc, cmp.Or(completed.identity.traceID, tm.traceIDFor(id.invocationID)), completed.identity.spanID, now)
 					inv.restoreEvicted(completed.identity)
+				} else {
+					inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
+				}
+			}
+			if target != nil {
+				if !target.bound {
+					*target = runEndTarget{inv: inv, bound: true}
+				} else if target.inv == nil {
+					target.inv = inv
 				}
 			}
 		}()
@@ -3138,6 +3302,10 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 		func() {
 			tm.mu.Lock()
 			defer tm.mu.Unlock()
+			if cur := tm.invocations[id.invocationID]; cur != nil && cur != inv && cur.rootSpanID != inv.rootSpanID {
+				finishDetachedTrace(inv)
+				return
+			}
 			// Publish the final identity, including any trace adopted by rowSpan,
 			// and remove active state before marking inv finished. Late Live
 			// callbacks may start and end an operation, so their state is shared
@@ -3146,6 +3314,35 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 		}()
 	}
 	return row
+}
+
+func (tm *traceManager) endInvocationRetry(ctx context.Context, id identity, target runEndTarget) {
+	if tm == nil || id.invocationID == "" {
+		return
+	}
+	if target.inv != nil {
+		var alreadyFinished bool
+		func() {
+			target.inv.mu.Lock()
+			defer target.inv.mu.Unlock()
+			alreadyFinished = target.inv.finished
+		}()
+		if alreadyFinished {
+			return
+		}
+	}
+	now := tm.now()
+	if target.inv != nil {
+		rootIn := prepareRootAgentInput(ctx, target.inv, id, nil, nil)
+		func() {
+			target.inv.mu.Lock()
+			defer target.inv.mu.Unlock()
+			if !target.inv.finished {
+				target.inv.noteRootAgentLocked(id, rootIn, false)
+			}
+		}()
+	}
+	tm.completeRunEndTarget(id, target, now)
 }
 
 // forceEndInvocation publishes completion bookkeeping and clears active and
@@ -3158,16 +3355,99 @@ func (tm *traceManager) forceEndInvocation(id identity) {
 	now := time.Now()
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	inv := tm.invocations[id.invocationID]
-	if inv == nil {
-		inv = newInvocationTraceWithSpan(trace.SpanContext{}, tm.traceIDFor(id.invocationID), now)
-		if ev, ok := tm.evicted[id.invocationID]; ok {
-			inv.restoreEvicted(ev)
-		} else if completed := tm.completed[id.invocationID]; completed != nil {
-			inv.restoreEvicted(completed.identity)
+	if inv := tm.invocations[id.invocationID]; inv != nil {
+		tm.rememberCompletedAtLocked(id.invocationID, id.agentName, inv, now)
+		return
+	}
+	var saved evictedTrace
+	if ev, ok := tm.evicted[id.invocationID]; ok {
+		saved = ev
+		if saved.traceID == "" {
+			saved.traceID = tm.traceIDFor(id.invocationID)
+		}
+	} else if completed := tm.completed[id.invocationID]; completed != nil {
+		saved = completed.identity
+	} else {
+		saved = evictedTrace{
+			traceID:       tm.traceIDFor(id.invocationID),
+			rootAgentName: id.agentName,
+			lastActive:    now.UnixNano(),
 		}
 	}
-	tm.rememberCompletedAtLocked(id.invocationID, id.agentName, inv, now)
+	tm.publishCompletedIdentityLocked(id.invocationID, saved)
+	tm.pruneCompletedToLimitLocked()
+}
+
+func (tm *traceManager) forceEndInvocationTarget(id identity, target runEndTarget) {
+	if tm == nil || id.invocationID == "" {
+		return
+	}
+	tm.completeRunEndTarget(id, target, time.Now())
+}
+
+func (tm *traceManager) completeRunEndTarget(id identity, target runEndTarget, now time.Time) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if target.inv != nil {
+		var alreadyFinished bool
+		func() {
+			target.inv.mu.Lock()
+			defer target.inv.mu.Unlock()
+			alreadyFinished = target.inv.finished
+		}()
+		if alreadyFinished {
+			return
+		}
+		if cur := tm.invocations[id.invocationID]; cur != nil {
+			if cur == target.inv || (target.inv.rootSpanID != "" && cur.rootSpanID == target.inv.rootSpanID) {
+				tm.rememberCompletedAtLocked(id.invocationID, id.agentName, cur, now)
+				return
+			}
+			finishDetachedTrace(target.inv)
+			return
+		}
+		tm.rememberCompletedAtLocked(id.invocationID, id.agentName, target.inv, now)
+		return
+	}
+	if target.hasEvicted {
+		if cur := tm.invocations[id.invocationID]; cur != nil {
+			if target.evicted.spanID != "" && cur.rootSpanID == target.evicted.spanID {
+				tm.rememberCompletedAtLocked(id.invocationID, id.agentName, cur, now)
+			}
+			return
+		}
+		if completed := tm.completed[id.invocationID]; completed != nil && completed.identity.spanID == target.evicted.spanID {
+			if ev, ok := tm.evicted[id.invocationID]; ok && ev.spanID == target.evicted.spanID {
+				delete(tm.evicted, id.invocationID)
+			}
+			return
+		}
+		saved := target.evicted
+		if ev, ok := tm.evicted[id.invocationID]; ok {
+			if ev.spanID != target.evicted.spanID {
+				return
+			}
+			saved = ev
+		}
+		if saved.traceID == "" {
+			saved.traceID = tm.traceIDFor(id.invocationID)
+		}
+		tm.publishCompletedIdentityLocked(id.invocationID, saved)
+		tm.pruneCompletedToLimitLocked()
+		return
+	}
+	if tm.invocations[id.invocationID] != nil || tm.completed[id.invocationID] != nil {
+		return
+	}
+	if _, ok := tm.evicted[id.invocationID]; ok {
+		return
+	}
+	tm.publishCompletedIdentityLocked(id.invocationID, evictedTrace{
+		traceID:       tm.traceIDFor(id.invocationID),
+		rootAgentName: id.agentName,
+		lastActive:    now.UnixNano(),
+	})
+	tm.pruneCompletedToLimitLocked()
 }
 
 // popDelegatingAgentSpan ends the activation of the agent of id that a task
@@ -5411,6 +5691,14 @@ func (inv *invocationTrace) retireLateSettledLocked() {
 	if !inv.isLate || len(inv.agentStack) <= 1 {
 		return
 	}
+	hasSettled := func() bool {
+		return slices.ContainsFunc(inv.agentStack[1:], func(rec *spanRecord) bool {
+			return rec.runDone && rec.contextEnded
+		})
+	}
+	if !hasSettled() {
+		return
+	}
 	// The lineage of a failed activation follows parent even across an
 	// activation that already retired, as subtreeLocked does.
 	failed := inv.openCallOwnersLocked(nil)
@@ -5442,7 +5730,7 @@ func (inv *invocationTrace) retireLateSettledLocked() {
 	// node path below that span's, and of the ones under them.
 	invSpan := inv.agentStack[0]
 	var retired []*spanRecord
-	for {
+	for hasSettled() {
 		openAgents := make(map[string]bool, len(inv.agentStack))
 		for _, rec := range inv.agentStack[1:] {
 			openAgents[rec.spanID] = true
