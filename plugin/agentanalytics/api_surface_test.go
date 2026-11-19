@@ -67,23 +67,26 @@ func TestStructLiterals_ExternalKeyedComparableAndJSON(t *testing.T) {
 	dropsA := agentanalytics.DropStats{
 		QueueFullDrops:        1,
 		AppendFailureDrops:    2,
+		RowErrorDrops:         5,
 		FormatterFailureDrops: 3,
 		ShutdownDrops:         4,
-		TotalDrops:            7,
+		TotalDrops:            12,
 	}
 	dropsB := agentanalytics.DropStats{
 		QueueFullDrops:        1,
 		AppendFailureDrops:    2,
+		RowErrorDrops:         5,
 		FormatterFailureDrops: 3,
 		ShutdownDrops:         4,
-		TotalDrops:            7,
+		TotalDrops:            12,
 	}
 	dropsC := agentanalytics.DropStats{
 		QueueFullDrops:        1,
 		AppendFailureDrops:    2,
+		RowErrorDrops:         5,
 		FormatterFailureDrops: 3,
 		ShutdownDrops:         4,
-		TotalDrops:            8,
+		TotalDrops:            13,
 	}
 	if dropsA != dropsB {
 		t.Fatalf("equal DropStats values compared unequal: %#v != %#v", dropsA, dropsB)
@@ -96,7 +99,7 @@ func TestStructLiterals_ExternalKeyedComparableAndJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal(DropStats) failed: %v", err)
 	}
-	const wantJSON = `{"queue_full_drops":1,"append_failure_drops":2,"formatter_failure_drops":3,"shutdown_drops":4,"total_drops":7}`
+	const wantJSON = `{"queue_full_drops":1,"append_failure_drops":2,"row_error_drops":5,"formatter_failure_drops":3,"shutdown_drops":4,"total_drops":12}`
 	if string(gotJSON) != wantJSON {
 		t.Fatalf("json.Marshal(DropStats) = %s, want %s", gotJSON, wantJSON)
 	}

@@ -938,7 +938,7 @@ func TestViews_JSONPathsMatchEmittedPayloads(t *testing.T) {
 	// valid scalars/objects and parse under BigQuery CAST rules.
 	t.Run("live plugin callbacks emit JSON keys matching view definitions", func(t *testing.T) {
 		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
-			c.CustomMetadataAllowlist = []string{"adk_compaction", "adk_agent_state", "end_of_agent"}
+			c.CustomMetadataAllowlist = []string{"adk_compaction"}
 		})
 		mCtx.functionCallID = "call-42"
 
