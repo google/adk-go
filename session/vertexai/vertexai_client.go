@@ -412,7 +412,8 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		// Context cache state has no column either. Without it the next
 		// invocation cannot find the cache the last one created, and creates
 		// another while the first stays on the provider until its TTL runs out.
-		event.CacheMetadata != nil
+		event.CacheMetadata != nil ||
+		event.Actions.SetModelResponse != nil
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for

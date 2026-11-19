@@ -288,20 +288,20 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 	text := b.String()
 
 	var output any
-	// parsed stays nil for a reply of literal null, which validates as a nil
-	// map when the schema has no required fields.
-	var parsed map[string]any
+	// hasParsedOutput stays false for a reply of literal null, which validates
+	// as a nil map when the schema has no required fields or unmarshals as nil.
+	hasParsedOutput := false
 	switch {
 	case state.OutputSchema != nil:
 		if strings.TrimSpace(text) == "" {
 			output = nil
 		} else {
-			var err error
-			parsed, err = utils.ValidateOutputSchema(text, state.OutputSchema)
+			parsed, err := utils.ValidateOutputSchema(text, state.OutputSchema)
 			if err != nil {
 				return fmt.Errorf("LlmAgent %q output validation failed: %w", a.Name(), err)
 			}
 			output = parsed
+			hasParsedOutput = parsed != nil
 		}
 	case state.OutputJsonSchema != nil:
 		if strings.TrimSpace(text) == "" {
@@ -314,6 +314,7 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 				return fmt.Errorf("LlmAgent %q output is not valid JSON: %w", a.Name(), err)
 			}
 			output = parsed
+			hasParsedOutput = parsed != nil
 		}
 	default:
 		output = text
@@ -330,11 +331,11 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 
 	// The runner drops Output from events flagged MessageAsOutput, which
 	// would discard a non-null parsed value, so that case skips the flag. For a
-	// null reply Output holds a nil map. The database and Vertex AI session
-	// services write it as JSON null and read back no output, so the flag
-	// keeps the reply text as the node output once the event is stored. The
-	// in-memory service keeps the nil map as it is.
-	if parsed != nil {
+	// null reply Output holds nil or a nil map. The database and Vertex AI
+	// session services write it as JSON null and read back no output, so the
+	// flag keeps the reply text as the node output once the event is stored.
+	// The in-memory service keeps the nil map as it is.
+	if hasParsedOutput {
 		return nil
 	}
 	if ev.NodeInfo == nil {

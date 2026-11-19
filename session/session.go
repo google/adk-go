@@ -367,8 +367,7 @@ type EventActions struct {
 	// value the model sent for any other schema. The flow ends the agent's turn
 	// with a text event holding this value as JSON. Nil means no answer was
 	// stored, so a stored answer is never nil; an empty list is a stored answer.
-	// Only the set_model_response tool writes it. The Vertex AI session service
-	// does not persist it.
+	// Only the set_model_response tool writes it.
 	SetModelResponse any `json:"setModelResponse,omitempty"`
 
 	// Compaction, when non-nil, marks this event as a context-compaction

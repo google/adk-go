@@ -316,14 +316,27 @@ func TestOutputJSONSchema_FinalTextIsParsed(t *testing.T) {
 			}
 
 			want := map[string]any{"a": float64(1)}
-			var delta any
+			var (
+				delta   any
+				finalEv *session.Event
+			)
 			for _, ev := range events {
 				if v, ok := ev.Actions.StateDelta["out"]; ok {
 					delta = v
+					finalEv = ev
 				}
 			}
 			if diff := cmp.Diff(want, delta); diff != "" {
 				t.Errorf("state delta %q mismatch (-want +got):\n%s", "out", diff)
+			}
+			if finalEv == nil {
+				t.Fatal("missing final event with state delta")
+			}
+			if diff := cmp.Diff(want, finalEv.Output); diff != "" {
+				t.Errorf("final event Output mismatch (-want +got):\n%s", diff)
+			}
+			if finalEv.NodeInfo != nil && finalEv.NodeInfo.MessageAsOutput {
+				t.Errorf("final event NodeInfo.MessageAsOutput = true, want false when parsed JSON output is stored on Output")
 			}
 			resp, err := svc.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
 			if err != nil {
