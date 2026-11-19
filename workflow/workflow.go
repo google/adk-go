@@ -277,6 +277,14 @@ func WithNodeRootWrapper() Option {
 // Does NOT apply to dynamic sub-nodes invoked via workflow.RunNode
 // from inside a DynamicNode body — they are awaited inline by the
 // parent and gating them would deadlock.
+//
+// The cap counts the graph-scheduled nodes of this workflow in one run,
+// wherever the workflow runs: as a root built with agent.New over [Workflow.Run],
+// with workflowagent.Config.MaxConcurrency, as a [NewWorkflowNodeWithOptions]
+// node that is runner.Config.Node, nested in another workflow, or run by
+// [RunNode]. A nested workflow counts as one node of its parent, its own cap
+// applies inside it, and the parent's cap does not reach its nodes. The cap
+// holds after a resume.
 func WithMaxConcurrency(n int) Option {
 	return func(o *workflowOptions) {
 		if n < 0 {
@@ -307,6 +315,16 @@ func WithMaxConcurrency(n int) Option {
 // enclosing workflow's. A node's own [NodeConfig.StateSchema] replaces this
 // schema for that node.
 //
+// The schema applies to this workflow's nodes wherever the workflow runs and
+// on every turn of a resumed run. A nested workflow's own schema, given to
+// [NewWorkflowNodeWithOptions], replaces its parent's for its nodes; a
+// workflowagent run as an [AgentNode] with workflowagent.Config.StateSchema
+// behaves the same. A write that a resumed turn makes is refused in the
+// placements that continue a paused run: workflowagent.New, and a
+// [NewWorkflowNodeWithOptions] node that is runner.Config.Node. An agent built
+// with agent.New over [Workflow.Run] does not continue a paused run: on a later
+// turn the answer is not delivered and the node asks again.
+//
 // s is shared by every run of the workflow and is never modified.
 func WithStateSchema(s *jsonschema.Resolved) Option {
 	return func(o *workflowOptions) {
@@ -335,6 +353,9 @@ func WithStateSchema(s *jsonschema.Resolved) Option {
 // [Workflow.ReconstructRunState] validates the input it rebuilds from
 // history in the same way and returns the same error.
 //
+// Given to [NewWorkflowNodeWithOptions], s is the node's input schema, as
+// [NewWorkflowNodeWithSchemas] sets it.
+//
 // s is shared by every run of the workflow and is never modified.
 func WithInputSchema(s *jsonschema.Resolved) Option {
 	return func(o *workflowOptions) {
@@ -358,6 +379,10 @@ func WithInputSchema(s *jsonschema.Resolved) Option {
 // [ErrMultipleTerminalOutputs] before the schema is consulted. The value
 // validation produces is not emitted; the terminal node's event keeps the
 // output it yielded.
+//
+// Given to [NewWorkflowNodeWithOptions], s is the node's output schema, as
+// [NewWorkflowNodeWithSchemas] sets it, and the next node receives the
+// coerced value.
 //
 // s is shared by every run of the workflow and is never modified.
 func WithOutputSchema(s *jsonschema.Resolved) Option {
@@ -515,6 +540,12 @@ func (w *Workflow) OutputSchema() *jsonschema.Resolved {
 // effects, yields events to the caller, and schedules successors
 // when nodes complete. The consumer is the only mutator of the
 // per-node lifecycle map and of session state.
+//
+// Run has no resume detection: every call starts the graph from Start, as an
+// agent built with agent.New(agent.Config{Run: w.Run}) does on each turn. To
+// continue a paused or failed run on a later turn, run the workflow with
+// workflowagent.New, or as a [NewWorkflowNodeWithOptions] node that is
+// runner.Config.Node.
 func (w *Workflow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	var c agent.Context
 	if !w.isRootWrapper && w.Name() != "" {
