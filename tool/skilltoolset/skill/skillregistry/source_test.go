@@ -19,11 +19,13 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	agentregistry "google.golang.org/api/agentregistry/v1alpha"
+	"google.golang.org/api/googleapi"
 
 	"google.golang.org/adk/v2/tool/skilltoolset/skill"
 )
@@ -431,6 +433,57 @@ func TestSkillRegistrySource_GetSkillErrorPropagates(t *testing.T) {
 			t.Fatalf("LoadResource() error = %v, want errors.Is %v", err, boom)
 		}
 	})
+}
+
+// A registry not-found (HTTP 404) must surface as skill.ErrSkillNotFound so a
+// merged lookup falls through to the next source. It must reach every method
+// that resolves the skill, not just LoadFrontmatter.
+func TestSkillRegistrySource_NotFoundMapsToErrSkillNotFound(t *testing.T) {
+	notFound := &googleapi.Error{Code: http.StatusNotFound, Message: "skill not found"}
+	newSrc := func(t *testing.T) *SkillRegistrySource {
+		c := newCymbalClient(t)
+		c.getErr[nameCymbal] = notFound
+		return newSource(t, c)
+	}
+
+	t.Run("LoadFrontmatter", func(t *testing.T) {
+		if _, err := newSrc(t).LoadFrontmatter(t.Context(), nameCymbal); !errors.Is(err, skill.ErrSkillNotFound) {
+			t.Fatalf("LoadFrontmatter() error = %v, want errors.Is %v", err, skill.ErrSkillNotFound)
+		}
+	})
+	t.Run("LoadInstructions", func(t *testing.T) {
+		if _, err := newSrc(t).LoadInstructions(t.Context(), nameCymbal); !errors.Is(err, skill.ErrSkillNotFound) {
+			t.Fatalf("LoadInstructions() error = %v, want errors.Is %v", err, skill.ErrSkillNotFound)
+		}
+	})
+	t.Run("ListResources", func(t *testing.T) {
+		if _, err := newSrc(t).ListResources(t.Context(), nameCymbal, "."); !errors.Is(err, skill.ErrSkillNotFound) {
+			t.Fatalf("ListResources() error = %v, want errors.Is %v", err, skill.ErrSkillNotFound)
+		}
+	})
+	t.Run("LoadResource", func(t *testing.T) {
+		if _, err := newSrc(t).LoadResource(t.Context(), nameCymbal, "scripts/run.sh"); !errors.Is(err, skill.ErrSkillNotFound) {
+			t.Fatalf("LoadResource() error = %v, want errors.Is %v", err, skill.ErrSkillNotFound)
+		}
+	})
+}
+
+// A non-404 error is a real failure, not a missing skill, so it must not be
+// mapped to skill.ErrSkillNotFound.
+func TestSkillRegistrySource_NonNotFoundIsNotErrSkillNotFound(t *testing.T) {
+	// A 403 is a googleapi.Error too, to prove the mapping keys on the code.
+	forbidden := &googleapi.Error{Code: http.StatusForbidden, Message: "permission denied"}
+	c := newCymbalClient(t)
+	c.getErr[nameCymbal] = forbidden
+	src := newSource(t, c)
+
+	_, err := src.LoadFrontmatter(t.Context(), nameCymbal)
+	if errors.Is(err, skill.ErrSkillNotFound) {
+		t.Fatalf("LoadFrontmatter() error = %v, must not be errors.Is %v", err, skill.ErrSkillNotFound)
+	}
+	if !errors.Is(err, forbidden) {
+		t.Fatalf("LoadFrontmatter() error = %v, want errors.Is %v", err, forbidden)
+	}
 }
 
 // A skill whose DefaultRevision is empty must not trigger a GetZip("") call.

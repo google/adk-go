@@ -16,11 +16,14 @@ package skillregistry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	agentregistry "google.golang.org/api/agentregistry/v1alpha"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 
 	"google.golang.org/adk/v2/internal/utils"
@@ -83,15 +86,37 @@ func NewSkillRegistrySource(ctx context.Context, cfg SkillRegistrySourceConfig, 
 	return &SkillRegistrySource{client: client}, nil
 }
 
+// getSkill fetches the skill named by its full resource name. It maps the
+// registry's not-found (HTTP 404) response to [skill.ErrSkillNotFound] so that
+// a [skill.NewMergedSource] lookup falls through to the next source instead of
+// failing on the first.
+func (s *SkillRegistrySource) getSkill(name string) (*agentregistry.Skill, error) {
+	sk, err := s.client.GetSkill(name)
+	if err != nil {
+		if isNotFound(err) {
+			return nil, fmt.Errorf("%w: %q", skill.ErrSkillNotFound, name)
+		}
+		return nil, fmt.Errorf("cannot GetSkill: %w", err)
+	}
+	if sk == nil {
+		return nil, fmt.Errorf("got nil from GetSkill")
+	}
+	return sk, nil
+}
+
+// isNotFound reports whether err is, or wraps, a Skill Registry not-found
+// (HTTP 404) response.
+func isNotFound(err error) bool {
+	gerr, ok := errors.AsType[*googleapi.Error](err)
+	return ok && gerr.Code == http.StatusNotFound
+}
+
 // defaultRevision resolves a skill's full resource name to the revision its
 // archive is downloaded from.
 func (s *SkillRegistrySource) defaultRevision(name string) (string, error) {
-	sk, err := s.client.GetSkill(name)
+	sk, err := s.getSkill(name)
 	if err != nil {
-		return "", fmt.Errorf("cannot GetSkill: %w", err)
-	}
-	if sk == nil {
-		return "", fmt.Errorf("got nil from GetSkill")
+		return "", err
 	}
 	if sk.DefaultRevision == "" {
 		return "", fmt.Errorf("skill has no default revision")
@@ -179,12 +204,9 @@ func (s *SkillRegistrySource) ListResources(ctx context.Context, name, subpath s
 
 // LoadFrontmatter implements [skill.Source].
 func (s *SkillRegistrySource) LoadFrontmatter(ctx context.Context, name string) (*skill.Frontmatter, error) {
-	sk, err := s.client.GetSkill(name)
+	sk, err := s.getSkill(name)
 	if err != nil {
-		return nil, fmt.Errorf("cannot GetSkill: %w", err)
-	}
-	if sk == nil {
-		return nil, fmt.Errorf("got nil from GetSkill")
+		return nil, err
 	}
 	if sk.Frontmatter == nil {
 		return nil, fmt.Errorf("skill has no frontmatter")
