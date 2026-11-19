@@ -28,11 +28,10 @@ import (
 // than assumed unreachable, because a guard that only holds while callers keep
 // the right order is not a guard.
 func TestRequestTimeoutGuardsNonPositiveItself(t *testing.T) {
-	for _, d := range []time.Duration{0, -time.Second} {
-		timeout := d
+	for _, timeout := range []time.Duration{0, -time.Second} {
 		cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}}
 		if got := RequestTimeout(cfg); got != 0 {
-			t.Errorf("RequestTimeout(%v) = %v, want 0: a non-positive bound must not become a deadline", d, got)
+			t.Errorf("RequestTimeout(%v) = %v, want 0: a non-positive bound must not become a deadline", timeout, got)
 		}
 	}
 	// The positive case still comes through, so the guard is not simply off.

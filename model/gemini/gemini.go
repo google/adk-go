@@ -73,16 +73,19 @@ type geminiModel struct {
 func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (model.LLM, error) {
 	// Create a copy of the config to avoid mutating the caller's config
 	// or the underlying http.Client.
+	var cfgCopy genai.ClientConfig
 	if cfg != nil {
-		cfgCopy := *cfg
+		cfgCopy = *cfg
 		if cfg.HTTPClient != nil {
-			clientCopy := *cfg.HTTPClient
-			cfgCopy.HTTPClient = &clientCopy
+			cfgCopy.HTTPClient = new(*cfg.HTTPClient)
 		}
-		cfg = &cfgCopy
 	}
+	// The genai SDK builds the live WebSocket handshake from the client's
+	// headers alone, so the tracking headers GenerateContent sets per request
+	// never reach it.
+	cfgCopy.HTTPOptions.Headers = version.WithTrackingHeaders(cfgCopy.HTTPOptions.Headers)
 
-	client, err := genai.NewClient(ctx, cfg)
+	client, err := genai.NewClient(ctx, &cfgCopy)
 	if err != nil {
 		return nil, err
 	}

@@ -544,53 +544,6 @@ func TestRemoteAgent_AuthRefusesCrossOriginRedirect(t *testing.T) {
 	}
 }
 
-// TestSameCredentialTarget covers which redirects may carry the credential,
-// across the scheme and port combinations the end-to-end redirect tests above
-// do not reach: an upgrade to https, default ports written out or left
-// implicit, and schemes that are neither http nor https.
-func TestSameCredentialTarget(t *testing.T) {
-	tests := []struct {
-		name     string
-		from, to string
-		want     bool
-	}{
-		{name: "identical", from: "https://h/rpc", to: "https://h/other", want: true},
-		{name: "default port made explicit", from: "https://h/rpc", to: "https://h:443/rpc", want: true},
-		{name: "default http port made explicit", from: "http://h/rpc", to: "http://h:80/rpc", want: true},
-		{name: "host case differs", from: "https://Host/rpc", to: "https://host/rpc", want: true},
-		{name: "scheme upgraded to https, same explicit port", from: "http://h:8080/rpc", to: "https://h:8080/rpc", want: true},
-		{name: "scheme upgraded to https, both ports implicit", from: "http://h/rpc", to: "https://h/rpc", want: true},
-		{name: "scheme upgraded to https, explicit default ports", from: "http://h:80/rpc", to: "https://h:443/rpc", want: true},
-		{name: "scheme upgraded to https onto a different port", from: "http://h/rpc", to: "https://h:9443/rpc", want: false},
-		{name: "scheme downgraded with implicit ports", from: "https://h/rpc", to: "http://h/rpc", want: false},
-		{name: "unrelated scheme", from: "https://h/rpc", to: "ftp://h/rpc", want: false},
-		// Only http to https counts as an upgrade: either half alone is not one.
-		{name: "http to an unrelated scheme", from: "http://h/rpc", to: "ftp://h/rpc", want: false},
-		{name: "an unrelated scheme to https", from: "ftp://h/rpc", to: "https://h/rpc", want: false},
-		// An explicit default port on one side and an implicit one on the other
-		// is still each scheme's own default.
-		{name: "scheme upgraded to https, explicit http default to implicit", from: "http://h:80/rpc", to: "https://h/rpc", want: true},
-		{name: "scheme downgraded to http", from: "https://h/rpc", to: "http://h/rpc", want: false},
-		{name: "different host", from: "https://h/rpc", to: "https://other/rpc", want: false},
-		{name: "different port", from: "https://h:8443/rpc", to: "https://h:9443/rpc", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			from, err := url.Parse(tc.from)
-			if err != nil {
-				t.Fatalf("url.Parse(%q) error = %v", tc.from, err)
-			}
-			to, err := url.Parse(tc.to)
-			if err != nil {
-				t.Fatalf("url.Parse(%q) error = %v", tc.to, err)
-			}
-			if got := sameCredentialTarget(from, to); got != tc.want {
-				t.Errorf("sameCredentialTarget(%q, %q) = %v, want %v", tc.from, tc.to, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestAuthHTTPClientRedirectCap covers the redirect limit. A custom
 // CheckRedirect replaces net/http's default cap rather than extending it, so a
 // same-origin redirect loop would otherwise spin forever.
@@ -609,9 +562,9 @@ func TestAuthHTTPClientRedirectCap(t *testing.T) {
 	if !strings.Contains(err.Error(), "stopped after") {
 		t.Errorf("Get() error = %v, want it to report the redirect cap", err)
 	}
-	// The literal, not maxRedirects: an expectation derived from the constant
-	// under test shrinks and grows with it, so the test can never fire on a
-	// change to the cap. 10 is net/http's own default, which a custom
+	// The literal, not credredirect.MaxRedirects: an expectation derived from
+	// the constant under test shrinks and grows with it, so the test can never
+	// fire on a change to the cap. 10 is net/http's own default, which a custom
 	// CheckRedirect replaces rather than extends.
 	if got := hits.Load(); got != 10 {
 		t.Errorf("server saw %d requests, want %d", got, 10)
@@ -649,6 +602,7 @@ func TestCheckRedirect(t *testing.T) {
 	tests := []struct {
 		name    string
 		urls    []string
+		host    string // req.Host on the hop under test
 		wantErr string
 	}{
 		{name: "same origin", urls: []string{"https://h/a", "https://h/b"}},
@@ -663,10 +617,24 @@ func TestCheckRedirect(t *testing.T) {
 			urls:    []string{"http://h/a", "https://h/b", "http://h/c"},
 			wantErr: "refusing redirect",
 		},
+		// The rule is shared with mcptoolset through internal/credredirect.
+		// These are the decisions that differ from comparing the hostnames
+		// as written: a name in its mapped form and its punycode are one
+		// target, two spellings net/http would send as Host differently are
+		// not, a port written out on one side is the port implied on the
+		// other, and a Host header has to name the URL's host.
+		{name: "unicode host to its punycode form", urls: []string{"https://fa\u00df.example/a", "https://xn--fa-hia.example/a"}},
+		{name: "sharp s to capital sharp s", urls: []string{"https://fa\u00df.example/a", "https://fa\u1e9e.example/a"}, wantErr: "refusing redirect"},
+		{name: "unicode case differs", urls: []string{"https://M\u00dcNCHEN.example/a", "https://m\u00fcnchen.example/a"}, wantErr: "refusing redirect"},
+		{name: "upgrade with the http default written out", urls: []string{"http://h/a", "https://h:80/a"}},
+		{name: "upgrade with the https default written out", urls: []string{"http://h:443/a", "https://h/a"}},
+		{name: "host header names the url's host", urls: []string{"https://h/a", "https://h/b"}, host: "h"},
+		{name: "host header names another host", urls: []string{"https://h/a", "https://h/b"}, host: "other", wantErr: "refusing redirect"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			req, via := chain(tc.urls...)
+			req.Host = tc.host
 			err := checkRedirect(req, via)
 			if tc.wantErr == "" {
 				if err != nil {
@@ -893,8 +861,7 @@ func TestRedactTokenError(t *testing.T) {
 					t.Errorf("mintGroup.token() error = %v, want %q dropped", err, gone)
 				}
 			}
-			var re *oauth2.RetrieveError
-			if !errors.As(err, &re) {
+			if _, ok := errors.AsType[*oauth2.RetrieveError](err); !ok {
 				t.Errorf("mintGroup.token() error = %v, want errors.As to still find *oauth2.RetrieveError", err)
 			}
 		})
@@ -997,8 +964,7 @@ func TestRedactTokenErrorSeesThroughAWrapper(t *testing.T) {
 	if !strings.Contains(got, "400 Bad Request") || !strings.Contains(got, "invalid_grant") {
 		t.Errorf("redactTokenError() = %q, want it to keep the status and the error code", got)
 	}
-	var re *oauth2.RetrieveError
-	if !errors.As(redactTokenError(err), &re) {
+	if _, ok := errors.AsType[*oauth2.RetrieveError](redactTokenError(err)); !ok {
 		t.Error("redactTokenError() lost the error chain")
 	}
 }
@@ -1148,11 +1114,9 @@ func TestRemoteAgent_AuthConcurrentInvocations(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, users)
 	for i := range users {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, errs[i] = runAndCollect(contexts[i], remoteAgent)
-		}()
+		})
 	}
 	wg.Wait()
 	for i, err := range errs {
@@ -2646,7 +2610,7 @@ func TestAuthTransportSharesAMintWithinAScope(t *testing.T) {
 	<-entered
 	defer func() {
 		close(release)
-		<-first
+		<-first //nolint:errcheck // only reaps the first apply; its result is not under test here
 	}()
 
 	sid, _ := a2aclient.SessionIDFrom(scope)

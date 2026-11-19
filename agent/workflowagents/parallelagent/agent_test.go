@@ -542,7 +542,7 @@ func TestParallelAgent_PropagatesContextError(t *testing.T) {
 		cancel()
 	}()
 
-	for range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}) {
+	for range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}) { //nolint:errcheck // the canceled run's error is asserted through spy.yieldedError
 		// Simulate processing delay so that ackChan takes time,
 		// increasing chance runSubAgent is blocked on ackChan when cancel happens?
 		time.Sleep(100 * time.Millisecond)
