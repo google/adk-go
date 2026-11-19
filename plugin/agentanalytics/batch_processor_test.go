@@ -635,7 +635,7 @@ func TestBatchProcessor_CloseDrainsAndRejectsNewAppends(t *testing.T) {
 		ShutdownDrops: 1,
 		TotalDrops:    1,
 	}
-	if diff := cmp.Diff(wantStats, bp.DropStats()); diff != "" {
+	if diff := cmp.Diff(wantStats, bp.dropStats()); diff != "" {
 		t.Errorf("DropStats() after Close mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -644,8 +644,8 @@ func TestBatchProcessor_DropStats(t *testing.T) {
 	ctx := context.Background()
 
 	var nilBP *batchProcessor
-	if got := nilBP.DropStats(); got != (DropStats{}) {
-		t.Errorf("nil batchProcessor.DropStats() = %+v, want zero DropStats", got)
+	if got := nilBP.dropStats(); got != (DropStats{}) {
+		t.Errorf("nil batchProcessor.dropStats() = %+v, want zero DropStats", got)
 	}
 
 	config := DefaultConfig()
@@ -715,7 +715,7 @@ func TestBatchProcessor_DropStats(t *testing.T) {
 		ShutdownDrops:         1,
 		TotalDrops:            12,
 	}
-	if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+	if diff := cmp.Diff(want, bp.dropStats()); diff != "" {
 		t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -1159,7 +1159,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_AmbiguousSendThenAlreadyExistsAdvanc
 				t.Fatalf("writeBatch(batch 2) error = %v, want nil", err)
 			}
 
-			if got := bp.DropStats(); got != (DropStats{}) {
+			if got := bp.dropStats(); got != (DropStats{}) {
 				t.Errorf("DropStats() = %+v, want zero drops", got)
 			}
 
@@ -1373,7 +1373,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_TerminalAmbiguousSendRotatesStreamOn
 			AppendFailureDrops: 2,
 			TotalDrops:         2,
 		}
-		if diff := cmp.Diff(wantStats, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantStats, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 
@@ -2639,7 +2639,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_RotationOnDepletedBudget(t *testing.
 			if got := delivered.Load(); got != tc.wantDelivered {
 				t.Errorf("rows written = %d, want %d", got, tc.wantDelivered)
 			}
-			if got := bp.DropStats().AppendFailureDrops; got != tc.wantDrops {
+			if got := bp.dropStats().AppendFailureDrops; got != tc.wantDrops {
 				t.Errorf("AppendFailureDrops = %d, want %d", got, tc.wantDrops)
 			}
 			if got := srv.creates.Load(); got != tc.wantCreates {
@@ -2734,7 +2734,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_FreshStreamUnknownOutcomeArmsCooldow
 			if got := srv.createCount(); got != 2 {
 				t.Errorf("CreateWriteStream calls during the cooldown = %d, want 2", got)
 			}
-			if diff := cmp.Diff(DropStats{AppendFailureDrops: 2, TotalDrops: 2}, bp.DropStats()); diff != "" {
+			if diff := cmp.Diff(DropStats{AppendFailureDrops: 2, TotalDrops: 2}, bp.dropStats()); diff != "" {
 				t.Errorf("DropStats() during the cooldown mismatch (-want +got):\n%s", diff)
 			}
 
@@ -2793,7 +2793,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_CloseDrainDropsBatchesDuringCooldown
 
 	bp.Close()
 
-	if diff := cmp.Diff(DropStats{AppendFailureDrops: 2, TotalDrops: 2}, bp.DropStats()); diff != "" {
+	if diff := cmp.Diff(DropStats{AppendFailureDrops: 2, TotalDrops: 2}, bp.dropStats()); diff != "" {
 		t.Errorf("DropStats() after Close mismatch (-want +got):\n%s", diff)
 	}
 	if got := bp.pendingUploadBytes.Load(); got != 0 {
@@ -3494,7 +3494,7 @@ func TestBatchProcessor_ClosePreservesInflightAndQueuedBatchesUnderStalledUpload
 			ShutdownDrops:      4,
 			TotalDrops:         5,
 		}
-		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(wantDrops, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() after stalled Close mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -3991,7 +3991,7 @@ func TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats(t *testing.T) {
 			t.Fatalf("persisted rows = %d, want 10 (2 batches of 5)", persistedRows)
 		}
 
-		stats := bp.DropStats()
+		stats := bp.dropStats()
 		wantStats := DropStats{
 			AppendFailureDrops: 5,
 			ShutdownDrops:      51,
@@ -4030,7 +4030,7 @@ func TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats(t *testing.T) {
 			AppendFailureDrops: 3,
 			TotalDrops:         3,
 		}
-		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(want, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -4342,7 +4342,7 @@ func TestBatchProcessor_FlushRunEndBoundedReDeferral(t *testing.T) {
 	if len(bp.deferredBatch) != 2 {
 		t.Fatalf("deferredBatch length after first flushRunEnd = %d, want 2", len(bp.deferredBatch))
 	}
-	if got := bp.DropStats().AppendFailureDrops; got != 0 {
+	if got := bp.dropStats().AppendFailureDrops; got != 0 {
 		t.Errorf("AppendFailureDrops after batch 1 was deferred = %d, want 0 (a deferred batch is not dropped)", got)
 	}
 
@@ -4356,7 +4356,7 @@ func TestBatchProcessor_FlushRunEndBoundedReDeferral(t *testing.T) {
 	if !logger.contains("Failed to write batch to BigQuery") {
 		t.Errorf("expected drop error logged after retry failure, got:\n%s", logger)
 	}
-	if got := bp.DropStats().AppendFailureDrops; got != 2 {
+	if got := bp.dropStats().AppendFailureDrops; got != 2 {
 		t.Errorf("AppendFailureDrops after batch 1 was dropped = %d, want 2 (its 2 rows, counted once)", got)
 	}
 
@@ -4365,7 +4365,7 @@ func TestBatchProcessor_FlushRunEndBoundedReDeferral(t *testing.T) {
 	// retried once before being dropped.
 	bp.flushRunEnd()
 	bp.flushRunEnd()
-	if got := bp.DropStats().AppendFailureDrops; got != 4 {
+	if got := bp.dropStats().AppendFailureDrops; got != 4 {
 		t.Errorf("AppendFailureDrops after both batches were dropped = %d, want 4 (2 rows per batch, each batch counted once)", got)
 	}
 
@@ -4579,7 +4579,7 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 	if got := contentPartsOf(t, last)[0]["storage_mode"]; got != "GCS_REFERENCE" {
 		t.Errorf("last row part storage_mode = %v, want GCS_REFERENCE", got)
 	}
-	if ds := bp.DropStats(); ds.TotalDrops != 0 {
+	if ds := bp.dropStats(); ds.TotalDrops != 0 {
 		t.Errorf("DropStats after both rows were written = %+v, want no drops", ds)
 	}
 }
@@ -4815,7 +4815,7 @@ func TestBatchProcessor_FlushRunEndDeferredBatchRetriesCutShortUploads(t *testin
 					t.Errorf("part %d of the second batch has storage_mode %v and text %v, want %s and %q", i, parts[i]["storage_mode"], parts[i]["text"], wantMode, wantText)
 				}
 			}
-			if ds := bp.DropStats(); ds.TotalDrops != 0 {
+			if ds := bp.dropStats(); ds.TotalDrops != 0 {
 				t.Errorf("DropStats after both batches were written = %+v, want no drops", ds)
 			}
 		})
@@ -5143,7 +5143,7 @@ func TestBatchProcessor_FlushRunEndDeferredRetryPrioritizesBigQueryWrite(t *test
 	bp.flushRunEnd()
 	inRetry.Store(false)
 
-	if ds := bp.DropStats(); ds.TotalDrops != 0 {
+	if ds := bp.dropStats(); ds.TotalDrops != 0 {
 		t.Fatalf("DropStats after the second flushRunEnd = %+v, want no drops: the uploads of the retry left the write too little time", ds)
 	}
 	if got := pendingDuringRetryWrite.Load(); got != 0 {
@@ -5279,7 +5279,7 @@ func TestBatchProcessor_FlushRunEndDeferredRetryDoesNotPauseHealthyUploads(t *te
 	bp.flushRunEnd()
 	inRetry.Store(false)
 
-	if ds := bp.DropStats(); ds.TotalDrops != 0 {
+	if ds := bp.dropStats(); ds.TotalDrops != 0 {
 		t.Fatalf("DropStats after retry flushRunEnd = %+v, want no drops", ds)
 	}
 	if got := pendingDuringRetryWrite.Load(); got != 0 {
@@ -5622,7 +5622,7 @@ func TestBatchProcessor_FlushRunEndFailingUploadsPauseLaterBatches(t *testing.T)
 	if !logger.contains("upload skipped during timeout cooldown") {
 		t.Error("no log line says that an upload was skipped during the pause: no batch fell back without calling the offloader")
 	}
-	if ds := bp.DropStats(); ds.TotalDrops != 0 {
+	if ds := bp.dropStats(); ds.TotalDrops != 0 {
 		t.Fatalf("DropStats after the run-end flush = %+v, want no drops", ds)
 	}
 	// Every batch is written, with all of its parts inline.
@@ -5703,7 +5703,7 @@ func TestBatchProcessor_ExactlyOnceDelivery_NotFoundAfterLostResponseIsNotResent
 			t.Errorf("attempt %d sent the batch to %s after an attempt on %s whose outcome was unknown; it may now be stored on both streams", i+1, name, first)
 		}
 	}
-	if got := bp.DropStats().AppendFailureDrops; got != 2 {
+	if got := bp.dropStats().AppendFailureDrops; got != 2 {
 		t.Errorf("AppendFailureDrops = %d, want 2 (the batch's outcome is unknown, so it is dropped and counted)", got)
 	}
 }
@@ -5869,7 +5869,7 @@ func TestBatchProcessor_RoutingHeader_UnicodeTableName(t *testing.T) {
 			if err := bp.writeBatch(ctx, []map[string]any{{"event_type": "UNICODE_TABLE"}}); err != nil {
 				t.Fatalf("writeBatch() error = %v", err)
 			}
-			if got := bp.DropStats().AppendFailureDrops; got != 0 {
+			if got := bp.dropStats().AppendFailureDrops; got != 0 {
 				t.Errorf("AppendFailureDrops = %d, want 0", got)
 			}
 
@@ -6244,7 +6244,7 @@ func TestStreamWriter_PermanentStatusFailsFast(t *testing.T) {
 				if got := srv.attempts(); got != tc.wantAttempts {
 					t.Errorf("AppendRows attempts = %d, want %d (error: %v)", got, tc.wantAttempts, err)
 				}
-				if got := bp.DropStats().AppendFailureDrops; got != 1 {
+				if got := bp.dropStats().AppendFailureDrops; got != 1 {
 					t.Errorf("AppendFailureDrops = %d, want 1", got)
 				}
 			})
@@ -6274,7 +6274,7 @@ func TestStreamWriter_TransientInBandErrorIsRetried(t *testing.T) {
 				if got := srv.attempts(); got != 3 {
 					t.Errorf("AppendRows attempts = %d, want 3", got)
 				}
-				if got := bp.DropStats().AppendFailureDrops; got != 0 {
+				if got := bp.dropStats().AppendFailureDrops; got != 0 {
 					t.Errorf("AppendFailureDrops = %d, want 0", got)
 				}
 				if exactlyOnce {
@@ -6317,7 +6317,7 @@ func TestStreamWriter_InBandErrorRetriesAreBounded(t *testing.T) {
 			if got := srv.attempts(); got != tc.wantAttempts {
 				t.Errorf("AppendRows attempts = %d, want %d", got, tc.wantAttempts)
 			}
-			if got := bp.DropStats().AppendFailureDrops; got != 1 {
+			if got := bp.dropStats().AppendFailureDrops; got != 1 {
 				t.Errorf("AppendFailureDrops = %d, want 1", got)
 			}
 		})
@@ -6484,7 +6484,7 @@ func TestNextBatchAfterServerEndedStream(t *testing.T) {
 					if got := srv.createCount(); exactlyOnce && got != 1 {
 						t.Errorf("CreateWriteStream calls = %d, want 1: the committed stream stays", got)
 					}
-					if got := bp.DropStats().AppendFailureDrops; got != 0 {
+					if got := bp.dropStats().AppendFailureDrops; got != 0 {
 						t.Errorf("AppendFailureDrops = %d, want 0", got)
 					}
 				})
@@ -6554,7 +6554,7 @@ func TestStreamWriter_StatusOfEndedStreamIsRetriedOnFreshStream(t *testing.T) {
 							if err != nil {
 								t.Fatalf("writeBatch() error = %v, want nil", err)
 							}
-							if got := bp.DropStats().AppendFailureDrops; got != 0 {
+							if got := bp.dropStats().AppendFailureDrops; got != 0 {
 								t.Errorf("AppendFailureDrops = %d, want 0", got)
 							}
 							return
@@ -6562,7 +6562,7 @@ func TestStreamWriter_StatusOfEndedStreamIsRetriedOnFreshStream(t *testing.T) {
 						if got := status.Code(err); got != code {
 							t.Errorf("status.Code(writeBatch() error) = %v, want %v (error: %v)", got, code, err)
 						}
-						if got := bp.DropStats().AppendFailureDrops; got != 1 {
+						if got := bp.dropStats().AppendFailureDrops; got != 1 {
 							t.Errorf("AppendFailureDrops = %d, want 1", got)
 						}
 					})
@@ -6675,7 +6675,7 @@ func TestStreamWriter_PermanentStatusFailsFastOnFreshStream(t *testing.T) {
 			if got := opened.Load(); got != tc.wantOpened {
 				t.Errorf("streams opened = %d, want %d", got, tc.wantOpened)
 			}
-			if got := bp.DropStats().AppendFailureDrops; got != 1 {
+			if got := bp.dropStats().AppendFailureDrops; got != 1 {
 				t.Errorf("AppendFailureDrops = %d, want 1", got)
 			}
 		})
@@ -6895,7 +6895,7 @@ func TestFreshStreamClosedBeforeRecvIsRetried(t *testing.T) {
 							t.Errorf("CreateWriteStream calls = %d, want %d", gotCreates, wantCreates)
 						}
 					}
-					if gotDrops := bp.DropStats().AppendFailureDrops; gotDrops != 0 {
+					if gotDrops := bp.dropStats().AppendFailureDrops; gotDrops != 0 {
 						t.Errorf("AppendFailureDrops = %d, want 0", gotDrops)
 					}
 				})
@@ -7009,7 +7009,7 @@ func TestFreshStreamClosedBeforeRecvRetryIsBounded(t *testing.T) {
 					if len(delivered) != 0 {
 						t.Errorf("delivered requests = %d, want 0", len(delivered))
 					}
-					if got := bp.DropStats().AppendFailureDrops; got != 1 {
+					if got := bp.dropStats().AppendFailureDrops; got != 1 {
 						t.Errorf("AppendFailureDrops = %d, want 1", got)
 					}
 				})
@@ -7049,7 +7049,7 @@ func TestFreshStreamClosedBeforeRecvRetryIsBounded(t *testing.T) {
 		if streams, _ := srv.received(); streams != 1 {
 			t.Errorf("streams served = %d, want 1 when MaxRetries == 0", streams)
 		}
-		if got := bp.DropStats().AppendFailureDrops; got != 1 {
+		if got := bp.dropStats().AppendFailureDrops; got != 1 {
 			t.Errorf("AppendFailureDrops = %d, want 1", got)
 		}
 	})
@@ -7339,7 +7339,7 @@ func TestBatchProcessor_SplitsOversizedBatchAcrossRequests(t *testing.T) {
 			t.Fatalf("row %d = %q, want %q: rows must arrive in order", i, id, want)
 		}
 	}
-	if got := bp.DropStats().AppendFailureDrops; got != 0 {
+	if got := bp.dropStats().AppendFailureDrops; got != 0 {
 		t.Errorf("AppendFailureDrops = %d, want 0", got)
 	}
 }
@@ -7404,7 +7404,7 @@ func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
 	if want := []string{"a", "b", "b", "b"}; !slices.Equal(got, want) {
 		t.Errorf("requests received = %v, want %v: the third request must not be sent", got, want)
 	}
-	if got := bp.DropStats().AppendFailureDrops; got != 2 {
+	if got := bp.dropStats().AppendFailureDrops; got != 2 {
 		t.Errorf("AppendFailureDrops = %d, want 2 (the rows after the confirmed first request)", got)
 	}
 }
@@ -7438,7 +7438,7 @@ func TestInBandResendThenPermanentStatus(t *testing.T) {
 			if got := srv.attempts(); got != 3 {
 				t.Fatalf("attempts = %d, want 3 (in-band transient on attempt 1 + stream-level PermissionDenied on attempt 2 + one fresh-stream retry on attempt 3)", got)
 			}
-			if got := bp.DropStats().AppendFailureDrops; got != 1 {
+			if got := bp.dropStats().AppendFailureDrops; got != 1 {
 				t.Fatalf("AppendFailureDrops = %d, want 1", got)
 			}
 		})
@@ -7473,7 +7473,7 @@ func TestInBandResendThenPermanentStatus(t *testing.T) {
 			if got := srv.attempts() - 1; got != 4 {
 				t.Fatalf("second request attempts = %d, want 4 (in-band transient on reused stream + PermissionDenied on reused stream + fresh-stream attempt + one bounded fresh-stream retry)", got)
 			}
-			if got := bp.DropStats().AppendFailureDrops; got != 1 {
+			if got := bp.dropStats().AppendFailureDrops; got != 1 {
 				t.Fatalf("AppendFailureDrops = %d, want 1", got)
 			}
 		})
@@ -7573,7 +7573,7 @@ func TestWriteRunEndBatch_DropsOnlyUnconfirmedRows(t *testing.T) {
 				t.Errorf("AppendRows attempts = %d, want 4", got)
 			}
 			// Counting the whole batch as dropped would report 3 here.
-			if got := bp.DropStats().AppendFailureDrops; got != 2 {
+			if got := bp.dropStats().AppendFailureDrops; got != 2 {
 				t.Errorf("AppendFailureDrops = %d, want 2 (b and c; a was confirmed)", got)
 			}
 			if got := len(bp.deferredBatch); got != 0 {
@@ -7672,7 +7672,7 @@ func TestStreamWriter_InBandRejectionDoesNotIntroduceAmbiguity(t *testing.T) {
 		if got := bp.streamWriter.streamOffset.Load(); got != 0 {
 			t.Errorf("streamOffset = %d, want 0 (neither request accepted the batch)", got)
 		}
-		if got := bp.DropStats().AppendFailureDrops; got != 2 {
+		if got := bp.dropStats().AppendFailureDrops; got != 2 {
 			t.Errorf("AppendFailureDrops = %d, want 2", got)
 		}
 		srv.mu.Lock()
@@ -7706,7 +7706,7 @@ func TestStreamWriter_InBandRejectionDoesNotIntroduceAmbiguity(t *testing.T) {
 		if err == nil {
 			t.Fatal("first writeBatch() error = nil, want failure after retries exhausted")
 		}
-		if got := bp.DropStats().AppendFailureDrops; got != 1 {
+		if got := bp.dropStats().AppendFailureDrops; got != 1 {
 			t.Errorf("AppendFailureDrops after first batch = %d, want 1", got)
 		}
 		bp.streamWriter.mu.Lock()
@@ -7938,7 +7938,7 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 			}
 			// The first chunk was confirmed, so only the two rows after it
 			// are dropped.
-			if got := bp.DropStats().AppendFailureDrops; path.countsDrops && got != 2 {
+			if got := bp.dropStats().AppendFailureDrops; path.countsDrops && got != 2 {
 				t.Errorf("AppendFailureDrops = %d, want 2", got)
 			}
 		})
@@ -8030,7 +8030,7 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 			if created != 2 {
 				t.Errorf("CreateWriteStream calls = %d, want 2 (initial stream + 1 entry rotation on chunk 1)", created)
 			}
-			if got := bp.DropStats().AppendFailureDrops; path.countsDrops && got != 2 {
+			if got := bp.dropStats().AppendFailureDrops; path.countsDrops && got != 2 {
 				t.Errorf("AppendFailureDrops = %d, want 2 (1 from first batch + 1 unconfirmed chunk from second batch)", got)
 			}
 		})
@@ -8186,7 +8186,7 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 			if got, want := bp.pendingUploadBytes.Load(), int64(7*len(kept)); got != want {
 				t.Errorf("pendingUploadBytes after the first flushRunEnd = %d, want %d (ev-0's 5-byte upload released, the 7-byte upload of each other row kept)", got, want)
 			}
-			if ds := bp.DropStats(); ds.TotalDrops != 0 {
+			if ds := bp.dropStats(); ds.TotalDrops != 0 {
 				t.Errorf("DropStats after the first flushRunEnd = %+v, want no drops", ds)
 			}
 
@@ -8204,7 +8204,7 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 			if got := len(off.uploads()) - callsBefore; got != len(kept) {
 				t.Errorf("retry flushRunEnd offloader calls = %d, want %d (only the kept uploads of the rows that BigQuery had not confirmed)", got, len(kept))
 			}
-			if ds := bp.DropStats(); ds.TotalDrops != 0 {
+			if ds := bp.dropStats(); ds.TotalDrops != 0 {
 				t.Errorf("DropStats after the retry flushRunEnd = %+v, want no drops", ds)
 			}
 

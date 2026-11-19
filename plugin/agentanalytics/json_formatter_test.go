@@ -4904,7 +4904,7 @@ func TestJSONFormatter_InvalidUTF8(t *testing.T) {
 		}
 	})
 
-	t.Run("FormatContentParts", func(t *testing.T) {
+	t.Run("formatContentParts", func(t *testing.T) {
 		content := &genai.Content{Parts: []*genai.Part{
 			{Text: in},
 			{FunctionCall: &genai.FunctionCall{Name: "find\xff", Args: map[string]any{"q": in}}},

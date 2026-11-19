@@ -27,12 +27,12 @@ import (
 	"net/http"
 	"path"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 	"unsafe"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/adk/plugin/agentanalytics"
 )
 
@@ -108,13 +108,23 @@ func TestStructLiterals_ExternalKeyedComparableAndJSON(t *testing.T) {
 		t.Fatalf("json.Unmarshal(DropStats) = %#v, want %#v", roundTripDrops, dropsA)
 	}
 
-	uploadReq := agentanalytics.GCSUploadRequest{
+	uploadReqA := agentanalytics.GCSUploadRequest{
 		Path:        "prefix/2026-11-07/obj.txt",
 		Data:        []byte("payload"),
 		ContentType: "text/plain; charset=utf-8",
 	}
-	if uploadReq.Path != "prefix/2026-11-07/obj.txt" || !bytes.Equal(uploadReq.Data, []byte("payload")) || uploadReq.ContentType != "text/plain; charset=utf-8" {
-		t.Fatalf("unexpected GCSUploadRequest fields: %#v", uploadReq)
+	uploadReqB := agentanalytics.GCSUploadRequest{
+		Path:        "prefix/2026-11-07/obj.txt",
+		Data:        []byte("payload"),
+		ContentType: "text/plain; charset=utf-8",
+	}
+	uploadReqC := agentanalytics.GCSUploadRequest{
+		Path:        "prefix/2026-11-07/obj.txt",
+		Data:        []byte("other"),
+		ContentType: "text/plain; charset=utf-8",
+	}
+	if uploadReqA.Path != "prefix/2026-11-07/obj.txt" || !bytes.Equal(uploadReqA.Data, []byte("payload")) || uploadReqA.ContentType != "text/plain; charset=utf-8" {
+		t.Fatalf("unexpected GCSUploadRequest fields: %#v", uploadReqA)
 	}
 
 	viewA := agentanalytics.ViewDefinition{
@@ -138,6 +148,37 @@ func TestStructLiterals_ExternalKeyedComparableAndJSON(t *testing.T) {
 	if viewA == viewC {
 		t.Fatalf("distinct ViewDefinition values compared equal: %#v == %#v", viewA, viewC)
 	}
+
+	// Pin cmp.Equal without options on the four exported value structs. Blank
+	// `_ struct{}` guards are ignored by go-cmp, whereas adding a named
+	// unexported field to any of these structs would make cmp.Equal panic for
+	// external callers.
+	t.Run("CmpEqual", func(t *testing.T) {
+		if !cmp.Equal(retryA, retryB) {
+			t.Errorf("cmp.Equal(retryA, retryB) = false, want true")
+		}
+		if cmp.Equal(retryA, retryC) {
+			t.Errorf("cmp.Equal(retryA, retryC) = true, want false")
+		}
+		if !cmp.Equal(dropsA, dropsB) {
+			t.Errorf("cmp.Equal(dropsA, dropsB) = false, want true")
+		}
+		if cmp.Equal(dropsA, dropsC) {
+			t.Errorf("cmp.Equal(dropsA, dropsC) = true, want false")
+		}
+		if !cmp.Equal(viewA, viewB) {
+			t.Errorf("cmp.Equal(viewA, viewB) = false, want true")
+		}
+		if cmp.Equal(viewA, viewC) {
+			t.Errorf("cmp.Equal(viewA, viewC) = true, want false")
+		}
+		if !cmp.Equal(uploadReqA, uploadReqB) {
+			t.Errorf("cmp.Equal(uploadReqA, uploadReqB) = false, want true")
+		}
+		if cmp.Equal(uploadReqA, uploadReqC) {
+			t.Errorf("cmp.Equal(uploadReqA, uploadReqC) = true, want false")
+		}
+	})
 
 	cfg := agentanalytics.Config{
 		Enabled:        false,
@@ -186,32 +227,34 @@ func TestStructLiterals_ExternalKeyedComparableAndJSON(t *testing.T) {
 
 // guardedStruct is a struct whose first field, `_ struct{}`, keeps code in
 // other packages from writing positional (unkeyed) literals of it, so that
-// adding a field cannot break such code. name is what the literal probes call
-// the struct.
+// adding a field cannot break such code. name is the exported identifier in
+// package agentanalytics (recorded explicitly rather than via rt.Name() so an
+// exported alias over an unexported struct still probes the exported name).
 type guardedStruct struct {
 	name string
 	typ  reflect.Type
 }
 
-// guardedStructs returns the package's guarded structs.
+// guardedStructs returns the package's guarded structs with their explicit
+// exported identifiers.
 func guardedStructs() []guardedStruct {
-	var structs []guardedStruct
-	for _, rt := range []reflect.Type{
-		reflect.TypeFor[agentanalytics.RetryConfig](),
-		reflect.TypeFor[agentanalytics.DropStats](),
-		reflect.TypeFor[agentanalytics.GCSUploadRequest](),
-		reflect.TypeFor[agentanalytics.ViewDefinition](),
-		reflect.TypeFor[agentanalytics.Config](),
-	} {
-		structs = append(structs, guardedStruct{name: rt.Name(), typ: rt})
+	return []guardedStruct{
+		{name: "RetryConfig", typ: reflect.TypeFor[agentanalytics.RetryConfig]()},
+		{name: "DropStats", typ: reflect.TypeFor[agentanalytics.DropStats]()},
+		{name: "GCSUploadRequest", typ: reflect.TypeFor[agentanalytics.GCSUploadRequest]()},
+		{name: "ViewDefinition", typ: reflect.TypeFor[agentanalytics.ViewDefinition]()},
+		{name: "Config", typ: reflect.TypeFor[agentanalytics.Config]()},
 	}
-	return structs
 }
 
 // checkGuardLayout returns an error unless field 0 of gs is the unexported
 // blank `_ struct{}` guard of gs's own package at byte offset 0 and gs has
 // at least one exported field after it. Additional unexported fields after
-// field 0 (for example, internal caches) are permitted.
+// field 0 are permitted here for non-value structs such as Config (which
+// already carries function and interface fields); the plain value structs
+// (RetryConfig, DropStats, GCSUploadRequest, and ViewDefinition) are pinned
+// separately with cmp.Equal so named unexported fields cannot break caller
+// comparisons.
 func checkGuardLayout(gs guardedStruct) error {
 	rt := gs.typ
 	if rt.NumField() == 0 {
@@ -288,6 +331,7 @@ type probeTypes struct {
 	// local holds the import paths of the guarded structs, whose unexported
 	// fields belong to pkg.
 	local map[string]bool
+	pkgs  map[string]*types.Package
 	named map[reflect.Type]*types.Named
 }
 
@@ -297,6 +341,7 @@ func probePackage(structs []guardedStruct) (*types.Package, error) {
 	c := probeTypes{
 		pkg:   types.NewPackage(agentAnalyticsPkgPath, "agentanalytics"),
 		local: make(map[string]bool),
+		pkgs:  make(map[string]*types.Package),
 		named: make(map[reflect.Type]*types.Named),
 	}
 	// Declare every struct before converting any, so that a struct used as a
@@ -324,7 +369,12 @@ func (c *probeTypes) pkgFor(pkgPath string) *types.Package {
 	if pkgPath == "" || c.local[pkgPath] {
 		return c.pkg
 	}
-	return types.NewPackage(pkgPath, path.Base(pkgPath))
+	if p, ok := c.pkgs[pkgPath]; ok {
+		return p
+	}
+	p := types.NewPackage(pkgPath, path.Base(pkgPath))
+	c.pkgs[pkgPath] = p
+	return p
 }
 
 func (c *probeTypes) typ(rt reflect.Type) (types.Type, error) {
@@ -443,25 +493,18 @@ func (c *probeTypes) tuple(rts iter.Seq[reflect.Type]) (*types.Tuple, error) {
 	return types.NewTuple(vars...), nil
 }
 
-// guardRejection is how go/types rejects a positional literal, written in
-// another package, that assigns a value to the guard.
-const guardRejection = "implicit assignment to unexported field _ in struct literal"
-
-func isGuardRejection(err error) bool {
-	return strings.Contains(err.Error(), guardRejection)
-}
-
 // checkExternalPositional type-checks literals of gs written in another
 // package against pkg, and returns an error for each that does not come out
 // the way the guard intends:
-//   - a keyed literal of all the exported fields compiles;
-//   - a positional literal of the exported fields, as code could write before
-//     the guard was added, is rejected for assigning to the `_` guard;
-//   - the same literal with struct{}{} in the guard's place is also rejected
-//     for assigning to the `_` guard.
+//   - a keyed literal of all the exported fields compiles with no type errors;
+//   - a positional literal of the exported fields fails type-checking;
+//   - the same positional literal with struct{}{} in the guard's place also
+//     fails type-checking.
 //
-// The values are selectors on a zero value of gs, so each has exactly the type
-// of its field, whatever that type is.
+// Any go/types error on the positional literals counts as a rejection so the
+// check does not depend on toolchain-specific diagnostic wording. The values
+// are selectors on a zero value of gs, so each has the exact type of its
+// field, whatever that type is.
 func checkExternalPositional(pkg *types.Package, gs guardedStruct) []error {
 	var keyed, positional []string
 	for sf := range gs.typ.Fields() {
@@ -474,12 +517,12 @@ func checkExternalPositional(pkg *types.Package, gs guardedStruct) []error {
 	if errs := typecheckLiteral(pkg, gs.name, keyed); len(errs) != 0 {
 		problems = append(problems, fmt.Errorf("keyed literal of %s: got errors %v, want none", gs.name, errs))
 	}
-	if errs := typecheckLiteral(pkg, gs.name, positional); !slices.ContainsFunc(errs, isGuardRejection) {
-		problems = append(problems, fmt.Errorf("positional literal of %s: got errors %v, want %q", gs.name, errs, guardRejection))
+	if errs := typecheckLiteral(pkg, gs.name, positional); len(errs) == 0 {
+		problems = append(problems, fmt.Errorf("positional literal of %s compiled without error, want rejection", gs.name))
 	}
 	padded := append([]string{"struct{}{}"}, positional...)
-	if errs := typecheckLiteral(pkg, gs.name, padded); !slices.ContainsFunc(errs, isGuardRejection) {
-		problems = append(problems, fmt.Errorf("positional literal of %s with struct{}{} for the guard: got errors %v, want %q", gs.name, errs, guardRejection))
+	if errs := typecheckLiteral(pkg, gs.name, padded); len(errs) == 0 {
+		problems = append(problems, fmt.Errorf("positional literal of %s with struct{}{} for the guard compiled without error, want rejection", gs.name))
 	}
 	return problems
 }
@@ -488,7 +531,14 @@ func checkExternalPositional(pkg *types.Package, gs guardedStruct) []error {
 // zero value of the struct called name in pkg, and a literal of that struct
 // with the given elements, and returns the errors.
 func typecheckLiteral(pkg *types.Package, name string, elems []string) []error {
-	src := fmt.Sprintf("package external\n\nimport %q\n\nvar z agentanalytics.%s\n\nvar _ = agentanalytics.%s{%s}\n",
+	src := fmt.Sprintf(`package external
+
+import %q
+
+var z agentanalytics.%s
+
+var _ = agentanalytics.%s{%s}
+`,
 		pkg.Path(), name, name, strings.Join(elems, ", "))
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "external.go", src, 0)
@@ -548,8 +598,9 @@ type syntheticGuardedStruct struct {
 }
 
 // syntheticGuardedWithPrivateCache verifies that adding unexported fields
-// after the field-0 `_ struct{}` guard keeps keyed construction working and
-// positional literals rejected.
+// after the field-0 `_ struct{}` guard on a Config-like struct keeps keyed
+// construction working and positional literals rejected (note that named
+// unexported fields would make cmp.Equal panic on plain value structs).
 type syntheticGuardedWithPrivateCache struct {
 	_     struct{}
 	Name  string
@@ -557,6 +608,13 @@ type syntheticGuardedWithPrivateCache struct {
 	Count int
 	note  *http.Client
 }
+
+type syntheticUnexportedGuarded struct {
+	_     struct{}
+	Value string
+}
+
+type syntheticGuardedAlias = syntheticUnexportedGuarded
 
 type syntheticNamedPrivateFirst struct {
 	cache int
@@ -582,45 +640,111 @@ func TestStructLiterals_SyntheticGuardedStruct(t *testing.T) {
 		t.Error(problem)
 	}
 
-	// The conversion keeps the name, embedding and type of each field,
-	// including array lengths, channel directions and variadic parameters.
+	// Verify structurally (without depending on types.TypeString formatting)
+	// that the conversion keeps the name, embedding, and type of each field,
+	// including array lengths, channel directions, and variadic parameters.
 	converted := pkg.Scope().Lookup(gs.name).Type()
 	st, ok := converted.Underlying().(*types.Struct)
 	if !ok {
 		t.Fatalf("%s converted to %v, want a struct", gs.name, converted)
 	}
-	wantTypes := []string{
-		"struct{}",
-		"*bytes.Buffer",
-		"*http.Client",
-		"chan struct{}",
-		"<-chan struct{}",
-		"chan<- error",
-		"time.Time",
-		"[3]time.Duration",
-		"[2]int",
-		"func(...string)",
-		"interface{Close() error}",
-		"unsafe.Pointer",
+	if st.NumFields() != gs.typ.NumField() {
+		t.Fatalf("converted struct has %d fields, want %d", st.NumFields(), gs.typ.NumField())
 	}
-	var gotTypes []string
 	for i := range st.NumFields() {
 		f, sf := st.Field(i), gs.typ.Field(i)
 		if f.Name() != sf.Name || f.Embedded() != sf.Anonymous {
 			t.Errorf("field %d = {Name:%q Embedded:%v}, want {Name:%q Embedded:%v}", i, f.Name(), f.Embedded(), sf.Name, sf.Anonymous)
 		}
-		gotTypes = append(gotTypes, types.TypeString(f.Type(), (*types.Package).Name))
-		// An opaque stand-in would print the same, so compare the type itself.
-		if sf.Type == reflect.TypeFor[unsafe.Pointer]() && f.Type() != types.Typ[types.UnsafePointer] {
-			t.Errorf("field %s converted to %v (%T), want the predeclared unsafe.Pointer", sf.Name, f.Type(), f.Type())
+	}
+	isNamed := func(t types.Type, pkgPath, name string) bool {
+		n, ok := t.(*types.Named)
+		return ok && n.Obj().Pkg() != nil && n.Obj().Pkg().Path() == pkgPath && n.Obj().Name() == name
+	}
+	isEmptyStruct := func(t types.Type) bool {
+		s, ok := t.(*types.Struct)
+		return ok && s.NumFields() == 0
+	}
+	errorType := types.Universe.Lookup("error").Type()
+	fieldChecks := []struct {
+		name string
+		ok   func(types.Type) bool
+	}{
+		{"_", isEmptyStruct},
+		{"Buffer", func(t types.Type) bool {
+			p, ok := t.(*types.Pointer)
+			return ok && isNamed(p.Elem(), "bytes", "Buffer")
+		}},
+		{"Client", func(t types.Type) bool {
+			p, ok := t.(*types.Pointer)
+			return ok && isNamed(p.Elem(), "net/http", "Client")
+		}},
+		{"Done", func(t types.Type) bool {
+			ch, ok := t.(*types.Chan)
+			return ok && ch.Dir() == types.SendRecv && isEmptyStruct(ch.Elem())
+		}},
+		{"Ready", func(t types.Type) bool {
+			ch, ok := t.(*types.Chan)
+			return ok && ch.Dir() == types.RecvOnly && isEmptyStruct(ch.Elem())
+		}},
+		{"Errs", func(t types.Type) bool {
+			ch, ok := t.(*types.Chan)
+			return ok && ch.Dir() == types.SendOnly && ch.Elem() == errorType
+		}},
+		{"Since", func(t types.Type) bool { return isNamed(t, "time", "Time") }},
+		{"Backoffs", func(t types.Type) bool {
+			a, ok := t.(*types.Array)
+			return ok && a.Len() == 3 && isNamed(a.Elem(), "time", "Duration")
+		}},
+		{"Dims", func(t types.Type) bool {
+			a, ok := t.(*types.Array)
+			return ok && a.Len() == 2 && a.Elem() == types.Typ[types.Int]
+		}},
+		{"OnEvent", func(t types.Type) bool {
+			sig, ok := t.(*types.Signature)
+			if !ok || !sig.Variadic() || sig.Params().Len() != 1 || sig.Results().Len() != 0 {
+				return false
+			}
+			sl, ok := sig.Params().At(0).Type().(*types.Slice)
+			return ok && sl.Elem() == types.Typ[types.String]
+		}},
+		{"Closer", func(t types.Type) bool {
+			iface, ok := t.(*types.Interface)
+			if !ok || iface.NumMethods() != 1 || iface.Method(0).Name() != "Close" {
+				return false
+			}
+			sig, ok := iface.Method(0).Type().(*types.Signature)
+			return ok && sig.Params().Len() == 0 && sig.Results().Len() == 1 && sig.Results().At(0).Type() == errorType
+		}},
+		{"Ptr", func(t types.Type) bool { return t == types.Typ[types.UnsafePointer] }},
+	}
+	if len(fieldChecks) != st.NumFields() {
+		t.Fatalf("fieldChecks has %d entries, want %d", len(fieldChecks), st.NumFields())
+	}
+	for i, want := range fieldChecks {
+		f := st.Field(i)
+		if f.Name() != want.name || !want.ok(f.Type()) {
+			t.Errorf("field %d (%s) converted to %T (%v), did not match structural check for %s", i, f.Name(), f.Type(), f.Type(), want.name)
 		}
 	}
-	if !slices.Equal(gotTypes, wantTypes) {
-		t.Errorf("converted field types = %q, want %q", gotTypes, wantTypes)
+
+	// An exported alias over an unexported struct type works when guardedStruct
+	// records the explicit exported identifier rather than rt.Name().
+	aliasGS := guardedStruct{name: "SyntheticGuardedAlias", typ: reflect.TypeFor[syntheticGuardedAlias]()}
+	if err := checkGuardLayout(aliasGS); err != nil {
+		t.Errorf("checkGuardLayout(%s) = %v, want nil", aliasGS.name, err)
+	}
+	aliasPkg, err := probePackage([]guardedStruct{aliasGS})
+	if err != nil {
+		t.Fatalf("probePackage(%s) failed: %v", aliasGS.name, err)
+	}
+	if problems := checkExternalPositional(aliasPkg, aliasGS); len(problems) != 0 {
+		t.Errorf("checkExternalPositional(%s) reported problems: %v", aliasGS.name, problems)
 	}
 
-	// Unexported fields after field 0 (for example, internal caches) remain
-	// compatible with both the layout check and the external literal probes.
+	// On a Config-like struct that is not compared with plain cmp.Equal,
+	// unexported fields after field 0 remain compatible with both the layout
+	// check and the external literal probes.
 	withPrivate := guardedStruct{name: "SyntheticGuardedWithPrivateCache", typ: reflect.TypeFor[syntheticGuardedWithPrivateCache]()}
 	if err := checkGuardLayout(withPrivate); err != nil {
 		t.Errorf("checkGuardLayout(%s) = %v, want nil", withPrivate.name, err)
@@ -633,21 +757,24 @@ func TestStructLiterals_SyntheticGuardedStruct(t *testing.T) {
 		t.Errorf("checkExternalPositional(%s) reported problems: %v", withPrivate.name, problems)
 	}
 
-	// The same checks fail for a struct with these fields and no guard, and
-	// for a struct whose first field is a named unexported field rather than `_`.
-	for _, control := range []guardedStruct{
-		{name: "SyntheticUnguarded", typ: unguardedFields(gs.typ)},
-		{name: "SyntheticNamedPrivateFirst", typ: reflect.TypeFor[syntheticNamedPrivateFirst]()},
-	} {
-		if err := checkGuardLayout(control); err == nil {
-			t.Errorf("checkGuardLayout(%s) = nil, want an error", control.name)
-		}
-		controlPkg, err := probePackage([]guardedStruct{control})
-		if err != nil {
-			t.Fatalf("probePackage(%s) failed: %v", control.name, err)
-		}
-		if problems := checkExternalPositional(controlPkg, control); len(problems) != 2 {
-			t.Errorf("checkExternalPositional(%s) reported %d problems, want 2, one for each positional literal: %v", control.name, len(problems), problems)
-		}
+	// An unguarded struct fails both checkGuardLayout and checkExternalPositional
+	// (its unpadded positional literal compiles without error).
+	unguarded := guardedStruct{name: "SyntheticUnguarded", typ: unguardedFields(gs.typ)}
+	if err := checkGuardLayout(unguarded); err == nil {
+		t.Errorf("checkGuardLayout(%s) = nil, want an error", unguarded.name)
+	}
+	unguardedPkg, err := probePackage([]guardedStruct{unguarded})
+	if err != nil {
+		t.Fatalf("probePackage(%s) failed: %v", unguarded.name, err)
+	}
+	if problems := checkExternalPositional(unguardedPkg, unguarded); len(problems) != 1 {
+		t.Errorf("checkExternalPositional(%s) reported %d problems, want 1 (unpadded positional literal): %v", unguarded.name, len(problems), problems)
+	}
+
+	// A struct whose first field is a named unexported field rather than `_`
+	// fails checkGuardLayout.
+	namedFirst := guardedStruct{name: "SyntheticNamedPrivateFirst", typ: reflect.TypeFor[syntheticNamedPrivateFirst]()}
+	if err := checkGuardLayout(namedFirst); err == nil {
+		t.Errorf("checkGuardLayout(%s) = nil, want an error", namedFirst.name)
 	}
 }

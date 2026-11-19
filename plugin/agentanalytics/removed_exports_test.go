@@ -12,14 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package agentanalytics
+package agentanalytics_test
 
-// These test-only variables take the names that were removed from the
-// package's exported API. Declaring any of them again at package level, as a
-// function, type, variable or constant, then fails to compile the package's
-// tests, including when the declaration comes from a `go test -overlay` file,
-// which no scan of the files on disk can see.
-var (
+import . "google.golang.org/adk/plugin/agentanalytics" //nolint:staticcheck,revive // intentional dot-import so re-exporting any removed symbol fails to compile
+
+// These external-test variables take the names that were removed from the
+// package's exported API without re-exporting them on package agentanalytics
+// during `go test`. If package agentanalytics (including via `go test -overlay`)
+// exports any of them again as a function, type, variable, or constant, the
+// dot-import collides with the package-block declaration below and fails to
+// compile, while any reference such as `agentanalytics.SmartTruncate` in
+// agentanalytics_test fails as undefined just as it does for downstream callers.
+// Note that this check only sees files included in the current build
+// configuration (for example, a `//go:build !race` file re-adding a name is
+// not compiled under `go test -race`).
+var ( //nolint:revive // intentional tripwire names matching removed exports
 	ArrowSchema           struct{}
 	SerializedArrowSchema struct{}
 	BatchProcessor        struct{}
@@ -27,3 +34,15 @@ var (
 	FormatContentParts    struct{}
 	SmartTruncate         struct{}
 )
+
+// Reference an exported identifier from the dot-import and each tripwire
+// variable so neither the compiler nor the unused linter reports them unused.
+var _ = [7]any{
+	SchemaVersion,
+	ArrowSchema,
+	SerializedArrowSchema,
+	BatchProcessor,
+	NewBatchProcessor,
+	FormatContentParts,
+	SmartTruncate,
+}

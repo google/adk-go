@@ -4761,7 +4761,7 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 			FormatterFailureDrops: 1,
 			TotalDrops:            0,
 		}
-		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(want, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -4791,7 +4791,7 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 		if truncated := p.addContent(row, EventUserMessageReceived, &eventData{content: textContent("user", "hello")}); truncated {
 			t.Error("addContent() truncated = true, want false when both content and content_parts are denied")
 		}
-		if got := bp.DropStats(); got != (DropStats{}) {
+		if got := bp.dropStats(); got != (DropStats{}) {
 			t.Errorf("DropStats() = %+v, want zero drops when both content and content_parts are denied", got)
 		}
 	})
@@ -4833,7 +4833,7 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 			FormatterFailureDrops: 1,
 			TotalDrops:            0,
 		}
-		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(want, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})

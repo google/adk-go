@@ -5827,7 +5827,7 @@ func TestGCSOffloading_FlushRunEndDropPathReleasesAllUploadsWhenLoggerPanics(t *
 	if got := len(bp.deferredBatch); got != 0 {
 		t.Errorf("deferredBatch length = %d, want 0: a rejected batch is dropped", got)
 	}
-	if got := bp.DropStats().AppendFailureDrops; got != 3 {
+	if got := bp.dropStats().AppendFailureDrops; got != 3 {
 		t.Errorf("AppendFailureDrops = %d, want 3, the rows of the rejected batch", got)
 	}
 }
