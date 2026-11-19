@@ -3911,9 +3911,11 @@ func (tm *traceManager) endRestartedNodeRuns(ctx context.Context, id identity) [
 // then marks the open activation that the scheduler started as the node's
 // agent for it (see isNodeAgentOf), if there is exactly one, as reported over
 // (see spanRecord.nodeRunEnded); if no such activation is open anymore, its
-// run ended earlier. A run that ends with an output gets no completion event,
-// so once a node completed with an output, later runs of it on the same path
-// and branch are not attributed; neither are runs of a node that the
+// run ended earlier. A run that ends with an output gets no completion event
+// that is read here. Only a resumed run that ends with an output gets a
+// record, under a key of its own (adk.workflow.node_resume_completed) that
+// nodeCompletion does not count. So once a node completed with an output,
+// later runs of it on the same path and branch are not attributed; neither are runs of a node that the
 // scheduler started again while it ran, as a node that two join nodes route
 // to may be.
 func (tm *traceManager) recordNodeCompletion(ctx context.Context, id identity, workflowName, path, branch string, failed bool) {
