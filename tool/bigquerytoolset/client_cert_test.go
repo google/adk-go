@@ -16,6 +16,7 @@ package bigquerytoolset
 
 import (
 	"bytes"
+	"crypto/tls"
 	"net/http"
 	"os"
 	"testing"
@@ -50,6 +51,8 @@ func TestNewClientFollowsTheCertificateRule(t *testing.T) {
 	)
 
 	own := &http.Client{}
+	callerCert, callerDER := clientcerttest.Certificate(t)
+	callerSource := func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &callerCert, nil }
 	unset := clientcerttest.Unset
 	for _, tc := range []struct {
 		name         string
@@ -59,12 +62,14 @@ func TestNewClientFollowsTheCertificateRule(t *testing.T) {
 		opts         []option.ClientOption
 		wantEndpoint string
 		wantCert     bool
+		wantDER      []byte // the workload certificate when nil
 		wantClient   *http.Client
 	}{
 		{name: "workload config", useCert: unset, gcloud: unset, wantEndpoint: mtls, wantCert: true},
 		{name: "gcloud's variable", useCert: unset, gcloud: "true", wantEndpoint: mtls, wantCert: true},
 		{name: "never keeps the default endpoint and the certificate", useCert: unset, gcloud: unset, mode: "never", wantEndpoint: plain, wantCert: true},
 		{name: "an endpoint from ClientOptions wins", useCert: unset, gcloud: unset, opts: []option.ClientOption{option.WithEndpoint(explicit)}, wantEndpoint: explicit, wantCert: true},
+		{name: "a certificate from ClientOptions wins", useCert: unset, gcloud: unset, opts: []option.ClientOption{option.WithClientCertSource(callerSource)}, wantEndpoint: mtls, wantCert: true, wantDER: callerDER},
 		{name: "an HTTP client from ClientOptions is left alone", useCert: unset, gcloud: unset, opts: []option.ClientOption{option.WithHTTPClient(own)}, wantEndpoint: plain, wantClient: own},
 		// The auth library leaves the certificate off outside googleapis.com.
 		{name: "another universe keeps its endpoint", useCert: unset, gcloud: unset, opts: []option.ClientOption{option.WithUniverseDomain("example.com")}, wantEndpoint: "https://bigquery.example.com/bigquery/v2/"},
@@ -101,8 +106,15 @@ func TestNewClientFollowsTheCertificateRule(t *testing.T) {
 				}
 				return
 			}
-			if len(got) != 1 || !bytes.Equal(got[0], der) {
-				t.Errorf("server saw %d client certificates, want exactly the configured one", len(got))
+			want, whose := der, "the workload certificate"
+			if tc.wantDER != nil {
+				want, whose = tc.wantDER, "the certificate from ClientOptions"
+			}
+			if len(got) != 1 {
+				t.Fatalf("server saw %d client certificates, want one", len(got))
+			}
+			if !bytes.Equal(got[0], want) {
+				t.Errorf("server saw a certificate other than %s", whose)
 			}
 		})
 	}
