@@ -129,10 +129,13 @@ func (m *apigeeModel) Name() string {
 
 // Capabilities returns the resolved capabilities of the Apigee model.
 //
-// They are the capabilities of the Gemini model the proxy forwards to, so
+// They are the capabilities of the Gemini model the proxy forwards to,
+// returned unchanged as [model.CapabilitiesProvider] asks of a wrapper, so
 // OutputSchemaAndTools is true when the model ID names a Gemini model and
-// [NewModel] chose the Vertex AI backend for it, and false otherwise. A nil
-// or uninitialized model reports the zero Capabilities.
+// [NewModel] chose the Vertex AI backend for it, and false otherwise.
+// ClientFunctionCallIDs is false, as it is for that Gemini model, so ADK
+// removes the function call IDs it generated from Apigee requests. A nil or
+// uninitialized model reports the zero Capabilities.
 func (m *apigeeModel) Capabilities() model.Capabilities {
 	if m == nil || m.delegate == nil {
 		return model.Capabilities{}

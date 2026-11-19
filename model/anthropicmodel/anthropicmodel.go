@@ -420,8 +420,13 @@ func (m *anthropicModel) Name() string {
 // OutputSchemaAndTools is false, so an agent that has both an output schema
 // and tools gets the set_model_response tool instead of a native response
 // schema. An agent without tools still sends its output schema natively.
+//
+// ClientFunctionCallIDs is true on both backends: the Messages API pairs each
+// tool_result with its tool_use by ID, so the flow keeps the adk- function
+// call IDs ADK generates. A wrapper around this model keeps them only when its
+// own Capabilities returns this value, as [model.Capabilities] describes.
 func (m *anthropicModel) Capabilities() model.Capabilities {
-	return model.Capabilities{}
+	return model.Capabilities{ClientFunctionCallIDs: true}
 }
 
 var _ model.CapabilitiesProvider = (*anthropicModel)(nil)

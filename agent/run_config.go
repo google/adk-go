@@ -203,4 +203,52 @@ type RunConfig struct {
 	// that agent. Labels other than "adk_agent_name" set on that agent's own
 	// GenerateContentConfig still make the connector return an error.
 	Labels *map[string]string
+
+	// ModelInputContext holds transient contents that every model request of
+	// the invocation receives besides the session history. The runner does not
+	// write them to the session: they are neither events nor part of the
+	// history a later invocation reads.
+	//
+	// A request gets them immediately before the last content of the request
+	// that equals the user content the LLM agent sees (the UserContent of its
+	// context), so they stay before the user message on every later request
+	// of the invocation, after a tool call for example. When no content
+	// equals it, the contents go first, before the history; a run that has no
+	// message and resumes no invocation is one such case. An LLM agent that
+	// runs as a workflow graph node sees its node input as its user content.
+	//
+	// When a run posts back a long-running tool's result, the root decides
+	// where they go:
+	//   - An LLM agent root: the user content is the stored message that
+	//     started the resumed invocation, so they go before that message.
+	//   - A root set in runner.Config.Node: the run resumes the LLM agent node
+	//     with the input it had when it made the call, and they go before
+	//     that input.
+	//   - A workflowagent root: the graph runs again from Start, which passes
+	//     a node, by default, the text of the posted message. That text is
+	//     empty, so an LLM agent node that Start feeds gets them first.
+	//   - Any other root, a sequential agent for example: the user content is
+	//     the posted message. Its copy in the history equals it only for a
+	//     model that keeps "adk-" call IDs
+	//     (model.Capabilities.ClientFunctionCallIDs), so they go just before
+	//     the response for such a model and first for any other.
+	//
+	// Every LLM agent of the run gets them, whatever its IncludeContents.
+	// Agents run through agenttool and live runs (RunLive) do not.
+	//
+	// Each request gets its own deep copy of every entry, so a request
+	// processor or BeforeModelCallback that edits req.Contents, at any depth,
+	// reaches neither the caller's contents nor the next request.
+	//
+	// A nil entry is an error: the run yields an error that names the index,
+	// before the first model call.
+	//
+	// ModelInputContext is a pointer so that RunConfig stays comparable and
+	// usable as a map key. Nil (the zero value) or a pointer to an empty slice
+	// adds nothing.
+	//
+	// Run does not copy ModelInputContext. ADK reads the slice and its contents
+	// each time it builds a model request, while the sequence returned by Run
+	// is iterated, so leave them unchanged until the iteration ends.
+	ModelInputContext *[]*genai.Content
 }

@@ -1012,6 +1012,51 @@ func TestGeminiModel_CapabilitiesOnVertexAIFollowModelName(t *testing.T) {
 	}
 }
 
+// TestNewModel_DoesNotDeclareClientFunctionCallIDs checks that a Gemini model
+// declares no ID pairing on either backend, so the flow removes the adk-
+// function call IDs ADK generates from its requests, as adk-python does for
+// every model outside its ID-pairing list
+// (flows/llm_flows/context/_contents.py:128).
+func TestNewModel_DoesNotDeclareClientFunctionCallIDs(t *testing.T) {
+	tests := []struct {
+		name   string
+		config *genai.ClientConfig
+	}{
+		{
+			name: "vertex_ai",
+			config: &genai.ClientConfig{
+				Backend:    genai.BackendVertexAI,
+				Project:    "test-project",
+				Location:   "us-central1",
+				HTTPClient: &http.Client{},
+			},
+		},
+		{
+			name: "gemini_api",
+			config: &genai.ClientConfig{
+				Backend:    genai.BackendGeminiAPI,
+				APIKey:     "fake-key",
+				HTTPClient: &http.Client{},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gemini-2.5-flash", tt.config)
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			cp, ok := llm.(model.CapabilitiesProvider)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement model.CapabilitiesProvider", llm)
+			}
+			if cp.Capabilities().ClientFunctionCallIDs {
+				t.Error("Capabilities().ClientFunctionCallIDs = true, want false")
+			}
+		})
+	}
+}
+
 func TestModel_MaybeAppendUserContent(t *testing.T) {
 	tests := []struct {
 		name     string

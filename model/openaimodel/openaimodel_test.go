@@ -294,6 +294,37 @@ func TestNewModel_DeclaresNoOutputSchemaWithTools(t *testing.T) {
 	}
 }
 
+// TestNewModel_ClientFunctionCallIDsByAPI checks that the Responses API, which
+// is also the default, declares that it pairs tool calls with their results by
+// ID, so the flow keeps ADK's adk- function call IDs in the request, and that
+// Chat Completions does not, so the flow removes them. adk-python keeps the
+// IDs for OpenAIResponsesLlm only (flows/llm_flows/context/_contents.py:96).
+func TestNewModel_ClientFunctionCallIDsByAPI(t *testing.T) {
+	tests := []struct {
+		api  API
+		want bool
+	}{
+		{api: "", want: true},
+		{api: APIResponses, want: true},
+		{api: APIChatCompletions, want: false},
+	}
+	for _, tt := range tests {
+		t.Run("api="+string(tt.api), func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gpt-4o", &ClientConfig{APIKey: "test", API: tt.api})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			cp, ok := llm.(model.CapabilitiesProvider)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement model.CapabilitiesProvider", llm)
+			}
+			if got := cp.Capabilities().ClientFunctionCallIDs; got != tt.want {
+				t.Errorf("Capabilities().ClientFunctionCallIDs = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestOpenAIAndAnthropic_IgnoreADKAgentNameLabelOnly checks, on both APIs, that
 // the adk_agent_name label the flow adds to every request is accepted and never
 // sent, while a label the caller set, or an empty labels map, is still refused
