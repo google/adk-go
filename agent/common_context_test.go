@@ -39,7 +39,7 @@ func TestCommonContext_ContextFallbackDelegation(t *testing.T) {
 	wantPath := "wf/child@123"
 	wantAncestors := []string{"wf/root", "wf/parent"}
 	runID := "123"
-	var subScheduler DynamicSubScheduler = nil
+	var subScheduler DynamicSubScheduler
 	// Create a dynamic node context that explicitly populates path and outputForAncestors.
 	delta := &CommonContextDelta{
 		Path:               &wantPath,
