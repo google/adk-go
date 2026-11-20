@@ -19,11 +19,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"strings"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/schemautil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 )
@@ -147,38 +147,13 @@ func withJSONSchemaArgs(schema any, args map[string]*genai.Schema) (map[string]a
 		out["properties"] = props
 	}
 	for name, arg := range args {
-		data, err := json.Marshal(arg)
+		prop, err := schemautil.GeminiToJSONSchema(arg)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("argument %q: %w", name, err)
 		}
-		var prop any
-		if err := json.Unmarshal(data, &prop); err != nil {
-			return nil, err
-		}
-		// genai.Schema spells types in upper case ("STRING"); JSON Schema in
-		// lower case.
-		lowercaseTypes(prop)
 		props[name] = prop
 	}
 	return out, nil
-}
-
-// lowercaseTypes lower-cases every string "type" value in a decoded schema.
-func lowercaseTypes(node any) {
-	switch node := node.(type) {
-	case map[string]any:
-		for key, child := range node {
-			if t, ok := child.(string); ok && key == "type" {
-				node[key] = strings.ToLower(t)
-				continue
-			}
-			lowercaseTypes(child)
-		}
-	case []any:
-		for _, child := range node {
-			lowercaseTypes(child)
-		}
-	}
 }
 
 func afterModelCallback(cfg FunctionCallModifierConfig) func(agent.Context, *model.LLMResponse, error) (*model.LLMResponse, error) {
