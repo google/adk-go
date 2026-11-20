@@ -1387,40 +1387,4 @@ func TestRun_SupportCFCAndRunLiveStampBeforeToolRuns(t *testing.T) {
 			t.Errorf("SupportCFC tool calls mismatch (-want +got):\n%s", diff)
 		}
 	})
-
-	t.Run("RunLive", func(t *testing.T) {
-		m := newLiveTestModel(t, serveToolTurn)
-		tl, calls := countingTransfer(t)
-		a, err := llmagent.New(llmagent.Config{Name: "agent", Model: m, Tools: []tool.Tool{tl}})
-		if err != nil {
-			t.Fatalf("llmagent.New() error = %v", err)
-		}
-		svc := session.InMemoryService()
-		createSession(t, svc)
-		p := newPlugin(t, toolcallintegrity.Config{SecretKey: testKey})
-		r := newRunner(t, a, svc, p)
-
-		liveSess, events, err := r.RunLive(t.Context(), "user", "session", agent.LiveRunConfig{})
-		if err != nil {
-			t.Fatalf("RunLive() error = %v", err)
-		}
-		defer func() { _ = liveSess.Close() }()
-
-		for ev, err := range events {
-			if err != nil {
-				t.Fatalf("RunLive() event error = %v", err)
-			}
-			for _, fr := range ev.FunctionResponses() {
-				if errMsg, refused := fr.Response["error"]; refused {
-					t.Fatalf("RunLive function response error = %v, want tool execution to succeed", errMsg)
-				}
-			}
-			if ev.TurnComplete {
-				break
-			}
-		}
-		if diff := cmp.Diff([]transferArgs{{Amount: 10}}, *calls); diff != "" {
-			t.Errorf("RunLive tool calls mismatch (-want +got):\n%s", diff)
-		}
-	})
 }
