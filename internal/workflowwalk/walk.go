@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package workflowwalk lets the experimental app-info endpoint (exp/appinfo)
-// walk workflow graphs, and exists for that feature only.
+// Package workflowwalk lets code in this module walk workflow graphs: the
+// experimental app-info endpoint (exp/appinfo) and the runner's Close
+// (package runner), through internal/agenttree.
 //
 // The init function in workflow/walk.go assigns workflow's unexported graph
-// walk to [WalkAgents], and app-info calls the walk through that variable.
+// walks to [WalkAgents] and [WalkToolAgents], and those callers reach the
+// walks through these variables.
 // Because this package is internal, only code in this module can reach it. The
 // comment on that init function explains why the walk is not exported instead.
 package workflowwalk
@@ -29,3 +31,10 @@ import "google.golang.org/adk/v2/agent"
 // edges must be a []workflow.Edge; it is an any because this package cannot
 // import workflow without an import cycle.
 var WalkAgents func(edges any) []agent.Agent
+
+// WalkToolAgents returns the agents behind the agent tools that the ToolNodes
+// of edges run, including ToolNodes in nested workflows and ParallelWorkers.
+// An agent tool is a tool that implements toolinternal.AgentWrapper. It is
+// set by the init function in workflow/walk.go, as WalkAgents is, and edges
+// must be a []workflow.Edge.
+var WalkToolAgents func(edges any) []agent.Agent

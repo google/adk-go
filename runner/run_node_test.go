@@ -17,18 +17,25 @@ package runner_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagent"
+	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/plugin"
@@ -1528,4 +1535,1519 @@ func sessionOutputs(sess session.Session) []any {
 		}
 	}
 	return outs
+}
+
+// requestRecordingModel replies with a fixed text and records the texts of
+// every user content of each request it receives.
+type requestRecordingModel struct {
+	reply     string
+	userTexts [][]string
+}
+
+func (*requestRecordingModel) Name() string { return "request_recording" }
+
+func (m *requestRecordingModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	var texts []string
+	for _, c := range req.Contents {
+		if c == nil || c.Role != genai.RoleUser {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p != nil && p.Text != "" {
+				texts = append(texts, p.Text)
+			}
+		}
+	}
+	m.userTexts = append(m.userTexts, texts)
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: genai.NewContentFromText(m.reply, genai.RoleModel)}, nil)
+	}
+}
+
+// newNodeTestRunnerWithPlugins is newNodeTestRunner with plugins.
+func newNodeTestRunnerWithPlugins(t *testing.T, a agent.Agent, svc session.Service, plugins ...*plugin.Plugin) *runner.Runner {
+	t.Helper()
+	r, err := runner.New(runner.Config{
+		AppName:        nodeTestApp,
+		Agent:          a,
+		SessionService: svc,
+		PluginConfig:   runner.PluginConfig{Plugins: plugins},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return r
+}
+
+// replaceMessagePlugin returns a plugin whose OnUserMessageCallback replaces
+// every user message with replacement.
+func replaceMessagePlugin(t *testing.T, replacement *genai.Content) *plugin.Plugin {
+	t.Helper()
+	p, err := plugin.New(plugin.Config{
+		Name: "replace_message",
+		OnUserMessageCallback: func(agent.InvocationContext, *genai.Content) (*genai.Content, error) {
+			return replacement, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+	return p
+}
+
+// collectRun ranges seq and returns its non-nil events and its errors.
+func collectRun(seq iter.Seq2[*session.Event, error]) ([]*session.Event, []error) {
+	var events []*session.Event
+	var errs []error
+	for ev, err := range seq {
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if ev != nil {
+			events = append(events, ev)
+		}
+	}
+	return events, errs
+}
+
+// storedNodeTestSession reads the node test session back from svc.
+func storedNodeTestSession(t *testing.T, ctx context.Context, svc session.Service) session.Session {
+	t.Helper()
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: nodeTestApp, UserID: nodeTestUser, SessionID: nodeTestSession})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	return got.Session
+}
+
+// appendSeedEvent appends ev to the stored node test session.
+func appendSeedEvent(t *testing.T, ctx context.Context, svc session.Service, ev *session.Event) {
+	t.Helper()
+	if err := svc.AppendEvent(ctx, storedNodeTestSession(t, ctx, svc), ev); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+}
+
+// eventText concatenates the text parts of ev's content.
+func eventText(ev *session.Event) string {
+	if ev == nil || ev.Content == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range ev.Content.Parts {
+		if p != nil {
+			b.WriteString(p.Text)
+		}
+	}
+	return b.String()
+}
+
+// textReplyAgent returns a custom (non-LLM) agent that yields one event with
+// the given text.
+func textReplyAgent(t *testing.T, name, text string) agent.Agent {
+	t.Helper()
+	a, err := agent.New(agent.Config{
+		Name: name,
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = name
+				ev.Branch = ctx.Branch()
+				ev.Content = genai.NewContentFromText(text, genai.RoleModel)
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	return a
+}
+
+// textReplyLlmAgent returns an LlmAgent whose model always replies text.
+func textReplyLlmAgent(t *testing.T, name, text string) agent.Agent {
+	t.Helper()
+	a, err := llmagent.New(llmagent.Config{
+		Name:  name,
+		Model: &scriptedModel{responses: []*genai.Content{genai.NewContentFromText(text, genai.RoleModel)}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	return a
+}
+
+func TestRunner_GetSessionConfig_ForwardsLimits(t *testing.T) {
+	// seed stores five user events "m0" to "m4", one second apart.
+	seed := func(t *testing.T, ctx context.Context, svc session.Service) {
+		t.Helper()
+		newNodeTestSession(t, ctx, svc)
+		for i := range 5 {
+			ev := session.NewEvent(ctx, "inv_seed")
+			ev.Author = "user"
+			ev.Timestamp = time.Date(2026, 1, 1, 0, 0, 1+i, 0, time.UTC)
+			ev.Content = genai.NewContentFromText(fmt.Sprintf("m%d", i), genai.RoleUser)
+			appendSeedEvent(t, ctx, svc, ev)
+		}
+	}
+	// newReader returns a custom agent that records the texts of the session
+	// events it sees.
+	newReader := func(t *testing.T, got *[]string) agent.Agent {
+		t.Helper()
+		a, err := agent.New(agent.Config{
+			Name: "reader",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					events := ctx.Session().Events()
+					for i := range events.Len() {
+						*got = append(*got, eventText(events.At(i)))
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New() error = %v", err)
+		}
+		return a
+	}
+
+	t.Run("node_path_num_recent_events", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		seed(t, ctx, svc)
+		m := &requestRecordingModel{reply: "ok"}
+		a, err := llmagent.New(llmagent.Config{Name: "greeter", Model: m})
+		if err != nil {
+			t.Fatalf("llmagent.New() error = %v", err)
+		}
+		r := newNodeTestRunner(t, a, svc)
+
+		cfg := agent.RunConfig{GetSessionConfig: &agent.GetSessionConfig{NumRecentEvents: 2}}
+		if _, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("hi"), cfg)); len(errs) > 0 {
+			t.Fatalf("Run() errors = %v", errs)
+		}
+
+		want := [][]string{{"m3", "m4", "hi"}}
+		if diff := cmp.Diff(want, m.userTexts); diff != "" {
+			t.Errorf("user texts of the model requests mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		cfg  *agent.GetSessionConfig
+		want []string
+	}{
+		{
+			name: "classic_path_after",
+			cfg:  &agent.GetSessionConfig{After: time.Date(2026, 1, 1, 0, 0, 4, 0, time.UTC)},
+			want: []string{"m3", "m4", "hi"},
+		},
+		{
+			name: "nil_config",
+			cfg:  nil,
+			want: []string{"m0", "m1", "m2", "m3", "m4", "hi"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			svc := session.InMemoryService()
+			seed(t, ctx, svc)
+			var got []string
+			r := newNodeTestRunner(t, newReader(t, &got), svc)
+
+			if _, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("hi"), agent.RunConfig{GetSessionConfig: tc.cfg})); len(errs) > 0 {
+				t.Fatalf("Run() errors = %v", errs)
+			}
+
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("session event texts the agent saw mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+
+	t.Run("snapshot_on_run_call", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		seed(t, ctx, svc)
+		var got []string
+		r := newNodeTestRunner(t, newReader(t, &got), svc)
+
+		cfg := agent.RunConfig{GetSessionConfig: &agent.GetSessionConfig{NumRecentEvents: 2}}
+		seq := r.Run(ctx, nodeTestUser, nodeTestSession, userText("hi"), cfg)
+		cfg.GetSessionConfig.NumRecentEvents = 1
+		if _, errs := collectRun(seq); len(errs) > 0 {
+			t.Fatalf("Run() errors = %v", errs)
+		}
+
+		want := []string{"m3", "m4", "hi"}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("session event texts the agent saw mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestRunner_RejectsUserFunctionCall_BeforeAppendAndAfterPlugin(t *testing.T) {
+	const wantErr = "user message cannot contain function calls"
+	functionCallMsg := func() *genai.Content {
+		return &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: "exec", Args: map[string]any{"k": "v"}}},
+		}}
+	}
+	injected := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{Name: "injected"}},
+	}}
+	roots := []struct {
+		kind string
+		new  func(t *testing.T) agent.Agent
+	}{
+		{kind: "classic", new: func(t *testing.T) agent.Agent { return textReplyAgent(t, "custom", "ok") }},
+		{kind: "node", new: func(t *testing.T) agent.Agent { return textReplyLlmAgent(t, "greeter", "ok") }},
+	}
+
+	t.Run("node_path_direct_function_call", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+		r := newNodeTestRunner(t, textReplyLlmAgent(t, "greeter", "ok"), svc)
+
+		events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, functionCallMsg(), agent.RunConfig{}))
+
+		if len(events) != 0 {
+			t.Errorf("Run() yielded %d events, want 0", len(events))
+		}
+		if len(errs) != 1 || errs[0].Error() != wantErr {
+			t.Errorf("Run() errors = %v, want exactly [%q]", errs, wantErr)
+		}
+		if n := storedNodeTestSession(t, ctx, svc).Events().Len(); n != 0 {
+			t.Errorf("stored session has %d events, want 0", n)
+		}
+	})
+
+	for _, root := range roots {
+		t.Run("plugin_injects_function_call/"+root.kind, func(t *testing.T) {
+			ctx := t.Context()
+			svc := session.InMemoryService()
+			newNodeTestSession(t, ctx, svc)
+			r := newNodeTestRunnerWithPlugins(t, root.new(t), svc, replaceMessagePlugin(t, injected))
+
+			events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("hello"), agent.RunConfig{}))
+
+			if len(events) != 0 {
+				t.Errorf("Run() yielded %d events, want 0", len(events))
+			}
+			if len(errs) != 1 || errs[0].Error() != wantErr {
+				t.Errorf("Run() errors = %v, want exactly [%q]", errs, wantErr)
+			}
+			if n := storedNodeTestSession(t, ctx, svc).Events().Len(); n != 0 {
+				t.Errorf("stored session has %d events, want 0", n)
+			}
+		})
+	}
+
+	for _, root := range roots {
+		t.Run("plugin_replaces_function_call_with_text/"+root.kind, func(t *testing.T) {
+			ctx := t.Context()
+			svc := session.InMemoryService()
+			newNodeTestSession(t, ctx, svc)
+			safe := genai.NewContentFromText("safe text", genai.RoleUser)
+			r := newNodeTestRunnerWithPlugins(t, root.new(t), svc, replaceMessagePlugin(t, safe))
+
+			events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, functionCallMsg(), agent.RunConfig{}))
+
+			if len(errs) != 0 {
+				t.Fatalf("Run() errors = %v, want none", errs)
+			}
+			if len(events) != 1 || eventText(events[0]) != "ok" {
+				t.Errorf("Run() yielded %d events (first text %q), want exactly one with text %q", len(events), eventText(firstOrNil(events)), "ok")
+			}
+			stored := storedNodeTestSession(t, ctx, svc).Events()
+			if stored.Len() == 0 {
+				t.Fatal("stored session has no events, want the user event first")
+			}
+			if first := stored.At(0); first.Author != "user" || eventText(first) != "safe text" {
+				t.Errorf("stored event 0 = author %q text %q, want author %q text %q", first.Author, eventText(first), "user", "safe text")
+			}
+		})
+	}
+}
+
+// firstOrNil returns events[0], or nil for an empty slice.
+func firstOrNil(events []*session.Event) *session.Event {
+	if len(events) == 0 {
+		return nil
+	}
+	return events[0]
+}
+
+func TestRunner_EmptyMessageParts_RefusedOnClassicAllowedOnNode(t *testing.T) {
+	const wantErr = "no parts in the new_message"
+
+	for _, tc := range []struct {
+		name    string
+		msg     *genai.Content
+		plugins func(t *testing.T) []*plugin.Plugin
+	}{
+		{
+			name:    "classic_direct_empty_parts",
+			msg:     &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{}},
+			plugins: func(*testing.T) []*plugin.Plugin { return nil },
+		},
+		{
+			name: "classic_plugin_returns_empty_parts",
+			msg:  userText("hello"),
+			plugins: func(t *testing.T) []*plugin.Plugin {
+				return []*plugin.Plugin{replaceMessagePlugin(t, &genai.Content{Role: genai.RoleUser, Parts: nil})}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			svc := session.InMemoryService()
+			newNodeTestSession(t, ctx, svc)
+			r := newNodeTestRunnerWithPlugins(t, textReplyAgent(t, "custom", "ok"), svc, tc.plugins(t)...)
+
+			events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, tc.msg, agent.RunConfig{}))
+
+			if len(events) != 0 {
+				t.Errorf("Run() yielded %d events, want 0", len(events))
+			}
+			if len(errs) != 1 || errs[0].Error() != wantErr {
+				t.Errorf("Run() errors = %v, want exactly [%q]", errs, wantErr)
+			}
+			if n := storedNodeTestSession(t, ctx, svc).Events().Len(); n != 0 {
+				t.Errorf("stored session has %d events, want 0", n)
+			}
+		})
+	}
+
+	t.Run("node_path_allows_empty_parts", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+		r := newNodeTestRunner(t, textReplyLlmAgent(t, "greeter", "ack"), svc)
+
+		events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{}}, agent.RunConfig{}))
+
+		if len(errs) != 0 {
+			t.Fatalf("Run() errors = %v, want none", errs)
+		}
+		if len(events) == 0 || events[0].Author != "greeter" || eventText(events[0]) != "ack" {
+			t.Errorf("first yielded event = %+v, want author %q text %q", firstOrNil(events), "greeter", "ack")
+		}
+		stored := storedNodeTestSession(t, ctx, svc).Events()
+		if stored.Len() != 2 {
+			t.Fatalf("stored session has %d events, want 2", stored.Len())
+		}
+		if first := stored.At(0); first.Author != "user" || first.Content == nil || len(first.Content.Parts) != 0 {
+			t.Errorf("stored event 0 = author %q content %+v, want an empty user event", first.Author, first.Content)
+		}
+	})
+}
+
+// seedPendingSubAgentCall creates the node test session holding a user turn
+// "Start" and sub_agent's long-running call fc_1 to its tool "ask", both of
+// invocation inv_prev, the call on branch root_agent.sub_agent. It returns the
+// chat root root_agent, whose model replies "root_reply"; sub_agent cannot
+// transfer back to it and its model replies "sub_done".
+func seedPendingSubAgentCall(t *testing.T, ctx context.Context, svc session.Service) agent.Agent {
+	t.Helper()
+	newNodeTestSession(t, ctx, svc)
+
+	askTool, err := functiontool.New(functiontool.Config{
+		Name:          "ask",
+		Description:   "asks a human and waits",
+		IsLongRunning: true,
+	}, func(agent.Context, struct{}) (map[string]string, error) {
+		return map[string]string{"status": "pending"}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() error = %v", err)
+	}
+	sub, err := llmagent.New(llmagent.Config{
+		Name:                     "sub_agent",
+		Model:                    &scriptedModel{responses: []*genai.Content{genai.NewContentFromText("sub_done", genai.RoleModel)}},
+		Tools:                    []tool.Tool{askTool},
+		DisallowTransferToParent: true,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(sub_agent) error = %v", err)
+	}
+	root, err := llmagent.New(llmagent.Config{
+		Name:      "root_agent",
+		Model:     &scriptedModel{responses: []*genai.Content{genai.NewContentFromText("root_reply", genai.RoleModel)}},
+		SubAgents: []agent.Agent{sub},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(root_agent) error = %v", err)
+	}
+
+	start := session.NewEvent(ctx, "inv_prev")
+	start.Author = "user"
+	start.Content = genai.NewContentFromText("Start", genai.RoleUser)
+	appendSeedEvent(t, ctx, svc, start)
+	call := session.NewEvent(ctx, "inv_prev")
+	call.Author = "sub_agent"
+	call.Branch = "root_agent.sub_agent"
+	call.LongRunningToolIDs = []string{"fc_1"}
+	call.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+		{FunctionCall: &genai.FunctionCall{ID: "fc_1", Name: "ask"}},
+	}}
+	appendSeedEvent(t, ctx, svc, call)
+	return root
+}
+
+func TestRunner_OnUserMessageCallback_ReroutesAndUpdatesInvocationIDAndBranch(t *testing.T) {
+	t.Run("node_path", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		root := seedPendingSubAgentCall(t, ctx, svc)
+
+		answer := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{ID: "fc_1", Name: "ask", Response: map[string]any{"status": "done"}}},
+		}}
+		r := newNodeTestRunnerWithPlugins(t, root, svc, replaceMessagePlugin(t, answer))
+
+		events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("approve"), agent.RunConfig{}))
+
+		if len(errs) != 0 {
+			t.Fatalf("Run() errors = %v, want none", errs)
+		}
+		if len(events) != 1 {
+			t.Fatalf("Run() yielded %d events, want 1", len(events))
+		}
+		got := events[0]
+		if got.Author != "sub_agent" || got.InvocationID != "inv_prev" || got.Branch != "root_agent.sub_agent" || eventText(got) != "sub_done" {
+			t.Errorf("yielded event = author %q invocation %q branch %q text %q, want author %q invocation %q branch %q text %q",
+				got.Author, got.InvocationID, got.Branch, eventText(got), "sub_agent", "inv_prev", "root_agent.sub_agent", "sub_done")
+		}
+		stored := storedNodeTestSession(t, ctx, svc).Events()
+		if stored.Len() < 3 {
+			t.Fatalf("stored session has %d events, want the user event at index 2", stored.Len())
+		}
+		userEv := stored.At(2)
+		frs := userEv.Content.Parts
+		if userEv.Author != "user" || userEv.InvocationID != "inv_prev" || len(frs) != 1 || frs[0].FunctionResponse == nil || frs[0].FunctionResponse.ID != "fc_1" {
+			t.Errorf("stored event 2 = author %q invocation %q content %+v, want the user's function response fc_1 under invocation %q",
+				userEv.Author, userEv.InvocationID, userEv.Content, "inv_prev")
+		}
+	})
+
+	t.Run("classic_path", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+
+		type seen struct{ invocationID, branch, agent string }
+		var callerRuns, otherRuns []seen
+		recorder := func(name string, runs *[]seen) agent.Agent {
+			a, err := agent.New(agent.Config{
+				Name: name,
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(func(*session.Event, error) bool) {
+						*runs = append(*runs, seen{ctx.InvocationID(), ctx.Branch(), ctx.Agent().Name()})
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(%s) error = %v", name, err)
+			}
+			return a
+		}
+		root, err := parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{recorder("caller", &callerRuns), recorder("other", &otherRuns)},
+		}})
+		if err != nil {
+			t.Fatalf("parallelagent.New() error = %v", err)
+		}
+
+		call := session.NewEvent(ctx, "inv_par")
+		call.Author = "caller"
+		call.Branch = "root.caller"
+		call.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "fc_p", Name: "ask"}},
+		}}
+		appendSeedEvent(t, ctx, svc, call)
+
+		answer := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{ID: "fc_p", Name: "ask", Response: map[string]any{"ok": true}}},
+		}}
+		r := newNodeTestRunnerWithPlugins(t, root, svc, replaceMessagePlugin(t, answer))
+
+		if _, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("approve"), agent.RunConfig{})); len(errs) != 0 {
+			t.Fatalf("Run() errors = %v, want none", errs)
+		}
+
+		wantCaller := []seen{{invocationID: "inv_par", branch: "root.caller", agent: "caller"}}
+		if diff := cmp.Diff(wantCaller, callerRuns, cmp.AllowUnexported(seen{})); diff != "" {
+			t.Errorf("caller runs mismatch (-want +got):\n%s", diff)
+		}
+		if len(otherRuns) != 0 {
+			t.Errorf("other ran %d times, want 0", len(otherRuns))
+		}
+		stored := storedNodeTestSession(t, ctx, svc).Events()
+		if stored.Len() < 2 {
+			t.Fatalf("stored session has %d events, want the user event at index 1", stored.Len())
+		}
+		if userEv := stored.At(1); userEv.Author != "user" || userEv.InvocationID != "inv_par" {
+			t.Errorf("stored event 1 = author %q invocation %q, want author %q invocation %q", userEv.Author, userEv.InvocationID, "user", "inv_par")
+		}
+	})
+}
+
+// TestRunner_OnUserMessageCallback_TextReplacementDoesNotTakeEarlierBranch pins the
+// branch restore after a replaced message on the node path: it considers only
+// events of the invocation's own id (adk-python
+// workflow/_node_runner_utils.py:200-203), so an agent routed for a
+// replacement that answers no call does not continue on the branch it had in
+// an earlier invocation.
+func TestRunner_OnUserMessageCallback_TextReplacementDoesNotTakeEarlierBranch(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+
+	sub := textReplyLlmAgent(t, "sub_agent", "sub_reply")
+	root, err := llmagent.New(llmagent.Config{
+		Name:      "root_agent",
+		Model:     &scriptedModel{responses: []*genai.Content{genai.NewContentFromText("root_reply", genai.RoleModel)}},
+		SubAgents: []agent.Agent{sub},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(root_agent) error = %v", err)
+	}
+
+	start := session.NewEvent(ctx, "inv_old")
+	start.Author = "user"
+	start.Content = genai.NewContentFromText("Start", genai.RoleUser)
+	appendSeedEvent(t, ctx, svc, start)
+	earlier := session.NewEvent(ctx, "inv_old")
+	earlier.Author = "sub_agent"
+	earlier.Branch = "root_agent.sub_agent"
+	earlier.Content = genai.NewContentFromText("earlier", genai.RoleModel)
+	appendSeedEvent(t, ctx, svc, earlier)
+
+	r := newNodeTestRunnerWithPlugins(t, root, svc, replaceMessagePlugin(t, genai.NewContentFromText("hello again", genai.RoleUser)))
+
+	events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("hello"), agent.RunConfig{}))
+
+	if len(errs) != 0 {
+		t.Fatalf("Run() errors = %v, want none", errs)
+	}
+	if len(events) != 1 {
+		t.Fatalf("Run() yielded %d events, want 1", len(events))
+	}
+	if got := events[0]; got.Author != "sub_agent" || got.Branch != "" || eventText(got) != "sub_reply" {
+		t.Errorf("yielded event = author %q branch %q text %q, want author %q branch %q text %q",
+			got.Author, got.Branch, eventText(got), "sub_agent", "", "sub_reply")
+	}
+}
+
+func TestRunner_RootTaskMode_EventSequenceAndGoIntSchemaValidation(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+	m := &scriptedModel{responses: []*genai.Content{
+		genai.NewContentFromFunctionCall("finish_task", map[string]any{"result": int(42)}, genai.RoleModel),
+	}}
+	a, err := llmagent.New(llmagent.Config{
+		Name:         "task_int_agent",
+		Mode:         llmagent.ModeTask,
+		OutputKey:    "answer_key",
+		OutputSchema: &genai.Schema{Type: genai.TypeInteger},
+		Model:        m,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	r := newNodeTestRunner(t, a, svc)
+
+	events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("compute"), agent.RunConfig{}))
+
+	if len(errs) != 0 {
+		t.Fatalf("Run() errors = %v, want none", errs)
+	}
+	if len(events) != 2 {
+		t.Fatalf("Run() yielded %d events, want 2", len(events))
+	}
+	call, resp := events[0], events[1]
+	if call.Author != "task_int_agent" || call.Content == nil || len(call.Content.Parts) == 0 ||
+		call.Content.Parts[0].FunctionCall == nil || call.Content.Parts[0].FunctionCall.Name != "finish_task" || call.Output != nil {
+		t.Errorf("event 0 = author %q content %+v output %v, want the finish_task call by %q with no output", call.Author, call.Content, call.Output, "task_int_agent")
+	}
+	if resp.Author != "task_int_agent" || resp.Content == nil || len(resp.Content.Parts) == 0 ||
+		resp.Content.Parts[0].FunctionResponse == nil || resp.Content.Parts[0].FunctionResponse.Name != "finish_task" {
+		t.Fatalf("event 1 = author %q content %+v, want the finish_task response by %q", resp.Author, resp.Content, "task_int_agent")
+	}
+	if diff := cmp.Diff(map[string]any{"result": "Task completed."}, resp.Content.Parts[0].FunctionResponse.Response); diff != "" {
+		t.Errorf("finish_task response mismatch (-want +got):\n%s", diff)
+	}
+	if resp.Output != 42 {
+		t.Errorf("event 1 Output = %#v, want int 42", resp.Output)
+	}
+	if diff := cmp.Diff(map[string]any{"answer_key": 42}, resp.Actions.StateDelta); diff != "" {
+		t.Errorf("event 1 StateDelta mismatch (-want +got):\n%s", diff)
+	}
+	got, err := storedNodeTestSession(t, ctx, svc).State().Get("answer_key")
+	if err != nil {
+		t.Fatalf("State().Get(answer_key) error = %v", err)
+	}
+	if got != 42 {
+		t.Errorf("state[answer_key] = %#v, want int 42", got)
+	}
+}
+
+func TestRunner_InvalidRootMode_FailsBeforeSessionReadOrCreate(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "single_turn_root",
+		Mode:  llmagent.ModeSingleTurn,
+		Model: &scriptedModel{responses: []*genai.Content{genai.NewContentFromText("ok", genai.RoleModel)}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	r, err := runner.New(runner.Config{
+		AppName:           nodeTestApp,
+		Agent:             a,
+		SessionService:    svc,
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	events, errs := collectRun(r.Run(ctx, nodeTestUser, "missing_session", userText("hi"), agent.RunConfig{}))
+
+	const wantErr = "LlmAgent as root agent must have mode='chat' or 'task', but got mode='single_turn'"
+	if len(events) != 0 {
+		t.Errorf("Run() yielded %d events, want 0", len(events))
+	}
+	if len(errs) != 1 || errs[0].Error() != wantErr {
+		t.Errorf("Run() errors = %v, want exactly [%q]", errs, wantErr)
+	}
+	if _, err := svc.Get(ctx, &session.GetRequest{AppName: nodeTestApp, UserID: nodeTestUser, SessionID: "missing_session"}); !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(missing_session) error = %v, want session.ErrNotFound (no session created)", err)
+	}
+}
+
+// TestRunner_Node_FunctionResponseRestoresSubAgentBranch pins the branch
+// restore on the node path's first route: a function response answering a
+// sub-agent's call runs that sub-agent on the branch of the call (adk-python
+// workflow/_node_runner_utils.py:117-121).
+func TestRunner_Node_FunctionResponseRestoresSubAgentBranch(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	root := seedPendingSubAgentCall(t, ctx, svc)
+	r := newNodeTestRunner(t, root, svc)
+	answer := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{FunctionResponse: &genai.FunctionResponse{ID: "fc_1", Name: "ask", Response: map[string]any{"status": "done"}}},
+	}}
+
+	events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, answer, agent.RunConfig{}))
+
+	if len(errs) != 0 {
+		t.Fatalf("Run() errors = %v, want none", errs)
+	}
+	if len(events) != 1 {
+		t.Fatalf("Run() yielded %d events, want 1", len(events))
+	}
+	if got := events[0]; got.Author != "sub_agent" || got.InvocationID != "inv_prev" || got.Branch != "root_agent.sub_agent" {
+		t.Errorf("yielded event = author %q invocation %q branch %q, want author %q invocation %q branch %q",
+			got.Author, got.InvocationID, got.Branch, "sub_agent", "inv_prev", "root_agent.sub_agent")
+	}
+}
+
+// TestRunner_TaskRoot_RunsItselfWhenChatSubAgentSpokeLast pins that a
+// task-mode root never hands a new message to the sub-agent that spoke last:
+// only a chat root picks the agent from history (adk-python
+// runners.py:1803-1818, Runner._uses_legacy_sub_agent_picker).
+func TestRunner_TaskRoot_RunsItselfWhenChatSubAgentSpokeLast(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+	appendSeedEvent(t, ctx, svc, &session.Event{
+		ID: "h1", InvocationID: "inv_prev", Author: "helper",
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("helper said", genai.RoleModel)},
+	})
+	root, err := llmagent.New(llmagent.Config{
+		Name:      "task_root",
+		Mode:      llmagent.ModeTask,
+		SubAgents: []agent.Agent{textReplyLlmAgent(t, "helper", "helper_reply")},
+		Model: &scriptedModel{responses: []*genai.Content{
+			genai.NewContentFromFunctionCall("finish_task", map[string]any{"result": "done"}, genai.RoleModel),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	r := newNodeTestRunner(t, root, svc)
+
+	events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{}))
+
+	if len(errs) != 0 {
+		t.Fatalf("Run() errors = %v, want none", errs)
+	}
+	var authors []string
+	for _, ev := range events {
+		authors = append(authors, ev.Author)
+	}
+	if diff := cmp.Diff([]string{"task_root", "task_root"}, authors); diff != "" {
+		t.Errorf("yielded event authors mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// newNodeRootRunner returns a runner whose root is the node n.
+func newNodeRootRunner(t *testing.T, n workflow.Node, svc session.Service, plugins ...*plugin.Plugin) *runner.Runner {
+	t.Helper()
+	r, err := runner.New(runner.Config{
+		AppName:        nodeTestApp,
+		Node:           n,
+		SessionService: svc,
+		PluginConfig:   runner.PluginConfig{Plugins: plugins},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return r
+}
+
+// funcNode is a node whose body the test supplies.
+type funcNode struct {
+	workflow.BaseNode
+	run func(ctx agent.Context, input any, yield func(*session.Event, error) bool)
+}
+
+func newFuncNode(name string, run func(ctx agent.Context, input any, yield func(*session.Event, error) bool)) *funcNode {
+	return &funcNode{BaseNode: workflow.NewBaseNode(name, "", workflow.NodeConfig{}), run: run}
+}
+
+func (n *funcNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		n.run(ctx, input, yield)
+	}
+}
+
+// inputRecorder records node inputs by node name. Nodes run on scheduler
+// goroutines, so it is guarded by a mutex.
+type inputRecorder struct {
+	mu     sync.Mutex
+	inputs map[string][]any
+}
+
+func (r *inputRecorder) record(name string, in any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.inputs == nil {
+		r.inputs = map[string][]any{}
+	}
+	r.inputs[name] = append(r.inputs[name], in)
+}
+
+func (r *inputRecorder) recorded() map[string][]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.inputs
+}
+
+func TestRunner_Node_YieldUserMessageWithStateDeltaAndNilMessage(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+	noop := newFuncNode("noop", func(agent.Context, any, func(*session.Event, error) bool) {})
+	r := newNodeRootRunner(t, noop, svc)
+
+	events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, nil, agent.RunConfig{},
+		runner.WithYieldUserMessage(), runner.WithStateDelta(map[string]any{"k": "v"})))
+
+	if len(errs) > 0 {
+		t.Fatalf("Run() errors = %v", errs)
+	}
+	if len(events) == 0 {
+		t.Fatal("Run() yielded no events, want the state-delta user event first")
+	}
+	first := events[0]
+	if first.Author != "user" || first.Content != nil {
+		t.Errorf("first event author/content = %q/%v, want %q/nil", first.Author, first.Content, "user")
+	}
+	if diff := cmp.Diff(map[string]any{"k": "v"}, first.Actions.StateDelta); diff != "" {
+		t.Errorf("first event state delta (-want +got):\n%s", diff)
+	}
+	got, err := storedNodeTestSession(t, ctx, svc).State().Get("k")
+	if err != nil || got != "v" {
+		t.Errorf("session state[k] = %v, %v; want %q", got, err, "v")
+	}
+
+	// An empty delta carries nothing, so no event is stored or yielded
+	// (adk-python's `elif state_delta:`).
+	events, errs = collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, nil, agent.RunConfig{},
+		runner.WithYieldUserMessage(), runner.WithStateDelta(map[string]any{})))
+	if len(errs) > 0 || len(events) != 0 {
+		t.Errorf("Run() with an empty delta = %d events, errors %v; want none", len(events), errs)
+	}
+	if got := storedNodeTestSession(t, ctx, svc).Events().Len(); got != 1 {
+		t.Errorf("session holds %d events, want only the first run's state-delta event", got)
+	}
+}
+
+func TestRunner_Node_BeforeRunCallback_ReturnsContent(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+	runs := 0
+	n := newFuncNode("myNode", func(agent.Context, any, func(*session.Event, error) bool) { runs++ })
+	p, err := plugin.New(plugin.Config{
+		Name: "short_circuit",
+		BeforeRunCallback: func(agent.InvocationContext) (*genai.Content, error) {
+			return genai.NewContentFromText("short-circuit", genai.RoleModel), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+	r := newNodeRootRunner(t, n, svc, p)
+
+	events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}))
+
+	if len(errs) > 0 {
+		t.Fatalf("Run() errors = %v", errs)
+	}
+	if len(events) != 1 {
+		t.Fatalf("Run() yielded %d events, want 1", len(events))
+	}
+	if events[0].Author != "model" || eventText(events[0]) != "short-circuit" {
+		t.Errorf("reply author/text = %q/%q, want %q/%q", events[0].Author, eventText(events[0]), "model", "short-circuit")
+	}
+	if events[0].CustomMetadata[plugininternal.BeforeRunReplyKey] != true {
+		t.Errorf("reply custom metadata = %v, want key %q set", events[0].CustomMetadata, plugininternal.BeforeRunReplyKey)
+	}
+	if runs != 0 {
+		t.Errorf("node ran %d times, want 0", runs)
+	}
+}
+
+func TestRunner_BareNodeRoot_ReceivesContentAndOriginalContentOnResume(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+	rec := &inputRecorder{}
+	n := newFuncNode("approver", func(ctx agent.Context, input any, yield func(*session.Event, error) bool) {
+		rec.record("approver", input)
+		if _, ok := ctx.ResumedInput("fc-1"); ok {
+			in, _ := input.(*genai.Content)
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Output = "resumed with prompt: " + in.Parts[0].Text
+			yield(ev, nil)
+			return
+		}
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "approve"}},
+		}}
+		ev.LongRunningToolIDs = []string{"fc-1"}
+		yield(ev, nil)
+	})
+	r := newNodeRootRunner(t, n, svc)
+
+	turn1, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession,
+		&genai.Content{Parts: []*genai.Part{{Text: "initial prompt"}}}, agent.RunConfig{}))
+	if len(errs) > 0 {
+		t.Fatalf("turn 1 Run() errors = %v", errs)
+	}
+	var paused bool
+	for _, ev := range turn1 {
+		if cmp.Equal(ev.LongRunningToolIDs, []string{"fc-1"}) {
+			paused = true
+		}
+	}
+	if !paused {
+		t.Error("turn 1 yielded no event with LongRunningToolIDs [fc-1]")
+	}
+
+	turn2, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{FunctionResponse: &genai.FunctionResponse{ID: "fc-1", Name: "approve", Response: map[string]any{"ok": true}}},
+	}}, agent.RunConfig{}))
+	if len(errs) > 0 {
+		t.Fatalf("turn 2 Run() errors = %v", errs)
+	}
+
+	original := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "initial prompt"}}}
+	if diff := cmp.Diff(map[string][]any{"approver": {original, original}}, rec.recorded()); diff != "" {
+		t.Errorf("node root inputs over both turns (-want +got):\n%s", diff)
+	}
+	var outputs []any
+	for _, ev := range turn2 {
+		if ev.Output != nil {
+			outputs = append(outputs, ev.Output)
+		}
+	}
+	if diff := cmp.Diff([]any{"resumed with prompt: initial prompt"}, outputs); diff != "" {
+		t.Errorf("turn 2 outputs (-want +got):\n%s", diff)
+	}
+}
+
+func TestRunner_NodePath_ResultWrappedAnswerMatchesRequestSchema(t *testing.T) {
+	// newAsker returns the node "asker", which requests a string answer and,
+	// on re-entry, records the answer it receives and outputs "done".
+	newAsker := func(rec *inputRecorder) workflow.Node {
+		rerun := true
+		return &funcNode{
+			BaseNode: workflow.NewBaseNode("asker", "", workflow.NodeConfig{RerunOnResume: &rerun}),
+			run: func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+				if v, ok := ctx.ResumedInput("approval"); ok {
+					rec.record("asker", v)
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Output = "done"
+					yield(ev, nil)
+					return
+				}
+				yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{
+					InterruptID:    "approval",
+					ResponseSchema: &jsonschema.Schema{Type: "string"},
+				}), nil)
+			},
+		}
+	}
+	tests := []struct {
+		name      string
+		newRunner func(t *testing.T, asker workflow.Node, svc session.Service) *runner.Runner
+		// wantAnswers is what the asker receives on re-entry; wantTexts is
+		// the text of the second turn's events.
+		wantAnswers map[string][]any
+		wantTexts   []string
+	}{
+		{
+			name: "node_root",
+			newRunner: func(t *testing.T, asker workflow.Node, svc session.Service) *runner.Runner {
+				return newNodeRootRunner(t, asker, svc)
+			},
+			wantAnswers: map[string][]any{"asker": {"approved"}},
+		},
+		{
+			name: "workflow_node_root",
+			newRunner: func(t *testing.T, asker workflow.Node, svc session.Service) *runner.Runner {
+				wf, err := workflow.NewWorkflowNode("wf", []workflow.Edge{{From: workflow.Start, To: asker}})
+				if err != nil {
+					t.Fatalf("NewWorkflowNode() error = %v", err)
+				}
+				return newNodeRootRunner(t, wf, svc)
+			},
+			wantAnswers: map[string][]any{"asker": {"approved"}},
+		},
+		{
+			name: "dynamic_node_root",
+			newRunner: func(t *testing.T, asker workflow.Node, svc session.Service) *runner.Runner {
+				dyn := workflow.NewDynamicNode("dyn", func(ctx agent.Context, in any, _ func(*session.Event) error) (any, error) {
+					return workflow.RunNode[any](ctx, asker, in)
+				}, workflow.NodeConfig{})
+				return newNodeRootRunner(t, dyn, svc)
+			},
+			wantAnswers: map[string][]any{"asker": {"approved"}},
+		},
+		{
+			// The answer goes to the LlmAgent, which calls the model again
+			// without re-running the tool.
+			name: "llm_agent_root_tool_runs_node",
+			newRunner: func(t *testing.T, asker workflow.Node, svc session.Service) *runner.Runner {
+				type noArgs struct{}
+				runAsker, err := functiontool.New(functiontool.Config{
+					Name:        "run_asker",
+					Description: "runs the asker node",
+				}, func(tc agent.Context, _ noArgs) (string, error) {
+					return workflow.RunNode[string](tc, asker, nil)
+				})
+				if err != nil {
+					t.Fatalf("functiontool.New() error = %v", err)
+				}
+				a, err := llmagent.New(llmagent.Config{
+					Name: "approver",
+					Model: &scriptedModel{responses: []*genai.Content{
+						genai.NewContentFromFunctionCall("run_asker", map[string]any{}, genai.RoleModel),
+						genai.NewContentFromText("finished", genai.RoleModel),
+					}},
+					Tools: []tool.Tool{runAsker},
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New() error = %v", err)
+				}
+				return newNodeTestRunner(t, a, svc)
+			},
+			wantTexts: []string{"finished"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			svc := session.InMemoryService()
+			newNodeTestSession(t, ctx, svc)
+			rec := &inputRecorder{}
+			r := tc.newRunner(t, newAsker(rec), svc)
+			if _, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{})); len(errs) > 0 {
+				t.Fatalf("turn 1 Run() errors = %v", errs)
+			}
+
+			// adk-python's FunctionResponse shape for a RequestInput answer.
+			answer := genai.NewContentFromFunctionResponse(workflow.WorkflowInputFunctionCallName, map[string]any{"result": "approved"}, genai.RoleUser)
+			answer.Parts[0].FunctionResponse.ID = "approval"
+			events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, answer, agent.RunConfig{}))
+			if len(errs) > 0 {
+				t.Fatalf("turn 2 Run() errors = %v", errs)
+			}
+
+			if diff := cmp.Diff(tc.wantAnswers, rec.recorded()); diff != "" {
+				t.Errorf("answers the asker received (-want +got):\n%s", diff)
+			}
+			var texts []string
+			for _, ev := range events {
+				if text := eventText(ev); text != "" {
+					texts = append(texts, text)
+				}
+			}
+			if diff := cmp.Diff(tc.wantTexts, texts); diff != "" {
+				t.Errorf("turn 2 texts (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestRunner_RootPathScoping_BareNodeVsLlmAgent(t *testing.T) {
+	// nodeInfoOf returns the NodeInfo of the first yielded event whose
+	// Output is want.
+	nodeInfoOf := func(t *testing.T, r *runner.Runner, ctx context.Context, want any) *session.NodeInfo {
+		t.Helper()
+		events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("hi"), agent.RunConfig{}))
+		if len(errs) > 0 {
+			t.Fatalf("Run() errors = %v", errs)
+		}
+		for _, ev := range events {
+			if ev.Output == want {
+				if ev.NodeInfo == nil {
+					t.Fatalf("output event %q has no NodeInfo", want)
+				}
+				return ev.NodeInfo
+			}
+		}
+		t.Fatalf("Run() yielded no event with output %q", want)
+		return nil
+	}
+
+	t.Run("node_root", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+		echo := workflow.NewFunctionNode("echo", func(_ agent.Context, in *genai.Content) (string, error) {
+			return "Echo: " + in.Parts[0].Text, nil
+		}, workflow.NodeConfig{})
+
+		info := nodeInfoOf(t, newNodeRootRunner(t, echo, svc), ctx, "Echo: hi")
+
+		if info.Path != "echo@1" {
+			t.Errorf("NodeInfo.Path = %q, want %q", info.Path, "echo@1")
+		}
+	})
+
+	t.Run("dynamic_node_root_delegates_output", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+		child := workflow.NewFunctionNode("child", func(agent.Context, any) (string, error) {
+			return "from child", nil
+		}, workflow.NodeConfig{})
+		parent := workflow.NewDynamicNode("parent", func(ctx agent.Context, in any, _ func(*session.Event) error) (any, error) {
+			return workflow.RunNode[string](ctx, child, in, workflow.WithUseAsOutput())
+		}, workflow.NodeConfig{})
+
+		info := nodeInfoOf(t, newNodeRootRunner(t, parent, svc), ctx, "from child")
+
+		want := session.NodeInfo{Path: "parent@1/child@1", OutputFor: []string{"parent@1/child@1", "parent@1"}}
+		if diff := cmp.Diff(want, *info); diff != "" {
+			t.Errorf("child output NodeInfo (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("llm_agent_root", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+		r := newNodeTestRunner(t, textReplyLlmAgent(t, "greeter", "hello"), svc)
+
+		events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("hi"), agent.RunConfig{}))
+		if len(errs) > 0 {
+			t.Fatalf("Run() errors = %v", errs)
+		}
+		var paths []string
+		for _, ev := range events {
+			if eventText(ev) == "hello" && ev.NodeInfo != nil {
+				paths = append(paths, ev.NodeInfo.Path)
+			}
+		}
+		if diff := cmp.Diff([]string{"greeter"}, paths); diff != "" {
+			t.Errorf("agent reply NodeInfo.Path (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestRunner_BareNodeRoot_MixedMessageRefusalAndScoping(t *testing.T) {
+	const wantErr = "message cannot contain both function responses and text: function responses resume an existing invocation while text starts a new one"
+	mixed := func(id string) *genai.Content {
+		return &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+			{Text: "hi"},
+			{FunctionResponse: &genai.FunctionResponse{ID: id, Name: "t"}},
+		}}
+	}
+	// newEcho returns the node root "echo" and a pointer to its run count.
+	newEcho := func() (workflow.Node, *int) {
+		runs := 0
+		return workflow.NewFunctionNode("echo", func(_ agent.Context, in *genai.Content) (string, error) {
+			runs++
+			return "Echo: " + in.Parts[0].Text, nil
+		}, workflow.NodeConfig{}), &runs
+	}
+
+	tests := []struct {
+		name    string
+		msg     *genai.Content
+		plugins func(t *testing.T) []*plugin.Plugin
+	}{
+		{name: "caller_message", msg: mixed("fc-1")},
+		{
+			// The caller's message is checked before OnUserMessageCallback,
+			// so a plugin that would clean it is never called (adk-python
+			// workflow/_node_runner_utils.py).
+			name: "caller_message_before_plugin",
+			msg:  mixed("fc-1"),
+			plugins: func(t *testing.T) []*plugin.Plugin {
+				p, err := plugin.New(plugin.Config{
+					Name: "clean_message",
+					OnUserMessageCallback: func(agent.InvocationContext, *genai.Content) (*genai.Content, error) {
+						t.Error("OnUserMessageCallback called for a refused caller message")
+						return userText("clean"), nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("plugin.New() error = %v", err)
+				}
+				return []*plugin.Plugin{p}
+			},
+		},
+		{
+			name: "plugin_replacement",
+			msg:  userText("hi"),
+			plugins: func(t *testing.T) []*plugin.Plugin {
+				return []*plugin.Plugin{replaceMessagePlugin(t, mixed("fc-1"))}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name+"_refused", func(t *testing.T) {
+			ctx := t.Context()
+			svc := session.InMemoryService()
+			newNodeTestSession(t, ctx, svc)
+			echo, runs := newEcho()
+			var plugins []*plugin.Plugin
+			if tc.plugins != nil {
+				plugins = tc.plugins(t)
+			}
+			r := newNodeRootRunner(t, echo, svc, plugins...)
+
+			events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, tc.msg, agent.RunConfig{}))
+
+			if len(errs) != 1 || errs[0].Error() != wantErr {
+				t.Errorf("Run() errors = %v, want [%s]", errs, wantErr)
+			}
+			if len(events) != 0 || *runs != 0 {
+				t.Errorf("Run() yielded %d events and ran the node %d times, want 0 and 0", len(events), *runs)
+			}
+			if got := storedNodeTestSession(t, ctx, svc).Events().Len(); got != 0 {
+				t.Errorf("session holds %d events, want 0", got)
+			}
+		})
+	}
+
+	t.Run("function_response_without_id_accepted", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+		echo, runs := newEcho()
+		r := newNodeRootRunner(t, echo, svc)
+
+		events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, mixed(""), agent.RunConfig{}))
+
+		if len(errs) > 0 {
+			t.Fatalf("Run() errors = %v", errs)
+		}
+		var outputs []any
+		for _, ev := range events {
+			if ev.Output != nil {
+				outputs = append(outputs, ev.Output)
+			}
+		}
+		if diff := cmp.Diff([]any{"Echo: hi"}, outputs); diff != "" || *runs != 1 {
+			t.Errorf("node ran %d times, outputs (-want +got):\n%s", *runs, diff)
+		}
+	})
+
+	t.Run("classic_agent_root_accepts_mixed_message", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+		subRuns := 0
+		sub, err := agent.New(agent.Config{
+			Name: "sub",
+			Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) { subRuns++ }
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New() error = %v", err)
+		}
+		seq, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "seq", SubAgents: []agent.Agent{sub}}})
+		if err != nil {
+			t.Fatalf("sequentialagent.New() error = %v", err)
+		}
+		r := newNodeTestRunner(t, seq, svc)
+
+		_, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, mixed("fc-1"), agent.RunConfig{}))
+
+		if len(errs) > 0 {
+			t.Errorf("Run() errors = %v, want none", errs)
+		}
+		if subRuns != 1 {
+			t.Errorf("sub-agent ran %d times, want 1", subRuns)
+		}
+	})
+}
+
+func TestRunner_WorkflowNodeRoot_SeedResolvedPerInnerSuccessor(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+	rec := &inputRecorder{}
+	anyNode := workflow.NewFunctionNode("any_node", func(_ agent.Context, in any) (string, error) {
+		rec.record("any_node", in)
+		return "a", nil
+	}, workflow.NodeConfig{})
+	contentNode := workflow.NewFunctionNode("content_node", func(_ agent.Context, in *genai.Content) (string, error) {
+		rec.record("content_node", in)
+		return "c", nil
+	}, workflow.NodeConfig{})
+	join := workflow.NewJoinNode("join")
+	wf, err := workflow.NewWorkflowNode("wf", []workflow.Edge{
+		{From: workflow.Start, To: anyNode},
+		{From: workflow.Start, To: contentNode},
+		{From: anyNode, To: join},
+		{From: contentNode, To: join},
+	})
+	if err != nil {
+		t.Fatalf("workflow.NewWorkflowNode() error = %v", err)
+	}
+	r := newNodeRootRunner(t, wf, svc)
+
+	_, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}))
+
+	if len(errs) > 0 {
+		t.Errorf("Run() errors = %v, want none", errs)
+	}
+	want := map[string][]any{
+		"any_node":     {"hi"},
+		"content_node": {&genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "hi"}}}},
+	}
+	if diff := cmp.Diff(want, rec.recorded()); diff != "" {
+		t.Errorf("inner successor inputs (-want +got):\n%s", diff)
+	}
+}
+
+// A node root runs on the root branch on every turn, as in adk-python,
+// even after a child that ran on a sub-branch stored events under the
+// node's name.
+func TestRunner_BareNodeRoot_RunsOnRootBranch(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	newNodeTestSession(t, ctx, svc)
+	child := newFuncNode("child", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+		// As an agent does, the child stamps its own branch.
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Branch = ctx.Branch()
+		ev.Content = genai.NewContentFromText("child progress", genai.RoleModel)
+		yield(ev, nil)
+	})
+	var branches []string
+	parent := workflow.NewDynamicNode("parent", func(ctx agent.Context, in any, _ func(*session.Event) error) (any, error) {
+		branches = append(branches, ctx.Branch())
+		return workflow.RunNode[any](ctx, child, in, workflow.WithUseSubBranch())
+	}, workflow.NodeConfig{})
+	r := newNodeRootRunner(t, parent, svc)
+
+	for _, text := range []string{"turn 1", "turn 2"} {
+		if _, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText(text), agent.RunConfig{})); len(errs) > 0 {
+			t.Fatalf("Run(%q) errors = %v", text, errs)
+		}
+	}
+
+	if diff := cmp.Diff([]string{"", ""}, branches); diff != "" {
+		t.Errorf("node root branch per turn (-want +got):\n%s", diff)
+	}
+}
+
+func TestRunner_WorkflowNodeRoot_MultiNodeResume(t *testing.T) {
+	t.Run("handoff", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+
+		var step1Runs atomic.Int32
+		step1 := workflow.NewFunctionNode("step1", func(_ agent.Context, in string) (string, error) {
+			step1Runs.Add(1)
+			return in + "-prepared", nil
+		}, workflow.NodeConfig{})
+		asker := newFuncNode("asker", func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+			yield(workflow.NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "approval"}), nil)
+		})
+		step2 := workflow.NewFunctionNode("step2", func(_ agent.Context, in string) (string, error) {
+			return "final:" + in, nil
+		}, workflow.NodeConfig{})
+
+		wfNode, err := workflow.NewWorkflowNode("wf", workflow.Chain(workflow.Start, step1, asker, step2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := newNodeRootRunner(t, wfNode, svc)
+
+		if _, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{})); len(errs) > 0 {
+			t.Fatalf("turn 1 errors = %v", errs)
+		}
+
+		answer := genai.NewContentFromFunctionResponse(workflow.WorkflowInputFunctionCallName, map[string]any{"result": "approved"}, genai.RoleUser)
+		answer.Parts[0].FunctionResponse.ID = "approval"
+		events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, answer, agent.RunConfig{}))
+		if len(errs) > 0 {
+			t.Fatalf("turn 2 errors = %v", errs)
+		}
+		if got := step1Runs.Load(); got != 1 {
+			t.Errorf("step1 ran %d times across pause+resume, want 1", got)
+		}
+		var outputs []any
+		for _, ev := range events {
+			if ev.Output != nil {
+				outputs = append(outputs, ev.Output)
+			}
+		}
+		if diff := cmp.Diff([]any{"final:approved"}, outputs); diff != "" {
+			t.Errorf("turn 2 outputs (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("reentry_preserves_predecessor_output", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+
+		var step1Runs atomic.Int32
+		step1 := workflow.NewFunctionNode("step1", func(_ agent.Context, in string) (string, error) {
+			step1Runs.Add(1)
+			return in + "-prepared", nil
+		}, workflow.NodeConfig{})
+		rerun := true
+		var askerInputs []any
+		asker := workflow.NewDynamicNode("asker", func(ctx agent.Context, in any, emit func(*session.Event) error) (any, error) {
+			askerInputs = append(askerInputs, in)
+			if v, ok := ctx.ResumedInput("approval"); ok {
+				return fmt.Sprintf("%v:%v", in, v), nil
+			}
+			return nil, emit(workflow.NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "approval"}))
+		}, workflow.NodeConfig{RerunOnResume: &rerun})
+		step2 := workflow.NewFunctionNode("step2", func(_ agent.Context, in string) (string, error) {
+			return "final:" + in, nil
+		}, workflow.NodeConfig{})
+
+		wfNode, err := workflow.NewWorkflowNode("wf", workflow.Chain(workflow.Start, step1, asker, step2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := newNodeRootRunner(t, wfNode, svc)
+
+		if _, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{})); len(errs) > 0 {
+			t.Fatalf("turn 1 errors = %v", errs)
+		}
+
+		answer := genai.NewContentFromFunctionResponse(workflow.WorkflowInputFunctionCallName, map[string]any{"result": "approved"}, genai.RoleUser)
+		answer.Parts[0].FunctionResponse.ID = "approval"
+		events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, answer, agent.RunConfig{}))
+		if len(errs) > 0 {
+			t.Fatalf("turn 2 errors = %v", errs)
+		}
+		if got := step1Runs.Load(); got != 1 {
+			t.Errorf("step1 ran %d times across pause+resume, want 1", got)
+		}
+		if diff := cmp.Diff([]any{"go-prepared", "go-prepared"}, askerInputs); diff != "" {
+			t.Errorf("asker inputs across pause+resume (-want +got):\n%s", diff)
+		}
+		var outputs []any
+		for _, ev := range events {
+			if ev.Output != nil {
+				outputs = append(outputs, ev.Output)
+			}
+		}
+		if diff := cmp.Diff([]any{"final:go-prepared:approved"}, outputs); diff != "" {
+			t.Errorf("turn 2 outputs (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("nested_under_outer_predecessor", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		newNodeTestSession(t, ctx, svc)
+
+		outerPrep := workflow.NewFunctionNode("outer_prep", func(_ agent.Context, in string) (string, error) {
+			return in + "-outer-prep", nil
+		}, workflow.NodeConfig{})
+		rerun := true
+		var askerInputs []any
+		asker := workflow.NewDynamicNode("asker", func(ctx agent.Context, in any, emit func(*session.Event) error) (any, error) {
+			askerInputs = append(askerInputs, in)
+			if v, ok := ctx.ResumedInput("approval"); ok {
+				return fmt.Sprintf("%v:%v", in, v), nil
+			}
+			return nil, emit(workflow.NewRequestInputEvent(ctx, session.RequestInput{InterruptID: "approval"}))
+		}, workflow.NodeConfig{RerunOnResume: &rerun})
+		innerFinal := workflow.NewFunctionNode("inner_final", func(_ agent.Context, in string) (string, error) {
+			return "inner:" + in, nil
+		}, workflow.NodeConfig{})
+		sub, err := workflow.NewWorkflowNode("sub", workflow.Chain(workflow.Start, asker, innerFinal))
+		if err != nil {
+			t.Fatal(err)
+		}
+		outerFinal := workflow.NewFunctionNode("outer_final", func(_ agent.Context, in string) (string, error) {
+			return "outer:" + in, nil
+		}, workflow.NodeConfig{})
+		outer, err := workflow.NewWorkflowNode("outer", workflow.Chain(workflow.Start, outerPrep, sub, outerFinal))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := newNodeRootRunner(t, outer, svc)
+
+		if _, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{})); len(errs) > 0 {
+			t.Fatalf("turn 1 errors = %v", errs)
+		}
+		answer := genai.NewContentFromFunctionResponse(workflow.WorkflowInputFunctionCallName, map[string]any{"result": "approved"}, genai.RoleUser)
+		answer.Parts[0].FunctionResponse.ID = "approval"
+		events, errs := collectRun(r.Run(ctx, nodeTestUser, nodeTestSession, answer, agent.RunConfig{}))
+		if len(errs) > 0 {
+			t.Fatalf("turn 2 errors = %v", errs)
+		}
+		if diff := cmp.Diff([]any{"go-outer-prep", "go-outer-prep"}, askerInputs); diff != "" {
+			t.Errorf("asker inputs across pause+resume (-want +got):\n%s", diff)
+		}
+		var outputs []any
+		for _, ev := range events {
+			if ev.Output != nil {
+				outputs = append(outputs, ev.Output)
+			}
+		}
+		if diff := cmp.Diff([]any{"outer:inner:go-outer-prep:approved"}, outputs); diff != "" {
+			t.Errorf("turn 2 outputs (-want +got):\n%s", diff)
+		}
+	})
 }

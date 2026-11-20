@@ -445,9 +445,11 @@ func TestRunner_ContextCacheReplyNotStored(t *testing.T) {
 			},
 		},
 		{
-			// The plugin's event is stored in place of the model's, without
-			// its cache state.
-			name: "a plugin replaces the reply",
+			// A plugin that marks the reply partial prevents the session store
+			// from recording turn 3's cache state (an unset CacheMetadata on a
+			// non-partial replacement inherits the original's, as in adk-python's
+			// Runner._get_output_event).
+			name: "a plugin marks the reply partial",
 			build: func(api *cachingGeminiAPI, turn *int) (agent.Agent, Config) {
 				p, err := plugin.New(plugin.Config{
 					Name: "replacer",
@@ -455,7 +457,7 @@ func TestRunner_ContextCacheReplyNotStored(t *testing.T) {
 						if ev.Author != "assistant" || *turn != failTurn {
 							return nil, nil
 						}
-						return &session.Event{Author: ev.Author, LLMResponse: model.LLMResponse{Content: ev.Content}}, nil
+						return &session.Event{Author: ev.Author, LLMResponse: model.LLMResponse{Content: ev.Content, Partial: true}}, nil
 					},
 				})
 				if err != nil {
@@ -487,6 +489,50 @@ func TestRunner_ContextCacheReplyNotStored(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunner_ContextCachePluginReplacementInheritsAndOverridesCacheMetadata(t *testing.T) {
+	api := &cachingGeminiAPI{}
+	turn := 0
+	override := &model.CacheMetadata{Fingerprint: "plugin-override"}
+	p, err := plugin.New(plugin.Config{
+		Name: "rewriter",
+		OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+			if ev.Author != "assistant" {
+				return nil, nil
+			}
+			if turn == 3 {
+				return &session.Event{Author: ev.Author, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("overridden", genai.RoleModel), CacheMetadata: override}}, nil
+			}
+			return &session.Event{Author: ev.Author, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("scrubbed", genai.RoleModel)}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+	r, sessionService := newCachingRunnerWith(t, Config{
+		Agent:          cachingAgent(t, api, llmagent.Config{}),
+		SessionService: session.InMemoryService(),
+		ContextCache:   &model.ContextCacheConfig{CacheIntervals: 1},
+		PluginConfig:   PluginConfig{Plugins: []*plugin.Plugin{p}},
+	})
+
+	turn = 1
+	_ = runTurn(t, r, turn)
+	turn = 2
+	_ = runTurn(t, r, turn)
+	checkCachesMatchSession(t, api, sessionService, turn)
+	if got, want := api.liveCaches(), []string{"cachedContents/1"}; !cmp.Equal(got, want) {
+		t.Errorf("turn 2 live caches = %v, want %v (inherited across unset plugin CacheMetadata)", got, want)
+	}
+
+	turn = 3
+	_ = runTurn(t, r, turn)
+	checkCachesMatchSession(t, api, sessionService, turn)
+	stored := storedCacheMetadata(t, sessionService)
+	if got := stored[len(stored)-1].Fingerprint; got != "plugin-override" {
+		t.Errorf("turn 3 stored Fingerprint = %q, want %q", got, "plugin-override")
 	}
 }
 

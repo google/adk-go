@@ -17,6 +17,7 @@ package tool_test
 import (
 	"context"
 	"errors"
+	"io"
 	"iter"
 	"strings"
 	"testing"
@@ -735,4 +736,91 @@ func TestWithConfirmation_StreamingProcessRequest_Packing(t *testing.T) {
 			}
 		})
 	}
+}
+
+// closingToolset counts its Close calls and returns err from each of them.
+type closingToolset struct {
+	testToolset
+	closes int
+	err    error
+}
+
+func (c *closingToolset) Close() error {
+	c.closes++
+	return c.err
+}
+
+// closeToolset calls Close on ts, which must implement io.Closer.
+func closeToolset(t *testing.T, ts tool.Toolset) error {
+	t.Helper()
+	c, ok := ts.(io.Closer)
+	if !ok {
+		t.Fatalf("%T does not implement io.Closer", ts)
+	}
+	return c.Close()
+}
+
+// unwrapToolset returns what ts wraps; ts must have an Unwrap method.
+func unwrapToolset(t *testing.T, ts tool.Toolset) tool.Toolset {
+	t.Helper()
+	u, ok := ts.(interface{ Unwrap() tool.Toolset })
+	if !ok {
+		t.Fatalf("%T has no Unwrap() tool.Toolset method", ts)
+	}
+	return u.Unwrap()
+}
+
+func TestToolsetWrappers_PassCloseThroughAndUnwrap(t *testing.T) {
+	errClose := errors.New("close failed")
+	wrappers := []struct {
+		name string
+		wrap func(tool.Toolset) tool.Toolset
+	}{
+		{
+			name: "FilterToolset",
+			wrap: func(ts tool.Toolset) tool.Toolset { return tool.FilterToolset(ts, tool.AllowedToolsPredicate(nil)) },
+		},
+		{
+			name: "WithConfirmation",
+			wrap: func(ts tool.Toolset) tool.Toolset { return tool.WithConfirmation(ts, false, nil) },
+		},
+	}
+	for _, w := range wrappers {
+		t.Run(w.name, func(t *testing.T) {
+			t.Run("closes inner", func(t *testing.T) {
+				inner := &closingToolset{}
+				if err := closeToolset(t, w.wrap(inner)); err != nil {
+					t.Errorf("Close() = %v, want nil", err)
+				}
+				if inner.closes != 1 {
+					t.Errorf("inner closes = %d, want 1", inner.closes)
+				}
+			})
+			t.Run("returns inner error", func(t *testing.T) {
+				inner := &closingToolset{err: errClose}
+				if err := closeToolset(t, w.wrap(inner)); !errors.Is(err, errClose) {
+					t.Errorf("Close() = %v, want %v", err, errClose)
+				}
+			})
+			t.Run("inner is not a closer", func(t *testing.T) {
+				if err := closeToolset(t, w.wrap(&testToolset{})); err != nil {
+					t.Errorf("Close() = %v, want nil", err)
+				}
+			})
+			t.Run("unwraps to inner", func(t *testing.T) {
+				inner := &closingToolset{}
+				if got := unwrapToolset(t, w.wrap(inner)); got != inner {
+					t.Errorf("Unwrap() = %v, want the wrapped toolset %v", got, inner)
+				}
+			})
+		})
+	}
+
+	t.Run("nested wrappers unwrap to inner", func(t *testing.T) {
+		inner := &closingToolset{}
+		outer := tool.FilterToolset(tool.WithConfirmation(inner, false, nil), tool.AllowedToolsPredicate(nil))
+		if got := unwrapToolset(t, unwrapToolset(t, outer)); got != inner {
+			t.Errorf("Unwrap().Unwrap() = %v, want the wrapped toolset %v", got, inner)
+		}
+	})
 }

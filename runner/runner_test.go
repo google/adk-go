@@ -32,6 +32,8 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/workflow"
 )
 
 func TestRunner_findAgentToRun(t *testing.T) {
@@ -442,34 +444,73 @@ func TestRunner_InboundMessageIsUserTurn(t *testing.T) {
 }
 
 // TestRunner_SaveInputBlobsDoesNotMutateCallerMessage guards that replacing
-// inline blobs with placeholders edits the stored copy, not the caller's Parts.
+// inline blobs with placeholders edits the stored copy, not the Parts of the
+// caller's message or of a message an OnUserMessageCallback plugin returned,
+// on both run paths.
 func TestRunner_SaveInputBlobsDoesNotMutateCallerMessage(t *testing.T) {
-	ctx := t.Context()
-	testAgent := must(agent.New(agent.Config{
-		Name: "test_agent",
-		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
-			return func(func(*session.Event, error) bool) {}
-		},
-	}))
-	sessionService := session.InMemoryService()
-	r, err := New(Config{AppName: "app", Agent: testAgent, SessionService: sessionService})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
+	customRoot := func() agent.Agent {
+		return must(agent.New(agent.Config{
+			Name: "test_agent",
+			Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {}
+			},
+		}))
 	}
-	r.artifactService = artifact.InMemoryService()
-	if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
-		t.Fatalf("sessionService.Create() error = %v", err)
+	llmRoot := func() agent.Agent {
+		return must(llmagent.New(llmagent.Config{Name: "test_agent", Model: &recordingModel{}}))
 	}
 
-	blob := &genai.Part{InlineData: &genai.Blob{MIMEType: "application/octet-stream", Data: []byte("data")}}
-	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromText("file"), blob}}
-	for _, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{SaveInputBlobsAsArtifacts: true}) {
-		if err != nil {
-			t.Fatalf("r.Run() returned an error: %v", err)
-		}
-	}
-	if msg.Parts[1] != blob || blob.InlineData == nil {
-		t.Errorf("caller's message was modified: Parts[1] = %+v, want the original blob part", msg.Parts[1])
+	for _, tc := range []struct {
+		name      string
+		root      func() agent.Agent
+		viaPlugin bool
+	}{
+		{name: "classic_path", root: customRoot},
+		{name: "node_path", root: llmRoot},
+		{name: "plugin_message/classic", root: customRoot, viaPlugin: true},
+		{name: "plugin_message/node", root: llmRoot, viaPlugin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			blob := &genai.Part{InlineData: &genai.Blob{MIMEType: "application/octet-stream", Data: []byte("data")}}
+			// watched is the message whose Parts must survive the run: the
+			// caller's own message, or the one the plugin returns.
+			watched := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromText("file"), blob}}
+			msg := watched
+			var plugins []*plugin.Plugin
+			if tc.viaPlugin {
+				msg = &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromText("hi")}}
+				p, err := plugin.New(plugin.Config{
+					Name: "returns_blob",
+					OnUserMessageCallback: func(agent.InvocationContext, *genai.Content) (*genai.Content, error) {
+						return watched, nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("plugin.New() error = %v", err)
+				}
+				plugins = append(plugins, p)
+			}
+
+			sessionService := session.InMemoryService()
+			r, err := New(Config{AppName: "app", Agent: tc.root(), SessionService: sessionService, PluginConfig: PluginConfig{Plugins: plugins}})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			r.artifactService = artifact.InMemoryService()
+			if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+				t.Fatalf("sessionService.Create() error = %v", err)
+			}
+
+			for _, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{SaveInputBlobsAsArtifacts: true}) {
+				if err != nil {
+					t.Fatalf("r.Run() returned an error: %v", err)
+				}
+			}
+			if watched.Parts[1] != blob || blob.InlineData == nil {
+				t.Errorf("message was modified: Parts[1] = %+v, want the original blob part", watched.Parts[1])
+			}
+		})
 	}
 }
 
@@ -1245,5 +1286,77 @@ func TestRunner_NilEventYieldedTerminatesRun(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Run() did not terminate after a nil event")
+	}
+}
+
+// newTestNode returns a function node named name that returns no output.
+func newTestNode(name string) workflow.Node {
+	return workflow.NewFunctionNode(name, func(agent.Context, any) (any, error) { return nil, nil }, workflow.NodeConfig{})
+}
+
+func TestRunner_New_MutuallyExclusiveRoots(t *testing.T) {
+	a := must(agent.New(agent.Config{Name: "a"}))
+
+	r, err := New(Config{Agent: a, Node: newTestNode("myNode"), SessionService: session.InMemoryService()})
+
+	if r != nil || err == nil || err.Error() != "only one of Agent or Node may be provided" {
+		t.Errorf("New() = %v, %v; want nil, %q", r, err, "only one of Agent or Node may be provided")
+	}
+}
+
+func TestRunner_New_NodeNameRequired(t *testing.T) {
+	r, err := New(Config{Node: newTestNode(""), SessionService: session.InMemoryService()})
+
+	if r != nil || err == nil || err.Error() != "node name must not be empty" {
+		t.Errorf("New() = %v, %v; want nil, %q", r, err, "node name must not be empty")
+	}
+}
+
+func TestRunner_New_NodeRootCompactionNeedsSummarizer(t *testing.T) {
+	const want = "the Compaction config needs a Summarizer: root is a node, so no default model is available"
+
+	r, err := New(Config{
+		Node:           newTestNode("myNode"),
+		SessionService: session.InMemoryService(),
+		Compaction:     &compaction.Config{CompactionInterval: 2, OverlapSize: 1},
+	})
+
+	if r != nil || err == nil || err.Error() != want {
+		t.Errorf("New() = %v, %v; want nil, %q", r, err, want)
+	}
+}
+
+func TestRunner_New_DefaultsAppNameToNodeName(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	r, err := New(Config{Node: newTestNode("myNode"), SessionService: svc, AutoCreateSession: true})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	for _, err := range r.Run(ctx, "u", "s", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	}
+
+	if _, err := svc.Get(ctx, &session.GetRequest{AppName: "myNode", UserID: "u", SessionID: "s"}); err != nil {
+		t.Errorf("session under app name %q: Get() error = %v", "myNode", err)
+	}
+}
+
+func TestRunner_RunLive_RefusedOnNodeRoot(t *testing.T) {
+	const want = `runner root "myNode" is a node, not an agent`
+	r, err := New(Config{AppName: "app", Node: newTestNode("myNode"), SessionService: session.InMemoryService()})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	// The session does not exist, so the refusal has to come before the
+	// session is read.
+	sess, events, err := r.RunLive(t.Context(), "u", "s", agent.LiveRunConfig{})
+
+	if sess != nil || events != nil || err == nil || err.Error() != want {
+		t.Errorf("RunLive() = %v, %v, %v; want nil, nil, %q", sess, events, err, want)
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"log"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"google.golang.org/genai"
@@ -36,6 +37,7 @@ import (
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	"google.golang.org/adk/v2/internal/compactioninternal"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/eventmetadata"
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
 	"google.golang.org/adk/v2/internal/plugininternal"
@@ -48,13 +50,33 @@ import (
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/workflow"
 )
 
 // Config is used to create a [Runner].
+//
+// Exactly one of [Config.Agent] or [Config.Node] must be non-nil.
 type Config struct {
+	// AppName identifies the application in session, artifact, and memory
+	// requests. When Node is set and AppName is empty, New defaults AppName
+	// to Node.Name().
 	AppName string
-	// Root agent which starts the execution.
-	Agent          agent.Agent
+	// Agent is the root agent which starts execution. Mutually exclusive
+	// with Node.
+	Agent agent.Agent
+	// Node is the root workflow node (such as a [workflow.BaseNode]
+	// embedder, [workflow.FunctionNode], a node built by
+	// [workflow.NewDynamicNode], or a [workflow.WorkflowNode]) which starts
+	// execution on the node runtime path. Mutually exclusive with Agent.
+	//
+	// A node root that is not a [workflow.WorkflowNode] receives the user
+	// message as a *genai.Content with Role "user"; on a turn that resumes
+	// it, it receives the invocation's original user message. A
+	// [workflow.WorkflowNode] root passes the message on to each successor
+	// of its [workflow.Start] in the form that successor declares (see
+	// [workflow.NodeConfig.ContentInput]). The node's events carry the root
+	// path "<Node.Name()>@1" in [session.NodeInfo].
+	Node           workflow.Node
 	SessionService session.Service
 
 	// optional
@@ -136,18 +158,48 @@ func WithYieldUserMessage() RunOption {
 }
 
 // New creates a new [Runner].
+//
+// Exactly one of cfg.Agent or cfg.Node must be non-nil, and
+// cfg.SessionService must be non-nil. When cfg.Node is set, its name must
+// not be empty, and an empty cfg.AppName defaults to cfg.Node.Name(). When
+// cfg.Compaction is set, it must be valid, and either name a Summarizer or
+// have an LLM agent with a model as the root. New returns an error
+// describing the first precondition that does not hold. It does not modify
+// cfg or cfg.Compaction.
 func New(cfg Config) (*Runner, error) {
-	if cfg.Agent == nil {
+	if cfg.Agent == nil && cfg.Node == nil {
 		return nil, fmt.Errorf("root agent is required")
+	}
+	if cfg.Agent != nil && cfg.Node != nil {
+		return nil, errors.New("only one of Agent or Node may be provided")
 	}
 
 	if cfg.SessionService == nil {
 		return nil, fmt.Errorf("session service is required")
 	}
 
-	parents, err := parentmap.New(cfg.Agent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create agent tree: %w", err)
+	appName := cfg.AppName
+	var parents parentmap.Map
+	var standIn agent.Agent
+	if cfg.Agent != nil {
+		var err error
+		parents, err = parentmap.New(cfg.Agent)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create agent tree: %w", err)
+		}
+	} else {
+		if cfg.Node.Name() == "" {
+			return nil, errors.New("node name must not be empty")
+		}
+		// adk-python names the app after a node root (Runner._resolve_app).
+		if appName == "" {
+			appName = cfg.Node.Name()
+		}
+		var err error
+		standIn, err = newStandInAgent(cfg.Node)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	pluginManager, err := plugininternal.NewPluginManager(plugininternal.PluginConfig{
@@ -172,8 +224,10 @@ func New(cfg Config) (*Runner, error) {
 	contextCache := llminternal.CloneContextCacheConfig(cfg.ContextCache)
 
 	return &Runner{
-		appName:           cfg.AppName,
+		appName:           appName,
 		rootAgent:         cfg.Agent,
+		rootNode:          cfg.Node,
+		standInAgent:      standIn,
 		sessionService:    cfg.SessionService,
 		artifactService:   cfg.ArtifactService,
 		memoryService:     cfg.MemoryService,
@@ -191,6 +245,7 @@ func New(cfg Config) (*Runner, error) {
 var defaultSummarizerTimeout = 60 * time.Second
 
 // resolveCompactionConfig validates cfg and fills in the default summarizer.
+// rootAgent is nil when the runner's root is a node.
 //
 // Resolving at construction time means a misconfigured runner fails fast at
 // New, rather than silently skipping compaction turns later, or blowing up
@@ -208,6 +263,9 @@ func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*co
 		return &resolved, nil
 	}
 
+	if rootAgent == nil {
+		return nil, errors.New("the Compaction config needs a Summarizer: root is a node, so no default model is available")
+	}
 	llmAgent, ok := rootAgent.(llminternal.Agent)
 	if !ok {
 		return nil, fmt.Errorf("the Compaction config needs a Summarizer: root agent %q is not an LLM agent, so no default model is available", rootAgent.Name())
@@ -258,8 +316,14 @@ func NewInMemory(appName string, a agent.Agent) (*Runner, error) {
 // processing, event generation, and interaction with various services like
 // artifact storage, session management, and memory.
 type Runner struct {
-	appName         string
-	rootAgent       agent.Agent
+	appName   string
+	rootAgent agent.Agent
+	// rootNode is Config.Node; exactly one of rootAgent and rootNode is set.
+	rootNode workflow.Node
+	// standInAgent is the invocation context's agent when rootNode is set,
+	// so that plugins, callbacks and telemetry that read ctx.Agent() see the
+	// node's name. It is never run.
+	standInAgent    agent.Agent
 	sessionService  session.Service
 	artifactService artifact.Service
 	memoryService   memory.Service
@@ -486,8 +550,21 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	return nil
 }
 
-// fromPlugin returns the event a plugin gave back, with the compaction record
-// the framework put on the original rather than any the plugin supplied.
+// fromPlugin returns the event a plugin's OnEventCallback leaves behind, with
+// the compaction record the framework put on the original rather than any the
+// plugin supplied.
+//
+// When modified is nil or original itself, it returns original. Otherwise it
+// returns a new event: a copy of original with every field that modified sets
+// laid over it, mirroring adk-python's Runner._get_output_event
+// (runners.py). ID, InvocationID and Timestamp always stay the original's,
+// and an empty Author falls back to the original's. A field counts as set
+// when it is not its zero value; Partial counts as set when it is true or
+// PartialSet is true, so a plugin can downgrade a partial event. A non-nil
+// CustomMetadata, an empty map included, replaces the original's public keys
+// while the original's ADK-internal keys survive (eventmetadata.WithInternalFrom);
+// a nil one keeps the original's map. fromPlugin mutates neither modified nor
+// any map of original or modified.
 //
 // A compaction record is not content. It says which stored events every later
 // prompt drops and what stands in for them, so planting one erases history and
@@ -527,22 +604,185 @@ func fromPlugin(original, modified *session.Event, record *session.EventCompacti
 		original.Actions.Compaction = record
 		return original
 	}
-	out := *modified
-	out.Actions.Compaction = record
-	out.ID = original.ID
-	out.InvocationID = original.InvocationID
-	out.Timestamp = original.Timestamp
-	if out.Author == "" {
-		out.Author = original.Author
+	out := *original
+	mergeLLMResponse(&out.LLMResponse, &modified.LLMResponse)
+	if modified.Author != "" {
+		out.Author = modified.Author
+	}
+	if modified.Branch != "" {
+		out.Branch = modified.Branch
+	}
+	if modified.IsolationScope != "" {
+		out.IsolationScope = modified.IsolationScope
+	}
+	mergeEventActions(&out.Actions, &modified.Actions, record)
+	if len(modified.LongRunningToolIDs) > 0 {
+		out.LongRunningToolIDs = slices.Clone(modified.LongRunningToolIDs)
+	}
+	if len(modified.Routes) > 0 {
+		out.Routes = slices.Clone(modified.Routes)
+	}
+	if modified.RequestedInput != nil {
+		out.RequestedInput = modified.RequestedInput
+	}
+	if modified.Output != nil {
+		out.Output = modified.Output
+	}
+	if modified.NodeInfo != nil {
+		out.NodeInfo = modified.NodeInfo
 	}
 	return &out
 }
 
-// stampTimestamp gives an event without a timestamp the time the runner
-// received it, as adk-python's Event does on construction. That is an event an
-// agent yielded without one, or one a plugin rewrote in place and left without
-// one. A replacement a plugin returns has already inherited the original's
-// timestamp through fromPlugin.
+// mergeLLMResponse lays the fields src sets over dst, for fromPlugin.
+func mergeLLMResponse(dst, src *model.LLMResponse) {
+	if src.Content != nil {
+		dst.Content = src.Content
+	}
+	if src.CitationMetadata != nil {
+		dst.CitationMetadata = src.CitationMetadata
+	}
+	if src.GroundingMetadata != nil {
+		dst.GroundingMetadata = src.GroundingMetadata
+	}
+	if src.UsageMetadata != nil {
+		dst.UsageMetadata = src.UsageMetadata
+	}
+	if src.CacheMetadata != nil {
+		dst.CacheMetadata = src.CacheMetadata
+	}
+	if src.CustomMetadata != nil {
+		dst.CustomMetadata = eventmetadata.WithInternalFrom(src.CustomMetadata, dst.CustomMetadata)
+	}
+	if src.LogprobsResult != nil {
+		dst.LogprobsResult = src.LogprobsResult
+	}
+	if src.InputTranscription != nil {
+		dst.InputTranscription = src.InputTranscription
+	}
+	if src.OutputTranscription != nil {
+		dst.OutputTranscription = src.OutputTranscription
+	}
+	if src.ModelVersion != "" {
+		dst.ModelVersion = src.ModelVersion
+	}
+	// A Go bool cannot say whether a struct literal set it to false, so an
+	// explicit downgrade needs PartialSet (model.LLMResponse.PartialSet).
+	if src.Partial || src.PartialSet {
+		dst.Partial = src.Partial
+		dst.PartialSet = src.PartialSet
+	}
+	if src.TurnComplete {
+		dst.TurnComplete = true
+	}
+	if src.Interrupted {
+		dst.Interrupted = true
+	}
+	if src.SessionResumptionHandle != "" {
+		dst.SessionResumptionHandle = src.SessionResumptionHandle
+	}
+	if src.ErrorCode != "" {
+		dst.ErrorCode = src.ErrorCode
+	}
+	if src.ErrorMessage != "" {
+		dst.ErrorMessage = src.ErrorMessage
+	}
+	if src.FinishReason != "" {
+		dst.FinishReason = src.FinishReason
+	}
+	if src.AvgLogprobs != 0 {
+		dst.AvgLogprobs = src.AvgLogprobs
+	}
+}
+
+// mergeEventActions lays the actions src sets over dst, for fromPlugin, and
+// sets dst.Compaction to record. The delta maps dst ends up with are copies,
+// because the session service applies and keeps them.
+func mergeEventActions(dst, src *session.EventActions, record *session.EventCompaction) {
+	if len(src.StateDelta) > 0 {
+		dst.StateDelta = maps.Clone(src.StateDelta)
+	} else if dst.StateDelta != nil {
+		dst.StateDelta = maps.Clone(dst.StateDelta)
+	}
+	if len(src.ArtifactDelta) > 0 {
+		dst.ArtifactDelta = maps.Clone(src.ArtifactDelta)
+	} else if dst.ArtifactDelta != nil {
+		dst.ArtifactDelta = maps.Clone(dst.ArtifactDelta)
+	}
+	if len(src.RequestedToolConfirmations) > 0 {
+		dst.RequestedToolConfirmations = maps.Clone(src.RequestedToolConfirmations)
+	}
+	if len(src.RequestedAuthConfigs) > 0 {
+		dst.RequestedAuthConfigs = maps.Clone(src.RequestedAuthConfigs)
+	}
+	if src.SkipSummarization {
+		dst.SkipSummarization = true
+	}
+	if src.TransferToAgent != "" {
+		dst.TransferToAgent = src.TransferToAgent
+	}
+	if src.Escalate {
+		dst.Escalate = true
+	}
+	if src.SetModelResponse != nil {
+		dst.SetModelResponse = src.SetModelResponse
+	}
+	dst.Compaction = record
+}
+
+// processEventWithPlugins stamps the event's timestamp if it is zero, merges
+// the run's custom metadata into event, runs the OnEventCallback plugins and
+// applies fromPlugin. When a plugin returns a non-nil event, a replacement or
+// the same event, the run's custom metadata is merged into that event again,
+// its own keys winning; a nil return keeps the plugin's in-place edits as they
+// are. This mirrors adk-python's Runner._process_event_with_plugin_callbacks
+// and _get_output_event (runners.py).
+//
+// It does not persist the event: the caller decides on the returned event, with
+// shouldAppendEvent, whether to append it to the session. A runner-synthesized event goes through
+// this function so it gets the run's custom metadata before OnEventCallback,
+// like agent output events. event must be non-nil. On a plugin error it
+// returns (nil, err) unchanged.
+func (r *Runner) processEventWithPlugins(ctx agent.InvocationContext, event *session.Event) (*session.Event, error) {
+	stampTimestamp(ctx, event)
+	runMetadata := runMetadataFromContext(ctx)
+	eventmetadata.MergeIntoEvent(event, runMetadata)
+	if r.pluginManager == nil {
+		return event, nil
+	}
+	// Captured before the plugin runs. A plugin that mutates the event in
+	// place has already overwritten this field by the time the callback
+	// returns, so reading it afterwards reads the plugin's value rather than
+	// the framework's.
+	record := event.Actions.Compaction
+	modifiedEvent, err := r.pluginManager.RunOnEventCallback(ctx, event)
+	if err != nil {
+		return nil, err
+	}
+	event = fromPlugin(event, modifiedEvent, record)
+	stampTimestamp(ctx, event) // a plugin may have cleared it in place
+	// adk-python merges again for every returned event, the same object
+	// included, and only a None return skips it (runners.py,
+	// _get_output_event).
+	if modifiedEvent != nil {
+		eventmetadata.MergeIntoEvent(event, runMetadata)
+	}
+	return event, nil
+}
+
+// runMetadataFromContext returns the invocation's custom metadata, which Run
+// or RunLive filtered with eventmetadata.WithoutInternal and stored on the
+// context's runconfig.RunConfig. It returns nil when ctx carries none.
+func runMetadataFromContext(ctx context.Context) map[string]any {
+	if rc := runconfig.FromContext(ctx); rc != nil {
+		return rc.CustomMetadata
+	}
+	return nil
+}
+
+// stampTimestamp gives an event that an agent yielded, or a plugin returned in
+// its place, without a timestamp the time the runner received it, as
+// adk-python's Event does on construction.
 //
 // An event built as a struct literal never passes through session.NewEvent.
 // Stored with a zero timestamp it moves the session's last update time back to
@@ -627,11 +867,15 @@ func (r *Runner) reloadSession(ctx context.Context, s session.Session) (session.
 	return resp.Session, nil
 }
 
-func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string) (session.Session, error) {
+// getOrCreateSession loads the session with the event limits of sessionCfg,
+// creating it when it does not exist and the runner auto-creates sessions.
+func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string, sessionCfg agent.GetSessionConfig) (session.Session, error) {
 	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
-		AppName:   r.appName,
-		UserID:    userID,
-		SessionID: sessionID,
+		AppName:         r.appName,
+		UserID:          userID,
+		SessionID:       sessionID,
+		NumRecentEvents: sessionCfg.NumRecentEvents,
+		After:           sessionCfg.After,
 	})
 	if err == nil {
 		return getResp.Session, nil
@@ -655,13 +899,61 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // Run runs the agent for the given user input, yielding events from agents.
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
+//
+// A root LlmAgent must run in chat mode (the default) or task mode; any other
+// mode ends the run with an error before the session is read or created. The
+// session is loaded with the event window of cfg.GetSessionConfig, read when
+// Run is called. The on-user-message plugin callbacks run before the route is
+// final, so a replacement message that answers a sub-agent's call is routed to
+// that sub-agent. The message they leave is refused, with nothing stored, when
+// it carries a function call ("user message cannot contain function calls"),
+// or when it has no parts and the root agent is not an LlmAgent ("no parts in
+// the new_message").
+//
+// A root node (Config.Node) runs on the node path; see [Config.Node] for the
+// input it receives and the paths its events carry. On a node root, Run also
+// refuses, with nothing stored, a message that holds both text and a
+// function response with an ID ("message cannot contain both function
+// responses and text: ..."); a BeforeRunCallback reply is authored "model";
+// and the node's events carry no workflow bookkeeping metadata. On any root,
+// a nil msg with a non-empty [WithStateDelta] stores a user event without
+// content that carries the delta, which [WithYieldUserMessage] yields on the
+// node path.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
-	return telemetry.InstrumentInvocation(ctx, r.rootAgent, sessionID, func(ctx context.Context) iter.Seq2[*session.Event, error] {
-		return r.run(ctx, userID, sessionID, msg, cfg, opts...)
+	// Copied now: the sequence below runs only when ranged, and later
+	// changes to the caller's map must not reach the invocation's events.
+	var runMetadata map[string]any
+	if cfg.CustomMetadata != nil {
+		runMetadata = eventmetadata.WithoutInternal(*cfg.CustomMetadata)
+	}
+	sessionCfg := getSessionConfigOf(cfg.GetSessionConfig)
+	return telemetry.InstrumentInvocation(ctx, r.invocationRoot(), sessionID, func(ctx context.Context) iter.Seq2[*session.Event, error] {
+		return r.run(ctx, userID, sessionID, msg, cfg, runMetadata, sessionCfg, opts...)
 	})
 }
 
-func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
+// invocationRoot returns the root whose name and description the invocation
+// span records: the root node when the runner has one, else the root agent.
+func (r *Runner) invocationRoot() telemetry.AgentLike {
+	if r.rootNode != nil {
+		return r.rootNode
+	}
+	return r.rootAgent
+}
+
+// getSessionConfigOf returns a copy of *cfg, or the zero GetSessionConfig
+// (no event window) when cfg is nil.
+func getSessionConfigOf(cfg *agent.GetSessionConfig) agent.GetSessionConfig {
+	if cfg == nil {
+		return agent.GetSessionConfig{}
+	}
+	return *cfg
+}
+
+// run is the body of Run. runMetadata is the caller's RunConfig.CustomMetadata
+// without ADK-internal keys, and sessionCfg its RunConfig.GetSessionConfig,
+// both copied when Run was called.
+func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, runMetadata map[string]any, sessionCfg agent.GetSessionConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
@@ -690,39 +982,41 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// context and the stored event all see the same message.
 		msg = asUserContent(msg)
 
-		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
+		// A root LlmAgent runs in chat mode (the default) or task mode. The
+		// mode is checked before the session is read or created, as
+		// adk-python does (runners.py, Runner.run_async), so a misconfigured
+		// root leaves no session behind.
+		var llmInternalState *llminternal.State
+		var rootMode llminternal.Mode
+		if llmInternalAgent, ok := r.rootAgent.(llminternal.Agent); ok {
+			llmInternalState = llminternal.Reveal(llmInternalAgent)
+			rootMode = llminternal.ResolveMode(llmInternalState.Mode, llminternal.ModeChat)
+			if rootMode != llminternal.ModeChat && rootMode != llminternal.ModeTask {
+				yield(nil, fmt.Errorf("LlmAgent as root agent must have mode='chat' or 'task', but got mode='%s'", rootMode))
+				return
+			}
+		}
+
+		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID, sessionCfg)
 		if err != nil {
 			yield(nil, err)
+			return
+		}
+
+		// A node root always runs on the node path, as adk-python's
+		// Runner.run_async sends a BaseNode root to _run_node_async.
+		if r.rootNode != nil {
+			r.runNode(ctx, storedSession, r.standInAgent, msg, cfg, runMetadata, llminternal.ModeUnset, options, yield)
 			return
 		}
 
 		// Node path: an LlmAgent runs through the ADK 2.0 node runtime
 		// (the Go equivalent of adk-python's _run_node_async, reached for
 		// an LlmAgent root).
-
-		if isLlmAgent(r.rootAgent) {
-			llmInternalAgent, ok := r.rootAgent.(llminternal.Agent)
-			if !ok {
-				yield(nil, fmt.Errorf("agent %s is not an LlmAgent", r.rootAgent.Name()))
-				return
-			}
-
-			llmInternalState := llminternal.Reveal(llmInternalAgent)
-
-			// LlmAgent as root agent must have chat mode.
-			rootMode := llminternal.ResolveMode(llmInternalState.Mode, llminternal.ModeChat)
-			if rootMode != llminternal.ModeChat {
-				yield(nil, fmt.Errorf("root agent %s must be a chat LlmAgent, but has mode %s", r.rootAgent.Name(), rootMode))
-				return
-			}
-			// Record the root's placement, as every other placement does.
-			// This changes no behavior today: the check above has already
-			// rejected anything but chat, and chat is also what an unbound
-			// agent falls back to, so no reader can tell a chat binding from
-			// an absent one. It is here so the runner is not the one
-			// placement that resolves a mode and then keeps it to itself,
-			// which is how a later reader would come to be right about graph
-			// nodes and wrong about roots.
+		if llmInternalState != nil {
+			// Record the root's placement, as every other placement does, so
+			// the runner is not the one placement that resolves a mode and
+			// then keeps it to itself.
 			//
 			// Kept in a local rather than assigned back to ctx, this closure's
 			// captured parameter, so ranging the returned iterator twice cannot
@@ -731,27 +1025,8 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			// iterator really is clean for a re-range.
 			rootCtx := llminternal.WithBoundMode(ctx, r.rootAgent.Name(), llmInternalState, rootMode)
 
-			hasTaskSubAgent := func() bool {
-				for _, subAgent := range r.rootAgent.SubAgents() {
-					if !isLlmAgent(subAgent) {
-						continue
-					}
-					llmInternalSubAgent := llminternal.Reveal(subAgent.(llminternal.Agent))
-					if llmInternalSubAgent.Mode == llminternal.ModeTask {
-						return true
-					}
-				}
-				return false
-			}
-
-			var agentToRun agent.Agent
-
-			// when the chat coordinator has task-mode sub-agents,
-			// the wrapper handles delegation via ctx.run_node. Don't let
-			// the legacy sub-agent picker bypass the coordinator on resume.
-			if hasTaskSubAgent() {
-				agentToRun = r.rootAgent
-			} else {
+			agentToRun := r.rootAgent
+			if r.usesLegacySubAgentPicker(rootMode) {
 				agentToRun, err = r.findAgentToRun(storedSession, msg)
 				if err != nil {
 					yield(nil, err)
@@ -759,16 +1034,17 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 				}
 			}
 
-			r.runNode(rootCtx, storedSession, agentToRun, msg, cfg, options, yield)
+			r.runNode(rootCtx, storedSession, agentToRun, msg, cfg, runMetadata, rootMode, options, yield)
 			return
 		}
 
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
-			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
-			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
-			HTTPOptions:   cfg.HTTPOptions,
-			Labels:        cfg.Labels,
+			StreamingMode:  runconfig.StreamingMode(cfg.StreamingMode),
+			MaxLLMCalls:    runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
+			HTTPOptions:    cfg.HTTPOptions,
+			Labels:         cfg.Labels,
+			CustomMetadata: runMetadata,
 		})
 		ctx = r.withPluginManager(ctx)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
@@ -821,28 +1097,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		// A function response goes back to the agent that made the call, on
-		// the branch it ran on (adk-python find_agent_to_run and
-		// restore_branch_from_history). Re-running the root would run agents
-		// that never saw the call, and they fail on the unmatched response.
-		// A call made inside a graph workflow is the exception: the root runs,
-		// and sequential, parallel and loop agents on the way narrow to the
-		// sub-agents holding the callers (utils.GraphResumeIndexes), provided
-		// the workflow's node agents are listed in its SubAgents. Sub-agents
-		// after it in a sequence still run, and an LLM agent among them sees
-		// the user's answer as context, unless the node's call is on a branch
-		// it cannot see, as when the workflow fans out inside a parallel agent
-		// (#2204). The workflow resumes the interrupted node only for an
-		// adk_request_input response; any other response restarts the graph.
-		// The first response in the message decides the route.
-		agentToRun, branch := r.rootAgent, ""
-		routedToCaller := false
-		if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
-			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
-				agentToRun, branch = sub, ev.Branch
-				routedToCaller = true
-			}
-		}
+		agentToRun, branch := r.classicAgentToRun(storedSession, msg)
 		// Answers to calls from several invocations start a new invocation
 		// when they go back to the calling agent, as adk-python does for a
 		// BaseAgent root of an app that is not resumable. A graph workflow
@@ -852,7 +1107,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// caller can be a workflow node agent missing from the workflow's
 		// sub-agents; adk-python starts a new invocation there.
 		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
-		if spansInvocations && routedToCaller {
+		if spansInvocations && agentToRun != r.rootAgent {
 			invocationID = ""
 		}
 
@@ -868,10 +1123,19 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		})
 		invocationCtx = ic
 		ctx := agent.NewContext(ic)
-		ctx, _, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
+		ctx, _, replaced, err := r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, true, r.pluginManager, options.stateDelta)
 		if err != nil {
 			yield(nil, err)
 			return
+		}
+		if replaced {
+			// A plugin's replacement can answer a call another agent made, so
+			// the route is taken again from the replacement, now in history.
+			agentToRun, branch = r.classicAgentToRun(storedSession, ctx.UserContent())
+			ctx = ctx.WithDelta(&agent.CommonContextDelta{
+				InvocationContextDelta: &agent.InvocationContextDelta{Agent: &agentToRun, Branch: &branch},
+			})
+			invocationCtx = ctx
 		}
 
 		pluginManager := r.pluginManager
@@ -880,7 +1144,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			// This does NOT emit any event.
 			defer pluginManager.RunAfterRunCallback(ctx)
 
-			if event, err := r.runBeforeRunCallback(ctx); event != nil || err != nil {
+			if event, err := r.runBeforeRunCallback(ctx, false); event != nil || err != nil {
 				yield(event, err)
 				return
 			}
@@ -907,33 +1171,16 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 			stampTimestamp(ctx, event)
 
-			if !event.LLMResponse.Partial {
-				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
-					clone := *event
-					clone.Output = nil
-					event = &clone
+			event, err = r.processEventWithPlugins(ctx, event)
+			if err != nil {
+				if !yield(nil, err) {
+					return
 				}
+				continue
 			}
+			event = clearMessageAsOutput(event)
 
-			if pluginManager != nil {
-				// Captured before the plugin runs. A plugin that mutates the
-				// event in place has already overwritten this field by the time
-				// the callback returns, so reading it afterwards reads the
-				// plugin's value rather than the framework's.
-				record := event.Actions.Compaction
-				modifiedEvent, err := pluginManager.RunOnEventCallback(ctx, event)
-				if err != nil {
-					if !yield(nil, err) {
-						return
-					}
-					continue
-				}
-				event = fromPlugin(event, modifiedEvent, record)
-				stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
-			}
-
-			// only commit non-partial event to a session service
-			if !event.LLMResponse.Partial {
+			if shouldAppendEvent(event, false) {
 				if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 					return
@@ -959,33 +1206,39 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 }
 
 // runBeforeRunCallback processes and persists a plugin's replacement reply.
-// A nil event and nil error mean agent execution should continue.
-func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Event, error) {
+// A nil event and nil error mean agent execution should continue. The reply
+// goes through the OnEventCallback plugins and is appended to the session
+// when shouldAppendEvent(reply, isLive) holds; isLive is true for RunLive.
+func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext, isLive bool) (*session.Event, error) {
 	content, err := r.pluginManager.RunBeforeRunCallback(ctx)
 	if err != nil || content == nil {
 		return nil, err
 	}
 
 	event := session.NewEvent(ctx, ctx.InvocationID())
-	// Match RunLive's attribution so later turns can resolve the agent from history.
-	event.Author = ctx.Agent().Name()
+	if r.rootNode != nil {
+		// adk-python authors a node root's before-run reply "model"
+		// (workflow/_node_runner_utils.py).
+		event.Author = genai.RoleModel
+	} else {
+		// Match RunLive's attribution so later turns can resolve the agent from history.
+		event.Author = ctx.Agent().Name()
+	}
 	event.Content = content
 
-	record := event.Actions.Compaction
-	modifiedEvent, err := r.pluginManager.RunOnEventCallback(ctx, event)
+	event, err = r.processEventWithPlugins(ctx, event)
 	if err != nil {
 		return nil, err
 	}
 	// Stamp after OnEvent so a replacement keeps its BeforeRun origin, without
 	// changing plugin-owned metadata.
-	event = fromPlugin(event, modifiedEvent, record)
 	reply := *event
 	reply.CustomMetadata = make(map[string]any, len(event.CustomMetadata)+1)
 	maps.Copy(reply.CustomMetadata, event.CustomMetadata)
 	reply.CustomMetadata[plugininternal.BeforeRunReplyKey] = true
 	event = &reply
-	stampTimestamp(ctx, event) // a plugin may have rewritten the event in place
-	if !event.Partial {
+	stampTimestamp(ctx, event) // a replacement may be a struct literal
+	if shouldAppendEvent(event, isLive) {
 		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
 			return nil, fmt.Errorf("failed to add event to session: %w", err)
 		}
@@ -1069,14 +1322,18 @@ func (s *closedLiveSession) Close() error {
 }
 
 // RunLive starts a live, bidirectional agent session, returning the session
-// and a stream of events from the agents.
+// and a stream of events from the agents. It returns an error, before the
+// session is read, when the runner's root is a node.
 func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	if r.rootNode != nil {
+		return nil, nil, fmt.Errorf("runner root %q is a node, not an agent", r.rootNode.Name())
+	}
 	options := runOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
 
-	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
+	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID, getSessionConfigOf(cfg.GetSessionConfig))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1094,8 +1351,9 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
-		StreamingMode: runconfig.StreamingModeBidi, // Live is always bidirectional streaming
-		Live:          &cfg,
+		StreamingMode:  runconfig.StreamingModeBidi, // Live is always bidirectional streaming
+		Live:           &cfg,
+		CustomMetadata: eventmetadata.WithoutInternal(cfg.CustomMetadata),
 	})
 	ctx = r.withPluginManager(ctx)
 	// Deliberately no compactionctx here: context compaction does not apply to
@@ -1135,7 +1393,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		// The reply goes through OnEvent and the run through AfterRun, as on
 		// Run. adk-python runs a live agent through the same
 		// Runner._exec_with_plugin as run_async (runners.py).
-		earlyExitEvent, err := r.runBeforeRunCallback(iCtx)
+		earlyExitEvent, err := r.runBeforeRunCallback(iCtx, true)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1184,29 +1442,14 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			}
 			stampTimestamp(iCtx, event)
 
-			if !event.LLMResponse.Partial {
-				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
-					clone := *event
-					clone.Output = nil
-					event = &clone
+			event, err = r.processEventWithPlugins(iCtx, event)
+			if err != nil {
+				if !yield(nil, err) {
+					return
 				}
+				continue
 			}
-
-			if r.pluginManager != nil {
-				// Captured before the plugin runs: one that mutates the event in
-				// place has already overwritten this field by the time the callback
-				// returns.
-				record := event.Actions.Compaction
-				modifiedEvent, pluginErr := r.pluginManager.RunOnEventCallback(iCtx, event)
-				if pluginErr != nil {
-					if !yield(nil, pluginErr) {
-						return
-					}
-					continue
-				}
-				event = fromPlugin(event, modifiedEvent, record)
-				stampTimestamp(iCtx, event) // a plugin may have rewritten the event in place
-			}
+			event = clearMessageAsOutput(event)
 
 			// Chronological event buffering logic for Live streaming.
 			// Holds back tool calls/responses if they arrive before the transcription finishes.
@@ -1233,22 +1476,26 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				if event.LLMResponse.InputTranscription != nil || event.LLMResponse.OutputTranscription != nil {
 					isTranscribing = false
 
-					if err := r.sessionService.AppendEvent(iCtx, storedSession, event); err != nil {
-						if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
-							return
+					if shouldAppendEvent(event, true) {
+						if err := r.sessionService.AppendEvent(iCtx, storedSession, event); err != nil {
+							if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
+								return
+							}
+							continue
 						}
-						continue
 					}
 					if !yield(event, nil) {
 						return
 					}
 
 					for _, bufferedEvent := range bufferedEvents {
-						if err := r.sessionService.AppendEvent(iCtx, storedSession, bufferedEvent); err != nil {
-							if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
-								return
+						if shouldAppendEvent(bufferedEvent, true) {
+							if err := r.sessionService.AppendEvent(iCtx, storedSession, bufferedEvent); err != nil {
+								if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
+									return
+								}
+								continue
 							}
-							continue
 						}
 						if !yield(bufferedEvent, nil) {
 							return
@@ -1259,7 +1506,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				}
 			}
 
-			if !event.LLMResponse.Partial && !hasInlineData(event) {
+			if shouldAppendEvent(event, true) {
 				if err := r.sessionService.AppendEvent(iCtx, storedSession, event); err != nil {
 					if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
 						return
@@ -1277,15 +1524,17 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		// Live agents reach here when their session closes, including on cancellation.
 		// Python persists live events as they arrive; Go buffers them during transcription.
 		// Detach cancellation so session teardown can still persist that buffer.
-		// Match the mid-stream flush's persistence policy for buffered tool events,
-		// including those carrying inline data.
+		// Like the mid-stream flush, store each buffered event that
+		// shouldAppendEvent accepts, and yield every one.
 		flushCtx := context.WithoutCancel(iCtx)
 		for _, bufferedEvent := range bufferedEvents {
-			if err := r.sessionService.AppendEvent(flushCtx, storedSession, bufferedEvent); err != nil {
-				if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
-					return
+			if shouldAppendEvent(bufferedEvent, true) {
+				if err := r.sessionService.AppendEvent(flushCtx, storedSession, bufferedEvent); err != nil {
+					if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
+						return
+					}
+					continue
 				}
-				continue
 			}
 			if !yield(bufferedEvent, nil) {
 				return
@@ -1301,31 +1550,67 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	}, wrappedIter, nil
 }
 
-func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (agent.Context, *session.Event, error) {
+// appendMessageToSession runs the on-user-message callbacks on msg, refuses
+// the resulting message if it is not a valid user turn, and appends it to
+// storedSession as the user event. requireParts refuses a message with no
+// parts, which only the classic path does (adk-python
+// Runner._append_new_message_to_session; the node path's _append_user_event
+// stores it). replaced reports whether a callback returned a replacement; the
+// replacement is then ctx's UserContent, and when it answers a function call
+// in history, ctx carries that call's invocation ID. On a node root, a
+// message that holds both text and a function response with an ID is
+// refused before and after the callbacks. A nil msg runs no callback and
+// appends a content-less user event carrying stateDelta when stateDelta is
+// not empty, and nothing otherwise (adk-python
+// Runner._append_state_delta_event).
+func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session.Session, msg *genai.Content, saveInputBlobsAsArtifacts, requireParts bool, pluginManager *plugininternal.PluginManager, stateDelta map[string]any) (_ agent.Context, _ *session.Event, replaced bool, _ error) {
 	if msg == nil {
-		return ctx, nil, nil
+		if len(stateDelta) == 0 {
+			return ctx, nil, false, nil
+		}
+		event, err := r.appendUserEvent(ctx, storedSession, nil, stateDelta)
+		return ctx, event, false, err
+	}
+	if err := r.validateNodeRootMessage(msg); err != nil {
+		return ctx, nil, false, err
 	}
 	if pluginManager != nil {
 		modifiedMsg, err := pluginManager.RunOnUserMessageCallback(ctx, msg)
 		if err != nil {
-			return ctx, nil, fmt.Errorf("error running on run user message callback : %w", err)
+			return ctx, nil, false, fmt.Errorf("error running on run user message callback : %w", err)
 		}
 		if modifiedMsg != nil {
+			replaced = true
 			// A plugin can return a message with any Role. Normalize it before
 			// it becomes the invocation context's UserContent: WithDelta copies
 			// the value it points to, so a later reassignment would not reach it.
 			msg = asUserContent(modifiedMsg)
+
+			// A replacement that answers an earlier call continues that call's
+			// invocation (adk-python workflow/_node_runner_utils.py). The ID is
+			// set before WithDelta, which copies the invocation context.
+			if id, _ := resolveInvocationID(storedSession, msg); id != "" {
+				if err := setInvocationID(ctx, id); err != nil {
+					return ctx, nil, replaced, err
+				}
+			}
 
 			ctx = ctx.WithDelta(&agent.CommonContextDelta{
 				InvocationContextDelta: &agent.InvocationContextDelta{
 					UserContent: &msg,
 				},
 			})
+			if err := r.validateNodeRootMessage(msg); err != nil {
+				return ctx, nil, replaced, err
+			}
 		}
 	}
 
+	if requireParts && len(msg.Parts) == 0 {
+		return ctx, nil, replaced, errors.New("no parts in the new_message")
+	}
 	if len(utils.FunctionCalls(msg)) > 0 {
-		return ctx, nil, errUserFunctionCall
+		return ctx, nil, replaced, errUserFunctionCall
 	}
 
 	artifactsService := ctx.Artifacts()
@@ -1338,7 +1623,7 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 			}
 			fileName := fmt.Sprintf("artifact_%s_%d", ctx.InvocationID(), i)
 			if _, err := artifactsService.Save(ctx, fileName, part); err != nil {
-				return ctx, nil, fmt.Errorf("failed to save artifact %s: %w", fileName, err)
+				return ctx, nil, replaced, fmt.Errorf("failed to save artifact %s: %w", fileName, err)
 			}
 			// Replace the part with a text placeholder
 			msg.Parts[i] = &genai.Part{
@@ -1347,6 +1632,13 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		}
 	}
 
+	event, err := r.appendUserEvent(ctx, storedSession, msg, stateDelta)
+	return ctx, event, replaced, err
+}
+
+// appendUserEvent appends a user event with content msg, which may be nil,
+// and stateDelta to storedSession, and returns it.
+func (r *Runner) appendUserEvent(ctx agent.Context, storedSession session.Session, msg *genai.Content, stateDelta map[string]any) (*session.Event, error) {
 	event := session.NewEvent(ctx, ctx.InvocationID())
 
 	event.Author = "user"
@@ -1361,11 +1653,57 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 			event.IsolationScope = iso
 		}
 	}
+	eventmetadata.MergeIntoEvent(event, runMetadataFromContext(ctx))
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
-		return ctx, nil, fmt.Errorf("failed to append event to sessionService: %w", err)
+		return nil, fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
-	return ctx, event, nil
+	return event, nil
+}
+
+// validateNodeRootMessage refuses, on a node root, a message that holds
+// both non-empty text and a function response with an ID: the response
+// resumes an existing invocation while the text starts a new one
+// (adk-python Runner._validate_new_message). Agent roots accept such a
+// message, which the A2A input-required flow sends.
+func (r *Runner) validateNodeRootMessage(msg *genai.Content) error {
+	if r.rootNode == nil {
+		return nil
+	}
+	hasResumeResponse, hasText := false, false
+	for _, p := range msg.Parts {
+		if p == nil {
+			continue
+		}
+		if p.FunctionResponse != nil && p.FunctionResponse.ID != "" {
+			hasResumeResponse = true
+		}
+		if p.Text != "" {
+			hasText = true
+		}
+	}
+	if hasResumeResponse && hasText {
+		return errors.New("message cannot contain both function responses and text: function responses resume an existing invocation while text starts a new one")
+	}
+	return nil
+}
+
+// setInvocationID replaces the invocation ID of the invocation context ctx
+// wraps. ctx must be the context the runner built with agent.NewContext from
+// an icontext.InvocationContext, before any context is derived from it.
+func setInvocationID(ctx agent.Context, id string) error {
+	holder, ok := ctx.(interface {
+		InvocationContext() agent.InvocationContext
+	})
+	if !ok {
+		return fmt.Errorf("invocation context %T cannot take a resolved id", ctx)
+	}
+	ic, ok := holder.InvocationContext().(*icontext.InvocationContext)
+	if !ok {
+		return fmt.Errorf("invocation context %T cannot take a resolved id", holder.InvocationContext())
+	}
+	ic.SetInvocationID(id)
+	return nil
 }
 
 // asUserContent returns a copy of msg with Role set to [genai.RoleUser] and its
@@ -1412,6 +1750,77 @@ func findActiveTaskIsolationScope(sess session.Session) string {
 			continue
 		}
 		return scope
+	}
+	return ""
+}
+
+// classicAgentToRun returns the agent the classic path runs for msg and the
+// branch it runs on.
+//
+// A function response goes back to the agent that made the call, on the
+// branch it ran on (adk-python find_agent_to_run and
+// restore_branch_from_history). Re-running the root would run agents that
+// never saw the call, and they fail on the unmatched response. A call made
+// inside a graph workflow is the exception: the root runs, and sequential,
+// parallel and loop agents on the way narrow to the sub-agents holding the
+// callers (utils.GraphResumeIndexes), provided the workflow's node agents are
+// listed in its SubAgents. Sub-agents after it in a sequence still run, and an
+// LLM agent among them sees the user's answer as context, unless the node's
+// call is on a branch it cannot see, as when the workflow fans out inside a
+// parallel agent (#2204). The workflow resumes the interrupted node only for
+// an adk_request_input response; any other response restarts the graph. The
+// first response in the message decides the route.
+func (r *Runner) classicAgentToRun(storedSession session.Session, msg *genai.Content) (agent.Agent, string) {
+	if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
+		if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
+			return sub, ev.Branch
+		}
+	}
+	return r.rootAgent, ""
+}
+
+// usesLegacySubAgentPicker reports whether a root LlmAgent running in rootMode
+// picks the agent to run from session history with findAgentToRun: only a chat
+// root with no task-mode sub-agent does. A chat coordinator with task-mode
+// sub-agents delegates through its own wrapper, so the picker must not bypass
+// it on a resume (adk-python Runner._uses_legacy_sub_agent_picker).
+func (r *Runner) usesLegacySubAgentPicker(rootMode llminternal.Mode) bool {
+	if rootMode != llminternal.ModeChat {
+		return false
+	}
+	for _, subAgent := range r.rootAgent.SubAgents() {
+		sub, ok := subAgent.(llminternal.Agent)
+		if ok && llminternal.Reveal(sub).Mode == llminternal.ModeTask {
+			return false
+		}
+	}
+	return true
+}
+
+// restoreBranchFromHistory returns the branch agentToRun last ran on, taken
+// from its most recent event in sess that has a branch. A non-empty
+// invocationID limits the search to that invocation's events, so an agent
+// does not continue on a branch of an earlier invocation. The root agent, a
+// node root's stand-in agent, and an agent with no such event, run on the
+// root branch "" (adk-python agents/_agent_router.py
+// restore_branch_from_history; adk-python restores no branch for a node
+// root).
+func (r *Runner) restoreBranchFromHistory(sess session.Session, agentToRun agent.Agent, invocationID string) string {
+	if sess == nil || agentToRun == nil || agentToRun == r.rootAgent || agentToRun == r.standInAgent {
+		return ""
+	}
+	events := sess.Events()
+	for i := events.Len() - 1; i >= 0; i-- {
+		ev := events.At(i)
+		if ev == nil || ev.Branch == "" {
+			continue
+		}
+		if invocationID != "" && ev.InvocationID != invocationID {
+			continue
+		}
+		if ev.Author == agentToRun.Name() {
+			return ev.Branch
+		}
 	}
 	return ""
 }
@@ -1478,16 +1887,57 @@ func (r *Runner) isTransferableAcrossAgentTree(agentToRun agent.Agent) bool {
 	return true
 }
 
-func hasInlineData(event *session.Event) bool {
-	if event.LLMResponse.Content == nil {
+// shouldAppendEvent reports whether the runner appends event, as the
+// OnEventCallback plugins left it, to the session: never a partial event, and
+// in live mode no event carrying inline model media. This mirrors adk-python's
+// Runner._process_and_append_event and _should_append_event (runners.py).
+func shouldAppendEvent(event *session.Event, isLive bool) bool {
+	if event == nil || event.LLMResponse.Partial {
+		return false
+	}
+	if isLive && isLiveMediaWithInlineData(event) {
+		return false
+	}
+	return true
+}
+
+// isLiveMediaWithInlineData reports whether event's content has a part with
+// inline audio, video or image data, matched on the MIME type without regard
+// to case. Such data stays out of a live session to keep large blobs out of
+// storage; a FileData reference to the same media is kept. This mirrors
+// adk-python's _is_live_model_media_event_with_inline_data
+// (flows/llm_flows/context/_contents.py).
+func isLiveMediaWithInlineData(event *session.Event) bool {
+	if event == nil || event.LLMResponse.Content == nil {
 		return false
 	}
 	for _, part := range event.LLMResponse.Content.Parts {
-		if part != nil && part.InlineData != nil {
+		if part == nil || part.InlineData == nil {
+			continue
+		}
+		mime := strings.ToLower(part.InlineData.MIMEType)
+		if strings.HasPrefix(mime, "audio/") ||
+			strings.HasPrefix(mime, "video/") ||
+			strings.HasPrefix(mime, "image/") {
 			return true
 		}
 	}
 	return false
+}
+
+// clearMessageAsOutput returns event with Output cleared when event is a
+// final model message that also serves as its node's output
+// (NodeInfo.MessageAsOutput), so the message is stored once, as content. It
+// returns a copy rather than editing event, and event itself otherwise. The
+// loops call it after the OnEventCallback plugins, which therefore still see
+// Output, as adk-python's Runner does (runners.py).
+func clearMessageAsOutput(event *session.Event) *session.Event {
+	if !event.LLMResponse.Partial && event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
+		clone := *event
+		clone.Output = nil
+		return &clone
+	}
+	return event
 }
 
 // withPluginManager puts this runner's plugin manager in ctx, which is where

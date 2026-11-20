@@ -46,4 +46,33 @@ type LiveRunConfig struct {
 	SessionResumption        *genai.SessionResumptionConfig
 	SaveLiveBlob             bool
 	MaxLLMCalls              int
+	// CustomMetadata holds caller-supplied key-value metadata for this live
+	// invocation.
+	//
+	// The runner merges CustomMetadata (after dropping ADK-reserved keys, as
+	// on RunConfig.CustomMetadata) into every event yielded by RunLive's event
+	// stream — including a BeforeRunCallback early-exit reply — before
+	// OnEventCallback plugins run and before non-partial events are persisted.
+	// An event's own value wins on a key conflict. User content events
+	// appended through LiveSession.Send do not carry CustomMetadata.
+	//
+	// Nil or empty leaves every event's CustomMetadata unchanged. The runner
+	// copies the non-reserved entries when RunLive is called and merges that
+	// copy into events: the caller's map is never mutated by ADK, and changes
+	// to it after RunLive is called do not reach the events. The copy is
+	// shallow, so values must not be mutated concurrently while the session
+	// runs.
+	//
+	// A plugin that edits the event and returns nil keeps its edits; one that
+	// returns an event, the same or a new one, gets the run's metadata merged
+	// into it, its own keys winning. When a replacement event leaves
+	// CustomMetadata nil, the original event's CustomMetadata is preserved and
+	// its keys win over the run's metadata; to clear the original event's
+	// public keys on a replacement, set CustomMetadata to an empty map
+	// (map[string]any{}).
+	CustomMetadata map[string]any
+	// GetSessionConfig controls which events are fetched when the runner
+	// loads the session from the session service at the start of RunLive.
+	// Nil or a zero GetSessionConfig loads all session events.
+	GetSessionConfig *GetSessionConfig
 }

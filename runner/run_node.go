@@ -55,18 +55,34 @@ func buildRunnerNode(a agent.Agent) (workflow.Node, error) {
 	return newAgentNode(a), nil
 }
 
+// newStandInAgent returns the agent a node root's invocation context
+// carries, named and described as n. Plugins, callbacks and telemetry read
+// ctx.Agent(); adk-java gives a node root the same kind of stand-in
+// (Runner.NodeViewAgent). The stand-in has no Run function and is never run.
+func newStandInAgent(n workflow.Node) (agent.Agent, error) {
+	a, err := agent.New(agent.Config{Name: n.Name(), Description: n.Description()})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stand-in agent for node %q: %w", n.Name(), err)
+	}
+	return a, nil
+}
+
 // runNode drives an agent through the workflow engine by wrapping it
 // in a single-node workflow (START -> node), reusing the agent path's
 // session/plugin/persist pipeline. The wrapping node bridges the agent's
 // HITL (long-running tools, which emit LongRunningToolIDs) into a
 // workflow pause; see newAgentNode. Go equivalent of adk-python
-// Runner._run_node_async.
+// Runner._run_node_async. rootMode is the root LlmAgent's resolved mode.
+// When the runner's root is a node, agentToRun is its stand-in agent and
+// the workflow drives the node itself.
 func (r *Runner) runNode(
 	ctx context.Context,
 	storedSession session.Session,
 	agentToRun agent.Agent,
 	msg *genai.Content,
 	cfg agent.RunConfig,
+	runMetadata map[string]any,
+	rootMode llminternal.Mode,
 	opts runOptions,
 	yield func(*session.Event, error) bool,
 ) {
@@ -90,12 +106,6 @@ func (r *Runner) runNode(
 			invocationFailed = true
 		}
 		return emit(ev, err)
-	}
-
-	node, err := buildRunnerNode(agentToRun)
-	if err != nil {
-		yield(nil, err)
-		return
 	}
 
 	// Compaction has to happen however iteration ends. Breaking out of the
@@ -124,30 +134,40 @@ func (r *Runner) runNode(
 		}
 	}()
 
-	// Architectural note: Unlike Go, Python ADK executes standalone agents
-	// directly via agent.run_async. Go wraps top-level agents in a synthetic
-	// single-node workflow (START -> node) so all execution rides through
-	// a unified graph engine. We pass workflow.WithRootWrapper() to prevent
-	// this synthetic workflow from stamping an unwanted namespace prefix
-	// ("app/agent@1") onto events, ensuring 100% path parity with Python.
-	wf, err := workflow.New(rootWorkflowName(r.appName, agentToRun), []workflow.Edge{
-		{From: workflow.Start, To: node},
-	}, workflow.WithRootWrapper())
-	if err != nil {
-		yield(nil, fmt.Errorf("failed to build node workflow: %w", err))
-		return
-	}
-
 	// UserContent is read by Workflow.Run as the workflow's seed input.
-	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg)
+	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg, runMetadata)
 	invocationCtx = ictx
 
 	// Append the user message to history (also runs the on_user_message
 	// plugin callback), same as the agent path.
-	ictx, userEvent, err := r.appendMessageToSession(ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, opts.stateDelta)
+	ictx, userEvent, replaced, err := r.appendMessageToSession(ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, false, r.pluginManager, opts.stateDelta)
 	if err != nil {
 		yield(nil, err)
 		return
+	}
+	if replaced && r.usesLegacySubAgentPicker(rootMode) {
+		// The agent is picked again from the session that now holds the
+		// replacement, which may answer a sub-agent's call. Its branch is
+		// restored from the invocation's own events only, as adk-python
+		// does, so it never takes a branch of an earlier invocation.
+		agentToRun, err = r.findAgentToRun(storedSession, ictx.UserContent())
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		branch := r.restoreBranchFromHistory(storedSession, agentToRun, ictx.InvocationID())
+		ictx = ictx.WithDelta(&agent.CommonContextDelta{
+			InvocationContextDelta: &agent.InvocationContextDelta{Agent: &agentToRun, Branch: &branch},
+		})
+		invocationCtx = ictx
+	}
+
+	// Plugin lifecycle: after_run is deferred before the user message is
+	// yielded, so a caller that stops ranging on that message still gets it,
+	// as in adk-python, whose finally covers the user-message yield.
+	pluginManager := r.pluginManager
+	if pluginManager != nil {
+		defer pluginManager.RunAfterRunCallback(ictx)
 	}
 	if opts.yieldUserMessage && userEvent != nil {
 		if !yield(userEvent, nil) {
@@ -155,15 +175,44 @@ func (r *Runner) runNode(
 		}
 	}
 
-	// Plugin lifecycle: defer after_run, run before_run, honor early exit.
-	pluginManager := r.pluginManager
+	// Run before_run and honor its early exit.
 	if pluginManager != nil {
-		defer pluginManager.RunAfterRunCallback(ictx)
-
-		if event, err := r.runBeforeRunCallback(ictx); event != nil || err != nil {
+		if event, err := r.runBeforeRunCallback(ictx, false); event != nil || err != nil {
 			yield(event, err)
 			return
 		}
+	}
+
+	var wf *workflow.Workflow
+	if r.rootNode != nil {
+		// Anonymous, so the node's path is "<name>@1" as in Python, and
+		// marked as the node-root wrapper, so the node's events carry no
+		// workflow bookkeeping (Python runs a node root directly).
+		wf, err = workflow.New("", []workflow.Edge{
+			{From: workflow.Start, To: r.rootNode},
+		}, workflow.WithNodeRootWrapper())
+	} else {
+		// Built only now, for the agent picked after the message was taken in:
+		// the node runs the agent it wraps, not the context's agent.
+		var node workflow.Node
+		node, err = buildRunnerNode(agentToRun)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		// Architectural note: Unlike Go, Python ADK executes standalone agents
+		// directly via agent.run_async. Go wraps top-level agents in a synthetic
+		// single-node workflow (START -> node) so all execution rides through
+		// a unified graph engine. We pass workflow.WithRootWrapper() to prevent
+		// this synthetic workflow from stamping an unwanted namespace prefix
+		// ("app/agent@1") onto events, ensuring 100% path parity with Python.
+		wf, err = workflow.New(rootWorkflowName(r.appName, agentToRun), []workflow.Edge{
+			{From: workflow.Start, To: node},
+		}, workflow.WithRootWrapper())
+	}
+	if err != nil {
+		yield(nil, fmt.Errorf("failed to build node workflow: %w", err))
+		return
 	}
 
 	// Resume (HITL continuation) vs Run (fresh): a resume is a turn whose
@@ -176,7 +225,7 @@ func (r *Runner) runNode(
 	}
 
 	var events iter.Seq2[*session.Event, error]
-	responses := buildResumeResponses(msg, state, storedSession)
+	responses := buildResumeResponses(ictx.UserContent(), state, storedSession)
 	if len(responses) > 0 {
 		events = wf.Resume(ictx, state, responses)
 	} else {
@@ -201,31 +250,16 @@ func (r *Runner) runNode(
 		}
 		stampTimestamp(ictx, event)
 
-		if event != nil && !event.LLMResponse.Partial {
-			if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
-				clone := *event
-				clone.Output = nil
-				event = &clone
+		event, err = r.processEventWithPlugins(ictx, event)
+		if err != nil {
+			if !yield(nil, err) {
+				return
 			}
+			continue
 		}
+		event = clearMessageAsOutput(event)
 
-		if pluginManager != nil {
-			// Captured before the plugin runs: one that mutates the event in
-			// place has already overwritten this field by the time the callback
-			// returns.
-			record := event.Actions.Compaction
-			modifiedEvent, perr := pluginManager.RunOnEventCallback(ictx, event)
-			if perr != nil {
-				if !yield(nil, perr) {
-					return
-				}
-				continue
-			}
-			event = fromPlugin(event, modifiedEvent, record)
-			stampTimestamp(ictx, event) // a plugin may have rewritten the event in place
-		}
-
-		if !event.LLMResponse.Partial {
+		if shouldAppendEvent(event, false) {
 			if err := r.sessionService.AppendEvent(ictx, storedSession, event); err != nil {
 				yield(nil, fmt.Errorf("failed to add event to session: %w", err))
 				return
@@ -265,13 +299,15 @@ func (r *Runner) newNodeInvocationContext(
 	agentToRun agent.Agent,
 	msg *genai.Content,
 	cfg agent.RunConfig,
+	runMetadata map[string]any,
 ) agent.Context {
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
-		StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
-		MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
-		HTTPOptions:   cfg.HTTPOptions,
-		Labels:        cfg.Labels,
+		StreamingMode:  runconfig.StreamingMode(cfg.StreamingMode),
+		MaxLLMCalls:    runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
+		HTTPOptions:    cfg.HTTPOptions,
+		Labels:         cfg.Labels,
+		CustomMetadata: runMetadata,
 	})
 	ctx = r.withPluginManager(ctx)
 
@@ -304,6 +340,7 @@ func (r *Runner) newNodeInvocationContext(
 		Artifacts:    artifacts,
 		Memory:       memoryImpl,
 		Session:      storedSession,
+		Branch:       r.restoreBranchFromHistory(storedSession, agentToRun, invocationID),
 		Agent:        agentToRun,
 		UserContent:  msg,
 		RunConfig:    &cfg,
@@ -353,6 +390,21 @@ func buildResumeResponses(msg *genai.Content, state *workflow.RunState, sess ses
 		}
 		// Opaque payload; Workflow.Resume validates against any schema.
 		out[fr.ID] = decodeResumeResponse(fr)
+	}
+	// The runner has already persisted this turn's answers. Rehydration
+	// unwraps and validates them (adk-python's {"result": v} included), so
+	// its value replaces the ingress decoding, as in workflowagent.
+	if state != nil {
+		for _, ns := range state.Nodes {
+			if ns == nil {
+				continue
+			}
+			for id, response := range ns.ResumedInputs {
+				if _, matched := out[id]; matched {
+					out[id] = response
+				}
+			}
+		}
 	}
 	return out
 }
@@ -408,11 +460,21 @@ func decodeResumeResponse(fr *genai.FunctionResponse) any {
 }
 
 // waitingInterruptIDs returns the set of interrupt IDs for every node
-// in state that is currently paused on a long-running interrupt.
+// in state that is currently paused on a long-running interrupt, plus the
+// IDs of interrupts that history answers (NodeState.ResumedInputs). The
+// runner appends the turn's message before it reconstructs the state, so
+// the interrupts this turn answers are in the second set, as they are for
+// agent/workflowagent's detectResume.
 func waitingInterruptIDs(state *workflow.RunState) map[string]struct{} {
 	ids := map[string]struct{}{}
 	for _, ns := range state.Nodes {
-		if ns == nil || ns.Status != workflow.NodeWaiting {
+		if ns == nil {
+			continue
+		}
+		for id := range ns.ResumedInputs {
+			ids[id] = struct{}{}
+		}
+		if ns.Status != workflow.NodeWaiting {
 			continue
 		}
 		for _, id := range ns.Interrupts {

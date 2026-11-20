@@ -16,6 +16,7 @@ package agent
 
 import (
 	"errors"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -34,6 +35,22 @@ const (
 	// LLM response parts are streamed immediately as they are generated.
 	StreamingModeSSE StreamingMode = "sse"
 )
+
+// GetSessionConfig controls which historical events the runner requests from
+// [session.Service.Get] when loading a session for an invocation.
+//
+// Its fields mirror the event-window filter fields of [session.GetRequest].
+// A zero GetSessionConfig (or a nil *GetSessionConfig on [RunConfig] or
+// [LiveRunConfig]) applies no filter and loads the full session history.
+// GetSessionConfig is a pure value type and is safe for concurrent read use.
+type GetSessionConfig struct {
+	// NumRecentEvents limits the loaded session to at most the NumRecentEvents
+	// most recent events. If zero or negative, no count limit is applied.
+	NumRecentEvents int
+	// After limits the loaded session to events with Timestamp >= After.
+	// If zero (After.IsZero()), no timestamp filter is applied.
+	After time.Time
+}
 
 // RunConfig controls runtime behavior of an agent.
 type RunConfig struct {
@@ -69,6 +86,50 @@ type RunConfig struct {
 	// appends an event per turn and re-sends a growing history, so token cost
 	// grows quadratically with no exit.
 	MaxLLMCalls int
+
+	// CustomMetadata holds caller-supplied key-value metadata for this
+	// invocation.
+	//
+	// The runner merges CustomMetadata into every event the invocation
+	// persists and yields, including the initial user message event and a
+	// BeforeRunCallback early-exit reply, before OnEventCallback plugins run
+	// and before the event is appended to the session. When an event already
+	// defines a key present in CustomMetadata, the event's own value wins.
+	//
+	// Keys reserved for ADK's own event bookkeeping — keys starting with
+	// "__adk_internal_" or "adk.workflow.", and "adk:before_run_reply" — are
+	// dropped from CustomMetadata before merging. Keys with those prefixes
+	// that an event itself sets are preserved on that event.
+	//
+	// CustomMetadata is a pointer so that RunConfig stays comparable and
+	// usable as a map key. Nil (the zero value) or a pointer to an empty map
+	// leaves every event's CustomMetadata unchanged. The runner copies the
+	// non-reserved entries when Run is called, before Run returns, and merges
+	// that copy into events: the caller's map is never mutated by ADK, and
+	// changes to it after Run is called do not reach the events. The copy is
+	// shallow. Values stored in the map should be JSON-serializable for
+	// persistent session backends and must not be mutated concurrently while
+	// the invocation runs.
+	//
+	// A plugin that edits the event and returns nil keeps its edits; one that
+	// returns an event, the same or a new one, gets the run's metadata merged
+	// into it, its own keys winning. When a replacement event leaves
+	// CustomMetadata nil, the original event's CustomMetadata is preserved and
+	// its keys win over the run's metadata; to clear the original event's
+	// public keys on a replacement, set CustomMetadata to an empty map
+	// (map[string]any{}).
+	CustomMetadata *map[string]any
+
+	// GetSessionConfig controls which events are fetched when the runner
+	// loads the session from the session service at the start of Run.
+	//
+	// When non-nil, the runner copies NumRecentEvents and After into the
+	// session.GetRequest it sends to session.Service.Get. Nil or a zero
+	// GetSessionConfig leaves both filters unset (0 and time.Time{}), loading
+	// all session events. The runner snapshots GetSessionConfig when Run is
+	// called, before Run returns, so mutating the struct after calling Run
+	// does not affect the invocation.
+	GetSessionConfig *GetSessionConfig
 
 	// HTTPOptions holds per-invocation HTTP options (such as custom headers,
 	// timeout, retry options, or extra body fields) merged into each model

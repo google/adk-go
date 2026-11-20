@@ -227,5 +227,43 @@ type AfterRunCallback func(agent.InvocationContext)
 // bypasses the non-live run loop, so it does not invoke this callback.
 type OnAgentErrorCallback func(ctx agent.Context, a agent.Agent, err error)
 
-// OnEventCallback is invoked for each event, and may return a replacement event.
+// OnEventCallback is invoked for each event before the runner decides whether
+// to persist it to the session service and yields it to the caller.
+//
+// Callbacks run in plugin registration order. A callback may either mutate the
+// incoming *session.Event in place and return (nil, nil) so later plugins still
+// run, or return a non-nil *session.Event, which stops the callback chain.
+//
+// When a callback returns a new *session.Event pointer, the runner merges the
+// fields set on that replacement onto a copy of the original event rather than
+// swapping the struct whole:
+//   - ID, InvocationID, and Timestamp always come from the original event.
+//   - Author takes the replacement's Author if non-empty, and otherwise falls
+//     back to the original event's Author.
+//   - Actions.Compaction always keeps the framework's compaction record from
+//     the original event.
+//   - Partial takes the replacement's Partial when Partial is true or
+//     PartialSet is true (see [google.golang.org/adk/v2/model.LLMResponse.PartialSet]).
+//     A replacement, whether a struct literal or a copy of the original event,
+//     with Partial: false and PartialSet: false leaves the original's Partial
+//     in place. To downgrade a partial event to non-partial, set Partial = false
+//     on the incoming event and return nil or the same pointer, or return a
+//     replacement with Partial: false and PartialSet: true.
+//   - CustomMetadata, when nil on the replacement, keeps the original event's
+//     CustomMetadata (with any non-internal RunConfig.CustomMetadata entries
+//     merged underneath). When non-nil on the replacement (including an empty
+//     map[string]any{} to clear public keys), the replacement's entries
+//     replace the original event's public keys while preserving any
+//     ADK-internal keys ("__adk_internal_*", "adk:before_run_reply",
+//     "adk.workflow.*") from the original event and merging
+//     RunConfig.CustomMetadata underneath.
+//   - Every other field on session.Event, model.LLMResponse, and
+//     session.EventActions overrides the original event's value when non-zero
+//     on the replacement, and keeps the original event's value when left at
+//     its zero value. To clear a non-zero field on the original event (other
+//     than Partial via PartialSet or CustomMetadata via map[string]any{}),
+//     mutate the incoming event in place (and return nil or the same pointer).
+//
+// Neither the original event's maps nor the replacement event's maps are
+// mutated by the runner's merge.
 type OnEventCallback func(agent.InvocationContext, *session.Event) (*session.Event, error)

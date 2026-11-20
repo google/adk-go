@@ -53,6 +53,12 @@ type RunConfig struct {
 	// tool/agenttool to forward to the nested run, as HTTPOptions is.
 	Labels *map[string]string
 
+	// CustomMetadata holds the invocation's pre-filtered custom metadata
+	// (eventmetadata.WithoutInternal), or nil when none was supplied. It is
+	// the runner's own copy: never write to it, and never hand it to an event
+	// without copying.
+	CustomMetadata map[string]any
+
 	// llmCalls counts model calls made during this invocation, across every
 	// agent it runs, so one budget covers the whole invocation rather than one
 	// budget per agent.

@@ -17,6 +17,7 @@ package workflow
 import (
 	"fmt"
 	"iter"
+	"maps"
 	"strings"
 
 	"google.golang.org/adk/v2/agent"
@@ -36,8 +37,9 @@ func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 	if err != nil {
 		return nil, err
 	}
+	rerun := true
 	return &WorkflowNode{
-		BaseNode:    NewBaseNode(name, "", NodeConfig{}),
+		BaseNode:    NewBaseNode(name, "", NodeConfig{RerunOnResume: &rerun}),
 		subWorkflow: wf,
 	}, nil
 }
@@ -50,6 +52,11 @@ func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 // this node's output; more than one is a graph-design error
 // (ErrMultipleOutputs); zero means the node produces no output.
 // Mirrors adk-python's _set_ctx_output_or_interrupts.
+//
+// As a successor of [Start], the node receives the outer workflow's
+// START seed unchanged and passes it to the inner workflow, whose own
+// [Start] gives each inner successor the form it declares (see
+// [NodeConfig.ContentInput]).
 func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	terminals := n.subWorkflow.graph.terminalNodeNames()
 	nodesByName := buildNodesByName(n.subWorkflow.graph)
@@ -69,7 +76,22 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 		defer cancel()
 		ctx = ctx.WithAgentContext(subCtx)
 
-		for ev, err := range n.subWorkflow.RunNode(ctx, input) {
+		var subEvents iter.Seq2[*session.Event, error]
+		if state, responses, err := n.resumeState(ctx, input); err != nil {
+			yield(nil, err)
+			return
+		} else if len(responses) > 0 {
+			for name := range terminals {
+				if ns := state.Nodes[name]; ns != nil && ns.Status == NodeCompleted && ns.Output != nil {
+					terminalOutputs[name] = ns.Output
+				}
+			}
+			subEvents = n.subWorkflow.Resume(ctx, state, responses)
+		} else {
+			subEvents = n.subWorkflow.RunNode(ctx, input)
+		}
+
+		for ev, err := range subEvents {
 			if err != nil {
 				pendingErr = err
 				// Signal the sub-workflow to stop execution. We use 'continue' instead of 'break'
@@ -112,9 +134,19 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 				}
 				continue
 			}
-			// Forward with Output stripped (see the doc comment).
+			// Forward with Output stripped (see the doc comment), keeping the
+			// inner node's output in sub-workflow metadata so ReconstructRunState
+			// can restore completed predecessors when the sub-workflow resumes.
 			evCopy := *ev
 			evCopy.Output = nil
+			if n.subWorkflow.Name() != "" {
+				meta := maps.Clone(ev.CustomMetadata)
+				if meta == nil {
+					meta = map[string]any{}
+				}
+				meta[workflowSubNodeOutputPrefix+n.subWorkflow.Name()] = ev.Output
+				evCopy.CustomMetadata = meta
+			}
 			if !yield(&evCopy, nil) {
 				consumerGone = true
 				cancel()
@@ -147,4 +179,40 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 			}
 		}
 	}
+}
+
+func (n *WorkflowNode) resumeState(ctx agent.Context, input any) (*RunState, map[string]any, error) {
+	if ctx.Session() == nil {
+		return nil, nil, nil
+	}
+	state, err := n.subWorkflow.reconstructRunState(ctx.Session(), ctx.InvocationID(), input, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	if state == nil {
+		return nil, nil, nil
+	}
+	var responses map[string]any
+	for _, ns := range state.Nodes {
+		if ns == nil {
+			continue
+		}
+		for _, id := range ns.Interrupts {
+			if v, ok := ctx.ResumedInput(id); ok {
+				if responses == nil {
+					responses = map[string]any{}
+				}
+				responses[id] = v
+			}
+		}
+		for id, validated := range ns.ResumedInputs {
+			if _, ok := ctx.ResumedInput(id); ok {
+				if responses == nil {
+					responses = map[string]any{}
+				}
+				responses[id] = validated
+			}
+		}
+	}
+	return state, responses, nil
 }

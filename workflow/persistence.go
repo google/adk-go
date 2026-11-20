@@ -22,6 +22,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -44,6 +45,8 @@ const workflowNodeCompletedKey = "adk.workflow.node_completed"
 const workflowNodeResumeCompletedKey = "adk.workflow.node_resume_completed"
 
 const workflowBasePathPrefix = "adk.workflow.base_path."
+
+const workflowSubNodeOutputPrefix = "adk.workflow.sub_node_output."
 
 const workflowFailedChildPathsKey = "adk.workflow.failed_child_paths"
 
@@ -188,7 +191,11 @@ func (s *nodeScanState) addInterrupt(id string) {
 // share it. Empty invocationID disables the filter (scan all history).
 // Mirrors adk-python _reconstruct_node_states' invocation_id gate.
 func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string) (*RunState, error) {
-	if sess == nil {
+	return w.reconstructRunState(sess, invocationID, nil, false)
+}
+
+func (w *Workflow) reconstructRunState(sess session.Session, invocationID string, seedOverride any, hasSeedOverride bool) (*RunState, error) {
+	if sess == nil || sess.Events() == nil {
 		return nil, nil
 	}
 	nodesByName := buildNodesByName(w.graph)
@@ -202,7 +209,10 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 	// re-entry node's input: every node's cached output, the set of
 	// nodes that ran, and the workflow's seed input.
 	nodeOutputs, completed := collectNodeOutputs(events, nodesByName, invocationID, w.name)
-	workflowInput := firstUserInput(events, invocationID)
+	workflowInput := seedOverride
+	if !hasSeedOverride {
+		workflowInput = firstUserSeed(events, invocationID)
+	}
 
 	// Stage 3: turn each interrupted node's scan into a NodeState.
 	state, err := w.buildRunState(scans, nodesByName, nodeOutputs, workflowInput)
@@ -215,6 +225,8 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 	// Restore completed predecessors as well as interrupted nodes. Join
 	// barriers consult Nodes, not the completed set used to skip replayed
 	// successors, and need the predecessors' outputs after a resume.
+	state.Nodes[Start.Name()] = &NodeState{Status: NodeCompleted, Input: workflowInput}
+	completed[Start.Name()] = true
 	for name, output := range nodeOutputs {
 		if _, exists := state.Nodes[name]; !exists {
 			ns := &NodeState{Status: NodeCompleted, Output: output}
@@ -429,17 +441,35 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 // Older history has no base metadata; Run's conventional prefix is the
 // best available fallback, while Resume and RunNode can be unprefixed.
 func graphHistoryEvent(ev *session.Event, workflowName string) *session.Event {
+	var subOut any
+	hasSubOut := false
+	if ev.Output == nil && workflowName != "" {
+		subOut, hasSubOut = ev.CustomMetadata[workflowSubNodeOutputPrefix+workflowName]
+	}
 	if ev.NodeInfo == nil {
-		return ev
+		if !hasSubOut {
+			return ev
+		}
+		copy := *ev
+		copy.Output = subOut
+		return &copy
 	}
 	base, known := ev.CustomMetadata[workflowBasePathPrefix+workflowName].(string)
 	if !known && workflowName != "" {
 		base = workflowName + "@1"
 	}
 	if base == "" {
-		return ev
+		if !hasSubOut {
+			return ev
+		}
+		copy := *ev
+		copy.Output = subOut
+		return &copy
 	}
 	copy := *ev
+	if hasSubOut {
+		copy.Output = subOut
+	}
 	info := *ev.NodeInfo
 	info.Path = strings.TrimPrefix(info.Path, base+"/")
 	info.OutputFor = make([]string, len(ev.NodeInfo.OutputFor))
@@ -487,10 +517,14 @@ func unresolvedInterrupts(scan *nodeScanState) []string {
 
 // rerunsOnResume reports whether the node opted into re-entry mode
 // (NodeConfig.RerunOnResume), in which Resume re-runs the node with
-// the user responses rather than handing off to its successors.
-func rerunsOnResume(node Node) bool {
+// the user responses rather than handing off to its successors. The
+// node root of a workflow built with WithNodeRootWrapper always does.
+func (g *graph) rerunsOnResume(node Node) bool {
 	if node == nil {
 		return false
+	}
+	if g.isNodeRootWrapper {
+		return true
 	}
 	r := node.Config().RerunOnResume
 	return r != nil && *r
@@ -533,7 +567,7 @@ func validateResolved(scan *nodeScanState) (map[string]any, error) {
 //     with Output = the response (forwarded to successors by Resume)
 func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs map[string]any, workflowInput any) (*NodeState, error) {
 	unresolved := unresolvedInterrupts(scan)
-	reenter := rerunsOnResume(node)
+	reenter := w.graph.rerunsOnResume(node)
 
 	resumed, err := validateResolved(scan)
 	if err != nil {
@@ -614,44 +648,33 @@ func (w *Workflow) predecessorInput(node Node, nodeOutputs map[string]any, workf
 	}
 	for _, e := range incoming {
 		if e.From.Name() == Start.Name() {
-			return workflowInput, Start.Name()
+			return w.graph.startSeedFor(workflowInput, node), Start.Name()
 		}
 	}
 	return nodeOutputs[incoming[0].From.Name()], incoming[0].From.Name()
 }
 
-// firstUserInput returns the seed workflow input: the text of the
-// first user event in history (the original prompt), used as the
-// START successor's input on re-entry. Resume turns (user
-// FunctionResponses) are skipped. When invocationID is non-empty, only
-// that invocation's user events are considered, so the seed is the
-// current run's prompt rather than an earlier run's.
-func firstUserInput(events session.Events, invocationID string) any {
+// firstUserSeed returns the seed workflow input: the START seed built
+// from the first user event in history (the original prompt), used as
+// the START successor's input on re-entry. Resume turns (user
+// FunctionResponses) and user events without parts are skipped. When
+// invocationID is non-empty, only that invocation's user events are
+// considered, so the seed is the current run's prompt rather than an
+// earlier run's. Returns nil when no such event exists. Mirrors
+// adk-python Runner._find_user_message_for_invocation.
+func firstUserSeed(events session.Events, invocationID string) any {
 	for i := range events.Len() {
 		ev := events.At(i)
-		if ev == nil || ev.Author != "user" || ev.Content == nil {
+		if ev == nil || ev.Author != "user" || ev.Content == nil || len(ev.Content.Parts) == 0 {
 			continue
 		}
 		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
-		var text strings.Builder
-		hasFR := false
-		for _, p := range ev.Content.Parts {
-			if p == nil {
-				continue
-			}
-			if p.FunctionResponse != nil {
-				hasFR = true
-			}
-			text.WriteString(p.Text)
-		}
-		if hasFR {
+		if len(utils.FunctionResponses(ev.Content)) > 0 {
 			continue
 		}
-		if text.String() != "" {
-			return text.String()
-		}
+		return newStartSeed(ev.Content)
 	}
 	return nil
 }

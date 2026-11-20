@@ -208,7 +208,7 @@ func NewFunctionNodeFromState[Params, OUT any](
 		}
 
 		if hasNodeInput {
-			stateMap[nodeInputField.Name] = input
+			stateMap[nodeInputField.Name] = contentAsText(nodeInputField.Type, input)
 		}
 
 		p, err := typeutil.ConvertToWithJSONSchema[any, Params](stateMap, nil)
@@ -231,6 +231,9 @@ func NewFunctionNodeFromState[Params, OUT any](
 		return output, nil
 	}
 
+	if hasNodeInput && isContentType(nodeInputField.Type) {
+		cfg.ContentInput = true
+	}
 	return &FunctionNode{
 		BaseNode:        NewBaseNodeWithSchemas(name, "", cfg, ischema, oschema),
 		fn:              wrappedFn,
@@ -240,6 +243,7 @@ func NewFunctionNodeFromState[Params, OUT any](
 
 // newFunctionNodeWithResolvedSchemas is an internal constructor that consumes already resolved schemas.
 func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx agent.Context, input IN) (OUT, error), inputSchema, outputSchema *jsonschema.Resolved, cfg NodeConfig) *FunctionNode {
+	inputType := reflect.TypeFor[IN]()
 	wrappedFn := func(ctx agent.Context, input any) (any, error) {
 		var output OUT
 		var err error
@@ -247,6 +251,7 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 			var zero IN
 			output, err = fn(ctx, zero)
 		} else {
+			input = contentAsText(inputType, input)
 			typedInput, ok := input.(IN)
 			if !ok {
 				// Fallback to the json-like input types that cannot be converted by the standard type assertion.
@@ -272,6 +277,9 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 		return output, nil
 	}
 
+	if isContentType(inputType) {
+		cfg.ContentInput = true
+	}
 	return &FunctionNode{
 		BaseNode: NewBaseNodeWithSchemas(name, "", cfg, inputSchema, outputSchema),
 		fn:       wrappedFn,
@@ -281,9 +289,11 @@ func newFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn func(ctx ag
 // newEmittingFunctionNodeWithResolvedSchemas is the internal
 // constructor for the streaming variant.
 func newEmittingFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn EmittingFunctionFn[IN, OUT], inputSchema, outputSchema *jsonschema.Resolved, cfg NodeConfig) *FunctionNode {
+	inputType := reflect.TypeFor[IN]()
 	wrappedFn := func(ctx agent.Context, input any, emit func(*session.Event) error) (any, error) {
 		var typedInput IN
 		if input != nil {
+			input = contentAsText(inputType, input)
 			t, ok := input.(IN)
 			if !ok {
 				// Fallback to the json-like input types that cannot be converted by the standard type assertion.
@@ -310,10 +320,43 @@ func newEmittingFunctionNodeWithResolvedSchemas[IN, OUT any](name string, fn Emi
 		return output, nil
 	}
 
+	if isContentType(inputType) {
+		cfg.ContentInput = true
+	}
 	return &FunctionNode{
 		BaseNode:   NewBaseNodeWithSchemas(name, "", cfg, inputSchema, outputSchema),
 		emittingFn: wrappedFn,
 	}
+}
+
+// isContentType reports whether t is *genai.Content or genai.Content,
+// the input types for which a node constructor sets
+// NodeConfig.ContentInput.
+func isContentType(t reflect.Type) bool {
+	return t == reflect.TypeFor[*genai.Content]() || t == reflect.TypeFor[genai.Content]()
+}
+
+// contentAsText returns the text of a *genai.Content or genai.Content
+// input when inputType is string, and input unchanged otherwise, so a
+// string-typed node accepts the user message as Content. Mirrors
+// adk-python FunctionNode._coerce_param, which converts types.Content to
+// str for a str annotation (workflow/_function_node.py).
+func contentAsText(inputType reflect.Type, input any) any {
+	if inputType != reflect.TypeFor[string]() {
+		return input
+	}
+	var c *genai.Content
+	switch v := input.(type) {
+	case *genai.Content:
+		c = v
+	case genai.Content:
+		c = &v
+	}
+	if c == nil {
+		return input
+	}
+	text, _ := modelText(c)
+	return text
 }
 
 // Run executes the function node with the given input and returns an iterator over events.

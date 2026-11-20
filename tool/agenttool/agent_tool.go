@@ -44,6 +44,8 @@ import (
 
 var _ toolinternal.SkipSummarizationResultDisplayer = (*agentTool)(nil)
 
+var _ toolinternal.AgentWrapper = (*agentTool)(nil)
+
 // agentTool implements a tool that allows an agent to call another agent.
 type agentTool struct {
 	agent             agent.Agent
@@ -94,6 +96,12 @@ func (t *agentTool) IsLongRunning() bool {
 func (t *agentTool) DisplayResultOnSkipSummarization() bool {
 	return true
 }
+
+// WrappedAgent implements toolinternal.AgentWrapper. Run does not close the
+// runner it builds, because every call runs the same agent with the same
+// toolsets; the runner that owns this tool reaches the agent through
+// WrappedAgent and closes its toolsets in Runner.Close.
+func (t *agentTool) WrappedAgent() agent.Agent { return t.agent }
 
 // Declaration returns the function declaration for the wrapped agent.
 // It generates a function declaration based on the agent's input schema.
