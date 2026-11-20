@@ -23,6 +23,8 @@ import (
 	"log"
 	"maps"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -33,6 +35,7 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
@@ -2382,6 +2385,235 @@ func TestCallLLM_AgentNameLabelStampingAndPreservation(t *testing.T) {
 		}
 		if res.modelCalls != 1 {
 			t.Errorf("model called %d times, want 1", res.modelCalls)
+		}
+	})
+}
+
+func TestFlowRun_ReplayExecutesToolsetToolsAndTransfersAndFreshIDs(t *testing.T) {
+	t.Run("tool from a toolset gets a fresh event ID", func(t *testing.T) {
+		var runs atomic.Int32
+		tsTool := countedTool(t, "ts_tool", &runs, map[string]any{"ok": true})
+		toolset := &dynamicToolset{toolsByCall: map[int][]tool.Tool{0: {tsTool}, 1: {tsTool}}}
+		a := &mockLLMAgent{Agent: utils.Must(agent.New(agent.Config{Name: "agent"})), s: &State{Toolsets: []tool.Toolset{toolset}}}
+		modelCalls := 0
+		f := &Flow{
+			Model: replayModel(t, &modelCalls, "after replay"),
+			RequestProcessors: []func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error]{
+				toolProcessor,
+			},
+		}
+		seeded := callEv("agent", fcall("ts_tool", "c1"))
+		seeded.ID = "orig-event-id"
+		ctx, sess := replayAgentContext(t, true, a, seeded)
+
+		events := runReplayFlow(t, f, ctx, sess)
+
+		if diff := cmp.Diff([]string{"agent response ts_tool/c1", "agent text after replay"}, describeReplayEvents(events)); diff != "" {
+			t.Fatalf("Run() events mismatch (-want +got):\n%s", diff)
+		}
+		wantResponses := []*genai.FunctionResponse{{ID: "c1", Name: "ts_tool", Response: map[string]any{"ok": true}}}
+		if diff := cmp.Diff(wantResponses, utils.FunctionResponses(events[0].Content)); diff != "" {
+			t.Errorf("replayed response mismatch (-want +got):\n%s", diff)
+		}
+		if events[0].ID == "" || events[0].ID == "orig-event-id" {
+			t.Errorf("replayed response event ID = %q, want a new non-empty ID", events[0].ID)
+		}
+	})
+	t.Run("unexecuted sibling call of a toolset tool is replayed", func(t *testing.T) {
+		// The decision finds the call event only among calls of the tools it
+		// knows, so it must see the tools that preprocessing adds.
+		var runs atomic.Int32
+		tsTool := countedTool(t, "ts_tool", &runs, map[string]any{"ok": true})
+		toolset := &dynamicToolset{toolsByCall: map[int][]tool.Tool{0: {tsTool}, 1: {tsTool}}}
+		a := &mockLLMAgent{Agent: utils.Must(agent.New(agent.Config{Name: "agent"})), s: &State{Toolsets: []tool.Toolset{toolset}}}
+		modelCalls := 0
+		f := &Flow{
+			Model: replayModel(t, &modelCalls, "done"),
+			RequestProcessors: []func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error]{
+				toolProcessor,
+			},
+		}
+		ctx, sess := replayAgentContext(t, true, a,
+			callEv("agent", fcall("ts_tool", "c1"), fcall("ts_tool", "c2")),
+			respEv("user", "ts_tool", "c1"),
+		)
+
+		events := runReplayFlow(t, f, ctx, sess)
+
+		if diff := cmp.Diff([]string{"agent response ts_tool/c2", "agent text done"}, describeReplayEvents(events)); diff != "" {
+			t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
+		}
+		if got := runs.Load(); got != 1 {
+			t.Errorf("ts_tool ran %d times, want 1", got)
+		}
+	})
+	t.Run("replayed transfer runs the target", func(t *testing.T) {
+		sub := utils.Must(agent.New(agent.Config{
+			Name: "sub",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "sub"
+					ev.Content = genai.NewContentFromText("from sub", genai.RoleModel)
+					yield(ev, nil)
+				}
+			},
+		}))
+		parent := utils.Must(agent.New(agent.Config{Name: "agent", SubAgents: []agent.Agent{sub}}))
+		modelCalls := 0
+		f := &Flow{
+			Model: replayModel(t, &modelCalls),
+			Tools: []tool.Tool{&TransferToAgentTool{supportedAgents: []agent.Agent{sub}}},
+		}
+		ctx, sess := replayAgentContext(t, true, parent,
+			callEv("agent", fcallArgs(transferAgentName, "c1", map[string]any{"agent_name": "sub"})))
+
+		events := runReplayFlow(t, f, ctx, sess)
+
+		if diff := cmp.Diff([]string{"agent response transfer_to_agent/c1", "sub text from sub"}, describeReplayEvents(events)); diff != "" {
+			t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
+		}
+		if modelCalls != 0 {
+			t.Errorf("model called %d times, want 0", modelCalls)
+		}
+	})
+}
+
+func TestFlowRun_ReplaySameNameCallsWithSkipSummarizationAndCrashRecovery(t *testing.T) {
+	t.Run("ID-less response before an explicit ID, SkipSummarization", func(t *testing.T) {
+		var mu sync.Mutex
+		var ranIndexes []int
+		ask, err := functiontool.New(functiontool.Config{Name: "ask", Description: "ask"}, func(ctx agent.Context, args struct {
+			Index int `json:"index"`
+		},
+		) (map[string]any, error) {
+			mu.Lock()
+			ranIndexes = append(ranIndexes, args.Index)
+			mu.Unlock()
+			ctx.Actions().SkipSummarization = true
+			return map[string]any{"index": args.Index}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New() error = %v", err)
+		}
+		modelCalls := 0
+		f := &Flow{Model: replayModel(t, &modelCalls), Tools: []tool.Tool{ask}}
+		callEvent := callEv("root_agent",
+			fcallArgs("ask", "c1", map[string]any{"index": 0}),
+			fcallArgs("ask", "c2", map[string]any{"index": 1}),
+			fcallArgs("ask", "c3", map[string]any{"index": 2}),
+		)
+		ctx, sess := replayAgentContext(t, true, &mockAgent{name: "root_agent"},
+			textEv("user", "Resume"), callEvent, respEv("user", "ask", ""), respEv("user", "ask", "c1"))
+
+		events := runReplayFlow(t, f, ctx, sess)
+
+		if diff := cmp.Diff([]int{2}, ranIndexes); diff != "" {
+			t.Errorf("ask ran with indexes mismatch (-want +got):\n%s", diff)
+		}
+		if len(events) != 1 {
+			t.Fatalf("Run() yielded %v, want one response event", describeReplayEvents(events))
+		}
+		// functiontool passes results through JSON, so numbers come back as float64.
+		wantResponses := []*genai.FunctionResponse{{ID: "c3", Name: "ask", Response: map[string]any{"index": float64(2)}}}
+		if diff := cmp.Diff(wantResponses, utils.FunctionResponses(events[0].Content)); diff != "" {
+			t.Errorf("replayed response mismatch (-want +got):\n%s", diff)
+		}
+		if modelCalls != 0 {
+			t.Errorf("model called %d times, want 0", modelCalls)
+		}
+		if got := len(callEvent.Content.Parts); got != 3 {
+			t.Errorf("stored call event has %d parts after the run, want 3", got)
+		}
+	})
+	t.Run("crash after the first call ran", func(t *testing.T) {
+		var askRuns, fetchRuns atomic.Int32
+		modelCalls := 0
+		f := &Flow{
+			Model: replayModel(t, &modelCalls, "done"),
+			Tools: []tool.Tool{
+				countedTool(t, "ask", &askRuns, map[string]any{"result": "client"}),
+				countedTool(t, "fetch", &fetchRuns, map[string]any{"result": "fetched"}),
+			},
+		}
+		ctx, sess := replayAgentContext(t, true, &mockAgent{name: "root_agent"},
+			textEv("user", "query"),
+			callEv("root_agent", fcall("ask", "c1"), fcall("fetch", "c2")),
+			respEv("user", "ask", "c1"),
+		)
+
+		events := runReplayFlow(t, f, ctx, sess)
+
+		if got := fetchRuns.Load(); got != 1 {
+			t.Errorf("fetch ran %d times, want 1", got)
+		}
+		if got := askRuns.Load(); got != 0 {
+			t.Errorf("ask ran %d times, want 0", got)
+		}
+		if diff := cmp.Diff([]string{"root_agent response fetch/c2", "root_agent text done"}, describeReplayEvents(events)); diff != "" {
+			t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestFlowRun_PreprocessShortCircuitsBeforeResumeDecisionAndPauseEmitsNothing(t *testing.T) {
+	t.Run("final event from preprocessing ends the step", func(t *testing.T) {
+		var askRuns atomic.Int32
+		final := respEv("agent", "confirmed", "x")
+		final.Actions.SkipSummarization = true
+		modelCalls := 0
+		f := &Flow{
+			Model: replayModel(t, &modelCalls),
+			Tools: []tool.Tool{countedTool(t, "ask", &askRuns, map[string]any{"r": 1})},
+			RequestProcessors: []func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error]{
+				func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) { yield(final, nil) }
+				},
+			},
+		}
+		ctx, _ := replayAgentContext(t, true, &mockAgent{name: "agent"}, callEv("agent", fcall("ask", "c1")))
+
+		// The yielded events are not stored, so a decision taken at any point
+		// of the step sees only the trailing call. A replay would then repeat
+		// every step, so the loop stops after a few events.
+		var events []*session.Event
+		for ev, err := range f.Run(ctx) {
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			events = append(events, ev)
+			if len(events) == 3 {
+				break
+			}
+		}
+
+		if diff := cmp.Diff([]string{"agent response confirmed/x"}, describeReplayEvents(events)); diff != "" {
+			t.Errorf("Run() events mismatch (-want +got):\n%s", diff)
+		}
+		if got := askRuns.Load(); got != 0 {
+			t.Errorf("ask ran %d times, want 0", got)
+		}
+		if modelCalls != 0 {
+			t.Errorf("model called %d times, want 0", modelCalls)
+		}
+	})
+	t.Run("pause emits nothing", func(t *testing.T) {
+		var askRuns atomic.Int32
+		modelCalls := 0
+		f := &Flow{
+			Model: replayModel(t, &modelCalls),
+			Tools: []tool.Tool{countedTool(t, "ask", &askRuns, map[string]any{"r": 1})},
+		}
+		ctx, sess := replayAgentContext(t, true, &mockAgent{name: "agent"},
+			withLRO(callEv("agent", fcall("ask", "c1")), "c1"), textEv("user", "later"))
+
+		events := runReplayFlow(t, f, ctx, sess)
+
+		if len(events) != 0 {
+			t.Errorf("Run() yielded %v, want nothing", describeReplayEvents(events))
+		}
+		if modelCalls != 0 {
+			t.Errorf("model called %d times, want 0", modelCalls)
 		}
 	})
 }

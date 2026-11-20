@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
@@ -55,6 +56,9 @@ func (s *seqAgent) FindAgent(name string) agent.Agent {
 // SequentialAgent executes its sub-agents once, in the order they are listed.
 // Use the SequentialAgent when you want the execution to occur in a fixed,
 // strict order.
+// In a resumable run (runner.Config.Resumable), the agent stops after
+// the sub-agent whose event pauses the invocation, once that sub-agent's
+// events end.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.AgentConfig.Run != nil {
 		return nil, fmt.Errorf("SequentialAgent doesn't allow custom Run implementations")
@@ -97,13 +101,22 @@ func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Ev
 		if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
 			subAgents = subAgents[indexes[0]:]
 		}
+		rc := runconfig.FromContext(ctx)
+		resumable := rc != nil && rc.Resumable
 		for _, subAgent := range subAgents {
+			paused := false
 			for event, err := range subAgent.Run(utils.PassErrRelay(ctx, subAgent)) {
 				// A failed sub-agent ends the sequence, as in adk-python: later
 				// sub-agents would run without the output they depend on.
 				if !yield(event, err) || err != nil {
 					return
 				}
+				paused = paused || resumable && event != nil && llminternal.ShouldPauseInvocation(ctx, event)
+			}
+			// The paused sub-agent's remaining events still reach the caller,
+			// but no later sub-agent runs (agents/sequential_agent.py).
+			if paused {
+				return
 			}
 		}
 	}

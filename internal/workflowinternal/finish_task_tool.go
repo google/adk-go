@@ -32,6 +32,9 @@ import (
 const (
 	FinishTaskToolName      = "finish_task"
 	FinishTaskSuccessResult = "Task completed."
+	// FinishTaskErrorResult is the finish_task result of a task that ended in
+	// failure. Like FinishTaskSuccessResult, it closes the task's scope.
+	FinishTaskErrorResult = "Task failed."
 )
 
 // NewFinishTaskTool allows the model to signal that the agent has completed its

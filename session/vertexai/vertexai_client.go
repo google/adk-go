@@ -413,7 +413,15 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		// invocation cannot find the cache the last one created, and creates
 		// another while the first stays on the provider until its TTL runs out.
 		event.CacheMetadata != nil ||
-		event.Actions.SetModelResponse != nil
+		event.Actions.SetModelResponse != nil ||
+		// A rewind's target has no column either, and prompt assembly needs
+		// it to drop the rewound events after a reload.
+		event.Actions.RewindBeforeInvocationID != "" ||
+		// Nor do a resumable agent's end-of-agent marker and state, which a
+		// resumed invocation is rebuilt from. An empty state counts: it marks
+		// an agent that started.
+		event.Actions.EndOfAgent != nil ||
+		event.Actions.AgentState != nil
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for

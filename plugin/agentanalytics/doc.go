@@ -210,8 +210,10 @@
 //     non-workflow rows rather than "" as in adk-python. (Pinned by
 //     TestDocParity_ADKNodeAttributesAndOmissions in doc_test.go).
 //   - render_ui_widgets and rewind_before_invocation_id omitted: ADK Go's
-//     session.Event and session.EventActions do not define these fields, so
-//     attributes.adk never includes them. (Pinned by
+//     session.Event and session.EventActions do not define render_ui_widgets,
+//     and the plugin does not write
+//     session.EventActions.RewindBeforeInvocationID, so attributes.adk never
+//     includes either attribute. (Pinned by
 //     TestDocParity_ADKNodeAttributesAndOmissions in doc_test.go).
 //   - attributes.usage_metadata shape: On [EventLLMResponse], Go writes
 //     snake_case prompt_token_count, candidates_token_count, and

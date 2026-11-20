@@ -239,3 +239,110 @@ func TestEventActions_SetModelResponseConversion(t *testing.T) {
 		t.Errorf("ToSessionEvent() SetModelResponse mismatch (-want +got):\n%s", diff)
 	}
 }
+
+// TestEventActions_RewindBeforeInvocationIDConversion verifies that a rewind's
+// target crosses the REST API in both directions: the response body carries
+// it under rewindBeforeInvocationId, and a request body that carries it gives
+// it back to the session event.
+func TestEventActions_RewindBeforeInvocationIDConversion(t *testing.T) {
+	original := session.Event{
+		ID:     "evt-rewind",
+		Author: "user",
+		Actions: session.EventActions{
+			RewindBeforeInvocationID: "inv-2",
+		},
+	}
+
+	body, err := json.Marshal(FromSessionEvent(original))
+	if err != nil {
+		t.Fatalf("json.Marshal() failed: %v", err)
+	}
+	var wire struct {
+		Actions map[string]json.RawMessage `json:"actions"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatalf("json.Unmarshal() failed: %v", err)
+	}
+	if got, want := string(wire.Actions["rewindBeforeInvocationId"]), `"inv-2"`; got != want {
+		t.Errorf("REST actions.rewindBeforeInvocationId = %q, want %q", got, want)
+	}
+
+	var restEvent Event
+	if err := json.Unmarshal([]byte(`{"id":"evt-rewind","author":"user","actions":{"rewindBeforeInvocationId":"inv-2"}}`), &restEvent); err != nil {
+		t.Fatalf("json.Unmarshal() into Event failed: %v", err)
+	}
+	got, err := ToSessionEvent(restEvent)
+	if err != nil {
+		t.Fatalf("ToSessionEvent() failed: %v", err)
+	}
+	if got.Actions.RewindBeforeInvocationID != "inv-2" {
+		t.Errorf("ToSessionEvent() RewindBeforeInvocationID = %q, want \"inv-2\"", got.Actions.RewindBeforeInvocationID)
+	}
+}
+
+// A REST client reads the end-of-agent marker and agent state of the events it
+// lists, and a client that posts an event back must not lose them. An empty
+// agent state stays an empty object, as adk-python's REST API writes it.
+func TestEventActions_EndOfAgentAndAgentStateConversion(t *testing.T) {
+	ended := true
+	tests := []struct {
+		name           string
+		actions        session.EventActions
+		wantEndOfAgent string // raw JSON of actions.endOfAgent, "" means absent
+		wantAgentState string // raw JSON of actions.agentState, "" means absent
+	}{
+		{
+			name:           "both set",
+			actions:        session.EventActions{EndOfAgent: &ended, AgentState: map[string]any{"k": "v"}},
+			wantEndOfAgent: "true",
+			wantAgentState: `{"k":"v"}`,
+		},
+		{
+			name:           "empty agent state",
+			actions:        session.EventActions{AgentState: map[string]any{}},
+			wantAgentState: "{}",
+		},
+		{
+			name:    "both unset",
+			actions: session.EventActions{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(FromSessionEvent(session.Event{ID: "evt-1", Author: "root_agent", Actions: tt.actions}))
+			if err != nil {
+				t.Fatalf("json.Marshal() failed: %v", err)
+			}
+			var wire struct {
+				Actions map[string]json.RawMessage `json:"actions"`
+			}
+			if err := json.Unmarshal(body, &wire); err != nil {
+				t.Fatalf("json.Unmarshal() failed: %v", err)
+			}
+			for key, want := range map[string]string{"endOfAgent": tt.wantEndOfAgent, "agentState": tt.wantAgentState} {
+				raw, ok := wire.Actions[key]
+				if want == "" && ok {
+					t.Errorf("REST actions.%s = %s, want the key to be absent", key, raw)
+				}
+				if want != "" && string(raw) != want {
+					t.Errorf("REST actions.%s = %q, want %q", key, raw, want)
+				}
+			}
+
+			var restEvent Event
+			if err := json.Unmarshal(body, &restEvent); err != nil {
+				t.Fatalf("json.Unmarshal() into Event failed: %v", err)
+			}
+			got, err := ToSessionEvent(restEvent)
+			if err != nil {
+				t.Fatalf("ToSessionEvent() failed: %v", err)
+			}
+			if diff := cmp.Diff(tt.actions.EndOfAgent, got.Actions.EndOfAgent); diff != "" {
+				t.Errorf("ToSessionEvent() EndOfAgent mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.actions.AgentState, got.Actions.AgentState); diff != "" {
+				t.Errorf("ToSessionEvent() AgentState mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

@@ -22,6 +22,8 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
@@ -36,6 +38,9 @@ type Config struct {
 	// MaxIterations. The context is checked before each pass, and if it is
 	// done the loop ends with the context's error. A LoopAgent with no
 	// sub-agents returns immediately without yielding any event or error.
+	// In a resumable run (runner.Config.Resumable), the agent stops after
+	// the sub-agent whose event pauses the invocation, once that sub-agent's
+	// events end.
 	MaxIterations uint
 }
 
@@ -87,6 +92,8 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		if len(ctx.Agent().SubAgents()) == 0 {
 			return
 		}
+		rc := runconfig.FromContext(ctx)
+		resumable := rc != nil && rc.Resumable
 		subAgents := ctx.Agent().SubAgents()
 		if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
 			subAgents = subAgents[indexes[0]:]
@@ -101,7 +108,7 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 				return
 			}
 
-			shouldExit := false
+			shouldExit, paused := false, false
 			for _, subAgent := range subAgents {
 				for event, err := range subAgent.Run(utils.PassErrRelay(passCtx, subAgent)) {
 					// A failed sub-agent ends the loop, as in adk-python. Retrying
@@ -114,8 +121,15 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 					if event != nil && event.Actions.Escalate {
 						shouldExit = true
 					}
+					if resumable && event != nil && llminternal.ShouldPauseInvocation(ctx, event) {
+						paused = true
+					}
 				}
-				if shouldExit {
+				// The paused sub-agent's remaining events have reached the
+				// caller; no later sub-agent or pass runs, as in adk-python
+				// (loop_agent.py, _run_async_impl). Only a resumable run pauses,
+				// as in adk-java (InvocationContext.shouldPauseInvocation).
+				if shouldExit || paused {
 					return
 				}
 			}

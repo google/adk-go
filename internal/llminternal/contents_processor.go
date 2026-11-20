@@ -95,6 +95,8 @@ func ContentsRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 				events = append(events, e)
 			}
 		}
+		// A rewound turn stays in the session but must not reach the model.
+		events = utils.ApplyRewinds(events)
 		contents, err := fn(ctx.Agent().Name(), ctx.Branch(), ctx.IsolationScope(), events, isSingleTurn, ctx.UserContent())
 		if err != nil {
 			yield(nil, err)
@@ -122,7 +124,7 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationScope string, events, allEvents []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
-	callIDs := functionCallIDs(allEvents)
+	callIDs := FunctionCallIDs(allEvents)
 	// visible reports whether the agent sees ev at all: it has content (or a
 	// transcription or compaction summary), and it is on the agent's branch,
 	// not on a tool sub-branch below it, in its isolation scope, and not

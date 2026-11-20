@@ -1101,6 +1101,22 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		if ctx.Ended() || preprocessYieldedFinalResponse {
 			return
 		}
+		tools, err := extractTools(req)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		// A resumed step first settles what its branch already holds: a call
+		// still waiting for its answer pauses the step, and calls that never
+		// ran run before the model is asked again, as in adk-python
+		// (base_llm_flow.py).
+		switch d := decideStepResume(ctx, tools); d.action {
+		case resumeActionPause:
+			return
+		case resumeActionReplayCalls:
+			f.postprocessFunctionCalls(ctx, tools, d.event, yield)
+			return
+		}
 		// Create event to pass to callback state delta
 		stateDelta := make(map[string]any)
 		artifactDelta := make(map[string]int64)
@@ -1123,22 +1139,10 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				continue
 			}
 
-			// TODO: temporarily convert
-			tools := make(map[string]tool.Tool)
-			for k, v := range req.Tools {
-				tool, ok := v.(tool.Tool)
-				if !ok {
-					if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
-						return
-					}
-					continue
-				}
-				// An entry registered after preprocess, for example by a
-				// before-model callback, is still subject to the rule.
-				if undeclared(tool) {
-					continue
-				}
-				tools[k] = tool
+			// A before-model callback may have registered tools after preprocess.
+			if tools, err = extractTools(req); err != nil {
+				yield(nil, err)
+				return
 			}
 
 			// Build the event and yield.
@@ -1150,73 +1154,108 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			if resp.Partial {
 				continue
 			}
-			// Handle function calls.
-
-			ev, err := f.handleFunctionCalls(ctx, tools, resp.LLMResponse, nil, nil)
-			if err != nil {
-				yield(nil, err)
+			if !f.postprocessFunctionCalls(ctx, tools, modelResponseEvent, yield) {
 				return
-			}
-			if ev == nil {
-				// nothing to yield/process.
-				continue
-			}
-
-			toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
-
-			// Yield function responses before confirmation and credential requests
-			// so consumers that pause for the user still persist completed tool
-			// results.
-			if !yieldWithAuthRequest(ctx, ev, yield) {
-				return
-			}
-
-			if toolConfirmationEvent != nil {
-				if !yield(toolConfirmationEvent, nil) {
-					return
-				}
-			}
-
-			// If the model response is structured, yield it as a final model response event.
-			final, err := structuredFinalEvent(ctx, ev)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			if final != nil {
-				if !yield(final, nil) {
-					return
-				}
-			}
-			// Actually handle "transfer_to_agent" tool. The function call sets the ev.Actions.TransferToAgent field.
-			// We are following python's execution flow which is
-			//   BaseLlmFlow._postprocess_async
-			//    -> _postprocess_handle_function_calls_async
-			// TODO(hakim): figure out why this isn't handled by the runner.
-			if ev.Actions.TransferToAgent == "" {
-				return
-			}
-			nextAgent := f.agentToRun(ctx, ev.Actions.TransferToAgent)
-			if nextAgent == nil {
-				yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
-				return
-			}
-			type nodeRunner interface {
-				RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
-			}
-			var nextStream iter.Seq2[*session.Event, error]
-			if nr, ok := nextAgent.(nodeRunner); ok {
-				nextStream = nr.RunNode(agent.Promote(ctx), nil)
-			} else {
-				nextStream = nextAgent.Run(ctx)
-			}
-			for ev, err := range nextStream {
-				if !yield(ev, err) || err != nil { // forward
-					return
-				}
 			}
 		}
 	}
+}
+
+// extractTools returns the tools of req by name, leaving out every entry
+// without a declaration. It fails when an entry is not a tool.Tool.
+func extractTools(req *model.LLMRequest) (map[string]tool.Tool, error) {
+	tools := make(map[string]tool.Tool, len(req.Tools))
+	for k, v := range req.Tools {
+		t, ok := v.(tool.Tool)
+		if !ok {
+			return nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)
+		}
+		// An entry registered after preprocess, for example by a
+		// before-model callback, is still subject to the rule.
+		if undeclared(t) {
+			continue
+		}
+		tools[k] = t
+	}
+	return tools, nil
+}
+
+// postprocessFunctionCalls runs the function calls of functionCallEvent with
+// tools, then yields their response event, any credential request, any tool
+// confirmation request and any structured final answer, and runs the agent
+// that a transfer_to_agent call names. A model turn and a replay of calls
+// that never ran both go through it.
+//
+// It reports whether the step may go on to the model's next response: true
+// when no call produced a response or when a transfer target ran to its end,
+// false when the step ends, because the calls ran without a transfer, an
+// error was yielded or the consumer stopped.
+func (f *Flow) postprocessFunctionCalls(ctx agent.InvocationContext, tools map[string]tool.Tool, functionCallEvent *session.Event, yield func(*session.Event, error) bool) bool {
+	ev, err := f.handleFunctionCalls(ctx, tools, &functionCallEvent.LLMResponse, nil, nil)
+	if err != nil {
+		yield(nil, err)
+		return false
+	}
+	if ev == nil {
+		// nothing to yield/process.
+		return true
+	}
+
+	toolConfirmationEvent := generateRequestConfirmationEvent(ctx, functionCallEvent, ev)
+
+	// Yield function responses before confirmation and credential requests
+	// so consumers that pause for the user still persist completed tool
+	// results.
+	if !yieldWithAuthRequest(ctx, ev, yield) {
+		return false
+	}
+
+	if toolConfirmationEvent != nil {
+		if !yield(toolConfirmationEvent, nil) {
+			return false
+		}
+	}
+
+	// If the model response is structured, yield it as a final model response event.
+	final, err := structuredFinalEvent(ctx, ev)
+	if err != nil {
+		yield(nil, err)
+		return false
+	}
+	if final != nil {
+		if !yield(final, nil) {
+			return false
+		}
+	}
+	// Actually handle "transfer_to_agent" tool. The function call sets the ev.Actions.TransferToAgent field.
+	// We are following python's execution flow which is
+	//   BaseLlmFlow._postprocess_async
+	//    -> _postprocess_handle_function_calls_async
+	// TODO(hakim): figure out why this isn't handled by the runner.
+	if ev.Actions.TransferToAgent == "" {
+		return false
+	}
+	nextAgent := f.agentToRun(ctx, ev.Actions.TransferToAgent)
+	if nextAgent == nil {
+		yield(nil, fmt.Errorf("failed to find agent: %s", ev.Actions.TransferToAgent))
+		return false
+	}
+	// On a resumable run on the node path, the transferring agent ends
+	// before its target runs, as adk-python's node wrapper ends it
+	// (workflow/_llm_agent_wrapper.py). On the classic path its own run
+	// writes its end after the target returns, as adk-python's legacy
+	// path does.
+	if rc := runconfig.FromContext(ctx); rc != nil && rc.Resumable && rc.NodePath {
+		if !yield(NewEndOfAgentEvent(ctx, ctx.Agent().Name()), nil) {
+			return false
+		}
+	}
+	for ev, err := range RunTransferTarget(ctx, nextAgent) {
+		if !yield(ev, err) || err != nil { // forward
+			return false
+		}
+	}
+	return true
 }
 
 // preprocess runs the request processors, then the tools and toolsets of the

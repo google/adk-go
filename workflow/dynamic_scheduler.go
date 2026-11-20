@@ -17,6 +17,7 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -192,14 +193,14 @@ func newDynamicSubScheduler(parent agent.Context, parentPath string, emitUp func
 // _reconstruct_node_states / _scan_parent_child_sequence).
 func (s *dynamicSubScheduler) rehydrateCache() {
 	sess := s.parentCtx.Session()
-	if sess == nil {
+	if sess == nil || sess.Events() == nil {
 		return
 	}
 	invocationID := s.parentCtx.InvocationID()
 	prefix := s.parentPath + "/"
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for ev := range sess.Events().All() {
+	for _, ev := range utils.ApplyRewinds(slices.Collect(sess.Events().All())) {
 		if ev == nil || ev.Partial || ev.NodeInfo == nil {
 			continue
 		}

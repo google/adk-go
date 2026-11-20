@@ -552,3 +552,56 @@ func TestEventActions_SetModelResponseJSONRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// An event's actions are stored as this JSON by the database session service
+// and as raw_event by the Vertex AI one, and adk-python writes the same keys.
+// An explicit false and an empty agent state are values a resumable runner
+// reads (an empty state still marks the agent as started), so each must come
+// back as written, distinct from absent.
+func TestEventActionsJSON_EndOfAgentAndAgentState(t *testing.T) {
+	isTrue, isFalse := true, false
+	tests := []struct {
+		name           string
+		actions        session.EventActions
+		wantEndOfAgent string // raw JSON of endOfAgent, "" means absent
+		wantAgentState string // raw JSON of agentState, "" means absent
+	}{
+		{name: "end of agent true", actions: session.EventActions{EndOfAgent: &isTrue}, wantEndOfAgent: "true"},
+		{name: "end of agent false is kept", actions: session.EventActions{EndOfAgent: &isFalse}, wantEndOfAgent: "false"},
+		{name: "agent state with values", actions: session.EventActions{AgentState: map[string]any{"step": float64(1)}}, wantAgentState: `{"step":1}`},
+		{name: "empty agent state is kept", actions: session.EventActions{AgentState: map[string]any{}}, wantAgentState: "{}"},
+		{name: "both unset are omitted", actions: session.EventActions{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := json.Marshal(tt.actions)
+			if err != nil {
+				t.Fatalf("Marshal() failed: %v", err)
+			}
+			var wire map[string]json.RawMessage
+			if err := json.Unmarshal(b, &wire); err != nil {
+				t.Fatalf("Unmarshal() to map failed: %v", err)
+			}
+			for key, want := range map[string]string{"endOfAgent": tt.wantEndOfAgent, "agentState": tt.wantAgentState} {
+				raw, ok := wire[key]
+				if want == "" && ok {
+					t.Errorf("%s = %s, want the key to be absent", key, raw)
+				}
+				if want != "" && string(raw) != want {
+					t.Errorf("%s = %q, want %q", key, raw, want)
+				}
+			}
+
+			var got session.EventActions
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatalf("Unmarshal() failed: %v", err)
+			}
+			if diff := cmp.Diff(tt.actions.EndOfAgent, got.EndOfAgent); diff != "" {
+				t.Errorf("EndOfAgent after round trip mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tt.actions.AgentState, got.AgentState); diff != "" {
+				t.Errorf("AgentState after round trip mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

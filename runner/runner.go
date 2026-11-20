@@ -109,21 +109,32 @@ type Config struct {
 	// optional
 	Compaction *compaction.Config
 
-	// ContextCache enables explicit context caching for the model requests of
-	// every LLM agent this runner drives, so the system instruction, tools and
-	// stable conversation prefix are not resent in full on every turn. Nil, the
-	// default, disables it. It does not apply to [Runner.RunLive].
-	//
-	// When an invocation ends, the runner deletes the caches its model calls
-	// created or stopped using, except those the latest stored record of an
-	// agent still names. It reads the stored session to tell, so an invocation
-	// that only reused a cache reads nothing extra.
-	//
 	// See [model.ContextCacheConfig] for when a cache is created and reused,
 	// and which models and session services support it.
 	//
 	// optional
 	ContextCache *model.ContextCacheConfig
+
+	// Resumable makes the runner's invocations resumable: an invocation pauses
+	// on a long-running tool call, agents record their state and their end in
+	// session events, and a later Run with [WithInvocationID], or on the
+	// classic path with a function response that answers one of the
+	// invocation's calls, resumes the invocation from its last event.
+	//
+	// A sequential or loop agent stops after the sub-agent whose event
+	// pauses the invocation, once that sub-agent's events end; resuming the
+	// invocation runs that sub-agent again, but not the sub-agents or loop
+	// passes after it. On a resume, an LlmAgent first runs the function
+	// calls it made in the invocation that never got a response, other than
+	// long-running ones, and pauses again without calling the model while a
+	// long-running call is unanswered.
+	//
+	// Resumption is best effort: in-memory state is lost, and a tool call
+	// that ran before the pause may run again after a resume, so tools must
+	// tolerate at-least-once calls.
+	//
+	// EXPERIMENTAL: Config.Resumable is experimental; its API and behavior may change or be removed in a later version.
+	Resumable bool
 }
 
 // PluginConfig configures the plugins a [Runner] applies and how long it waits
@@ -139,6 +150,7 @@ type RunOption func(*runOptions)
 type runOptions struct {
 	stateDelta       map[string]any
 	yieldUserMessage bool
+	invocationID     string
 }
 
 // WithStateDelta sets a state delta for the run invocation.
@@ -154,6 +166,38 @@ func WithStateDelta(delta map[string]any) RunOption {
 func WithYieldUserMessage() RunOption {
 	return func(o *runOptions) {
 		o.yieldUserMessage = true
+	}
+}
+
+// WithInvocationID makes the run continue the invocation id instead of
+// starting a new one. An empty id means a new invocation. It applies to Run;
+// RunLive returns an error when it is given.
+//
+// On a runner whose root is an LlmAgent or a [Config.Node] (the node path),
+// the run uses id as its invocation ID and runs the root with the
+// invocation's original user message; with no message it appends no user
+// event and runs no on-user-message callback. It does not skip an agent that
+// already ended.
+//
+// On any other runner (the classic path), if [Config.Resumable] is true, the
+// run resumes the invocation: it restores the original user message when msg
+// is nil, appends msg under id when msg is given, rebuilds the agents' states
+// from the invocation's events, routes to the agent that was active, and
+// yields nothing if that agent already ended. If [Config.Resumable] is false,
+// the run's events carry id.
+//
+// With no message and a non-empty [WithStateDelta], both paths append a user
+// event with no content that carries the delta.
+//
+// On the resumable classic path, Run yields an error and adds no event when
+// the session has no events ("session <id> has no events to resume") or when
+// no user message of the invocation is stored and msg is nil ("no user
+// message available for resuming invocation: <id>").
+//
+// The option is safe to use from concurrent Run calls.
+func WithInvocationID(id string) RunOption {
+	return func(o *runOptions) {
+		o.invocationID = id
 	}
 }
 
@@ -236,6 +280,7 @@ func New(cfg Config) (*Runner, error) {
 		autoCreateSession: cfg.AutoCreateSession,
 		compactionConfig:  compactionConfig,
 		contextCache:      contextCache,
+		resumable:         cfg.Resumable,
 	}, nil
 }
 
@@ -340,6 +385,9 @@ type Runner struct {
 	// contextCache is nil when context caching is disabled. Otherwise it is
 	// a validated copy of Config.ContextCache.
 	contextCache *model.ContextCacheConfig
+
+	// resumable is Config.Resumable.
+	resumable bool
 }
 
 // invocationIDOf returns the invocation an InvocationContext names, or "".
@@ -696,8 +744,8 @@ func mergeLLMResponse(dst, src *model.LLMResponse) {
 }
 
 // mergeEventActions lays the actions src sets over dst, for fromPlugin, and
-// sets dst.Compaction to record. The delta maps dst ends up with are copies,
-// because the session service applies and keeps them.
+// sets dst.Compaction to record. The delta and agent-state maps dst ends up
+// with are copies, because the session service applies and keeps them.
 func mergeEventActions(dst, src *session.EventActions, record *session.EventCompaction) {
 	if len(src.StateDelta) > 0 {
 		dst.StateDelta = maps.Clone(src.StateDelta)
@@ -726,6 +774,17 @@ func mergeEventActions(dst, src *session.EventActions, record *session.EventComp
 	}
 	if src.SetModelResponse != nil {
 		dst.SetModelResponse = src.SetModelResponse
+	}
+	if src.RewindBeforeInvocationID != "" {
+		dst.RewindBeforeInvocationID = src.RewindBeforeInvocationID
+	}
+	if src.EndOfAgent != nil {
+		dst.EndOfAgent = src.EndOfAgent
+	}
+	if src.AgentState != nil {
+		dst.AgentState = maps.Clone(src.AgentState)
+	} else if dst.AgentState != nil {
+		dst.AgentState = maps.Clone(dst.AgentState)
 	}
 	dst.Compaction = record
 }
@@ -919,6 +978,13 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // a nil msg with a non-empty [WithStateDelta] stores a user event without
 // content that carries the delta, which [WithYieldUserMessage] yields on the
 // node path.
+//
+// A user message whose first function response answers a call made in the
+// same invocation is stored with that call's branch, and with the call's
+// isolation scope when the message has none of its own. A sub-agent that a
+// function response or a resume sends back to work continues on the branch
+// of its newest event in the invocation it continues that a rewind did not
+// remove and that is not on a tool's message branch.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// Copied now: the sequence below runs only when ranged, and later
 	// changes to the caller's map must not reach the invocation's events.
@@ -1038,6 +1104,27 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
+		// A resumable runner treats an invocation ID, given by the caller or
+		// resolved from a function response, as a resume. Its refusals come
+		// before anything is stored (adk-python Runner.run_async and
+		// Runner._setup_context_for_resumed_invocation).
+		userContent := msg
+		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
+		if options.invocationID != "" {
+			invocationID = options.invocationID
+		}
+		resuming := r.resumable && invocationID != ""
+		var agentStates map[string]map[string]any
+		var ended map[string]bool
+		if resuming {
+			userContent, err = resumedUserContent(storedSession, msg, invocationID)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			agentStates, ended = rebuildAgentStates(storedSession.Events(), invocationID)
+		}
+
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode:  runconfig.StreamingMode(cfg.StreamingMode),
@@ -1045,6 +1132,8 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			HTTPOptions:    cfg.HTTPOptions,
 			Labels:         cfg.Labels,
 			CustomMetadata: runMetadata,
+			Resumable:      r.resumable,
+			AgentStates:    agentStates,
 		})
 		ctx = r.withPluginManager(ctx)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
@@ -1097,18 +1186,22 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		agentToRun, branch := r.classicAgentToRun(storedSession, msg)
-		// Answers to calls from several invocations start a new invocation
-		// when they go back to the calling agent, as adk-python does for a
-		// BaseAgent root of an app that is not resumable. A graph workflow
-		// resumes a paused run from its invocation's events, so it keeps the
-		// first call's invocation; adk-python raises for a Workflow root. So
-		// does an answer whose caller is not in the agent tree, since that
-		// caller can be a workflow node agent missing from the workflow's
-		// sub-agents; adk-python starts a new invocation there.
-		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
-		if spansInvocations && agentToRun != r.rootAgent {
-			invocationID = ""
+		// A resume routes once the message is stored, below.
+		agentToRun, branch := r.rootAgent, ""
+		if !resuming {
+			agentToRun, branch = r.classicAgentToRun(storedSession, msg)
+			// Answers to calls from several invocations start a new invocation
+			// when they go back to the calling agent, as adk-python does for a
+			// BaseAgent root of an app that is not resumable. A graph workflow
+			// resumes a paused run from its invocation's events, so it keeps the
+			// first call's invocation; adk-python raises for a Workflow root. So
+			// does an answer whose caller is not in the agent tree, since that
+			// caller can be a workflow node agent missing from the workflow's
+			// sub-agents; adk-python starts a new invocation there. An ID the
+			// caller gives with WithInvocationID is kept.
+			if spansInvocations && options.invocationID == "" && agentToRun != r.rootAgent {
+				invocationID = ""
+			}
 		}
 
 		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
@@ -1117,7 +1210,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			Session:      storedSession,
 			Branch:       branch,
 			Agent:        agentToRun,
-			UserContent:  msg,
+			UserContent:  userContent,
 			RunConfig:    &cfg,
 			InvocationID: invocationID,
 		})
@@ -1128,7 +1221,23 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			yield(nil, err)
 			return
 		}
-		if replaced {
+		switch {
+		case resuming:
+			agentToRun, branch, err = r.resumedAgentToRun(storedSession, invocationID, ended)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			// An agent that already ended its run in the invocation is not run
+			// again (adk-python Runner.run_async).
+			if ended[agentToRun.Name()] {
+				return
+			}
+			ctx = ctx.WithDelta(&agent.CommonContextDelta{
+				InvocationContextDelta: &agent.InvocationContextDelta{Agent: &agentToRun, Branch: &branch},
+			})
+			invocationCtx = ctx
+		case replaced:
 			// A plugin's replacement can answer a call another agent made, so
 			// the route is taken again from the replacement, now in history.
 			agentToRun, branch = r.classicAgentToRun(storedSession, ctx.UserContent())
@@ -1323,7 +1432,8 @@ func (s *closedLiveSession) Close() error {
 
 // RunLive starts a live, bidirectional agent session, returning the session
 // and a stream of events from the agents. It returns an error, before the
-// session is read, when the runner's root is a node.
+// session is read, when the runner's root is a node or when opts include
+// [WithInvocationID].
 func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	if r.rootNode != nil {
 		return nil, nil, fmt.Errorf("runner root %q is a node, not an agent", r.rootNode.Name())
@@ -1331,6 +1441,10 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	options := runOptions{}
 	for _, opt := range opts {
 		opt(&options)
+	}
+	// adk-python's run_live takes no invocation ID.
+	if options.invocationID != "" {
+		return nil, nil, errors.New("RunLive does not support WithInvocationID; resume an invocation with Run")
 	}
 
 	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID, getSessionConfigOf(cfg.GetSessionConfig))
@@ -1354,6 +1468,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		StreamingMode:  runconfig.StreamingModeBidi, // Live is always bidirectional streaming
 		Live:           &cfg,
 		CustomMetadata: eventmetadata.WithoutInternal(cfg.CustomMetadata),
+		Resumable:      r.resumable,
 	})
 	ctx = r.withPluginManager(ctx)
 	// Deliberately no compactionctx here: context compaction does not apply to
@@ -1649,16 +1764,44 @@ func (r *Runner) appendUserEvent(ctx agent.Context, storedSession session.Sessio
 		event.Actions.StateDelta = stateDelta
 	}
 	if event.IsolationScope == "" {
-		if iso := findActiveTaskIsolationScope(storedSession); iso != "" {
+		if iso, _ := findActiveTaskIsolationScope(storedSession); iso != "" {
 			event.IsolationScope = iso
 		}
 	}
 	eventmetadata.MergeIntoEvent(event, runMetadataFromContext(ctx))
+	stampCallBranch(ctx, event)
 
 	if err := r.sessionService.AppendEvent(ctx, storedSession, event); err != nil {
 		return nil, fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
 	return event, nil
+}
+
+// stampCallBranch gives ev, a user event not yet appended, the branch of the
+// function call its first function response answers and, when ev has no
+// isolation scope, that call's scope. The call is searched among the events
+// of ctx's invocation only, newest first. ev is left as it is when it has no
+// function response, its first response has no ID, or no event of the
+// invocation holds the call (adk-python runners.py
+// _stamp_event_branch_context).
+func stampCallBranch(ctx agent.InvocationContext, ev *session.Event) {
+	responses := utils.FunctionResponses(ev.Content)
+	if len(responses) == 0 || responses[0].ID == "" {
+		return
+	}
+	events := llminternal.InvocationEvents(ctx, true, false)
+	for _, event := range slices.Backward(events) {
+		for _, call := range utils.FunctionCalls(utils.Content(event)) {
+			if call.ID != responses[0].ID {
+				continue
+			}
+			ev.Branch = event.Branch
+			if ev.IsolationScope == "" {
+				ev.IsolationScope = event.IsolationScope
+			}
+			return
+		}
+	}
 }
 
 // validateNodeRootMessage refuses, on a node root, a message that holds
@@ -1721,45 +1864,60 @@ func asUserContent(msg *genai.Content) *genai.Content {
 	return &out
 }
 
-// findActiveTaskIsolationScope returns the most recent isolation_scope that has
-// not yet been closed by a successful finish_task FunctionResponse.
-func findActiveTaskIsolationScope(sess session.Session) string {
+// findActiveTaskIsolationScope returns the open task delegation of sess: the
+// isolation scope of its newest live event (see utils.ApplyRewinds) whose
+// scope no finish_task response has closed, and that event's invocation ID.
+// It returns two empty strings when sess is nil or no scope is open.
+//
+// A scope is closed when the first finish_task function response of a live
+// event in that scope has the result FinishTaskSuccessResult or
+// FinishTaskErrorResult, wherever the response sits; events after it in the
+// same scope do not reopen it. A response with an error instead of a result
+// leaves the scope open, because the task agent retries. Port of adk-python's
+// _find_active_task_scope (runners.py).
+func findActiveTaskIsolationScope(sess session.Session) (scope, invocationID string) {
 	if sess == nil {
-		return ""
+		return "", ""
 	}
-	events := sess.Events()
-	finished := map[string]struct{}{}
-	for i := events.Len() - 1; i >= 0; i-- {
-		ev := events.At(i)
-		if ev == nil || ev.IsolationScope == "" {
-			continue
-		}
-		scope := ev.IsolationScope
+	// closesTask reports whether the first finish_task function response of
+	// ev ends its task.
+	closesTask := func(ev *session.Event) bool {
 		for _, fr := range utils.FunctionResponses(ev.Content) {
 			if fr == nil || fr.Name != workflowinternal.FinishTaskToolName {
 				continue
 			}
-			if result, ok := fr.Response["result"]; ok {
-				if s, ok := result.(string); ok && s == workflowinternal.FinishTaskSuccessResult {
-					finished[scope] = struct{}{}
-				}
-			}
-			break
+			result, _ := fr.Response["result"].(string)
+			return result == workflowinternal.FinishTaskSuccessResult || result == workflowinternal.FinishTaskErrorResult
 		}
-		if _, done := finished[scope]; done {
+		return false
+	}
+	events := utils.ApplyRewinds(slices.Collect(sess.Events().All()))
+	finished := map[string]struct{}{}
+	for _, ev := range events {
+		if ev.IsolationScope != "" && closesTask(ev) {
+			finished[ev.IsolationScope] = struct{}{}
+		}
+	}
+	for _, ev := range slices.Backward(events) {
+		if ev.IsolationScope == "" {
 			continue
 		}
-		return scope
+		if _, done := finished[ev.IsolationScope]; !done {
+			return ev.IsolationScope, ev.InvocationID
+		}
 	}
-	return ""
+	return "", ""
 }
 
 // classicAgentToRun returns the agent the classic path runs for msg and the
 // branch it runs on.
 //
 // A function response goes back to the agent that made the call, on the
-// branch it ran on (adk-python find_agent_to_run and
-// restore_branch_from_history). Re-running the root would run agents that
+// branch restoreBranchFromHistory gives it within the invocation the
+// responses resolve to leniently, or within the whole session when they
+// resolve to none (adk-python find_agent_to_run, and
+// _setup_context_for_new_invocation with restore_branch_from_history).
+// Re-running the root would run agents that
 // never saw the call, and they fail on the unmatched response. A call made
 // inside a graph workflow is the exception: the root runs, and sequential,
 // parallel and loop agents on the way narrow to the sub-agents holding the
@@ -1771,10 +1929,27 @@ func findActiveTaskIsolationScope(sess session.Session) string {
 // an adk_request_input response; any other response restarts the graph. The
 // first response in the message decides the route.
 func (r *Runner) classicAgentToRun(storedSession session.Session, msg *genai.Content) (agent.Agent, string) {
-	if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
-		if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
-			return sub, ev.Branch
+	responses := utils.FunctionResponses(msg)
+	if len(responses) == 0 {
+		return r.rootAgent, ""
+	}
+	// The call is looked up in the live events only (adk-python
+	// find_agent_to_run reads _apply_rewinds).
+	answers := func(fc *genai.FunctionCall) bool { return fc.ID == responses[0].ID }
+	for _, ev := range slices.Backward(utils.ApplyRewinds(slices.Collect(storedSession.Events().All()))) {
+		if !slices.ContainsFunc(utils.FunctionCalls(ev.Content), answers) {
+			continue
 		}
+		sub := r.rootAgent.FindAgent(ev.Author)
+		if sub == nil || r.isInGraphWorkflow(sub) {
+			return r.rootAgent, ""
+		}
+		// Answers to calls of several invocations search the whole session.
+		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
+		if spansInvocations {
+			invocationID = ""
+		}
+		return sub, r.restoreBranchFromHistory(storedSession, sub, invocationID)
 	}
 	return r.rootAgent, ""
 }
@@ -1798,24 +1973,29 @@ func (r *Runner) usesLegacySubAgentPicker(rootMode llminternal.Mode) bool {
 }
 
 // restoreBranchFromHistory returns the branch agentToRun last ran on, taken
-// from its most recent event in sess that has a branch. A non-empty
-// invocationID limits the search to that invocation's events, so an agent
-// does not continue on a branch of an earlier invocation. The root agent, a
-// node root's stand-in agent, and an agent with no such event, run on the
-// root branch "" (adk-python agents/_agent_router.py
-// restore_branch_from_history; adk-python restores no branch for a node
-// root).
+// from its most recent live event in sess (see utils.ApplyRewinds) that has a
+// branch. A non-empty invocationID limits the search to that invocation's
+// events, so an agent does not continue on a branch of an earlier invocation.
+// An event on a tool's message branch (llminternal.IsToolBranch, over the
+// function calls of the live events) is skipped: the tool published it under
+// the agent's name, but the agent does not run there. The root agent, a node
+// root's stand-in agent, and an agent with no such event, run on the root
+// branch "" (adk-python agents/_agent_router.py restore_branch_from_history;
+// adk-python restores no branch for a node root).
 func (r *Runner) restoreBranchFromHistory(sess session.Session, agentToRun agent.Agent, invocationID string) string {
 	if sess == nil || agentToRun == nil || agentToRun == r.rootAgent || agentToRun == r.standInAgent {
 		return ""
 	}
-	events := sess.Events()
-	for i := events.Len() - 1; i >= 0; i-- {
-		ev := events.At(i)
-		if ev == nil || ev.Branch == "" {
+	events := utils.ApplyRewinds(slices.Collect(sess.Events().All()))
+	callIDs := llminternal.FunctionCallIDs(events)
+	for _, ev := range slices.Backward(events) {
+		if ev.Branch == "" {
 			continue
 		}
 		if invocationID != "" && ev.InvocationID != invocationID {
+			continue
+		}
+		if llminternal.IsToolBranch(ev.Branch, agentToRun.Name(), callIDs) {
 			continue
 		}
 		if ev.Author == agentToRun.Name() {
@@ -1827,20 +2007,35 @@ func (r *Runner) restoreBranchFromHistory(sess session.Session, agentToRun agent
 
 // findAgentToRun returns the agent that should handle the next request based on
 // session history.
-func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (agent.Agent, error) {
-	if event := utils.FunctionCallEvent(session.Events(), msg); event != nil {
-		subAgent := r.rootAgent.FindAgent(event.Author)
-		if subAgent != nil {
-			return subAgent, nil
+//
+// It decides on the routing view: the session's live events (see
+// utils.ApplyRewinds), followed by msg as a user event when msg carries
+// function responses. When the view ends with an answer to a function call,
+// llminternal.DecideResumeAction decides whether the call's author runs,
+// which an answer authored "user" always routes to and an agent's own answer
+// does on a resumable runner. Otherwise the most recent agent that may
+// transfer across the agent tree runs, skipping user events and the events
+// that record an agent's state or end, and the root agent when there is none.
+// It ports adk-python's find_agent_to_run (agents/_agent_router.py) with
+// Runner._session_for_routing (runners.py).
+func (r *Runner) findAgentToRun(sess session.Session, msg *genai.Content) (agent.Agent, error) {
+	if isGraphWorkflowAgent(r.rootAgent) {
+		return r.rootAgent, nil
+	}
+	events := utils.ApplyRewinds(slices.Collect(sess.Events().All()))
+	if len(utils.FunctionResponses(msg)) > 0 {
+		events = append(events, &session.Event{Author: "user", LLMResponse: model.LLMResponse{Content: msg}})
+	}
+	if subAgent := r.answeredCallAgent(events); subAgent != nil {
+		if entry := r.graphWorkflowEntrypoint(subAgent); entry != nil {
+			return entry, nil
 		}
-		log.Printf("Function call from an unknown agent: %s, event id: %s", event.Author, event.ID) //nolint:forbidigo // pre-slog call site
+		return subAgent, nil
 	}
 
-	events := session.Events()
-	for i := events.Len() - 1; i >= 0; i-- {
-		event := events.At(i)
-
-		if event.Author == "user" {
+	for _, event := range slices.Backward(events) {
+		if event.Author == "user" || event.Actions.AgentState != nil ||
+			(event.Actions.EndOfAgent != nil && *event.Actions.EndOfAgent) {
 			continue
 		}
 
@@ -1860,15 +2055,148 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 	return r.rootAgent, nil
 }
 
+// answeredCallAgent returns the agent that made the function call the last
+// of events answers, when llminternal.DecideResumeAction routes the answer to
+// that call's author and the author is in the agent tree; nil otherwise.
+func (r *Runner) answeredCallAgent(events []*session.Event) agent.Agent {
+	if len(events) == 0 {
+		return nil
+	}
+	answer := events[len(events)-1]
+	responses := utils.FunctionResponses(answer.Content)
+	if len(responses) == 0 {
+		return nil
+	}
+	call := llminternal.FindCallEvent(events[:len(events)-1], responses[0].ID)
+	if call == nil || call.Author == "" {
+		return nil
+	}
+	switch llminternal.DecideResumeAction(call, answer, r.resumable) {
+	case llminternal.ResumeRouteToAuthor, llminternal.ResumeReplayCalls:
+		if subAgent := r.rootAgent.FindAgent(call.Author); subAgent != nil {
+			return subAgent
+		}
+		log.Printf("Function call from an unknown agent: %s, event id: %s", call.Author, call.ID) //nolint:forbidigo // pre-slog call site
+	}
+	return nil
+}
+
+// resumedUserContent returns the user content of a resume of invocationID on
+// the classic path: msg when it is given, else the invocation's stored user
+// message (utils.FindUserMessageForInvocation). It returns an error when sess
+// has no events, or when msg is nil and no user message of the invocation is
+// stored (adk-python Runner._setup_context_for_resumed_invocation).
+func resumedUserContent(sess session.Session, msg *genai.Content, invocationID string) (*genai.Content, error) {
+	if sess.Events().Len() == 0 {
+		return nil, fmt.Errorf("session %s has no events to resume", sess.ID())
+	}
+	if msg != nil {
+		return msg, nil
+	}
+	if stored := utils.FindUserMessageForInvocation(sess.Events(), invocationID); stored != nil {
+		return stored, nil
+	}
+	return nil, fmt.Errorf("no user message available for resuming invocation: %s", invocationID)
+}
+
+// rebuildAgentStates returns the agent states and the ended agents of the
+// invocation invocationID, keyed by author, from its events in order: an
+// end-of-agent event ends its author and drops its state; an event with an
+// agent state sets its author's state and reopens it; any other event with
+// content not authored "user" gives an author without a non-empty state an
+// empty one and reopens it. An author absent from ended has neither ended nor
+// recorded anything. It ports adk-python's
+// InvocationContext.populate_invocation_agent_states
+// (agents/invocation_context.py).
+func rebuildAgentStates(events session.Events, invocationID string) (states map[string]map[string]any, ended map[string]bool) {
+	states, ended = map[string]map[string]any{}, map[string]bool{}
+	for _, ev := range utils.ApplyRewinds(slices.Collect(events.All())) {
+		if ev.InvocationID != invocationID {
+			continue
+		}
+		switch {
+		case ev.Actions.EndOfAgent != nil && *ev.Actions.EndOfAgent:
+			ended[ev.Author] = true
+			delete(states, ev.Author)
+		case ev.Actions.AgentState != nil:
+			states[ev.Author] = ev.Actions.AgentState
+			ended[ev.Author] = false
+		case ev.Author != "user" && ev.Content != nil && len(states[ev.Author]) == 0:
+			states[ev.Author] = map[string]any{}
+			ended[ev.Author] = false
+		}
+	}
+	return states, ended
+}
+
+// resumedAgentToRun returns the agent a resume of invocationID on the
+// classic path runs, and its branch. When the root agent has recorded its
+// state or its end in the invocation (it is in ended), that is the root;
+// otherwise findAgentToRun picks the agent from sess, which already holds the
+// turn's message, and it continues on the branch it last ran on in the
+// invocation (adk-python Runner._setup_context_for_resumed_invocation).
+func (r *Runner) resumedAgentToRun(sess session.Session, invocationID string, ended map[string]bool) (agent.Agent, string, error) {
+	if _, ok := ended[r.rootAgent.Name()]; ok {
+		return r.rootAgent, "", nil
+	}
+	agentToRun, err := r.findAgentToRun(sess, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	return agentToRun, r.restoreBranchFromHistory(sess, agentToRun, invocationID), nil
+}
+
 // isInGraphWorkflow reports whether a or one of its ancestors is a graph
 // workflow agent built by workflowagent.New.
 func (r *Runner) isInGraphWorkflow(a agent.Agent) bool {
+	return r.outermostGraphWorkflow(a) != nil
+}
+
+func isGraphWorkflowAgent(a agent.Agent) bool {
+	ia, ok := a.(agentinternal.Agent)
+	return ok && agentinternal.Reveal(ia).AgentType == agentinternal.TypeWorkflowAgent
+}
+
+func isCompositeWorkflowAgent(a agent.Agent) bool {
+	ia, ok := a.(agentinternal.Agent)
+	if !ok {
+		return false
+	}
+	switch agentinternal.Reveal(ia).AgentType {
+	case agentinternal.TypeWorkflowAgent, agentinternal.TypeSequentialAgent, agentinternal.TypeLoopAgent, agentinternal.TypeParallelAgent:
+		return true
+	default:
+		return false
+	}
+}
+
+// outermostGraphWorkflow returns the highest graph workflow agent
+// (workflowagent.New) enclosing a, or nil when none does.
+func (r *Runner) outermostGraphWorkflow(a agent.Agent) agent.Agent {
+	var outermost agent.Agent
 	for cur := a; cur != nil; cur = r.parents[cur.Name()] {
-		if ia, ok := cur.(agentinternal.Agent); ok && agentinternal.Reveal(ia).AgentType == agentinternal.TypeWorkflowAgent {
-			return true
+		if isGraphWorkflowAgent(cur) {
+			outermost = cur
 		}
 	}
-	return false
+	return outermost
+}
+
+// graphWorkflowEntrypoint returns the agent findAgentToRun dispatches to when a
+// belongs to a graph workflow: the highest contiguous composite workflow
+// ancestor above the outermost graph workflow (so SequentialAgent, LoopAgent
+// and ParallelAgent narrow via utils.GraphResumeIndexes and still run sibling
+// sub-agents), stopping before any non-workflow ancestor such as an LlmAgent.
+func (r *Runner) graphWorkflowEntrypoint(a agent.Agent) agent.Agent {
+	wf := r.outermostGraphWorkflow(a)
+	if wf == nil {
+		return nil
+	}
+	entry := wf
+	for parent := r.parents[entry.Name()]; parent != nil && isCompositeWorkflowAgent(parent); parent = r.parents[entry.Name()] {
+		entry = parent
+	}
+	return entry
 }
 
 // checks if the agent and its parent chain allow transfer up the tree.
