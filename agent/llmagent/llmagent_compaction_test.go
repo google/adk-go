@@ -182,14 +182,12 @@ func TestCompactionE2E(t *testing.T) {
 	}
 
 	a, err := llmagent.New(llmagent.Config{
-		Name:                     "compaction_agent",
-		Description:              "agent used to exercise context compaction",
-		Model:                    compactionModel(t),
-		Instruction:              "You are a concise assistant. Answer in one short sentence.",
-		Tools:                    []tool.Tool{weather},
-		BeforeModelCallbacks:     []llmagent.BeforeModelCallback{capture},
-		DisallowTransferToParent: true,
-		DisallowTransferToPeers:  true,
+		Name:                 "compaction_agent",
+		Description:          "agent used to exercise context compaction",
+		Model:                compactionModel(t),
+		Instruction:          "You are a concise assistant. Answer in one short sentence.",
+		Tools:                []tool.Tool{weather},
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{capture},
 	})
 	if err != nil {
 		t.Fatalf("llmagent.New() error = %v", err)

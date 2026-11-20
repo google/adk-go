@@ -161,13 +161,11 @@ func TestTailRetentionE2E(t *testing.T) {
 	)
 
 	a, err := llmagent.New(llmagent.Config{
-		Name:                     "tail_retention_agent",
-		Description:              "agent used to exercise tail-retention compaction",
-		Model:                    compactionModel(t),
-		Instruction:              "You are a concise assistant. Answer in one short sentence.",
-		BeforeModelCallbacks:     []llmagent.BeforeModelCallback{capture},
-		DisallowTransferToParent: true,
-		DisallowTransferToPeers:  true,
+		Name:                 "tail_retention_agent",
+		Description:          "agent used to exercise tail-retention compaction",
+		Model:                compactionModel(t),
+		Instruction:          "You are a concise assistant. Answer in one short sentence.",
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{capture},
 	})
 	if err != nil {
 		t.Fatalf("llmagent.New() error = %v", err)
