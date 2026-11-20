@@ -27,6 +27,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/sessionutils"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
@@ -501,13 +502,19 @@ func runNode(
 		}
 		// Block on non-partial events until the consumer has persisted
 		// them (see eventItem.processed). Partial events are
-		// fire-and-forget.
+		// fire-and-forget, so send a deep copy that shares no mutable
+		// memory with the continuing producer goroutine.
 		var processed chan struct{}
-		if ev != nil && !ev.LLMResponse.Partial {
-			processed = make(chan struct{})
+		sendEv := ev
+		if ev != nil {
+			if ev.LLMResponse.Partial {
+				sendEv = sessionutils.CloneValue(ev)
+			} else {
+				processed = make(chan struct{})
+			}
 		}
 		select {
-		case out <- eventItem{nodeName: name, ev: ev, processed: processed}:
+		case out <- eventItem{nodeName: name, ev: sendEv, processed: processed}:
 		case <-ctx.Done():
 			completion.err = ctx.Err()
 			return

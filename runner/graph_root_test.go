@@ -15,14 +15,19 @@
 package runner_test
 
 import (
+	"context"
 	"fmt"
+	"iter"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
@@ -365,4 +370,102 @@ func textRecordingGraph(t *testing.T, inputs *[]string) agent.Agent {
 		t.Fatalf("workflowagent.New() error = %v", err)
 	}
 	return a
+}
+
+type partialStreamModel struct{}
+
+func (partialStreamModel) Name() string { return "partial-stream-model" }
+
+func (partialStreamModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for i := range 8 {
+			if !yield(&model.LLMResponse{
+				Partial: true,
+				Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: fmt.Sprintf("chunk-%d", i)}}},
+			}, nil) {
+				return
+			}
+		}
+		yield(&model.LLMResponse{
+			Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "final"}}},
+		}, nil)
+	}
+}
+
+// Partial events are forwarded fire-and-forget while the producer goroutine
+// continues reading its event, so neither scheduler.handleEvent nor an
+// OnEventCallback plugin mutating Content.Parts may race with the producer.
+func TestRun_PartialEventsDetachedFromProducerUnderRace(t *testing.T) {
+	mutatingPlugin, err := plugin.New(plugin.Config{
+		Name: "mutate_partials",
+		OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+			if ev.Partial && ev.Content != nil && len(ev.Content.Parts) > 0 {
+				ev.Content.Parts[0] = &genai.Part{Text: "scrubbed"}
+			}
+			return ev, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+
+	t.Run("llm_agent_root", func(t *testing.T) {
+		a, err := llmagent.New(llmagent.Config{Name: "chat", Model: partialStreamModel{}})
+		if err != nil {
+			t.Fatalf("llmagent.New() error = %v", err)
+		}
+		svc := session.InMemoryService()
+		newNodeTestSession(t, t.Context(), svc)
+		r, err := runner.New(runner.Config{
+			AppName:        nodeTestApp,
+			Agent:          a,
+			SessionService: svc,
+			PluginConfig:   runner.PluginConfig{Plugins: []*plugin.Plugin{mutatingPlugin}},
+		})
+		if err != nil {
+			t.Fatalf("runner.New() error = %v", err)
+		}
+		for ev, err := range r.Run(t.Context(), nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			_ = ev
+		}
+	})
+
+	t.Run("graph_workflow_root", func(t *testing.T) {
+		sub, err := llmagent.New(llmagent.Config{Name: "chat", Model: partialStreamModel{}})
+		if err != nil {
+			t.Fatalf("llmagent.New() error = %v", err)
+		}
+		node, err := workflow.NewAgentNode(sub, workflow.NodeConfig{})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode() error = %v", err)
+		}
+		wf, err := workflowagent.New(workflowagent.Config{
+			Name:      "wf",
+			SubAgents: []agent.Agent{sub},
+			Edges:     workflow.Chain(workflow.Start, node),
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New() error = %v", err)
+		}
+		svc := session.InMemoryService()
+		newNodeTestSession(t, t.Context(), svc)
+		r, err := runner.New(runner.Config{
+			AppName:        nodeTestApp,
+			Agent:          wf,
+			SessionService: svc,
+			PluginConfig:   runner.PluginConfig{Plugins: []*plugin.Plugin{mutatingPlugin}},
+		})
+		if err != nil {
+			t.Fatalf("runner.New() error = %v", err)
+		}
+		for ev, err := range r.Run(t.Context(), nodeTestUser, nodeTestSession, userText("go"), agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			_ = ev
+		}
+	})
 }

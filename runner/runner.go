@@ -73,6 +73,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
 	"google.golang.org/adk/v2/internal/plugininternal"
+	"google.golang.org/adk/v2/internal/sessionutils"
 	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/internal/workflowinternal"
@@ -1603,6 +1604,9 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 				yield(nil, err)
 				lc.stop()
 				return
+			}
+			if event.Partial {
+				event = sessionutils.CloneValue(event)
 			}
 			stampTimestamp(ctx, event)
 

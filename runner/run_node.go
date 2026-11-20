@@ -32,6 +32,7 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
+	"google.golang.org/adk/v2/internal/sessionutils"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
@@ -311,8 +312,7 @@ func (r *Runner) runNode(
 		// A non-partial event is this loop's until it is yielded, because its
 		// producer waits for that, so it is used as it is.
 		if event.Partial {
-			owned := *event
-			event = &owned
+			event = sessionutils.CloneValue(event)
 		}
 
 		// Stamp the agent as author on engine control events that have
