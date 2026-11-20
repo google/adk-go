@@ -95,9 +95,19 @@ func NewTransport(base http.RoundTripper) http.RoundTripper {
 	return &transport{base: base, source: defaultSource, configure: testConfigure}
 }
 
+// NewTransportAllHosts is [NewTransport], except that while the environment
+// provides a certificate every https request goes over mutual TLS, so any
+// host that asks for the certificate gets it. Only *.googleapis.com hosts are
+// moved to their mTLS names. This is what google-genai Python, which
+// adk-python's Gemini model uses, does for a Vertex AI client.
+func NewTransportAllHosts(base http.RoundTripper) http.RoundTripper {
+	return &transport{base: base, source: defaultSource, configure: testConfigure, allHosts: true}
+}
+
 type transport struct {
-	base   http.RoundTripper
-	source source
+	base     http.RoundTripper
+	source   source
+	allHosts bool
 	// configure, when set, is applied to the mTLS transport after it is
 	// built. Tests use it to reach a local server.
 	configure func(*http.Transport)
@@ -115,7 +125,8 @@ type lookup struct {
 }
 
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if !isGoogleAPI(req.URL) {
+	google := isGoogleAPI(req.URL)
+	if !google && (!t.allHosts || !isHTTPS(req.URL)) {
 		return t.plain().RoundTrip(req)
 	}
 	p, err := t.provider(req.Context())
@@ -129,7 +140,7 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return t.plain().RoundTrip(req)
 	}
 	mtls := t.mtlsTransport(p)
-	if host, ok := mtlsHost(req.URL); ok {
+	if host, ok := mtlsHost(req.URL); google && ok {
 		req = req.Clone(req.Context())
 		req.URL.Host = host
 		// net/http writes the Host header and the HTTP/2 :authority from
@@ -247,11 +258,15 @@ func guardProxy(proxy func(*http.Request) (*url.URL, error)) func(*http.Request)
 
 // isGoogleAPI reports whether u is an https URL on a *.googleapis.com host.
 func isGoogleAPI(u *url.URL) bool {
-	if u == nil || !strings.EqualFold(u.Scheme, "https") {
+	if !isHTTPS(u) {
 		return false
 	}
 	h := strings.ToLower(u.Hostname())
 	return len(h) > len(googleAPIsSuffix) && strings.HasSuffix(h, googleAPIsSuffix)
+}
+
+func isHTTPS(u *url.URL) bool {
+	return u != nil && strings.EqualFold(u.Scheme, "https")
 }
 
 // PlainHost returns host lowercased, with a *.mtls.googleapis.com name

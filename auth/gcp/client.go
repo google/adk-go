@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -35,7 +34,6 @@ import (
 
 	"cloud.google.com/go/auth/credentials"
 	"cloud.google.com/go/auth/httptransport"
-	"golang.org/x/net/http2"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
@@ -401,8 +399,8 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 				return nil, fmt.Errorf("gcp: build default credentials client: %w", err)
 			}
 			opts.Credentials = creds
-			opts.ClientCertProvider = noClientCertificate
-			opts.BaseRoundTripper, _ = plainTransport(http.DefaultTransport)
+			opts.ClientCertProvider = clientcert.NoCertificate
+			opts.BaseRoundTripper, _ = clientcert.PlainTransport(http.DefaultTransport)
 		}
 		hc, err := httptransport.NewClient(opts)
 		if err != nil {
@@ -430,38 +428,6 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 	}
 	c.cacheSlot = joinFields(clientNonce, strconv.FormatUint(clientSeq.Add(1), 10))
 	return c, nil
-}
-
-// noClientCertificate answers a server's certificate request with no
-// certificate.
-func noClientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-	return &tls.Certificate{}, nil
-}
-
-// plainTransport returns the base transport the auth library builds from def,
-// the default transport, when it has no certificate source. Given a source,
-// even one that presents nothing, the library replaces the TLS configuration
-// an application set on the default transport.
-//
-// It returns nil when def is not an [http.Transport]. The library then starts
-// from a transport of its own, which has no configuration to lose. The second
-// result is the HTTP/2 side of the transport, for the tests.
-func plainTransport(def http.RoundTripper) (http.RoundTripper, *http2.Transport) {
-	t, ok := def.(*http.Transport)
-	if !ok {
-		return nil, nil
-	}
-	// The same steps as the library's (cloud.google.com/go/auth v0.24.4,
-	// httptransport.defaultBaseTransport): a larger idle pool, HTTP/2
-	// configured by golang.org/x/net/http2, and a health check that drops a
-	// connection gone quiet.
-	t = t.Clone()
-	t.MaxIdleConnsPerHost = 100
-	h2, err := http2.ConfigureTransports(t)
-	if err == nil {
-		h2.ReadIdleTimeout = 31 * time.Second
-	}
-	return t, h2
 }
 
 const (
