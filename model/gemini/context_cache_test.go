@@ -33,6 +33,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
@@ -673,8 +674,8 @@ func TestGenerateContent_ContextCacheRequestShape(t *testing.T) {
 		t.Errorf("CreateHTTPOptions header on the create call = %q, want %q", got, "yes")
 	}
 	// genai appends its own identifier after ADK's, as on model calls.
-	if got := headers.Get("x-goog-api-client"); !strings.HasPrefix(got, m.versionHeaderValue) {
-		t.Errorf("x-goog-api-client on the create call = %q, want it to start with ADK's %q", got, m.versionHeaderValue)
+	if got := headers.Get("x-goog-api-client"); !strings.HasPrefix(got, m.trackingHeader(nil)) {
+		t.Errorf("x-goog-api-client on the create call = %q, want it to start with ADK's %q", got, m.trackingHeader(nil))
 	}
 
 	sent := api.generates[0]
@@ -867,8 +868,8 @@ func TestGenerateContent_ContextCacheConsumerStops(t *testing.T) {
 		t.Errorf("API calls mismatch (-want +got):\n%s", diff)
 	}
 	if len(api.deleteHeaders) == 1 {
-		if got := api.deleteHeaders[0].Get("x-goog-api-client"); !strings.HasPrefix(got, m.versionHeaderValue) {
-			t.Errorf("x-goog-api-client on the delete call = %q, want it to start with ADK's %q", got, m.versionHeaderValue)
+		if got := api.deleteHeaders[0].Get("x-goog-api-client"); !strings.HasPrefix(got, m.trackingHeader(nil)) {
+			t.Errorf("x-goog-api-client on the delete call = %q, want it to start with ADK's %q", got, m.trackingHeader(nil))
 		}
 	}
 }
@@ -1466,4 +1467,38 @@ func contentTexts(v any) []string {
 		out = append(out, text.String())
 	}
 	return out
+}
+
+// Cache calls follow the same rule as model calls: the hosting runtime is
+// named only when the base URL in effect is a Google API endpoint.
+func TestContextCacheHTTPOptionsRuntimeSuffix(t *testing.T) {
+	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	const google, proxy = "https://generativelanguage.googleapis.com/", "https://proxy.example.com/"
+	plain := version.TrackingHeader("")
+	tagged := strings.Replace(plain, " ", "+k8s ", 1)
+
+	for _, tt := range []struct {
+		name          string
+		clientBaseURL string
+		opts          *genai.HTTPOptions
+		want          string
+	}{
+		{name: "Google client, no options", clientBaseURL: google, want: tagged},
+		{name: "Google client, options without a base URL", clientBaseURL: google, opts: &genai.HTTPOptions{}, want: tagged},
+		{name: "Google client, options with a proxy", clientBaseURL: google, opts: &genai.HTTPOptions{BaseURL: proxy}, want: plain},
+		{name: "proxy client, no options", clientBaseURL: proxy, want: plain},
+		{name: "proxy client, options with Google", clientBaseURL: proxy, opts: &genai.HTTPOptions{BaseURL: google}, want: tagged},
+	} {
+		m := &geminiModel{baseURL: tt.clientBaseURL}
+		c := &contextCache{trackingHeader: m.trackingHeader}
+		headers := c.httpOptions(tt.opts).Headers
+		for _, name := range []string{"x-goog-api-client", "user-agent"} {
+			if got := headers.Get(name); got != tt.want {
+				t.Errorf("%s: %s = %q, want %q", tt.name, name, got, tt.want)
+			}
+		}
+	}
 }

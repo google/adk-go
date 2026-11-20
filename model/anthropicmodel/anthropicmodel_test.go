@@ -4040,3 +4040,75 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 		"ExaAISearch":           true,
 	})
 }
+
+// Claude on Vertex AI names the hosting runtime in its tracking headers only
+// when the request goes to a Google API endpoint.
+func TestNewModel_VertexRuntimeSuffix(t *testing.T) {
+	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("CLOUD_RUN_JOB", "job")
+	const proxy = "https://proxy.example.com"
+
+	tests := []struct {
+		name       string
+		location   string
+		baseURL    string
+		reqOpts    []option.RequestOption
+		wantHost   string
+		wantSuffix bool
+	}{
+		{name: "regional endpoint", location: "us-east5", wantHost: "us-east5-aiplatform.googleapis.com", wantSuffix: true},
+		{name: "global endpoint", location: "global", wantHost: "aiplatform.googleapis.com", wantSuffix: true},
+		{name: "Google base URL", location: "us-east5", baseURL: "https://us-east5-aiplatform.mtls.googleapis.com", wantHost: "us-east5-aiplatform.mtls.googleapis.com", wantSuffix: true},
+		{name: "other base URL", location: "us-east5", baseURL: proxy, wantHost: "proxy.example.com"},
+		{name: "other base URL in the request options", location: "us-east5", reqOpts: []option.RequestOption{option.WithBaseURL(proxy)}, wantHost: "proxy.example.com"},
+		{name: "request options replace a Google base URL", location: "us-east5", baseURL: "https://us-east5-aiplatform.googleapis.com", reqOpts: []option.RequestOption{option.WithBaseURL(proxy)}, wantHost: "proxy.example.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var sent *http.Request
+			m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+				Backend:        anthropicmodel.BackendVertex,
+				Project:        "proj",
+				Location:       tt.location,
+				TokenSource:    staticTokenSource{token: "vertex-token"},
+				BaseURL:        tt.baseURL,
+				RequestOptions: tt.reqOpts,
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					sent = r
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": {"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"id":"msg_v","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":4,"output_tokens":1}}`)),
+						Request:    r,
+					}, nil
+				})},
+			})
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			for _, err := range m.GenerateContent(t.Context(), &model.LLMRequest{Contents: genai.Text("ping")}, false) {
+				if err != nil {
+					t.Fatalf("GenerateContent() error = %v", err)
+				}
+			}
+			if sent == nil {
+				t.Fatal("no request was sent")
+			}
+			if got := sent.URL.Hostname(); got != tt.wantHost {
+				t.Fatalf("request went to %q, want %q", got, tt.wantHost)
+			}
+			for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
+				adk, _, _ := strings.Cut(sent.Header.Get(name), " ")
+				_, suffix, _ := strings.Cut(adk, "+")
+				if !strings.HasPrefix(adk, "google-adk/") {
+					t.Errorf("%s = %q, want it to start with a google-adk label", name, sent.Header.Get(name))
+				}
+				if want := map[bool]string{true: "cloud_run"}[tt.wantSuffix]; suffix != want {
+					t.Errorf("%s = %q, want runtime suffix %q", name, sent.Header.Get(name), want)
+				}
+			}
+		})
+	}
+}

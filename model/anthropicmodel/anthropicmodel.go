@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -236,7 +235,18 @@ func NewModel(ctx context.Context, modelName string, cfg ClientConfig) (model.LL
 			opts = append(opts, option.WithBaseURL(strings.TrimSpace(cfg.BaseURL)))
 		}
 
-		trackingHeader := fmt.Sprintf("google-adk/%s gl-go/%s", version.Version, strings.TrimPrefix(runtime.Version(), "go"))
+		// The SDK's own Vertex endpoints are all hosts under googleapis.com.
+		// A base URL from RequestOptions replaces any other, and only its
+		// presence is known here, so it gets the labels without the hosting
+		// runtime.
+		dest := "https://aiplatform.googleapis.com/"
+		switch {
+		case reqOptsHasBaseURL:
+			dest = ""
+		case cfg.BaseURL != "":
+			dest = strings.TrimSpace(cfg.BaseURL)
+		}
+		trackingHeader := version.TrackingHeader(dest)
 		opts = append(opts,
 			option.WithHeader("x-goog-api-client", trackingHeader),
 			option.WithHeader("user-agent", trackingHeader),

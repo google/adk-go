@@ -657,7 +657,7 @@ func TestModel_NoSideEffects(t *testing.T) {
 }
 
 func TestModel_LiveTrackingHeaders(t *testing.T) {
-	adk := version.TrackingHeader()
+	adk := version.TrackingHeader("")
 	tests := []struct {
 		name          string
 		clientHeaders http.Header
@@ -747,7 +747,7 @@ func TestModel_LiveTrackingHeaders_NilConfig(t *testing.T) {
 	if _, err := llm.(*geminiModel).Client().Live.Connect(t.Context(), "gemini-live-test", &genai.LiveConnectConfig{}); err == nil {
 		t.Fatal("Live.Connect() succeeded against a server that rejects the upgrade")
 	}
-	adk := version.TrackingHeader()
+	adk := version.TrackingHeader("")
 	checkLiveHandshake(t, handshakes, adk, adk)
 }
 
@@ -991,6 +991,128 @@ func TestModel_MaybeAppendUserContent(t *testing.T) {
 			(&geminiModel{}).maybeAppendUserContent(req)
 			if diff := cmp.Diff(tt.want, req.Contents); diff != "" {
 				t.Errorf("maybeAppendUserContent() diff (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// The hosting runtime is reported only when the request goes to a Google API
+// endpoint, which for a Gemini model is decided by the base URL in effect: the
+// one genai resolved for the client, or the one a request sets.
+func TestModel_TrackingHeaders_RuntimeSuffix(t *testing.T) {
+	const proxy = "https://proxy.example.com/"
+	plain := version.TrackingHeader("")
+	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)
+
+	tests := []struct {
+		name string
+		cfg  genai.ClientConfig
+		env  map[string]string
+		// reqBaseURL is the base URL the request itself sets, if any.
+		reqBaseURL string
+		wantHost   string
+		// wantClient and wantRequest are the labels on the client, which the
+		// live handshake sends, and on the generate request.
+		wantClient, wantRequest string
+	}{
+		{
+			name:        "Gemini API default endpoint",
+			cfg:         genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: "fakekey"},
+			wantHost:    "generativelanguage.googleapis.com",
+			wantClient:  tagged,
+			wantRequest: tagged,
+		},
+		{
+			name:        "Vertex AI default endpoint",
+			cfg:         genai.ClientConfig{Backend: genai.BackendVertexAI, Project: "p", Location: "us-central1"},
+			wantHost:    "us-central1-aiplatform.googleapis.com",
+			wantClient:  tagged,
+			wantRequest: tagged,
+		},
+		{
+			name:        "base URL in the config",
+			cfg:         genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: "fakekey", HTTPOptions: genai.HTTPOptions{BaseURL: proxy}},
+			wantHost:    "proxy.example.com",
+			wantClient:  plain,
+			wantRequest: plain,
+		},
+		{
+			name:        "base URL from the environment",
+			cfg:         genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: "fakekey"},
+			env:         map[string]string{"GOOGLE_GEMINI_BASE_URL": proxy},
+			wantHost:    "proxy.example.com",
+			wantClient:  plain,
+			wantRequest: plain,
+		},
+		{
+			name:        "request overrides a Google base URL",
+			cfg:         genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: "fakekey"},
+			reqBaseURL:  proxy,
+			wantHost:    "proxy.example.com",
+			wantClient:  tagged,
+			wantRequest: plain,
+		},
+		{
+			name:        "request overrides with a Google base URL",
+			cfg:         genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: "fakekey", HTTPOptions: genai.HTTPOptions{BaseURL: proxy}},
+			reqBaseURL:  "https://generativelanguage.googleapis.com/",
+			wantHost:    "generativelanguage.googleapis.com",
+			wantClient:  plain,
+			wantRequest: tagged,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "GOOGLE_API_KEY", "GEMINI_API_KEY"} {
+				t.Setenv(name, "")
+			}
+			t.Setenv("K_SERVICE", "svc")
+			for name, value := range tt.env {
+				t.Setenv(name, value)
+			}
+
+			var sent *http.Request
+			cfg := tt.cfg
+			cfg.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				sent = r
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`)),
+					Request:    r,
+				}, nil
+			})}
+			llm, err := NewModel(t.Context(), "gemini-2.0-flash", &cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			clientHeaders := llm.(*geminiModel).Client().ClientConfig().HTTPOptions.Headers
+			for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
+				if got := clientHeaders.Values(name); len(got) != 1 || got[0] != tt.wantClient {
+					t.Errorf("client %s = %q, want [%q]", name, got, tt.wantClient)
+				}
+			}
+
+			req := &model.LLMRequest{Contents: genai.Text("ping")}
+			if tt.reqBaseURL != "" {
+				req.Config = &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{BaseURL: tt.reqBaseURL}}
+			}
+			for _, err := range llm.GenerateContent(t.Context(), req, false) {
+				if err != nil {
+					t.Fatalf("GenerateContent() error = %v", err)
+				}
+			}
+			if sent == nil {
+				t.Fatal("no request was sent")
+			}
+			if got := sent.URL.Hostname(); got != tt.wantHost {
+				t.Fatalf("request went to %q, want %q", got, tt.wantHost)
+			}
+			for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
+				if got := sent.Header.Get(name); !strings.HasPrefix(got, tt.wantRequest+" ") {
+					t.Errorf("request %s = %q, want it to start with %q", name, got, tt.wantRequest)
+				}
 			}
 		})
 	}

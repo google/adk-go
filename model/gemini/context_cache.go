@@ -96,8 +96,9 @@ type contextCache struct {
 	// model is the name the request is sent to, which explicit caches are
 	// specific to.
 	model string
-	// trackingHeader identifies ADK on the cache calls, as on the model calls.
-	trackingHeader string
+	// trackingHeader returns the labels that identify ADK on a cache call
+	// sent with the given options, as on the model calls.
+	trackingHeader func(*genai.HTTPOptions) string
 }
 
 // cachePlan is what prepare decided for one request.
@@ -248,8 +249,9 @@ func (c *contextCache) httpOptions(base *genai.HTTPOptions) *genai.HTTPOptions {
 	if out.Headers == nil {
 		out.Headers = http.Header{}
 	}
-	out.Headers.Set("x-goog-api-client", c.trackingHeader)
-	out.Headers.Set("user-agent", c.trackingHeader)
+	value := c.trackingHeader(out)
+	out.Headers.Set("x-goog-api-client", value)
+	out.Headers.Set("user-agent", value)
 	return out
 }
 
