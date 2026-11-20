@@ -705,7 +705,6 @@ func runNode(
 			completion.inventory = inventoryRecorder.snapshot()
 			return
 		}
-		writes.forwardUp(ev)
 		// Block on non-partial events until the consumer has persisted
 		// them (see eventItem.processed). Partial events are
 		// fire-and-forget, so send a deep copy that shares no mutable
@@ -719,6 +718,7 @@ func runNode(
 				processed = make(chan struct{})
 			}
 		}
+		writes.forwardUp(sendEv)
 		select {
 		case out <- eventItem{nodeName: name, ev: sendEv, processed: processed, pending: pending}:
 		case <-ctx.Done():

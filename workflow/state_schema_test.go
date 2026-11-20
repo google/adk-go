@@ -1238,3 +1238,43 @@ func TestNew_SharedSchemaBuiltConcurrently(t *testing.T) {
 		}
 	}
 }
+
+func TestNewWorkflowNodeWithStateSchema_PartialEventBypassesOuterSchema(t *testing.T) {
+	innerSchema, err := (&jsonschema.Schema{
+		Type:       "object",
+		Properties: map[string]*jsonschema.Schema{"inner_key": {Type: "integer"}},
+	}).Resolve(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outerSchema, err := (&jsonschema.Schema{
+		Type:       "object",
+		Properties: map[string]*jsonschema.Schema{"outer_key": {Type: "integer"}},
+	}).Resolve(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	emitter := workflow.NewEmittingFunctionNode("emitter", func(ctx agent.Context, _ any, emit func(*session.Event) error) (string, error) {
+		partial := session.NewEvent(ctx, ctx.InvocationID())
+		partial.Partial = true
+		partial.Actions.StateDelta = map[string]any{"inner_key": 7}
+		if err := emit(partial); err != nil {
+			return "", err
+		}
+		return "done", nil
+	}, workflow.NodeConfig{})
+
+	innerNode, err := workflow.NewWorkflowNodeWithStateSchema("inner", workflow.Chain(workflow.Start, emitter), innerSchema)
+	if err != nil {
+		t.Fatalf("NewWorkflowNodeWithStateSchema() error = %v", err)
+	}
+	outer, err := workflow.New("outer", workflow.Chain(workflow.Start, innerNode), workflow.WithStateSchema(outerSchema))
+	if err != nil {
+		t.Fatalf("workflow.New() error = %v", err)
+	}
+
+	if _, _, err := runStateWorkflow(t, outer, nil); err != nil {
+		t.Fatalf("outer workflow Run() error = %v, want nil (partial event already validated by inner schema)", err)
+	}
+}
