@@ -63,6 +63,11 @@ type ClientConfig struct {
 	// tool instead of a native response format. Enable it for endpoints that
 	// support function calling but cannot use native structured output, either
 	// alone or together with tools. The zero value keeps native output.
+	// Unlike API-enforced strict structured output, this tool is sent without
+	// strict mode on either OpenAI API; set_model_response validates returned
+	// arguments after generation, and an invalid response can require another
+	// model call. Wrappers must forward UseOutputSchemaTool() to preserve this
+	// preference; otherwise the agent may fall back to native response_format.
 	// Task-mode agents continue to use finish_task. Direct GenerateContent
 	// calls and schemas explicitly set in GenerateContentConfig are unchanged.
 	UseOutputSchemaTool bool
