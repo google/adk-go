@@ -355,7 +355,6 @@ type liveSessionImpl struct {
 	closeOnce    sync.Once
 	audioMgr     *AudioCacheManager
 	waitForYield bool
-	gate         *liveEventGate
 	mu           sync.Mutex
 	activeTools  map[string][]activeTask
 	// finalErr buffers one terminal error for recvIter to deliver after
@@ -464,9 +463,6 @@ func (s *liveSessionImpl) recvIter() iter.Seq2[*session.Event, error] {
 					res.taken <- ok
 				}
 				if !ok {
-					if s.gate != nil && res.event != nil {
-						s.gate.release(res.event, false)
-					}
 					return
 				}
 			case <-s.done:
@@ -502,40 +498,16 @@ func (s *liveSessionImpl) pushLiveEvent(ev *session.Event, waitBeforeCalls bool)
 	if waitBeforeCalls && s.waitForYield && ev != nil && !ev.LLMResponse.Partial {
 		taken = make(chan bool, 1)
 	}
-	var gateCh chan bool
-	if waitBeforeCalls && s.gate != nil {
-		gateCh = s.gate.hold(ev)
-	}
 	select {
 	case s.outputCh <- eventOrError{event: ev, taken: taken}:
 	case <-s.done:
-		if gateCh != nil {
-			s.gate.release(ev, false)
-		}
 		return false
 	}
 	if taken != nil {
 		select {
 		case ok := <-taken:
-			if !ok {
-				if gateCh != nil {
-					s.gate.release(ev, false)
-				}
-				return false
-			}
-		case <-s.done:
-			if gateCh != nil {
-				s.gate.release(ev, false)
-			}
-			return false
-		}
-	}
-	if gateCh != nil {
-		select {
-		case ok := <-gateCh:
 			return ok
 		case <-s.done:
-			s.gate.release(ev, false)
 			return false
 		}
 	}
@@ -690,7 +662,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 
 	sess := newLiveSessionImpl()
 	sess.waitForYield = opts.waitForYield
-	sess.gate = liveEventGateFrom(ctx)
 
 	go func() {
 		defer func() {
@@ -1016,7 +987,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						}
 						ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(ev.LLMResponse.Content, tools)
 					}
-					pushed := false
+					var pushed bool
 					if len(fnCalls) > 0 {
 						pushed = sess.pushCallEvent(ev)
 					} else {
