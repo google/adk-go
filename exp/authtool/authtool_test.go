@@ -353,6 +353,36 @@ func TestNew_ResponseForAuthRequired(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("nested map is detached from caller and across concurrent calls", func(t *testing.T) {
+		nested := map[string]any{"code": "AUTH_REQUIRED"}
+		tl, err := authtool.New(authtool.Config{
+			Config:                  functiontool.Config{Name: "f"},
+			AuthConfig:              toolNoRawCredential(),
+			ResponseForAuthRequired: map[string]any{"error": nested},
+		}, func(agent.Context, noArgs, *toolauth.Credential, error) (string, error) { return "ran", nil })
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		nested["code"] = "MUTATED_BY_CALLER"
+
+		var wg sync.WaitGroup
+		for i := range 8 {
+			wg.Go(func() {
+				got, err := toolRun(t, tl, newToolContext(t, nil), map[string]any{})
+				if err != nil {
+					t.Errorf("Run() error = %v", err)
+					return
+				}
+				inner, _ := got["error"].(map[string]any)
+				if inner["code"] != "AUTH_REQUIRED" {
+					t.Errorf("Run() error.code = %v, want AUTH_REQUIRED", inner["code"])
+				}
+				inner["code"] = fmt.Sprintf("mutated-%d", i)
+			})
+		}
+		wg.Wait()
+	})
 }
 
 // Test 7. Fails if the auth-required answer has to pass through TResults.

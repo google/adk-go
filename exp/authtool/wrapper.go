@@ -17,13 +17,13 @@ package authtool
 import (
 	"context"
 	"fmt"
-	"maps"
 	"reflect"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/adkcontext"
+	"google.golang.org/adk/v2/internal/sessionutils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -91,7 +91,7 @@ func authRequiredResult(response any) (map[string]any, error) {
 		}
 	case map[string]any:
 		if len(r) > 0 {
-			return r, nil
+			return sessionutils.CloneStateMap(r), nil
 		}
 	default:
 		return nil, fmt.Errorf("authtool: ResponseForAuthRequired must be a string or a map[string]any, got %T", response)
@@ -161,7 +161,7 @@ func (t *authTool) authorize(ctx agent.Context) (callCtx agent.Context, early ma
 		if err := t.manager.RequestCredential(ctx); err != nil {
 			return nil, nil, err
 		}
-		return nil, maps.Clone(t.authRequired), nil
+		return nil, sessionutils.CloneStateMap(t.authRequired), nil
 	}
 	return withCallAuth(ctx, &callAuth{cred: cred, err: authErr}), nil, nil
 }
