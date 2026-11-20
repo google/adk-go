@@ -30,6 +30,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,6 +59,9 @@ type Server struct {
 	// Roots trusts the server's certificate.
 	Roots      *x509.CertPool
 	clientCert tls.Certificate
+
+	mu      sync.Mutex
+	headers []http.Header
 }
 
 // NewServer starts a Server that is closed when the test ends.
@@ -109,6 +113,9 @@ func NewServer(t testing.TB) *Server {
 		if len(r.TLS.PeerCertificates) > 0 {
 			req.Leaf = Fingerprint(r.TLS.PeerCertificates[0].Raw)
 		}
+		s.mu.Lock()
+		s.headers = append(s.headers, r.Header.Clone())
+		s.mu.Unlock()
 		s.Requests <- req
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -145,6 +152,13 @@ func (s *Server) Configure(tr *http.Transport) {
 		return d.DialContext(ctx, network, addr)
 	}
 	tr.TLSClientConfig.RootCAs = s.Roots
+}
+
+// Headers returns the headers of every request served so far, in order.
+func (s *Server) Headers() []http.Header {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]http.Header(nil), s.headers...)
 }
 
 // Leaf returns the Fingerprint of the certificate Provider presents.

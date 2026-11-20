@@ -119,6 +119,25 @@ func TestNonGoogleHostGetsNoCertificate(t *testing.T) {
 	}
 }
 
+// From NewTransportAllHosts, a host that is not a Google API host gets the
+// certificate too, under its own name.
+func TestAllHostsHandshakePresentsCertificateToOtherHost(t *testing.T) {
+	srv := googlemtlstest.NewServer(t)
+	t.Cleanup(googlemtls.SetTestHooks(func() (func(*tls.CertificateRequestInfo) (*tls.Certificate, error), error) {
+		return srv.Provider, nil
+	}, func(tr *http.Transport) {
+		srv.Configure(tr)
+		// The server's certificate names only Google API hosts.
+		tr.TLSClientConfig.ServerName = "proxy.googleapis.com"
+	}))
+	if _, err := roundTrip(t, googlemtls.NewTransportAllHosts(unusedTransport{t}), "https://proxy.example.test/v1"); err != nil {
+		t.Fatalf("RoundTrip error = %v", err)
+	}
+	if got := <-srv.Requests; got.PeerCerts != 1 || got.Leaf != srv.Leaf() || got.Host != "proxy.example.test" {
+		t.Errorf("server saw %+v, want Host proxy.example.test and the client certificate", got)
+	}
+}
+
 // The default source is the environment's. With the rule off the transport
 // sends Google API requests to base. With it on through the workload config at
 // gcloud's default path, which Isolate's child home holds, it presents that

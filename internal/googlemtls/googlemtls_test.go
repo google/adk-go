@@ -288,3 +288,53 @@ func TestNewTransportNilBaseUsesCurrentDefaultTransport(t *testing.T) {
 		t.Errorf("http.DefaultTransport got %v, want the request", rec.urls)
 	}
 }
+
+func TestAllHostsRoute(t *testing.T) {
+	t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "")
+	p := func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return nil, nil }
+	for _, tc := range []struct {
+		name     string
+		url      string
+		provider provider
+		wantMTLS bool
+		wantHost string
+	}{
+		{name: "other https host with a certificate", url: "https://proxy.example.test/v1", provider: p, wantMTLS: true, wantHost: "proxy.example.test"},
+		{name: "Google host with a certificate", url: "https://aiplatform.googleapis.com/v1", provider: p, wantMTLS: true, wantHost: "aiplatform.mtls.googleapis.com"},
+		{name: "other https host without a certificate", url: "https://proxy.example.test/v1"},
+		{name: "plain http host with a certificate", url: "http://proxy.example.test/v1", provider: p},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plain, mtls := &recordingTransport{}, &recordingTransport{}
+			src, _ := countingSource(tc.provider, nil)
+			tr := &transport{base: plain, source: src, allHosts: true}
+			// A transport built from a provider is cached, so it can be
+			// replaced by one that records what reaches it.
+			tr.mtls = &http.Transport{}
+			tr.mtls.RegisterProtocol("https", mtls)
+			if _, err := get(t, tr, tc.url); err != nil {
+				t.Fatalf("RoundTrip error = %v", err)
+			}
+			if !tc.wantMTLS {
+				if len(plain.urls) != 1 || plain.urls[0] != tc.url || len(mtls.urls) != 0 {
+					t.Errorf("plain got %v, mTLS got %v; want %s on the plain transport only", plain.urls, mtls.urls, tc.url)
+				}
+				return
+			}
+			if len(plain.urls) != 0 || len(mtls.urls) != 1 {
+				t.Fatalf("plain got %v, mTLS got %v; want one request on the mTLS transport", plain.urls, mtls.urls)
+			}
+			if u, err := url.Parse(mtls.urls[0]); err != nil || u.Host != tc.wantHost {
+				t.Errorf("mTLS transport got %s, want host %s", mtls.urls[0], tc.wantHost)
+			}
+		})
+	}
+}
+
+func TestAllHostsSourceErrorFailsOtherHost(t *testing.T) {
+	src, _ := countingSource(nil, errors.New("bad cert config"))
+	tr := &transport{base: failingTransport{t}, source: src, allHosts: true}
+	if _, err := get(t, tr, "https://proxy.example.test/v1"); err == nil || !strings.Contains(err.Error(), "bad cert config") {
+		t.Errorf("RoundTrip error = %v, want the source error", err)
+	}
+}
