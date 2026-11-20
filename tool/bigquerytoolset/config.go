@@ -38,9 +38,13 @@ type Config struct {
 	// presents it, and GOOGLE_API_USE_MTLS_ENDPOINT's default, auto, selects
 	// BigQuery's mTLS endpoint. The client is then built by the newer Google
 	// auth library, which does not apply the deprecated
-	// [option.ImpersonateCredentials]. An [option.WithHTTPClient] is the
-	// caller's to configure: the toolset adds neither the certificate nor
-	// that endpoint to it. The same holds outside the googleapis.com universe.
+	// [option.ImpersonateCredentials]: the calls then run as the base
+	// credentials, with no error. Pass [option.WithTokenSource] with a token
+	// source from [google.golang.org/api/impersonate.CredentialsTokenSource]
+	// instead, which is applied with the certificate on and off. An
+	// [option.WithHTTPClient] is the caller's to configure: the toolset adds
+	// neither the certificate nor that endpoint to it. The same holds outside
+	// the googleapis.com universe.
 	ClientOptions []option.ClientOption
 
 	// ExternalAccessTokenKey, when set, is the session state key holding the

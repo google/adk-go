@@ -20,11 +20,15 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
+	aiplatform "cloud.google.com/go/aiplatform/apiv1beta1"
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
+	"golang.org/x/oauth2"
+	"google.golang.org/api/impersonate"
 	"google.golang.org/api/option"
 
 	"google.golang.org/adk/v2/internal/clientcert/clientcerttest"
@@ -235,6 +239,64 @@ func TestNewVertexRAGClientFollowsTheCertificateRule(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestNewVertexRAGClientImpersonation runs what NewService says about
+// impersonation. The proxy refuses every request, so the host a call asks for
+// shows whose token it wanted: the IAM credentials service for the
+// impersonated one, Vertex AI itself for the base one.
+func TestNewVertexRAGClientImpersonation(t *testing.T) {
+	if !clientcerttest.Isolate(t) {
+		return
+	}
+	hosts := clientcerttest.RecordingProxy(t)
+	workload, _ := clientcerttest.Workload(t)
+	const (
+		iam    = "iamcredentials.googleapis.com:443"
+		plain  = "us-central1-aiplatform.googleapis.com:443"
+		mtls   = "us-central1-aiplatform.mtls.googleapis.com:443"
+		target = "target@example-project.iam.gserviceaccount.com"
+	)
+	scopes := aiplatform.DefaultAuthScopes()
+	base := option.WithTokenSource(oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "base"}))
+	source, err := impersonate.CredentialsTokenSource(t.Context(), impersonate.CredentialsConfig{TargetPrincipal: target, Scopes: scopes}, base)
+	if err != nil {
+		t.Fatalf("impersonate.CredentialsTokenSource() error = %v", err)
+	}
+	deprecated := []option.ClientOption{base, option.WithScopes(scopes...), option.ImpersonateCredentials(target)}
+	replacement := []option.ClientOption{option.WithTokenSource(source)}
+
+	for _, tc := range []struct {
+		name    string
+		useCert string // GOOGLE_API_USE_CLIENT_CERTIFICATE
+		opts    []option.ClientOption
+		// The host the upload, list and retrieve clients ask for, in that
+		// order.
+		want []string
+	}{
+		// Only the upload client ever applied the deprecated option.
+		{name: "certificate off, option.ImpersonateCredentials", useCert: "false", opts: deprecated, want: []string{iam, plain, plain}},
+		{name: "certificate on, option.ImpersonateCredentials is not applied", useCert: clientcerttest.Unset, opts: deprecated, want: []string{mtls, mtls, mtls}},
+		{name: "certificate off, a token source from the impersonate package", useCert: "false", opts: replacement, want: []string{iam, iam, iam}},
+		{name: "certificate on, a token source from the impersonate package", useCert: clientcerttest.Unset, opts: replacement, want: []string{iam, iam, iam}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientcerttest.Setenv(t, "GOOGLE_API_USE_CLIENT_CERTIFICATE", tc.useCert)
+			t.Setenv("GOOGLE_API_CERTIFICATE_CONFIG", workload)
+
+			c, err := newVertexRAGClient(t.Context(), "us-central1", tc.opts...)
+			if err != nil {
+				t.Fatalf("newVertexRAGClient() error = %v", err)
+			}
+			before := len(hosts())
+			if upload, list, retrieve := callAll(t, c); upload == nil || list == nil || retrieve == nil {
+				t.Fatalf("calls through the refusing proxy = %v, %v, %v, want three errors", upload, list, retrieve)
+			}
+			if got := hosts()[before:]; !slices.Equal(got, tc.want) {
+				t.Errorf("the calls asked for %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // TestNewVertexRAGClientInAnotherUniverse pins that the regional host does not
