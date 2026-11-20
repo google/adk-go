@@ -101,7 +101,7 @@ func TestDocGo_ParityBulletsReferenceExistingTests(t *testing.T) {
 	}
 	flush()
 
-	const wantBulletCount = 24
+	const wantBulletCount = 26
 	if len(bullets) != wantBulletCount {
 		t.Fatalf("parsed %d behavioral-differences bullets in doc.go, want %d", len(bullets), wantBulletCount)
 	}
