@@ -234,7 +234,7 @@ func (m *geminiModel) modelName(req *model.LLMRequest) string {
 // candidate. The genai SDK resumes a generation the model paused with
 // CONTINUATION and returns the responses of every request merged into one.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-	config := configPreservingEmptyTextThoughtSignatures(req.Config, m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider)
+	config := m.requestConfig(req)
 	resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), req.Contents, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call model: %w", err)
@@ -252,7 +252,7 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 	aggregator := llminternal.NewStreamingResponseAggregator()
 
 	return func(yield func(*model.LLMResponse, error) bool) {
-		config := configPreservingEmptyTextThoughtSignatures(req.Config, m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider)
+		config := m.requestConfig(req)
 		for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), req.Contents, config) {
 			if err != nil {
 				yield(nil, err)
@@ -268,6 +268,18 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 			yield(closeResult, nil)
 		}
 	}
+}
+
+// requestConfig returns the copy of req.Config sent to the backend. The Gemini
+// Developer API does not support labels, so the copy sent there has none, while
+// req.Config keeps them for callbacks and plugins that read the request.
+func (m *geminiModel) requestConfig(req *model.LLMRequest) *genai.GenerateContentConfig {
+	clientConfig := m.client.ClientConfig()
+	config := configPreservingEmptyTextThoughtSignatures(req.Config, clientConfig.HTTPOptions.ExtrasRequestProvider)
+	if clientConfig.Backend == genai.BackendGeminiAPI {
+		config.Labels = nil
+	}
+	return config
 }
 
 // configPreservingEmptyTextThoughtSignatures works around googleapis/go-genai#931.
@@ -395,4 +407,20 @@ func (m *geminiModel) Client() *genai.Client {
 	return m.client
 }
 
-var _ googlellm.GoogleLLM = &geminiModel{}
+// Capabilities returns the resolved capabilities of the Gemini model.
+//
+// OutputSchemaAndTools is true for a Gemini model name whose client uses the
+// Vertex AI backend. The backend comes from the model's own client, not from
+// the GOOGLE_GENAI_USE_VERTEXAI or GOOGLE_GENAI_USE_ENTERPRISE environment
+// variables that adk-python's Gemini.capabilities reads, so a client
+// configured explicitly for one backend is never reported as the other.
+func (m *geminiModel) Capabilities() model.Capabilities {
+	return model.Capabilities{
+		OutputSchemaAndTools: googlellm.GeminiOutputSchemaAndTools(m),
+	}
+}
+
+var (
+	_ googlellm.GoogleLLM        = &geminiModel{}
+	_ model.CapabilitiesProvider = &geminiModel{}
+)

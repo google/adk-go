@@ -15,6 +15,7 @@
 package openaimodel
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,9 +25,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/openai/openai-go/v3/option"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/openaimodel/internal/responses"
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
@@ -269,6 +272,101 @@ func TestNewModel_UsesTheConfiguredClient(t *testing.T) {
 	}
 }
 
+// TestNewModel_DeclaresNoOutputSchemaWithTools checks, on both APIs, that an
+// OpenAI model declares it cannot take an output schema next to tools, as
+// adk-python's OpenAILlm and OpenAIResponsesLlm do through the base fallback
+// for a non-Gemini model (models/base_llm.py:92-124).
+func TestNewModel_DeclaresNoOutputSchemaWithTools(t *testing.T) {
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gpt-4o", &ClientConfig{APIKey: "test", API: api})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			cp, ok := llm.(model.CapabilitiesProvider)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement model.CapabilitiesProvider", llm)
+			}
+			if cp.Capabilities().OutputSchemaAndTools {
+				t.Error("Capabilities().OutputSchemaAndTools = true, want false")
+			}
+		})
+	}
+}
+
+// TestOpenAIAndAnthropic_IgnoreADKAgentNameLabelOnly checks, on both APIs, that
+// the adk_agent_name label the flow adds to every request is accepted and never
+// sent, while a label the caller set, or an empty labels map, is still refused
+// before any request leaves.
+func TestOpenAIAndAnthropic_IgnoreADKAgentNameLabelOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		labels  map[string]string
+		wantErr error
+	}{
+		{name: "adk_label_only", labels: map[string]string{"adk_agent_name": "my_agent"}},
+		{name: "adk_and_user_label", labels: map[string]string{"adk_agent_name": "my_agent", "env": "prod"}, wantErr: ErrLabelsNotSupported},
+		{name: "empty_map", labels: map[string]string{}, wantErr: ErrLabelsNotSupported},
+	}
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("%s/%s", api, tt.name), func(t *testing.T) {
+				var requestBody []byte
+				server := newLoopbackServer(t, func(w http.ResponseWriter, r *http.Request) {
+					var err error
+					if requestBody, err = io.ReadAll(r.Body); err != nil {
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprint(w, completedBodies[api])
+				})
+				llm, err := NewModel(t.Context(), "gpt-4o-mini", &ClientConfig{
+					APIKey:     "test",
+					BaseURL:    server.URL + "/v1",
+					HTTPClient: server.Client(),
+					API:        api,
+				})
+				if err != nil {
+					t.Fatalf("NewModel() err = %v", err)
+				}
+				req := &model.LLMRequest{
+					Contents: []*genai.Content{genai.NewContentFromText("hi", genai.RoleUser)},
+					Config:   &genai.GenerateContentConfig{Labels: tt.labels},
+				}
+				var gotErr error
+				for _, err := range llm.GenerateContent(t.Context(), req, false) {
+					if err != nil {
+						gotErr = err
+					}
+				}
+				if tt.wantErr != nil {
+					if !errors.Is(gotErr, tt.wantErr) {
+						t.Errorf("GenerateContent() err = %v, want %v", gotErr, tt.wantErr)
+					}
+					if requestBody != nil {
+						t.Error("a request reached the server, want it refused before sending")
+					}
+					return
+				}
+				if gotErr != nil {
+					t.Fatalf("GenerateContent() err = %v", gotErr)
+				}
+				if requestBody == nil {
+					t.Fatal("no request reached the server")
+				}
+				var payload map[string]any
+				if err := json.Unmarshal(requestBody, &payload); err != nil {
+					t.Fatalf("json.Unmarshal(request body) err = %v", err)
+				}
+				if v, ok := payload["labels"]; ok {
+					t.Errorf("request body carries labels %v, want none", v)
+				}
+			})
+		}
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
@@ -289,4 +387,60 @@ func redact(v string) string {
 		return "empty"
 	}
 	return fmt.Sprintf("<%d-byte value>", len(v))
+}
+
+// TestRunHTTPOptions_KeepsTimeoutAndHeaders checks, on both APIs, that the
+// agent flow is given only the fields of a run's HTTP options these models
+// accept, so that RetryOptions or ExtraBody set for every agent of a run do
+// not make an OpenAI request fail, as adk-python's OpenAI models ignore HTTP
+// options.
+func TestRunHTTPOptions_KeepsTimeoutAndHeaders(t *testing.T) {
+	opts := &genai.HTTPOptions{
+		Timeout:      genai.Ptr(2 * time.Second),
+		Headers:      http.Header{"X-Run": {"run"}},
+		BaseURL:      "https://proxy.example",
+		RetryOptions: &genai.HTTPRetryOptions{Attempts: genai.Ptr[int32](3)},
+		ExtraBody:    map[string]any{"k": "v"},
+	}
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gpt-4o", &ClientConfig{APIKey: "test", API: api})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			filter, ok := llm.(llminternal.RunHTTPOptionsFilter)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement llminternal.RunHTTPOptionsFilter", llm)
+			}
+			want := &genai.HTTPOptions{Timeout: genai.Ptr(2 * time.Second), Headers: http.Header{"X-Run": {"run"}}}
+			if diff := cmp.Diff(want, filter.RunHTTPOptions(opts)); diff != "" {
+				t.Errorf("RunHTTPOptions() mismatch (-want +got):\n%s", diff)
+			}
+			if got := filter.RunHTTPOptions(&genai.HTTPOptions{ExtraBody: map[string]any{"k": "v"}}); got != nil {
+				t.Errorf("RunHTTPOptions(ExtraBody only) = %+v, want nil", got)
+			}
+		})
+	}
+}
+
+// TestRunLabels_DropsAll checks, on both APIs, that the agent flow is given
+// none of a run's labels for an OpenAI agent, so labels set for every agent of
+// a run do not make an OpenAI request fail, as adk-python's OpenAI models
+// ignore labels.
+func TestRunLabels_DropsAll(t *testing.T) {
+	for _, api := range []API{APIResponses, APIChatCompletions} {
+		t.Run(string(api), func(t *testing.T) {
+			llm, err := NewModel(t.Context(), "gpt-4o", &ClientConfig{APIKey: "test", API: api})
+			if err != nil {
+				t.Fatalf("NewModel() err = %v", err)
+			}
+			filter, ok := llm.(llminternal.RunLabelsFilter)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement llminternal.RunLabelsFilter", llm)
+			}
+			if got := filter.RunLabels(map[string]string{"cost_center": "x"}); got != nil {
+				t.Errorf("RunLabels() = %v, want nil", got)
+			}
+		})
+	}
 }

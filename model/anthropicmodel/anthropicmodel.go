@@ -415,6 +415,17 @@ func (m *anthropicModel) Name() string {
 	return m.name
 }
 
+// Capabilities returns the resolved capabilities of the Anthropic model.
+//
+// OutputSchemaAndTools is false, so an agent that has both an output schema
+// and tools gets the set_model_response tool instead of a native response
+// schema. An agent without tools still sends its output schema natively.
+func (m *anthropicModel) Capabilities() model.Capabilities {
+	return model.Capabilities{}
+}
+
+var _ model.CapabilitiesProvider = (*anthropicModel)(nil)
+
 func (m *anthropicModel) logger() *slog.Logger {
 	if m.cfgLogger != nil {
 		return m.cfgLogger

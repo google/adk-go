@@ -767,6 +767,8 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
+			HTTPOptions:   cfg.HTTPOptions,
+			Labels:        cfg.Labels,
 		})
 		ctx = r.withPluginManager(ctx)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())

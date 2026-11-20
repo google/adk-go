@@ -26,7 +26,29 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/version"
 )
+
+// RunHTTPOptions returns the fields of a run's HTTP options this connector
+// accepts, Timeout and Headers, or nil when opts sets neither. The agent flow
+// merges only these into a request (see agent.RunConfig.HTTPOptions), so an
+// option set for every agent of a run, such as RetryOptions, does not make
+// this connector refuse the request.
+func (m *anthropicModel) RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions {
+	if opts == nil || (opts.Timeout == nil && opts.Headers == nil) {
+		return nil
+	}
+	return &genai.HTTPOptions{Timeout: opts.Timeout, Headers: opts.Headers}
+}
+
+// RunLabels returns no labels, because Anthropic has no request labels. The
+// agent flow therefore merges none of a run's labels into a request (see
+// agent.RunConfig.Labels), so labels set for every agent of a run do not make
+// this connector refuse the request.
+func (m *anthropicModel) RunLabels(map[string]string) map[string]string {
+	return nil
+}
 
 // DefaultMaxTokens is the default max_tokens value sent to Claude when neither
 // [genai.GenerateContentConfig.MaxOutputTokens] nor [ClientConfig.MaxTokens] is set.
@@ -328,8 +350,12 @@ func validateGenerateContentConfig(cfg *genai.GenerateContentConfig, reqTools ma
 	if cfg.CachedContent != "" {
 		return fmt.Errorf("%w: CachedContent is not supported; use ClientConfig.PromptCache instead", ErrInvalidConfig)
 	}
-	if len(cfg.Labels) > 0 {
-		return fmt.Errorf("%w: Labels is not supported", ErrInvalidConfig)
+	// The label the agent flow adds to every request is dropped; Anthropic has
+	// no request labels to send it in.
+	for key := range cfg.Labels {
+		if key != version.AgentNameLabel {
+			return fmt.Errorf("%w: Labels is not supported", ErrInvalidConfig)
+		}
 	}
 	if cfg.MediaResolution != "" {
 		return fmt.Errorf("%w: MediaResolution is not supported", ErrInvalidConfig)

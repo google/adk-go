@@ -44,6 +44,26 @@ type Model struct {
 // one itself.
 func (m *Model) Name() string { return m.name }
 
+// Capabilities returns the resolved capabilities of the OpenAI Chat Completions model.
+//
+// OutputSchemaAndTools is false, so an agent that has both an output schema
+// and tools gets the set_model_response tool instead of a native response
+// schema. An agent without tools still sends its output schema natively.
+func (m *Model) Capabilities() model.Capabilities { return model.Capabilities{} }
+
+var _ model.CapabilitiesProvider = (*Model)(nil)
+
+// RunHTTPOptions returns the fields of a run's HTTP options the Chat Completions
+// endpoint accepts; see shared.RunHTTPOptions.
+func (m *Model) RunHTTPOptions(opts *genai.HTTPOptions) *genai.HTTPOptions {
+	return shared.RunHTTPOptions(opts)
+}
+
+// RunLabels returns no labels, because the Chat Completions API has no request
+// labels. The agent flow therefore merges none of a run's labels into a
+// request (see agent.RunConfig.Labels).
+func (m *Model) RunLabels(map[string]string) map[string]string { return nil }
+
 // GenerateContent converts a generic LLMRequest into a Chat Completions request
 // and calls the API, streaming or not.
 func (m *Model) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {

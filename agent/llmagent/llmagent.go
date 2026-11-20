@@ -16,6 +16,31 @@
 // LLM agents use large language models to perform tasks based on instructions, user input,
 // deciding on actions to take, and executing actions using available tools or
 // delegating to sub agents.
+//
+// # Model requests and responses
+//
+// Before each model call, the agent adds the label "adk_agent_name", set to
+// its own name, to the request's GenerateContentConfig.Labels, so that billing
+// reports can be split per agent. It keeps a label already present under that
+// key, for example one set through [agent.RunConfig.Labels] or by a
+// BeforeModelCallback. The connector in model/gemini removes every label from
+// what it sends to the Gemini Developer API, which does not accept labels; the
+// connectors in model/anthropicmodel and model/openaimodel drop this label.
+//
+// A completed model response that finished with [genai.FinishReasonStop] but
+// holds no part a caller can act on (no parts at all, only thought parts, or
+// only text that is whitespace) becomes an error event, which ends the agent's
+// turn. Its ErrorCode is "MODEL_RETURNED_NO_CONTENT", and its ErrorMessage, if
+// the response had none, says whether the response had no parts or only
+// thought or whitespace parts. The check runs after the AfterModelCallbacks,
+// on the response a callback put in place of the model's, and leaves a
+// response that already has an ErrorCode as it is. Under
+// [agent.StreamingModeSSE], a response without parts is exempt, because one
+// ends every stream.
+//
+// A thought-only response that did not finish with STOP is not an error: the
+// agent calls the model again after it, up to ten thought-only responses in a
+// row, and then ends its turn on the last one.
 package llmagent
 
 import (
@@ -382,8 +407,12 @@ type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (
 // If it returns non-nil LLMResponse or error, the actual model response/error
 // is replaced with the returned response/error. A replacement keeps the
 // Partial, TurnComplete and UsageMetadata of the response it replaces unless
-// it sets them itself; since Partial and TurnComplete are bools, setting them
-// to false has no effect.
+// it sets them itself. Partial counts as set when it is true or when
+// PartialSet is true, so a replacement for a partial response that sets
+// Partial: false and PartialSet: true produces a non-partial event, while one
+// that sets only Partial: false stays partial. TurnComplete has no such mark:
+// a replacement for a response with TurnComplete true always keeps
+// TurnComplete true. UsageMetadata counts as set when it is non-nil.
 type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 // OnModelErrorCallback that is called when receiving an error response from the llm model.

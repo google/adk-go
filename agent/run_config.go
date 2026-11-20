@@ -14,7 +14,11 @@
 
 package agent
 
-import "errors"
+import (
+	"errors"
+
+	"google.golang.org/genai"
+)
 
 // ErrLLMCallsLimitExceeded is returned when an invocation makes more model
 // calls than RunConfig.MaxLLMCalls allows. Detect it with errors.Is.
@@ -65,4 +69,73 @@ type RunConfig struct {
 	// appends an event per turn and re-sends a growing history, so token cost
 	// grows quadratically with no exit.
 	MaxLLMCalls int
+
+	// HTTPOptions holds per-invocation HTTP options (such as custom headers,
+	// timeout, retry options, or extra body fields) merged into each model
+	// request's GenerateContentConfig.HTTPOptions during the invocation.
+	//
+	// When the agent has no GenerateContentConfig.HTTPOptions, each request
+	// receives a copy of HTTPOptions (including BaseURL and APIVersion). When
+	// the agent already configures GenerateContentConfig.HTTPOptions,
+	// HTTPOptions.Headers are merged into the agent's headers by canonical
+	// HTTP header name (with HTTPOptions winning on conflict), and non-nil
+	// Timeout, RetryOptions, and ExtraBody replace the agent's values;
+	// configuration-time fields (BaseURL, APIVersion, BaseURLResourceScope,
+	// ExtrasRequestProvider) on the agent's HTTPOptions are kept.
+	//
+	// Nil (the zero value) leaves each request's HTTPOptions as configured on
+	// the agent. ADK copies HTTPOptions, its Headers and ExtraBody maps (the
+	// ExtraBody map is copied and the values inside it are shared), its
+	// RetryOptions struct, and its Timeout pointer before attaching them to a
+	// request, so neither the caller's HTTPOptions nor the agent's is mutated
+	// by request assembly or by BeforeModelCallback.
+	//
+	// Run does not copy HTTPOptions. ADK reads the struct HTTPOptions points
+	// to, and its nested maps, each time it builds a model request, and it
+	// builds them while the sequence returned by Run is iterated. A change
+	// made through the pointer after Run returns therefore applies to every
+	// request built after the change. Set HTTPOptions before calling Run, and
+	// leave the struct and its maps unchanged until the iteration ends. An
+	// agent run through tool/agenttool gets the same HTTPOptions.
+	//
+	// The model connectors in model/anthropicmodel and model/openaimodel
+	// accept only the Timeout and Headers fields of a request's HTTPOptions:
+	// they apply a positive Timeout as the request timeout and send none of
+	// the Headers. For an agent whose model uses one of these connectors, ADK
+	// drops the other fields of HTTPOptions before the merge, as adk-python's
+	// connectors ignore HTTP options, so an invocation that sets RetryOptions
+	// or ExtraBody for its Gemini agents does not fail on that agent. HTTP
+	// options set on that agent's own GenerateContentConfig are not dropped:
+	// the connector returns an error for a field it cannot send.
+	HTTPOptions *genai.HTTPOptions
+
+	// Labels holds per-invocation key-value labels (for example, for billing
+	// or attribution) merged into each model request's
+	// GenerateContentConfig.Labels during the invocation.
+	//
+	// When an agent also configures GenerateContentConfig.Labels, entries in
+	// Labels are merged on top and win on key conflict. An explicitly set
+	// "adk_agent_name" entry in Labels is preserved and not overwritten by
+	// ADK's default agent-name attribution label.
+	//
+	// Labels is a pointer so that RunConfig stays comparable and usable as a
+	// map key. Nil (the zero value) or a pointer to an empty map leaves each
+	// request's Labels as configured on the agent. ADK copies Labels into a
+	// fresh map per request, so neither the caller's map nor the agent's map
+	// is mutated.
+	//
+	// Run does not copy Labels. ADK reads the map each time it builds a model
+	// request, and it builds them while the sequence returned by Run is
+	// iterated. A change to the map's entries after Run returns therefore
+	// applies to every request built after the change. Set Labels before
+	// calling Run, and leave the map unchanged until the iteration ends. An
+	// agent run through tool/agenttool gets the same Labels.
+	//
+	// The model connectors in model/anthropicmodel and model/openaimodel have
+	// no request labels to send. For an agent whose model uses one of these
+	// connectors, ADK drops Labels, as adk-python's connectors ignore labels,
+	// so an invocation that sets Labels for its Gemini agents does not fail on
+	// that agent. Labels other than "adk_agent_name" set on that agent's own
+	// GenerateContentConfig still make the connector return an error.
+	Labels *map[string]string
 }

@@ -956,6 +956,178 @@ func TestModel_GenerateWithoutCandidates(t *testing.T) {
 	}
 }
 
+// TestGeminiModel_LabelsStrippedOnGeminiAPIAndKeptOnVertex checks that request
+// labels, which the flow fills with the calling agent's name, reach the wire
+// only on Vertex AI. The Gemini Developer API does not support labels, so the
+// body sent there carries none while the caller's config keeps them.
+func TestGeminiModel_LabelsStrippedOnGeminiAPIAndKeptOnVertex(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     *genai.ClientConfig
+		wantLabels map[string]any
+	}{
+		{
+			name:   "gemini_api",
+			config: &genai.ClientConfig{Backend: genai.BackendGeminiAPI, APIKey: "test-key"},
+		},
+		{
+			name:       "vertex_ai",
+			config:     &genai.ClientConfig{Backend: genai.BackendVertexAI, Project: "test-project", Location: "eu"},
+			wantLabels: map[string]any{"adk_agent_name": "my_agent", "team": "core"},
+		},
+	}
+	for _, tt := range tests {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tt.name, stream), func(t *testing.T) {
+				var requestBody []byte
+				transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					var err error
+					requestBody, err = io.ReadAll(req.Body)
+					if err != nil {
+						return nil, err
+					}
+					contentType, responseBody := "application/json", `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`
+					if stream {
+						contentType, responseBody = "text/event-stream", "data: "+responseBody+"\n\n"
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": {contentType}},
+						Body:       io.NopCloser(strings.NewReader(responseBody)),
+					}, nil
+				})
+				clientConfig := *tt.config
+				clientConfig.HTTPClient = &http.Client{Transport: transport}
+				llm, err := NewModel(t.Context(), "gemini-2.5-flash", &clientConfig)
+				if err != nil {
+					t.Fatalf("NewModel() error = %v", err)
+				}
+				req := &model.LLMRequest{
+					Contents: genai.Text("hello"),
+					Config: &genai.GenerateContentConfig{
+						Labels: map[string]string{"adk_agent_name": "my_agent", "team": "core"},
+					},
+				}
+				for _, err := range llm.GenerateContent(t.Context(), req, stream) {
+					if err != nil {
+						t.Fatalf("GenerateContent() error = %v", err)
+					}
+				}
+				if requestBody == nil {
+					t.Fatal("no request reached the transport")
+				}
+				var payload map[string]any
+				if err := json.Unmarshal(requestBody, &payload); err != nil {
+					t.Fatalf("json.Unmarshal(request body) error = %v", err)
+				}
+				// Vertex AI takes labels at the top level of the body.
+				gotLabels, sent := payload["labels"]
+				if tt.wantLabels == nil && sent {
+					t.Errorf("request body carries labels %v, want none", gotLabels)
+				}
+				if tt.wantLabels != nil {
+					if diff := cmp.Diff(tt.wantLabels, gotLabels); diff != "" {
+						t.Errorf("request body labels mismatch (-want +got):\n%s", diff)
+					}
+				}
+				wantCallerLabels := map[string]string{"adk_agent_name": "my_agent", "team": "core"}
+				if diff := cmp.Diff(wantCallerLabels, req.Config.Labels); diff != "" {
+					t.Errorf("req.Config.Labels changed (-want +got):\n%s", diff)
+				}
+			})
+		}
+	}
+}
+
+// TestGeminiModel_CapabilitiesUsesClientBackendNotEnv checks that the
+// OutputSchemaAndTools capability follows the backend of the model's own
+// client. adk-python's Gemini.capabilities reads GOOGLE_GENAI_USE_ENTERPRISE
+// and GOOGLE_GENAI_USE_VERTEXAI from the environment instead
+// (models/_capabilities.py:30-51), so a model whose client disagrees with the
+// environment reports the wrong value there. Each case sets the environment to
+// the opposite of the client's backend.
+func TestGeminiModel_CapabilitiesUsesClientBackendNotEnv(t *testing.T) {
+	tests := []struct {
+		name   string
+		envUse string
+		config *genai.ClientConfig
+		want   bool
+	}{
+		{
+			name:   "vertex_ai_client_env_off",
+			envUse: "0",
+			config: &genai.ClientConfig{
+				Backend:    genai.BackendVertexAI,
+				Project:    "test-project",
+				Location:   "us-central1",
+				HTTPClient: &http.Client{},
+			},
+			want: true,
+		},
+		{
+			name:   "gemini_api_client_env_on",
+			envUse: "1",
+			config: &genai.ClientConfig{
+				Backend:    genai.BackendGeminiAPI,
+				APIKey:     "fake-key",
+				HTTPClient: &http.Client{},
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", tt.envUse)
+			t.Setenv("GOOGLE_GENAI_USE_ENTERPRISE", tt.envUse)
+			llm, err := NewModel(t.Context(), "gemini-2.5-flash", tt.config)
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			cp, ok := llm.(model.CapabilitiesProvider)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement model.CapabilitiesProvider", llm)
+			}
+			if got := cp.Capabilities().OutputSchemaAndTools; got != tt.want {
+				t.Errorf("Capabilities().OutputSchemaAndTools = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGeminiModel_CapabilitiesOnVertexAIFollowModelName checks that on Vertex
+// AI the OutputSchemaAndTools capability follows the model name: every Gemini
+// name has it, with no version check (adk-python commit 745de0ac1), and a
+// non-Gemini name such as Gemma does not (models/_capabilities.py:30-51).
+func TestGeminiModel_CapabilitiesOnVertexAIFollowModelName(t *testing.T) {
+	tests := []struct {
+		modelName string
+		want      bool
+	}{
+		{modelName: "gemini-1.5-pro", want: true},
+		{modelName: "gemma-3-27b-it", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.modelName, func(t *testing.T) {
+			llm, err := NewModel(t.Context(), tt.modelName, &genai.ClientConfig{
+				Backend:    genai.BackendVertexAI,
+				Project:    "test-project",
+				Location:   "us-central1",
+				HTTPClient: &http.Client{},
+			})
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			cp, ok := llm.(model.CapabilitiesProvider)
+			if !ok {
+				t.Fatalf("NewModel() returned %T, which does not implement model.CapabilitiesProvider", llm)
+			}
+			if got := cp.Capabilities().OutputSchemaAndTools; got != tt.want {
+				t.Errorf("Capabilities().OutputSchemaAndTools = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestModel_MaybeAppendUserContent(t *testing.T) {
 	tests := []struct {
 		name     string

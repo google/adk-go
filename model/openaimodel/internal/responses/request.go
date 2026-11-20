@@ -507,7 +507,7 @@ func applyGenerationConfig(params *oairesponses.ResponseNewParams, cfg *genai.Ge
 			}
 		}
 	}
-	if cfg.Labels != nil {
+	if shared.HasUnsupportedLabels(cfg.Labels) {
 		return shared.ErrLabelsNotSupported
 	}
 	if cfg.SafetySettings != nil {

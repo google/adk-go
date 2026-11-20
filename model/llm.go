@@ -28,6 +28,38 @@ type LLM interface {
 	GenerateContent(ctx context.Context, req *LLMRequest, stream bool) iter.Seq2[*LLMResponse, error]
 }
 
+// Capabilities holds the resolved capabilities of an [LLM] instance.
+//
+// Each field reports whether the model supports a specific optional feature.
+// The zero value (Capabilities{}) indicates that none of the optional
+// capabilities are supported. Capabilities is a value type and is safe for
+// concurrent use.
+type Capabilities struct {
+	// OutputSchemaAndTools reports whether the model can accept a native
+	// output schema (GenerateContentConfig.ResponseSchema) and tools in the
+	// same request.
+	//
+	// When false and an agent has both an OutputSchema and tools (or
+	// toolsets), ADK omits ResponseSchema and ResponseMIMEType from the
+	// request config and uses the set_model_response tool workaround instead.
+	OutputSchemaAndTools bool
+}
+
+// CapabilitiesProvider is an optional interface that an [LLM] may implement to
+// declare its [Capabilities].
+//
+// When an [LLM] implements CapabilitiesProvider, ADK uses the returned
+// [Capabilities] directly instead of inferring support from the model name or
+// backend variant. When an [LLM] does not implement CapabilitiesProvider, ADK
+// falls back to granting OutputSchemaAndTools only to Gemini models on the
+// Vertex AI backend.
+//
+// Implementations of Capabilities must be safe for concurrent use and must not
+// mutate the model or have observable side effects.
+type CapabilitiesProvider interface {
+	Capabilities() Capabilities
+}
+
 // LLMRequest is the raw LLM request.
 type LLMRequest struct {
 	Model    string
@@ -67,6 +99,22 @@ type LLMResponse struct {
 	// The Runner fully processes only the final non-partial event, partial
 	// events are simply forwarded downstream (eg. to UI for display).
 	Partial bool `json:"partial,omitempty"`
+	// PartialSet reports whether Partial was set explicitly on this response.
+	//
+	// adk-python has no such field: its LlmResponse.partial is an
+	// Optional[bool], so an unset partial (None) and an explicit False differ
+	// there. Partial here is a plain bool whose zero value is false, so a
+	// response that leaves Partial unset cannot otherwise be told apart from
+	// one that sets Partial: false. An AfterModelCallback replacement with
+	// Partial: false and PartialSet: true for a partial model response
+	// therefore produces a non-partial event, instead of inheriting
+	// Partial: true from the response it replaces.
+	//
+	// When Partial is true, the response is always treated as explicitly
+	// partial regardless of PartialSet. The zero value (Partial: false,
+	// PartialSet: false) means Partial was left unset. PartialSet is never
+	// written to JSON.
+	PartialSet bool `json:"-"`
 	// Indicates whether the response from the model is complete.
 	// Only used for streaming mode.
 	TurnComplete bool `json:"turnComplete,omitempty"`

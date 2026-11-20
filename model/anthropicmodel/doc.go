@@ -134,7 +134,7 @@
 //	| Seed                         | Rejected |
 //	| SafetySettings               | Rejected |
 //	| CachedContent                | Rejected (use ClientConfig.PromptCache) |
-//	| Labels                       | Rejected |
+//	| Labels                       | Rejected for any label other than adk_agent_name; adk_agent_name, which the agent flow adds to every request, is ignored |
 //	| MediaResolution              | Rejected |
 //	| SpeechConfig                 | Rejected |
 //	| AudioTimestamp               | Rejected |
@@ -146,6 +146,12 @@
 //	| ServiceTier                  | Rejected |
 //	| AudioTranscriptionConfig     | Rejected |
 //	| ContinuationToken            | Rejected |
+//
+// The rejections of HTTPOptions fields and Labels apply to values set on the
+// agent's GenerateContentConfig. From agent.RunConfig.HTTPOptions, which
+// applies to every agent of a run, the agent flow passes only Timeout and
+// Headers to this connector and drops the other fields; it drops
+// agent.RunConfig.Labels whole.
 //
 // Claude 4.5 and later reject requests that set both `temperature` and `top_p`;
 // setting both on [genai.GenerateContentConfig] when thinking and
