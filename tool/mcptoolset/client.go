@@ -83,9 +83,15 @@ func newConnectionRefresher(client *mcp.Client, transport mcp.Transport) *connec
 // orDefaultClient returns client, or a default MCP client if it is nil.
 func orDefaultClient(client *mcp.Client) *mcp.Client {
 	if client == nil {
-		return mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, nil)
+		return newDefaultClient(nil)
 	}
 	return client
+}
+
+// newDefaultClient returns an MCP client that identifies itself as ADK and
+// uses options.
+func newDefaultClient(options *mcp.ClientOptions) *mcp.Client {
+	return mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, options)
 }
 
 func (c *connectionRefresher) Close() error {
