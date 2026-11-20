@@ -28,8 +28,10 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"google.golang.org/genai"
 
@@ -1463,17 +1465,25 @@ func TestScheduler_Finalize_SingleTerminalOutput(t *testing.T) {
 
 // A node's own panic must not put the panic value into the completion error
 // the run reports; the value and the stack belong on a span (#2153) — the
-// node's invoke_node span for a plain node, or the enclosing span for a
-// node that emits its own span, whose invoke_node stand-in is a no-op that
-// would discard the record. Both halves are pinned against an exported
-// span, so deleting the recordPanic call fails this test.
+// node's invoke_node span for a plain node, or a short dedicated
+// node_panic span for a node that emits its own span, whose invoke_node
+// stand-in is a no-op that would discard the record. The dedicated span
+// must be exported even when the context carries no span at all (a direct
+// Run with a plain context, or a root the legacy telemetry schema opens
+// no invoke_workflow span for), and the record must not flip the status
+// of any other span: a retry can still complete the run after a panicked
+// attempt. Each case pins the record to the named exported span, so
+// deleting the recordPanic call fails this test.
 func TestScheduler_RunNodePanicDetailOnSpanOnly(t *testing.T) {
 	tests := []struct {
-		name   string
-		config NodeConfig
+		name          string
+		config        NodeConfig
+		withEnclosing bool
+		wantSpan      string
 	}{
-		{"plain node records on its invoke_node span", defaultNodeConfig},
-		{"EmitsOwnSpan node records on the enclosing span", NodeConfig{EmitsOwnSpan: true}},
+		{"plain node records on its invoke_node span", defaultNodeConfig, true, "invoke_node boom"},
+		{"EmitsOwnSpan node records on a dedicated node_panic span", NodeConfig{EmitsOwnSpan: true}, true, "node_panic"},
+		{"EmitsOwnSpan node with no span on the context still records", NodeConfig{EmitsOwnSpan: true}, false, "node_panic"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1485,19 +1495,26 @@ func TestScheduler_RunNodePanicDetailOnSpanOnly(t *testing.T) {
 				panic("secret-user-data-123")
 			}, tc.config)
 
-			// runNode runs under the workflow agent's span in production;
-			// recreate that enclosing span so the EmitsOwnSpan fallback has
-			// a real span to land on.
+			// With the default schema a workflow root puts an
+			// invoke_workflow span on the context; recreate it to pin that
+			// the record must not mark it failed. The legacy schema and a
+			// direct Run leave the context span-less — the third case.
 			ctx := agent.NewContext(newMockCtx(t))
-			spanCtx, enclosing := tp.Tracer("test").Start(ctx, "invoke_workflow")
-			ctx = ctx.WithAgentContext(spanCtx)
+			var enclosing trace.Span
+			if tc.withEnclosing {
+				var spanCtx context.Context
+				spanCtx, enclosing = tp.Tracer("test").Start(ctx, "invoke_workflow")
+				ctx = ctx.WithAgentContext(spanCtx)
+			}
 
 			out := make(chan queueItem, 1)
 			var wg sync.WaitGroup
 			wg.Add(1)
 			runNode(out, &wg, "boom", node, ctx, map[string]any{})
 			wg.Wait()
-			enclosing.End()
+			if enclosing != nil {
+				enclosing.End()
+			}
 
 			completion, ok := (<-out).(completionItem)
 			if !ok {
@@ -1513,8 +1530,18 @@ func TestScheduler_RunNodePanicDetailOnSpanOnly(t *testing.T) {
 				t.Errorf("completion error = %q, want %q", completion.err.Error(), want)
 			}
 
-			valueOnSpan, stackOnSpan := false, false
+			found, valueOnSpan, stackOnSpan := false, false, false
 			for _, s := range spanExp.GetSpans() {
+				if s.Name != tc.wantSpan {
+					if s.Status.Code == codes.Error {
+						t.Errorf("span %q has status Error; the panic record owns only %q", s.Name, tc.wantSpan)
+					}
+					continue
+				}
+				found = true
+				if s.Status.Code != codes.Error {
+					t.Errorf("span %q status = %v, want Error", s.Name, s.Status.Code)
+				}
 				if strings.Contains(s.Status.Description, "secret-user-data-123") {
 					valueOnSpan = true
 				}
@@ -1530,8 +1557,11 @@ func TestScheduler_RunNodePanicDetailOnSpanOnly(t *testing.T) {
 					}
 				}
 			}
+			if !found {
+				t.Fatalf("no exported span named %q", tc.wantSpan)
+			}
 			if !valueOnSpan || !stackOnSpan {
-				t.Errorf("panic value on an exported span = %v, stack = %v; both must be recorded", valueOnSpan, stackOnSpan)
+				t.Errorf("panic value on span %q = %v, stack = %v; both must be recorded", tc.wantSpan, valueOnSpan, stackOnSpan)
 			}
 		})
 	}

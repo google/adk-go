@@ -500,8 +500,8 @@ func TestToolNode_DropsToolSuppliedCompaction(t *testing.T) {
 
 // wrappedPanicTool returns a *toolinternal.PanicError buried under two
 // fmt.Errorf %w layers, the shape an error has after passing through tool
-// middleware: only errors.As can still see it, a direct type assertion
-// cannot.
+// middleware: only errors.AsType can still see it, a direct type
+// assertion cannot.
 type wrappedPanicTool struct{}
 
 func (wrappedPanicTool) Name() string        { return "wrapped_panic" }
@@ -536,7 +536,7 @@ func TestToolNode_PanicTextStaysOutOfRunError(t *testing.T) {
 			`tool "lookup_order" execution failed with an internal error`,
 		},
 		{
-			"PanicError wrapped by middleware is still caught via errors.As",
+			"PanicError wrapped by middleware is still caught via errors.AsType",
 			wrappedPanicTool{},
 			`tool "wrapped_panic" execution failed with an internal error`,
 		},

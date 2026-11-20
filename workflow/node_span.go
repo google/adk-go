@@ -29,11 +29,16 @@ import (
 // the parallel worker.
 type nodeSpan struct {
 	span trace.Span
-	// enclosing is the span already on the context for nodes whose own
-	// span is a no-op (Start and EmitsOwnSpan nodes). Recording a
-	// recovered panic on the no-op span would discard it, so recordPanic
-	// falls back to this one.
-	enclosing trace.Span
+	// panicCtx is set for nodes whose own span is a no-op (Start and
+	// EmitsOwnSpan nodes). Recording a recovered panic on the no-op span
+	// would discard it, and the span already on this context is not a
+	// safe target either: trace.SpanFromContext never returns nil, so it
+	// can itself be a no-op (a direct Run with a plain context, or a
+	// root the legacy schema opens no invoke_workflow span for), and it
+	// outlives the attempt, so an Error status there would mark a run
+	// failed that a retry went on to complete. recordPanic opens a short
+	// dedicated span from this context instead.
+	panicCtx context.Context
 }
 
 // startNodeSpan begins an invoke_node span for n and returns a context
@@ -42,20 +47,22 @@ type nodeSpan struct {
 // can unconditionally defer end / call recordError.
 func startNodeSpan(ctx agent.Context, n Node) (nodeSpan, agent.Context) {
 	if n == Start || n.Config().EmitsOwnSpan {
-		return nodeSpan{span: noop.Span{}, enclosing: trace.SpanFromContext(ctx)}, ctx
+		return nodeSpan{span: noop.Span{}, panicCtx: ctx}, ctx
 	}
 	spanCtx, span := telemetry.StartNodeSpan(ctx, ctx, telemetry.OperationNode{Node: n})
 	return nodeSpan{span: span}, ctx.WithAgentContext(spanCtx)
 }
 
 // recordPanic records err — a recovered panic's value and stack — on the
-// node's span, or on the enclosing span when the node's own span is a
-// no-op. The run error for a panic is generic, so this record is the
-// only place an operator can read the panic detail; it must land on a
-// span that is actually exported.
+// node's own span, or on a short dedicated node_panic span when the
+// node's own span is a no-op. The run error for a panic is generic, so
+// this record is the only place an operator can read the panic detail;
+// it must land on a span that is exported under every supported
+// telemetry configuration, without flipping the status of a span the
+// attempt does not own.
 func (s nodeSpan) recordPanic(err error) {
-	if s.enclosing != nil {
-		telemetry.RecordError(s.enclosing, err)
+	if s.panicCtx != nil {
+		telemetry.RecordPanicSpan(s.panicCtx, err)
 		return
 	}
 	telemetry.RecordError(s.span, err)
