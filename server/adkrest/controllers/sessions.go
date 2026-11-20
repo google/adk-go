@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"reflect"
 	"slices"
@@ -249,6 +250,13 @@ func (c *SessionsAPIController) UpdateSessionHandler(rw http.ResponseWriter, req
 	// dropEchoedKeys.
 	stateDelta, err := dropEchoedKeys(req.Context(), updateRequest.StateDelta, storedSession.Session.State())
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// The client is gone. There is nobody to answer, and a 500 would
+			// report the cancellation as the server's failure.
+			log.Printf("adkrest: update session: %v", err) //nolint:forbidigo // pre-slog call site
+			return
+		}
+		log.Printf("adkrest: cannot merge the state delta: %v", err) //nolint:forbidigo // pre-slog call site
 		http.Error(rw, "cannot merge the state delta", http.StatusInternalServerError)
 		return
 	}
@@ -374,9 +382,11 @@ func isScopedStateKey(key string) bool {
 // different value is still a write outside this session, and is still
 // refused. Every other key is written as submitted, except that a value the
 // client sent back without the credential secrets a read stripped gets those
-// omitted secrets restored, and only into a credential that still has the same
-// authType and principal and carries no secret of its own. A credential under
-// rawAuthCredential that has no authType is written as submitted.
+// omitted secrets restored, and only inside a credential that is still the same
+// authType and principal and carries no secret of its own: nothing outside a
+// credential is restored. A secret sent as JSON null counts as sent, so it
+// clears the stored secret. A credential under rawAuthCredential that has no
+// authType cannot be matched and is written as submitted.
 //
 // It returns an error when the merge cannot finish: the request context is
 // canceled, or a stored value cannot be encoded.

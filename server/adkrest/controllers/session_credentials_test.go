@@ -128,8 +128,12 @@ func TestChangedAuthTypeDoesNotRestoreSecrets(t *testing.T) {
 			if stored["authType"] != authType {
 				t.Error("the changed authType was not stored")
 			}
+			oauth, ok := stored["oauth2"].(map[string]any)
+			if !ok {
+				t.Fatalf("stored oauth2 has type %T, want map[string]any", stored["oauth2"])
+			}
 			for _, key := range []string{"accessToken", "refreshToken"} {
-				if _, ok := stored[key]; ok {
+				if _, ok := oauth[key]; ok {
 					t.Errorf("the stored credential kept %q after the authType changed", key)
 				}
 			}
@@ -689,6 +693,137 @@ func TestSwappingDuplicateIdentitiesUnderObjectKeysRestoresNothing(t *testing.T)
 		}
 	}
 	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "at-1", "rt-1", "at-2", "rt-2")
+}
+
+// TestDeletingFirstOfTwoNonCredentialEntriesKeepsNoSecrets covers the review
+// finding that the restore walk started switched on: two sibling entries that
+// are not themselves credentials used to pair by index and hand the survivor the
+// deleted entry's secret.
+func TestDeletingFirstOfTwoNonCredentialEntriesKeepsNoSecrets(t *testing.T) {
+	f := newSessionFixture(t, map[string]any{
+		"configs": []any{
+			map[string]any{"name": "a", "rawAuthCredential": map[string]any{"apiKey": "AK-A"}},
+			map[string]any{"name": "b", "rawAuthCredential": map[string]any{"apiKey": "AK-B"}},
+		},
+	})
+	state := f.readState(t)
+	configs := state["configs"].([]any)
+	patch := f.patch(t, map[string]any{"configs": []any{configs[1]}})
+
+	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "AK-A", "AK-B")
+	stored := f.stored(t, "configs").([]any)
+	if len(stored) != 1 {
+		t.Fatalf("stored configs has %d entries, want 1", len(stored))
+	}
+	entry := stored[0].(map[string]any)
+	if entry["name"] != "b" {
+		t.Errorf("stored entry name = %v, want b", entry["name"])
+	}
+	raw, _ := entry["rawAuthCredential"].(map[string]any)
+	if _, ok := raw["apiKey"]; ok {
+		t.Error("the deleted entry's apiKey was restored into the survivor")
+	}
+}
+
+// TestChangingClientIDUnderCredentialFieldDoesNotRestoreSecrets covers the
+// second case from the same review finding: a credential field without an
+// authType takes no secret restore, because the merge has no identity to match
+// it by.
+func TestChangingClientIDUnderCredentialFieldDoesNotRestoreSecrets(t *testing.T) {
+	f := newSessionFixture(t, map[string]any{
+		"auth": map[string]any{"rawAuthCredential": map[string]any{
+			"oauth2": map[string]any{"clientId": "app", "accessToken": "OLD-TOKEN"},
+		}},
+	})
+	state := f.readState(t)
+	raw := state["auth"].(map[string]any)["rawAuthCredential"].(map[string]any)
+	raw["oauth2"].(map[string]any)["clientId"] = "other"
+	patch := f.patch(t, map[string]any{"auth": state["auth"]})
+
+	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "OLD-TOKEN")
+	stored := f.stored(t, "auth").(map[string]any)
+	oauth := stored["rawAuthCredential"].(map[string]any)["oauth2"].(map[string]any)
+	if oauth["clientId"] != "other" {
+		t.Errorf("stored clientId = %v, want other", oauth["clientId"])
+	}
+	if _, ok := oauth["accessToken"]; ok {
+		t.Error("the old token followed the changed clientId")
+	}
+}
+
+// TestDeletingVisibleTokenNextToCredentialStaysDeleted covers the third case
+// from the same review finding: a secret-looking key outside a credential must
+// be written as sent, so the client can delete it.
+func TestDeletingVisibleTokenNextToCredentialStaysDeleted(t *testing.T) {
+	f := newSessionFixture(t, map[string]any{
+		"app_state": map[string]any{
+			"drive":   oauth2Credential("app", "AT-DRIVE", "RT-DRIVE"),
+			"profile": map[string]any{"name": "ann", "token": "page-2"},
+		},
+	})
+	state := f.readState(t)
+	appState := state["app_state"].(map[string]any)
+	delete(appState["profile"].(map[string]any), "token")
+	patch := f.patch(t, map[string]any{"app_state": appState})
+
+	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "AT-DRIVE", "RT-DRIVE", "page-2")
+	stored := f.stored(t, "app_state").(map[string]any)
+	profile := stored["profile"].(map[string]any)
+	if _, ok := profile["token"]; ok {
+		t.Error("the deleted visible token was restored")
+	}
+	drive := stored["drive"].(map[string]any)["oauth2"].(map[string]any)
+	if drive["accessToken"] != "AT-DRIVE" {
+		t.Error("the credential's own token was not kept")
+	}
+}
+
+// TestNullAccessTokenClearsStoredTokens checks that a secret sent as JSON null
+// counts as sent, so a client can sign out as it does on main.
+func TestNullAccessTokenClearsStoredTokens(t *testing.T) {
+	f := newSessionFixture(t, map[string]any{
+		"drive": oauth2Credential("app", "AT-SIGN-OUT", "RT-SIGN-OUT"),
+	})
+	state := f.readState(t)
+	drive := state["drive"].(map[string]any)
+	drive["oauth2"].(map[string]any)["accessToken"] = nil
+	patch := f.patch(t, map[string]any{"drive": drive})
+
+	assertNoSecrets(t, "PATCH response", patch.Body.Bytes(), "AT-SIGN-OUT", "RT-SIGN-OUT")
+	stored := f.stored(t, "drive").(map[string]any)
+	oauth := stored["oauth2"].(map[string]any)
+	if value, ok := oauth["accessToken"]; !ok || value != nil {
+		t.Errorf("stored accessToken = %v (present %v), want an explicit null", value, ok)
+	}
+}
+
+// TestCanceledPatchDoesNotWriteState checks that a canceled request is not
+// answered as a server error and leaves storage unchanged.
+func TestCanceledPatchDoesNotWriteState(t *testing.T) {
+	f := newSessionFixture(t, map[string]any{
+		"drive": oauth2Credential("app", "AT-CANCEL", "RT-CANCEL"),
+	})
+	body, err := json.Marshal(map[string]any{"stateDelta": map[string]any{
+		"drive": map[string]any{"authType": "oauth2", "oauth2": map[string]any{"clientId": "app"}},
+	}})
+	if err != nil {
+		t.Fatalf("Marshal(PATCH) failed: %v", err)
+	}
+	canceled, cancel := context.WithCancel(f.ctx)
+	cancel()
+	patch := httptest.NewRecorder()
+	f.controller.UpdateSessionHandler(patch, mux.SetURLVars(httptest.NewRequestWithContext(canceled, http.MethodPatch, "/", bytes.NewReader(body)), f.vars))
+	if patch.Code == http.StatusInternalServerError {
+		t.Error("a canceled request was answered as a server error")
+	}
+	stored := f.stored(t, "drive")
+	encoded, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("Marshal(stored drive) failed: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte("AT-CANCEL")) {
+		t.Error("the canceled PATCH changed the stored session")
+	}
 }
 
 // assertNoSecrets checks that encoded, a JSON document, does not contain any of

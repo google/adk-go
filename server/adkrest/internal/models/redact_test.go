@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -83,7 +84,7 @@ func TestMergeRedactedValueCredentialIdentity(t *testing.T) {
 			wantSecret: "AT-SNAKE-POSITIVE",
 		},
 		{
-			name: "null secret counts as omitted",
+			name: "explicit null secret is a replacement",
 			stored: map[string]any{
 				"authType": "oauth2",
 				"oauth2":   map[string]any{"clientId": "app", "accessToken": "AT-NULL"},
@@ -92,7 +93,7 @@ func TestMergeRedactedValueCredentialIdentity(t *testing.T) {
 				"authType": "oauth2",
 				"oauth2":   map[string]any{"clientId": "app", "accessToken": nil},
 			},
-			wantSecret: "AT-NULL",
+			wantNone: true,
 		},
 		{
 			name:   "http username change is a replacement",
@@ -415,6 +416,168 @@ func TestMergeRedactedValueObjectArraySiblingEdit(t *testing.T) {
 	}
 }
 
+// TestMergeRedactedValueRestoresNothingOutsideCredentials covers the review
+// finding that the walk used to start with restoring switched on, so secrets
+// were filled in outside any credential: a pairing entry that is not a
+// credential, a credential field without an authType, and a visible secret next
+// to a credential.
+func TestMergeRedactedValueRestoresNothingOutsideCredentials(t *testing.T) {
+	t.Run("deleting the first of two non-credential entries", func(t *testing.T) {
+		stored := map[string]any{"configs": []any{
+			map[string]any{"name": "a", "rawAuthCredential": map[string]any{"apiKey": "AK-A"}},
+			map[string]any{"name": "b", "rawAuthCredential": map[string]any{"apiKey": "AK-B"}},
+		}}
+		submitted := map[string]any{"configs": []any{
+			map[string]any{"name": "b", "rawAuthCredential": map[string]any{}},
+		}}
+		merged, restored, err := MergeRedactedValue(context.Background(), stored, submitted)
+		if err != nil {
+			t.Fatalf("MergeRedactedValue() failed: %v", err)
+		}
+		if restored {
+			t.Error("MergeRedactedValue() reported a restore, want none")
+		}
+		encoded, err := json.Marshal(merged)
+		if err != nil {
+			t.Fatalf("Marshal() failed: %v", err)
+		}
+		for _, secret := range []string{"AK-A", "AK-B"} {
+			if bytes.Contains(encoded, []byte(secret)) {
+				t.Errorf("merged value carries %s, want it not restored", secret)
+			}
+		}
+	})
+
+	t.Run("changing a client id under a credential field without authType", func(t *testing.T) {
+		stored := map[string]any{"auth": map[string]any{"rawAuthCredential": map[string]any{
+			"oauth2": map[string]any{"clientId": "app", "accessToken": "AT-OLD"},
+		}}}
+		submitted := map[string]any{"auth": map[string]any{"rawAuthCredential": map[string]any{
+			"oauth2": map[string]any{"clientId": "other"},
+		}}}
+		merged, restored, err := MergeRedactedValue(context.Background(), stored, submitted)
+		if err != nil {
+			t.Fatalf("MergeRedactedValue() failed: %v", err)
+		}
+		if restored {
+			t.Error("MergeRedactedValue() reported a restore, want none")
+		}
+		if encoded, _ := json.Marshal(merged); bytes.Contains(encoded, []byte("AT-OLD")) {
+			t.Error("the old token was restored under the new client id")
+		}
+	})
+
+	t.Run("deleting a visible secret next to a credential", func(t *testing.T) {
+		stored := map[string]any{
+			"drive":   oauth2Credential("app", "", "AT-DRIVE"),
+			"profile": map[string]any{"name": "ann", "token": "page-2"},
+		}
+		submitted := map[string]any{
+			"drive":   redactedOAuth2Credential("app", ""),
+			"profile": map[string]any{"name": "ann"},
+		}
+		merged, _, err := MergeRedactedValue(context.Background(), stored, submitted)
+		if err != nil {
+			t.Fatalf("MergeRedactedValue() failed: %v", err)
+		}
+		encoded, err := json.Marshal(merged)
+		if err != nil {
+			t.Fatalf("Marshal() failed: %v", err)
+		}
+		if !bytes.Contains(encoded, []byte("AT-DRIVE")) {
+			t.Error("the credential's token was not restored")
+		}
+		if bytes.Contains(encoded, []byte("page-2")) {
+			t.Error("a visible secret outside the credential was restored")
+		}
+	})
+
+	t.Run("a credential field without authType inside a credential", func(t *testing.T) {
+		stored := map[string]any{
+			"authType":          "oauth2",
+			"oauth2":            map[string]any{"clientId": "app", "accessToken": "AT-TOP"},
+			"rawAuthCredential": map[string]any{"apiKey": "AK-NESTED"},
+		}
+		submitted := map[string]any{
+			"authType":          "oauth2",
+			"oauth2":            map[string]any{"clientId": "app"},
+			"rawAuthCredential": map[string]any{},
+		}
+		merged, _, err := MergeRedactedValue(context.Background(), stored, submitted)
+		if err != nil {
+			t.Fatalf("MergeRedactedValue() failed: %v", err)
+		}
+		encoded, err := json.Marshal(merged)
+		if err != nil {
+			t.Fatalf("Marshal() failed: %v", err)
+		}
+		if !bytes.Contains(encoded, []byte("AT-TOP")) {
+			t.Error("the credential's own token was not restored")
+		}
+		if bytes.Contains(encoded, []byte("AK-NESTED")) {
+			t.Error("a credential field without an authType had a secret restored")
+		}
+	})
+}
+
+// TestMergeRedactedValueNullSecretClears checks that a secret sent as JSON null
+// counts as sent: the stored secret is replaced by the null, so a client can
+// sign out as it does on main.
+func TestMergeRedactedValueNullSecretClears(t *testing.T) {
+	stored := map[string]any{
+		"authType": "oauth2",
+		"oauth2":   map[string]any{"clientId": "app", "accessToken": "AT-CLEAR", "refreshToken": "RT-CLEAR"},
+	}
+	submitted := map[string]any{
+		"authType": "oauth2",
+		"oauth2":   map[string]any{"clientId": "app", "accessToken": nil},
+	}
+	merged, restored, err := MergeRedactedValue(context.Background(), stored, submitted)
+	if err != nil {
+		t.Fatalf("MergeRedactedValue() failed: %v", err)
+	}
+	if restored {
+		t.Error("MergeRedactedValue() reported a restore, want none")
+	}
+	oauth, ok := merged.(map[string]any)["oauth2"].(map[string]any)
+	if !ok {
+		t.Fatalf("merged oauth2 has type %T, want map[string]any", merged.(map[string]any)["oauth2"])
+	}
+	if value, ok := oauth["accessToken"]; !ok || value != nil {
+		t.Errorf("merged accessToken = %v (present %v), want an explicit null", value, ok)
+	}
+}
+
+// TestMergeRedactedValueNestedCredentialWorkIsLinear checks that a chain of
+// nested credentials costs linear work. Every level passes the identity checks,
+// so the restore walk descends through all of them, and every credential is
+// counted in the same pass that computes its secret flag.
+func TestMergeRedactedValueNestedCredentialWorkIsLinear(t *testing.T) {
+	const depth = 2000
+	build := func() any {
+		value := any(map[string]any{"x": 1})
+		for i := range depth {
+			value = map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": fmt.Sprintf("app-%d", i)},
+				"inner":    value,
+			}
+		}
+		return value
+	}
+	stored := build()
+	submitted := build()
+	_, _, visited, err := mergeRedactedValue(context.Background(), stored, submitted)
+	if err != nil {
+		t.Fatalf("mergeRedactedValue() failed: %v", err)
+	}
+	// A linear merge visits each node a small constant number of times. The
+	// broken version walked every credential's whole subtree at every level.
+	if limit := 10 * (depth * 3); visited > limit {
+		t.Errorf("mergeRedactedValue() visited %d nodes, want at most %d", visited, limit)
+	}
+}
+
 // TestCredentialIdentityOfSpellings checks that the visible principal matches
 // across the camelCase and snake_case spellings, and takes part in the identity
 // when it changes or is not a string.
@@ -461,22 +624,64 @@ func TestCredentialIdentityOfSpellings(t *testing.T) {
 			},
 			wantEqual: false,
 		},
+		{
+			// The authType spelling that is not a credential type must not stand
+			// in for the stored one: "oauth_2" normalizes onto "oauth2", so only
+			// a type check keeps it from matching a stored OAuth2 credential.
+			name: "unknown authType spelling is not the stored type",
+			stored: map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": "app"},
+			},
+			submitted: map[string]any{
+				"authType":  "oauth_2",
+				"auth_type": "http",
+				"http":      map[string]any{"scheme": "bearer", "credentials": map[string]any{"username": "app"}},
+			},
+			wantEqual: false,
+		},
+		{
+			name: "object principal is not read",
+			stored: map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": map[string]any{"nested": "one"}},
+			},
+			submitted: map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": map[string]any{"nested": "two"}},
+			},
+			wantEqual: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			w := &restoreWalk{ctx: context.Background()}
-			storedIdentity := credentialIdentityOf(w, tt.stored)
-			submittedIdentity := credentialIdentityOf(w, tt.submitted)
+			storedIdentity := credentialIdentityOf(tt.stored)
+			submittedIdentity := credentialIdentityOf(tt.submitted)
 			if storedIdentity == "" {
 				t.Fatal("credentialIdentityOf() = \"\", want an identity")
 			}
 			if got := storedIdentity == submittedIdentity; got != tt.wantEqual {
 				t.Errorf("credentialIdentityOf() equal = %v, want %v", got, tt.wantEqual)
 			}
-			if w.err != nil {
-				t.Fatalf("credentialIdentityOf() walk failed: %v", w.err)
-			}
 		})
+	}
+}
+
+// TestCredentialIdentityOfDoesNotReadNonScalarPrincipal checks that a principal
+// field holding a large object is not encoded into the identity: doing that is
+// what let one request allocate depth times body size.
+func TestCredentialIdentityOfDoesNotReadNonScalarPrincipal(t *testing.T) {
+	payload := strings.Repeat("x", 200_000)
+	credential := map[string]any{
+		"authType": "oauth2",
+		"oauth2":   map[string]any{"clientId": map[string]any{"nested": payload}},
+	}
+	identity := credentialIdentityOf(credential)
+	if len(identity) > 100 {
+		t.Errorf("credentialIdentityOf() returned %d bytes, want the non-scalar principal left out", len(identity))
+	}
+	if strings.Contains(identity, payload) {
+		t.Error("credentialIdentityOf() encoded the non-scalar principal")
 	}
 }
 
@@ -549,22 +754,23 @@ func BenchmarkMergeRedactedValueLookalikes(b *testing.B) {
 	}
 }
 
-// BenchmarkMergeRedactedValueDeepNesting measures a value nested in
-// single-entry arrays around a wide array. Identity is only computed for array
-// entries that are themselves credentials, so the depth should not multiply the
-// work.
+// BenchmarkMergeRedactedValueDeepNesting measures a chain of nested
+// credentials. Every level is a credential with its own identity, and its
+// identity and secret flag are computed once per request, so the depth should
+// not multiply the work.
 func BenchmarkMergeRedactedValueDeepNesting(b *testing.B) {
 	build := func(depth int) any {
 		wide := make([]any, 0, 20000)
 		for range 19999 {
 			wide = append(wide, map[string]any{"x": 1})
 		}
-		// A credential without secrets: matching it changes nothing, so the
-		// benchmark measures the walk itself.
-		wide = append(wide, oauth2Credential("app", "", ""))
 		var value any = wide
-		for range depth {
-			value = []any{value}
+		for i := range depth {
+			value = map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": fmt.Sprintf("app-%d", i)},
+				"inner":    value,
+			}
 		}
 		return value
 	}
