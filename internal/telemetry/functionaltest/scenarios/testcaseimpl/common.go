@@ -72,6 +72,22 @@ func Run(t *testing.T, s testcasedata.Scenario) error {
 	return nil
 }
 
+// firstTurnUsage is the token usage the model reports for the first turn of a
+// conversation, copied from adk-python's
+// tests/unittests/telemetry/functional/scenarios/conversation.py. Every count
+// across both turns is distinct, so a golden shows which turn and which count
+// a number came from. Over both turns that is 250 input, 75 output, 100 cache
+// read and 20 reasoning tokens.
+func firstTurnUsage() *genai.GenerateContentResponseUsageMetadata {
+	return &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 100, CachedContentTokenCount: 40, CandidatesTokenCount: 20, ThoughtsTokenCount: 5, TotalTokenCount: 125}
+}
+
+// secondTurnUsage is the token usage the model reports for the second turn of
+// a conversation, from the same adk-python file.
+func secondTurnUsage() *genai.GenerateContentResponseUsageMetadata {
+	return &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 150, CachedContentTokenCount: 60, CandidatesTokenCount: 35, ThoughtsTokenCount: 15, TotalTokenCount: 200}
+}
+
 // Cases returns every case of every scenario build knows.
 func Cases() []testcasedata.Case {
 	return slices.Concat(toolcall.Matrix(), streaming.Matrix(), delegation.Matrix(), dynamicworkflow.Matrix())

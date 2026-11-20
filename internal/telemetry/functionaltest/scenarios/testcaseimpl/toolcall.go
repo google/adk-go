@@ -32,11 +32,13 @@ func newToolCall(t *testing.T, s toolcall.Scenario) agent.Agent {
 	t.Helper()
 	// A MockModel with no responses left fails the call.
 	var responses []*genai.Content
+	var usage []*genai.GenerateContentResponseUsageMetadata
 	if s.Failure != toolcall.InferenceError {
 		responses = []*genai.Content{
 			{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "some_tool", Args: map[string]any{"arg1": "val1"}}}}},
 			{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "text response"}}},
 		}
+		usage = []*genai.GenerateContentResponseUsageMetadata{firstTurnUsage(), secondTurnUsage()}
 	}
 
 	type Args struct {
@@ -58,7 +60,7 @@ func newToolCall(t *testing.T, s toolcall.Scenario) agent.Agent {
 	a, err := llmagent.New(llmagent.Config{
 		Name:        "some_root_agent",
 		Description: "A sample root agent.",
-		Model:       &testutil.MockModel{Responses: responses},
+		Model:       &testutil.MockModel{Responses: responses, Usage: usage},
 		Instruction: "you are helpful",
 		Tools:       []tool.Tool{sampleTool},
 	})

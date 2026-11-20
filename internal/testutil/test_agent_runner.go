@@ -176,9 +176,22 @@ func NewTestAgentRunnerWithCompaction(t *testing.T, agent agent.Agent, compactio
 }
 
 type MockModel struct {
-	Requests             []*model.LLMRequest
-	Responses            []*genai.Content
+	Requests  []*model.LLMRequest
+	Responses []*genai.Content
+	// Usage is reported with the responses, in the same order. A nil entry,
+	// or a response past its end, reports none.
+	Usage                []*genai.GenerateContentResponseUsageMetadata
 	StreamResponsesCount int
+}
+
+// nextUsage removes and returns the usage reported with the next response.
+func (m *MockModel) nextUsage() *genai.GenerateContentResponseUsageMetadata {
+	if len(m.Usage) == 0 {
+		return nil
+	}
+	u := m.Usage[0]
+	m.Usage = m.Usage[1:]
+	return u
 }
 
 var errNoModelData = errors.New("no data")
@@ -201,8 +214,9 @@ func (m *MockModel) Generate(ctx context.Context, req *model.LLMRequest) (*model
 	}
 
 	resp := &model.LLMResponse{
-		Content:      m.Responses[0],
-		FinishReason: genai.FinishReasonStop,
+		Content:       m.Responses[0],
+		FinishReason:  genai.FinishReasonStop,
+		UsageMetadata: m.nextUsage(),
 	}
 
 	m.Responses = m.Responses[1:]
@@ -226,7 +240,10 @@ func (m *MockModel) GenerateStream(ctx context.Context, req *model.LLMRequest) i
 			if i == streamResponsesCount-1 || len(m.Responses) == 1 {
 				finishReason = genai.FinishReasonStop
 			}
-			resp := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{Content: m.Responses[0], FinishReason: finishReason}}}
+			resp := &genai.GenerateContentResponse{
+				Candidates:    []*genai.Candidate{{Content: m.Responses[0], FinishReason: finishReason}},
+				UsageMetadata: m.nextUsage(),
+			}
 			m.Responses = m.Responses[1:]
 			for llmResponse, err := range aggregator.ProcessResponse(ctx, resp) {
 				if !yield(llmResponse, err) {

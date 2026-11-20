@@ -34,6 +34,7 @@ import (
 
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/anthropicmodel"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -276,6 +277,26 @@ func TestGenerateContent(t *testing.T) {
 				genAIUsageReasoningOutputTokens:       "15",
 				semconv.GenAIResponseFinishReasonsKey: "[\"stop\"]",
 				gcpVertexAgentInvocationID:            invocationID,
+			},
+		},
+		{
+			name: "CacheWrites",
+			startParams: GenerateContentParams{
+				ModelName:    "test-model",
+				InvocationID: invocationID,
+			},
+			resultParams: generateContentResult{
+				Response: &model.LLMResponse{
+					UsageMetadata:  &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 20},
+					CustomMetadata: map[string]any{anthropicmodel.CacheCreationInputTokensMetadataKey: int64(6)},
+					FinishReason:   genai.FinishReasonStop,
+				},
+			},
+			wantName:   "generate_content test-model",
+			wantStatus: codes.Unset,
+			wantAttrs: map[attribute.Key]string{
+				semconv.GenAIUsageInputTokensKey: "10",
+				genAIUsageCacheWriteInputTokens:  "6",
 			},
 		},
 		{

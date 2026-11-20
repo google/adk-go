@@ -23,6 +23,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
@@ -57,11 +58,13 @@ var jsonStringAttributes = map[string]bool{
 const jsonStringKey = "JSON_STRING"
 
 // Digest is what a golden compares of one scenario run: the span tree, with
-// each log record attached to the span it was emitted under. Of a span it
-// keeps the name, attributes and status code; of a log record, the event name,
-// body and attributes.
+// each log record attached to the span it was emitted under, and every metric
+// data point. Of a span it keeps the name, attributes and status code; of a
+// log record, the event name, body and attributes.
 type Digest struct {
 	RootSpan *SpanDigest `json:"root_span"`
+	// MetricPoints maps each metric name to its data points.
+	MetricPoints map[string][]MetricPoint `json:"metric_points"`
 }
 
 // SpanDigest is a deterministic snapshot of one span.
@@ -80,10 +83,11 @@ type spanWithMeta struct {
 	startTime int64
 }
 
-// BuildDigest collects spans and log records into one tree. The scenario must
-// produce exactly one root span, and emit every log record under a span;
-// otherwise BuildDigest returns an error.
-func BuildDigest(spans tracetest.SpanStubs, logs []sdklog.Record) (*Digest, error) {
+// BuildDigest collects spans and log records into one tree, alongside the
+// collected metric data points. The scenario must produce exactly one root
+// span, and emit every log record under a span; otherwise BuildDigest returns
+// an error.
+func BuildDigest(spans tracetest.SpanStubs, logs []sdklog.Record, metrics metricdata.ResourceMetrics) (*Digest, error) {
 	ordered := make([]*spanWithMeta, 0, len(spans))
 	bySpanID := make(map[trace.SpanID]*spanWithMeta, len(spans))
 	for _, s := range spans {
@@ -112,7 +116,7 @@ func BuildDigest(spans tracetest.SpanStubs, logs []sdklog.Record) (*Digest, erro
 	if len(roots) != 1 {
 		return nil, fmt.Errorf("expected exactly 1 root span, got %d", len(roots))
 	}
-	return &Digest{RootSpan: roots[0]}, nil
+	return &Digest{RootSpan: roots[0], MetricPoints: buildMetricPoints(metrics)}, nil
 }
 
 // linkAndSort links each span to its parent, orders siblings by start time

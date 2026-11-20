@@ -126,12 +126,12 @@ func StartCompactEventsSpan(ctx context.Context, params StartCompactEventsSpanPa
 	// definition this repo has for it, so a future change to that mapping
 	// reaches compaction too.
 	//
-	// Two known divergences from adk-python, both repo-wide rather than
-	// compaction's. The values come from this repo's semconv version, which
-	// prefixes them "gcp.", where adk-python is on an older generation and
-	// emits the bare "gemini" and "vertex_ai". And the attribute is omitted for
-	// a provider this mapping does not know, where adk-python always emits one:
-	// naming a provider we cannot identify would be worse than saying nothing.
+	// Two known divergences from adk-python. The values come from this repo's
+	// semconv version, which prefixes them "gcp.", where adk-python is on an
+	// older generation and emits the bare "gemini" and "vertex_ai". And the
+	// attribute is omitted for a provider this mapping does not know, where
+	// adk-python always emits one: naming a provider we cannot identify would be
+	// worse than saying nothing.
 	if sys, ok := GenAISystemAttr(params.Backend); ok {
 		attrs = append(attrs, sys)
 	}

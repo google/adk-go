@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -51,6 +52,7 @@ var (
 	gcpVertexAgentToolResponseName  = attribute.Key("gcp.vertex.agent.tool_response")
 	gcpVertexAgentInvocationID      = attribute.Key("gcp.vertex.agent.invocation_id")
 	genAIUsageCacheReadInputTokens  = attribute.Key("gen_ai.usage.cache_read.input_tokens")
+	genAIUsageCacheWriteInputTokens = attribute.Key("gen_ai.usage.cache_write.input_tokens")
 	genAIUsageReasoningOutputTokens = attribute.Key("gen_ai.usage.reasoning.output_tokens")
 	genAIToolCallArguments          = attribute.Key("gen_ai.tool.call.arguments")
 	genAIToolCallResult             = attribute.Key("gen_ai.tool.call.result")
@@ -108,6 +110,21 @@ type GenerateContentParams struct {
 	Stream bool
 }
 
+// elapsed is the ended span's duration from its own timestamps, or
+// fallbackEnd minus fallbackStart when the span does not expose them.
+func elapsed(span trace.Span, fallbackStart, fallbackEnd time.Time) time.Duration {
+	if s, ok := span.(interface {
+		StartTime() time.Time
+		EndTime() time.Time
+	}); ok {
+		// From wall-clock readings, without the monotonic one, so the result
+		// equals the duration exporters compute from the span's timestamps
+		// even when the system clock is adjusted while the span is open.
+		return s.EndTime().Round(0).Sub(s.StartTime().Round(0))
+	}
+	return fallbackEnd.Sub(fallbackStart)
+}
+
 // startGenerateContentSpan starts a new semconv generate_content span.
 func startGenerateContentSpan(ctx context.Context, params GenerateContentParams) (context.Context, trace.Span) {
 	modelName := params.ModelName
@@ -117,8 +134,8 @@ func startGenerateContentSpan(ctx context.Context, params GenerateContentParams)
 		semconv.GenAIOperationNameGenerateContent,
 		semconv.GenAIRequestModel(modelName),
 	}
-	if provider, ok := providerName(params.ModelName, params.Backend); ok && !useLegacySchema() {
-		attrs = append(attrs, provider)
+	if !useLegacySchema() {
+		attrs = append(attrs, providerName(params.ModelName, params.Backend))
 	}
 	spanCtx, span := tracer().Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(attrs...))
 	// After the sampling decision, not before: converting a whole conversation
@@ -150,16 +167,19 @@ func (r generateContentResult) responses() []*model.LLMResponse {
 	return r.Responses
 }
 
-// usage is the token usage of the latest response that reports any, as a
-// stream may repeat it on every chunk or put it on one.
-func (r generateContentResult) usage() *genai.GenerateContentResponseUsageMetadata {
+// usageResponse is the latest response that reports token usage, as a stream
+// may repeat it on every chunk or put it on one.
+func (r generateContentResult) usageResponse() *model.LLMResponse {
 	if useLegacySchema() {
-		return r.Response.UsageMetadata
+		if r.Response.UsageMetadata == nil {
+			return nil
+		}
+		return r.Response
 	}
 	responses := r.responses()
 	for _, response := range slices.Backward(responses) {
-		if u := response.UsageMetadata; u != nil {
-			return u
+		if response.UsageMetadata != nil {
+			return response
 		}
 	}
 	return nil
@@ -194,7 +214,8 @@ func generateContentResultAttributes(params generateContentResult) []attribute.K
 		return attrs
 	}
 	attrs = append(attrs, gcpVertexAgentEventID.String(params.EventID))
-	if u := params.usage(); u != nil {
+	if resp := params.usageResponse(); resp != nil {
+		u := resp.UsageMetadata
 		attrs = append(attrs,
 			// Tool-use prompt tokens are reported separately from PromptTokenCount and
 			// are billed as input, so they belong in gen_ai.usage.input_tokens. This
@@ -208,6 +229,9 @@ func generateContentResultAttributes(params generateContentResult) []attribute.K
 			genAIUsageCacheReadInputTokens.Int(int(u.CachedContentTokenCount)),
 			genAIUsageReasoningOutputTokens.Int(int(u.ThoughtsTokenCount)),
 		)
+		if n, _ := resp.CustomMetadata[cacheWriteKey].(int64); n > 0 {
+			attrs = append(attrs, genAIUsageCacheWriteInputTokens.Int64(n))
+		}
 	}
 	return attrs
 }
@@ -316,6 +340,9 @@ func RecordPanic(span trace.Span, err error) {
 
 // errorType mirrors ADK Python: https://github.com/google/adk-python/blob/ed030cbf431ef6c12a2b3a75dcc7aff08378cb82/src/google/adk/telemetry/tracing.py#L183-L198
 func errorType(err error) attribute.KeyValue {
+	if errors.Is(err, errInferencePanicked) {
+		return semconv.ErrorTypeOther
+	}
 	if apiErr, ok := errors.AsType[genai.APIError](err); ok {
 		return semconv.ErrorTypeKey.String(strconv.Itoa(apiErr.Code))
 	}
