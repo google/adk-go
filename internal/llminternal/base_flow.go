@@ -41,6 +41,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/internal/toolerror"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
@@ -214,6 +215,7 @@ type liveSessionImpl struct {
 	audioMgr    *AudioCacheManager
 	mu          sync.Mutex
 	activeTools map[string][]activeTask
+	pendingSent map[string]chan struct{}
 	// finalErr buffers one terminal error for recvIter to deliver after
 	// done is closed: the iterator cannot rely on outputCh (unbuffered)
 	// once Close has been called, because the consumer may be parked in Send.
@@ -247,6 +249,56 @@ func (s *liveSessionImpl) RegisterStreamingTool(toolName, callID string, cancel 
 		callID: callID,
 		cancel: cancel,
 	})
+}
+
+// expectPendingSent records that callID's pending response has not yet been
+// sent to the model.
+func (s *liveSessionImpl) expectPendingSent(callID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pendingSent == nil {
+		s.pendingSent = make(map[string]chan struct{})
+	}
+	if _, ok := s.pendingSent[callID]; !ok {
+		s.pendingSent[callID] = make(chan struct{})
+	}
+}
+
+// markPendingSent releases follow-ups for every function response in content.
+func (s *liveSessionImpl) markPendingSent(content *genai.Content) {
+	if content == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, part := range content.Parts {
+		if part.FunctionResponse == nil {
+			continue
+		}
+		if ch, ok := s.pendingSent[part.FunctionResponse.ID]; ok {
+			close(ch)
+			delete(s.pendingSent, part.FunctionResponse.ID)
+		}
+	}
+}
+
+// waitPendingSent blocks until callID's pending response was sent. It returns
+// false if ctx ends or the session closes first.
+func (s *liveSessionImpl) waitPendingSent(ctx context.Context, callID string) bool {
+	s.mu.Lock()
+	ch, ok := s.pendingSent[callID]
+	s.mu.Unlock()
+	if !ok {
+		return true
+	}
+	select {
+	case <-ch:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-s.done:
+		return false
+	}
 }
 
 func (s *liveSessionImpl) UnregisterStreamingTool(toolName, callID string) {
@@ -836,6 +888,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						}
 					}
 				case inputCase <- inputReq:
+					sess.markPendingSent(pendingSend)
 					pendingSend = nil
 				case ce := <-errChan:
 					if isResumable(ce.err) {
@@ -876,6 +929,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					return
 				}
 				if reconnect {
+					// A pending response queued when the socket drops is
+					// discarded with the connection; release its gate so the
+					// streaming tool can still deliver follow-ups after reconnect.
+					sess.markPendingSent(pendingSend)
 					break // Break the for loop
 				}
 			}
@@ -1610,6 +1667,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						}
 						if impl, ok := liveSess.(*liveSessionImpl); ok {
 							impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel)
+							impl.expectPendingSent(fnCall.ID)
 						}
 						go func() {
 							defer func() {
@@ -1618,14 +1676,39 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 								}
 								cancel()
 							}()
+							waited := false
 							for chunk, err := range streamTool.RunStream(cancelToolCtx, args) {
 								select {
 								case <-cancelCtx.Done():
 									return
 								default:
 								}
+								// Hold every follow-up until this call's pending response has
+								// reached the model, so the model never sees "pending" last.
+								if !waited {
+									waited = true
+									if impl, ok := liveSess.(*liveSessionImpl); ok && !impl.waitPendingSent(cancelCtx, fnCall.ID) {
+										return
+									}
+								}
 								if err != nil {
-									fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err) //nolint:forbidigo // pre-slog call site
+									errorContent := &genai.Content{
+										Role: "user",
+										Parts: []*genai.Part{
+											{
+												FunctionResponse: &genai.FunctionResponse{
+													ID:   fnCall.ID,
+													Name: streamTool.Name(),
+													Response: map[string]any{
+														"error": streamingToolErrorMessage(streamTool.Name(), err),
+													},
+												},
+											},
+										},
+									}
+									// The send error has nowhere to go: this goroutine has no caller,
+									// and a failed send means the session is already closing.
+									_ = liveSess.Send(agent.LiveRequest{Content: errorContent})
 									return
 								}
 								updatedContent := &genai.Content{
@@ -1896,6 +1979,23 @@ func (f *Flow) invokeOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool,
 	}
 	// If no callback returned a result/error, return the original result/error.
 	return nil, fErr
+}
+
+// streamingToolErrorMessage preserves only framework errors in live mode raised before the
+// handler runs. Custom tools need not use ADK's handler wrapper, so unknown
+// errors must also be sanitized, as in adk-python's _live_caller.
+func streamingToolErrorMessage(toolName string, err error) string {
+	if before, ok := err.(*toolerror.BeforeHandler); ok {
+		return before.Error()
+	}
+	return streamingToolInternalError(toolName)
+}
+
+// streamingToolInternalError is the generic FunctionResponse error text for a
+// failed streaming tool. Panic values, handler errors and stacks stay out of
+// the model-facing payload (parity with adk-python _live_caller).
+func streamingToolInternalError(toolName string) string {
+	return fmt.Sprintf("Invoking `%s()` failed with an internal error.", toolName)
 }
 
 func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Event, error) {
