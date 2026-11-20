@@ -252,6 +252,7 @@ func replayAnswer(st *segmentState, id string, resp any) bool {
 	}
 	st.answers[id] = resp
 	st.open = slices.DeleteFunc(st.open, func(open string) bool { return open == id })
+	st.terminal = NodeRunning
 	st.clearResult()
 	return true
 }
@@ -259,7 +260,7 @@ func replayAnswer(st *segmentState, id string, resp any) bool {
 // replayOwnEvent applies an activation's own event to st, as handleEvent
 // and handleCompletion would, and reports whether it is terminal.
 func replayOwnEvent(st *segmentState, ev *session.Event) bool {
-	if ev.CustomMetadata[workflowNodeCompletedKey] == true {
+	if ev.CustomMetadata[workflowNodeResumeCompletedKey] == true || ev.CustomMetadata[workflowNodeCompletedKey] == true {
 		st.terminal = NodeCompleted
 		if value, delegated := completedDelegatedOutput(ev); delegated && value != nil {
 			st.output, st.hasOutput = value, true

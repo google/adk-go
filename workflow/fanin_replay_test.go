@@ -660,3 +660,82 @@ func TestResume_TerminalOutputOfEarlierTurnCountsAtFinalize(t *testing.T) {
 		t.Errorf("Resume error = %v, want ErrMultipleTerminalOutputs", turn2.err)
 	}
 }
+
+func TestReplayHistory_PrePauseOutputResetWhenInterruptAnswered(t *testing.T) {
+	c := newFaninNode("c", NodeConfig{RerunOnResume: new(true)}, func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+		faninEmit(ctx, yield, "draft", "done")
+		faninAsk(ctx, yield, "ask-1")
+	})
+	done := NewFunctionNode("done", func(_ agent.Context, in any) (string, error) {
+		return fmt.Sprintf("done:%v", in), nil
+	}, NodeConfig{})
+	w, err := New("wf", []Edge{
+		{From: Start, To: c},
+		{From: c, To: c, Route: Default},
+		{From: c, To: done, Route: StringRoute("done")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv := startFaninConv(t, w)
+	userAns := faninUserResponse("ask-1", "ok1")
+	state := faninReconstruct(t, w, append(slices.Clone(conv.history), userAns))
+	if got := len(state.queued["c"]); got != 0 {
+		t.Fatalf("state.queued[c] len = %d, want 0 (pre-pause output left st.terminal == NodeCompleted)", got)
+	}
+}
+
+func TestResume_EarlierHandoffDoesNotDoubleTriggerFailedLoopSuccessor(t *testing.T) {
+	var xCalls atomic.Int32
+	var xInputs []any
+	var mu sync.Mutex
+	h := newFaninNode("h", NodeConfig{}, func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+		faninAsk(ctx, yield, "ask-h")
+	})
+	p := newFaninNode("p", NodeConfig{}, func(ctx agent.Context, _ any, yield func(*session.Event, error) bool) {
+		faninAsk(ctx, yield, "ask-p")
+	})
+	x := newFaninNode("x", NodeConfig{}, func(ctx agent.Context, in any, yield func(*session.Event, error) bool) {
+		n := xCalls.Add(1)
+		mu.Lock()
+		xInputs = append(xInputs, in)
+		mu.Unlock()
+		switch n {
+		case 1:
+			faninEmit(ctx, yield, "iter1", "again")
+		case 2:
+			yield(nil, errors.New("x@2 failed"))
+		default:
+			faninEmit(ctx, yield, fmt.Sprintf("iter2:%v", in))
+		}
+	})
+	w, err := New("wf", []Edge{
+		{From: Start, To: h},
+		{From: Start, To: p},
+		{From: h, To: x},
+		{From: x, To: x, Route: StringRoute("again")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv := startFaninConv(t, w)
+
+	// Turn 2: answer h; x@1 loops to x@2, which fails.
+	turn2 := conv.reply(map[string]any{"ask-h": "from-h"})
+	if turn2.err == nil {
+		t.Fatal("turn 2 error = nil, want x@2 failure")
+	}
+	mu.Lock()
+	xInputs = nil
+	mu.Unlock()
+
+	// Turn 3: user sends BOTH ask-h (repeated from Turn 2) and ask-p (new);
+	// x@2 must retry once with "iter1", not also get re-triggered by h's repeated "from-h".
+	turn3 := conv.reply(map[string]any{"ask-h": "from-h", "ask-p": "from-p"})
+	if turn3.err != nil {
+		t.Fatalf("turn 3 error = %v, want nil", turn3.err)
+	}
+	if diff := cmp.Diff([]any{"iter1"}, xInputs); diff != "" {
+		t.Errorf("turn 3 x inputs mismatch (-want +got):\n%s", diff)
+	}
+}

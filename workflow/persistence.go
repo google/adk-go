@@ -271,6 +271,21 @@ func (w *Workflow) reconstructRunState(sess session.Session, invocationID string
 	if replay != nil {
 		state.runCounts = replay.maxRun
 	}
+	state.everRan = map[string]bool{}
+	for name := range scans {
+		state.everRan[name] = true
+	}
+	for name := range completed {
+		state.everRan[name] = true
+	}
+	if replay != nil {
+		for name, n := range replay.maxRun {
+			if n > 0 {
+				state.everRan[name] = true
+			}
+		}
+	}
+
 	// Restore completed predecessors as well as interrupted nodes. Join
 	// barriers consult Nodes, not the completed set used to skip replayed
 	// successors, and need the predecessors' outputs after a resume.
@@ -435,7 +450,9 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 	outputs = map[string]any{}
 	completed = map[string]bool{}
 	interruptOwner := map[string]string{}
+	interruptSchema := map[string]*jsonschema.Schema{}
 	resolved := map[string]bool{}
+	latestRun := map[string]int{}
 	for _, ev := range utils.ApplyRewinds(slices.Collect(events.All())) {
 		if ev == nil {
 			continue
@@ -451,6 +468,10 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 			for _, part := range ev.Content.Parts {
 				if fr := frPart(part); fr != nil {
 					if owner, ok := interruptOwner[fr.ID]; ok && !resolved[fr.ID] {
+						resp := unwrapResponse(fr.Response)
+						if sc := interruptSchema[fr.ID]; sc != nil && !validResumeResponse(resp, sc) {
+							continue
+						}
 						delete(outputs, owner)
 						delete(completed, owner)
 						resolved[fr.ID] = true
@@ -463,10 +484,21 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 		if _, ok := nodesByName[name]; !ok {
 			continue
 		}
+		if key, ok := eventActivation(ev, nodesByName); ok && key.name == name && key.run > latestRun[name] {
+			if latestRun[name] > 0 {
+				delete(outputs, name)
+				delete(completed, name)
+				maps.DeleteFunc(interruptOwner, func(_, owner string) bool { return owner == name })
+			}
+			latestRun[name] = key.run
+		}
 		completed[name] = true
 		for _, id := range ev.LongRunningToolIDs {
 			if id != "" {
 				interruptOwner[id] = name
+				if sc := schemaFromEvent(ev, id); sc != nil {
+					interruptSchema[id] = sc
+				}
 				// Raised again, the ID waits for a new answer, and
 				// that first answer clears output emitted before it.
 				delete(resolved, id)

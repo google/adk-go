@@ -275,7 +275,7 @@ func (w *Workflow) Resume(
 			// whose successor never ran (a rejected response) does not
 			// skip it.
 			succs := slices.DeleteFunc(findSuccessors(s.graph, h.node, h.resp, nil, parentBranch), func(sc successor) bool {
-				return h.answeredEarlier && state.completed[sc.node.Name()]
+				return h.answeredEarlier && (state.completed[sc.node.Name()] || state.everRan[sc.node.Name()])
 			})
 			// Non-join triggers first, then the barriers, as
 			// bufferSuccessors orders them.

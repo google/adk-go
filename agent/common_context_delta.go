@@ -107,6 +107,9 @@ func (c *commonContext) WithDelta(d *CommonContextDelta) Context {
 	}
 	if d.EventActions != nil {
 		res.actions = prepareEventActions(d.EventActions)
+		if ta, ok := res.artifacts.(*trackedArtifacts); ok {
+			res.artifacts = newTrackedArtifacts(ta.Unwrap(), res.actions)
+		}
 	}
 	if d.AttemptCount != nil {
 		res.attempt = *d.AttemptCount

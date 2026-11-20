@@ -179,6 +179,11 @@ type RunState struct {
 	// that already ran on a prior turn (idempotency). Not persisted.
 	completed map[string]bool
 
+	// everRan records every node name that already started in session
+	// history, including one whose latest activation paused or failed, so
+	// an earlier turn's already-consumed handoff does not trigger it again.
+	everRan map[string]bool
+
 	// runCounts is the highest run id seen in history for each node name,
 	// set by ReconstructRunState. Resume seeds the run counters with it.
 	runCounts map[string]int

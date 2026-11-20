@@ -35,6 +35,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
@@ -1997,5 +1998,79 @@ func TestAgentNode_ConsumerStopsWhileToolChildRuns(t *testing.T) {
 
 	if !errors.Is(toolErr, context.Canceled) {
 		t.Errorf("RunNode() error = %v, want one wrapping context.Canceled", toolErr)
+	}
+}
+
+type stubArtifacts struct{}
+
+func (stubArtifacts) Save(context.Context, string, *genai.Part) (*artifact.SaveResponse, error) {
+	return &artifact.SaveResponse{Version: 1}, nil
+}
+
+func (stubArtifacts) List(context.Context) (*artifact.ListResponse, error) {
+	return &artifact.ListResponse{}, nil
+}
+
+func (stubArtifacts) Load(context.Context, string) (*artifact.LoadResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (stubArtifacts) LoadVersion(context.Context, string, int) (*artifact.LoadResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+type artifactInvocationContext struct {
+	*MockInvocationContext
+	artifacts agent.Artifacts
+}
+
+func (a *artifactInvocationContext) Artifacts() agent.Artifacts { return a.artifacts }
+
+func (a *artifactInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
+	cp := *a
+	cp.MockInvocationContext = a.MockInvocationContext.WithContext(ctx).(*MockInvocationContext)
+	return &cp
+}
+
+func (a *artifactInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	cp := *a
+	cp.MockInvocationContext = a.MockInvocationContext.WithICDelta(d).(*MockInvocationContext)
+	return &cp
+}
+
+func TestRunNode_FallbackConcurrentArtifactSavesDoNotRace(t *testing.T) {
+	mock, _ := newSessionMockCtx(t)
+	ic := &artifactInvocationContext{MockInvocationContext: mock, artifacts: stubArtifacts{}}
+	toolActions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
+	toolCtx := agent.NewToolContext(ic, "fc-fallback", toolActions, nil)
+
+	var wg sync.WaitGroup
+	for i := range 16 {
+		name := fmt.Sprintf("child_%d", i)
+		file := fmt.Sprintf("out_%d.txt", i)
+		useDirectDelta := i%2 == 1
+		child := NewDynamicNode(name, func(ctx agent.Context, _ any, emit func(*session.Event) error) (string, error) {
+			if useDirectDelta {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Actions.ArtifactDelta = map[string]int64{file: 1}
+				if err := emit(ev); err != nil {
+					return "", err
+				}
+				return "ok", nil
+			}
+			if _, err := ctx.Artifacts().Save(ctx, file, genai.NewPartFromText("payload")); err != nil {
+				return "", err
+			}
+			return "ok", nil
+		}, NodeConfig{})
+		wg.Go(func() {
+			if _, err := RunNode[string](toolCtx, child, nil); err != nil {
+				t.Errorf("RunNode(%s) error = %v", name, err)
+			}
+		})
+	}
+	wg.Wait()
+	if got := len(toolActions.ArtifactDelta); got != 16 {
+		t.Errorf("toolActions.ArtifactDelta len = %d, want 16", got)
 	}
 }
