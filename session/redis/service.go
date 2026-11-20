@@ -771,39 +771,11 @@ func mergeStates(appState, userState, sessionState map[string]any) map[string]an
 	return merged
 }
 
-// detachStateMap deep-copies JSON-like nested maps and slices in m so the
-// returned Session shares no mutable container with CreateRequest.State.
+// detachStateMap deep-copies all reference values in m (via CloneSession) so
+// the returned Session shares no mutable memory with CreateRequest.State.
 func detachStateMap(m map[string]any) map[string]any {
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		out[k] = detachStateValue(v)
-	}
-	return out
-}
-
-func detachStateValue(v any) any {
-	switch t := v.(type) {
-	case map[string]any:
-		if t == nil {
-			return t
-		}
-		out := make(map[string]any, len(t))
-		for k, elem := range t {
-			out[k] = detachStateValue(elem)
-		}
-		return out
-	case []any:
-		if t == nil {
-			return t
-		}
-		out := make([]any, len(t))
-		for i, elem := range t {
-			out[i] = detachStateValue(elem)
-		}
-		return out
-	default:
-		return v
-	}
+	cloned := session.CloneSession(&localSession{state: m})
+	return maps.Collect(cloned.State().All())
 }
 
 // trimTempDeltaState returns event, or a shallow copy of it whose state delta

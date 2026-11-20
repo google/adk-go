@@ -1545,12 +1545,18 @@ func TestCreate_DetachesCallerStateMaps(t *testing.T) {
 	svc, _, _ := newTestService(t, redis.Config{})
 	nested := map[string]any{"role": "viewer"}
 	tempNested := map[string]any{"step": "one"}
+	roles := []string{"viewer"}
+	tempMeta := map[string]string{"env": "prod"}
 	created := mustCreate(t, ctx, svc, "a", "u", "s1", map[string]any{
 		"profile":      nested,
 		"temp:scratch": tempNested,
+		"roles":        roles,
+		"temp:meta":    tempMeta,
 	})
 	nested["role"] = "admin"
 	tempNested["step"] = "two"
+	roles[0] = "admin"
+	tempMeta["env"] = "dev"
 
 	gotProfile, err := created.State().Get("profile")
 	if err != nil {
@@ -1565,5 +1571,19 @@ func TestCreate_DetachesCallerStateMaps(t *testing.T) {
 	}
 	if diff := cmp.Diff(map[string]any{"step": "one"}, gotTemp); diff != "" {
 		t.Errorf("created session temp:scratch mismatch (-want +got):\n%s", diff)
+	}
+	gotRoles, err := created.State().Get("roles")
+	if err != nil {
+		t.Fatalf("State().Get(roles) error = %v", err)
+	}
+	if diff := cmp.Diff([]string{"viewer"}, gotRoles); diff != "" {
+		t.Errorf("created session roles mismatch (-want +got):\n%s", diff)
+	}
+	gotMeta, err := created.State().Get("temp:meta")
+	if err != nil {
+		t.Fatalf("State().Get(temp:meta) error = %v", err)
+	}
+	if diff := cmp.Diff(map[string]string{"env": "prod"}, gotMeta); diff != "" {
+		t.Errorf("created session temp:meta mismatch (-want +got):\n%s", diff)
 	}
 }
