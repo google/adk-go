@@ -34,9 +34,10 @@ type executeSQLArgs struct {
 	DryRun    bool   `json:"dry_run,omitempty"`
 }
 
-// executeSQL runs a read-only query, as adk-python's execute_sql does with
-// its default write mode, WriteMode.BLOCKED: a dry run first finds the
-// statement type, and anything but a SELECT is refused.
+// executeSQL runs a query, as adk-python's execute_sql does. With
+// WriteModeBlocked a dry run first finds the statement type, and anything but
+// a SELECT is refused. With WriteModeAllowed the query runs without a dry
+// run, unless a KMS key needs the statement type.
 func (b *bigQuery) executeSQL(ctx agent.Context, args executeSQLArgs) (any, error) {
 	projectID := b.project(args.ProjectID)
 	project, err := pathSegment("project_id", projectID)
@@ -48,18 +49,27 @@ func (b *bigQuery) executeSQL(ctx agent.Context, args executeSQLArgs) (any, erro
 	}
 	labels := b.jobLabels(executeSQLName)
 
-	job, err := b.dryRun(ctx, project, projectID, args.Query, labels)
-	if err != nil {
-		return nil, err
-	}
-	if statementType(job) != "SELECT" {
-		return errorDetails("Read-only mode only supports SELECT statements."), nil
-	}
-	if args.DryRun {
-		return map[string]any{"status": "SUCCESS", "dry_run_info": job}, nil
+	readOnly := b.writeMode != WriteModeAllowed
+	var job map[string]any
+	if readOnly || args.DryRun || b.kmsKeyName != "" {
+		job, err = b.dryRun(ctx, project, projectID, args.Query, labels)
+		if err != nil {
+			return nil, err
+		}
+		if readOnly && statementType(job) != "SELECT" {
+			return errorDetails("Read-only mode only supports SELECT statements."), nil
+		}
+		if args.DryRun {
+			return map[string]any{"status": "SUCCESS", "dry_run_info": job}, nil
+		}
 	}
 
-	rows, truncated, err := b.query(ctx, project, args.Query, labels)
+	// BigQuery rejects a job-level key for DDL, DML and scripts.
+	var kmsKeyName string
+	if statementType(job) == "SELECT" {
+		kmsKeyName = b.kmsKeyName
+	}
+	rows, truncated, err := b.query(ctx, project, args.Query, labels, kmsKeyName)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +165,8 @@ type queryResults struct {
 // and whether rows were left out. adk-python instead flags every result that
 // reaches the limit as likely truncated. Like adk-python's query_and_wait, it
 // asks for timestamps as integer microseconds, which keeps their precision.
-func (b *bigQuery) query(ctx agent.Context, project, query string, labels map[string]string) ([]map[string]any, bool, error) {
+// A non-empty kmsKeyName encrypts the results with that key.
+func (b *bigQuery) query(ctx agent.Context, project, query string, labels map[string]string, kmsKeyName string) ([]map[string]any, bool, error) {
 	body := map[string]any{
 		"query":         query,
 		"useLegacySql":  false,
@@ -168,6 +179,9 @@ func (b *bigQuery) query(ctx agent.Context, project, query string, labels map[st
 	}
 	if b.location != "" {
 		body["location"] = b.location
+	}
+	if kmsKeyName != "" {
+		body["destinationEncryptionConfiguration"] = map[string]any{"kmsKeyName": kmsKeyName}
 	}
 	var res queryResults
 	if err := b.client.post(ctx, executeSQLName, "projects/"+project+"/queries", body, &res); err != nil {

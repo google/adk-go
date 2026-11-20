@@ -14,13 +14,14 @@
 
 // Package bigquerytoolset provides a [tool.Toolset] whose tools let an agent
 // explore BigQuery: list the datasets in a project and the tables in a
-// dataset, read the metadata of a dataset, a table or a job, and run
-// read-only SQL queries.
+// dataset, read the metadata of a dataset, a table or a job, and run SQL
+// queries.
 //
 // The tools have the same names, arguments and results as adk-python's
 // BigQueryToolset, so prompts and skills written for it work unchanged.
-// execute_sql runs only SELECT statements, like adk-python's with its default
-// WriteMode.BLOCKED. The differences in results: get_job_info returns the
+// By default execute_sql runs only SELECT statements, like adk-python's with
+// its default WriteMode.BLOCKED; [Config.WriteMode] can allow writes. The
+// differences in results: get_job_info returns the
 // job's creationTime, startTime and endTime statistics as the strings the REST
 // API sends, where adk-python returns numbers; execute_sql returns some
 // values adk-python turns into Python strings as the REST API sends them,
