@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"reflect"
 	"slices"
@@ -247,7 +248,18 @@ func (c *SessionsAPIController) UpdateSessionHandler(rw http.ResponseWriter, req
 	//
 	// What the client echoes back is not a write, so drop that first. See
 	// dropEchoedKeys.
-	stateDelta := dropEchoedKeys(updateRequest.StateDelta, storedSession.Session.State())
+	stateDelta, err := dropEchoedKeys(req.Context(), updateRequest.StateDelta, storedSession.Session.State())
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// The client is gone. There is nobody to answer, and a 500 would
+			// report the cancellation as the server's failure.
+			log.Printf("adkrest: update session: %v", err) //nolint:forbidigo // pre-slog call site
+			return
+		}
+		log.Printf("adkrest: cannot merge the state delta: %v", err) //nolint:forbidigo // pre-slog call site
+		http.Error(rw, "cannot merge the state delta", http.StatusInternalServerError)
+		return
+	}
 	if scoped := scopedStateKeys(stateDelta); len(scoped) > 0 {
 		http.Error(rw, fmt.Sprintf(
 			"stateDelta may only contain session-scoped keys; remove %v (the %q, %q and %q prefixes write outside this session)",
@@ -368,25 +380,50 @@ func isScopedStateKey(key string) bool {
 //
 // Dropping such a key leaves the session as it stands. A scoped key carrying a
 // different value is still a write outside this session, and is still
-// refused. Every other key is written as submitted, changed or not.
-func dropEchoedKeys(delta map[string]any, stored session.ReadonlyState) map[string]any {
+// refused. Every other key is written as submitted, except that a value the
+// client sent back without the credential secrets a read stripped gets those
+// omitted secrets restored, and only inside a credential that is still the same
+// authType and principal and carries no secret of its own: nothing outside a
+// credential is restored. A secret sent as JSON null counts as sent, so it
+// clears the stored secret. A credential under rawAuthCredential that has no
+// authType cannot be matched and is written as submitted.
+//
+// It returns an error when the merge cannot finish: the request context is
+// canceled, or a stored value cannot be encoded.
+func dropEchoedKeys(ctx context.Context, delta map[string]any, stored session.ReadonlyState) (map[string]any, error) {
 	read := models.RedactedState(stored)
 	kept := make(map[string]any, len(delta))
 	for key, value := range delta {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		readValue, ok := read[key]
-		if ok && sameJSON(readValue, value) && (isScopedStateKey(key) || strippedOnRead(stored, key, readValue)) {
+		if !ok {
+			kept[key] = value
 			continue
+		}
+		storedValue, err := stored.Get(key)
+		if err != nil {
+			return nil, err
+		}
+		stripped := !sameJSON(readValue, storedValue)
+		if sameJSON(readValue, value) && (isScopedStateKey(key) || stripped) {
+			continue
+		}
+		// A value that a read returned with credential secrets stripped is not
+		// an echo: the client edited something in it and sent it back without
+		// the secrets it never saw. Restore those before writing it. A scoped
+		// key is refused below, so there is no point restoring into one.
+		if stripped && !isScopedStateKey(key) {
+			merged, _, err := models.MergeRedactedValue(ctx, storedValue, value)
+			if err != nil {
+				return nil, err
+			}
+			value = merged
 		}
 		kept[key] = value
 	}
-	return kept
-}
-
-// strippedOnRead reports whether readValue, the value a read returns for key,
-// lacks credential secrets that the stored value holds.
-func strippedOnRead(stored session.ReadonlyState, key string, readValue json.RawMessage) bool {
-	value, err := stored.Get(key)
-	return err == nil && !sameJSON(readValue, value)
+	return kept, nil
 }
 
 // sameJSON reports whether encoded and value are the same JSON value once both
