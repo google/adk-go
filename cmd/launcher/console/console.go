@@ -67,10 +67,20 @@ func NewLauncher() launcher.SubLauncher {
 	return &consoleLauncher{config: config, flags: fs}
 }
 
-// Run implements launcher.SubLauncher. It starts the console interaction loop.
+// Run implements launcher.SubLauncher. It starts the console interaction loop,
+// and closes the plugins in config.PluginConfig on every return.
 func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) error {
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
+	// Deferred before the other cleanup so it runs last, on every return path.
+	// ctx is canceled by then after an interrupt, hence WithoutCancel.
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.config.shutdownTimeout)
+		defer cancel()
+		if err := config.PluginConfig.Close(closeCtx); err != nil {
+			log.Printf("plugin shutdown failed: %v", err)
+		}
+	}()
 
 	telemetry, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, l.config.otelToCloud)
 	if err != nil {
