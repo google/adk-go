@@ -17,6 +17,8 @@ package anthropicmodel
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -118,6 +120,7 @@ func buildOutputFormatSchema(cfg *genai.GenerateContentConfig) (map[string]any, 
 			schemaMap["type"] = "object"
 		}
 	}
+	moveUnsupportedSchemaKeywords(schemaMap)
 	normalizeOutputSchemaObjects(schemaMap)
 	if rootType, _ := schemaMap["type"].(string); rootType == "object" {
 		return schemaMap, false, nil
@@ -162,6 +165,125 @@ func rewriteWrappedSchemaRefs(node any) {
 			rewriteWrappedSchemaRefs(elem)
 		}
 	}
+}
+
+// supportedOutputSchemaKeywords is the set of JSON Schema keywords Claude
+// accepts in output_config.format. It is supportedSchemaKeys from
+// anthropic-sdk-go's schemautil.go plus "default" and "definitions", which
+// https://platform.claude.com/docs/en/build-with-claude/structured-outputs#json-schema-limitations
+// lists as supported.
+var supportedOutputSchemaKeywords = map[string]bool{
+	"$ref":                 true,
+	"$defs":                true,
+	"definitions":          true,
+	"type":                 true,
+	"anyOf":                true,
+	"oneOf":                true,
+	"allOf":                true,
+	"description":          true,
+	"title":                true,
+	"default":              true,
+	"enum":                 true,
+	"const":                true,
+	"properties":           true,
+	"additionalProperties": true,
+	"required":             true,
+	"items":                true,
+	"minItems":             true,
+	"format":               true,
+	"pattern":              true,
+}
+
+// supportedOutputSchemaFormats is the set of format values Claude accepts.
+var supportedOutputSchemaFormats = map[string]bool{
+	"date-time": true,
+	"time":      true,
+	"date":      true,
+	"duration":  true,
+	"email":     true,
+	"hostname":  true,
+	"uri":       true,
+	"ipv4":      true,
+	"ipv6":      true,
+	"uuid":      true,
+}
+
+// moveUnsupportedSchemaKeywords removes the keywords Claude rejects in
+// output_config.format from schema and its subschemas, and appends them to
+// that schema's description as "{keyword: value, ...}" so the model still sees
+// the constraint. A format outside supportedOutputSchemaFormats and a minItems
+// other than 0 or 1 are moved the same way. This is the keyword step of
+// transformSchema in anthropic-sdk-go, with two differences: default and
+// definitions are kept, and format is checked on every type rather than only
+// on strings, since the API documents no formats for other types.
+func moveUnsupportedSchemaKeywords(schema map[string]any) {
+	moved := map[string]any{}
+	for k, v := range schema {
+		if !supportedOutputSchemaKeywords[k] {
+			moved[k] = v
+			delete(schema, k)
+		}
+	}
+	if v, ok := schema["format"]; ok {
+		if f, _ := v.(string); !supportedOutputSchemaFormats[f] {
+			moved["format"] = v
+			delete(schema, "format")
+		}
+	}
+	if v, ok := schema["minItems"]; ok {
+		if n, ok := v.(float64); !ok || (n != 0 && n != 1) {
+			moved["minItems"] = v
+			delete(schema, "minItems")
+		}
+	}
+
+	// Recurse only where a keyword holds subschemas. The keys of properties and
+	// $defs are names, and enum, const and default hold values, so a nested
+	// "minimum" there is not a keyword.
+	for _, k := range []string{"properties", "$defs", "definitions"} {
+		named, _ := schema[k].(map[string]any)
+		for _, sub := range named {
+			if s, ok := sub.(map[string]any); ok {
+				moveUnsupportedSchemaKeywords(s)
+			}
+		}
+	}
+	for _, k := range []string{"items", "additionalProperties", "anyOf", "oneOf", "allOf"} {
+		switch v := schema[k].(type) {
+		case map[string]any:
+			moveUnsupportedSchemaKeywords(v)
+		case []any:
+			for _, elem := range v {
+				if s, ok := elem.(map[string]any); ok {
+					moveUnsupportedSchemaKeywords(s)
+				}
+			}
+		}
+	}
+
+	if len(moved) == 0 {
+		return
+	}
+	parts := make([]string, 0, len(moved))
+	for _, k := range slices.Sorted(maps.Keys(moved)) {
+		parts = append(parts, k+": "+formatSchemaKeywordValue(moved[k]))
+	}
+	note := "{" + strings.Join(parts, ", ") + "}"
+	if desc, _ := schema["description"].(string); desc != "" {
+		note = desc + "\n\n" + note
+	}
+	schema["description"] = note
+}
+
+// formatSchemaKeywordValue renders a moved keyword's value for a description.
+// Strings are written bare and everything else as JSON.
+func formatSchemaKeywordValue(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	// v was decoded from JSON, so it always marshals.
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 func normalizeOutputSchemaObjects(node any) {
