@@ -33,6 +33,7 @@ import (
 	"google.golang.org/adk/v2/codeexecutor"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -958,4 +959,190 @@ func TestRunOneStep_PreprocessCodeEventDoesNotSkipModelCall(t *testing.T) {
 	if got := len(m.unaryCalls()); got != 1 {
 		t.Errorf("model calls = %d, want 1", got)
 	}
+}
+
+// When an after-model callback fails on a CFC function call event, or when
+// the consumer stops ranging at that event, RunLive must not execute the tool.
+func TestCFCDoesNotRunToolBeforeConsumerAcceptsCallEvent(t *testing.T) {
+	t.Run("after_model_callback_error", func(t *testing.T) {
+		baseline, _ := runLiveStacks()
+		defer assertNoRunLiveLeak(t, baseline)
+		client, _ := startFakeLiveServer(t, func(_ int, conn *websocket.Conn) {
+			if !writeFrames(t, conn, addNumbersCall) {
+				return
+			}
+			blockUntilClientCloses(conn)
+		})
+		var toolRuns atomic.Int32
+		addNumbers := &mockFunctionTool{name: "add_numbers", runFunc: func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+			toolRuns.Add(1)
+			return map[string]any{"sum": 7}, nil
+		}}
+		wantErr := errors.New("rejected by after-model callback")
+		f := &Flow{
+			Model:             &cfcModel{name: "gemini-2.0-flash", client: client},
+			Tools:             []tool.Tool{addNumbers},
+			RequestProcessors: liveOnlyProcessors,
+			AfterModelCallbacks: []AfterModelCallback{func(_ agent.Context, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+				if len(utils.FunctionCalls(resp.Content)) > 0 {
+					time.Sleep(15 * time.Millisecond)
+					return nil, wantErr
+				}
+				return nil, nil
+			}},
+		}
+		ctx := newCFCContext(t, cfcRun{agent: newCFCAgent(t, "cfc_agent", &State{}), runConfig: agent.RunConfig{SupportCFC: true}})
+
+		_, errs := collectEvents(t, f.Run(ctx))
+
+		if len(errs) != 1 || !errors.Is(errs[0], wantErr) {
+			t.Fatalf("Run() errors = %v, want [%v]", errs, wantErr)
+		}
+		if got := toolRuns.Load(); got != 0 {
+			t.Errorf("tool runs = %d, want 0 when AfterModelCallback rejects the call", got)
+		}
+	})
+
+	t.Run("consumer_waits_then_stops_at_call_event", func(t *testing.T) {
+		baseline, _ := runLiveStacks()
+		defer assertNoRunLiveLeak(t, baseline)
+		client, _ := startFakeLiveServer(t, func(_ int, conn *websocket.Conn) {
+			if !writeFrames(t, conn, addNumbersCall) {
+				return
+			}
+			blockUntilClientCloses(conn)
+		})
+		var toolRuns atomic.Int32
+		addNumbers := &mockFunctionTool{name: "add_numbers", runFunc: func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+			toolRuns.Add(1)
+			return map[string]any{"sum": 7}, nil
+		}}
+		f := &Flow{
+			Model:             &cfcModel{name: "gemini-2.0-flash", client: client},
+			Tools:             []tool.Tool{addNumbers},
+			RequestProcessors: liveOnlyProcessors,
+		}
+		ctx := newCFCContext(t, cfcRun{agent: newCFCAgent(t, "cfc_agent", &State{}), runConfig: agent.RunConfig{SupportCFC: true}})
+
+		sawCall := false
+		for ev, err := range f.Run(ctx) {
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			if ev != nil && len(utils.FunctionCalls(ev.LLMResponse.Content)) > 0 {
+				sawCall = true
+				time.Sleep(15 * time.Millisecond)
+				if got := toolRuns.Load(); got != 0 {
+					t.Errorf("tool runs while consumer is handling call event = %d, want 0", got)
+				}
+				break
+			}
+		}
+		if !sawCall {
+			t.Fatal("Run() ended without yielding the function call event")
+		}
+		if got := toolRuns.Load(); got != 0 {
+			t.Errorf("tool runs after consumer stopped at call event = %d, want 0", got)
+		}
+	})
+}
+
+// WithLiveEventGate holds RunLive before handleFunctionCalls until
+// ReleaseLiveEvent releases the event, and stops without running the tool
+// when ReleaseLiveEvent reports false.
+func TestRunLiveEventGateWaitsForRelease(t *testing.T) {
+	t.Run("waits_until_released_true", func(t *testing.T) {
+		baseline, _ := runLiveStacks()
+		defer assertNoRunLiveLeak(t, baseline)
+		client, _ := startFakeLiveServer(t, func(_ int, conn *websocket.Conn) {
+			if !writeFrames(t, conn, addNumbersCall) {
+				return
+			}
+			if _, ok := awaitFunctionResponse(conn); !ok {
+				return
+			}
+			blockUntilClientCloses(conn)
+		})
+		var stamped atomic.Bool
+		var sawStamped atomic.Bool
+		addNumbers := &mockFunctionTool{name: "add_numbers", runFunc: func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+			sawStamped.Store(stamped.Load())
+			return map[string]any{"sum": 7}, nil
+		}}
+		f := &Flow{
+			Model:             &cfcModel{name: "gemini-2.0-flash", client: client},
+			Tools:             []tool.Tool{addNumbers},
+			RequestProcessors: liveOnlyProcessors,
+		}
+		baseCtx := newCFCContext(t, cfcRun{agent: newCFCAgent(t, "live_agent", &State{})})
+		ctx := baseCtx.WithContext(WithLiveEventGate(runconfig.ToContext(baseCtx, &runconfig.RunConfig{Live: &agent.LiveRunConfig{}})))
+		sess, events, err := f.RunLive(ctx)
+		if err != nil {
+			t.Fatalf("RunLive() error = %v", err)
+		}
+		defer func() { _ = sess.Close() }()
+
+		for ev, err := range events {
+			if err != nil {
+				t.Fatalf("RunLive() event error = %v", err)
+			}
+			if ev == nil {
+				continue
+			}
+			if len(utils.FunctionCalls(ev.LLMResponse.Content)) > 0 {
+				time.Sleep(15 * time.Millisecond)
+				stamped.Store(true)
+				ReleaseLiveEvent(ctx, ev, true)
+				continue
+			}
+			ReleaseLiveEvent(ctx, ev, true)
+			if len(utils.FunctionResponses(ev.LLMResponse.Content)) > 0 {
+				break
+			}
+		}
+		if !sawStamped.Load() {
+			t.Error("tool ran before ReleaseLiveEvent(ctx, ev, true) completed")
+		}
+	})
+
+	t.Run("stops_when_released_false", func(t *testing.T) {
+		baseline, _ := runLiveStacks()
+		defer assertNoRunLiveLeak(t, baseline)
+		client, _ := startFakeLiveServer(t, func(_ int, conn *websocket.Conn) {
+			if !writeFrames(t, conn, addNumbersCall) {
+				return
+			}
+			blockUntilClientCloses(conn)
+		})
+		var toolRuns atomic.Int32
+		addNumbers := &mockFunctionTool{name: "add_numbers", runFunc: func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+			toolRuns.Add(1)
+			return map[string]any{"sum": 7}, nil
+		}}
+		f := &Flow{
+			Model:             &cfcModel{name: "gemini-2.0-flash", client: client},
+			Tools:             []tool.Tool{addNumbers},
+			RequestProcessors: liveOnlyProcessors,
+		}
+		baseCtx := newCFCContext(t, cfcRun{agent: newCFCAgent(t, "live_agent", &State{})})
+		ctx := baseCtx.WithContext(WithLiveEventGate(runconfig.ToContext(baseCtx, &runconfig.RunConfig{Live: &agent.LiveRunConfig{}})))
+		sess, events, err := f.RunLive(ctx)
+		if err != nil {
+			t.Fatalf("RunLive() error = %v", err)
+		}
+		defer func() { _ = sess.Close() }()
+
+		for ev, err := range events {
+			if err != nil {
+				t.Fatalf("RunLive() event error = %v", err)
+			}
+			if ev != nil && len(utils.FunctionCalls(ev.LLMResponse.Content)) > 0 {
+				ReleaseLiveEvent(ctx, ev, false)
+				break
+			}
+		}
+		if got := toolRuns.Load(); got != 0 {
+			t.Errorf("tool runs = %d, want 0 when ReleaseLiveEvent rejected the call", got)
+		}
+	})
 }

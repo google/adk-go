@@ -1474,6 +1474,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		Resumable:      r.resumable,
 	})
 	ctx = r.withPluginManager(ctx)
+	ctx = llminternal.WithLiveEventGate(ctx)
 	// Deliberately no compactionctx here: context compaction does not apply to
 	// live runs. A live session streams over a persistent connection instead of
 	// re-sending assembled history each turn, so replacing older events with a
@@ -1534,7 +1535,16 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			defer r.pluginManager.RunAfterRunCallback(iCtx)
 		}
 
-		var bufferedEvents []*session.Event
+		type bufferedLiveEvent struct {
+			raw       *session.Event
+			processed *session.Event
+		}
+		var bufferedEvents []bufferedLiveEvent
+		defer func() {
+			for _, b := range bufferedEvents {
+				llminternal.ReleaseLiveEvent(iCtx, b.raw, false)
+			}
+		}()
 		isTranscribing := false
 
 		for event, err := range innerIter {
@@ -1550,7 +1560,8 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				if len(bufferedEvents) > 0 {
 					ids := make([]string, 0, len(bufferedEvents))
 					for _, bufferedEvent := range bufferedEvents {
-						ids = append(ids, bufferedEvent.ID)
+						llminternal.ReleaseLiveEvent(iCtx, bufferedEvent.raw, false)
+						ids = append(ids, bufferedEvent.processed.ID)
 					}
 					err = fmt.Errorf("%w; discarded buffered event IDs: %q", err, ids)
 				}
@@ -1558,10 +1569,12 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				yield(nil, err)
 				return
 			}
+			rawEvent := event
 			stampTimestamp(iCtx, event)
 
 			event, err = r.processEventWithPlugins(iCtx, event)
 			if err != nil {
+				llminternal.ReleaseLiveEvent(iCtx, rawEvent, false)
 				if !yield(nil, err) {
 					return
 				}
@@ -1586,7 +1599,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 			}
 
 			if isTranscribing && isToolCallOrResp {
-				bufferedEvents = append(bufferedEvents, event)
+				bufferedEvents = append(bufferedEvents, bufferedLiveEvent{raw: rawEvent, processed: event})
 				continue
 			}
 
@@ -1596,26 +1609,42 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 					if shouldAppendEvent(event, true) {
 						if err := r.sessionService.AppendEvent(iCtx, storedSession, event); err != nil {
+							llminternal.ReleaseLiveEvent(iCtx, rawEvent, false)
 							if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
+								for _, b := range bufferedEvents {
+									llminternal.ReleaseLiveEvent(iCtx, b.raw, false)
+								}
 								return
 							}
 							continue
 						}
 					}
+					llminternal.ReleaseLiveEvent(iCtx, rawEvent, true)
 					if !yield(event, nil) {
+						for _, b := range bufferedEvents {
+							llminternal.ReleaseLiveEvent(iCtx, b.raw, false)
+						}
 						return
 					}
 
-					for _, bufferedEvent := range bufferedEvents {
-						if shouldAppendEvent(bufferedEvent, true) {
-							if err := r.sessionService.AppendEvent(iCtx, storedSession, bufferedEvent); err != nil {
+					for idx, b := range bufferedEvents {
+						if shouldAppendEvent(b.processed, true) {
+							if err := r.sessionService.AppendEvent(iCtx, storedSession, b.processed); err != nil {
+								llminternal.ReleaseLiveEvent(iCtx, b.raw, false)
 								if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
+									for _, rest := range bufferedEvents[idx+1:] {
+										llminternal.ReleaseLiveEvent(iCtx, rest.raw, false)
+									}
 									return
 								}
 								continue
 							}
 						}
-						if !yield(bufferedEvent, nil) {
+						llminternal.ReleaseLiveEvent(iCtx, b.raw, true)
+						if !yield(b.processed, nil) {
+							for _, rest := range bufferedEvents[idx+1:] {
+								llminternal.ReleaseLiveEvent(iCtx, rest.raw, false)
+							}
 							return
 						}
 					}
@@ -1626,6 +1655,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 			if shouldAppendEvent(event, true) {
 				if err := r.sessionService.AppendEvent(iCtx, storedSession, event); err != nil {
+					llminternal.ReleaseLiveEvent(iCtx, rawEvent, false)
 					if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
 						return
 					}
@@ -1633,6 +1663,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				}
 			}
 
+			llminternal.ReleaseLiveEvent(iCtx, rawEvent, true)
 			if !yield(event, nil) {
 				return
 			}
@@ -1645,16 +1676,16 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		// Like the mid-stream flush, store each buffered event that
 		// shouldAppendEvent accepts, and yield every one.
 		flushCtx := context.WithoutCancel(iCtx)
-		for _, bufferedEvent := range bufferedEvents {
-			if shouldAppendEvent(bufferedEvent, true) {
-				if err := r.sessionService.AppendEvent(flushCtx, storedSession, bufferedEvent); err != nil {
+		for _, b := range bufferedEvents {
+			if shouldAppendEvent(b.processed, true) {
+				if err := r.sessionService.AppendEvent(flushCtx, storedSession, b.processed); err != nil {
 					if !yield(nil, fmt.Errorf("failed to add event to session: %w", err)) {
 						return
 					}
 					continue
 				}
 			}
-			if !yield(bufferedEvent, nil) {
+			if !yield(b.processed, nil) {
 				return
 			}
 		}

@@ -38,6 +38,66 @@ type liveOptions struct {
 	// Without it, such a response is dropped only as it arrives from the
 	// connection, before the response processors run.
 	dropEmptyResponses bool
+	// waitForYield holds pushEvent on each non-partial event until recvIter's
+	// yield returns true, so a CFC step finishes AfterModelCallback,
+	// OnEventCallback and AppendEvent before RunLive runs any function calls.
+	waitForYield bool
+}
+
+type liveEventGateKey struct{}
+
+// liveEventGate coordinates non-partial live events pushed by Flow.RunLive
+// with Runner.RunLive, so plugins (such as toolcallintegrity) and session
+// persistence finish handling a function call event before handleFunctionCalls
+// starts, without blocking outer iter.Pull2 callers across yield.
+type liveEventGate struct {
+	mu    sync.Mutex
+	gates map[*session.Event]chan bool
+}
+
+// WithLiveEventGate returns a copy of ctx carrying a gate that holds each
+// non-partial Flow.RunLive event until ReleaseLiveEvent releases it.
+func WithLiveEventGate(ctx context.Context) context.Context {
+	return context.WithValue(ctx, liveEventGateKey{}, &liveEventGate{
+		gates: make(map[*session.Event]chan bool),
+	})
+}
+
+func liveEventGateFrom(ctx context.Context) *liveEventGate {
+	g, _ := ctx.Value(liveEventGateKey{}).(*liveEventGate)
+	return g
+}
+
+func (g *liveEventGate) hold(ev *session.Event) chan bool {
+	if g == nil || ev == nil || ev.LLMResponse.Partial {
+		return nil
+	}
+	ch := make(chan bool, 1)
+	g.mu.Lock()
+	g.gates[ev] = ch
+	g.mu.Unlock()
+	return ch
+}
+
+func (g *liveEventGate) release(ev *session.Event, ok bool) {
+	if g == nil || ev == nil {
+		return
+	}
+	g.mu.Lock()
+	ch, exists := g.gates[ev]
+	delete(g.gates, ev)
+	g.mu.Unlock()
+	if exists {
+		ch <- ok
+	}
+}
+
+// ReleaseLiveEvent releases ev on the gate attached by WithLiveEventGate. ok
+// reports whether the runner accepted ev and RunLive may continue processing
+// its function calls. Calling ReleaseLiveEvent more than once or on an untracked
+// event is a no-op.
+func ReleaseLiveEvent(ctx context.Context, ev *session.Event, ok bool) {
+	liveEventGateFrom(ctx).release(ev, ok)
 }
 
 // liveOptionsKey keys liveOptions in a context. Keying by the Flow means a
@@ -81,7 +141,11 @@ func liveOptionsFrom(ctx context.Context, f *Flow) liveOptions {
 func (f *Flow) callLLMOverLive(ctx agent.InvocationContext, req *model.LLMRequest, actions *session.EventActions, yield func(*responseWithEventID, error) bool) {
 	marks := &processorEvents{set: make(map[*session.Event]struct{})}
 	lf := f.withMarkedProcessors(marks)
-	sess, events, err := lf.RunLive(withLiveOptions(ctx, lf, liveOptions{live: &agent.LiveRunConfig{}, dropEmptyResponses: true}))
+	sess, events, err := lf.RunLive(withLiveOptions(ctx, lf, liveOptions{
+		live:               &agent.LiveRunConfig{},
+		dropEmptyResponses: true,
+		waitForYield:       true,
+	}))
 	if err != nil {
 		f.yieldLiveError(ctx, req, actions, err, yield)
 		return

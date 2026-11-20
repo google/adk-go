@@ -349,13 +349,15 @@ type activeTask struct {
 }
 
 type liveSessionImpl struct {
-	inputCh     chan agent.LiveRequest
-	outputCh    chan eventOrError
-	done        chan struct{}
-	closeOnce   sync.Once
-	audioMgr    *AudioCacheManager
-	mu          sync.Mutex
-	activeTools map[string][]activeTask
+	inputCh      chan agent.LiveRequest
+	outputCh     chan eventOrError
+	done         chan struct{}
+	closeOnce    sync.Once
+	audioMgr     *AudioCacheManager
+	waitForYield bool
+	gate         *liveEventGate
+	mu           sync.Mutex
+	activeTools  map[string][]activeTask
 	// finalErr buffers one terminal error for recvIter to deliver after
 	// done is closed: the iterator cannot rely on outputCh (unbuffered)
 	// once Close has been called, because the consumer may be parked in Send.
@@ -426,6 +428,7 @@ func (s *liveSessionImpl) CancelAllStreamingTools(toolName string) bool {
 type eventOrError struct {
 	event *session.Event
 	err   error
+	taken chan bool
 }
 
 func newLiveSessionImpl() *liveSessionImpl {
@@ -456,7 +459,14 @@ func (s *liveSessionImpl) recvIter() iter.Seq2[*session.Event, error] {
 			}
 			select {
 			case res := <-s.outputCh:
-				if !yield(res.event, res.err) {
+				ok := yield(res.event, res.err)
+				if res.taken != nil {
+					res.taken <- ok
+				}
+				if !ok {
+					if s.gate != nil && res.event != nil {
+						s.gate.release(res.event, false)
+					}
 					return
 				}
 			case <-s.done:
@@ -480,12 +490,56 @@ func (s *liveSessionImpl) Close() error {
 }
 
 func (s *liveSessionImpl) pushEvent(ev *session.Event) bool {
+	return s.pushLiveEvent(ev, false)
+}
+
+func (s *liveSessionImpl) pushCallEvent(ev *session.Event) bool {
+	return s.pushLiveEvent(ev, true)
+}
+
+func (s *liveSessionImpl) pushLiveEvent(ev *session.Event, waitBeforeCalls bool) bool {
+	var taken chan bool
+	if waitBeforeCalls && s.waitForYield && ev != nil && !ev.LLMResponse.Partial {
+		taken = make(chan bool, 1)
+	}
+	var gateCh chan bool
+	if waitBeforeCalls && s.gate != nil {
+		gateCh = s.gate.hold(ev)
+	}
 	select {
-	case s.outputCh <- eventOrError{event: ev}:
-		return true
+	case s.outputCh <- eventOrError{event: ev, taken: taken}:
 	case <-s.done:
+		if gateCh != nil {
+			s.gate.release(ev, false)
+		}
 		return false
 	}
+	if taken != nil {
+		select {
+		case ok := <-taken:
+			if !ok {
+				if gateCh != nil {
+					s.gate.release(ev, false)
+				}
+				return false
+			}
+		case <-s.done:
+			if gateCh != nil {
+				s.gate.release(ev, false)
+			}
+			return false
+		}
+	}
+	if gateCh != nil {
+		select {
+		case ok := <-gateCh:
+			return ok
+		case <-s.done:
+			s.gate.release(ev, false)
+			return false
+		}
+	}
+	return true
 }
 
 func (s *liveSessionImpl) pushError(err error) bool {
@@ -635,6 +689,8 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 	}
 
 	sess := newLiveSessionImpl()
+	sess.waitForYield = opts.waitForYield
+	sess.gate = liveEventGateFrom(ctx)
 
 	go func() {
 		defer func() {
@@ -960,7 +1016,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						}
 						ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(ev.LLMResponse.Content, tools)
 					}
-					if !sess.pushEvent(ev) {
+					pushed := false
+					if len(fnCalls) > 0 {
+						pushed = sess.pushCallEvent(ev)
+					} else {
+						pushed = sess.pushEvent(ev)
+					}
+					if !pushed {
 						cleanup()
 						return
 					}
