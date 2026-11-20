@@ -1,0 +1,43 @@
+httprr trace v1
+366 5836
+POST https://api.openai.com/v1/responses HTTP/1.1
+Host: api.openai.com
+User-Agent: Go-http-client/1.1
+Content-Length: 180
+Accept: application/json
+Content-Type: application/json
+
+{"temperature":0,"input":[{"content":[{"text":"What is the capital of France? One word.","type":"input_text"}],"role":"user","type":"message"}],"model":"gpt-4o-mini","stream":true}HTTP/2.0 200 OK
+Connection: close
+Content-Type: text/event-stream; charset=utf-8
+
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_0e13a01b4d20760d006ad8a7fbff5c87d28ed65b4b60a3f8b3","object":"response","created_at":1792583676,"status":"in_progress","access_programs":null,"background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-4o-mini-2024-07-18","moderation":null,"output":[],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"in_memory","reasoning":{"context":null,"effort":null,"summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":0.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[],"top_logprobs":0,"top_p":1.0,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":0}
+
+event: response.in_progress
+data: {"type":"response.in_progress","response":{"id":"resp_0e13a01b4d20760d006ad8a7fbff5c87d28ed65b4b60a3f8b3","object":"response","created_at":1792583676,"status":"in_progress","access_programs":null,"background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-4o-mini-2024-07-18","moderation":null,"output":[],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"in_memory","reasoning":{"context":null,"effort":null,"summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":0.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[],"top_logprobs":0,"top_p":1.0,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":1}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"msg_0e13a01b4d20760d006ad8a7fc9db887d2b98d41b3a0744420","type":"message","status":"in_progress","content":[],"role":"assistant"},"output_index":0,"sequence_number":2}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","content_index":0,"item_id":"msg_0e13a01b4d20760d006ad8a7fc9db887d2b98d41b3a0744420","output_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""},"sequence_number":3}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","content_index":0,"delta":"Paris","item_id":"msg_0e13a01b4d20760d006ad8a7fc9db887d2b98d41b3a0744420","logprobs":[],"obfuscation":"uopBIuFFVT3","output_index":0,"sequence_number":4}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","content_index":0,"delta":".","item_id":"msg_0e13a01b4d20760d006ad8a7fc9db887d2b98d41b3a0744420","logprobs":[],"obfuscation":"AJFstmt97kJcBzl","output_index":0,"sequence_number":5}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","content_index":0,"item_id":"msg_0e13a01b4d20760d006ad8a7fc9db887d2b98d41b3a0744420","logprobs":[],"output_index":0,"sequence_number":6,"text":"Paris."}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","content_index":0,"item_id":"msg_0e13a01b4d20760d006ad8a7fc9db887d2b98d41b3a0744420","output_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":"Paris."},"sequence_number":7}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"msg_0e13a01b4d20760d006ad8a7fc9db887d2b98d41b3a0744420","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"Paris."}],"role":"assistant"},"output_index":0,"sequence_number":8}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_0e13a01b4d20760d006ad8a7fbff5c87d28ed65b4b60a3f8b3","object":"response","created_at":1792583676,"status":"completed","access_programs":null,"background":false,"completed_at":1792583676,"error":null,"frequency_penalty":0.0,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"max_tool_calls":null,"model":"gpt-4o-mini-2024-07-18","moderation":null,"output":[{"id":"msg_0e13a01b4d20760d006ad8a7fc9db887d2b98d41b3a0744420","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"Paris."}],"role":"assistant"}],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":"in_memory","reasoning":{"context":null,"effort":null,"summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":0.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tool_usage":{"image_gen":{"input_tokens":0,"input_tokens_details":{"image_tokens":0,"text_tokens":0},"output_tokens":0,"output_tokens_details":{"image_tokens":0,"text_tokens":0},"total_tokens":0},"web_search":{"num_requests":0}},"tools":[],"top_logprobs":0,"top_p":1.0,"truncation":"disabled","usage":{"input_tokens":17,"input_tokens_details":{"cache_write_tokens":0,"cached_tokens":0},"output_tokens":3,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":20},"user":null,"metadata":{}},"sequence_number":9}
+
