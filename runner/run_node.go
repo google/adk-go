@@ -134,7 +134,6 @@ func (r *Runner) runNode(
 	}
 	defer func() {
 		if err := compactOnce(); err != nil {
-			lc.end(err)
 			log.Printf("adk: %v", err) //nolint:forbidigo // pre-slog call site
 		}
 	}()
@@ -323,7 +322,6 @@ func (r *Runner) runNode(
 	// still be reported.
 	if err := compactOnce(); err != nil {
 		yield(nil, err)
-		lc.stop()
 		return
 	}
 }

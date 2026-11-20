@@ -1206,7 +1206,6 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 		defer func() {
 			if err := compactOnce(); err != nil {
-				lc.end(err)
 				log.Printf("adk: %v", err) //nolint:forbidigo // pre-slog call site
 			}
 		}()
@@ -1376,7 +1375,6 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// failure can still be reported.
 		if err := compactOnce(); err != nil {
 			yield(nil, err)
-			lc.stop()
 			return
 		}
 	}

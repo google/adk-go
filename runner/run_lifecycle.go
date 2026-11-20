@@ -47,6 +47,7 @@ type runLifecycle struct {
 	notified     bool  // OnRunErrorCallback ran: the run ended because of a run error
 	keepAfterRun bool  // the before-run short-circuit, which runs after-run even when notified
 	finished     bool  // finish ran the after-run callbacks, or decided not to
+	afterRunDone bool  // RunAfterRunCallback completed without error; post-run work cannot fire OnRunErrorCallback
 }
 
 func newRunLifecycle(pm *plugininternal.PluginManager) *runLifecycle {
@@ -104,7 +105,7 @@ func (lc *runLifecycle) stop() {
 // start that is not a stage error, and the caller's cancellation, are not run
 // errors and are ignored.
 func (lc *runLifecycle) end(err error) {
-	if lc.pm == nil || lc.notified {
+	if lc.pm == nil || lc.notified || lc.afterRunDone {
 		return
 	}
 	if !lc.open && !asStageError(err) {
@@ -143,6 +144,7 @@ func (lc *runLifecycle) finish(yield func(*session.Event, error) bool) bool {
 	}
 	err := lc.pm.RunAfterRunCallback(lc.ictx)
 	if err == nil {
+		lc.afterRunDone = true
 		return true
 	}
 	if yield != nil {

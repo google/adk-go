@@ -22,6 +22,8 @@ import (
 	"iter"
 	"log/slog"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -31,12 +33,14 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/google/go-cmp/cmp"
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/plugin/toolcallintegrity"
 	"google.golang.org/adk/v2/runner"
@@ -1288,4 +1292,135 @@ func TestConcurrentUse(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+type liveTestModel struct {
+	name   string
+	client *genai.Client
+}
+
+func (m *liveTestModel) Name() string { return m.name }
+
+func (m *liveTestModel) Client() *genai.Client { return m.client }
+
+func (m *liveTestModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(nil, errors.New("unexpected unary call"))
+	}
+}
+
+func newLiveTestModel(t *testing.T, serve func(*websocket.Conn)) *liveTestModel {
+	t.Helper()
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`)); err != nil {
+			return
+		}
+		serve(conn)
+	}))
+	t.Cleanup(srv.Close)
+	client, err := genai.NewClient(t.Context(), &genai.ClientConfig{
+		APIKey:      "test-key",
+		Backend:     genai.BackendGeminiAPI,
+		HTTPOptions: genai.HTTPOptions{BaseURL: strings.Replace(srv.URL, "http", "ws", 1)},
+	})
+	if err != nil {
+		t.Fatalf("genai.NewClient() error = %v", err)
+	}
+	return &liveTestModel{name: "gemini-2.0-flash", client: client}
+}
+
+func TestRun_SupportCFCAndRunLiveStampBeforeToolRuns(t *testing.T) {
+	serveToolTurn := func(conn *websocket.Conn) {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"toolCall":{"functionCalls":[{"id":"fc-live-1","name":"transfer_money","args":{"amount":10}}]}}`))
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if strings.Contains(string(data), "functionResponse") {
+				_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"serverContent":{"modelTurn":{"parts":[{"text":"done"}]},"turnComplete":true}}`))
+				for {
+					if _, _, err := conn.ReadMessage(); err != nil {
+						return
+					}
+				}
+			}
+		}
+	}
+
+	t.Run("SupportCFC", func(t *testing.T) {
+		m := newLiveTestModel(t, serveToolTurn)
+		tl, calls := countingTransfer(t)
+		a, err := llmagent.New(llmagent.Config{Name: "agent", Model: m, Tools: []tool.Tool{tl}})
+		if err != nil {
+			t.Fatalf("llmagent.New() error = %v", err)
+		}
+		svc := session.InMemoryService()
+		createSession(t, svc)
+		p := newPlugin(t, toolcallintegrity.Config{SecretKey: testKey})
+		r := newRunner(t, a, svc, p)
+
+		var events []*session.Event
+		for ev, err := range r.Run(t.Context(), "user", "session", genai.NewContentFromText("pay", "user"), agent.RunConfig{SupportCFC: true}) {
+			if err != nil {
+				t.Fatalf("Run(SupportCFC) error = %v", err)
+			}
+			events = append(events, ev)
+		}
+		for _, ev := range events {
+			for _, fr := range ev.FunctionResponses() {
+				if errMsg, refused := fr.Response["error"]; refused {
+					t.Fatalf("SupportCFC function response error = %v, want tool execution to succeed", errMsg)
+				}
+			}
+		}
+		if diff := cmp.Diff([]transferArgs{{Amount: 10}}, *calls); diff != "" {
+			t.Errorf("SupportCFC tool calls mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("RunLive", func(t *testing.T) {
+		m := newLiveTestModel(t, serveToolTurn)
+		tl, calls := countingTransfer(t)
+		a, err := llmagent.New(llmagent.Config{Name: "agent", Model: m, Tools: []tool.Tool{tl}})
+		if err != nil {
+			t.Fatalf("llmagent.New() error = %v", err)
+		}
+		svc := session.InMemoryService()
+		createSession(t, svc)
+		p := newPlugin(t, toolcallintegrity.Config{SecretKey: testKey})
+		r := newRunner(t, a, svc, p)
+
+		liveSess, events, err := r.RunLive(t.Context(), "user", "session", agent.LiveRunConfig{})
+		if err != nil {
+			t.Fatalf("RunLive() error = %v", err)
+		}
+		defer func() { _ = liveSess.Close() }()
+
+		for ev, err := range events {
+			if err != nil {
+				t.Fatalf("RunLive() event error = %v", err)
+			}
+			for _, fr := range ev.FunctionResponses() {
+				if errMsg, refused := fr.Response["error"]; refused {
+					t.Fatalf("RunLive function response error = %v, want tool execution to succeed", errMsg)
+				}
+			}
+			if ev.TurnComplete {
+				break
+			}
+		}
+		if diff := cmp.Diff([]transferArgs{{Amount: 10}}, *calls); diff != "" {
+			t.Errorf("RunLive tool calls mismatch (-want +got):\n%s", diff)
+		}
+	})
 }

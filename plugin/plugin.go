@@ -266,12 +266,11 @@ type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 //
 // AfterRunCallback is not called when a run error ends the run, so cleanup
 // that must also happen on a failed run belongs in OnRunErrorCallback too.
-// Three run errors come with an after-run call all the same: in
+// Two run errors come with an after-run call all the same: in
 // runner.Runner.Run, an error from a BeforeRunCallback or from handling its
-// reply, where OnRunErrorCallback is called first; a failing
+// reply, where OnRunErrorCallback is called first; and a failing
 // [FailableAfterRunCallback], which is itself an after-run call and follows
-// those of the earlier plugins; and a failing post-invocation compaction,
-// which runs after the after-run callbacks.
+// those of the earlier plugins.
 //
 // At the normal end of a run it is called after the last event and before
 // post-invocation compaction, so the compaction summary event is not yet in
@@ -314,10 +313,12 @@ type FailableAfterRunCallback func(ctx agent.InvocationContext) error
 // A run starts once the runner has taken in the user message (in
 // runner.Runner.Run) and picked the agent or node to run, before it calls
 // the BeforeRunCallback plugins. A run error is an error raised after
-// that: by the agent or workflow node, by a run-level plugin callback
-// (BeforeRunCallback, OnEventCallback, a failing [FailableAfterRunCallback]),
-// by the runner itself, such as a failure to append an event to the session,
-// or by post-invocation compaction. Two errors raised before the start are
+// that and before the after-run callbacks finish: by the agent or workflow
+// node, by a run-level plugin callback (BeforeRunCallback, OnEventCallback,
+// a failing [FailableAfterRunCallback]), or by the runner itself, such as a
+// failure to append an event to the session. Post-invocation compaction runs
+// after the after-run callbacks finish and is outside the plugin run
+// lifecycle, as in adk-python. Two errors raised before the start are
 // run errors too: a failing OnUserMessageCallback and, on the node path of
 // package runner, a failure to store the user event. Any other failure
 // before the start, such as a failed session lookup, a refused message or,
@@ -349,9 +350,7 @@ type FailableAfterRunCallback func(ctx agent.InvocationContext) error
 // The callback runs for every plugin in registration order, after the
 // OnAgentErrorCallback calls for the same error. When the runner yielded err,
 // err is the value the caller received; the runner does not wrap the agent's
-// or node's error. A failing post-invocation compaction can reach this
-// callback without being yielded, as after a BeforeRunCallback reply or after
-// the caller stopped ranging at the last event. For a caller that stops at
+// or node's error. For a caller that stops at
 // the error, the call happens after the caller's loop body has returned and
 // before its range statement completes.
 //

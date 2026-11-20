@@ -959,9 +959,11 @@ func TestRunner_StageErrors_AreRunErrors(t *testing.T) {
 	}
 }
 
-// A post-invocation compaction failure is a run error on both root paths, and
-// it happens after after-run.
-func TestRunner_PostInvocationCompactionFailure_NotifiesOnRunErrorAfterAfterRun(t *testing.T) {
+// Post-invocation compaction runs outside the plugin run lifecycle, as in
+// adk-python (runners.py:1361-1366), so a compaction failure after
+// AfterRunCallback has completed is yielded (or logged on early stop) without
+// firing OnRunErrorCallback.
+func TestRunner_PostInvocationCompactionFailure_DoesNotNotifyOnRunErrorAfterAfterRun(t *testing.T) {
 	failing := &compaction.Config{CompactionInterval: 1, Summarizer: failingSummarizer{}}
 	tests := []struct {
 		name      string
@@ -986,11 +988,11 @@ func TestRunner_PostInvocationCompactionFailure_NotifiesOnRunErrorAfterAfterRun(
 			yielded := l.consume(r.Run(t.Context(), "u", "s", userText("hi"), agent.RunConfig{}), tt.stop)
 
 			got := l.matching("after_run", "on_run_error:")
-			if len(got) != 2 || got[0] != "after_run" || !strings.HasPrefix(got[1], "on_run_error:") || !strings.Contains(got[1], "summarizer exploded") {
-				t.Fatalf("lifecycle = %v, want after_run then on_run_error with the compaction error", got)
+			if diff := cmp.Diff([]string{"after_run"}, got); diff != "" {
+				t.Fatalf("lifecycle mismatch (-want +got):\n%s", diff)
 			}
-			if notified := l.runErrors(); !errors.Is(notified[0], compaction.ErrCompaction) {
-				t.Errorf("on-run-error received %v, want an ErrCompaction", notified[0])
+			if notified := l.runErrors(); len(notified) != 0 {
+				t.Errorf("on-run-error received %v, want none", notified)
 			}
 			items := l.matching("err:", "event:")
 			if tt.earlyStop {
@@ -999,7 +1001,7 @@ func TestRunner_PostInvocationCompactionFailure_NotifiesOnRunErrorAfterAfterRun(
 				}
 				return
 			}
-			if len(yielded) != 1 || items[len(items)-1] != "err:"+yielded[0].Error() || len(items) < 2 {
+			if len(yielded) != 1 || !errors.Is(yielded[0], compaction.ErrCompaction) || items[len(items)-1] != "err:"+yielded[0].Error() || len(items) < 2 {
 				t.Errorf("caller items = %v, want the turn's events, then the compaction error last", items)
 			}
 		})
