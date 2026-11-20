@@ -28,6 +28,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -10602,3 +10604,231 @@ func (c *readonlyNamedPathCtx) AgentName() string {
 }
 
 func (c *readonlyNamedPathCtx) Path() string { return c.pathOverride }
+
+type cyclicPromotedPathWrapper struct {
+	agent.Context
+}
+
+func (c *cyclicPromotedPathWrapper) Value(any) any { return nil }
+
+type mutexEmbeddedContextPathWrapper struct {
+	mu sync.Mutex
+	agent.Context
+}
+
+func (c *mutexEmbeddedContextPathWrapper) Deadline() (time.Time, bool) {
+	c.mu.Lock()
+	inner := c.Context
+	c.mu.Unlock()
+	if inner == nil {
+		return time.Time{}, false
+	}
+	return inner.Deadline()
+}
+
+func (c *mutexEmbeddedContextPathWrapper) Done() <-chan struct{} {
+	c.mu.Lock()
+	inner := c.Context
+	c.mu.Unlock()
+	if inner == nil {
+		return nil
+	}
+	return inner.Done()
+}
+
+func (c *mutexEmbeddedContextPathWrapper) Err() error {
+	c.mu.Lock()
+	inner := c.Context
+	c.mu.Unlock()
+	if inner == nil {
+		return nil
+	}
+	return inner.Err()
+}
+
+func (c *mutexEmbeddedContextPathWrapper) Value(key any) any {
+	c.mu.Lock()
+	inner := c.Context
+	c.mu.Unlock()
+	if inner == nil {
+		return nil
+	}
+	return inner.Value(key)
+}
+
+func TestContextPath_ForwardingWrapperConcreteOverride(t *testing.T) {
+	rightPath := "workflow/right"
+	rightBranch := agent.Promote(&mockInvocationContext{
+		ctx:          context.Background(),
+		agentName:    "wf",
+		sessionID:    "s1",
+		invocationID: "inv-fwd-wrapper",
+		userID:       "u1",
+	}).WithDelta(&agent.CommonContextDelta{Path: &rightPath})
+
+	t.Run("non_empty_concrete_override_through_callback_wrapper", func(t *testing.T) {
+		cbRight := agent.NewCallbackContext(rightBranch, nil)
+		wrapped := &plainCallbackWrapper{
+			Context: &overridingCallbackCtx{
+				Context:  cbRight,
+				override: "workflow/left/leaf",
+			},
+		}
+		if got := contextPath(wrapped); got != "workflow/left/leaf" {
+			t.Fatalf("contextPath(plainCallbackWrapper -> overridingCallbackCtx) = %q, want %q", got, "workflow/left/leaf")
+		}
+	})
+
+	t.Run("empty_concrete_override_through_callback_wrapper", func(t *testing.T) {
+		cbRight := agent.NewCallbackContext(rightBranch, nil)
+		wrapped := &plainCallbackWrapper{
+			Context: &overridingCallbackCtx{
+				Context:  cbRight,
+				override: "",
+			},
+		}
+		if got := contextPath(wrapped); got != "" {
+			t.Fatalf("contextPath(plainCallbackWrapper -> empty overridingCallbackCtx) = %q, want empty string", got)
+		}
+	})
+
+	t.Run("double_wrapped_forwarding_interface", func(t *testing.T) {
+		cbRight := agent.NewCallbackContext(rightBranch, nil)
+		wrapped := &middlePlainWrapper{
+			plainCallbackWrapper: &plainCallbackWrapper{
+				Context: &overridingCallbackCtx{
+					Context:  cbRight,
+					override: "workflow/left/leaf",
+				},
+			},
+		}
+		if got := contextPath(wrapped); got != "workflow/left/leaf" {
+			t.Fatalf("contextPath(middlePlainWrapper -> overridingCallbackCtx) = %q, want %q", got, "workflow/left/leaf")
+		}
+	})
+
+	t.Run("nil_embedded_interface_does_not_panic", func(t *testing.T) {
+		wrapped := &plainCallbackWrapper{}
+		if got := contextPath(wrapped); got != "" {
+			t.Fatalf("contextPath(nil embedded Context) = %q, want empty string", got)
+		}
+	})
+
+	t.Run("cyclic_embedded_interface_terminates_without_panic", func(t *testing.T) {
+		if os.Getenv("PR2414_PATH_CYCLE") == "1" {
+			w := &cyclicPromotedPathWrapper{}
+			w.Context = w
+			if got := contextPath(w); got != "" {
+				t.Fatalf("contextPath(cyclic wrapper) = %q, want empty string", got)
+			}
+			return
+		}
+		subCtx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(subCtx, os.Args[0], "-test.run=^TestContextPath_ForwardingWrapperConcreteOverride/cyclic_embedded_interface_terminates_without_panic$")
+		cmd.Env = append(os.Environ(), "PR2414_PATH_CYCLE=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("subprocess cyclic contextPath failed (%v):\n%s", err, out)
+		}
+	})
+
+	t.Run("inspect_promoted_path_matrix", func(t *testing.T) {
+		cbRight := agent.NewCallbackContext(rightBranch, nil)
+		check := func(name string, ctx context.Context, wantDefer, wantCanCall bool) {
+			t.Helper()
+			gotDefer, gotCanCall := inspectPromotedPath(ctx)
+			if gotDefer != wantDefer || gotCanCall != wantCanCall {
+				t.Errorf("%s: inspectPromotedPath() = (%v, %v), want (%v, %v)", name, gotDefer, gotCanCall, wantDefer, wantCanCall)
+			}
+		}
+		check("plain_wrapping_adk_callback", &plainCallbackWrapper{Context: cbRight}, true, true)
+		check("plain_wrapping_override", &plainCallbackWrapper{Context: &overridingCallbackCtx{Context: cbRight, override: "wf/left"}}, false, true)
+		check("double_plain_wrapping_override", &middlePlainWrapper{plainCallbackWrapper: &plainCallbackWrapper{Context: &overridingCallbackCtx{Context: cbRight, override: "wf/left"}}}, false, true)
+		check("nil_embedded_interface", &plainCallbackWrapper{}, true, false)
+		check("mutex_embedded_interface", &mutexEmbeddedContextPathWrapper{Context: cbRight}, true, false)
+		cyc := &cyclicPromotedPathWrapper{}
+		cyc.Context = cyc
+		check("cyclic_embedded_interface", cyc, false, false)
+	})
+}
+
+var testPkgContextPathMu sync.Mutex
+
+type pkgLevelMutexForwardingContextPathWrapper struct {
+	agent.Context
+}
+
+func (w *pkgLevelMutexForwardingContextPathWrapper) Path() string {
+	testPkgContextPathMu.Lock()
+	inner := w.Context
+	testPkgContextPathMu.Unlock()
+	if inner == nil {
+		return ""
+	}
+	return inner.Path()
+}
+
+func TestContextPath_MutexWrapper_NoRace(t *testing.T) {
+	pathA := "wf/alpha"
+	pathB := "wf/beta"
+	ctxA := agent.Promote(&mockInvocationContext{
+		ctx:          context.Background(),
+		agentName:    "wf",
+		sessionID:    "s1",
+		invocationID: "inv-ctxpath-mutex",
+		userID:       "u1",
+	}).WithDelta(&agent.CommonContextDelta{Path: &pathA})
+	ctxB := agent.Promote(&mockInvocationContext{
+		ctx:          context.Background(),
+		agentName:    "wf",
+		sessionID:    "s1",
+		invocationID: "inv-ctxpath-mutex",
+		userID:       "u1",
+	}).WithDelta(&agent.CommonContextDelta{Path: &pathB})
+
+	w := &mutexEmbeddedContextPathWrapper{Context: ctxA}
+	pw := &pkgLevelMutexForwardingContextPathWrapper{Context: ctxA}
+	if deferToADK, canCall := inspectPromotedPath(pw); deferToADK || !canCall {
+		t.Fatalf("inspectPromotedPath(pkgLevelMutexForwardingContextPathWrapper) = (%v, %v), want (false, true)", deferToADK, canCall)
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				w.mu.Lock()
+				if i%2 == 0 {
+					w.Context = ctxB
+				} else {
+					w.Context = ctxA
+				}
+				w.mu.Unlock()
+
+				testPkgContextPathMu.Lock()
+				if i%2 == 0 {
+					pw.Context = ctxB
+				} else {
+					pw.Context = ctxA
+				}
+				testPkgContextPathMu.Unlock()
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+
+	for range 200 {
+		_ = contextPath(w)
+		if got := contextPath(pw); got != pathA && got != pathB {
+			t.Fatalf("contextPath(pkgLevelMutexForwardingContextPathWrapper) = %q, want %q or %q", got, pathA, pathB)
+		}
+	}
+}

@@ -31,6 +31,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -36650,10 +36652,10 @@ func TestParentForRunLocked_LaunchLineageWrapperShapes(t *testing.T) {
 			t.Fatalf("parentForRunLocked(context.WithCancel(w1Act)) = %s, want %s", got.spanID, w1.spanID)
 		}
 		var nilCtx context.Context
-		if observeLaunchLineage(nilCtx, nil, [3]any{}) != nil {
+		if observeLaunchLineage(nilCtx, nil, [4]any{}) != nil {
 			t.Fatal("observeLaunchLineage(nilCtx, nil) returned non-nil")
 		}
-		lin := observeLaunchLineage(w1Act, w1Act, [3]any{})
+		lin := observeLaunchLineage(w1Act, w1Act, [4]any{})
 		if !reflect.TypeOf(any(lin)).Comparable() {
 			t.Fatalf("observeLaunchLineage returned uncomparable type %T", lin)
 		}
@@ -36754,11 +36756,11 @@ func TestParentForRunLocked_LaunchLineageWrapperShapes(t *testing.T) {
 			t.Fatalf("parentForRunLocked(re-entrant ADK callback lineage) = %s, want %s (not self %s)", got.spanID, rootObs.spanID, w1Obs.spanID)
 		}
 
-		selfSlots := [3]any{"self-tok-0", "self-tok-1", "self-tok-2"}
+		selfSlots := [4]any{"self-tok-0", "self-tok-1", "self-tok-2", "self-tok-3"}
 		invSlots := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-self-token-slots", time.Unix(1_700_000_000, 0))
-		rootSlot := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", nonLLM: true, children: []string{"worker"}, parent: invSlots.agentStack[0], goroutineID: 100, activationTokens: [3]any{"root-tok"}}
+		rootSlot := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", nonLLM: true, children: []string{"worker"}, parent: invSlots.agentStack[0], goroutineID: 100, activationTokens: [4]any{"root-tok"}}
 		w1Slot := &spanRecord{spanID: "worker-1", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"worker"}, parent: rootSlot, goroutineID: 101, activationTokens: selfSlots}
-		w2Slot := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"worker"}, parent: rootSlot, goroutineID: 102, activationTokens: [3]any{"peer-tok"}}
+		w2Slot := &spanRecord{spanID: "worker-2", kind: spanKindAgent, name: "worker", nonLLM: true, children: []string{"worker"}, parent: rootSlot, goroutineID: 102, activationTokens: [4]any{"peer-tok"}}
 		invSlots.agentStack = append(invSlots.agentStack, rootSlot, w1Slot, w2Slot)
 
 		for slot, selfTok := range selfSlots {
@@ -38423,7 +38425,7 @@ func TestLaunchLineage_FilteringDualParentLockAndDecoratorRegressions(t *testing
 		if tok := adkContextToken(extChild); tok != nil {
 			t.Fatalf("adkContextToken(externalEmbeddedInvocationContext) = %#v, want nil", tok)
 		}
-		extSelfToks := [3]any{adkContextToken(extChild)}
+		extSelfToks := [4]any{adkContextToken(extChild)}
 		lin := observeLaunchLineage(extChild, extChild, extSelfToks)
 
 		if lineageWalkerOnce() != nil {
@@ -39320,7 +39322,7 @@ func TestContextWalkers_PackageLevelMutexWrapperPreservesPathAndParentMapRaceFre
 		if next, ok := stepEmbeddedContext(w); ok || next != nil {
 			t.Fatalf("stepEmbeddedContext(pkgLevelLockedWrapper) = (%v, %v), want (nil, false)", next, ok)
 		}
-		_ = observeLaunchLineage(w, nil, [3]any{})
+		_ = observeLaunchLineage(w, nil, [4]any{})
 	}
 }
 
@@ -40076,5 +40078,993 @@ func TestRunner_PromoteADKParentMap_SnapshotDoesNotMutateRunner(t *testing.T) {
 	gotChild2 := rv2.MapIndex(reflect.ValueOf("snapshot_child"))
 	if !gotChild2.IsValid() || gotChild2.Interface() != root {
 		t.Fatalf("ADKParentMap(ctx2)[snapshot_child] = %v, want %v", gotChild2, root)
+	}
+}
+
+type extValueCycleCtx struct {
+	next context.Context
+}
+
+func (c *extValueCycleCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *extValueCycleCtx) Done() <-chan struct{}       { return nil }
+func (c *extValueCycleCtx) Err() error                  { return nil }
+func (c *extValueCycleCtx) Value(key any) any {
+	if c.next == nil {
+		return nil
+	}
+	return c.next.Value(key)
+}
+
+type unwrapCycleCtx struct {
+	context.Context
+	parent context.Context
+}
+
+func (c *unwrapCycleCtx) Unwrap() context.Context { return c.parent }
+
+func TestObserveLaunchLineage_PureExternalValueCycleTerminates(t *testing.T) {
+	if os.Getenv("PR2414_LINEAGE_CYCLE") == "1" {
+		type cycleValKey struct{}
+		extA := &extValueCycleCtx{}
+		extB := &extValueCycleCtx{}
+		extA.next = extB
+		extB.next = extA
+
+		if lin := observeLaunchLineage(extA, nil, activationTokensOf(extA, nil)); lin != nil && lin.observed {
+			t.Fatalf("observeLaunchLineage(pure external cycle) observed=%v, want false", lin.observed)
+		}
+		if got := activationKey(extA); got != nil {
+			t.Fatalf("activationKey(pure external cycle) = %#v, want nil", got)
+		}
+
+		canceledExt, cancel := context.WithCancel(extA)
+		defer cancel()
+		if lin := observeLaunchLineage(canceledExt, nil, activationTokensOf(canceledExt, nil)); lin != nil && lin.observed {
+			t.Fatalf("observeLaunchLineage(WithCancel(pure external cycle)) observed=%v, want false", lin.observed)
+		}
+		if got := activationKey(canceledExt); got != nil {
+			t.Fatalf("activationKey(WithCancel(pure external cycle)) = %#v, want nil", got)
+		}
+
+		valuedExt := context.WithValue(extA, cycleValKey{}, "v")
+		if lin := observeLaunchLineage(valuedExt, nil, activationTokensOf(valuedExt, nil)); lin != nil && lin.observed {
+			t.Fatalf("observeLaunchLineage(WithValue(pure external cycle)) observed=%v, want false", lin.observed)
+		}
+		if got := activationKey(valuedExt); got != nil {
+			t.Fatalf("activationKey(WithValue(pure external cycle)) = %#v, want nil", got)
+		}
+
+		uA := &unwrapCycleCtx{Context: context.Background()}
+		uB := &unwrapCycleCtx{Context: context.Background(), parent: uA}
+		uA.parent = uB
+		if lin := observeLaunchLineage(uA, nil, activationTokensOf(uA, nil)); lin != nil && lin.observed {
+			t.Fatalf("observeLaunchLineage(Unwrap cycle) observed=%v, want false", lin.observed)
+		}
+		if got := activationKey(uA); got != nil {
+			t.Fatalf("activationKey(Unwrap cycle) = %#v, want nil", got)
+		}
+		return
+	}
+
+	subCtx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(subCtx, os.Args[0], "-test.run=^TestObserveLaunchLineage_PureExternalValueCycleTerminates$")
+	cmd.Env = append(os.Environ(), "PR2414_LINEAGE_CYCLE=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("subprocess observeLaunchLineage cycle failed (%v):\n%s", err, out)
+	}
+}
+
+type copyingICWrapper struct {
+	agent.InvocationContext
+}
+
+func (c *copyingICWrapper) WithContext(ctx context.Context) agent.InvocationContext {
+	return &copyingICWrapper{InvocationContext: c.InvocationContext.WithContext(ctx)}
+}
+
+func (c *copyingICWrapper) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	if d == nil {
+		return c
+	}
+	return &copyingICWrapper{InvocationContext: c.InvocationContext.WithICDelta(d)}
+}
+
+func TestRunner_CopyingInvocationContext_ModelAttachesToCallingWorker(t *testing.T) {
+	if runTokenReaderOnce() == nil {
+		t.Skip("ADKRunToken requires ADK core > v2.8.0")
+	}
+	p, requests, _ := setupTestPlugin(t)
+
+	leaf := newOneEventAgent(t, "leaf", nil)
+
+	dispatchCh := make(chan func())
+	dispatchDone := make(chan struct{})
+	go func() {
+		defer close(dispatchDone)
+		for fn := range dispatchCh {
+			fn()
+		}
+	}()
+	defer func() {
+		close(dispatchCh)
+		<-dispatchDone
+	}()
+
+	var w1Calls atomic.Int32
+	w1EnteredTurn1 := make(chan struct{})
+	w2EnteredTurn1 := make(chan struct{})
+	releaseW2 := make(chan struct{})
+
+	launchLeafTool, err := functiontool.New(functiontool.Config{
+		Name:        "launch_leaf_from_tool",
+		Description: "Launches leaf sub-agent on dispatch goroutine",
+	}, func(ctx agent.Context, _ map[string]any) (map[string]any, error) {
+		done := make(chan error, 1)
+		ic := ctx.WithICDelta(nil)
+		dispatchCh <- func() {
+			var runErr error
+			for _, err := range leaf.Run(ic) {
+				if err != nil {
+					runErr = err
+				}
+			}
+			done <- runErr
+		}
+		if runErr := <-done; runErr != nil {
+			return nil, runErr
+		}
+		return map[string]any{"worker": "w1"}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+
+	llm := &concurrentBarrierLLM{
+		name: "copying-ic-model",
+		fn: func(_ context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+			hasToolResp := false
+			for _, c := range req.Contents {
+				for _, part := range c.Parts {
+					if part.FunctionResponse != nil && part.FunctionResponse.Name == "launch_leaf_from_tool" {
+						hasToolResp = true
+					}
+				}
+			}
+			if hasToolResp {
+				return &model.LLMResponse{
+					Content:      textContent("model", "w1-after-tool-final"),
+					TurnComplete: true,
+				}, nil
+			}
+			if w1Calls.Add(1) == 1 {
+				close(w1EnteredTurn1)
+				<-w2EnteredTurn1
+				return &model.LLMResponse{
+					Content: genai.NewContentFromParts([]*genai.Part{{
+						FunctionCall: &genai.FunctionCall{ID: "call_w1_leaf", Name: "launch_leaf_from_tool"},
+					}}, genai.RoleModel),
+				}, nil
+			}
+			close(w2EnteredTurn1)
+			<-releaseW2
+			return &model.LLMResponse{
+				Content:      textContent("model", "w2-final"),
+				TurnComplete: true,
+			}, nil
+		},
+	}
+
+	worker, err := llmagent.New(llmagent.Config{
+		Name:      "worker",
+		Model:     llm,
+		Tools:     []tool.Tool{launchLeafTool},
+		SubAgents: []agent.Agent{leaf},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(worker): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{worker},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				type evErr struct {
+					ev  *session.Event
+					err error
+					ack chan bool
+				}
+				w1Out := make(chan evErr)
+				w2Out := make(chan evErr)
+				go func() {
+					defer close(w1Out)
+					w1Ctx := &copyingICWrapper{InvocationContext: ctx}
+					for ev, runErr := range worker.Run(w1Ctx) {
+						ack := make(chan bool, 1)
+						w1Out <- evErr{ev: ev, err: runErr, ack: ack}
+						if !<-ack {
+							return
+						}
+					}
+				}()
+				<-w1EnteredTurn1
+				go func() {
+					defer close(w2Out)
+					w2Ctx := &copyingICWrapper{InvocationContext: ctx}
+					for ev, runErr := range worker.Run(w2Ctx) {
+						ack := make(chan bool, 1)
+						w2Out <- evErr{ev: ev, err: runErr, ack: ack}
+						if !<-ack {
+							return
+						}
+					}
+				}()
+				for item := range w1Out {
+					ok := yield(item.ev, item.err)
+					item.ack <- ok
+					if !ok {
+						close(releaseW2)
+						return
+					}
+				}
+				close(releaseW2)
+				for item := range w2Out {
+					ok := yield(item.ev, item.err)
+					item.ack <- ok
+					if !ok {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	var workerSpans []string
+	for _, row := range rowsOfType(rows, EventAgentStarting) {
+		if row["agent"] == "worker" {
+			workerSpans = append(workerSpans, placeOf(row).span)
+		}
+	}
+	if len(workerSpans) != 2 {
+		t.Fatalf("got %d worker AGENT_STARTING spans, want 2: %v", len(workerSpans), workerSpans)
+	}
+	w1SpanID := workerSpans[0]
+
+	var toolRow map[string]any
+	for _, row := range rowsOfType(rows, EventToolStarting) {
+		toolRow = row
+	}
+	if toolRow == nil {
+		t.Fatal("missing TOOL_STARTING row")
+	}
+	if got := placeOf(toolRow).parent; got != w1SpanID {
+		t.Errorf("TOOL_STARTING parent_span_id = %q, want w1 %q (not w2 %q)", got, w1SpanID, workerSpans[1])
+	}
+	toolCompletes := rowsOfType(rows, EventToolCompleted)
+	if len(toolCompletes) != 1 {
+		t.Fatalf("got %d TOOL_COMPLETED rows, want 1", len(toolCompletes))
+	}
+	if got, want := placeOf(toolCompletes[0]), placeOf(toolRow); got != want {
+		t.Errorf("TOOL_COMPLETED place = %+v, want %+v (same span and parent w1 %q)", got, want, w1SpanID)
+	}
+
+	var leafRow map[string]any
+	for _, row := range rowsOfType(rows, EventAgentStarting) {
+		if row["agent"] == "leaf" {
+			leafRow = row
+		}
+	}
+	if leafRow == nil {
+		t.Fatal("missing leaf AGENT_STARTING row")
+	}
+	if got := placeOf(leafRow).parent; got != w1SpanID {
+		t.Errorf("leaf AGENT_STARTING parent_span_id = %q, want w1 %q (not w2 %q)", got, w1SpanID, workerSpans[1])
+	}
+
+	// w1 runs 2 LLM turns (turn 1 -> tool call, turn 2 -> "w1-after-tool-final");
+	// w2 runs 1 LLM turn ("w2-final"). Both turn-2 LLM_REQUEST and LLM_RESPONSE
+	// belong to w1, with per-worker counts (w1=2, w2=1) for both requests and responses.
+	llmResps := rowsOfType(rows, EventLLMResponse)
+	if len(llmResps) != 3 {
+		t.Fatalf("got %d LLM_RESPONSE rows, want 3", len(llmResps))
+	}
+	var w1RespCount, w2RespCount int
+	var turn2Resp, w2FinalResp map[string]any
+	for _, row := range llmResps {
+		p := placeOf(row)
+		switch p.parent {
+		case w1SpanID:
+			w1RespCount++
+		case workerSpans[1]:
+			w2RespCount++
+		default:
+			t.Errorf("unexpected LLM_RESPONSE parent_span_id = %q, want w1 %q or w2 %q", p.parent, w1SpanID, workerSpans[1])
+		}
+		if strings.Contains(fmt.Sprint(row["content"]), "w1-after-tool-final") {
+			turn2Resp = row
+		}
+		if strings.Contains(fmt.Sprint(row["content"]), "w2-final") {
+			w2FinalResp = row
+		}
+	}
+	if w1RespCount != 2 || w2RespCount != 1 {
+		t.Errorf("LLM_RESPONSE parent counts = (w1=%d, w2=%d), want (2, 1)", w1RespCount, w2RespCount)
+	}
+	if turn2Resp == nil {
+		t.Fatalf("missing w1 turn-2 LLM_RESPONSE row in %v", len(llmResps))
+	}
+	if got := placeOf(turn2Resp).parent; got != w1SpanID {
+		t.Errorf("w1 turn-2 LLM_RESPONSE parent_span_id = %q, want w1 %q (not w2 %q)", got, w1SpanID, workerSpans[1])
+	}
+	if w2FinalResp == nil {
+		t.Fatalf("missing w2 LLM_RESPONSE row in %v", len(llmResps))
+	}
+	if got := placeOf(w2FinalResp).parent; got != workerSpans[1] {
+		t.Errorf("w2 LLM_RESPONSE parent_span_id = %q, want w2 %q", got, workerSpans[1])
+	}
+
+	llmReqs := rowsOfType(rows, EventLLMRequest)
+	if len(llmReqs) != 3 {
+		t.Fatalf("got %d LLM_REQUEST rows, want 3", len(llmReqs))
+	}
+	var w1ReqCount, w2ReqCount int
+	var turn2Req map[string]any
+	for _, row := range llmReqs {
+		p := placeOf(row)
+		switch p.parent {
+		case w1SpanID:
+			w1ReqCount++
+		case workerSpans[1]:
+			w2ReqCount++
+		default:
+			t.Errorf("unexpected LLM_REQUEST parent_span_id = %q, want w1 %q or w2 %q", p.parent, w1SpanID, workerSpans[1])
+		}
+		for _, part := range contentPartsOf(t, row) {
+			rawAttrs, _ := part["part_attributes"].(string)
+			if rawAttrs == "" {
+				continue
+			}
+			var attrs struct {
+				FunctionResponse *struct {
+					Name string `json:"name"`
+				} `json:"function_response"`
+			}
+			if json.Unmarshal([]byte(rawAttrs), &attrs) == nil && attrs.FunctionResponse != nil && attrs.FunctionResponse.Name == "launch_leaf_from_tool" {
+				if turn2Req != nil {
+					t.Fatalf("found multiple LLM_REQUEST rows carrying launch_leaf_from_tool FunctionResponse")
+				}
+				turn2Req = row
+				break
+			}
+		}
+	}
+	if w1ReqCount != 2 || w2ReqCount != 1 {
+		t.Errorf("LLM_REQUEST parent counts = (w1=%d, w2=%d), want (2, 1)", w1ReqCount, w2ReqCount)
+	}
+	if turn2Req == nil {
+		t.Fatal("missing w1 turn-2 LLM_REQUEST row carrying launch_leaf_from_tool FunctionResponse part")
+	}
+	if got := placeOf(turn2Req).parent; got != w1SpanID {
+		t.Errorf("w1 turn-2 LLM_REQUEST parent_span_id = %q, want w1 %q (not w2 %q)", got, w1SpanID, workerSpans[1])
+	}
+	if got, want := placeOf(turn2Req).span, placeOf(turn2Resp).span; got != want {
+		t.Errorf("w1 turn-2 LLM_REQUEST span_id = %q, want LLM_RESPONSE span_id %q", got, want)
+	}
+}
+
+type cancelPlusValuesContext struct {
+	context.Context
+	values context.Context
+}
+
+type cancelPlusExportedValues struct {
+	context.Context
+	Values context.Context
+}
+
+type innerValuesField struct {
+	values context.Context
+}
+
+type cancelPlusAnonNested struct {
+	context.Context
+	innerValuesField
+}
+
+type cancelPlusNestedValues struct {
+	context.Context
+	inner struct {
+		values context.Context
+	}
+}
+
+func TestStepContext_CountsAllExternalContextFields(t *testing.T) {
+	type testValKey struct{}
+	cancelSrc := context.Background()
+	valSrc := context.WithValue(context.Background(), testValKey{}, "v")
+
+	cases := []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"unexported_values_field", &cancelPlusValuesContext{Context: cancelSrc, values: valSrc}},
+		{"exported_Values_field", &cancelPlusExportedValues{Context: cancelSrc, Values: valSrc}},
+		{"anon_nested_values_field", &cancelPlusAnonNested{Context: cancelSrc, innerValuesField: innerValuesField{values: valSrc}}},
+		{"named_nested_values_field", func() context.Context {
+			c := &cancelPlusNestedValues{Context: cancelSrc}
+			c.inner.values = valSrc
+			return c
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			next, ok := stepContext(tc.ctx, true)
+			if ok || next != nil {
+				t.Fatalf("stepContext(%s, true) = (%v, %v), want (nil, false) due to ambiguity", tc.name, next, ok)
+			}
+		})
+	}
+
+	t.Run("adk_and_stdlib_unaffected", func(t *testing.T) {
+		base := context.Background()
+		cctx, cancel := context.WithCancel(base)
+		defer cancel()
+		if next, ok := stepContext(cctx, true); !ok || next != base {
+			t.Fatalf("stepContext(WithCancel, true) = (%v, %v), want (%v, true)", next, ok, base)
+		}
+		prom := agent.Promote(&mockInvocationContext{
+			ctx:          base,
+			agentName:    "a",
+			sessionID:    "s1",
+			invocationID: "inv-step-adk",
+			userID:       "u1",
+		})
+		if next, ok := stepContext(prom, true); !ok || next == nil {
+			t.Fatalf("stepContext(commonContext, true) = (%v, %v), want non-nil parent", next, ok)
+		}
+	})
+}
+
+func TestRunner_V280Legacy_CancelSourceNotLauncher(t *testing.T) {
+	orig := lineageWalkerOnce
+	lineageWalkerOnce = func() func(context.Context) []any { return nil }
+	defer func() { lineageWalkerOnce = orig }()
+
+	cancelSrc := agent.Promote(&mockInvocationContext{ctx: context.Background(), agentName: "w1", sessionID: "s1", invocationID: "inv-v280", userID: "u1"})
+	valSrc := agent.Promote(&mockInvocationContext{ctx: context.Background(), agentName: "w2", sessionID: "s1", invocationID: "inv-v280", userID: "u1"})
+	dual := &cancelPlusValuesContext{Context: cancelSrc, values: valSrc}
+
+	lin := observeLaunchLineage(dual, nil, activationTokensOf(dual, nil))
+	if lin != nil {
+		for _, tok := range lin.tokens {
+			if tok == adkContextToken(cancelSrc) {
+				t.Fatalf("legacy observeLaunchLineage leaked cancelSrc token %v in lin.tokens", tok)
+			}
+		}
+		for _, step := range lin.unwrapChain {
+			if step == cancelSrc {
+				t.Fatalf("legacy observeLaunchLineage walked ambiguous dual-context wrapper into cancelSrc %v", step)
+			}
+		}
+	}
+
+	t.Run("runner_legacy_walk_attributes_leaf_to_submitting_worker", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		leaf := newOneEventAgent(t, "leaf", nil)
+
+		var callSeq atomic.Int32
+		w1ICCh := make(chan agent.InvocationContext, 1)
+		releaseWorkers := make(chan struct{})
+
+		worker, err := agent.New(agent.Config{
+			Name:      "worker",
+			SubAgents: []agent.Agent{leaf},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					if callSeq.Add(1) == 1 {
+						w1ICCh <- ctx.WithICDelta(nil)
+						<-releaseWorkers
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "worker"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "w1-done")
+						yield(ev, nil)
+						return
+					}
+					w1IC := <-w1ICCh
+					wrapped := ctx.WithContext(&cancelPlusValuesContext{
+						Context: w1IC,
+						values:  ctx,
+					})
+					for ev, runErr := range leaf.Run(wrapped) {
+						if !yield(ev, runErr) || runErr != nil {
+							close(releaseWorkers)
+							return
+						}
+					}
+					close(releaseWorkers)
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "w2-done")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(worker): %v", err)
+		}
+
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{worker},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					type item struct {
+						ev  *session.Event
+						err error
+					}
+					ch := make(chan item, 8)
+					var wg sync.WaitGroup
+					w1Started := make(chan struct{})
+					wg.Go(func() {
+						close(w1Started)
+						for ev, runErr := range worker.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+					<-w1Started
+					// Ensure w1 emits AGENT_STARTING before launching w2 so
+					// workerStarts[0] == w1 and workerStarts[1] == w2.
+					for callSeq.Load() < 1 {
+						runtime.Gosched()
+					}
+					wg.Go(func() {
+						for ev, runErr := range worker.Run(ctx) {
+							ch <- item{ev: ev, err: runErr}
+						}
+					})
+					go func() {
+						wg.Wait()
+						close(ch)
+					}()
+					for it := range ch {
+						if !yield(it.ev, it.err) || it.err != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-v280-cancel", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+		workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+		if len(workerStarts) != 2 {
+			t.Fatalf("worker AGENT_STARTING count = %d, want 2", len(workerStarts))
+		}
+		w1SpanID := placeOf(workerStarts[0]).span
+		w2SpanID := placeOf(workerStarts[1]).span
+		rootSpanID := placeOf(onlyAgentRow(t, rows, EventAgentStarting, "root")).span
+		leafStart := onlyAgentRow(t, rows, EventAgentStarting, "leaf")
+		if got := placeOf(leafStart).parent; got != w2SpanID || got == w1SpanID || got == rootSpanID {
+			t.Fatalf("leaf parent_span_id = %q, want w2 %q (not cancelSrc w1 %q or root %q)", got, w2SpanID, w1SpanID, rootSpanID)
+		}
+		onlyAgentRow(t, rows, EventAgentCompleted, "leaf")
+	})
+}
+
+type typedNilAgent struct {
+	agent.Agent
+	name string
+}
+
+func (a *typedNilAgent) Name() string { return a.name }
+
+func TestConvertAgentParentMap_TypedNil(t *testing.T) {
+	var typedNil *typedNilAgent
+	good := newOneEventAgent(t, "good", nil)
+	raw := map[string]agent.Agent{
+		"nil_agent": typedNil,
+		"good":      good,
+	}
+	out, ok := convertAgentParentMap(raw)
+	if !ok {
+		t.Fatal("convertAgentParentMap returned ok=false")
+	}
+	if _, exists := out["nil_agent"]; exists {
+		t.Fatalf("convertAgentParentMap kept typed-nil entry: %#v", out["nil_agent"])
+	}
+	if out["good"] != good {
+		t.Fatalf("convertAgentParentMap[good] = %v, want %v", out["good"], good)
+	}
+}
+
+func TestTopAgentFromMap_TypedNilParent(t *testing.T) {
+	var typedNil *typedNilAgent
+	parents := map[string]agent.Agent{
+		"leaf": typedNil,
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("topAgentFromMap panicked on typed-nil parent: %v", r)
+		}
+	}()
+	if got := topAgentFromMap(nil, "leaf", parents); got != nil {
+		t.Fatalf("topAgentFromMap(typed-nil) = %#v, want nil", got)
+	}
+}
+
+func TestActivationKey_FallsBackWithoutRunToken(t *testing.T) {
+	promoted := agent.Promote(&mockInvocationContext{
+		ctx:          context.Background(),
+		agentName:    "worker",
+		sessionID:    "s1",
+		invocationID: "inv-act-fallback",
+		userID:       "u1",
+	})
+	// Outer promoted commonContext not created by agent.Run carries no runToken
+	// and falls back to icActivationKey.
+	got := activationKey(promoted)
+	want := icActivationKey(promoted)
+	if got == nil || got != want {
+		t.Fatalf("activationKey(promoted outside agent.Run) = %#v, want icActivationKey %#v", got, want)
+	}
+
+	// Simulate core <= v2.8.0 (runTokenReaderOnce == nil).
+	orig := runTokenReaderOnce
+	runTokenReaderOnce = func() func(context.Context) any { return nil }
+	defer func() { runTokenReaderOnce = orig }()
+	if gotLegacy := activationKey(promoted); gotLegacy != want {
+		t.Fatalf("activationKey(legacy nil reader) = %#v, want %#v", gotLegacy, want)
+	}
+}
+
+func TestRunner_ParentMap_PreservedThrough10ADKHops(t *testing.T) {
+	sub := newOneEventAgent(t, "deep_child", nil)
+	var observedPM map[string]agent.Agent
+	root, err := agent.New(agent.Config{
+		Name:      "deep_root",
+		SubAgents: []agent.Agent{sub},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				cur := ctx
+				for i := range 10 {
+					path := fmt.Sprintf("wf/hop-%d", i)
+					cur = agent.PromoteWithDelta(cur, &agent.CommonContextDelta{Path: &path})
+				}
+				observedPM = contextParentMap(cur)
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "deep_root"
+				ev.Branch = ctx.Branch()
+				ev.Content = textContent("model", "ok")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(deep_root): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, root).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+	if observedPM["deep_child"] != root {
+		t.Fatalf("contextParentMap after 10 ADK hops = %#v, want deep_child -> %v", observedPM, root)
+	}
+}
+
+type bareOneFieldOuterDecorator struct {
+	Inner context.Context
+}
+
+func (p *bareOneFieldOuterDecorator) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (p *bareOneFieldOuterDecorator) Done() <-chan struct{}       { return nil }
+func (p *bareOneFieldOuterDecorator) Err() error                  { return nil }
+func (p *bareOneFieldOuterDecorator) Value(any) any {
+	panic("unexpected Value call on unrecognized outer decorator")
+}
+
+type wrappedInvocationContext interface {
+	agent.InvocationContext
+}
+
+type icDeltaCycleWrapper struct {
+	wrappedInvocationContext
+	next agent.InvocationContext
+}
+
+func (c *icDeltaCycleWrapper) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	if d == nil {
+		return c.next
+	}
+	return c.wrappedInvocationContext.WithICDelta(d)
+}
+
+func (c *icDeltaCycleWrapper) InvocationContext() agent.InvocationContext {
+	return c.next
+}
+
+func TestObserveLaunchLineage_MixedBoundedADKAndUnwrapCycles(t *testing.T) {
+	if lineageWalkerOnce() == nil {
+		t.Skip("ADK WalkLineage requires ADK core > v2.8.0")
+	}
+	base := agent.Promote(&mockInvocationContext{
+		ctx:          context.Background(),
+		agentName:    "w",
+		sessionID:    "s1",
+		invocationID: "inv-mixed-cycle",
+		userID:       "u1",
+	})
+	u := &unwrapCycleCtx{Context: context.Background()}
+	u.parent = u
+	// Cyclic Unwrap() terminates cleanly under peelToADKContext's cycle guard.
+	linU := observeLaunchLineage(u, nil, [4]any{})
+	if linU != nil && linU.observed {
+		t.Fatalf("observeLaunchLineage(cyclic Unwrap) observed=%v, want false", linU.observed)
+	}
+	adkA := agent.NewContext(base)
+	adkB := adkA.WithContext(adkA)
+	linADK := observeLaunchLineage(adkB, adkB, activationTokensOf(adkB, adkB))
+	if linADK == nil || !linADK.observed || len(linADK.tokens) == 0 {
+		t.Fatalf("observeLaunchLineage(self-referential WithContext) = %+v, want bounded observed tokens", linADK)
+	}
+
+	// Outer unrecognized non-ADK/non-Unwrap/non-WithICDelta decorator stops in peelToADKContext without calling Value().
+	bareDec := &bareOneFieldOuterDecorator{Inner: base}
+	if got := peelToADKContext(bareDec); got != nil {
+		t.Fatalf("peelToADKContext(bareOneFieldOuterDecorator) = %#v, want nil", got)
+	}
+	if linDec := observeLaunchLineage(bareDec, nil, [4]any{}); linDec != nil && linDec.observed {
+		t.Fatalf("observeLaunchLineage(bareOneFieldOuterDecorator) observed=%v, want false", linDec.observed)
+	}
+	if got := activationKey(bareDec); got != nil {
+		t.Fatalf("activationKey(bareOneFieldOuterDecorator) = %#v, want nil", got)
+	}
+	type bareDecValKey struct{}
+	wrappedBareDec := context.WithValue(bareDec, bareDecValKey{}, "v")
+	if linWrapped := observeLaunchLineage(wrappedBareDec, nil, [4]any{}); linWrapped != nil && linWrapped.observed {
+		t.Fatalf("observeLaunchLineage(WithValue(bareOneFieldOuterDecorator)) observed=%v, want false", linWrapped.observed)
+	}
+
+	// Cyclic WithICDelta(nil) wrappers terminate cleanly under pointer cycle detection.
+	icCycA := &icDeltaCycleWrapper{wrappedInvocationContext: base}
+	icCycB := &icDeltaCycleWrapper{wrappedInvocationContext: base, next: icCycA}
+	icCycA.next = icCycB
+	if got := peelToADKContext(icCycA); got != nil {
+		t.Fatalf("peelToADKContext(WithICDelta cycle) = %#v, want nil", got)
+	}
+	if linIC := observeLaunchLineage(icCycA, nil, [4]any{}); linIC != nil && linIC.observed {
+		t.Fatalf("observeLaunchLineage(WithICDelta cycle) observed=%v, want false", linIC.observed)
+	}
+	if got := activationKey(icCycA); got == nil {
+		t.Fatalf("activationKey(WithICDelta cycle) = nil, want bounded icActivationKey fallback")
+	}
+}
+
+func TestFindAgentForContext_ICActivationFallbackRespectsPath(t *testing.T) {
+	sharedIC := agent.Promote(&mockInvocationContext{
+		ctx:          context.Background(),
+		agentName:    "worker",
+		sessionID:    "s1",
+		invocationID: "inv-ic-path",
+		userID:       "u1",
+	})
+	leftPath := "wf/left/worker"
+	rightPath := "wf/right/worker"
+	leftCtx := sharedIC.WithDelta(&agent.CommonContextDelta{Path: &leftPath})
+	rightCtx := sharedIC.WithDelta(&agent.CommonContextDelta{Path: &rightPath})
+
+	inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-ic-path", time.Unix(1_700_000_000, 0))
+	rootSpan := &spanRecord{spanID: "root", kind: spanKindAgent, name: "wf", parent: inv.agentStack[0]}
+	leftSpan := &spanRecord{spanID: "worker-left", kind: spanKindAgent, name: "worker", path: leftPath, parent: rootSpan, icActivation: sharedIC}
+	rightSpan := &spanRecord{spanID: "worker-right", kind: spanKindAgent, name: "worker", path: rightPath, parent: rootSpan, icActivation: sharedIC}
+	inv.agentStack = append(inv.agentStack, rootSpan, leftSpan, rightSpan)
+
+	if idx := inv.findAgentForContext(leftCtx, leftPath, "worker", ""); idx != 2 {
+		t.Fatalf("findAgentForContext(leftCtx) = %d, want index 2 (%s)", idx, leftSpan.spanID)
+	}
+	if idx := inv.findAgentForContext(rightCtx, rightPath, "worker", ""); idx != 3 {
+		t.Fatalf("findAgentForContext(rightCtx) = %d, want index 3 (%s)", idx, rightSpan.spanID)
+	}
+}
+
+func TestRunner_WithAgentContext_ExternalCopyingInvocationContextPreservesRunToken(t *testing.T) {
+	if runTokenReaderOnce() == nil {
+		t.Skip("ADKRunToken requires ADK core > v2.8.0")
+	}
+	p, requests, _ := setupTestPlugin(t)
+	leaf := newOneEventAgent(t, "leaf", nil)
+
+	dispatchCh := make(chan func())
+	dispatchDone := make(chan struct{})
+	go func() {
+		defer close(dispatchDone)
+		for fn := range dispatchCh {
+			fn()
+		}
+	}()
+	defer func() {
+		close(dispatchCh)
+		<-dispatchDone
+	}()
+
+	var w1Entered sync.WaitGroup
+	w1Entered.Add(1)
+	w2Entered := make(chan struct{})
+	releaseW2 := make(chan struct{})
+
+	var w1Ctx, w2Ctx agent.InvocationContext
+	var reboundFromCopying agent.Context
+
+	w1, err := agent.New(agent.Config{
+		Name:      "worker",
+		SubAgents: []agent.Agent{leaf},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				if w1Ctx == nil {
+					w1Ctx = ctx
+					w1Entered.Done()
+					<-w2Entered
+
+					extCopying := &copyingICWrapper{InvocationContext: ctx}
+					freshBase := agent.NewContext(agent.Promote(&mockInvocationContext{
+						ctx:          context.Background(),
+						agentName:    "unrelated",
+						sessionID:    "s1",
+						invocationID: "inv-withagentctx-copying",
+						userID:       "u1",
+					}))
+					rebound := freshBase.WithAgentContext(extCopying)
+					reboundFromCopying = rebound
+
+					done := make(chan error, 1)
+					dispatchCh <- func() {
+						var runErr error
+						for _, err := range leaf.Run(rebound) {
+							if err != nil {
+								runErr = err
+							}
+						}
+						done <- runErr
+					}
+					if runErr := <-done; runErr != nil {
+						t.Errorf("leaf.Run(rebound): %v", runErr)
+					}
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "worker"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "w1-done")
+					yield(ev, nil)
+					return
+				}
+				w2Ctx = ctx
+				close(w2Entered)
+				<-releaseW2
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "worker"
+				ev.Branch = ctx.Branch()
+				ev.Content = textContent("model", "w2-done")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(worker): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{w1},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				type evErr struct {
+					ev  *session.Event
+					err error
+					ack chan bool
+				}
+				out1 := make(chan evErr)
+				out2 := make(chan evErr)
+				go func() {
+					defer close(out1)
+					for ev, err := range w1.Run(ctx) {
+						ack := make(chan bool, 1)
+						out1 <- evErr{ev: ev, err: err, ack: ack}
+						if !<-ack {
+							return
+						}
+					}
+				}()
+				w1Entered.Wait()
+				go func() {
+					defer close(out2)
+					for ev, err := range w1.Run(ctx) {
+						ack := make(chan bool, 1)
+						out2 <- evErr{ev: ev, err: err, ack: ack}
+						if !<-ack {
+							return
+						}
+					}
+				}()
+				for item := range out1 {
+					ok := yield(item.ev, item.err)
+					item.ack <- ok
+					if !ok {
+						close(releaseW2)
+						return
+					}
+				}
+				close(releaseW2)
+				for item := range out2 {
+					ok := yield(item.ev, item.err)
+					item.ack <- ok
+					if !ok {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error: %v", runErr)
+		}
+	}
+
+	if reboundFromCopying == nil || w1Ctx == nil || w2Ctx == nil {
+		t.Fatalf("missing observed contexts: rebound=%v w1=%v w2=%v", reboundFromCopying, w1Ctx, w2Ctx)
+	}
+	gotKey := activationKey(reboundFromCopying)
+	wantKey := activationKey(w1Ctx)
+	w2Key := activationKey(w2Ctx)
+	if gotKey == nil || gotKey != wantKey {
+		t.Fatalf("activationKey(WithAgentContext(extCopying)) = %#v, want w1 runToken %#v", gotKey, wantKey)
+	}
+	if gotKey == w2Key {
+		t.Fatalf("activationKey(WithAgentContext(extCopying)) collided with w2 runToken %#v", w2Key)
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	var workerSpans []string
+	var leafSpanParent string
+	for _, row := range rowsOfType(rows, EventAgentStarting) {
+		switch row["agent"] {
+		case "worker":
+			workerSpans = append(workerSpans, placeOf(row).span)
+		case "leaf":
+			leafSpanParent = placeOf(row).parent
+		}
+	}
+	if len(workerSpans) != 2 {
+		t.Fatalf("got %d worker spans, want 2: %v", len(workerSpans), workerSpans)
+	}
+	if leafSpanParent != workerSpans[0] {
+		t.Fatalf("leaf AGENT_STARTING parent_span_id = %q, want w1 %q (not w2 %q)", leafSpanParent, workerSpans[0], workerSpans[1])
 	}
 }

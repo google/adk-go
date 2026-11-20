@@ -69,12 +69,15 @@ func (m Map) RootAgent(cur agent.Agent) agent.Agent {
 }
 
 func ToContext(ctx context.Context, parents Map) context.Context {
-	// TODO(kdroste): move to invocationContext?
-	return context.WithValue(ctx, mapCtxKey, parents)
+	return adkcontext.WithParentMap(ctx, parents)
 }
 
 func FromContext(ctx context.Context) Map {
-	m, ok := ctx.Value(mapCtxKey).(Map)
+	if ctx == nil {
+		return nil
+	}
+	v, _ := adkcontext.Recovered(func() any { return ctx.Value(mapCtxKey) })
+	m, ok := v.(Map)
 	if !ok {
 		return nil
 	}

@@ -68,8 +68,21 @@ func (c *ReadonlyContext) Value(key any) any {
 		}
 		return agent.Promote(c.InvocationContext).Value(key)
 	}
-	if (adkcontext.IsLineageKey(key) || adkcontext.IsPathKey(key) || adkcontext.IsParentMapKey(key)) && c.Context == nil && c.InvocationContext != nil {
-		return c.InvocationContext.Value(key)
+	target := c.Context
+	if target == nil {
+		target = c.InvocationContext
+	}
+	if v, ok := adkcontext.ForwardLineage(key, target); ok {
+		return v
+	}
+	if v, ok := adkcontext.PathStep(key, "", target); ok {
+		return v
+	}
+	if v, ok := adkcontext.ParentMapStep(key, target); ok {
+		return v
+	}
+	if v, ok := adkcontext.RunTokenStep(key, nil, target); ok {
+		return v
 	}
 	if c.Context == nil {
 		return nil

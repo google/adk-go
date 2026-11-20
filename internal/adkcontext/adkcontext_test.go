@@ -21,11 +21,15 @@ package adkcontext_test
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/v2/internal/adkcontext"
 )
@@ -262,8 +266,9 @@ func TestLineageStepTokenIsOpaqueImmutableAndBounded(t *testing.T) {
 	}
 }
 
-func build64LayerChain() (context.Context, []*sampleStepCtx) {
-	const depth = 64
+var walkLineageTestSink []any
+
+func buildLayerChain(depth int) (context.Context, []*sampleStepCtx) {
 	layers := make([]*sampleStepCtx, depth)
 	cur := context.Background()
 	for i := range depth {
@@ -274,26 +279,82 @@ func build64LayerChain() (context.Context, []*sampleStepCtx) {
 	return cur, layers
 }
 
-func TestWalkLineage_64LayersOrderAndLinearAllocs(t *testing.T) {
-	top, layers := build64LayerChain()
-	tokens := adkcontext.WalkLineage(top)
-	if len(tokens) != len(layers) {
-		t.Fatalf("len(WalkLineage(64 layers)) = %d, want %d", len(tokens), len(layers))
+func bytesPerRun(n int, fn func()) uint64 {
+	prev := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(prev)
+	fn()
+	best := ^uint64(0)
+	for range 3 {
+		runtime.GC()
+		var m0, m1 runtime.MemStats
+		runtime.ReadMemStats(&m0)
+		for range n {
+			fn()
+		}
+		runtime.ReadMemStats(&m1)
+		if m1.TotalAlloc >= m0.TotalAlloc {
+			if per := (m1.TotalAlloc - m0.TotalAlloc) / uint64(n); per < best {
+				best = per
+			}
+		}
 	}
-	for i, wantNode := range layers {
-		// Outermost token sits at index 0; deepest sits at index len(layers)-1.
-		got := tokens[len(layers)-1-i]
-		if want := adkcontext.Token(wantNode); got != want {
-			t.Fatalf("token mismatch at layer %d: got %#v, want %#v", i, got, want)
+	return best
+}
+
+func TestWalkLineage_64LayersOrderAndLinearAllocs(t *testing.T) {
+	for _, depth := range []int{16, 32, 64} {
+		top, layers := buildLayerChain(depth)
+		tokens := adkcontext.WalkLineage(top)
+		if len(tokens) != len(layers) {
+			t.Fatalf("len(WalkLineage(%d layers)) = %d, want %d", depth, len(tokens), len(layers))
+		}
+		for i, wantNode := range layers {
+			// Outermost token sits at index 0; deepest sits at index len(layers)-1.
+			got := tokens[len(layers)-1-i]
+			if want := adkcontext.Token(wantNode); got != want {
+				t.Fatalf("depth %d token mismatch at layer %d: got %#v, want %#v", depth, i, got, want)
+			}
 		}
 	}
 
-	// Verify linear O(D) heap usage: 64 layers with 64 hops would copy >2,000
-	// interface slots quadratically under per-hop slice copying; linked nodes
-	// keep total allocs linear in depth.
+	top16, _ := buildLayerChain(16)
+	top32, _ := buildLayerChain(32)
+	top64, _ := buildLayerChain(64)
+
+	measure := func(top context.Context, wantLen int) uint64 {
+		return bytesPerRun(50, func() {
+			got := adkcontext.WalkLineage(top)
+			if len(got) != wantLen {
+				t.Fatalf("unexpected len=%d, want %d", len(got), wantLen)
+			}
+			walkLineageTestSink = got
+		})
+	}
+	b16 := measure(top16, 16)
+	b32 := measure(top32, 32)
+	b64 := measure(top64, 64)
+	t.Logf("WalkLineage bytes/run (race=%v): d16=%d, d32=%d, d64=%d", raceEnabled, b16, b32, b64)
+
+	// Verify linear O(D) heap usage: quadratic per-hop slice copying grows ~14x
+	// from depth 16->64 and ~3.8x from depth 32->64; linear O(D) grows ~3.8x and ~2x.
+	if b16 == 0 || b32 == 0 {
+		t.Fatalf("unexpected zero measured bytes: b16=%d b32=%d b64=%d", b16, b32, b64)
+	}
+	if b64 > b16*7 {
+		t.Fatalf("super-linear byte growth 16->64: b16=%d b64=%d (ratio %.2f > 7.0)", b16, b64, float64(b64)/float64(b16))
+	}
+	if b64 > b32*3 {
+		t.Fatalf("super-linear byte growth 32->64: b32=%d b64=%d (ratio %.2f > 3.0)", b32, b64, float64(b64)/float64(b32))
+	}
+	if !raceEnabled && b64 > b16 {
+		if perLayer := (b64 - b16) / 48; perLayer > 256 {
+			t.Fatalf("excess per-layer allocation slope 16->64: %d bytes/layer > 256 (b16=%d b64=%d)", perLayer, b16, b64)
+		}
+	}
+
 	if allocs := testing.AllocsPerRun(50, func() {
-		got := adkcontext.WalkLineage(top)
-		if len(got) != len(layers) {
+		got := adkcontext.WalkLineage(top64)
+		if len(got) != 64 {
 			t.Fatalf("unexpected len=%d", len(got))
 		}
 	}); allocs > 300 {
@@ -302,7 +363,7 @@ func TestWalkLineage_64LayersOrderAndLinearAllocs(t *testing.T) {
 }
 
 func BenchmarkWalkLineage_64Layers(b *testing.B) {
-	top, layers := build64LayerChain()
+	top, layers := buildLayerChain(64)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
@@ -310,6 +371,41 @@ func BenchmarkWalkLineage_64Layers(b *testing.B) {
 		if len(got) != len(layers) {
 			b.Fatalf("len(WalkLineage) = %d, want %d", len(got), len(layers))
 		}
+	}
+}
+
+type samplePathStepCtx struct {
+	context.Context
+	path string
+}
+
+func (c *samplePathStepCtx) Value(key any) any {
+	if v, ok := adkcontext.PathStep(key, c.path, c.Context); ok {
+		return v
+	}
+	if c.Context == nil {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+func TestReadPath_ADKStepCycleTerminates(t *testing.T) {
+	if os.Getenv("PR2414_READPATH_CYCLE") == "1" {
+		bridge := &cyclicStepBridge{Context: context.Background()}
+		cyc := &samplePathStepCtx{Context: bridge}
+		bridge.loop = cyc
+		if got := adkcontext.ReadPath(cyc); got != "" {
+			t.Fatalf("ReadPath(cyclic) = %q, want empty", got)
+		}
+		return
+	}
+	subCtx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(subCtx, os.Args[0], "-test.run=^TestReadPath_ADKStepCycleTerminates$")
+	cmd.Env = append(os.Environ(), "PR2414_READPATH_CYCLE=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("subprocess ReadPath cycle failed (%v):\n%s", err, out)
 	}
 }
 
@@ -330,8 +426,12 @@ func TestReadPathAndParentMap(t *testing.T) {
 	if v, ok := adkcontext.PathStep(adkcontext.IdentityKey, "wf/a", nil); ok || v != nil {
 		t.Fatalf("PathStep(IdentityKey) = (%v, %v), want (nil, false)", v, ok)
 	}
-	base := context.WithValue(context.Background(), adkcontext.ParentMapKey, map[string]string{"leaf": "root"})
-	withPath := context.WithValue(base, adkcontext.PathKey, "wf/parent")
+	base := adkcontext.WithParentMap(context.Background(), map[string]string{"leaf": "root"})
+	directPath := context.WithValue(base, adkcontext.PathKey, "wf/direct")
+	if got := adkcontext.ReadPath(directPath); got != "wf/direct" {
+		t.Fatalf("ReadPath(direct Value) = %q, want wf/direct", got)
+	}
+	withPath := &samplePathStepCtx{Context: base, path: "wf/parent"}
 	if v, ok := adkcontext.PathStep(adkcontext.PathKey, "", withPath); !ok || v != "wf/parent" {
 		t.Fatalf("PathStep(delegate) = (%v, %v), want (wf/parent, true)", v, ok)
 	}
@@ -340,6 +440,201 @@ func TestReadPathAndParentMap(t *testing.T) {
 	}
 	if m, ok := adkcontext.ReadParentMap(withPath).(map[string]string); !ok || m["leaf"] != "root" {
 		t.Fatalf("ReadParentMap = %#v, want leaf->root", adkcontext.ReadParentMap(withPath))
+	}
+}
+
+type sampleParentMapStepCtx struct {
+	context.Context
+}
+
+func (c *sampleParentMapStepCtx) Value(key any) any {
+	if v, ok := adkcontext.ParentMapStep(key, c.Context); ok {
+		return v
+	}
+	if c.Context == nil {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+type sampleRunTokenStepCtx struct {
+	context.Context
+	tok any
+}
+
+func (c *sampleRunTokenStepCtx) Value(key any) any {
+	if v, ok := adkcontext.LineageStepWithRunToken(key, c, c.tok, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.RunTokenStep(key, c.tok, c.Context); ok {
+		return v
+	}
+	if c.Context == nil {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+func TestReadPath_63HopsFound_65HopsNil(t *testing.T) {
+	root := context.Context(&samplePathStepCtx{Context: context.Background(), path: "wf/root"})
+	build := func(hops int) context.Context {
+		cur := root
+		for range hops {
+			cur = &samplePathStepCtx{Context: cur}
+		}
+		return cur
+	}
+	if got := adkcontext.ReadPath(build(63)); got != "wf/root" {
+		t.Fatalf("ReadPath(63 hops) = %q, want wf/root", got)
+	}
+	if got := adkcontext.ReadPath(build(64)); got != "wf/root" {
+		t.Fatalf("ReadPath(64 hops) = %q, want wf/root", got)
+	}
+	if got := adkcontext.ReadPath(build(65)); got != "" {
+		t.Fatalf("ReadPath(65 hops) = %q, want empty (budget exhausted)", got)
+	}
+}
+
+func TestReadParentMap_FoundThroughBudgetedADKHopsAndCycle(t *testing.T) {
+	base := adkcontext.WithParentMap(context.Background(), map[string]string{"leaf": "root"})
+	cur := base
+	for range 10 {
+		cur = &sampleParentMapStepCtx{Context: cur}
+	}
+	if pm, ok := adkcontext.ReadParentMap(cur).(map[string]string); !ok || pm["leaf"] != "root" {
+		t.Fatalf("ReadParentMap(10 ADK hops) = %#v, want leaf->root", adkcontext.ReadParentMap(cur))
+	}
+
+	cur65 := base
+	for range 65 {
+		cur65 = &sampleParentMapStepCtx{Context: cur65}
+	}
+	if got := adkcontext.ReadParentMap(cur65); got != nil {
+		t.Fatalf("ReadParentMap(65 ADK hops) = %#v, want nil", got)
+	}
+
+	bridge := &cyclicStepBridge{Context: context.Background()}
+	cyc := &sampleParentMapStepCtx{Context: bridge}
+	bridge.loop = cyc
+	if got := adkcontext.ReadParentMap(cyc); got != nil {
+		t.Fatalf("ReadParentMap(cyclic ADK hops) = %#v, want nil", got)
+	}
+}
+
+func TestReadParentMap_DropsTypedNil(t *testing.T) {
+	type customPtr struct{}
+	type parentMap map[string]any
+	var typedNil *customPtr
+	src := parentMap{
+		"nil_ptr": typedNil,
+		"good":    "ok",
+	}
+	ctx := adkcontext.WithParentMap(context.Background(), src)
+	got, ok := adkcontext.ReadParentMap(ctx).(parentMap)
+	if !ok {
+		t.Fatalf("ReadParentMap() type = %T, want parentMap", adkcontext.ReadParentMap(ctx))
+	}
+	if _, exists := got["nil_ptr"]; exists {
+		t.Fatalf("ReadParentMap() retained typed-nil entry: %#v", got)
+	}
+	if got["good"] != "ok" {
+		t.Fatalf("ReadParentMap()[good] = %#v, want ok", got["good"])
+	}
+}
+
+type sampleForwardCtx struct {
+	context.Context
+}
+
+func (c *sampleForwardCtx) Value(key any) any {
+	if v, ok := adkcontext.ForwardLineage(key, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.PathStep(key, "", c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.ParentMapStep(key, c.Context); ok {
+		return v
+	}
+	if v, ok := adkcontext.RunTokenStep(key, nil, c.Context); ok {
+		return v
+	}
+	if c.Context == nil {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+func TestForwardLineage_BoundedCycleAndDelegation(t *testing.T) {
+	inner := &sampleStepCtx{Context: context.Background(), id: 1}
+	fwd := &sampleForwardCtx{Context: inner}
+	if got := adkcontext.WalkLineage(fwd); len(got) != 1 || got[0] != adkcontext.Token(inner) {
+		t.Fatalf("WalkLineage(ForwardLineage -> inner) = %#v, want [%#v]", got, adkcontext.Token(inner))
+	}
+
+	bridge := &cyclicStepBridge{Context: context.Background()}
+	cyc := &sampleForwardCtx{Context: bridge}
+	bridge.loop = cyc
+	if got := adkcontext.WalkLineage(cyc); got != nil {
+		t.Fatalf("WalkLineage(ForwardLineage cycle) = %#v, want nil", got)
+	}
+	if got := adkcontext.ReadPath(cyc); got != "" {
+		t.Fatalf("ReadPath(ForwardLineage cycle) = %q, want empty", got)
+	}
+	if got := adkcontext.ReadParentMap(cyc); got != nil {
+		t.Fatalf("ReadParentMap(ForwardLineage cycle) = %#v, want nil", got)
+	}
+	if got := adkcontext.ReadRunToken(cyc); got != nil {
+		t.Fatalf("ReadRunToken(ForwardLineage cycle) = %#v, want nil", got)
+	}
+}
+
+func TestRunToken_StepBudgetCycleAndForgeRejection(t *testing.T) {
+	tokA := adkcontext.NewRunToken()
+	tokB := adkcontext.NewRunToken()
+	if tokA == nil || tokB == nil || tokA == tokB {
+		t.Fatalf("NewRunToken failed uniqueness: %#v vs %#v", tokA, tokB)
+	}
+	if !adkcontext.IsRunTokenKey(adkcontext.RunTokenKey) || adkcontext.IsRunTokenKey(adkcontext.PathKey) {
+		t.Fatal("IsRunTokenKey returned unexpected result")
+	}
+
+	forged := context.WithValue(context.Background(), adkcontext.RunTokenKey, new(byte))
+	if got := adkcontext.ReadRunToken(forged); got != nil {
+		t.Fatalf("ReadRunToken accepted forged *byte: %#v", got)
+	}
+
+	root := &sampleRunTokenStepCtx{Context: context.Background(), tok: tokA}
+	if got := adkcontext.ReadRunToken(root); got != tokA {
+		t.Fatalf("ReadRunToken(root) = %#v, want %#v", got, tokA)
+	}
+	nested := &sampleRunTokenStepCtx{Context: root, tok: tokB}
+	if got := adkcontext.ReadRunToken(nested); got != tokB {
+		t.Fatalf("ReadRunToken(nested) = %#v, want %#v", got, tokB)
+	}
+
+	// Build 65 distinct-token layers and confirm every contextToken and runToken survives flattening.
+	cur := context.Background()
+	var wantRunTokens []any
+	for range 65 {
+		rt := adkcontext.NewRunToken()
+		wantRunTokens = append(wantRunTokens, rt)
+		cur = &sampleRunTokenStepCtx{Context: cur, tok: rt}
+	}
+	lineage := adkcontext.WalkLineage(cur)
+	for i, rt := range wantRunTokens {
+		if !slices.Contains(lineage, rt) {
+			t.Fatalf("WalkLineage(65 layers) missing runToken #%d (%#v) in len=%d", i, rt, len(lineage))
+		}
+	}
+
+	// 65 hops with nil tok reaches budget exhaustion cleanly.
+	curNil := context.Context(root)
+	for range 65 {
+		curNil = &sampleRunTokenStepCtx{Context: curNil}
+	}
+	if got := adkcontext.ReadRunToken(curNil); got != nil {
+		t.Fatalf("ReadRunToken(65 nil hops) = %#v, want nil", got)
 	}
 }
 
@@ -372,5 +667,49 @@ func TestReadParentMap_ReturnsSnapshotAndFiltersNil(t *testing.T) {
 	nonMapCtx := context.WithValue(context.Background(), adkcontext.ParentMapKey, "not-a-map")
 	if gotNonMap := adkcontext.ReadParentMap(nonMapCtx); gotNonMap != nil {
 		t.Fatalf("ReadParentMap(non-map) = %#v, want nil", gotNonMap)
+	}
+}
+
+type uint8BlockingCtx struct {
+	context.Context
+}
+
+func (c *uint8BlockingCtx) Value(key any) any {
+	if key != nil && reflect.TypeOf(key).Kind() == reflect.Uint8 {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+func TestPathAndParentMapSurviveUint8BlockingWrapperAfterADKStep(t *testing.T) {
+	base := adkcontext.WithParentMap(context.Background(), map[string]string{"leaf": "worker"})
+	innerTok := adkcontext.NewRunToken()
+	innerLineage := &sampleRunTokenStepCtx{
+		Context: &samplePathStepCtx{Context: base, path: "wf/left/leaf@1"},
+		tok:     innerTok,
+	}
+	filtered := &uint8BlockingCtx{Context: innerLineage}
+	outerTok := adkcontext.NewRunToken()
+	outerADK := &sampleRunTokenStepCtx{
+		Context: &samplePathStepCtx{Context: &sampleParentMapStepCtx{Context: filtered}},
+		tok:     outerTok,
+	}
+	outerEmptyTok := &sampleRunTokenStepCtx{
+		Context: &samplePathStepCtx{Context: &sampleParentMapStepCtx{Context: filtered}},
+	}
+
+	if got := adkcontext.ReadPath(outerADK); got != "wf/left/leaf@1" {
+		t.Fatalf("ReadPath across ADK step + uint8BlockingCtx = %q, want wf/left/leaf@1", got)
+	}
+	if m, ok := adkcontext.ReadParentMap(outerADK).(map[string]string); !ok || m["leaf"] != "worker" {
+		t.Fatalf("ReadParentMap across ADK step + uint8BlockingCtx = %#v, want leaf->worker", adkcontext.ReadParentMap(outerADK))
+	}
+	if lineage := adkcontext.WalkLineage(outerADK); len(lineage) == 0 || !slices.Contains(lineage, adkcontext.Token(outerADK)) {
+		t.Fatalf("WalkLineage(outerADK) missing outer token: %#v", lineage)
+	} else if slices.Contains(lineage, adkcontext.Token(innerLineage)) {
+		t.Fatalf("WalkLineage penetrated uint8BlockingCtx: %#v", lineage)
+	}
+	if got := adkcontext.ReadRunToken(outerEmptyTok); got != nil {
+		t.Fatalf("ReadRunToken penetrated uint8BlockingCtx: %#v, want nil", got)
 	}
 }

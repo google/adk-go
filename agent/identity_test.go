@@ -17,8 +17,10 @@ package agent
 import (
 	"bytes"
 	"context"
+	"iter"
 	"log"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -538,7 +540,7 @@ func TestLineageWalksWithoutExposingContextOrInterceptingAppKeys(t *testing.T) {
 
 	pathA := "wf/left"
 	pmVal := map[string]string{"leaf": "worker"}
-	pmCtx := context.WithValue(context.Background(), adkcontext.ParentMapKey, pmVal)
+	pmCtx := adkcontext.WithParentMap(context.Background(), pmVal)
 	withPath := Promote(outer).WithAgentContext(pmCtx).WithDelta(&CommonContextDelta{Path: &pathA})
 	cbCtx := NewCallbackContext(withPath, nil)
 	pathReader := Promote(nil).(interface{ ADKContextPath(context.Context) string })
@@ -595,5 +597,133 @@ func TestPromoteADKParentMap_ReturnsSnapshotCopy(t *testing.T) {
 	nilMapCtx := context.WithValue(context.Background(), adkcontext.ParentMapKey, runnerParentMap(nil))
 	if gotNil := carrier.ADKParentMap(nilMapCtx); gotNil != nil {
 		t.Fatalf("ADKParentMap(typed-nil map) = %#v, want nil", gotNil)
+	}
+}
+
+type runTokenUint8Blocker struct {
+	context.Context
+}
+
+func (c *runTokenUint8Blocker) Value(key any) any {
+	if key != nil && reflect.TypeOf(key).Kind() == reflect.Uint8 {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+func TestRunToken_StableWithinRun_FreshPerChild(t *testing.T) {
+	type runTestSpanKey struct{}
+	outer := &invocationContext{Context: t.Context(), session: &identityTestSession{}}
+	rtReader, ok := any(Promote(nil)).(interface{ ADKRunToken(context.Context) any })
+	if !ok {
+		t.Fatal("Promote(nil) does not expose ADKRunToken")
+	}
+
+	var nilCtx context.Context
+	if got := rtReader.ADKRunToken(nilCtx); got != nil {
+		t.Fatalf("ADKRunToken(nil) = %#v, want nil", got)
+	}
+	if got := rtReader.ADKRunToken(Promote(outer)); got != nil {
+		t.Fatalf("ADKRunToken(unpromoted outer) = %#v, want nil", got)
+	}
+
+	var parentBeforeTok, parentAfterDeltaTok, parentAfterCtxTok, cbTok, toolTok, childTok any
+	var resetBgTok, resetBlockedTok, reboundTok any
+	var childLineage []any
+	var childCtx InvocationContext
+
+	child, err := New(Config{
+		Name: "child",
+		Run: func(ctx InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				childCtx = ctx
+				childTok = rtReader.ADKRunToken(ctx)
+				childLineage = adkcontext.WalkLineage(ctx)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(child): %v", err)
+	}
+
+	parent, err := New(Config{
+		Name:      "parent",
+		SubAgents: []Agent{child},
+		Run: func(ctx InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				parentBeforeTok = rtReader.ADKRunToken(ctx)
+				icCopy := ctx.WithICDelta(&InvocationContextDelta{Branch: new("b1")})
+				parentAfterDeltaTok = rtReader.ADKRunToken(icCopy)
+				withSpan := icCopy.WithContext(context.WithValue(icCopy, runTestSpanKey{}, "span"))
+				parentAfterCtxTok = rtReader.ADKRunToken(withSpan)
+				cbTok = rtReader.ADKRunToken(NewCallbackContext(icCopy, nil))
+				tCtx := NewToolContext(withSpan, "call-1", nil, nil)
+				toolTok = rtReader.ADKRunToken(tCtx)
+
+				// Synthetic child InvocationContext directly wrapping nodeCtx stops RunTokenKey.
+				synthetic := &invocationContext{Context: ctx, session: &identityTestSession{}}
+				if got := rtReader.ADKRunToken(synthetic); got != nil {
+					t.Fatalf("synthetic invocationContext stole parent runToken: %#v", got)
+				}
+
+				for ev, runErr := range child.Run(icCopy) {
+					if !yield(ev, runErr) {
+						return
+					}
+				}
+
+				// WithAgentContext resets runToken on non-InvocationContext contexts
+				// rather than retaining a stale parent token, and picks up another
+				// run's token when wrapping a context derived from that run.
+				withSpanCtx, ok := withSpan.(Context)
+				if !ok {
+					t.Fatalf("withSpan %T does not implement agent.Context", withSpan)
+				}
+				resetBgTok = rtReader.ADKRunToken(withSpanCtx.WithAgentContext(context.Background()))
+				resetBlockedTok = rtReader.ADKRunToken(withSpanCtx.WithAgentContext(&runTokenUint8Blocker{Context: withSpan}))
+				reboundTok = rtReader.ADKRunToken(withSpanCtx.WithAgentContext(context.WithValue(childCtx, runTestSpanKey{}, "other")))
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(parent): %v", err)
+	}
+
+	for _, runErr := range parent.Run(outer) {
+		if runErr != nil {
+			t.Fatalf("parent.Run error: %v", runErr)
+		}
+	}
+
+	if parentBeforeTok == nil {
+		t.Fatal("parentBeforeTok = nil, want non-nil per-run token")
+	}
+	for name, got := range map[string]any{
+		"WithICDelta":        parentAfterDeltaTok,
+		"WithContext":        parentAfterCtxTok,
+		"NewCallbackContext": cbTok,
+		"NewToolContext":     toolTok,
+	} {
+		if got != parentBeforeTok {
+			t.Fatalf("%s runToken = %#v, want parent token %#v", name, got, parentBeforeTok)
+		}
+	}
+	if childTok == nil || childTok == parentBeforeTok {
+		t.Fatalf("child runToken = %#v, want fresh token != %#v", childTok, parentBeforeTok)
+	}
+	if resetBgTok != nil {
+		t.Fatalf("WithAgentContext(Background) retained stale runToken %#v, want nil", resetBgTok)
+	}
+	if resetBlockedTok != nil {
+		t.Fatalf("WithAgentContext(uint8Blocker) retained stale runToken %#v, want nil", resetBlockedTok)
+	}
+	if reboundTok != childTok {
+		t.Fatalf("WithAgentContext(WithValue(childCtx)) runToken = %#v, want child token %#v", reboundTok, childTok)
+	}
+	if !slices.Contains(childLineage, childTok) || !slices.Contains(childLineage, parentBeforeTok) {
+		t.Fatalf("child WalkLineage = %#v, want both child (%#v) and parent (%#v) runTokens", childLineage, childTok, parentBeforeTok)
+	}
+	if rtReader.ADKRunToken(outer) != nil {
+		t.Fatal("parent outer invocationContext mutated by child run")
 	}
 }

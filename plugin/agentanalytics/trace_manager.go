@@ -388,13 +388,16 @@ type spanRecord struct {
 	// children holds the names of the sub-agents configured on this agent
 	// activation.
 	children []string
-	// activation identifies the agent run that started the span: the
-	// InvocationContext that ADK creates for each run of an agent, which its
-	// agent, model and tool callbacks share (see activationKey). It tells
-	// apart concurrent runs of the same agent on one branch and node path,
-	// which the name, branch and path of the span do not. It is nil when the
-	// context does not show it.
+	// activation identifies the agent run that started the span: the per-run
+	// token minted by agent.Run when the ADK core provides ADKRunToken, or the
+	// InvocationContext pointer from icActivationKey on earlier cores. It
+	// tells apart concurrent runs of the same agent on one branch and node path
+	// even when a custom InvocationContext copies itself across WithICDelta.
 	activation any
+	// icActivation holds icActivationKey(ctx) alongside activation so
+	// pointer-chain lineage (launcherLocked) and contexts derived outside an
+	// agent.Run can still match on InvocationContext identity when needed.
+	icActivation any
 	// popRetirement holds transient retirement metadata for
 	// recordRetiredActivationLocked, so that the retired activation's entry
 	// receives it before any pruning inspects it.
@@ -405,9 +408,10 @@ type spanRecord struct {
 	// previously issued or settled credits.
 	recordedAfterAgentCredit bool
 	recordedModelCredits     int
-	// activationTokens holds the opaque weak tokens reported by the ADK
-	// contexts of the agent run that started the span (see activationTokensOf).
-	activationTokens [3]any
+	// activationTokens holds the opaque weak ADK context tokens and optional
+	// per-run token reported for the agent run that started the span (see
+	// activationTokensOf).
+	activationTokens [4]any
 }
 
 // popRetirement carries per-retirement metadata into
@@ -3921,13 +3925,37 @@ func walkAgentEdges(root agent.Agent) []agentEdge {
 	return edges
 }
 
+func isNilAgent(a agent.Agent) bool {
+	if a == nil {
+		return true
+	}
+	rv := reflect.ValueOf(a)
+	for range 4 {
+		if !rv.IsValid() {
+			return true
+		}
+		switch rv.Kind() {
+		case reflect.Interface:
+			if rv.IsNil() {
+				return true
+			}
+			rv = rv.Elem()
+		case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func, reflect.UnsafePointer:
+			return rv.IsNil()
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 func prepareRootAgentInput(ctx context.Context, inv *invocationTrace, id identity, runner, rememberedRoot agent.Agent) rootAgentInput {
 	var in rootAgentInput
 	if !inv.ancestryFromContextAtomic.Load() {
 		if parents := orZero(func() map[string]agent.Agent { return contextParentMap(ctx) }); parents != nil {
 			in.hasContextParents = true
 			for child, parent := range parents {
-				if parent == nil {
+				if isNilAgent(parent) {
 					continue
 				}
 				if pName := orZero(parent.Name); child != "" && pName != "" {
@@ -3939,17 +3967,17 @@ func prepareRootAgentInput(ctx context.Context, inv *invocationTrace, id identit
 				}
 				in.contextEdges = append(in.contextEdges, walkAgentEdges(parent)...)
 			}
-			if root := topAgentFromMap(runner, id.agentName, parents); root != nil {
+			if root := topAgentFromMap(runner, id.agentName, parents); !isNilAgent(root) {
 				in.contextRoot = root
 				in.contextRootName = orZero(root.Name)
 			}
 		}
 	}
-	if runner != nil {
+	if !isNilAgent(runner) {
 		in.runner = runner
 		in.runnerName = orZero(runner.Name)
 		in.runnerEdges = walkAgentEdges(runner)
-		if rememberedRoot != nil && rememberedRoot != runner {
+		if !isNilAgent(rememberedRoot) && rememberedRoot != runner {
 			in.remembered = rememberedRoot
 			in.rememberedName = orZero(rememberedRoot.Name)
 			in.rememberedEdges = walkAgentEdges(rememberedRoot)
@@ -4358,21 +4386,28 @@ func runningAgentChildren(ctx context.Context, name string, selfPlugin *baseplug
 // configured root agent of the runner's tree.
 func topAgentFromMap(start agent.Agent, agentName string, parents map[string]agent.Agent) agent.Agent {
 	cur := start
+	if isNilAgent(cur) {
+		cur = nil
+	}
 	if cur == nil && agentName != "" {
-		cur = parents[agentName]
+		if candidate := parents[agentName]; !isNilAgent(candidate) {
+			cur = candidate
+		}
 	}
 	if cur == nil {
 		for _, p := range parents {
-			cur = p
-			break
+			if !isNilAgent(p) {
+				cur = p
+				break
+			}
 		}
 	}
 	for range len(parents) + 1 {
-		if cur == nil {
-			break
+		if isNilAgent(cur) {
+			return nil
 		}
 		next := parents[orZero(cur.Name)]
-		if next == nil || next == cur {
+		if isNilAgent(next) || next == cur {
 			return cur
 		}
 		cur = next
@@ -4560,8 +4595,14 @@ func (inv *invocationTrace) syncLookalikesLocked() {
 }
 
 // maxLaunchLineage bounds the chain of contexts that launcherLocked and
-// observeLaunchLineage follow so a cyclic custom context terminates.
+// observeLaunchLineage inspect; peelToADKContext bounds Value-entry peeling to
+// maxLineageEntryPeel (64) hops, and ADK's WalkLineage bounds its Value hop
+// budget to 64 ADK layers so cyclic contexts terminate cleanly.
 const maxLaunchLineage = 4096
+
+// maxLineageEntryPeel bounds how many outer stdlib/"context", Unwrap() context.Context,
+// or WithICDelta(nil) hops peelToADKContext inspects before invoking ADK's Value readers.
+const maxLineageEntryPeel = 64
 
 // maxLegacyContextLineage bounds the fallback context chain walked before
 // acquiring inv.mu when running against an ADK core without ADKWalkLineage.
@@ -4578,6 +4619,15 @@ var lineageWalkerOnce = sync.OnceValue(func() func(context.Context) []any {
 		ADKWalkLineage(context.Context) []any
 	}); ok {
 		return w.ADKWalkLineage
+	}
+	return nil
+})
+
+var runTokenReaderOnce = sync.OnceValue(func() func(context.Context) any {
+	if r, ok := any(agent.Promote(nil)).(interface {
+		ADKRunToken(context.Context) any
+	}); ok {
+		return r.ADKRunToken
 	}
 	return nil
 })
@@ -4627,12 +4677,11 @@ func adkContextToken(x any) any {
 }
 
 // activationTokensOf returns the opaque ADK context tokens identifying the run
-// of ctx (its underlying activation key, its promoted node context, and its
-// unwrapped commonContext; WithICDelta(nil) returns commonContext directly
-// without allocating).
-func activationTokensOf(ctx context.Context, act any) [3]any {
-	var out [3]any
-	out[0] = adkContextToken(act)
+// of icAct and ctx (icAct's underlying token, its promoted node context, and its
+// unwrapped commonContext), plus an optional per-run token in slot 3.
+func activationTokensOf(ctx context.Context, icAct any, extra ...any) [4]any {
+	var out [4]any
+	out[0] = adkContextToken(icAct)
 	if c, ok := ctx.(interface {
 		WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext
 	}); ok {
@@ -4649,7 +4698,75 @@ func activationTokensOf(ctx context.Context, act any) [3]any {
 			}
 		}
 	}
+	if len(extra) > 0 && isComparableToken(extra[0]) && !sameComparableValue(extra[0], out[0]) && !sameComparableValue(extra[0], out[1]) && !sameComparableValue(extra[0], out[2]) {
+		out[3] = extra[0]
+	}
 	return out
+}
+
+func isADKContextStruct(cur any) bool {
+	if cur == nil {
+		return false
+	}
+	v := reflect.ValueOf(cur)
+	for derefs := 0; derefs < 16 && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface); derefs++ {
+		if v.IsNil() {
+			return false
+		}
+		v = v.Elem()
+	}
+	return v.Kind() == reflect.Struct && isADKStructPkg(v.Type().PkgPath())
+}
+
+// peelToADKContext steps only through allowlisted Go stdlib "context" wrappers
+// (with allowLockFreeExternal=false), explicit Unwrap() context.Context chains,
+// and WithICDelta(nil) InvocationContext promotions up to maxLineageEntryPeel
+// hops with pointer cycle tracking, stopping as soon as it reaches a concrete
+// ADK context struct. Pure-external Value cycles and unrecognized external
+// decorators stop cleanly without invoking Value().
+func peelToADKContext(ctx context.Context) context.Context {
+	var seenPtrs map[visitedContextStruct]bool
+	cur := any(ctx)
+	for step := 0; cur != nil && step < maxLineageEntryPeel; step++ {
+		if rv := reflect.ValueOf(cur); rv.Kind() == reflect.Pointer && !rv.IsNil() {
+			key := visitedContextStruct{ptr: rv.Pointer(), typ: rv.Type()}
+			if seenPtrs == nil {
+				seenPtrs = make(map[visitedContextStruct]bool, 4)
+			}
+			if seenPtrs[key] {
+				return nil
+			}
+			seenPtrs[key] = true
+		}
+		if isADKContextStruct(cur) {
+			adkCtx, _ := cur.(context.Context)
+			return adkCtx
+		}
+		if u, ok := cur.(contextUnwrapper); ok {
+			next := orZero(u.Unwrap)
+			if next == nil || sameComparableValue(next, cur) {
+				return nil
+			}
+			cur = next
+			continue
+		}
+		if c, ok := cur.(interface {
+			WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext
+		}); ok {
+			next := orZero(func() agent.InvocationContext { return c.WithICDelta(nil) })
+			if next == nil || sameComparableValue(next, cur) {
+				return nil
+			}
+			cur = next
+			continue
+		}
+		next, ok := stepContext(cur, false)
+		if !ok || sameComparableValue(next, cur) {
+			return nil
+		}
+		cur = next
+	}
+	return nil
 }
 
 // launchLineage holds the ADK context tokens observed along a starting run's
@@ -4657,7 +4774,7 @@ func activationTokensOf(ctx context.Context, act any) [3]any {
 // activation key and tokens.
 type launchLineage struct {
 	selfActivation any
-	selfTokens     [3]any
+	selfTokens     [4]any
 	tokens         []any
 	unwrapChain    []any
 	observed       bool
@@ -4669,7 +4786,7 @@ type launchLineage struct {
 // and no user code runs under inv.mu. On older ADK cores without ADKWalkLineage,
 // it pre-collects comparable contexts via optional Unwrap() context.Context
 // methods and lock-free single-parent stepping outside inv.mu.
-func observeLaunchLineage(ctx context.Context, act any, selfTokens [3]any) *launchLineage {
+func observeLaunchLineage(ctx context.Context, act any, selfTokens [4]any) *launchLineage {
 	if ctx == nil && act == nil {
 		return nil
 	}
@@ -4678,17 +4795,19 @@ func observeLaunchLineage(ctx context.Context, act any, selfTokens [3]any) *laun
 	var observed bool
 	if ctx != nil {
 		if walk := lineageWalkerOnce(); walk != nil {
-			raw := orZero(func() []any { return walk(ctx) })
-			if len(raw) > 0 {
-				observed = true
-				tokens = make([]any, 0, min(len(raw), maxLaunchLineage))
-				for _, tok := range raw {
-					if !isComparableToken(tok) {
-						continue
-					}
-					tokens = append(tokens, tok)
-					if len(tokens) >= maxLaunchLineage {
-						break
+			if entry := peelToADKContext(ctx); entry != nil {
+				raw := orZero(func() []any { return walk(entry) })
+				if len(raw) > 0 {
+					observed = true
+					tokens = make([]any, 0, min(len(raw), maxLaunchLineage))
+					for _, tok := range raw {
+						if !isComparableToken(tok) {
+							continue
+						}
+						tokens = append(tokens, tok)
+						if len(tokens) >= maxLaunchLineage {
+							break
+						}
 					}
 				}
 			}
@@ -4877,18 +4996,68 @@ func stepEmbeddedContextStrict(v reflect.Value, depth int, allowLockFreeExternal
 			}
 			continue
 		}
+		external := !isImmutableContextOrAgentPkg(t.PkgPath())
 		isNamedImmutableCtx := (t.PkgPath() == "context" && sf.Name == "c") ||
 			(t.PkgPath() == agentPkgPath && (t.Name() == "callbackContextWrapper" || t.Name() == "toolContextWrapper") && sf.Name == "context")
-		if (isNamedImmutableCtx || sf.Name == "Context") && sf.Type.Implements(contextInterfaceType) {
+		if (external || isNamedImmutableCtx || sf.Name == "Context") && sf.Type.Implements(contextInterfaceType) {
 			if !isNilContextField(fv) {
 				c, ok := extractCtx(fv)
 				if !ok || recordLive(c) {
 					return nil, true
 				}
 			}
+			continue
+		}
+		if external && allowLockFreeExternal && typeHasContextField(sf.Type, 0) {
+			switch sf.Type.Kind() {
+			case reflect.Struct:
+				if !canStepStructType(sf.Type, allowLockFreeExternal) {
+					return nil, true
+				}
+				if c, ambig := stepEmbeddedContextStrict(fv, depth+1, allowLockFreeExternal); ambig || (c != nil && recordLive(c)) {
+					return nil, true
+				}
+			case reflect.Pointer:
+				if sf.Type.Elem().Kind() != reflect.Struct {
+					continue
+				}
+				if !canStepStructType(sf.Type.Elem(), allowLockFreeExternal) {
+					return nil, true
+				}
+				if !fv.IsNil() {
+					if c, ambig := stepEmbeddedContextStrict(fv.Elem(), depth+1, allowLockFreeExternal); ambig || (c != nil && recordLive(c)) {
+						return nil, true
+					}
+				}
+			}
 		}
 	}
 	return candidate, false
+}
+
+func typeHasContextField(t reflect.Type, depth int) bool {
+	if t == nil || depth >= 8 {
+		return false
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return false
+	}
+	for sf := range t.Fields() {
+		if sf.Type.Implements(contextInterfaceType) {
+			return true
+		}
+		st := sf.Type
+		for st.Kind() == reflect.Pointer {
+			st = st.Elem()
+		}
+		if st.Kind() == reflect.Struct && typeHasContextField(st, depth+1) {
+			return true
+		}
+	}
+	return false
 }
 
 // stepEmbeddedContextValue is a test-only helper (no production callers;
@@ -4980,7 +5149,11 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 		}
 		if len(byToken) > 0 {
 			for _, tok := range lin.tokens {
-				if !isComparableToken(tok) || sameComparableValue(tok, lin.selfTokens[0]) || sameComparableValue(tok, lin.selfTokens[1]) || sameComparableValue(tok, lin.selfTokens[2]) {
+				if !isComparableToken(tok) ||
+					sameComparableValue(tok, lin.selfTokens[0]) ||
+					sameComparableValue(tok, lin.selfTokens[1]) ||
+					sameComparableValue(tok, lin.selfTokens[2]) ||
+					sameComparableValue(tok, lin.selfTokens[3]) {
 					continue
 				}
 				if i, ok := byToken[tok]; ok {
@@ -4992,11 +5165,14 @@ func (inv *invocationTrace) launcherLocked(act any, excluded []bool) int {
 
 	byActivation := make(map[any]int)
 	for i, rec := range inv.agentStack {
-		if i == 0 || excluded[i] || rec.kind != spanKindAgent || rec.activation == nil {
+		if i == 0 || excluded[i] || rec.kind != spanKindAgent {
 			continue
 		}
 		if isComparableToken(rec.activation) {
 			byActivation[rec.activation] = i
+		}
+		if rec.icActivation != nil && isComparableToken(rec.icActivation) {
+			byActivation[rec.icActivation] = i
 		}
 	}
 	if len(byActivation) == 0 {
@@ -7516,10 +7692,11 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		eventClockStart = platform.Now(ctx)
 	}
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	icAct := icActivationKey(ctx)
 	activation := activationKey(ctx)
-	actTokens := activationTokensOf(ctx, activation)
+	actTokens := activationTokensOf(ctx, icAct, activation)
 	var launch any
-	if l := observeLaunchLineage(ctx, activation, actTokens); l != nil {
+	if l := observeLaunchLineage(ctx, icAct, actTokens); l != nil {
 		launch = l
 	}
 	ended := endedFunc(ctx)
@@ -7720,6 +7897,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		origin:                 origin,
 		attempt:                attempt,
 		activation:             activation,
+		icActivation:           icAct,
 		activationTokens:       actTokens,
 		parent:                 parent,
 		stopPoint:              parent.kind == spanKindInvocation || id.path != parent.path || id.branch != parent.branch,
@@ -10716,19 +10894,27 @@ func endedFunc(ctx context.Context) func() bool {
 // follows.
 const maxActivationKeyDepth = 8
 
-// activationKey returns the per-activation context pointer that ADK created for
-// the agent run that ctx belongs to, or nil if ctx does not show it. Each
-// agent.Run allocates a fresh run context via ctx.WithContext(spanCtx) and
-// stores it in the base InvocationContext's embedded Context field; llmagent.run
-// then derives a second base InvocationContext via WithICDelta that copies the
-// same embedded Context pointer. Unwrapping to the innermost InvocationContext
-// and returning its embedded InvocationContext pointer when present gives an
-// identical key across BeforeAgentCallback, model and tool callbacks, and
-// AfterAgentCallback of one run while keeping concurrent runs of the same agent
-// on one branch and node path distinct. An agent callback receives a
-// callbackContextWrapper whose InvocationContext method logs a warning and
-// returns nil, so the chain starts at WithICDelta(nil).
+// activationKey returns a stable per-activation identity key for ctx. On ADK
+// cores exposing ADKRunToken, it prefers the unforgeable per-run token minted
+// by agent.Run (copied across WithICDelta and WithContext derivatives so
+// copying InvocationContext decorators keep a single activation key across
+// BeforeAgentCallback, model/tool callbacks, and AfterAgentCallback). Otherwise
+// (and when ADKRunToken returns nil for contexts created outside agent.Run), it
+// falls back to icActivationKey.
 func activationKey(ctx context.Context) any {
+	if r := runTokenReaderOnce(); r != nil && ctx != nil {
+		if entry := peelToADKContext(ctx); entry != nil {
+			if tok := orZero(func() any { return r(entry) }); isComparableToken(tok) {
+				return tok
+			}
+		}
+	}
+	return icActivationKey(ctx)
+}
+
+// icActivationKey returns the per-activation context pointer that ADK created
+// for the agent run that ctx belongs to, or nil if ctx does not show it.
+func icActivationKey(ctx context.Context) any {
 	c, ok := ctx.(interface {
 		WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext
 	})
@@ -10771,7 +10957,16 @@ func activationKey(ctx context.Context) any {
 // isActivationOf reports whether rec is the span of the agent activation
 // whose run ctx belongs to (see activationKey).
 func (rec *spanRecord) isActivationOf(ctx context.Context) bool {
-	return rec.kind == spanKindAgent && rec.activation != nil && rec.activation == activationKey(ctx)
+	if rec.kind != spanKindAgent {
+		return false
+	}
+	if act := activationKey(ctx); act != nil && rec.activation == act {
+		return true
+	}
+	if icAct := icActivationKey(ctx); icAct != nil && rec.icActivation == icAct {
+		return true
+	}
+	return false
 }
 
 // findAgentForContext returns the index in agentStack of the open span of the
@@ -10784,6 +10979,14 @@ func (inv *invocationTrace) findAgentForContext(ctx context.Context, path, name,
 		for i := len(inv.agentStack) - 1; i > 0; i-- {
 			rec := inv.agentStack[i]
 			if rec.kind == spanKindAgent && rec.activation == act && rec.name == name && rec.branch == branch {
+				return i
+			}
+		}
+	}
+	if icAct := icActivationKey(ctx); icAct != nil {
+		for i := len(inv.agentStack) - 1; i > 0; i-- {
+			rec := inv.agentStack[i]
+			if rec.kind == spanKindAgent && rec.icActivation == icAct && rec.name == name && rec.branch == branch && (path == "" || rec.path == "" || rec.path == path) {
 				return i
 			}
 		}
@@ -11844,7 +12047,8 @@ func callKey(ctx context.Context, key string) string {
 // report false, contextFailureCause and openFailureCause report nil, and
 // collateralFailureCause reports (nil, false) for such a record.
 func (rec *spanRecord) dropContexts() {
-	rec.canceled, rec.ended, rec.activation, rec.parent = nil, nil, nil, nil
+	rec.canceled, rec.ended, rec.activation, rec.icActivation, rec.parent = nil, nil, nil, nil, nil
+	rec.activationTokens = [4]any{}
 	rec.retiredCauses = nil
 }
 
@@ -11859,7 +12063,8 @@ func (rec *spanRecord) dropContexts() {
 // up that chain and read canceled on each record in it.
 func (inv *invocationTrace) dropRetiredLateContextsLocked(retired ...*spanRecord) {
 	for _, r := range retired {
-		r.ended, r.activation, r.retiredCauses = nil, nil, nil
+		r.ended, r.activation, r.icActivation, r.retiredCauses = nil, nil, nil, nil
+		r.activationTokens = [4]any{}
 	}
 	keepParent := make(map[*spanRecord]bool)
 	markChain := func(s *spanRecord) {
@@ -12062,6 +12267,10 @@ func adkContextChildren(v reflect.Value) (reflect.Value, reflect.Value) {
 		if vt.Name() == "executorContext" {
 			return directStructField(v, "Context"), reflect.Value{}
 		}
+	case adkPkgPrefix + "internal/adkcontext":
+		if vt.Name() == "parentMapCtx" {
+			return directStructField(v, "Context"), reflect.Value{}
+		}
 	}
 	return reflect.Value{}, reflect.Value{}
 }
@@ -12084,7 +12293,7 @@ func convertAgentParentMap(raw any) (map[string]agent.Agent, bool) {
 		}
 		out := make(map[string]agent.Agent, len(m))
 		for k, a := range m {
-			if a != nil {
+			if !isNilAgent(a) {
 				out[k] = a
 			}
 		}
@@ -12101,7 +12310,7 @@ func convertAgentParentMap(raw any) (map[string]agent.Agent, bool) {
 		src := rv.Convert(mapType).Interface().(map[string]agent.Agent)
 		out := make(map[string]agent.Agent, len(src))
 		for k, a := range src {
-			if a != nil {
+			if !isNilAgent(a) {
 				out[k] = a
 			}
 		}
@@ -12110,7 +12319,7 @@ func convertAgentParentMap(raw any) (map[string]agent.Agent, bool) {
 	out := make(map[string]agent.Agent, rv.Len())
 	iter := rv.MapRange()
 	for iter.Next() {
-		if a, ok := reflect.TypeAssert[agent.Agent](iter.Value()); ok && a != nil {
+		if a, ok := reflect.TypeAssert[agent.Agent](iter.Value()); ok && !isNilAgent(a) {
 			out[iter.Key().String()] = a
 		}
 	}
@@ -12229,12 +12438,17 @@ func probeParentMapCtxKey() (key any) {
 // that ADK's runner attaches to ctx, or nil if ctx does not carry one. In
 // production it is invoked only via prepareRootAgentInput outside tm.mu and
 // inv.mu. When ADK core exposes ADKParentMap (parentMapReaderOnce() != nil), it
-// relies exclusively on that reader and returns nil immediately without running
-// the runner.RunLive probe or walking structs when read(ctx) has no map. On
-// earlier cores (parentMapReaderOnce() == nil), it lazily runs
-// discoverParentMapCtxKey once and matches only that runner key via ctx.Value
-// and allowlisted Go stdlib / ADK context wrappers so application maps of the
-// same type are never mistaken for runner lineage.
+// relies exclusively on that reader (calling Value directly rather than peeling
+// external wrappers so lock-guarded wrappers without Unwrap() stay race-free;
+// only ADK-mediated hops terminate under their 64-hop ParentMapStep budget,
+// while inner pure-external Value cycles reached through ADKParentMap still
+// recurse without bound, matching Go's context.Context Value delegation
+// contract) and returns nil immediately without running the runner.RunLive
+// probe or walking structs when read(ctx) has no map. On earlier cores
+// (parentMapReaderOnce() == nil), it lazily runs discoverParentMapCtxKey once
+// and matches only that runner key via ctx.Value and allowlisted Go stdlib /
+// ADK context wrappers so application maps of the same type are never mistaken
+// for runner lineage.
 func contextParentMap(ctx context.Context) map[string]agent.Agent {
 	return contextParentMapWith(ctx, parentMapReaderOnce(), discoverParentMapCtxKey)
 }

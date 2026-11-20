@@ -158,6 +158,12 @@ func (c *InvocationContext) Value(key any) any {
 	if v, ok := adkcontext.PathStep(key, c.params.Path, c.Context); ok {
 		return v
 	}
+	if v, ok := adkcontext.ParentMapStep(key, c.Context); ok {
+		return v
+	}
+	if adkcontext.IsRunTokenKey(key) {
+		return nil
+	}
 	if c.Context == nil {
 		return nil
 	}
@@ -178,6 +184,10 @@ func (*InvocationContext) ADKContextPath(ctx context.Context) string {
 
 func (*InvocationContext) ADKParentMap(ctx context.Context) any {
 	return adkcontext.ReadParentMap(ctx)
+}
+
+func (*InvocationContext) ADKRunToken(ctx context.Context) any {
+	return adkcontext.ReadRunToken(ctx)
 }
 
 // ResumedInput always returns (nil, false) for the base

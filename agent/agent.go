@@ -185,7 +185,7 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 
 		icDelta := &InvocationContextDelta{Agent: &aa, Context: &newCtx}
 
-		nodeCtx := PromoteWithDelta(ctx, &CommonContextDelta{
+		nodeCtx := promoteForRun(ctx, &CommonContextDelta{
 			InvocationContextDelta: icDelta,
 		})
 
@@ -506,6 +506,12 @@ func (c *invocationContext) Value(key any) any {
 	if v, ok := adkcontext.PathStep(key, "", c.Context); ok {
 		return v
 	}
+	if v, ok := adkcontext.ParentMapStep(key, c.Context); ok {
+		return v
+	}
+	if adkcontext.IsRunTokenKey(key) {
+		return nil
+	}
 	if c.Context == nil {
 		return nil
 	}
@@ -526,6 +532,10 @@ func (*invocationContext) ADKContextPath(ctx context.Context) string {
 
 func (*invocationContext) ADKParentMap(ctx context.Context) any {
 	return adkcontext.ReadParentMap(ctx)
+}
+
+func (*invocationContext) ADKRunToken(ctx context.Context) any {
+	return adkcontext.ReadRunToken(ctx)
 }
 
 func (c *invocationContext) InvocationID() string {

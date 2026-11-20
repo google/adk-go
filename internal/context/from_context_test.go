@@ -539,7 +539,7 @@ func TestLineageWalksBaseInvocationContextWithoutInterceptingAppKeys(t *testing.
 		t.Fatal("typed-nil InvocationContext returned non-nil")
 	}
 
-	pmBase := context.WithValue(t.Context(), adkcontext.ParentMapKey, map[string]string{"leaf": "root"})
+	pmBase := adkcontext.WithParentMap(t.Context(), map[string]string{"leaf": "root"})
 	withPath := icontext.NewInvocationContext(pmBase, icontext.InvocationContextParams{Path: "wf/ic"})
 	roNoCtx := &icontext.ReadonlyContext{InvocationContext: withPath}
 	if got := adkcontext.ReadPath(roNoCtx); got != "wf/ic" {
@@ -547,5 +547,21 @@ func TestLineageWalksBaseInvocationContextWithoutInterceptingAppKeys(t *testing.
 	}
 	if pm, ok := adkcontext.ReadParentMap(roNoCtx).(map[string]string); !ok || pm["leaf"] != "root" {
 		t.Fatalf("ReadParentMap(ReadonlyContext without Context) = %#v, want leaf->root", adkcontext.ReadParentMap(roNoCtx))
+	}
+
+	roCycleA := &icontext.ReadonlyContext{}
+	roCycleB := &icontext.ReadonlyContext{Context: roCycleA}
+	roCycleA.Context = roCycleB
+	if got := adkcontext.WalkLineage(roCycleA); got != nil {
+		t.Fatalf("WalkLineage(cyclic ReadonlyContext) = %#v, want nil", got)
+	}
+	if got := adkcontext.ReadPath(roCycleA); got != "" {
+		t.Fatalf("ReadPath(cyclic ReadonlyContext) = %q, want empty", got)
+	}
+	if got := adkcontext.ReadParentMap(roCycleA); got != nil {
+		t.Fatalf("ReadParentMap(cyclic ReadonlyContext) = %#v, want nil", got)
+	}
+	if got := adkcontext.ReadRunToken(roCycleA); got != nil {
+		t.Fatalf("ReadRunToken(cyclic ReadonlyContext) = %#v, want nil", got)
 	}
 }

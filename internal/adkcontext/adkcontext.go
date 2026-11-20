@@ -58,6 +58,30 @@ const PathKey ctxKey = 1
 // attaches the child-to-parent agent map.
 const ParentMapKey ctxKey = 2
 
+type runTokenHop uint8
+
+// RunTokenKey is the private context value key under which ADK exposes the
+// per-run identity token minted for each agent.Run execution. Using an
+// unexported uint8 key type matches LineageKey so wrappers blocking ADK's
+// private lineage key also block RunTokenKey cleanly.
+const RunTokenKey runTokenHop = 64
+
+const maxHopBudget uint8 = 64
+
+type pathHop int
+
+type parentMapHop int
+
+type runToken struct {
+	_ byte
+}
+
+// NewRunToken mints an unforgeable, comparable, non-nil per-run identity token
+// owned by a single agent.Run execution.
+func NewRunToken() any {
+	return &runToken{}
+}
+
 // Recovered returns what read produced, and whether it returned at all.
 //
 // It exists for the ADK Value implementations, which read the invocation
@@ -209,12 +233,35 @@ func appendLineageNodes(dst []any, node *lineageNode, limit int) []any {
 	return dst
 }
 
-// LineageStep handles an ADK lineage lookup on heap-allocated ADK context c
-// with embedded parent context parent. When key is not a lineage lookup key, it
-// returns (nil, false) so the caller delegates key unchanged. Inner recursive
-// hops return an immutable linked node in O(1) without copying ancestor tails,
-// and the outermost LineageKey hop flattens the chain once into []any in O(D).
-func LineageStep[T any](key any, c *T, parent context.Context) (any, bool) {
+func collectLineageTail(rem lineageKey, parent context.Context) *lineageNode {
+	if rem == 0 || parent == nil {
+		return nil
+	}
+	nextVal, _ := Recovered(func() any { return parent.Value(rem - 1) })
+	switch v := nextVal.(type) {
+	case *lineageNode:
+		return v
+	case []any:
+		if len(v) > 0 {
+			return &lineageNode{extra: v}
+		}
+	}
+	return nil
+}
+
+func flattenLineageValue(v any, limit int) []any {
+	switch t := v.(type) {
+	case []any:
+		return t
+	case *lineageNode:
+		out := make([]any, 0, countLineageNodes(t, limit))
+		return appendLineageNodes(out, t, limit)
+	default:
+		return nil
+	}
+}
+
+func lineageStep[T any](key any, c *T, runTok any, parent context.Context) (any, bool) {
 	rem, ok := key.(lineageKey)
 	if !ok {
 		return nil, false
@@ -223,28 +270,64 @@ func LineageStep[T any](key any, c *T, parent context.Context) (any, bool) {
 		return nil, true
 	}
 	tok := contextToken{ptr: weak.Make(c)}
-	var tail *lineageNode
-	if rem > 0 && parent != nil {
-		nextVal, _ := Recovered(func() any { return parent.Value(rem - 1) })
-		switch v := nextVal.(type) {
-		case *lineageNode:
-			tail = v
-		case []any:
-			if len(v) > 0 {
-				tail = &lineageNode{extra: v}
-			}
+	tail := collectLineageTail(rem, parent)
+	var rtNode *lineageNode
+	if rt, ok := runTok.(*runToken); ok && rt != nil {
+		// Avoid duplicating an identical runToken right below when inner ADK
+		// hops share the same agent run.
+		if tail == nil || (tail.tok != rt && (tail.next == nil || tail.next.tok != rt)) {
+			rtNode = &lineageNode{tok: rt, next: tail}
 		}
 	}
 	if rem < LineageKey {
+		if rtNode != nil {
+			return &lineageNode{tok: tok, next: rtNode}, true
+		}
 		return &lineageNode{tok: tok, next: tail}, true
 	}
-	if tail == nil {
+	if rtNode == nil && tail == nil {
 		return []any{tok}, true
 	}
-	head := &lineageNode{tok: tok, next: tail}
-	limit := int(rem) + 1
-	out := make([]any, 0, countLineageNodes(head, limit))
-	return appendLineageNodes(out, head, limit), true
+	nextNode := tail
+	if rtNode != nil {
+		nextNode = rtNode
+	}
+	head := &lineageNode{tok: tok, next: nextNode}
+	return flattenLineageValue(head, 2*(int(rem)+1)), true
+}
+
+// LineageStep handles an ADK lineage lookup on heap-allocated ADK context c
+// with embedded parent context parent. When key is not a lineage lookup key, it
+// returns (nil, false) so the caller delegates key unchanged. Inner recursive
+// hops return an immutable linked node in O(1) without copying ancestor tails,
+// and the outermost LineageKey hop flattens the chain once into []any in O(D).
+func LineageStep[T any](key any, c *T, parent context.Context) (any, bool) {
+	return lineageStep(key, c, nil, parent)
+}
+
+// LineageStepWithRunToken behaves like LineageStep and also emits a non-nil
+// runToken allocated by NewRunToken so child runs launched after WithICDelta
+// or WithContext copies still match the launching run's activation token.
+func LineageStepWithRunToken[T any](key any, c *T, runTok any, parent context.Context) (any, bool) {
+	return lineageStep(key, c, runTok, parent)
+}
+
+// ForwardLineage forwards a lineage lookup across a forwarding-only ADK context
+// without its own node identity, decrementing the hop budget so cyclic chains
+// through it terminate cleanly.
+func ForwardLineage(key any, parent context.Context) (any, bool) {
+	rem, ok := key.(lineageKey)
+	if !ok {
+		return nil, false
+	}
+	if parent == nil || rem == 0 {
+		return nil, true
+	}
+	v, _ := Recovered(func() any { return parent.Value(rem - 1) })
+	if rem < LineageKey {
+		return v, true
+	}
+	return flattenLineageValue(v, 2*(int(rem)+1)), true
 }
 
 // WalkLineage returns the slice of opaque ADK context tokens observed along ctx
@@ -254,47 +337,126 @@ func WalkLineage(ctx context.Context) []any {
 		return nil
 	}
 	v, _ := Recovered(func() any { return ctx.Value(LineageKey) })
-	switch t := v.(type) {
-	case []any:
-		return t
-	case *lineageNode:
-		limit := int(LineageKey) + 1
-		out := make([]any, 0, countLineageNodes(t, limit))
-		return appendLineageNodes(out, t, limit)
-	default:
+	return flattenLineageValue(v, 2*(int(LineageKey)+1))
+}
+
+func pathBudget(key any) (int, bool) {
+	if key == PathKey {
+		return int(maxHopBudget), true
+	}
+	h, ok := key.(pathHop)
+	if !ok || int(h) < 0 || int(h) > int(maxHopBudget) {
+		return 0, false
+	}
+	return int(h), true
+}
+
+// IsPathKey reports whether key is the private ADK node-path key or one of its
+// internal hop-budget keys.
+func IsPathKey(key any) bool {
+	_, ok := pathBudget(key)
+	return ok
+}
+
+func parentMapBudget(key any) (int, bool) {
+	if key == ParentMapKey {
+		return int(maxHopBudget), true
+	}
+	h, ok := key.(parentMapHop)
+	if !ok || int(h) < 0 || int(h) > int(maxHopBudget) {
+		return 0, false
+	}
+	return int(h), true
+}
+
+// IsParentMapKey reports whether key is the private ADK parent-map key or one of
+// its internal hop-budget keys.
+func IsParentMapKey(key any) bool {
+	_, ok := parentMapBudget(key)
+	return ok
+}
+
+// IsRunTokenKey reports whether key is the private ADK per-run token key or
+// one of its internal hop-budget keys.
+func IsRunTokenKey(key any) bool {
+	_, ok := key.(runTokenHop)
+	return ok
+}
+
+type parentMapCtx struct {
+	context.Context
+	m any
+}
+
+func (c *parentMapCtx) Value(key any) any {
+	if _, ok := parentMapBudget(key); ok {
+		return c.m
+	}
+	if c.Context == nil {
 		return nil
 	}
+	return c.Context.Value(key)
 }
 
-// IsPathKey reports whether key is the private ADK node-path key.
-func IsPathKey(key any) bool {
-	return key == PathKey
+// WithParentMap attaches the runner's child-to-parent agent map m to ctx so
+// both direct Value(ParentMapKey) lookups and hop-budgeted ReadParentMap walks
+// resolve across up to 64 ADK hops while terminating cleanly on ADK cycles.
+func WithParentMap(ctx context.Context, m any) context.Context {
+	return context.WithValue(&parentMapCtx{Context: ctx, m: m}, ParentMapKey, m)
 }
 
-// IsParentMapKey reports whether key is the private ADK parent-map key.
-func IsParentMapKey(key any) bool {
-	return key == ParentMapKey
-}
-
-// PathStep answers a Value(PathKey) lookup for an ADK context. When path is
-// non-empty it returns path immediately; otherwise it delegates to parent when
-// non-nil, returning nil if no ancestor carries a path.
+// PathStep answers a hop-budgeted PathKey lookup for an ADK context. When path
+// is non-empty it returns path immediately; otherwise it delegates to parent
+// with a decremented hop budget until empty or exhausted at 64 ADK hops.
 func PathStep(key any, path string, parent context.Context) (any, bool) {
-	if key != PathKey {
+	rem, ok := pathBudget(key)
+	if !ok {
 		return nil, false
 	}
 	if path != "" {
 		return path, true
 	}
-	if parent == nil {
+	if parent == nil || rem == 0 {
 		return nil, true
 	}
-	v, _ := Recovered(func() any { return parent.Value(key) })
+	v, _ := Recovered(func() any { return parent.Value(pathHop(rem - 1)) })
+	return v, true
+}
+
+// ParentMapStep answers a hop-budgeted ParentMapKey lookup for an ADK context,
+// delegating to parent with a decremented hop budget up to 64 ADK hops.
+func ParentMapStep(key any, parent context.Context) (any, bool) {
+	rem, ok := parentMapBudget(key)
+	if !ok {
+		return nil, false
+	}
+	if parent == nil || rem == 0 {
+		return nil, true
+	}
+	v, _ := Recovered(func() any { return parent.Value(parentMapHop(rem - 1)) })
+	return v, true
+}
+
+// RunTokenStep answers a hop-budgeted RunTokenKey lookup for an ADK context.
+// When runTok is non-nil it returns runTok immediately; otherwise it delegates
+// to parent with a decremented hop budget up to 64 ADK hops.
+func RunTokenStep(key, runTok any, parent context.Context) (any, bool) {
+	rem, ok := key.(runTokenHop)
+	if !ok {
+		return nil, false
+	}
+	if runTok != nil {
+		return runTok, true
+	}
+	if parent == nil || rem == 0 {
+		return nil, true
+	}
+	v, _ := Recovered(func() any { return parent.Value(rem - 1) })
 	return v, true
 }
 
 // ReadPath returns the workflow node path recovered from ctx via Value(PathKey),
-// or "" if ctx is nil, panics, or carries no node path.
+// or "" if ctx is nil, panics, exceeds the hop budget, or carries no node path.
 func ReadPath(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -307,11 +469,48 @@ func ReadPath(ctx context.Context) string {
 	return s
 }
 
+// ReadRunToken returns the non-nil per-run identity token recovered from ctx via
+// Value(RunTokenKey), or nil if ctx is nil, panics, or carries no valid token.
+func ReadRunToken(ctx context.Context) any {
+	if ctx == nil {
+		return nil
+	}
+	v, ok := Recovered(func() any { return ctx.Value(RunTokenKey) })
+	if !ok {
+		return nil
+	}
+	tok, _ := v.(*runToken)
+	if tok == nil {
+		return nil
+	}
+	return tok
+}
+
+func isNilish(rv reflect.Value) bool {
+	for range 4 {
+		if !rv.IsValid() {
+			return true
+		}
+		switch rv.Kind() {
+		case reflect.Interface:
+			if rv.IsNil() {
+				return true
+			}
+			rv = rv.Elem()
+		case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func, reflect.UnsafePointer:
+			return rv.IsNil()
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 // ReadParentMap returns a shallow snapshot copy of the child-to-parent map
 // recovered from ctx via Value(ParentMapKey), or nil if ctx is nil, panics, or
-// carries no non-nil map. Nil pointer, interface, map, slice, channel, and
-// function entries are omitted so callers (including via
-// agent.Promote(nil).ADKParentMap) cannot mutate the runner's reused map.
+// carries no non-nil map. Nil and typed-nil entries are omitted so callers
+// (including via agent.Promote(nil).ADKParentMap) cannot mutate the runner's
+// reused map.
 func ReadParentMap(ctx context.Context) any {
 	if ctx == nil {
 		return nil
@@ -329,11 +528,8 @@ func ReadParentMap(ctx context.Context) any {
 		iter := rv.MapRange()
 		for iter.Next() {
 			val := iter.Value()
-			switch val.Kind() {
-			case reflect.Interface, reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
-				if val.IsNil() {
-					continue
-				}
+			if isNilish(val) {
+				continue
 			}
 			cp.SetMapIndex(iter.Key(), val)
 		}
