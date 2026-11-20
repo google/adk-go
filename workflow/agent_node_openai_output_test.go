@@ -69,6 +69,21 @@ func TestAgentNode_OpenAIOutputSchemaTool(t *testing.T) {
 									}
 									if decl["name"] == "set_model_response" {
 										responseTools++
+										// Both OpenAI APIs require standard lower-case JSON Schema
+										// types even when the source is a *genai.Schema.
+										params, ok := decl["parameters"].(map[string]any)
+										if !ok || params["type"] != "object" {
+											t.Error("set_model_response parameters must be an object JSON Schema")
+										} else if props, ok := params["properties"].(map[string]any); !ok {
+											t.Error("set_model_response properties missing")
+										} else {
+											for name, wantType := range map[string]string{"city": "string", "temp": "integer"} {
+												prop, ok := props[name].(map[string]any)
+												if !ok || prop["type"] != wantType {
+													t.Errorf("set_model_response %s schema has wrong type", name)
+												}
+											}
+										}
 									}
 									if decl["name"] == "lookup" {
 										lookupTools++
