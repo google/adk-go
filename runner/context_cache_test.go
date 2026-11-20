@@ -60,6 +60,10 @@ type cachingGeminiAPI struct {
 	// emptyReplies holds the generations, numbered from 1, answered with no
 	// content.
 	emptyReplies map[int]bool
+	// createStatus and deleteStatus, when non-zero, are the error status every
+	// cache creation or deletion gets.
+	createStatus int
+	deleteStatus int
 }
 
 // snapshot returns what the server has seen so far, under the lock the handler
@@ -101,10 +105,20 @@ func (f *cachingGeminiAPI) serve(w http.ResponseWriter, r *http.Request) {
 		f.creates++
 		f.createHeaders = append(f.createHeaders, r.Header.Clone())
 		f.createBodies = append(f.createBodies, decoded)
+		if f.createStatus != 0 {
+			w.WriteHeader(f.createStatus)
+			_, _ = fmt.Fprintf(w, `{"error": {"code": %d, "message": "refused", "status": "RESOURCE_EXHAUSTED"}}`, f.createStatus)
+			return
+		}
 		name := fmt.Sprintf("cachedContents/%d", f.creates)
 		f.live[name] = true
 		_, _ = fmt.Fprintf(w, `{"name": %q, "expireTime": %q}`, name, time.Now().Add(time.Hour).Format(time.RFC3339))
 	case r.Method == http.MethodDelete:
+		if f.deleteStatus != 0 {
+			w.WriteHeader(f.deleteStatus)
+			_, _ = fmt.Fprintf(w, `{"error": {"code": %d, "message": "refused", "status": "INTERNAL"}}`, f.deleteStatus)
+			return
+		}
 		delete(f.live, r.URL.Path[strings.Index(r.URL.Path, "cachedContents/"):])
 		_, _ = fmt.Fprint(w, `{}`)
 	case strings.HasSuffix(r.URL.Path, ":generateContent"):

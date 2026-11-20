@@ -38,6 +38,18 @@
 // once without it, and the next request creates a new cache.
 //
 // A request that already names a cache in its own config is sent as it is.
+//
+// Each request with a CacheConfig gets a handle_context_caching span, a child
+// of the generate_content span when an agent makes the call. Its cache_action
+// attribute is active_cache, with the cache in cache_name, when the request is
+// sent through a cache, and fingerprint_only when it is sent without one. A
+// request that names its own cache carries no cache_action. A create_cache
+// child span covers each call that creates a cache, and a delete_cache span
+// each call that deletes one. A create or delete the provider refused leaves
+// its span failed, with the provider's error. A request resent without a
+// missing cache gets a second handle_context_caching span, marked
+// fingerprint_only. The span names and attributes are adk-python's, apart from
+// delete_cache, which adk-python does not have.
 package gemini
 
 import (
@@ -52,6 +64,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/llminternal/converters"
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
 )
@@ -154,7 +167,10 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		cache := &contextCache{client: m.client, model: m.modelName(req), trackingHeader: m.versionHeaderValue}
-		plan := cache.prepare(ctx, req)
+		spanCtx, span := telemetry.StartHandleContextCachingSpan(ctx)
+		plan := cache.prepare(spanCtx, req)
+		telemetry.TraceContextCacheAction(span, plan.metadata)
+		span.End()
 
 		ledger := llminternal.ContextCacheLedgerFromContext(ctx)
 		responded := false
@@ -169,9 +185,11 @@ func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.L
 		// attempt sends r and yields what comes back. It reports whether r
 		// named a cache the provider no longer holds and nothing has been
 		// yielded yet, so the request can be sent again without it.
+		var missingErr error
 		attempt := func(r *model.LLMRequest) (retry bool) {
 			for resp, err := range m.callModel(ctx, r, stream) {
 				if err != nil && !yielded && r != req && isMissingCacheError(err) {
+					missingErr = err
 					return true
 				}
 				if err == nil && resp != nil && !resp.Partial && plan.metadata != nil {
@@ -199,6 +217,7 @@ func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.L
 		// The prefix is unchanged, so the next request can create a cache for
 		// it straight away.
 		plan = cachePlan{req: req, metadata: fingerprintOnly(plan.metadata), stale: plan.stale}
+		telemetry.TraceContextCacheRetry(ctx, missing, missingErr)
 		attempt(plan.req)
 	}
 }
