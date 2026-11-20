@@ -249,6 +249,13 @@
 // `LLMResponse.CustomMetadata[StopReasonMetadataKey]`. `LLMResponse.ErrorCode`
 // is never set on a content-bearing response because of its stop reason alone.
 //
+// A turn that maps to anything other than [genai.FinishReasonStop] and carries
+// no content, meaning no non-thought text and no tool call, is reported as an
+// error: `LLMResponse.ErrorCode` holds the [genai.FinishReason] (for example
+// `SAFETY` for a refusal) and `LLMResponse.ErrorMessage` names the stop reason.
+// This covers a turn that holds only thinking, and one whose only output was a
+// `tool_use` block dropped because the turn was truncated.
+//
 // # Errors and Retries
 //
 // API failures return an [*APIError] that unwraps to a sentinel error for use
