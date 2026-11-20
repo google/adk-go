@@ -702,11 +702,12 @@ func TestLoopAgentStopsOnSubAgentPause(t *testing.T) {
 		}
 	}
 
-	// Pass 1 used 2 calls (initial pause + resume), and passes 2 and 3 used 1 call each.
-	if firstLLM.calls != 4 {
-		t.Errorf("first agent's model called %d times across 3 passes, want 4", firstLLM.calls)
+	// Without resumability, the answer turn routes directly to first and does
+	// not resume the enclosing loop or run later siblings.
+	if firstLLM.calls != 2 {
+		t.Errorf("first agent's model called %d times after answer, want 2", firstLLM.calls)
 	}
-	if secondLLM.callCounter != 3 {
-		t.Errorf("second agent's model called %d times across 3 passes after resume, want 3", secondLLM.callCounter)
+	if secondLLM.callCounter != 0 {
+		t.Errorf("second agent's model called %d times after answer, want 0", secondLLM.callCounter)
 	}
 }

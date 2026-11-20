@@ -19,8 +19,6 @@ package loopagent
 import (
 	"fmt"
 	"iter"
-	"slices"
-	"sync"
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
@@ -34,10 +32,11 @@ type Config struct {
 	AgentConfig agent.Config
 
 	// If MaxIterations == 0, then LoopAgent runs indefinitely or until any
-	// sub-agent escalates. A sub-agent error ends the loop regardless of
-	// MaxIterations. The context is checked before each pass, and if it is
-	// done the loop ends with the context's error. A LoopAgent with no
-	// sub-agents returns immediately without yielding any event or error.
+	// sub-agent escalates or pauses the invocation for a long-running tool
+	// response. A sub-agent error ends the loop regardless of MaxIterations.
+	// The context is checked before each pass, and if it is done the loop ends
+	// with the context's error. A LoopAgent with no sub-agents returns
+	// immediately without yielding any event or error.
 	MaxIterations uint
 }
 
@@ -74,164 +73,59 @@ func New(cfg Config) (agent.Agent, error) {
 	return loopAgent, nil
 }
 
-const maxTrackedPausedInvocations = 256
-
 type loopAgent struct {
 	maxIterations uint
-
-	mu           sync.Mutex
-	pausedPasses map[string]uint
-	pausedOrder  []string
-}
-
-func pauseKey(ctx agent.InvocationContext) string {
-	if ctx.InvocationID() == "" {
-		return ""
-	}
-	sessionID := ""
-	if ctx.Session() != nil {
-		sessionID = ctx.Session().ID()
-	}
-	return sessionID + "\x00" + ctx.InvocationID() + "\x00" + ctx.Branch()
-}
-
-func (a *loopAgent) loadPausedPasses(ctx agent.InvocationContext) uint {
-	key := pauseKey(ctx)
-	if key != "" {
-		a.mu.Lock()
-		passes, ok := a.pausedPasses[key]
-		a.mu.Unlock()
-		if ok {
-			return passes
-		}
-	}
-	return utils.CompletedLoopPasses(ctx)
-}
-
-func (a *loopAgent) savePausedPasses(ctx agent.InvocationContext, passes uint) {
-	key := pauseKey(ctx)
-	if key == "" {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.pausedPasses == nil {
-		a.pausedPasses = make(map[string]uint)
-	}
-	if _, exists := a.pausedPasses[key]; !exists {
-		if len(a.pausedPasses) >= maxTrackedPausedInvocations && len(a.pausedOrder) > 0 {
-			oldest := a.pausedOrder[0]
-			a.pausedOrder = a.pausedOrder[1:]
-			delete(a.pausedPasses, oldest)
-		}
-		a.pausedOrder = append(a.pausedOrder, key)
-	}
-	a.pausedPasses[key] = passes
-}
-
-func (a *loopAgent) clearPausedPasses(ctx agent.InvocationContext) {
-	key := pauseKey(ctx)
-	if key == "" {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if _, exists := a.pausedPasses[key]; !exists {
-		return
-	}
-	delete(a.pausedPasses, key)
-	a.pausedOrder = slices.DeleteFunc(a.pausedOrder, func(k string) bool { return k == key })
 }
 
 func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	count := a.maxIterations
+
 	return func(yield func(*session.Event, error) bool) {
 		// Without sub-agents there is nothing to run, escalate or fail. With
 		// MaxIterations == 0 the loop would spin forever, and with it set the
 		// loop would only count down through empty passes. Return at once in
 		// both cases, as adk-python does.
+		if len(ctx.Agent().SubAgents()) == 0 {
+			return
+		}
 		subAgents := ctx.Agent().SubAgents()
-		if len(subAgents) == 0 {
-			return
-		}
-
-		indexes := utils.GraphResumeIndexes(ctx)
-		resumingPass := len(indexes) > 0
-		var completedPasses uint
-		startIdx := 0
-		if resumingPass {
-			startIdx = indexes[0]
-			completedPasses = a.loadPausedPasses(ctx)
-		}
-		if a.maxIterations > 0 && completedPasses >= a.maxIterations {
-			a.clearPausedPasses(ctx)
-			return
-		}
-		var remaining uint
-		if a.maxIterations > 0 {
-			remaining = a.maxIterations - completedPasses
+		if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+			subAgents = subAgents[indexes[0]:]
 		}
 		passCtx := ctx
-
 		for {
 			// A pass can yield no events (for example when every sub-agent is
 			// empty), so the consumer never gets a chance to stop the loop.
 			// Stop on cancellation here and yield the context's error.
 			if err := ctx.Err(); err != nil {
-				a.clearPausedPasses(ctx)
 				yield(nil, err)
 				return
 			}
 
-			shouldEscalate := false
-			shouldPause := false
-			for i := startIdx; i < len(subAgents); i++ {
-				subAgent := subAgents[i]
-				subCtx := passCtx
-				if resumingPass {
-					if slices.Contains(indexes, i) {
-						subAgent = utils.ResumeSubAgent(passCtx, subAgent)
-						subCtx = utils.WithWorkflowResuming(passCtx)
-					} else {
-						subCtx = utils.WithGraphResumeDone(passCtx)
-					}
-				}
-				for event, err := range subAgent.Run(subCtx) {
+			shouldExit := false
+			for _, subAgent := range subAgents {
+				for event, err := range subAgent.Run(passCtx) {
 					// A failed sub-agent ends the loop, as in adk-python. Retrying
 					// it would repeat the same failure, forever when there is no
 					// MaxIterations.
 					if !yield(event, err) || err != nil {
-						a.clearPausedPasses(ctx)
 						return
 					}
-					if event != nil {
-						if event.Actions.Escalate {
-							shouldEscalate = true
-						}
-						if utils.ShouldPauseInvocation(event) {
-							shouldPause = true
-						}
+
+					if event != nil && (event.Actions.Escalate || utils.ShouldPauseInvocation(event)) {
+						shouldExit = true
 					}
 				}
-				if shouldPause || utils.HasUnresolvedLongRunningCalls(ctx) {
-					a.savePausedPasses(ctx, completedPasses)
-					ctx.EndInvocation()
-					return
-				}
-				if shouldEscalate {
-					a.clearPausedPasses(ctx)
+				if shouldExit {
 					return
 				}
 			}
-
-			completedPasses++
-			startIdx = 0
-			resumingPass = false
+			subAgents = ctx.Agent().SubAgents()
 			passCtx = utils.WithGraphResumeDone(ctx)
 
-			if a.maxIterations > 0 {
-				remaining--
-				if remaining == 0 {
-					a.clearPausedPasses(ctx)
+			if count > 0 {
+				count--
+				if count == 0 {
 					return
 				}
 			}

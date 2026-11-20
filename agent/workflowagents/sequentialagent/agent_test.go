@@ -1060,7 +1060,7 @@ func (m *singleCallLLM) GenerateContent(context.Context, *model.LLMRequest, bool
 }
 
 func TestSequentialAgentStopsOnSubAgentPause(t *testing.T) {
-	t.Run("tool confirmation pauses sequence and continues on approval", func(t *testing.T) {
+	t.Run("tool confirmation pauses sequence and answer goes only to caller", func(t *testing.T) {
 		askTool, err := functiontool.New(functiontool.Config{
 			Name:                "ask_approval",
 			Description:         "requires approval",
@@ -1134,12 +1134,12 @@ func TestSequentialAgentStopsOnSubAgentPause(t *testing.T) {
 		if firstLLM.calls != 2 {
 			t.Errorf("first agent's model called %d times after approval, want 2", firstLLM.calls)
 		}
-		if secondLLM.callCounter != 1 {
-			t.Errorf("second agent's model called %d times after approval, want 1", secondLLM.callCounter)
+		if secondLLM.callCounter != 0 {
+			t.Errorf("second agent's model called %d times after approval, want 0", secondLLM.callCounter)
 		}
 	})
 
-	t.Run("credential request stops sequence and continues after sign-in", func(t *testing.T) {
+	t.Run("credential request stops sequence and skips after-agent callbacks", func(t *testing.T) {
 		authCfg := &toolauth.Config{
 			AuthScheme: toolauth.Scheme{Type: toolauth.SchemeTypeHTTP, Scheme: "bearer"},
 		}
@@ -1244,8 +1244,8 @@ func TestSequentialAgentStopsOnSubAgentPause(t *testing.T) {
 		if !afterAgentRan {
 			t.Error("first agent's AfterAgentCallback did not run after sign-in completed first")
 		}
-		if secondLLM.callCounter != 1 {
-			t.Errorf("second agent's model called %d times after sign-in, want 1", secondLLM.callCounter)
+		if secondLLM.callCounter != 0 {
+			t.Errorf("second agent's model called %d times after sign-in, want 0", secondLLM.callCounter)
 		}
 	})
 }

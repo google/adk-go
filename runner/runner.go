@@ -744,31 +744,29 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// the branch it ran on (adk-python find_agent_to_run and
 		// restore_branch_from_history). Re-running the root would run agents
 		// that never saw the call, and they fail on the unmatched response.
-		// A call made inside a graph, sequential, or loop workflow is the
-		// exception: the root runs, and sequential, parallel and loop agents on
-		// the way narrow to the sub-agents holding the callers
-		// (utils.GraphResumeIndexes), provided a graph workflow's node agents
-		// are listed in its SubAgents. Sub-agents after the caller in a
-		// sequence or loop then run once the pause clears, and an LLM agent
-		// among them sees the user's answer as context, unless the call is on a
-		// branch it cannot see, as when a workflow fans out inside a parallel
-		// agent (#2204). A graph workflow resumes the interrupted node only for
-		// an adk_request_input response; any other response restarts the graph.
+		// A call made inside a graph workflow is the exception: the root runs,
+		// and sequential, parallel and loop agents on the way narrow to the
+		// sub-agents holding the callers (utils.GraphResumeIndexes), provided
+		// the workflow's node agents are listed in its SubAgents. Sub-agents
+		// after it in a sequence still run, and an LLM agent among them sees
+		// the user's answer as context, unless the node's call is on a branch
+		// it cannot see, as when the workflow fans out inside a parallel agent
+		// (#2204). The workflow resumes the interrupted node only for an
+		// adk_request_input response; any other response restarts the graph.
+		// The first response in the message decides the route.
 		agentToRun, branch := r.rootAgent, ""
 		routedToCaller := false
-		if !r.resumesThroughRoot(storedSession.Events(), msg) {
-			if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
-				if sub := r.rootAgent.FindAgent(ev.Author); sub != nil {
-					agentToRun, branch = sub, ev.Branch
-					routedToCaller = true
-				}
+		if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
+			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
+				agentToRun, branch = sub, ev.Branch
+				routedToCaller = true
 			}
 		}
 		// Answers to calls from several invocations start a new invocation
 		// when they go back to the calling agent, as adk-python does for a
-		// BaseAgent root of an app that is not resumable. A workflow keeps the
-		// first call's invocation because it resumes the paused run from its
-		// invocation's events; adk-python raises for a Workflow root. So
+		// BaseAgent root of an app that is not resumable. A graph workflow
+		// resumes a paused run from its invocation's events, so it keeps the
+		// first call's invocation; adk-python raises for a Workflow root. So
 		// does an answer whose caller is not in the agent tree, since that
 		// caller can be a workflow node agent missing from the workflow's
 		// sub-agents; adk-python starts a new invocation there.
@@ -1372,32 +1370,11 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 	return r.rootAgent, nil
 }
 
-// resumesThroughRoot reports whether msg answers a call from an agent inside a
-// graph, sequential, or loop workflow, so r.rootAgent must run to continue the
-// enclosing workflow after the paused sub-agent finishes.
-func (r *Runner) resumesThroughRoot(events session.Events, msg *genai.Content) bool {
-	for _, resp := range utils.FunctionResponses(msg) {
-		ev := utils.FindFunctionCallEvent(events, resp.ID)
-		if ev == nil {
-			continue
-		}
-		if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && r.isInResumableWorkflow(sub) {
-			return true
-		}
-	}
-	return false
-}
-
-// isInResumableWorkflow reports whether a or one of its ancestors is a graph,
-// sequential, or loop workflow agent.
-func (r *Runner) isInResumableWorkflow(a agent.Agent) bool {
+// isInGraphWorkflow reports whether a or one of its ancestors is a graph
+// workflow agent built by workflowagent.New.
+func (r *Runner) isInGraphWorkflow(a agent.Agent) bool {
 	for cur := a; cur != nil; cur = r.parents[cur.Name()] {
-		ia, ok := cur.(agentinternal.Agent)
-		if !ok {
-			continue
-		}
-		switch agentinternal.Reveal(ia).AgentType {
-		case agentinternal.TypeWorkflowAgent, agentinternal.TypeSequentialAgent, agentinternal.TypeLoopAgent:
+		if ia, ok := cur.(agentinternal.Agent); ok && agentinternal.Reveal(ia).AgentType == agentinternal.TypeWorkflowAgent {
 			return true
 		}
 	}
