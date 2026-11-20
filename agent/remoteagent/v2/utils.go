@@ -98,7 +98,7 @@ func isFunctionCallEvent(event *session.Event, callID, agentName string) bool {
 // toMissingRemoteSessionParts and adk-python's task_scope filter).
 func collectRemoteFunctionCallIDs(events session.Events, agentName, scope string) map[string]struct{} {
 	ids := make(map[string]struct{})
-	for i := 0; i < events.Len(); i++ {
+	for i := range events.Len() {
 		event := events.At(i)
 		if event == nil || event.Content == nil {
 			continue

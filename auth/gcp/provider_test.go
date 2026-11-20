@@ -557,10 +557,10 @@ func TestCredentialSurfacesAnUnavailableClient(t *testing.T) {
 	// Application Default Credentials at a path that does not exist. The file is
 	// never created, so discovery fails on the open rather than on the contents.
 	//
-	// The builder reads the host's client certificate config before discovery
-	// fails, and reads the trust boundary opt-in once per process, so without the
-	// pin this test runs a workstation's certificate signer and can fix that
-	// opt-in for every test that runs after it.
+	// The builder loads a client certificate the shell turns on before
+	// discovery fails, and reads the trust boundary opt-in once per process, so
+	// without the pin this test can run a workstation's certificate signer and
+	// can fix that opt-in for every test that runs after it.
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "absent.json"))
 	gcp.IsolateADCEnv(t)
 

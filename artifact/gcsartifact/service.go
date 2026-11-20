@@ -29,7 +29,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -273,9 +272,7 @@ func (s *gcsService) Delete(ctx context.Context, req *artifact.DeleteRequest) er
 	g, gctx := errgroup.WithContext(ctx)
 
 	// delete versions in parallel
-	for _, version := range response.Versions {
-		v := version // capture loop variable for goroutine
-
+	for _, v := range response.Versions {
 		g.Go(func() error {
 			blobName := buildBlobName(appName, userID, sessionID, fileName, v)
 			obj := s.bucket.object(blobName)
@@ -395,8 +392,7 @@ func (s *gcsService) List(ctx context.Context, req *artifact.ListRequest) (*arti
 		return nil, fmt.Errorf("failed to fetch user filenames: %w", err)
 	}
 
-	filenames := slices.Collect(maps.Keys(filenamesSet))
-	sort.Strings(filenames)
+	filenames := slices.Sorted(maps.Keys(filenamesSet))
 	return &artifact.ListResponse{FileNames: filenames}, nil
 }
 
