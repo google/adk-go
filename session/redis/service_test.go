@@ -1539,3 +1539,31 @@ func TestTTL_ExpiryAndSelectiveRefresh(t *testing.T) {
 		}
 	})
 }
+
+func TestCreate_DetachesCallerStateMaps(t *testing.T) {
+	ctx := t.Context()
+	svc, _, _ := newTestService(t, redis.Config{})
+	nested := map[string]any{"role": "viewer"}
+	tempNested := map[string]any{"step": "one"}
+	created := mustCreate(t, ctx, svc, "a", "u", "s1", map[string]any{
+		"profile":      nested,
+		"temp:scratch": tempNested,
+	})
+	nested["role"] = "admin"
+	tempNested["step"] = "two"
+
+	gotProfile, err := created.State().Get("profile")
+	if err != nil {
+		t.Fatalf("State().Get(profile) error = %v", err)
+	}
+	if diff := cmp.Diff(map[string]any{"role": "viewer"}, gotProfile); diff != "" {
+		t.Errorf("created session profile mismatch (-want +got):\n%s", diff)
+	}
+	gotTemp, err := created.State().Get("temp:scratch")
+	if err != nil {
+		t.Fatalf("State().Get(temp:scratch) error = %v", err)
+	}
+	if diff := cmp.Diff(map[string]any{"step": "one"}, gotTemp); diff != "" {
+		t.Errorf("created session temp:scratch mismatch (-want +got):\n%s", diff)
+	}
+}

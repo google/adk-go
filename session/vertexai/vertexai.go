@@ -197,8 +197,14 @@ func (s *vertexAiService) Delete(ctx context.Context, req *session.DeleteRequest
 }
 
 func (s *vertexAiService) AppendEvent(ctx context.Context, sess session.Session, event *session.Event) error {
+	if sess == nil {
+		return fmt.Errorf("session is nil")
+	}
 	if sess.ID() == "" || event == nil {
 		return fmt.Errorf("session_id and event are required, got session_id: %q, event_id: %t", sess.ID(), event == nil)
+	}
+	if err := checkSessionID(sess.ID()); err != nil {
+		return err
 	}
 	// temp: keys are scoped to the current invocation and must not reach storage.
 	// The session value below still receives the untrimmed state delta, which

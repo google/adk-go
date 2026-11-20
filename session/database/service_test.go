@@ -2406,3 +2406,25 @@ func TestClose_OwnershipByConstructor(t *testing.T) {
 		})
 	}
 }
+
+func TestDatabaseService_Create_DetachesCallerStateMaps(t *testing.T) {
+	s := emptyService(t)
+	nested := map[string]any{"role": "viewer"}
+	created, err := s.Create(t.Context(), &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user",
+		State:   map[string]any{"profile": nested},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	nested["role"] = "admin"
+
+	got, err := created.Session.State().Get("profile")
+	if err != nil {
+		t.Fatalf("State().Get(profile) error = %v", err)
+	}
+	if diff := cmp.Diff(map[string]any{"role": "viewer"}, got); diff != "" {
+		t.Errorf("created session profile mismatch (-want +got):\n%s", diff)
+	}
+}

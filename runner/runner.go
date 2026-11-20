@@ -1721,7 +1721,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 								}
 								continue
 							}
-							bufferedEvent = withoutTempState(bufferedEvent)
+							b.processed = withoutTempState(b.processed)
 						}
 						if !yield(bufferedEvent, nil) {
 							return
@@ -1762,7 +1762,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					}
 					continue
 				}
-				bufferedEvent = withoutTempState(bufferedEvent)
+				b.processed = withoutTempState(b.processed)
 			}
 			if !yield(bufferedEvent, nil) {
 				return

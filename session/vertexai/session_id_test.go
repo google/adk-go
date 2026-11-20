@@ -244,4 +244,36 @@ func TestVertexAIService_SessionIDValidationAndExtraction(t *testing.T) {
 			t.Errorf("CreateSession RPCs = %d, want 1", got)
 		}
 	})
+
+	t.Run("AppendEvent/nil session returns error without panic", func(t *testing.T) {
+		s, _ := newFakeService(t)
+		if err := s.AppendEvent(t.Context(), nil, &session.Event{ID: "e1", Author: "agent"}); err == nil {
+			t.Error("AppendEvent(nil, event) error = nil, want an error")
+		}
+	})
+
+	for _, tc := range rejected {
+		t.Run("AppendEvent/"+tc.name, func(t *testing.T) {
+			s, _ := newFakeService(t)
+			foreign := &foreignTestSession{appName: "123", userID: "user1", id: tc.id}
+			err := s.AppendEvent(t.Context(), foreign, &session.Event{ID: "e1", Author: "agent"})
+			if err == nil || errors.Is(err, session.ErrNotFound) {
+				t.Errorf("AppendEvent(%q) error = %v, want an error that is not session.ErrNotFound", tc.id, err)
+			}
+		})
+	}
+}
+
+type foreignTestSession struct {
+	session.Session
+	appName string
+	userID  string
+	id      string
+}
+
+func (f *foreignTestSession) AppName() string { return f.appName }
+func (f *foreignTestSession) UserID() string  { return f.userID }
+func (f *foreignTestSession) ID() string      { return f.id }
+func (f *foreignTestSession) State() session.State {
+	return nil
 }

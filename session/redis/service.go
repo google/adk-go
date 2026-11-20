@@ -244,7 +244,7 @@ func (s *Service) Create(ctx context.Context, req *session.CreateRequest) (*sess
 		appName:   req.AppName,
 		userID:    req.UserID,
 		sessionID: sid,
-		state:     merged,
+		state:     detachStateMap(merged),
 		updatedAt: now,
 	}}, nil
 }
@@ -769,6 +769,41 @@ func mergeStates(appState, userState, sessionState map[string]any) map[string]an
 		merged[session.KeyPrefixUser+k] = v
 	}
 	return merged
+}
+
+// detachStateMap deep-copies JSON-like nested maps and slices in m so the
+// returned Session shares no mutable container with CreateRequest.State.
+func detachStateMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = detachStateValue(v)
+	}
+	return out
+}
+
+func detachStateValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		if t == nil {
+			return t
+		}
+		out := make(map[string]any, len(t))
+		for k, elem := range t {
+			out[k] = detachStateValue(elem)
+		}
+		return out
+	case []any:
+		if t == nil {
+			return t
+		}
+		out := make([]any, len(t))
+		for i, elem := range t {
+			out[i] = detachStateValue(elem)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // trimTempDeltaState returns event, or a shallow copy of it whose state delta

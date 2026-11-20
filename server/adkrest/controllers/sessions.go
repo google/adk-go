@@ -28,6 +28,7 @@ import (
 	"github.com/gorilla/mux"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/eventmetadata"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/server/authz"
@@ -98,6 +99,7 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 			http.Error(rw, fmt.Sprintf("events[%d]: %v", i, err), http.StatusBadRequest)
 			return
 		}
+		eventmetadata.MarkRestored(sessionEvent)
 		events = append(events, sessionEvent)
 	}
 	respSession, err := c.createSession(req.Context(), sessionID, createSessionRequest.State, events)

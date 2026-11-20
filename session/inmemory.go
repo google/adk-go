@@ -81,14 +81,14 @@ func (s *inMemoryService) Create(ctx context.Context, req *CreateRequest) (*Crea
 	appDelta, userDelta, sessionState := sessionutils.ExtractStateDeltas(req.State)
 	val := &session{
 		id:         key,
-		state:      sessionState,
+		state:      sessionutils.CloneStateMap(sessionState),
 		updatedAt:  platform.Now(ctx),
 		eventsByID: make(map[string][]*Event),
 	}
 
 	s.sessions.Set(encodedKey, val)
-	s.updateAppState(appDelta, req.AppName)
-	s.updateUserState(userDelta, req.AppName, req.UserID)
+	s.updateAppState(sessionutils.CloneStateMap(appDelta), req.AppName)
+	s.updateUserState(sessionutils.CloneStateMap(userDelta), req.AppName, req.UserID)
 
 	return &CreateResponse{
 		Session: s.snapshot(val, val.events),
@@ -286,44 +286,12 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	}
 
 	trimmedEvent := trimTempDeltaState(event)
-	// The canonical record gets a map of its own: trimTempDeltaState returns
-	// the caller's map when it strips nothing.
-	trimmedDelta := maps.Clone(trimmedEvent.Actions.StateDelta)
-
-	// Only StateDelta comes from the trim above; every other field below is
-	// read off event. Compaction, ArtifactDelta, RequestedToolConfirmations,
-	// RequestedAuthConfigs, SetModelResponse, EndOfAgent, AgentState and
-	// RenderUIWidgets are cloned so that the caller's event shares none of
-	// them with the canonical record.
-	eventCopy := &Event{
-		ID:             event.ID,
-		InvocationID:   event.InvocationID,
-		Timestamp:      event.Timestamp,
-		Author:         event.Author,
-		Branch:         event.Branch,
-		IsolationScope: event.IsolationScope,
-		Actions: EventActions{
-			StateDelta:                 trimmedDelta,
-			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
-			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
-			RequestedAuthConfigs:       maps.Clone(event.Actions.RequestedAuthConfigs),
-			TransferToAgent:            event.Actions.TransferToAgent,
-			TransferReason:             event.Actions.TransferReason,
-			Escalate:                   event.Actions.Escalate,
-			SetModelResponse:           sessionutils.CloneValue(event.Actions.SetModelResponse),
-			RewindBeforeInvocationID:   event.Actions.RewindBeforeInvocationID,
-			EndOfAgent:                 sessionutils.CloneValue(event.Actions.EndOfAgent),
-			AgentState:                 sessionutils.CloneValue(event.Actions.AgentState),
-			SkipSummarization:          event.Actions.SkipSummarization,
-			Compaction:                 event.Actions.Compaction.clone(),
-			RenderUIWidgets:            sessionutils.CloneValue(event.Actions.RenderUIWidgets),
-		},
-		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
-		Routes:             slices.Clone(event.Routes),
-		RequestedInput:     event.RequestedInput,
-		LLMResponse:        event.LLMResponse,
-		Output:             event.Output,
-		NodeInfo:           event.NodeInfo,
+	// Deep-copy the trimmed event so that the canonical record shares no
+	// mutable fields (Content, CustomMetadata, CacheMetadata, nested StateDelta
+	// maps, etc.) with the caller's event.
+	eventCopy := sessionutils.CloneValue(trimmedEvent)
+	if trimmedEvent.Actions.StateDelta != nil {
+		eventCopy.Actions.StateDelta = sessionutils.CloneStateMap(trimmedEvent.Actions.StateDelta)
 	}
 
 	// An equal re-delivery of a stored event is ignored, so a caller that
@@ -343,9 +311,9 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	stored_session.updatedAt = event.Timestamp
 	if len(event.Actions.StateDelta) > 0 {
 		appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
-		s.updateAppState(appDelta, curSession.AppName())
-		s.updateUserState(userDelta, curSession.AppName(), curSession.UserID())
-		maps.Copy(stored_session.state, sessionDelta)
+		s.updateAppState(sessionutils.CloneStateMap(appDelta), curSession.AppName())
+		s.updateUserState(sessionutils.CloneStateMap(userDelta), curSession.AppName(), curSession.UserID())
+		maps.Copy(stored_session.state, sessionutils.CloneStateMap(sessionDelta))
 	}
 
 	// curSession changes only now that the stored session has, and under

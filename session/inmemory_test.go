@@ -2530,4 +2530,78 @@ func TestInMemoryService_DetachedCopies(t *testing.T) {
 		mutateNestedState(t, listed.Sessions[0].State())
 		assertStoredState(t, svc, detachedCopiesState())
 	})
+
+	t.Run("WritePathIsolationAndRedelivery", func(t *testing.T) {
+		ctx := t.Context()
+		svc := session.InMemoryService()
+		nestedCreate := map[string]any{"role": "viewer"}
+		nestedApp := map[string]any{"tier": "free"}
+		nestedUser := map[string]any{"lang": "en"}
+		created, err := svc.Create(ctx, &session.CreateRequest{
+			AppName:   "app",
+			UserID:    "u1",
+			SessionID: "s_write",
+			State: map[string]any{
+				"profile":  nestedCreate,
+				"app:cfg":  nestedApp,
+				"user:cfg": nestedUser,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		nestedCreate["role"] = "admin"
+		nestedApp["tier"] = "enterprise"
+		nestedUser["lang"] = "de"
+
+		nestedDelta := map[string]any{"count": 1}
+		ev := &session.Event{
+			ID:           "ev-1",
+			InvocationID: "inv-1",
+			Author:       "agent",
+			Timestamp:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			LLMResponse: model.LLMResponse{
+				Content:        genai.NewContentFromText("original", "model"),
+				CustomMetadata: map[string]any{"tag": "v1"},
+			},
+			Actions: session.EventActions{
+				StateDelta: map[string]any{"delta_map": nestedDelta},
+			},
+		}
+		if err := svc.AppendEvent(ctx, created.Session, ev); err != nil {
+			t.Fatalf("AppendEvent(first) error = %v", err)
+		}
+		ev.Content.Parts[0].Text = "mutated-in-place"
+		ev.CustomMetadata["tag"] = "v2"
+		nestedDelta["count"] = 999
+
+		// Re-delivering the mutated event under the same ID must store a second
+		// distinct event rather than comparing equal against an aliased record.
+		if err := svc.AppendEvent(ctx, created.Session, ev); err != nil {
+			t.Fatalf("AppendEvent(second) error = %v", err)
+		}
+
+		got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s_write"})
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		if got.Session.Events().Len() != 2 {
+			t.Fatalf("stored events = %d, want 2 (original and mutated with same ID)", got.Session.Events().Len())
+		}
+		if text := got.Session.Events().At(0).Content.Parts[0].Text; text != "original" {
+			t.Errorf("first stored event text = %q, want %q", text, "original")
+		}
+		if tag := got.Session.Events().At(0).CustomMetadata["tag"]; tag != "v1" {
+			t.Errorf("first stored event CustomMetadata[tag] = %v, want v1", tag)
+		}
+		if prof, _ := got.Session.State().Get("profile"); !cmp.Equal(prof, map[string]any{"role": "viewer"}) {
+			t.Errorf("stored profile = %v, want map[role:viewer]", prof)
+		}
+		if appCfg, _ := got.Session.State().Get("app:cfg"); !cmp.Equal(appCfg, map[string]any{"tier": "free"}) {
+			t.Errorf("stored app:cfg = %v, want map[tier:free]", appCfg)
+		}
+		if userCfg, _ := got.Session.State().Get("user:cfg"); !cmp.Equal(userCfg, map[string]any{"lang": "en"}) {
+			t.Errorf("stored user:cfg = %v, want map[lang:en]", userCfg)
+		}
+	})
 }

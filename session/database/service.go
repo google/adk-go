@@ -324,7 +324,7 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 			return fmt.Errorf("error creating session on database: %w", err)
 		}
 
-		val.state = mergeStates(storageApp.State, storageUser.State, sessionState)
+		val.state = sessionutils.CloneStateMap(mergeStates(storageApp.State, storageUser.State, sessionState))
 		val.updatedAt = createdSession.UpdateTime
 		return nil
 	})
