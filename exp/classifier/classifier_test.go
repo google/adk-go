@@ -736,3 +736,40 @@ func TestResponseMarshalRejectsInvalidValues(t *testing.T) {
 		})
 	}
 }
+
+func TestResponseUsageMetadataJSONRoundTrip(t *testing.T) {
+	for _, usage := range []*genai.GenerateContentResponseUsageMetadata{
+		nil,
+		{PromptTokenCount: 12, CandidatesTokenCount: 3, TotalTokenCount: 15, CachedContentTokenCount: 4},
+	} {
+		name := "unreported"
+		if usage != nil {
+			name = "reported"
+		}
+		t.Run(name, func(t *testing.T) {
+			original := classifier.Response{Answers: map[string]classifier.Answer{}, UsageMetadata: usage}
+			encoded, err := json.Marshal(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, present := fields["usage_metadata"]; present != (usage != nil) {
+				t.Errorf("usage_metadata present = %v, want %v", present, usage != nil)
+			}
+
+			restored := classifier.Response{UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 99}}
+			if err := json.Unmarshal(encoded, &restored); err != nil {
+				t.Fatal(err)
+			}
+
+			if diff := cmp.Diff(original, restored); diff != "" {
+				t.Errorf("JSON round-trip mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

@@ -963,3 +963,36 @@ func TestLLMClassifierEndToEndWithGeminiModelAndWorkflowNode(t *testing.T) {
 		t.Errorf("billingSink inputs mismatch (-want +got):\n%s", diff)
 	}
 }
+
+func TestLLMClassifierUsageMetadata(t *testing.T) {
+	for _, usage := range []*genai.GenerateContentResponseUsageMetadata{
+		nil,
+		{PromptTokenCount: 12, CandidatesTokenCount: 3, TotalTokenCount: 15, CachedContentTokenCount: 4},
+	} {
+		name := "unreported"
+		if usage != nil {
+			name = "reported"
+		}
+		t.Run(name, func(t *testing.T) {
+			partial := &model.LLMResponse{Partial: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 99}}
+			engine := &scriptedLLM{responses: []*model.LLMResponse{
+				partial,
+				{Content: genai.NewContentFromText(`{"route":{"billing":1,"technical":0}}`, genai.RoleModel), UsageMetadata: usage},
+				partial,
+			}}
+			clf, err := classifier.NewLLM(classifier.LLMConfig{Model: engine})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			response, err := clf.Classify(t.Context(), "input", map[string]classifier.Question{"route": llmRouteQuestion})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if diff := cmp.Diff(usage, response.UsageMetadata); diff != "" {
+				t.Errorf("UsageMetadata mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

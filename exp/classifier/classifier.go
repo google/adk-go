@@ -469,15 +469,17 @@ type Response struct {
 	// ModelVersion is the concrete model version reported by the provider, or
 	// empty when unreported.
 	ModelVersion string
+	// UsageMetadata is nil when token usage is not reported by the model.
+	UsageMetadata *genai.GenerateContentResponseUsageMetadata
 }
 
 type responseJSON struct {
-	Answers      map[string]json.RawMessage `json:"answers"`
-	ModelVersion string                     `json:"model_version,omitempty"`
+	Answers       map[string]json.RawMessage                  `json:"answers"`
+	ModelVersion  string                                      `json:"model_version,omitempty"`
+	UsageMetadata *genai.GenerateContentResponseUsageMetadata `json:"usage_metadata,omitempty"`
 }
 
-// MarshalJSON validates r and encodes it in the JSON format of adk-python's
-// ClassifierResponse.
+// MarshalJSON extends adk-python's answer format with optional usage metadata.
 func (r Response) MarshalJSON() ([]byte, error) {
 	if r.Answers == nil {
 		return nil, fmt.Errorf("%w: answers map is nil", ErrInvalidAnswer)
@@ -492,8 +494,9 @@ func (r Response) MarshalJSON() ([]byte, error) {
 		raw[name] = b
 	}
 	return json.Marshal(responseJSON{
-		Answers:      raw,
-		ModelVersion: r.ModelVersion,
+		Answers:       raw,
+		ModelVersion:  r.ModelVersion,
+		UsageMetadata: r.UsageMetadata,
 	})
 }
 
@@ -502,8 +505,9 @@ func (r Response) MarshalJSON() ([]byte, error) {
 // unknown fields or out-of-range probabilities.
 func (r *Response) UnmarshalJSON(data []byte) error {
 	var wire struct {
-		Answers      map[string]json.RawMessage `json:"answers"`
-		ModelVersion string                     `json:"model_version"`
+		Answers       map[string]json.RawMessage                  `json:"answers"`
+		ModelVersion  string                                      `json:"model_version"`
+		UsageMetadata *genai.GenerateContentResponseUsageMetadata `json:"usage_metadata"`
 	}
 	if err := decodeStrict(data, &wire); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidAnswer, err)
@@ -522,6 +526,7 @@ func (r *Response) UnmarshalJSON(data []byte) error {
 	}
 	r.Answers = answers
 	r.ModelVersion = wire.ModelVersion
+	r.UsageMetadata = wire.UsageMetadata
 	return nil
 }
 
