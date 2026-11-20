@@ -35,6 +35,8 @@ const (
 		"required structured format. After using any other tools needed " +
 		"to complete the task, always call set_model_response with your " +
 		"final answer in the specified schema format."
+	instructionForOnlyResponseTool = "IMPORTANT: You must provide your final response by " +
+		"calling the set_model_response tool with the required structured format."
 )
 
 // outputSchemaRequestProcessor adds the set_model_response tool to handle structured output.
@@ -55,6 +57,10 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 			return
 		}
 
+		// Capture the other tools before adding set_model_response itself.
+		// The no-tools case must not instruct the model to use nonexistent tools.
+		hasOtherTools := (req.Config != nil && len(req.Config.Tools) > 0) || len(req.Tools) > 0
+
 		// Add the set_model_response tool to handle structured output
 		setResponseTool := &setModelResponseTool{schema: schema}
 		if err := toolutils.PackTool(req, setResponseTool); err != nil {
@@ -62,8 +68,12 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 			return
 		}
 
-		// Add instruction about using the set_model_response tool
-		utils.AppendInstructions(req, instructionForProcessor)
+		// Add instruction about using the set_model_response tool.
+		if hasOtherTools {
+			utils.AppendInstructions(req, instructionForProcessor)
+		} else {
+			utils.AppendInstructions(req, instructionForOnlyResponseTool)
+		}
 	}
 }
 
