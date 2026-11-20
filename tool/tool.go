@@ -32,6 +32,12 @@ import (
 // ErrConfirmationRequired indicates that the tool requires confirmation.
 var ErrConfirmationRequired = errors.New("requires confirmation, please approve or reject")
 
+// ErrPanicked matches, with [errors.Is], an error that is a panic recovered
+// from a tool's handler. The error's text carries the panic value and the
+// goroutine stack, so plugins and callbacks that build a response from it
+// should not pass that text on to the model or clients.
+var ErrPanicked = errors.New("tool panicked")
+
 // ErrConfirmationRejected indicated that the tool call confirmation rejected.
 var ErrConfirmationRejected = errors.New("call is rejected")
 
