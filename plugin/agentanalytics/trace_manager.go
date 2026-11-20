@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"iter"
 	"maps"
 	"reflect"
 	"runtime"
@@ -42,7 +41,6 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/platform"
 	baseplugin "google.golang.org/adk/v2/plugin"
-	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
@@ -12327,75 +12325,41 @@ func convertAgentParentMap(raw any) (map[string]agent.Agent, bool) {
 }
 
 var (
-	parentMapKeyOnce sync.Once
-	parentMapCtxKey  any
+	parentMapKeyMu  sync.Mutex
+	parentMapCtxKey any
 )
 
 // discoverParentMapCtxKey returns the context key under which ADK's runner
-// attaches its child-to-parent agent map, or nil if it cannot be discovered.
-// It probes runner.RunLive once with a root carrying one sub-agent so only ADK's
-// own runner parent-map key matches; in production contextParentMap calls it
-// only when parentMapReaderOnce() == nil (ADK cores <= v2.8.0), and every
-// production call flows through prepareRootAgentInput outside tm.mu and inv.mu.
-func discoverParentMapCtxKey() any {
-	parentMapKeyOnce.Do(func() {
-		parentMapCtxKey = probeParentMapCtxKey()
-	})
+// attaches its child-to-parent agent map, lazily probing an existing callback
+// context without starting a runner or emitting OTel spans. In production
+// contextParentMap calls it only when parentMapReaderOnce() == nil (ADK cores
+// <= v2.8.0), and every production call flows through prepareRootAgentInput
+// outside tm.mu and inv.mu.
+func discoverParentMapCtxKey(ctx context.Context) any {
+	parentMapKeyMu.Lock()
+	defer parentMapKeyMu.Unlock()
+	if parentMapCtxKey == nil {
+		if key := probeParentMapCtxKey(ctx); key != nil {
+			parentMapCtxKey = key
+		}
+	}
 	return parentMapCtxKey
 }
 
-// probeParentMapCtxKey discovers ADK's unexported parentmap context key via
-// runner.RunLive (which invokes the root agent's RunLive synchronously before
-// returning) without starting OTel spans or reading crypto/rand.
-func probeParentMapCtxKey() (key any) {
+// probeParentMapCtxKey reads ADK's unexported parentmap context key from an
+// existing callback context. Starting a runner for discovery would emit an
+// invocation span, even if its agent returned immediately.
+func probeParentMapCtxKey(ctx context.Context) (key any) {
+	if ctx == nil {
+		return nil
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			key = nil
 		}
 	}()
-	const childName = "parent-map-key-probe-child"
-	childAgent, err := agent.New(agent.Config{
-		Name: childName,
-	})
-	if err != nil {
-		return nil
-	}
-	baseAgent, err := agent.New(agent.Config{
-		Name:      "parent-map-key-probe",
-		SubAgents: []agent.Agent{childAgent},
-	})
-	if err != nil {
-		return nil
-	}
-	var probeMu sync.Mutex
-	var probeCtx context.Context
-	probeAgent := &probeLiveAgent{
-		Agent: baseAgent,
-		onRunLive: func(ctx agent.InvocationContext) {
-			probeMu.Lock()
-			probeCtx = ctx
-			probeMu.Unlock()
-		},
-	}
-	r, err := runner.New(runner.Config{
-		AppName:           "parent-map-key-probe",
-		Agent:             probeAgent,
-		SessionService:    session.InMemoryService(),
-		AutoCreateSession: true,
-	})
-	if err != nil {
-		return nil
-	}
-	ctx := platform.WithUUIDProvider(context.Background(), func() string { return "probe" })
-	_, _, _ = r.RunLive(ctx, "probe-user", "probe-session", agent.LiveRunConfig{})
-	probeMu.Lock()
-	capturedCtx := probeCtx
-	probeMu.Unlock()
-	if capturedCtx == nil {
-		return nil
-	}
 	var q contextStructQueue
-	q.push(reflect.ValueOf(capturedCtx))
+	q.push(reflect.ValueOf(ctx))
 	var seen map[visitedContextStruct]bool
 	for steps := range 512 {
 		item, ok := q.pop()
@@ -12406,7 +12370,7 @@ func probeParentMapCtxKey() (key any) {
 		if !ok {
 			continue
 		}
-		if v.Type().PkgPath() == "context" {
+		if v.Type().PkgPath() == "context" && v.Type().Name() == "valueCtx" {
 			if k, val := directStructField(v, "key"), directStructField(v, "val"); k.IsValid() && val.IsValid() {
 				if val.Kind() == reflect.Interface && !val.IsNil() {
 					val = val.Elem()
@@ -12416,12 +12380,9 @@ func probeParentMapCtxKey() (key any) {
 					val.Type().Elem() == agentInterfaceType {
 					if keyVal, ok := exportContextKey(k); ok && keyVal != nil {
 						if kt := reflect.TypeOf(keyVal); kt != nil && kt.Comparable() &&
-							strings.HasPrefix(kt.PkgPath(), adkPkgPrefix) {
-							if raw := orZero(func() any { return capturedCtx.Value(keyVal) }); raw != nil {
-								if out, ok := convertAgentParentMap(raw); ok && out[childName] == probeAgent {
-									return keyVal
-								}
-							}
+							(kt.PkgPath() == adkPkgPrefix+"internal/agent/parentmap" ||
+								kt.PkgPath() == adkPkgPrefix+"internal/adkcontext") {
+							return keyVal
 						}
 					}
 				}
@@ -12443,17 +12404,17 @@ func probeParentMapCtxKey() (key any) {
 // only ADK-mediated hops terminate under their 64-hop ParentMapStep budget,
 // while inner pure-external Value cycles reached through ADKParentMap still
 // recurse without bound, matching Go's context.Context Value delegation
-// contract) and returns nil immediately without running the runner.RunLive
-// probe or walking structs when read(ctx) has no map. On earlier cores
-// (parentMapReaderOnce() == nil), it lazily runs discoverParentMapCtxKey once
-// and matches only that runner key via ctx.Value and allowlisted Go stdlib /
-// ADK context wrappers so application maps of the same type are never mistaken
-// for runner lineage.
+// contract) and returns nil immediately without calling discoverParentMapCtxKey
+// or walking structs when read(ctx) has no map. On earlier cores
+// (parentMapReaderOnce() == nil), it lazily probes ctx via
+// discoverParentMapCtxKey(ctx) and matches only that runner key via ctx.Value
+// and allowlisted Go stdlib / ADK context wrappers so application maps of the
+// same type are never mistaken for runner lineage.
 func contextParentMap(ctx context.Context) map[string]agent.Agent {
 	return contextParentMapWith(ctx, parentMapReaderOnce(), discoverParentMapCtxKey)
 }
 
-func contextParentMapWith(ctx context.Context, read func(context.Context) any, discover func() any) (res map[string]agent.Agent) {
+func contextParentMapWith(ctx context.Context, read, discover func(context.Context) any) (res map[string]agent.Agent) {
 	defer func() {
 		if r := recover(); r != nil {
 			res = nil
@@ -12468,7 +12429,7 @@ func contextParentMapWith(ctx context.Context, read func(context.Context) any, d
 		}
 		return nil
 	}
-	runnerKey := discover()
+	runnerKey := discover(ctx)
 	if runnerKey == nil {
 		return nil
 	}
@@ -12528,30 +12489,11 @@ var (
 	uuidProviderKeyOnce sync.Once
 	uuidProviderCtxKey  any
 
-	pluginManagerKeyOnce      sync.Once
+	pluginManagerKeyMu        sync.Mutex
 	pluginManagerCtxKey       any
 	pluginManagerStructType   reflect.Type
 	pluginManagerPluginsField = -1
-
-	errPluginManagerProbe = errors.New("plugin manager key probe")
 )
-
-type probeLiveAgent struct {
-	agent.Agent
-	onRunLive func(agent.InvocationContext)
-}
-
-func (a *probeLiveAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-	if a.onRunLive != nil {
-		a.onRunLive(ctx)
-	}
-	return nil, nil, errPluginManagerProbe
-}
-
-func isContextField(f reflect.Value) bool {
-	return f.IsValid() && (f.Type().Implements(contextInterfaceType) ||
-		(f.Kind() == reflect.Struct && reflect.PointerTo(f.Type()).Implements(contextInterfaceType)))
-}
 
 func isPluginManagerType(t reflect.Type) bool {
 	return t != nil && t.Kind() == reflect.Struct &&
@@ -12589,58 +12531,31 @@ func discoverUUIDProviderCtxKey() any {
 	return uuidProviderCtxKey
 }
 
-func discoverPluginManagerCtxKey() any {
-	pluginManagerKeyOnce.Do(func() {
-		key, structType, pluginsField := probePluginManagerCtxKey()
+func discoverPluginManagerCtxKey(ctx context.Context) any {
+	pluginManagerKeyMu.Lock()
+	defer pluginManagerKeyMu.Unlock()
+	if pluginManagerCtxKey == nil {
+		key, structType, pluginsField := probePluginManagerCtxKey(ctx)
 		if key != nil && structType != nil && pluginsField >= 0 {
 			pluginManagerStructType = structType
 			pluginManagerPluginsField = pluginsField
 			pluginManagerCtxKey = key
 		}
-	})
+	}
 	return pluginManagerCtxKey
 }
 
-// probePluginManagerCtxKey discovers ADK's unexported PluginManager context
-// key, struct type, and plugins slice field index via runner.RunLive. RunLive
-// is used rather than Run because it binds the PluginManager context value
-// without starting OTel invocation or agent spans, and platform.WithUUIDProvider
-// prevents the invocation context from reading crypto/rand.
-func probePluginManagerCtxKey() (key any, structType reflect.Type, pluginsField int) {
+// probePluginManagerCtxKey reads ADK's unexported PluginManager context key
+// and layout from an existing callback context. Starting a runner for discovery
+// would emit an invocation span, even if its agent returned immediately.
+func probePluginManagerCtxKey(ctx context.Context) (key any, structType reflect.Type, pluginsField int) {
 	pluginsField = -1
 	defer func() {
 		if r := recover(); r != nil {
 			key, structType, pluginsField = nil, nil, -1
 		}
 	}()
-	baseAgent, err := agent.New(agent.Config{
-		Name: "plugin-manager-key-probe",
-	})
-	if err != nil {
-		return nil, nil, -1
-	}
-	var probeCtx context.Context
-	probeAgent := &probeLiveAgent{
-		Agent: baseAgent,
-		onRunLive: func(ctx agent.InvocationContext) {
-			probeCtx = ctx
-		},
-	}
-	r, err := runner.New(runner.Config{
-		AppName:           "plugin-manager-key-probe",
-		Agent:             probeAgent,
-		SessionService:    session.InMemoryService(),
-		AutoCreateSession: true,
-	})
-	if err != nil {
-		return nil, nil, -1
-	}
-	ctx := platform.WithUUIDProvider(context.Background(), func() string { return "probe" })
-	_, _, _ = r.RunLive(ctx, "probe-user", "probe-session", agent.LiveRunConfig{})
-	if probeCtx == nil {
-		return nil, nil, -1
-	}
-	queue := []reflect.Value{reflect.ValueOf(probeCtx)}
+	queue := []reflect.Value{reflect.ValueOf(ctx)}
 	seen := map[visitedContextStruct]bool{}
 	for len(queue) > 0 {
 		v := queue[0]
@@ -12666,30 +12581,25 @@ func probePluginManagerCtxKey() (key any, structType reflect.Type, pluginsField 
 			}
 			seen[visitKey] = true
 		}
-		if kVal, val := directStructField(v, "key"), directStructField(v, "val"); kVal.IsValid() && val.IsValid() {
-			for val.Kind() == reflect.Pointer || val.Kind() == reflect.Interface {
-				if val.IsNil() {
-					val = reflect.Value{}
-					break
+		if v.Type().PkgPath() == "context" && v.Type().Name() == "valueCtx" {
+			if kVal, val := directStructField(v, "key"), directStructField(v, "val"); kVal.IsValid() && val.IsValid() {
+				if val.Kind() == reflect.Interface && !val.IsNil() {
+					val = val.Elem()
 				}
-				val = val.Elem()
-			}
-			if val.IsValid() && isPluginManagerType(val.Type()) {
-				vt := val.Type()
-				for sf := range vt.Fields() {
-					if len(sf.Index) == 1 && sf.Name == "plugins" && sf.Type.Kind() == reflect.Slice && sf.Type.Elem() == pluginPtrType {
-						if k, ok := exportContextKey(kVal); ok {
-							return k, vt, sf.Index[0]
+				if val.Kind() == reflect.Pointer && !val.IsNil() && isPluginManagerType(val.Type().Elem()) {
+					vt := val.Type().Elem()
+					for sf := range vt.Fields() {
+						if len(sf.Index) == 1 && sf.Name == "plugins" && sf.Type.Kind() == reflect.Slice && sf.Type.Elem() == pluginPtrType {
+							if k, ok := exportContextKey(kVal); ok && reflect.TypeOf(k).PkgPath() == pluginManagerPkgPath+"/plugincontext" {
+								return k, vt, sf.Index[0]
+							}
 						}
 					}
 				}
 			}
 		}
-		for _, field := range []string{"Context", "context", "c", "cancelCtx"} {
-			if next := directStructField(v, field); isContextField(next) {
-				queue = append(queue, next)
-			}
-		}
+		c1, c2 := adkContextChildren(v)
+		queue = append(queue, c1, c2)
 	}
 	return nil, nil, -1
 }
@@ -12708,7 +12618,7 @@ func contextHasAfterAgentPlugin(ctx context.Context, self *baseplugin.Plugin) (r
 	if ctx == nil {
 		return unknown
 	}
-	key := discoverPluginManagerCtxKey()
+	key := discoverPluginManagerCtxKey(ctx)
 	if key == nil || pluginManagerStructType == nil || pluginManagerPluginsField < 0 {
 		return unknown
 	}

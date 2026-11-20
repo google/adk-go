@@ -5790,9 +5790,10 @@ func TestTraceManager_EarlierRunnerAncestryStaysOutOfTheInvocation(t *testing.T)
 	worker := newTestAgent(t, "worker", helper)
 	root := newTestAgent(t, "root", worker)
 
-	runnerKey := discoverParentMapCtxKey()
+	pmCtx := captureRunnerContextWithParentMap(t, root)
+	runnerKey := discoverParentMapCtxKey(pmCtx)
 	if runnerKey == nil {
-		t.Fatal("discoverParentMapCtxKey() = nil, want non-nil runner parent map key")
+		t.Fatal("discoverParentMapCtxKey(pmCtx) = nil, want non-nil runner parent map key")
 	}
 	tests := []struct {
 		name    string
@@ -30516,7 +30517,7 @@ func TestContextHasAfterAgentPlugin(t *testing.T) {
 		// Even under the real PluginManagerCtxKey, an unrelated value type must
 		// not spoof a PluginManager (nil self returns false; non-nil self fails
 		// closed conservatively to true).
-		pmKey := discoverPluginManagerCtxKey()
+		pmKey := discoverPluginManagerCtxKey(realCtx)
 		if pmKey == nil {
 			t.Fatal("discoverPluginManagerCtxKey() = nil")
 		}
@@ -30572,7 +30573,7 @@ func TestContextHasAfterAgentPlugin(t *testing.T) {
 	t.Run("nil or unreadable plugin element fails closed to conservative true", func(t *testing.T) {
 		p := newNoopAnalyticsPluginForTest(t, pluginName)
 		ctx := captureRunnerCallbackContext(t, t.Context(), p)
-		pmKey := discoverPluginManagerCtxKey()
+		pmKey := discoverPluginManagerCtxKey(ctx)
 		if pmKey == nil {
 			t.Fatal("discoverPluginManagerCtxKey() = nil")
 		}
@@ -30596,23 +30597,38 @@ func TestContextHasAfterAgentPlugin(t *testing.T) {
 	})
 }
 
+var errPluginManagerProbe = errors.New("plugin manager key probe")
+
+type probeLiveAgent struct {
+	agent.Agent
+	onRunLive func(agent.InvocationContext)
+}
+
+func (a *probeLiveAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	if a.onRunLive != nil {
+		a.onRunLive(ctx)
+	}
+	return nil, nil, errPluginManagerProbe
+}
+
 func TestDiscoverPluginManagerCtxKey(t *testing.T) {
-	key, structType, pluginsField := probePluginManagerCtxKey()
+	p := newNoopAnalyticsPluginForTest(t, pluginName)
+	tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
+	runCtx := captureRunnerCallbackContext(t, t.Context(), p, tail)
+	key, structType, pluginsField := probePluginManagerCtxKey(runCtx)
 	if key == nil || structType == nil || pluginsField < 0 {
 		t.Fatalf("probePluginManagerCtxKey() = (%v, %v, %d), want valid key, type, and field index", key, structType, pluginsField)
 	}
 	if !isPluginManagerType(structType) {
 		t.Fatalf("probePluginManagerCtxKey() structType = %v, want internal PluginManager", structType)
 	}
-	// Verify lazy sync.Once stability and equality with the uncached probe.
-	d1 := discoverPluginManagerCtxKey()
-	d2 := discoverPluginManagerCtxKey()
+	// Verify cache stability and equality with the uncached probe.
+	d1 := discoverPluginManagerCtxKey(runCtx)
+	d2 := discoverPluginManagerCtxKey(runCtx)
 	if d1 == nil || d1 != d2 || d1 != key {
 		t.Fatalf("discoverPluginManagerCtxKey() = (%v, %v), want %v", d1, d2, key)
 	}
 
-	p := newNoopAnalyticsPluginForTest(t, pluginName)
-	tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
 	noAfterTail, err := baseplugin.New(baseplugin.Config{
 		Name: "tail_before_only",
 		BeforeAgentCallback: func(_ agent.Context) (*genai.Content, error) {
@@ -30623,9 +30639,8 @@ func TestDiscoverPluginManagerCtxKey(t *testing.T) {
 		t.Fatalf("baseplugin.New(tail_before_only): %v", err)
 	}
 
-	// Verify the RunLive-discovered key resolves the exact PluginManager on both
+	// Verify the discovered key resolves the exact PluginManager on both
 	// runner.Run and runner.RunLive contexts.
-	runCtx := captureRunnerCallbackContext(t, t.Context(), p, tail)
 	rawRunPM := runCtx.Value(key)
 	if rawRunPM == nil {
 		t.Fatal("runCtx.Value(discoveredKey) = nil, want *PluginManager")
@@ -30635,6 +30650,23 @@ func TestDiscoverPluginManagerCtxKey(t *testing.T) {
 	}
 	if !contextHasAfterAgentPlugin(runCtx, p) {
 		t.Fatal("contextHasAfterAgentPlugin(runCtx, p) = false, want true")
+	}
+
+	// An application may store the same manager under another context key.
+	type aliasKey struct{}
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want any
+	}{
+		{"alias over real key", context.WithValue(runCtx, aliasKey{}, rawRunPM), key},
+		{"alias without real key", context.WithValue(t.Context(), aliasKey{}, rawRunPM), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, _, _ := probePluginManagerCtxKey(tc.ctx); got != tc.want {
+				t.Fatal("discovery accepted an unrelated context key")
+			}
+		})
 	}
 
 	baseLive, err := agent.New(agent.Config{Name: "live-pm-probe"})
@@ -30744,19 +30776,21 @@ func installTestTracerProvider(t *testing.T, tp *sdktrace.TracerProvider) {
 	})
 }
 
+func resetPluginManagerKeyCache() {
+	pluginManagerKeyMu.Lock()
+	defer pluginManagerKeyMu.Unlock()
+	pluginManagerCtxKey = nil
+	pluginManagerStructType = nil
+	pluginManagerPluginsField = -1
+}
+
 func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 	spanExp := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp))
 	installTestTracerProvider(t, tp)
 
-	resetProbeState := func() {
-		pluginManagerKeyOnce = sync.Once{}
-		pluginManagerCtxKey = nil
-		pluginManagerStructType = nil
-		pluginManagerPluginsField = -1
-	}
-	resetProbeState()
-	t.Cleanup(resetProbeState)
+	resetPluginManagerKeyCache()
+	t.Cleanup(resetPluginManagerKeyCache)
 
 	realPlugin, tm, requestsChan, _ := newTestPluginWithConfigAndTraces(t, func(cfg *Config) {
 		cfg.DisableCreateViews = true
@@ -30795,12 +30829,26 @@ func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 	}
 	assertZeroSideEffects("after plugin construction")
 
+	noopSelf := newNoopAnalyticsPluginForTest(t, pluginName)
+	tailPlugin := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
+	cbCtx := captureRunnerCallbackContext(t, t.Context(), noopSelf, tailPlugin)
+	if len(spanExp.GetSpans()) == 0 {
+		t.Fatal("control runner emitted no OTel spans")
+	}
+	spanExp.Reset()
+
 	// Direct uncached probe must not emit OTel spans, BQ rows, traceManager invocations, or drops.
-	key, structType, pluginsField := probePluginManagerCtxKey()
+	key, structType, pluginsField := probePluginManagerCtxKey(cbCtx)
 	if key == nil || structType == nil || pluginsField < 0 {
 		t.Fatalf("probePluginManagerCtxKey() = (%v, %v, %d), want valid result", key, structType, pluginsField)
 	}
 	assertZeroSideEffects("after probePluginManagerCtxKey")
+
+	// A context without a manager must not prevent discovery on a later callback.
+	if got := discoverPluginManagerCtxKey(context.Background()); got != nil {
+		t.Fatal("discovered a plugin manager on an empty context")
+	}
+	assertZeroSideEffects("after empty context discovery")
 
 	// Agent-level AfterAgentCallbacks short-circuits hasAfterAgentCallbacks without triggering discovery.
 	agentWithOwnCB, err := agent.New(agent.Config{
@@ -30820,17 +30868,20 @@ func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 	}
 	assertZeroSideEffects("after agentWithOwnCB check")
 
-	// First hasAfterAgentCallbacks check that inspects plugins triggers lazy discovery with zero side effects.
-	noopSelf := newNoopAnalyticsPluginForTest(t, pluginName)
-	tailPlugin := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
-	spanExp.Reset()
-	cbCtx := captureRunnerCallbackContext(t, t.Context(), noopSelf, tailPlugin)
-	if spans := spanExp.GetSpans(); len(spans) == 0 {
-		t.Fatal("control captureRunnerCallbackContext emitted 0 OTel spans; test exporter is not receiving ADK runner spans")
+	// Concurrent first callbacks discover the same key without starting a runner.
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Go(func() {
+			if got := discoverPluginManagerCtxKey(cbCtx); got != key {
+				t.Error("concurrent discovery returned a different plugin manager key")
+			}
+		})
 	}
-	spanExp.Reset()
-	resetProbeState()
+	wg.Wait()
+	assertZeroSideEffects("after concurrent discovery")
+	resetPluginManagerKeyCache()
 
+	// First hasAfterAgentCallbacks check that inspects plugins triggers lazy discovery with zero side effects.
 	ch := runningAgentChildren(cbCtx, "capture", noopSelf)
 	if !ch.hasAfterAgentCallbacks {
 		t.Fatal("first plugin-inspecting runningAgentChildren.hasAfterAgentCallbacks = false, want true")
@@ -30843,9 +30894,9 @@ func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 	// Also verify the cached discoverPluginManagerCtxKey + fresh realPlugin's first BeforeAgentCallback:
 	// reset probe state so BeforeAgentCallback runs lazy discovery, and confirm zero OTel spans from the probe
 	// and zero probe rows/drops.
-	resetProbeState()
+	resetPluginManagerKeyCache()
 	spanExp.Reset()
-	if gotKey := discoverPluginManagerCtxKey(); gotKey != key {
+	if gotKey := discoverPluginManagerCtxKey(cbCtx); gotKey != key {
 		t.Fatalf("discoverPluginManagerCtxKey() = %v, want %v", gotKey, key)
 	}
 	assertZeroSideEffects("after discoverPluginManagerCtxKey")
@@ -30855,10 +30906,10 @@ func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 	// runningAgentChildren -> contextHasAfterAgentPlugin actually triggers lazy
 	// discovery, and verify zero probe OTel spans, zero leaked spans, and zero
 	// probe rows/drops.
-	resetProbeState()
+	resetPluginManagerKeyCache()
 	spanExp.Reset()
 	if pluginManagerCtxKey != nil {
-		t.Fatalf("pluginManagerCtxKey = %v after resetProbeState, want nil", pluginManagerCtxKey)
+		t.Fatalf("pluginManagerCtxKey = %v after resetPluginManagerKeyCache, want nil", pluginManagerCtxKey)
 	}
 	var realInvID string
 	leaf, err := agent.New(agent.Config{
@@ -30881,7 +30932,7 @@ func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 			t.Fatalf("runner.Run error: %v", runErr)
 		}
 	}
-	if pluginManagerCtxKey == nil || discoverPluginManagerCtxKey() != key {
+	if pluginManagerCtxKey == nil || discoverPluginManagerCtxKey(cbCtx) != key {
 		t.Fatalf("live runner.Run did not populate pluginManagerCtxKey: got %v, want %v", pluginManagerCtxKey, key)
 	}
 	spans := spanExp.GetSpans()
@@ -31977,10 +32028,15 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			t.Fatal("cbCtx = nil")
 		}
 
+		resetPluginManagerKeyCache()
+		t.Cleanup(resetPluginManagerKeyCache)
+
 		swappable := &mutexSwappableContext{parent: outerUUIDCtx}
 		embedded := &lockedEmbeddedContext{Context: cbCtx}
 		type testKey struct{}
 		wrappedEmbedded := context.WithValue(embedded, testKey{}, 1)
+		var appValue any
+		wrappedValue := context.WithValue(cbCtx, testKey{}, &appValue)
 
 		stop := make(chan struct{})
 		var wg sync.WaitGroup
@@ -31995,6 +32051,7 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 				if i%2 == 0 {
 					next = outerUUIDCtx
 				}
+				appValue = i
 				swappable.setParent(next)
 				if i%2 == 0 {
 					embedded.setContext(cbCtx)
@@ -32015,6 +32072,10 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			_ = contextHasAfterAgentPlugin(swappable, p)
 			_ = contextHasAfterAgentPlugin(embedded, p)
 			_ = contextHasAfterAgentPlugin(wrappedEmbedded, p)
+			// Discovery must not dereference application-owned context values.
+			if key, _, _ := probePluginManagerCtxKey(wrappedValue); key == nil {
+				t.Fatal("probePluginManagerCtxKey(wrappedValue) = nil, want PluginManager key")
+			}
 			if am, keep := callbackAfterAgentActions(swappable); am != (actionMaps{}) || keep != nil {
 				t.Fatalf("callbackAfterAgentActions(swappable) = (%+v, %v), want zero", am, keep)
 			}
@@ -32293,7 +32354,7 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			selfParams = &selfParams
 
 			hasPathKey := contextPathReaderOnce() != nil
-			hasParentMap := parentMapReaderOnce() != nil || discoverParentMapCtxKey() != nil
+			hasParentMap := parentMapReaderOnce() != nil || discoverParentMapCtxKey(capturedIC) != nil
 			wantPath := ""
 			if hasPathKey {
 				wantPath = "wf_cycle@1/leaf@1"
@@ -32356,7 +32417,7 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 		// ADK provides private Value keys or runner parent-map key discovery succeeds, Value
 		// delegation reads them race-free.
 		hasPathKey := contextPathReaderOnce() != nil
-		hasParentMap := parentMapReaderOnce() != nil || discoverParentMapCtxKey() != nil
+		hasParentMap := parentMapReaderOnce() != nil || discoverParentMapCtxKey(capturedIC) != nil
 		wantRacePath := ""
 		if hasPathKey {
 			wantRacePath = "wf_cycle@1/leaf@1"
@@ -39900,28 +39961,110 @@ func TestAgentMetadataUnwrapLockSafe(t *testing.T) {
 	})
 }
 
+func resetParentMapKeyCache() {
+	parentMapKeyMu.Lock()
+	defer parentMapKeyMu.Unlock()
+	parentMapCtxKey = nil
+}
+
 func TestDiscoverParentMapCtxKey_NoSpans(t *testing.T) {
 	spanExp := tracetest.NewInMemoryExporter()
 	sr := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp), sdktrace.WithSpanProcessor(sr))
 	installTestTracerProvider(t, tp)
 
-	key := probeParentMapCtxKey()
+	child := newOneEventAgent(t, "pm-child", nil)
+	var pmCtx context.Context
+	proxy, err := agent.New(agent.Config{
+		Name:      "pm-root",
+		SubAgents: []agent.Agent{child},
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(ctx agent.Context) (*genai.Content, error) {
+				pmCtx = ctx
+				return nil, nil
+			},
+		},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "pm-root"
+				ev.Content = textContent("model", "ok")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(pm-root): %v", err)
+	}
+	for _, err := range newTestRunner(t, proxy).Run(t.Context(), "u1", "s-pm-capture", textContent("user", "go"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("runner.Run error = %v", err)
+		}
+	}
+	if pmCtx == nil {
+		t.Fatal("BeforeAgentCallback did not capture parent-map context")
+	}
+	if spans := spanExp.GetSpans(); len(spans) == 0 {
+		t.Fatal("control runner emitted 0 OTel spans; test exporter is not receiving ADK runner spans")
+	}
+	spanExp.Reset()
+	startedBefore := len(sr.Started())
+	endedBefore := len(sr.Ended())
+
+	resetParentMapKeyCache()
+	t.Cleanup(resetParentMapKeyCache)
+
+	key := probeParentMapCtxKey(pmCtx)
 	if key == nil {
-		t.Fatal("probeParentMapCtxKey() = nil, want non-nil runner parent map key")
+		t.Fatal("probeParentMapCtxKey(pmCtx) = nil, want non-nil runner parent map key")
 	}
 	if spans := spanExp.GetSpans(); len(spans) != 0 {
-		t.Fatalf("probeParentMapCtxKey() exported %d OTel spans, want 0 (%v)", len(spans), spans)
+		t.Fatalf("probeParentMapCtxKey(pmCtx) exported %d OTel spans, want 0 (%v)", len(spans), spans)
 	}
-	if started := sr.Started(); len(started) != 0 {
-		t.Fatalf("probeParentMapCtxKey() started %d spans, want 0", len(started))
+	if started := len(sr.Started()) - startedBefore; started != 0 {
+		t.Fatalf("probeParentMapCtxKey(pmCtx) started %d spans, want 0", started)
 	}
-	if ended := sr.Ended(); len(ended) != 0 {
-		t.Fatalf("probeParentMapCtxKey() ended %d spans, want 0", len(ended))
+	if ended := len(sr.Ended()) - endedBefore; ended != 0 {
+		t.Fatalf("probeParentMapCtxKey(pmCtx) ended %d spans, want 0", ended)
 	}
-	if got := discoverParentMapCtxKey(); got == nil {
-		t.Fatal("discoverParentMapCtxKey() = nil, want non-nil runner parent map key")
+	if got := discoverParentMapCtxKey(pmCtx); got == nil {
+		t.Fatal("discoverParentMapCtxKey(pmCtx) = nil, want non-nil runner parent map key")
 	}
+	if spans := spanExp.GetSpans(); len(spans) != 0 {
+		t.Fatalf("discoverParentMapCtxKey(pmCtx) exported %d OTel spans, want 0 (%v)", len(spans), spans)
+	}
+	if started := len(sr.Started()) - startedBefore; started != 0 {
+		t.Fatalf("discoverParentMapCtxKey(pmCtx) started %d spans, want 0", started)
+	}
+	if ended := len(sr.Ended()) - endedBefore; ended != 0 {
+		t.Fatalf("discoverParentMapCtxKey(pmCtx) ended %d spans, want 0", ended)
+	}
+
+	// Discovery must not dereference or race on application-owned context values.
+	type appKey struct{}
+	var mutatedAppVal any
+	wrapped := context.WithValue(pmCtx, appKey{}, &mutatedAppVal)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				mutatedAppVal = i
+			}
+		}
+	})
+	for range 100 {
+		if got := probeParentMapCtxKey(wrapped); got == nil {
+			close(stop)
+			wg.Wait()
+			t.Fatal("probeParentMapCtxKey(wrapped) = nil, want non-nil runner parent map key")
+		}
+	}
+	close(stop)
+	wg.Wait()
 }
 
 func TestContextParentMap_LegacyFallbackMatchesRunnerKeyOnly(t *testing.T) {
@@ -39929,19 +40072,35 @@ func TestContextParentMap_LegacyFallbackMatchesRunnerKeyOnly(t *testing.T) {
 	type comparableBox struct {
 		x any
 	}
-	runnerKey := discoverParentMapCtxKey()
-	if runnerKey == nil {
-		t.Fatal("discoverParentMapCtxKey() = nil, want non-nil")
-	}
+	resetParentMapKeyCache()
+	t.Cleanup(resetParentMapKeyCache)
 
 	root := newOneEventAgent(t, "root", nil)
+	pmRoot := newTestAgent(t, "pm-root", root)
+	pmCtx := captureRunnerContextWithParentMap(t, pmRoot)
 	spoof := newOneEventAgent(t, "spoof", nil)
 
 	spoofOnly := context.WithValue(context.Background(), spoofKey{}, map[string]agent.Agent{
 		"child": spoof,
 	})
+	// Before parentMapCtxKey is cached: spoofOnly must still return nil.
+	if got := contextParentMapWith(spoofOnly, nil, discoverParentMapCtxKey); got != nil {
+		t.Fatalf("contextParentMapWith(spoofOnly before cache) = %v, want nil", got)
+	}
 	if got := contextParentMap(spoofOnly); got != nil {
-		t.Fatalf("contextParentMap(spoofOnly) = %v, want nil", got)
+		t.Fatalf("contextParentMap(spoofOnly before cache) = %v, want nil", got)
+	}
+
+	runnerKey := discoverParentMapCtxKey(pmCtx)
+	if runnerKey == nil {
+		t.Fatal("discoverParentMapCtxKey(pmCtx) = nil, want non-nil")
+	}
+	// After parentMapCtxKey is cached: spoofOnly still returns nil.
+	if got := contextParentMapWith(spoofOnly, nil, discoverParentMapCtxKey); got != nil {
+		t.Fatalf("contextParentMapWith(spoofOnly after cache) = %v, want nil", got)
+	}
+	if got := contextParentMap(spoofOnly); got != nil {
+		t.Fatalf("contextParentMap(spoofOnly after cache) = %v, want nil", got)
 	}
 
 	uncompBox := comparableBox{x: []int{1}}
@@ -39971,6 +40130,10 @@ func TestContextParentMap_LegacyFallbackMatchesRunnerKeyOnly(t *testing.T) {
 	if len(got) != 1 || got["child"] != root {
 		t.Fatalf("contextParentMap(withBoth) = %v, want map[child:%v]", got, root)
 	}
+	gotLegacy := contextParentMapWith(withBoth, nil, discoverParentMapCtxKey)
+	if len(gotLegacy) != 1 || gotLegacy["child"] != root {
+		t.Fatalf("contextParentMapWith(withBoth, legacy) = %v, want map[child:%v]", gotLegacy, root)
+	}
 }
 
 func TestContextParentMap_DoesNotProbeWhenADKParentMapAvailable(t *testing.T) {
@@ -39978,7 +40141,7 @@ func TestContextParentMap_DoesNotProbeWhenADKParentMapAvailable(t *testing.T) {
 	got := contextParentMapWith(
 		context.Background(),
 		func(context.Context) any { return nil },
-		func() any {
+		func(context.Context) any {
 			probeCalls++
 			return struct{}{}
 		},

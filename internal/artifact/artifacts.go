@@ -50,13 +50,13 @@ func (a *Artifacts) Load(ctx context.Context, name string) (*artifact.LoadRespon
 	})
 }
 
-func (a *Artifacts) LoadVersion(ctx context.Context, name string, version int) (*artifact.LoadResponse, error) {
+func (a *Artifacts) LoadVersion(ctx context.Context, name string, version *int64) (*artifact.LoadResponse, error) {
 	return a.Service.Load(ctx, &artifact.LoadRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 		FileName:  name,
-		Version:   int64(version),
+		Version:   version,
 	})
 }
 

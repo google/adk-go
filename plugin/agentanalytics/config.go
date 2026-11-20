@@ -393,10 +393,11 @@ type GCSContentOffloader interface {
 // embedded interface field (skipping wrappers with visible struct-local
 // synchronization primitives) to preserve custom Path() overrides, while the
 // fallback walk traverses only allowlisted stdlib and ADK context structs.
-// Against earlier core versions, parent-map lookup lazily runs a one-time
-// spanless runner.RunLive probe on first use to discover ADK's private
-// parent-map key, and launch lineage traverses up to 256 wrapper hops total
-// across context.WithoutCancel, standard-library wrappers (WithCancel,
+// Against earlier core versions, parent-map lookup lazily discovers ADK's
+// private parent-map key from an existing callback context on first use
+// without starting a runner or emitting spans, and launch lineage traverses
+// up to 256 wrapper hops total across context.WithoutCancel, standard-library
+// wrappers (WithCancel,
 // WithTimeout, WithValue), ADK context wrappers, lock-free external wrappers
 // carrying a single live exported context.Context field without visible
 // struct-local synchronization primitives, and synchronized wrappers
