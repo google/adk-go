@@ -425,7 +425,8 @@ type A2AConfig struct {
 	// With Auth set it is additionally wrapped so it is still an
 	// agent.InvocationContext and still carries the credential scope, which is
 	// what lets a cancel this callback issues be authenticated.
-	// If no callback is provided the default behavior is to make a cancel RPC request with 5 second timeout.
+	// If no callback is provided the default behavior is to make a cancel RPC request with 5 second timeout,
+	// unless Run ended without an error on a task waiting for input or authorization.
 	RemoteTaskCleanupCallback A2ARemoteTaskCleanupCallback
 }
 
@@ -692,7 +693,11 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 		return
 	}
 
-	if state == a2a.TaskStateInputRequired && cause == nil {
+	// A task waiting for input or for authorization is paused, not cut short.
+	// One waiting for authorization may resume on its own once the remote
+	// agent receives the credential out of band (A2A spec 7.6.1), so canceling
+	// it would end work that is still expected to finish.
+	if (state == a2a.TaskStateInputRequired || state == a2a.TaskStateAuthRequired) && cause == nil {
 		return
 	}
 	cancelCtx, cancelTimeout := context.WithTimeout(ctx, cleanupTimeout)
