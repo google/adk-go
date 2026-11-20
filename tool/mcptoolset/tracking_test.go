@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -51,7 +52,7 @@ func (r *headerRecorder) all() []http.Header {
 
 func TestTrackingHeadersOnMCPRequests(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "ua_server", Version: "v1"}, nil)
-	want := version.TrackingHeader()
+	want := version.TrackingHeader("")
 
 	tests := []struct {
 		name      string
@@ -159,7 +160,7 @@ func TestTrackingHeadersOnMCPRequests(t *testing.T) {
 }
 
 func TestTrackingTransportMergesCallerHeaders(t *testing.T) {
-	adk := version.TrackingHeader()
+	adk := version.TrackingHeader("")
 	tests := []struct {
 		name     string
 		header   http.Header
@@ -300,3 +301,40 @@ func (u userAgentTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// The hosting runtime is reported to Google API endpoints only, and the rule
+// is applied to the URL of each request, so a redirect to another host is
+// judged on its own.
+func TestTrackingTransportRuntimeSuffix(t *testing.T) {
+	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("K_SERVICE", "svc")
+	plain := version.TrackingHeader("")
+	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)
+
+	for _, tt := range []struct {
+		url  string
+		want string
+	}{
+		{url: "https://bigquery.googleapis.com/mcp", want: tagged},
+		{url: "https://mcp.example/mcp", want: plain},
+		{url: "http://bigquery.googleapis.com/mcp", want: plain},
+		{url: "http://127.0.0.1:8080/mcp", want: plain},
+	} {
+		req := httptest.NewRequest(http.MethodPost, tt.url, nil)
+		var sent *http.Request
+		rt := &trackingTransport{base: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			sent = r
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: r}, nil
+		})}
+		if _, err := rt.RoundTrip(req); err != nil {
+			t.Fatalf("RoundTrip(%s) error = %v", tt.url, err)
+		}
+		for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
+			if got := sent.Header.Values(name); len(got) != 1 || got[0] != tt.want {
+				t.Errorf("request to %s: %s = %q, want [%q]", tt.url, name, got, tt.want)
+			}
+		}
+	}
+}

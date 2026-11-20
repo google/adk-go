@@ -17,6 +17,8 @@ package version
 import (
 	"maps"
 	"net/http"
+	"net/url"
+	"os"
 	"runtime"
 	"slices"
 	"strings"
@@ -27,25 +29,70 @@ import (
 // traffic to ADK Go, for example "google-adk/2.6.0 gl-go/1.26.5". Other tokens
 // may follow them in the header. It has the same form as the
 // labels adk-python builds in google/adk/utils/_client_labels_utils.py.
-func TrackingHeader() string {
-	return trackingHeader
+//
+// dest is the URL the request goes to. When it is a Google API endpoint and
+// the process runs on a runtime ADK recognizes, the ADK label names that
+// runtime, as in "google-adk/2.6.0+cloud_run". Any other dest, including "",
+// gets the label without a suffix.
+func TrackingHeader(dest string) string {
+	return strings.Join(trackingTokens(dest), " ")
 }
 
-var trackingHeader = "google-adk/" + Version + " gl-go/" + strings.TrimPrefix(runtime.Version(), "go")
+var languageToken = "gl-go/" + strings.TrimPrefix(runtime.Version(), "go")
 
-var trackingTokens = strings.Fields(trackingHeader)
+func trackingTokens(dest string) []string {
+	adk := "google-adk/" + Version
+	if tag := runtimeTag(); tag != "" && isGoogleAPI(dest) {
+		adk += "+" + tag
+	}
+	return []string{adk, languageToken}
+}
+
+// runtimeTag returns the tag of the runtime hosting the process, or "" when
+// none is recognized. The tags and the order match adk-python's
+// _detect_runtime_tag. Only whether a variable is set to a non-empty value is
+// read, never the value, and nothing is cached.
+func runtimeTag() string {
+	switch {
+	// Most specific first: the Agent Engine runtime may set K_SERVICE too, and
+	// Knative on a cluster sets KUBERNETES_SERVICE_HOST as well.
+	case os.Getenv("GOOGLE_CLOUD_AGENT_ENGINE_ID") != "":
+		return "remote_reasoning_engine"
+	// K_SERVICE is set for Cloud Run services, Cloud Functions (2nd gen) and
+	// Knative, CLOUD_RUN_JOB for Cloud Run jobs.
+	case os.Getenv("K_SERVICE") != "" || os.Getenv("CLOUD_RUN_JOB") != "":
+		return "cloud_run"
+	// Set in every pod of any Kubernetes cluster, not only on GKE.
+	case os.Getenv("KUBERNETES_SERVICE_HOST") != "":
+		return "k8s"
+	}
+	return ""
+}
+
+// isGoogleAPI reports whether dest is an https URL of a host under
+// googleapis.com, the same rule as adk-python's is_googleapis_url. A URL with
+// userinfo is rejected, because HTTP clients disagree on which host it names.
+func isGoogleAPI(dest string) bool {
+	u, err := url.Parse(dest)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "https" && u.User == nil && strings.HasSuffix(strings.ToLower(u.Hostname()), ".googleapis.com")
+}
 
 // WithTrackingHeaders returns a copy of h whose user-agent and
 // x-goog-api-client headers hold ADK's tracking labels followed by the tokens
 // h held under any casing of those names, without duplicates. It is the rule
-// adk-python's merge_tracking_headers applies. h is not modified.
-func WithTrackingHeaders(h http.Header) http.Header {
+// adk-python's merge_tracking_headers applies. dest is the URL the request
+// goes to, as for [TrackingHeader]. h is not modified.
+func WithTrackingHeaders(h http.Header, dest string) http.Header {
 	merged := h.Clone()
 	if merged == nil {
 		merged = make(http.Header)
 	}
+	adk := trackingTokens(dest)
 	for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
-		tokens := slices.Clone(trackingTokens)
+		tokens := slices.Clone(adk)
 		// Sorted, so differently cased keys merge in the same order every time.
 		for _, key := range slices.Sorted(maps.Keys(merged)) {
 			if !strings.EqualFold(key, name) {

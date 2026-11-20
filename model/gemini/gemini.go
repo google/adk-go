@@ -44,6 +44,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"net/http"
 	"strings"
 
@@ -58,9 +59,12 @@ import (
 
 // TODO: test coverage
 type geminiModel struct {
-	client             *genai.Client
-	name               string
-	versionHeaderValue string
+	client *genai.Client
+	name   string
+	// baseURL is the client's base URL. Whether a request goes to a Google API
+	// endpoint, and so may name the hosting runtime in its tracking headers,
+	// is decided by it.
+	baseURL string
 }
 
 // NewModel returns [model.LLM], backed by the Gemini API.
@@ -83,12 +87,18 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 	// The genai SDK builds the live WebSocket handshake from the client's
 	// headers alone, so the tracking headers GenerateContent sets per request
 	// never reach it.
-	cfgCopy.HTTPOptions.Headers = version.WithTrackingHeaders(cfgCopy.HTTPOptions.Headers)
+	callerHeaders := cfgCopy.HTTPOptions.Headers
+	cfgCopy.HTTPOptions.Headers = version.WithTrackingHeaders(callerHeaders, "")
 
 	client, err := genai.NewClient(ctx, &cfgCopy)
 	if err != nil {
 		return nil, err
 	}
+	// genai resolves the base URL from the config, its defaults and the
+	// environment, so it is known only now. The client reads its headers from
+	// this map on every call, so writing into it reaches the live handshake.
+	baseURL := client.ClientConfig().HTTPOptions.BaseURL
+	maps.Copy(cfgCopy.HTTPOptions.Headers, version.WithTrackingHeaders(callerHeaders, baseURL))
 
 	if client.ClientConfig().HTTPClient != nil {
 		client.ClientConfig().HTTPClient.Transport = &mergeHeadersInterceptor{
@@ -97,9 +107,9 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 	}
 
 	return &geminiModel{
-		name:               modelName,
-		client:             client,
-		versionHeaderValue: version.TrackingHeader(),
+		name:    modelName,
+		client:  client,
+		baseURL: baseURL,
 	}, nil
 }
 
@@ -119,7 +129,7 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	if req.Config.HTTPOptions.Headers == nil {
 		req.Config.HTTPOptions.Headers = make(http.Header)
 	}
-	m.addHeaders(req.Config.HTTPOptions.Headers)
+	m.addHeaders(req.Config.HTTPOptions)
 
 	if req.CacheConfig != nil {
 		return m.generateWithContextCache(ctx, req, stream)
@@ -153,7 +163,7 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 // the recorded expiry.
 func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		cache := &contextCache{client: m.client, model: m.modelName(req), trackingHeader: m.versionHeaderValue}
+		cache := &contextCache{client: m.client, model: m.modelName(req), trackingHeader: m.trackingHeader}
 		plan := cache.prepare(ctx, req)
 
 		ledger := llminternal.ContextCacheLedgerFromContext(ctx)
@@ -215,9 +225,19 @@ func (m *geminiModel) callModel(ctx context.Context, req *model.LLMRequest, stre
 }
 
 // addHeaders sets the x-goog-api-client and user-agent headers
-func (m *geminiModel) addHeaders(headers http.Header) {
-	headers.Set("x-goog-api-client", m.versionHeaderValue)
-	headers.Set("user-agent", m.versionHeaderValue)
+func (m *geminiModel) addHeaders(opts *genai.HTTPOptions) {
+	value := m.trackingHeader(opts)
+	opts.Headers.Set("x-goog-api-client", value)
+	opts.Headers.Set("user-agent", value)
+}
+
+// trackingHeader returns the tracking labels for a request sent with opts,
+// whose BaseURL, when set, replaces the client's.
+func (m *geminiModel) trackingHeader(opts *genai.HTTPOptions) string {
+	if opts != nil && opts.BaseURL != "" {
+		return version.TrackingHeader(opts.BaseURL)
+	}
+	return version.TrackingHeader(m.baseURL)
 }
 
 // modelName returns the model name to use for the API call.
