@@ -10832,3 +10832,145 @@ func TestContextPath_MutexWrapper_NoRace(t *testing.T) {
 		}
 	}
 }
+
+type embeddedStringPath string
+
+func (p embeddedStringPath) Path() string { return string(p) }
+
+type embeddedPtrStringPath string
+
+func (p *embeddedPtrStringPath) Path() string { return string(*p) }
+
+type embeddedIntPath int
+
+func (p embeddedIntPath) Path() string {
+	if p == 0 {
+		return ""
+	}
+	return fmt.Sprintf("shallow/int/%d", int(p))
+}
+
+type plainNonStructTag string
+
+func TestContextPath_EmbeddedNonStructShallowerOverride(t *testing.T) {
+	rightPath := "workflow/right"
+	rightBranch := agent.Promote(&mockInvocationContext{
+		ctx:          context.Background(),
+		agentName:    "right",
+		sessionID:    "s1",
+		invocationID: "inv-path-nonstruct",
+		userID:       "u1",
+	}).WithDelta(&agent.CommonContextDelta{Path: &rightPath})
+	deeper := &plainCallbackWrapper{Context: rightBranch}
+
+	type strValEmbedOuter struct {
+		embeddedStringPath
+		*plainCallbackWrapper
+	}
+	type ptrStrEmbedOuter struct {
+		*embeddedPtrStringPath
+		*plainCallbackWrapper
+	}
+	type valPtrRecvStrEmbedOuter struct {
+		embeddedPtrStringPath
+		*plainCallbackWrapper
+	}
+	type intEmbedOuter struct {
+		embeddedIntPath
+		*plainCallbackWrapper
+	}
+	type controlTagOuter struct {
+		plainNonStructTag
+		*plainCallbackWrapper
+	}
+
+	t.Run("value_receiver_defined_string", func(t *testing.T) {
+		nonEmpty := strValEmbedOuter{
+			embeddedStringPath:   "shallow/str",
+			plainCallbackWrapper: deeper,
+		}
+		if got := contextPath(nonEmpty); got != "shallow/str" {
+			t.Fatalf("contextPath(strValEmbedOuter non-empty) = %q, want %q", got, "shallow/str")
+		}
+		if got := contextPath(&nonEmpty); got != "shallow/str" {
+			t.Fatalf("contextPath(*strValEmbedOuter non-empty) = %q, want %q", got, "shallow/str")
+		}
+		empty := strValEmbedOuter{
+			embeddedStringPath:   "",
+			plainCallbackWrapper: deeper,
+		}
+		if got := contextPath(empty); got != "" {
+			t.Fatalf("contextPath(strValEmbedOuter empty) = %q, want empty string", got)
+		}
+		if got := contextPath(&empty); got != "" {
+			t.Fatalf("contextPath(*strValEmbedOuter empty) = %q, want empty string", got)
+		}
+	})
+
+	t.Run("pointer_receiver_defined_string", func(t *testing.T) {
+		tagVal := embeddedPtrStringPath("shallow/ptr-str")
+		nonEmpty := ptrStrEmbedOuter{
+			embeddedPtrStringPath: &tagVal,
+			plainCallbackWrapper:  deeper,
+		}
+		if got := contextPath(nonEmpty); got != "shallow/ptr-str" {
+			t.Fatalf("contextPath(ptrStrEmbedOuter value non-empty) = %q, want %q", got, "shallow/ptr-str")
+		}
+		if got := contextPath(&nonEmpty); got != "shallow/ptr-str" {
+			t.Fatalf("contextPath(*ptrStrEmbedOuter non-empty) = %q, want %q", got, "shallow/ptr-str")
+		}
+		emptyTag := embeddedPtrStringPath("")
+		empty := ptrStrEmbedOuter{
+			embeddedPtrStringPath: &emptyTag,
+			plainCallbackWrapper:  deeper,
+		}
+		if got := contextPath(empty); got != "" {
+			t.Fatalf("contextPath(ptrStrEmbedOuter value empty) = %q, want empty string", got)
+		}
+		if got := contextPath(&empty); got != "" {
+			t.Fatalf("contextPath(*ptrStrEmbedOuter empty) = %q, want empty string", got)
+		}
+
+		addrVal := valPtrRecvStrEmbedOuter{
+			embeddedPtrStringPath: "shallow/addr-ptr-recv",
+			plainCallbackWrapper:  deeper,
+		}
+		if got := contextPath(&addrVal); got != "shallow/addr-ptr-recv" {
+			t.Fatalf("contextPath(*valPtrRecvStrEmbedOuter non-empty) = %q, want %q", got, "shallow/addr-ptr-recv")
+		}
+		addrEmpty := valPtrRecvStrEmbedOuter{
+			embeddedPtrStringPath: "",
+			plainCallbackWrapper:  deeper,
+		}
+		if got := contextPath(&addrEmpty); got != "" {
+			t.Fatalf("contextPath(*valPtrRecvStrEmbedOuter empty) = %q, want empty string", got)
+		}
+	})
+
+	t.Run("defined_int", func(t *testing.T) {
+		nonEmpty := intEmbedOuter{
+			embeddedIntPath:      7,
+			plainCallbackWrapper: deeper,
+		}
+		if got := contextPath(nonEmpty); got != "shallow/int/7" {
+			t.Fatalf("contextPath(intEmbedOuter non-empty) = %q, want %q", got, "shallow/int/7")
+		}
+		empty := intEmbedOuter{
+			embeddedIntPath:      0,
+			plainCallbackWrapper: deeper,
+		}
+		if got := contextPath(empty); got != "" {
+			t.Fatalf("contextPath(intEmbedOuter empty) = %q, want empty string", got)
+		}
+	})
+
+	t.Run("negative_control_without_path_method", func(t *testing.T) {
+		ctrl := controlTagOuter{
+			plainNonStructTag:    "ignored",
+			plainCallbackWrapper: deeper,
+		}
+		if got := contextPath(ctrl); got != rightPath {
+			t.Fatalf("contextPath(controlTagOuter) = %q, want %q", got, rightPath)
+		}
+	})
+}

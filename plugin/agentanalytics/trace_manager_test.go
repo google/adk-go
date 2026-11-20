@@ -41231,3 +41231,1681 @@ func TestRunner_WithAgentContext_ExternalCopyingInvocationContextPreservesRunTok
 		t.Fatalf("leaf AGENT_STARTING parent_span_id = %q, want w1 %q (not w2 %q)", leafSpanParent, workerSpans[0], workerSpans[1])
 	}
 }
+
+type modelFuncLLM func(context.Context, *model.LLMRequest) (*model.LLMResponse, error)
+
+func (f modelFuncLLM) Name() string { return "func-llm" }
+
+func (f modelFuncLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		resp, err := f(ctx, req)
+		yield(resp, err)
+	}
+}
+
+type privateKeyFilteringAgentCtx struct {
+	agent.Context
+	filter *atomic.Bool
+}
+
+func (c *privateKeyFilteringAgentCtx) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	if (c.filter == nil || c.filter.Load()) && d == nil {
+		return c
+	}
+	return c.Context.WithICDelta(d)
+}
+
+func (c *privateKeyFilteringAgentCtx) InvocationContext() agent.InvocationContext {
+	return c.Context.WithICDelta(nil)
+}
+
+func (c *privateKeyFilteringAgentCtx) Value(key any) any {
+	if (c.filter == nil || c.filter.Load()) && key != nil && reflect.TypeOf(key).Kind() == reflect.Uint8 {
+		return nil
+	}
+	return c.Context.Value(key)
+}
+
+func wrapComposingPlugin(p *baseplugin.Plugin, filterBeforeModel, filterAfterModel, filterOnModelError, filterBeforeTool, filterAfterTool func(agent.Context) bool) (*baseplugin.Plugin, error) {
+	return wrapComposingPluginWithToolError(p, filterBeforeModel, filterAfterModel, filterOnModelError, filterBeforeTool, filterAfterTool, nil)
+}
+
+func wrapComposingPluginWithToolError(p *baseplugin.Plugin, filterBeforeModel, filterAfterModel, filterOnModelError, filterBeforeTool, filterAfterTool, filterOnToolError func(agent.Context) bool) (*baseplugin.Plugin, error) {
+	wrapAgentCtx := func(ctx agent.Context, shouldFilter func(agent.Context) bool) agent.Context {
+		if shouldFilter != nil && shouldFilter(ctx) {
+			return &privateKeyFilteringAgentCtx{Context: ctx}
+		}
+		return ctx
+	}
+	return baseplugin.New(baseplugin.Config{
+		Name:                  "composing-filter-" + p.Name(),
+		OnUserMessageCallback: p.OnUserMessageCallback(),
+		BeforeRunCallback:     p.BeforeRunCallback(),
+		AfterRunCallback:      p.AfterRunCallback(),
+		OnEventCallback:       p.OnEventCallback(),
+		BeforeAgentCallback:   p.BeforeAgentCallback(),
+		AfterAgentCallback:    p.AfterAgentCallback(),
+		BeforeModelCallback: func(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+			return p.BeforeModelCallback()(wrapAgentCtx(ctx, filterBeforeModel), req)
+		},
+		AfterModelCallback: func(ctx agent.Context, res *model.LLMResponse, err error) (*model.LLMResponse, error) {
+			return p.AfterModelCallback()(wrapAgentCtx(ctx, filterAfterModel), res, err)
+		},
+		OnModelErrorCallback: func(ctx agent.Context, req *model.LLMRequest, err error) (*model.LLMResponse, error) {
+			return p.OnModelErrorCallback()(wrapAgentCtx(ctx, filterOnModelError), req, err)
+		},
+		BeforeToolCallback: func(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+			return p.BeforeToolCallback()(wrapAgentCtx(ctx, filterBeforeTool), t, args)
+		},
+		AfterToolCallback: func(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+			return p.AfterToolCallback()(wrapAgentCtx(ctx, filterAfterTool), t, args, result, err)
+		},
+		OnToolErrorCallback: func(ctx agent.Context, t tool.Tool, args map[string]any, cbErr error) (map[string]any, error) {
+			return p.OnToolErrorCallback()(wrapAgentCtx(ctx, filterOnToolError), t, args, cbErr)
+		},
+	})
+}
+
+func TestRunner_FilteredPrivateKeyAcrossCallbacks_SingleCallSpan(t *testing.T) {
+	alwaysFilter := func(agent.Context) bool { return true }
+	neverFilter := func(agent.Context) bool { return false }
+
+	t.Run("after_model_filtered", func(t *testing.T) {
+		realPlugin, _, requests, _ := setupTestPluginWithTraces(t)
+		comp, err := wrapComposingPlugin(realPlugin, neverFilter, alwaysFilter, neverFilter, neverFilter, neverFilter)
+		if err != nil {
+			t.Fatalf("wrapComposingPlugin: %v", err)
+		}
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "hello")}}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		for _, runErr := range newTestRunner(t, bot, comp).Run(t.Context(), "u1", "s-after-model-filtered", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		reqRow := onlyRowOfType(t, rows, EventLLMRequest)
+		respRow := onlyRowOfType(t, rows, EventLLMResponse)
+		if reqPlace, respPlace := placeOf(reqRow), placeOf(respRow); reqPlace.span == "" || reqPlace.span != respPlace.span || reqPlace.parent != respPlace.parent {
+			t.Fatalf("LLM_REQUEST=%+v and LLM_RESPONSE=%+v must share span_id and parent_span_id", reqPlace, respPlace)
+		}
+		if got := respRow["status"]; got != "OK" {
+			t.Fatalf("LLM_RESPONSE status = %v, want OK", got)
+		}
+	})
+
+	t.Run("before_model_filtered", func(t *testing.T) {
+		realPlugin, _, requests, _ := setupTestPluginWithTraces(t)
+		comp, err := wrapComposingPlugin(realPlugin, alwaysFilter, neverFilter, neverFilter, neverFilter, neverFilter)
+		if err != nil {
+			t.Fatalf("wrapComposingPlugin: %v", err)
+		}
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "hello")}}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		for _, runErr := range newTestRunner(t, bot, comp).Run(t.Context(), "u1", "s-before-model-filtered", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		reqRow := onlyRowOfType(t, rows, EventLLMRequest)
+		respRow := onlyRowOfType(t, rows, EventLLMResponse)
+		if reqPlace, respPlace := placeOf(reqRow), placeOf(respRow); reqPlace.span == "" || reqPlace.span != respPlace.span || reqPlace.parent != respPlace.parent {
+			t.Fatalf("LLM_REQUEST=%+v and LLM_RESPONSE=%+v must share span_id and parent_span_id", reqPlace, respPlace)
+		}
+	})
+
+	t.Run("after_tool_filtered", func(t *testing.T) {
+		realPlugin, _, requests, _ := setupTestPluginWithTraces(t)
+		comp, err := wrapComposingPlugin(realPlugin, neverFilter, neverFilter, neverFilter, neverFilter, alwaysFilter)
+		if err != nil {
+			t.Fatalf("wrapComposingPlugin: %v", err)
+		}
+		echoTool, err := functiontool.New(functiontool.Config{Name: "echo_tool", Description: "echo"},
+			func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+				return map[string]any{"ok": true}, nil
+			})
+		if err != nil {
+			t.Fatalf("functiontool.New: %v", err)
+		}
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Tools: []tool.Tool{echoTool},
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{
+					Role:  genai.RoleModel,
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "echo_tool", Args: map[string]any{"q": "hi"}}}},
+				}},
+				{Content: textContent("model", "all done")},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		for _, runErr := range newTestRunner(t, bot, comp).Run(t.Context(), "u1", "s-after-tool-filtered", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		startRow := onlyRowOfType(t, rows, EventToolStarting)
+		doneRow := onlyRowOfType(t, rows, EventToolCompleted)
+		if startPlace, donePlace := placeOf(startRow), placeOf(doneRow); startPlace.span == "" || startPlace.span != donePlace.span || startPlace.parent != donePlace.parent {
+			t.Fatalf("TOOL_STARTING=%+v and TOOL_COMPLETED=%+v must share span_id and parent_span_id", startPlace, donePlace)
+		}
+		if got := len(rowsOfType(rows, EventToolError)); got != 0 {
+			t.Fatalf("got %d TOOL_ERROR rows, want 0", got)
+		}
+	})
+
+	t.Run("on_model_error_and_after_model_flipped_filter", func(t *testing.T) {
+		realPlugin, _, requests, _ := setupTestPluginWithTraces(t)
+		comp, err := wrapComposingPlugin(realPlugin, neverFilter, alwaysFilter, alwaysFilter, neverFilter, neverFilter)
+		if err != nil {
+			t.Fatalf("wrapComposingPlugin: %v", err)
+		}
+		recoverPlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "model-error-recover",
+			OnModelErrorCallback: func(_ agent.Context, _ *model.LLMRequest, _ error) (*model.LLMResponse, error) {
+				return &model.LLMResponse{Content: textContent("model", "recovered response")}, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Model: &failingLLM{err: errors.New("transient boom")},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		for _, runErr := range newTestRunner(t, bot, comp, recoverPlugin).Run(t.Context(), "u1", "s-model-err-recover-flipped", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		reqRow := onlyRowOfType(t, rows, EventLLMRequest)
+		errRow := onlyRowOfType(t, rows, EventLLMError)
+		respRow := onlyRowOfType(t, rows, EventLLMResponse)
+		reqPlace, errPlace, respPlace := placeOf(reqRow), placeOf(errRow), placeOf(respRow)
+		if reqPlace.span == "" || errPlace.span != reqPlace.span || respPlace.span != reqPlace.span ||
+			errPlace.parent != reqPlace.parent || respPlace.parent != reqPlace.parent {
+			t.Fatalf("LLM_REQUEST=%+v, LLM_ERROR=%+v, LLM_RESPONSE=%+v must share exact span_id and parent_span_id", reqPlace, errPlace, respPlace)
+		}
+		if got := respRow[columnLatencyMS]; got != nil {
+			t.Fatalf("recovered LLM_RESPONSE reported latency_ms=%v, want nil (already reported on LLM_ERROR)", got)
+		}
+	})
+
+	t.Run("concurrent_lookalikes_w1_after_model_filtered", func(t *testing.T) {
+		type workerSlotKey struct{}
+		realPlugin, _, requests, _ := setupTestPluginWithTraces(t)
+		filterW1Only := func(ctx agent.Context) bool {
+			return ctx.Value(workerSlotKey{}) == "w1"
+		}
+		comp, err := wrapComposingPlugin(realPlugin, neverFilter, filterW1Only, neverFilter, neverFilter, neverFilter)
+		if err != nil {
+			t.Fatalf("wrapComposingPlugin: %v", err)
+		}
+
+		w1BeforeModel := make(chan struct{})
+		w2BeforeModel := make(chan struct{})
+		releaseModels := make(chan struct{})
+		var modelSeq atomic.Int32
+
+		llm := modelFuncLLM(func(ctx context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+			slot, _ := ctx.Value(workerSlotKey{}).(string)
+			if slot == "w1" {
+				close(w1BeforeModel)
+			} else {
+				close(w2BeforeModel)
+			}
+			<-releaseModels
+			seq := modelSeq.Add(1)
+			return &model.LLMResponse{Content: textContent("model", fmt.Sprintf("ok-%s-%d", slot, seq))}, nil
+		})
+		worker, err := llmagent.New(llmagent.Config{
+			Name:  "worker",
+			Model: llm,
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(worker): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{worker},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					type item struct {
+						ev  *session.Event
+						err error
+						ack chan struct{}
+					}
+					ch := make(chan item)
+					w1Ctx := ctx.WithContext(context.WithValue(ctx, workerSlotKey{}, "w1"))
+					w2Ctx := ctx.WithContext(context.WithValue(ctx, workerSlotKey{}, "w2"))
+					var wg sync.WaitGroup
+					for _, wCtx := range []agent.InvocationContext{w1Ctx, w2Ctx} {
+						wg.Go(func() {
+							for ev, runErr := range worker.Run(wCtx) {
+								ack := make(chan struct{})
+								ch <- item{ev: ev, err: runErr, ack: ack}
+								<-ack
+							}
+						})
+					}
+					go func() {
+						<-w1BeforeModel
+						<-w2BeforeModel
+						close(releaseModels)
+					}()
+					go func() {
+						wg.Wait()
+						close(ch)
+					}()
+					for it := range ch {
+						cont := yield(it.ev, it.err)
+						close(it.ack)
+						if !cont || it.err != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, root, comp).Run(t.Context(), "u1", "s-lookalike-filtered", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		starts := agentRowsOfType(rows, EventAgentStarting, "worker")
+		reqs := rowsOfType(rows, EventLLMRequest)
+		resps := rowsOfType(rows, EventLLMResponse)
+		if len(starts) != 2 || len(reqs) != 2 || len(resps) != 2 {
+			t.Fatalf("got worker starts=%d reqs=%d resps=%d, want 2/2/2", len(starts), len(reqs), len(resps))
+		}
+		reqSpans := map[string]string{}
+		for _, r := range reqs {
+			pl := placeOf(r)
+			reqSpans[pl.parent] = pl.span
+		}
+		for _, r := range resps {
+			pl := placeOf(r)
+			wantSpan, ok := reqSpans[pl.parent]
+			if !ok || pl.span != wantSpan {
+				t.Fatalf("LLM_RESPONSE %+v did not match its worker parent's LLM_REQUEST span (reqs=%v)", pl, reqSpans)
+			}
+		}
+	})
+
+	t.Run("ambiguous_shared_ic_pointer_never_cross_pairs", func(t *testing.T) {
+		if runTokenReaderOnce() == nil {
+			t.Skip("per-run activation tokens require ADK core > v2.8.0")
+		}
+		p, tm, requests, _ := setupTestPluginWithTraces(t)
+		var capturedMu sync.Mutex
+		var wCtxs []agent.Context
+		captureSub, err := agent.New(agent.Config{
+			Name: "worker",
+			BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+				func(ctx agent.Context) (*genai.Content, error) {
+					capturedMu.Lock()
+					wCtxs = append(wCtxs, ctx)
+					capturedMu.Unlock()
+					return textContent("model", "done"), nil
+				},
+			},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(worker): %v", err)
+		}
+		var sharedRootCtx agent.InvocationContext
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{captureSub},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					sharedRootCtx = ctx
+					for range 2 {
+						for ev, runErr := range captureSub.Run(ctx) {
+							if !yield(ev, runErr) || runErr != nil {
+								return
+							}
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-capture-shared", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run: %v", runErr)
+			}
+		}
+		_ = collectRows(t, requests, untilInvocationEnd)
+		if len(wCtxs) != 2 || sharedRootCtx == nil {
+			t.Fatalf("captured %d worker contexts, want 2", len(wCtxs))
+		}
+		var sharedCtx context.Context = sharedRootCtx
+		w1Ctx := wCtxs[0].WithDelta(&agent.CommonContextDelta{
+			InvocationContextDelta: &agent.InvocationContextDelta{Context: &sharedCtx},
+		})
+		w2Ctx := wCtxs[1].WithDelta(&agent.CommonContextDelta{
+			InvocationContextDelta: &agent.InvocationContextDelta{Context: &sharedCtx},
+		})
+		if got1, got2 := icActivationKey(w1Ctx), icActivationKey(w2Ctx); got1 == nil || got1 != got2 {
+			t.Fatalf("precondition: expected shared icActivationKey across w1 and w2, got %#v vs %#v", got1, got2)
+		}
+		if a1, a2 := activationKey(w1Ctx), activationKey(w2Ctx); a1 == nil || a2 == nil || a1 == a2 {
+			t.Fatalf("precondition: expected distinct runTokens for w1 and w2, got %#v vs %#v", a1, a2)
+		}
+
+		// Use a fresh invocation in tm to keep both concurrent worker spans open simultaneously.
+		rootID := identity{invocationID: "inv-shared-ic", sessionID: "s-shared-ic", userID: "u1", agentName: "root"}
+		wID := identity{invocationID: "inv-shared-ic", sessionID: "s-shared-ic", userID: "u1", agentName: "worker"}
+		tm.invocationSpan(sharedRootCtx, rootID, nil)
+		tm.pushAgentSpan(w1Ctx, wID)
+		tm.pushAgentSpan(w2Ctx, wID)
+
+		// Start w2's model call unfiltered (keyed by w2 runToken), then deliver a
+		// filtered AfterModel callback on w1 (strips RunTokenKey while keeping
+		// InvocationContext identity so icAct matches the shared pointer).
+		w2ReqSpan := tm.pushLLMSpan(w2Ctx, wID)
+		w1FilteredAfter := &privateKeyFilteringAgentCtx{Context: w1Ctx}
+		if gotIC := icActivationKey(w1FilteredAfter); gotIC == nil || gotIC != icActivationKey(w1Ctx) {
+			t.Fatalf("precondition: icActivationKey(w1FilteredAfter) = %#v, want shared non-nil icAct %#v", gotIC, icActivationKey(w1Ctx))
+		}
+		if gotAct := resolveContextActivation(w1FilteredAfter); gotAct.runToken != nil || gotAct.icAct == nil {
+			t.Fatalf("precondition: resolveContextActivation(w1FilteredAfter) = %+v, want nil runToken and non-nil icAct", gotAct)
+		}
+		if respSpan := tm.popLLMSpan(w1FilteredAfter, wID, true); respSpan.spanID == w2ReqSpan.spanID {
+			t.Fatalf("w1 filtered AfterModel cross-paired into w2's open LLM span %q", w2ReqSpan.spanID)
+		}
+		// w2's own AfterModel must still match w2ReqSpan intact.
+		w2RespSpan := tm.popLLMSpan(w2Ctx, wID, true)
+		if w2RespSpan.spanID != w2ReqSpan.spanID {
+			t.Fatalf("w2 LLM_RESPONSE span_id = %q, want w2ReqSpan %q", w2RespSpan.spanID, w2ReqSpan.spanID)
+		}
+	})
+
+	t.Run("on_tool_error_and_after_tool_flipped_filter", func(t *testing.T) {
+		realPlugin, _, requests, _ := setupTestPluginWithTraces(t)
+		var afterToolSeen atomic.Bool
+		comp, err := wrapComposingPluginWithToolError(realPlugin, neverFilter, neverFilter, neverFilter, alwaysFilter, neverFilter, alwaysFilter)
+		if err != nil {
+			t.Fatalf("wrapComposingPluginWithToolError: %v", err)
+		}
+		recoverPlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "tool-error-recover",
+			OnToolErrorCallback: func(_ agent.Context, _ tool.Tool, _ map[string]any, _ error) (map[string]any, error) {
+				return map[string]any{"recovered": true}, nil
+			},
+			AfterToolCallback: func(_ agent.Context, _ tool.Tool, _, _ map[string]any, _ error) (map[string]any, error) {
+				afterToolSeen.Store(true)
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+		failTool, err := functiontool.New(functiontool.Config{Name: "flaky_tool", Description: "flaky"},
+			func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+				return nil, errors.New("transient tool boom")
+			})
+		if err != nil {
+			t.Fatalf("functiontool.New: %v", err)
+		}
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Tools: []tool.Tool{failTool},
+			Model: &scriptedLLM{responses: []*model.LLMResponse{
+				{Content: &genai.Content{
+					Role:  genai.RoleModel,
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "fc-err-1", Name: "flaky_tool", Args: map[string]any{}}}},
+				}},
+				{Content: textContent("model", "tool recovered")},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		for _, runErr := range newTestRunner(t, bot, comp, recoverPlugin).Run(t.Context(), "u1", "s-tool-err-recover-flipped", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run: %v", runErr)
+			}
+		}
+		if !afterToolSeen.Load() {
+			t.Fatal("expected AfterToolCallback to run after OnToolErrorCallback recovery")
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		startRow := onlyRowOfType(t, rows, EventToolStarting)
+		errRow := onlyRowOfType(t, rows, EventToolError)
+		startPlace, errPlace := placeOf(startRow), placeOf(errRow)
+		if startPlace.span == "" || errPlace.span != startPlace.span || errPlace.parent != startPlace.parent {
+			t.Fatalf("TOOL_STARTING=%+v and TOOL_ERROR=%+v must share exact span_id and parent_span_id", startPlace, errPlace)
+		}
+		if got := len(rowsOfType(rows, EventToolCompleted)); got != 0 {
+			t.Fatalf("got %d TOOL_COMPLETED rows, want 0 (closedByError must match recovered completedTools across flipped filter)", got)
+		}
+	})
+}
+
+type privateValueCarrier interface {
+	Value(key any) any
+}
+
+type embeddedWithMapOverrideCtx struct {
+	context.Context
+	ov       map[any]any
+	fallback privateValueCarrier
+}
+
+func (c *embeddedWithMapOverrideCtx) Value(key any) any {
+	if v, ok := c.ov[key]; ok {
+		return v
+	}
+	if c.fallback != nil {
+		return c.fallback.Value(key)
+	}
+	return nil
+}
+
+type embeddedWithClosureValueCtx struct {
+	context.Context
+	valueFn func(key any) any
+}
+
+func (c *embeddedWithClosureValueCtx) Value(key any) any {
+	return c.valueFn(key)
+}
+
+type embeddedWithPrivateCarrierCtx struct {
+	context.Context
+	priv privateValueCarrier
+}
+
+func (c *embeddedWithPrivateCarrierCtx) Value(key any) any {
+	return c.priv.Value(key)
+}
+
+type InnerCustomValueCtx struct {
+	context.Context
+	valueFn func(key any) any
+}
+
+func (c *InnerCustomValueCtx) Value(key any) any {
+	return c.valueFn(key)
+}
+
+type outerPromotingInnerCustomValueCtx struct {
+	*InnerCustomValueCtx
+}
+
+type anonymousNonCtxValueIfaceWithNamedCancelCtx struct {
+	privateValueCarrier
+	CancelSrc context.Context
+}
+
+func (c *anonymousNonCtxValueIfaceWithNamedCancelCtx) Deadline() (time.Time, bool) {
+	return c.CancelSrc.Deadline()
+}
+
+func (c *anonymousNonCtxValueIfaceWithNamedCancelCtx) Done() <-chan struct{} {
+	return c.CancelSrc.Done()
+}
+
+func (c *anonymousNonCtxValueIfaceWithNamedCancelCtx) Err() error { return c.CancelSrc.Err() }
+
+type ValueReceiverCustomCtx struct {
+	context.Context
+	val any
+}
+
+func (c ValueReceiverCustomCtx) Value(any) any { return c.val }
+
+type pointerReceiverCustomValueEmbed struct {
+	context.Context
+	val any
+}
+
+func (c *pointerReceiverCustomValueEmbed) Value(any) any { return c.val }
+
+type namedContextFieldWrapper struct {
+	Ctx context.Context
+}
+
+func (c *namedContextFieldWrapper) Deadline() (time.Time, bool) { return c.Ctx.Deadline() }
+func (c *namedContextFieldWrapper) Done() <-chan struct{}       { return c.Ctx.Done() }
+func (c *namedContextFieldWrapper) Err() error                  { return c.Ctx.Err() }
+func (c *namedContextFieldWrapper) Value(key any) any           { return c.Ctx.Value(key) }
+
+func TestRunner_V280Legacy_CancelSourceWithCustomValueNotLauncher(t *testing.T) {
+	orig := lineageWalkerOnce
+	lineageWalkerOnce = func() func(context.Context) []any { return nil }
+	defer func() { lineageWalkerOnce = orig }()
+
+	cases := []struct {
+		name        string
+		makeWrapper func(cancelSrc, valSrc agent.InvocationContext) context.Context
+	}{
+		{
+			name: "embedded_context_plus_overridden_Value",
+			makeWrapper: func(cancelSrc, valSrc agent.InvocationContext) context.Context {
+				return &embeddedWithMapOverrideCtx{
+					Context:  cancelSrc,
+					ov:       map[any]any{"marker": valSrc},
+					fallback: valSrc,
+				}
+			},
+		},
+		{
+			name: "embedded_context_plus_closure_value",
+			makeWrapper: func(cancelSrc, valSrc agent.InvocationContext) context.Context {
+				return &embeddedWithClosureValueCtx{
+					Context: cancelSrc,
+					valueFn: valSrc.Value,
+				}
+			},
+		},
+		{
+			name: "embedded_context_plus_private_value_carrier",
+			makeWrapper: func(cancelSrc, valSrc agent.InvocationContext) context.Context {
+				return &embeddedWithPrivateCarrierCtx{
+					Context: cancelSrc,
+					priv:    valSrc,
+				}
+			},
+		},
+		{
+			name: "embedded_unexported_type_context_promotion",
+			makeWrapper: func(cancelSrc, valSrc agent.InvocationContext) context.Context {
+				return &outerPromotingInnerCustomValueCtx{
+					InnerCustomValueCtx: &InnerCustomValueCtx{
+						Context: cancelSrc,
+						valueFn: valSrc.Value,
+					},
+				}
+			},
+		},
+		{
+			name: "anonymous_non_context_value_interface_plus_named_cancel",
+			makeWrapper: func(cancelSrc, valSrc agent.InvocationContext) context.Context {
+				return &anonymousNonCtxValueIfaceWithNamedCancelCtx{
+					privateValueCarrier: valSrc,
+					CancelSrc:           cancelSrc,
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			leaf := newOneEventAgent(t, "leaf", nil)
+
+			var callSeq atomic.Int32
+			w1ICCh := make(chan agent.InvocationContext, 1)
+			releaseW1 := make(chan struct{})
+			dispatch := make(chan func())
+			dispatchDone := make(chan struct{})
+
+			worker, err := agent.New(agent.Config{
+				Name:      "worker",
+				SubAgents: []agent.Agent{leaf},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						if callSeq.Add(1) == 1 {
+							w1ICCh <- ctx.WithICDelta(nil)
+							<-releaseW1
+							ev := session.NewEvent(ctx, ctx.InvocationID())
+							ev.Author = "worker"
+							ev.Branch = ctx.Branch()
+							ev.Content = textContent("model", "w1-done")
+							yield(ev, nil)
+							return
+						}
+						w1IC := <-w1ICCh
+						wrapped := ctx.WithContext(tc.makeWrapper(w1IC, ctx))
+						type item struct {
+							ev  *session.Event
+							err error
+						}
+						out := make(chan item, 4)
+						// Dispatch leaf on root's helper goroutine so only launch lineage
+						// could attribute leaf to w1 (cancelSrc).
+						dispatch <- func() {
+							defer close(out)
+							for ev, runErr := range leaf.Run(wrapped) {
+								out <- item{ev: ev, err: runErr}
+							}
+						}
+						for it := range out {
+							if !yield(it.ev, it.err) || it.err != nil {
+								return
+							}
+						}
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "worker"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "w2-done")
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(worker): %v", err)
+			}
+
+			root, err := agent.New(agent.Config{
+				Name:      "root",
+				SubAgents: []agent.Agent{worker},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						go func() {
+							defer close(dispatchDone)
+							for fn := range dispatch {
+								fn()
+							}
+						}()
+						type item struct {
+							ev  *session.Event
+							err error
+						}
+						ch := make(chan item, 16)
+						var wg sync.WaitGroup
+						wg.Go(func() {
+							for ev, runErr := range worker.Run(ctx) {
+								ch <- item{ev: ev, err: runErr}
+							}
+						})
+						for callSeq.Load() < 1 {
+							runtime.Gosched()
+						}
+						wg.Go(func() {
+							for ev, runErr := range worker.Run(ctx) {
+								ch <- item{ev: ev, err: runErr}
+							}
+							close(releaseW1)
+						})
+						go func() {
+							wg.Wait()
+							close(dispatch)
+							<-dispatchDone
+							close(ch)
+						}()
+						for it := range ch {
+							if !yield(it.ev, it.err) || it.err != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+
+			for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-"+tc.name, textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("runner.Run(%s): %v", tc.name, runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			onlyRowOfType(t, rows, EventInvocationCompleted)
+			workerStarts := agentRowsOfType(rows, EventAgentStarting, "worker")
+			if len(workerStarts) != 2 {
+				t.Fatalf("got %d worker starts, want 2", len(workerStarts))
+			}
+			w1SpanID := placeOf(workerStarts[0]).span
+			leafStart := onlyAgentRow(t, rows, EventAgentStarting, "leaf")
+			if got := placeOf(leafStart).parent; got == w1SpanID {
+				t.Fatalf("%s: leaf parent_span_id = %q == cancelSrc w1 %q", tc.name, got, w1SpanID)
+			}
+		})
+	}
+}
+
+type ExportedInnerHolder struct {
+	context.Context
+}
+
+func TestStepContext_V280ExternalValuePromotion(t *testing.T) {
+	target := context.WithValue(context.Background(), struct{ k string }{"k"}, "v")
+	alt := context.Background()
+
+	type outerExportedInnerHolderPtr struct {
+		*ExportedInnerHolder
+	}
+	type unexportedInnerHolder struct {
+		context.Context
+	}
+	type outerUnexportedInnerHolderPtr struct {
+		*unexportedInnerHolder
+	}
+	type outerNilOptionalAndCtx struct {
+		*optionalContextMetadata
+		context.Context
+	}
+	type lockFreePtrWrapper struct {
+		context.Context
+	}
+	type valOverrideOuter struct {
+		ValueReceiverCustomCtx
+	}
+	type outerPtrRecvEmbed struct {
+		pointerReceiverCustomValueEmbed
+	}
+	type ptrRecvNestedHolder struct {
+		pointerReceiverCustomValueEmbed
+	}
+	type unaddrPtrRecvOuter struct {
+		ptrRecvNestedHolder
+		context.Context
+	}
+	var _ context.Context = unaddrPtrRecvOuter{}
+
+	nestedHolder := &ExportedInnerHolder{Context: target}
+	positive := []struct {
+		name string
+		ctx  context.Context
+		want context.Context
+	}{
+		{"ptr_embeddedValueContext", &embeddedValueContext{Context: target}, target},
+		{"val_embeddedValueContext", embeddedValueContext{Context: target}, target},
+		{"exportedOptionalMetadataContext", &exportedOptionalMetadataContext{Context: target}, target},
+		{"outerNilOptionalAndCtx", &outerNilOptionalAndCtx{Context: target}, target},
+		{"lockFreePtrWrapper", &lockFreePtrWrapper{Context: target}, target},
+		{"nested_ptr_ExportedInnerHolder", &outerExportedInnerHolderPtr{ExportedInnerHolder: nestedHolder}, nestedHolder},
+		{"shallower_ctx_wins_over_deeper_ptr_recv_Value", unaddrPtrRecvOuter{
+			ptrRecvNestedHolder: ptrRecvNestedHolder{},
+			Context:             target,
+		}, target},
+	}
+	for _, tc := range positive {
+		t.Run("positive/"+tc.name, func(t *testing.T) {
+			got, ok := stepContext(tc.ctx, true)
+			if !ok || got != tc.want {
+				t.Fatalf("stepContext(%s, true) = (%v, %v), want (%v, true)", tc.name, got, ok, tc.want)
+			}
+		})
+	}
+
+	negative := []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"embeddedWithMapOverrideCtx", &embeddedWithMapOverrideCtx{Context: target, ov: map[any]any{}}},
+		{"embeddedWithClosureValueCtx", &embeddedWithClosureValueCtx{Context: target, valueFn: alt.Value}},
+		{"embeddedWithPrivateCarrierCtx", &embeddedWithPrivateCarrierCtx{Context: target, priv: alt}},
+		{"outerPromotingInnerCustomValueCtx", &outerPromotingInnerCustomValueCtx{
+			InnerCustomValueCtx: &InnerCustomValueCtx{Context: target, valueFn: alt.Value},
+		}},
+		{"anonymousNonCtxValueIfaceWithNamedCancelCtx", &anonymousNonCtxValueIfaceWithNamedCancelCtx{
+			privateValueCarrier: alt,
+			CancelSrc:           target,
+		}},
+		{"ValueReceiverCustomCtx_val", ValueReceiverCustomCtx{Context: target, val: "x"}},
+		{"ValueReceiverCustomCtx_outer", &valOverrideOuter{ValueReceiverCustomCtx: ValueReceiverCustomCtx{Context: target, val: "x"}}},
+		{"addressable_outerPtrRecvEmbed", &outerPtrRecvEmbed{pointerReceiverCustomValueEmbed: pointerReceiverCustomValueEmbed{Context: target, val: "x"}}},
+		{"namedContextFieldWrapper", &namedContextFieldWrapper{Ctx: target}},
+		{"nil_embedded_ExportedInnerHolder", &outerExportedInnerHolderPtr{}},
+		{"unexported_embedded_innerHolder", &outerUnexportedInnerHolderPtr{unexportedInnerHolder: &unexportedInnerHolder{Context: target}}},
+	}
+	for _, tc := range negative {
+		t.Run("negative/"+tc.name, func(t *testing.T) {
+			got, ok := stepContext(tc.ctx, true)
+			if ok || got != nil {
+				t.Fatalf("stepContext(%s, true) = (%v, %v), want (nil, false)", tc.name, got, ok)
+			}
+		})
+	}
+}
+
+type invLockProbeState struct {
+	tm            *traceManager
+	invPtr        atomic.Pointer[invocationTrace]
+	valueCalls    atomic.Int64
+	doneCalls     atomic.Int64
+	errCalls      atomic.Int64
+	deadlineCalls atomic.Int64
+	withICCalls   atomic.Int64
+	endedCalls    atomic.Int64
+	actionsCalls  atomic.Int64
+	violations    atomic.Int64
+	firstStack    atomic.Value
+}
+
+func (p *invLockProbeState) check(invID string) {
+	inv := p.invPtr.Load()
+	if inv == nil && p.tm != nil && invID != "" {
+		if p.tm.mu.TryLock() {
+			inv = p.tm.invocations[invID]
+			if inv != nil {
+				p.invPtr.CompareAndSwap(nil, inv)
+			}
+			p.tm.mu.Unlock()
+		}
+	}
+	if inv == nil {
+		return
+	}
+	if !inv.mu.TryLock() {
+		if p.violations.Add(1) <= 4 {
+			var pcs [24]uintptr
+			n := runtime.Callers(2, pcs[:])
+			frames := runtime.CallersFrames(pcs[:n])
+			var b strings.Builder
+			for {
+				f, more := frames.Next()
+				fmt.Fprintf(&b, "  %s (%s:%d)\n", f.Function, f.File, f.Line)
+				if !more {
+					break
+				}
+			}
+			for {
+				cur := p.firstStack.Load()
+				prev, _ := cur.(string)
+				if p.firstStack.CompareAndSwap(cur, prev+"\n--- VIOLATION ---\n"+b.String()) {
+					break
+				}
+			}
+		}
+		return
+	}
+	inv.mu.Unlock()
+}
+
+type lockProbingRootCtx struct {
+	context.Context
+	probe *invLockProbeState
+	invID atomic.Value
+}
+
+func (c *lockProbingRootCtx) currentInvID() string {
+	s, _ := c.invID.Load().(string)
+	return s
+}
+
+func (c *lockProbingRootCtx) Deadline() (time.Time, bool) {
+	c.probe.deadlineCalls.Add(1)
+	c.probe.check(c.currentInvID())
+	return c.Context.Deadline()
+}
+
+func (c *lockProbingRootCtx) Done() <-chan struct{} {
+	c.probe.doneCalls.Add(1)
+	c.probe.check(c.currentInvID())
+	return c.Context.Done()
+}
+
+func (c *lockProbingRootCtx) Err() error {
+	c.probe.errCalls.Add(1)
+	c.probe.check(c.currentInvID())
+	return c.Context.Err()
+}
+
+func (c *lockProbingRootCtx) Value(key any) any {
+	c.probe.valueCalls.Add(1)
+	c.probe.check(c.currentInvID())
+	return c.Context.Value(key)
+}
+
+type lockProbingAgentCtx struct {
+	agent.Context
+	probe *invLockProbeState
+}
+
+func (c *lockProbingAgentCtx) Deadline() (time.Time, bool) {
+	c.probe.deadlineCalls.Add(1)
+	c.probe.check(c.Context.InvocationID())
+	return c.Context.Deadline()
+}
+
+func (c *lockProbingAgentCtx) Done() <-chan struct{} {
+	c.probe.doneCalls.Add(1)
+	c.probe.check(c.Context.InvocationID())
+	return c.Context.Done()
+}
+
+func (c *lockProbingAgentCtx) Err() error {
+	c.probe.errCalls.Add(1)
+	c.probe.check(c.Context.InvocationID())
+	return c.Context.Err()
+}
+
+func (c *lockProbingAgentCtx) Value(key any) any {
+	c.probe.valueCalls.Add(1)
+	c.probe.check(c.Context.InvocationID())
+	return c.Context.Value(key)
+}
+
+func (c *lockProbingAgentCtx) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	c.probe.withICCalls.Add(1)
+	c.probe.check(c.Context.InvocationID())
+	return c.Context.WithICDelta(d)
+}
+
+func (c *lockProbingAgentCtx) Ended() bool {
+	c.probe.endedCalls.Add(1)
+	c.probe.check(c.Context.InvocationID())
+	return c.Context.Ended()
+}
+
+func (c *lockProbingAgentCtx) Actions() *session.EventActions {
+	c.probe.actionsCalls.Add(1)
+	c.probe.check(c.Context.InvocationID())
+	return c.Context.Actions()
+}
+
+type lockProbingInvCtx struct {
+	agent.InvocationContext
+	probe *invLockProbeState
+}
+
+func (c *lockProbingInvCtx) Deadline() (time.Time, bool) {
+	c.probe.deadlineCalls.Add(1)
+	c.probe.check(c.InvocationContext.InvocationID())
+	return c.InvocationContext.Deadline()
+}
+
+func (c *lockProbingInvCtx) Done() <-chan struct{} {
+	c.probe.doneCalls.Add(1)
+	c.probe.check(c.InvocationContext.InvocationID())
+	return c.InvocationContext.Done()
+}
+
+func (c *lockProbingInvCtx) Err() error {
+	c.probe.errCalls.Add(1)
+	c.probe.check(c.InvocationContext.InvocationID())
+	return c.InvocationContext.Err()
+}
+
+func (c *lockProbingInvCtx) Value(key any) any {
+	c.probe.valueCalls.Add(1)
+	c.probe.check(c.InvocationContext.InvocationID())
+	return c.InvocationContext.Value(key)
+}
+
+func (c *lockProbingInvCtx) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	c.probe.withICCalls.Add(1)
+	c.probe.check(c.InvocationContext.InvocationID())
+	return c.InvocationContext.WithICDelta(d)
+}
+
+func (c *lockProbingInvCtx) Ended() bool {
+	c.probe.endedCalls.Add(1)
+	c.probe.check(c.InvocationContext.InvocationID())
+	return c.InvocationContext.Ended()
+}
+
+func TestRunner_NoUserContextCallsUnderInvocationMutex(t *testing.T) {
+	t.Run("sequential_all_callbacks_never_hold_inv_mu", func(t *testing.T) {
+		realPlugin, tm, requests, _ := setupTestPluginWithTraces(t)
+		probe := &invLockProbeState{tm: tm}
+		rootProbe := &lockProbingRootCtx{Context: t.Context(), probe: probe}
+
+		captureInv := func(invID string) {
+			rootProbe.invID.Store(invID)
+			tm.mu.Lock()
+			if inv := tm.invocations[invID]; inv != nil {
+				probe.invPtr.Store(inv)
+			}
+			tm.mu.Unlock()
+		}
+
+		comp, err := baseplugin.New(baseplugin.Config{
+			Name: "lock-probing-composing",
+			OnUserMessageCallback: func(ctx agent.InvocationContext, msg *genai.Content) (*genai.Content, error) {
+				res, cbErr := realPlugin.OnUserMessageCallback()(&lockProbingInvCtx{InvocationContext: ctx, probe: probe}, msg)
+				captureInv(ctx.InvocationID())
+				return res, cbErr
+			},
+			BeforeRunCallback: func(ctx agent.InvocationContext) (*genai.Content, error) {
+				res, cbErr := realPlugin.BeforeRunCallback()(&lockProbingInvCtx{InvocationContext: ctx, probe: probe})
+				captureInv(ctx.InvocationID())
+				return res, cbErr
+			},
+			AfterRunCallback: func(ctx agent.InvocationContext) {
+				realPlugin.AfterRunCallback()(&lockProbingInvCtx{InvocationContext: ctx, probe: probe})
+			},
+			OnEventCallback: func(ctx agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+				return realPlugin.OnEventCallback()(&lockProbingInvCtx{InvocationContext: ctx, probe: probe}, ev)
+			},
+			BeforeAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+				return realPlugin.BeforeAgentCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe})
+			},
+			AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+				return realPlugin.AfterAgentCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe})
+			},
+			BeforeModelCallback: func(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+				return realPlugin.BeforeModelCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe}, req)
+			},
+			AfterModelCallback: func(ctx agent.Context, res *model.LLMResponse, cbErr error) (*model.LLMResponse, error) {
+				return realPlugin.AfterModelCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe}, res, cbErr)
+			},
+			OnModelErrorCallback: func(ctx agent.Context, req *model.LLMRequest, cbErr error) (*model.LLMResponse, error) {
+				return realPlugin.OnModelErrorCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe}, req, cbErr)
+			},
+			BeforeToolCallback: func(ctx agent.Context, tTool tool.Tool, args map[string]any) (map[string]any, error) {
+				return realPlugin.BeforeToolCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe}, tTool, args)
+			},
+			AfterToolCallback: func(ctx agent.Context, tTool tool.Tool, args, result map[string]any, cbErr error) (map[string]any, error) {
+				return realPlugin.AfterToolCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe}, tTool, args, result, cbErr)
+			},
+			OnToolErrorCallback: func(ctx agent.Context, tTool tool.Tool, args map[string]any, cbErr error) (map[string]any, error) {
+				return realPlugin.OnToolErrorCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe}, tTool, args, cbErr)
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(lock-probing-composing): %v", err)
+		}
+
+		recoverPlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "recover-err",
+			OnModelErrorCallback: func(_ agent.Context, _ *model.LLMRequest, _ error) (*model.LLMResponse, error) {
+				return &model.LLMResponse{Content: textContent("model", "recovered-final")}, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(recover-err): %v", err)
+		}
+
+		okTool, err := functiontool.New(functiontool.Config{Name: "ok_tool", Description: "ok"},
+			func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+				return map[string]any{"v": 1}, nil
+			})
+		if err != nil {
+			t.Fatalf("functiontool.New(ok_tool): %v", err)
+		}
+		errTool, err := functiontool.New(functiontool.Config{Name: "err_tool", Description: "err"},
+			func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+				return nil, errors.New("tool failed")
+			})
+		if err != nil {
+			t.Fatalf("functiontool.New(err_tool): %v", err)
+		}
+
+		var turn atomic.Int32
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Tools: []tool.Tool{okTool, errTool},
+			Model: modelFuncLLM(func(_ context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+				switch turn.Add(1) {
+				case 1:
+					return &model.LLMResponse{Content: &genai.Content{
+						Role: genai.RoleModel,
+						Parts: []*genai.Part{
+							{FunctionCall: &genai.FunctionCall{ID: "fc-ok", Name: "ok_tool", Args: map[string]any{}}},
+						},
+					}}, nil
+				case 2:
+					return &model.LLMResponse{Content: &genai.Content{
+						Role: genai.RoleModel,
+						Parts: []*genai.Part{
+							{FunctionCall: &genai.FunctionCall{ID: "fc-err", Name: "err_tool", Args: map[string]any{}}},
+						},
+					}}, nil
+				default:
+					return nil, errors.New("transient model boom")
+				}
+			}),
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot): %v", err)
+		}
+
+		var beforeSubRan atomic.Bool
+		shortcutSub, err := agent.New(agent.Config{
+			Name: "shortcut_sub",
+			BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+				func(ctx agent.Context) (*genai.Content, error) {
+					beforeSubRan.Store(true)
+					return textContent("model", "answered-in-before-agent"), nil
+				},
+			},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(shortcut_sub): %v", err)
+		}
+
+		seqRoot, err := sequentialagent.New(sequentialagent.Config{
+			AgentConfig: agent.Config{
+				Name:      "root",
+				SubAgents: []agent.Agent{shortcutSub, bot},
+			},
+		})
+		if err != nil {
+			t.Fatalf("sequentialagent.New: %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, seqRoot, comp, recoverPlugin).Run(rootProbe, "u1", "s-no-inv-mu", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run: %v", runErr)
+			}
+		}
+		if !beforeSubRan.Load() {
+			t.Fatal("shortcut_sub BeforeAgentCallback did not run")
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+
+		if probe.valueCalls.Load() == 0 {
+			t.Errorf("valueCalls = 0, want > 0")
+		}
+		if probe.withICCalls.Load() == 0 {
+			t.Errorf("withICDeltaCalls = 0, want > 0")
+		}
+		if probe.violations.Load() > 0 {
+			stacks, _ := probe.firstStack.Load().(string)
+			t.Fatalf("observed %d user context calls made while inv.mu was held (value=%d done=%d err=%d withIC=%d ended=%d actions=%d)%s",
+				probe.violations.Load(), probe.valueCalls.Load(), probe.doneCalls.Load(), probe.errCalls.Load(), probe.withICCalls.Load(), probe.endedCalls.Load(), probe.actionsCalls.Load(), stacks)
+		}
+	})
+
+	t.Run("canceled_parallel_and_after_run_never_hold_inv_mu", func(t *testing.T) {
+		realPlugin, tm, requests, _ := setupTestPluginWithTraces(t)
+		probe := &invLockProbeState{tm: tm}
+		baseCtx, cancel := context.WithCancelCause(t.Context())
+		defer cancel(nil)
+		rootProbe := &lockProbingRootCtx{Context: baseCtx, probe: probe}
+
+		captureInv := func(invID string) {
+			rootProbe.invID.Store(invID)
+			tm.mu.Lock()
+			if inv := tm.invocations[invID]; inv != nil {
+				probe.invPtr.Store(inv)
+			}
+			tm.mu.Unlock()
+		}
+
+		comp, err := baseplugin.New(baseplugin.Config{
+			Name: "lock-probing-cancel",
+			OnUserMessageCallback: func(ctx agent.InvocationContext, msg *genai.Content) (*genai.Content, error) {
+				res, cbErr := realPlugin.OnUserMessageCallback()(&lockProbingInvCtx{InvocationContext: ctx, probe: probe}, msg)
+				captureInv(ctx.InvocationID())
+				return res, cbErr
+			},
+			BeforeRunCallback: func(ctx agent.InvocationContext) (*genai.Content, error) {
+				res, cbErr := realPlugin.BeforeRunCallback()(&lockProbingInvCtx{InvocationContext: ctx, probe: probe})
+				captureInv(ctx.InvocationID())
+				return res, cbErr
+			},
+			AfterRunCallback: func(ctx agent.InvocationContext) {
+				realPlugin.AfterRunCallback()(&lockProbingInvCtx{InvocationContext: ctx, probe: probe})
+			},
+			OnEventCallback: func(ctx agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+				return realPlugin.OnEventCallback()(&lockProbingInvCtx{InvocationContext: ctx, probe: probe}, ev)
+			},
+			BeforeAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+				return realPlugin.BeforeAgentCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe})
+			},
+			AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+				return realPlugin.AfterAgentCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe})
+			},
+			BeforeModelCallback: func(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+				return realPlugin.BeforeModelCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe}, req)
+			},
+			AfterModelCallback: func(ctx agent.Context, res *model.LLMResponse, cbErr error) (*model.LLMResponse, error) {
+				return realPlugin.AfterModelCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe}, res, cbErr)
+			},
+			OnModelErrorCallback: func(ctx agent.Context, req *model.LLMRequest, cbErr error) (*model.LLMResponse, error) {
+				return realPlugin.OnModelErrorCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe}, req, cbErr)
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+
+		boom := errors.New("branch abort")
+		failBot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Model: &failingLLM{err: boom},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		cancelWrap, err := agent.New(agent.Config{
+			Name:      "cancel_wrap",
+			SubAgents: []agent.Agent{failBot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					wrappedIC := agent.Promote(&lockProbingInvCtx{InvocationContext: ctx, probe: probe})
+					cancel(errors.New("user canceled"))
+					for ev, runErr := range failBot.Run(wrappedIC) {
+						if !yield(ev, runErr) || runErr != nil {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New: %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, cancelWrap, comp).Run(rootProbe, "u1", "s-no-inv-mu-cancel", textContent("user", "go"), agent.RunConfig{}) {
+			_ = runErr
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationError)
+		if probe.valueCalls.Load() == 0 || probe.doneCalls.Load() == 0 {
+			t.Errorf("expected valueCalls (%d) and doneCalls (%d) > 0", probe.valueCalls.Load(), probe.doneCalls.Load())
+		}
+		if probe.violations.Load() > 0 {
+			t.Fatalf("observed %d user context calls made while inv.mu was held under cancellation (value=%d done=%d err=%d withIC=%d ended=%d)",
+				probe.violations.Load(), probe.valueCalls.Load(), probe.doneCalls.Load(), probe.errCalls.Load(), probe.withICCalls.Load(), probe.endedCalls.Load())
+		}
+	})
+
+	t.Run("concurrent_user_lock_inversion_deadlock_resistance", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		var rootMu, b1Mu, b2Mu sync.Mutex
+
+		parBranch := func(name string, branchMu *sync.Mutex) agent.Agent {
+			a, err := agent.New(agent.Config{
+				Name: name,
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						child, err := llmagent.New(llmagent.Config{
+							Name: name + "_inner",
+							Model: &scriptedLLM{responses: []*model.LLMResponse{
+								{Content: textContent("model", "ok-"+name)},
+							}},
+						})
+						if err != nil {
+							yield(nil, err)
+							return
+						}
+						wrapped := ctx.WithContext(&userMutexContext{Context: ctx, mu: branchMu})
+						for ev, runErr := range child.Run(wrapped) {
+							if !yield(ev, runErr) || runErr != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(%s): %v", name, err)
+			}
+			return a
+		}
+
+		par, err := parallelagent.New(parallelagent.Config{
+			AgentConfig: agent.Config{
+				Name:      "par",
+				SubAgents: []agent.Agent{parBranch("b1", &b1Mu), parBranch("b2", &b2Mu)},
+			},
+		})
+		if err != nil {
+			t.Fatalf("parallelagent.New: %v", err)
+		}
+
+		// Second plugin acquires userMu during plugin callbacks so any inv.mu -> userMu
+		// order inside analyticsPlugin creates ABBA lock inversion under concurrent runs.
+		lockAllUserMus := func() func() {
+			b1Mu.Lock()
+			b2Mu.Lock()
+			rootMu.Lock()
+			return func() {
+				rootMu.Unlock()
+				b2Mu.Unlock()
+				b1Mu.Unlock()
+			}
+		}
+		userMuPlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "user-mu-holder",
+			BeforeAgentCallback: func(agent.Context) (*genai.Content, error) {
+				defer lockAllUserMus()()
+				runtime.Gosched()
+				return nil, nil
+			},
+			BeforeModelCallback: func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+				defer lockAllUserMus()()
+				runtime.Gosched()
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(user-mu-holder): %v", err)
+		}
+
+		runCtx, cancel := context.WithTimeout(&userMutexContext{Context: t.Context(), mu: &rootMu}, 4*time.Second)
+		defer cancel()
+		for _, runErr := range newTestRunner(t, par, p, userMuPlugin).Run(runCtx, "u1", "s-abba", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+	})
+
+	t.Run("late_after_run_callbacks_never_hold_inv_mu", func(t *testing.T) {
+		realPlugin, tm, requests, _ := setupTestPluginWithTraces(t)
+		probe := &invLockProbeState{tm: tm}
+		rootProbe := &lockProbingRootCtx{Context: t.Context(), probe: probe}
+
+		var afterRunClosed atomic.Bool
+		afterRunDone := make(chan struct{})
+		closeAfterRun := sync.OnceFunc(func() {
+			afterRunClosed.Store(true)
+			close(afterRunDone)
+		})
+		beforeModelEntered := make(chan struct{})
+		var lateModelDone, lateAgentDone atomic.Bool
+
+		captureInv := func(invID string) {
+			rootProbe.invID.Store(invID)
+			tm.mu.Lock()
+			if inv := tm.invocations[invID]; inv != nil {
+				probe.invPtr.Store(inv)
+			}
+			tm.mu.Unlock()
+		}
+
+		comp, err := baseplugin.New(baseplugin.Config{
+			Name: "lock-probing-late",
+			OnUserMessageCallback: func(ctx agent.InvocationContext, msg *genai.Content) (*genai.Content, error) {
+				res, cbErr := realPlugin.OnUserMessageCallback()(&lockProbingInvCtx{InvocationContext: ctx, probe: probe}, msg)
+				captureInv(ctx.InvocationID())
+				return res, cbErr
+			},
+			BeforeRunCallback: func(ctx agent.InvocationContext) (*genai.Content, error) {
+				res, cbErr := realPlugin.BeforeRunCallback()(&lockProbingInvCtx{InvocationContext: ctx, probe: probe})
+				captureInv(ctx.InvocationID())
+				return res, cbErr
+			},
+			AfterRunCallback: func(ctx agent.InvocationContext) {
+				realPlugin.AfterRunCallback()(&lockProbingInvCtx{InvocationContext: ctx, probe: probe})
+				closeAfterRun()
+			},
+			OnEventCallback: func(ctx agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+				return realPlugin.OnEventCallback()(&lockProbingInvCtx{InvocationContext: ctx, probe: probe}, ev)
+			},
+			BeforeAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+				return realPlugin.BeforeAgentCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe})
+			},
+			AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+				if afterRunClosed.Load() {
+					lateAgentDone.Store(true)
+				}
+				return realPlugin.AfterAgentCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe})
+			},
+			BeforeModelCallback: func(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+				return realPlugin.BeforeModelCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe}, req)
+			},
+			AfterModelCallback: func(ctx agent.Context, res *model.LLMResponse, cbErr error) (*model.LLMResponse, error) {
+				if afterRunClosed.Load() {
+					lateModelDone.Store(true)
+				}
+				return realPlugin.AfterModelCallback()(&lockProbingAgentCtx{Context: ctx, probe: probe}, res, cbErr)
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(lock-probing-late): %v", err)
+		}
+
+		bgBot, err := llmagent.New(llmagent.Config{
+			Name: "bg_bot",
+			Model: modelFuncLLM(func(_ context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+				close(beforeModelEntered)
+				<-afterRunDone
+				return &model.LLMResponse{Content: textContent("model", "late-done")}, nil
+			}),
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bg_bot): %v", err)
+		}
+
+		var bgWG sync.WaitGroup
+		earlyRoot, err := agent.New(agent.Config{
+			Name:      "early_root",
+			SubAgents: []agent.Agent{bgBot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					bgCtx := ctx.WithContext(&lockProbingRootCtx{Context: ctx, probe: probe})
+					bgWG.Go(func() {
+						for _, runErr := range bgBot.Run(bgCtx) {
+							_ = runErr
+						}
+					})
+					<-beforeModelEntered
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "early_root"
+					ev.LLMResponse.Content = textContent("model", "yield-once")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(early_root): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, earlyRoot, comp).Run(rootProbe, "u1", "s-no-inv-mu-late", textContent("user", "go"), agent.RunConfig{}) {
+			_ = runErr
+			break
+		}
+		<-afterRunDone
+		bgWG.Wait()
+		rows := collectRows(t, requests, func(rows []map[string]any) bool {
+			return len(rowsOfType(rows, EventInvocationError)) >= 1 &&
+				len(rowsOfType(rows, EventLLMResponse)) >= 1 &&
+				len(agentRowsOfType(rows, EventAgentCompleted, "bg_bot")) >= 1
+		})
+		if len(rows) == 0 {
+			t.Fatal("expected emitted rows")
+		}
+		if !lateModelDone.Load() || !lateAgentDone.Load() {
+			t.Fatalf("expected late AfterModel (%t) and AfterAgent (%t) after AfterRun", lateModelDone.Load(), lateAgentDone.Load())
+		}
+		if probe.violations.Load() > 0 {
+			stacks, _ := probe.firstStack.Load().(string)
+			t.Fatalf("observed %d user context calls made while inv.mu was held in late callbacks%s", probe.violations.Load(), stacks)
+		}
+	})
+
+	t.Run("concurrent_pop_during_ended_probe_no_duplicate_span_id", func(t *testing.T) {
+		for _, mode := range []string{"concurrent_pop_agent", "concurrent_after_run_finish"} {
+			t.Run(mode, func(t *testing.T) {
+				tm := newTraceManager()
+				probe := &invLockProbeState{tm: tm}
+				invID := "inv-barrier-" + mode
+				rootID := identity{invocationID: invID, sessionID: "s-barrier", userID: "u1", agentName: "root"}
+				childID := identity{invocationID: invID, sessionID: "s-barrier", userID: "u1", agentName: "worker"}
+
+				endedEntered := make(chan struct{})
+				releaseEnded := make(chan struct{})
+				rootCtx := &lockProbingRootCtx{Context: t.Context(), probe: probe}
+				rootCtx.invID.Store(invID)
+
+				tm.invocationSpan(rootCtx, rootID, nil)
+				inv := tm.invocation(rootCtx, rootID)
+				probe.invPtr.Store(inv)
+
+				barrierCtx := &endedBarrierCtx{
+					Context: rootCtx,
+					probe:   probe,
+					invID:   invID,
+					onFirstEnded: func() {
+						close(endedEntered)
+						<-releaseEnded
+					},
+				}
+				childStart, _ := tm.pushAgentSpan(barrierCtx, childID)
+
+				row1Ch := make(chan rowSpan, 1)
+				go func() {
+					row1Ch <- tm.popAgentSpan(barrierCtx, childID)
+				}()
+
+				<-endedEntered
+				var concurrentID string
+				switch mode {
+				case "concurrent_pop_agent":
+					row2 := tm.popAgentSpan(barrierCtx, childID)
+					concurrentID = row2.spanID
+				case "concurrent_after_run_finish":
+					cancelCtx, cancelCause := context.WithCancelCause(rootCtx)
+					cancelCause(context.Canceled)
+					popped, _ := tm.popUnclosedAgentSpans(cancelCtx, rootID)
+					if len(popped) != 1 {
+						close(releaseEnded)
+						t.Fatalf("popUnclosedAgentSpans returned %d rows, want 1", len(popped))
+					}
+					concurrentID = popped[0].span.spanID
+					tm.endInvocation(cancelCtx, rootID)
+				}
+				close(releaseEnded)
+				row1 := <-row1Ch
+
+				if concurrentID != childStart.spanID {
+					t.Fatalf("concurrent pop span_id = %q, want original childStart %q", concurrentID, childStart.spanID)
+				}
+				if row1.spanID == concurrentID {
+					t.Fatalf("duplicate closing span_id %q emitted across sampleSettledProbesLocked unlock window", row1.spanID)
+				}
+				if probe.violations.Load() > 0 {
+					stacks, _ := probe.firstStack.Load().(string)
+					t.Fatalf("observed %d user context calls made while inv.mu was held%s", probe.violations.Load(), stacks)
+				}
+			})
+		}
+	})
+}
+
+type endedBarrierCtx struct {
+	context.Context
+	probe        *invLockProbeState
+	invID        string
+	enteredOnce  atomic.Bool
+	onFirstEnded func()
+}
+
+func (c *endedBarrierCtx) Ended() bool {
+	c.probe.endedCalls.Add(1)
+	c.probe.check(c.invID)
+	if c.enteredOnce.CompareAndSwap(false, true) && c.onFirstEnded != nil {
+		c.onFirstEnded()
+	}
+	return true
+}
+
+func (inv *invocationTrace) unobservedTaskLocked(ctx context.Context, id identity, callID string, eventTime time.Time) int {
+	return inv.unobservedTaskForActivationLocked(resolveContextActivation(ctx), id, callID, eventTime)
+}
+
+func (inv *invocationTrace) retireFailedTaskAttemptsLocked(ctx context.Context, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int) {
+	inv.retireFailedTaskAttemptsAtLocked(ctx, id, remaining, total, overruled, overruledTotal, "", taskDispatchMaps{}, total+overruledTotal > 1, time.Time{})
+}
+
+func (inv *invocationTrace) retireFailedTaskAttemptsAtLocked(ctx context.Context, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int, leadingActionCallID string, evDispatch taskDispatchMaps, mergedResponse bool, eventTime time.Time) {
+	inv.retireFailedTaskAttemptsAtActivationLocked(resolveContextActivation(ctx), id, remaining, total, overruled, overruledTotal, leadingActionCallID, evDispatch, mergedResponse, eventTime)
+}
+
+func (rec *spanRecord) settleEndedLocked() {
+	if rec.ended != nil && rec.ended() {
+		rec.contextEnded = true
+		rec.ended = nil
+	}
+}
+
+func (inv *invocationTrace) settleEndedInSubtreeLocked(i int, done bool, since uint64) {
+	root := inv.agentStack[i]
+	if done {
+		root.settleEndedLocked()
+		root.runDone = true
+	}
+	subtree := inv.subtreeLocked(i)
+	var needDescendantCheck bool
+	for _, rec := range inv.agentStack[i+1:] {
+		if subtree[rec.spanID] && !rec.runDone {
+			needDescendantCheck = true
+			break
+		}
+	}
+	if needDescendantCheck {
+		var curGoid uint64
+		if since != noFrame {
+			curGoid = currentGoroutineID()
+		}
+		for _, rec := range inv.agentStack[i+1:] {
+			if subtree[rec.spanID] && !rec.runDone && inv.canSettleInSubtreeLocked(i, rec, curGoid, since) {
+				rec.runDone = true
+			}
+		}
+	}
+	inv.settleFinishedLocked()
+}
+
+func (inv *invocationTrace) settleFinishedLocked() {
+	for _, rec := range inv.agentStack[1:] {
+		if rec.runDone && !inv.launcherOpenLocked(rec) {
+			rec.settleEndedLocked()
+		}
+	}
+}
+
+func (inv *invocationTrace) findAgentForContext(ctx context.Context, path, name, branch string) int {
+	return inv.findAgentForActivation(resolveContextActivation(ctx), path, name, branch)
+}
+
+type userMutexContext struct {
+	context.Context
+	mu *sync.Mutex
+}
+
+func (c *userMutexContext) Deadline() (time.Time, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Context.Deadline()
+}
+
+func (c *userMutexContext) Done() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Context.Done()
+}
+
+func (c *userMutexContext) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Context.Err()
+}
+
+func (c *userMutexContext) Value(key any) any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Context.Value(key)
+}

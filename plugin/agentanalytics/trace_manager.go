@@ -62,6 +62,7 @@ const (
 var (
 	agentInterfaceType   = reflect.TypeFor[agent.Agent]()
 	contextInterfaceType = reflect.TypeFor[context.Context]()
+	valueCarrierType     = reflect.TypeFor[interface{ Value(any) any }]()
 )
 
 // agentPkgPath and workflowPkgPath are the import paths of ADK's agent and
@@ -263,6 +264,10 @@ type spanRecord struct {
 	// sub-agent even when an enclosing workflow.ParallelWorker or custom
 	// parent drops its event before OnEventCallback sees it.
 	contextEnded bool
+	// endedSelfSynced records that the activation's own run returned (as in
+	// AfterAgentCallback), synchronizing its own InvocationContext.Ended read
+	// independently of open launchers above it.
+	endedSelfSynced bool
 	// runDone records that the activation's run is known to be over while its
 	// span is open: its own AfterAgentCallback ran, a later attempt of its
 	// workflow.ParallelWorker item started on the goroutine on which it ran
@@ -410,6 +415,15 @@ type spanRecord struct {
 	// per-run token reported for the agent run that started the span (see
 	// activationTokensOf).
 	activationTokens [4]any
+	// cancelState caches cancellation state sampled from ctx.Done/Err/Cause
+	// outside inv.mu so context methods never run while inv.mu is held.
+	cancelState *cancelProbe
+	// baseCallKey, icCallKey, and callHasRunToken support Layer 2 call-span
+	// disambiguation when a wrapper filters private RunTokenKey on some
+	// callbacks while preserving WithICDelta.
+	baseCallKey     string
+	icCallKey       string
+	callHasRunToken bool
 }
 
 // popRetirement carries per-retirement metadata into
@@ -3675,13 +3689,15 @@ type invocationTrace struct {
 // parallel-branch stop point (see collateralFailureCause), as when a parallel
 // agent's errgroup cancels sibling branches with a failing branch's error.
 type recordedError struct {
-	err        error
-	cause      error
-	spanID     string
-	bareKey    string
-	seq        uint64
-	canceled   bool
-	collateral bool
+	err             error
+	cause           error
+	spanID          string
+	bareKey         string
+	icCallKey       string
+	seq             uint64
+	canceled        bool
+	collateral      bool
+	callHasRunToken bool
 }
 
 func newInvocationTraceWithSpan(sc trace.SpanContext, traceID string, now time.Time) *invocationTrace {
@@ -5068,13 +5084,165 @@ func stepEmbeddedContextValue(v reflect.Value, depth int) context.Context {
 	return c
 }
 
+const maxExternalValueHops = 8
+
+type promotedValueKind uint8
+
+const (
+	promotedValueCustom promotedValueKind = iota
+	promotedValueDynamicCtx
+)
+
+type promotedValueInfo struct {
+	kind       promotedValueKind
+	ifaceField []int
+}
+
+var promotedExternalValueCache sync.Map // map[reflect.Type]promotedValueInfo
+
+func classifyPromotedExternalValue(vt reflect.Type) promotedValueInfo {
+	if vt == nil {
+		return promotedValueInfo{kind: promotedValueCustom}
+	}
+	if cached, ok := promotedExternalValueCache.Load(vt); ok {
+		return cached.(promotedValueInfo)
+	}
+	res := computePromotedExternalValueInfo(vt)
+	actual, _ := promotedExternalValueCache.LoadOrStore(vt, res)
+	return actual.(promotedValueInfo)
+}
+
+// computePromotedExternalValueInfo checks using Go's breadth-first method
+// promotion rules whether origVT's Value(any) any method is promoted solely
+// from a unique anonymous field whose interface type embeds or implements
+// context.Context, without custom Value overrides on origVT or on any embedded
+// struct, non-struct defined type, or non-context.Context interface along any
+// promotion path at or above the shallowest Value depth.
+func computePromotedExternalValueInfo(origVT reflect.Type) promotedValueInfo {
+	if !origVT.Implements(contextInterfaceType) {
+		return promotedValueInfo{kind: promotedValueCustom}
+	}
+	type node struct {
+		typ         reflect.Type
+		addressable bool
+		path        []int
+	}
+	type seenKey struct {
+		typ         reflect.Type
+		addressable bool
+	}
+	startAddr := origVT.Kind() == reflect.Pointer
+	vt := origVT
+	if startAddr {
+		vt = vt.Elem()
+	}
+	if vt.Kind() != reflect.Struct || hasVisibleSyncPrimitive(vt, 0, nil) {
+		return promotedValueInfo{kind: promotedValueCustom}
+	}
+	if hasDeclaredMethodOnType(vt, startAddr, "Value") {
+		return promotedValueInfo{kind: promotedValueCustom}
+	}
+	level := []node{{typ: vt, addressable: startAddr}}
+	seenDepth := make(map[seenKey]int, 4)
+	seenDepth[seenKey{typ: vt, addressable: startAddr}] = 0
+	for depth := 0; depth < maxExternalValueHops && len(level) > 0; depth++ {
+		var next []node
+		var ctxFound []int
+		ctxCount := 0
+		customFound := false
+		for _, cur := range level {
+			if cur.typ.Kind() != reflect.Struct {
+				continue
+			}
+			for sf := range cur.typ.Fields() {
+				if !sf.Anonymous {
+					continue
+				}
+				ft := sf.Type
+				fieldPath := slices.Concat(cur.path, sf.Index)
+				if ft.Kind() == reflect.Interface {
+					if ft.Implements(contextInterfaceType) {
+						ctxCount++
+						ctxFound = fieldPath
+					} else if ft.Implements(valueCarrierType) {
+						customFound = true
+					}
+					continue
+				}
+				childAddr := cur.addressable
+				base := ft
+				if base.Kind() == reflect.Pointer {
+					childAddr = true
+					base = base.Elem()
+				}
+				if base.Kind() != reflect.Interface && hasDeclaredMethodOnType(base, childAddr, "Value") {
+					customFound = true
+					continue
+				}
+				if base.Kind() != reflect.Struct {
+					continue
+				}
+				cn := seenKey{typ: base, addressable: childAddr}
+				if prevDepth, ok := seenDepth[cn]; ok && prevDepth < depth+1 {
+					continue
+				}
+				seenDepth[cn] = depth + 1
+				if len(next) >= 64 {
+					return promotedValueInfo{kind: promotedValueCustom}
+				}
+				next = append(next, node{typ: base, addressable: childAddr, path: fieldPath})
+			}
+		}
+		if customFound || ctxCount > 1 {
+			return promotedValueInfo{kind: promotedValueCustom}
+		}
+		if ctxCount == 1 {
+			return promotedValueInfo{
+				kind:       promotedValueDynamicCtx,
+				ifaceField: ctxFound,
+			}
+		}
+		level = next
+	}
+	return promotedValueInfo{kind: promotedValueCustom}
+}
+
+func promotedValueFieldLive(structVal reflect.Value, ifaceField []int) bool {
+	if len(ifaceField) == 0 {
+		return false
+	}
+	cur := structVal
+	for hop, idx := range ifaceField {
+		for cur.Kind() == reflect.Pointer {
+			if cur.IsNil() {
+				return false
+			}
+			cur = cur.Elem()
+		}
+		if cur.Kind() != reflect.Struct || idx < 0 || idx >= cur.NumField() {
+			return false
+		}
+		fv := cur.Field(idx)
+		if !fv.CanInterface() {
+			return false
+		}
+		if hop == len(ifaceField)-1 {
+			return !isNilContextField(fv)
+		}
+		cur = fv
+	}
+	return false
+}
+
 func stepContext(cur any, allowLockFreeExternal bool) (context.Context, bool) {
 	if cur == nil {
 		return nil, false
 	}
 	next := orZero(func() context.Context {
 		v := reflect.ValueOf(cur)
-		for derefs := 0; derefs < 16 && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface); derefs++ {
+		origType := v.Type()
+		var derefs int
+		for ; derefs < 16 && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface); derefs++ {
 			if v.IsNil() {
 				return nil
 			}
@@ -5082,6 +5250,15 @@ func stepContext(cur any, allowLockFreeExternal bool) (context.Context, bool) {
 		}
 		if v.Kind() != reflect.Struct || !canStepStructType(v.Type(), allowLockFreeExternal) {
 			return nil
+		}
+		if allowLockFreeExternal && !isImmutableContextOrAgentPkg(v.Type().PkgPath()) {
+			if derefs > 1 {
+				return nil
+			}
+			info := classifyPromotedExternalValue(origType)
+			if info.kind != promotedValueDynamicCtx || !promotedValueFieldLive(v, info.ifaceField) {
+				return nil
+			}
 		}
 		if !v.CanAddr() {
 			cp := reflect.New(v.Type()).Elem()
@@ -6461,13 +6638,12 @@ func (inv *invocationTrace) excludePeerLookalikesLocked(exclude map[string]bool,
 	return exclude, unmatched, unmatchedByRec, tree
 }
 
-// ownerOf returns the span that the model and tool calls of id run under:
-// the agent's own span, if it is known, preferring the one that the agent run
-// of ctx started (see findAgentForContext), or else the span that it would run
-// under (see parentFor). It never returns nil: parentFor falls back to
-// agentStack[0], the invocation span.
-func (inv *invocationTrace) ownerOf(ctx context.Context, id identity) *spanRecord {
-	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+// ownerOfActivation returns the span that the model and tool calls of act and
+// id run under without invoking any context methods while inv.mu is held: the
+// agent's own span if known, preferring the matching activation on agentStack,
+// or else parentFor(id), falling back to agentStack[0].
+func (inv *invocationTrace) ownerOfActivation(act contextActivation, id identity) *spanRecord {
+	if i := inv.findAgentForActivation(act, id.path, id.agentName, id.branch); i > 0 {
 		return inv.agentStack[i]
 	}
 	return inv.parentFor(id)
@@ -7259,12 +7435,14 @@ func (tm *traceManager) invocationSpan(ctx context.Context, id identity, runner 
 	rememberedRoot := tm.rememberAgentTree(runner)
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, runner, rememberedRoot)
+	cancelState, cancelFn := newCancelProbe(ctx)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteUUIDProviderLocked(id, customUUIDs, true)
 	inv.noteRootAgentLocked(id, rootIn, false)
-	inv.agentStack[0].canceled = canceledFunc(ctx)
+	inv.agentStack[0].canceled = cancelFn
+	inv.agentStack[0].cancelState = cancelState
 	span := inv.rowSpan(inv.agentStack[0], nil, ambient)
 	span.timestamp = now
 	return span
@@ -7603,41 +7781,69 @@ func (tm *traceManager) completeRunEndTarget(id identity, target runEndTarget, n
 // in popTaskAgentSpan on finish_task because llmagent.ModeTask sub-agents
 // complete without firing AfterAgentCallback.
 func (tm *traceManager) popDelegatingAgentSpan(ctx context.Context, id identity) (span rowSpan, ok bool) {
-	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
-	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	ended := endedFunc(ctx)
-	inv.mu.Lock()
-	defer inv.mu.Unlock()
-	inv.noteRootAgentLocked(id, rootIn, true)
-	for i := len(inv.agentStack) - 1; i > 0; i-- {
-		rec := inv.agentStack[i]
-		if rec.kind == spanKindAgent && rec.name == id.agentName && rec.branch == id.branch && rec.path == id.path && rec.taskDelegated {
-			defer inv.retireLateSettledLocked()
-			if rec.parent != nil && rec.parent.kind == spanKindAgent {
-				inv.touchAgentActivityLocked(rec.parent, now)
-			}
-			// As in pushAgentSpan, which runs in the same callback, the runs that
-			// started on this goroutine before are over only if its trace shows
-			// a node attempt (see sameGoroutineSince there).
-			since := noFrame
-			if ended != nil {
-				if _, _, attempt := currentGoroutine(); attempt != attemptNone {
-					since = 0
-				}
-			}
-			// The mark comes from the task's finish_task event and the start
-			// of a new activation of the agent, neither of which shows that
-			// the delegating activation's run returned, so its
-			// InvocationContext is not read (see popTaskAgentSpan).
-			inv.retireAgentLocked(i, false, since)
-			span = inv.rowSpan(rec, latencyOf(rec, now), ambient)
-			span.timestamp = now
-			return span, true
+	since := noFrame
+	if ended != nil {
+		if _, _, attempt := currentGoroutine(); attempt != attemptNone {
+			since = 0
 		}
 	}
-	return rowSpan{}, false
+	for {
+		inv := tm.invocation(ctx, id)
+		rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+		if !inv.lockLive() {
+			continue
+		}
+		outSpan, outOK, retry := func() (rowSpan, bool, bool) {
+			locked := true
+			defer func() {
+				if locked {
+					inv.mu.Unlock()
+				}
+			}()
+			var endedSampled map[*spanRecord]bool
+			if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+				locked = false
+				return rowSpan{}, false, true
+			}
+			inv.noteRootAgentLocked(id, rootIn, true)
+			for i := len(inv.agentStack) - 1; i > 0; i-- {
+				rec := inv.agentStack[i]
+				if rec.kind == spanKindAgent && rec.name == id.agentName && rec.branch == id.branch && rec.path == id.path && rec.taskDelegated {
+					// The mark comes from the task's finish_task event and the start
+					// of a new activation of the agent, neither of which shows that
+					// the delegating activation's run returned, so its
+					// InvocationContext is not read (see popTaskAgentSpan).
+					inv.markSettledSubtreeLocked(i, false, since)
+					if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+						locked = false
+						return rowSpan{}, false, true
+					}
+					curIdx := slices.Index(inv.agentStack, rec)
+					if curIdx <= 0 {
+						return rowSpan{}, false, true
+					}
+					if rec.parent != nil && rec.parent.kind == spanKindAgent {
+						inv.touchAgentActivityLocked(rec.parent, now)
+					}
+					inv.retireAgentLocked(curIdx, false, since)
+					res := inv.rowSpan(rec, latencyOf(rec, now), ambient)
+					res.timestamp = now
+					inv.sampleSettledProbesLocked(true, false, &endedSampled)
+					if !inv.finished {
+						inv.retireLateSettledLocked()
+					}
+					return res, true, false
+				}
+			}
+			return rowSpan{}, false, false
+		}()
+		if !retry {
+			return outSpan, outOK
+		}
+	}
 }
 
 // pushAgentSpan starts the span of an agent run and returns the place of
@@ -7690,13 +7896,15 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		eventClockStart = platform.Now(ctx)
 	}
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-	icAct := icActivationKey(ctx)
-	activation := activationKey(ctx)
+	act := resolveContextActivation(ctx)
+	icAct := act.icAct
+	activation := act.primary()
 	actTokens := activationTokensOf(ctx, icAct, activation)
 	var launch any
 	if l := observeLaunchLineage(ctx, icAct, actTokens); l != nil {
 		launch = l
 	}
+	cancelState, cancelFn := newCancelProbe(ctx)
 	ended := endedFunc(ctx)
 	var goid uint64
 	var origin goroutineOrigin
@@ -7731,15 +7939,6 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	if !inv.lockLive() {
 		return tm.pushAgentSpan(ctx, id)
 	}
-	defer inv.mu.Unlock()
-	inv.started = true
-	inv.noteRootAgentLocked(id, rootIn, true)
-	inv.noteUUIDProviderLocked(id, customUUIDs, false)
-	// Register concurrent peers before the workflow-retry completion-inference
-	// loop so the retry guard can check !rec.concurrentPeer. Only peers that
-	// are NOT earlier attempts of the node are marked (see laterAttempt).
-	parent := inv.parentForRunLocked(id, nil, goid, origin, launch)
-	var concurrentPeer bool
 	isSyntheticRetry := func(other *spanRecord) bool {
 		return activation == nil && other.activation == nil && other.parent != nil && other.parent.activation == nil
 	}
@@ -7796,9 +7995,50 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		}
 		return false, false
 	}
-	// The workflow scheduler starts a node again, on the same branch and node
-	// path, when RetryConfig retries it or when a running node is triggered
-	// again.
+	matchRetryAttempt := func(idx int, rec *spanRecord) (match, synced bool) {
+		later, synced := laterAttempt(rec)
+		if !later {
+			return false, false
+		}
+		sameWorker := attempt == attemptWorker && rec.attempt == attemptWorker && goid != 0 && rec.goroutineID == goid
+		match = sameWorker || (!rec.concurrentPeer && rec.parent == inv.parentForRunLocked(id, inv.subtreeLocked(idx), goid, origin, launch))
+		return match, synced
+	}
+	// Pre-mark any synced earlier retry attempts and sample all ready
+	// cancel/ended probes outside inv.mu before mutating peer/retry state or
+	// inspecting failuresLocked. Re-scan until no newly matching synced retry
+	// arrived while inv.mu was unlocked.
+	var endedSampled map[*spanRecord]bool
+	markedSynced := make(map[*spanRecord]bool)
+	for {
+		newlyMarked := false
+		for i := len(inv.agentStack) - 1; i > 0; i-- {
+			rec := inv.agentStack[i]
+			if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch || rec.path != id.path {
+				continue
+			}
+			if match, synced := matchRetryAttempt(i, rec); match && synced && !markedSynced[rec] {
+				markedSynced[rec] = true
+				inv.markSettledSubtreeLocked(i, true, sameGoroutineSince)
+				newlyMarked = true
+			}
+		}
+		if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+			return tm.pushAgentSpan(ctx, id)
+		}
+		if !newlyMarked {
+			break
+		}
+	}
+	defer inv.mu.Unlock()
+	inv.started = true
+	inv.noteRootAgentLocked(id, rootIn, true)
+	inv.noteUUIDProviderLocked(id, customUUIDs, false)
+	// Register concurrent peers before the workflow-retry completion-inference
+	// loop so the retry guard can check !rec.concurrentPeer. Only peers that
+	// are NOT earlier attempts of the node are marked (see laterAttempt).
+	var concurrentPeer bool
+	parent := inv.parentForRunLocked(id, nil, goid, origin, launch)
 	restarted := attempt == attemptNode && parent.isWorkflow && origin.startedBy(schedulerCreator, parent)
 	for _, other := range inv.agentStack[1:] {
 		if other.kind != spanKindAgent ||
@@ -7838,14 +8078,13 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		// laterAttempt) are kept too: they may still run, or their failure is
 		// the code's own to handle, so neither their InvocationContext nor
 		// whether they failed is read here.
-		later, synced := laterAttempt(rec)
-		sameWorker := attempt == attemptWorker && rec.attempt == attemptWorker && goid != 0 && rec.goroutineID == goid
-		if !later || (!sameWorker && (rec.concurrentPeer || rec.parent != inv.parentForRunLocked(id, inv.subtreeLocked(i), goid, origin, launch))) {
+		match, synced := matchRetryAttempt(i, rec)
+		if !match {
 			continue
 		}
 		if synced {
 			// The earlier attempt's run returned (see laterAttempt).
-			inv.settleEndedInSubtreeLocked(i, true, sameGoroutineSince)
+			inv.markSettledSubtreeLocked(i, true, sameGoroutineSince)
 		}
 		// Without that, only a report shows that the earlier attempt's run
 		// ended, and a node can write one while its run goes on, so the
@@ -7889,7 +8128,8 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		start:                  now,
 		lastActivity:           now,
 		eventClockStart:        eventClockStart,
-		canceled:               canceledFunc(ctx),
+		canceled:               cancelFn,
+		cancelState:            cancelState,
 		ended:                  ended,
 		goroutineID:            goid,
 		origin:                 origin,
@@ -7965,33 +8205,69 @@ func (tm *traceManager) agentNamed(ctx context.Context, id identity) agent.Agent
 // read on, so a run that fails while another branch streams does not look
 // like a caller that stopped reading mid-stream (see clearLastPartialLocked).
 func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
-	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
-	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-	inv.mu.Lock()
-	defer inv.mu.Unlock()
-	defer inv.retireLateSettledLocked()
-	inv.noteRootAgentLocked(id, rootIn, true)
-	i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
-	if i < 0 {
-		span := inv.rowSpan(inv.newChild(inv.parentFor(id), spanKindAgent, now), nil, ambient)
-		span.timestamp = now
-		return span
+	act := resolveContextActivation(ctx)
+	for {
+		inv := tm.invocation(ctx, id)
+		rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+		if !inv.lockLive() {
+			continue
+		}
+		span, retry := func() (rowSpan, bool) {
+			locked := true
+			defer func() {
+				if locked {
+					inv.mu.Unlock()
+				}
+			}()
+			var endedSampled map[*spanRecord]bool
+			if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+				locked = false
+				return rowSpan{}, true
+			}
+			inv.noteRootAgentLocked(id, rootIn, true)
+			i := inv.findAgentForActivation(act, id.path, id.agentName, id.branch)
+			if i < 0 {
+				res := inv.rowSpan(inv.newChild(inv.parentFor(id), spanKindAgent, now), nil, ambient)
+				res.timestamp = now
+				inv.sampleSettledProbesLocked(true, false, &endedSampled)
+				if !inv.finished {
+					inv.retireLateSettledLocked()
+				}
+				return res, false
+			}
+			rec := inv.agentStack[i]
+			rec.completed = true
+			inv.markSettledSubtreeLocked(i, true, rec.seq)
+			if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+				locked = false
+				return rowSpan{}, true
+			}
+			curIdx := slices.Index(inv.agentStack, rec)
+			if curIdx <= 0 {
+				return rowSpan{}, true
+			}
+			if rec.parent != nil && rec.parent.kind == spanKindAgent {
+				inv.touchAgentActivityLocked(rec.parent, now)
+			}
+			if rec.nonLLM && rec.parent != nil && rec.parent.kind == spanKindInvocation {
+				inv.clearLastPartialLocked()
+			}
+			inv.reconcileConcurrentResponseOnPopLocked(curIdx, rec.seq)
+			inv.retireAgentLocked(curIdx, true, rec.seq)
+			res := inv.rowSpan(rec, latencyOf(rec, now), ambient)
+			res.timestamp = now
+			inv.sampleSettledProbesLocked(true, false, &endedSampled)
+			if !inv.finished {
+				inv.retireLateSettledLocked()
+			}
+			return res, false
+		}()
+		if !retry {
+			return span
+		}
 	}
-	rec := inv.agentStack[i]
-	rec.completed = true
-	if rec.parent != nil && rec.parent.kind == spanKindAgent {
-		inv.touchAgentActivityLocked(rec.parent, now)
-	}
-	if rec.nonLLM && rec.parent != nil && rec.parent.kind == spanKindInvocation {
-		inv.clearLastPartialLocked()
-	}
-	inv.reconcileConcurrentResponseOnPopLocked(i, rec.seq)
-	inv.retireAgentLocked(i, true, rec.seq)
-	span := inv.rowSpan(rec, latencyOf(rec, now), ambient)
-	span.timestamp = now
-	return span
 }
 
 // endRestartedNodeRuns purges, when the activation of a workflow agent that id
@@ -8014,36 +8290,87 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 // while it ran, and an attempt that failed without a recorded failure, by not
 // responding, is not known to have stopped until here.
 func (tm *traceManager) endRestartedNodeRuns(ctx context.Context, id identity) []unclosedAgentSpan {
-	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
-	inv.mu.Lock()
-	defer inv.mu.Unlock()
-	i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
-	if i < 0 {
-		return nil
-	}
-	w := inv.agentStack[i]
-	if !w.isWorkflow {
-		return nil
-	}
-	var purged []unclosedAgentSpan
-	// purgeActivationLocked removes agentStack[j] and the spans that run under
-	// it, which all come after it, so the scan goes backwards.
-	for j := len(inv.agentStack) - 1; j > i; j-- {
-		if j >= len(inv.agentStack) {
+	act := resolveContextActivation(ctx)
+	for {
+		inv := tm.invocation(ctx, id)
+		if !inv.lockLive() {
 			continue
 		}
-		rec := inv.agentStack[j]
-		if rec.kind != spanKindAgent || rec.parent != w || !rec.startedAgain || !rec.origin.startedBy(schedulerCreator, w) {
-			continue
-		}
-		inv.settleEndedInSubtreeLocked(j, true, w.seq)
-		if failures := inv.failuresLocked(j, false, inv.reportedOverLocked(j), true); len(failures) > 0 {
-			purged = append(purged, inv.purgeActivationLocked(j, failures, now, ambient)...)
+		purged, retry := func() ([]unclosedAgentSpan, bool) {
+			locked := true
+			defer func() {
+				if locked {
+					inv.mu.Unlock()
+				}
+			}()
+			var endedSampled map[*spanRecord]bool
+			if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+				locked = false
+				return nil, true
+			}
+			i := inv.findAgentForActivation(act, id.path, id.agentName, id.branch)
+			if i <= 0 {
+				return nil, false
+			}
+			w := inv.agentStack[i]
+			if !w.isWorkflow {
+				return nil, false
+			}
+			marked := make(map[*spanRecord]bool)
+			for {
+				newlyMarked := false
+				i = slices.Index(inv.agentStack, w)
+				if i <= 0 {
+					return nil, false
+				}
+				for j := len(inv.agentStack) - 1; j > i; j-- {
+					rec := inv.agentStack[j]
+					if rec.kind != spanKindAgent || rec.parent != w || !rec.startedAgain || !rec.origin.startedBy(schedulerCreator, w) {
+						continue
+					}
+					if !marked[rec] {
+						marked[rec] = true
+						inv.markSettledSubtreeLocked(j, true, w.seq)
+						newlyMarked = true
+					}
+				}
+				if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+					locked = false
+					return nil, true
+				}
+				if !newlyMarked {
+					break
+				}
+			}
+			i = slices.Index(inv.agentStack, w)
+			if i <= 0 {
+				return nil, false
+			}
+			var res []unclosedAgentSpan
+			// purgeActivationLocked removes agentStack[j] and the spans that run under
+			// it, which all come after it, so the scan goes backwards.
+			for j := len(inv.agentStack) - 1; j > i; j-- {
+				if j >= len(inv.agentStack) {
+					continue
+				}
+				rec := inv.agentStack[j]
+				if rec.kind != spanKindAgent || rec.parent != w || !rec.startedAgain || !rec.origin.startedBy(schedulerCreator, w) {
+					continue
+				}
+				inv.markSettledSubtreeLocked(j, true, w.seq)
+				if failures := inv.failuresLocked(j, false, inv.reportedOverLocked(j), true); len(failures) > 0 {
+					res = append(res, inv.purgeActivationLocked(j, failures, now, ambient)...)
+				}
+			}
+			inv.sampleSettledProbesLocked(true, false, &endedSampled)
+			return res, false
+		}()
+		if !retry {
+			return purged
 		}
 	}
-	return purged
 }
 
 // recordNodeCompletion records the end of a node run that ADK's workflow
@@ -8161,7 +8488,7 @@ func (inv *invocationTrace) inWorkflowNodeSubtreeLocked(rec *spanRecord) bool {
 // ran on the current goroutine.
 func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since uint64) {
 	rec := inv.agentStack[i]
-	inv.settleEndedInSubtreeLocked(i, true, since)
+	inv.markSettledSubtreeLocked(i, true, since)
 	var livePeers []*spanRecord
 	for j, other := range inv.agentStack {
 		if j == 0 || j == i {
@@ -8346,56 +8673,88 @@ func (tm *traceManager) popTaskAgentSpanForCalls(ctx context.Context, id identit
 }
 
 func (tm *traceManager) popTaskAgentSpanForEvent(ctx context.Context, id identity, endingCallIDs []string, leadingActionCallID string, evDispatch taskDispatchMaps, failed, mergedResponse bool, eventTime time.Time) (span rowSpan, ok bool) {
-	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
-	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-	inv.mu.Lock()
-	defer inv.mu.Unlock()
-	inv.noteRootAgentLocked(id, rootIn, true)
-	i, status := inv.resolveFinishedTaskLocked(id, endingCallIDs, leadingActionCallID, evDispatch, failed, mergedResponse, eventTime)
-	switch status {
-	case taskMatchAmbiguous:
-		return rowSpan{}, false
-	case taskMatchUnobserved:
-		fallbackCallID := ""
-		for _, cid := range endingCallIDs {
-			if cid != "" {
-				fallbackCallID = cid
-				break
+	act := resolveContextActivation(ctx)
+	for {
+		inv := tm.invocation(ctx, id)
+		rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+		if !inv.lockLive() {
+			continue
+		}
+		outSpan, outOK, retry := func() (rowSpan, bool, bool) {
+			locked := true
+			defer func() {
+				if locked {
+					inv.mu.Unlock()
+				}
+			}()
+			var endedSampled map[*spanRecord]bool
+			if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+				locked = false
+				return rowSpan{}, false, true
 			}
+			inv.noteRootAgentLocked(id, rootIn, true)
+			i, status := inv.resolveFinishedTaskLocked(id, endingCallIDs, leadingActionCallID, evDispatch, failed, mergedResponse, eventTime)
+			switch status {
+			case taskMatchAmbiguous:
+				return rowSpan{}, false, false
+			case taskMatchUnobserved:
+				fallbackCallID := ""
+				for _, cid := range endingCallIDs {
+					if cid != "" {
+						fallbackCallID = cid
+						break
+					}
+				}
+				i = inv.unobservedTaskForActivationLocked(act, id, fallbackCallID, eventTime)
+			}
+			if i <= 0 {
+				return rowSpan{}, false, false
+			}
+			rec := inv.agentStack[i]
+			if !rec.taskMode {
+				return rowSpan{}, false, false
+			}
+			inv.markSettledSubtreeLocked(i, false, noFrame)
+			if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+				locked = false
+				return rowSpan{}, false, true
+			}
+			curIdx := slices.Index(inv.agentStack, rec)
+			if curIdx <= 0 {
+				return rowSpan{}, false, true
+			}
+			if rec.parent != nil && rec.parent.kind == spanKindAgent {
+				inv.touchAgentActivityLocked(rec.parent, now)
+			}
+			// A resumed task can start before its delegating chat's callback, placing
+			// its span under a still-running ancestor instead. Only mark a parent
+			// activation that actually has this task configured as its child.
+			// Non-LLM workflow agents run their own AfterAgentCallback, so nonLLM is
+			// defensively excluded.
+			for j := range inv.agentStack {
+				if inv.agentStack[j].spanID == rec.parentSpanID &&
+					inv.agentStack[j].kind == spanKindAgent &&
+					!inv.agentStack[j].nonLLM &&
+					slices.Contains(inv.agentStack[j].children, rec.name) {
+					inv.agentStack[j].taskDelegated = true
+					break
+				}
+			}
+			inv.retireAgentLocked(curIdx, false, noFrame)
+			res := inv.rowSpan(rec, latencyOf(rec, now), ambient)
+			res.timestamp = now
+			inv.sampleSettledProbesLocked(true, false, &endedSampled)
+			if !inv.finished {
+				inv.retireLateSettledLocked()
+			}
+			return res, true, false
+		}()
+		if !retry {
+			return outSpan, outOK
 		}
-		i = inv.unobservedTaskLocked(ctx, id, fallbackCallID, eventTime)
 	}
-	if i < 0 {
-		return rowSpan{}, false
-	}
-	rec := inv.agentStack[i]
-	if !rec.taskMode {
-		return rowSpan{}, false
-	}
-	defer inv.retireLateSettledLocked()
-	if rec.parent != nil && rec.parent.kind == spanKindAgent {
-		inv.touchAgentActivityLocked(rec.parent, now)
-	}
-	// A resumed task can start before its delegating chat's callback, placing
-	// its span under a still-running ancestor instead. Only mark a parent
-	// activation that actually has this task configured as its child.
-	// Non-LLM workflow agents run their own AfterAgentCallback, so nonLLM is
-	// defensively excluded.
-	for j := range inv.agentStack {
-		if inv.agentStack[j].spanID == rec.parentSpanID &&
-			inv.agentStack[j].kind == spanKindAgent &&
-			!inv.agentStack[j].nonLLM &&
-			slices.Contains(inv.agentStack[j].children, rec.name) {
-			inv.agentStack[j].taskDelegated = true
-			break
-		}
-	}
-	inv.retireAgentLocked(i, false, noFrame)
-	span = inv.rowSpan(rec, latencyOf(rec, now), ambient)
-	span.timestamp = now
-	return span, true
 }
 
 func (inv *invocationTrace) matchesTaskAgentLocked(rec *spanRecord, id identity) bool {
@@ -8844,16 +9203,7 @@ func (inv *invocationTrace) resolveFinishedTaskLocked(id identity, endingCallIDs
 	return consumeWinner(best.idx, candidates)
 }
 
-// unobservedTaskLocked resolves the open task-mode activation of id for a
-// finish_task completion event whose callID was not observed by any open
-// activation's tool callbacks (for example, when an earlier plugin answered
-// BeforeToolCallback and AfterToolCallback, or in synthetic event-only tests
-// without call IDs). Activations that already hold an unconsumed observed
-// ending attempt for another call are skipped when another candidate exists,
-// eventTime excludes activations started after the event was created, and ties
-// fall back to ctx's activation (when in pool) or the newest plausible
-// matching activation as on main. inv.mu must be held.
-func (inv *invocationTrace) unobservedTaskLocked(ctx context.Context, id identity, _ string, eventTime time.Time) int {
+func (inv *invocationTrace) unobservedTaskForActivationLocked(act contextActivation, id identity, _ string, eventTime time.Time) int {
 	var withoutEnding, allMatching []int
 	for i := 1; i < len(inv.agentStack); i++ {
 		rec := inv.agentStack[i]
@@ -8890,7 +9240,7 @@ func (inv *invocationTrace) unobservedTaskLocked(ctx context.Context, id identit
 	if len(pool) == 1 {
 		return pool[0]
 	}
-	if ctxIdx := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); ctxIdx > 0 && slices.Contains(pool, ctxIdx) {
+	if ctxIdx := inv.findAgentForActivation(act, id.path, id.agentName, id.branch); ctxIdx > 0 && slices.Contains(pool, ctxIdx) {
 		return ctxIdx
 	}
 	return pool[len(pool)-1]
@@ -8906,12 +9256,13 @@ func (tm *traceManager) noteTaskStart(ctx context.Context, id identity, callID s
 	}
 	recordedAt := platform.Now(ctx)
 	dispatch := dispatchMapsOf(toolActionsOf(ctx))
+	act := resolveContextActivation(ctx)
 	inv := tm.invocation(ctx, id)
 	for !inv.lockLive() {
 		inv = tm.invocation(ctx, id)
 	}
 	defer inv.mu.Unlock()
-	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+	if i := inv.findAgentForActivation(act, id.path, id.agentName, id.branch); i > 0 {
 		rec := inv.agentStack[i]
 		for j := range rec.taskAttempts {
 			if rec.taskAttempts[j].callID == callID && rec.taskAttempts[j].startedOnly {
@@ -8944,6 +9295,7 @@ func (tm *traceManager) noteTaskAttempt(ctx context.Context, id identity, callID
 	}
 	recordedAt := platform.Now(ctx)
 	dispatch := dispatchMapsOf(toolActionsOf(ctx))
+	act := resolveContextActivation(ctx)
 	kind := taskAttemptPending
 	if ends {
 		if failed {
@@ -8957,7 +9309,7 @@ func (tm *traceManager) noteTaskAttempt(ctx context.Context, id identity, callID
 		inv = tm.invocation(ctx, id)
 	}
 	defer inv.mu.Unlock()
-	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+	if i := inv.findAgentForActivation(act, id.path, id.agentName, id.branch); i > 0 {
 		rec := inv.agentStack[i]
 		for j := range rec.taskAttempts {
 			if rec.taskAttempts[j].callID == callID && rec.taskAttempts[j].startedOnly {
@@ -9021,24 +9373,14 @@ func (tm *traceManager) retireFailedTaskAttemptsForEvent(ctx context.Context, id
 	if total == 0 && overruledTotal == 0 {
 		return
 	}
+	act := resolveContextActivation(ctx)
 	inv := tm.invocation(ctx, id)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
-	inv.retireFailedTaskAttemptsAtLocked(ctx, id, remaining, total, overruled, overruledTotal, leadingActionCallID, evDispatch, mergedResponse, eventTime)
+	inv.retireFailedTaskAttemptsAtActivationLocked(act, id, remaining, total, overruled, overruledTotal, leadingActionCallID, evDispatch, mergedResponse, eventTime)
 }
 
-func (inv *invocationTrace) retireFailedTaskAttemptsLocked(ctx context.Context, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int) {
-	inv.retireFailedTaskAttemptsAtLocked(ctx, id, remaining, total, overruled, overruledTotal, "", taskDispatchMaps{}, total+overruledTotal > 1, time.Time{})
-}
-
-// retireFailedTaskAttemptsAtLocked compacts pending finish_task attempts
-// matching remaining across plausible open activations of id, preferring an
-// exact leading-part EventActions map match first, excluding activations and
-// single-call attempts recorded after eventTime so a delayed older failure
-// cannot erase a newer activation's pending attempt, and retiring
-// overruledEndingCalls on the activation where remaining matched or on a
-// plausible matching activation when remaining was empty. inv.mu must be held.
-func (inv *invocationTrace) retireFailedTaskAttemptsAtLocked(ctx context.Context, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int, leadingActionCallID string, evDispatch taskDispatchMaps, mergedResponse bool, eventTime time.Time) {
+func (inv *invocationTrace) retireFailedTaskAttemptsAtActivationLocked(act contextActivation, id identity, remaining map[string]int, total int, overruled map[string]int, overruledTotal int, leadingActionCallID string, evDispatch taskDispatchMaps, mergedResponse bool, eventTime time.Time) {
 	matchesAgent := func(rec *spanRecord) bool {
 		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch ||
 			(id.path != "" && rec.path != "" && rec.path != id.path) || len(rec.taskAttempts) == 0 {
@@ -9147,15 +9489,15 @@ func (inv *invocationTrace) retireFailedTaskAttemptsAtLocked(ctx context.Context
 		clear(rec.taskAttempts[write:])
 		rec.taskAttempts = rec.taskAttempts[:write]
 	}
-	ctxIdx := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
-	if ctxIdx > 0 && activationKey(ctx) != nil && matchesAgent(inv.agentStack[ctxIdx]) {
+	ctxIdx := inv.findAgentForActivation(act, id.path, id.agentName, id.branch)
+	if ctxIdx > 0 && act.primary() != nil && matchesAgent(inv.agentStack[ctxIdx]) {
 		retireOverruledOn(inv.agentStack[ctxIdx])
 	}
 	// When no concrete activation context matched, prefer the earliest-recorded
 	// plausible overruled attempt so a failed merged batch on an older open run
 	// retires its own overruled ending call before a concurrent newer run's.
 	for i := 1; i < len(inv.agentStack) && overruledTotal > 0; i++ {
-		if i == ctxIdx && activationKey(ctx) != nil {
+		if i == ctxIdx && act.primary() != nil {
 			continue
 		}
 		if rec := inv.agentStack[i]; matchesAgent(rec) {
@@ -9203,7 +9545,7 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 	// runs of the sub-agents that it ran on its own goroutine, and ADK's
 	// built-in workflow and parallel agents after those that they started on
 	// goroutines that they wait for (see spanRecord.joins).
-	inv.settleEndedInSubtreeLocked(i, done, since)
+	inv.markSettledSubtreeLocked(i, done, since)
 	// The failed activations and the open spans they run under are attributed
 	// while the spans are still open.
 	failed := inv.openCallOwnersLocked(nil)
@@ -9552,13 +9894,37 @@ func (inv *invocationTrace) purgeActivationLocked(i int, failures map[string]err
 // tool call that the current callback ends, or noFrame if it is not known:
 // the activations that started on the current goroutine after the call did
 // returned before it (see canSettleInSubtreeLocked).
-func (inv *invocationTrace) endToolRunsLocked(ctx context.Context, id identity, stopped bool, now time.Time, ambient string, since uint64) []unclosedAgentSpan {
+func (inv *invocationTrace) prepareToolRunSettlementLocked(act contextActivation, id identity, since uint64) {
+	if len(inv.agentStack) == 0 {
+		return
+	}
+	i := max(0, inv.findAgentForActivation(act, id.path, id.agentName, id.branch))
+	owner := inv.agentStack[i]
+	for _, rec := range inv.toolSpans {
+		if rec.parentSpanID == owner.spanID {
+			return
+		}
+	}
+	for j := len(inv.agentStack) - 1; j > i; j-- {
+		rec := inv.agentStack[j]
+		if rec.parentSpanID != owner.spanID || !isSubNodePath(rec.path, owner.path) {
+			continue
+		}
+		done := rec.runDone || rec.activation == nil || rec.goroutineID == 0
+		inv.markSettledSubtreeLocked(j, done, since)
+	}
+}
+
+func (inv *invocationTrace) endToolRunsForActivationLocked(act contextActivation, id identity, stopped bool, now time.Time, ambient string, since uint64) []unclosedAgentSpan {
+	if len(inv.agentStack) == 0 {
+		return nil
+	}
 	// In RunLive the root agent has no span on agentStack, so
-	// findAgentForContext returns -1 and Live-tool child activations parent
+	// findAgentForActivation returns -1 and Live-tool child activations parent
 	// under agentStack[0] (spanKindInvocation). Using max(0, ...) lets
-	// endToolRunsLocked end the activations that a Live tool ran once the
-	// tool finishes.
-	i := max(0, inv.findAgentForContext(ctx, id.path, id.agentName, id.branch))
+	// endToolRunsForActivationLocked end the activations that a Live tool ran
+	// once the tool finishes.
+	i := max(0, inv.findAgentForActivation(act, id.path, id.agentName, id.branch))
 	owner := inv.agentStack[i]
 	for _, rec := range inv.toolSpans {
 		if rec.parentSpanID == owner.spanID {
@@ -9576,7 +9942,7 @@ func (inv *invocationTrace) endToolRunsLocked(ctx context.Context, id identity, 
 		// The tool call that ran the activation returned, but only a run on
 		// the tool call's own goroutine is known to be over with it.
 		done := rec.runDone || rec.activation == nil || rec.goroutineID == 0
-		inv.settleEndedInSubtreeLocked(j, done, since)
+		inv.markSettledSubtreeLocked(j, done, since)
 		failures := inv.failuresLocked(j, stopped, nil, true)
 		switch {
 		case len(failures) == 0:
@@ -9731,100 +10097,125 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 }
 
 func (tm *traceManager) completeResponseWithActions(ctx context.Context, id identity, author, branch string, calls []string, eventActions *session.EventActions) {
-	inv := tm.invocation(ctx, id)
 	now := tm.now()
-	inv.mu.Lock()
-	defer inv.mu.Unlock()
-	// Any return, early ones included, can leave a late activation that
-	// nothing can end anymore (see retireLateSettledLocked).
-	defer inv.retireLateSettledLocked()
-	wasPartial := inv.lastSessionEventPartial
-	partialSpanID := inv.lastPartialSpanID
-	inv.clearLastPartialLocked()
-	i := inv.findAgent(id.path, author, branch)
-	if i <= 0 {
-		if author == "" || author == userAuthor {
-			return
+	for {
+		inv := tm.invocation(ctx, id)
+		if !inv.lockLive() {
+			continue
 		}
-		// ADK runs an agent's own AfterAgentCallback after this plugin's
-		// retired the agent's activation, so recovery content that a custom
-		// agent returns arrives once the activation is gone: scan all open
-		// spans because a concurrent undeclared sibling started before the
-		// custom agent retired can sit above the ancestor carrying the
-		// swallowable retiredCause (see retireAgentLocked).
-		for _, rec := range inv.agentStack {
-			rec.clearRetiredCauseFor(author, branch, id.path)
-		}
-		inv.retireDrainedDescendantsLocked(func(p *spanRecord, openSet map[string]bool) bool {
-			return !openSet[p.spanID] && !p.propagatesChildError && p.contextFailureCause() == nil &&
-				p.name == author && p.branch == branch && (id.path == "" || p.path == "" || p.path == id.path)
-		})
-		parent := inv.parentFor(identity{agentName: author, branch: branch, path: id.path})
-		if author == id.agentName {
-			return
-		}
-		if j := slices.Index(inv.agentStack, parent); j > 0 {
-			inv.touchAgentActivityLocked(inv.agentStack[j], now)
-			inv.markRespondedLocked(inv.lineageLocked(j))
-		}
-		return
-	}
-	var matchedPending, absorbed bool
-	i, matchedPending, absorbed = inv.selectResponseOwnerLocked(i, calls, wasPartial, partialSpanID, now)
-	if absorbed {
-		return
-	}
-	owner := inv.agentStack[i]
-	inv.touchAgentActivityLocked(owner, now)
-	// An activation is created after the one that it runs under, so one pass
-	// over the later spans finds all that run under the owner.
-	under := map[string]bool{owner.spanID: true}
-	for _, rec := range inv.agentStack[i+1:] {
-		if under[rec.parentSpanID] && withinBranch(rec.branch, branch) && withinPath(rec.path, id.path, false) {
-			under[rec.spanID] = true
-		}
-	}
-	for _, rec := range inv.agentStack[i:] {
-		if under[rec.spanID] {
-			rec.retiredCauses = nil
-		}
-	}
-	if !owner.concurrentPeer || matchedPending {
-		for key, e := range inv.unrecoveredErrors {
-			if inv.activationOfLocked(e) == i && !e.collateral {
-				delete(inv.unrecoveredErrors, key)
+		retry := func() bool {
+			locked := true
+			settledExit := false
+			var endedSampled map[*spanRecord]bool
+			defer func() {
+				if locked {
+					inv.mu.Unlock()
+				}
+			}()
+			defer func() {
+				if settledExit {
+					// Removing the matched tool calls or drained descendants may leave no
+					// launcher open for an activation whose run is over (see
+					// launcherOpenLocked); sample ready probes before retiring late state.
+					inv.sampleSettledProbesLocked(true, false, &endedSampled)
+					if !inv.finished {
+						inv.retireLateSettledLocked()
+					}
+				}
+			}()
+			if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+				locked = false
+				return true
 			}
+			wasPartial := inv.lastSessionEventPartial
+			partialSpanID := inv.lastPartialSpanID
+			inv.clearLastPartialLocked()
+			i := inv.findAgent(id.path, author, branch)
+			if i <= 0 {
+				if author == "" || author == userAuthor {
+					return false
+				}
+				settledExit = true
+				// ADK runs an agent's own AfterAgentCallback after this plugin's
+				// retired the agent's activation, so recovery content that a custom
+				// agent returns arrives once the activation is gone: scan all open
+				// spans because a concurrent undeclared sibling started before the
+				// custom agent retired can sit above the ancestor carrying the
+				// swallowable retiredCause (see retireAgentLocked).
+				for _, rec := range inv.agentStack {
+					rec.clearRetiredCauseFor(author, branch, id.path)
+				}
+				inv.retireDrainedDescendantsLocked(func(p *spanRecord, openSet map[string]bool) bool {
+					return !openSet[p.spanID] && !p.propagatesChildError && p.contextFailureCause() == nil &&
+						p.name == author && p.branch == branch && (id.path == "" || p.path == "" || p.path == id.path)
+				})
+				parent := inv.parentFor(identity{agentName: author, branch: branch, path: id.path})
+				if author == id.agentName {
+					return false
+				}
+				if j := slices.Index(inv.agentStack, parent); j > 0 {
+					inv.touchAgentActivityLocked(inv.agentStack[j], now)
+					inv.markRespondedLocked(inv.lineageLocked(j))
+				}
+				return false
+			}
+			settledExit = true
+			var matchedPending, absorbed bool
+			i, matchedPending, absorbed = inv.selectResponseOwnerLocked(i, calls, wasPartial, partialSpanID, now)
+			if absorbed {
+				return false
+			}
+			owner := inv.agentStack[i]
+			inv.touchAgentActivityLocked(owner, now)
+			// An activation is created after the one that it runs under, so one pass
+			// over the later spans finds all that run under the owner.
+			under := map[string]bool{owner.spanID: true}
+			for _, rec := range inv.agentStack[i+1:] {
+				if under[rec.parentSpanID] && withinBranch(rec.branch, branch) && withinPath(rec.path, id.path, false) {
+					under[rec.spanID] = true
+				}
+			}
+			for _, rec := range inv.agentStack[i:] {
+				if under[rec.spanID] {
+					rec.retiredCauses = nil
+				}
+			}
+			if !owner.concurrentPeer || matchedPending {
+				for key, e := range inv.unrecoveredErrors {
+					if inv.activationOfLocked(e) == i && !e.collateral {
+						delete(inv.unrecoveredErrors, key)
+					}
+				}
+			}
+			for key, rec := range inv.llmSpans {
+				if rec.parentSpanID == owner.spanID {
+					delete(inv.llmSpans, key)
+				}
+			}
+			for key, rec := range inv.toolSpans {
+				if rec.parentSpanID == owner.spanID && slices.Contains(calls, toolKeyCall(key)) {
+					delete(inv.toolSpans, key)
+				}
+			}
+			for key, rec := range inv.completedTools {
+				if rec.parentSpanID == owner.spanID && slices.Contains(calls, toolKeyCall(key)) && eventActionsMatchLiveAttempt(eventActions, rec.errorAttempt.Value()) {
+					delete(inv.completedTools, key)
+				}
+			}
+			inv.syncOpenCallsLocked()
+			inv.markRespondedLocked(inv.lineageLocked(i))
+			inv.markRespondedLocked(under)
+			if !owner.propagatesChildError && owner.contextFailureCause() == nil {
+				inv.retireDrainedDescendantsLocked(func(p *spanRecord, _ map[string]bool) bool {
+					return p == owner
+				})
+			}
+			return false
+		}()
+		if !retry {
+			return
 		}
 	}
-	for key, rec := range inv.llmSpans {
-		if rec.parentSpanID == owner.spanID {
-			delete(inv.llmSpans, key)
-		}
-	}
-	for key, rec := range inv.toolSpans {
-		if rec.parentSpanID == owner.spanID && slices.Contains(calls, toolKeyCall(key)) {
-			delete(inv.toolSpans, key)
-		}
-	}
-	for key, rec := range inv.completedTools {
-		if rec.parentSpanID == owner.spanID && slices.Contains(calls, toolKeyCall(key)) && eventActionsMatchLiveAttempt(eventActions, rec.errorAttempt.Value()) {
-			delete(inv.completedTools, key)
-		}
-	}
-	inv.syncOpenCallsLocked()
-	inv.markRespondedLocked(inv.lineageLocked(i))
-	inv.markRespondedLocked(under)
-	if !owner.propagatesChildError && owner.contextFailureCause() == nil {
-		inv.retireDrainedDescendantsLocked(func(p *spanRecord, _ map[string]bool) bool {
-			return p == owner
-		})
-	}
-	// Removing the matched tool calls may leave no launcher open for an
-	// activation whose run was already known to be over (see
-	// launcherOpenLocked). The event does not show that any run that those
-	// calls made returned, so none is marked as finished here (see
-	// markToolRunsDoneLocked).
-	inv.settleFinishedLocked()
 }
 
 func sameMapPtr[K comparable, V any](a, b map[K]V) bool {
@@ -10007,53 +10398,83 @@ func (tm *traceManager) recordError(ctx context.Context, id identity, key string
 		return
 	}
 	bareKey := key
-	key = callKey(ctx, key)
-	inv := tm.invocation(ctx, id)
-	inv.mu.Lock()
-	defer inv.mu.Unlock()
-	if inv.unrecoveredErrors == nil {
-		inv.unrecoveredErrors = make(map[string]recordedError)
-	}
-	var spanID string
-	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
-		spanID = inv.agentStack[i].spanID
-	}
-	seq := inv.nextSeqLocked()
-	if prev, exists := inv.unrecoveredErrors[key]; exists && (prev.spanID == "" || prev.spanID == spanID) {
-		seq = prev.seq
-	}
-	if prev, exists := inv.unrecoveredErrors[key]; exists && prev.spanID != "" && prev.spanID != spanID {
-		inv.unrecoveredErrors[prev.spanID+"\x00"+key] = prev
-	}
-	// The error is checked like a call that ctx starts under the agent. A
-	// context cancels its children before cancel returns, so the contexts
-	// that a workflow or a parallel agent canceled are canceled by now.
-	owner := inv.ownerOf(ctx, id)
-	if owner.kind == spanKindAgent {
-		inv.touchAgentActivityLocked(owner, tm.now())
-		// A recorded error clears stale model- and tool-event credits so a
-		// peer's response cannot claim this activation's events (see
-		// selectResponseOwnerLocked).
-		owner.awaitingModelEvent = 0
-		owner.awaitingToolEvent = 0
-	}
-	call := &spanRecord{canceled: canceledFunc(ctx), parent: owner, stopPoint: owner.kind == spanKindInvocation}
-	var cause error
-	var collateral bool
-	if errors.Is(err, context.Canceled) {
-		cause, collateral = call.collateralFailureCause()
-		if cause != nil && !errors.Is(err, cause) {
-			err = fmt.Errorf("%w: %w", err, cause)
+	act := resolveContextActivation(ctx)
+	callCancelState, callCancelFn := newCancelProbe(ctx)
+	for {
+		inv := tm.invocation(ctx, id)
+		if !inv.lockLive() {
+			continue
 		}
-	}
-	inv.unrecoveredErrors[key] = recordedError{
-		err:        err,
-		cause:      cause,
-		spanID:     spanID,
-		bareKey:    bareKey,
-		seq:        seq,
-		canceled:   call.canceledByStop(),
-		collateral: collateral,
+		retry := func() bool {
+			locked := true
+			defer func() {
+				if locked {
+					inv.mu.Unlock()
+				}
+			}()
+			if !inv.sampleSettledProbesLocked(false, true, nil) {
+				locked = false
+				return true
+			}
+			if inv.unrecoveredErrors == nil {
+				inv.unrecoveredErrors = make(map[string]recordedError)
+			}
+			canon, ambiguousIC := inv.canonicalActivationLocked(act, id)
+			resolvedKey, prev, hasPrev := inv.resolveErrorKeyLocked(bareKey, canon, ambiguousIC)
+			storeKey := callKeyFromAct(canon.primary(), bareKey)
+			icKey := callKeyFromAct(canon.icAct, bareKey)
+			var spanID string
+			if i := inv.findAgentForActivation(canon, id.path, id.agentName, id.branch); i > 0 {
+				spanID = inv.agentStack[i].spanID
+			}
+			seq := inv.nextSeqLocked()
+			if hasPrev && (prev.spanID == "" || prev.spanID == spanID) {
+				seq = prev.seq
+				if resolvedKey != storeKey {
+					delete(inv.unrecoveredErrors, resolvedKey)
+				}
+			} else if hasPrev && prev.spanID != "" && prev.spanID != spanID {
+				inv.unrecoveredErrors[prev.spanID+"\x00"+resolvedKey] = prev
+			} else if directPrev, exists := inv.unrecoveredErrors[storeKey]; exists && (directPrev.spanID == "" || directPrev.spanID == spanID) {
+				seq = directPrev.seq
+			} else if directPrev, exists := inv.unrecoveredErrors[storeKey]; exists && directPrev.spanID != "" && directPrev.spanID != spanID {
+				inv.unrecoveredErrors[directPrev.spanID+"\x00"+storeKey] = directPrev
+			}
+			// The error is checked like a call that ctx starts under the agent.
+			owner := inv.ownerOfActivation(canon, id)
+			if owner.kind == spanKindAgent {
+				inv.touchAgentActivityLocked(owner, tm.now())
+				// A recorded error clears stale model- and tool-event credits so a
+				// peer's response cannot claim this activation's events (see
+				// selectResponseOwnerLocked).
+				owner.awaitingModelEvent = 0
+				owner.awaitingToolEvent = 0
+			}
+			call := &spanRecord{cancelState: callCancelState, canceled: callCancelFn, parent: owner, stopPoint: owner.kind == spanKindInvocation}
+			var cause error
+			var collateral bool
+			if errors.Is(err, context.Canceled) {
+				cause, collateral = call.collateralFailureCause()
+				if cause != nil && !errors.Is(err, cause) {
+					err = fmt.Errorf("%w: %w", err, cause)
+				}
+			}
+			inv.unrecoveredErrors[storeKey] = recordedError{
+				err:             err,
+				cause:           cause,
+				spanID:          spanID,
+				bareKey:         bareKey,
+				icCallKey:       icKey,
+				seq:             seq,
+				canceled:        call.canceledByStop(),
+				collateral:      collateral,
+				callHasRunToken: canon.runToken != nil,
+			}
+			return false
+		}()
+		if !retry {
+			return
+		}
 	}
 }
 
@@ -10062,12 +10483,18 @@ func (tm *traceManager) recordError(ctx context.Context, id identity, key string
 // (completedModels[key] != nil). A later call on a new activation, such as a
 // retry in a loop agent, does not erase an earlier unrecovered error.
 func (tm *traceManager) clearError(ctx context.Context, id identity, key string) {
-	key = callKey(ctx, key)
+	bareKey := key
+	act := resolveContextActivation(ctx)
 	inv := tm.invocation(ctx, id)
-	inv.mu.Lock()
+	for !inv.lockLive() {
+		inv = tm.invocation(ctx, id)
+	}
 	defer inv.mu.Unlock()
-	if inv.completedModels[key] != nil {
-		delete(inv.unrecoveredErrors, key)
+	canon, ambiguousIC := inv.canonicalActivationLocked(act, id)
+	if _, compRec, hasComp := inv.resolveCallSpanLocked(inv.completedModels, bareKey, canon, ambiguousIC); hasComp && compRec != nil {
+		if errKey, _, hasErr := inv.resolveErrorKeyLocked(bareKey, canon, ambiguousIC); hasErr {
+			delete(inv.unrecoveredErrors, errKey)
+		}
 	}
 }
 
@@ -10275,13 +10702,19 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-	inv.mu.Lock()
-	defer inv.mu.Unlock()
-	inv.noteRootAgentLocked(id, rootIn, false)
 	var cancelErr error
 	if ctx != nil {
 		cancelErr = orZero(ctx.Err)
 	}
+	ctxEnded := invocationEnded(ctx)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	var endedSampled map[*spanRecord]bool
+	inv.sampleSettledProbesLocked(true, false, &endedSampled)
+	if inv.finished {
+		return nil, nil
+	}
+	inv.noteRootAgentLocked(id, rootIn, false)
 	// A caller that stopped reading on the last session event, a partial one,
 	// stopped the run's workflow and any parallel agent too, which cancel the
 	// work that still runs, including work that started after the event. A
@@ -10325,26 +10758,29 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 
 	siblingCause := cmp.Or(inv.openFailureCauseLocked(), collateralCause)
 	if len(inv.agentStack) <= 1 {
-		if primaryErr == nil && !invocationEnded(ctx) && siblingCause != nil {
+		if primaryErr == nil && !ctxEnded && siblingCause != nil {
 			primaryErr = siblingCause
 		}
 		inv.truncateAgentsLocked()
 		return nil, primaryErr
 	}
 
-	if primaryErr == nil && !invocationEnded(ctx) {
+	if primaryErr == nil && !ctxEnded {
 		// When AfterRun runs on the goroutine that started agentStack[1] (the
 		// runner's root agent, or an activation that stayed open after the
-		// root agent's span retired), settleEndedInSubtreeLocked(1, true, 0)
-		// records that agentStack[1] finished running, settles it, and
-		// settles the activations under it whose runs are known to be over
-		// before the reverse-order loop below pops any remaining unclosed
-		// spans. done and since 0 hold here: AfterRun runs only after the
-		// root agent's Run returned, and every agent run that started on this
-		// goroutine ran inside that Run, so it has returned too.
+		// root agent's span retired), markSettledSubtreeLocked(1, true, 0) +
+		// sampleSettledProbesLocked records that agentStack[1] finished running,
+		// settles it, and settles the activations under it whose runs are known
+		// to be over outside inv.mu before the reverse-order loop pops any
+		// remaining unclosed spans.
 		if len(inv.agentStack) > 1 {
 			if goid := currentGoroutineID(); goid != 0 && inv.agentStack[1].goroutineID == goid {
-				inv.settleEndedInSubtreeLocked(1, true, 0)
+				inv.markSettledSubtreeLocked(1, true, 0)
+				inv.sampleSettledProbesLocked(true, false, &endedSampled)
+				if inv.finished {
+					return nil, nil
+				}
+				siblingCause = cmp.Or(inv.openFailureCauseLocked(), collateralCause)
 			}
 		}
 		partialSuppress := inv.lastEventPartial && siblingCause == nil
@@ -10433,29 +10869,7 @@ func (rec *spanRecord) responded() bool {
 	return rec.hasResponse || rec.contextEnded
 }
 
-// settleEndedLocked calls rec.ended and, once it reports true, records that in
-// contextEnded and drops rec.ended. An activation's InvocationContext is
-// marked as ended on the goroutine that runs the activation, without
-// synchronization: by ADK when a BeforeAgentCallback answers for the
-// activation, before the activation yields its first event, or by a custom
-// agent that calls EndInvocation while it runs, which it can do after it
-// wrote its last event. So the callers call it only for an activation whose
-// run is known to be over (see spanRecord.runDone, which neither a node
-// completion event nor a run on the current goroutine shows by itself), on a
-// goroutine that has synchronized with the end of that run (see
-// settleEndedInSubtreeLocked and settleFinishedLocked), and a false result is
-// checked again when such a point is reached for an activation that it runs
-// under. An activation whose span an event retires, such as a finish_task
-// function response, is not settled on that event (see
-// settleEndedInSubtreeLocked).
-func (rec *spanRecord) settleEndedLocked() {
-	if rec.ended != nil && rec.ended() {
-		rec.contextEnded = true
-		rec.ended = nil
-	}
-}
-
-// noFrame is the since bound of settleEndedInSubtreeLocked that takes no
+// noFrame is the since bound of markSettledSubtreeLocked that takes no
 // activation to be over because it ran on the current goroutine.
 const noFrame = ^uint64(0)
 
@@ -10509,11 +10923,11 @@ const noFrame = ^uint64(0)
 // end, whereas one that started earlier may still be suspended below that
 // callback, as when a function node runs an agent inside its loop over the
 // events of another run.
-func (inv *invocationTrace) settleEndedInSubtreeLocked(i int, done bool, since uint64) {
+func (inv *invocationTrace) markSettledSubtreeLocked(i int, done bool, since uint64) {
 	root := inv.agentStack[i]
 	if done {
-		root.settleEndedLocked()
 		root.runDone = true
+		root.endedSelfSynced = true
 	}
 	subtree := inv.subtreeLocked(i)
 	var needDescendantCheck bool
@@ -10534,7 +10948,88 @@ func (inv *invocationTrace) settleEndedInSubtreeLocked(i int, done bool, since u
 			}
 		}
 	}
-	inv.settleFinishedLocked()
+}
+
+// sampleSettledProbesLocked releases inv.mu only when at least one reachable
+// closed cancelProbe or eligible ended callback needs sampling, reads those
+// callbacks outside inv.mu, re-acquires inv.mu, commits ended=true results,
+// and repeats until no eligible probes remain. When requireLive is true and inv
+// finished while unlocked, it unlocks inv.mu and returns false.
+func (inv *invocationTrace) sampleSettledProbesLocked(includeEnded, requireLive bool, endedSampled *map[*spanRecord]bool) bool {
+	if endedSampled == nil {
+		var local map[*spanRecord]bool
+		endedSampled = &local
+	}
+	for {
+		var probes []*cancelProbe
+		var seen map[*spanRecord]bool
+		addChain := func(r *spanRecord) {
+			for s := r; s != nil; s = s.parent {
+				if seen != nil && seen[s] {
+					break
+				}
+				if seen == nil {
+					seen = make(map[*spanRecord]bool, 8)
+				}
+				seen[s] = true
+				if s.cancelState != nil && s.cancelState.readyToSample() {
+					probes = append(probes, s.cancelState)
+				}
+			}
+		}
+		for _, rec := range inv.agentStack {
+			addChain(rec)
+		}
+		for _, rec := range inv.llmSpans {
+			addChain(rec)
+		}
+		for _, rec := range inv.toolSpans {
+			addChain(rec)
+		}
+
+		var endedRecs []*spanRecord
+		var endedFns []func() bool
+		if includeEnded {
+			for _, rec := range inv.agentStack[1:] {
+				if !rec.contextEnded && rec.ended != nil && rec.runDone && (rec.endedSelfSynced || !inv.launcherOpenLocked(rec)) {
+					if *endedSampled != nil && (*endedSampled)[rec] {
+						continue
+					}
+					if *endedSampled == nil {
+						*endedSampled = make(map[*spanRecord]bool, 4)
+					}
+					(*endedSampled)[rec] = true
+					endedRecs = append(endedRecs, rec)
+					endedFns = append(endedFns, rec.ended)
+				}
+			}
+		}
+		if len(probes) == 0 && len(endedRecs) == 0 {
+			return true
+		}
+		inv.mu.Unlock()
+		for _, p := range probes {
+			p.sample()
+		}
+		var endedDone []bool
+		if len(endedFns) > 0 {
+			endedDone = make([]bool, len(endedFns))
+			for i, fn := range endedFns {
+				endedDone[i] = fn()
+			}
+		}
+		inv.mu.Lock()
+		for i, rec := range endedRecs {
+			if endedDone[i] {
+				rec.contextEnded = true
+				rec.ended = nil
+			}
+		}
+		if requireLive && inv.finished {
+			inv.mu.Unlock()
+			return false
+		}
+	}
 }
 
 // canSettleInSubtreeLocked reports whether the run of d, an open activation
@@ -10613,25 +11108,6 @@ func (p *spanRecord) joins(c *spanRecord, reported bool) bool {
 	return false
 }
 
-// settleFinishedLocked settles (see settleEndedLocked) the open activations
-// that are already known to have finished running (see spanRecord.runDone)
-// and that no tool call or agent that is still open may have run (see
-// launcherOpenLocked). It marks no run as finished itself, so the callers call
-// it after something marked one or ended a tool call or an agent that may have
-// held one back: settleEndedInSubtreeLocked when an agent ends, popToolSpan
-// when a tool call returns, after markToolRunsDoneLocked marked the runs that
-// the call made on its own goroutine, and completeResponse when a function
-// response of an agent's event ends the agent's tool calls. Such an event
-// shows that the calls answered, not that any run that they made is over, so
-// it only releases activations that were marked before.
-func (inv *invocationTrace) settleFinishedLocked() {
-	for _, rec := range inv.agentStack[1:] {
-		if rec.runDone && !inv.launcherOpenLocked(rec) {
-			rec.settleEndedLocked()
-		}
-	}
-}
-
 // retireLateSettledLocked retires the activations of a late trace that
 // nothing can end anymore. An activation that its BeforeAgentCallback
 // answered never gets an AfterAgentCallback, and in the late state, where
@@ -10680,7 +11156,7 @@ func (inv *invocationTrace) settleFinishedLocked() {
 // completeResponse) call it last, once they no longer hold an index into
 // agentStack and have reported the failures that they found.
 func (inv *invocationTrace) retireLateSettledLocked() {
-	if !inv.isLate || len(inv.agentStack) <= 1 {
+	if !inv.isLate || inv.finished || len(inv.agentStack) <= 1 {
 		return
 	}
 	hasSettled := func() bool {
@@ -10892,6 +11368,43 @@ func endedFunc(ctx context.Context) func() bool {
 // follows.
 const maxActivationKeyDepth = 8
 
+// contextActivation carries the two independent activation identities extracted
+// outside inv.mu from a callback context: runToken from ADK's unforgeable private
+// RunTokenKey when unfiltered, and icAct from WithICDelta(nil).
+type contextActivation struct {
+	runToken any
+	icAct    any
+}
+
+func (a contextActivation) primary() any {
+	if a.runToken != nil {
+		return a.runToken
+	}
+	return a.icAct
+}
+
+func runTokenKey(ctx context.Context) any {
+	if r := runTokenReaderOnce(); r != nil && ctx != nil {
+		if entry := peelToADKContext(ctx); entry != nil {
+			if tok := orZero(func() any { return r(entry) }); isComparableToken(tok) {
+				return tok
+			}
+		}
+	}
+	return nil
+}
+
+// resolveContextActivation extracts both runToken and icAct outside inv.mu.
+func resolveContextActivation(ctx context.Context) contextActivation {
+	if ctx == nil {
+		return contextActivation{}
+	}
+	return contextActivation{
+		runToken: runTokenKey(ctx),
+		icAct:    icActivationKey(ctx),
+	}
+}
+
 // activationKey returns a stable per-activation identity key for ctx. On ADK
 // cores exposing ADKRunToken, it prefers the unforgeable per-run token minted
 // by agent.Run (copied across WithICDelta and WithContext derivatives so
@@ -10900,14 +11413,7 @@ const maxActivationKeyDepth = 8
 // (and when ADKRunToken returns nil for contexts created outside agent.Run), it
 // falls back to icActivationKey.
 func activationKey(ctx context.Context) any {
-	if r := runTokenReaderOnce(); r != nil && ctx != nil {
-		if entry := peelToADKContext(ctx); entry != nil {
-			if tok := orZero(func() any { return r(entry) }); isComparableToken(tok) {
-				return tok
-			}
-		}
-	}
-	return icActivationKey(ctx)
+	return resolveContextActivation(ctx).primary()
 }
 
 // icActivationKey returns the per-activation context pointer that ADK created
@@ -10952,44 +11458,161 @@ func icActivationKey(ctx context.Context) any {
 	})
 }
 
-// isActivationOf reports whether rec is the span of the agent activation
-// whose run ctx belongs to (see activationKey).
-func (rec *spanRecord) isActivationOf(ctx context.Context) bool {
+func (rec *spanRecord) isActivation(act contextActivation) bool {
 	if rec.kind != spanKindAgent {
 		return false
 	}
-	if act := activationKey(ctx); act != nil && rec.activation == act {
+	if p := act.primary(); p != nil && rec.activation == p {
 		return true
 	}
-	if icAct := icActivationKey(ctx); icAct != nil && rec.icActivation == icAct {
+	if act.runToken != nil && rec.activation == act.runToken {
+		return true
+	}
+	if act.icAct != nil && rec.icActivation == act.icAct {
 		return true
 	}
 	return false
 }
 
-// findAgentForContext returns the index in agentStack of the open span of the
-// agent name on branch that the agent run of ctx started (see activationKey),
-// or else, if no open span of it carries the key, as findAgent does. Concurrent
-// runs of the same agent on one branch and node path are then told apart by
-// the run that each callback belongs to rather than by which started last.
-func (inv *invocationTrace) findAgentForContext(ctx context.Context, path, name, branch string) int {
-	if act := activationKey(ctx); act != nil {
+func (inv *invocationTrace) findAgentForActivation(act contextActivation, path, name, branch string) int {
+	if act.runToken != nil {
 		for i := len(inv.agentStack) - 1; i > 0; i-- {
 			rec := inv.agentStack[i]
-			if rec.kind == spanKindAgent && rec.activation == act && rec.name == name && rec.branch == branch {
+			if rec.kind == spanKindAgent && rec.activation == act.runToken && rec.name == name && rec.branch == branch {
 				return i
 			}
 		}
 	}
-	if icAct := icActivationKey(ctx); icAct != nil {
+	if act.icAct != nil {
 		for i := len(inv.agentStack) - 1; i > 0; i-- {
 			rec := inv.agentStack[i]
-			if rec.kind == spanKindAgent && rec.icActivation == icAct && rec.name == name && rec.branch == branch && (path == "" || rec.path == "" || rec.path == path) {
+			if rec.kind == spanKindAgent && rec.icActivation == act.icAct && rec.name == name && rec.branch == branch && (path == "" || rec.path == "" || rec.path == path) {
 				return i
 			}
 		}
 	}
 	return inv.findAgent(path, name, branch)
+}
+
+// canonicalActivationLocked resolves a callback activation whose private
+// RunTokenKey was filtered by a wrapper back to the single open agent span
+// sharing act.icAct on id, or marks ambiguousIC when multiple concurrent open
+// activations share act.icAct so calls never cross-pair across lookalikes.
+// inv.mu must be held.
+func (inv *invocationTrace) canonicalActivationLocked(act contextActivation, id identity) (canon contextActivation, ambiguousIC bool) {
+	canon = act
+	if act.runToken != nil {
+		if canon.icAct == nil {
+			for i := len(inv.agentStack) - 1; i > 0; i-- {
+				rec := inv.agentStack[i]
+				if rec.kind == spanKindAgent && rec.activation == act.runToken && rec.icActivation != nil {
+					canon.icAct = rec.icActivation
+					break
+				}
+			}
+		}
+		return canon, false
+	}
+	if act.icAct == nil {
+		return canon, false
+	}
+	var match *spanRecord
+	matches := 0
+	for i := len(inv.agentStack) - 1; i > 0; i-- {
+		rec := inv.agentStack[i]
+		if rec.kind == spanKindAgent && rec.icActivation == act.icAct && rec.name == id.agentName && rec.branch == id.branch && (id.path == "" || rec.path == "" || rec.path == id.path) {
+			matches++
+			if matches == 1 {
+				match = rec
+			}
+		}
+	}
+	if matches > 1 {
+		return canon, true
+	}
+	if matches == 1 && match.activation != nil && match.activation != match.icActivation {
+		canon.runToken = match.activation
+	}
+	return canon, false
+}
+
+func callKeyFromAct(act any, baseKey string) string {
+	if act != nil {
+		return fmt.Sprintf("%p\x00%s", act, baseKey)
+	}
+	return baseKey
+}
+
+// resolveCallSpanLocked resolves an in-flight or completed call span across
+// canonical primary key lookup and unambiguous icCallKey Layer 2 matching,
+// rejecting cross-pairing when concurrent open activations share icAct or
+// when two distinct runTokens collide. inv.mu must be held.
+func (inv *invocationTrace) resolveCallSpanLocked(m map[string]*spanRecord, baseKey string, canon contextActivation, ambiguousIC bool) (key string, rec *spanRecord, ok bool) {
+	pref := callKeyFromAct(canon.primary(), baseKey)
+	if !ambiguousIC {
+		if rec = m[pref]; rec != nil {
+			return pref, rec, true
+		}
+	}
+	if ambiguousIC || canon.icAct == nil {
+		return pref, nil, false
+	}
+	icKey := callKeyFromAct(canon.icAct, baseKey)
+	var foundKey string
+	var foundRec *spanRecord
+	matches := 0
+	for k, candidate := range m {
+		if candidate == nil || candidate.baseCallKey != baseKey || candidate.icCallKey != icKey {
+			continue
+		}
+		if canon.runToken != nil && candidate.callHasRunToken {
+			continue
+		}
+		matches++
+		if matches > 1 {
+			return pref, nil, false
+		}
+		foundKey = k
+		foundRec = candidate
+	}
+	if matches == 1 {
+		return foundKey, foundRec, true
+	}
+	return pref, nil, false
+}
+
+func (inv *invocationTrace) resolveErrorKeyLocked(baseKey string, canon contextActivation, ambiguousIC bool) (key string, rec recordedError, ok bool) {
+	pref := callKeyFromAct(canon.primary(), baseKey)
+	if !ambiguousIC {
+		if rec, ok = inv.unrecoveredErrors[pref]; ok {
+			return pref, rec, true
+		}
+	}
+	if ambiguousIC || canon.icAct == nil {
+		return pref, recordedError{}, false
+	}
+	icKey := callKeyFromAct(canon.icAct, baseKey)
+	var foundKey string
+	var foundRec recordedError
+	matches := 0
+	for k, candidate := range inv.unrecoveredErrors {
+		if candidate.bareKey != baseKey || candidate.icCallKey != icKey {
+			continue
+		}
+		if canon.runToken != nil && candidate.callHasRunToken {
+			continue
+		}
+		matches++
+		if matches > 1 {
+			return pref, recordedError{}, false
+		}
+		foundKey = k
+		foundRec = candidate
+	}
+	if matches == 1 {
+		return foundKey, foundRec, true
+	}
+	return pref, recordedError{}, false
 }
 
 // currentGoroutineID returns the runtime goroutine ID of the caller, or 0 if
@@ -11477,14 +12100,19 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	act := resolveContextActivation(ctx)
+	cancelState, cancelFn := newCancelProbe(ctx)
 	if !inv.lockLive() {
 		return tm.pushLLMSpan(ctx, id)
 	}
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key := callKey(ctx, llmKey(id))
-	owner := inv.ownerOf(ctx, id)
+	canon, ambiguousIC := inv.canonicalActivationLocked(act, id)
+	baseKey := llmKey(id)
+	icKey := callKeyFromAct(canon.icAct, baseKey)
+	key := callKeyFromAct(canon.primary(), baseKey)
+	owner := inv.ownerOfActivation(canon, id)
 	inv.clearLastPartialUnderLocked(owner)
 	if owner.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(owner, now)
@@ -11496,12 +12124,20 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 		owner.awaitingToolEvent = 0
 	}
 	rec := inv.newChild(owner, spanKindLLM, now)
-	rec.canceled = canceledFunc(ctx)
+	rec.canceled = cancelFn
+	rec.cancelState = cancelState
 	rec.callStarted = true
-	rec.ownActivation = owner.isActivationOf(ctx)
+	rec.ownActivation = owner.isActivation(canon)
+	rec.baseCallKey = baseKey
+	rec.icCallKey = icKey
+	rec.callHasRunToken = canon.runToken != nil
 	inv.llmSpans[key] = rec
 	inv.syncOpenCallsLocked()
-	delete(inv.completedModels, key)
+	if oldKey, _, ok := inv.resolveCallSpanLocked(inv.completedModels, baseKey, canon, ambiguousIC); ok {
+		delete(inv.completedModels, oldKey)
+	} else {
+		delete(inv.completedModels, key)
+	}
 	span := inv.rowSpan(rec, nil, ambient)
 	span.timestamp = now
 	return span
@@ -11515,13 +12151,15 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 func (tm *traceManager) recordFirstToken(ctx context.Context, id identity) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
+	act := resolveContextActivation(ctx)
 	for !inv.lockLive() {
 		inv = tm.invocation(ctx, id)
 	}
 	defer inv.mu.Unlock()
-	if rec := inv.llmSpans[callKey(ctx, llmKey(id))]; rec != nil && rec.firstToken.IsZero() {
+	canon, ambiguousIC := inv.canonicalActivationLocked(act, id)
+	if _, rec, ok := inv.resolveCallSpanLocked(inv.llmSpans, llmKey(id), canon, ambiguousIC); ok && rec.firstToken.IsZero() {
 		rec.firstToken = now
-		if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
+		if owner := inv.ownerOfActivation(canon, id); owner.kind == spanKindAgent {
 			inv.touchAgentActivityLocked(owner, now)
 		}
 	}
@@ -11590,51 +12228,68 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	act := resolveContextActivation(ctx)
 	if !inv.lockLive() {
 		return tm.popLLMSpan(ctx, id, responded)
 	}
 	defer inv.mu.Unlock()
-	// The ended call, including a recovered call completed from completedModels,
-	// no longer keeps its agent or the agents above it from retiring in the
-	// late state (see retireLateSettledLocked).
-	defer inv.retireLateSettledLocked()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key := callKey(ctx, llmKey(id))
-	rec := inv.llmSpans[key]
+	canon, ambiguousIC := inv.canonicalActivationLocked(act, id)
+	baseKey := llmKey(id)
+	icKey := callKeyFromAct(canon.icAct, baseKey)
+	key, rec, _ := inv.resolveCallSpanLocked(inv.llmSpans, baseKey, canon, ambiguousIC)
+	owner := inv.ownerOfActivation(canon, id)
+	finishPop := func(span rowSpan) rowSpan {
+		// The ended call, including a recovered call completed from
+		// completedModels, no longer keeps its agent or the agents above it
+		// from retiring in the late state (see retireLateSettledLocked).
+		inv.sampleSettledProbesLocked(true, false, nil)
+		if !inv.finished {
+			inv.retireLateSettledLocked()
+		}
+		return span
+	}
 	if rec == nil {
 		if responded {
-			if prev := inv.completedModels[key]; prev != nil {
-				delete(inv.completedModels, key)
-				if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
+			if compKey, prev, ok := inv.resolveCallSpanLocked(inv.completedModels, baseKey, canon, ambiguousIC); ok && prev != nil {
+				delete(inv.completedModels, compKey)
+				if owner.kind == spanKindAgent {
 					owner.hasResponse = true
 					owner.modelResponded = true
 					owner.awaitingModelEvent++
 				}
 				span := inv.rowSpan(prev, nil, ambient)
 				span.timestamp = now
-				return span
+				return finishPop(span)
 			}
 		}
-		span := inv.rowSpan(inv.newChild(inv.ownerOf(ctx, id), spanKindLLM, now), nil, ambient)
+		span := inv.rowSpan(inv.newChild(owner, spanKindLLM, now), nil, ambient)
 		span.timestamp = now
-		return span
+		return finishPop(span)
 	}
 	delete(inv.llmSpans, key)
 	inv.syncOpenCallsLocked()
 	rec.dropContexts()
-	if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
+	if owner.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(owner, now)
 	}
 	if !responded {
 		// A model call that did not respond leaves no pending model-event
 		// credit: clear stale credits so a peer's response cannot claim
 		// this activation's events (see selectResponseOwnerLocked).
-		inv.completedModels[key] = rec
-		if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
+		storeKey := key
+		if !rec.callHasRunToken && canon.runToken != nil {
+			storeKey = callKeyFromAct(canon.primary(), baseKey)
+			rec.callHasRunToken = true
+		}
+		rec.baseCallKey = baseKey
+		rec.icCallKey = icKey
+		inv.completedModels[storeKey] = rec
+		if owner.kind == spanKindAgent {
 			owner.awaitingModelEvent = 0
 		}
 	} else {
-		if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
+		if owner.kind == spanKindAgent {
 			owner.hasResponse = true
 			owner.modelResponded = true
 			owner.awaitingModelEvent++
@@ -11645,7 +12300,7 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 	}
 	span := inv.rowSpan(rec, latencyOf(rec, now), ambient)
 	span.timestamp = now
-	return span
+	return finishPop(span)
 }
 
 // pushToolSpan starts the span of a tool call and returns the place of its
@@ -11656,14 +12311,19 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	baseKey := key
+	act := resolveContextActivation(ctx)
+	cancelState, cancelFn := newCancelProbe(ctx)
 	if !inv.lockLive() {
 		return tm.pushToolSpan(ctx, id, key)
 	}
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key = callKey(ctx, key)
-	owner := inv.ownerOf(ctx, id)
+	canon, ambiguousIC := inv.canonicalActivationLocked(act, id)
+	icKey := callKeyFromAct(canon.icAct, baseKey)
+	key = callKeyFromAct(canon.primary(), baseKey)
+	owner := inv.ownerOfActivation(canon, id)
 	inv.clearLastPartialUnderLocked(owner)
 	if owner.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(owner, now)
@@ -11677,13 +12337,21 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 		owner.awaitingModelEvent = 0
 	}
 	rec := inv.newChild(owner, spanKindTool, now)
-	rec.canceled = canceledFunc(ctx)
+	rec.canceled = cancelFn
+	rec.cancelState = cancelState
 	rec.seq = inv.nextSeqLocked()
 	rec.callStarted = true
-	rec.ownActivation = owner.isActivationOf(ctx)
+	rec.ownActivation = owner.isActivation(canon)
+	rec.baseCallKey = baseKey
+	rec.icCallKey = icKey
+	rec.callHasRunToken = canon.runToken != nil
 	inv.toolSpans[key] = rec
 	inv.syncOpenCallsLocked()
-	delete(inv.completedTools, key)
+	if oldKey, _, ok := inv.resolveCallSpanLocked(inv.completedTools, baseKey, canon, ambiguousIC); ok {
+		delete(inv.completedTools, oldKey)
+	} else {
+		delete(inv.completedTools, key)
+	}
 	span := inv.rowSpan(rec, nil, ambient)
 	span.timestamp = now
 	return span
@@ -11702,66 +12370,126 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 // that never ended are ended—purged if they failed, or retired quietly
 // otherwise (see endToolRunsLocked).
 func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string, fromError bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
-	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	actions := toolActionsOf(ctx)
-	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-	if !inv.lockLive() {
-		return tm.popToolSpan(ctx, id, key, fromError)
-	}
-	defer inv.mu.Unlock()
-	inv.noteRootAgentLocked(id, rootIn, true)
-	key = callKey(ctx, key)
-	open := inv.toolSpans[key]
-	delete(inv.toolSpans, key)
-	inv.syncOpenCallsLocked()
-	if open != nil {
-		inv.markToolRunsDoneLocked(open)
-	}
-	if !fromError {
-		if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
-			inv.agentStack[i].awaitingToolEvent++
+	baseKey := key
+	act := resolveContextActivation(ctx)
+	for {
+		inv := tm.invocation(ctx, id)
+		rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+		if !inv.lockLive() {
+			continue
+		}
+		outSpan, outPurged, outClosed, retry := func() (rowSpan, []unclosedAgentSpan, bool, bool) {
+			locked := true
+			defer func() {
+				if locked {
+					inv.mu.Unlock()
+				}
+			}()
+			var endedSampled map[*spanRecord]bool
+			if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+				locked = false
+				return rowSpan{}, nil, false, true
+			}
+			inv.noteRootAgentLocked(id, rootIn, true)
+			canon, ambiguousIC := inv.canonicalActivationLocked(act, id)
+			icKey := callKeyFromAct(canon.icAct, baseKey)
+			resolvedKey, open, found := inv.resolveCallSpanLocked(inv.toolSpans, baseKey, canon, ambiguousIC)
+			if found {
+				delete(inv.toolSpans, resolvedKey)
+			}
+			inv.syncOpenCallsLocked()
+			if open != nil {
+				inv.markToolRunsDoneLocked(open)
+			}
+			if !fromError {
+				if i := inv.findAgentForActivation(canon, id.path, id.agentName, id.branch); i > 0 {
+					inv.agentStack[i].awaitingToolEvent++
+				}
+			}
+			if open != nil && open.parent != nil && open.parent.kind == spanKindAgent {
+				inv.touchAgentActivityLocked(open.parent, now)
+			}
+			since := noFrame
+			if open != nil {
+				since = open.seq
+			}
+			var openSpan rowSpan
+			if open != nil {
+				// Finalize open.dropContexts(), completedTools, and openSpan before
+				// releasing inv.mu so neither a concurrent pushToolSpan nor AfterRun
+				// handover can interleave with stale completedTools state.
+				open.dropContexts()
+				if fromError {
+					storeKey := resolvedKey
+					if !open.callHasRunToken && canon.runToken != nil {
+						storeKey = callKeyFromAct(canon.primary(), baseKey)
+						open.callHasRunToken = true
+					}
+					open.baseCallKey = baseKey
+					open.icCallKey = icKey
+					open.errorAttempt = attemptOf(actions)
+					inv.completedTools[storeKey] = open
+				}
+				openSpan = inv.rowSpan(open, latencyOf(open, now), ambient)
+				openSpan.timestamp = now
+			}
+			inv.prepareToolRunSettlementLocked(canon, id, since)
+			if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+				locked = false
+				if open != nil {
+					return openSpan, nil, false, false
+				}
+				return rowSpan{}, nil, false, true
+			}
+			resPurged := inv.endToolRunsForActivationLocked(canon, id, inv.lastSessionEventPartial, now, ambient, since)
+			if open != nil {
+				// The ended tool call may have run open activations under other spans.
+				inv.sampleSettledProbesLocked(true, false, &endedSampled)
+				if !inv.finished {
+					inv.retireLateSettledLocked()
+				}
+				return openSpan, resPurged, false, false
+			}
+			// Sample newly unblocked probes and retire settled late activations before
+			// choosing ownerOfActivation for a synthesized fallback span.
+			if !inv.sampleSettledProbesLocked(true, true, &endedSampled) {
+				locked = false
+				return rowSpan{}, nil, false, true
+			}
+			inv.retireLateSettledLocked()
+			var resSpan rowSpan
+			var resClosed bool
+			if !fromError {
+				if compKey, rec, ok := inv.resolveCallSpanLocked(inv.completedTools, baseKey, canon, ambiguousIC); ok && rec != nil && rec.errorAttempt == attemptOf(actions) {
+					delete(inv.completedTools, compKey)
+					resSpan = inv.rowSpan(rec, nil, ambient)
+					resSpan.timestamp = now
+					resClosed = true
+				} else {
+					rec := inv.newChild(inv.ownerOfActivation(canon, id), spanKindTool, now)
+					resSpan = inv.rowSpan(rec, nil, ambient)
+					resSpan.timestamp = now
+				}
+			} else {
+				rec := inv.newChild(inv.ownerOfActivation(canon, id), spanKindTool, now)
+				rec.dropContexts()
+				rec.baseCallKey = baseKey
+				rec.icCallKey = icKey
+				rec.callHasRunToken = canon.runToken != nil
+				rec.errorAttempt = attemptOf(actions)
+				inv.completedTools[callKeyFromAct(canon.primary(), baseKey)] = rec
+				resSpan = inv.rowSpan(rec, nil, ambient)
+				resSpan.timestamp = now
+			}
+			return resSpan, resPurged, resClosed, false
+		}()
+		if !retry {
+			return outSpan, outPurged, outClosed
 		}
 	}
-	if open != nil && open.parent != nil && open.parent.kind == spanKindAgent {
-		inv.touchAgentActivityLocked(open.parent, now)
-	}
-	since := noFrame
-	if open != nil {
-		since = open.seq
-	}
-	purged = inv.endToolRunsLocked(ctx, id, inv.lastSessionEventPartial, now, ambient, since)
-	// The ended tool call may have run open activations under other spans.
-	inv.settleFinishedLocked()
-	inv.retireLateSettledLocked()
-	if open != nil {
-		open.dropContexts()
-		if fromError {
-			open.errorAttempt = attemptOf(actions)
-			inv.completedTools[key] = open
-		}
-		span = inv.rowSpan(open, latencyOf(open, now), ambient)
-		span.timestamp = now
-		return span, purged, false
-	}
-	if !fromError {
-		if rec := inv.completedTools[key]; rec != nil && rec.errorAttempt == attemptOf(actions) {
-			delete(inv.completedTools, key)
-			span = inv.rowSpan(rec, nil, ambient)
-			span.timestamp = now
-			return span, purged, true
-		}
-	}
-	rec := inv.newChild(inv.ownerOf(ctx, id), spanKindTool, now)
-	if fromError {
-		rec.dropContexts()
-		rec.errorAttempt = attemptOf(actions)
-		inv.completedTools[key] = rec
-	}
-	span = inv.rowSpan(rec, nil, ambient)
-	span.timestamp = now
-	return span, purged, false
 }
 
 // eventSpan returns the place of a row that describes a session event: the
@@ -11813,33 +12541,110 @@ func (inv *invocationTrace) lockLive() bool {
 	return true
 }
 
-// canceledFunc returns the spanRecord.canceled function of a span that a
-// callback with ctx starts. It reports canceled == true only when ctx was
-// canceled with the sentinel context.Canceled as its cause, as when a
-// consumer stop cancels through a plain CancelFunc. When ctx ended with any
-// other cause, such as a sibling branch's error in a parallel agent's
-// errgroup (errgroup.WithContext) or context.DeadlineExceeded, it reports
-// canceled == false and returns that cause.
-func canceledFunc(ctx context.Context) func() (canceled bool, cause error) {
-	if ctx == nil {
-		return nil
-	}
-	return func() (bool, error) {
-		err := orZero(ctx.Err)
-		if err == nil {
-			return false, nil
-		}
-		cause := orZero(func() error { return context.Cause(ctx) })
+type cancelSnapshot struct {
+	canceled bool
+	cause    error
+}
+
+type cancelProbe struct {
+	done    <-chan struct{}
+	errFn   func() error
+	causeFn func() error
+	snap    atomic.Pointer[cancelSnapshot]
+}
+
+func (p *cancelProbe) readState() cancelSnapshot {
+	err := orZero(p.errFn)
+	var s cancelSnapshot
+	if err != nil {
+		cause := orZero(p.causeFn)
 		if errors.Is(err, context.Canceled) && cause == context.Canceled {
-			return true, nil
+			s.canceled = true
+		} else {
+			s.cause = cmp.Or(cause, err)
 		}
-		return false, cmp.Or(cause, err)
 	}
+	return s
+}
+
+func (p *cancelProbe) readyToSample() bool {
+	if p == nil || p.snap.Load() != nil || p.done == nil {
+		return false
+	}
+	select {
+	case <-p.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *cancelProbe) sample() cancelSnapshot {
+	if p == nil {
+		return cancelSnapshot{}
+	}
+	if s := p.snap.Load(); s != nil {
+		return *s
+	}
+	s := p.readState()
+	p.snap.CompareAndSwap(nil, &s)
+	if cur := p.snap.Load(); cur != nil {
+		return *cur
+	}
+	return s
+}
+
+func (p *cancelProbe) settled() (cancelSnapshot, bool) {
+	if p == nil {
+		return cancelSnapshot{}, false
+	}
+	s := p.snap.Load()
+	if s == nil {
+		return cancelSnapshot{}, false
+	}
+	return *s, true
+}
+
+// newCancelProbe captures ctx.Done outside inv.mu and pre-samples initial state
+// if Done is already closed or nil, returning both the lock-free cancelProbe and
+// a compatible canceledFunc closure.
+func newCancelProbe(ctx context.Context) (*cancelProbe, func() (bool, error)) {
+	if ctx == nil {
+		return nil, nil
+	}
+	done := orZero(ctx.Done)
+	p := &cancelProbe{
+		done:    done,
+		errFn:   ctx.Err,
+		causeFn: func() error { return context.Cause(ctx) },
+	}
+	if done == nil {
+		p.sample()
+	} else {
+		select {
+		case <-done:
+			p.sample()
+		default:
+		}
+	}
+	fn := func() (bool, error) {
+		if s, ok := p.settled(); ok {
+			return s.canceled, s.cause
+		}
+		return false, nil
+	}
+	return p, fn
 }
 
 // wasCanceled reports whether the context of the callback that started rec
 // was canceled with cause context.Canceled.
 func (rec *spanRecord) wasCanceled() bool {
+	if rec.cancelState != nil {
+		if s, ok := rec.cancelState.settled(); ok {
+			return s.canceled
+		}
+		return false
+	}
 	if rec.canceled == nil {
 		return false
 	}
@@ -11851,6 +12656,12 @@ func (rec *spanRecord) wasCanceled() bool {
 // of the callback that started rec ended, or nil if the context is still live
 // or was canceled with cause context.Canceled.
 func (rec *spanRecord) failureCause() error {
+	if rec.cancelState != nil {
+		if s, ok := rec.cancelState.settled(); ok {
+			return s.cause
+		}
+		return nil
+	}
 	if rec.canceled == nil {
 		return nil
 	}
@@ -12024,18 +12835,6 @@ func attemptOf(actions *session.EventActions) toolAttempt {
 	return weak.Make(actions)
 }
 
-// callKey prefixes key with the pointer identity of ctx's agent-run
-// InvocationContext when present (see activationKey), isolating concurrent
-// activations of the same agent on one branch and node path without retaining
-// ctx. Because toolKeyCall reads after the final NUL byte, prefixing before
-// toolKey preserves toolKeyCall unchanged.
-func callKey(ctx context.Context, key string) string {
-	if act := activationKey(ctx); act != nil {
-		return fmt.Sprintf("%p\x00%s", act, key)
-	}
-	return key
-}
-
 // dropContexts drops what rec keeps of the callbacks of its run: the context
 // of the callback that started it, the InvocationContext of its activation
 // (see ended and activation), any retired causes, and the span that it started
@@ -12045,7 +12844,7 @@ func callKey(ctx context.Context, key string) string {
 // report false, contextFailureCause and openFailureCause report nil, and
 // collateralFailureCause reports (nil, false) for such a record.
 func (rec *spanRecord) dropContexts() {
-	rec.canceled, rec.ended, rec.activation, rec.icActivation, rec.parent = nil, nil, nil, nil, nil
+	rec.canceled, rec.cancelState, rec.ended, rec.activation, rec.icActivation, rec.parent = nil, nil, nil, nil, nil, nil
 	rec.activationTokens = [4]any{}
 	rec.retiredCauses = nil
 }
@@ -12084,7 +12883,7 @@ func (inv *invocationTrace) dropRetiredLateContextsLocked(retired ...*spanRecord
 		// reaches anymore.
 		for s := r; !keepParent[s]; {
 			p := s.parent
-			s.canceled, s.parent = nil, nil
+			s.canceled, s.cancelState, s.parent = nil, nil, nil
 			if p == nil || p.kind != spanKindAgent || slices.Contains(inv.agentStack, p) {
 				break
 			}

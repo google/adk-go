@@ -68,10 +68,16 @@ func (m Map) RootAgent(cur agent.Agent) agent.Agent {
 	}
 }
 
+// ToContext returns a context that carries parents for ADK agents and runner
+// internals without an artificial ADK hop limit, while wrapping it with ADK's
+// hop-bounded internal parent-map key on the outside so ADKParentMap and legacy
+// key discovery both resolve directly to ADK's internal key.
 func ToContext(ctx context.Context, parents Map) context.Context {
-	return adkcontext.WithParentMap(ctx, parents)
+	return adkcontext.WithParentMap(context.WithValue(ctx, mapCtxKey, parents), parents)
 }
 
+// FromContext returns the child-to-parent agent map stored in ctx, or nil if
+// ctx is nil or carries none.
 func FromContext(ctx context.Context) Map {
 	if ctx == nil {
 		return nil
@@ -84,4 +90,6 @@ func FromContext(ctx context.Context) Map {
 	return m
 }
 
-const mapCtxKey = adkcontext.ParentMapKey
+type ctxKey int
+
+const mapCtxKey ctxKey = 0
