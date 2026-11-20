@@ -310,7 +310,7 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 		InvocationContextDelta: &agent.InvocationContextDelta{Branch: &childBranch, IsolationScope: &childScope},
 	}
 
-	childCtx := s.parentCtx.WithDelta(delta)
+	childCtx := withAgentNodeOwner(s.parentCtx.WithDelta(delta), child, append([]string{childPath}, childAncestors...))
 
 	// Emit an "invoke_node <name>" span nested under the dynamic
 	// node's span (carried in s.parentCtx), so RunNode-driven
@@ -445,6 +445,12 @@ func (s *dynamicSubScheduler) runNode(child Node, input any, opts runNodeOptions
 			}
 		}
 		childOut, hasChildOutput := childEventOutput(ev)
+		if hasChildOutput && !outputCountsFor(ev, childPath) {
+			// Forwarded from a node nested under the child, such as a task
+			// agent dispatched by a workflow the child transferred to. The
+			// resume scan already keys outputs by the emitter's path.
+			childOut, hasChildOutput = nil, false
+		}
 		delegatedCompletion := false
 		if !hasChildOutput && ev.NodeInfo.Path == childPath {
 			childOut, delegatedCompletion = completedDelegatedOutput(ev)
