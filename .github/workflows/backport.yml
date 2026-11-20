@@ -71,8 +71,9 @@ jobs:
     # later backport, and six hours of that is the default. Not tighter than
     # this, though: the job is killed mid-drain if it overruns, and a kill
     # between the push and `gh pr create` leaves a branch with no pull request
-    # behind it, which in_flight then reads as a backport already under way. A
-    # full-history checkout plus a backlog of replays has to fit comfortably.
+    # behind it, which every later run then skips with a warning until someone
+    # deletes it. A full-history checkout plus a backlog of replays has to fit
+    # comfortably.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
