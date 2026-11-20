@@ -99,7 +99,7 @@ func TestInvocationWorkflowSpanOwnership(t *testing.T) {
 			child := &fakeAgent{State: agentinternal.State{AgentType: agentinternal.TypeWorkflowAgent}, name: "child"}
 			ictx := &fakeInvocationContext{t: t, sessionID: "s", invocationID: "i"}
 			var invocation trace.Span
-			for range InstrumentInvocation(t.Context(), root, "s", func(ctx context.Context) iter.Seq2[*session.Event, error] {
+			for _, err := range InstrumentInvocation(t.Context(), root, "s", func(ctx context.Context) iter.Seq2[*session.Event, error] {
 				return func(func(*session.Event, error) bool) {
 					invocation = trace.SpanFromContext(ctx)
 					if !resumeChild {
@@ -123,6 +123,9 @@ func TestInvocationWorkflowSpanOwnership(t *testing.T) {
 					}
 				}
 			}) {
+				if err != nil {
+					t.Fatalf("InstrumentInvocation() error = %v", err)
+				}
 			}
 			spans := exporter.GetSpans()
 			if len(spans) != 2 {
