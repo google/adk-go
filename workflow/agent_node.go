@@ -60,6 +60,11 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	// whether this node is activated by a static edge or delegated to
 	// via RunNode. Mirrors runner.newAgentNode.
 	cfg.EmitsOwnSpan = true
+	// RerunOnResume defaults to true for LlmAgent (matching adk-python's
+	// build_node and runner.newAgentNode).
+	if _, isLLM := a.(llminternal.Agent); isLLM && cfg.RerunOnResume == nil {
+		cfg.RerunOnResume = new(true)
+	}
 
 	return &AgentNode{
 		BaseNode:          NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
