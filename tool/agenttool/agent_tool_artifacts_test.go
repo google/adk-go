@@ -114,8 +114,10 @@ func testAgentToolArtifacts(t *testing.T, nested bool) {
 		if err != nil {
 			t.Fatal("parent run failed")
 		}
-		if event != nil && event.Actions.ArtifactDelta["output.txt"] > 0 {
-			parentDelta = true
+		if event != nil {
+			if version, ok := event.Actions.ArtifactDelta["output.txt"]; ok && version == 0 {
+				parentDelta = true
+			}
 		}
 	}
 	if !childSaved {
