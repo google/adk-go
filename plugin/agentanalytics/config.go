@@ -90,6 +90,8 @@ type Logger interface {
 // storage_mode is GCS_REFERENCE or text is not [UPLOAD FAILED]). Unfinished
 // batches during background or Close flushes are dropped directly.
 type RetryConfig struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_            struct{} `json:"-"`
 	MaxRetries   int
 	InitialDelay time.Duration
 	MaxDelay     time.Duration
@@ -146,7 +148,7 @@ func (d ToolResultDecision) String() string {
 // abstains.
 type ToolResultVerdict struct {
 	// _ prevents unkeyed literals, which adding a field would break.
-	_ struct{}
+	_ struct{} `json:"-"`
 	// Decision says how the call is recorded; see [ToolResultDecision].
 	Decision ToolResultDecision
 	// ErrorMessage is written to error_message when Decision is
@@ -191,6 +193,8 @@ type ToolResultClassifier func(ctx agent.Context, t tool.Tool, args, result map[
 // lost, so it is an upper bound. FormatterFailureDrops separately counts
 // payload replacement or omission, which does not itself discard a row.
 type DropStats struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{} `json:"-"`
 	// QueueFullDrops counts events dropped because QueueMaxSize was reached.
 	QueueFullDrops int64 `json:"queue_full_drops"`
 	// AppendFailureDrops counts events dropped because a plugin callback or row
@@ -213,9 +217,9 @@ type DropStats struct {
 	// ContentFormatter returned an error or panicked; this does not itself
 	// discard a row.
 	FormatterFailureDrops int64 `json:"formatter_failure_drops"`
-	// ShutdownDrops counts events rejected because Append was called after Close,
-	// or queued events dropped during Close because ShutdownTimeout expired
-	// before their batch could be written.
+	// ShutdownDrops counts events logged after Close finishes stopping any
+	// in-flight view-creation wait and stops accepting new rows, plus queued
+	// events discarded when the ShutdownTimeout write budget expires.
 	ShutdownDrops int64 `json:"shutdown_drops"`
 	// TotalDrops sums locally discarded events and writes whose success could
 	// not be confirmed (QueueFullDrops + AppendFailureDrops + RowErrorDrops +
@@ -225,6 +229,8 @@ type DropStats struct {
 
 // GCSUploadRequest describes one payload to upload to Cloud Storage.
 type GCSUploadRequest struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{} `json:"-"`
 	// Path is the object name within the bucket. When Config.GCSPathPrefix is
 	// non-empty after trimming leading and trailing '/', Path begins with the
 	// effective prefix followed by "/" — either the '/'-trimmed
@@ -327,7 +333,7 @@ type GCSContentOffloader interface {
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
-// [DefaultConfig] when a plugin or batch processor is constructed.
+// [DefaultConfig] when a plugin is constructed.
 //
 // ToolResultClassifier maps to adk-python's tool_result_classifier. As there,
 // an answer with which plugin/retryandreflect replaces a tool error
@@ -374,6 +380,9 @@ type GCSContentOffloader interface {
 // open span enclosing the concurrent activations that hold an open span its
 // branch and node path fit (or the invocation span if none encloses them).
 type Config struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{} `json:"-"`
+
 	Enabled        bool
 	ProjectID      string
 	DatasetID      string
@@ -647,7 +656,7 @@ type Config struct {
 	//
 	// Any other prefix is rewritten to "<base>~<sha256>", and a warning with
 	// the rewrite reason and byte lengths (without logging prefix text) is
-	// logged to Logger when the plugin or BatchProcessor is constructed: each
+	// logged to Logger when the plugin is constructed: each
 	// '~', each byte that is not valid UTF-8, and each of those control or
 	// line/paragraph-separator characters is replaced with '_', a leading
 	// ".well-known" segment before "acme-challenge" becomes "_well-known", the

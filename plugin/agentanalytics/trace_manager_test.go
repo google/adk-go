@@ -417,9 +417,9 @@ func newClockedPlugin(t *testing.T) *clockedPlugin {
 	t.Helper()
 	config := applyDefaults(DefaultConfig())
 	config.DisableFlushOnRunEnd = true
-	processor, err := NewBatchProcessor(t.Context(), nil, "test_stream", config)
+	processor, err := newBatchProcessor(t.Context(), nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(func() {
 		// Close writes the rows that are left, which needs a write client.
@@ -21767,9 +21767,9 @@ func newQueuedRowsPlugin(t *testing.T, tm *traceManager) (*baseplugin.Plugin, fu
 	t.Helper()
 	config := applyDefaults(DefaultConfig())
 	config.DisableFlushOnRunEnd = true
-	processor, err := NewBatchProcessor(t.Context(), nil, "test_stream", config)
+	processor, err := newBatchProcessor(t.Context(), nil, "test_stream", config)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(func() {
 		// Close writes the rows that are left, which needs a write client.

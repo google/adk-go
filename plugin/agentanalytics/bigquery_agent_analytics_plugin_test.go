@@ -686,11 +686,11 @@ func TestEventsSchema_ColumnOrder(t *testing.T) {
 		t.Errorf("EventsSchema() columns mismatch (-want +got):\n%s", diff)
 	}
 	var arrowColumns []string
-	for _, f := range ArrowSchema().Fields() {
+	for _, f := range arrowSchema().Fields() {
 		arrowColumns = append(arrowColumns, f.Name)
 	}
 	if diff := cmp.Diff(want, arrowColumns); diff != "" {
-		t.Errorf("ArrowSchema() columns mismatch (-want +got):\n%s", diff)
+		t.Errorf("arrowSchema() columns mismatch (-want +got):\n%s", diff)
 	}
 	if got := EventsSchema()[1].Type; got != bq.StringFieldType {
 		t.Errorf("event_id type = %v, want %v", got, bq.StringFieldType)
@@ -1498,9 +1498,10 @@ func TestEventFiltering_DenylistOverridesAllowlist(t *testing.T) {
 
 func TestNewPlugin_RejectsInvalidConfig(t *testing.T) {
 	tests := []struct {
-		name    string
-		mutate  func(*Config)
-		wantErr string
+		name     string
+		mutate   func(*Config)
+		wantErr  string
+		exactErr bool
 	}{
 		{
 			name:    "unknown payload column",
@@ -1541,9 +1542,12 @@ func TestNewPlugin_RejectsInvalidConfig(t *testing.T) {
 			wantErr: "BatchSize and QueueMaxSize must be >= 1",
 		},
 		{
-			name:    "negative RetryConfig.MaxRetries",
-			mutate:  func(c *Config) { c.RetryConfig.MaxRetries = -1 },
-			wantErr: "invalid RetryConfig",
+			name:   "negative RetryConfig.MaxRetries",
+			mutate: func(c *Config) { c.RetryConfig.MaxRetries = -1 },
+			// The full message pins how the rejected settings are reported,
+			// including the leading "invalid config: " prefix.
+			wantErr:  "invalid config: invalid RetryConfig: needs MaxRetries >= 0, InitialDelay >= 0, Multiplier >= 1 and MaxDelay >= InitialDelay, got {MaxRetries:-1 InitialDelay:100ms MaxDelay:10s Multiplier:2}",
+			exactErr: true,
 		},
 		{
 			name:    "Multiplier less than 1",
@@ -1573,12 +1577,22 @@ func TestNewPlugin_RejectsInvalidConfig(t *testing.T) {
 			config.ProjectID = "test-project"
 			tt.mutate(&config)
 			// Validation happens before any client is created or used.
-			if _, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, config); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v, want an error containing %q", err, tt.wantErr)
+			_, errWithConfig := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, config)
+			_, errWithClients := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, nil, nil)
+			checkErr := func(fn string, err error) {
+				t.Helper()
+				if tt.exactErr {
+					if err == nil || err.Error() != tt.wantErr {
+						t.Errorf("%s() error = %v, want exact %q", fn, err, tt.wantErr)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("%s() error = %v, want an error containing %q", fn, err, tt.wantErr)
+				}
 			}
-			if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, nil, nil); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Errorf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v, want an error containing %q", err, tt.wantErr)
-			}
+			checkErr("NewBigQueryAgentAnalyticsPluginWithConfig", errWithConfig)
+			checkErr("NewBigQueryAgentAnalyticsPluginWithClients", errWithClients)
 		})
 	}
 }
@@ -2106,9 +2120,9 @@ func TestLLMRequestAttributes_Tools(t *testing.T) {
 	if !ok {
 		t.Fatal("llmRequestAttributes() has no tools")
 	}
-	b, _, err := SmartTruncate(tools, -1)
+	b, _, err := smartTruncate(tools, -1, true)
 	if err != nil {
-		t.Fatalf("SmartTruncate() error: %v", err)
+		t.Fatalf("smartTruncate() error: %v", err)
 	}
 	var got any
 	if err := json.Unmarshal(b, &got); err != nil {
@@ -4051,7 +4065,7 @@ func TestBigQueryAgentAnalyticsPlugin_DropStats(t *testing.T) {
 	// Verify a recovered panic inside logEvent increments AppendFailureDrops and TotalDrops once.
 	ap := &analyticsPlugin{
 		config:    DefaultConfig(),
-		processor: &BatchProcessor{counters: counters},
+		processor: &batchProcessor{counters: counters},
 	}
 	ap.logEvent(context.Background(), identity{}, EventUserMessageReceived, nil, func(*eventData) {
 		panic("boom in callback")
@@ -4083,7 +4097,7 @@ func TestBigQueryAgentAnalyticsPlugin_DropStats(t *testing.T) {
 	disabledCfg.Enabled = false
 	disabledAP := &analyticsPlugin{
 		config:    disabledCfg,
-		processor: &BatchProcessor{counters: counters},
+		processor: &batchProcessor{counters: counters},
 	}
 	disabledAP.logEvent(context.Background(), identity{}, EventUserMessageReceived, nil, func(*eventData) {
 		panic("boom in disabled plugin")
@@ -4584,7 +4598,7 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 	// for as long as the plugin lives, so a value that reached such an object
 	// would keep the plugin alive for the life of the process. That holds for
 	// a plugin that is dropped without Close too, even though its
-	// BatchProcessor goroutine then keeps running, as it does on main.
+	// batchProcessor goroutine then keeps running, as it does on main.
 	for _, tc := range []struct {
 		name string
 		// newPlugin returns a plugin that refers to h, and a function that
@@ -4769,9 +4783,9 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 			return nil, errors.New("boom")
 		}
 
-		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		bp, err := newBatchProcessor(ctx, nil, "test_stream", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		denied, err := validateConfig(cfg)
 		if err != nil {
@@ -4802,7 +4816,7 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 			FormatterFailureDrops: 1,
 			TotalDrops:            0,
 		}
-		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(want, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -4814,9 +4828,9 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 			return nil, errors.New("boom")
 		}
 
-		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		bp, err := newBatchProcessor(ctx, nil, "test_stream", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		denied, err := validateConfig(cfg)
 		if err != nil {
@@ -4832,7 +4846,7 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 		if truncated := p.addContent(row, EventUserMessageReceived, &eventData{content: textContent("user", "hello")}); truncated {
 			t.Error("addContent() truncated = true, want false when both content and content_parts are denied")
 		}
-		if got := bp.DropStats(); got != (DropStats{}) {
+		if got := bp.dropStats(); got != (DropStats{}) {
 			t.Errorf("DropStats() = %+v, want zero drops when both content and content_parts are denied", got)
 		}
 	})
@@ -4845,9 +4859,9 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 			return nil, errors.New("formatter boom")
 		}
 
-		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		bp, err := newBatchProcessor(ctx, nil, "test_stream", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		denied, err := validateConfig(cfg)
 		if err != nil {
@@ -4874,7 +4888,7 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 			FormatterFailureDrops: 1,
 			TotalDrops:            0,
 		}
-		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+		if diff := cmp.Diff(want, bp.dropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -6357,9 +6371,9 @@ func TestPlugin_CloseOnceAndAfterRunPanic(t *testing.T) {
 		cfg.BatchFlushIntv = time.Hour
 		cfg.DisableCreateViews = true
 
-		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		processor, err := newBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(processor.Close)
 
@@ -6422,7 +6436,7 @@ func TestPlugin_CloseOnceAndAfterRunPanic(t *testing.T) {
 			t.Fatal("timed out waiting for flushRunEnd batch after panic in afterRun")
 		}
 
-		if got := processor.DropStats().AppendFailureDrops; got != 1 {
+		if got := processor.dropStats().AppendFailureDrops; got != 1 {
 			t.Errorf("AppendFailureDrops = %d, want 1 from recovered afterRun panic", got)
 		}
 	})
@@ -6576,9 +6590,9 @@ func TestPlugin_CloseOnceAndAfterRunPanic(t *testing.T) {
 		cfg.DisableCreateViews = true
 		cfg.Logger = logger
 
-		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		processor, err := newBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(processor.Close)
 
@@ -6665,7 +6679,7 @@ func TestPlugin_CloseOnceAndAfterRunPanic(t *testing.T) {
 		if logger.contains("secret-double-panic-now") {
 			t.Errorf("logger leaked panic value in:\n%s", logger.String())
 		}
-		if got := processor.DropStats().AppendFailureDrops; got != 4 {
+		if got := processor.dropStats().AppendFailureDrops; got != 4 {
 			t.Errorf("AppendFailureDrops = %d, want 4 (2 invocations x [endInvocationSafe + recoverCallback])", got)
 		}
 	})
@@ -6717,9 +6731,9 @@ func TestPlugin_CloseOnceAndAfterRunPanic(t *testing.T) {
 		cfg.RetryConfig.MaxRetries = 0
 		cfg.Logger = logger
 
-		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		processor, err := newBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(processor.Close)
 
@@ -6761,7 +6775,7 @@ func TestPlugin_CloseOnceAndAfterRunPanic(t *testing.T) {
 			t.Errorf("logger leaked flush panic value in:\n%s", recLog.String())
 		}
 		// 1 failed batch row + 1 flushRunEndSafe panic + 1 afterRun recoverCallback = 3.
-		if got := processor.DropStats().AppendFailureDrops; got != 3 {
+		if got := processor.dropStats().AppendFailureDrops; got != 3 {
 			t.Errorf("AppendFailureDrops = %d, want 3 (failed row + flushRunEndSafe + recoverCallback)", got)
 		}
 	})
@@ -6828,9 +6842,9 @@ func TestPlugin_CloseOnceAndAfterRunPanic(t *testing.T) {
 		cfg.DisableCreateViews = true
 		cfg.Logger = logger
 
-		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		processor, err := newBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(processor.Close)
 
@@ -6887,7 +6901,7 @@ func TestPlugin_CloseOnceAndAfterRunPanic(t *testing.T) {
 
 		// 1 endInvocationSafe panic + 1 afterRun recoverCallback panic = 2,
 		// counted before each Logger.Printf call panicked.
-		if got := processor.DropStats().AppendFailureDrops; got != 2 {
+		if got := processor.dropStats().AppendFailureDrops; got != 2 {
 			t.Errorf("AppendFailureDrops = %d, want 2", got)
 		}
 	})
@@ -7037,9 +7051,9 @@ func TestAfterRun_TerminalClockPanicAndResumedRunSafety(t *testing.T) {
 		cfg.DisableCreateViews = true
 		cfg.Logger = &recordingLogger{}
 
-		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		processor, err := newBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(processor.Close)
 
@@ -7121,7 +7135,7 @@ func TestAfterRun_TerminalClockPanicAndResumedRunSafety(t *testing.T) {
 		if got := afterRunClockCalls.Load(); got < 4 {
 			t.Fatalf("afterRunClockCalls = %d, want >= 4 (popUnclosedAgentSpans + failed terminal logEvent + retry + late callbacks)", got)
 		}
-		if got := processor.DropStats().AppendFailureDrops; got != 1 {
+		if got := processor.dropStats().AppendFailureDrops; got != 1 {
 			t.Errorf("AppendFailureDrops = %d, want 1 (dropped terminal logEvent only)", got)
 		}
 		if !flushSawCompleted.Load() {
@@ -7203,9 +7217,9 @@ func TestAfterRun_TerminalClockPanicAndResumedRunSafety(t *testing.T) {
 		cfg.DisableCreateViews = true
 		cfg.Logger = logger
 
-		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		processor, err := newBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(processor.Close)
 
@@ -7371,9 +7385,9 @@ func TestAfterRun_TerminalClockPanicAndResumedRunSafety(t *testing.T) {
 		cfg.DisableCreateViews = true
 		cfg.Logger = &recordingLogger{}
 
-		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		processor, err := newBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		t.Cleanup(processor.Close)
 
@@ -7499,9 +7513,9 @@ func TestPlugin_PanicSitesNeverPassRawPanicValueToLogger(t *testing.T) {
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.Logger = logger
 
-	processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+	processor, err := newBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 	t.Cleanup(processor.Close)
 
