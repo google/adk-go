@@ -17,6 +17,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -46,6 +47,37 @@ const workflowNodeResumeCompletedKey = "adk.workflow.node_resume_completed"
 const workflowBasePathPrefix = "adk.workflow.base_path."
 
 const workflowFailedChildPathsKey = "adk.workflow.failed_child_paths"
+
+// The scheduler of workflow W stores under workflowNodeTriggerPrefix+W how
+// it started a node's activation: the node it set as TriggeredBy and the
+// input it passed. It adds this to the node's pause events and failure
+// records, which is where a resume picks the node up again. History
+// cannot tell which edge fired, so without it the input of a rerun node
+// has to be guessed. The workflow name in the key keeps the records of
+// nested workflows apart, as with workflowBasePathPrefix.
+const workflowNodeTriggerPrefix = "adk.workflow.trigger."
+
+// nodeTrigger is a trigger record read back from history.
+type nodeTrigger struct {
+	from  string
+	input any
+}
+
+// recordedTrigger returns the trigger that the scheduler of workflowName
+// stored on ev, or nil if there is none.
+func recordedTrigger(ev *session.Event, workflowName string) *nodeTrigger {
+	record, ok := ev.CustomMetadata[workflowNodeTriggerPrefix+workflowName].(map[string]any)
+	if !ok {
+		return nil
+	}
+	from, _ := record["from"].(string)
+	return &nodeTrigger{from: from, input: record["input"]}
+}
+
+// raisesInterrupt reports whether ev pauses its node.
+func raisesInterrupt(ev *session.Event) bool {
+	return slices.ContainsFunc(ev.LongRunningToolIDs, func(id string) bool { return id != "" })
+}
 
 const (
 	workflowNodeOutcomeKey     = "adk.workflow.node_outcome"
@@ -129,6 +161,10 @@ type nodeScanState struct {
 	branch   string
 	finished bool
 	failed   bool
+	// trigger is the trigger record on the event of the node's latest
+	// pause or failure, nil if that event has none, as in history
+	// written before the scheduler recorded triggers.
+	trigger *nodeTrigger
 }
 
 // consumeResolved marks every answered interrupt as consumed. Called
@@ -315,6 +351,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 				sf.finished, sf.failed = true, false
 			} else if outcome := workflowNodeOutcome(ev); outcome != "" {
 				sf.branch = ev.Branch
+				sf.trigger = recordedTrigger(ev, workflowName)
 				sf.finished = false
 				// A sibling failure may cancel an asker just after its
 				// pause was persisted. Its interrupt still owns the resume;
@@ -324,6 +361,9 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			if completionRecorded(ev) {
 				sf.consumeResolved()
 			}
+		}
+		if raisesInterrupt(ev) {
+			s.trigger = recordedTrigger(ev, workflowName)
 		}
 		for _, id := range ev.LongRunningToolIDs {
 			if id == "" {
@@ -549,7 +589,7 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		ns.Status = NodePending
 		ns.ResumedInputs = resumed
 		ns.Interrupts = unresolved
-		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, workflowInput)
+		ns.Input, ns.TriggeredBy = w.predecessorInput(node, scan.trigger, nodeOutputs, workflowInput)
 	case len(unresolved) > 0:
 		// Still waiting for the remaining interrupts.
 		ns.Status = NodeWaiting
@@ -560,7 +600,7 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 	case scan.failed:
 		ns.Status = NodeFailed
 		ns.ResumedInputs = resumed
-		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, workflowInput)
+		ns.Input, ns.TriggeredBy = w.predecessorInput(node, scan.trigger, nodeOutputs, workflowInput)
 	case scan.finished:
 		// A re-entry node may have finished on an earlier resume turn.
 		// Its consumed interrupt must not turn it back into Pending.
@@ -570,7 +610,7 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		// All resolved, re-entry: re-run with the responses.
 		ns.Status = NodePending
 		ns.ResumedInputs = resumed
-		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, workflowInput)
+		ns.Input, ns.TriggeredBy = w.predecessorInput(node, scan.trigger, nodeOutputs, workflowInput)
 	default:
 		// All resolved, handoff: the node is done; its output is the
 		// response, which Resume forwards to successors. Keep the
@@ -592,17 +632,32 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 	return ns, nil
 }
 
-// predecessorInput walks incoming edges backward to find a resuming
-// node's input: a predecessor's cached output, else the workflow seed
-// input for a START successor. Mirrors adk-python
-// _find_predecessor_input.
-func (w *Workflow) predecessorInput(node Node, nodeOutputs map[string]any, workflowInput any) (any, string) {
+// predecessorInput returns the input and TriggeredBy for a node that
+// resumes by running again.
+//
+// When the scheduler recorded how it started the node's last activation
+// (see workflowNodeTriggerPrefix), the node gets that input again, and
+// TriggeredBy names the node that triggered it, START included. adk-python
+// gets the same result by replaying the graph on resume: START's
+// successors get the workflow input (_seed_start_triggers in
+// workflow/_workflow.py) and every other node gets the trigger.input of
+// the edge that fired into it. A record is only used while the node it
+// names is still a predecessor.
+//
+// History written before triggers were recorded falls back to a guess
+// from cached outputs: the first declared predecessor other than START
+// that produced output, then the workflow input for a START successor.
+// That predecessor need not be the one whose edge fired.
+func (w *Workflow) predecessorInput(node Node, trigger *nodeTrigger, nodeOutputs map[string]any, workflowInput any) (any, string) {
 	if node == nil {
 		return nil, ""
 	}
 	incoming := w.graph.predecessorsOf(node)
 	if len(incoming) == 0 {
 		return nil, ""
+	}
+	if trigger != nil && slices.ContainsFunc(incoming, func(e Edge) bool { return e.From.Name() == trigger.from }) {
+		return trigger.input, trigger.from
 	}
 	for _, e := range incoming {
 		from := e.From.Name()

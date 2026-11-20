@@ -203,6 +203,363 @@ func TestReconstructRunState_PreviouslyResumedReentry(t *testing.T) {
 	}
 }
 
+// A re-entry node with several incoming edges must rerun with the input it
+// ran with. The scheduler records that on the node's pause and failure events.
+// History without the record resumes as it did before the record existed.
+func TestReconstructRunState_RerunInputFromTrigger(t *testing.T) {
+	a, b, c, p := newDummyNode("a"), newDummyNode("b"), newDummyNode("c"), newDummyNode("p")
+	ask := NewFunctionNode("ask", func(agent.Context, any) (any, error) { return nil, nil }, NodeConfig{RerunOnResume: new(true)})
+	// The events are stamped the way the scheduler stamps them: the node
+	// path on every event, and on an output event the emitter's own path
+	// in OutputFor too.
+	nodeEvent := func(node string) *session.Event {
+		return &session.Event{NodeInfo: &session.NodeInfo{Path: node + "@1"}}
+	}
+	finished := func(node, output string, routes ...string) *session.Event {
+		ev := nodeEvent(node)
+		ev.Output, ev.Routes = output, routes
+		ev.NodeInfo.OutputFor = []string{ev.NodeInfo.Path}
+		return ev
+	}
+	routed := func(node string, routes ...string) *session.Event {
+		ev := nodeEvent(node)
+		ev.Routes = routes
+		return ev
+	}
+	failed := func(node string) *session.Event {
+		ev := nodeEvent(node)
+		ev.CustomMetadata = map[string]any{workflowNodeOutcomeKey: workflowNodeFailureOutcome}
+		return ev
+	}
+	raised := func(node, id string) *session.Event {
+		ev := nodeEvent(node)
+		ev.LongRunningToolIDs = []string{id}
+		return ev
+	}
+	answered := func(id string) *session.Event {
+		ev := &session.Event{Author: "user"}
+		ev.Content = genai.NewContentFromFunctionResponse(WorkflowInputFunctionCallName, map[string]any{"response": "approved"}, genai.RoleUser)
+		ev.Content.Parts[0].FunctionResponse.ID = id
+		return ev
+	}
+	// recorded adds the scheduler's trigger record for workflow "wf".
+	recorded := func(ev *session.Event, from string, input any) *session.Event {
+		if ev.CustomMetadata == nil {
+			ev.CustomMetadata = map[string]any{}
+		}
+		ev.CustomMetadata[workflowNodeTriggerPrefix+"wf"] = map[string]any{"from": from, "input": input}
+		return ev
+	}
+	// stored passes the event's metadata through JSON, as a database
+	// session service does.
+	stored := func(ev *session.Event) *session.Event {
+		data, err := json.Marshal(ev.CustomMetadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev.CustomMetadata = nil
+		if err := json.Unmarshal(data, &ev.CustomMetadata); err != nil {
+			t.Fatal(err)
+		}
+		return ev
+	}
+	// routedElsewhere is the graph of the reported case: a comes first
+	// among the edges into ask but routes around it through b.
+	routedElsewhere := []Edge{
+		{From: Start, To: a},
+		{From: a, To: ask, Route: StringRoute("go")},
+		{From: a, To: b, Route: StringRoute("skip")},
+		{From: b, To: ask},
+	}
+	for _, tc := range []struct {
+		name    string
+		edges   []Edge
+		history []*session.Event
+		// pause is what ask itself recorded. By default it raised
+		// "approval", recorded as triggered by b with "B", and got the
+		// answer.
+		pause       []*session.Event
+		wantStatus  NodeStatus
+		wantTrigger string
+		wantInput   any
+	}{
+		{
+			name:        "recorded_trigger",
+			edges:       routedElsewhere,
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			wantTrigger: "b",
+			wantInput:   "B",
+		},
+		{
+			// a has output and is declared first, but ask was triggered
+			// over its START edge and gets the workflow input.
+			name: "recorded_start",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: a, To: ask, Route: StringRoute("go")},
+				{From: a, To: b, Route: StringRoute("skip")},
+				{From: Start, To: ask},
+			},
+			history:     []*session.Event{finished("a", "A", "skip")},
+			pause:       []*session.Event{recorded(raised("ask", "approval"), Start.Name(), "seed"), answered("approval")},
+			wantTrigger: Start.Name(),
+			wantInput:   "seed",
+		},
+		{
+			// b ran again after it triggered ask. ask gets the output
+			// it ran with, not b's latest one.
+			name: "recorded_input_older_than_latest_output",
+			edges: []Edge{
+				{From: Start, To: b},
+				{From: b, To: ask},
+				{From: ask, To: c, Route: StringRoute("again")},
+				{From: c, To: b, Route: Default},
+			},
+			history:     []*session.Event{finished("b", "B1"), finished("b", "B2")},
+			pause:       []*session.Event{recorded(raised("ask", "approval"), "b", "B1"), answered("approval")},
+			wantTrigger: "b",
+			wantInput:   "B1",
+		},
+		{
+			// The pause came from a dynamic child of ask. The scheduler
+			// records ask's trigger on it as well.
+			name:        "recorded_on_child_pause",
+			edges:       routedElsewhere,
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause:       []*session.Event{recorded(raised("ask@1/child", "approval"), "b", "B"), answered("approval")},
+			wantTrigger: "b",
+			wantInput:   "B",
+		},
+		{
+			// Two interrupts and only one answered: ask reruns with the
+			// answer it has and must get the same input again.
+			name:        "partial_resume",
+			edges:       routedElsewhere,
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause:       []*session.Event{recorded(raised("ask", "approval"), "b", "B"), recorded(raised("ask", "second"), "b", "B"), answered("approval")},
+			wantTrigger: "b",
+			wantInput:   "B",
+		},
+		{
+			// The rerun after the answer failed. The failure record
+			// carries the trigger for the retry.
+			name:        "failed_after_answer",
+			edges:       routedElsewhere,
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval"), recorded(failed("ask"), "b", "B")},
+			wantStatus:  NodeFailed,
+			wantTrigger: "b",
+			wantInput:   "B",
+		},
+		{
+			// A database session service returns the record as plain
+			// JSON values.
+			name:        "recorded_after_json_round_trip",
+			edges:       routedElsewhere,
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause:       []*session.Event{stored(recorded(raised("ask", "approval"), "b", map[string]any{"n": 1})), answered("approval")},
+			wantTrigger: "b",
+			wantInput:   map[string]any{"n": float64(1)},
+		},
+		{
+			// Only the latest pause counts. Here it has no record, so ask
+			// resumes the way history without records does.
+			name:    "latest_pause_without_record",
+			edges:   routedElsewhere,
+			history: []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause: []*session.Event{
+				recorded(raised("ask", "first"), "b", "B"), answered("first"), finished("ask", "done"),
+				raised("ask", "approval"), answered("approval"),
+			},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		{
+			// An empty interrupt ID pauses nothing, so its event does not
+			// replace the record of the real pause.
+			name:    "empty_interrupt_id",
+			edges:   routedElsewhere,
+			history: []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause: []*session.Event{
+				recorded(raised("ask", "approval"), "b", "B"), raised("ask", ""), answered("approval"),
+			},
+			wantTrigger: "b",
+			wantInput:   "B",
+		},
+		{
+			// The graph no longer has the recorded edge.
+			name:        "recorded_node_not_a_predecessor",
+			edges:       routedElsewhere,
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause:       []*session.Event{recorded(raised("ask", "approval"), "gone", "G"), answered("approval")},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		{
+			// A record of an enclosing or nested workflow is not about
+			// this one.
+			name:    "record_of_another_workflow",
+			edges:   routedElsewhere,
+			history: []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause: func() []*session.Event {
+				ev := raised("ask", "approval")
+				ev.CustomMetadata = map[string]any{workflowNodeTriggerPrefix + "outer": map[string]any{"from": "b", "input": "B"}}
+				return []*session.Event{ev, answered("approval")}
+			}(),
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		// History written before the scheduler recorded triggers resumes
+		// as before: the first declared predecessor with output, else the
+		// workflow input over a START edge.
+		{
+			name:        "unrecorded_routed_elsewhere",
+			edges:       routedElsewhere,
+			history:     []*session.Event{finished("a", "A", "skip"), finished("b", "B")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval")},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		{
+			// A sibling that routed elsewhere finishes between b's output
+			// and b's own pause.
+			name: "unrecorded_sibling_before_predecessor_pause",
+			edges: []Edge{
+				{From: Start, To: c},
+				{From: Start, To: b},
+				{From: Start, To: p},
+				{From: c, To: ask},
+				{From: b, To: ask, Route: Default},
+				{From: p, To: b, Route: StringRoute("x")},
+			},
+			history:     []*session.Event{finished("c", "C"), finished("b", "B"), finished("p", "P", "done"), raised("b", "other")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval")},
+			wantTrigger: "c",
+			wantInput:   "C",
+		},
+		{
+			// The same before a failure outcome.
+			name: "unrecorded_sibling_before_predecessor_failure",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: Start, To: c},
+				{From: Start, To: ask},
+				{From: c, To: a, Route: StringRoute("back")},
+				{From: a, To: ask, Route: Default},
+			},
+			history:     []*session.Event{finished("a", "A1"), finished("c", "C", "on"), failed("a")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval")},
+			wantTrigger: Start.Name(),
+			wantInput:   "seed",
+		},
+		{
+			// A node on a Default self-loop emits its route on its own
+			// event.
+			name: "unrecorded_route_after_output_on_self_loop",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: Start, To: ask},
+				{From: a, To: a, Route: Default},
+				{From: a, To: ask, Route: StringRoute("go")},
+			},
+			history:     []*session.Event{finished("a", "A"), routed("a", "go")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval")},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+		{
+			// A sibling finishes between a node's output and its own
+			// route.
+			name: "unrecorded_sibling_before_predecessor_route",
+			edges: []Edge{
+				{From: Start, To: a},
+				{From: Start, To: c},
+				{From: Start, To: ask},
+				{From: a, To: ask, Route: StringRoute("go")},
+				{From: c, To: a, Route: StringRoute("back")},
+			},
+			history:     []*session.Event{finished("a", "A"), finished("c", "C", "on"), routed("a", "go")},
+			pause:       []*session.Event{raised("ask", "approval"), answered("approval")},
+			wantTrigger: "a",
+			wantInput:   "A",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wf, err := New("wf", tc.edges)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := &session.Event{Author: "user"}
+			seed.Content = genai.NewContentFromText("seed", genai.RoleUser)
+			pause := tc.pause
+			if pause == nil {
+				pause = []*session.Event{recorded(raised("ask", "approval"), "b", "B"), answered("approval")}
+			}
+			events := append(sliceEvents{seed}, tc.history...)
+			events = append(events, pause...)
+			for _, ev := range events {
+				if ev.InvocationID == "" {
+					ev.InvocationID = "current"
+				}
+			}
+
+			state, err := wf.ReconstructRunState(fakeSession{events: events}, "current")
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantStatus := tc.wantStatus
+			if wantStatus == 0 {
+				wantStatus = NodePending
+			}
+			ns := nodeState(t, state, "ask")
+			if ns.Status != wantStatus || ns.TriggeredBy != tc.wantTrigger || !reflect.DeepEqual(ns.Input, tc.wantInput) {
+				t.Errorf("ask = status %v, triggered by %q with input %v, want status %v, triggered by %q with input %v",
+					ns.Status, ns.TriggeredBy, ns.Input, wantStatus, tc.wantTrigger, tc.wantInput)
+			}
+		})
+	}
+}
+
+// The scheduler records how it started a node on the node's pause events and
+// failure records, and nowhere else.
+func TestScheduler_RecordsTrigger(t *testing.T) {
+	records := func(events []*session.Event) map[string]any {
+		got := map[string]any{}
+		for _, ev := range events {
+			if record, ok := ev.CustomMetadata[workflowNodeTriggerPrefix]; ok {
+				got[ev.NodeInfo.Path] = record
+			}
+		}
+		return got
+	}
+	t.Run("pause", func(t *testing.T) {
+		a := NewFunctionNode("a", func(agent.Context, any) (string, error) { return "A", nil }, NodeConfig{})
+		ask := NewDynamicNode("ask", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+			return ResumeOrRequestInput(ctx, emit, session.RequestInput{InterruptID: "approval"})
+		}, NodeConfig{})
+		wf := mustNew(t, []Edge{{From: Start, To: a}, {From: a, To: ask}})
+		got := records(drain(t, wf.Run(newSeededMockCtx(t))))
+		want := map[string]any{"ask@1": map[string]any{"from": "a", "input": "A"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("trigger records %v, want %v", got, want)
+		}
+	})
+	t.Run("failure", func(t *testing.T) {
+		f := NewFunctionNode("f", func(agent.Context, any) (any, error) { return nil, errors.New("scripted failure") }, NodeConfig{})
+		wf := mustNew(t, []Edge{{From: Start, To: f}})
+		var events []*session.Event
+		for ev, err := range wf.Run(newSeededMockCtx(t)) {
+			if err == nil {
+				events = append(events, ev)
+			}
+		}
+		want := map[string]any{"f@1": map[string]any{"from": Start.Name(), "input": "seed"}}
+		if got := records(events); !reflect.DeepEqual(got, want) {
+			t.Errorf("trigger records %v, want %v", got, want)
+		}
+	})
+}
+
 func TestResume_FailedSiblingRequiresMatchedInterrupt(t *testing.T) {
 	var attempts atomic.Int32
 	ask := newDummyNode("ask")

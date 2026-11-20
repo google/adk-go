@@ -726,11 +726,25 @@ func (s *scheduler) completionEvent(name string, nr *nodeRun, inventory failureI
 		// A failed attempt can still recover through retries or a parent
 		// fallback. ErrorCode would terminate AgentTool/A2A consumers.
 		ev.CustomMetadata[workflowNodeOutcomeKey] = outcome
+		s.recordTrigger(ev.CustomMetadata, name)
 		recordFailedChildPaths(ev.CustomMetadata, inventory)
 	} else {
 		ev.CustomMetadata[completedKey] = true
 	}
 	return ev
+}
+
+// recordTrigger stores in metadata how the node's current activation was
+// started (see workflowNodeTriggerPrefix).
+func (s *scheduler) recordTrigger(metadata map[string]any, name string) {
+	ns := s.state.Nodes[name]
+	if ns == nil {
+		return
+	}
+	metadata[workflowNodeTriggerPrefix+s.workflowName] = map[string]any{
+		"from":  ns.TriggeredBy,
+		"input": ns.Input,
+	}
 }
 
 // finalize errors if more than one terminal node (no outgoing edges,
@@ -813,6 +827,11 @@ func (s *scheduler) handleEvent(it eventItem) {
 			metadata = map[string]any{}
 		}
 		metadata[workflowBasePathPrefix+s.workflowName] = s.parentCtx.Path()
+		// A dynamic child's pause pauses the node too, so it gets the
+		// node's record as well.
+		if raisesInterrupt(it.ev) {
+			s.recordTrigger(metadata, it.nodeName)
+		}
 		it.ev.CustomMetadata = metadata
 	}
 	// Stamp the activation's branch onto events that left
