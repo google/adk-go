@@ -485,16 +485,14 @@ func runNode(
 		}
 		// Block on non-partial events until the consumer has persisted
 		// them (see eventItem.processed). Partial events are
-		// fire-and-forget, so the consumer gets its own copy: the node
-		// keeps reading the event it yielded, and the consumer writes
-		// to the one it received, such as the runner restoring the
-		// compaction record or stamping a timestamp.
+		// fire-and-forget: the node may keep reading the event it
+		// yielded while the consumer handles it, so the consumer gets
+		// a copy (see copyPartialEvent).
 		var processed chan struct{}
 		if ev != nil && !ev.LLMResponse.Partial {
 			processed = make(chan struct{})
 		} else if ev != nil {
-			c := *ev
-			ev = &c
+			ev = copyPartialEvent(ev)
 		}
 		select {
 		case out <- eventItem{nodeName: name, ev: ev, processed: processed}:
@@ -1231,4 +1229,27 @@ func aggregatePredecessorBranches(g *graph, state *RunState, target Node) []stri
 		branches = append(branches, br)
 	}
 	return branches
+}
+
+// copyPartialEvent returns the copy of a partial event that the consumer
+// receives. The top-level fields, Content (with its Parts slice) and
+// NodeInfo (with OutputFor) belong to the copy, because the scheduler
+// writes Content.Role and NodeInfo.Path, and the runner writes
+// top-level fields such as Timestamp and Actions.Compaction. Everything
+// else stays shared with the node: the Part values, the Actions maps
+// and LongRunningToolIDs. Consumers must replace those, not modify
+// them in place.
+func copyPartialEvent(ev *session.Event) *session.Event {
+	c := *ev
+	if ev.Content != nil {
+		content := *ev.Content
+		content.Parts = slices.Clone(ev.Content.Parts)
+		c.Content = &content
+	}
+	if ev.NodeInfo != nil {
+		info := *ev.NodeInfo
+		info.OutputFor = slices.Clone(ev.NodeInfo.OutputFor)
+		c.NodeInfo = &info
+	}
+	return &c
 }
