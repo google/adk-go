@@ -156,3 +156,17 @@ func startInvokeNodeSpan(ctx context.Context, ictx InvocationContext, n Workflow
 		semconv.GenAIConversationID(sessionID(ictx)),
 	))
 }
+
+// RecordPanicSpan opens a short dedicated node_panic span carrying a
+// recovered panic's value and stack, and ends it immediately. The span
+// already on ctx is not a safe place for the record: it can be a no-op
+// (a direct Run with a plain context, or a root the legacy schema opens
+// no invoke_workflow span for), and when it is real it outlives the
+// failed attempt, so an Error status there would mark a later-successful
+// run failed. A fresh child span — a root span when ctx carries none —
+// is exported under every supported configuration and owns its status.
+func RecordPanicSpan(ctx context.Context, err error) {
+	_, span := tracer().Start(ctx, "node_panic")
+	RecordError(span, err)
+	span.End()
+}
