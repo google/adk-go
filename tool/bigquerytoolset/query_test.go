@@ -708,6 +708,145 @@ func TestRowValues_Errors(t *testing.T) {
 	}
 }
 
+const testKMSKey = "projects/kp/locations/us/keyRings/r/cryptoKeys/k"
+
+// ddlResult is the jobs.query response of a finished statement that returns
+// no rows, such as DDL or DML.
+const ddlResult = `{"jobComplete":true,"jobReference":{"projectId":"p","jobId":"job1"}}`
+
+// TestExecuteSQL_WriteModeAllowed checks that any statement runs, with no
+// dry run first, and that DDL returns no rows.
+func TestExecuteSQL_WriteModeAllowed(t *testing.T) {
+	f, got := runSQL(t, Config{WriteMode: WriteModeAllowed}, map[string]fakeResponse{
+		queryPath: {body: ddlResult},
+	}, map[string]any{"project_id": "p", "query": "DROP TABLE d.t"})
+
+	want := map[string]any{"status": "SUCCESS", "rows": []any{}}
+	if diff := cmp.Diff(want, roundTrip(t, got)); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{queryPath}, requestKeys(f)); diff != "" {
+		t.Errorf("requests mismatch (-want +got):\n%s", diff)
+	}
+	wantBody := decodeJSON(t, `{
+		"query": "DROP TABLE d.t", "useLegacySql": false, "formatOptions": {"useInt64Timestamp": true},
+		"maxResults": 50, "labels": {"adk-bigquery-tool": "execute_sql"}
+	}`)
+	if diff := cmp.Diff([]any{wantBody}, f.requestBodies()); diff != "" {
+		t.Errorf("request bodies mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestExecuteSQL_WriteModeAllowedDryRun checks that a dry run of a write
+// returns the dry run job and runs nothing.
+func TestExecuteSQL_WriteModeAllowedDryRun(t *testing.T) {
+	f, got := runSQL(t, Config{WriteMode: WriteModeAllowed}, map[string]fakeResponse{
+		dryRunPath: {body: insertDryRun},
+	}, map[string]any{"project_id": "p", "query": "INSERT INTO t VALUES (1)", "dry_run": true})
+
+	want := map[string]any{"status": "SUCCESS", "dry_run_info": decodeJSON(t, insertDryRun)}
+	if diff := cmp.Diff(want, roundTrip(t, got)); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{dryRunPath}, requestKeys(f)); diff != "" {
+		t.Errorf("requests mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestExecuteSQL_WriteModeBlockedIsDefault checks that WriteModeBlocked
+// refuses a write like an unset WriteMode.
+func TestExecuteSQL_WriteModeBlockedIsDefault(t *testing.T) {
+	f, got := runSQL(t, Config{WriteMode: WriteModeBlocked}, map[string]fakeResponse{
+		dryRunPath: {body: insertDryRun},
+	}, map[string]any{"project_id": "p", "query": "INSERT INTO t VALUES (1)"})
+
+	want := map[string]any{"status": "ERROR", "error_details": "Read-only mode only supports SELECT statements."}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{dryRunPath}, requestKeys(f)); diff != "" {
+		t.Errorf("requests mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestExecuteSQL_WriteModeAllowedComputeProjectID checks that the compute
+// project guardrail holds when writes are allowed.
+func TestExecuteSQL_WriteModeAllowedComputeProjectID(t *testing.T) {
+	f, got := runSQL(t, Config{WriteMode: WriteModeAllowed, ComputeProjectID: "compute"}, nil, map[string]any{"project_id": "p", "query": "DROP TABLE d.t"})
+
+	if got["status"] != "ERROR" {
+		t.Errorf("Run() = %v, want an ERROR result", got)
+	}
+	if keys := requestKeys(f); len(keys) != 0 {
+		t.Errorf("requests = %v, want none", keys)
+	}
+}
+
+// TestExecuteSQL_KMSKeyName checks that the key encrypts the results of a
+// SELECT only, and that WriteModeAllowed dry runs a query to find out.
+func TestExecuteSQL_KMSKeyName(t *testing.T) {
+	encryption := map[string]any{"kmsKeyName": testKMSKey}
+	tests := []struct {
+		name         string
+		mode         WriteMode
+		dryRun       string
+		wantRequests []string
+		wantKey      any
+	}{
+		{name: "blocked select", mode: WriteModeBlocked, dryRun: selectDryRun, wantRequests: []string{dryRunPath, queryPath}, wantKey: encryption},
+		{name: "allowed select", mode: WriteModeAllowed, dryRun: selectDryRun, wantRequests: []string{dryRunPath, queryPath}, wantKey: encryption},
+		{name: "allowed insert", mode: WriteModeAllowed, dryRun: insertDryRun, wantRequests: []string{dryRunPath, queryPath}},
+		{name: "allowed missing statement type", mode: WriteModeAllowed, dryRun: `{}`, wantRequests: []string{dryRunPath, queryPath}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, got := runSQL(t, Config{WriteMode: tc.mode, KMSKeyName: testKMSKey}, map[string]fakeResponse{
+				dryRunPath: {body: tc.dryRun},
+				queryPath:  {body: ddlResult},
+			}, map[string]any{"project_id": "p", "query": "q"})
+
+			if got["status"] != "SUCCESS" {
+				t.Fatalf("Run() = %v, want SUCCESS", got)
+			}
+			if diff := cmp.Diff(tc.wantRequests, requestKeys(f)); diff != "" {
+				t.Errorf("requests mismatch (-want +got):\n%s", diff)
+			}
+			bodies := f.requestBodies()
+			if _, ok := bodies[0].(map[string]any)["configuration"].(map[string]any)["destinationEncryptionConfiguration"]; ok {
+				t.Errorf("dry run sets destinationEncryptionConfiguration")
+			}
+			gotKey := bodies[len(bodies)-1].(map[string]any)["destinationEncryptionConfiguration"]
+			if diff := cmp.Diff(tc.wantKey, gotKey); diff != "" {
+				t.Errorf("query destinationEncryptionConfiguration mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestExecuteSQL_WriteModeDescription checks that the description shows the
+// model the statements it may run.
+func TestExecuteSQL_WriteModeDescription(t *testing.T) {
+	tests := []struct {
+		mode WriteMode
+		want string
+	}{
+		{mode: "", want: executeSQLDescription},
+		{mode: WriteModeBlocked, want: executeSQLDescription},
+		{mode: WriteModeAllowed, want: executeSQLWriteModeDescription},
+	}
+	for _, tc := range tests {
+		f := newFakeBigQuery(t, nil)
+		ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), WriteMode: tc.mode})
+		got := toolByName(t, ts, "execute_sql").Declaration().Description
+		if got != strings.TrimRight(tc.want, "\n") {
+			t.Errorf("WriteMode %q: description is not the one for that mode", tc.mode)
+		}
+	}
+	if !strings.Contains(executeSQLWriteModeDescription, "CREATE TABLE") || strings.Contains(executeSQLDescription, "CREATE TABLE") {
+		t.Errorf("only the write mode description should show a CREATE TABLE example")
+	}
+}
+
 func TestNew_RejectsInvalidQueryConfig(t *testing.T) {
 	tooMany := map[string]string{}
 	for i := range 21 {
@@ -734,6 +873,13 @@ func TestNew_RejectsInvalidQueryConfig(t *testing.T) {
 		{name: "label key too long", cfg: Config{JobLabels: map[string]string{"k" + strings.Repeat("a", 63): "v"}}, wantErr: "at most 63"},
 		{name: "invalid label value", cfg: Config{JobLabels: map[string]string{"team": "Data/Eng"}}, wantErr: `value "Data/Eng"`},
 		{name: "label value too long", cfg: Config{JobLabels: map[string]string{"team": strings.Repeat("a", 64)}}, wantErr: "at most 63"},
+		{name: "unknown write mode", cfg: Config{WriteMode: "protected"}, wantErr: "WriteMode"},
+		{name: "uppercase write mode", cfg: Config{WriteMode: "ALLOWED"}, wantErr: "WriteMode"},
+		{name: "kms key without the key", cfg: Config{KMSKeyName: "projects/p/locations/us/keyRings/r"}, wantErr: "KMSKeyName"},
+		{name: "kms key with an empty segment", cfg: Config{KMSKeyName: "projects//locations/us/keyRings/r/cryptoKeys/k"}, wantErr: "KMSKeyName"},
+		{name: "kms key with a trailing slash", cfg: Config{KMSKeyName: testKMSKey + "/"}, wantErr: "KMSKeyName"},
+		{name: "kms key version", cfg: Config{KMSKeyName: testKMSKey + "/cryptoKeyVersions/1"}, wantErr: "KMSKeyName"},
+		{name: "kms key with a prefix", cfg: Config{KMSKeyName: "x" + testKMSKey}, wantErr: "KMSKeyName"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -763,5 +909,7 @@ func TestNew_AcceptsQueryConfigLimits(t *testing.T) {
 		ComputeProjectID:   "p",
 		MaximumBytesBilled: 10 << 20,
 		JobLabels:          labels,
+		WriteMode:          WriteModeAllowed,
+		KMSKeyName:         testKMSKey,
 	})
 }

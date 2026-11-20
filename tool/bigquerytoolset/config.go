@@ -17,6 +17,7 @@ package bigquerytoolset
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -90,6 +91,23 @@ type Config struct {
 	// cut to 63 characters: "MyAgent/1.0" becomes "myagent_1_0".
 	JobLabels map[string]string
 
+	// WriteMode is which statements execute_sql runs. Unset, it runs only
+	// SELECT statements, as with WriteModeBlocked.
+	WriteMode WriteMode
+
+	// KMSKeyName, when set, is the Cloud KMS key execute_sql encrypts query
+	// results with, for an organization policy such as
+	// constraints/gcp.restrictNonCmekServices that requires customer-managed
+	// keys. It has the form
+	// projects/{project}/locations/{location}/keyRings/{key_ring}/cryptoKeys/{key},
+	// the key must be in the location of the queried data, and the BigQuery
+	// service agent of the project running the query needs the Cloud KMS
+	// CryptoKey Encrypter/Decrypter role on it. The key applies only to
+	// SELECT statements, because BigQuery rejects a job-level key for DDL,
+	// DML and scripts. With WriteModeAllowed, setting it adds a dry run
+	// before each query to find the statement type.
+	KMSKeyName string
+
 	// DefaultProjectID is the project the tools use when the model does not
 	// name one. Setting it makes the project_id argument optional, so the
 	// model no longer has to ask the user for a project. The model can still
@@ -101,6 +119,22 @@ type Config struct {
 	// argument optional. The model can still name another dataset.
 	DefaultDatasetID string
 }
+
+// WriteMode is which statements execute_sql runs, as adk-python's WriteMode.
+type WriteMode string
+
+const (
+	// WriteModeBlocked runs only SELECT statements: a dry run finds the
+	// statement type first, and anything else is refused. It is what an
+	// unset WriteMode does.
+	WriteModeBlocked WriteMode = "blocked"
+	// WriteModeAllowed runs any statement, including DDL, DML and scripts
+	// that create, change or delete tables and models.
+	WriteModeAllowed WriteMode = "allowed"
+)
+
+// kmsKeyNamePattern is the form of a Cloud KMS key resource name.
+var kmsKeyNamePattern = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/keyRings/[^/]+/cryptoKeys/[^/]+$`)
 
 const (
 	defaultMaxQueryResultRows = 50
@@ -127,6 +161,14 @@ func (c Config) validate() error {
 	}
 	if c.MaximumBytesBilled != 0 && c.MaximumBytesBilled < minMaximumBytesBilled {
 		return fmt.Errorf("bigquerytoolset: Config.MaximumBytesBilled must be at least %d, the least BigQuery bills for a query", minMaximumBytesBilled)
+	}
+	switch c.WriteMode {
+	case "", WriteModeBlocked, WriteModeAllowed:
+	default:
+		return fmt.Errorf("bigquerytoolset: Config.WriteMode %q is not %q or %q", c.WriteMode, WriteModeBlocked, WriteModeAllowed)
+	}
+	if c.KMSKeyName != "" && !kmsKeyNamePattern.MatchString(c.KMSKeyName) {
+		return fmt.Errorf("bigquerytoolset: Config.KMSKeyName %q is not a Cloud KMS key resource name of the form projects/{project}/locations/{location}/keyRings/{key_ring}/cryptoKeys/{key}", c.KMSKeyName)
 	}
 	if len(c.JobLabels) > maxJobLabels {
 		return fmt.Errorf("bigquerytoolset: Config.JobLabels has %d labels, more than the %d allowed", len(c.JobLabels), maxJobLabels)
