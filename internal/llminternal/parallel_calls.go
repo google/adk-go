@@ -117,10 +117,15 @@ func latestStateWrites(events []*session.Event, state session.ReadonlyState) (ma
 	return latest, nil
 }
 
-// sameObject reports whether a and b are the same map, or the same non-empty
-// slice: same type, first-element address, length and capacity. It is the Go
-// form of Python's `is` for dicts and lists. Values of any other kind, and
-// empty slices, are never the same object, as two Python [] never are.
+// sameObject reports whether a and b are the same map, or the same slice: same
+// type, data address, length and capacity, with a capacity above zero. It is
+// the Go form of Python's `is` for dicts and lists. A list emptied in place
+// (s[:0]) or filtered into make([]T, 0, n) is the same object as the session's
+// value when that is the very slice. A slice with capacity zero never is,
+// whatever the pointer says, because zero-capacity slices can share the
+// runtime's zero address. A slice of zero-size elements ([]struct{}) never is
+// either, empty or not: its array occupies no memory, so the pointer does not
+// identify it. Values of any other kind are never the same object.
 func sameObject(a, b any) bool {
 	if a == nil || b == nil {
 		return false
@@ -133,7 +138,10 @@ func sameObject(a, b any) bool {
 	case reflect.Map:
 		return va.UnsafePointer() == vb.UnsafePointer()
 	case reflect.Slice:
-		return va.Len() > 0 && va.UnsafePointer() == vb.UnsafePointer() && va.Len() == vb.Len() && va.Cap() == vb.Cap()
+		if va.Type().Elem().Size() == 0 {
+			return false
+		}
+		return va.Cap() > 0 && va.UnsafePointer() == vb.UnsafePointer() && va.Len() == vb.Len() && va.Cap() == vb.Cap()
 	default:
 		return false
 	}

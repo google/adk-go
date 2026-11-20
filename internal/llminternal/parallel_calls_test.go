@@ -142,7 +142,14 @@ func TestMergeParallelResponses_LatestWrites(t *testing.T) {
 	conflictDict := map[string]any{"k": 1}
 	typedMap := map[string]string{"a": "x"}
 	nestedLast := map[string]any{"n": map[string]any{"b": 2}}
+	// emptyList has capacity zero, so it shares its address with every other
+	// zero-capacity []any.
 	emptyList := []any{}
+	// spare is empty with room for two entries: a list emptied in place.
+	spare := make([]any, 0, 2)
+	spareBacking := make([]any, 0, 4)
+	// zeroSize has capacity but no memory: its elements are zero bytes wide.
+	zeroSize := make([]struct{}, 0, 2)
 
 	tests := []struct {
 		name string
@@ -162,6 +169,12 @@ func TestMergeParallelResponses_LatestWrites(t *testing.T) {
 		{name: "key absent from the session", key: "items", noSession: true, writes: []any{[]any{"a"}, []any{"b"}}, want: []any{"b"}},
 		{name: "equal list built separately is not the same write", key: "items", session: []any{"a"}, writes: []any{[]any{"a"}, []any{"b"}}, want: []any{"b"}},
 		{name: "empty list is never the same write", key: "items", session: emptyList, writes: []any{emptyList, []any{"b"}}, want: []any{"b"}},
+		{name: "list emptied in place is the same write", key: "items", session: spare, writes: []any{spare, []any{"b"}}, want: []any{}},
+		{name: "empty lists with capacity built separately are not the same write", key: "items", session: make([]any, 0, 2), writes: []any{make([]any, 0, 2), []any{"b"}}, want: []any{"b"}},
+		{name: "empty views of one array with different capacity are not the same write", key: "items", session: spareBacking[:0:2], writes: []any{spareBacking[:0], []any{"z"}}, want: []any{"z"}},
+		{name: "empty zero-size-element lists with capacity built separately are not the same write", key: "items", session: make([]struct{}, 0, 2), writes: []any{make([]struct{}, 0, 2), []struct{}{{}}}, want: []struct{}{{}}},
+		{name: "non-empty zero-size-element lists built separately are not the same write", key: "items", session: []struct{}{{}}, writes: []any{[]struct{}{{}}, []struct{}{{}, {}}}, want: []struct{}{{}, {}}},
+		{name: "zero-size-element list is never the same write", key: "items", session: zeroSize, writes: []any{zeroSize, []struct{}{{}}}, want: []struct{}{{}}},
 		{name: "same array, different length", key: "items", session: backing[:1], writes: []any{backing, []any{"z"}}, want: []any{"z"}},
 		{name: "same array and length, different capacity", key: "items", session: capped[:1:1], writes: []any{capped[:1], []any{"z"}}, want: []any{"z"}},
 		{name: "conflicting dict key: the latest write wins", key: "doc", session: conflictDict, writes: []any{conflictDict, map[string]any{"k": 2}}, want: map[string]any{"k": 1}},
