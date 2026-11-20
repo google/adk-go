@@ -95,8 +95,8 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 		return nil, err
 	}
 	// genai resolves the base URL from the config, its defaults and the
-	// environment, so it is known only now. The client reads its headers from
-	// this map on every call, so writing into it reaches the live handshake.
+	// environment, so it is known only now. Live.Connect reads the headers
+	// from this map when it dials, so writing into it reaches the handshake.
 	baseURL := client.ClientConfig().HTTPOptions.BaseURL
 	maps.Copy(cfgCopy.HTTPOptions.Headers, version.WithTrackingHeaders(callerHeaders, baseURL))
 

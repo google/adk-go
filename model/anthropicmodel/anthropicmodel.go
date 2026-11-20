@@ -236,8 +236,9 @@ func NewModel(ctx context.Context, modelName string, cfg ClientConfig) (model.LL
 		}
 
 		// The SDK's own Vertex endpoints are all hosts under googleapis.com.
-		// A base URL from RequestOptions replaces any other and cannot be
-		// read here, so it gets the labels without the hosting runtime.
+		// A base URL from RequestOptions replaces any other, and only its
+		// presence is known here, so it gets the labels without the hosting
+		// runtime.
 		dest := "https://aiplatform.googleapis.com/"
 		switch {
 		case reqOptsHasBaseURL:

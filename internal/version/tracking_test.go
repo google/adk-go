@@ -128,6 +128,9 @@ func TestTrackingHeaderDestination(t *testing.T) {
 		{dest: "HTTPS://bigquery.googleapis.com/v1", wantSuffix: true},
 		{dest: "https://bigquery.googleapis.com:443/v1", wantSuffix: true},
 		{dest: "https://bigquery.googleapis.com", wantSuffix: true},
+		{dest: "https://\u0130.googleapis.com/v1", wantSuffix: true},
+		// No such host exists, but it has the suffix, as in adk-python.
+		{dest: "https://.googleapis.com/v1", wantSuffix: true},
 		// A backslash outside the authority is fine.
 		{dest: `https://bigquery.googleapis.com/v1?q=a\b`, wantSuffix: true},
 		{dest: "http://aiplatform.googleapis.com/v1"},
@@ -148,6 +151,10 @@ func TestTrackingHeaderDestination(t *testing.T) {
 		{dest: "//bigquery.googleapis.com/v1"},
 		{dest: "https://bigquery.googleapis.com./v1"},
 		{dest: "https://%zz.googleapis.com/v1"},
+		// "İ" and "ſ" are not the ASCII letters that case mapping turns them
+		// into, so these are names of other domains.
+		{dest: "https://x.googleap\u0130s.com/v1"},
+		{dest: "https://x.googleapi\u017f.com/v1"},
 		{dest: ""},
 	}
 	for _, tt := range tests {

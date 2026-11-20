@@ -62,7 +62,7 @@ func runtimeTag() string {
 	// Knative, CLOUD_RUN_JOB for Cloud Run jobs.
 	case os.Getenv("K_SERVICE") != "" || os.Getenv("CLOUD_RUN_JOB") != "":
 		return "cloud_run"
-	// Set in every pod of any Kubernetes cluster, not only on GKE.
+	// Kubernetes sets it in pods on any cluster, not only on GKE.
 	case os.Getenv("KUBERNETES_SERVICE_HOST") != "":
 		return "k8s"
 	}
@@ -77,7 +77,12 @@ func isGoogleAPI(dest string) bool {
 	if err != nil {
 		return false
 	}
-	return u.Scheme == "https" && u.User == nil && strings.HasSuffix(strings.ToLower(u.Hostname()), ".googleapis.com")
+	const suffix = ".googleapis.com"
+	host := u.Hostname()
+	// Compared as bytes of the same length rather than after strings.ToLower,
+	// which turns letters such as "İ" into ASCII ones.
+	i := len(host) - len(suffix)
+	return u.Scheme == "https" && u.User == nil && i >= 0 && strings.EqualFold(host[i:], suffix)
 }
 
 // WithTrackingHeaders returns a copy of h whose user-agent and
