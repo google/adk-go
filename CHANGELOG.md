@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0](https://github.com/google/adk-go/compare/v1.10.0...v1.11.0) (2026-11-20)
+
+
+### Bug Fixes
+
+* **v1:** align Go version requirements and deployment builds ([#1927](https://github.com/google/adk-go/issues/1927)) ([9dca8d7](https://github.com/google/adk-go/commit/9dca8d7f0111589e348c50743f30b9e6269532db))
+
 ## [1.10.0](https://github.com/google/adk-go/compare/v1.9.0...v1.10.0) (2026-11-16)
 
 
