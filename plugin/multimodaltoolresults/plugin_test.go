@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -937,7 +936,7 @@ func TestConcurrentAfterToolCallbacksKeepEveryPart(t *testing.T) {
 	for i := range n {
 		wantTexts[i] = fmt.Sprint(i)
 	}
-	sort.Strings(wantTexts)
+	slices.Sort(wantTexts)
 
 	// run calls the after-tool callback from n goroutines, each with its own
 	// tool context, and returns a callback context over the same session and
@@ -977,7 +976,7 @@ func TestConcurrentAfterToolCallbacksKeepEveryPart(t *testing.T) {
 				t.Fatalf("state entry is %T, want *genai.Part or map[string]any", e)
 			}
 		}
-		sort.Strings(texts)
+		slices.Sort(texts)
 		return texts
 	}
 
@@ -1227,7 +1226,7 @@ func TestParallelCallsThatSavePartsEndTheRun(t *testing.T) {
 					texts = append(texts, p.Text)
 				}
 			}
-			sort.Strings(texts)
+			slices.Sort(texts)
 			if diff := cmp.Diff([]string{"from earlier", "from later"}, texts); diff != "" {
 				t.Errorf("text parts of the second request's last content mismatch (-want +got):\n%s", diff)
 			}

@@ -78,7 +78,7 @@ func extractMedia(result any, depth int) (any, []*genai.FunctionResponsePart) {
 	v := reflect.ValueOf(result)
 	var parts []*genai.FunctionResponsePart
 	var remaining any
-	empty := false
+	var empty bool
 	switch {
 	case isStringMap(v):
 		kept := map[string]any{}

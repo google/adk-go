@@ -194,7 +194,7 @@ func TestReconstructRunState_ChildOnSubBranchPausesAndResumes(t *testing.T) {
 	}
 	events := branchResume(t, ctx, wf, state, map[string]any{"q1": "A"})
 
-	wantOrch := []branchObs{{Branch: ""}, {Branch: "", Output: "A"}}
+	wantOrch := []branchObs{{Branch: ""}, {Branch: "", Output: "A"}, {Branch: ""}}
 	if diff := cmp.Diff(wantOrch, branchEventsOf(events, "orch")); diff != "" {
 		t.Errorf("resume turn orch events mismatch (-want +got):\n%s", diff)
 	}

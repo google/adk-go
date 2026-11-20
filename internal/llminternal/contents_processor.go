@@ -926,7 +926,7 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 				settled = append(settled, u[len(u)-1])
 			}
 		}
-		sort.Ints(settled)
+		slices.Sort(settled)
 		settled = slices.Compact(settled)
 		switch len(settled) {
 		case 0:
