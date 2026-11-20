@@ -15,14 +15,11 @@
 package telemetry
 
 import (
-	"os"
 	"regexp"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/genai"
-
-	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 )
 
 // genAIProviderName supersedes gen_ai.system in semantic conventions >1.36.
@@ -30,10 +27,7 @@ var genAIProviderName = attribute.Key("gen_ai.provider.name")
 
 // providerName is the provider a model call's span, log record and metrics
 // report: named by the model, else by the provider segment of an Apigee path,
-// else by the backend, else by the backend the environment selects, which for
-// an Apigee path is the one the Apigee model picks. A backend it does not know
-// reports gcp.gen_ai. adk-python skips the client's backend and guesses from
-// the environment; Go knows the backend, so it uses it.
+// else by the call's backend, else unknown.
 func providerName(modelName string, backend genai.Backend) attribute.KeyValue {
 	name := bareModelName(modelName)
 	if !strings.HasPrefix(name, "gemini-") {
@@ -48,24 +42,14 @@ func providerName(modelName string, backend genai.Backend) attribute.KeyValue {
 		if segment, _, ok := strings.Cut(rest, "/"); ok && apigeeProviders[segment] != "" {
 			return genAIProviderName.String(apigeeProviders[segment])
 		}
-		if backend == genai.BackendUnspecified {
-			// The Apigee model reads GOOGLE_GENAI_USE_VERTEXAI alone.
-			backend = genai.BackendGeminiAPI
-			if v := os.Getenv("GOOGLE_GENAI_USE_VERTEXAI"); strings.ToLower(v) == "true" || v == "1" {
-				backend = genai.BackendVertexAI
-			}
-		}
 	}
-	switch backend {
-	case genai.BackendUnspecified:
-		backend = googlellm.EnvironmentBackend()
-	case genai.BackendEnterprise:
+	if backend == genai.BackendEnterprise {
 		backend = genai.BackendVertexAI
 	}
 	if sys, ok := GenAISystemAttr(backend); ok {
 		return genAIProviderName.String(sys.Value.AsString())
 	}
-	return genAIProviderName.String("gcp.gen_ai")
+	return genAIProviderName.String("unknown")
 }
 
 var (

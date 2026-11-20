@@ -49,7 +49,9 @@
             "body": {
               "content": "you are helpful\n\nYou are an agent. Your internal name is \"some_root_agent\". The description about you is \"A sample root agent.\"."
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.user.message",
@@ -63,7 +65,9 @@
                 "role": "user"
               }
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           }
         ]
       }

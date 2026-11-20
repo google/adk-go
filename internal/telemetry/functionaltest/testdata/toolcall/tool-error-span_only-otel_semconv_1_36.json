@@ -71,14 +71,18 @@
             "body": {
               "content": "<elided>"
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.user.message",
             "body": {
               "content": "<elided>"
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.choice",
@@ -87,7 +91,9 @@
               "finish_reason": "STOP",
               "index": 0
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           }
         ]
       },
@@ -196,28 +202,36 @@
             "body": {
               "content": "<elided>"
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.user.message",
             "body": {
               "content": "<elided>"
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.user.message",
             "body": {
               "content": "<elided>"
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.user.message",
             "body": {
               "content": "<elided>"
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.choice",
@@ -226,7 +240,9 @@
               "finish_reason": "STOP",
               "index": 0
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           }
         ]
       }

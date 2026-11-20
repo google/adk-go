@@ -71,7 +71,9 @@
             "body": {
               "content": "you are helpful\n\nYou are an agent. Your internal name is \"some_delegating_agent\". The description about you is \"A delegating agent.\"."
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.user.message",
@@ -85,7 +87,9 @@
                 "role": "user"
               }
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.choice",
@@ -106,7 +110,9 @@
               "finish_reason": "STOP",
               "index": 0
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           }
         ]
       },
@@ -200,7 +206,9 @@
                     "body": {
                       "content": "you are helpful\n\nYou are an agent. Your internal name is \"some_delegate_agent\". The description about you is \"A delegate agent.\"."
                     },
-                    "attributes": {}
+                    "attributes": {
+                      "gen_ai.system": "gcp.gemini"
+                    }
                   },
                   {
                     "event_name": "gen_ai.user.message",
@@ -214,7 +222,9 @@
                         "role": "user"
                       }
                     },
-                    "attributes": {}
+                    "attributes": {
+                      "gen_ai.system": "gcp.gemini"
+                    }
                   },
                   {
                     "event_name": "gen_ai.choice",
@@ -230,7 +240,9 @@
                       "finish_reason": "STOP",
                       "index": 0
                     },
-                    "attributes": {}
+                    "attributes": {
+                      "gen_ai.system": "gcp.gemini"
+                    }
                   }
                 ]
               }
@@ -322,7 +334,9 @@
             "body": {
               "content": "you are helpful\n\nYou are an agent. Your internal name is \"some_delegating_agent\". The description about you is \"A delegating agent.\"."
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.user.message",
@@ -336,7 +350,9 @@
                 "role": "user"
               }
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.user.message",
@@ -355,7 +371,9 @@
                 "role": "model"
               }
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.user.message",
@@ -374,7 +392,9 @@
                 "role": "user"
               }
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           },
           {
             "event_name": "gen_ai.choice",
@@ -390,7 +410,9 @@
               "finish_reason": "STOP",
               "index": 0
             },
-            "attributes": {}
+            "attributes": {
+              "gen_ai.system": "gcp.gemini"
+            }
           }
         ]
       }

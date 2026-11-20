@@ -148,10 +148,6 @@ func record(t *testing.T, tc testcasedata.Case) *telemetrytest.Digest {
 	telemetry.OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(logExp))))
 	metricReader := sdkmetric.NewManualReader()
 	telemetry.OverrideMeterForTesting(t, sdkmetric.NewMeterProvider(sdkmetric.WithReader(metricReader)))
-	// The mock model names no provider, so spans, events and metrics guess one
-	// from these.
-	t.Setenv("GOOGLE_GENAI_USE_ENTERPRISE", "")
-	t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "")
 
 	err := testcaseimpl.Run(t, tc.Scenario)
 	if gotErr := err != nil; gotErr != tc.Scenario.WantErr() {

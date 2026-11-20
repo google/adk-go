@@ -109,7 +109,7 @@ func newCollaborativeAgent(t *testing.T, name string, mode llmagent.Mode, ok boo
 	a, err := llmagent.New(llmagent.Config{
 		Name:        name,
 		Description: "collaborative " + name,
-		Model:       &testutil.MockModel{Responses: responses, Usage: usages},
+		Model:       &testutil.MockModel{Responses: responses, Usage: usages, Backend: genai.BackendGeminiAPI},
 		Instruction: "you are helpful",
 		Mode:        mode,
 	})

@@ -33,6 +33,7 @@ func newStreaming(t *testing.T) agent.Agent {
 		Name:        "some_root_agent",
 		Description: "A sample root agent.",
 		Model: &testutil.MockModel{
+			Backend: genai.BackendGeminiAPI,
 			Responses: []*genai.Content{
 				{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "text "}}},
 				{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "response"}}},

@@ -403,11 +403,11 @@ func TestInstrumentGenerateContent_Metrics(t *testing.T) {
 			reasoning: unknown(10),
 		},
 		{
-			name:           "provider from the environment",
+			name:           "no backend",
 			params:         GenerateContentParams{ModelName: "gemini-x", Request: &model.LLMRequest{}},
 			env:            map[string]string{"GOOGLE_GENAI_USE_ENTERPRISE": "true"},
 			steps:          []modelStep{{resp: &model.LLMResponse{FinishReason: genai.FinishReasonStop}}},
-			provider:       "gcp.vertex_ai",
+			provider:       "unknown",
 			histogramAttrs: []attribute.KeyValue{responseModel},
 			counterAttrs:   []attribute.KeyValue{responseModel},
 		},

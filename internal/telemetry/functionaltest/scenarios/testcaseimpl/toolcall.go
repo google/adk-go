@@ -60,7 +60,7 @@ func newToolCall(t *testing.T, s toolcall.Scenario) agent.Agent {
 	a, err := llmagent.New(llmagent.Config{
 		Name:        "some_root_agent",
 		Description: "A sample root agent.",
-		Model:       &testutil.MockModel{Responses: responses, Usage: usage},
+		Model:       &testutil.MockModel{Responses: responses, Usage: usage, Backend: genai.BackendGeminiAPI},
 		Instruction: "you are helpful",
 		Tools:       []tool.Tool{sampleTool},
 	})

@@ -97,7 +97,9 @@
                     "body": {
                       "content": "you are helpful\n\nYou are an agent. Your internal name is \"task_agent\". The description about you is \"collaborative task_agent\".\n\n\nDo NOT call 'finish_task' prematurely. Use your available tools to\nfully complete every aspect of the delegated task first. If the\ntask is unclear, ask the user for clarification before proceeding.\nOnce the task is fully complete, call 'finish_task' by itself with\nno accompanying text output.\n"
                     },
-                    "attributes": {}
+                    "attributes": {
+                      "gen_ai.system": "gcp.gemini"
+                    }
                   },
                   {
                     "event_name": "gen_ai.user.message",
@@ -111,7 +113,9 @@
                         "role": "user"
                       }
                     },
-                    "attributes": {}
+                    "attributes": {
+                      "gen_ai.system": "gcp.gemini"
+                    }
                   },
                   {
                     "event_name": "gen_ai.choice",
@@ -127,7 +131,9 @@
                       "finish_reason": "STOP",
                       "index": 0
                     },
-                    "attributes": {}
+                    "attributes": {
+                      "gen_ai.system": "gcp.gemini"
+                    }
                   }
                 ]
               }
@@ -184,7 +190,9 @@
                     "body": {
                       "content": "you are helpful"
                     },
-                    "attributes": {}
+                    "attributes": {
+                      "gen_ai.system": "gcp.gemini"
+                    }
                   },
                   {
                     "event_name": "gen_ai.user.message",
@@ -198,7 +206,9 @@
                         "role": "user"
                       }
                     },
-                    "attributes": {}
+                    "attributes": {
+                      "gen_ai.system": "gcp.gemini"
+                    }
                   }
                 ]
               }

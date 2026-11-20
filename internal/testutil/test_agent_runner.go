@@ -182,6 +182,8 @@ type MockModel struct {
 	// or a response past its end, reports none.
 	Usage                []*genai.GenerateContentResponseUsageMetadata
 	StreamResponsesCount int
+	// Backend is the backend the model reports, unspecified by default.
+	Backend genai.Backend
 }
 
 // nextUsage removes and returns the usage reported with the next response.
@@ -260,6 +262,11 @@ func (m *MockModel) GenerateStream(ctx context.Context, req *model.LLMRequest) i
 // Name implements llm.Model.
 func (m *MockModel) Name() string {
 	return "mock"
+}
+
+// GetGoogleLLMVariant returns the backend the model reports.
+func (m *MockModel) GetGoogleLLMVariant() genai.Backend {
+	return m.Backend
 }
 
 var _ model.LLM = (*MockModel)(nil)

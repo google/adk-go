@@ -32,6 +32,7 @@ func newDelegation(t *testing.T) agent.Agent {
 		Name:        "some_delegate_agent",
 		Description: "A delegate agent.",
 		Model: &testutil.MockModel{
+			Backend:   genai.BackendGeminiAPI,
 			Responses: []*genai.Content{{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "delegate response"}}}},
 			Usage:     []*genai.GenerateContentResponseUsageMetadata{usageC()},
 		},
@@ -44,6 +45,7 @@ func newDelegation(t *testing.T) agent.Agent {
 		Name:        "some_delegating_agent",
 		Description: "A delegating agent.",
 		Model: &testutil.MockModel{
+			Backend: genai.BackendGeminiAPI,
 			Responses: []*genai.Content{
 				{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "some_delegate_agent", Args: map[string]any{"request": "delegate this"}}}}},
 				{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "text response"}}},

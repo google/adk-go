@@ -660,8 +660,6 @@ func toGoKeyValues(kvs []attribute.KeyValue) []goKeyValue {
 	return values
 }
 
-// Not covered by goldens, whose mock model has no backend. The span, its event
-// and the metrics report the same provider; the older span format has none.
 func TestGenerateContentProviderName(t *testing.T) {
 	for _, tc := range []struct {
 		schema     string
@@ -672,12 +670,11 @@ func TestGenerateContentProviderName(t *testing.T) {
 	}{
 		{"otel_semconv_1_44", genai.BackendVertexAI, "gcp.vertex_ai", "gcp.vertex_ai", 1},
 		{"otel_semconv_1_44", genai.BackendGeminiAPI, "gcp.gemini", "gcp.gemini", 1},
-		// Guessed from GOOGLE_GENAI_USE_ENTERPRISE.
-		{"otel_semconv_1_44", genai.BackendUnspecified, "gcp.vertex_ai", "gcp.vertex_ai", 1},
+		{"otel_semconv_1_44", genai.BackendUnspecified, "unknown", "unknown", 1},
 		{"otel_semconv_1_36", genai.BackendVertexAI, nil, "gcp.vertex_ai", 0},
 	} {
 		t.Run(tc.schema+"/"+tc.backend.String(), func(t *testing.T) {
-			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schema, "GOOGLE_GENAI_USE_ENTERPRISE": "true"})
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schema})
 			reader := setupTestMeter(t)
 			spans := setupTestTracer(t)
 			logs := &inMemoryExporter{}

@@ -57,14 +57,18 @@
                     "body": {
                       "content": "<elided>"
                     },
-                    "attributes": {}
+                    "attributes": {
+                      "gen_ai.system": "gcp.gemini"
+                    }
                   },
                   {
                     "event_name": "gen_ai.user.message",
                     "body": {
                       "content": "<elided>"
                     },
-                    "attributes": {}
+                    "attributes": {
+                      "gen_ai.system": "gcp.gemini"
+                    }
                   }
                 ]
               }
