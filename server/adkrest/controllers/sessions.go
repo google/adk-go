@@ -115,6 +115,16 @@ func (c *SessionsAPIController) createSession(ctx context.Context, sessionID mod
 		return models.Session{}, err
 	}
 	for _, event := range events {
+		// An event sent without a timestamp arrives with the zero time. Stored
+		// as it is, it moves the session's last update back to year 1, so the
+		// session reports lastUpdateTime -62135596800 and sorts as the oldest
+		// in the list, and session/database reads it back ahead of any event
+		// that has a timestamp. adk-python's Event defaults the timestamp to
+		// the current time, and the runner stamps the events it stores the
+		// same way, so stamp the time the event is stored.
+		if event.Timestamp.IsZero() {
+			event.Timestamp = platform.Now(ctx)
+		}
 		err = c.service.AppendEvent(ctx, session.Session, event)
 		if err != nil {
 			return models.Session{}, err

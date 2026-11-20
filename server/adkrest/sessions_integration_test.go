@@ -24,11 +24,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/server/adkrest"
 	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
@@ -323,4 +325,133 @@ func doTimestampRequest(t *testing.T, method, target, body string) (int, string)
 		t.Fatalf("response body Close() failed: %v", closeErr)
 	}
 	return resp.StatusCode, string(respBody)
+}
+
+// TestCreateSessionStampsEventsWithoutTimestamp pins that an event sent to
+// create-session without a timestamp is stored at the time it was stored, as
+// adk-python's Event defaults it, while an event's own timestamp is kept.
+//
+// Stored with the zero time instead, the event moved the session's last update
+// back to year 1: lastUpdateTime read -62135596800, and the session sorted
+// ahead of every older session in the list.
+func TestCreateSessionStampsEventsWithoutTimestamp(t *testing.T) {
+	services := map[string]func(t *testing.T) session.Service{
+		"inmemory": func(*testing.T) session.Service { return session.InMemoryService() },
+		"sqlite":   newSQLiteSessionService,
+	}
+	for serviceName, newService := range services {
+		t.Run(serviceName, func(t *testing.T) {
+			server, err := adkrest.NewServer(adkrest.ServerConfig{
+				SessionService: newService(t),
+				Authenticator: authn.NewCustom(func(r *http.Request) (*authn.Caller, error) {
+					return &authn.Caller{UserID: "u"}, nil
+				}),
+			})
+			if err != nil {
+				t.Fatalf("adkrest.NewServer() failed: %v", err)
+			}
+			// Every request reads the clock the test last set, so each
+			// session's creation and each stamped event land at a known time.
+			var now atomic.Pointer[time.Time]
+			testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				clock := *now.Load()
+				ctx := platform.WithTimeProvider(r.Context(), func() time.Time { return clock })
+				server.ServeHTTP(w, r.WithContext(ctx))
+			}))
+			t.Cleanup(testServer.Close)
+			base := testServer.URL + "/apps/app/users/u/sessions"
+
+			older := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+			newer := older.Add(time.Hour + 123456*time.Microsecond)
+			now.Store(&older)
+			if status, body := doTimestampRequest(t, http.MethodPost, base+"/older", `{}`); status != http.StatusOK {
+				t.Fatalf("create older session = %d, want 200; body: %s", status, body)
+			}
+			now.Store(&newer)
+			status, body := doTimestampRequest(t, http.MethodPost, base+"/newer", `{"events":[
+				{"author":"user","timestamp":1733040000.5},
+				{"author":"model"}
+			]}`)
+			if status != http.StatusOK {
+				t.Fatalf("create newer session = %d, want 200; body: %s", status, body)
+			}
+
+			wantNewer := stampedSession{
+				ID:             "newer",
+				LastUpdateTime: newer.Unix(),
+				// The first event keeps its own timestamp; the second, sent
+				// without one, carries the time it was stored.
+				EventTimestamps: []float64{1733040000.5, float64(newer.UnixMicro()) / 1e6},
+			}
+			if got := decodeStampedSession(t, body); !stampedSessionsEqual(got, wantNewer) {
+				t.Errorf("create response = %+v, want %+v", got, wantNewer)
+			}
+			status, body = doTimestampRequest(t, http.MethodGet, base+"/newer", "")
+			if status != http.StatusOK {
+				t.Fatalf("GET newer session = %d, want 200; body: %s", status, body)
+			}
+			if got := decodeStampedSession(t, body); !stampedSessionsEqual(got, wantNewer) {
+				t.Errorf("GET response = %+v, want %+v", got, wantNewer)
+			}
+
+			status, body = doTimestampRequest(t, http.MethodGet, base, "")
+			if status != http.StatusOK {
+				t.Fatalf("list sessions = %d, want 200; body: %s", status, body)
+			}
+			var listed []stampedSession
+			if err := json.Unmarshal([]byte(body), &listed); err != nil {
+				t.Fatalf("json.Unmarshal(%s) failed: %v", body, err)
+			}
+			// List is ordered by last update time, oldest first.
+			want := []stampedSession{
+				{ID: "older", LastUpdateTime: older.Unix()},
+				{ID: "newer", LastUpdateTime: newer.Unix()},
+			}
+			if !slices.EqualFunc(listed, want, func(a, b stampedSession) bool {
+				return a.ID == b.ID && a.LastUpdateTime == b.LastUpdateTime
+			}) {
+				t.Errorf("list = %+v, want %+v", listed, want)
+			}
+		})
+	}
+}
+
+// stampedSession is the part of a session response that
+// TestCreateSessionStampsEventsWithoutTimestamp checks.
+type stampedSession struct {
+	ID              string
+	LastUpdateTime  int64
+	EventTimestamps []float64
+}
+
+func (s *stampedSession) UnmarshalJSON(b []byte) error {
+	var wire struct {
+		ID             string `json:"id"`
+		LastUpdateTime int64  `json:"lastUpdateTime"`
+		Events         []struct {
+			Timestamp float64 `json:"timestamp"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		return err
+	}
+	s.ID, s.LastUpdateTime = wire.ID, wire.LastUpdateTime
+	s.EventTimestamps = nil
+	for _, e := range wire.Events {
+		s.EventTimestamps = append(s.EventTimestamps, e.Timestamp)
+	}
+	return nil
+}
+
+func decodeStampedSession(t *testing.T, body string) stampedSession {
+	t.Helper()
+	var got stampedSession
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("json.Unmarshal(%s) failed: %v", body, err)
+	}
+	return got
+}
+
+func stampedSessionsEqual(a, b stampedSession) bool {
+	return a.ID == b.ID && a.LastUpdateTime == b.LastUpdateTime && slices.Equal(a.EventTimestamps, b.EventTimestamps)
 }
