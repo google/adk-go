@@ -302,9 +302,7 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// The hosting runtime is reported to Google API endpoints only, and the rule
-// is applied to the URL of each request, so a redirect to another host is
-// judged on its own.
+// The hosting runtime is reported to Google API endpoints only.
 func TestTrackingTransportRuntimeSuffix(t *testing.T) {
 	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
 		t.Setenv(name, "")
@@ -335,6 +333,51 @@ func TestTrackingTransportRuntimeSuffix(t *testing.T) {
 			if got := sent.Header.Values(name); len(got) != 1 || got[0] != tt.want {
 				t.Errorf("request to %s: %s = %q, want [%q]", tt.url, name, got, tt.want)
 			}
+		}
+	}
+}
+
+// Each hop of a redirect is labeled for its own URL.
+func TestTrackingTransportRuntimeSuffixOnRedirect(t *testing.T) {
+	for _, name := range []string{"GOOGLE_CLOUD_AGENT_ENGINE_ID", "K_SERVICE", "CLOUD_RUN_JOB", "KUBERNETES_SERVICE_HOST"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("K_SERVICE", "svc")
+	plain := version.TrackingHeader("")
+	tagged := strings.Replace(plain, " ", "+cloud_run ", 1)
+	const google, other = "https://bigquery.googleapis.com/mcp", "https://mcp.example/mcp"
+
+	for _, tt := range []struct {
+		from, to string
+		want     []string
+	}{
+		{from: google, to: other, want: []string{tagged, plain}},
+		{from: other, to: google, want: []string{plain, tagged}},
+	} {
+		var got []string
+		client := &http.Client{Transport: &trackingTransport{base: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			got = append(got, r.Header.Get("User-Agent"), r.Header.Get("X-Goog-Api-Client"))
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody, Request: r}
+			if r.URL.String() == tt.from {
+				resp.StatusCode = http.StatusTemporaryRedirect
+				resp.Header.Set("Location", tt.to)
+			}
+			return resp, nil
+		})}}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, tt.from, http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("Do(%s) error = %v", tt.from, err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{tt.want[0], tt.want[0], tt.want[1], tt.want[1]}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s redirected to %s: labels per hop = %q, want %q", tt.from, tt.to, got, want)
 		}
 	}
 }

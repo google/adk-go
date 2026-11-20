@@ -112,7 +112,7 @@ func TestTrackingHeaderReadsEnvironmentOnEveryCall(t *testing.T) {
 	}
 }
 
-// The destinations match adk-python's test_is_googleapis_url.
+// The table holds the rows of adk-python's test_is_googleapis_url, and more.
 func TestTrackingHeaderDestination(t *testing.T) {
 	clearRuntimeEnv(t)
 	t.Setenv("K_SERVICE", "svc")

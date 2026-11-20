@@ -70,8 +70,9 @@ func runtimeTag() string {
 }
 
 // isGoogleAPI reports whether dest is an https URL of a host under
-// googleapis.com, the same rule as adk-python's is_googleapis_url. A URL with
-// userinfo is rejected, because HTTP clients disagree on which host it names.
+// googleapis.com. It follows adk-python's is_googleapis_url, and also rejects
+// a URL that url.Parse does. A URL with userinfo is rejected, because HTTP
+// clients disagree on which host it names.
 func isGoogleAPI(dest string) bool {
 	u, err := url.Parse(dest)
 	if err != nil {
