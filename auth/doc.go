@@ -29,7 +29,8 @@
 // is the process-local implementation. Providers backed by a token source
 // refresh themselves and need none.
 //
-// Token exchange and refresh are delegated to golang.org/x/oauth2 rather than
-// reimplemented here. Heavier, provider-specific integrations (for example GCP
-// agent identity) live in subpackages so this package stays dependency-light.
+// Token exchange and refresh are delegated to cloud.google.com/go/auth and
+// golang.org/x/oauth2 rather than reimplemented here. Heavier,
+// provider-specific integrations (for example GCP agent identity) live in
+// subpackages so this package stays dependency-light.
 package auth

@@ -17,7 +17,8 @@ package utils
 import (
 	"bytes"
 	"encoding/json"
-	"sort"
+	"maps"
+	"slices"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -58,11 +59,7 @@ func canonicalize(v any) ([]byte, error) {
 		if val == nil {
 			return []byte("null"), nil
 		}
-		keys := make([]string, 0, len(val))
-		for k := range val {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
+		keys := slices.Sorted(maps.Keys(val))
 
 		var buf bytes.Buffer
 		buf.WriteByte('{')
@@ -127,9 +124,7 @@ func canonicalizeUnorderedArray(items []any) ([]byte, error) {
 		}
 		encoded[i] = b
 	}
-	sort.Slice(encoded, func(i, j int) bool {
-		return bytes.Compare(encoded[i], encoded[j]) < 0
-	})
+	slices.SortFunc(encoded, bytes.Compare)
 
 	var buf bytes.Buffer
 	buf.WriteByte('[')

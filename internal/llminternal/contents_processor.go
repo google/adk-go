@@ -19,9 +19,9 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"maps"
 	"reflect"
 	"slices"
-	"sort"
 
 	"google.golang.org/genai"
 
@@ -128,16 +128,13 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	// not on a tool sub-branch below it, in its isolation scope, and not
 	// excluded.
 	visible := func(ev *session.Event) bool {
-		content := utils.Content(ev)
 		// Skip events without content or generated neither by user nor
 		// by model, UNLESS they have transcriptions.
 		//
 		// Compaction events are exempt: they carry their summary on
 		// Actions.Compaction rather than on Content, and compaction.Apply
 		// below expands them into content.
-		if (content == nil || content.Role == "" || len(content.Parts) == 0) &&
-			ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil &&
-			!compactioninternal.HasUsableSummary(ev) {
+		if isEmptyEvent(ev) {
 			// TODO: log a bad event with content but no Role is skipped
 			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
 			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
@@ -204,8 +201,7 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	var accumulatedInputTranscription string
 	var accumulatedOutputTranscription string
 
-	for i := 0; i < len(filtered); i++ {
-		ev := filtered[i]
+	for i, ev := range filtered {
 		content := utils.Content(ev)
 		if content == nil || len(content.Parts) == 0 {
 			if ev.LLMResponse.InputTranscription != nil && ev.LLMResponse.InputTranscription.Text != "" {
@@ -670,11 +666,7 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 			// moves to the tail.
 			//
 			// Collect and sort the indices to process events in order.
-			var sortedIndices []int
-			for index := range responseEventIndicesSet {
-				sortedIndices = append(sortedIndices, index)
-			}
-			sort.Ints(sortedIndices)
+			sortedIndices := slices.Sorted(maps.Keys(responseEventIndicesSet))
 
 			// Collect the actual event objects to be merged.
 			eventsToMerge := make([]*session.Event, len(sortedIndices))
@@ -741,7 +733,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 	// 2. Create an index (map) of function_response parts by their ID
 	partIndicesInMergedEvent := make(map[string]int)
 	for idx, part := range partsInMergedEvent {
-		if part.FunctionResponse != nil {
+		if part != nil && part.FunctionResponse != nil {
 			functionCallID := part.FunctionResponse.ID
 			partIndicesInMergedEvent[functionCallID] = idx
 		}
@@ -755,7 +747,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 
 		// 4. Update or Append parts
 		for _, part := range event.LLMResponse.Content.Parts {
-			if part.FunctionResponse != nil {
+			if part != nil && part.FunctionResponse != nil {
 				functionCallID := part.FunctionResponse.ID
 				// If we've seen this response ID before, replace it
 				if idx, found := partIndicesInMergedEvent[functionCallID]; found {
@@ -809,8 +801,9 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 	// Here a result counts only once it passes the branch and isolation-scope
 	// checks below, and call IDs come from every event.
 	unanswered := make(map[string]struct{})
-	for i := len(events) - 1; i >= 0; i-- {
-		event := events[i]
+	// The latest hand-over skipped as a turn start below, if any.
+	handover := -1
+	for i, event := range slices.Backward(events) {
 		for _, call := range utils.FunctionCalls(utils.Content(event)) {
 			delete(unanswered, call.ID)
 		}
@@ -844,24 +837,71 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		if len(unanswered) > 0 {
 			continue
 		}
+		// An event that gives the model nothing to read is left out of the
+		// contents, so it cannot start the turn either: it would slice out
+		// the input before it. This matches adk-python's
+		// _should_include_event_in_context gate for an event with no content,
+		// role or parts. An event whose parts are all empty still starts the
+		// turn here, because isEmptyEvent does not look inside the parts.
+		if isEmptyEvent(event) {
+			continue
+		}
 		// An event discarded by foreign conversion cannot start a visible
 		// turn: keep searching so it does not slice out the preceding input.
 		if isOtherAgentReply(agentName, event) && !compactioninternal.HasUsableSummary(event) && ConvertForeignEvent(event) == nil {
 			continue
 		}
-		if event.Author == "user" || isOtherAgentReply(agentName, event) {
-			return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
+		if event.Author != "user" && !isOtherAgentReply(agentName, event) {
+			continue
 		}
+		// A transfer_to_agent hand-over continues the turn of the request it
+		// hands over, so it stays in the prompt as context rather than
+		// starting the turn and slicing that request out. As in adk-python's
+		// _is_direct_transfer.
+		if isDirectTransfer(event) {
+			if handover < 0 {
+				handover = i
+			}
+			continue
+		}
+		return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
+	}
+	// With no earlier turn start, the turn starts at the latest hand-over, the
+	// event it started at before hand-overs were skipped. Falling back to the
+	// whole session instead would show the agent its own earlier turns.
+	// adk-python returns [] here.
+	if handover >= 0 {
+		return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[handover:], events, isSingleTurn, userContent)
 	}
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
 	// but that may be a bug.
 	return buildContentsDefault(agentName, branch, isolationScope, events, isSingleTurn, userContent)
 }
 
+// isEmptyEvent reports whether ev gives the model nothing to read: no content
+// with a role and parts, no transcription and no usable compaction summary.
+func isEmptyEvent(ev *session.Event) bool {
+	content := utils.Content(ev)
+	return (content == nil || content.Role == "" || len(content.Parts) == 0) &&
+		ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil &&
+		!compactioninternal.HasUsableSummary(ev)
+}
+
 // isSubmittedToolResult reports whether ev is a tool result the caller posted
 // back as a user-authored function response.
 func isSubmittedToolResult(ev *session.Event) bool {
 	return ev.Author == "user" && len(utils.FunctionResponses(utils.Content(ev))) > 0
+}
+
+// isDirectTransfer reports whether ev is a transfer_to_agent call or the
+// response that carries out the transfer.
+func isDirectTransfer(ev *session.Event) bool {
+	if ev.Actions.TransferToAgent != "" {
+		return true
+	}
+	return slices.ContainsFunc(utils.FunctionCalls(utils.Content(ev)), func(call *genai.FunctionCall) bool {
+		return call.Name == transferAgentName
+	})
 }
 
 func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
@@ -896,8 +936,8 @@ func answersOtherAgentCall(currentAgentName string, ev *session.Event, callAutho
 // This is to provide another agent's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
 // the previous agent's reply, etc.
-// Thought parts and standalone metadata are omitted. A non-empty event with no
-// remaining payload returns nil.
+// Thought parts, nil parts and standalone metadata are omitted. A non-empty
+// event with no remaining payload returns nil.
 func ConvertForeignEvent(ev *session.Event) *session.Event {
 	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {
@@ -909,6 +949,9 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		Parts: []*genai.Part{{Text: "For context:"}},
 	}
 	for _, p := range content.Parts {
+		if p == nil {
+			continue
+		}
 		// Never replay another agent's private reasoning into the current
 		// agent's context. Matches adk-python's _present_other_agent_message,
 		// which drops thought parts as the first step of its per-part loop.
@@ -984,6 +1027,12 @@ func shouldExcludeEvent(ev *session.Event) bool {
 		return false
 	}
 	for _, p := range c.Parts {
+		// adk-python rejects a null part when decoding a request or building
+		// Content, but here a nil part can already be in the session, for
+		// example from an SDK caller.
+		if p == nil {
+			continue
+		}
 		if p.FunctionCall != nil {
 			switch p.FunctionCall.Name {
 			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:

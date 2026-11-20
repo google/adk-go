@@ -28,6 +28,7 @@ import (
 
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/testutil"
+	"google.golang.org/adk/v2/model"
 )
 
 // connectFakeLive returns a LiveConnection for model on a fake Live API server,
@@ -168,6 +169,8 @@ func TestLiveConnectionSendHistoryFiltersInternalParts(t *testing.T) {
 		want []*genai.Content
 		// wantTurnComplete mirrors whether want ends in a user turn.
 		wantTurnComplete bool
+		// backend defaults to the Gemini API.
+		backend genai.Backend
 	}{
 		{
 			name: "DropsInternalArtifactRefsAndKeepsRest",
@@ -276,10 +279,152 @@ func TestLiveConnectionSendHistoryFiltersInternalParts(t *testing.T) {
 			},
 			wantTurnComplete: true,
 		},
+		{
+			// A text model's thought signatures make the Live API close the
+			// connection with 1007, so they are dropped from every part that
+			// carries one, while the rest of the part is kept.
+			name: "DropsThoughtSignatures",
+			history: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "what is the weather?"}},
+				},
+				{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "let me check", Thought: true, ThoughtSignature: []byte("sig-thought")},
+						{FunctionCall: &genai.FunctionCall{Name: "get_weather", Args: map[string]any{"city": "Paris"}}, ThoughtSignature: []byte("sig-call")},
+					},
+				},
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "get_weather", Response: map[string]any{"sky": "clear"}}}},
+				},
+				{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "it is clear", ThoughtSignature: []byte("sig-text")}},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "what is the weather?"}},
+				},
+				{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "let me check", Thought: true},
+						{FunctionCall: &genai.FunctionCall{Name: "get_weather", Args: map[string]any{"city": "Paris"}}},
+					},
+				},
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "get_weather", Response: map[string]any{"sky": "clear"}}}},
+				},
+				{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "it is clear"}},
+				},
+			},
+			wantTurnComplete: false,
+		},
+		{
+			// Gemini can put a signature on an empty part of its own, with or
+			// without the thought marker. Without the signature it holds
+			// nothing, so it is dropped, and so is a turn left empty.
+			name: "DropsSignatureOnlyParts",
+			history: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+				{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "hi there"},
+						{ThoughtSignature: []byte("sig-trailing")},
+					},
+				},
+				{
+					Role:  "model",
+					Parts: []*genai.Part{{Thought: true, ThoughtSignature: []byte("sig-marked")}},
+				},
+				{
+					// Metadata that only describes text or media the part
+					// does not carry is not content either.
+					Role: "model",
+					Parts: []*genai.Part{
+						{ThoughtSignature: []byte("sig-speech"), SpeechMetadata: &genai.SpeechMetadata{Speaker: "a"}},
+						{ThoughtSignature: []byte("sig-video"), VideoMetadata: &genai.VideoMetadata{FPS: new(1.0)}},
+						{ThoughtSignature: []byte("sig-media"), MediaResolution: &genai.PartMediaResolution{}, MediaProcessing: genai.MediaProcessingStatic},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+				{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: "hi there"}},
+				},
+			},
+			wantTurnComplete: false,
+		},
+		{
+			// PartMetadata is caller bookkeeping that encodes to nothing when
+			// empty, so a signature-only part carrying it is still dropped
+			// rather than sent as a bare {} part. With the final model turn
+			// gone, the history ends in a user turn and completes it.
+			name: "DropsSignatureOnlyPartWithEmptyMetadata",
+			history: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+				{
+					Role:  "model",
+					Parts: []*genai.Part{{ThoughtSignature: []byte("sig-meta"), PartMetadata: map[string]any{}}},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+			},
+			wantTurnComplete: true,
+		},
+		{
+			name:    "DropsSignatureOnlyPartWithEmptyMetadataVertex",
+			backend: genai.BackendVertexAI,
+			history: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+				{
+					Role:  "model",
+					Parts: []*genai.Part{{Thought: true, ThoughtSignature: []byte("sig-meta"), PartMetadata: map[string]any{}}},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+			},
+			wantTurnComplete: true,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			conn, frames := connectFakeLive(t, genai.BackendGeminiAPI, "gemini-2.0-flash-live-001")
+			backend := tc.backend
+			if backend == genai.BackendUnspecified {
+				backend = genai.BackendGeminiAPI
+			}
+			conn, frames := connectFakeLive(t, backend, "gemini-2.0-flash-live-001")
 			if err := conn.SendHistory(t.Context(), tc.history); err != nil {
 				t.Fatalf("SendHistory failed: %v", err)
 			}
@@ -297,6 +442,36 @@ func TestLiveConnectionSendHistoryFiltersInternalParts(t *testing.T) {
 				t.Errorf("SendHistory sent turnComplete=%t, want %t", got, tc.wantTurnComplete)
 			}
 		})
+	}
+}
+
+// TestLiveConnectionSendHistoryKeepsSessionSignatures checks that dropping
+// thought signatures from the live history leaves the caller's contents alone:
+// they are the session's events, and later text turns still need the
+// signatures. It also checks the wire frame, not only the decoded turns, so a
+// signature cannot reach the Live API under another encoding.
+func TestLiveConnectionSendHistoryKeepsSessionSignatures(t *testing.T) {
+	conn, frames := connectFakeLive(t, genai.BackendGeminiAPI, "gemini-2.0-flash-live-001")
+	callPart := &genai.Part{
+		FunctionCall:     &genai.FunctionCall{Name: "get_weather"},
+		ThoughtSignature: []byte("sig-call"),
+	}
+	history := []*genai.Content{
+		{Role: "user", Parts: []*genai.Part{{Text: "weather?"}}},
+		{Role: "model", Parts: []*genai.Part{callPart}},
+	}
+	if err := conn.SendHistory(t.Context(), history); err != nil {
+		t.Fatalf("SendHistory failed: %v", err)
+	}
+	raw := testutil.AwaitValue(t, frames, "history frame")
+	if strings.Contains(string(raw), "thoughtSignature") || strings.Contains(string(raw), "thought_signature") {
+		t.Errorf("SendHistory sent a thought signature to the Live API: %s", raw)
+	}
+	if got := string(callPart.ThoughtSignature); got != "sig-call" {
+		t.Errorf("SendHistory changed the caller's part: ThoughtSignature = %q, want %q", got, "sig-call")
+	}
+	if history[1].Parts[0] != callPart {
+		t.Error("SendHistory replaced a part in the caller's history")
 	}
 }
 
@@ -324,5 +499,144 @@ func TestLiveConnectionSendHistoryAllFiltered(t *testing.T) {
 			t.Errorf("SendHistory sent %s, want no frame", raw)
 		}
 	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// connectFakeLiveServing returns a LiveConnection on a fake Live API server
+// that sends messages, in order, right after the setup exchange. The
+// setupComplete response has already been received.
+func connectFakeLiveServing(t *testing.T, messages ...string) *googlellm.LiveConnection {
+	t.Helper()
+	var upgrader websocket.Upgrader
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`)); err != nil {
+			return
+		}
+		for _, m := range messages {
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(m)); err != nil {
+				return
+			}
+		}
+		// Keep the socket open until the client goes away.
+		_, _, _ = conn.ReadMessage()
+	}))
+	t.Cleanup(ts.Close)
+
+	client, err := genai.NewClient(t.Context(), &genai.ClientConfig{
+		Backend:     genai.BackendGeminiAPI,
+		APIKey:      "test-api-key",
+		HTTPOptions: genai.HTTPOptions{BaseURL: strings.Replace(ts.URL, "http", "ws", 1)},
+	})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	session, err := client.Live.Connect(t.Context(), "gemini-live-2.5-flash-preview", &genai.LiveConnectConfig{})
+	if err != nil {
+		t.Fatalf("Live.Connect failed: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	conn := googlellm.NewLiveConnection(session, "gemini-live-2.5-flash-preview")
+	// Connect does not consume setupComplete, so Recv returns it first as an
+	// empty response.
+	if _, err := conn.Recv(t.Context()); err != nil {
+		t.Fatalf("Recv of setupComplete failed: %v", err)
+	}
+	return conn
+}
+
+const liveUsageJSON = `"usageMetadata":{` +
+	`"promptTokenCount":174,"cachedContentTokenCount":20,"responseTokenCount":146,` +
+	`"toolUsePromptTokenCount":7,"thoughtsTokenCount":31,"totalTokenCount":358,` +
+	`"promptTokensDetails":[{"modality":"AUDIO","tokenCount":174}],` +
+	`"cacheTokensDetails":[{"modality":"TEXT","tokenCount":20}],` +
+	`"responseTokensDetails":[{"modality":"AUDIO","tokenCount":146}],` +
+	`"toolUsePromptTokensDetails":[{"modality":"TEXT","tokenCount":7}],` +
+	`"trafficType":"ON_DEMAND"}`
+
+// wantLiveUsage is liveUsageJSON as GenerateContent usage: the Live API's
+// response* fields become candidates*.
+var wantLiveUsage = &genai.GenerateContentResponseUsageMetadata{
+	PromptTokenCount:           174,
+	CachedContentTokenCount:    20,
+	CandidatesTokenCount:       146,
+	ToolUsePromptTokenCount:    7,
+	ThoughtsTokenCount:         31,
+	TotalTokenCount:            358,
+	PromptTokensDetails:        []*genai.ModalityTokenCount{{Modality: genai.MediaModalityAudio, TokenCount: 174}},
+	CacheTokensDetails:         []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: 20}},
+	CandidatesTokensDetails:    []*genai.ModalityTokenCount{{Modality: genai.MediaModalityAudio, TokenCount: 146}},
+	ToolUsePromptTokensDetails: []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: 7}},
+	TrafficType:                genai.TrafficTypeOnDemand,
+}
+
+func TestLiveConnectionRecvCarriesUsageMetadata(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		// want is the response Recv returns for message, UsageMetadata aside.
+		want *model.LLMResponse
+	}{
+		{
+			name:    "usage only",
+			message: `{` + liveUsageJSON + `}`,
+			want:    &model.LLMResponse{},
+		},
+		{
+			name:    "usage with turn complete",
+			message: `{"serverContent":{"turnComplete":true},` + liveUsageJSON + `}`,
+			want:    &model.LLMResponse{TurnComplete: true},
+		},
+		{
+			name:    "usage with session resumption update",
+			message: `{"sessionResumptionUpdate":{"newHandle":"h1","resumable":true},` + liveUsageJSON + `}`,
+			want:    &model.LLMResponse{SessionResumptionHandle: "h1"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := connectFakeLiveServing(t, tc.message)
+			got, err := conn.Recv(t.Context())
+			if err != nil {
+				t.Fatalf("Recv failed: %v", err)
+			}
+			want := *tc.want
+			want.UsageMetadata = wantLiveUsage
+			if diff := cmp.Diff(&want, got); diff != "" {
+				t.Errorf("Recv mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// When a turn ends with buffered transcriptions, the usage stays on the
+// turn-complete response, which Recv delivers after the transcriptions.
+func TestLiveConnectionRecvKeepsUsageOnBufferedTurnComplete(t *testing.T) {
+	conn := connectFakeLiveServing(t,
+		`{"serverContent":{"outputTranscription":{"text":"hello"}}}`,
+		`{"serverContent":{"turnComplete":true},`+liveUsageJSON+`}`,
+	)
+	var got []*model.LLMResponse
+	for range 3 {
+		resp, err := conn.Recv(t.Context())
+		if err != nil {
+			t.Fatalf("Recv failed: %v", err)
+		}
+		got = append(got, resp)
+	}
+	want := []*model.LLMResponse{
+		{OutputTranscription: &genai.Transcription{Text: "hello"}, Partial: true},
+		{OutputTranscription: &genai.Transcription{Text: "hello", Finished: true}},
+		{TurnComplete: true, UsageMetadata: wantLiveUsage},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Recv sequence mismatch (-want +got):\n%s", diff)
 	}
 }

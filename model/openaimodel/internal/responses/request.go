@@ -40,10 +40,10 @@ func buildParams(modelName string, req *model.LLMRequest) (oairesponses.Response
 	}
 
 	params := oairesponses.ResponseNewParams{
-		Model: oaishared.ResponsesModel(modelName),
+		Model: modelName,
 	}
 	if req.Model != "" {
-		params.Model = oaishared.ResponsesModel(req.Model)
+		params.Model = req.Model
 	}
 
 	// We convert the generic content parts into OpenAI's input format.

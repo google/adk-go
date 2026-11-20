@@ -64,7 +64,6 @@ func TestMaxConcurrency_Caps(t *testing.T) {
 	releases := make([]chan struct{}, fanOut)
 	nodes := make([]Node, fanOut)
 	for i := range fanOut {
-		i := i
 		releases[i] = make(chan struct{})
 		nodes[i] = newBlockingNode(fmt.Sprintf("N%d", i), func() {
 			defer bumpPeak(&inFlight, &peak)()
@@ -115,7 +114,6 @@ func TestMaxConcurrency_PendingDispatchedFIFO(t *testing.T) {
 	starts := make([]int32, fanOut)
 	nodes := make([]Node, fanOut)
 	for i := range fanOut {
-		i := i
 		nodes[i] = NewFunctionNode(
 			fmt.Sprintf("N%d", i),
 			func(ctx agent.Context, input any) (string, error) {
