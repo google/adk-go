@@ -30492,7 +30492,7 @@ func TestContextHasAfterAgentPlugin(t *testing.T) {
 		// Even under the real PluginManagerCtxKey, an unrelated value type must
 		// not spoof a PluginManager (nil self returns false; non-nil self fails
 		// closed conservatively to true).
-		pmKey := discoverPluginManagerCtxKey()
+		pmKey := discoverPluginManagerCtxKey(realCtx)
 		if pmKey == nil {
 			t.Fatal("discoverPluginManagerCtxKey() = nil")
 		}
@@ -30548,7 +30548,7 @@ func TestContextHasAfterAgentPlugin(t *testing.T) {
 	t.Run("nil or unreadable plugin element fails closed to conservative true", func(t *testing.T) {
 		p := newNoopAnalyticsPluginForTest(t, pluginName)
 		ctx := captureRunnerCallbackContext(t, t.Context(), p)
-		pmKey := discoverPluginManagerCtxKey()
+		pmKey := discoverPluginManagerCtxKey(ctx)
 		if pmKey == nil {
 			t.Fatal("discoverPluginManagerCtxKey() = nil")
 		}
@@ -30572,23 +30572,38 @@ func TestContextHasAfterAgentPlugin(t *testing.T) {
 	})
 }
 
+var errPluginManagerProbe = errors.New("plugin manager key probe")
+
+type probeLiveAgent struct {
+	agent.Agent
+	onRunLive func(agent.InvocationContext)
+}
+
+func (a *probeLiveAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	if a.onRunLive != nil {
+		a.onRunLive(ctx)
+	}
+	return nil, nil, errPluginManagerProbe
+}
+
 func TestDiscoverPluginManagerCtxKey(t *testing.T) {
-	key, structType, pluginsField := probePluginManagerCtxKey()
+	p := newNoopAnalyticsPluginForTest(t, pluginName)
+	tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
+	runCtx := captureRunnerCallbackContext(t, t.Context(), p, tail)
+	key, structType, pluginsField := probePluginManagerCtxKey(runCtx)
 	if key == nil || structType == nil || pluginsField < 0 {
 		t.Fatalf("probePluginManagerCtxKey() = (%v, %v, %d), want valid key, type, and field index", key, structType, pluginsField)
 	}
 	if !isPluginManagerType(structType) {
 		t.Fatalf("probePluginManagerCtxKey() structType = %v, want internal PluginManager", structType)
 	}
-	// Verify lazy sync.Once stability and equality with the uncached probe.
-	d1 := discoverPluginManagerCtxKey()
-	d2 := discoverPluginManagerCtxKey()
+	// Verify cache stability and equality with the uncached probe.
+	d1 := discoverPluginManagerCtxKey(runCtx)
+	d2 := discoverPluginManagerCtxKey(runCtx)
 	if d1 == nil || d1 != d2 || d1 != key {
 		t.Fatalf("discoverPluginManagerCtxKey() = (%v, %v), want %v", d1, d2, key)
 	}
 
-	p := newNoopAnalyticsPluginForTest(t, pluginName)
-	tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
 	noAfterTail, err := baseplugin.New(baseplugin.Config{
 		Name: "tail_before_only",
 		BeforeAgentCallback: func(_ agent.Context) (*genai.Content, error) {
@@ -30599,9 +30614,8 @@ func TestDiscoverPluginManagerCtxKey(t *testing.T) {
 		t.Fatalf("baseplugin.New(tail_before_only): %v", err)
 	}
 
-	// Verify the RunLive-discovered key resolves the exact PluginManager on both
+	// Verify the discovered key resolves the exact PluginManager on both
 	// runner.Run and runner.RunLive contexts.
-	runCtx := captureRunnerCallbackContext(t, t.Context(), p, tail)
 	rawRunPM := runCtx.Value(key)
 	if rawRunPM == nil {
 		t.Fatal("runCtx.Value(discoveredKey) = nil, want *PluginManager")
@@ -30611,6 +30625,23 @@ func TestDiscoverPluginManagerCtxKey(t *testing.T) {
 	}
 	if !contextHasAfterAgentPlugin(runCtx, p) {
 		t.Fatal("contextHasAfterAgentPlugin(runCtx, p) = false, want true")
+	}
+
+	// An application may store the same manager under another context key.
+	type aliasKey struct{}
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want any
+	}{
+		{"alias over real key", context.WithValue(runCtx, aliasKey{}, rawRunPM), key},
+		{"alias without real key", context.WithValue(t.Context(), aliasKey{}, rawRunPM), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, _, _ := probePluginManagerCtxKey(tc.ctx); got != tc.want {
+				t.Fatal("discovery accepted an unrelated context key")
+			}
+		})
 	}
 
 	baseLive, err := agent.New(agent.Config{Name: "live-pm-probe"})
@@ -30720,19 +30751,21 @@ func installTestTracerProvider(t *testing.T, tp *sdktrace.TracerProvider) {
 	})
 }
 
+func resetPluginManagerKeyCache() {
+	pluginManagerKeyMu.Lock()
+	defer pluginManagerKeyMu.Unlock()
+	pluginManagerCtxKey = nil
+	pluginManagerStructType = nil
+	pluginManagerPluginsField = -1
+}
+
 func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 	spanExp := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp))
 	installTestTracerProvider(t, tp)
 
-	resetProbeState := func() {
-		pluginManagerKeyOnce = sync.Once{}
-		pluginManagerCtxKey = nil
-		pluginManagerStructType = nil
-		pluginManagerPluginsField = -1
-	}
-	resetProbeState()
-	t.Cleanup(resetProbeState)
+	resetPluginManagerKeyCache()
+	t.Cleanup(resetPluginManagerKeyCache)
 
 	realPlugin, tm, requestsChan, _ := newTestPluginWithConfigAndTraces(t, func(cfg *Config) {
 		cfg.DisableCreateViews = true
@@ -30771,12 +30804,26 @@ func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 	}
 	assertZeroSideEffects("after plugin construction")
 
+	noopSelf := newNoopAnalyticsPluginForTest(t, pluginName)
+	tailPlugin := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
+	cbCtx := captureRunnerCallbackContext(t, t.Context(), noopSelf, tailPlugin)
+	if len(spanExp.GetSpans()) == 0 {
+		t.Fatal("control runner emitted no OTel spans")
+	}
+	spanExp.Reset()
+
 	// Direct uncached probe must not emit OTel spans, BQ rows, traceManager invocations, or drops.
-	key, structType, pluginsField := probePluginManagerCtxKey()
+	key, structType, pluginsField := probePluginManagerCtxKey(cbCtx)
 	if key == nil || structType == nil || pluginsField < 0 {
 		t.Fatalf("probePluginManagerCtxKey() = (%v, %v, %d), want valid result", key, structType, pluginsField)
 	}
 	assertZeroSideEffects("after probePluginManagerCtxKey")
+
+	// A context without a manager must not prevent discovery on a later callback.
+	if got := discoverPluginManagerCtxKey(context.Background()); got != nil {
+		t.Fatal("discovered a plugin manager on an empty context")
+	}
+	assertZeroSideEffects("after empty context discovery")
 
 	// Agent-level AfterAgentCallbacks short-circuits hasAfterAgentCallbacks without triggering discovery.
 	agentWithOwnCB, err := agent.New(agent.Config{
@@ -30796,17 +30843,20 @@ func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 	}
 	assertZeroSideEffects("after agentWithOwnCB check")
 
-	// First hasAfterAgentCallbacks check that inspects plugins triggers lazy discovery with zero side effects.
-	noopSelf := newNoopAnalyticsPluginForTest(t, pluginName)
-	tailPlugin := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
-	spanExp.Reset()
-	cbCtx := captureRunnerCallbackContext(t, t.Context(), noopSelf, tailPlugin)
-	if spans := spanExp.GetSpans(); len(spans) == 0 {
-		t.Fatal("control captureRunnerCallbackContext emitted 0 OTel spans; test exporter is not receiving ADK runner spans")
+	// Concurrent first callbacks discover the same key without starting a runner.
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Go(func() {
+			if got := discoverPluginManagerCtxKey(cbCtx); got != key {
+				t.Error("concurrent discovery returned a different plugin manager key")
+			}
+		})
 	}
-	spanExp.Reset()
-	resetProbeState()
+	wg.Wait()
+	assertZeroSideEffects("after concurrent discovery")
+	resetPluginManagerKeyCache()
 
+	// First hasAfterAgentCallbacks check that inspects plugins triggers lazy discovery with zero side effects.
 	ch := runningAgentChildren(cbCtx, "capture", noopSelf)
 	if !ch.hasAfterAgentCallbacks {
 		t.Fatal("first plugin-inspecting runningAgentChildren.hasAfterAgentCallbacks = false, want true")
@@ -30819,9 +30869,9 @@ func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 	// Also verify the cached discoverPluginManagerCtxKey + fresh realPlugin's first BeforeAgentCallback:
 	// reset probe state so BeforeAgentCallback runs lazy discovery, and confirm zero OTel spans from the probe
 	// and zero probe rows/drops.
-	resetProbeState()
+	resetPluginManagerKeyCache()
 	spanExp.Reset()
-	if gotKey := discoverPluginManagerCtxKey(); gotKey != key {
+	if gotKey := discoverPluginManagerCtxKey(cbCtx); gotKey != key {
 		t.Fatalf("discoverPluginManagerCtxKey() = %v, want %v", gotKey, key)
 	}
 	assertZeroSideEffects("after discoverPluginManagerCtxKey")
@@ -30831,10 +30881,10 @@ func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 	// runningAgentChildren -> contextHasAfterAgentPlugin actually triggers lazy
 	// discovery, and verify zero probe OTel spans, zero leaked spans, and zero
 	// probe rows/drops.
-	resetProbeState()
+	resetPluginManagerKeyCache()
 	spanExp.Reset()
 	if pluginManagerCtxKey != nil {
-		t.Fatalf("pluginManagerCtxKey = %v after resetProbeState, want nil", pluginManagerCtxKey)
+		t.Fatalf("pluginManagerCtxKey = %v after resetPluginManagerKeyCache, want nil", pluginManagerCtxKey)
 	}
 	var realInvID string
 	leaf, err := agent.New(agent.Config{
@@ -30857,7 +30907,7 @@ func TestDiscoverPluginManagerCtxKey_LazyAndZeroSideEffects(t *testing.T) {
 			t.Fatalf("runner.Run error: %v", runErr)
 		}
 	}
-	if pluginManagerCtxKey == nil || discoverPluginManagerCtxKey() != key {
+	if pluginManagerCtxKey == nil || discoverPluginManagerCtxKey(cbCtx) != key {
 		t.Fatalf("live runner.Run did not populate pluginManagerCtxKey: got %v, want %v", pluginManagerCtxKey, key)
 	}
 	spans := spanExp.GetSpans()
@@ -31953,10 +32003,15 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			t.Fatal("cbCtx = nil")
 		}
 
+		resetPluginManagerKeyCache()
+		t.Cleanup(resetPluginManagerKeyCache)
+
 		swappable := &mutexSwappableContext{parent: outerUUIDCtx}
 		embedded := &lockedEmbeddedContext{Context: cbCtx}
 		type testKey struct{}
 		wrappedEmbedded := context.WithValue(embedded, testKey{}, 1)
+		var appValue any
+		wrappedValue := context.WithValue(cbCtx, testKey{}, &appValue)
 
 		stop := make(chan struct{})
 		var wg sync.WaitGroup
@@ -31971,6 +32026,7 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 				if i%2 == 0 {
 					next = outerUUIDCtx
 				}
+				appValue = i
 				swappable.setParent(next)
 				if i%2 == 0 {
 					embedded.setContext(cbCtx)
@@ -31991,6 +32047,10 @@ func TestContextLookups_WrapperIsolationAndSafety(t *testing.T) {
 			_ = contextHasAfterAgentPlugin(swappable, p)
 			_ = contextHasAfterAgentPlugin(embedded, p)
 			_ = contextHasAfterAgentPlugin(wrappedEmbedded, p)
+			// Discovery must not dereference application-owned context values.
+			if key, _, _ := probePluginManagerCtxKey(wrappedValue); key == nil {
+				t.Fatal("probePluginManagerCtxKey(wrappedValue) = nil, want PluginManager key")
+			}
 			if am, keep := callbackAfterAgentActions(swappable); am != (actionMaps{}) || keep != nil {
 				t.Fatalf("callbackAfterAgentActions(swappable) = (%+v, %v), want zero", am, keep)
 			}
