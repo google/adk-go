@@ -485,10 +485,16 @@ func runNode(
 		}
 		// Block on non-partial events until the consumer has persisted
 		// them (see eventItem.processed). Partial events are
-		// fire-and-forget.
+		// fire-and-forget, so the consumer gets its own copy: the node
+		// keeps reading the event it yielded, and the consumer writes
+		// to the one it received, such as the runner restoring the
+		// compaction record or stamping a timestamp.
 		var processed chan struct{}
 		if ev != nil && !ev.LLMResponse.Partial {
 			processed = make(chan struct{})
+		} else if ev != nil {
+			c := *ev
+			ev = &c
 		}
 		select {
 		case out <- eventItem{nodeName: name, ev: ev, processed: processed}:
